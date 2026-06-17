@@ -162,20 +162,24 @@ describe("readStatuses — exit metadata parsing (#22)", () => {
     expect(batch.byId.get("t2")?.exitCode).toBe(1);
   });
 
-  it("coerces null / string / NaN / Infinity exit metadata to undefined", async () => {
+  it("coerces null / string / NaN / Infinity / fractional exit metadata to undefined", async () => {
     const ctx = ctxWithStatus([
       { terminalId: "n", agentState: "exited", exitCode: null },
       { terminalId: "s", agentState: "exited", exitCode: "1" },
       { terminalId: "nan", agentState: "exited", exitCode: Number.NaN },
       { terminalId: "inf", agentState: "exited", exitCode: Number.POSITIVE_INFINITY },
+      { terminalId: "frac", agentState: "exited", exitCode: 1.5 },
       { terminalId: "tsStr", agentState: "exited", spawnedAt: "2024-01-01" },
+      { terminalId: "tsStr2", agentState: "exited", lastTransitionAt: "2026-06-17T10:00:00Z" },
     ]);
-    const batch = await readStatuses(ctx, ["n", "s", "nan", "inf", "tsStr"]);
+    const batch = await readStatuses(ctx, ["n", "s", "nan", "inf", "frac", "tsStr", "tsStr2"]);
     expect(batch.byId.get("n")?.exitCode).toBeUndefined();
     expect(batch.byId.get("s")?.exitCode).toBeUndefined();
     expect(batch.byId.get("nan")?.exitCode).toBeUndefined();
     expect(batch.byId.get("inf")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("frac")?.exitCode).toBeUndefined();
     expect(batch.byId.get("tsStr")?.spawnedAt).toBeUndefined();
+    expect(batch.byId.get("tsStr2")?.lastTransitionAt).toBeUndefined();
   });
 
   it("leaves exit metadata undefined when the fields are absent (backwards compat)", async () => {

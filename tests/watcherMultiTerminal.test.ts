@@ -523,6 +523,11 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     expect(outcome.classification).toBe("terminal_exited");
     expect(outcome.evidence).toContain("agentState=exited");
     expect(outcome.evidence).toContain("exitCode=1 (nonzero)");
+    // The evidence reaches the published queue event, not just the outcome.
+    const evt = queue
+      .digest({ severityAtLeast: "info" })
+      .find((e) => e.target?.terminalId === "term-a");
+    expect(evt?.evidence).toContain("exitCode=1 (nonzero)");
     db.close();
   });
 

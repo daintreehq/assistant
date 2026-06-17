@@ -261,16 +261,17 @@ export async function readStatuses(
         error: typeof e.error === "string" ? e.error : undefined,
         recentOutput:
           typeof e.recentOutput === "string" ? e.recentOutput : undefined,
-        // New exit metadata — read defensively. Number.isFinite excludes NaN and
-        // Infinity (valid JS numbers, garbage as a code/timestamp); null, strings,
-        // and absent values all fall through to undefined for backwards compat.
-        exitCode: Number.isFinite(e.exitCode as number)
+        // New exit metadata — read defensively. Exit codes and epoch-ms
+        // timestamps are integers, so Number.isInteger rejects NaN, Infinity, and
+        // stray fractional values; null, strings, and absent values all fall
+        // through to undefined for backwards compat.
+        exitCode: Number.isInteger(e.exitCode as number)
           ? (e.exitCode as number)
           : undefined,
-        spawnedAt: Number.isFinite(e.spawnedAt as number)
+        spawnedAt: Number.isInteger(e.spawnedAt as number)
           ? (e.spawnedAt as number)
           : undefined,
-        lastTransitionAt: Number.isFinite(e.lastTransitionAt as number)
+        lastTransitionAt: Number.isInteger(e.lastTransitionAt as number)
           ? (e.lastTransitionAt as number)
           : undefined,
       });
