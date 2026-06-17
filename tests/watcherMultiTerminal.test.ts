@@ -54,6 +54,16 @@ function fakeMcp(perTerminal: Record<string, { agentState?: string; tail?: strin
           isError: false,
         };
       }
+      // Post-completion verification reads git cleanliness; default to clean so a
+      // "completed" agent resolves to completed_success unless a test overrides.
+      if (name === "git.getProjectPulse") {
+        return {
+          text: "",
+          content: [],
+          structuredContent: { isDirty: false, changedFiles: 0 },
+          isError: false,
+        };
+      }
       return { text: "", content: [], isError: false };
     },
   };

@@ -193,12 +193,55 @@ export const WatcherClassification = z.enum([
   "tests_passed",
   "merge_conflict",
   "completed_success",
+  // The agent reports completion but a deterministic post-completion check found
+  // uncommitted changes (or could not verify) — completion is NOT yet trustworthy,
+  // so irreversible actions (commit/push/worktree.delete) must not be suggested.
+  // Set ONLY by the engine's verification pass, never by the small model — it is
+  // intentionally absent from the model-facing classification enum in prompts.
+  "completed_unverified",
   "completed_unknown",
   "terminal_exited",
   "needs_large_model",
   "unknown",
 ]);
 export type WatcherClassification = z.infer<typeof WatcherClassification>;
+
+/* -------------------------------------------------------------------------- */
+/* Post-completion verification                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Deterministic verdict of a post-completion reconciliation pass.
+ *   - "clean"   — the worktree has no uncommitted changes; completion is trustworthy.
+ *   - "dirty"   — uncommitted changes remain; the agent's work needs review first.
+ *   - "unknown" — the git state could not be read (MCP down / unrecognized shape);
+ *                 treat as not-yet-verified, never as clean.
+ */
+export const VerificationVerdict = z.enum(["clean", "dirty", "unknown"]);
+export type VerificationVerdict = z.infer<typeof VerificationVerdict>;
+
+/**
+ * Structured result of the read-only post-completion verification pass. Daintree
+ * exposes no exit code and no test/lint runner, so the verdict is derived solely
+ * from the worktree's git cleanliness (via git.getProjectPulse). This is attached
+ * as queue-event evidence so the conductor can require a clean result before ever
+ * suggesting irreversible git operations.
+ */
+export const VerificationResult = z
+  .object({
+    verdict: VerificationVerdict,
+    /** True when the worktree has uncommitted changes. */
+    hasGitChanges: z.boolean(),
+    /** Count of changed files when derivable from the pulse, else 0. */
+    changedFiles: z.number().int().min(0).default(0),
+    /** One-line human/LLM-facing description of the git state observed. */
+    gitSummary: z.string(),
+  })
+  .strict();
+export type VerificationResult = z.infer<typeof VerificationResult>;
+
+/** Evidence-string prefix that carries a serialized VerificationResult. */
+export const VERIFICATION_EVIDENCE_PREFIX = "verification:";
 
 /** Schema the small watcher model must return as a JSON object. */
 export const WatcherVerdict = z
