@@ -32,6 +32,24 @@ describe("loadConfig", () => {
     expect(cfg.largeModel).toBe("accounts/fireworks/models/minimax-m3");
     expect(cfg.largeModel).toBe(DEFAULTS.largeModel);
   });
+
+  describe("DAINTREE_WINDOW_ID", () => {
+    const prev = process.env.DAINTREE_WINDOW_ID;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.DAINTREE_WINDOW_ID;
+      else process.env.DAINTREE_WINDOW_ID = prev;
+    });
+
+    it("reads DAINTREE_WINDOW_ID from the environment", () => {
+      process.env.DAINTREE_WINDOW_ID = "win-42";
+      expect(loadConfig({ stateDir }).windowId).toBe("win-42");
+    });
+
+    it("leaves windowId unset when the env var is absent", () => {
+      delete process.env.DAINTREE_WINDOW_ID;
+      expect(loadConfig({ stateDir }).windowId).toBeUndefined();
+    });
+  });
 });
 
 describe("describeConfig", () => {
@@ -43,6 +61,12 @@ describe("describeConfig", () => {
     expect(cfg.fireworksApiKey).toBe(rawKey);
     expect(described.fireworksApiKey).not.toBe(rawKey);
     expect(described.fireworksApiKey).not.toContain(rawKey);
+  });
+
+  it("surfaces windowId (Daintree-injected, non-secret)", () => {
+    const described = describeConfig(loadConfig({ stateDir }));
+    expect(described).toHaveProperty("windowId");
+    expect(described).toHaveProperty("projectId");
   });
 });
 

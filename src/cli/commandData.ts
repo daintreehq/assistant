@@ -64,6 +64,43 @@ export async function runDoctor(app: App): Promise<DoctorCheck[]> {
         : undefined,
   });
 
+  // Live functional probe: list/connection can be "up" while the token lacks the
+  // tier to actually call a tool. actions.getContext is workbench tier (read-only,
+  // no confirmation), so it verifies end-to-end access without mutating anything.
+  if (st.connected) {
+    const probeTool = "actions.getContext";
+    const advertised = await app.mcp.listTools().catch(() => []);
+    if (!advertised.some((t) => t.name === probeTool)) {
+      checks.push({
+        label: "mcp probe",
+        ok: false,
+        detail: `${probeTool} not advertised — workbench tier may be unavailable`,
+        fix: "verify the MCP token grants at least workbench tier",
+      });
+    } else {
+      const startedAt = Date.now();
+      try {
+        const res = await app.mcp.callTool(probeTool, {});
+        const ms = Date.now() - startedAt;
+        checks.push({
+          label: "mcp probe",
+          ok: !res.isError,
+          detail: res.isError
+            ? `${probeTool} returned an error: ${res.text || "(no detail)"}`
+            : `${probeTool} ok (${ms}ms)`,
+          fix: res.isError ? "check Daintree tier/permissions; run /reconnect" : undefined,
+        });
+      } catch (e) {
+        checks.push({
+          label: "mcp probe",
+          ok: false,
+          detail: `${probeTool} call failed: ${e instanceof Error ? e.message : String(e)}`,
+          fix: "connection may be stale; run /reconnect",
+        });
+      }
+    }
+  }
+
   let writable = false;
   let writeErr = "";
   try {

@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { App } from "../src/cli/app.js";
-import { handleUiCommand } from "../src/cli/commandData.js";
+import { handleUiCommand, runDoctor } from "../src/cli/commandData.js";
+import type { LowLevelMcpClient } from "../src/mcp/client.js";
 
 let lastStateDir = "";
 function makeApp(): App {
@@ -68,5 +69,53 @@ describe("handleUiCommand (structured slash commands)", () => {
     const r = await handleUiCommand("/tools", app);
     expect(r.title).toMatch(/^Tools/);
     expect((r.text ?? "").length).toBeGreaterThan(0);
+  });
+});
+
+describe("runDoctor MCP probe", () => {
+  function appWithMcp(client: LowLevelMcpClient): { app: App; dir: string } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-doc-"));
+    const app = App.create({
+      overrides: { offline: true, stateDir: dir, projectPath: dir, tier: "operator" },
+      mcpOptions: { clientOverride: client },
+    });
+    return { app, dir };
+  }
+
+  it("calls actions.getContext as a live read-only probe when connected", async () => {
+    const calls: string[] = [];
+    const { app, dir } = appWithMcp({
+      listTools: async () => ({
+        tools: [{ name: "actions.getContext", inputSchema: { type: "object" } }],
+      }),
+      callTool: async ({ name }) => {
+        calls.push(name);
+        return { content: [{ type: "text", text: "ctx" }], isError: false };
+      },
+    });
+    try {
+      const checks = await runDoctor(app);
+      const probe = checks.find((c) => c.label === "mcp probe");
+      expect(probe?.ok).toBe(true);
+      expect(calls).toContain("actions.getContext");
+    } finally {
+      await app.shutdown();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the probe as failed when the tool is not advertised", async () => {
+    const { app, dir } = appWithMcp({
+      listTools: async () => ({ tools: [{ name: "terminal.list", inputSchema: {} }] }),
+      callTool: async () => ({ content: [], isError: false }),
+    });
+    try {
+      const probe = (await runDoctor(app)).find((c) => c.label === "mcp probe");
+      expect(probe?.ok).toBe(false);
+      expect(probe?.detail).toContain("not advertised");
+    } finally {
+      await app.shutdown();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
