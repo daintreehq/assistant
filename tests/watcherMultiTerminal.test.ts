@@ -29,18 +29,30 @@ function fakeMcp(perTerminal: Record<string, { agentState?: string; tail?: strin
     status: () => ({ connected: true, transport: "injected" as const }),
     listTools: async () => [],
     callTool: async (name: string, args?: Record<string, unknown>) => {
-      const tid = String(args?.terminalId ?? "");
-      const cfg = perTerminal[tid] ?? {};
+      // terminal.getStatus is batched: { terminalIds } -> { terminals: [...] }.
       if (name === "terminal.getStatus") {
+        const ids = Array.isArray(args?.terminalIds)
+          ? (args!.terminalIds as unknown[]).map(String)
+          : [];
+        const terminals = ids.map((tid) => {
+          const cfg = perTerminal[tid] ?? {};
+          return {
+            terminalId: tid,
+            ...(cfg.agentState ? { agentState: cfg.agentState } : {}),
+          };
+        });
+        return { text: "", content: [], structuredContent: { terminals }, isError: false };
+      }
+      // terminal.getOutput returns scrollback under structuredContent.content.
+      if (name === "terminal.getOutput") {
+        const tid = String(args?.terminalId ?? "");
+        const cfg = perTerminal[tid] ?? {};
         return {
           text: "",
           content: [],
-          structuredContent: cfg.agentState ? { agentState: cfg.agentState } : {},
+          structuredContent: { terminalId: tid, content: cfg.tail ?? "" },
           isError: false,
         };
-      }
-      if (name === "terminal.getOutput") {
-        return { text: cfg.tail ?? "", content: [], isError: false };
       }
       return { text: "", content: [], isError: false };
     },
@@ -198,6 +210,136 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     const after = db.getWatcher(w.id)!;
     const options = JSON.parse(after.optionsJson!);
     expect(Object.keys(options.perTerminal).sort()).toEqual(["term-a", "term-b"]);
+    db.close();
+  });
+
+  it("batches terminal.getStatus into ONE call for N targets and threads waitingReason", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    const base = fakeMcp({
+      "term-a": { agentState: "waiting" },
+      "term-b": { agentState: "working" },
+    });
+    const mcp = {
+      ...base,
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        calls.push({ name, args });
+        // term-a is waiting for a "question" specifically.
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) =>
+                terminalId === "term-a"
+                  ? { terminalId, agentState: "waiting", waitingReason: "question" }
+                  : { terminalId, agentState: "working" },
+              ),
+            },
+            isError: false,
+          };
+        }
+        return base.callTool(name, args);
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "batch",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    // Exactly one status call covering both terminals (not one per terminal).
+    const statusCalls = calls.filter((c) => c.name === "terminal.getStatus");
+    expect(statusCalls).toHaveLength(1);
+    expect((statusCalls[0].args!.terminalIds as string[]).sort()).toEqual([
+      "term-a",
+      "term-b",
+    ]);
+
+    // waitingReason "question" reaches the published event's evidence.
+    const events = queue.digest({ severityAtLeast: "attention" });
+    const waitEvt = events.find((e) => e.target?.terminalId === "term-a");
+    expect(waitEvt?.evidence?.some((x) => x.includes("question"))).toBe(true);
+    db.close();
+  });
+
+  it("stops and alerts when a watched terminal is closed (absent from status)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Status call succeeds but returns NO terminals — the terminal is gone.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "gone",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("terminal_exited");
+    expect(outcome.stop).toBe(true);
+    // Watcher stopped polling; an event was surfaced for the closed terminal.
+    expect(db.getWatcher(w.id)!.status).not.toBe("active");
+    const events = queue.digest({ severityAtLeast: "info" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
+  it("does NOT treat a terminal as gone when the status call itself fails", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // getStatus errors → ok:false → absence must not be read as "closed".
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "boom", content: [], isError: true };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "transient",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).not.toBe("terminal_exited");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
     db.close();
   });
 

@@ -326,7 +326,7 @@ export const mcpTools: ToolDef[] = [
   {
     name: "terminal.focus",
     description:
-      "Focus a Daintree terminal in the UI (read-only side effect on the UI; no state mutation).",
+      "Focus/reveal a Daintree terminal in the UI (read-only side effect on the UI; no state mutation).",
     risk: "ui",
     schema: FocusArgs,
     parameters: {
@@ -338,7 +338,9 @@ export const mcpTools: ToolDef[] = [
       required: ["terminalId"],
     },
     async handler(args, ctx) {
-      return passthrough(ctx, "terminal.focus", { terminalId: args.terminalId });
+      // Daintree has no `terminal.focus` MCP tool — terminals are panels, so the
+      // correct call is `panel.focus` with the terminal id as the panelId.
+      return passthrough(ctx, "panel.focus", { panelId: args.terminalId });
     },
   },
 ];

@@ -8,10 +8,14 @@
  * so this prefix stays byte-for-byte identical across ordinary turns.
  *
  * Bump BASE_SYSTEM_PROMPT_VERSION (and the cache key) only when this text changes.
+ * The hardcoded Daintree MCP reference is appended here so the model knows the
+ * real MCP surface without runtime discovery — it is static and stays cached.
  */
-export const BASE_SYSTEM_PROMPT_VERSION = "daintree-main-system-v1";
+import { DAINTREE_MCP_REFERENCE } from "./daintreeMcp.js";
 
-export const BASE_SYSTEM_PROMPT = `You are the **Daintree Assistant** — Daintree's local operations officer.
+export const BASE_SYSTEM_PROMPT_VERSION = "daintree-main-system-v2";
+
+const IDENTITY_AND_RULES = `You are the **Daintree Assistant** — Daintree's local operations officer.
 
 Mission:
 You help the user orchestrate Daintree work: worktrees, terminals, agents, recipes, watchers, timers, queues, git, forge actions, and project context. You supervise and coordinate; you do not secretly edit files.
@@ -31,3 +35,5 @@ You may receive loaded recipes in a later message. Recipes are operational runbo
 
 Communication:
 Be direct, concise, and operational. You are talking to an expert developer. State what you inspected, what you did, what is pending, and the next checkpoint.`;
+
+export const BASE_SYSTEM_PROMPT = `${IDENTITY_AND_RULES}\n\n${DAINTREE_MCP_REFERENCE}`;

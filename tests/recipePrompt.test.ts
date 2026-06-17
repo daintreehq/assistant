@@ -39,7 +39,7 @@ describe("base system prompt", () => {
   });
 
   it("pins the version used as the cache key", () => {
-    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v1");
+    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v2");
   });
 });
 

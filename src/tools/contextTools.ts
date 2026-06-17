@@ -141,7 +141,7 @@ export const contextTools: ToolDef[] = [
       try {
         const out = await ctx.mcp.callTool("terminal.getOutput", {
           terminalId: args.terminalId,
-          lines: 200,
+          maxLines: 200,
         });
         if (out.isError) {
           return fail(
@@ -149,7 +149,9 @@ export const contextTools: ToolDef[] = [
             `Could not read output for terminal ${args.terminalId}: ${out.text || "terminal returned an error"}`,
           );
         }
-        tail = out.text;
+        // Scrollback is in structuredContent.content; text is JSON-serialized.
+        const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
+        tail = typeof sc.content === "string" ? sc.content : out.text;
       } catch (e) {
         return fail(
           "TERMINAL_OUTPUT",

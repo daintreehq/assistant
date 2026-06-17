@@ -69,19 +69,30 @@ export function useTerminalPreview(
       for (const { terminalId, watcher } of targets) {
         try {
           const [status, output] = await Promise.all([
-            app.mcp.callTool("terminal.getStatus", { terminalId }),
-            app.mcp.callTool("terminal.getOutput", { terminalId, lines: 40 }),
+            app.mcp.callTool("terminal.getStatus", { terminalIds: [terminalId] }),
+            app.mcp.callTool("terminal.getOutput", { terminalId, maxLines: 40 }),
           ]);
-          const sc = (status.structuredContent ?? {}) as Record<string, unknown>;
+          // terminal.getStatus -> { terminals: [{ terminalId, agentState, ... }] }.
+          // Only attribute status when the returned id matches the one we asked
+          // for — never guess from terminals[0].
+          const statusSc = (status.structuredContent ?? {}) as Record<string, unknown>;
+          const terminals = Array.isArray(statusSc.terminals)
+            ? (statusSc.terminals as Array<Record<string, unknown>>)
+            : [];
+          const entry = terminals.find((t) => t?.terminalId === terminalId);
+          const agentState =
+            entry && typeof entry.agentState === "string" ? entry.agentState : undefined;
+          // terminal.getOutput -> { content }; ignore errored reads.
+          const outSc = (output.structuredContent ?? {}) as Record<string, unknown>;
+          const content =
+            !output.isError && typeof outSc.content === "string" ? outSc.content : "";
           next.push({
             terminalId,
             watcherId: watcher.id,
             title: watcher.title,
-            agentState:
-              typeof sc.agentState === "string" ? sc.agentState : undefined,
-            runtimeStatus:
-              typeof sc.runtimeStatus === "string" ? sc.runtimeStatus : undefined,
-            tail: output.text.slice(-3000),
+            agentState,
+            runtimeStatus: agentState === "exited" ? "exited" : undefined,
+            tail: (content ?? "").slice(-3000),
             updatedAt: Date.now(),
           });
         } catch {

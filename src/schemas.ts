@@ -152,7 +152,7 @@ export interface QueueEvent {
 
 export type WatchCondition =
   | { stateIs: AgentState }
-  | { runtimeStatusIs: "running" | "background" | "exited" | "error" }
+  | { runtimeStatusIs: "running" | "exited" }
   | { contains: string }
   | { regex: string }
   | { noOutputForMs: number }
@@ -166,7 +166,7 @@ export const WatchCondition: z.ZodType<WatchCondition> = z.lazy(() =>
     z.object({ stateIs: AgentState }).strict(),
     z
       .object({
-        runtimeStatusIs: z.enum(["running", "background", "exited", "error"]),
+        runtimeStatusIs: z.enum(["running", "exited"]),
       })
       .strict(),
     z.object({ contains: z.string() }).strict(),

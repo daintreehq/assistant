@@ -12,7 +12,8 @@ const CreateArgs = z.object({
   terminalIds: z
     .array(z.string())
     .min(1)
-    .describe("Daintree terminal ids to watch."),
+    .max(256)
+    .describe("Daintree terminal ids to watch (max 256 — terminal.getStatus cap)."),
   title: z.string().describe("Short label for the watcher."),
   goal: z.string().describe("What the watcher is looking for / waiting on."),
   cadenceMs: z

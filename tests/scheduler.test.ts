@@ -17,12 +17,20 @@ function fakeMcp(opts: {
     isConnected: () => connected,
     status: () => ({ connected, transport: "injected" as const }),
     listTools: async () => [],
-    callTool: async (name: string) => {
+    callTool: async (name: string, args?: Record<string, unknown>) => {
       if (name === "terminal.getStatus") {
+        // Real shape: { terminalIds } -> { terminals: [{ terminalId, ...status }] }.
+        const ids = Array.isArray(args?.terminalIds)
+          ? (args!.terminalIds as unknown[]).map(String)
+          : [];
+        const terminals = ids.map((terminalId) => ({
+          terminalId,
+          ...(opts.getStatus ?? {}),
+        }));
         return {
           text: "",
           content: [],
-          structuredContent: opts.getStatus ?? {},
+          structuredContent: { terminals },
           isError: false,
         };
       }

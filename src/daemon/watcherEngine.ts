@@ -26,7 +26,10 @@ import type { WatcherRecord } from "../schemas.js";
 
 export interface WatcherSignals {
   agentState?: string;
+  /** Coarse liveness derived from agentState ("running" | "exited"). */
   runtimeStatus?: string;
+  /** Why the agent is waiting, when agentState === "waiting" ("prompt" | "question"). */
+  waitingReason?: string;
   tail: string;
   msSinceOutput?: number;
   classification?: WatcherClassification;
@@ -172,34 +175,88 @@ export function decideOutcome(args: {
   };
 }
 
-/** Read bounded terminal state + tail from Daintree via MCP. */
-export async function readTerminal(
+/** A single terminal's status from a batched terminal.getStatus call. */
+export interface TerminalStatusEntry {
+  terminalId: string;
+  agentState?: string;
+  waitingReason?: string;
+  error?: string;
+}
+
+/** Result of a batched status read: the per-terminal map plus whether the call
+ *  itself succeeded — so an absent id can be told apart from a failed read. */
+export interface StatusBatch {
+  ok: boolean;
+  byId: Map<string, TerminalStatusEntry>;
+}
+
+/**
+ * Batch-read the status of N terminals in ONE terminal.getStatus call.
+ *
+ * Daintree's terminal.getStatus takes `terminalIds: string[]` (1–256) and
+ * returns `{ terminals: [{ terminalId, agentState, waitingReason, ... }] }` —
+ * there is no flat `agentState`/`runtimeStatus` on the result. Reading the wrong
+ * shape silently never detects state, so the watcher would fall through to the
+ * model every tick. `ok` is false when the call failed (so a missing terminal
+ * id is NOT mistaken for "closed"); on success an absent id means it is gone.
+ */
+export async function readStatuses(
+  ctx: ToolContext,
+  terminalIds: string[],
+): Promise<StatusBatch> {
+  const byId = new Map<string, TerminalStatusEntry>();
+  if (terminalIds.length === 0) return { ok: true, byId };
+  try {
+    const res = await ctx.mcp.callTool("terminal.getStatus", { terminalIds });
+    if (res.isError) return { ok: false, byId };
+    const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
+    const terminals = Array.isArray(sc.terminals) ? sc.terminals : [];
+    for (const t of terminals) {
+      if (!t || typeof t !== "object") continue;
+      const e = t as Record<string, unknown>;
+      const id = typeof e.terminalId === "string" ? e.terminalId : undefined;
+      if (!id) continue;
+      byId.set(id, {
+        terminalId: id,
+        agentState: typeof e.agentState === "string" ? e.agentState : undefined,
+        waitingReason:
+          typeof e.waitingReason === "string" ? e.waitingReason : undefined,
+        error: typeof e.error === "string" ? e.error : undefined,
+      });
+    }
+    return { ok: true, byId };
+  } catch {
+    return { ok: false, byId };
+  }
+}
+
+/**
+ * Read a bounded tail of one terminal via terminal.getOutput. The scrollback is
+ * in `structuredContent.content` (a string), NOT the JSON-serialized `text`. An
+ * errored read returns "" rather than leaking the error JSON in as fake output.
+ */
+export async function readOutput(
   ctx: ToolContext,
   terminalId: string,
   tailBytes = 12000,
-): Promise<WatcherSignals> {
-  let agentState: string | undefined;
-  let runtimeStatus: string | undefined;
-  let tail = "";
-  try {
-    const status = await ctx.mcp.callTool("terminal.getStatus", { terminalId });
-    const sc = (status.structuredContent ?? {}) as Record<string, unknown>;
-    agentState = (sc.agentState as string) ?? undefined;
-    runtimeStatus = (sc.runtimeStatus as string) ?? undefined;
-    if (!agentState && status.text) agentState = status.text.trim() || undefined;
-  } catch {
-    /* status optional */
-  }
+): Promise<string> {
   try {
     const out = await ctx.mcp.callTool("terminal.getOutput", {
       terminalId,
-      lines: 200,
+      maxLines: 200,
     });
-    tail = out.text.slice(-tailBytes);
+    if (out.isError) return "";
+    const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
+    return typeof sc.content === "string" ? sc.content.slice(-tailBytes) : "";
   } catch {
-    /* output optional */
+    return "";
   }
-  return { agentState, runtimeStatus, tail };
+}
+
+/** Map Daintree's agentState onto the coarse runtimeStatus the DSL exposes. */
+function runtimeFromAgentState(agentState?: string): string | undefined {
+  if (!agentState) return undefined;
+  return agentState === "exited" ? "exited" : "running";
 }
 
 /** Stable 32-bit hash of a terminal tail, used to detect new output cheaply. */
@@ -314,6 +371,12 @@ export async function runTerminalWatcherCheck(
   );
   const perTerminal: Record<string, TerminalState> = { ...options.perTerminal };
 
+  // One batched terminal.getStatus for ALL targets, instead of N per-terminal
+  // status calls. The deep scrollback tail is still read per terminal below.
+  const statuses: StatusBatch = ctx.mcp.isConnected()
+    ? await readStatuses(ctx, targets)
+    : { ok: false, byId: new Map<string, TerminalStatusEntry>() };
+
   const outcomes: CheckOutcome[] = [];
 
   for (const terminalId of targets) {
@@ -324,31 +387,55 @@ export async function runTerminalWatcherCheck(
     let summary = "Watcher check.";
     let evidence: string[] = [];
 
+    const entry = statuses.byId.get(terminalId);
+
     if (!ctx.mcp.isConnected()) {
       classification = "needs_large_model";
       summary = "Daintree MCP not connected; cannot read terminal.";
+    } else if (statuses.ok && !entry) {
+      // The status call succeeded but this terminal isn't in the response — it
+      // has been closed/removed. Treat as exited so the watcher stops polling a
+      // terminal that no longer exists, instead of looping on empty no_change.
+      classification = "terminal_exited";
+      confidence = 0.9;
+      summary = "Terminal is no longer reported by Daintree (closed or removed).";
+      evidence = ["absent from terminal.getStatus response"];
+      signals = { agentState: "exited", runtimeStatus: "exited", tail: "" };
     } else {
-      signals = await readTerminal(ctx, terminalId);
-      const out = nextOutputState(prevState, signals.tail, now);
+      const agentState = entry?.agentState;
+      const waitingReason = entry?.waitingReason;
+      const tail = await readOutput(ctx, terminalId);
+      const out = nextOutputState(prevState, tail, now);
       perTerminal[terminalId] = out.state;
-      signals.msSinceOutput = out.msSinceOutput;
+      signals = {
+        agentState,
+        runtimeStatus: runtimeFromAgentState(agentState),
+        waitingReason,
+        tail,
+        msSinceOutput: out.msSinceOutput,
+      };
 
-      if (signals.runtimeStatus === "exited" || signals.agentState === "exited") {
+      if (agentState === "exited") {
         classification = "terminal_exited";
         confidence = 0.95;
         summary = "Terminal exited.";
-        evidence = ["runtimeStatus/agentState=exited"];
-      } else if (signals.agentState === "waiting") {
+        evidence = ["agentState=exited"];
+      } else if (agentState === "waiting") {
         classification = "waiting_for_input";
         confidence = 0.9;
-        summary = "Agent is waiting for input.";
-        evidence = ["agentState=waiting"];
-      } else if (signals.agentState === "completed") {
+        summary =
+          waitingReason === "question"
+            ? "Agent is asking a question."
+            : "Agent is waiting for input.";
+        evidence = [
+          `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""}`,
+        ];
+      } else if (agentState === "completed") {
         classification = "completed_success";
         confidence = 0.85;
         summary = "Agent reports completion.";
         evidence = ["agentState=completed"];
-      } else if (signals.tail.trim().length > 0) {
+      } else if (tail.trim().length > 0) {
         const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
         classification = verdict.classification;
         confidence = verdict.confidence;
@@ -358,6 +445,10 @@ export async function runTerminalWatcherCheck(
         classification = "no_change";
         summary = "No new output.";
       }
+
+      // Surface a per-terminal status error as evidence (e.g. a transient
+      // read problem reported by Daintree) without overriding the verdict.
+      if (entry?.error) evidence = [...evidence, `status error: ${entry.error}`];
     }
 
     const outcome = decideOutcome({

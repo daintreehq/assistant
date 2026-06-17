@@ -53,10 +53,18 @@ describe("typed Daintree wrappers vs daintree.call (#2)", () => {
     expect(call?.args.recipeId).toBe("pr-review");
   });
 
-  it("terminal.focus is allowed at operator tier without confirmation plumbing", async () => {
+  it("terminal.focus maps to panel.focus({ panelId }) at operator tier", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
-    const res = await reg.dispatch("terminal.focus", { terminalId: "term_1" }, ctx("operator"));
+    const c = ctx("operator") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch("terminal.focus", { terminalId: "term_1" }, c);
     expect(res.ok).toBe(true);
+    // There is no terminal.focus MCP tool — it must call panel.focus by panelId.
+    const call = c._calls.find((x) => x.name === "panel.focus");
+    expect(call).toBeDefined();
+    expect(call?.args.panelId).toBe("term_1");
+    expect(c._calls.some((x) => x.name === "terminal.focus")).toBe(false);
   });
 });
