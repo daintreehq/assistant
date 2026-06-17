@@ -9,7 +9,7 @@
  */
 import {
   TIMER_CHECK_SYSTEM_PROMPT,
-} from "../models/prompts.js";
+} from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { Db } from "../storage/db.js";

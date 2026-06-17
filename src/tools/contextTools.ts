@@ -12,7 +12,7 @@ import { ok, fail, NO_ARGS, type ToolDef } from "./types.js";
 import {
   SUMMARIZER_SYSTEM_PROMPT,
   buildSummarizerUserPrompt,
-} from "../models/prompts.js";
+} from "../models/prompts/index.js";
 
 /** Best-effort MCP call: returns the result text or undefined if it fails. */
 async function tryCall(

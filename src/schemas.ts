@@ -289,6 +289,18 @@ export interface ConversationMessageRecord {
   createdAt: number;
 }
 
+/** One small-model recipe-selection decision; the dataset for improving recipes. */
+export interface RecipeSelectionLogRecord {
+  id: string;
+  ts: number;
+  sessionId: string;
+  userInput: string;
+  selectedRecipeIdsJson: string;
+  confidence: number;
+  taskType?: string;
+  reason?: string;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */

@@ -11,8 +11,9 @@ import { ModelRouter } from "../models/router.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { buildAllTools } from "../tools/index.js";
 import type { ConfirmRequest, ToolActor, ToolContext } from "../tools/types.js";
+import { RecipeRegistry } from "../recipes/registry.js";
 import { AgentSession } from "../agent/loop.js";
-import type { MainPromptContext } from "../models/prompts.js";
+import type { MainPromptContext } from "../models/prompts/index.js";
 import { Scheduler } from "../daemon/scheduler.js";
 import type { QueueEvent } from "../schemas.js";
 
@@ -38,6 +39,7 @@ export class App {
   readonly queue: Queue;
   readonly router: ModelRouter;
   readonly registry: ToolRegistry;
+  readonly recipes: RecipeRegistry;
   readonly sessionId: string;
   session!: AgentSession;
   scheduler?: Scheduler;
@@ -53,6 +55,7 @@ export class App {
     this.registry = new ToolRegistry();
     this.registry.registerAll(buildAllTools());
     this.registry.assertSafe();
+    this.recipes = new RecipeRegistry();
     this.hooks = opts.hooks ?? {};
     this.sessionId = opts.sessionId ?? `ses_${randomUUID().slice(0, 8)}`;
   }
@@ -62,6 +65,7 @@ export class App {
     app.session = new AgentSession({
       router: app.router,
       registry: app.registry,
+      recipeRegistry: app.recipes,
       ctx: app.buildContext("main"),
       promptContext: app.promptContext(),
       sessionId: app.sessionId,
@@ -107,7 +111,7 @@ export class App {
   /** Connect to Daintree MCP (best-effort) and refresh the system prompt. */
   async connectMcp(): Promise<void> {
     await this.mcp.connect();
-    this.session.refreshSystemPrompt(this.promptContext());
+    this.session.refreshRuntimeContext(this.promptContext());
   }
 
   startScheduler(onAttention?: (events: QueueEvent[]) => void): Scheduler {

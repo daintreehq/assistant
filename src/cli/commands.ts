@@ -20,6 +20,7 @@ const HELP = `${c.bold("Commands")}
   /watchers               active watchers
   /audit [n]              recent tool calls (default 15)
   /models                 model routing
+  /recipes [sub]          assistant recipes (loaded|reload|load <id…>|clear)
   /permissions [tier]     show or set tier (supervisor|operator|system)
   /compact                summarize + reset the conversation
   /doctor                 check MCP / config / project mapping
@@ -136,7 +137,7 @@ export async function handleSlashCommand(
           return { handled: true };
         }
         app.config.tier = parsed.data;
-        app.session.refreshSystemPrompt(app.promptContext());
+        app.session.refreshRuntimeContext(app.promptContext());
         render.success(`Tier set to ${parsed.data}.`);
       } else {
         render.line(`\nCurrent tier: ${c.bold(app.config.tier)}`);
@@ -178,6 +179,74 @@ export async function handleSlashCommand(
       } catch (e) {
         render.error(`Compaction failed: ${e instanceof Error ? e.message : String(e)}`);
       }
+      return { handled: true };
+    }
+
+    case "recipes": {
+      const sub = rest[0];
+      if (!sub) {
+        const all = app.recipes.list();
+        render.line(c.bold(`\nRecipes (${all.length})`));
+        for (const r of all) {
+          render.line(
+            `  ${c.cyan(r.id)} ${c.gray(`[${r.risk}]`)} ${r.title} — ${r.summary}`,
+          );
+        }
+        render.line(
+          c.gray("\n  /recipes loaded | reload | load <id…> | clear"),
+        );
+        return { handled: true };
+      }
+      if (sub === "loaded") {
+        render.line(`\n${app.session.describeRecipes()}`);
+        return { handled: true };
+      }
+      if (sub === "clear") {
+        app.session.setRecipes([]);
+        render.success("Cleared loaded recipes.");
+        return { handled: true };
+      }
+      if (sub === "load") {
+        const ids = rest.slice(1);
+        if (ids.length === 0) {
+          render.warn("Usage: /recipes load <id> [<id>…]");
+          return { handled: true };
+        }
+        const known = ids.filter((id) => app.recipes.has(id));
+        const unknown = ids.filter((id) => !app.recipes.has(id));
+        if (unknown.length) {
+          render.warn(`Unknown recipe id(s): ${unknown.join(", ")}`);
+        }
+        if (known.length === 0) {
+          // Don't clear the loaded set just because every id was a typo.
+          render.warn("No known recipe ids given; loaded recipes unchanged.");
+          return { handled: true };
+        }
+        if (new Set(known).size > 3) {
+          render.warn("More than 3 recipes given; loading the first 3.");
+        }
+        app.session.setRecipes(known);
+        render.line(app.session.describeRecipes());
+        return { handled: true };
+      }
+      if (sub === "reload") {
+        render.info("Re-selecting recipes…");
+        try {
+          const ok = await app.session.forceRecipeRefresh();
+          if (ok) {
+            render.success("Recipe selection refreshed.");
+          } else {
+            render.warn("Selector unavailable; kept existing recipes.");
+          }
+          render.line(app.session.describeRecipes());
+        } catch (e) {
+          render.error(
+            `Recipe refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        return { handled: true };
+      }
+      render.warn("Usage: /recipes [loaded|reload|load <id…>|clear]");
       return { handled: true };
     }
 
