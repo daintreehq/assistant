@@ -70,3 +70,31 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   window is gone — stop retrying that session and tell the user.
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`;
+
+/**
+ * The Daintree MCP tool names we have VERIFIED and documented above. Maintained
+ * by hand (not parsed from the prose, which deliberately names tools that do NOT
+ * exist as negative examples — e.g. terminal.listStatus, terminal.waitForAny).
+ *
+ * Used at startup to detect drift: any name here that is absent from the live
+ * server's tool list means our documented surface has gone stale. Keep this in
+ * sync with the "verified shapes" section above when the reference changes.
+ */
+export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
+  "actions.getContext",
+  "actions.list",
+  "actions.search",
+  "actions.getSchema",
+  "agent.launch",
+  "git.getProjectPulse",
+  "panel.focus",
+  "recipe.list",
+  "recipe.run",
+  "terminal.getOutput",
+  "terminal.getStatus",
+  "terminal.list",
+  "terminal.waitUntilIdle",
+  "worktree.createWithRecipe",
+  "worktree.getCurrent",
+  "worktree.list",
+];
