@@ -16,6 +16,7 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
 };
 import type {
   AuditRecord,
+  AutomationGrantRecord,
   ConversationMessageRecord,
   QueueEvent,
   RecipeSelectionLogRecord,
@@ -114,6 +115,20 @@ CREATE TABLE IF NOT EXISTS recipe_selection_log (
   reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recipe_sel_ts ON recipe_selection_log (ts);
+
+CREATE TABLE IF NOT EXISTS automation_grants (
+  id TEXT PRIMARY KEY,
+  actorId TEXT NOT NULL,
+  actorType TEXT NOT NULL,
+  allowedRiskClassesJson TEXT,
+  allowedToolNamesJson TEXT,
+  expiresAt INTEGER NOT NULL,
+  maxUses INTEGER NOT NULL,
+  usesRemaining INTEGER NOT NULL,
+  revokedAt INTEGER,
+  createdAt INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_grants_actor ON automation_grants (actorId, revokedAt, expiresAt);
 `;
 
 export interface QueueDigestOptions {
@@ -156,6 +171,32 @@ function toSqlValue(v: unknown): SqlIn {
   if (typeof v === "string" || typeof v === "number" || typeof v === "bigint") return v;
   if (v instanceof Uint8Array) return v;
   return String(v);
+}
+
+/** Parse a stored JSON string-array column, tolerating null/garbage. */
+function parseJsonArray(s: string | null): string[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Union semantics: a grant authorizes a call when the tool name is in its
+ * allowed-tool-names list OR the tool's risk class is in its allowed-risk-classes
+ * list. An empty/absent list simply contributes no matches on that axis.
+ */
+function grantAuthorizes(
+  g: AutomationGrantRecord,
+  toolName: string,
+  riskClass: string,
+): boolean {
+  if (parseJsonArray(g.allowedToolNamesJson).includes(toolName)) return true;
+  if (parseJsonArray(g.allowedRiskClassesJson).includes(riskClass)) return true;
+  return false;
 }
 
 export class Db {
@@ -552,6 +593,114 @@ export class Db {
     return this.db
       .prepare("SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?")
       .all(limit) as unknown as AuditRecord[];
+  }
+
+  /* ----------------------- automation grants ----------------------------- */
+
+  insertGrant(
+    rec: Omit<AutomationGrantRecord, "id" | "createdAt" | "usesRemaining" | "revokedAt"> &
+      Partial<AutomationGrantRecord>,
+  ): AutomationGrantRecord {
+    const full: AutomationGrantRecord = {
+      id: rec.id ?? `grt_${randomUUID().slice(0, 8)}`,
+      actorId: rec.actorId,
+      actorType: rec.actorType,
+      allowedRiskClassesJson: rec.allowedRiskClassesJson ?? null,
+      allowedToolNamesJson: rec.allowedToolNamesJson ?? null,
+      expiresAt: rec.expiresAt,
+      maxUses: rec.maxUses,
+      usesRemaining: rec.usesRemaining ?? rec.maxUses,
+      revokedAt: rec.revokedAt ?? null,
+      createdAt: rec.createdAt ?? Date.now(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO automation_grants (id,actorId,actorType,allowedRiskClassesJson,allowedToolNamesJson,expiresAt,maxUses,usesRemaining,revokedAt,createdAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.actorId,
+        full.actorType,
+        full.allowedRiskClassesJson,
+        full.allowedToolNamesJson,
+        full.expiresAt,
+        full.maxUses,
+        full.usesRemaining,
+        full.revokedAt,
+        full.createdAt,
+      );
+    return full;
+  }
+
+  getGrant(id: string): AutomationGrantRecord | undefined {
+    return this.db.prepare("SELECT * FROM automation_grants WHERE id = ?").get(id) as
+      | unknown as AutomationGrantRecord | undefined;
+  }
+
+  /** Live grants (non-revoked, non-expired, with uses left), optionally scoped to one actor. */
+  listGrants(actorId?: string, now = Date.now()): AutomationGrantRecord[] {
+    const rows = actorId
+      ? this.db
+          .prepare(
+            "SELECT * FROM automation_grants WHERE actorId = ? AND revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0 ORDER BY createdAt",
+          )
+          .all(actorId, now)
+      : this.db
+          .prepare(
+            "SELECT * FROM automation_grants WHERE revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0 ORDER BY createdAt",
+          )
+          .all(now);
+    return rows as unknown as AutomationGrantRecord[];
+  }
+
+  /**
+   * Find a live grant for `actorId`/`actorType` that authorizes `toolName` (or
+   * its `riskClass`) and atomically consume one use. Returns the updated grant on
+   * success, or undefined when no in-scope live grant exists. The `actorType`
+   * must also match so a grant minted for a timer can never be consumed by a
+   * watcher that happens to share an id (and vice versa).
+   *
+   * The `UPDATE ... WHERE usesRemaining > 0 AND revokedAt IS NULL AND
+   * expiresAt > ?` is the consume guard; in this single-threaded synchronous
+   * store the follow-up read cannot interleave with another consume, so the
+   * check-and-decrement is effectively atomic (same shape as resolveEvent).
+   */
+  consumeGrant(
+    actorId: string,
+    actorType: string,
+    toolName: string,
+    riskClass: string,
+    now = Date.now(),
+  ): AutomationGrantRecord | undefined {
+    const stmt = this.db.prepare(
+      "UPDATE automation_grants SET usesRemaining = usesRemaining - 1 WHERE id = ? AND usesRemaining > 0 AND revokedAt IS NULL AND expiresAt > ?",
+    );
+    for (const g of this.listGrants(actorId, now)) {
+      if (g.actorType !== actorType) continue;
+      if (!grantAuthorizes(g, toolName, riskClass)) continue;
+      const res = stmt.run(g.id, now);
+      if (Number(res.changes) > 0) return this.getGrant(g.id);
+    }
+    return undefined;
+  }
+
+  /** Explicitly revoke one grant by id. Returns true if it was still live. */
+  revokeGrant(id: string, now = Date.now()): boolean {
+    const res = this.db
+      .prepare("UPDATE automation_grants SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL")
+      .run(now, id);
+    return Number(res.changes) > 0;
+  }
+
+  /** Revoke every live grant for an actor — called on watcher/timer stop or cancel. */
+  revokeGrantsByActor(actorId: string, now = Date.now()): number {
+    const res = this.db
+      .prepare(
+        "UPDATE automation_grants SET revokedAt = ? WHERE actorId = ? AND revokedAt IS NULL",
+      )
+      .run(now, actorId);
+    return Number(res.changes);
   }
 
   /* -------------------------- conversation ------------------------------- */

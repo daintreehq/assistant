@@ -163,6 +163,152 @@ describe("ToolRegistry.dispatch", () => {
     expect(events[0].count).toBe(2);
     expect(events[0].dedupeKey).toBe("denied:watcher:test.project");
   });
+
+  it("lets a non-main actor with a valid scoped grant run a confirm-required tool, audited grant_ok", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const confirm = vi.fn();
+    const ctx = makeCtx(db, config, confirm, "watcher");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_1",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    // A non-interactive actor is still never prompted.
+    expect(confirm).not.toHaveBeenCalled();
+
+    const audit = db.listAudit();
+    expect(audit[0].toolName).toBe("test.project");
+    expect(audit[0].outcome).toBe("grant_ok");
+
+    // The single use was consumed — the next call is denied as usual.
+    const res2 = await reg.dispatch("test.project", { name: "y" }, ctx);
+    expect(res2.error?.code).toBe("CONFIRMATION_REQUIRED");
+  });
+
+  it("authorizes by tool name as well as risk class", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "timer");
+    ctx.actorId = "tmr_1";
+    db.insertGrant({
+      actorId: "tmr_1",
+      actorType: "timer",
+      allowedRiskClassesJson: null,
+      allowedToolNamesJson: JSON.stringify(["test.project"]),
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    expect(db.listAudit()[0].outcome).toBe("grant_ok");
+  });
+
+  it("does not let a grant scoped to a different actor authorize the call", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_OTHER",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+    expect(db.listAudit()[0].outcome).toBe("denied");
+  });
+
+  it("an expired grant does not authorize the call", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_1",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() - 1, // already expired
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+  });
+
+  it("a grant never overrides a tier denial", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    config.tier = "supervisor"; // 'project' is not allowed at all
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_1",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.error?.code).toBe("TIER_DENIED");
+    // The grant use must NOT have been consumed by a tier-denied call.
+    expect(db.listGrants("wch_1")[0].usesRemaining).toBe(1);
+  });
+
+  it("does not let a grant of a different actor type authorize the call", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    // Same id, but the grant is for a watcher while the actor is a timer.
+    const ctx = makeCtx(db, config, vi.fn(), "timer");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_1",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+    // The mismatched grant must not have been consumed.
+    expect(db.getGrant(db.listGrants("wch_1")[0].id)?.usesRemaining).toBe(1);
+  });
+
+  it("keeps distinct actors' denial events from collapsing via the actor id", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctxA = makeCtx(db, config, vi.fn(), "watcher");
+    ctxA.actorId = "wch_a";
+    const ctxB = makeCtx(db, config, vi.fn(), "watcher");
+    ctxB.actorId = "wch_b";
+    await reg.dispatch("test.project", { name: "x" }, ctxA);
+    await reg.dispatch("test.project", { name: "y" }, ctxB);
+
+    const events = new Queue(db).digest();
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.dedupeKey).sort()).toEqual([
+      "denied:watcher:wch_a:test.project",
+      "denied:watcher:wch_b:test.project",
+    ]);
+  });
 });
 
 const OPENAI_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;

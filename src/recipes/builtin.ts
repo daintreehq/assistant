@@ -38,6 +38,9 @@ export const BASIC_DAINTREE_ORCHESTRATION_RECIPE: Recipe = {
     "watcher.terminal.create",
     "watcher.list",
     "watcher.cancel",
+    "grant.create",
+    "grant.list",
+    "grant.revoke",
   ],
   body: `Use when: the user asks about current Daintree state or what to do next.
 Procedure:

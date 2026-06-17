@@ -153,10 +153,29 @@ export class ToolRegistry {
     }
 
     // Confirmation for mutating actions. Non-interactive actors (timer, watcher,
-    // workflow) can NEVER run a confirm-required tool — this is what stops a
-    // benign local timer from later invoking a high-risk tool unattended.
+    // workflow) can NEVER run a confirm-required tool unattended — UNLESS a
+    // scoped automation grant tied to that exact actor authorizes it. This is
+    // what stops a benign local timer from later invoking a high-risk tool
+    // unattended, while still allowing a user-minted, bounded follow-up.
     if (decision.needsConfirmation) {
       if (ctx.actor !== "main") {
+        // A grant is scoped to a specific watcher/timer id, an allowlist of risk
+        // classes or tool names, a TTL, and a remaining-uses counter. Consume one
+        // use atomically; on success the call proceeds and is audited as
+        // "grant_ok" so a grant-authorized mutation is distinguishable from an
+        // interactive one.
+        if (ctx.actorId) {
+          const grant = ctx.db.consumeGrant(
+            ctx.actorId,
+            ctx.actor,
+            name,
+            tool.risk,
+            started,
+          );
+          if (grant) {
+            return this.runHandler(tool, name, args, ctx, started, "grant_ok");
+          }
+        }
         const res = fail(
           "CONFIRMATION_REQUIRED",
           `${name} (${tool.risk}) needs user confirmation and cannot be run by a non-interactive '${ctx.actor}' actor.`,
@@ -167,13 +186,15 @@ export class ToolRegistry {
         // and why. Low severity keeps it out of the proactive notifier, and a
         // stable dedupeKey (no tick-specific value) collapses repeated denials
         // of the same tool by the same actor into one count-bumped inbox row.
+        // The actor id (when present) keeps distinct watchers/timers from
+        // collapsing into one another's denial row.
         try {
           ctx.queue.publish({
             source: "system",
             severity: "info",
             title: `Autonomous action blocked: ${name}`,
             summary: res.summary,
-            dedupeKey: `denied:${ctx.actor}:${name}`,
+            dedupeKey: `denied:${ctx.actor}:${ctx.actorId ? `${ctx.actorId}:` : ""}${name}`,
           });
         } catch {
           /* surfacing must never break a tool call */
@@ -201,9 +222,27 @@ export class ToolRegistry {
     }
 
     // Run.
+    return this.runHandler(tool, name, args, ctx, started);
+  }
+
+  /**
+   * Invoke a tool handler and audit the result. `okOutcome` is the audit outcome
+   * recorded on success — "ok" for a normal call, "grant_ok" when a scoped
+   * automation grant authorized a non-interactive actor. A failing/throwing
+   * handler always audits as "error" regardless (a grant-authorized failure is
+   * still just an error). Never throws.
+   */
+  private async runHandler(
+    tool: ToolDef,
+    name: string,
+    args: unknown,
+    ctx: ToolContext,
+    started: number,
+    okOutcome: "ok" | "grant_ok" = "ok",
+  ): Promise<ToolResult> {
     try {
       const res = await tool.handler(args, ctx);
-      this.audit(ctx, name, args, res, started, res.ok ? "ok" : "error");
+      this.audit(ctx, name, args, res, started, res.ok ? okOutcome : "error");
       return res;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -219,7 +258,9 @@ export class ToolRegistry {
     args: unknown,
     res: ToolResult,
     started: number,
-    outcome: "ok" | "error" | "denied" | "dedup" = res.ok ? "ok" : "error",
+    outcome: "ok" | "error" | "denied" | "dedup" | "grant_ok" = res.ok
+      ? "ok"
+      : "error",
   ): void {
     try {
       const row = ctx.db.insertAudit({

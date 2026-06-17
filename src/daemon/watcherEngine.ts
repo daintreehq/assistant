@@ -583,6 +583,8 @@ export async function runTerminalWatcherCheck(
     // Disable the watcher and tell the user, instead of throwing silently every
     // tick (the scheduler swallows watcher errors).
     ctx.db.updateWatcher(rec.id, { status: "error", lastCheckedAt: now });
+    // A disabled watcher will never check again — release any scoped grants.
+    ctx.db.revokeGrantsByActor(rec.id, now);
     ctx.queue.publish({
       source: "terminal_watcher",
       severity: "error",
@@ -769,6 +771,10 @@ export async function runTerminalWatcherCheck(
     optionsJson: JSON.stringify({ ...options, perTerminal }),
     status: stop ? (stopReason === "timeout" ? "timeout" : "condition_met") : "active",
   });
+
+  // Once the watcher has stopped (timed out or its stop condition met) it will
+  // never run again — release any scoped automation grants tied to it.
+  if (stop) ctx.db.revokeGrantsByActor(rec.id, now);
 
   return { ...headline, stop, stopReason };
 }

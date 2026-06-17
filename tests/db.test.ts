@@ -152,4 +152,103 @@ describe("Db", () => {
       expect(ordered).toEqual([error.id, attention.id, info.id]);
     });
   });
+
+  describe("automation grants", () => {
+    const T0 = 10_000_000;
+
+    function grant(over: Partial<Parameters<Db["insertGrant"]>[0]> = {}) {
+      return db.insertGrant({
+        actorId: "wch_abc",
+        actorType: "watcher",
+        allowedRiskClassesJson: JSON.stringify(["git"]),
+        allowedToolNamesJson: null,
+        expiresAt: T0 + 60_000,
+        maxUses: 3,
+        createdAt: T0,
+        ...over,
+      });
+    }
+
+    it("insertGrant defaults usesRemaining to maxUses and revokedAt to null", () => {
+      const g = grant({ maxUses: 5 });
+      const fetched = db.getGrant(g.id)!;
+      expect(fetched.usesRemaining).toBe(5);
+      expect(fetched.revokedAt).toBeNull();
+      expect(fetched.actorId).toBe("wch_abc");
+    });
+
+    it("listGrants returns only live grants, optionally scoped to an actor", () => {
+      grant({ actorId: "wch_a" });
+      grant({ actorId: "wch_b" });
+      grant({ actorId: "wch_expired", expiresAt: T0 - 1 });
+      grant({ actorId: "wch_used", usesRemaining: 0 });
+
+      // Scoped lookups exclude expired/exhausted grants.
+      expect(db.listGrants("wch_a", T0).map((g) => g.actorId)).toEqual(["wch_a"]);
+      expect(db.listGrants("wch_expired", T0)).toHaveLength(0);
+      expect(db.listGrants("wch_used", T0)).toHaveLength(0);
+      // Unscoped lists every live grant.
+      expect(db.listGrants(undefined, T0).map((g) => g.actorId).sort()).toEqual([
+        "wch_a",
+        "wch_b",
+      ]);
+    });
+
+    it("consumeGrant decrements a use and returns the updated grant on a risk-class match", () => {
+      const g = grant({ maxUses: 2 });
+      const consumed = db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0);
+      expect(consumed?.id).toBe(g.id);
+      expect(consumed?.usesRemaining).toBe(1);
+    });
+
+    it("consumeGrant matches by tool name (union semantics)", () => {
+      grant({
+        allowedRiskClassesJson: null,
+        allowedToolNamesJson: JSON.stringify(["terminal.send"]),
+      });
+      // The risk class is not allowed, but the exact tool name is.
+      const consumed = db.consumeGrant("wch_abc", "watcher", "terminal.send", "terminal", T0);
+      expect(consumed).toBeDefined();
+      // A different tool of the same (un-allowed) risk class is rejected.
+      expect(db.consumeGrant("wch_abc", "watcher", "terminal.other", "terminal", T0)).toBeUndefined();
+    });
+
+    it("consumeGrant returns undefined when nothing matches the scope", () => {
+      grant(); // allows git only
+      expect(db.consumeGrant("wch_abc", "watcher", "project.spawn", "project", T0)).toBeUndefined();
+      // A wrong actor never matches.
+      expect(db.consumeGrant("wch_other", "watcher", "git.commit", "git", T0)).toBeUndefined();
+    });
+
+    it("consumeGrant exhausts after maxUses and then denies", () => {
+      grant({ maxUses: 2 });
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)?.usesRemaining).toBe(1);
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)?.usesRemaining).toBe(0);
+      // Third call: exhausted (usesRemaining = 0 fails the WHERE guard).
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)).toBeUndefined();
+    });
+
+    it("consumeGrant denies an expired grant", () => {
+      grant({ expiresAt: T0 + 1000 });
+      // now is past expiry.
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0 + 2000)).toBeUndefined();
+    });
+
+    it("revokeGrant prevents further consumption and is idempotent", () => {
+      const g = grant();
+      expect(db.revokeGrant(g.id, T0)).toBe(true);
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)).toBeUndefined();
+      // Already revoked → no longer live.
+      expect(db.revokeGrant(g.id, T0)).toBe(false);
+    });
+
+    it("revokeGrantsByActor revokes every live grant for an actor and returns the count", () => {
+      grant({ actorId: "wch_x" });
+      grant({ actorId: "wch_x" });
+      grant({ actorId: "wch_y" });
+      expect(db.revokeGrantsByActor("wch_x", T0)).toBe(2);
+      expect(db.listGrants("wch_x", T0)).toHaveLength(0);
+      expect(db.listGrants("wch_y", T0)).toHaveLength(1);
+    });
+  });
 });

@@ -10,6 +10,7 @@ import { watcherTools } from "./watcherTools.js";
 import { queueTools } from "./queueTools.js";
 import { contextTools } from "./contextTools.js";
 import { agentTaskTools } from "./agentTaskTools.js";
+import { grantTools } from "./grantTools.js";
 
 export function buildAllTools(): ToolDef[] {
   return [
@@ -20,5 +21,6 @@ export function buildAllTools(): ToolDef[] {
     ...queueTools,
     ...contextTools,
     ...agentTaskTools,
+    ...grantTools,
   ];
 }

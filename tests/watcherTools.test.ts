@@ -4,6 +4,7 @@ import { Db } from "../src/storage/db.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 const create = watcherTools.find((t) => t.name === "watcher.terminal.create")!;
+const cancel = watcherTools.find((t) => t.name === "watcher.cancel")!;
 
 function ctxWith(daemonActive?: () => boolean): ToolContext {
   const db = new Db(":memory:");
@@ -39,5 +40,35 @@ describe("watcher.terminal.create lifecycle notice", () => {
     const res = await create.handler(args, ctxWith(undefined));
     expect(res.ok).toBe(true);
     expect(res.summary).toContain("pauses when you close the assistant");
+  });
+});
+
+describe("watcher.cancel revokes scoped grants", () => {
+  it("cancels the watcher and revokes its live automation grants", async () => {
+    const db = new Db(":memory:");
+    const ctx = { db, actor: "main" } as unknown as ToolContext;
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "w",
+      goal: "g",
+      targetsJson: JSON.stringify(["term_1"]),
+      cadenceMs: 1000,
+      modelTier: "small",
+      nextCheckAt: Date.now(),
+    });
+    db.insertGrant({
+      actorId: w.id,
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["git"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 3,
+    });
+    expect(db.listGrants(w.id)).toHaveLength(1);
+
+    const res = await cancel.handler({ id: w.id }, ctx);
+    expect(res.ok).toBe(true);
+    expect(db.listGrants(w.id)).toHaveLength(0);
+    db.close();
   });
 });

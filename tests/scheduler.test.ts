@@ -266,4 +266,55 @@ describe("Scheduler.tick", () => {
       events.some((e) => e.source === "timer" && e.severity === "error"),
     ).toBe(true);
   });
+
+  it("threads the timer id as actorId so a scoped grant authorizes its call_safe_tool", async () => {
+    const deps = makeDeps();
+    deps.registry.register(projectTool);
+    // ctxFor now forwards the actor id the scheduler passes in.
+    const ctxFor = (actor: ToolContext["actor"], actorId?: string): ToolContext =>
+      ({
+        config: { tier: "operator" } as ToolContext["config"],
+        mcp: {} as ToolContext["mcp"],
+        db: deps.db,
+        queue: deps.queue,
+        router: deps.router,
+        projectPath: "/tmp/project",
+        actor,
+        actorId,
+        confirm: async () => true,
+        log: () => {},
+      }) as ToolContext;
+    const scheduler = new Scheduler({ ...deps, ctxFor });
+    const now = 6_000_000;
+
+    const timer = deps.db.insertTimer({
+      title: "granted project action",
+      fireAt: now - 5000,
+      payloadType: "call_safe_tool",
+      payloadJson: JSON.stringify({
+        type: "call_safe_tool",
+        toolCall: { toolName: "test.project", args: { name: "x" } },
+      }),
+    });
+    // The registry consumes grants against real Date.now() (dispatch's clock),
+    // not the scheduler's injected `now`, so the TTL must be real wall-clock.
+    deps.db.insertGrant({
+      actorId: timer.id,
+      actorType: "timer",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    await scheduler.tick(now);
+
+    // The grant authorized the otherwise-denied call: audited grant_ok, no denial.
+    const audit = deps.db.listAudit();
+    expect(audit.some((a) => a.toolName === "test.project" && a.outcome === "grant_ok")).toBe(
+      true,
+    );
+    const events = deps.queue.digest();
+    expect(events.some((e) => e.source === "system")).toBe(false);
+  });
 });

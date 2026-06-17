@@ -317,10 +317,46 @@ export interface AuditRecord {
   actor: "main" | "watcher" | "timer" | "workflow" | "system";
   toolName: string;
   argsJson: string;
-  outcome: "ok" | "error" | "denied" | "dedup";
+  // "grant_ok": a non-interactive actor ran a confirm-required tool because a
+  // valid scoped automation grant authorized (and consumed) the use.
+  outcome: "ok" | "error" | "denied" | "dedup" | "grant_ok";
   durationMs: number;
   summary: string;
   resultJson?: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Automation grants                                                           */
+/* -------------------------------------------------------------------------- */
+
+/** Which kind of non-interactive actor a grant is scoped to. */
+export type AutomationGrantActorType = "watcher" | "timer";
+
+/**
+ * A scoped, expiring authorization that lets a specific watcher/timer perform a
+ * bounded number of confirm-required follow-up mutations without an interactive
+ * prompt. Minted by the main actor; consumed atomically at dispatch time.
+ *
+ * The allowlist is two nullable JSON-array columns rather than a SQL
+ * discriminated union: a call is authorized when the tool name is in
+ * `allowedToolNamesJson` OR its risk class is in `allowedRiskClassesJson` (union
+ * semantics). At least one list must be non-empty — enforced in the TypeScript
+ * layer, not the schema.
+ *
+ * `revokedAt` means explicit revocation only. Use-exhaustion is implicit via
+ * `usesRemaining = 0`; it does NOT stamp `revokedAt`.
+ */
+export interface AutomationGrantRecord {
+  id: string;
+  actorId: string; // wch_… or tmr_…
+  actorType: AutomationGrantActorType;
+  allowedRiskClassesJson: string | null; // JSON array of RiskClass, or null
+  allowedToolNamesJson: string | null; // JSON array of tool names, or null
+  expiresAt: number; // wall-clock ms
+  maxUses: number;
+  usesRemaining: number;
+  revokedAt: number | null;
+  createdAt: number;
 }
 
 export interface ConversationMessageRecord {

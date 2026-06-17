@@ -268,6 +268,8 @@ export const timerTools: ToolDef[] = [
           return fail("TIMER_NOT_FOUND", `No timer with id ${args.id}.`, { recoverable: false });
         }
         ctx.db.updateTimer(args.id, { status: "cancelled" });
+        // A cancelled timer must not retain any scoped authorization.
+        ctx.db.revokeGrantsByActor(args.id);
         return ok(`Cancelled timer ${args.id}.`, { timerId: args.id, status: "cancelled" });
       } catch (e) {
         return fail(

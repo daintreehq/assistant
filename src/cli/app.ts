@@ -97,7 +97,7 @@ export class App {
     };
   }
 
-  buildContext(actor: ToolActor): ToolContext {
+  buildContext(actor: ToolActor, actorId?: string): ToolContext {
     return {
       config: this.config,
       mcp: this.mcp,
@@ -106,6 +106,7 @@ export class App {
       router: this.router,
       projectPath: this.config.projectPath,
       actor,
+      actorId,
       // Read hooks live so setHooks() updates take effect without rebuilding the
       // session (which would drop conversation history).
       confirm:
@@ -167,7 +168,7 @@ export class App {
       queue: this.queue,
       router: this.router,
       registry: this.registry,
-      ctxFor: (actor) => this.buildContext(actor),
+      ctxFor: (actor, actorId) => this.buildContext(actor, actorId),
       onAttention,
     });
     this.scheduler.start();
