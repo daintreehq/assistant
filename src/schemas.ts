@@ -291,6 +291,10 @@ export interface WatcherRecord {
   goal: string;
   targetsJson: string; // string[] of terminalIds / worktreeIds
   cadenceMs: number;
+  /** True for supervisor watchers attached to CLI-spawned worker terminals.
+   * These default to a fast cadence and are floored at the scheduler tick so a
+   * stalled worker surfaces quickly. User-created background watchers are false. */
+  isSupervisor?: boolean;
   modelTier: ModelTier;
   startAfterMs?: number;
   stopAfterMs?: number;

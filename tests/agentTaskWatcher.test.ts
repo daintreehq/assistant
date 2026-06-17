@@ -54,4 +54,24 @@ describe("agentTask.spawnForEdits watcher lifecycle notice", () => {
     expect(res.ok).toBe(true);
     expect(res.summary).not.toContain("pauses when you close the assistant");
   });
+
+  it("attaches a fast supervisor watcher (3s cadence, isSupervisor true)", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await spawn.handler(args, ctx);
+    expect(res.ok).toBe(true);
+    const watchers = ctx.db.listWatchers();
+    expect(watchers).toHaveLength(1);
+    expect(watchers[0].cadenceMs).toBe(3000);
+    expect(watchers[0].isSupervisor).toBe(true);
+  });
+
+  it("honours an explicit cadence override at or above the tick", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await spawn.handler(
+      { ...args, watcher: { create: true, cadenceMs: 30_000 } },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(ctx.db.listWatchers()[0].cadenceMs).toBe(30_000);
+  });
 });
