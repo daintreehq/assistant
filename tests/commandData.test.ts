@@ -118,4 +118,56 @@ describe("runDoctor MCP probe", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("reports the probe as failed when the tool returns isError", async () => {
+    const { app, dir } = appWithMcp({
+      listTools: async () => ({
+        tools: [{ name: "actions.getContext", inputSchema: {} }],
+      }),
+      callTool: async () => ({
+        content: [{ type: "text", text: "forbidden" }],
+        isError: true,
+      }),
+    });
+    try {
+      const probe = (await runDoctor(app)).find((c) => c.label === "mcp probe");
+      expect(probe?.ok).toBe(false);
+      expect(probe?.detail).toContain("forbidden");
+    } finally {
+      await app.shutdown();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a connection failure (not a tier issue) when listTools throws", async () => {
+    const { app, dir } = appWithMcp({
+      listTools: async () => {
+        throw new Error("ECONNRESET");
+      },
+      callTool: async () => ({ content: [], isError: false }),
+    });
+    try {
+      const probe = (await runDoctor(app)).find((c) => c.label === "mcp probe");
+      expect(probe?.ok).toBe(false);
+      expect(probe?.detail).toContain("probe failed");
+      expect(probe?.detail).not.toContain("not advertised");
+    } finally {
+      await app.shutdown();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds no probe check when MCP is disconnected", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-doc-"));
+    const app = App.create({
+      overrides: { offline: true, stateDir: dir, projectPath: dir, tier: "operator" },
+    });
+    try {
+      const probe = (await runDoctor(app)).find((c) => c.label === "mcp probe");
+      expect(probe).toBeUndefined();
+    } finally {
+      await app.shutdown();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

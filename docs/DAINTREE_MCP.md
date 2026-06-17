@@ -23,7 +23,8 @@ Daintree launches the CLI and passes the connection details via environment / fl
 
 `DAINTREE_WINDOW_ID` is injected by Daintree so a CLI bound to one Daintree window
 can be told apart from another. It is read into config (`AppConfig.windowId`, env-only —
-never a CLI flag) and surfaced by `/doctor` and `/status` via `describeConfig()`.
+never a CLI flag) and surfaced by `/status` via `describeConfig()`. (`/doctor` reports
+connection health and a live MCP probe rather than the raw config values.)
 
 Client uses `@modelcontextprotocol/sdk`:
 

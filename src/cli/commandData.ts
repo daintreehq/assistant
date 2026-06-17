@@ -9,6 +9,20 @@ import type { App } from "./app.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 
+/** Bound an MCP call so a stalled server can't hang a diagnostic command. */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      const t = setTimeout(
+        () => reject(new Error(`${what} timed out after ${ms}ms`)),
+        ms,
+      );
+      t.unref();
+    }),
+  ]);
+}
+
 export type PanelKey = "watchers" | "inbox" | "timers" | "audit" | "help";
 
 export interface DoctorCheck {
@@ -69,18 +83,18 @@ export async function runDoctor(app: App): Promise<DoctorCheck[]> {
   // no confirmation), so it verifies end-to-end access without mutating anything.
   if (st.connected) {
     const probeTool = "actions.getContext";
-    const advertised = await app.mcp.listTools().catch(() => []);
-    if (!advertised.some((t) => t.name === probeTool)) {
-      checks.push({
-        label: "mcp probe",
-        ok: false,
-        detail: `${probeTool} not advertised — workbench tier may be unavailable`,
-        fix: "verify the MCP token grants at least workbench tier",
-      });
-    } else {
-      const startedAt = Date.now();
-      try {
-        const res = await app.mcp.callTool(probeTool, {});
+    try {
+      const advertised = await withTimeout(app.mcp.listTools(), 5_000, "listTools");
+      if (!advertised.some((t) => t.name === probeTool)) {
+        checks.push({
+          label: "mcp probe",
+          ok: false,
+          detail: `${probeTool} not advertised — workbench tier may be unavailable`,
+          fix: "verify the MCP token grants at least workbench tier",
+        });
+      } else {
+        const startedAt = Date.now();
+        const res = await withTimeout(app.mcp.callTool(probeTool, {}), 5_000, probeTool);
         const ms = Date.now() - startedAt;
         checks.push({
           label: "mcp probe",
@@ -90,14 +104,16 @@ export async function runDoctor(app: App): Promise<DoctorCheck[]> {
             : `${probeTool} ok (${ms}ms)`,
           fix: res.isError ? "check Daintree tier/permissions; run /reconnect" : undefined,
         });
-      } catch (e) {
-        checks.push({
-          label: "mcp probe",
-          ok: false,
-          detail: `${probeTool} call failed: ${e instanceof Error ? e.message : String(e)}`,
-          fix: "connection may be stale; run /reconnect",
-        });
       }
+    } catch (e) {
+      // A throw here is a live connection/transport failure (or timeout) — NOT a
+      // tier issue — so report it as such rather than "tool not advertised".
+      checks.push({
+        label: "mcp probe",
+        ok: false,
+        detail: `probe failed: ${e instanceof Error ? e.message : String(e)}`,
+        fix: "connection may be stale; run /reconnect",
+      });
     }
   }
 
