@@ -73,6 +73,7 @@ const CORE_TOOL_NAMES = [
   "queue.digest",
   "daintree.status",
   "tool.search",
+  "terminal.extract",
 ];
 
 export interface AgentSessionDeps {

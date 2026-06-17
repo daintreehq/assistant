@@ -26,6 +26,11 @@ Your local tools wrap Daintree:
   with the deterministic poller. timer.* schedule reminders/checks.
 - terminal.summarize — read+summarize one terminal's tail. terminal.focus —
   reveal a terminal in the UI.
+- terminal.extract — read terminal tail(s) and extract caller-specified content
+  (text or JSON) with the small model; optional wait mode polls until a condition
+  is met first. terminal.extract.async fires it in the background and publishes the
+  result (with an optional pass/fail verdict) to the attention queue instead of
+  blocking. Prefer these over dumping raw scrollback into context.
 - recipe.list / recipe.run, worktree.createWithRecipe — Daintree workspace recipes.
 - tool.search / daintree.listTools / daintree.status — discover Daintree tools and
   connection state. queue.* manage the attention queue. fs.list/read/search read

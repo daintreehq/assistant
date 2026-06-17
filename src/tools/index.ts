@@ -9,6 +9,7 @@ import { timerTools } from "./timerTools.js";
 import { watcherTools } from "./watcherTools.js";
 import { queueTools } from "./queueTools.js";
 import { contextTools } from "./contextTools.js";
+import { extractionTools } from "./extractionTools.js";
 import { agentTaskTools } from "./agentTaskTools.js";
 import { grantTools } from "./grantTools.js";
 
@@ -20,6 +21,7 @@ export function buildAllTools(): ToolDef[] {
     ...watcherTools,
     ...queueTools,
     ...contextTools,
+    ...extractionTools,
     ...agentTaskTools,
     ...grantTools,
   ];

@@ -32,6 +32,8 @@ export const BASIC_DAINTREE_ORCHESTRATION_RECIPE: Recipe = {
     "daintree.call",
     "queue.digest",
     "terminal.summarize",
+    "terminal.extract",
+    "terminal.extract.async",
     "timer.schedule",
     "timer.list",
     "timer.cancel",
