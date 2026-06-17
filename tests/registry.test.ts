@@ -144,14 +144,26 @@ function watcherCreateTool(name: string): ToolDef {
 
 describe("ToolRegistry wire-name alias layer", () => {
   it("projects every real tool to an OpenAI-legal wire name with no dots", () => {
+    const all = buildAllTools();
     const reg = new ToolRegistry();
-    reg.registerAll(buildAllTools());
+    reg.registerAll(all);
     const tools = reg.toOpenAITools();
-    expect(tools.length).toBeGreaterThan(0);
+    // No silent drops: every registered tool must be projected.
+    expect(tools).toHaveLength(all.length);
     for (const t of tools) {
       expect(t.function.name).toMatch(OPENAI_NAME_RE);
       expect(t.function.name).not.toContain(".");
+      // Every projected wire name must round-trip back to a real internal name.
+      expect(reg.resolveWireName(t.function.name)).toBeDefined();
     }
+  });
+
+  it("throws when a sanitized wire name exceeds 64 characters", () => {
+    const reg = new ToolRegistry();
+    // 30 dotted segments -> a __-joined wire name far longer than 64 chars.
+    const longName = Array.from({ length: 30 }, (_, i) => `seg${i}`).join(".");
+    reg.register(watcherCreateTool(longName));
+    expect(() => reg.toOpenAITools()).toThrow(/does not match/i);
   });
 
   it("round-trips a dotted name to its wire name and back", () => {

@@ -123,7 +123,18 @@ export class AgentSession {
     await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });
 
-    const tools = this.deps.registry.toOpenAITools();
+    // Projection can throw if a registered tool produces an illegal or
+    // colliding wire name (a registration-time programmer error). Surface it
+    // through the event sink rather than letting it escape send() and strand
+    // the session after the user message was already persisted.
+    let tools;
+    try {
+      tools = this.deps.registry.toOpenAITools();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.events.error(`Tool projection failed: ${msg}`);
+      return `Tool projection failed: ${msg}`;
+    }
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       this.events.assistantStart();

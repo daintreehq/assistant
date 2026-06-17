@@ -90,8 +90,10 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const { events, sink } = recordingSink();
     const responses = [
       chatResult({
+        // The model returns the OpenAI-legal wire name; the loop must translate
+        // it back to the internal dotted name before dispatch and events.
         toolCalls: [
-          { id: "c1", type: "function", function: { name: "fs.search", arguments: "{}" } },
+          { id: "c1", type: "function", function: { name: "fs__search", arguments: "{}" } },
         ],
       }),
       chatResult({ content: "done" }),
