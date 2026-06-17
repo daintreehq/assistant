@@ -4,7 +4,10 @@ import { mcpTools } from "../src/tools/mcpTools.js";
 import { Db } from "../src/storage/db.js";
 import type { ToolContext } from "../src/tools/types.js";
 
-function ctx(tier: "supervisor" | "operator" | "system"): ToolContext {
+function ctx(
+  tier: "supervisor" | "operator" | "system",
+  confirm: () => Promise<boolean> = async () => true,
+): ToolContext {
   const calls: Array<{ name: string; args: unknown }> = [];
   const mcp = {
     isConnected: () => true,
@@ -21,7 +24,7 @@ function ctx(tier: "supervisor" | "operator" | "system"): ToolContext {
     router: {} as ToolContext["router"],
     projectPath: "/tmp/p",
     actor: "main",
-    confirm: async () => true,
+    confirm,
     log: () => {},
   } as ToolContext;
   return Object.assign(c, { _calls: calls }) as ToolContext & { _calls: typeof calls };
@@ -126,16 +129,30 @@ describe("typed forge + workflow wrappers (#26)", () => {
     expect(prepCall?.args.requestKey).toBe("rk-2");
   });
 
-  it("workflow mutations are denied below operator tier", async () => {
+  it("both workflow mutations are denied below operator tier", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
     const c = ctx("supervisor");
+    for (const name of ["workflow.startWorkOnIssue", "workflow.prepBranchForReview"]) {
+      const res = await reg.dispatch(name, { arguments: { issueId: "42" } }, c);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("TIER_DENIED");
+    }
+  });
+
+  it("declining confirmation on a workflow mutation blocks the MCP call", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("operator", async () => false) as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
     const res = await reg.dispatch(
       "workflow.startWorkOnIssue",
       { arguments: { issueId: "42" } },
       c,
     );
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.code).toBe("TIER_DENIED");
+    if (!res.ok) expect(res.error.code).toBe("USER_DECLINED");
+    expect(c._calls.some((x) => x.name === "workflow.startWorkOnIssue")).toBe(false);
   });
 });
