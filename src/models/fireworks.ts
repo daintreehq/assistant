@@ -308,10 +308,37 @@ function stripThink(s: string): string {
   return s.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }
 
-/** Pull the first balanced JSON object/array out of a string. */
-function extractJson(s: string): string {
+/**
+ * Pull the first balanced JSON object/array out of a string, ignoring trailing
+ * prose or stray `<think>` residue the provider may append. Scans with string-
+ * and escape-awareness so braces inside string literals don't unbalance the
+ * count. Falls back to the slice-from-first-bracket behavior if no balanced
+ * span is found.
+ */
+export function extractJson(s: string): string {
   const start = s.search(/[[{]/);
   if (start === -1) return s;
+  const open = s[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  // Unbalanced — return from the first bracket and let JSON.parse report it.
   return s.slice(start);
 }
 

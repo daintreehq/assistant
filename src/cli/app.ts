@@ -109,6 +109,9 @@ export class App {
           ? (req) => (this.hooks.confirm ?? (async () => false))(req)
           : async () => false,
       log: (msg) => (this.hooks.log ?? (() => {}))(msg),
+      // Read live: the scheduler is started later (interactive paths) and never
+      // in a one-shot run, so timers/watchers can warn honestly.
+      daemonActive: () => Boolean(this.scheduler),
     };
   }
 
@@ -131,6 +134,12 @@ export class App {
   /** Connect to Daintree MCP (best-effort) and refresh the system prompt. */
   async connectMcp(): Promise<void> {
     await this.mcp.connect();
+    this.session.refreshRuntimeContext(this.promptContext());
+  }
+
+  /** Force a fresh MCP connection (e.g. /reconnect, /doctor) and refresh prompt. */
+  async reconnectMcp(): Promise<void> {
+    await this.mcp.reconnect();
     this.session.refreshRuntimeContext(this.promptContext());
   }
 

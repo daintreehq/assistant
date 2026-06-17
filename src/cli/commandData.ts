@@ -3,11 +3,110 @@
  * (and may switch a panel) instead of printing to stdout. The legacy REPL keeps
  * using commands.ts. Both share the same App accessors.
  */
+import path from "node:path";
+import fs from "node:fs";
 import type { App } from "./app.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 
 export type PanelKey = "watchers" | "inbox" | "timers" | "audit" | "help";
+
+export interface DoctorCheck {
+  label: string;
+  ok: boolean;
+  detail: string;
+  /** Suggested remedy when the check failed. */
+  fix?: string;
+}
+
+/**
+ * Actionable environment diagnosis shared by the Ink UI and the REPL. Attempts a
+ * safe reconnect when credentials exist but the connection is down, then reports
+ * each prerequisite with a concrete fix for the ones that fail.
+ */
+export async function runDoctor(app: App): Promise<DoctorCheck[]> {
+  const cfg = app.config;
+  if (!app.mcp.isConnected() && cfg.mcpUrl && cfg.mcpToken) {
+    try {
+      await app.reconnectMcp();
+    } catch {
+      /* failure is reported by the connection check below */
+    }
+  }
+  const st = app.mcp.status();
+  const checks: DoctorCheck[] = [];
+  const need = (v: string | undefined, env: string) =>
+    v ? undefined : `set ${env}`;
+
+  checks.push({
+    label: "fireworks key",
+    ok: !!cfg.fireworksApiKey,
+    detail: cfg.fireworksApiKey ? "present" : "MISSING",
+    fix: need(cfg.fireworksApiKey, "FIREWORKS_API_KEY in .env or the environment"),
+  });
+  checks.push({ label: "large model", ok: !!cfg.largeModel, detail: cfg.largeModel || "(unset)", fix: need(cfg.largeModel, "DAINTREE_LARGE_MODEL") });
+  checks.push({ label: "small model", ok: !!cfg.smallModel, detail: cfg.smallModel || "(unset)", fix: need(cfg.smallModel, "DAINTREE_SMALL_MODEL") });
+  checks.push({ label: "mcp url", ok: !!cfg.mcpUrl, detail: cfg.mcpUrl ?? "(unset)", fix: need(cfg.mcpUrl, "DAINTREE_MCP_URL to Daintree's MCP endpoint") });
+  checks.push({ label: "mcp token", ok: !!cfg.mcpToken, detail: cfg.mcpToken ? "present" : "(unset)", fix: need(cfg.mcpToken, "DAINTREE_MCP_TOKEN") });
+  checks.push({
+    label: "mcp connection",
+    ok: st.connected,
+    detail: st.connected ? `ok (${st.transport})` : st.error ?? "not connected",
+    fix: st.connected ? undefined : "start Daintree, then run /reconnect",
+  });
+  checks.push({
+    label: "mcp tools",
+    ok: st.connected && (st.toolCount ?? 0) > 0,
+    detail: st.connected ? `${st.toolCount ?? 0} tools` : "unavailable",
+    fix:
+      st.connected && !(st.toolCount ?? 0)
+        ? "connected but no tools listed; run /reconnect"
+        : undefined,
+  });
+
+  let writable = false;
+  let writeErr = "";
+  try {
+    const probe = path.join(cfg.stateDir, ".doctor-probe");
+    fs.writeFileSync(probe, "ok");
+    fs.unlinkSync(probe);
+    writable = true;
+  } catch (e) {
+    writeErr = e instanceof Error ? e.message : String(e);
+  }
+  checks.push({
+    label: "state writable",
+    ok: writable,
+    detail: writable ? cfg.stateDir : `not writable: ${writeErr}`,
+    fix: writable ? undefined : "ensure the state dir is writable or set DAINTREE_ASSISTANT_STATE_DIR",
+  });
+
+  let projOk = false;
+  try {
+    projOk = fs.statSync(cfg.projectPath).isDirectory();
+  } catch {
+    /* projOk stays false */
+  }
+  checks.push({
+    label: "project path",
+    ok: projOk,
+    detail: cfg.projectPath,
+    fix: projOk ? undefined : "pass --project <dir> or run from the project root",
+  });
+  checks.push({ label: "tier", ok: true, detail: cfg.tier });
+  checks.push({ label: "tools loaded", ok: app.registry.list().length > 0, detail: String(app.registry.list().length) });
+  return checks;
+}
+
+function formatDoctor(checks: DoctorCheck[]): string {
+  return checks
+    .map((c) => {
+      const mark = c.ok ? "✓" : "✗";
+      const fix = !c.ok && c.fix ? `  → ${c.fix}` : "";
+      return `${mark} ${c.label.padEnd(16)}: ${c.detail}${fix}`;
+    })
+    .join("\n");
+}
 
 export interface UiCommandResult {
   handled: boolean;
@@ -28,7 +127,8 @@ const HELP_TEXT = [
   "/permissions [tier]     show or set tier (supervisor|operator|system)",
   "/recipes [sub]          loaded | reload | load <id…> | clear",
   "/compact                summarize + condense the conversation",
-  "/doctor                 check MCP / config / project mapping",
+  "/doctor                 check MCP / config / project mapping (with fixes)",
+  "/reconnect              retry the Daintree MCP connection",
   "/help                   this help",
   "/quit                   exit",
   "",
@@ -266,19 +366,19 @@ export async function handleUiCommand(
     }
 
     case "doctor": {
+      const checks = await runDoctor(app);
+      return { handled: true, title: "Doctor", text: formatDoctor(checks) };
+    }
+
+    case "reconnect": {
+      await app.reconnectMcp();
       const st = app.mcp.status();
       return {
         handled: true,
-        title: "Doctor",
-        text: [
-          `project path   : ${app.config.projectPath}`,
-          `state dir      : ${app.config.stateDir}`,
-          `fireworks key  : ${app.config.fireworksApiKey ? "present" : "MISSING"}`,
-          `mcp url        : ${app.config.mcpUrl ?? "(unset)"}`,
-          `mcp token      : ${app.config.mcpToken ? "present" : "(unset)"}`,
-          `mcp connection : ${st.connected ? "ok" : st.error ?? "not connected"}`,
-          `tools loaded   : ${app.registry.list().length}`,
-        ].join("\n"),
+        title: "Reconnect",
+        text: st.connected
+          ? `Reconnected to Daintree MCP (${st.transport}, ${st.toolCount ?? "?"} tools).`
+          : `Still not connected — ${st.error ?? "no url/token"}.`,
       };
     }
 
@@ -302,13 +402,11 @@ export async function handleUiCommand(
           ],
           maxTokens: 400,
         });
-        app.session.injectNote(
-          `Compacted summary of earlier conversation:\n${res.content}`,
-        );
+        app.session.compact(res.content);
         return {
           handled: true,
           title: "Compact",
-          text: "Conversation compacted into a summary note.",
+          text: "Conversation compacted — earlier turns replaced with a summary.",
         };
       } catch (e) {
         return {

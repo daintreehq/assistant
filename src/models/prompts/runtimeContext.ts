@@ -34,7 +34,7 @@ export function buildRuntimeContextMessage(ctx: MainPromptContext): string {
     `Permission tier: ${ctx.tier} — ${TIER_BLURB[ctx.tier]}`,
     `Project path: ${ctx.projectPath}`,
     `Project id: ${ctx.projectId ?? "(none)"}`,
-    `Active worktree: ${ctx.activeWorktree ?? "(unknown — read with daintree.status)"}`,
+    `Active worktree: ${ctx.activeWorktree ?? "(unknown — read with context.snapshot)"}`,
     `Daintree MCP: ${ctx.mcpStatusLine}`,
     `Models: large=${ctx.largeModel}, small=${ctx.smallModel}`,
   ];

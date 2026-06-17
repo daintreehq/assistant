@@ -138,6 +138,8 @@ export interface QueueEvent {
   recommendedActions?: RecommendedAction[];
   dedupeKey?: string;
   createdAt: number;
+  /** Advances on each dedupe bump; createdAt stays fixed. Used for recency. */
+  updatedAt?: number;
   expiresAt?: number;
   resolvedAt?: number;
   /** How many times this dedupeKey collapsed into the same event. */

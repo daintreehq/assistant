@@ -96,6 +96,28 @@ export class AgentSession {
     });
   }
 
+  /**
+   * Compact the conversation: drop the working history and replace it with a
+   * single summary note, keeping the three control messages (base prompt,
+   * runtime context, loaded recipes) so the prompt-cache prefix and recipe state
+   * survive. Unlike injectNote(), this actually shrinks the prompt — the model no
+   * longer receives the old turns. A marker is appended to the durable log so the
+   * persisted transcript records that earlier context was intentionally dropped.
+   */
+  compact(summary: string): void {
+    const control = this.messages.slice(0, CONTROL_MESSAGE_COUNT);
+    const note: ChatMessage = {
+      role: "user",
+      content: `[compacted summary of earlier conversation]\n${summary}`,
+    };
+    this.messages = [...control, note];
+    this.persistMessage({
+      role: "system",
+      content: "[conversation compacted — earlier turns dropped from context]",
+    });
+    this.persistMessage(note);
+  }
+
   /** Run a full user turn. Returns the final assistant text. */
   async send(userInput: string): Promise<string> {
     await this.maybeRefreshRecipes(userInput);

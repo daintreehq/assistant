@@ -9,8 +9,73 @@
  */
 import { z } from "zod";
 import { ok, fail, NO_ARGS, type ToolDef } from "./types.js";
+import type { ToolContext } from "./types.js";
+import type { ToolResult } from "../schemas.js";
+
+/**
+ * Forward a call to a named Daintree MCP tool. Shared by the typed wrappers
+ * below and structurally identical to daintree.call — but each wrapper carries an
+ * accurate risk class, so operators can run recipes / focus terminals without the
+ * system-tier raw escape hatch. The arguments object is forwarded verbatim, so
+ * these stay agnostic to Daintree's exact per-tool argument schema.
+ */
+async function passthrough(
+  ctx: ToolContext,
+  mcpName: string,
+  args: Record<string, unknown>,
+  requestKey?: string,
+): Promise<ToolResult> {
+  if (!ctx.mcp.isConnected()) {
+    return fail("MCP_UNAVAILABLE", `Daintree MCP is not connected; cannot call ${mcpName}.`);
+  }
+  try {
+    const callArgs: Record<string, unknown> = {
+      ...args,
+      ...(requestKey ? { requestKey } : {}),
+    };
+    const res = await ctx.mcp.callTool(mcpName, callArgs);
+    if (res.isError) {
+      return fail("MCP_TOOL_ERROR", res.text || `Daintree tool ${mcpName} returned an error.`, {
+        details: { structuredContent: res.structuredContent },
+      });
+    }
+    return ok(`Called ${mcpName}.`, {
+      text: res.text,
+      structuredContent: res.structuredContent,
+    });
+  } catch (e) {
+    return fail(
+      "MCP_TOOL_ERROR",
+      `Daintree call ${mcpName} failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
 
 const ListToolsArgs = z.object({}).strict();
+
+const RecipeListArgs = z
+  .object({ arguments: z.record(z.string(), z.unknown()).optional() })
+  .strict();
+
+const RecipeRunArgs = z.object({
+  recipeId: z.string().describe("Daintree workspace recipe id to run."),
+  arguments: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("Recipe arguments forwarded to Daintree (e.g. worktreeId)."),
+  requestKey: z.string().optional(),
+});
+
+const WorktreeCreateArgs = z.object({
+  arguments: z
+    .record(z.string(), z.unknown())
+    .describe("Arguments for worktree.createWithRecipe (recipe id, name, etc.)."),
+  requestKey: z.string().optional(),
+});
+
+const FocusArgs = z.object({
+  terminalId: z.string().describe("Daintree terminal id to focus in the UI."),
+});
 
 const SearchArgs = z.object({
   query: z.string().describe("Keyword to match against MCP tool names/descriptions."),
@@ -179,6 +244,101 @@ export const mcpTools: ToolDef[] = [
           `Daintree MCP call ${args.name} failed: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
+    },
+  },
+  {
+    name: "recipe.list",
+    description:
+      "List available Daintree workspace recipes (read-only). Typed wrapper around the Daintree recipe.list MCP tool.",
+    risk: "read",
+    readOnly: true,
+    schema: RecipeListArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Optional filters forwarded to Daintree (e.g. projectId).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "recipe.list", args.arguments ?? {});
+    },
+  },
+  {
+    name: "recipe.run",
+    description:
+      "Run a Daintree workspace recipe against the current/active context. Mutates real workspace state, so it always confirms.",
+    risk: "project",
+    schema: RecipeRunArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        recipeId: { type: "string", description: "Daintree workspace recipe id to run." },
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Recipe arguments forwarded to Daintree (e.g. worktreeId).",
+        },
+        requestKey: { type: "string", description: "Optional idempotency key." },
+      },
+      required: ["recipeId"],
+    },
+    async handler(args, ctx) {
+      // Explicit recipeId wins — a nested arguments.recipeId must not override
+      // the confirmed/audited top-level value.
+      return passthrough(
+        ctx,
+        "recipe.run",
+        { ...(args.arguments ?? {}), recipeId: args.recipeId },
+        args.requestKey,
+      );
+    },
+  },
+  {
+    name: "worktree.createWithRecipe",
+    description:
+      "Create a new Daintree worktree with a startup recipe. Mutates real workspace state, so it always confirms.",
+    risk: "project",
+    schema: WorktreeCreateArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Arguments for worktree.createWithRecipe (recipe id, name, etc.).",
+        },
+        requestKey: { type: "string", description: "Optional idempotency key." },
+      },
+      required: ["arguments"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "worktree.createWithRecipe", args.arguments, args.requestKey);
+    },
+  },
+  {
+    name: "terminal.focus",
+    description:
+      "Focus a Daintree terminal in the UI (read-only side effect on the UI; no state mutation).",
+    risk: "ui",
+    schema: FocusArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: { type: "string", description: "Daintree terminal id to focus in the UI." },
+      },
+      required: ["terminalId"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "terminal.focus", { terminalId: args.terminalId });
     },
   },
 ];

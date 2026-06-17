@@ -120,6 +120,8 @@ export interface QueueDigestOptions {
   severityAtLeast?: QueueEvent["severity"];
   maxItems?: number;
   includeResolved?: boolean;
+  /** Only events that have never been pushed to the attention notifier. */
+  notifiedIsNull?: boolean;
 }
 
 const SEVERITY_ORDER: Record<QueueEvent["severity"], number> = {
@@ -164,6 +166,52 @@ export class Db {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Forward-only schema migrations keyed on `PRAGMA user_version`. The base
+   * SCHEMA above uses CREATE TABLE IF NOT EXISTS for a fresh database; these
+   * incremental steps evolve a database that predates a column. Each step is
+   * idempotent and runs only when user_version is below its index+1.
+   */
+  private migrate(): void {
+    const migrations: Array<() => void> = [
+      // v1: events.updatedAt — recency that advances on dedupe bumps while
+      // createdAt stays fixed (so a recurring event doesn't re-notify forever).
+      () => {
+        this.addColumnIfMissing("events", "updatedAt", "INTEGER");
+        this.db.exec(
+          "UPDATE events SET updatedAt = createdAt WHERE updatedAt IS NULL",
+        );
+      },
+      // v2: events.notifiedAt — set once when an event is first pushed to the
+      // attention notifier, so a deduped event neither re-notifies forever nor
+      // misses a genuine escalation. Existing rows are treated as already
+      // notified so a restart doesn't replay history.
+      () => {
+        this.addColumnIfMissing("events", "notifiedAt", "INTEGER");
+        this.db.exec(
+          "UPDATE events SET notifiedAt = createdAt WHERE notifiedAt IS NULL",
+        );
+      },
+    ];
+    const row = this.db.prepare("PRAGMA user_version").get() as
+      | { user_version?: number }
+      | undefined;
+    const current = Number(row?.user_version ?? 0);
+    for (let v = current; v < migrations.length; v++) migrations[v]();
+    // PRAGMA values can't be bound as parameters; the count is an internal int.
+    this.db.exec(`PRAGMA user_version = ${migrations.length}`);
+  }
+
+  private addColumnIfMissing(table: string, column: string, type: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   close(): void {
@@ -336,10 +384,12 @@ export class Db {
         .get(ev.dedupeKey, now) as Record<string, unknown> | undefined;
       if (existing) {
         const id = existing.id as string;
-        // Refresh TTL on bump so an active, recurring event stays visible.
+        // Bump recency via updatedAt and refresh TTL, but DO NOT touch createdAt.
+        // The scheduler's "is this new?" check keys on createdAt, so refreshing it
+        // here made a recurring deduped event look new every tick and re-notify.
         this.db
           .prepare(
-            "UPDATE events SET count = count + 1, summary = ?, severity = ?, createdAt = ?, expiresAt = ? WHERE id = ?",
+            "UPDATE events SET count = count + 1, summary = ?, severity = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
           )
           .run(ev.summary, ev.severity, now, ev.expiresAt ?? null, id);
         return this.getEvent(id)!;
@@ -362,8 +412,8 @@ export class Db {
     };
     this.db
       .prepare(
-        `INSERT INTO events (id,source,severity,title,summary,targetJson,evidenceJson,recommendedActionsJson,dedupeKey,createdAt,expiresAt,resolvedAt,count)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO events (id,source,severity,title,summary,targetJson,evidenceJson,recommendedActionsJson,dedupeKey,createdAt,updatedAt,expiresAt,resolvedAt,count)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -375,6 +425,7 @@ export class Db {
         full.evidence ? JSON.stringify(full.evidence) : null,
         full.recommendedActions ? JSON.stringify(full.recommendedActions) : null,
         full.dedupeKey ?? null,
+        full.createdAt,
         full.createdAt,
         full.expiresAt ?? null,
         full.resolvedAt ?? null,
@@ -395,11 +446,15 @@ export class Db {
     const where: string[] = ["(expiresAt IS NULL OR expiresAt > ?)"];
     const params: unknown[] = [now];
     if (!opts.includeResolved) where.push("resolvedAt IS NULL");
+    if (opts.notifiedIsNull) where.push("notifiedAt IS NULL");
     if (opts.severityAtLeast) {
       where.push(`${SEV_CASE} >= ?`);
       params.push(SEVERITY_ORDER[opts.severityAtLeast]);
     }
-    let sql = `SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY ${SEV_CASE} DESC, createdAt DESC`;
+    // Order by recency-of-update so a recurring (deduped) event stays near the
+    // top even though its createdAt is pinned; fall back to createdAt for rows
+    // migrated before updatedAt existed.
+    let sql = `SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY ${SEV_CASE} DESC, COALESCE(updatedAt, createdAt) DESC`;
     if (opts.maxItems) {
       sql += " LIMIT ?";
       params.push(opts.maxItems);
@@ -409,6 +464,13 @@ export class Db {
       unknown
     >[];
     return rows.map((r) => this.rowToEvent(r));
+  }
+
+  /** Stamp notifiedAt on the given events so they are not re-notified. */
+  markNotified(ids: string[], ts = Date.now()): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare("UPDATE events SET notifiedAt = ? WHERE id = ?");
+    for (const id of ids) stmt.run(ts, id);
   }
 
   resolveEvent(id: string): boolean {
@@ -432,6 +494,7 @@ export class Db {
         : undefined,
       dedupeKey: (r.dedupeKey as string) ?? undefined,
       createdAt: r.createdAt as number,
+      updatedAt: (r.updatedAt as number) ?? (r.createdAt as number),
       expiresAt: (r.expiresAt as number) ?? undefined,
       resolvedAt: (r.resolvedAt as number) ?? undefined,
       count: r.count as number,

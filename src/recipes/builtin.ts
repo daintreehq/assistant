@@ -82,15 +82,22 @@ export const DAINTREE_RECIPE_RUNNER_RECIPE: Recipe = {
   priority: 180,
   maxTurns: 8,
   risk: "project",
-  requiredTools: ["tool.search", "daintree.call", "context.snapshot"],
+  requiredTools: [
+    "tool.search",
+    "recipe.list",
+    "recipe.run",
+    "worktree.createWithRecipe",
+    "context.snapshot",
+  ],
   body: `Use when: the user asks about Daintree workspace recipes or creating a worktree with one.
 Note: "Daintree workspace recipes" (MCP actions) are distinct from the assistant recipes loaded into your context.
 Procedure:
 1. Inspect current Daintree context first if the project/worktree is ambiguous.
-2. List available recipes with daintree.call name="recipe.list" when needed.
-3. To apply a recipe to an existing context, use daintree.call name="recipe.run".
-4. To create a new worktree with a startup recipe, use daintree.call name="worktree.createWithRecipe".
+2. List available recipes with the recipe.list tool when needed.
+3. To apply a recipe to an existing context, use recipe.run with the recipeId.
+4. To create a new worktree with a startup recipe, use worktree.createWithRecipe.
 5. Pass an idempotency requestKey for mutating calls when available.
+6. These typed tools work at the operator tier; daintree.call is only the system-tier raw fallback for tools without a wrapper.
 Confirmation: mutating actions require confirmation before execution.
 Report back: what was started, which worktree/terminal ids were created, and whether a watcher should be attached.`,
 };

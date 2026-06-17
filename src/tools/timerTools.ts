@@ -8,19 +8,36 @@
 import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
 
-const TimerPayload = z
-  .object({
-    type: z.enum(["enqueue", "run_check", "call_safe_tool"]),
-    message: z.string().optional(),
-    checkPrompt: z.string().optional(),
-    toolCall: z
-      .object({
-        toolName: z.string(),
+/**
+ * Discriminated by `type` so a payload that omits its required field is rejected
+ * at schedule time rather than silently doing nothing when the timer fires:
+ *   - enqueue       → optional message (falls back to the timer title)
+ *   - run_check     → requires checkPrompt
+ *   - call_safe_tool→ requires toolCall
+ */
+const TimerPayload = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("enqueue"),
+      message: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("run_check"),
+      checkPrompt: z.string().min(1, "run_check requires a non-empty checkPrompt"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("call_safe_tool"),
+      toolCall: z.object({
+        toolName: z.string().min(1),
         args: z.record(z.unknown()).optional(),
-      })
-      .optional(),
-  })
-  .strict();
+      }),
+    })
+    .strict(),
+]);
 
 const TimerTarget = z
   .object({
@@ -174,9 +191,14 @@ export const timerTools: ToolDef[] = [
 
         const fireAtIso = new Date(rec.fireAt).toISOString();
         const repeatNote = rec.repeatEveryMs ? ` (repeats every ${rec.repeatEveryMs}ms)` : "";
-        return ok(`Scheduled timer ${rec.id} "${rec.title}" for ${fireAtIso}${repeatNote}.`, {
+        const dormant =
+          ctx.daemonActive && !ctx.daemonActive()
+            ? " NOTE: no scheduler is running in this session, so it will not fire until the assistant runs interactively."
+            : "";
+        return ok(`Scheduled timer ${rec.id} "${rec.title}" for ${fireAtIso}${repeatNote}.${dormant}`, {
           timerId: rec.id,
           fireAt: fireAtIso,
+          daemonActive: ctx.daemonActive ? ctx.daemonActive() : true,
         });
       } catch (e) {
         return fail(

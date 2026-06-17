@@ -7,12 +7,43 @@
  */
 import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
-import { resolveInsideProject } from "../safety/policy.js";
+import { resolveInsideProject, isSensitivePath } from "../safety/policy.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 /** Directory names skipped by every recursive walk. */
-const SKIP_DIRS = new Set([".git", "node_modules", "dist"]);
+const SKIP_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".turbo",
+  ".cache",
+  "vendor",
+]);
+
+/** Default ceiling for a single file read / per-file search scan (bytes). */
+const DEFAULT_MAX_BYTES = 200_000;
+/** Files larger than this are skipped entirely by fs.search. */
+const SEARCH_MAX_FILE_BYTES = 1_000_000;
+
+/**
+ * Heuristic binary sniff: a NUL byte in the first chunk, or a high ratio of
+ * non-text control bytes, means we should not treat the buffer as UTF-8 text.
+ */
+function looksBinary(buf: Buffer): boolean {
+  const n = Math.min(buf.length, 4096);
+  let suspicious = 0;
+  for (let i = 0; i < n; i++) {
+    const b = buf[i];
+    if (b === 0) return true;
+    // Allow tab(9) newline(10) CR(13) and the printable range; count the rest.
+    if (b < 9 || (b > 13 && b < 32)) suspicious++;
+  }
+  return n > 0 && suspicious / n > 0.3;
+}
 
 const ListArgs = z.object({
   path: z.string().optional().describe("Directory relative to project root."),
@@ -168,13 +199,59 @@ export const fsTools: ToolDef[] = [
     },
     async handler(args, ctx) {
       try {
+        if (isSensitivePath(args.path)) {
+          return fail(
+            "FS_SENSITIVE",
+            `Refusing to read ${args.path}: it looks like a secrets file (env file, private key, or credential store). Reading it could persist secrets into the audit log and conversation history. Ask the user to share only the specific values you need.`,
+            { recoverable: false },
+          );
+        }
         const abs = resolveInsideProject(ctx.projectPath, args.path);
-        const buf = await fs.readFile(abs, "utf8");
-        const sliced = args.maxBytes ? buf.slice(0, args.maxBytes) : buf;
-        return ok(`Read ${args.path} (${sliced.length} chars).`, {
-          path: args.path,
-          content: sliced,
-        });
+        // Re-check the symlink-resolved target: a project-local symlink could
+        // point at a secret (e.g. notes.txt -> .env) and slip past the lexical
+        // check above. resolveInsideProject already guarantees containment.
+        let real = abs;
+        try {
+          real = await fs.realpath(abs);
+        } catch {
+          /* file may not exist yet; the open below reports it */
+        }
+        if (isSensitivePath(real)) {
+          return fail(
+            "FS_SENSITIVE",
+            `Refusing to read ${args.path}: it resolves to a secrets file. Ask the user to share only the specific values you need.`,
+            { recoverable: false },
+          );
+        }
+        const limit = Math.min(args.maxBytes ?? DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES);
+        // Byte-aware read: open and read at most `limit` bytes so maxBytes is a
+        // true byte cap and a huge file never loads fully into memory.
+        const handle = await fs.open(abs, "r");
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) {
+            return fail("FS_READ", `Not a regular file: ${args.path}`, { recoverable: false });
+          }
+          const toRead = Math.min(stat.size, limit);
+          const buf = Buffer.alloc(toRead);
+          const { bytesRead } = await handle.read(buf, 0, toRead, 0);
+          const slice = buf.subarray(0, bytesRead);
+          if (looksBinary(slice)) {
+            return fail(
+              "FS_BINARY",
+              `Refusing to read ${args.path}: it appears to be a binary file.`,
+              { recoverable: false },
+            );
+          }
+          const content = slice.toString("utf8");
+          const truncated = stat.size > toRead;
+          return ok(
+            `Read ${args.path} (${bytesRead} bytes${truncated ? `, truncated from ${stat.size}` : ""}).`,
+            { path: args.path, content, bytes: bytesRead, truncated },
+          );
+        } finally {
+          await handle.close();
+        }
       } catch (e) {
         return fail(
           "FS_READ",
@@ -220,9 +297,15 @@ export const fsTools: ToolDef[] = [
         for (const file of files) {
           if (matches.length >= max) break;
           if (suffix && !file.rel.endsWith(suffix)) continue;
+          // Never scan secrets, and never load very large or binary files.
+          if (isSensitivePath(file.rel)) continue;
           let content: string;
           try {
-            content = await fs.readFile(file.abs, "utf8");
+            const stat = await fs.stat(file.abs);
+            if (!stat.isFile() || stat.size > SEARCH_MAX_FILE_BYTES) continue;
+            const buf = await fs.readFile(file.abs);
+            if (looksBinary(buf)) continue;
+            content = buf.toString("utf8");
           } catch {
             continue;
           }

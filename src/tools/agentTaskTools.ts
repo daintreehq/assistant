@@ -19,6 +19,60 @@ const CONSTRAINTS_BLOCK = [
   "If you need clarification, stop and ask.",
 ].join(" ");
 
+/**
+ * Compose the agent prompt from the task, any caller-supplied context hints
+ * (relevant file paths, whether to include a diff, the target worktree), and the
+ * standard constraints block. The schema accepts `context`, the recipe tells the
+ * model to pass file paths — so we must actually fold them into the prompt.
+ */
+function buildAgentPrompt(args: SpawnForEditsArgs): string {
+  const lines: string[] = [args.taskPrompt.trim()];
+  const ctxLines: string[] = [];
+  if (args.worktreeId) ctxLines.push(`Work in worktree: ${args.worktreeId}`);
+  const files = args.context?.filePaths?.filter((f) => f.trim());
+  if (files && files.length) {
+    ctxLines.push(`Relevant files:\n${files.map((f) => `  - ${f}`).join("\n")}`);
+  }
+  if (args.context?.includeDiff) {
+    ctxLines.push(
+      "Review the current working-tree diff in this worktree before changing anything.",
+    );
+  }
+  if (ctxLines.length) lines.push(`\nContext:\n${ctxLines.join("\n")}`);
+  lines.push(`\n${CONSTRAINTS_BLOCK}`);
+  return lines.join("\n");
+}
+
+/**
+ * Robustly pull a named field from an MCP launch result. Daintree may return it
+ * under structuredContent, nested under a `task`/`agent` object, or only in the
+ * text body (e.g. "terminalId: term_3a") — check each so a watcher isn't dropped
+ * just because the field wasn't where we first looked.
+ */
+function extractField(
+  res: { structuredContent?: unknown; text?: string },
+  key: string,
+): string | undefined {
+  const sc = res.structuredContent;
+  if (sc && typeof sc === "object") {
+    const obj = sc as Record<string, unknown>;
+    const direct = obj[key];
+    if (typeof direct === "string" && direct) return direct;
+    for (const nestedKey of ["task", "agent", "result", "data"]) {
+      const nested = obj[nestedKey];
+      if (nested && typeof nested === "object") {
+        const v = (nested as Record<string, unknown>)[key];
+        if (typeof v === "string" && v) return v;
+      }
+    }
+  }
+  if (typeof res.text === "string") {
+    const m = res.text.match(new RegExp(`"?${key}"?\\s*[:=]\\s*"?([\\w.-]+)"?`));
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
 const SpawnForEditsArgs = z.object({
   worktreeId: z
     .string()
@@ -108,7 +162,7 @@ export const agentTaskTools: ToolDef[] = [
       }
 
       const agentId = args.agentId ?? "claude";
-      const prompt = `${args.taskPrompt}\n\n${CONSTRAINTS_BLOCK}`;
+      const prompt = buildAgentPrompt(args);
       const requestKey = randomUUID();
 
       try {
@@ -126,31 +180,44 @@ export const agentTaskTools: ToolDef[] = [
           );
         }
 
-        const sc = res.structuredContent as { terminalId?: string } | undefined;
-        const terminalId = sc?.terminalId;
+        const terminalId = extractField(res, "terminalId");
+        const worktreeId = extractField(res, "worktreeId") ?? args.worktreeId;
+        const taskId = extractField(res, "taskId");
 
         let watcherId: string | undefined;
-        if (args.watcher?.create && terminalId) {
-          const watcher = ctx.db.insertWatcher({
-            kind: "terminal",
-            title: `watch ${args.title}`,
-            goal: args.watcher.goal ?? `Supervise: ${args.title}`,
-            targetsJson: JSON.stringify([terminalId]),
-            cadenceMs: args.watcher.cadenceMs ?? 120_000,
-            modelTier: "small",
-            nextCheckAt: Date.now(),
-          });
-          watcherId = watcher.id;
+        let watcherWarning: string | undefined;
+        if (args.watcher?.create) {
+          if (terminalId) {
+            const watcher = ctx.db.insertWatcher({
+              kind: "terminal",
+              title: `watch ${args.title}`,
+              goal: args.watcher.goal ?? `Supervise: ${args.title}`,
+              targetsJson: JSON.stringify([terminalId]),
+              cadenceMs: args.watcher.cadenceMs ?? 120_000,
+              modelTier: "small",
+              nextCheckAt: Date.now(),
+            });
+            watcherId = watcher.id;
+          } else {
+            // A watcher was requested but the launch response carried no terminal
+            // id — surface this instead of silently dropping the supervision.
+            watcherWarning =
+              "watcher requested but agent.launch returned no terminalId, so no watcher was created";
+          }
         }
 
         return ok(
           `Spawned ${agentId} for "${args.title}"${
             terminalId ? ` (terminal ${terminalId})` : ""
-          }${watcherId ? `; watcher ${watcherId}` : ""}.`,
+          }${watcherId ? `; watcher ${watcherId}` : ""}${
+            watcherWarning ? ` — ${watcherWarning}` : ""
+          }.`,
           {
             terminalId,
-            worktreeId: args.worktreeId,
+            worktreeId,
+            ...(taskId ? { taskId } : {}),
             ...(watcherId ? { watcherId } : {}),
+            ...(watcherWarning ? { watcherWarning } : {}),
           },
         );
       } catch (e) {

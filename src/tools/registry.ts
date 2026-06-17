@@ -155,11 +155,12 @@ export class ToolRegistry {
       const row = ctx.db.insertAudit({
         actor: ctx.actor,
         toolName: name,
-        argsJson: safeJson(args),
+        argsJson: capJson(safeJson(args)),
         outcome,
         durationMs: Date.now() - started,
         summary: res.summary,
-        resultJson: res.result !== undefined ? safeJson(res.result) : undefined,
+        resultJson:
+          res.result !== undefined ? capJson(safeJson(res.result)) : undefined,
       });
       res.auditId = row.id;
     } catch {
@@ -168,10 +169,29 @@ export class ToolRegistry {
   }
 }
 
+/** Largest serialized args/result we persist to the audit log. */
+const MAX_AUDIT_JSON = 4000;
+
 function safeJson(v: unknown): string {
   try {
     return JSON.stringify(v) ?? "null";
   } catch {
     return '"<unserializable>"';
   }
+}
+
+/**
+ * Bound the size of audited JSON. Tool results can contain large file contents
+ * or terminal scrollback; the audit log keeps a redacted preview plus the byte
+ * count rather than the full blob, so a single read can't bloat the DB.
+ */
+function capJson(s: string): string {
+  if (s.length <= MAX_AUDIT_JSON) return s;
+  return JSON.stringify({
+    truncated: true,
+    bytes: Buffer.byteLength(s, "utf8"),
+    // Leave headroom for the wrapper + JSON escaping so the stored row stays
+    // near the cap rather than ballooning past it.
+    preview: s.slice(0, MAX_AUDIT_JSON - 200),
+  });
 }

@@ -33,6 +33,13 @@ export interface ToolContext {
   confirm: (req: ConfirmRequest) => Promise<boolean>;
   /** Print an out-of-band line to the user (e.g. "spawned watcher wch_..."). */
   log: (msg: string) => void;
+  /**
+   * Whether the in-process scheduler/daemon is running. When false (e.g. a
+   * one-shot non-interactive run), timers and watchers are persisted but will
+   * not fire until the assistant runs interactively — tools say so rather than
+   * implying they'll be monitored. Absent ⇒ assume active.
+   */
+  daemonActive?: () => boolean;
 }
 
 export interface ToolDef<A = any> {

@@ -33,6 +33,11 @@ export class Queue {
     return this.db.resolveEvent(id);
   }
 
+  /** Mark events as already pushed to the attention notifier. */
+  markNotified(ids: string[]): void {
+    this.db.markNotified(ids);
+  }
+
   /** Compact, human-readable digest for /inbox and the main model context. */
   format(events: QueueEvent[]): string {
     if (events.length === 0) return "Inbox is empty.";

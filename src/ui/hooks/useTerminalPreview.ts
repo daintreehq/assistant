@@ -49,11 +49,20 @@ export function useTerminalPreview(
         if (!cancelled) setPreviews([]);
         return;
       }
+      // Dedupe by terminalId so several watchers on the same terminal don't each
+      // trigger a separate poll of it. First watcher to reference a terminal owns
+      // the preview card's title.
+      const seen = new Set<string>();
       const targets = watchers
         .filter((w) => w.kind === "terminal")
         .flatMap((w) =>
           parseTargets(w).map((terminalId) => ({ terminalId, watcher: w })),
         )
+        .filter(({ terminalId }) => {
+          if (seen.has(terminalId)) return false;
+          seen.add(terminalId);
+          return true;
+        })
         .slice(0, MAX_TERMINALS);
 
       const next: TerminalPreview[] = [];

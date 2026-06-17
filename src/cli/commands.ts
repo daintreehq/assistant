@@ -6,6 +6,7 @@ import type { App } from "./app.js";
 import { render, c } from "./render.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
+import { runDoctor } from "./commandData.js";
 
 export interface CommandResult {
   handled: boolean;
@@ -23,7 +24,8 @@ const HELP = `${c.bold("Commands")}
   /recipes [sub]          assistant recipes (loaded|reload|load <id…>|clear)
   /permissions [tier]     show or set tier (supervisor|operator|system)
   /compact                summarize + reset the conversation
-  /doctor                 check MCP / config / project mapping
+  /doctor                 check MCP / config / project mapping (with fixes)
+  /reconnect              retry the Daintree MCP connection
   /help                   this help
   /quit                   exit
 
@@ -148,14 +150,24 @@ export async function handleSlashCommand(
 
     case "doctor": {
       render.line(c.bold("\nDoctor"));
-      render.line(`  project path   : ${app.config.projectPath}`);
-      render.line(`  state dir      : ${app.config.stateDir}`);
-      render.line(`  fireworks key  : ${app.config.fireworksApiKey ? c.green("present") : c.red("MISSING")}`);
-      render.line(`  mcp url        : ${app.config.mcpUrl ?? c.yellow("(unset)")}`);
-      render.line(`  mcp token      : ${app.config.mcpToken ? c.green("present") : c.yellow("(unset)")}`);
+      const checks = await runDoctor(app);
+      for (const ch of checks) {
+        const mark = ch.ok ? c.green("✓") : c.red("✗");
+        const fix = !ch.ok && ch.fix ? c.gray(`  → ${ch.fix}`) : "";
+        render.line(`  ${mark} ${ch.label.padEnd(16)}: ${ch.detail}${fix}`);
+      }
+      return { handled: true };
+    }
+
+    case "reconnect": {
+      render.info("Reconnecting to Daintree MCP…");
+      await app.reconnectMcp();
       const st = app.mcp.status();
-      render.line(`  mcp connection : ${st.connected ? c.green("ok") : c.yellow(st.error ?? "not connected")}`);
-      render.line(`  tools loaded   : ${app.registry.list().length}`);
+      if (st.connected) {
+        render.success(`Reconnected (${st.transport}, ${st.toolCount ?? "?"} tools).`);
+      } else {
+        render.warn(`Still not connected — ${st.error ?? "no url/token"}.`);
+      }
       return { handled: true };
     }
 
@@ -174,8 +186,8 @@ export async function handleSlashCommand(
           ],
           maxTokens: 400,
         });
-        app.session.injectNote(`Compacted summary of earlier conversation:\n${res.content}`);
-        render.success("Conversation compacted.");
+        app.session.compact(res.content);
+        render.success("Conversation compacted — earlier turns replaced with a summary.");
       } catch (e) {
         render.error(`Compaction failed: ${e instanceof Error ? e.message : String(e)}`);
       }

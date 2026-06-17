@@ -232,11 +232,11 @@ const SEVERITY_RANK: Record<string, number> = {
   debug: 6,
 };
 
-/** Most-urgent-first, then most-recent-first. */
+/** Most-urgent-first, then most-recent-first (by update recency, matching the DB). */
 function compareEvents(a: QueueEvent, b: QueueEvent): number {
   const pa = SEVERITY_RANK[a.severity] ?? 3;
   const pb = SEVERITY_RANK[b.severity] ?? 3;
-  return pa - pb || b.createdAt - a.createdAt;
+  return pa - pb || (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt);
 }
 
 function buildAttention(

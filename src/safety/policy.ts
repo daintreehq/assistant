@@ -112,6 +112,67 @@ export function assertNoFileEditTools(toolNames: string[]): void {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Secret-file guard                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Basenames and suffixes that commonly hold credentials. A read-only tool can
+ * still leak secrets into the durable audit log / conversation history, so the
+ * fs tools refuse to read these and the recursive search skips them. Matching is
+ * on the path's basename, case-insensitive.
+ */
+const SECRET_BASENAMES: ReadonlySet<string> = new Set([
+  ".env",
+  ".npmrc",
+  ".netrc",
+  ".pgpass",
+  ".htpasswd",
+  "credentials",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  ".dockercfg",
+]);
+
+const SECRET_SUFFIXES: readonly string[] = [
+  ".pem",
+  ".key",
+  ".p12",
+  ".pfx",
+  ".keystore",
+  ".jks",
+  ".asc",
+  ".gpg",
+  ".ppk",
+];
+
+/**
+ * True if `relOrPath` looks like a secrets-bearing file (env files, private
+ * keys, cloud/credential stores, SSH keys). Matches `.env`, `.env.local`, etc.,
+ * known credential basenames, and key/cert suffixes — anywhere in the path.
+ */
+const SECRET_DIR_SEGMENTS: ReadonlySet<string> = new Set([".ssh", ".aws", ".gnupg"]);
+
+/** A single path segment that signals secrets (env file/dir or credential dir). */
+function isSensitiveSegment(seg: string): boolean {
+  if (SECRET_DIR_SEGMENTS.has(seg)) return true;
+  // .env, prod.env, .env.local, an `.env/` secrets dir, etc.
+  if (seg === ".env" || seg.endsWith(".env") || seg.startsWith(".env.")) return true;
+  return false;
+}
+
+export function isSensitivePath(relOrPath: string): boolean {
+  const lower = relOrPath.toLowerCase();
+  const base = path.basename(lower);
+  if (SECRET_BASENAMES.has(base)) return true;
+  if (SECRET_SUFFIXES.some((s) => base.endsWith(s))) return true;
+  // Check EVERY segment, so a sensitive file or directory anywhere in the path
+  // (e.g. `nested/.env/x`, `home/.aws/credentials`, `config/prod.env`) is caught.
+  return lower.split(/[\\/]/).some(isSensitiveSegment);
+}
+
 /**
  * Resolve a user-supplied path against the project root and ensure it stays
  * inside it. Used by every read-only fs tool. Throws on traversal.

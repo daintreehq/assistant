@@ -118,6 +118,7 @@ export class DaintreeMcpClient {
       this.connected = true;
       this.transportKind = "streamable-http";
       this.lastError = undefined;
+      await this.warmToolCache();
       return this.status();
     } catch (httpErr) {
       // Fall back to SSE (legacy endpoint).
@@ -136,12 +137,41 @@ export class DaintreeMcpClient {
         this.connected = true;
         this.transportKind = "sse";
         this.lastError = undefined;
+        await this.warmToolCache();
         return this.status();
       } catch (sseErr) {
         this.lastError = `streamable-http: ${errMsg(httpErr)}; sse: ${errMsg(sseErr)}`;
         this.connected = false;
         return this.status();
       }
+    }
+  }
+
+  /**
+   * Drop any existing connection and attempt a fresh connect. Used by /doctor
+   * and /reconnect so a CLI started before Daintree (or after a transport drop)
+   * can recover without a full restart.
+   */
+  async reconnect(): Promise<McpStatus> {
+    await this.close();
+    this.connected = false;
+    this.toolCache = undefined;
+    this.transportKind = "none";
+    this.lastError = undefined;
+    return this.connect();
+  }
+
+  /** Populate the tool cache once after connecting so status shows a tool count. */
+  private async warmToolCache(): Promise<void> {
+    const before = { connected: this.connected, lastError: this.lastError };
+    try {
+      await this.listTools(true);
+    } catch {
+      // Best-effort: a transient tool-list failure must not flip a healthy
+      // transport to "degraded" (listTools' catch calls markDegraded). The
+      // connection stays up; the tool count is simply unknown.
+      this.connected = before.connected;
+      this.lastError = before.lastError;
     }
   }
 

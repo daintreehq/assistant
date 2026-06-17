@@ -127,10 +127,18 @@ export const watcherTools: ToolDef[] = [
             : undefined,
           nextCheckAt: Date.now() + (args.startAfterMs ?? 0),
         });
-        return ok(`Created terminal watcher ${w.id} for ${args.terminalIds.length} terminal(s).`, {
-          id: w.id,
-          nextCheckAt: w.nextCheckAt,
-        });
+        const dormant =
+          ctx.daemonActive && !ctx.daemonActive()
+            ? " NOTE: no scheduler is running in this session, so it will not check until the assistant runs interactively."
+            : "";
+        return ok(
+          `Created terminal watcher ${w.id} for ${args.terminalIds.length} terminal(s).${dormant}`,
+          {
+            id: w.id,
+            nextCheckAt: w.nextCheckAt,
+            daemonActive: ctx.daemonActive ? ctx.daemonActive() : true,
+          },
+        );
       } catch (e) {
         return fail(
           "WATCHER_CREATE",

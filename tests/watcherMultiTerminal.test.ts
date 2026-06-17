@@ -1,0 +1,226 @@
+import { describe, it, expect } from "vitest";
+import {
+  runTerminalWatcherCheck,
+  nextOutputState,
+  findModelJudge,
+  hashTail,
+} from "../src/daemon/watcherEngine.js";
+import { Db } from "../src/storage/db.js";
+import { Queue } from "../src/queue.js";
+import type { ToolContext } from "../src/tools/types.js";
+import type { ModelRouter } from "../src/models/router.js";
+
+function fakeRouter(): ModelRouter {
+  return {
+    chat: async () => ({ content: "(no change)" }),
+    json: async () => ({
+      classification: "still_working",
+      confidence: 0.7,
+      summary: "still working",
+      evidence: [],
+      recommendedAction: "none",
+    }),
+  } as unknown as ModelRouter;
+}
+
+function fakeMcp(perTerminal: Record<string, { agentState?: string; tail?: string }>) {
+  return {
+    isConnected: () => true,
+    status: () => ({ connected: true, transport: "injected" as const }),
+    listTools: async () => [],
+    callTool: async (name: string, args?: Record<string, unknown>) => {
+      const tid = String(args?.terminalId ?? "");
+      const cfg = perTerminal[tid] ?? {};
+      if (name === "terminal.getStatus") {
+        return {
+          text: "",
+          content: [],
+          structuredContent: cfg.agentState ? { agentState: cfg.agentState } : {},
+          isError: false,
+        };
+      }
+      if (name === "terminal.getOutput") {
+        return { text: cfg.tail ?? "", content: [], isError: false };
+      }
+      return { text: "", content: [], isError: false };
+    },
+  };
+}
+
+function ctxWith(db: Db, queue: Queue, mcp: unknown): ToolContext {
+  return {
+    config: {} as ToolContext["config"],
+    mcp: mcp as ToolContext["mcp"],
+    db,
+    queue,
+    router: fakeRouter(),
+    projectPath: "/tmp/p",
+    actor: "watcher",
+    confirm: async () => true,
+    log: () => {},
+  } as ToolContext;
+}
+
+describe("nextOutputState (#4)", () => {
+  it("resets outAt when the tail changes, otherwise grows msSinceOutput", () => {
+    const first = nextOutputState(undefined, "abc", 1000);
+    expect(first.msSinceOutput).toBe(0);
+    expect(first.state.outAt).toBe(1000);
+
+    // Same tail later → time since last output keeps growing.
+    const same = nextOutputState(first.state, "abc", 5000);
+    expect(same.msSinceOutput).toBe(4000);
+    expect(same.state.outAt).toBe(1000);
+
+    // New tail → clock resets.
+    const changed = nextOutputState(same.state, "abcd", 6000);
+    expect(changed.msSinceOutput).toBe(0);
+    expect(changed.state.outAt).toBe(6000);
+    expect(hashTail("abcd")).not.toBe(hashTail("abc"));
+  });
+});
+
+describe("findModelJudge (#15)", () => {
+  it("locates a modelJudge inside composite conditions", () => {
+    expect(findModelJudge({ modelJudge: "done?" })).toBe("done?");
+    expect(findModelJudge({ any: [{ contains: "x" }, { modelJudge: "ready?" }] })).toBe("ready?");
+    expect(findModelJudge({ not: { all: [{ modelJudge: "ok?" }] } })).toBe("ok?");
+    expect(findModelJudge({ contains: "x" })).toBeUndefined();
+    expect(findModelJudge(undefined)).toBeUndefined();
+  });
+});
+
+describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
+  it("checks EVERY target terminal and publishes a per-terminal event", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = fakeMcp({
+      "term-a": { agentState: "waiting" },
+      "term-b": { agentState: "exited" },
+    });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "multi",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    const events = queue.digest({ severityAtLeast: "attention" });
+    const terminals = events.map((e) => e.target?.terminalId).sort();
+    expect(terminals).toEqual(["term-a", "term-b"]);
+
+    // Per-terminal state was persisted.
+    const after = db.getWatcher(w.id)!;
+    const options = JSON.parse(after.optionsJson!);
+    expect(Object.keys(options.perTerminal).sort()).toEqual(["term-a", "term-b"]);
+    db.close();
+  });
+
+  it("stops only when EVERY terminal is terminal; stays active if one is still working (#stop)", async () => {
+    // Both completed → watcher stops.
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "completed" }, "term-b": { agentState: "completed" } }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "both done",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a", "term-b"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+      });
+      await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(db.getWatcher(w.id)!.status).toBe("condition_met");
+      db.close();
+    }
+    // One completed, one still waiting → watcher stays active (not prematurely stopped).
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "completed" }, "term-b": { agentState: "waiting" } }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "mixed",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a", "term-b"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+      });
+      await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(db.getWatcher(w.id)!.status).toBe("active");
+      db.close();
+    }
+  });
+
+  it("does not throw when MCP is disconnected (no per-terminal output captured)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const offline = {
+      isConnected: () => false,
+      status: () => ({ connected: false, transport: "none" as const }),
+      listTools: async () => [],
+      callTool: async () => ({ text: "", content: [], isError: false }),
+    };
+    const ctx = ctxWith(db, queue, offline);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "offline",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("needs_large_model");
+    const after = db.getWatcher(w.id)!;
+    const options = JSON.parse(after.optionsJson!);
+    expect(Object.keys(options.perTerminal).sort()).toEqual(["term-a", "term-b"]);
+    db.close();
+  });
+
+  it("disables a watcher with corrupt target JSON and raises an error event (#14)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(db, queue, fakeMcp({}));
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "broken",
+      goal: "g",
+      targetsJson: "{not valid json",
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    expect(db.getWatcher(w.id)!.status).toBe("error");
+    const errs = queue.digest({ severityAtLeast: "error" });
+    expect(errs.some((e) => e.title.includes("watcher disabled"))).toBe(true);
+    db.close();
+  });
+});

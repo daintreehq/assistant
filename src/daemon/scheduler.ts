@@ -33,7 +33,6 @@ export class Scheduler {
   private timer?: NodeJS.Timeout;
   private running = false;
   private current?: Promise<void>;
-  private lastNotifyAt = Date.now();
   private readonly tickMs: number;
 
   constructor(private deps: SchedulerDeps) {
@@ -77,22 +76,26 @@ export class Scheduler {
           this.deps.db.updateWatcher(w.id, { nextCheckAt: now + w.cadenceMs });
         }
       }
-      this.notify(now);
+      this.notify();
     } finally {
       this.running = false;
     }
   }
 
-  private notify(now: number): void {
-    if (!this.deps.onAttention) {
-      this.lastNotifyAt = now;
-      return;
+  private notify(): void {
+    if (!this.deps.onAttention) return;
+    // Push each attention+ event exactly once: select those never notified, then
+    // stamp them. This survives the dedupe path (which pins createdAt) and still
+    // catches a below-threshold event that later escalates to attention+.
+    const fresh = this.deps.queue.digest({
+      severityAtLeast: "attention",
+      notifiedIsNull: true,
+      maxItems: 20,
+    });
+    if (fresh.length > 0) {
+      this.deps.onAttention(fresh);
+      this.deps.queue.markNotified(fresh.map((e) => e.id));
     }
-    const fresh = this.deps.queue
-      .digest({ severityAtLeast: "attention", maxItems: 20 })
-      .filter((e) => e.createdAt > this.lastNotifyAt);
-    if (fresh.length > 0) this.deps.onAttention(fresh);
-    this.lastNotifyAt = now;
   }
 
   private async fireTimer(rec: TimerRecord, now: number): Promise<void> {
@@ -120,9 +123,12 @@ export class Scheduler {
 
     try {
       if (payload.type === "enqueue") {
+        // A scheduled enqueue is a user-requested reminder. Publish at
+        // "attention" so it reaches the inbox/notifier — "info" sits below the
+        // surfacing threshold, which made reminders silently never appear.
         this.deps.queue.publish({
           source: "timer",
-          severity: "info",
+          severity: "attention",
           title: rec.title,
           summary: payload.message ?? rec.title,
           target,
