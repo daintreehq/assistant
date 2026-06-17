@@ -12,6 +12,12 @@ import { randomUUID } from "node:crypto";
 import { ok, fail, type ToolDef } from "./types.js";
 import { SUPERVISOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
 
+/** Max length for the human-readable name passed to agent.launch (terminal/tab label). */
+const AGENT_LAUNCH_NAME_MAX_LEN = 60;
+
+/** Default agent id; its name suffix would be noise, so it is omitted. */
+const DEFAULT_AGENT_ID = "claude";
+
 /** Standard constraints appended to every spawned-agent prompt (docs §18). */
 const CONSTRAINTS_BLOCK = [
   "Make changes only in this worktree. Do not modify unrelated files.",
@@ -42,6 +48,22 @@ function buildAgentPrompt(args: SpawnForEditsArgs): string {
   if (ctxLines.length) lines.push(`\nContext:\n${ctxLines.join("\n")}`);
   lines.push(`\n${CONSTRAINTS_BLOCK}`);
   return lines.join("\n");
+}
+
+/**
+ * Derive a short, human-readable name for the spawned agent so it shows legibly
+ * in Daintree's terminal/tab UI and stays distinguishable during parallel
+ * orchestration. Built from the task title, with a ` (agentId)` suffix only for
+ * non-default agents (the default "claude" suffix would just be noise). Collapses
+ * whitespace, falls back to "agent" for a blank title, and truncates the whole
+ * label to AGENT_LAUNCH_NAME_MAX_LEN so the suffix always survives.
+ */
+function buildAgentLaunchName(title: string, agentId: string): string {
+  const base = title.trim().replace(/\s+/g, " ") || "agent";
+  const suffix = agentId !== DEFAULT_AGENT_ID ? ` (${agentId})` : "";
+  const room = Math.max(0, AGENT_LAUNCH_NAME_MAX_LEN - suffix.length);
+  const head = base.length > room ? base.slice(0, room) : base;
+  return `${head}${suffix}`;
 }
 
 /**
@@ -162,13 +184,15 @@ export const agentTaskTools: ToolDef[] = [
         );
       }
 
-      const agentId = args.agentId ?? "claude";
+      const agentId = args.agentId ?? DEFAULT_AGENT_ID;
+      const name = buildAgentLaunchName(args.title, agentId);
       const prompt = buildAgentPrompt(args);
       const requestKey = randomUUID();
 
       try {
         const res = await ctx.mcp.callTool("agent.launch", {
           agentId,
+          name,
           ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
           prompt,
           requestKey,

@@ -53,7 +53,9 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - There is NO terminal.listStatus and NO terminal.waitForAny. Batch by passing
   several terminalIds to terminal.getStatus. terminal.waitUntilIdle blocks on ONE
   terminal — targeted use only, never fan out many concurrent waits.
-- agent.launch(...) -> { terminalId, location } ONLY (no worktreeId, no taskId).
+- agent.launch({ agentId, name?, worktreeId?, prompt, requestKey }) -> { terminalId,
+  location } ONLY (no worktreeId, no taskId). "name" is a short human-readable label
+  for the spawned agent's terminal/tab so parallel agents stay distinguishable.
 - To focus a terminal, Daintree uses panel.focus({ panelId }) — the terminal id IS
   the panelId. There is NO terminal.focus MCP tool (the local wrapper maps to it).
 - Read tools (workbench tier, no confirmation): actions.getContext / list / search /
