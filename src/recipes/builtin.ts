@@ -29,7 +29,15 @@ export const BASIC_DAINTREE_ORCHESTRATION_RECIPE: Recipe = {
     "daintree.status",
     "daintree.listTools",
     "tool.search",
+    "daintree.call",
     "queue.digest",
+    "terminal.summarize",
+    "timer.schedule",
+    "timer.list",
+    "timer.cancel",
+    "watcher.terminal.create",
+    "watcher.list",
+    "watcher.cancel",
   ],
   body: `Use when: the user asks about current Daintree state or what to do next.
 Procedure:
@@ -87,6 +95,7 @@ export const DAINTREE_RECIPE_RUNNER_RECIPE: Recipe = {
     "recipe.list",
     "recipe.run",
     "worktree.createWithRecipe",
+    "daintree.call",
     "context.snapshot",
   ],
   body: `Use when: the user asks about Daintree workspace recipes or creating a worktree with one.

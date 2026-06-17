@@ -44,7 +44,13 @@ export const Recipe = z.object({
   maxTurns: z.number().int().positive().default(8),
   /** The riskiest action class this recipe tends to drive. */
   risk: RecipeRisk.default("read"),
-  /** Tools the recipe leans on (documentation/selection hint only). */
+  /**
+   * Tools the recipe needs. When a recipe is active this acts as a per-turn
+   * allowlist (unioned with the core tools — see CORE_TOOL_NAMES in
+   * agent/loop.ts), so any tool the body instructs the model to use MUST be
+   * listed here or the model never sees it. Under-declaring silently starves
+   * the model; an empty list means "core tools only".
+   */
   requiredTools: z.array(z.string()).default([]),
   /** The actual runbook injected into the main model. Keep it short + procedural. */
   body: z.string().min(1),

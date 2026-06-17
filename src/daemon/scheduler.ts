@@ -151,14 +151,19 @@ export class Scheduler {
           payload.toolCall.args,
           this.deps.ctxFor("timer"),
         );
-        this.deps.queue.publish({
-          source: "timer",
-          severity: res.ok ? "info" : "error",
-          title: rec.title,
-          summary: res.summary,
-          target,
-          dedupeKey: `timer:${rec.id}:${rec.runCount}`,
-        });
+        // A confirm-required tool denied to a non-interactive actor is an
+        // expected, structural outcome that the registry already surfaces as a
+        // low-severity event — don't also raise a timer 'error' for it.
+        if (res.error?.code !== "CONFIRMATION_REQUIRED") {
+          this.deps.queue.publish({
+            source: "timer",
+            severity: res.ok ? "info" : "error",
+            title: rec.title,
+            summary: res.summary,
+            target,
+            dedupeKey: `timer:${rec.id}:${rec.runCount}`,
+          });
+        }
       }
     } catch (err) {
       this.deps.queue.publish({

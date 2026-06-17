@@ -3,11 +3,35 @@ import { AgentSession } from "../src/agent/loop.js";
 import { RecipeRegistry } from "../src/recipes/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
+import { ok, type ToolDef } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { ChatOptions } from "../src/models/fireworks.js";
 import type { MainPromptContext } from "../src/models/prompts/runtimeContext.js";
 import type { RecipeSelection } from "../src/recipes/types.js";
+
+/**
+ * toOpenAITools() projects internal dotted names to OpenAI wire names
+ * (`a.b` -> `a__b`). These filter assertions are written against the internal
+ * dotted names, so translate the captured wire name back before comparing.
+ */
+function fromWire(name: string): string {
+  return name.replaceAll("__", ".");
+}
+
+/** A no-op read tool used only to populate the registry for filter tests. */
+function dummyTool(name: string): ToolDef {
+  return {
+    name,
+    description: `dummy ${name}`,
+    risk: "read",
+    readOnly: true,
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async handler() {
+      return ok("ok");
+    },
+  };
+}
 
 function promptCtx(over: Partial<MainPromptContext> = {}): MainPromptContext {
   return {
@@ -35,10 +59,12 @@ function makeSession(opts: {
   selection?: RecipeSelection;
   json?: () => Promise<RecipeSelection>;
   onStream?: (o: ChatOptions) => void;
+  tools?: string[];
 } = {}) {
   const db = new Db(":memory:");
   const recipeRegistry = new RecipeRegistry();
   const registry = new ToolRegistry();
+  for (const name of opts.tools ?? []) registry.register(dummyTool(name));
   const calls = { json: 0, stream: 0 };
   const json =
     opts.json ?? (async () => opts.selection ?? NO_RECIPES);
@@ -62,8 +88,26 @@ function makeSession(opts: {
     promptContext: promptCtx(),
     sessionId: "ses_test",
   });
-  return { session, db, calls };
+  return { session, db, calls, registry };
 }
+
+/** Tool names a registered registry must hold so filtering has something to cut. */
+const REGISTERED_TOOLS = [
+  // core
+  "context.snapshot",
+  "fs.read",
+  "fs.list",
+  "fs.search",
+  "queue.digest",
+  "daintree.status",
+  "tool.search",
+  // extra tools a recipe may require
+  "agentTask.spawnForEdits",
+  "watcher.terminal.create",
+  // tools NO active recipe here requires — must be pruned when a recipe is active
+  "timer.schedule",
+  "recipe.run",
+];
 
 describe("AgentSession control messages", () => {
   it("starts with [base, runtime, recipes] system messages", () => {
@@ -228,5 +272,75 @@ describe("AgentSession control messages", () => {
     expect(calls.json).toBe(1); // skipped
     await session.send("please implement the fix"); // trigger term
     expect(calls.json).toBe(2);
+  });
+
+  it("sends the full registry when no recipe is active", async () => {
+    let captured: ChatOptions | undefined;
+    const { session } = makeSession({
+      selection: NO_RECIPES,
+      onStream: (o) => (captured = o),
+      tools: REGISTERED_TOOLS,
+    });
+    await session.send("just a simple question");
+    const names = (captured?.tools ?? []).map((t) => fromWire(t.function.name));
+    // No recipe ⇒ undefined filter ⇒ every registered tool is offered.
+    expect(names.sort()).toEqual([...REGISTERED_TOOLS].sort());
+    expect(names.length).toBeGreaterThan(0);
+  });
+
+  it("prunes tools to core ∪ recipe.requiredTools when a recipe is active", async () => {
+    let captured: ChatOptions | undefined;
+    const { session } = makeSession({
+      selection: {
+        recipeIds: ["daintree.edits.spawn-visible-agent"],
+        confidence: 0.9,
+        reason: "user asked to implement",
+        taskType: "code_edit",
+        keepExisting: false,
+      },
+      onStream: (o) => (captured = o),
+      tools: REGISTERED_TOOLS,
+    });
+    await session.send("implement the new feature");
+    const names = new Set(
+      (captured?.tools ?? []).map((t) => fromWire(t.function.name)),
+    );
+
+    // Core tools are always present.
+    expect(names.has("context.snapshot")).toBe(true);
+    expect(names.has("tool.search")).toBe(true);
+    // The active recipe's required tools are present.
+    expect(names.has("agentTask.spawnForEdits")).toBe(true);
+    expect(names.has("watcher.terminal.create")).toBe(true);
+    // Tools no active recipe requires are pruned.
+    expect(names.has("timer.schedule")).toBe(false);
+    expect(names.has("recipe.run")).toBe(false);
+
+    // Exact set = core ∪ this recipe's requiredTools (deduped), nothing else.
+    const expected = new Set([
+      "context.snapshot",
+      "fs.read",
+      "fs.list",
+      "fs.search",
+      "queue.digest",
+      "daintree.status",
+      "tool.search",
+      "agentTask.spawnForEdits",
+      "watcher.terminal.create",
+    ]);
+    expect([...names].sort()).toEqual([...expected].sort());
+  });
+
+  it("never sends an empty tool list on an unconstrained turn", async () => {
+    let captured: ChatOptions | undefined;
+    const { session } = makeSession({
+      selection: NO_RECIPES,
+      onStream: (o) => (captured = o),
+      tools: REGISTERED_TOOLS,
+    });
+    await session.send("hi");
+    // Guard: empty activeRecipeIds returns an undefined filter (full registry),
+    // never an empty array that would strip every tool.
+    expect((captured?.tools ?? []).length).toBe(REGISTERED_TOOLS.length);
   });
 });
