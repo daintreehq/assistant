@@ -21,7 +21,6 @@ import {
   type RenderedRecipeBundle,
 } from "../recipes/render.js";
 import type { RecipeSelection } from "../recipes/types.js";
-import { truncate } from "../utils/text.js";
 import { type AgentEventSink, noopAgentEvents } from "./events.js";
 
 const MAX_TOOL_ITERATIONS = 12;
@@ -35,6 +34,24 @@ const MAIN_PROMPT_CACHE_KEY = BASE_SYSTEM_PROMPT_VERSION;
 const RECIPE_TRIGGER_RE =
   /\b(recipe|worktree|agent|edit|fix|implement|refactor|test|monitor|watch|terminal)\b/i;
 const MAX_TOOL_RESULT_CHARS = 8000;
+/**
+ * Auto-compact the conversation once the estimated prompt size crosses this many
+ * tokens. Conservative — well under a typical 128k context window, but high
+ * enough that ordinary sessions never trip it. Tune here if the window changes.
+ */
+const AUTO_COMPACT_TOKEN_THRESHOLD = 60_000;
+/** Rough chars-per-token ratio used by the dependency-free token estimator. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Cheap, dependency-free token estimate: total message content length divided by
+ * a fixed chars-per-token ratio. Counts only `content` (not tool-call argument
+ * JSON), so it slightly undercounts — fine for a "should we compact?" threshold.
+ */
+function estimateTokens(messages: ChatMessage[]): number {
+  const chars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
 
 export interface AgentSessionDeps {
   router: ModelRouter;
@@ -118,8 +135,46 @@ export class AgentSession {
     this.persistMessage(note);
   }
 
+  /**
+   * Before a turn, compact automatically if the accumulated history is large. We
+   * summarize the working history (everything past the 3 control messages) with
+   * the small model and fold it into a single note via compact(), so the cached
+   * base prefix and recipe state survive. Best-effort: any failure (or no real
+   * history to compact) leaves the conversation untouched and the turn proceeds.
+   */
+  private async maybeAutoCompact(): Promise<void> {
+    if (estimateTokens(this.messages) <= AUTO_COMPACT_TOKEN_THRESHOLD) return;
+    // Need real working history beyond the controls + any prior summary note.
+    if (this.messages.length <= CONTROL_MESSAGE_COUNT + 1) return;
+
+    const history = this.messages.slice(CONTROL_MESSAGE_COUNT);
+    try {
+      const result = await this.deps.router.chat("small", {
+        messages: [
+          {
+            role: "system",
+            content:
+              "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual.",
+          },
+          ...history,
+        ],
+      });
+      const summary = result.content.trim();
+      if (!summary) {
+        this.events.info("Auto-compact skipped: empty summary");
+        return;
+      }
+      this.compact(summary);
+      this.events.info("Auto-compacted conversation");
+    } catch {
+      // Summary failed — keep the full history and let the turn continue.
+      this.events.info("Auto-compact skipped: summary failed");
+    }
+  }
+
   /** Run a full user turn. Returns the final assistant text. */
   async send(userInput: string): Promise<string> {
+    await this.maybeAutoCompact();
     await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });
 
@@ -387,7 +442,7 @@ export class AgentSession {
   }
 }
 
-function serializeToolResult(res: {
+export function serializeToolResult(res: {
   ok: boolean;
   summary: string;
   result?: unknown;
@@ -405,5 +460,8 @@ function serializeToolResult(res: {
   } catch {
     s = JSON.stringify({ ok: res.ok, summary: res.summary });
   }
-  return truncate(s, MAX_TOOL_RESULT_CHARS);
+  if (s.length <= MAX_TOOL_RESULT_CHARS) return s;
+  const omitted = s.length - MAX_TOOL_RESULT_CHARS;
+  // Explicit marker so the model knows output was clipped (vs. a silent ellipsis).
+  return `${s.slice(0, MAX_TOOL_RESULT_CHARS)}\n[output truncated: ${omitted} chars omitted]`;
 }

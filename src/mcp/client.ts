@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { AppConfig } from "../config.js";
+import { DOCUMENTED_MCP_TOOL_NAMES } from "../models/prompts/daintreeMcp.js";
 
 export interface McpToolInfo {
   name: string;
@@ -49,15 +50,32 @@ export interface McpStatus {
   transport?: "streamable-http" | "sse" | "injected" | "none";
   toolCount?: number;
   error?: string;
+  /**
+   * Warnings about documented-vs-live tool drift, populated at startup. Each
+   * entry names a tool we document (DOCUMENTED_MCP_TOOL_NAMES) that the live
+   * server did not advertise. Undefined when there is no drift — drift never
+   * fails the connection, it only surfaces here for the UI/doctor to render.
+   */
+  driftWarnings?: string[];
+  /** The connected server's reported implementation info (name + version). */
+  serverInfo?: { name?: string; version?: string };
 }
 
 export class DaintreeMcpClient {
   private cfg: AppConfig;
   private low?: LowLevelMcpClient;
+  /**
+   * The typed SDK client, kept alongside `low` so we can read server metadata
+   * (getServerVersion / getServerCapabilities) that the LowLevelMcpClient
+   * interface deliberately omits. Undefined when a clientOverride is injected.
+   */
+  private raw?: Client;
   private connected = false;
   private transportKind: McpStatus["transport"] = "none";
   private lastError?: string;
   private toolCache?: McpToolInfo[];
+  private driftWarnings: string[] = [];
+  private serverInfo?: { name?: string; version?: string };
 
   constructor(cfg: AppConfig, opts: McpClientOptions = {}) {
     this.cfg = cfg;
@@ -79,12 +97,22 @@ export class DaintreeMcpClient {
       transport: this.transportKind,
       toolCount: this.toolCache?.length,
       error: this.lastError,
+      driftWarnings:
+        this.driftWarnings.length > 0 ? [...this.driftWarnings] : undefined,
+      serverInfo: this.serverInfo ? { ...this.serverInfo } : undefined,
     };
   }
 
   /** Attempt to connect. Never throws — returns whether it succeeded. */
   async connect(): Promise<McpStatus> {
-    if (this.connected) return this.status();
+    if (this.connected) {
+      // An injected client is "connected" from construction but its cache was
+      // never warmed — do it once here so toolCount and drift detection run.
+      if (this.transportKind === "injected" && !this.toolCache) {
+        await this.warmToolCache();
+      }
+      return this.status();
+    }
     if (this.cfg.offline) {
       this.lastError = "offline mode";
       return this.status();
@@ -114,6 +142,7 @@ export class DaintreeMcpClient {
         requestInit: { headers },
       });
       await client.connect(transport);
+      this.raw = client;
       this.low = client as unknown as LowLevelMcpClient;
       this.connected = true;
       this.transportKind = "streamable-http";
@@ -133,6 +162,7 @@ export class DaintreeMcpClient {
           requestInit: { headers },
         });
         await client.connect(transport);
+        this.raw = client;
         this.low = client as unknown as LowLevelMcpClient;
         this.connected = true;
         this.transportKind = "sse";
@@ -158,6 +188,9 @@ export class DaintreeMcpClient {
     this.toolCache = undefined;
     this.transportKind = "none";
     this.lastError = undefined;
+    this.driftWarnings = [];
+    this.serverInfo = undefined;
+    this.raw = undefined;
     return this.connect();
   }
 
@@ -166,12 +199,47 @@ export class DaintreeMcpClient {
     const before = { connected: this.connected, lastError: this.lastError };
     try {
       await this.listTools(true);
+      // Drift is a best-effort, warning-only signal — runDriftCheck never throws,
+      // but keep it inside the try so it only runs once we have a live tool list.
+      this.runDriftCheck();
     } catch {
       // Best-effort: a transient tool-list failure must not flip a healthy
       // transport to "degraded" (listTools' catch calls markDegraded). The
       // connection stays up; the tool count is simply unknown.
       this.connected = before.connected;
       this.lastError = before.lastError;
+    }
+  }
+
+  /**
+   * Compare the documented tool surface against what the live server actually
+   * advertises and record a warning for every documented tool that is missing.
+   * Warning-only: never throws, never affects `connected`. We check missing-only
+   * (documented names absent from the live set) — extra live tools are expected,
+   * since the reference intentionally documents a verified subset, not the whole
+   * surface.
+   */
+  private runDriftCheck(): void {
+    try {
+      this.driftWarnings = [];
+      // Capture the server's reported implementation info if available.
+      const info = this.raw?.getServerVersion?.();
+      this.serverInfo = info
+        ? { name: info.name, version: info.version }
+        : undefined;
+      const live = new Set((this.toolCache ?? []).map((t) => t.name));
+      // No tools came back — treat as "unknown", not "everything drifted".
+      if (live.size === 0) return;
+      for (const name of DOCUMENTED_MCP_TOOL_NAMES) {
+        if (!live.has(name)) {
+          this.driftWarnings.push(
+            `MCP drift: tool '${name}' is documented but missing from the live server`,
+          );
+        }
+      }
+    } catch {
+      // Drift detection must never break startup.
+      this.driftWarnings = [];
     }
   }
 
@@ -188,6 +256,8 @@ export class DaintreeMcpClient {
   private markDegraded(e: unknown): void {
     this.connected = false;
     this.toolCache = undefined;
+    this.driftWarnings = [];
+    this.serverInfo = undefined;
     this.lastError = errMsg(e);
   }
 

@@ -5,7 +5,11 @@
 import { randomUUID } from "node:crypto";
 import { loadConfig, type AppConfig, type ConfigOverrides } from "../config.js";
 import { Db } from "../storage/db.js";
-import { DaintreeMcpClient, type McpClientOptions } from "../mcp/client.js";
+import {
+  DaintreeMcpClient,
+  type McpClientOptions,
+  type McpStatus,
+} from "../mcp/client.js";
 import { Queue } from "../queue.js";
 import { ModelRouter } from "../models/router.js";
 import { ToolRegistry } from "../tools/registry.js";
@@ -133,14 +137,23 @@ export class App {
 
   /** Connect to Daintree MCP (best-effort) and refresh the system prompt. */
   async connectMcp(): Promise<void> {
-    await this.mcp.connect();
+    const st = await this.mcp.connect();
+    this.warnOnDrift(st);
     this.session.refreshRuntimeContext(this.promptContext());
   }
 
   /** Force a fresh MCP connection (e.g. /reconnect, /doctor) and refresh prompt. */
   async reconnectMcp(): Promise<void> {
-    await this.mcp.reconnect();
+    const st = await this.mcp.reconnect();
+    this.warnOnDrift(st);
     this.session.refreshRuntimeContext(this.promptContext());
+  }
+
+  /** Surface documented-vs-live MCP tool drift as a startup warning (non-fatal). */
+  private warnOnDrift(st: McpStatus): void {
+    if (!st.driftWarnings?.length) return;
+    const log = this.hooks.log ?? (() => {});
+    for (const w of st.driftWarnings) log(`⚠️  ${w}`);
   }
 
   startScheduler(onAttention?: (events: QueueEvent[]) => void): Scheduler {
