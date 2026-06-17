@@ -12,8 +12,14 @@ const extractAsync = extractionTools.find(
   (t) => t.name === "terminal.extract.async",
 )!;
 
+/** A per-terminal status entry, optionally carrying the inline recentOutput tail. */
+type StatusEntry = {
+  terminalId: string;
+  agentState?: string;
+  recentOutput?: string;
+};
 /** A status result shaped like Daintree's terminal.getStatus. */
-function statusRes(entries: Array<{ terminalId: string; agentState?: string }>) {
+function statusRes(entries: Array<StatusEntry>) {
   return { isError: false, text: "", structuredContent: { terminals: entries } };
 }
 /** An output result shaped like Daintree's terminal.getOutput. */
@@ -23,7 +29,7 @@ function outputRes(content: string) {
 
 interface CtxParts {
   connected?: boolean;
-  status?: (call: number) => Array<{ terminalId: string; agentState?: string }>;
+  status?: (call: number) => Array<StatusEntry>;
   output?: (call: number) => string;
   chat?: ReturnType<typeof vi.fn>;
   json?: ReturnType<typeof vi.fn>;
@@ -212,6 +218,64 @@ describe("terminal.extract — inline", () => {
     expect(userMsg).toContain("find the error code");
     expect(userMsg).toContain("the build log content");
     expect(sent.maxTokens).toBe(400);
+  });
+
+  it("requests the inline output tail on terminal.getStatus", async () => {
+    const { ctx } = ctxWith({});
+    await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    const callTool = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    const statusCall = callTool.mock.calls.find((c) => c[0] === "terminal.getStatus");
+    expect(statusCall?.[1]?.includeOutput).toEqual({ lines: 50, stripAnsi: true });
+  });
+
+  it("uses recentOutput and skips terminal.getOutput when the inline tail covers tailBytes", async () => {
+    const tail = "BUILD OK and the rest of the log";
+    const { ctx, chat } = ctxWith({
+      status: () => [{ terminalId: "t1", agentState: "working", recentOutput: tail }],
+      chat: vi.fn().mockResolvedValue({ content: "ok" }),
+    });
+    await extract.handler(
+      // tailBytes small enough that the inline tail already covers it.
+      { terminalIds: ["t1"], instruction: "did it pass", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 8, maxTokens: 400 },
+      ctx,
+    );
+    const callTool = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    expect(callTool.mock.calls.filter((c) => c[0] === "terminal.getOutput")).toHaveLength(0);
+    // The tail handed to the model is the last `tailBytes` chars of recentOutput.
+    const userMsg = chat.mock.calls[0][1].messages.find(
+      (m: { role: string }) => m.role === "user",
+    ).content;
+    expect(userMsg).toContain(tail.slice(-8));
+  });
+
+  it("falls back to terminal.getOutput when recentOutput is shorter than tailBytes", async () => {
+    const { ctx } = ctxWith({
+      // Inline tail present but far shorter than the requested 12000 bytes.
+      status: () => [{ terminalId: "t1", agentState: "working", recentOutput: "short" }],
+      output: () => "deep scrollback from getOutput",
+    });
+    await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    const callTool = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    expect(callTool.mock.calls.filter((c) => c[0] === "terminal.getOutput")).toHaveLength(1);
+  });
+
+  it("falls back to terminal.getOutput when recentOutput is absent", async () => {
+    const { ctx } = ctxWith({
+      status: () => [{ terminalId: "t1", agentState: "working" }],
+      output: () => "deep scrollback from getOutput",
+    });
+    await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    const callTool = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    expect(callTool.mock.calls.filter((c) => c[0] === "terminal.getOutput")).toHaveLength(1);
   });
 });
 

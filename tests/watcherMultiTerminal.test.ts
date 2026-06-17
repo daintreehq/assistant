@@ -23,7 +23,12 @@ function fakeRouter(): ModelRouter {
   } as unknown as ModelRouter;
 }
 
-function fakeMcp(perTerminal: Record<string, { agentState?: string; tail?: string }>) {
+function fakeMcp(
+  perTerminal: Record<
+    string,
+    { agentState?: string; tail?: string; recentOutput?: string }
+  >,
+) {
   return {
     isConnected: () => true,
     status: () => ({ connected: true, transport: "injected" as const }),
@@ -34,11 +39,16 @@ function fakeMcp(perTerminal: Record<string, { agentState?: string; tail?: strin
         const ids = Array.isArray(args?.terminalIds)
           ? (args!.terminalIds as unknown[]).map(String)
           : [];
+        // recentOutput is only echoed back when the caller asked for it.
+        const wantOutput = Boolean(args?.includeOutput);
         const terminals = ids.map((tid) => {
           const cfg = perTerminal[tid] ?? {};
           return {
             terminalId: tid,
             ...(cfg.agentState ? { agentState: cfg.agentState } : {}),
+            ...(wantOutput && cfg.recentOutput !== undefined
+              ? { recentOutput: cfg.recentOutput }
+              : {}),
           };
         });
         return { text: "", content: [], structuredContent: { terminals }, isError: false };
@@ -275,11 +285,90 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
       "term-a",
       "term-b",
     ]);
+    // The status call piggybacks a bounded recent-output tail (<=50 lines).
+    expect(statusCalls[0].args!.includeOutput).toEqual({
+      lines: 50,
+      stripAnsi: true,
+    });
 
     // waitingReason "question" reaches the published event's evidence.
     const events = queue.digest({ severityAtLeast: "attention" });
     const waitEvt = events.find((e) => e.target?.terminalId === "term-a");
     expect(waitEvt?.evidence?.some((x) => x.includes("question"))).toBe(true);
+    db.close();
+  });
+
+  it("uses the inline recentOutput tail and skips terminal.getOutput entirely", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    const base = fakeMcp({
+      "term-a": { agentState: "working", recentOutput: "building module A..." },
+      "term-b": { agentState: "working", recentOutput: "compiling B..." },
+    });
+    const mcp = {
+      ...base,
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return base.callTool(name, args);
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "inline-tail",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    // recentOutput satisfied the watcher → zero per-terminal getOutput calls.
+    expect(calls.filter((c) => c.name === "terminal.getOutput")).toHaveLength(0);
+    expect(calls.filter((c) => c.name === "terminal.getStatus")).toHaveLength(1);
+    db.close();
+  });
+
+  it("falls back to terminal.getOutput when recentOutput is absent", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    // No recentOutput configured → Daintree omits it → fallback per terminal.
+    const base = fakeMcp({
+      "term-a": { agentState: "working", tail: "deep scrollback A" },
+      "term-b": { agentState: "working", tail: "deep scrollback B" },
+    });
+    const mcp = {
+      ...base,
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return base.callTool(name, args);
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "fallback-tail",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    // One getOutput per terminal since the inline tail was not provided.
+    const outputCalls = calls
+      .filter((c) => c.name === "terminal.getOutput")
+      .map((c) => String(c.args?.terminalId))
+      .sort();
+    expect(outputCalls).toEqual(["term-a", "term-b"]);
     db.close();
   });
 
