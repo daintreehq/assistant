@@ -3,6 +3,7 @@ import {
   runTerminalWatcherCheck,
   nextOutputState,
   findModelJudge,
+  hasTextCondition,
   hashTail,
 } from "../src/daemon/watcherEngine.js";
 import { Db } from "../src/storage/db.js";
@@ -119,6 +120,18 @@ describe("findModelJudge (#15)", () => {
     expect(findModelJudge({ not: { all: [{ modelJudge: "ok?" }] } })).toBe("ok?");
     expect(findModelJudge({ contains: "x" })).toBeUndefined();
     expect(findModelJudge(undefined)).toBeUndefined();
+  });
+});
+
+describe("hasTextCondition (#23)", () => {
+  it("detects contains/regex anywhere in a composite condition", () => {
+    expect(hasTextCondition({ contains: "FAILED" })).toBe(true);
+    expect(hasTextCondition({ regex: "err\\d+" })).toBe(true);
+    expect(hasTextCondition({ any: [{ stateIs: "exited" }, { contains: "x" }] })).toBe(true);
+    expect(hasTextCondition({ not: { all: [{ regex: "x" }] } })).toBe(true);
+    expect(hasTextCondition({ stateIs: "completed" })).toBe(false);
+    expect(hasTextCondition({ all: [{ stateIs: "exited" }, { modelJudge: "done?" }] })).toBe(false);
+    expect(hasTextCondition(undefined)).toBe(false);
   });
 });
 
@@ -369,6 +382,49 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
       .map((c) => String(c.args?.terminalId))
       .sort();
     expect(outputCalls).toEqual(["term-a", "term-b"]);
+    db.close();
+  });
+
+  it("reads the deep getOutput tail (not just inline) when a contains condition is set", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    // Inline tail is clean; the marker only lives in the deep scrollback. A
+    // contains condition must still match it, so the watcher must read deep.
+    const base = fakeMcp({
+      "term-a": {
+        agentState: "working",
+        recentOutput: "...recent clean progress lines...",
+        tail: "earlier output\nFAILED: build broke\nmore lines",
+      },
+    });
+    const mcp = {
+      ...base,
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return base.callTool(name, args);
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "contains-deep",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a"]),
+      alertWhenJson: JSON.stringify({ contains: "FAILED" }),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    // The contains condition forced a deep read despite recentOutput present.
+    expect(calls.filter((c) => c.name === "terminal.getOutput")).toHaveLength(1);
+    // And the marker found in deep output produced an attention-level alert.
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-a")).toBe(true);
     db.close();
   });
 

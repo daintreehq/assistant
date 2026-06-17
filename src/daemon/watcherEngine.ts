@@ -345,6 +345,22 @@ export function findModelJudge(cond?: WatchCondition): string | undefined {
 }
 
 /**
+ * Whether a (possibly composite) condition matches against terminal output text
+ * (`contains`/`regex`). Such conditions need the full scrollback window, so when
+ * one is present the watcher reads the deep terminal.getOutput tail instead of
+ * trusting the bounded inline recentOutput tail — a 50-line tail could otherwise
+ * silently miss a match that lives deeper in the output.
+ */
+export function hasTextCondition(cond?: WatchCondition): boolean {
+  if (!cond) return false;
+  if ("contains" in cond || "regex" in cond) return true;
+  if ("all" in cond) return cond.all.some((c) => hasTextCondition(c));
+  if ("any" in cond) return cond.any.some((c) => hasTextCondition(c));
+  if ("not" in cond) return hasTextCondition(cond.not);
+  return false;
+}
+
+/**
  * Count uncommitted file changes from a git.getProjectPulse structuredContent,
  * tolerating several plausible shapes (a flat count, a changed-files array, or
  * grouped staged/unstaged/untracked collections). Returns undefined when none of
@@ -621,6 +637,11 @@ export async function runTerminalWatcherCheck(
   }
 
   const judge = findModelJudge(alertWhen) ?? findModelJudge(stopWhen);
+  // A deterministic contains/regex condition must see the full scrollback the
+  // user expects, so the bounded inline tail isn't enough — read deep in that
+  // case. Pure state/model watchers (the common supervisor) keep the cheap tail.
+  const needsDeepTail =
+    hasTextCondition(alertWhen) || hasTextCondition(stopWhen);
   const timedOut = Boolean(
     rec.stopAfterMs && now - rec.createdAt >= rec.stopAfterMs,
   );
@@ -662,11 +683,12 @@ export async function runTerminalWatcherCheck(
       const waitingReason = entry?.waitingReason;
       // Prefer the inline tail from terminal.getStatus (includeOutput). It is
       // bounded to 50 lines — enough for the watcher to classify — and saves a
-      // per-terminal terminal.getOutput. Fall back to the deep read only when
-      // Daintree omitted recentOutput. An empty-string tail is a valid "no
-      // output yet", so we fall back on undefined, not on falsiness.
+      // per-terminal terminal.getOutput. Fall back to the deep read when Daintree
+      // omitted recentOutput, or when a contains/regex condition needs the full
+      // scrollback window. An empty-string tail is a valid "no output yet", so we
+      // fall back on undefined, not on falsiness.
       const tail =
-        entry?.recentOutput !== undefined
+        !needsDeepTail && entry?.recentOutput !== undefined
           ? entry.recentOutput
           : await readOutput(ctx, terminalId);
       const out = nextOutputState(prevState, tail, now);
