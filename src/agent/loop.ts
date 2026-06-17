@@ -9,9 +9,10 @@ import { FireworksUnavailableError } from "../models/fireworks.js";
 import type { ModelRouter } from "../models/router.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
+import type { ToolResult } from "../schemas.js";
 import { buildMainSystemPrompt, type MainPromptContext } from "../models/prompts.js";
-import { render, c } from "../cli/render.js";
-import { truncate } from "../cli/render.js";
+import { truncate } from "../utils/text.js";
+import { type AgentEventSink, noopAgentEvents } from "./events.js";
 
 const MAX_TOOL_ITERATIONS = 12;
 const MAX_TOOL_RESULT_CHARS = 8000;
@@ -22,15 +23,19 @@ export interface AgentSessionDeps {
   ctx: ToolContext;
   promptContext: MainPromptContext;
   sessionId: string;
+  /** Where streamed tokens, tool calls, and errors go. Defaults to a no-op sink. */
+  events?: AgentEventSink;
 }
 
 export class AgentSession {
   private messages: ChatMessage[] = [];
   private seq = 0;
   private readonly deps: AgentSessionDeps;
+  private readonly events: AgentEventSink;
 
   constructor(deps: AgentSessionDeps) {
     this.deps = deps;
+    this.events = deps.events ?? noopAgentEvents;
     const system = buildMainSystemPrompt(deps.promptContext);
     this.pushMessage({ role: "system", content: system });
   }
@@ -63,23 +68,22 @@ export class AgentSession {
     const tools = this.deps.registry.toOpenAITools();
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      render.assistantStart();
+      this.events.assistantStart();
       let result;
       try {
         result = await this.deps.router.stream(
           "large",
           { messages: this.messages, tools, toolChoice: "auto" },
-          (tok) => render.streamToken(tok),
+          (tok) => this.events.assistantToken(tok),
         );
       } catch (err) {
-        render.line();
         if (err instanceof FireworksUnavailableError) {
           const msg = `Model unavailable: ${err.message}`;
-          render.error(msg);
+          this.events.error(msg);
           return msg;
         }
         const msg = err instanceof Error ? err.message : String(err);
-        render.error(`Model error: ${msg}`);
+        this.events.error(`Model error: ${msg}`);
         return `Model error: ${msg}`;
       }
 
@@ -91,12 +95,11 @@ export class AgentSession {
       });
 
       if (result.toolCalls.length === 0) {
-        render.assistantEnd();
+        this.events.assistantEnd(result.content);
         return result.content;
       }
 
       // Execute each requested tool call.
-      render.line();
       for (const call of result.toolCalls) {
         let args: unknown;
         let parseFailed = false;
@@ -106,9 +109,9 @@ export class AgentSession {
           parseFailed = true;
         }
 
-        let res;
+        let res: ToolResult;
         if (parseFailed) {
-          render.toolCall(call.function.name, call.function.arguments);
+          this.events.toolCall(call.function.name, call.function.arguments);
           res = {
             ok: false,
             summary: `Invalid JSON arguments for ${call.function.name}; not executed.`,
@@ -119,14 +122,14 @@ export class AgentSession {
             },
           };
         } else {
-          render.toolCall(call.function.name, args);
+          this.events.toolCall(call.function.name, args);
           res = await this.deps.registry.dispatch(
             call.function.name,
             args,
             this.deps.ctx,
           );
         }
-        render.toolResult(res.ok, res.summary);
+        this.events.toolResult(call.function.name, res);
 
         this.pushMessage({
           role: "tool",
@@ -137,10 +140,8 @@ export class AgentSession {
       }
     }
 
-    const msg = c.yellow(
-      "Reached the tool-iteration limit without a final answer.",
-    );
-    render.line(msg);
+    const msg = "Reached the tool-iteration limit without a final answer.";
+    this.events.error(msg);
     return msg;
   }
 

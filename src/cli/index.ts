@@ -1,11 +1,15 @@
 /**
- * CLI entry point. Default action launches the interactive REPL. A trailing
- * quoted prompt runs a single turn and exits. `doctor` checks the environment.
+ * CLI entry point. With no prompt and a TTY it launches the Ink operations
+ * cockpit. A trailing quoted prompt runs a single turn (console output) and
+ * exits. `--classic` forces the legacy readline REPL; non-TTY stdin/stdout also
+ * falls back to it. `doctor` checks the environment.
  */
 import { Command } from "commander";
 import { App } from "./app.js";
 import { startRepl } from "./repl.js";
 import { render, c } from "./render.js";
+import { createConsoleSink } from "./consoleSink.js";
+import { startInkApp } from "../ui/runInkApp.js";
 import type { ConfigOverrides } from "../config.js";
 import type { Tier } from "../schemas.js";
 
@@ -15,6 +19,8 @@ interface CliOptions {
   project?: string;
   tier?: string;
   offline?: boolean;
+  classic?: boolean;
+  altScreen?: boolean;
 }
 
 function overridesFromOptions(opts: CliOptions): ConfigOverrides {
@@ -30,6 +36,7 @@ function overridesFromOptions(opts: CliOptions): ConfigOverrides {
 async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
   app.setHooks({
+    agentEvents: createConsoleSink(),
     // One-shot is non-interactive: auto-decline mutations rather than hang.
     confirm: async (req) => {
       render.warn(
@@ -42,6 +49,16 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   await app.connectMcp();
   await app.session.send(prompt);
   await app.shutdown();
+}
+
+async function runInteractive(opts: CliOptions): Promise<void> {
+  const app = App.create({ overrides: overridesFromOptions(opts) });
+  const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (opts.classic || !ttyOk) {
+    await startRepl(app);
+    return;
+  }
+  await startInkApp(app, { alternateScreen: opts.altScreen !== false });
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
@@ -69,18 +86,18 @@ async function main(): Promise<void> {
     .option("--project <path>", "Project directory (defaults to cwd)")
     .option("--tier <tier>", "supervisor | operator | system")
     .option("--offline", "Do not make network calls")
+    .option("--classic", "Use the legacy readline interface")
+    .option("--no-alt-screen", "Render Ink without the alternate (full-screen) buffer")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);
-      else await startRepl(App.create({ overrides: overridesFromOptions(opts) }));
+      else await runInteractive(opts);
     });
 
   program
     .command("doctor")
     .description("Check MCP connection, Fireworks key, and project mapping")
-    .action(async () => {
-      await runDoctor(program.opts() as CliOptions);
-    });
+    .action(() => runDoctor(program.opts() as CliOptions));
 
   await program.parseAsync(process.argv);
 }

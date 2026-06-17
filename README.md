@@ -21,15 +21,28 @@ Powered by **Fireworks AI** (OpenAI-compatible): a large model
 npm install
 cp .env.example .env      # then set FIREWORKS_API_KEY (already present in this repo's .env)
 
-# Interactive REPL
+# Interactive Ink cockpit (full-screen TUI)
 npm run dev
 
-# One-shot
+# Legacy readline REPL / non-TTY-safe
+npm run dev -- --classic
+
+# Ink without the alternate (full-screen) buffer — keeps scrollback
+npm run dev -- --no-alt-screen
+
+# One-shot (console output)
 npm run dev -- "which worktrees are ready for review?"
 
 # Environment check
 npm run dev -- doctor
 ```
+
+The default interactive experience is an **Ink operations cockpit**: a streaming
+chat/decisions timeline on the left and a live **Operations Deck** on the right
+(watchers, watched-terminal previews, attention inbox, scheduled timers, recent
+audit). Risky actions raise an in-UI confirmation modal; `?` toggles help, `^O`
+toggles the deck, `^C` shuts down the scheduler, MCP, and DB cleanly. One-shot
+prompts and non-TTY invocations use the console renderer instead.
 
 Build a standalone binary entry: `npm run build` → `dist/index.js` (exposed as the
 `daintree-assistant` bin).
@@ -52,9 +65,9 @@ timer, watcher, and queue tools work; Daintree orchestration tools report a clea
 ## Architecture
 
 ```
-User ↔ REPL ↔ AgentSession (large model)
-                  │  tools (function calling)
-                  ▼
+User ↔ Ink UI ↔ UiBridge ↔ AgentSession (large model)
+       (events/confirm)  │  tools (function calling)
+                         ▼
             ToolRegistry ── safety policy (tiers, confirm, NO file edits) ── audit
                   │
    ┌──────────────┼─────────────────────────────┐
@@ -79,12 +92,15 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/FIREWORKS.md`](docs/FIREWORKS.md), and
 [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md).
 
-## Commands (in the REPL)
+## Commands (cockpit or classic REPL)
 
 ```
 /status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
 /permissions [tier]  /compact  /doctor  /help  /quit
 ```
+
+In the Ink cockpit these render as command cards (and may focus a deck panel);
+in `--classic` mode they print to the console.
 
 ## Tools the model can call
 
@@ -109,8 +125,11 @@ npm run typecheck
 
 - The daemon runs **in-process** in this prototype. State lives in SQLite so it's
   ready to split into a detachable background process (spec §5.1).
-- UI is intentionally `readline` + ANSI (not Ink) so streaming stays simple. An
-  Ink dashboard (live watcher/worktree grid) is a clean future addition — all
-  rendering is isolated in `src/cli/render.ts`.
+- **UI boundary:** the runtime (App, AgentSession, ToolRegistry, Scheduler, Db,
+  Queue, MCP, Router) emits structured events and exposes state; the Ink layer
+  under `src/ui` is the only thing that imports Ink. Tools never call Ink, the
+  watcher engine never renders, and the model loop never writes to stdout — it
+  emits through an `AgentEventSink` consumed by either the Ink `UiBridge` or the
+  legacy console sink (`src/cli/consoleSink.ts`).
 - Workflow templates (start_issue, merge_supervision, …) and worktree watchers
   are the next phase on top of this foundation.
