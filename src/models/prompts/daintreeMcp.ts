@@ -65,7 +65,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   trustworthy completion: a "completed_success" terminal-watcher event for that
   terminal (worktree clean and verified). A "completed_unverified" event means the
   agent stopped but uncommitted changes remain (or git state could not be read) —
-  prompt the user to review the work first; do not propose commit/push/delete yet.
+  prompt the user to review the work before proposing any commit/push/delete.
 - If a call fails with SESSION_BINDING_GONE or BINDING_STALE, the bound Daintree
   window is gone — stop retrying that session and tell the user.
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
