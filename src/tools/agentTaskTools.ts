@@ -181,6 +181,10 @@ export const agentTaskTools: ToolDef[] = [
         }
 
         const terminalId = extractField(res, "terminalId");
+        // Daintree gap: agent.launch returns only { terminalId, location } — it
+        // never carries worktreeId/taskId, so these reads degrade gracefully to
+        // the caller-supplied worktreeId / undefined. Tracked in docs/DAINTREE_MCP.md
+        // ("Known Daintree-side gaps") and issue #9; revisit if Daintree adds them.
         const worktreeId = extractField(res, "worktreeId") ?? args.worktreeId;
         const taskId = extractField(res, "taskId");
 

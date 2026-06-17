@@ -32,6 +32,11 @@ export interface AppConfig {
   mcpUrl?: string;
   mcpToken?: string;
   projectId?: string;
+  /**
+   * Window/session id Daintree injects (DAINTREE_WINDOW_ID) so a CLI bound to
+   * one Daintree window can be told apart from another. Env-only — Daintree
+   * sets it; the CLI never accepts it as a flag. See docs/DAINTREE_MCP.md.
+   */
   windowId?: string;
 
   /** Permission tier the CLI operates at. */

@@ -32,6 +32,29 @@ describe("loadConfig", () => {
     expect(cfg.largeModel).toBe("accounts/fireworks/models/minimax-m3");
     expect(cfg.largeModel).toBe(DEFAULTS.largeModel);
   });
+
+  describe("DAINTREE_WINDOW_ID", () => {
+    const prev = process.env.DAINTREE_WINDOW_ID;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.DAINTREE_WINDOW_ID;
+      else process.env.DAINTREE_WINDOW_ID = prev;
+    });
+
+    it("reads DAINTREE_WINDOW_ID from the environment", () => {
+      process.env.DAINTREE_WINDOW_ID = "win-42";
+      expect(loadConfig({ stateDir }).windowId).toBe("win-42");
+    });
+
+    it("leaves windowId unset when the env var is absent", () => {
+      delete process.env.DAINTREE_WINDOW_ID;
+      expect(loadConfig({ stateDir }).windowId).toBeUndefined();
+    });
+
+    it("trims surrounding whitespace", () => {
+      process.env.DAINTREE_WINDOW_ID = "  win-99  ";
+      expect(loadConfig({ stateDir }).windowId).toBe("win-99");
+    });
+  });
 });
 
 describe("describeConfig", () => {
@@ -43,6 +66,33 @@ describe("describeConfig", () => {
     expect(cfg.fireworksApiKey).toBe(rawKey);
     expect(described.fireworksApiKey).not.toBe(rawKey);
     expect(described.fireworksApiKey).not.toContain(rawKey);
+  });
+
+  it("surfaces windowId and projectId values (Daintree-injected, non-secret)", () => {
+    const prevWin = process.env.DAINTREE_WINDOW_ID;
+    const prevProj = process.env.DAINTREE_PROJECT_ID;
+    process.env.DAINTREE_WINDOW_ID = "win-7";
+    process.env.DAINTREE_PROJECT_ID = "proj-7";
+    try {
+      const described = describeConfig(loadConfig({ stateDir }));
+      expect(described.windowId).toBe("win-7");
+      expect(described.projectId).toBe("proj-7");
+    } finally {
+      if (prevWin === undefined) delete process.env.DAINTREE_WINDOW_ID;
+      else process.env.DAINTREE_WINDOW_ID = prevWin;
+      if (prevProj === undefined) delete process.env.DAINTREE_PROJECT_ID;
+      else process.env.DAINTREE_PROJECT_ID = prevProj;
+    }
+  });
+
+  it("shows (unset) for windowId when absent", () => {
+    const prev = process.env.DAINTREE_WINDOW_ID;
+    delete process.env.DAINTREE_WINDOW_ID;
+    try {
+      expect(describeConfig(loadConfig({ stateDir })).windowId).toBe("(unset)");
+    } finally {
+      if (prev !== undefined) process.env.DAINTREE_WINDOW_ID = prev;
+    }
   });
 });
 
