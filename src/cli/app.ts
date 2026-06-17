@@ -132,6 +132,7 @@ export class App {
       mcpStatusLine: statusLine,
       largeModel: this.config.largeModel,
       smallModel: this.config.smallModel,
+      schedulerActive: Boolean(this.scheduler),
     };
   }
 
@@ -170,6 +171,9 @@ export class App {
       onAttention,
     });
     this.scheduler.start();
+    // The runtime context advertises scheduler state; now that it is running,
+    // refresh message[1] so the dormant-scheduler note disappears.
+    this.session.refreshRuntimeContext(this.promptContext());
     return this.scheduler;
   }
 

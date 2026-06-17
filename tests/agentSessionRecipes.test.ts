@@ -18,6 +18,7 @@ function promptCtx(over: Partial<MainPromptContext> = {}): MainPromptContext {
     mcpStatusLine: "connected (injected, 3 tools)",
     largeModel: "large-x",
     smallModel: "small-x",
+    schedulerActive: true,
     ...over,
   };
 }

@@ -191,11 +191,13 @@ export const timerTools: ToolDef[] = [
 
         const fireAtIso = new Date(rec.fireAt).toISOString();
         const repeatNote = rec.repeatEveryMs ? ` (repeats every ${rec.repeatEveryMs}ms)` : "";
-        const dormant =
-          ctx.daemonActive && !ctx.daemonActive()
-            ? " NOTE: no scheduler is running in this session, so it will not fire until the assistant runs interactively."
-            : "";
-        return ok(`Scheduled timer ${rec.id} "${rec.title}" for ${fireAtIso}${repeatNote}.${dormant}`, {
+        // Always surface the foreground-only lifecycle, even when the scheduler
+        // is running: supervision pauses the moment the assistant is closed.
+        const schedulerRunning = ctx.daemonActive ? ctx.daemonActive() : true;
+        const lifecycleNote = schedulerRunning
+          ? " NOTE: supervision runs only while this assistant is open; this timer pauses when you close the assistant and resumes on the next launch."
+          : " NOTE: no scheduler is running in this session, so it will not fire until the assistant runs interactively.";
+        return ok(`Scheduled timer ${rec.id} "${rec.title}" for ${fireAtIso}${repeatNote}.${lifecycleNote}`, {
           timerId: rec.id,
           fireAt: fireAtIso,
           daemonActive: ctx.daemonActive ? ctx.daemonActive() : true,
