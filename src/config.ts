@@ -118,8 +118,7 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   // read and surfaced on the config but does not yet affect the path.
   const stateRoot = path.join(os.homedir(), ".daintree", "assistant-cli");
   const stateDir =
-    overrides.stateDir ??
-    process.env.DAINTREE_ASSISTANT_STATE_DIR ??
+    firstString(overrides.stateDir, process.env.DAINTREE_ASSISTANT_STATE_DIR) ??
     (projectId ? path.join(stateRoot, projectIdToDir(projectId)) : stateRoot);
 
   fs.mkdirSync(stateDir, { recursive: true });

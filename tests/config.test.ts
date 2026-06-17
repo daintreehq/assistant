@@ -197,6 +197,27 @@ describe("per-project state isolation (issue #4)", () => {
     expect(cfg.stateDir).toBe(path.join(flat, projectIdToDir("alpha")));
   });
 
+  it("falls through to the per-project path when state-dir env is blank", () => {
+    const home = withHome();
+    vi.stubEnv("DAINTREE_PROJECT_ID", "alpha");
+    vi.stubEnv("DAINTREE_ASSISTANT_STATE_DIR", "   ");
+
+    const cfg = loadConfig();
+
+    const flat = path.join(home, ".daintree", "assistant-cli");
+    expect(cfg.stateDir).toBe(path.join(flat, projectIdToDir("alpha")));
+  });
+
+  it("falls through to the per-project path when overrides.stateDir is blank", () => {
+    const home = withHome();
+    vi.stubEnv("DAINTREE_PROJECT_ID", "alpha");
+
+    const cfg = loadConfig({ stateDir: "" });
+
+    const flat = path.join(home, ".daintree", "assistant-cli");
+    expect(cfg.stateDir).toBe(path.join(flat, projectIdToDir("alpha")));
+  });
+
   it("keeps a traversal-style project id inside the state root", () => {
     const home = withHome();
     vi.stubEnv("DAINTREE_PROJECT_ID", "../../escape");
