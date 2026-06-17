@@ -20,7 +20,7 @@ import {
 import {
   WATCHER_SYSTEM_PROMPT,
   buildWatcherUserPrompt,
-} from "../models/prompts.js";
+} from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { WatcherRecord } from "../schemas.js";
 

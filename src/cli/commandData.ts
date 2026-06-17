@@ -26,6 +26,7 @@ const HELP_TEXT = [
   "/audit [n]              recent tool calls (default 15)",
   "/models                 model routing",
   "/permissions [tier]     show or set tier (supervisor|operator|system)",
+  "/recipes [sub]          loaded | reload | load <id…> | clear",
   "/compact                summarize + condense the conversation",
   "/doctor                 check MCP / config / project mapping",
   "/help                   this help",
@@ -180,11 +181,87 @@ export async function handleUiCommand(
         };
       }
       app.config.tier = parsed.data;
-      app.session.refreshSystemPrompt(app.promptContext());
+      app.session.refreshRuntimeContext(app.promptContext());
       return {
         handled: true,
         title: "Permissions",
         text: `Tier set to ${parsed.data}.`,
+      };
+    }
+
+    case "recipes": {
+      const sub = rest[0];
+      if (!sub) {
+        const all = app.recipes.list();
+        return {
+          handled: true,
+          title: `Recipes (${all.length})`,
+          text:
+            all
+              .map((r) => `${r.id}  [${r.risk}]  ${r.title} — ${r.summary}`)
+              .join("\n") +
+            "\n\n/recipes loaded | reload | load <id…> | clear",
+        };
+      }
+      if (sub === "loaded") {
+        return {
+          handled: true,
+          title: "Recipes",
+          text: app.session.describeRecipes(),
+        };
+      }
+      if (sub === "clear") {
+        app.session.setRecipes([]);
+        return { handled: true, title: "Recipes", text: "Cleared loaded recipes." };
+      }
+      if (sub === "load") {
+        const ids = rest.slice(1);
+        if (ids.length === 0) {
+          return {
+            handled: true,
+            title: "Recipes",
+            text: "Usage: /recipes load <id> [<id>…]",
+          };
+        }
+        const known = ids.filter((id) => app.recipes.has(id));
+        const unknown = ids.filter((id) => !app.recipes.has(id));
+        if (known.length === 0) {
+          return {
+            handled: true,
+            title: "Recipes",
+            text: `No known recipe ids given; loaded recipes unchanged.${unknown.length ? ` Unknown: ${unknown.join(", ")}` : ""}`,
+          };
+        }
+        app.session.setRecipes(known);
+        const note = unknown.length
+          ? `Unknown id(s) ignored: ${unknown.join(", ")}\n`
+          : "";
+        return {
+          handled: true,
+          title: "Recipes",
+          text: note + app.session.describeRecipes(),
+        };
+      }
+      if (sub === "reload") {
+        try {
+          const ok = await app.session.forceRecipeRefresh();
+          return {
+            handled: true,
+            title: "Recipes",
+            text: `${ok ? "Recipe selection refreshed." : "Selector unavailable; kept existing recipes."}\n${app.session.describeRecipes()}`,
+          };
+        } catch (e) {
+          return {
+            handled: true,
+            title: "Recipes",
+            text: `Recipe refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+          };
+        }
+      }
+      return {
+        handled: true,
+        title: "Recipes",
+        text: "Usage: /recipes [loaded|reload|load <id…>|clear]",
       };
     }
 

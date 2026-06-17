@@ -1,6 +1,18 @@
 import { AgentSession } from "../src/agent/loop.js";
 import type { AgentEventSink } from "../src/agent/events.js";
-import type { MainPromptContext } from "../src/models/prompts.js";
+import type { MainPromptContext } from "../src/models/prompts/index.js";
+import { RecipeRegistry } from "../src/recipes/registry.js";
+
+// Recipe selection runs at the top of send(); a stub keeps it a no-op so these
+// tests stay focused on the event sink.
+const recipeRegistry = new RecipeRegistry();
+const selectNone = async () => ({
+  recipeIds: [],
+  confidence: 0,
+  reason: "test",
+  taskType: "none",
+  keepExisting: false,
+});
 
 function recordingSink() {
   const events: string[] = [];
@@ -25,7 +37,9 @@ const PROMPT_CTX: MainPromptContext = {
   smallModel: "small",
 };
 
-const ctx = { db: { insertMessage: () => {} } } as any;
+const ctx = {
+  db: { insertMessage: () => {}, insertRecipeSelection: () => {} },
+} as any;
 
 function chatResult(over: Partial<{ content: string; toolCalls: any[] }>) {
   return {
@@ -49,12 +63,14 @@ describe("AgentSession emits structured events instead of rendering", () => {
         onToken?.("lo");
         return chatResult({ content: "Hello" });
       },
+      json: selectNone,
     } as any;
     const registry = { toOpenAITools: () => [], dispatch: async () => ({}) } as any;
 
     const session = new AgentSession({
       router,
       registry,
+      recipeRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t1",
@@ -77,7 +93,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
       chatResult({ content: "done" }),
     ];
     let n = 0;
-    const router = { stream: async () => responses[n++] } as any;
+    const router = { stream: async () => responses[n++], json: selectNone } as any;
     const registry = {
       toOpenAITools: () => [],
       dispatch: async () => ({ ok: true, summary: "found 2 files" }),
@@ -86,6 +102,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
+      recipeRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t2",
@@ -105,12 +122,14 @@ describe("AgentSession emits structured events instead of rendering", () => {
       stream: async () => {
         throw new Error("boom");
       },
+      json: selectNone,
     } as any;
     const registry = { toOpenAITools: () => [], dispatch: async () => ({}) } as any;
 
     const session = new AgentSession({
       router,
       registry,
+      recipeRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t3",

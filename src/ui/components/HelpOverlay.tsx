@@ -8,6 +8,7 @@ const ROWS: Array<[string, string]> = [
   ["/audit [n]", "recent tool calls"],
   ["/tools [q]", "list/search tools"],
   ["/permissions <tier>", "supervisor | operator | system"],
+  ["/recipes [sub]", "loaded · reload · load <id…> · clear"],
   ["/compact", "summarize the conversation"],
   ["/doctor", "environment check"],
   ["/quit", "exit"],

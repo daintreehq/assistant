@@ -96,11 +96,30 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ```
 /status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
-/permissions [tier]  /compact  /doctor  /help  /quit
+/permissions [tier]  /recipes [loaded|reload|load <id…>|clear]
+/compact  /doctor  /help  /quit
 ```
 
 In the Ink cockpit these render as command cards (and may focus a deck panel);
 in `--classic` mode they print to the console.
+
+## Recipe system
+
+Behavior is steered by **recipes** — short procedural runbooks injected into the
+main model's context only when relevant, instead of fine-tuning. The base system
+prompt is split into three stable control messages to preserve Fireworks prompt
+caching:
+
+1. **base** — the cached prefix, almost never changes
+2. **runtime context** — tier, project, MCP status, model ids
+3. **loaded recipes** — the bodies of whatever recipes are active
+
+The small model (`deepseek-v4-flash`) selects 0–3 recipes from a metadata-only
+view of the library via `router.json("small", …)`, validated against a Zod schema.
+Selection is throttled (first turn, every 4th turn, or on a trigger term) so the
+cached prefix doesn't churn each message. Drive it manually with `/recipes`
+(`loaded` / `reload` / `load <id…>` / `clear`); decisions are written to a
+`recipe_selection_log` table for later tuning. See [`src/recipes`](src/recipes).
 
 ## Tools the model can call
 

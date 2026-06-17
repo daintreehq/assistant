@@ -18,6 +18,7 @@ import type {
   AuditRecord,
   ConversationMessageRecord,
   QueueEvent,
+  RecipeSelectionLogRecord,
   TimerRecord,
   WatcherRecord,
 } from "../schemas.js";
@@ -101,6 +102,18 @@ CREATE TABLE IF NOT EXISTS conversation (
   createdAt INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation (sessionId, seq);
+
+CREATE TABLE IF NOT EXISTS recipe_selection_log (
+  id TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  sessionId TEXT NOT NULL,
+  userInput TEXT NOT NULL,
+  selectedRecipeIdsJson TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  taskType TEXT,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recipe_sel_ts ON recipe_selection_log (ts);
 `;
 
 export interface QueueDigestOptions {
@@ -499,5 +512,44 @@ export class Db {
     return this.db
       .prepare("SELECT * FROM conversation WHERE sessionId = ? ORDER BY seq")
       .all(sessionId) as unknown as ConversationMessageRecord[];
+  }
+
+  /* ----------------------- recipe selection log -------------------------- */
+
+  insertRecipeSelection(
+    rec: Omit<RecipeSelectionLogRecord, "id" | "ts"> & Partial<RecipeSelectionLogRecord>,
+  ): RecipeSelectionLogRecord {
+    const full: RecipeSelectionLogRecord = {
+      id: rec.id ?? `rsl_${randomUUID().slice(0, 8)}`,
+      ts: rec.ts ?? Date.now(),
+      sessionId: rec.sessionId,
+      userInput: rec.userInput,
+      selectedRecipeIdsJson: rec.selectedRecipeIdsJson,
+      confidence: rec.confidence,
+      taskType: rec.taskType,
+      reason: rec.reason,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO recipe_selection_log (id,ts,sessionId,userInput,selectedRecipeIdsJson,confidence,taskType,reason)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.ts,
+        full.sessionId,
+        full.userInput,
+        full.selectedRecipeIdsJson,
+        full.confidence,
+        full.taskType ?? null,
+        full.reason ?? null,
+      );
+    return full;
+  }
+
+  listRecipeSelections(limit = 50): RecipeSelectionLogRecord[] {
+    return this.db
+      .prepare("SELECT * FROM recipe_selection_log ORDER BY ts DESC LIMIT ?")
+      .all(limit) as unknown as RecipeSelectionLogRecord[];
   }
 }
