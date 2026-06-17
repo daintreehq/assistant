@@ -21,6 +21,7 @@ const CTX: MainPromptContext = {
   largeModel: "large-model-x",
   smallModel: "small-model-y",
   activeWorktree: "wt_main",
+  schedulerActive: true,
 };
 
 describe("base system prompt", () => {
@@ -41,6 +42,11 @@ describe("base system prompt", () => {
   it("pins the version used as the cache key", () => {
     expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v3");
   });
+
+  it("states the foreground-only scheduler lifecycle", () => {
+    expect(BASE_SYSTEM_PROMPT).toContain("Scheduler lifecycle");
+    expect(BASE_SYSTEM_PROMPT).toContain("ONLY while this assistant is open");
+  });
 });
 
 describe("runtime context message", () => {
@@ -57,6 +63,18 @@ describe("runtime context message", () => {
   it("warns clearly when MCP is not connected", () => {
     const msg = buildRuntimeContextMessage({ ...CTX, mcpConnected: false });
     expect(msg).toContain("degraded local mode");
+  });
+
+  it("warns the scheduler is dormant only when it is not running", () => {
+    expect(buildRuntimeContextMessage(CTX)).not.toContain(
+      "the scheduler is NOT running",
+    );
+    const dormant = buildRuntimeContextMessage({
+      ...CTX,
+      schedulerActive: false,
+    });
+    expect(dormant).toContain("the scheduler is NOT running");
+    expect(dormant).toContain("dormant");
   });
 });
 

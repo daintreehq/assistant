@@ -73,6 +73,7 @@ function makeDeps() {
       actor,
       confirm: async () => true,
       log: () => {},
+      daemonActive: () => true,
     }) as ToolContext;
 
   return { db, queue, router, registry, ctxFor };
@@ -146,6 +147,7 @@ describe("Scheduler.tick", () => {
         actor,
         confirm: async () => true,
         log: () => {},
+        daemonActive: () => true,
       }) as ToolContext;
     const scheduler = new Scheduler({ ...deps, ctxFor });
     const now = 3_000_000;

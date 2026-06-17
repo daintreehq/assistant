@@ -128,12 +128,14 @@ export const watcherTools: ToolDef[] = [
             : undefined,
           nextCheckAt: Date.now() + (args.startAfterMs ?? 0),
         });
-        const dormant =
-          ctx.daemonActive && !ctx.daemonActive()
-            ? " NOTE: no scheduler is running in this session, so it will not check until the assistant runs interactively."
-            : "";
+        // Always surface the foreground-only lifecycle, even when the scheduler
+        // is running: supervision pauses the moment the assistant is closed.
+        const schedulerRunning = ctx.daemonActive ? ctx.daemonActive() : true;
+        const lifecycleNote = schedulerRunning
+          ? " NOTE: supervision runs only while this assistant is open; this watcher pauses when you close the assistant and resumes on the next launch."
+          : " NOTE: no scheduler is running in this session, so it will not check until the assistant runs interactively.";
         return ok(
-          `Created terminal watcher ${w.id} for ${args.terminalIds.length} terminal(s).${dormant}`,
+          `Created terminal watcher ${w.id} for ${args.terminalIds.length} terminal(s).${lifecycleNote}`,
           {
             id: w.id,
             nextCheckAt: w.nextCheckAt,

@@ -29,6 +29,7 @@ function makeSession(routerOverrides: Partial<Record<string, unknown>> = {}) {
     mcpStatusLine: "connected",
     largeModel: "L",
     smallModel: "S",
+    schedulerActive: true,
   };
   const session = new AgentSession({
     router,

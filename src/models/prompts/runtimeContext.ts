@@ -17,6 +17,12 @@ export interface MainPromptContext {
   largeModel: string;
   smallModel: string;
   activeWorktree?: string;
+  /**
+   * Whether the foreground scheduler is running in this session. False on
+   * one-shot / non-interactive paths, where timers and watchers are persisted
+   * but dormant until the next interactive launch.
+   */
+  schedulerActive: boolean;
 }
 
 const TIER_BLURB: Record<Tier, string> = {
@@ -41,6 +47,11 @@ export function buildRuntimeContextMessage(ctx: MainPromptContext): string {
   if (!ctx.mcpConnected) {
     lines.push(
       "NOTE: Daintree MCP is NOT connected. You are in degraded local mode: fs/timer/watcher/queue tools work, but Daintree orchestration tools will fail until a connection is provided. Tell the user clearly rather than pretending.",
+    );
+  }
+  if (!ctx.schedulerActive) {
+    lines.push(
+      "NOTE: the scheduler is NOT running in this session. Timers, watchers, and automatic reactions are persisted but dormant; they will not fire now and will resume and catch up on the next interactive launch. Tell the user rather than implying anything is being supervised.",
     );
   }
   return lines.join("\n");

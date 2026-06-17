@@ -42,6 +42,35 @@ src/
 tests/                  vitest specs                                <-- build
 ```
 
+## Scheduler architecture decision (issue #5)
+
+The scheduler (`daemon/scheduler.ts`) is **foreground-only**: it runs in-process
+via `setInterval(...).unref()` and is started only on interactive paths
+(`App.startScheduler`). Timers, watchers, and automatic reactions are persisted
+in SQLite and resume on the next launch, but **nothing ticks while the CLI is
+closed**. This is honest, current behavior (call it *option A*) and the prompt /
+tool surfaces now say so explicitly rather than implying background supervision.
+
+Two longer-term options were considered for true background ticking:
+
+- **Option B — detached sidecar.** A separate long-lived process owns the tick
+  loop (`ref()`'d interval or a kept-open server) and survives TUI close. Viable,
+  but only as an *interim* step and **gated on per-project DB isolation (issue
+  #4)**: without a per-project `state.db` plus SQLite WAL mode + busy timeout, a
+  sidecar and an open TUI are concurrent writers that can double-fire. Adds
+  process supervision / IPC / daemonization complexity.
+- **Option C — Daintree-owned watch-sets over MCP.** Daintree owns the lifecycle
+  entirely (watch-sets + completion callbacks over an SSE/HTTP MCP transport) and
+  the CLI becomes a pure conversation UI with no tick loop. No local concurrency
+  problem, but requires Daintree-side primitives that do not exist yet and an
+  SSE transport (stdio dies with the parent), and couples scheduling to Daintree
+  availability (no offline operation).
+
+**Decision:** keep option A now; the honesty fix is the only in-repo work for
+issue #5. Target **option C** long-term once Daintree exposes watch-sets over an
+SSE transport. Option B remains a viable intermediate, but only after issue #4
+(per-project DB). No sidecar or transport work is undertaken here.
+
 ## The ToolDef contract (from src/tools/types.ts)
 
 ```ts

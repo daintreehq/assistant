@@ -35,6 +35,7 @@ const PROMPT_CTX: MainPromptContext = {
   mcpStatusLine: "degraded",
   largeModel: "large",
   smallModel: "small",
+  schedulerActive: true,
 };
 
 const ctx = {
