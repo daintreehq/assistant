@@ -3,6 +3,7 @@ import { ToolRegistry } from "../src/tools/registry.js";
 import { buildAllTools } from "../src/tools/index.js";
 import { ok, fail, type ToolContext, type ToolDef } from "../src/tools/types.js";
 import { Db } from "../src/storage/db.js";
+import { Queue } from "../src/queue.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
 import os from "node:os";
 import path from "node:path";
@@ -16,14 +17,15 @@ function makeCtx(
   db: Db,
   config: AppConfig,
   confirm: ToolContext["confirm"],
+  actor: ToolContext["actor"] = "main",
 ): ToolContext {
   return {
     config,
     db,
-    actor: "main",
+    actor,
     confirm,
     mcp: {} as any,
-    queue: {} as any,
+    queue: new Queue(db),
     router: {} as any,
     projectPath: config.projectPath,
     log: () => {},
@@ -124,6 +126,42 @@ describe("ToolRegistry.dispatch", () => {
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("TIER_DENIED");
     expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("denies a confirm-required tool to a non-main actor and surfaces a low-severity event", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const confirm = vi.fn().mockResolvedValue(true);
+    const ctx = makeCtx(db, config, confirm, "timer");
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+    // A non-interactive actor is never prompted.
+    expect(confirm).not.toHaveBeenCalled();
+
+    const audit = db.listAudit();
+    expect(audit[0].outcome).toBe("denied");
+
+    const events = new Queue(db).digest();
+    expect(events).toHaveLength(1);
+    expect(events[0].source).toBe("system");
+    expect(events[0].severity).toBe("info");
+    expect(events[0].dedupeKey).toBe("denied:timer:test.project");
+    expect(events[0].title).toContain("test.project");
+  });
+
+  it("collapses repeated autonomous denials of the same tool into one count-bumped event", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    await reg.dispatch("test.project", { name: "x" }, ctx);
+    await reg.dispatch("test.project", { name: "y" }, ctx);
+
+    const events = new Queue(db).digest();
+    expect(events).toHaveLength(1);
+    expect(events[0].count).toBe(2);
+    expect(events[0].dedupeKey).toBe("denied:watcher:test.project");
   });
 });
 

@@ -29,7 +29,15 @@ export const BASIC_DAINTREE_ORCHESTRATION_RECIPE: Recipe = {
     "daintree.status",
     "daintree.listTools",
     "tool.search",
+    "daintree.call",
     "queue.digest",
+    "terminal.summarize",
+    "timer.schedule",
+    "timer.list",
+    "timer.cancel",
+    "watcher.terminal.create",
+    "watcher.list",
+    "watcher.cancel",
   ],
   body: `Use when: the user asks about current Daintree state or what to do next.
 Procedure:

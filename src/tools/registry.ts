@@ -163,6 +163,21 @@ export class ToolRegistry {
           { recoverable: false },
         );
         this.audit(ctx, name, args, res, started, "denied");
+        // Surface the denial so the user can see their automation was blocked
+        // and why. Low severity keeps it out of the proactive notifier, and a
+        // stable dedupeKey (no tick-specific value) collapses repeated denials
+        // of the same tool by the same actor into one count-bumped inbox row.
+        try {
+          ctx.queue.publish({
+            source: "system",
+            severity: "info",
+            title: `Autonomous action blocked: ${name}`,
+            summary: res.summary,
+            dedupeKey: `denied:${ctx.actor}:${name}`,
+          });
+        } catch {
+          /* surfacing must never break a tool call */
+        }
         return res;
       }
       let approved = false;

@@ -3,9 +3,20 @@ import { Scheduler } from "../src/daemon/scheduler.js";
 import { Db } from "../src/storage/db.js";
 import { Queue } from "../src/queue.js";
 import { ToolRegistry } from "../src/tools/registry.js";
-import type { ToolContext } from "../src/tools/types.js";
+import { ok, type ToolContext, type ToolDef } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
 import type { WatcherVerdict } from "../src/schemas.js";
+
+/** A mutating tool that a non-interactive actor can never run unattended. */
+const projectTool: ToolDef = {
+  name: "test.project",
+  description: "A mutating project test tool.",
+  risk: "project",
+  parameters: { type: "object", properties: {}, additionalProperties: false },
+  async handler() {
+    return ok("project ran");
+  },
+};
 
 /** Minimal fake MCP client implementing the LowLevelMcpClient-ish surface used by ctx. */
 function fakeMcp(opts: {
@@ -175,5 +186,84 @@ describe("Scheduler.tick", () => {
     // A waiting_for_input classification is meaningful -> published once.
     const digest = deps.queue.digest({ severityAtLeast: "attention" });
     expect(digest.some((e) => e.source === "terminal_watcher")).toBe(true);
+  });
+
+  it("surfaces a call_safe_tool denial as a low-severity event without a duplicate timer error", async () => {
+    const deps = makeDeps();
+    deps.registry.register(projectTool);
+    // The timer actor hits a confirm-required tool: the registry denies it and
+    // publishes the surfacing event; the scheduler must not also raise an error.
+    const ctxFor = (actor: ToolContext["actor"]): ToolContext =>
+      ({
+        config: { tier: "operator" } as ToolContext["config"],
+        mcp: {} as ToolContext["mcp"],
+        db: deps.db,
+        queue: deps.queue,
+        router: deps.router,
+        projectPath: "/tmp/project",
+        actor,
+        confirm: async () => true,
+        log: () => {},
+      }) as ToolContext;
+    const scheduler = new Scheduler({ ...deps, ctxFor });
+    const now = 4_000_000;
+
+    deps.db.insertTimer({
+      title: "auto project action",
+      fireAt: now - 5000,
+      payloadType: "call_safe_tool",
+      payloadJson: JSON.stringify({
+        type: "call_safe_tool",
+        toolCall: { toolName: "test.project", args: { name: "x" } },
+      }),
+    });
+
+    await scheduler.tick(now);
+
+    const events = deps.queue.digest();
+    // No duplicate timer error for the structural denial.
+    expect(events.some((e) => e.source === "timer" && e.severity === "error")).toBe(
+      false,
+    );
+    // The registry's low-severity surfacing event is present.
+    const denial = events.find((e) => e.source === "system");
+    expect(denial).toBeDefined();
+    expect(denial!.severity).toBe("info");
+    expect(denial!.dedupeKey).toBe("denied:timer:test.project");
+  });
+
+  it("still raises a timer error when a call_safe_tool fails for a non-denial reason", async () => {
+    const deps = makeDeps();
+    const ctxFor = (actor: ToolContext["actor"]): ToolContext =>
+      ({
+        config: { tier: "operator" } as ToolContext["config"],
+        mcp: {} as ToolContext["mcp"],
+        db: deps.db,
+        queue: deps.queue,
+        router: deps.router,
+        projectPath: "/tmp/project",
+        actor,
+        confirm: async () => true,
+        log: () => {},
+      }) as ToolContext;
+    const scheduler = new Scheduler({ ...deps, ctxFor });
+    const now = 5_000_000;
+
+    deps.db.insertTimer({
+      title: "broken tool call",
+      fireAt: now - 5000,
+      payloadType: "call_safe_tool",
+      payloadJson: JSON.stringify({
+        type: "call_safe_tool",
+        toolCall: { toolName: "does.not.exist", args: {} },
+      }),
+    });
+
+    await scheduler.tick(now);
+
+    const events = deps.queue.digest();
+    expect(
+      events.some((e) => e.source === "timer" && e.severity === "error"),
+    ).toBe(true);
   });
 });

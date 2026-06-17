@@ -59,6 +59,22 @@ function estimateTokens(messages: ChatMessage[]): number {
   return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
+/**
+ * Tools always sent to the model regardless of which recipes are loaded —
+ * low-risk read/orient tools it needs to stay unblocked in any context. The
+ * per-turn subset (see buildToolFilter) is the union of these and the loaded
+ * recipes' declared `requiredTools`.
+ */
+const CORE_TOOL_NAMES = [
+  "context.snapshot",
+  "fs.read",
+  "fs.list",
+  "fs.search",
+  "queue.digest",
+  "daintree.status",
+  "tool.search",
+];
+
 export interface AgentSessionDeps {
   router: ModelRouter;
   registry: ToolRegistry;
@@ -187,10 +203,11 @@ export class AgentSession {
     // Projection can throw if a registered tool produces an illegal or
     // colliding wire name (a registration-time programmer error). Surface it
     // through the event sink rather than letting it escape send() and strand
-    // the session after the user message was already persisted.
+    // the session after the user message was already persisted. The per-turn
+    // filter narrows the projection to the core ∪ active-recipe tool subset.
     let tools;
     try {
-      tools = this.deps.registry.toOpenAITools();
+      tools = this.deps.registry.toOpenAITools(this.buildToolFilter());
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.events.error(`Tool projection failed: ${msg}`);
@@ -286,6 +303,26 @@ export class AgentSession {
     const msg = "Reached the tool-iteration limit without a final answer.";
     this.events.error(msg);
     return msg;
+  }
+
+  /**
+   * Compute the per-turn tool subset to send to the model. With no recipe
+   * active, return undefined so the full registry is sent — an unconstrained
+   * turn must not be starved of tools. With recipes active, send only the core
+   * tools plus the tools the loaded recipes declare they need; pruning the
+   * schema list cuts per-turn input tokens without hiding anything a loaded
+   * recipe relies on. Recomputed each turn after maybeRefreshRecipes() has
+   * settled activeRecipeIds.
+   */
+  private buildToolFilter(): string[] | undefined {
+    if (this.activeRecipeIds.length === 0) return undefined;
+    const recipes = this.deps.recipeRegistry.getMany(this.activeRecipeIds);
+    return [
+      ...new Set([
+        ...CORE_TOOL_NAMES,
+        ...recipes.flatMap((r) => r.requiredTools),
+      ]),
+    ];
   }
 
   private pushMessage(m: ChatMessage): void {
