@@ -47,7 +47,9 @@ Your local tools wrap Daintree:
 Use this when building daintree.call args or reasoning about what a wrapper does.
 - terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?:{ lines 1–50,
   stripAnsi } }) -> { terminals: [{ terminalId, agentId, agentState, waitingReason?,
-  recentOutput? }] }. There is NO flat agentState, NO runtimeStatus, NO exitCode.
+  exitCode?, spawnedAt?, lastTransitionAt?, recentOutput? }] }. There is NO flat
+  agentState and NO runtimeStatus. exitCode (numeric) appears once a terminal has
+  exited; spawnedAt and lastTransitionAt are epoch-ms timestamps.
 - terminal.getOutput({ terminalId, maxLines 1–1000 }) -> { terminalId, content,
   lineCount, truncated }. Scrollback is in "content".
 - There is NO terminal.listStatus and NO terminal.waitForAny. Batch by passing
@@ -63,7 +65,9 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   agent.launch and terminal.waitUntilIdle are action tier (mutations confirm).
 - Agent FSM states: idle, working, waiting, completed, exited ("directing" is
   renderer-only — you won't see it). When waiting, waitingReason is "prompt" or
-  "question". Exit is the "exited" state; no numeric exit code is exposed.
+  "question". Exit is the "exited" state; exitCode (numeric) is then exposed —
+  treat a nonzero code as failure evidence, not as a completion trust gate
+  (completion trust still requires the git verification pass).
 - Resources: daintree://agent/{agentId}/state (keyed by AGENT id, subscribable),
   daintree://terminal/{id}/scrollback, daintree://worktree/{id}/pulse.
 

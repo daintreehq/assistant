@@ -17,6 +17,9 @@ type StatusEntry = {
   terminalId: string;
   agentState?: string;
   recentOutput?: string;
+  exitCode?: number;
+  spawnedAt?: number;
+  lastTransitionAt?: number;
 };
 /** A status result shaped like Daintree's terminal.getStatus. */
 function statusRes(entries: Array<StatusEntry>) {
@@ -172,6 +175,22 @@ describe("terminal.extract — inline", () => {
     expect(chat).not.toHaveBeenCalled();
     expect(json).not.toHaveBeenCalled();
     expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("gate mode tolerates an exited terminal carrying an exitCode (#22)", async () => {
+    // The new exitCode field threads through readSignals without breaking the
+    // finished gate or triggering a model call.
+    const { ctx, chat, json } = ctxWith({
+      status: () => [{ terminalId: "t1", agentState: "exited", exitCode: 1 }],
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+    expect(chat).not.toHaveBeenCalled();
+    expect(json).not.toHaveBeenCalled();
   });
 
   it("gate mode with an unmet wait still returns booleans (not WAIT_TIMEOUT)", async () => {

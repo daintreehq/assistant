@@ -27,7 +27,12 @@ function fakeRouter(): ModelRouter {
 function fakeMcp(
   perTerminal: Record<
     string,
-    { agentState?: string; tail?: string; recentOutput?: string }
+    {
+      agentState?: string;
+      tail?: string;
+      recentOutput?: string;
+      exitCode?: number | null;
+    }
   >,
 ) {
   return {
@@ -50,6 +55,7 @@ function fakeMcp(
             ...(wantOutput && cfg.recentOutput !== undefined
               ? { recentOutput: cfg.recentOutput }
               : {}),
+            ...(cfg.exitCode !== undefined ? { exitCode: cfg.exitCode } : {}),
           };
         });
         return { text: "", content: [], structuredContent: { terminals }, isError: false };
@@ -496,6 +502,56 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     expect(outcome.classification).not.toBe("terminal_exited");
     expect(db.getWatcher(w.id)!.status).toBe("active");
     db.close();
+  });
+
+  it("surfaces a nonzero exitCode as evidence on a terminal_exited event (#22)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(db, queue, fakeMcp({ "term-a": { agentState: "exited", exitCode: 1 } }));
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "exit-fail",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("terminal_exited");
+    expect(outcome.evidence).toContain("agentState=exited");
+    expect(outcome.evidence).toContain("exitCode=1 (nonzero)");
+    db.close();
+  });
+
+  it("does NOT add exitCode evidence for a clean (0) or absent exit (#22)", async () => {
+    for (const cfg of [
+      { agentState: "exited", exitCode: 0 },
+      { agentState: "exited" },
+      { agentState: "exited", exitCode: null as number | null },
+    ]) {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(db, queue, fakeMcp({ "term-a": cfg }));
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "exit-clean",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+      });
+
+      const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(outcome.classification).toBe("terminal_exited");
+      expect(outcome.evidence).toEqual(["agentState=exited"]);
+      expect(outcome.evidence.some((e) => e.includes("exitCode"))).toBe(false);
+      db.close();
+    }
   });
 
   it("disables a watcher with corrupt target JSON and raises an error event (#14)", async () => {

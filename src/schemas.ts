@@ -221,11 +221,12 @@ export const VerificationVerdict = z.enum(["clean", "dirty", "unknown"]);
 export type VerificationVerdict = z.infer<typeof VerificationVerdict>;
 
 /**
- * Structured result of the read-only post-completion verification pass. Daintree
- * exposes no exit code and no test/lint runner, so the verdict is derived solely
- * from the worktree's git cleanliness (via git.getProjectPulse). This is attached
- * as queue-event evidence so the conductor can require a clean result before ever
- * suggesting irreversible git operations.
+ * Structured result of the read-only post-completion verification pass. The exit
+ * code is now available as signal evidence, but Daintree exposes no test/lint
+ * runner, so the verdict is still derived solely from the worktree's git
+ * cleanliness (via git.getProjectPulse). This is attached as queue-event evidence
+ * so the conductor can require a clean result before ever suggesting irreversible
+ * git operations.
  */
 export const VerificationResult = z
   .object({
