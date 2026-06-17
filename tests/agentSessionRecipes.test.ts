@@ -304,6 +304,20 @@ describe("AgentSession control messages", () => {
     // Tools no active recipe requires are pruned.
     expect(names.has("timer.schedule")).toBe(false);
     expect(names.has("recipe.run")).toBe(false);
+
+    // Exact set = core ∪ this recipe's requiredTools (deduped), nothing else.
+    const expected = new Set([
+      "context.snapshot",
+      "fs.read",
+      "fs.list",
+      "fs.search",
+      "queue.digest",
+      "daintree.status",
+      "tool.search",
+      "agentTask.spawnForEdits",
+      "watcher.terminal.create",
+    ]);
+    expect([...names].sort()).toEqual([...expected].sort());
   });
 
   it("never sends an empty tool list on an unconstrained turn", async () => {

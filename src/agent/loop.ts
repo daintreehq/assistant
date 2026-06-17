@@ -312,7 +312,10 @@ export class AgentSession {
    * tools plus the tools the loaded recipes declare they need; pruning the
    * schema list cuts per-turn input tokens without hiding anything a loaded
    * recipe relies on. Recomputed each turn after maybeRefreshRecipes() has
-   * settled activeRecipeIds.
+   * settled activeRecipeIds. Note: on throttled turns the active set is reused,
+   * so a request needing a tool outside the loaded recipes' requiredTools (and
+   * not in core) won't have it offered until the next re-selection — tool.search
+   * stays in core so the model can still discover and request it.
    */
   private buildToolFilter(): string[] | undefined {
     if (this.activeRecipeIds.length === 0) return undefined;

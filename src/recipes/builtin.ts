@@ -95,6 +95,7 @@ export const DAINTREE_RECIPE_RUNNER_RECIPE: Recipe = {
     "recipe.list",
     "recipe.run",
     "worktree.createWithRecipe",
+    "daintree.call",
     "context.snapshot",
   ],
   body: `Use when: the user asks about Daintree workspace recipes or creating a worktree with one.

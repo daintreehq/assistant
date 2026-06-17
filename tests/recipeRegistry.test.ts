@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { RecipeRegistry } from "../src/recipes/registry.js";
 import { BUILTIN_RECIPES } from "../src/recipes/builtin.js";
+import { buildAllTools } from "../src/tools/index.js";
 
 describe("RecipeRegistry", () => {
   it("validates the built-in recipes and exposes all of them", () => {
@@ -38,5 +39,18 @@ describe("RecipeRegistry", () => {
     const known = BUILTIN_RECIPES[0].id;
     const got = reg.getMany([known, "does.not.exist"]);
     expect(got.map((r) => r.id)).toEqual([known]);
+  });
+
+  it("every built-in recipe's requiredTools names a real registered tool", () => {
+    // requiredTools is a per-turn execution allowlist (see agent/loop.ts). A typo
+    // or a renamed tool would silently starve the model of that tool with no
+    // runtime error, so guard the names against the actual tool registry here.
+    const toolNames = new Set(buildAllTools().map((t) => t.name));
+    const unknown = BUILTIN_RECIPES.flatMap((r) =>
+      r.requiredTools
+        .filter((name) => !toolNames.has(name))
+        .map((name) => `${r.id} → ${name}`),
+    );
+    expect(unknown).toEqual([]);
   });
 });
