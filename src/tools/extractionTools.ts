@@ -156,7 +156,12 @@ export type ExtractAsyncArgs = z.infer<typeof ExtractAsyncArgs>;
 type TerminalState = ReturnType<typeof nextOutputState>["state"];
 
 const delay = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+  new Promise((resolve) => {
+    // unref so a pending poll delay never keeps the process alive at shutdown
+    // (mirrors the scheduler's interval — supervision pauses when the CLI exits).
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
 
 /** Map Daintree's agentState onto the coarse runtimeStatus the DSL exposes. */
 function runtimeFromAgentState(agentState?: string): string | undefined {
@@ -174,7 +179,8 @@ interface ReadResult {
 
 /**
  * One read across all target terminals, folded into a single aggregate signal:
- *   - tail        every terminal's tail concatenated (labelled when >1);
+ *   - tail        every terminal's tail concatenated UNLABELLED, so contains/regex
+ *                 conditions match real output, not the [terminalId] label headers;
  *   - runtimeStatus "exited" only when ALL terminals have exited/are gone;
  *   - msSinceOutput the MIN across terminals (the most recently active one), so a
  *                   noOutputForMs condition fires only once every terminal is idle;
@@ -206,9 +212,12 @@ async function readSignals(
     parts.push({ terminalId: id, tail, agentState });
   }
 
+  // Labelled tail goes to the model (so it knows which terminal said what); the
+  // raw, unlabelled tail drives contains/regex so the [id] headers never match.
   const combinedTail = parts
     .map((p) => (terminalIds.length > 1 ? `[${p.terminalId}]\n${p.tail}` : p.tail))
     .join("\n\n");
+  const rawTail = parts.map((p) => p.tail).join("\n\n");
 
   const signals: WatcherSignals = {
     agentState: terminalIds.length === 1 ? parts[0]?.agentState : undefined,
@@ -217,7 +226,7 @@ async function readSignals(
       : terminalIds.length === 1
         ? runtimeFromAgentState(parts[0]?.agentState)
         : "running",
-    tail: combinedTail,
+    tail: rawTail,
     msSinceOutput: Number.isFinite(minMsSinceOutput) ? minMsSinceOutput : 0,
   };
 
@@ -280,7 +289,9 @@ async function pollUntil(
   };
 }
 
-const ExtractionResult = z.object({ result: z.unknown() });
+// `result` defaults to null so a model returning a bare `{}` (no result key)
+// doesn't leave it `undefined` — JSON.stringify(undefined) is itself `undefined`.
+const ExtractionResult = z.object({ result: z.unknown().nullable().default(null) });
 
 /** Run the extraction model against the gathered tail. */
 async function runExtract(
@@ -389,9 +400,9 @@ export async function runAsyncExtraction(
 
     const extracted = await runExtract(ctx, args, poll.combinedTail);
     const resultText =
-      args.format === "json"
+      (args.format === "json"
         ? JSON.stringify(extracted.json)
-        : extracted.text ?? "";
+        : extracted.text) ?? "";
 
     let verdict: { pass: boolean; reason: string } | undefined;
     if (args.verdictInstruction) {
@@ -504,18 +515,9 @@ export const extractionTools: ToolDef[] = [
       const poll = await pollUntil(ctx, args);
       const elapsedMs = Date.now() - startedAt;
 
-      if (args.wait && !poll.matched) {
-        return fail(
-          "WAIT_TIMEOUT",
-          `Wait condition not met after ${poll.attempts} attempt(s) (${elapsedMs}ms).`,
-          {
-            recoverable: true,
-            details: { attempts: poll.attempts, finished: poll.finished },
-          },
-        );
-      }
-
       // Gate-only mode: no instruction ⇒ no model call, just report the booleans.
+      // Checked before the timeout path so a gate always answers met/not-met
+      // rather than erroring when the condition didn't resolve.
       if (!args.instruction) {
         return ok(
           `finished=${poll.finished}, condition ${poll.matched ? "met" : "not met"} (${poll.attempts} attempt(s)).`,
@@ -525,6 +527,17 @@ export const extractionTools: ToolDef[] = [
             attempts: poll.attempts,
             elapsedMs,
             terminalIds: args.terminalIds,
+          },
+        );
+      }
+
+      if (args.wait && !poll.matched) {
+        return fail(
+          "WAIT_TIMEOUT",
+          `Wait condition not met after ${poll.attempts} attempt(s) (${elapsedMs}ms).`,
+          {
+            recoverable: true,
+            details: { attempts: poll.attempts, finished: poll.finished },
           },
         );
       }

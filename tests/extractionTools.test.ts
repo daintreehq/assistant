@@ -167,6 +167,52 @@ describe("terminal.extract — inline", () => {
     expect(json).not.toHaveBeenCalled();
     expect((res.result as { finished: boolean }).finished).toBe(true);
   });
+
+  it("gate mode with an unmet wait still returns booleans (not WAIT_TIMEOUT)", async () => {
+    const { ctx } = ctxWith({ output: () => "never matches" });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], wait: { contains: "NEVER" }, format: "text", pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { matched: boolean }).matched).toBe(false);
+    expect((res.result as { finished: boolean }).finished).toBe(false);
+  });
+
+  it("matches runtimeStatusIs:exited only once ALL terminals have exited", async () => {
+    // Poll 1: t2 still running → not met. Poll 2: both exited → met.
+    let poll = 0;
+    const { ctx } = ctxWith({
+      status: () => {
+        const both = poll++ >= 1;
+        return [
+          { terminalId: "t1", agentState: "exited" },
+          { terminalId: "t2", agentState: both ? "exited" : "working" },
+        ];
+      },
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1", "t2"], format: "text", wait: { runtimeStatusIs: "exited" }, pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { attempts: number }).attempts).toBe(2);
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("feeds the instruction and terminal tail to the extraction model", async () => {
+    const chat = vi.fn().mockResolvedValue({ content: "answer" });
+    const { ctx } = ctxWith({ output: () => "the build log content", chat });
+    await extract.handler(
+      { terminalIds: ["t1"], instruction: "find the error code", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    const sent = chat.mock.calls[0][1];
+    const userMsg = sent.messages.find((m: { role: string }) => m.role === "user").content;
+    expect(userMsg).toContain("find the error code");
+    expect(userMsg).toContain("the build log content");
+    expect(sent.maxTokens).toBe(400);
+  });
 });
 
 describe("ExtractArgs validation", () => {
@@ -245,6 +291,20 @@ describe("terminal.extract.async — background", () => {
     expect(arg.severity).toBe("attention");
     expect(arg.title).toContain("fail");
     expect(arg.summary).toBe("the suite is red");
+  });
+
+  it("publishes an attention event (no extraction) when the wait times out", async () => {
+    const { ctx, publish, chat } = ctxWith({ output: () => "still running" });
+    await runAsyncExtraction(
+      ctx,
+      { terminalIds: ["t1"], instruction: "x", format: "text", wait: { contains: "DONE" }, pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      "req_wait",
+    );
+    const arg = publish.mock.calls[0][0];
+    expect(arg.source).toBe("model_worker");
+    expect(arg.severity).toBe("attention");
+    expect(arg.title).toContain("timed out");
+    expect(chat).not.toHaveBeenCalled();
   });
 
   it("publishes an error event when extraction throws", async () => {
