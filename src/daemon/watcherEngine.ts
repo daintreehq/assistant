@@ -56,7 +56,11 @@ const MEANINGFUL: ReadonlySet<WatcherClassification> = new Set([
 /** Classifications that mean the watcher's job is done and it should stop.
  *  `completed_unverified` is deliberately NOT here: the agent reported completion
  *  but the worktree is dirty/unverified, so the watcher keeps polling until it
- *  either reaches a clean `completed_success` or the user resolves it. */
+ *  either reaches a clean `completed_success` or the user resolves it.
+ *  NOTE: an explicit `stopWhen: { stateIs: "completed" }` fires on the raw FSM
+ *  state BEFORE the verification gate runs and will stop the watcher regardless of
+ *  the verdict. To keep the watcher alive until the tree is clean, gate on the
+ *  classification instead (e.g. a modelJudge / classification-based condition). */
 const TERMINAL_CLASS: ReadonlySet<WatcherClassification> = new Set([
   "completed_success",
   "terminal_exited",
@@ -391,6 +395,10 @@ export function deriveVerification(
       hasGitChanges = false;
     }
   }
+  // Dirty wins: a positive changed-file count overrides a clean flag, so a
+  // self-contradictory pulse ({ isDirty:false, changedFiles:3 }) is never read as
+  // clean. The safe failure mode is "needs review", never a false "verified".
+  if (changedFiles !== undefined && changedFiles > 0) hasGitChanges = true;
 
   if (hasGitChanges === undefined) {
     return {
@@ -451,6 +459,53 @@ export async function runVerificationPass(
   } catch {
     return unverifiable("git.getProjectPulse call failed");
   }
+}
+
+/** A completion classification resolved through the verification gate. */
+interface GatedCompletion {
+  classification: WatcherClassification;
+  confidence: number;
+  summary: string;
+  evidence: string[];
+}
+
+/**
+ * Resolve a tentative "the agent is done" signal into a trustworthy outcome by
+ * running the read-only verification pass. A clean worktree promotes to
+ * `completed_success` (terminal, severity done); a dirty or unverifiable tree
+ * demotes to `completed_unverified` (non-terminal, attention) so no irreversible
+ * action is suggested off an unverified completion. Called from BOTH the Daintree
+ * FSM `completed` path and the small-model `completed_success` path, so the gate
+ * cannot be bypassed by the model independently classifying completion from tail
+ * text while the FSM is still `working`.
+ */
+async function gateCompletion(
+  ctx: ToolContext,
+  scope: { worktreeId?: string } | undefined,
+  baseEvidence: string[],
+): Promise<GatedCompletion> {
+  const verification = await runVerificationPass(ctx, scope);
+  const evidence = [
+    ...baseEvidence,
+    `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify(verification)}`,
+  ];
+  if (verification.verdict === "clean") {
+    return {
+      classification: "completed_success",
+      confidence: 0.85,
+      summary: "Agent completed; worktree clean and verified.",
+      evidence,
+    };
+  }
+  return {
+    classification: "completed_unverified",
+    confidence: 0.8,
+    summary:
+      verification.verdict === "dirty"
+        ? `Agent completed but ${verification.gitSummary} — review before commit/push.`
+        : `Agent completed but git state is unverified (${verification.gitSummary}).`,
+    evidence,
+  };
 }
 
 /**
@@ -615,32 +670,27 @@ export async function runTerminalWatcherCheck(
         // The agent claims completion, but Daintree exposes no exit code — gate
         // trust on a deterministic, read-only git check before any irreversible
         // action can be suggested downstream.
-        const verification = await runVerificationPass(
+        ({ classification, confidence, summary, evidence } = await gateCompletion(
           ctx,
           options.verificationScope,
-        );
-        evidence = [
-          "agentState=completed",
-          `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify(verification)}`,
-        ];
-        if (verification.verdict === "clean") {
-          classification = "completed_success";
-          confidence = 0.85;
-          summary = "Agent completed; worktree clean and verified.";
-        } else {
-          classification = "completed_unverified";
-          confidence = 0.8;
-          summary =
-            verification.verdict === "dirty"
-              ? `Agent completed but ${verification.gitSummary} — review before commit/push.`
-              : `Agent completed but git state is unverified (${verification.gitSummary}).`;
-        }
+          ["agentState=completed"],
+        ));
       } else if (tail.trim().length > 0) {
         const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
         classification = verdict.classification;
         confidence = verdict.confidence;
         summary = verdict.summary;
         evidence = verdict.evidence;
+        // The small model can also conclude completion from tail text while the
+        // FSM is still "working". Route that through the SAME verification gate so
+        // a model-claimed completion can never bypass the git-cleanliness check.
+        if (classification === "completed_success") {
+          ({ classification, confidence, summary, evidence } = await gateCompletion(
+            ctx,
+            options.verificationScope,
+            evidence,
+          ));
+        }
       } else {
         classification = "no_change";
         summary = "No new output.";

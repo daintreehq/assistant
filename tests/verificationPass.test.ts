@@ -4,19 +4,19 @@ import {
   runVerificationPass,
   deriveVerification,
 } from "../src/daemon/watcherEngine.js";
-import { VERIFICATION_EVIDENCE_PREFIX } from "../src/schemas.js";
+import { VERIFICATION_EVIDENCE_PREFIX, VerificationResult } from "../src/schemas.js";
 import { Db } from "../src/storage/db.js";
 import { Queue } from "../src/queue.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
 
-function fakeRouter(): ModelRouter {
+function fakeRouter(classification = "still_working"): ModelRouter {
   return {
     chat: async () => ({ content: "(no change)" }),
     json: async () => ({
-      classification: "still_working",
+      classification,
       confidence: 0.7,
-      summary: "still working",
+      summary: classification,
       evidence: [],
       recommendedAction: "none",
     }),
@@ -35,9 +35,12 @@ type PulseResult = {
  */
 function fakeMcp(
   perTerminal: Record<string, { agentState?: string; tail?: string }>,
-  pulse: PulseResult = { structuredContent: { isDirty: false, changedFiles: 0 } },
+  pulse:
+    | PulseResult
+    | (() => PulseResult) = { structuredContent: { isDirty: false, changedFiles: 0 } },
   connected = true,
 ) {
+  const pulseOf = (): PulseResult => (typeof pulse === "function" ? pulse() : pulse);
   return {
     isConnected: () => connected,
     status: () => ({ connected, transport: "injected" as const }),
@@ -67,11 +70,12 @@ function fakeMcp(
         };
       }
       if (name === "git.getProjectPulse") {
+        const p = pulseOf();
         return {
-          text: pulse.text ?? "",
+          text: p.text ?? "",
           content: [],
-          structuredContent: pulse.structuredContent,
-          isError: pulse.isError ?? false,
+          structuredContent: p.structuredContent,
+          isError: p.isError ?? false,
         };
       }
       return { text: "", content: [], isError: false };
@@ -79,13 +83,18 @@ function fakeMcp(
   };
 }
 
-function ctxWith(db: Db, queue: Queue, mcp: unknown): ToolContext {
+function ctxWith(
+  db: Db,
+  queue: Queue,
+  mcp: unknown,
+  router: ModelRouter = fakeRouter(),
+): ToolContext {
   return {
     config: {} as ToolContext["config"],
     mcp: mcp as ToolContext["mcp"],
     db,
     queue,
-    router: fakeRouter(),
+    router,
     projectPath: "/tmp/p",
     actor: "watcher",
     confirm: async () => true,
@@ -141,6 +150,13 @@ describe("deriveVerification (#3)", () => {
     const r = deriveVerification({}, "");
     expect(r.verdict).toBe("unknown");
     expect(r.hasGitChanges).toBe(false);
+  });
+
+  it("dirty wins over a contradictory clean flag (count > 0)", () => {
+    // A self-contradictory pulse must never be read as clean.
+    const r = deriveVerification({ isDirty: false, changedFiles: 3 }, "");
+    expect(r.verdict).toBe("dirty");
+    expect(r.changedFiles).toBe(3);
   });
 });
 
@@ -206,6 +222,47 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     expect(outcome.classification).toBe("completed_success");
     expect(outcome.severity).toBe("done");
     expect(db.getWatcher(w.id)!.status).toBe("condition_met");
+
+    // The clean completion event carries a parseable VerificationResult.
+    const evt = queue
+      .digest({ severityAtLeast: "done" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    expect(blob).toBeDefined();
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("clean");
+    db.close();
+  });
+
+  it("a model-claimed completion (FSM still working) is routed through the same gate", async () => {
+    // FSM is "working" but the small model classifies the tail as completed_success.
+    // With a dirty worktree it must demote to completed_unverified, NOT stop with a
+    // clean done event — otherwise the model bypasses the verification gate.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp(
+        { "term-a": { agentState: "working", tail: "All done! Task complete." } },
+        { structuredContent: { isDirty: true, changedFiles: 2 } },
+      ),
+      fakeRouter("completed_success"),
+    );
+    const w = makeWatcher(db, ["term-a"]);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    expect(
+      evt?.evidence?.some((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX)),
+    ).toBe(true);
     db.close();
   });
 
@@ -241,6 +298,45 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     const parsed = JSON.parse(verEvidence!.slice(VERIFICATION_EVIDENCE_PREFIX.length));
     expect(parsed.verdict).toBe("dirty");
     expect(parsed.changedFiles).toBe(4);
+    db.close();
+  });
+
+  it("refreshes evidence when a deduped event re-publishes (no frozen VerificationResult)", async () => {
+    // A repeated event with the same dedupeKey must carry the latest evidence so a
+    // changed VerificationResult reaches the conductor instead of being frozen at
+    // the first publish.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const key = "watcher:w1:term-a:completed_unverified";
+    queue.publish({
+      source: "terminal_watcher",
+      severity: "attention",
+      title: "t",
+      summary: "first",
+      target: { terminalId: "term-a" },
+      evidence: [`${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify({ verdict: "unknown" })}`],
+      dedupeKey: key,
+    });
+    queue.publish({
+      source: "terminal_watcher",
+      severity: "attention",
+      title: "t",
+      summary: "second",
+      target: { terminalId: "term-a" },
+      evidence: [
+        `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify({ verdict: "dirty", changedFiles: 5 })}`,
+      ],
+      dedupeKey: key,
+    });
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.dedupeKey === key);
+    expect(evt?.count).toBe(2); // deduped, not a second row
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length));
+    expect(parsed.verdict).toBe("dirty");
+    expect(parsed.changedFiles).toBe(5);
     db.close();
   });
 

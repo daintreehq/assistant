@@ -207,6 +207,14 @@ export const agentTaskTools: ToolDef[] = [
                 : {}),
             });
             watcherId = watcher.id;
+            if (!worktreeId) {
+              // agent.launch doesn't return a worktreeId; without one the
+              // post-completion git check falls back to the active worktree, which
+              // may not be the agent's. Flag it so completion isn't silently
+              // verified against the wrong tree.
+              watcherWarning =
+                "watcher created without a known worktreeId, so post-completion verification will use the active worktree context";
+            }
           } else {
             // A watcher was requested but the launch response carried no terminal
             // id — surface this instead of silently dropping the supervision.

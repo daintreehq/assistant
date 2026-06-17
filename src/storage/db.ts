@@ -387,11 +387,25 @@ export class Db {
         // Bump recency via updatedAt and refresh TTL, but DO NOT touch createdAt.
         // The scheduler's "is this new?" check keys on createdAt, so refreshing it
         // here made a recurring deduped event look new every tick and re-notify.
+        // Evidence/recommendedActions ARE refreshed: a deduped watcher event (e.g.
+        // a repeated completed_unverified poll) must carry the latest structured
+        // payload — a frozen VerificationResult would feed the conductor stale git
+        // state. Falls back to the existing value when the new event omits them.
         this.db
           .prepare(
-            "UPDATE events SET count = count + 1, summary = ?, severity = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
+            "UPDATE events SET count = count + 1, summary = ?, severity = ?, evidenceJson = ?, recommendedActionsJson = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
           )
-          .run(ev.summary, ev.severity, now, ev.expiresAt ?? null, id);
+          .run(
+            ev.summary,
+            ev.severity,
+            ev.evidence ? JSON.stringify(ev.evidence) : (existing.evidenceJson as string | null) ?? null,
+            ev.recommendedActions
+              ? JSON.stringify(ev.recommendedActions)
+              : (existing.recommendedActionsJson as string | null) ?? null,
+            now,
+            ev.expiresAt ?? null,
+            id,
+          );
         return this.getEvent(id)!;
       }
     }
