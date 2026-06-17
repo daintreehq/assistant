@@ -18,3 +18,21 @@ export function compactArgs(args: unknown, max = 120): string {
     return "…";
   }
 }
+
+/**
+ * Usable content width inside a single-column sidebar of `columns` cells, after
+ * reserving `chrome` cells for the surrounding border + padding. Never returns
+ * less than 20 so rows stay legible even in survival-mode widths.
+ */
+export function cellBudget(columns: number, chrome = 4): number {
+  return Math.max(20, columns - chrome);
+}
+
+/**
+ * Truncate `s` to fit a column-budgeted width, reserving `reserved` cells for a
+ * symbol/badge/age that shares the row. Always leaves room for at least a few
+ * characters of the value itself.
+ */
+export function fit(s: string, width: number, reserved = 0): string {
+  return truncate(s, Math.max(4, width - reserved));
+}

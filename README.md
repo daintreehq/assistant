@@ -37,12 +37,27 @@ npm run dev -- "which worktrees are ready for review?"
 npm run dev -- doctor
 ```
 
-The default interactive experience is an **Ink operations cockpit**: a streaming
-chat/decisions timeline on the left and a live **Operations Deck** on the right
-(watchers, watched-terminal previews, attention inbox, scheduled timers, recent
-audit). Risky actions raise an in-UI confirmation modal; `?` toggles help, `^O`
-toggles the deck, `^C` shuts down the scheduler, MCP, and DB cleanly. One-shot
-prompts and non-TTY invocations use the console renderer instead.
+The default interactive experience is an **Ink operations cockpit** that adapts
+to the terminal width — important because Daintree usually hosts it in a narrow
+side panel:
+
+- **wide** (≥110 cols): streaming chat/decisions timeline on the left, a live
+  **Operations Deck** on the right (watchers, watched-terminal previews, attention
+  inbox, scheduled timers, recent audit).
+- **balanced** (72–109 cols): the same two panes with a slimmer deck; `^O` toggles
+  the deck away to give the chat the full pane.
+- **sidebar** (<72 cols): a single-column **operations cockpit**. Instead of
+  hiding the deck, it *becomes* the product surface — a 2-line status capsule, a
+  "Now" card (what Daintree is doing), then **Needs attention**, **Watchers**,
+  **Terminals**, **Timers**, and **Audit** in human-priority order, with chat
+  reduced to a "Recent" strip. Rows degrade gracefully (comfortable → compact →
+  dense) as height/width shrink. Slash commands open full-screen focus pages;
+  `Esc` returns home.
+
+Risky actions raise an in-UI confirmation (a modal in wide/balanced, an inline
+card in sidebar mode); `?` toggles help, `^C` shuts down the scheduler, MCP, and
+DB cleanly. One-shot prompts and non-TTY invocations use the console renderer
+instead.
 
 Build a standalone binary entry: `npm run build` → `dist/index.js` (exposed as the
 `daintree-assistant` bin).

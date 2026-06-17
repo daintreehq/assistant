@@ -216,6 +216,7 @@ export interface DaintreeController {
   busy: boolean;
   pendingConfirm: PendingConfirm | null;
   activePanel: PanelKey | null;
+  setActivePanel: (panel: PanelKey | null) => void;
   sendUserMessage: (text: string) => Promise<void>;
   resolveConfirm: (approved: boolean) => void;
 }
@@ -349,6 +350,7 @@ export function useDaintreeController(
     busy,
     pendingConfirm,
     activePanel,
+    setActivePanel,
     sendUserMessage,
     resolveConfirm,
   };

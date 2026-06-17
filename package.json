@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/assistant-cli",
+  "name": "@daintreehq/daintree-assistant",
   "version": "0.1.0",
   "description": "Daintree Assistant CLI — a local orchestration assistant for Daintree, powered by Fireworks AI.",
   "type": "module",
