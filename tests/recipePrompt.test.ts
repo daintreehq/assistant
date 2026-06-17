@@ -46,6 +46,9 @@ describe("base system prompt", () => {
   it("states the foreground-only scheduler lifecycle", () => {
     expect(BASE_SYSTEM_PROMPT).toContain("Scheduler lifecycle");
     expect(BASE_SYSTEM_PROMPT).toContain("ONLY while this assistant is open");
+    expect(BASE_SYSTEM_PROMPT).toContain("watchers");
+    expect(BASE_SYSTEM_PROMPT).toContain("timers");
+    expect(BASE_SYSTEM_PROMPT).toContain("resume on the next launch");
   });
 });
 
