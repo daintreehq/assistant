@@ -88,6 +88,33 @@ const CallArgs = z.object({
   requestKey: z.string().optional(),
 });
 
+const ForgeReadArgs = z
+  .object({
+    arguments: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Optional filters forwarded to Daintree verbatim."),
+  })
+  .strict();
+
+const ForgeGetIssueArgs = z
+  .object({
+    arguments: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Forwarded verbatim; expects the issue identifier (e.g. { issueId })."),
+  })
+  .strict();
+
+const WorkflowMutationArgs = z
+  .object({
+    arguments: z
+      .record(z.string(), z.unknown())
+      .describe("Arguments forwarded to the Daintree workflow action (e.g. issueId)."),
+    requestKey: z.string().optional(),
+  })
+  .strict();
+
 export const mcpTools: ToolDef[] = [
   {
     name: "daintree.status",
@@ -341,6 +368,121 @@ export const mcpTools: ToolDef[] = [
       // Daintree has no `terminal.focus` MCP tool — terminals are panels, so the
       // correct call is `panel.focus` with the terminal id as the panelId.
       return passthrough(ctx, "panel.focus", { panelId: args.terminalId });
+    },
+  },
+  {
+    name: "forge.listIssues",
+    description:
+      "List forge issues (GitHub/GitLab) via Daintree (read-only). Typed wrapper around the Daintree forge.listIssues MCP tool. Pass optional filters through 'arguments'.",
+    risk: "read",
+    readOnly: true,
+    schema: ForgeReadArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Optional filters forwarded to Daintree (e.g. state, labels).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "forge.listIssues", args.arguments ?? {});
+    },
+  },
+  {
+    name: "forge.getIssue",
+    description:
+      "Fetch a single forge issue via Daintree (read-only). Typed wrapper around the Daintree forge.getIssue MCP tool. Pass the issue identifier (e.g. issueId) through 'arguments'.",
+    risk: "read",
+    readOnly: true,
+    schema: ForgeGetIssueArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Forwarded verbatim; expects the issue identifier (e.g. { issueId }).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "forge.getIssue", args.arguments ?? {});
+    },
+  },
+  {
+    name: "forge.listPRs",
+    description:
+      "List forge pull/merge requests via Daintree (read-only). Typed wrapper around the Daintree forge.listPRs MCP tool. Pass optional filters through 'arguments'.",
+    risk: "read",
+    readOnly: true,
+    schema: ForgeReadArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Optional filters forwarded to Daintree (e.g. state, base).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "forge.listPRs", args.arguments ?? {});
+    },
+  },
+  {
+    name: "workflow.startWorkOnIssue",
+    description:
+      "Start work on a forge issue via Daintree — sets up a worktree/branch for the issue. Mutates real workspace state and touches the forge, so it always confirms. Pass an idempotency requestKey when available.",
+    risk: "external",
+    schema: WorkflowMutationArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Arguments for workflow.startWorkOnIssue (e.g. issueId).",
+        },
+        requestKey: { type: "string", description: "Optional idempotency key." },
+      },
+      required: ["arguments"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "workflow.startWorkOnIssue", args.arguments, args.requestKey);
+    },
+  },
+  {
+    name: "workflow.prepBranchForReview",
+    description:
+      "Prepare the current branch for review via Daintree — readies the branch/PR for review. Mutates real workspace state and touches the forge, so it always confirms. Pass an idempotency requestKey when available.",
+    risk: "external",
+    schema: WorkflowMutationArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        arguments: {
+          type: "object",
+          additionalProperties: true,
+          description: "Arguments for workflow.prepBranchForReview (e.g. worktreeId).",
+        },
+        requestKey: { type: "string", description: "Optional idempotency key." },
+      },
+      required: ["arguments"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "workflow.prepBranchForReview", args.arguments, args.requestKey);
     },
   },
 ];
