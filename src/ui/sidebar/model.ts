@@ -327,14 +327,21 @@ function buildAudit(
 ): AuditRow[] {
   return dashboard.audit.slice(0, limit).map((r) => {
     const color =
-      r.outcome === "ok"
+      r.outcome === "ok" || r.outcome === "grant_ok"
         ? theme.ok
         : r.outcome === "error"
           ? theme.error
           : r.outcome === "denied"
             ? theme.warn
             : theme.dim;
-    const symbol = r.outcome === "ok" ? glyph.done : r.outcome === "error" ? glyph.exited : "·";
+    const symbol =
+      r.outcome === "ok"
+        ? glyph.done
+        : r.outcome === "grant_ok"
+          ? "◎"
+          : r.outcome === "error"
+            ? glyph.exited
+            : "·";
     return {
       id: r.id,
       symbol,

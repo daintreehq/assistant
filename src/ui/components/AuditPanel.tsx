@@ -6,6 +6,7 @@ import { truncate } from "../../utils/text.js";
 function outcomeColor(outcome: AuditRecord["outcome"]): string {
   switch (outcome) {
     case "ok":
+    case "grant_ok":
       return theme.ok;
     case "denied":
       return theme.warn;

@@ -29,6 +29,13 @@ export interface ToolContext {
   router: ModelRouter;
   projectPath: string;
   actor: ToolActor;
+  /**
+   * Entity id of the non-interactive actor behind this dispatch — the watcher
+   * (`wch_…`) or timer (`tmr_…`) record id. Set by the scheduler so the registry
+   * can look up a scoped automation grant tied to that specific actor. Absent for
+   * the main (interactive) actor.
+   */
+  actorId?: string;
   /** Ask the user to approve a mutating action. Returns true if approved. */
   confirm: (req: ConfirmRequest) => Promise<boolean>;
   /** Print an out-of-band line to the user (e.g. "spawned watcher wch_..."). */

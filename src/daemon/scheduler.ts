@@ -23,7 +23,7 @@ export interface SchedulerDeps {
   queue: Queue;
   router: ModelRouter;
   registry: ToolRegistry;
-  ctxFor: (actor: ToolContext["actor"]) => ToolContext;
+  ctxFor: (actor: ToolContext["actor"], actorId?: string) => ToolContext;
   tickMs?: number;
   /** Called with newly-created attention+ events after each tick. */
   onAttention?: (events: QueueEvent[]) => void;
@@ -68,9 +68,10 @@ export class Scheduler {
       }
       for (const w of this.deps.db.dueWatchers(now)) {
         if (w.kind === "terminal") {
-          await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher")).catch(
-            () => {},
-          );
+          await runTerminalWatcherCheck(
+            w,
+            this.deps.ctxFor("watcher", w.id),
+          ).catch(() => {});
         } else {
           // Worktree watchers: reschedule (full git-state checks land in a later phase).
           this.deps.db.updateWatcher(w.id, { nextCheckAt: now + w.cadenceMs });
@@ -118,6 +119,8 @@ export class Scheduler {
         summary: `Disabling corrupt timer ${rec.id}: ${err instanceof Error ? err.message : String(err)}`,
       });
       this.deps.db.updateTimer(rec.id, { status: "fired", lastFiredAt: now });
+      // A disabled timer can never fire again — release any scoped grants it held.
+      this.deps.db.revokeGrantsByActor(rec.id, now);
       return;
     }
 
@@ -149,7 +152,7 @@ export class Scheduler {
         const res = await this.deps.registry.dispatch(
           payload.toolCall.toolName,
           payload.toolCall.args,
-          this.deps.ctxFor("timer"),
+          this.deps.ctxFor("timer", rec.id),
         );
         // A confirm-required tool denied to a non-interactive actor is an
         // expected, structural outcome that the registry already surfaces as a
@@ -211,6 +214,9 @@ export class Scheduler {
         runCount,
         lastFiredAt: now,
       });
+      // The timer is finished and will never fire again — release its grants so a
+      // recycled actor id can't inherit a stale authorization.
+      this.deps.db.revokeGrantsByActor(rec.id, now);
       return;
     }
     // Catch-up: schedule next fire relative to NOW, not the missed deadline, so a

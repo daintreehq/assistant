@@ -192,6 +192,8 @@ export const watcherTools: ToolDef[] = [
         });
       }
       ctx.db.updateWatcher(args.id, { status: "cancelled" });
+      // A cancelled watcher must not retain any scoped authorization.
+      ctx.db.revokeGrantsByActor(args.id);
       return ok(`Cancelled watcher ${args.id}.`, { id: args.id });
     },
   },
