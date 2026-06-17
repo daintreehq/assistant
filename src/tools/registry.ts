@@ -8,8 +8,25 @@ import { decide } from "../safety/policy.js";
 import { assertNoFileEditTools } from "../safety/policy.js";
 import { fail, type ToolContext, type ToolDef } from "./types.js";
 
+/**
+ * OpenAI (and the Fireworks OpenAI-compatible endpoint) constrains function
+ * names to this pattern. Our internal tool names use dot notation (`fs.read`),
+ * which the dot makes illegal — hence the wire-name alias layer below.
+ */
+const OPENAI_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** Sanitize an internal dotted tool name into an OpenAI-legal wire name. */
+function toWireName(name: string): string {
+  return name.replaceAll(".", "__");
+}
+
 export class ToolRegistry {
   private tools = new Map<string, ToolDef>();
+  // Bidirectional alias maps between internal dotted names and OpenAI-legal
+  // wire names, rebuilt on every toOpenAITools() projection so they always
+  // reflect the most recent (possibly filtered) tool set sent to the model.
+  private wireToInternal = new Map<string, string>();
+  private internalToWire = new Map<string, string>();
 
   register(tool: ToolDef): void {
     if (this.tools.has(tool.name)) {
@@ -35,19 +52,57 @@ export class ToolRegistry {
     assertNoFileEditTools([...this.tools.keys()]);
   }
 
-  /** Project tools to OpenAI function-calling specs (optionally a subset). */
+  /**
+   * Project tools to OpenAI function-calling specs (optionally a subset),
+   * emitting OpenAI-legal wire names and recording the alias maps needed to
+   * translate a model's tool call back to its internal dotted name. `filterNames`
+   * are matched against internal names. Throws if a wire name is illegal or two
+   * internal names collide on the same wire name — failing fast at projection
+   * time rather than silently dispatching to the wrong tool.
+   */
   toOpenAITools(filterNames?: string[]): ChatTool[] {
     const names = filterNames ? new Set(filterNames) : undefined;
-    return this.list()
-      .filter((t) => !names || names.has(t.name))
-      .map((t) => ({
-        type: "function" as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      }));
+    const selected = this.list().filter((t) => !names || names.has(t.name));
+
+    const wireToInternal = new Map<string, string>();
+    const internalToWire = new Map<string, string>();
+    for (const t of selected) {
+      const wire = toWireName(t.name);
+      if (!OPENAI_NAME_RE.test(wire)) {
+        throw new Error(
+          `Tool '${t.name}' produces wire name '${wire}', which does not match ${OPENAI_NAME_RE}`,
+        );
+      }
+      const existing = wireToInternal.get(wire);
+      if (existing !== undefined && existing !== t.name) {
+        throw new Error(
+          `Wire-name collision: '${existing}' and '${t.name}' both map to '${wire}'`,
+        );
+      }
+      wireToInternal.set(wire, t.name);
+      internalToWire.set(t.name, wire);
+    }
+    this.wireToInternal = wireToInternal;
+    this.internalToWire = internalToWire;
+
+    return selected.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: internalToWire.get(t.name)!,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+  }
+
+  /**
+   * Translate an OpenAI wire name (as returned in a model tool call) back to the
+   * internal dotted tool name. Returns undefined for an unknown wire name, so the
+   * caller can decide the fallback. Only resolves names from the most recent
+   * toOpenAITools() projection.
+   */
+  resolveWireName(wireName: string): string | undefined {
+    return this.wireToInternal.get(wireName);
   }
 
   /**

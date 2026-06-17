@@ -164,6 +164,14 @@ export class AgentSession {
 
       // Execute each requested tool call.
       for (const call of result.toolCalls) {
+        // The model echoes back the OpenAI-legal wire name (e.g. `fs__read`);
+        // translate it to the internal dotted name (`fs.read`) for dispatch,
+        // events, and audit. Fall back to the raw name if it's unrecognized so
+        // an unknown call still surfaces as UNKNOWN_TOOL rather than crashing.
+        const internalName =
+          this.deps.registry.resolveWireName(call.function.name) ??
+          call.function.name;
+
         let args: unknown;
         let parseFailed = false;
         try {
@@ -174,10 +182,10 @@ export class AgentSession {
 
         let res: ToolResult;
         if (parseFailed) {
-          this.events.toolCall(call.function.name, call.function.arguments);
+          this.events.toolCall(internalName, call.function.arguments);
           res = {
             ok: false,
-            summary: `Invalid JSON arguments for ${call.function.name}; not executed.`,
+            summary: `Invalid JSON arguments for ${internalName}; not executed.`,
             error: {
               code: "INVALID_TOOL_ARGS_JSON",
               message: "Arguments were not valid JSON.",
@@ -185,19 +193,19 @@ export class AgentSession {
             },
           };
         } else {
-          this.events.toolCall(call.function.name, args);
+          this.events.toolCall(internalName, args);
           res = await this.deps.registry.dispatch(
-            call.function.name,
+            internalName,
             args,
             this.deps.ctx,
           );
         }
-        this.events.toolResult(call.function.name, res);
+        this.events.toolResult(internalName, res);
 
         this.pushMessage({
           role: "tool",
           tool_call_id: call.id,
-          name: call.function.name,
+          name: internalName,
           content: serializeToolResult(res),
         });
       }
