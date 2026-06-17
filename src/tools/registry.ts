@@ -165,7 +165,13 @@ export class ToolRegistry {
         // "grant_ok" so a grant-authorized mutation is distinguishable from an
         // interactive one.
         if (ctx.actorId) {
-          const grant = ctx.db.consumeGrant(ctx.actorId, name, tool.risk, started);
+          const grant = ctx.db.consumeGrant(
+            ctx.actorId,
+            ctx.actor,
+            name,
+            tool.risk,
+            started,
+          );
           if (grant) {
             return this.runHandler(tool, name, args, ctx, started, "grant_ok");
           }

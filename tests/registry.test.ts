@@ -271,6 +271,27 @@ describe("ToolRegistry.dispatch", () => {
     expect(db.listGrants("wch_1")[0].usesRemaining).toBe(1);
   });
 
+  it("does not let a grant of a different actor type authorize the call", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    // Same id, but the grant is for a watcher while the actor is a timer.
+    const ctx = makeCtx(db, config, vi.fn(), "timer");
+    ctx.actorId = "wch_1";
+    db.insertGrant({
+      actorId: "wch_1",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+    });
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+    // The mismatched grant must not have been consumed.
+    expect(db.getGrant(db.listGrants("wch_1")[0].id)?.usesRemaining).toBe(1);
+  });
+
   it("keeps distinct actors' denial events from collapsing via the actor id", async () => {
     const reg = new ToolRegistry();
     reg.register(projectTool);

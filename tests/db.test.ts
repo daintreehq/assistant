@@ -196,7 +196,7 @@ describe("Db", () => {
 
     it("consumeGrant decrements a use and returns the updated grant on a risk-class match", () => {
       const g = grant({ maxUses: 2 });
-      const consumed = db.consumeGrant("wch_abc", "git.commit", "git", T0);
+      const consumed = db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0);
       expect(consumed?.id).toBe(g.id);
       expect(consumed?.usesRemaining).toBe(1);
     });
@@ -207,37 +207,37 @@ describe("Db", () => {
         allowedToolNamesJson: JSON.stringify(["terminal.send"]),
       });
       // The risk class is not allowed, but the exact tool name is.
-      const consumed = db.consumeGrant("wch_abc", "terminal.send", "terminal", T0);
+      const consumed = db.consumeGrant("wch_abc", "watcher", "terminal.send", "terminal", T0);
       expect(consumed).toBeDefined();
       // A different tool of the same (un-allowed) risk class is rejected.
-      expect(db.consumeGrant("wch_abc", "terminal.other", "terminal", T0)).toBeUndefined();
+      expect(db.consumeGrant("wch_abc", "watcher", "terminal.other", "terminal", T0)).toBeUndefined();
     });
 
     it("consumeGrant returns undefined when nothing matches the scope", () => {
       grant(); // allows git only
-      expect(db.consumeGrant("wch_abc", "project.spawn", "project", T0)).toBeUndefined();
+      expect(db.consumeGrant("wch_abc", "watcher", "project.spawn", "project", T0)).toBeUndefined();
       // A wrong actor never matches.
-      expect(db.consumeGrant("wch_other", "git.commit", "git", T0)).toBeUndefined();
+      expect(db.consumeGrant("wch_other", "watcher", "git.commit", "git", T0)).toBeUndefined();
     });
 
     it("consumeGrant exhausts after maxUses and then denies", () => {
       grant({ maxUses: 2 });
-      expect(db.consumeGrant("wch_abc", "git.commit", "git", T0)?.usesRemaining).toBe(1);
-      expect(db.consumeGrant("wch_abc", "git.commit", "git", T0)?.usesRemaining).toBe(0);
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)?.usesRemaining).toBe(1);
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)?.usesRemaining).toBe(0);
       // Third call: exhausted (usesRemaining = 0 fails the WHERE guard).
-      expect(db.consumeGrant("wch_abc", "git.commit", "git", T0)).toBeUndefined();
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)).toBeUndefined();
     });
 
     it("consumeGrant denies an expired grant", () => {
       grant({ expiresAt: T0 + 1000 });
       // now is past expiry.
-      expect(db.consumeGrant("wch_abc", "git.commit", "git", T0 + 2000)).toBeUndefined();
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0 + 2000)).toBeUndefined();
     });
 
     it("revokeGrant prevents further consumption and is idempotent", () => {
       const g = grant();
       expect(db.revokeGrant(g.id, T0)).toBe(true);
-      expect(db.consumeGrant("wch_abc", "git.commit", "git", T0)).toBeUndefined();
+      expect(db.consumeGrant("wch_abc", "watcher", "git.commit", "git", T0)).toBeUndefined();
       // Already revoked → no longer live.
       expect(db.revokeGrant(g.id, T0)).toBe(false);
     });

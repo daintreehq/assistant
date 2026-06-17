@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { grantTools } from "../src/tools/grantTools.js";
+import { ToolRegistry } from "../src/tools/registry.js";
+import { Queue } from "../src/queue.js";
 import { Db } from "../src/storage/db.js";
 import type { ToolActor, ToolContext } from "../src/tools/types.js";
 
@@ -79,6 +81,27 @@ describe("grant tools", () => {
 
     const scoped = await list.handler({ actorId: "wch_1" }, ctx());
     expect((scoped.result as { grants: unknown[] }).grants).toHaveLength(1);
+  });
+
+  it("rejects an over-long ttl via the schema, persisting no grant", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(grantTools);
+    const dispatchCtx = {
+      db,
+      actor: "main",
+      config: { tier: "operator" },
+      queue: new Queue(db),
+    } as unknown as ToolContext;
+
+    const res = await reg.dispatch(
+      "grant.create",
+      { ...validArgs, ttlMs: Number.MAX_SAFE_INTEGER },
+      dispatchCtx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("INVALID_ARGS");
+    // The Zod cap fires before insertGrant, so no ghost row is left behind.
+    expect(db.listGrants("wch_1")).toHaveLength(0);
   });
 
   it("grant.revoke revokes a live grant (main only) and 404s otherwise", async () => {

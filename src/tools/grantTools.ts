@@ -45,7 +45,11 @@ const CreateArgs = z.object({
     .number()
     .int()
     .positive()
-    .describe("Grant lifetime in milliseconds from now (TTL)."),
+    // Capped at 30 days: a grant is a scoped, short-lived authorization, and the
+    // bound also keeps expiresAt well inside the valid Date range so the success
+    // path's toISOString() can never throw after the row is already persisted.
+    .max(30 * 24 * 60 * 60 * 1000)
+    .describe("Grant lifetime in milliseconds from now (TTL; max 30 days)."),
   maxUses: z
     .number()
     .int()

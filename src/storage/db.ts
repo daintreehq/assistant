@@ -655,9 +655,11 @@ export class Db {
   }
 
   /**
-   * Find a live grant for `actorId` that authorizes `toolName` (or its
-   * `riskClass`) and atomically consume one use. Returns the updated grant on
-   * success, or undefined when no in-scope live grant exists.
+   * Find a live grant for `actorId`/`actorType` that authorizes `toolName` (or
+   * its `riskClass`) and atomically consume one use. Returns the updated grant on
+   * success, or undefined when no in-scope live grant exists. The `actorType`
+   * must also match so a grant minted for a timer can never be consumed by a
+   * watcher that happens to share an id (and vice versa).
    *
    * The `UPDATE ... WHERE usesRemaining > 0 AND revokedAt IS NULL AND
    * expiresAt > ?` is the consume guard; in this single-threaded synchronous
@@ -666,6 +668,7 @@ export class Db {
    */
   consumeGrant(
     actorId: string,
+    actorType: string,
     toolName: string,
     riskClass: string,
     now = Date.now(),
@@ -674,6 +677,7 @@ export class Db {
       "UPDATE automation_grants SET usesRemaining = usesRemaining - 1 WHERE id = ? AND usesRemaining > 0 AND revokedAt IS NULL AND expiresAt > ?",
     );
     for (const g of this.listGrants(actorId, now)) {
+      if (g.actorType !== actorType) continue;
       if (!grantAuthorizes(g, toolName, riskClass)) continue;
       const res = stmt.run(g.id, now);
       if (Number(res.changes) > 0) return this.getGrant(g.id);
