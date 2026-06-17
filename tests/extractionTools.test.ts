@@ -1,0 +1,324 @@
+import { describe, it, expect, vi } from "vitest";
+import {
+  extractionTools,
+  ExtractArgs,
+  ExtractAsyncArgs,
+  runAsyncExtraction,
+} from "../src/tools/extractionTools.js";
+import type { ToolContext } from "../src/tools/types.js";
+
+const extract = extractionTools.find((t) => t.name === "terminal.extract")!;
+const extractAsync = extractionTools.find(
+  (t) => t.name === "terminal.extract.async",
+)!;
+
+/** A status result shaped like Daintree's terminal.getStatus. */
+function statusRes(entries: Array<{ terminalId: string; agentState?: string }>) {
+  return { isError: false, text: "", structuredContent: { terminals: entries } };
+}
+/** An output result shaped like Daintree's terminal.getOutput. */
+function outputRes(content: string) {
+  return { isError: false, text: "", structuredContent: { content } };
+}
+
+interface CtxParts {
+  connected?: boolean;
+  status?: (call: number) => Array<{ terminalId: string; agentState?: string }>;
+  output?: (call: number) => string;
+  chat?: ReturnType<typeof vi.fn>;
+  json?: ReturnType<typeof vi.fn>;
+  publish?: ReturnType<typeof vi.fn>;
+}
+
+function ctxWith(parts: CtxParts = {}): {
+  ctx: ToolContext;
+  chat: ReturnType<typeof vi.fn>;
+  json: ReturnType<typeof vi.fn>;
+  publish: ReturnType<typeof vi.fn>;
+} {
+  let statusCall = 0;
+  let outputCall = 0;
+  const chat = parts.chat ?? vi.fn().mockResolvedValue({ content: "extracted" });
+  const json = parts.json ?? vi.fn().mockResolvedValue({ result: "x" });
+  const publish = parts.publish ?? vi.fn().mockReturnValue({ id: "evt_1", count: 1 });
+  const ctx = {
+    mcp: {
+      isConnected: () => parts.connected ?? true,
+      callTool: vi.fn(async (name: string) => {
+        if (name === "terminal.getStatus") {
+          const entries = parts.status
+            ? parts.status(statusCall++)
+            : [{ terminalId: "t1", agentState: "working" }];
+          return statusRes(entries);
+        }
+        if (name === "terminal.getOutput") {
+          const content = parts.output ? parts.output(outputCall++) : "log line";
+          return outputRes(content);
+        }
+        return { isError: true, text: "", structuredContent: {} };
+      }),
+    },
+    router: { chat, json },
+    queue: { publish },
+    actor: "main",
+  } as unknown as ToolContext;
+  return { ctx, chat, json, publish };
+}
+
+describe("terminal.extract — inline", () => {
+  it("extracts plain text via router.chat (not json) when format=text", async () => {
+    const { ctx, chat, json } = ctxWith({
+      chat: vi.fn().mockResolvedValue({ content: "  the answer  " }),
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "what is the answer", format: "text", pollIntervalMs: 0, maxAttempts: 30, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(json).not.toHaveBeenCalled();
+    expect((res.result as { result: string }).result).toBe("the answer");
+  });
+
+  it("extracts JSON via router.json (never router.chat) when format=json", async () => {
+    const { ctx, chat, json } = ctxWith({
+      json: vi.fn().mockResolvedValue({ result: { status: "passed" } }),
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "extract status", format: "json", jsonSchema: "{ status: string }", pollIntervalMs: 0, maxAttempts: 30, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(json).toHaveBeenCalledTimes(1);
+    expect(chat).not.toHaveBeenCalled();
+    expect((res.result as { result: unknown }).result).toEqual({ status: "passed" });
+  });
+
+  it("waits until a `contains` condition is met, then extracts", async () => {
+    // First read has no marker, second read does.
+    const { ctx, chat } = ctxWith({
+      output: (c) => (c === 0 ? "still building..." : "BUILD OK done"),
+      chat: vi.fn().mockResolvedValue({ content: "ok" }),
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "did it pass", format: "text", wait: { contains: "BUILD OK" }, pollIntervalMs: 0, maxAttempts: 30, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { attempts: number }).attempts).toBe(2);
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails WAIT_TIMEOUT when the condition never resolves within maxAttempts", async () => {
+    const { ctx, chat } = ctxWith({ output: () => "never matches" });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", wait: { contains: "ZZZ" }, pollIntervalMs: 0, maxAttempts: 3, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("WAIT_TIMEOUT");
+    expect((res.error?.details as { attempts: number }).attempts).toBe(3);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it("matches a runtimeStatusIs:exited wait condition", async () => {
+    const { ctx } = ctxWith({
+      status: () => [{ terminalId: "t1", agentState: "exited" }],
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "summarize the run", format: "text", wait: { runtimeStatusIs: "exited" }, pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("rejects a modelJudge wait condition as unsupported", async () => {
+    const { ctx, chat } = ctxWith({});
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", wait: { modelJudge: "is it done?" }, pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("UNSUPPORTED_CONDITION");
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it("fails MCP_UNAVAILABLE when Daintree is not connected", async () => {
+    const { ctx } = ctxWith({ connected: false });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("MCP_UNAVAILABLE");
+  });
+
+  it("gate mode: no instruction returns booleans and never calls the model", async () => {
+    const { ctx, chat, json } = ctxWith({
+      status: () => [{ terminalId: "t1", agentState: "exited" }],
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(chat).not.toHaveBeenCalled();
+    expect(json).not.toHaveBeenCalled();
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("gate mode with an unmet wait still returns booleans (not WAIT_TIMEOUT)", async () => {
+    const { ctx } = ctxWith({ output: () => "never matches" });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], wait: { contains: "NEVER" }, format: "text", pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { matched: boolean }).matched).toBe(false);
+    expect((res.result as { finished: boolean }).finished).toBe(false);
+  });
+
+  it("matches runtimeStatusIs:exited only once ALL terminals have exited", async () => {
+    // Poll 1: t2 still running → not met. Poll 2: both exited → met.
+    let poll = 0;
+    const { ctx } = ctxWith({
+      status: () => {
+        const both = poll++ >= 1;
+        return [
+          { terminalId: "t1", agentState: "exited" },
+          { terminalId: "t2", agentState: both ? "exited" : "working" },
+        ];
+      },
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1", "t2"], format: "text", wait: { runtimeStatusIs: "exited" }, pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { attempts: number }).attempts).toBe(2);
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("feeds the instruction and terminal tail to the extraction model", async () => {
+    const chat = vi.fn().mockResolvedValue({ content: "answer" });
+    const { ctx } = ctxWith({ output: () => "the build log content", chat });
+    await extract.handler(
+      { terminalIds: ["t1"], instruction: "find the error code", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    const sent = chat.mock.calls[0][1];
+    const userMsg = sent.messages.find((m: { role: string }) => m.role === "user").content;
+    expect(userMsg).toContain("find the error code");
+    expect(userMsg).toContain("the build log content");
+    expect(sent.maxTokens).toBe(400);
+  });
+});
+
+describe("ExtractArgs validation", () => {
+  it("requires jsonSchema when format=json and an instruction is given", () => {
+    const parsed = ExtractArgs.safeParse({
+      terminalIds: ["t1"],
+      instruction: "extract",
+      format: "json",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts json format with a jsonSchema", () => {
+    const parsed = ExtractArgs.safeParse({
+      terminalIds: ["t1"],
+      instruction: "extract",
+      format: "json",
+      jsonSchema: "{ ok: boolean }",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("ExtractAsyncArgs requires an instruction", () => {
+    const parsed = ExtractAsyncArgs.safeParse({ terminalIds: ["t1"] });
+    expect(parsed.success).toBe(false);
+  });
+});
+
+describe("terminal.extract.async — background", () => {
+  it("returns a requestId immediately without blocking", async () => {
+    const { ctx } = ctxWith({});
+    const res = await extractAsync.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { requestId: string }).requestId).toBeTruthy();
+  });
+
+  it("publishes a done event via model_worker after extracting", async () => {
+    const { ctx, publish } = ctxWith({
+      chat: vi.fn().mockResolvedValue({ content: "the extracted fact" }),
+    });
+    await runAsyncExtraction(
+      ctx,
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      "req_1",
+    );
+    expect(publish).toHaveBeenCalledTimes(1);
+    const arg = publish.mock.calls[0][0];
+    expect(arg.source).toBe("model_worker");
+    expect(arg.severity).toBe("done");
+    expect(arg.evidence[0]).toContain("the extracted fact");
+  });
+
+  it("publishes an attention/fail event when the verdict fails", async () => {
+    const { ctx, publish } = ctxWith({
+      chat: vi.fn().mockResolvedValue({ content: "tests failed" }),
+      json: vi.fn().mockResolvedValue({ pass: false, reason: "the suite is red" }),
+    });
+    await runAsyncExtraction(
+      ctx,
+      {
+        terminalIds: ["t1"],
+        instruction: "did the tests pass",
+        format: "text",
+        verdictInstruction: "tests passed",
+        pollIntervalMs: 0,
+        maxAttempts: 5,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      "req_2",
+    );
+    const arg = publish.mock.calls[0][0];
+    expect(arg.severity).toBe("attention");
+    expect(arg.title).toContain("fail");
+    expect(arg.summary).toBe("the suite is red");
+  });
+
+  it("publishes an attention event (no extraction) when the wait times out", async () => {
+    const { ctx, publish, chat } = ctxWith({ output: () => "still running" });
+    await runAsyncExtraction(
+      ctx,
+      { terminalIds: ["t1"], instruction: "x", format: "text", wait: { contains: "DONE" }, pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      "req_wait",
+    );
+    const arg = publish.mock.calls[0][0];
+    expect(arg.source).toBe("model_worker");
+    expect(arg.severity).toBe("attention");
+    expect(arg.title).toContain("timed out");
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it("publishes an error event when extraction throws", async () => {
+    const { ctx, publish } = ctxWith({
+      chat: vi.fn().mockRejectedValue(new Error("model exploded")),
+    });
+    await runAsyncExtraction(
+      ctx,
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      "req_3",
+    );
+    const arg = publish.mock.calls[0][0];
+    expect(arg.source).toBe("model_worker");
+    expect(arg.severity).toBe("error");
+    expect(arg.summary).toContain("model exploded");
+  });
+});

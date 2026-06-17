@@ -87,4 +87,36 @@ ${args.tail}
 Summarize.`;
 }
 
+export const EXTRACTOR_SYSTEM_PROMPT = `You extract specific information from terminal output for a developer's supervisor. You are a small, cheap sub-agent: you do NOT talk to the user and you cannot run tools. Read the provided terminal tail and return ONLY what the caller's instruction asks for — nothing else, no preamble, no commentary.
+
+When asked for plain text, return the extracted value as terse text. When asked for json, return ONLY a single JSON object of the shape { "result": <value> } where <value> matches the caller's requested schema. Do not wrap the json in markdown fences and do not add fields the caller did not ask for.
+
+Never invent content that is not present in the terminal output. If the requested information is genuinely absent, return an empty/"null" result (for text, an empty string; for json, { "result": null }) rather than guessing.`;
+
+export function buildExtractorUserPrompt(args: {
+  instruction: string;
+  format: "text" | "json";
+  jsonSchema?: string;
+  tail: string;
+  terminalIds: string[];
+}): string {
+  const header =
+    args.terminalIds.length > 1
+      ? `Source terminals: ${args.terminalIds.join(", ")}`
+      : `Source terminal: ${args.terminalIds[0] ?? "unknown"}`;
+  const shape =
+    args.format === "json"
+      ? `\n\nReturn a JSON object { "result": <value> } where <value> conforms to this schema:\n"""\n${args.jsonSchema ?? "(no schema provided — infer a reasonable JSON value)"}\n"""`
+      : `\n\nReturn the extracted value as plain text.`;
+  return `${header}
+Extraction instruction: ${args.instruction}${shape}
+
+Terminal output (most recent, bounded):
+"""
+${args.tail || "(no output captured)"}
+"""
+
+Extract now.`;
+}
+
 export const TIMER_CHECK_SYSTEM_PROMPT = `You are a Daintree timer check sub-agent. A scheduled check has fired. Using the provided context (and any state you were given), decide whether something the user cares about has happened — completion, failure, a blocker, or a needed decision. Return a single short sentence suitable for a notification queue. If nothing noteworthy changed, say so plainly with the prefix "(no change)".`;
