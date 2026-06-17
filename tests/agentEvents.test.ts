@@ -65,7 +65,11 @@ describe("AgentSession emits structured events instead of rendering", () => {
       },
       json: selectNone,
     } as any;
-    const registry = { toOpenAITools: () => [], dispatch: async () => ({}) } as any;
+    const registry = {
+      toOpenAITools: () => [],
+      resolveWireName: () => undefined,
+      dispatch: async () => ({}),
+    } as any;
 
     const session = new AgentSession({
       router,
@@ -86,8 +90,10 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const { events, sink } = recordingSink();
     const responses = [
       chatResult({
+        // The model returns the OpenAI-legal wire name; the loop must translate
+        // it back to the internal dotted name before dispatch and events.
         toolCalls: [
-          { id: "c1", type: "function", function: { name: "fs.search", arguments: "{}" } },
+          { id: "c1", type: "function", function: { name: "fs__search", arguments: "{}" } },
         ],
       }),
       chatResult({ content: "done" }),
@@ -96,6 +102,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const router = { stream: async () => responses[n++], json: selectNone } as any;
     const registry = {
       toOpenAITools: () => [],
+      resolveWireName: (w: string) => w.replaceAll("__", "."),
       dispatch: async () => ({ ok: true, summary: "found 2 files" }),
     } as any;
 
@@ -124,7 +131,11 @@ describe("AgentSession emits structured events instead of rendering", () => {
       },
       json: selectNone,
     } as any;
-    const registry = { toOpenAITools: () => [], dispatch: async () => ({}) } as any;
+    const registry = {
+      toOpenAITools: () => [],
+      resolveWireName: () => undefined,
+      dispatch: async () => ({}),
+    } as any;
 
     const session = new AgentSession({
       router,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
+import { buildAllTools } from "../src/tools/index.js";
 import { ok, fail, type ToolContext, type ToolDef } from "../src/tools/types.js";
 import { Db } from "../src/storage/db.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
@@ -123,5 +124,100 @@ describe("ToolRegistry.dispatch", () => {
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("TIER_DENIED");
     expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+const OPENAI_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+function watcherCreateTool(name: string): ToolDef {
+  return {
+    name,
+    description: "A multi-segment dotted test tool.",
+    risk: "read",
+    readOnly: true,
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async handler() {
+      return ok("ran");
+    },
+  };
+}
+
+describe("ToolRegistry wire-name alias layer", () => {
+  it("projects every real tool to an OpenAI-legal wire name with no dots", () => {
+    const all = buildAllTools();
+    const reg = new ToolRegistry();
+    reg.registerAll(all);
+    const tools = reg.toOpenAITools();
+    // No silent drops: every registered tool must be projected.
+    expect(tools).toHaveLength(all.length);
+    for (const t of tools) {
+      expect(t.function.name).toMatch(OPENAI_NAME_RE);
+      expect(t.function.name).not.toContain(".");
+      // Every projected wire name must round-trip back to a real internal name.
+      expect(reg.resolveWireName(t.function.name)).toBeDefined();
+    }
+  });
+
+  it("throws when a sanitized wire name exceeds 64 characters", () => {
+    const reg = new ToolRegistry();
+    // 30 dotted segments -> a __-joined wire name far longer than 64 chars.
+    const longName = Array.from({ length: 30 }, (_, i) => `seg${i}`).join(".");
+    reg.register(watcherCreateTool(longName));
+    expect(() => reg.toOpenAITools()).toThrow(/does not match/i);
+  });
+
+  it("round-trips a dotted name to its wire name and back", () => {
+    const reg = new ToolRegistry();
+    reg.register(readTool); // test.read
+    const tools = reg.toOpenAITools();
+    expect(tools[0].function.name).toBe("test__read");
+    expect(reg.resolveWireName("test__read")).toBe("test.read");
+  });
+
+  it("sanitizes multi-dot names across every segment", () => {
+    const reg = new ToolRegistry();
+    reg.register(watcherCreateTool("watcher.terminal.create"));
+    const tools = reg.toOpenAITools();
+    expect(tools[0].function.name).toBe("watcher__terminal__create");
+    expect(reg.resolveWireName("watcher__terminal__create")).toBe(
+      "watcher.terminal.create",
+    );
+  });
+
+  it("throws when two internal names collide on the same wire name", () => {
+    const reg = new ToolRegistry();
+    reg.register(watcherCreateTool("fs.read"));
+    reg.register(watcherCreateTool("fs__read"));
+    expect(() => reg.toOpenAITools()).toThrow(/collision/i);
+  });
+
+  it("returns undefined for an unknown wire name", () => {
+    const reg = new ToolRegistry();
+    reg.register(readTool);
+    reg.toOpenAITools();
+    expect(reg.resolveWireName("nope__missing")).toBeUndefined();
+  });
+
+  it("only includes filtered tools in the alias map", () => {
+    const reg = new ToolRegistry();
+    reg.register(readTool); // test.read
+    reg.register(projectTool); // test.project
+    const tools = reg.toOpenAITools(["test.read"]);
+    expect(tools).toHaveLength(1);
+    expect(tools[0].function.name).toBe("test__read");
+    expect(reg.resolveWireName("test__read")).toBe("test.read");
+    expect(reg.resolveWireName("test__project")).toBeUndefined();
+  });
+
+  it("still dispatches by internal dotted name after projection", async () => {
+    const db = new Db(":memory:");
+    const config = loadConfig({ tier: "operator", stateDir: makeStateDir() });
+    const reg = new ToolRegistry();
+    reg.register(readTool);
+    reg.toOpenAITools();
+    const ctx = makeCtx(db, config, vi.fn());
+    const res = await reg.dispatch("test.read", {}, ctx);
+    expect(res.ok).toBe(true);
+    db.close();
   });
 });
