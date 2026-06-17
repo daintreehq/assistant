@@ -44,12 +44,18 @@ const AUTO_COMPACT_TOKEN_THRESHOLD = 60_000;
 const CHARS_PER_TOKEN = 4;
 
 /**
- * Cheap, dependency-free token estimate: total message content length divided by
- * a fixed chars-per-token ratio. Counts only `content` (not tool-call argument
- * JSON), so it slightly undercounts — fine for a "should we compact?" threshold.
+ * Cheap, dependency-free token estimate: total message size divided by a fixed
+ * chars-per-token ratio. Counts message `content` plus tool-call argument JSON
+ * (assistant tool-call turns often carry `content: null` but large arguments),
+ * so a tool-heavy session still trips the threshold. Approximate by design —
+ * good enough for a "should we compact?" decision.
  */
 function estimateTokens(messages: ChatMessage[]): number {
-  const chars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  const chars = messages.reduce((n, m) => {
+    let c = m.content?.length ?? 0;
+    for (const tc of m.tool_calls ?? []) c += tc.function.arguments?.length ?? 0;
+    return n + c;
+  }, 0);
   return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 

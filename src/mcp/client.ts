@@ -222,11 +222,16 @@ export class DaintreeMcpClient {
   private runDriftCheck(): void {
     try {
       this.driftWarnings = [];
-      // Capture the server's reported implementation info if available.
-      const info = this.raw?.getServerVersion?.();
-      this.serverInfo = info
-        ? { name: info.name, version: info.version }
-        : undefined;
+      // Capture the server's reported implementation info if available. Isolated
+      // so a metadata-fetch failure can never suppress the drift comparison below.
+      try {
+        const info = this.raw?.getServerVersion?.();
+        this.serverInfo = info
+          ? { name: info.name, version: info.version }
+          : undefined;
+      } catch {
+        this.serverInfo = undefined;
+      }
       const live = new Set((this.toolCache ?? []).map((t) => t.name));
       // No tools came back — treat as "unknown", not "everything drifted".
       if (live.size === 0) return;

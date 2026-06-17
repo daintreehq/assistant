@@ -64,6 +64,17 @@ describe("DaintreeMcpClient drift detection (#7)", () => {
     expect(st.driftWarnings?.[0]).toContain(missing);
   });
 
+  it("reports one warning per missing documented tool", async () => {
+    const missing = DOCUMENTED_MCP_TOOL_NAMES.slice(0, 3);
+    const live = DOCUMENTED_MCP_TOOL_NAMES.filter((n) => !missing.includes(n));
+    const client = makeClient(live);
+    const st = await client.connect();
+    expect(st.driftWarnings?.length).toBe(3);
+    for (const name of missing) {
+      expect(st.driftWarnings?.some((w) => w.includes(name))).toBe(true);
+    }
+  });
+
   it("treats an empty live tool list as unknown, not total drift", async () => {
     const client = makeClient([]);
     const st = await client.connect();
