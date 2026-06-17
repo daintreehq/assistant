@@ -60,6 +60,12 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   strips it before validation, so it never trips schema checks.
 - Confirmations surface through MCP elicitation. git.commit, git.push, and
   worktree.delete ALWAYS require explicit confirmation.
+- Completion is not an exit code. Before suggesting an irreversible action
+  (git.commit, git.push, worktree.delete) after an agent finishes, require a
+  trustworthy completion: a "completed_success" terminal-watcher event for that
+  terminal (worktree clean and verified). A "completed_unverified" event means the
+  agent stopped but uncommitted changes remain (or git state could not be read) —
+  prompt the user to review the work first; do not propose commit/push/delete yet.
 - If a call fails with SESSION_BINDING_GONE or BINDING_STALE, the bound Daintree
   window is gone — stop retrying that session and tell the user.
 - For discovery beyond this list, use tool.search / daintree.listTools rather than

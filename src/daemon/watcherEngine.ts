@@ -13,9 +13,12 @@
  */
 import {
   WatcherVerdict,
+  VERIFICATION_EVIDENCE_PREFIX,
   type Severity,
   type WatchCondition,
   type WatcherClassification,
+  type VerificationResult,
+  type RecommendedAction,
 } from "../schemas.js";
 import {
   WATCHER_SYSTEM_PROMPT,
@@ -45,11 +48,15 @@ const MEANINGFUL: ReadonlySet<WatcherClassification> = new Set([
   "tests_passed",
   "merge_conflict",
   "completed_success",
+  "completed_unverified",
   "completed_unknown",
   "terminal_exited",
 ]);
 
-/** Classifications that mean the watcher's job is done and it should stop. */
+/** Classifications that mean the watcher's job is done and it should stop.
+ *  `completed_unverified` is deliberately NOT here: the agent reported completion
+ *  but the worktree is dirty/unverified, so the watcher keeps polling until it
+ *  either reaches a clean `completed_success` or the user resolves it. */
 const TERMINAL_CLASS: ReadonlySet<WatcherClassification> = new Set([
   "completed_success",
   "terminal_exited",
@@ -65,6 +72,7 @@ const SEVERITY_MAP: Record<WatcherClassification, Severity> = {
   tests_passed: "done",
   merge_conflict: "blocked",
   completed_success: "done",
+  completed_unverified: "attention",
   completed_unknown: "info",
   terminal_exited: "urgent",
   needs_large_model: "attention",
@@ -278,7 +286,12 @@ interface TerminalState {
   /** Wall-clock ms when the tail last changed (for noOutputForMs). */
   outAt?: number;
 }
-type WatcherOptions = { perTerminal?: Record<string, TerminalState> };
+type WatcherOptions = {
+  perTerminal?: Record<string, TerminalState>;
+  /** Scopes the post-completion git verification pass to a specific worktree.
+   *  Absent for manual watchers — verification then uses the active context. */
+  verificationScope?: { worktreeId?: string };
+};
 
 /**
  * Advance a terminal's output-tracking state. When the tail changed since the
@@ -307,6 +320,174 @@ export function findModelJudge(cond?: WatchCondition): string | undefined {
   if ("all" in cond) return cond.all.map((c) => findModelJudge(c)).find(Boolean);
   if ("any" in cond) return cond.any.map((c) => findModelJudge(c)).find(Boolean);
   if ("not" in cond) return findModelJudge(cond.not);
+  return undefined;
+}
+
+/**
+ * Count uncommitted file changes from a git.getProjectPulse structuredContent,
+ * tolerating several plausible shapes (a flat count, a changed-files array, or
+ * grouped staged/unstaged/untracked collections). Returns undefined when none of
+ * the recognized shapes are present, so the caller can fall back to text parsing.
+ */
+function countChangedFiles(sc: Record<string, unknown>): number | undefined {
+  for (const k of ["changedFiles", "changed_files", "fileCount", "changeCount"]) {
+    const v = sc[k];
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.floor(v));
+    if (Array.isArray(v)) return v.length;
+  }
+  let total = 0;
+  let found = false;
+  for (const k of ["staged", "unstaged", "untracked", "modified", "added", "deleted"]) {
+    const v = sc[k];
+    if (Array.isArray(v)) {
+      total += v.length;
+      found = true;
+    } else if (typeof v === "number" && Number.isFinite(v)) {
+      total += Math.max(0, Math.floor(v));
+      found = true;
+    }
+  }
+  return found ? total : undefined;
+}
+
+/**
+ * Derive a VerificationResult from a git.getProjectPulse result. The pulse shape
+ * is not strictly documented, so this is defensive: prefer an explicit dirty/clean
+ * flag, then a changed-file count, then text markers from a `git status`-style
+ * body. When nothing is conclusive the verdict is "unknown" — never a false
+ * "clean" — so the conductor stays on the safe (review-first) path. Pure +
+ * exported for unit testing without MCP.
+ */
+export function deriveVerification(
+  sc: Record<string, unknown>,
+  text: string,
+): VerificationResult {
+  const changedFiles = countChangedFiles(sc);
+
+  const dirtyFlag =
+    typeof sc.isDirty === "boolean"
+      ? sc.isDirty
+      : typeof sc.dirty === "boolean"
+        ? sc.dirty
+        : typeof sc.clean === "boolean"
+          ? !sc.clean
+          : typeof sc.isClean === "boolean"
+            ? !sc.isClean
+            : undefined;
+
+  let hasGitChanges: boolean | undefined;
+  if (dirtyFlag !== undefined) hasGitChanges = dirtyFlag;
+  else if (changedFiles !== undefined) hasGitChanges = changedFiles > 0;
+  else if (text) {
+    // Check dirty markers before clean ones — a status body listing changes never
+    // contains "working tree clean", but file paths could spuriously match /clean/.
+    if (
+      /Changes not staged|Changes to be committed|Untracked files|modified:|new file:|deleted:|renamed:/i.test(
+        text,
+      )
+    ) {
+      hasGitChanges = true;
+    } else if (/nothing to commit|working tree clean|no changes/i.test(text)) {
+      hasGitChanges = false;
+    }
+  }
+
+  if (hasGitChanges === undefined) {
+    return {
+      verdict: "unknown",
+      hasGitChanges: false,
+      changedFiles: 0,
+      gitSummary: "git state could not be determined from the project pulse",
+    };
+  }
+  if (hasGitChanges) {
+    const count = changedFiles ?? 0;
+    return {
+      verdict: "dirty",
+      hasGitChanges: true,
+      changedFiles: count,
+      gitSummary:
+        count > 0
+          ? `${count} uncommitted file change(s) in the worktree`
+          : "uncommitted changes present in the worktree",
+    };
+  }
+  return {
+    verdict: "clean",
+    hasGitChanges: false,
+    changedFiles: 0,
+    gitSummary: "working tree clean (no uncommitted changes)",
+  };
+}
+
+/**
+ * Read-only post-completion reconciliation pass. When an agent reports completion
+ * Daintree gives no exit code, so before any irreversible action is suggested we
+ * deterministically check the worktree's git cleanliness via git.getProjectPulse
+ * (a workbench-tier read tool — no confirmation, safe from watcher context). Never
+ * throws: any failure (MCP down, errored call, unrecognized shape) yields verdict
+ * "unknown", which the caller treats as not-yet-verified rather than clean.
+ */
+export async function runVerificationPass(
+  ctx: ToolContext,
+  scope?: { worktreeId?: string },
+): Promise<VerificationResult> {
+  const unverifiable = (gitSummary: string): VerificationResult => ({
+    verdict: "unknown",
+    hasGitChanges: false,
+    changedFiles: 0,
+    gitSummary,
+  });
+  if (!ctx.mcp.isConnected()) {
+    return unverifiable("Daintree MCP not connected; could not verify git state");
+  }
+  try {
+    const res = await ctx.mcp.callTool("git.getProjectPulse", {
+      ...(scope?.worktreeId ? { worktreeId: scope.worktreeId } : {}),
+    });
+    if (res.isError) return unverifiable("git.getProjectPulse reported an error");
+    const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
+    return deriveVerification(sc, typeof res.text === "string" ? res.text : "");
+  } catch {
+    return unverifiable("git.getProjectPulse call failed");
+  }
+}
+
+/**
+ * Build the recommended actions attached to a published watcher event. Both
+ * waiting states and an unverified completion point the user at the terminal —
+ * the latter so they can review and commit before any irreversible git action is
+ * suggested. terminal.focus is the real UI tool (open_review is display-only).
+ */
+function recommendedActionsFor(
+  classification: WatcherClassification,
+  terminalId: string,
+): RecommendedAction[] | undefined {
+  if (
+    classification === "waiting_for_input" ||
+    classification === "permission_prompt"
+  ) {
+    return [
+      {
+        label: "Focus terminal",
+        toolName: "terminal.focus",
+        args: { terminalId },
+        risk: "ui",
+        requiresConfirmation: false,
+      },
+    ];
+  }
+  if (classification === "completed_unverified") {
+    return [
+      {
+        label: "Review completion",
+        toolName: "terminal.focus",
+        args: { terminalId },
+        risk: "ui",
+        requiresConfirmation: false,
+      },
+    ];
+  }
   return undefined;
 }
 
@@ -431,10 +612,29 @@ export async function runTerminalWatcherCheck(
           `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""}`,
         ];
       } else if (agentState === "completed") {
-        classification = "completed_success";
-        confidence = 0.85;
-        summary = "Agent reports completion.";
-        evidence = ["agentState=completed"];
+        // The agent claims completion, but Daintree exposes no exit code — gate
+        // trust on a deterministic, read-only git check before any irreversible
+        // action can be suggested downstream.
+        const verification = await runVerificationPass(
+          ctx,
+          options.verificationScope,
+        );
+        evidence = [
+          "agentState=completed",
+          `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify(verification)}`,
+        ];
+        if (verification.verdict === "clean") {
+          classification = "completed_success";
+          confidence = 0.85;
+          summary = "Agent completed; worktree clean and verified.";
+        } else {
+          classification = "completed_unverified";
+          confidence = 0.8;
+          summary =
+            verification.verdict === "dirty"
+              ? `Agent completed but ${verification.gitSummary} — review before commit/push.`
+              : `Agent completed but git state is unverified (${verification.gitSummary}).`;
+        }
       } else if (tail.trim().length > 0) {
         const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
         classification = verdict.classification;
@@ -480,19 +680,7 @@ export async function runTerminalWatcherCheck(
         evidence: outcome.evidence,
         // Keyed by terminal so concurrent terminals don't collapse together.
         dedupeKey: `watcher:${rec.id}:${terminalId}:${outcome.classification}`,
-        recommendedActions:
-          outcome.classification === "waiting_for_input" ||
-          outcome.classification === "permission_prompt"
-            ? [
-                {
-                  label: "Focus terminal",
-                  toolName: "terminal.focus",
-                  args: { terminalId },
-                  risk: "ui",
-                  requiresConfirmation: false,
-                },
-              ]
-            : undefined,
+        recommendedActions: recommendedActionsFor(outcome.classification, terminalId),
       });
     }
 

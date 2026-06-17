@@ -196,6 +196,15 @@ export const agentTaskTools: ToolDef[] = [
               cadenceMs: args.watcher.cadenceMs ?? 120_000,
               modelTier: "small",
               nextCheckAt: Date.now(),
+              // Scope the post-completion git verification pass to this agent's
+              // worktree so the cleanliness check reads the right tree.
+              ...(worktreeId
+                ? {
+                    optionsJson: JSON.stringify({
+                      verificationScope: { worktreeId },
+                    }),
+                  }
+                : {}),
             });
             watcherId = watcher.id;
           } else {
