@@ -107,6 +107,48 @@ describe("agentTask.spawnForEdits", () => {
     db.close();
   });
 
+  it("normalizes whitespace and falls back to a non-empty name", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+
+    const collapse = ctx(db);
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "  Fix\n\nOAuth\t callback  ", taskPrompt: "go" },
+      collapse,
+    );
+    const collapsed = collapse._calls.find((x) => x.name === "agent.launch");
+    expect(collapsed?.args.name).toBe("Fix OAuth callback");
+
+    const blank = ctx(db);
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "   ", taskPrompt: "go" },
+      blank,
+    );
+    const blanked = blank._calls.find((x) => x.name === "agent.launch");
+    expect(blanked?.args.name).toBe("agent");
+
+    db.close();
+  });
+
+  it("hard-caps the launch name at 60 chars even for a long agentId", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+    const c = ctx(db);
+
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "Refactor", taskPrompt: "go", agentId: "x".repeat(100) },
+      c,
+    );
+    const launch = c._calls.find((x) => x.name === "agent.launch");
+    expect(String(launch?.args.name).length).toBeLessThanOrEqual(60);
+    db.close();
+  });
+
   it("fails cleanly when Daintree MCP is not connected", async () => {
     const db = new Db(":memory:");
     const reg = new ToolRegistry();

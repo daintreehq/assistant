@@ -63,7 +63,8 @@ function buildAgentLaunchName(title: string, agentId: string): string {
   const suffix = agentId !== DEFAULT_AGENT_ID ? ` (${agentId})` : "";
   const room = Math.max(0, AGENT_LAUNCH_NAME_MAX_LEN - suffix.length);
   const head = base.length > room ? base.slice(0, room) : base;
-  return `${head}${suffix}`;
+  // Final hard cap so the invariant holds even for a pathologically long agentId.
+  return `${head}${suffix}`.slice(0, AGENT_LAUNCH_NAME_MAX_LEN);
 }
 
 /**
@@ -184,7 +185,7 @@ export const agentTaskTools: ToolDef[] = [
         );
       }
 
-      const agentId = args.agentId ?? DEFAULT_AGENT_ID;
+      const agentId = args.agentId?.trim() || DEFAULT_AGENT_ID;
       const name = buildAgentLaunchName(args.title, agentId);
       const prompt = buildAgentPrompt(args);
       const requestKey = randomUUID();
