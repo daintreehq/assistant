@@ -10,6 +10,10 @@ export default defineConfig({
   dts: false,
   banner: { js: "#!/usr/bin/env node" },
   external: ["node:sqlite"],
+  esbuildOptions(options) {
+    // Compile JSX (the Ink UI under src/ui) with the React 17+ automatic runtime.
+    options.jsx = "automatic";
+  },
   esbuildPlugins: [
     {
       // esbuild (<= 0.27.x) doesn't recognise `node:sqlite` as a builtin and

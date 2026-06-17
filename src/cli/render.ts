@@ -1,7 +1,13 @@
 /**
- * Terminal rendering helpers. Keep this dependency-free (just ANSI codes) so the
- * CLI stays light. NO_COLOR is respected.
+ * Terminal rendering helpers for the legacy console surface (one-shot, doctor,
+ * --classic REPL). The interactive default is the Ink UI under src/ui. Keep this
+ * dependency-free (just ANSI codes). NO_COLOR is respected.
  */
+import { truncate, compactArgs } from "../utils/text.js";
+
+// Re-export so existing importers keep working from a single place.
+export { truncate, compactArgs };
+
 const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
 
 function wrap(code: string, s: string): string {
@@ -62,17 +68,3 @@ export const render = {
     this.line("\n");
   },
 };
-
-export function compactArgs(args: unknown): string {
-  if (args === undefined || args === null) return "";
-  try {
-    const s = JSON.stringify(args);
-    return truncate(s ?? "", 120);
-  } catch {
-    return "…";
-  }
-}
-
-export function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
-}

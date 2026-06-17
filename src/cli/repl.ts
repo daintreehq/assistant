@@ -7,6 +7,7 @@ import readline from "node:readline";
 import type { App } from "./app.js";
 import { handleSlashCommand } from "./commands.js";
 import { render, c } from "./render.js";
+import { createConsoleSink } from "./consoleSink.js";
 import type { ConfirmRequest } from "../tools/types.js";
 import type { QueueEvent } from "../schemas.js";
 import { compactArgs } from "./render.js";
@@ -21,6 +22,7 @@ export async function startRepl(app: App): Promise<void> {
 
   // Wire interactive confirmation + out-of-band logging into the app.
   app.setHooks({
+    agentEvents: createConsoleSink(),
     confirm: async (req: ConfirmRequest) => {
       render.line();
       render.warn(

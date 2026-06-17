@@ -13,6 +13,7 @@ import { buildAllTools } from "../tools/index.js";
 import type { ConfirmRequest, ToolActor, ToolContext } from "../tools/types.js";
 import { RecipeRegistry } from "../recipes/registry.js";
 import { AgentSession } from "../agent/loop.js";
+import type { AgentEventSink } from "../agent/events.js";
 import type { MainPromptContext } from "../models/prompts/index.js";
 import { Scheduler } from "../daemon/scheduler.js";
 import type { QueueEvent } from "../schemas.js";
@@ -22,6 +23,8 @@ export interface AppHooks {
   confirm?: (req: ConfirmRequest) => Promise<boolean>;
   /** Out-of-band line printer for tools/daemon. */
   log?: (msg: string) => void;
+  /** Where the main agent loop streams tokens/tool-calls/errors. */
+  agentEvents?: AgentEventSink;
 }
 
 export interface AppCreateOptions {
@@ -69,8 +72,25 @@ export class App {
       ctx: app.buildContext("main"),
       promptContext: app.promptContext(),
       sessionId: app.sessionId,
+      // Forward to whatever sink is currently registered via setHooks(); reading
+      // this.hooks live means the UI can attach after the session is built.
+      events: app.agentEventProxy(),
     });
     return app;
+  }
+
+  /** A stable AgentEventSink that delegates to the live hooks.agentEvents. */
+  private agentEventProxy(): AgentEventSink {
+    return {
+      assistantStart: () => this.hooks.agentEvents?.assistantStart(),
+      assistantToken: (token) => this.hooks.agentEvents?.assistantToken(token),
+      assistantEnd: (content) => this.hooks.agentEvents?.assistantEnd(content),
+      toolCall: (name, args) => this.hooks.agentEvents?.toolCall(name, args),
+      toolResult: (name, result) =>
+        this.hooks.agentEvents?.toolResult(name, result),
+      error: (message) => this.hooks.agentEvents?.error(message),
+      info: (message) => this.hooks.agentEvents?.info(message),
+    };
   }
 
   buildContext(actor: ToolActor): ToolContext {
@@ -115,6 +135,10 @@ export class App {
   }
 
   startScheduler(onAttention?: (events: QueueEvent[]) => void): Scheduler {
+    // Idempotent: a React effect may run more than once (remount / future
+    // StrictMode). Returning the existing scheduler avoids leaking a second
+    // interval that shutdown() would never stop.
+    if (this.scheduler) return this.scheduler;
     this.scheduler = new Scheduler({
       db: this.db,
       queue: this.queue,
@@ -128,8 +152,10 @@ export class App {
   }
 
   setHooks(hooks: AppHooks): void {
-    // Context closures read this.hooks live, so no session rebuild is needed.
-    this.hooks = hooks;
+    // Merge so partial updates (e.g. attaching only agentEvents) don't drop the
+    // existing confirm/log hooks. Context + event closures read this.hooks live,
+    // so no session rebuild is needed and conversation state is preserved.
+    this.hooks = { ...this.hooks, ...hooks };
   }
 
   async shutdown(): Promise<void> {
