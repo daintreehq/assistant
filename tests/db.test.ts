@@ -74,6 +74,62 @@ describe("Db", () => {
       expect(result.every((w) => w.status === "active")).toBe(true);
       expect(result.every((w) => w.nextCheckAt <= now)).toBe(true);
     });
+
+    const base = {
+      kind: "terminal" as const,
+      title: "w",
+      goal: "g",
+      targetsJson: "[]",
+      modelTier: "small" as const,
+      nextCheckAt: 0,
+    };
+
+    it("floors a supervisor cadence to the scheduler tick", () => {
+      const w = db.insertWatcher({
+        ...base,
+        cadenceMs: 1000,
+        isSupervisor: true,
+      });
+      // 1000ms is below the 3000ms scheduler tick — clamped up.
+      expect(w.cadenceMs).toBe(3000);
+      expect(w.isSupervisor).toBe(true);
+    });
+
+    it("leaves a supervisor cadence at or above the tick untouched", () => {
+      const w = db.insertWatcher({
+        ...base,
+        cadenceMs: 10_000,
+        isSupervisor: true,
+      });
+      expect(w.cadenceMs).toBe(10_000);
+    });
+
+    it("does not floor a non-supervisor (monitor) cadence", () => {
+      const w = db.insertWatcher({
+        ...base,
+        cadenceMs: 1000,
+        isSupervisor: false,
+      });
+      expect(w.cadenceMs).toBe(1000);
+      expect(w.isSupervisor).toBe(false);
+    });
+
+    it("defaults isSupervisor to false when omitted", () => {
+      const w = db.insertWatcher({ ...base, cadenceMs: 1000 });
+      expect(w.isSupervisor).toBe(false);
+    });
+
+    it("round-trips isSupervisor as a boolean through getWatcher", () => {
+      const w = db.insertWatcher({
+        ...base,
+        cadenceMs: 5000,
+        isSupervisor: true,
+      });
+      const fetched = db.getWatcher(w.id);
+      // SQLite stores 0/1; the read path must coerce back to a real boolean.
+      expect(fetched?.isSupervisor).toBe(true);
+      expect(db.listWatchers()[0].isSupervisor).toBe(true);
+    });
   });
 
   describe("events", () => {

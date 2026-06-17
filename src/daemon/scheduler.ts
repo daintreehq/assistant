@@ -17,6 +17,7 @@ import type { Queue } from "../queue.js";
 import type { ModelRouter } from "../models/router.js";
 import type { EventTarget, QueueEvent, TimerRecord } from "../schemas.js";
 import { runTerminalWatcherCheck } from "./watcherEngine.js";
+import { SCHEDULER_TICK_MS } from "../watcherCadence.js";
 
 export interface SchedulerDeps {
   db: Db;
@@ -36,7 +37,7 @@ export class Scheduler {
   private readonly tickMs: number;
 
   constructor(private deps: SchedulerDeps) {
-    this.tickMs = deps.tickMs ?? 5000;
+    this.tickMs = deps.tickMs ?? SCHEDULER_TICK_MS;
   }
 
   start(): void {

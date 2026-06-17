@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
 import { WatchCondition, type WatcherRecord } from "../schemas.js";
+import { MONITOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
 
 const CreateArgs = z.object({
   terminalIds: z
@@ -116,7 +117,8 @@ export const watcherTools: ToolDef[] = [
           title: args.title,
           goal: args.goal,
           targetsJson: JSON.stringify(args.terminalIds),
-          cadenceMs: args.cadenceMs ?? 120_000,
+          cadenceMs: args.cadenceMs ?? MONITOR_DEFAULT_CADENCE_MS,
+          isSupervisor: false,
           modelTier: args.modelTier ?? "small",
           startAfterMs: args.startAfterMs,
           stopAfterMs: args.stopAfterMs,

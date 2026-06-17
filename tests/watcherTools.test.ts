@@ -15,6 +15,17 @@ function ctxWith(daemonActive?: () => boolean): ToolContext {
   } as unknown as ToolContext;
 }
 
+describe("watcher.terminal.create defaults", () => {
+  it("creates a slow monitor watcher (120s, isSupervisor false) by default", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await create.handler(args, ctx);
+    expect(res.ok).toBe(true);
+    const w = ctx.db.getWatcher((res as { result: { id: string } }).result.id);
+    expect(w?.cadenceMs).toBe(120_000);
+    expect(w?.isSupervisor).toBe(false);
+  });
+});
+
 const args = {
   terminalIds: ["term_1"],
   title: "build",

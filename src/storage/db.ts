@@ -23,6 +23,7 @@ import type {
   TimerRecord,
   WatcherRecord,
 } from "../schemas.js";
+import { SCHEDULER_TICK_MS } from "../watcherCadence.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS timers (
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS watchers (
   goal TEXT NOT NULL,
   targetsJson TEXT NOT NULL,
   cadenceMs INTEGER NOT NULL,
+  isSupervisor INTEGER NOT NULL DEFAULT 0,
   modelTier TEXT NOT NULL,
   startAfterMs INTEGER,
   stopAfterMs INTEGER,
@@ -160,7 +162,7 @@ const TIMER_UPDATE_COLS: ReadonlySet<string> = new Set([
   "payloadType", "payloadJson", "targetJson", "status", "lastFiredAt",
 ]);
 const WATCHER_UPDATE_COLS: ReadonlySet<string> = new Set([
-  "title", "goal", "targetsJson", "cadenceMs", "modelTier", "startAfterMs",
+  "title", "goal", "targetsJson", "cadenceMs", "isSupervisor", "modelTier", "startAfterMs",
   "stopAfterMs", "stopWhenJson", "alertWhenJson", "optionsJson", "status",
   "lastClassification", "lastCheckedAt", "nextCheckAt",
 ]);
@@ -234,6 +236,17 @@ export class Db {
         this.addColumnIfMissing("events", "notifiedAt", "INTEGER");
         this.db.exec(
           "UPDATE events SET notifiedAt = createdAt WHERE notifiedAt IS NULL",
+        );
+      },
+      // v3: watchers.isSupervisor — distinguishes fast supervisor watchers
+      // (attached to CLI-spawned worker terminals) from slow user-created
+      // monitor watchers. Existing rows default to 0 (monitor), which is the
+      // correct classification for any watcher created before this column.
+      () => {
+        this.addColumnIfMissing(
+          "watchers",
+          "isSupervisor",
+          "INTEGER NOT NULL DEFAULT 0",
         );
       },
     ];
@@ -344,13 +357,20 @@ export class Db {
   /* ---------------------------- watchers --------------------------------- */
 
   insertWatcher(rec: Omit<WatcherRecord, "id" | "createdAt" | "status"> & Partial<WatcherRecord>): WatcherRecord {
+    const isSupervisor = Boolean(rec.isSupervisor ?? false);
     const full: WatcherRecord = {
       id: rec.id ?? `wch_${randomUUID().slice(0, 8)}`,
       kind: rec.kind,
       title: rec.title,
       goal: rec.goal,
       targetsJson: rec.targetsJson,
-      cadenceMs: rec.cadenceMs,
+      // A supervisor cannot be checked faster than the scheduler tick, so floor
+      // its cadence to the tick — storing a sub-tick value would misrepresent
+      // the actual check interval.
+      cadenceMs: isSupervisor
+        ? Math.max(rec.cadenceMs, SCHEDULER_TICK_MS)
+        : rec.cadenceMs,
+      isSupervisor,
       modelTier: rec.modelTier,
       startAfterMs: rec.startAfterMs,
       stopAfterMs: rec.stopAfterMs,
@@ -365,8 +385,8 @@ export class Db {
     };
     this.db
       .prepare(
-        `INSERT INTO watchers (id,kind,title,goal,targetsJson,cadenceMs,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastCheckedAt,nextCheckAt,createdAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO watchers (id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastCheckedAt,nextCheckAt,createdAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -375,6 +395,7 @@ export class Db {
         full.goal,
         full.targetsJson,
         full.cadenceMs,
+        full.isSupervisor ? 1 : 0,
         full.modelTier,
         full.startAfterMs ?? null,
         full.stopAfterMs ?? null,
@@ -391,21 +412,30 @@ export class Db {
   }
 
   getWatcher(id: string): WatcherRecord | undefined {
-    return this.db.prepare("SELECT * FROM watchers WHERE id = ?").get(id) as
-      | unknown as WatcherRecord | undefined;
+    const row = this.db.prepare("SELECT * FROM watchers WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToWatcher(row) : undefined;
   }
 
   listWatchers(status?: WatcherRecord["status"]): WatcherRecord[] {
-    const rows = status
+    const rows = (status
       ? this.db.prepare("SELECT * FROM watchers WHERE status = ? ORDER BY createdAt").all(status)
-      : this.db.prepare("SELECT * FROM watchers ORDER BY createdAt").all();
-    return rows as unknown as WatcherRecord[];
+      : this.db.prepare("SELECT * FROM watchers ORDER BY createdAt").all()) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToWatcher(r));
   }
 
   dueWatchers(now: number): WatcherRecord[] {
-    return this.db
+    const rows = this.db
       .prepare("SELECT * FROM watchers WHERE status = 'active' AND nextCheckAt <= ? ORDER BY nextCheckAt")
-      .all(now) as unknown as WatcherRecord[];
+      .all(now) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToWatcher(r));
+  }
+
+  /** Coerce a raw watchers row into a WatcherRecord. SQLite stores booleans as
+   * 0/1 integers, so isSupervisor must be mapped back to a real boolean. */
+  private rowToWatcher(r: Record<string, unknown>): WatcherRecord {
+    return { ...r, isSupervisor: Boolean(r.isSupervisor) } as unknown as WatcherRecord;
   }
 
   updateWatcher(id: string, patch: Partial<WatcherRecord>): void {

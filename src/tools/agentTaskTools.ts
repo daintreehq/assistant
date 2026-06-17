@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { ok, fail, type ToolDef } from "./types.js";
+import { SUPERVISOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
 
 /** Standard constraints appended to every spawned-agent prompt (docs §18). */
 const CONSTRAINTS_BLOCK = [
@@ -197,7 +198,8 @@ export const agentTaskTools: ToolDef[] = [
               title: `watch ${args.title}`,
               goal: args.watcher.goal ?? `Supervise: ${args.title}`,
               targetsJson: JSON.stringify([terminalId]),
-              cadenceMs: args.watcher.cadenceMs ?? 120_000,
+              cadenceMs: args.watcher.cadenceMs ?? SUPERVISOR_DEFAULT_CADENCE_MS,
+              isSupervisor: true,
               modelTier: "small",
               nextCheckAt: Date.now(),
               // Scope the post-completion git verification pass to this agent's
