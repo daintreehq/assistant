@@ -170,6 +170,9 @@ const WATCHER_UPDATE_COLS: ReadonlySet<string> = new Set([
 type SqlIn = string | number | bigint | null | Uint8Array;
 function toSqlValue(v: unknown): SqlIn {
   if (v === undefined || v === null) return null;
+  // SQLite has no boolean type; store as 0/1 so it round-trips correctly. Without
+  // this, String(false) → "false" and Boolean("false") reads back as true.
+  if (typeof v === "boolean") return v ? 1 : 0;
   if (typeof v === "string" || typeof v === "number" || typeof v === "bigint") return v;
   if (v instanceof Uint8Array) return v;
   return String(v);
