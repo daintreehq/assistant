@@ -10,6 +10,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import dotenv from "dotenv";
 import { Tier } from "./schemas.js";
 
@@ -31,6 +32,7 @@ export interface AppConfig {
   mcpUrl?: string;
   mcpToken?: string;
   projectId?: string;
+  windowId?: string;
 
   /** Permission tier the CLI operates at. */
   tier: Tier;
@@ -42,6 +44,8 @@ export interface AppConfig {
 export interface ConfigOverrides {
   projectPath?: string;
   stateDir?: string;
+  projectId?: string;
+  windowId?: string;
   mcpUrl?: string;
   mcpToken?: string;
   fireworksApiKey?: string;
@@ -64,6 +68,29 @@ function firstString(...vals: Array<string | undefined>): string | undefined {
   return undefined;
 }
 
+/**
+ * Map an arbitrary project (or window) identifier to a single safe directory
+ * name for use under the state root.
+ *
+ * The result is a human-readable slug plus a short SHA-256 suffix of the raw
+ * input. The slug aids debugging; the hash guarantees that two distinct inputs
+ * can never collide after slugging/truncation, and that path-traversal inputs
+ * (e.g. `../../evil`) collapse to a single harmless segment.
+ *
+ * @internal
+ */
+export function projectIdToDir(rawId: string): string {
+  const hash = createHash("sha256").update(rawId).digest("hex").slice(0, 8);
+  const slug = rawId
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40)
+    .replace(/-$/, ""); // truncation may leave a trailing dash
+  return slug ? `${slug}-${hash}` : hash;
+}
+
 export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   const projectPath = path.resolve(overrides.projectPath ?? process.cwd());
 
@@ -73,10 +100,26 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     dotenv.config({ path: envPath });
   }
 
+  const projectId = firstString(
+    overrides.projectId,
+    process.env.DAINTREE_PROJECT_ID,
+  );
+  const windowId = firstString(
+    overrides.windowId,
+    process.env.DAINTREE_WINDOW_ID,
+  );
+
+  // State location precedence (highest first):
+  //   1. explicit override / DAINTREE_ASSISTANT_STATE_DIR — caller decides.
+  //   2. per-project subdirectory derived from DAINTREE_PROJECT_ID, so
+  //      concurrent Daintree projects never share a state.db (issue #4).
+  //   3. legacy flat path — backward compatible for callers with no project id.
+  // Window-level isolation is deliberately deferred (see issue #5); windowId is
+  // read and surfaced on the config but does not yet affect the path.
+  const stateRoot = path.join(os.homedir(), ".daintree", "assistant-cli");
   const stateDir =
-    overrides.stateDir ??
-    process.env.DAINTREE_ASSISTANT_STATE_DIR ??
-    path.join(os.homedir(), ".daintree", "assistant-cli");
+    firstString(overrides.stateDir, process.env.DAINTREE_ASSISTANT_STATE_DIR) ??
+    (projectId ? path.join(stateRoot, projectIdToDir(projectId)) : stateRoot);
 
   fs.mkdirSync(stateDir, { recursive: true });
 
@@ -104,7 +147,8 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
       DEFAULTS.smallModel,
     mcpUrl: firstString(overrides.mcpUrl, process.env.DAINTREE_MCP_URL),
     mcpToken: firstString(overrides.mcpToken, process.env.DAINTREE_MCP_TOKEN),
-    projectId: firstString(process.env.DAINTREE_PROJECT_ID),
+    projectId,
+    windowId,
     tier: tier.success ? tier.data : "operator",
     offline: overrides.offline ?? process.env.DAINTREE_ASSISTANT_OFFLINE === "1",
   };
@@ -117,6 +161,8 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
   return {
     projectPath: cfg.projectPath,
     stateDir: cfg.stateDir,
+    projectId: cfg.projectId ?? "(unset)",
+    windowId: cfg.windowId ?? "(unset)",
     largeModel: cfg.largeModel,
     smallModel: cfg.smallModel,
     fireworksApiKey: redact(cfg.fireworksApiKey),
