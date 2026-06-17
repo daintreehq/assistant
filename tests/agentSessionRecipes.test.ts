@@ -10,6 +10,15 @@ import type { ChatOptions } from "../src/models/fireworks.js";
 import type { MainPromptContext } from "../src/models/prompts/runtimeContext.js";
 import type { RecipeSelection } from "../src/recipes/types.js";
 
+/**
+ * toOpenAITools() projects internal dotted names to OpenAI wire names
+ * (`a.b` -> `a__b`). These filter assertions are written against the internal
+ * dotted names, so translate the captured wire name back before comparing.
+ */
+function fromWire(name: string): string {
+  return name.replaceAll("__", ".");
+}
+
 /** A no-op read tool used only to populate the registry for filter tests. */
 function dummyTool(name: string): ToolDef {
   return {
@@ -273,7 +282,7 @@ describe("AgentSession control messages", () => {
       tools: REGISTERED_TOOLS,
     });
     await session.send("just a simple question");
-    const names = (captured?.tools ?? []).map((t) => t.function.name);
+    const names = (captured?.tools ?? []).map((t) => fromWire(t.function.name));
     // No recipe ⇒ undefined filter ⇒ every registered tool is offered.
     expect(names.sort()).toEqual([...REGISTERED_TOOLS].sort());
     expect(names.length).toBeGreaterThan(0);
@@ -293,7 +302,9 @@ describe("AgentSession control messages", () => {
       tools: REGISTERED_TOOLS,
     });
     await session.send("implement the new feature");
-    const names = new Set((captured?.tools ?? []).map((t) => t.function.name));
+    const names = new Set(
+      (captured?.tools ?? []).map((t) => fromWire(t.function.name)),
+    );
 
     // Core tools are always present.
     expect(names.has("context.snapshot")).toBe(true);
