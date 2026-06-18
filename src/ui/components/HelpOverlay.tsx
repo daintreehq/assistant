@@ -17,10 +17,12 @@ const COMMANDS: Array<[string, string]> = [
 ];
 
 const KEYS: Array<[string, string]> = [
-  ["^O", "operations surface"],
+  ["PgUp/PgDn", "scroll history"],
+  ["Home/End", "top / latest"],
+  ["^O", "full operations surface"],
   ["^X", "expand tool detail in the transcript"],
   ["Tab", "complete a slash command"],
-  ["Esc", "return home"],
+  ["Esc", "latest / return home"],
   ["^C", "shut down cleanly"],
 ];
 

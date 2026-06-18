@@ -236,6 +236,15 @@ export function transcriptReducer(
 function snapshot(app: App): DashboardState {
   return {
     mcp: app.mcp.status(),
+    workflowRuns: app.db
+      .listWorkflowRuns()
+      .filter(
+        (r) =>
+          r.status === "pending" ||
+          r.status === "active" ||
+          r.status === "blocked",
+      )
+      .slice(0, 5),
     watchers: app.db.listWatchers("active"),
     timers: app.db.listTimers("scheduled"),
     inbox: app.queue.digest({ severityAtLeast: "attention", maxItems: 30 }),

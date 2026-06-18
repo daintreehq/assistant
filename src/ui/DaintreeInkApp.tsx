@@ -20,6 +20,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   const { columns, rows } = useWindowSize();
   const [view, setView] = useState<View>("home");
   const [expanded, setExpanded] = useState(false);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const controller = useDaintreeController(app, exit);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
 
@@ -34,12 +35,34 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     controller.setActivePanel(null);
   };
 
+  const scrollPage = Math.max(6, rows - 8);
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
       return;
     }
+    if (view === "home" && key.pageUp) {
+      setScrollOffset((n) => n + scrollPage);
+      return;
+    }
+    if (view === "home" && key.pageDown) {
+      setScrollOffset((n) => Math.max(0, n - scrollPage));
+      return;
+    }
+    if (view === "home" && key.home) {
+      setScrollOffset(100_000);
+      return;
+    }
+    if (view === "home" && key.end) {
+      setScrollOffset(0);
+      return;
+    }
     if (key.escape) {
+      if (view === "home" && scrollOffset > 0) {
+        setScrollOffset(0);
+        return;
+      }
       if (view !== "home") returnHome();
       return;
     }
@@ -72,10 +95,14 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       view={view}
       expanded={expanded}
       pending={controller.pendingConfirm}
+      scrollOffset={scrollOffset}
       composerFocus={
         view === "home" && !controller.busy && !controller.pendingConfirm
       }
-      onSubmit={controller.sendUserMessage}
+      onSubmit={(text) => {
+        setScrollOffset(0);
+        return controller.sendUserMessage(text);
+      }}
       onResolve={controller.resolveConfirm}
     />
   );

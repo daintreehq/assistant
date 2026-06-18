@@ -9,6 +9,7 @@ import type {
   QueueEvent,
   TimerRecord,
   WatcherRecord,
+  WorkflowRunRecord,
 } from "../../schemas.js";
 import type { TerminalPreview } from "../hooks/useTerminalPreview.js";
 import type {
@@ -96,10 +97,30 @@ function audit(id: string, toolName: string, ok: boolean, ms: number): AuditReco
 function emptyDash(connected: boolean): DashboardState {
   return {
     mcp: { connected } as DashboardState["mcp"],
+    workflowRuns: [],
     watchers: [],
     timers: [],
     inbox: [],
     audit: [],
+  };
+}
+
+function workflow(over: Partial<WorkflowRunRecord>): WorkflowRunRecord {
+  return {
+    id: "wfr_1",
+    issueNumber: 1842,
+    issueTitle: "Repair watcher test race",
+    branch: "fix/watcher-race",
+    terminalIdsJson: JSON.stringify(["term_8"]),
+    watcherIdsJson: JSON.stringify(["wch_1"]),
+    status: "active",
+    nextActionJson: JSON.stringify({
+      label: "wait for tests",
+      toolName: "watcher.terminal.create",
+    }),
+    createdAt: FIXED_NOW - s(28),
+    updatedAt: FIXED_NOW - s(2),
+    ...over,
   };
 }
 
@@ -207,6 +228,7 @@ export function buildFixtures(): Fixture[] {
       transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
+        workflowRuns: [workflow({})],
         watchers: [watcher({})],
         timers: [timer({})],
         audit: [
@@ -236,6 +258,15 @@ export function buildFixtures(): Fixture[] {
       transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
+        workflowRuns: [
+          workflow({
+            status: "blocked",
+            nextActionJson: JSON.stringify({
+              label: "resolve failed tests",
+              toolName: "terminal.focus",
+            }),
+          }),
+        ],
         watchers: [
           watcher({ lastClassification: "tests_failed" }),
           watcher({
@@ -276,6 +307,17 @@ export function buildFixtures(): Fixture[] {
       transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
+        workflowRuns: [
+          workflow({
+            status: "active",
+            nextActionJson: JSON.stringify({
+              label: "approve git push",
+              toolName: "git.push",
+              risk: "external",
+              requiresConfirmation: true,
+            }),
+          }),
+        ],
         watchers: [watcher({ lastClassification: "tests_passed" })],
       },
       previews: [],
@@ -339,6 +381,18 @@ export function buildFixtures(): Fixture[] {
       transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
+        workflowRuns: [
+          workflow({
+            issueNumber: 1844,
+            issueTitle: "Coordinate terminal fleet",
+            branch: "ship/assistant-fleet",
+            status: "active",
+            nextActionJson: JSON.stringify({
+              label: "watch all terminals",
+              toolName: "watcher.terminal.create",
+            }),
+          }),
+        ],
         watchers: [
           watcher({ id: "wch_1", targetsJson: JSON.stringify(["term_8"]), lastClassification: "still_working", createdAt: FIXED_NOW - s(134) }),
           watcher({ id: "wch_2", title: "ship the branch", goal: "branch ready for review", targetsJson: JSON.stringify(["term_4"]), lastClassification: "tests_passed", createdAt: FIXED_NOW - s(531) }),
@@ -361,6 +415,7 @@ export function buildFixtures(): Fixture[] {
       transcript: longUserRun(),
       dashboard: {
         ...emptyDash(true),
+        workflowRuns: [workflow({})],
         watchers: [watcher({})],
         timers: [timer({ id: "tmr_1", title: "prune stale terminals", fireAt: FIXED_NOW + s(60 * 60 * 18) })],
       },

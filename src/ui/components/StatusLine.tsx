@@ -1,15 +1,10 @@
 /**
- * A single status line that prefers CURRENT STATE over inventory counts. Left:
- * what Daintree is doing right now (the active agent, or "Standing by"). Right: a
- * compact rollup — attention count, agent count, and the live MCP badge. The
- * attention chip is the only saturated token; everything else stays dim.
- *
- *   ◌ WORKING term_8 · tests running 18s            !1 · agents 2 · MCP
- *   Standing by                                     OPERATOR · MCP CONNECTED
+ * A compact footer, not a second dashboard. The scrollable ledger owns work
+ * detail; this line tells the user whether they are reading latest output or
+ * history, then gives the smallest useful health rollup.
  */
 import { Box, Text } from "ink";
 import type { DashboardState } from "../types.js";
-import { StateBadge, formatDuration } from "../primitives.js";
 import { severityTone, toneColor, ui } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
@@ -18,44 +13,40 @@ export function StatusLine({
   dashboard,
   tier,
   width = 80,
-  now = Date.now(),
+  scrollOffset = 0,
 }: {
   dashboard: DashboardState;
   tier?: string;
   width?: number;
   now?: number;
+  /** Rendered-line history offset. 0 means pinned to latest. */
+  scrollOffset?: number;
 }) {
   const agents = buildAgentRows(dashboard.watchers);
-  const active =
-    agents.find((a) => a.classification === "still_working") ?? agents[0];
   const attention = dashboard.inbox.length;
   const connected = dashboard.mcp.connected;
   const topSev = dashboard.inbox[0]?.severity ?? "attention";
+  const runs = dashboard.workflowRuns ?? [];
 
-  // Reserve room for the right-hand rollup so the line never wraps to 2 rows
-  // (which would overflow the fixed-height shell and overlap the row above).
-  const rightLen = (attention > 0 ? 6 : 0) + (agents.length > 0 ? 10 : 0) + 10;
-  const leftRoom = Math.max(12, width - rightLen);
+  const rightParts = [
+    attention > 0 ? `!${attention}` : "",
+    runs.length > 0 ? `runs ${runs.length}` : "",
+    agents.length > 0 ? `agents ${agents.length}` : "",
+    dashboard.timers.length > 0 ? `tmr ${dashboard.timers.length}` : "",
+    connected ? "MCP" : "DEGRADED",
+  ].filter(Boolean);
+  const rightText = rightParts.join(" · ");
+  const leftText =
+    scrollOffset > 0
+      ? `history -${scrollOffset} · PgDn/End`
+      : `latest · PgUp history${tier ? ` · ${tier.toUpperCase()}` : ""}`;
+  const leftRoom = Math.max(8, width - rightText.length - 3);
 
   return (
     <Box justifyContent="space-between">
-      <Box>
-        {active ? (
-          <Text wrap="truncate">
-            <StateBadge tone={active.badge.tone} label={active.badge.label} />
-            <Text dimColor>
-              {" "}
-              {active.id} ·{" "}
-              {truncate(active.goal || active.title, Math.max(6, leftRoom - active.id.length - 14))}{" "}
-              {formatDuration(Math.max(0, now - active.startedAt))}
-            </Text>
-          </Text>
-        ) : (
-          <Text dimColor wrap="truncate">
-            Standing by{tier ? ` · ${tier.toUpperCase()}` : ""}
-          </Text>
-        )}
-      </Box>
+      <Text dimColor wrap="truncate">
+        {truncate(leftText, leftRoom)}
+      </Text>
       <Box>
         {attention > 0 ? (
           <Text color={toneColor(severityTone(topSev))}>
@@ -63,8 +54,14 @@ export function StatusLine({
             <Text dimColor> · </Text>
           </Text>
         ) : null}
+        {runs.length > 0 ? (
+          <Text dimColor>runs {runs.length} · </Text>
+        ) : null}
         {agents.length > 0 ? (
           <Text dimColor>agents {agents.length} · </Text>
+        ) : null}
+        {dashboard.timers.length > 0 ? (
+          <Text dimColor>tmr {dashboard.timers.length} · </Text>
         ) : null}
         {connected ? (
           <Text color={ui.color.accent}>MCP</Text>

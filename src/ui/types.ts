@@ -13,6 +13,7 @@ import type {
   QueueEvent,
   TimerRecord,
   WatcherRecord,
+  WorkflowRunRecord,
 } from "../schemas.js";
 import type { McpStatus } from "../mcp/client.js";
 
@@ -93,6 +94,8 @@ export interface PendingConfirm {
 
 export interface DashboardState {
   mcp: McpStatus;
+  /** Durable issue/PR/work ledger rows. Optional for older tests/callers. */
+  workflowRuns?: WorkflowRunRecord[];
   watchers: WatcherRecord[];
   timers: TimerRecord[];
   inbox: QueueEvent[];

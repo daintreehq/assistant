@@ -34,18 +34,19 @@ function watcher(over: Partial<WatcherRecord> = {}): WatcherRecord {
 const event = (severity: string) => ({ id: severity, severity }) as any;
 
 describe("StatusLine", () => {
-  it("stands by when nothing is active, surfacing the tier", () => {
+  it("shows latest/history affordance, tier, and MCP health", () => {
     const frame = render(<StatusLine dashboard={dash()} tier="operator" />).lastFrame() ?? "";
-    expect(frame).toContain("Standing by");
+    expect(frame).toContain("latest");
+    expect(frame).toContain("PgUp history");
     expect(frame).toContain("OPERATOR");
     expect(frame).toContain("MCP");
   });
 
-  it("prefers the current active agent over inventory counts", () => {
+  it("keeps work detail out of the footer and shows only inventory counts", () => {
     const frame =
       render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
-    expect(frame).toContain("WORKING"); // active agent badge
-    expect(frame).toContain("term_8"); // the supervised terminal
+    expect(frame).not.toContain("WORKING"); // work detail belongs in the ledger
+    expect(frame).not.toContain("term_8");
     expect(frame).toContain("agents 1"); // compact rollup on the right
   });
 
@@ -61,5 +62,12 @@ describe("StatusLine", () => {
       render(<StatusLine dashboard={dash({ mcp: { connected: false } as any })} />).lastFrame() ??
       "";
     expect(frame).toContain("DEGRADED");
+  });
+
+  it("shows when the user is reading history", () => {
+    const frame =
+      render(<StatusLine dashboard={dash()} scrollOffset={24} />).lastFrame() ?? "";
+    expect(frame).toContain("history -24");
+    expect(frame).toContain("PgDn/End");
   });
 });

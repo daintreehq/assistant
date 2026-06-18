@@ -31,11 +31,10 @@ function suggestionsFor(value: string): Array<[string, string]> {
 }
 
 /**
- * The composer. Two visual layers: the input line (a single `›` — Daintree is
- * already named in the header) and a context line whose right side reflects the
- * session, not a fixed shortcut string. Typing `/` opens a command palette;
- * Tab completes the top match. While busy, the actual stage is shown, not a
- * generic "thinking".
+ * The composer is always fixed to the bottom. Guidance stays short here; the
+ * scrollable intro/help surfaces carry the long explanations. Typing `/` opens a
+ * command palette; Tab completes the top match. While busy, the actual stage is
+ * shown, not a generic "thinking".
  */
 export function Composer({
   busy,
@@ -58,6 +57,7 @@ export function Composer({
   const [value, setValue] = useState("");
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
   const set = glyphs();
+  const compactHints = width < 64;
 
   useInput(
     (_input, key) => {
@@ -98,7 +98,7 @@ export function Composer({
               setValue("");
               void onSubmit(trimmed);
             }}
-            placeholder="Ask Daintree to supervise, delegate, or inspect…"
+            placeholder="Ask Daintree..."
           />
         </Box>
         {busy ? (
@@ -112,9 +112,11 @@ export function Composer({
 
       <Box justifyContent="space-between">
         <Box>
-          <KeyHint keyName="/" action="commands" />
+          <KeyHint keyName="/" action={compactHints ? "cmd" : "commands"} />
           <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="^O" action="inspect ops" />
+          <KeyHint keyName="PgUp" action={compactHints ? "hist" : "history"} />
+          <Text dimColor>{" · "}</Text>
+          <KeyHint keyName="^O" action="ops" />
         </Box>
         {contextHint ? <Text dimColor>{contextHint}</Text> : null}
       </Box>

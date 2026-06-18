@@ -5,28 +5,21 @@
  * the controller, the gallery feeds it from frozen fixtures, and golden-frame
  * tests feed it fixed timestamps.
  *
- * Three intentional layouts chosen by width. The 55–65 column SIDEBAR is the
- * canonical Daintree surface (it usually lives in a host side panel), so it is
- * operations-first with conversation integrated; standard/wide are progressive
- * enhancements that hand more room to the transcript. Chrome is budgeted so the
- * operations sections and composer are never pushed off a short terminal.
+ * One intentional home layout: a vertical ledger with a fixed composer. Wider
+ * terminals get longer lines, not side rails. Operational detail is still
+ * available as a full-screen view, but the default surface stays Claude/Codex
+ * shaped: startup block at the top, history below, prompt at the bottom.
  */
-import { Box, Text } from "ink";
+import { Box } from "ink";
 import type { DashboardState, PendingConfirm, TranscriptCell } from "./types.js";
 import type { TerminalPreview } from "./hooks/useTerminalPreview.js";
-import { Header } from "./components/Header.js";
 import { Transcript } from "./components/Transcript.js";
-import { SidebarHome } from "./components/SidebarHome.js";
 import { OperationsView } from "./components/OperationsView.js";
-import { OpsRail } from "./components/OpsRail.js";
 import { StatusLine } from "./components/StatusLine.js";
-import { AttentionBanner } from "./components/AttentionBanner.js";
 import { Composer } from "./components/Composer.js";
 import { ApprovalSheet } from "./components/ApprovalSheet.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
-import { StateBadge, formatDuration } from "./primitives.js";
 import { buildAgentRows } from "./presentation/operations.js";
-import { truncate } from "../utils/text.js";
 
 export type LayoutMode = "sidebar" | "standard" | "wide";
 export type View = "home" | "operations" | "help";
@@ -63,6 +56,8 @@ export interface ControlRoomProps {
   view: View;
   expanded?: boolean;
   pending?: PendingConfirm | null;
+  /** Rendered-line offset into history. 0 means pinned to latest. */
+  scrollOffset?: number;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
   composerFocus?: boolean;
@@ -84,55 +79,29 @@ export function ControlRoom({
   view,
   expanded = false,
   pending = null,
+  scrollOffset = 0,
   now = Date.now(),
   composerFocus = false,
   onSubmit = () => {},
   onResolve = () => {},
 }: ControlRoomProps) {
-  // One cell of breathing room around the whole surface, the way other CLIs
-  // sit a little inside the terminal edge. The outer padding consumes one
-  // column/row on each edge, so the interior lays out at the host size minus
-  // two in each axis — every width/height calculation below uses these
-  // interior dimensions.
+  // One cell of breathing room around the whole surface, the way other CLIs sit
+  // a little inside the terminal edge. The interior dimensions below are the
+  // actual ledger/composer budget.
   const columns = Math.max(1, outerColumns - 2);
   const rows = Math.max(1, outerRows - 2);
-  const layout = layoutFor(columns);
   const agents = buildAgentRows(dashboard.watchers, previews);
-  const activeAgent =
-    agents.find((a) => a.classification === "still_working") ?? agents[0];
+  const runs = dashboard.workflowRuns ?? [];
 
-  // Sidebar home owns its own attention + current-operation rows (SidebarHome);
-  // wide shows them in the rail. Only standard layout gets the bottom banner and
-  // the one-line operation strip below the header.
-  const showAttention =
-    !pending && layout === "standard" && dashboard.inbox.length > 0 && view === "home";
-  // Sidebar's NOW section already names the active run, so the header subtitle
-  // is reserved for standard layout (which has no NOW section).
-  const runTitle =
-    busy && view === "home" && layout === "standard"
-      ? activeAgent?.goal ?? undefined
-      : undefined;
-
-  const headerH = runTitle ? 3 : 2;
   const composerH = 3;
   const statusH = 1;
-  const attentionH = showAttention ? 1 : 0;
-  const opStripH = layout === "standard" && view === "home" && activeAgent ? 1 : 0;
   const approvalH = pending ? 8 : 0;
-  const bodyHeight = Math.max(
-    3,
-    rows - headerH - composerH - statusH - attentionH - opStripH - approvalH,
-  );
-
-  const railWidth =
-    layout === "wide"
-      ? Math.min(40, Math.max(26, Math.floor(columns * 0.28)))
-      : 0;
-  const transcriptWidth =
-    layout === "wide" ? Math.max(40, columns - railWidth - 1) : columns;
+  const bodyHeight = Math.max(3, rows - composerH - statusH - approvalH);
 
   const contextHint = connected
-    ? `agents ${agents.length} · tmr ${dashboard.timers.length}`
+    ? columns < 64
+      ? `${runs.length}r · ${agents.length}a · ${dashboard.timers.length}t`
+      : `${runs.length} run${runs.length === 1 ? "" : "s"} · ${agents.length} agent${agents.length === 1 ? "" : "s"} · ${dashboard.timers.length} timer${dashboard.timers.length === 1 ? "" : "s"}`
     : "MCP degraded";
 
   return (
@@ -143,32 +112,6 @@ export function ControlRoom({
       paddingX={1}
       paddingY={1}
     >
-      <Header
-        project={project}
-        tier={tier}
-        connected={connected}
-        runTitle={runTitle}
-      />
-
-      {opStripH > 0 && activeAgent ? (
-        <Box justifyContent="space-between">
-          <Text wrap="truncate">
-            <StateBadge
-              tone={activeAgent.badge.tone}
-              label={activeAgent.badge.label}
-            />
-            <Text dimColor>
-              {" "}
-              {activeAgent.id} ·{" "}
-              {truncate(activeAgent.goal || activeAgent.title, Math.max(8, columns - 30))}
-            </Text>
-          </Text>
-          <Text dimColor>
-            {formatDuration(Math.max(0, now - activeAgent.startedAt))}
-          </Text>
-        </Box>
-      ) : null}
-
       <Box height={bodyHeight} flexDirection="column" overflow="hidden">
         {view === "help" ? (
           <Box height={bodyHeight}>
@@ -183,36 +126,6 @@ export function ControlRoom({
               now={now}
             />
           </Box>
-        ) : layout === "wide" ? (
-          <Box height={bodyHeight}>
-            <Box width={transcriptWidth} overflow="hidden">
-              <Transcript
-                cells={transcript}
-                height={bodyHeight}
-                width={transcriptWidth}
-                now={now}
-                expanded={expanded}
-              />
-            </Box>
-            <Box width={railWidth} marginLeft={1}>
-              <OpsRail
-                dashboard={dashboard}
-                previews={previews}
-                width={railWidth}
-                now={now}
-              />
-            </Box>
-          </Box>
-        ) : layout === "sidebar" ? (
-          <SidebarHome
-            dashboard={dashboard}
-            previews={previews}
-            transcript={transcript}
-            width={columns}
-            height={bodyHeight}
-            now={now}
-            expanded={expanded}
-          />
         ) : (
           <Transcript
             cells={transcript}
@@ -220,13 +133,19 @@ export function ControlRoom({
             width={columns}
             now={now}
             expanded={expanded}
+            scrollOffset={scrollOffset}
+            intro={{
+              project,
+              tier,
+              connected,
+              dashboard,
+              previews,
+              busy,
+              stage,
+            }}
           />
         )}
       </Box>
-
-      {showAttention ? (
-        <AttentionBanner events={dashboard.inbox} width={columns} />
-      ) : null}
 
       {pending ? (
         <ApprovalSheet
@@ -236,7 +155,13 @@ export function ControlRoom({
         />
       ) : null}
 
-      <StatusLine dashboard={dashboard} tier={tier} width={columns} now={now} />
+      <StatusLine
+        dashboard={dashboard}
+        tier={tier}
+        width={columns}
+        now={now}
+        scrollOffset={scrollOffset}
+      />
 
       <Composer
         busy={busy}
