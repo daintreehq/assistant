@@ -328,6 +328,12 @@ export interface AuditRecord {
   durationMs: number;
   summary: string;
   resultJson?: string;
+  // Provenance of the grant that authorized a "grant_ok" outcome, so audit
+  // summaries can distinguish a purely local grant from a (future) Daintree
+  // session grant. Absent on every non-grant_ok row. See AutomationGrantSource.
+  grantSource?: AutomationGrantSource;
+  /** Id of the grant consumed for a "grant_ok" outcome. Absent otherwise. */
+  grantId?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -336,6 +342,18 @@ export interface AuditRecord {
 
 /** Which kind of non-interactive actor a grant is scoped to. */
 export type AutomationGrantActorType = "watcher" | "timer";
+
+/**
+ * Where a grant's authority is anchored.
+ *   - "local"    — authority lives entirely in this CLI's SQLite store (today's
+ *                  behaviour, and the only kind mintable now).
+ *   - "daintree" — the grant mirrors a Daintree native session-scoped grant, so
+ *                  it is visible/revocable from the Daintree app. Reserved for
+ *                  when Daintree exposes an external grants API; no code path
+ *                  mints one yet. The column exists so the two lifecycles never
+ *                  diverge silently once the bridge lands.
+ */
+export type AutomationGrantSource = "local" | "daintree";
 
 /**
  * A scoped, expiring authorization that lets a specific watcher/timer perform a
@@ -362,6 +380,9 @@ export interface AutomationGrantRecord {
   usesRemaining: number;
   revokedAt: number | null;
   createdAt: number;
+  // Provenance of the grant's authority. Always "local" today; the column lets
+  // a future Daintree-backed grant be told apart in listings and audit.
+  source: AutomationGrantSource;
 }
 
 export interface ConversationMessageRecord {

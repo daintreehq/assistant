@@ -295,10 +295,15 @@ export async function handleUiCommand(
         title: `Audit (last ${rows.length})`,
         text:
           rows
-            .map(
-              (r) =>
-                `${new Date(r.ts).toLocaleTimeString()} ${r.toolName.padEnd(22)} ${r.outcome} ${r.durationMs}ms — ${r.summary}`,
-            )
+            .map((r) => {
+              // Tag grant-authorized calls with the grant's provenance so a local
+              // grant is distinguishable from a (future) Daintree session grant.
+              const outcome =
+                r.outcome === "grant_ok" && r.grantSource
+                  ? `grant_ok[${r.grantSource}]`
+                  : r.outcome;
+              return `${new Date(r.ts).toLocaleTimeString()} ${r.toolName.padEnd(22)} ${outcome} ${r.durationMs}ms — ${r.summary}`;
+            })
             .join("\n") || "(none)",
       };
     }

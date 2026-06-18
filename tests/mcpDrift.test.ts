@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   DaintreeMcpClient,
+  DAINTREE_GRANT_TOOL_NAMES,
+  toolsAdvertiseGrantSupport,
   type LowLevelMcpClient,
 } from "../src/mcp/client.js";
 import type { AppConfig } from "../src/config.js";
@@ -80,5 +82,42 @@ describe("DaintreeMcpClient drift detection (#7)", () => {
     const st = await client.connect();
     expect(st.connected).toBe(true);
     expect(st.driftWarnings).toBeUndefined();
+  });
+});
+
+describe("Daintree grant-support capability seam (#24)", () => {
+  it("DAINTREE_GRANT_TOOL_NAMES is empty until Daintree exposes an external grants API", () => {
+    expect(Array.isArray(DAINTREE_GRANT_TOOL_NAMES)).toBe(true);
+    expect(DAINTREE_GRANT_TOOL_NAMES.length).toBe(0);
+  });
+
+  it("toolsAdvertiseGrantSupport is false with the empty default allowlist, regardless of live tools", () => {
+    expect(toolsAdvertiseGrantSupport([{ name: "session.grant.create" }])).toBe(
+      false,
+    );
+    expect(toolsAdvertiseGrantSupport([])).toBe(false);
+  });
+
+  it("toolsAdvertiseGrantSupport lights up once the allowlist is populated and a live tool matches", () => {
+    const allow = ["session.grant.create"];
+    expect(
+      toolsAdvertiseGrantSupport([{ name: "session.grant.create" }], allow),
+    ).toBe(true);
+    expect(toolsAdvertiseGrantSupport([{ name: "terminal.list" }], allow)).toBe(
+      false,
+    );
+  });
+
+  it("hasDaintreeGrantSupport() is false today even when connected with a full tool set", async () => {
+    const client = makeClient([...DOCUMENTED_MCP_TOOL_NAMES]);
+    await client.connect();
+    expect(client.isConnected()).toBe(true);
+    expect(client.hasDaintreeGrantSupport()).toBe(false);
+  });
+
+  it("hasDaintreeGrantSupport() is false when disconnected", () => {
+    const client = new DaintreeMcpClient({} as AppConfig);
+    expect(client.isConnected()).toBe(false);
+    expect(client.hasDaintreeGrantSupport()).toBe(false);
   });
 });

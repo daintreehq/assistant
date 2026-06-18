@@ -35,9 +35,16 @@ async function passthrough(
     };
     const res = await ctx.mcp.callTool(mcpName, callArgs);
     if (res.isError) {
-      return fail("MCP_TOOL_ERROR", res.text || `Daintree tool ${mcpName} returned an error.`, {
-        details: { structuredContent: res.structuredContent },
-      });
+      // Carry Daintree's own refusal text into the failure summary so a denied
+      // grant-authorized mutation surfaces *why* it was refused (e.g. a revoked
+      // session grant) rather than a generic error, all the way to the queue.
+      return fail(
+        "MCP_TOOL_ERROR",
+        res.text
+          ? `Daintree refused ${mcpName}: ${res.text}`
+          : `Daintree tool ${mcpName} returned an error.`,
+        { details: { structuredContent: res.structuredContent, rawText: res.text } },
+      );
     }
     return ok(`Called ${mcpName}.`, {
       text: res.text,

@@ -72,6 +72,63 @@ describe("typed Daintree wrappers vs daintree.call (#2)", () => {
   });
 });
 
+describe("Daintree refusal text surfaces in the failure summary (#24)", () => {
+  /** A ctx whose MCP returns an isError result carrying Daintree's reason text. */
+  function errorCtx(reason: string): ToolContext {
+    const mcp = {
+      isConnected: () => true,
+      callTool: async () => ({
+        text: reason,
+        content: [{ type: "text", text: reason }],
+        structuredContent: undefined,
+        isError: true,
+      }),
+    } as unknown as ToolContext["mcp"];
+    return {
+      config: { tier: "operator" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+  }
+
+  it("prefixes the refusal with 'Daintree refused <tool>:' and keeps the reason", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const res = await reg.dispatch(
+      "recipe.run",
+      { recipeId: "pr-review" },
+      errorCtx("session grant revoked"),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("MCP_TOOL_ERROR");
+      expect(res.summary).toContain("Daintree refused recipe.run");
+      expect(res.summary).toContain("session grant revoked");
+    }
+  });
+
+  it("falls back to a generic message when Daintree returns no reason text", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const res = await reg.dispatch(
+      "recipe.run",
+      { recipeId: "pr-review" },
+      errorCtx(""),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.summary).toContain("recipe.run");
+      expect(res.summary).toContain("returned an error");
+    }
+  });
+});
+
 describe("typed forge + workflow wrappers (#26)", () => {
   it("forge reads forward arguments to the right MCP tools at operator tier", async () => {
     const reg = new ToolRegistry();

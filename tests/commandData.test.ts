@@ -55,6 +55,34 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(r.title).toContain("Inbox");
   });
 
+  it("/audit tags a grant_ok row with the grant's source", async () => {
+    app.db.insertAudit({
+      actor: "watcher",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 5,
+      summary: "committed",
+      grantSource: "local",
+      grantId: "grt_x",
+    });
+    app.db.insertAudit({
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read",
+    });
+    const r = await handleUiCommand("/audit", app);
+    expect(r.switchPanel).toBe("audit");
+    expect(r.text).toContain("grant_ok[local]");
+    // A plain ok row is not tagged with a source bracket.
+    const readLine = r.text!.split("\n").find((l) => l.includes("fs.read"))!;
+    expect(readLine).toContain(" ok ");
+    expect(readLine).not.toContain("[");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);
