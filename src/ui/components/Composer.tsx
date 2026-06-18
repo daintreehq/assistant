@@ -16,7 +16,7 @@ export function Composer({
 }) {
   const [value, setValue] = useState("");
   return (
-    <Box borderStyle="single" paddingX={1} alignItems="center">
+    <Box alignItems="center">
       <Text color={theme.brand}>daintree ❯ </Text>
       <Box flexGrow={1}>
         <TextInput

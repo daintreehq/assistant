@@ -83,6 +83,32 @@ export function watcherBadge(classification?: string): WatcherBadge {
   }
 }
 
+// Severity ranks for ordering (lower = more urgent). The status line and the
+// attention banner share this so they never disagree on the worst event.
+const SEVERITY_RANK: Record<string, number> = {
+  blocked: 0,
+  urgent: 0,
+  error: 1,
+  attention: 2,
+  done: 4,
+  info: 5,
+  debug: 6,
+};
+
+/** The most urgent severity among the events, or null when there are none. */
+export function topSeverity(events: ReadonlyArray<{ severity: string }>): string | null {
+  let best: string | null = null;
+  let bestRank = Infinity;
+  for (const e of events) {
+    const rank = SEVERITY_RANK[e.severity] ?? 3;
+    if (rank < bestRank) {
+      bestRank = rank;
+      best = e.severity;
+    }
+  }
+  return best;
+}
+
 /** Map a queue severity to a signature glyph + color. */
 export function severitySymbol(severity: string): { symbol: string; color: string } {
   switch (severity) {

@@ -1,47 +1,46 @@
 import { useState } from "react";
-import { Box, useApp, useInput, useWindowSize } from "ink";
+import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { App as DaintreeApp } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { Header } from "./components/Header.js";
 import { Timeline } from "./components/Timeline.js";
 import { OpsSidebar } from "./components/OpsSidebar.js";
+import { StatusLine } from "./components/StatusLine.js";
+import { AttentionBanner } from "./components/AttentionBanner.js";
 import { Composer } from "./components/Composer.js";
 import { ConfirmModal } from "./components/ConfirmModal.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
-import { SidebarShell } from "./sidebar/SidebarShell.js";
-
-export type LayoutMode = "sidebar" | "balanced" | "wide";
+import { theme } from "./theme.js";
 
 /**
- * Pick a layout mode from the terminal width. Below 72 cols (the Daintree
- * sidebar default) we drop the two-pane chat layout entirely for a single-column
- * operations cockpit — the deck is the product surface, never hidden.
+ * One single-column layout at every width — a calm conversation-first cockpit,
+ * not a fixed-pane dashboard. Top to bottom: identity header → transcript →
+ * (conditional) attention banner → status line → borderless composer.
+ *
+ * Operational detail (watchers, terminals, timers, audit) is detail-on-demand:
+ * `^O` opens a full-width overlay over the transcript, `Esc` closes it. Ambient
+ * awareness lives in two cheap places instead of a sidebar — discrete events
+ * flow through the transcript, continuous counts roll up onto the status line.
  */
-export function layoutMode(columns: number): LayoutMode {
-  if (columns < 72) return "sidebar";
-  if (columns < 110) return "balanced";
-  return "wide";
-}
-
 export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
   const [showHelp, setShowHelp] = useState(false);
-  const [showOps, setShowOps] = useState(true);
+  const [showOps, setShowOps] = useState(false);
   const controller = useDaintreeController(app, exit);
-  const mode = layoutMode(columns);
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
       return;
     }
+    if (key.escape) {
+      setShowOps(false);
+      setShowHelp(false);
+      return;
+    }
     if (input === "?") {
-      if (mode === "sidebar") {
-        controller.setActivePanel(controller.activePanel === "help" ? null : "help");
-      } else {
-        setShowHelp((v) => !v);
-      }
+      setShowHelp((v) => !v);
       return;
     }
     if (key.ctrl && input === "o") {
@@ -49,39 +48,41 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     }
   });
 
-  // Narrow widths become the single-column cockpit instead of hiding the deck.
-  if (mode === "sidebar") {
-    return (
-      <SidebarShell app={app} controller={controller} columns={columns} rows={rows} />
-    );
-  }
-
-  const headerHeight = 3;
-  const composerHeight = 3;
-  // Clamp so the body never exceeds the remaining rows on a short terminal
-  // (which would push the composer off-screen / overflow the root).
-  const bodyHeight = Math.max(3, rows - headerHeight - composerHeight);
-  // Wide keeps the roomy fixed deck; balanced gets a slimmer width-aware deck
-  // that ^O can toggle away to give the chat the full pane.
-  const deckWidth = mode === "wide" ? 44 : Math.max(32, Math.min(42, columns - 44));
+  const showBanner =
+    !controller.pendingConfirm && controller.dashboard.inbox.length > 0;
+  const headerHeight = 2; // identity line + its bottom margin
+  const chromeHeight = headerHeight + 1 /* status */ + 1 /* composer */ + (showBanner ? 1 : 0);
+  // Clamp so the transcript never pushes the composer off a short terminal.
+  const bodyHeight = Math.max(3, rows - chromeHeight);
 
   return (
     <Box flexDirection="column" height={rows} width={columns}>
-      <Header app={app} dashboard={controller.dashboard} />
-      <Box height={bodyHeight} flexDirection="row">
-        <Box flexGrow={1} flexDirection="column" paddingRight={1}>
-          <Timeline items={controller.timeline} height={bodyHeight} />
-        </Box>
+      <Header app={app} />
+      <Box flexGrow={1} flexDirection="column" overflow="hidden">
         {showOps ? (
-          <Box width={deckWidth} borderStyle="round" paddingX={1}>
+          <Box
+            flexDirection="column"
+            height={bodyHeight}
+            borderStyle="round"
+            borderColor={theme.border}
+            paddingX={1}
+            overflow="hidden"
+          >
             <OpsSidebar
               app={app}
               dashboard={controller.dashboard}
-              height={bodyHeight - 2}
+              height={Math.max(3, bodyHeight - 3)}
             />
+            <Text dimColor>Esc close · ^O toggle</Text>
           </Box>
-        ) : null}
+        ) : (
+          <Timeline items={controller.timeline} height={bodyHeight} />
+        )}
       </Box>
+      {showBanner ? (
+        <AttentionBanner events={controller.dashboard.inbox} />
+      ) : null}
+      <StatusLine dashboard={controller.dashboard} />
       <Composer
         busy={controller.busy}
         focus={!controller.busy && !controller.pendingConfirm}

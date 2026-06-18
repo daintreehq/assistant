@@ -14,7 +14,7 @@ const ROWS: Array<[string, string]> = [
   ["/quit", "exit"],
   ["", ""],
   ["?", "toggle this help"],
-  ["^O", "toggle the operations deck"],
+  ["^O", "toggle the operations overlay"],
   ["^C", "shut down cleanly"],
 ];
 

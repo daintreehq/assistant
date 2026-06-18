@@ -8,7 +8,7 @@ import { DaintreeInkApp } from "../../src/ui/DaintreeInkApp.js";
 const tick = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 
 describe("DaintreeInkApp (full mount, offline)", () => {
-  it("renders the cockpit: header, ops deck, composer", async () => {
+  it("renders the single-column cockpit: header, status line, composer", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-ink-"));
     const app = App.create({
       overrides: { offline: true, stateDir, projectPath: stateDir, tier: "operator" },
@@ -18,14 +18,15 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await tick(); // let mount effects (connect + scheduler + first poll) settle
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Daintree Assistant");
+    expect(frame).toContain("Daintree"); // identity header
     expect(frame).toContain("daintree ❯"); // composer prompt
-    // Offline → MCP degraded shows in the header and the mount log lands in the
-    // timeline (which is why the empty hint is gone by now).
+    // Offline → the status line flags "⚠ degraded" and the mount log lands in
+    // the timeline (which is why the empty hint is gone by now).
     expect(frame).toContain("degraded");
     expect(frame).toContain("not connected");
-    // The ops deck collapses on narrow terminals (<110 cols); the test stdout is
-    // 100 cols, so it's hidden here. The deck itself is covered by OpsSidebar.test.
+    // The operations deck is never inline now — it lives behind ^O. This test
+    // only covers the default surface; the deck itself is covered by
+    // OpsSidebar.test.
 
     unmount();
     // After teardown, a confirm requested by an in-flight tool call must
