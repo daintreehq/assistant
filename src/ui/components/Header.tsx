@@ -24,12 +24,18 @@ export function Header({
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box justifyContent="space-between">
-        <Box>
+        {/* Left gives way first (the project name truncates); the right-hand
+            tier + connection badge never shrinks. Without these guards a real
+            terminal briefly narrower than the laid-out width (a resize/host
+            race) detonates the row into a vertical char-by-char stack. */}
+        <Box flexShrink={1} minWidth={0}>
           <BrandMark />
           <Text dimColor>{"  "}</Text>
-          <Text dimColor>{project}</Text>
+          <Text dimColor wrap="truncate">
+            {project}
+          </Text>
         </Box>
-        <Box>
+        <Box flexShrink={0}>
           <Text dimColor>{tier.toUpperCase()}</Text>
           <Text>{"  "}</Text>
           {connected ? (

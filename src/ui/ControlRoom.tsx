@@ -73,8 +73,8 @@ export interface ControlRoomProps {
 export function ControlRoom({
   project,
   tier,
-  columns,
-  rows,
+  columns: outerColumns,
+  rows: outerRows,
   connected,
   transcript,
   dashboard,
@@ -89,6 +89,13 @@ export function ControlRoom({
   onSubmit = () => {},
   onResolve = () => {},
 }: ControlRoomProps) {
+  // One cell of breathing room around the whole surface, the way other CLIs
+  // sit a little inside the terminal edge. The outer padding consumes one
+  // column/row on each edge, so the interior lays out at the host size minus
+  // two in each axis — every width/height calculation below uses these
+  // interior dimensions.
+  const columns = Math.max(1, outerColumns - 2);
+  const rows = Math.max(1, outerRows - 2);
   const layout = layoutFor(columns);
   const agents = buildAgentRows(dashboard.watchers, previews);
   const activeAgent =
@@ -129,7 +136,13 @@ export function ControlRoom({
     : "MCP degraded";
 
   return (
-    <Box flexDirection="column" height={rows} width={columns}>
+    <Box
+      flexDirection="column"
+      height={outerRows}
+      width={outerColumns}
+      paddingX={1}
+      paddingY={1}
+    >
       <Header
         project={project}
         tier={tier}
