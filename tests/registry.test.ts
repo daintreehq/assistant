@@ -197,6 +197,31 @@ describe("ToolRegistry.dispatch", () => {
     expect(res2.error?.code).toBe("CONFIRMATION_REQUIRED");
   });
 
+  it("stamps the grant's actual source on the audit row, not a hardcoded 'local'", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    ctx.actorId = "wch_d";
+    // A (future) Daintree-backed grant: prove audit provenance reflects it.
+    const grant = db.insertGrant({
+      actorId: "wch_d",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      source: "daintree",
+    });
+    expect(grant.source).toBe("daintree");
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    const audit = db.listAudit()[0];
+    expect(audit.outcome).toBe("grant_ok");
+    expect(audit.grantSource).toBe("daintree");
+    expect(audit.grantId).toBe(grant.id);
+  });
+
   it("authorizes by tool name as well as risk class", async () => {
     const reg = new ToolRegistry();
     reg.register(projectTool);

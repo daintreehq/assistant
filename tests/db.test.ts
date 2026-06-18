@@ -104,6 +104,10 @@ describe("Db migration v3 -> v4 (grant provenance)", () => {
     const db = new Db(path);
     const old = db.getGrant("grt_old");
     expect(old?.source).toBe("local");
+    // The backfilled source also flows through the consume path, not just getGrant.
+    const consumed = db.consumeGrant("wch_old", "watcher", "git.commit", "git");
+    expect(consumed?.id).toBe("grt_old");
+    expect(consumed?.source).toBe("local");
     // New inserts can carry an explicit source and audit grant provenance.
     const fresh = db.insertGrant({
       actorId: "wch_new",

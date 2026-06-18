@@ -83,6 +83,23 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(readLine).not.toContain("[");
   });
 
+  it("/audit renders a sourceless grant_ok row (pre-v4 rows) without a bracket", async () => {
+    // A grant_ok row whose grantSource is absent (as migrated pre-v4 rows are)
+    // must render plain 'grant_ok', never 'grant_ok[undefined]'.
+    app.db.insertAudit({
+      actor: "watcher",
+      toolName: "git.push",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 2,
+      summary: "pushed",
+    });
+    const r = await handleUiCommand("/audit", app);
+    const line = r.text!.split("\n").find((l) => l.includes("git.push"))!;
+    expect(line).toContain("grant_ok ");
+    expect(line).not.toContain("grant_ok[");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);

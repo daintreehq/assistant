@@ -116,7 +116,13 @@ export async function handleSlashCommand(
       const rows = app.db.listAudit(n);
       render.line(c.bold(`\nAudit (last ${rows.length})`));
       for (const r of rows) {
-        const mark = r.outcome === "ok" ? c.green("ok") : r.outcome === "denied" ? c.yellow("denied") : c.red(r.outcome);
+        // Tag grant-authorized rows with the grant's provenance, matching the
+        // Ink UI's /audit rendering so both surfaces read the same.
+        const label =
+          r.outcome === "grant_ok" && r.grantSource
+            ? `grant_ok[${r.grantSource}]`
+            : r.outcome;
+        const mark = r.outcome === "ok" ? c.green("ok") : r.outcome === "denied" ? c.yellow("denied") : c.red(label);
         render.line(
           `  ${c.gray(new Date(r.ts).toLocaleTimeString())} ${r.toolName.padEnd(22)} ${mark} ${c.gray(`${r.durationMs}ms`)} — ${r.summary}`,
         );
