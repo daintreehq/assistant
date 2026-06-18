@@ -1,23 +1,33 @@
 import { Box, Text } from "ink";
 import type { QueueEvent } from "../../schemas.js";
-import { glyph, severityColor, topSeverity } from "../theme.js";
+import { glyphs, severityTone, toneColor, topSeverity } from "../theme.js";
+import { truncate } from "../../utils/text.js";
 
 /**
- * A sticky one-line banner that sits directly above the status line, in the
- * user's eyeline next to where they type. It renders only when the inbox has
- * items — there is no empty state. The rolled-up count points the user at the
- * `^O` operations overlay for the full queue.
+ * A one-line attention strip directly above the composer, in the user's eyeline.
+ * It names the MOST URGENT event (a title is far more useful than a bare count)
+ * and rolls the rest into "· N more", pointing at `^O` for the full queue. It
+ * renders only when the inbox has items — there is no empty state.
  */
-export function AttentionBanner({ events }: { events: QueueEvent[] }) {
+export function AttentionBanner({
+  events,
+  width = 72,
+}: {
+  events: QueueEvent[];
+  width?: number;
+}) {
   if (events.length === 0) return null;
-  const sev = topSeverity(events) ?? "attention";
-  const n = events.length;
+  const top = events[0];
+  const sev = top.severity ?? topSeverity(events) ?? "attention";
+  const more = events.length - 1;
+  const set = glyphs();
   return (
     <Box justifyContent="space-between">
-      <Text color={severityColor(sev)}>
-        {glyph.attention} {n} {n === 1 ? "item needs" : "items need"} attention
+      <Text color={toneColor(severityTone(sev))}>
+        {set.attention} {truncate(top.title ?? "needs attention", width - 18)}
+        {more > 0 ? <Text dimColor> · {more} more</Text> : null}
       </Text>
-      <Text dimColor>^O ops</Text>
+      <Text dimColor>^O inspect</Text>
     </Box>
   );
 }

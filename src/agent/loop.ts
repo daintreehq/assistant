@@ -270,9 +270,15 @@ export class AgentSession {
           parseFailed = true;
         }
 
+        const startedAt = Date.now();
         let res: ToolResult;
         if (parseFailed) {
-          this.events.toolCall(internalName, call.function.arguments);
+          this.events.toolCall({
+            id: call.id,
+            name: internalName,
+            args: call.function.arguments,
+            startedAt,
+          });
           res = {
             ok: false,
             summary: `Invalid JSON arguments for ${internalName}; not executed.`,
@@ -283,14 +289,19 @@ export class AgentSession {
             },
           };
         } else {
-          this.events.toolCall(internalName, args);
+          this.events.toolCall({ id: call.id, name: internalName, args, startedAt });
           res = await this.deps.registry.dispatch(
             internalName,
             args,
             this.deps.ctx,
           );
         }
-        this.events.toolResult(internalName, res);
+        this.events.toolResult({
+          id: call.id,
+          name: internalName,
+          result: res,
+          endedAt: Date.now(),
+        });
 
         this.pushMessage({
           role: "tool",

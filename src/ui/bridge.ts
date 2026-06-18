@@ -14,8 +14,8 @@ export type UiBridgeEvent =
   | { type: "assistant:start" }
   | { type: "assistant:token"; token: string }
   | { type: "assistant:end"; content: string }
-  | { type: "tool:call"; name: string; args: unknown }
-  | { type: "tool:result"; name: string; result: ToolResult }
+  | { type: "tool:call"; id: string; name: string; args: unknown; startedAt: number }
+  | { type: "tool:result"; id: string; name: string; result: ToolResult; endedAt: number }
   | { type: "log"; level: "info" | "warn" | "error"; message: string }
   | { type: "confirm"; pending: PendingConfirm }
   | { type: "attention"; events: unknown[] };
@@ -47,9 +47,10 @@ export class UiBridge {
       assistantStart: () => this.emit({ type: "assistant:start" }),
       assistantToken: (token) => this.emit({ type: "assistant:token", token }),
       assistantEnd: (content) => this.emit({ type: "assistant:end", content }),
-      toolCall: (name, args) => this.emit({ type: "tool:call", name, args }),
-      toolResult: (name, result) =>
-        this.emit({ type: "tool:result", name, result }),
+      toolCall: ({ id, name, args, startedAt }) =>
+        this.emit({ type: "tool:call", id, name, args, startedAt }),
+      toolResult: ({ id, name, result, endedAt }) =>
+        this.emit({ type: "tool:result", id, name, result, endedAt }),
       error: (message) => this.emit({ type: "log", level: "error", message }),
       info: (message) => this.emit({ type: "log", level: "info", message }),
     };

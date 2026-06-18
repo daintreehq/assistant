@@ -37,27 +37,54 @@ npm run dev -- "which worktrees are ready for review?"
 npm run dev -- doctor
 ```
 
-The default interactive experience is an **Ink operations cockpit** that adapts
-to the terminal width — important because Daintree usually hosts it in a narrow
-side panel:
+The default interactive experience is the **Daintree Control Room** — a living
+orchestration surface, not a chat box. Delegated work forms a visible tree
+(request → decision → agent → watcher → outcome), and it adapts to the terminal
+width because Daintree usually hosts it in a narrow side panel:
 
-- **wide** (≥110 cols): streaming chat/decisions timeline on the left, a live
-  **Operations Deck** on the right (watchers, watched-terminal previews, attention
-  inbox, scheduled timers, recent audit).
-- **balanced** (72–109 cols): the same two panes with a slimmer deck; `^O` toggles
-  the deck away to give the chat the full pane.
-- **sidebar** (<72 cols): a single-column **operations cockpit**. Instead of
-  hiding the deck, it *becomes* the product surface — a 2-line status capsule, a
-  "Now" card (what Daintree is doing), then **Needs attention**, **Watchers**,
-  **Terminals**, **Timers**, and **Audit** in human-priority order, with chat
-  reduced to a "Recent" strip. Rows degrade gracefully (comfortable → compact →
-  dense) as height/width shrink. Slash commands open full-screen focus pages;
-  `Esc` returns home.
+```
+◆ DAINTREE  assistant-main                         OPERATOR  ● CONNECTED
+YOU
+Fix the watcher tests and tell me when the branch is ready.
+◆ DAINTREE
+I'll delegate the edit and supervise the result.
+├─ ✓ Inspected   tests/ui                                      180ms
+├─ ✓ Delegated   term_8 · repair watcher tests
+╰─ ◌ Watching    tests running · 42 passed                      18s
+──────────────────────────────────────────────────────────────────────
+› Ask Daintree to supervise, delegate, or inspect…
+  / commands   ^O operations                    1 agent active · MCP
+```
 
-Risky actions raise an in-UI confirmation (a modal in wide/balanced, an inline
-card in sidebar mode); `?` toggles help, `^C` shuts down the scheduler, MCP, and
-DB cleanly. One-shot prompts and non-TTY invocations use the console renderer
-instead.
+- **wide** (≥116 cols): the run-oriented transcript on the left, a quiet
+  **operations rail** on the right (NOW / ATTENTION / NEXT).
+- **standard** (72–115 cols): conversation-first, with a one-line current-operation
+  strip below the header.
+- **narrow** (<72 cols): a compact identity row, current-operation strip,
+  transcript, and an attention line above the composer.
+
+Operational detail is a purposeful **view**, not a text dump: `^O` opens the
+operations surface (NOW → NEEDS ATTENTION → AGENTS → SCHEDULED → RECENT, with
+watchers and terminals merged into single agent rows and recommended actions
+exposed), and `/watchers`, `/inbox`, `/timers`, `/audit` open it directly. `^X`
+reveals raw tool args/results in the transcript; `Esc` returns home; `^C` shuts
+down the scheduler, MCP, and DB cleanly.
+
+Risky actions raise a full-width **approval sheet** above the composer with a
+risk-specific question (e.g. "Push branch to origin?") that defaults visually to
+decline and stays readable with color stripped. One-shot prompts and non-TTY
+invocations use the console renderer instead.
+
+### UI gallery (visual development)
+
+Iterate on the surface without a live model, scheduler, or MCP connection:
+
+```bash
+npm run ui:gallery   # 1 idle · 2 active · 3 attention · 4 approval · 5 degraded
+                     # w cycle width (52/80/120) · o operations · x detail · q quit
+```
+
+Fixtures use a frozen clock, so screenshots and golden-frame tests stay stable.
 
 Build a standalone binary entry: `npm run build` → `dist/index.js` (exposed as the
 `daintree-assistant` bin).

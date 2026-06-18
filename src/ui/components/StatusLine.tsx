@@ -1,56 +1,77 @@
+/**
+ * A single status line that prefers CURRENT STATE over inventory counts. Left:
+ * what Daintree is doing right now (the active agent, or "Standing by"). Right: a
+ * compact rollup — attention count, agent count, and the live MCP badge. The
+ * attention chip is the only saturated token; everything else stays dim.
+ *
+ *   ◌ WORKING term_8 · tests running 18s            !1 · agents 2 · MCP
+ *   Standing by                                     OPERATOR · MCP CONNECTED
+ */
 import { Box, Text } from "ink";
 import type { DashboardState } from "../types.js";
-import { glyph, severityColor, theme, topSeverity } from "../theme.js";
+import { StateBadge, formatDuration } from "../primitives.js";
+import { severityTone, toneColor, ui } from "../theme.js";
+import { truncate } from "../../utils/text.js";
+import { buildAgentRows } from "../presentation/operations.js";
 
-/**
- * The single status line that replaces the whole Operations Deck. One row of
- * packed count chips, each omitted at zero so the line never reads "0 0 0":
- *
- *   › 2  ! 1  ⏱ 1                                    ⚠ degraded
- *
- * When nothing is active it collapses to one calm token (`· watching`) instead
- * of a wall of empty sections — present and reassuring, not noisy. Only the
- * attention chip is saturated (colored by top severity); terminal/timer chips
- * stay dim because they are informational, not alarming.
- */
 export function StatusLine({
   dashboard,
+  tier,
+  width = 80,
+  now = Date.now(),
 }: {
   dashboard: DashboardState;
+  tier?: string;
+  width?: number;
+  now?: number;
 }) {
-  const terminals = dashboard.watchers.length;
-  const inbox = dashboard.inbox.length;
-  const timers = dashboard.timers.length;
-  const degraded = !dashboard.mcp.connected;
-  const idle = terminals === 0 && inbox === 0 && timers === 0;
-  const sev = topSeverity(dashboard.inbox) ?? "attention";
+  const agents = buildAgentRows(dashboard.watchers);
+  const active =
+    agents.find((a) => a.classification === "still_working") ?? agents[0];
+  const attention = dashboard.inbox.length;
+  const connected = dashboard.mcp.connected;
+  const topSev = dashboard.inbox[0]?.severity ?? "attention";
+
+  // Reserve room for the right-hand rollup so the line never wraps to 2 rows
+  // (which would overflow the fixed-height shell and overlap the row above).
+  const rightLen = (attention > 0 ? 6 : 0) + (agents.length > 0 ? 10 : 0) + 10;
+  const leftRoom = Math.max(12, width - rightLen);
 
   return (
     <Box justifyContent="space-between">
       <Box>
-        {idle ? (
-          <Text color={theme.brand} dimColor>
-            {"· watching"}
+        {active ? (
+          <Text wrap="truncate">
+            <StateBadge tone={active.badge.tone} label={active.badge.label} />
+            <Text dimColor>
+              {" "}
+              {active.id} ·{" "}
+              {truncate(active.goal || active.title, Math.max(6, leftRoom - active.id.length - 14))}{" "}
+              {formatDuration(Math.max(0, now - active.startedAt))}
+            </Text>
           </Text>
         ) : (
-          <Text>
-            {terminals > 0 ? (
-              <Text dimColor>
-                {glyph.active} {terminals}
-                {"   "}
-              </Text>
-            ) : null}
-            {inbox > 0 ? (
-              <Text color={severityColor(sev)}>
-                {glyph.attention} {inbox}
-                {"   "}
-              </Text>
-            ) : null}
-            {timers > 0 ? <Text dimColor>⏱ {timers}</Text> : null}
+          <Text dimColor wrap="truncate">
+            Standing by{tier ? ` · ${tier.toUpperCase()}` : ""}
           </Text>
         )}
       </Box>
-      {degraded ? <Text color={theme.warn}>⚠ degraded</Text> : null}
+      <Box>
+        {attention > 0 ? (
+          <Text color={toneColor(severityTone(topSev))}>
+            !{attention}
+            <Text dimColor> · </Text>
+          </Text>
+        ) : null}
+        {agents.length > 0 ? (
+          <Text dimColor>agents {agents.length} · </Text>
+        ) : null}
+        {connected ? (
+          <Text color={ui.color.accent}>MCP</Text>
+        ) : (
+          <Text color={ui.color.warning}>DEGRADED</Text>
+        )}
+      </Box>
     </Box>
   );
 }

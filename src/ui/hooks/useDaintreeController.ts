@@ -2,8 +2,9 @@
  * The controller hook owns all UI state and wires the runtime into React. It:
  *   - registers the agent-event / confirm / log hooks on the App,
  *   - connects MCP and starts the scheduler once,
- *   - reduces the bridge event stream into a timeline,
- *   - polls durable operational state (watchers/timers/inbox/audit) for the deck,
+ *   - folds the bridge event stream into a RUN-ORIENTED transcript (turns, not a
+ *     flat row list), matching tool results to their call by id,
+ *   - polls durable operational state (watchers/timers/inbox/audit),
  *   - routes slash commands through the structured command layer.
  */
 import {
@@ -17,33 +18,72 @@ import {
 import type { App } from "../../cli/app.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
 import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
+import { presentTool } from "../presentation/tools.js";
 import type {
+  ActivityItem,
   DashboardState,
   PendingConfirm,
-  TimelineItem,
+  TranscriptCell,
+  TurnCell,
 } from "../types.js";
 import type { QueueEvent } from "../../schemas.js";
 
-const MAX_TIMELINE = 200;
+const MAX_CELLS = 200;
 
 let idCounter = 0;
 function uid(prefix: string): string {
   return `${prefix}_${(idCounter++).toString(36)}`;
 }
 
-/**
- * Close out a trailing streaming-assistant row. A tool-call turn (or an error)
- * emits assistant:start but no assistant:end, which would otherwise leave a blank
- * "▌" row. Drop it if it has no visible text; otherwise stop its caret.
- */
-function finalizeStream(items: TimelineItem[]): TimelineItem[] {
-  if (items.length === 0) return items;
-  const last = items[items.length - 1];
-  if (last.kind !== "assistant" || !last.streaming) return items;
-  if (last.text.trim() === "") return items.slice(0, -1);
-  const copy = [...items];
-  copy[copy.length - 1] = { ...last, streaming: false };
+/** Index of the last turn cell when it is still active, else -1. */
+function activeTurnIndex(cells: TranscriptCell[]): number {
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const c = cells[i];
+    if (c.kind === "turn") return c.state === "active" ? i : -1;
+  }
+  return -1;
+}
+
+/** Immutably replace the cell at `index`. */
+function replaceAt(
+  cells: TranscriptCell[],
+  index: number,
+  next: TranscriptCell,
+): TranscriptCell[] {
+  const copy = [...cells];
+  copy[index] = next;
   return copy;
+}
+
+function newTurn(userText: string, now: number): TurnCell {
+  return {
+    kind: "turn",
+    id: uid("turn"),
+    userText,
+    assistantText: "",
+    streaming: false,
+    activities: [],
+    notes: [],
+    state: "active",
+    ts: now,
+  };
+}
+
+/** Ensure there is an active turn to attach to; create a system-origin one if not. */
+function ensureActiveTurn(
+  cells: TranscriptCell[],
+  now: number,
+): { cells: TranscriptCell[]; index: number } {
+  const idx = activeTurnIndex(cells);
+  if (idx >= 0) return { cells, index: idx };
+  const turn = newTurn("", now);
+  const next = [...cells, turn].slice(-MAX_CELLS);
+  return { cells: next, index: next.length - 1 };
+}
+
+/** Stop a trailing streaming caret without dropping committed assistant text. */
+function stopCaret(turn: TurnCell): TurnCell {
+  return turn.streaming ? { ...turn, streaming: false } : turn;
 }
 
 export type ControllerAction =
@@ -51,151 +91,145 @@ export type ControllerAction =
   | { type: "user:add"; text: string }
   | { type: "command:add"; title: string; text: string };
 
-export function timelineReducer(
-  items: TimelineItem[],
+export function transcriptReducer(
+  cells: TranscriptCell[],
   action: ControllerAction,
-): TimelineItem[] {
+): TranscriptCell[] {
   const now = Date.now();
   switch (action.type) {
     case "user:add":
-      return [
-        ...items,
-        { id: uid("usr"), kind: "user" as const, text: action.text, ts: now },
-      ].slice(-MAX_TIMELINE);
+      return [...cells, newTurn(action.text, now)].slice(-MAX_CELLS);
 
     case "command:add":
       return [
-        ...items,
+        ...cells,
         {
-          id: uid("cmd"),
           kind: "command" as const,
+          id: uid("cmd"),
           title: action.title,
           text: action.text,
           ts: now,
         },
-      ].slice(-MAX_TIMELINE);
+      ].slice(-MAX_CELLS);
 
-    case "assistant:start":
-      return [
-        ...items,
-        {
-          id: uid("ast"),
-          kind: "assistant" as const,
-          text: "",
-          streaming: true,
-          ts: now,
-        },
-      ].slice(-MAX_TIMELINE);
+    case "assistant:start": {
+      const { cells: c, index } = ensureActiveTurn(cells, now);
+      const turn = c[index] as TurnCell;
+      return replaceAt(c, index, { ...turn, streaming: true });
+    }
 
     case "assistant:token": {
-      const copy = [...items];
-      const last = copy[copy.length - 1];
-      if (last?.kind === "assistant" && last.streaming) {
-        copy[copy.length - 1] = { ...last, text: last.text + action.token };
-        return copy;
-      }
-      return [
-        ...items,
-        {
-          id: uid("ast"),
-          kind: "assistant" as const,
-          text: action.token,
-          streaming: true,
-          ts: now,
-        },
-      ].slice(-MAX_TIMELINE);
+      const { cells: c, index } = ensureActiveTurn(cells, now);
+      const turn = c[index] as TurnCell;
+      return replaceAt(c, index, {
+        ...turn,
+        assistantText: turn.assistantText + action.token,
+        streaming: true,
+      });
     }
 
     case "assistant:end": {
-      const copy = [...items];
-      const last = copy[copy.length - 1];
-      if (last?.kind === "assistant" && last.streaming) {
-        copy[copy.length - 1] = {
-          ...last,
-          text: action.content || last.text,
-          streaming: false,
-        };
-        return copy;
-      }
-      // No active stream (pure tool turns) — append the final text if any.
-      if (action.content) {
+      const idx = activeTurnIndex(cells);
+      if (idx < 0) {
+        if (!action.content) return cells;
+        const turn = newTurn("", now);
         return [
-          ...items,
-          {
-            id: uid("ast"),
-            kind: "assistant" as const,
-            text: action.content,
-            streaming: false,
-            ts: now,
-          },
-        ].slice(-MAX_TIMELINE);
+          ...cells,
+          { ...turn, assistantText: action.content, state: "complete" as const },
+        ].slice(-MAX_CELLS);
       }
-      return copy;
+      const turn = cells[idx] as TurnCell;
+      return replaceAt(cells, idx, {
+        ...turn,
+        assistantText: action.content || turn.assistantText,
+        streaming: false,
+        state: turn.state === "failed" ? "failed" : "complete",
+      });
     }
 
-    case "tool:call":
-      return [
-        ...finalizeStream(items),
-        {
-          id: uid("tool"),
-          kind: "tool" as const,
-          name: action.name,
-          args: action.args,
-          ts: now,
-        },
-      ].slice(-MAX_TIMELINE);
+    case "tool:call": {
+      const { cells: c, index } = ensureActiveTurn(cells, now);
+      const turn = stopCaret(c[index] as TurnCell);
+      const p = presentTool(action.name, action.args);
+      const activity: ActivityItem = {
+        id: action.id,
+        name: action.name,
+        label: p.label,
+        detail: p.detail,
+        args: action.args,
+        state: "active",
+        startedAt: action.startedAt,
+      };
+      return replaceAt(c, index, {
+        ...turn,
+        activities: [...turn.activities, activity],
+      });
+    }
 
     case "tool:result": {
-      const copy = [...items];
-      // Resolve the most recent un-finished tool row with the same name.
-      for (let i = copy.length - 1; i >= 0; i--) {
-        const item = copy[i];
-        if (
-          item.kind === "tool" &&
-          item.name === action.name &&
-          item.ok === undefined
-        ) {
-          copy[i] = {
-            ...item,
-            ok: Boolean(action.result.ok),
+      // Match by call id across all turns (results can arrive out of order).
+      for (let i = cells.length - 1; i >= 0; i--) {
+        const c = cells[i];
+        if (c.kind !== "turn") continue;
+        const ai = c.activities.findIndex((a) => a.id === action.id);
+        if (ai >= 0) {
+          const activities = [...c.activities];
+          activities[ai] = {
+            ...activities[ai],
+            state: action.result.ok ? "done" : "failed",
             summary: action.result.summary ?? "",
+            endedAt: action.endedAt,
           };
-          return copy;
+          return replaceAt(cells, i, { ...c, activities });
         }
       }
-      return copy;
+      return cells;
     }
 
-    case "log":
+    case "log": {
+      const idx = activeTurnIndex(cells);
+      if (idx >= 0) {
+        // Attach to the active turn; an error fails it and stops the caret.
+        const turn = stopCaret(cells[idx] as TurnCell);
+        const level = action.level;
+        return replaceAt(cells, idx, {
+          ...turn,
+          state: level === "error" ? "failed" : turn.state,
+          notes: [
+            ...turn.notes,
+            { id: uid("note"), level, text: action.message, ts: now },
+          ],
+        });
+      }
       return [
-        // An error ends the turn without an assistant:end — clear any stale caret.
-        ...(action.level === "error" ? finalizeStream(items) : items),
+        ...cells,
         {
-          id: uid("log"),
-          kind: "system" as const,
+          kind: "note" as const,
+          id: uid("note"),
           level: action.level,
           text: action.message,
           ts: now,
         },
-      ].slice(-MAX_TIMELINE);
+      ].slice(-MAX_CELLS);
+    }
 
     case "attention":
       return [
-        ...items,
+        ...cells,
         ...action.events.map((e) => {
           const ev = e as { title?: string; summary?: string };
           return {
+            kind: "note" as const,
             id: uid("att"),
-            kind: "system" as const,
             level: "warn" as const,
-            text: `${ev.title ?? "event"}: ${ev.summary ?? ""}`,
+            text: `${ev.title ?? "event"}${ev.summary ? `: ${ev.summary}` : ""}`,
             ts: now,
           };
         }),
-      ].slice(-MAX_TIMELINE);
+      ].slice(-MAX_CELLS);
 
     default:
-      return items;
+      return cells;
   }
 }
 
@@ -209,11 +243,41 @@ function snapshot(app: App): DashboardState {
   };
 }
 
+/** The composer's live-stage label — derived from the active run, not random. */
+function deriveStage(cells: TranscriptCell[]): string {
+  const idx = activeTurnIndex(cells);
+  if (idx < 0) return "Thinking";
+  const turn = cells[idx] as TurnCell;
+  const active = [...turn.activities].reverse().find((a) => a.state === "active");
+  if (active) {
+    // Map the verb to a control-room stage.
+    switch (active.label) {
+      case "Delegated":
+        return "Delegating";
+      case "Watching":
+        return "Watching";
+      case "Read":
+      case "Listed":
+      case "Searched":
+        return "Inspecting";
+      case "Scheduled":
+        return "Scheduling";
+      default:
+        return "Working";
+    }
+  }
+  if (turn.streaming) return "Responding";
+  if (turn.activities.length > 0) return "Orienting";
+  return "Planning";
+}
+
 export interface DaintreeController {
   bridge: UiBridge;
-  timeline: TimelineItem[];
+  transcript: TranscriptCell[];
   dashboard: DashboardState;
   busy: boolean;
+  /** Live stage label for the composer (Inspecting, Delegating, Watching…). */
+  stage: string;
   pendingConfirm: PendingConfirm | null;
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
@@ -226,7 +290,7 @@ export function useDaintreeController(
   onExit?: () => void,
 ): DaintreeController {
   const bridge = useMemo(() => new UiBridge(), []);
-  const [timeline, dispatch] = useReducer(timelineReducer, []);
+  const [transcript, dispatch] = useReducer(transcriptReducer, []);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(
     null,
   );
@@ -306,8 +370,12 @@ export function useDaintreeController(
             onExit?.();
             return;
           }
-          if (result.switchPanel) setActivePanel(result.switchPanel);
-          if (result.title || result.text) {
+          if (result.switchPanel) {
+            // A panel command opens a purposeful view rather than dumping text
+            // into the transcript. Bump to a fresh object each time so re-running
+            // the same command re-opens the view even after it was closed.
+            setActivePanel(result.switchPanel);
+          } else if (result.title || result.text) {
             dispatch({
               type: "command:add",
               title: result.title ?? "",
@@ -333,21 +401,21 @@ export function useDaintreeController(
     [app, bridge, onExit],
   );
 
-  const resolveConfirm = useCallback(
-    (approved: boolean) => {
-      setPendingConfirm((cur) => {
-        cur?.resolve(approved);
-        return null;
-      });
-    },
-    [],
-  );
+  const resolveConfirm = useCallback((approved: boolean) => {
+    setPendingConfirm((cur) => {
+      cur?.resolve(approved);
+      return null;
+    });
+  }, []);
+
+  const stage = useMemo(() => deriveStage(transcript), [transcript]);
 
   return {
     bridge,
-    timeline,
+    transcript,
     dashboard,
     busy,
+    stage,
     pendingConfirm,
     activePanel,
     setActivePanel,

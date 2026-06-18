@@ -1,48 +1,63 @@
 import { Box, Text } from "ink";
-import { theme } from "../theme.js";
+import { BrandMark, KeyHint } from "../primitives.js";
+import { ui } from "../theme.js";
 
-const ROWS: Array<[string, string]> = [
-  ["/status", "MCP connection, project, models, tier"],
+const COMMANDS: Array<[string, string]> = [
+  ["/status", "connection, project, models, tier"],
   ["/inbox [sev]", "queued watcher/timer events"],
-  ["/watchers /timers", "active watchers / scheduled timers"],
+  ["/watchers /timers", "supervised agents / scheduled ops"],
   ["/audit [n]", "recent tool calls"],
   ["/tools [q]", "list/search tools"],
   ["/permissions <tier>", "supervisor | operator | system"],
   ["/recipes [sub]", "loaded · reload · load <id…> · clear"],
   ["/compact", "summarize the conversation"],
   ["/doctor", "environment check"],
+  ["/reconnect", "retry the Daintree connection"],
   ["/quit", "exit"],
-  ["", ""],
-  ["?", "toggle this help"],
-  ["^O", "toggle the operations overlay"],
+];
+
+const KEYS: Array<[string, string]> = [
+  ["^O", "operations surface"],
+  ["^X", "expand tool detail in the transcript"],
+  ["Tab", "complete a slash command"],
+  ["Esc", "return home"],
   ["^C", "shut down cleanly"],
 ];
 
-export function HelpOverlay() {
+export function HelpOverlay({ width = 72 }: { width?: number }) {
   return (
     <Box
-      position="absolute"
-      marginLeft={4}
-      marginTop={2}
+      flexDirection="column"
       borderStyle="round"
-      borderColor={theme.brand}
+      borderColor={ui.color.accent}
       paddingX={2}
       paddingY={1}
-      flexDirection="column"
+      width={width}
     >
-      <Text bold color={theme.brand}>
-        Daintree Assistant — help
-      </Text>
+      <BrandMark label="DAINTREE — help" />
       <Box marginTop={1} flexDirection="column">
-        {ROWS.map(([k, v], i) => (
-          <Text key={i}>
-            <Text color={theme.info}>{k.padEnd(20)}</Text>
+        {COMMANDS.map(([k, v]) => (
+          <Text key={k}>
+            <Text color={ui.color.info}>{k.padEnd(20)}</Text>
             <Text dimColor>{v}</Text>
           </Text>
         ))}
       </Box>
+      <Box marginTop={1} flexDirection="column">
+        {KEYS.map(([k, v]) => (
+          <Box key={k}>
+            <Box width={20}>
+              <KeyHint keyName={k} action="" />
+            </Box>
+            <Text dimColor>{v}</Text>
+          </Box>
+        ))}
+      </Box>
       <Box marginTop={1}>
-        <Text dimColor>I supervise Daintree and spawn agents — I never edit files directly.</Text>
+        <Text dimColor>
+          I supervise Daintree and delegate to visible agents — I never edit
+          files directly.
+        </Text>
       </Box>
     </Box>
   );

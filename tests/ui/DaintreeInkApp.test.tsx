@@ -18,15 +18,14 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await tick(); // let mount effects (connect + scheduler + first poll) settle
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Daintree"); // identity header
-    expect(frame).toContain("daintree ❯"); // composer prompt
-    // Offline → the status line flags "⚠ degraded" and the mount log lands in
-    // the timeline (which is why the empty hint is gone by now).
-    expect(frame).toContain("degraded");
+    expect(frame).toContain("DAINTREE"); // brand identity bar
+    expect(frame).toContain("›"); // the composer prompt glyph
+    // Offline → the connection badge degrades and the mount log lands in the
+    // transcript (which is why the empty hint is gone by now).
+    expect(frame).toContain("DEGRADED");
     expect(frame).toContain("not connected");
-    // The operations deck is never inline now — it lives behind ^O. This test
-    // only covers the default surface; the deck itself is covered by
-    // OpsSidebar.test.
+    // The operations surface is never inline now — it lives behind ^O / a
+    // /panel command, covered by OperationsView.test.
 
     unmount();
     // After teardown, a confirm requested by an in-flight tool call must

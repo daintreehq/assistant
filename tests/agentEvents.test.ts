@@ -20,8 +20,9 @@ function recordingSink() {
     assistantStart: () => events.push("start"),
     assistantToken: (t) => events.push(`tok:${t}`),
     assistantEnd: (c) => events.push(`end:${c}`),
-    toolCall: (n) => events.push(`call:${n}`),
-    toolResult: (n, r) => events.push(`result:${n}:${r.ok}`),
+    toolCall: ({ id, name }) => events.push(`call:${name}:${id}`),
+    toolResult: ({ id, name, result }) =>
+      events.push(`result:${name}:${result.ok}:${id}`),
     error: (m) => events.push(`error:${m}`),
     info: (m) => events.push(`info:${m}`),
   };
@@ -119,8 +120,9 @@ describe("AgentSession emits structured events instead of rendering", () => {
 
     const out = await session.send("search");
     expect(out).toBe("done");
-    expect(events).toContain("call:fs.search");
-    expect(events).toContain("result:fs.search:true");
+    // The call id (c1) flows through both events so results match by id.
+    expect(events).toContain("call:fs.search:c1");
+    expect(events).toContain("result:fs.search:true:c1");
     expect(events[events.length - 1]).toBe("end:done");
   });
 

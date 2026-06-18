@@ -44,8 +44,8 @@ describe("UiBridge", () => {
     const sink = bridge.agentEvents();
     sink.assistantStart();
     sink.assistantToken("hi");
-    sink.toolCall("fs.read", { path: "a" });
-    sink.toolResult("fs.read", { ok: true, summary: "ok" });
+    sink.toolCall({ id: "c1", name: "fs.read", args: { path: "a" }, startedAt: 0 });
+    sink.toolResult({ id: "c1", name: "fs.read", result: { ok: true, summary: "ok" }, endedAt: 1 });
     sink.error("nope");
 
     expect(seen.map((e) => e.type)).toEqual([

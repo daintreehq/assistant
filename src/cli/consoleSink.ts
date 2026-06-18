@@ -17,11 +17,11 @@ export function createConsoleSink(): AgentEventSink {
     assistantEnd() {
       render.assistantEnd();
     },
-    toolCall(name, args) {
+    toolCall({ name, args }) {
       render.line();
       render.toolCall(name, args);
     },
-    toolResult(_name, result) {
+    toolResult({ result }) {
       render.toolResult(result.ok, result.summary);
     },
     error(message) {
