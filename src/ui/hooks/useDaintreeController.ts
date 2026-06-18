@@ -28,7 +28,11 @@ import type {
 } from "../types.js";
 import type { QueueEvent } from "../../schemas.js";
 import { logDebug } from "../../debugLog.js";
-import { isActionableWake, buildWakePrompt } from "../../agent/wake.js";
+import {
+  isActionableWake,
+  buildWakePrompt,
+  isWakeFailureReply,
+} from "../../agent/wake.js";
 
 let idCounter = 0;
 function uid(prefix: string): string {
@@ -346,19 +350,24 @@ export function useDaintreeController(
     try {
       // readOnly: an autonomous turn the user didn't initiate must only be able to
       // inspect (read the terminal) and report — never run a mutating tool.
-      await app.session.send(
+      const reply = await app.session.send(
         buildWakePrompt(events, {
           alreadySummarized: summarizedTerminals.current,
         }),
         { readOnly: true },
       );
       wakeRetried.current = false; // success resets the per-burst retry budget
-      // Record only on success: the model has now reported these terminals, so their
-      // later lifecycle events become one-line acks instead of repeat summaries.
-      for (const e of events) {
-        const terminalId = (e as { target?: { terminalId?: string } }).target
-          ?.terminalId;
-        if (terminalId) summarizedTerminals.current.add(terminalId);
+      // Record only when the turn actually delivered a report: send() returns a
+      // sentinel string (not a throw) on model failure, so guard on it — otherwise a
+      // transient outage would mark these terminals reported and suppress the real
+      // summary the user never saw. On a real reply, their later lifecycle events
+      // become one-line acks instead of repeat summaries.
+      if (!isWakeFailureReply(reply)) {
+        for (const e of events) {
+          const terminalId = (e as { target?: { terminalId?: string } }).target
+            ?.terminalId;
+          if (terminalId) summarizedTerminals.current.add(terminalId);
+        }
       }
     } catch (err) {
       bridge.emit({

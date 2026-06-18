@@ -41,6 +41,7 @@ export function buildWakePrompt(
   // appears twice within THIS batch only earns a full summary on its first line.
   const seen = new Set<string>(opts?.alreadySummarized ?? []);
   let anyFollowUp = false;
+  let anyNew = false;
   const lines = events.map((e) => {
     const ev = e as {
       title?: string;
@@ -56,12 +57,19 @@ export function buildWakePrompt(
       return `${base} (already reported — acknowledge in one line, do NOT call terminal.summarize/terminal.extract again)`;
     }
     if (terminalId) seen.add(terminalId);
+    anyNew = true; // a fresh terminal, or a non-terminal event worth deciding on
     return base;
   });
+  // The positive "read and summarize" instruction only applies when something new is
+  // present. When every event is a follow-up it would contradict the per-event "do
+  // NOT summarize" markers, so swap in acknowledge-only guidance instead.
+  const guidance = anyNew
+    ? "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it with terminal.summarize or terminal.extract and give the user a concise update. If it isn't worth acting on, say so in one line."
+    : "Every event below is a terminal you have already reported this session — these are lifecycle transitions only. Acknowledge each in one short line; do NOT call terminal.summarize/terminal.extract again.";
   return [
     "[automatic wake-up] A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
-    "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it with terminal.summarize or terminal.extract and give the user a concise update. If it isn't worth acting on, say so in one line.",
-    ...(anyFollowUp
+    guidance,
+    ...(anyNew && anyFollowUp
       ? [
           "Some events below are marked (already reported): you have already summarized that terminal this session. For those, do NOT summarize again — just acknowledge the transition in one short line.",
         ]
@@ -70,4 +78,24 @@ export function buildWakePrompt(
     "New events:",
     ...lines,
   ].join("\n");
+}
+
+/**
+ * Whether a string returned by `AgentSession.send` represents a turn that failed
+ * before delivering a real answer. `send` never throws on a model-layer failure —
+ * it catches and returns one of these sentinel strings (see `loop.ts` send/run).
+ * The wake reactors must treat such a reply as a failure and NOT record the
+ * terminals as summarized; otherwise a transient model outage would permanently
+ * downgrade those terminals' later lifecycle events to one-line acks and silently
+ * swallow the real summary the user never got.
+ */
+const WAKE_FAILURE_PREFIXES = [
+  "Model unavailable:",
+  "Model error:",
+  "Tool projection failed:",
+  "Reached the tool-iteration limit",
+] as const;
+
+export function isWakeFailureReply(reply: string): boolean {
+  return WAKE_FAILURE_PREFIXES.some((prefix) => reply.startsWith(prefix));
 }

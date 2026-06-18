@@ -1,4 +1,8 @@
-import { isActionableWake, buildWakePrompt } from "../src/agent/wake.js";
+import {
+  isActionableWake,
+  buildWakePrompt,
+  isWakeFailureReply,
+} from "../src/agent/wake.js";
 import type { QueueEvent } from "../src/schemas.js";
 
 /**
@@ -64,6 +68,45 @@ describe("buildWakePrompt", () => {
     expect(prompt).toContain("[terminal t1]");
   });
 
+  it("does not give contradictory guidance when every event is a follow-up", () => {
+    const prompt = buildWakePrompt([termEvent("t1"), termEvent("t1")], {
+      alreadySummarized: new Set(["t1"]),
+    });
+    // The positive "summarize and report" instruction must be absent — there is
+    // nothing new to summarize, so it would contradict the per-event ack markers.
+    expect(prompt).not.toContain("give the user a concise update");
+    expect(prompt).toContain("Acknowledge each in one short line");
+  });
+
+  it("emits the full-summary guidance and a per-event line free of the ack marker for a first-time terminal", () => {
+    const prompt = buildWakePrompt([termEvent("t1")]);
+    expect(prompt).toContain("give the user a concise update");
+    const eventLine = prompt
+      .split("\n")
+      .find((l) => l.startsWith("- ") && l.includes("[terminal t1]"));
+    expect(eventLine).toBeDefined();
+    expect(eventLine).not.toContain("already reported");
+  });
+
+  it("models the issue #39 lifecycle: a terminal summarized in one burst is a follow-up in the next", () => {
+    // Mirrors how the controller threads its summarizedTerminals set across bursts.
+    const summarized = new Set<string>();
+    const first = buildWakePrompt(
+      [termEvent("t1", { title: "supervised waiting: Terminal waiting" })],
+      { alreadySummarized: summarized },
+    );
+    expect(first).toContain("give the user a concise update");
+    expect(first).not.toContain("already reported");
+    // Caller records the terminal after a successful turn.
+    summarized.add("t1");
+    const second = buildWakePrompt(
+      [termEvent("t1", { title: "supervised done: Terminal exited" })],
+      { alreadySummarized: summarized },
+    );
+    expect(second).toContain("already reported");
+    expect(second).toContain("do NOT call terminal.summarize");
+  });
+
   it("summarizes a new terminal even when another was already reported (per-terminal granularity)", () => {
     const prompt = buildWakePrompt([termEvent("t1"), termEvent("t2")], {
       alreadySummarized: new Set(["t1"]),
@@ -102,5 +145,23 @@ describe("buildWakePrompt", () => {
     });
     expect(prompt).toContain("New events:");
     expect(prompt).not.toContain("already reported");
+  });
+});
+
+describe("isWakeFailureReply", () => {
+  it("recognizes every send() failure sentinel", () => {
+    expect(isWakeFailureReply("Model unavailable: 503")).toBe(true);
+    expect(isWakeFailureReply("Model error: boom")).toBe(true);
+    expect(isWakeFailureReply("Tool projection failed: dup name")).toBe(true);
+    expect(
+      isWakeFailureReply("Reached the tool-iteration limit without a final answer."),
+    ).toBe(true);
+  });
+
+  it("treats a real model reply as success", () => {
+    expect(isWakeFailureReply("Terminal t1 finished cleanly; tests passed.")).toBe(
+      false,
+    );
+    expect(isWakeFailureReply("")).toBe(false);
   });
 });

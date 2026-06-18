@@ -18,7 +18,11 @@
  */
 import { HostBridge } from "./bridge.js";
 import { installBootstrapErrorGuard } from "./errorGuard.js";
-import { isActionableWake, buildWakePrompt } from "../agent/wake.js";
+import {
+  isActionableWake,
+  buildWakePrompt,
+  isWakeFailureReply,
+} from "../agent/wake.js";
 import type { QueueEvent } from "../schemas.js";
 import {
   PROTOCOL_VERSION,
@@ -90,17 +94,21 @@ async function main(): Promise<void> {
     busy = true;
     bridge.startExchange();
     try {
-      await app.session.send(
+      const reply = await app.session.send(
         buildWakePrompt(events, { alreadySummarized: summarizedTerminals }),
         { readOnly: true },
       );
       wakeRetried = false;
-      // Record only on success: later lifecycle events for these terminals become
-      // one-line acks instead of repeat summaries.
-      for (const e of events) {
-        const terminalId = (e as { target?: { terminalId?: string } }).target
-          ?.terminalId;
-        if (terminalId) summarizedTerminals.add(terminalId);
+      // Record only when the turn actually delivered a report: send() returns a
+      // sentinel string (not a throw) on model failure, so guard on it — otherwise a
+      // transient outage would mark these terminals reported and suppress the real
+      // summary. On a real reply, later lifecycle events become one-line acks.
+      if (!isWakeFailureReply(reply)) {
+        for (const e of events) {
+          const terminalId = (e as { target?: { terminalId?: string } }).target
+            ?.terminalId;
+          if (terminalId) summarizedTerminals.add(terminalId);
+        }
       }
     } catch (err) {
       post({ type: "host:error", sessionId, code: "wake-failed", message: errMessage(err) });
