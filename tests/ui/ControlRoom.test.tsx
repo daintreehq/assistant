@@ -5,12 +5,7 @@ import { buildFixtures, FIXED_NOW } from "../../src/ui/dev/fixtures.js";
 const fixtures = buildFixtures();
 const byKey = (label: string) => fixtures.find((f) => f.label === label)!;
 
-function frameFor(
-  label: string,
-  columns: number,
-  rows = 24,
-  scrollOffset = 0,
-): string {
+function frameFor(label: string, columns: number, rows = 24): string {
   const f = byKey(label);
   const { lastFrame } = render(
     <ControlRoom
@@ -24,11 +19,9 @@ function frameFor(
       previews={f.previews}
       busy={f.busy}
       stage={f.stage}
-      view={f.view}
       pending={f.pending}
       now={FIXED_NOW}
       composerFocus={false}
-      scrollOffset={scrollOffset}
     />,
   );
   return lastFrame() ?? "";
@@ -43,7 +36,7 @@ describe("ControlRoom stream frames (deterministic fixtures)", () => {
     expect(frame).toContain("assistant");
     expect(frame).toContain("MCP CONNECTED");
     expect(frame).toContain("Standing by");
-    expect(frame).toContain("wheel scroll");
+    expect(frame).toContain("scroll the terminal"); // native scrollback hint
     expect(frame).toContain("Ask Daintree...");
   });
 
@@ -122,11 +115,5 @@ describe("ControlRoom sidebar (55-65 cols, the primary surface)", () => {
       if (prev === undefined) delete process.env.DAINTREE_ASCII;
       else process.env.DAINTREE_ASCII = prev;
     }
-  });
-
-  it("shows a history footer when scrolled away from latest", () => {
-    const frame = frameFor("active", 58, 18, 8);
-    expect(frame).toContain("history -8");
-    expect(frame).toContain("PgDn/End");
   });
 });

@@ -84,11 +84,17 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(out[0].kind).toBe("note");
   });
 
-  it("caps the transcript length", () => {
+  it("retains every cell (no front-pruning) so <Static> stays append-only", () => {
+    // Finished turns are committed to the terminal's scrollback via <Static>,
+    // which renders each item exactly once by COUNT — dropping cells off the
+    // front would desync that count and silently lose later output. So the
+    // transcript must only ever grow; the terminal, not us, bounds history.
     const actions: ControllerAction[] = Array.from({ length: 250 }, (_, i) => ({
       type: "user:add" as const,
       text: `m${i}`,
     }));
-    expect(run(actions).length).toBeLessThanOrEqual(200);
+    const out = run(actions);
+    expect(out).toHaveLength(250);
+    expect((out[0] as TurnCell).userText).toBe("m0");
   });
 });

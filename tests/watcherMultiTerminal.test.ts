@@ -8,6 +8,7 @@ import {
 } from "../src/daemon/watcherEngine.js";
 import { Db } from "../src/storage/db.js";
 import { Queue } from "../src/queue.js";
+import { WATCHER_SPAWN_GRACE_MS } from "../src/watcherCadence.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
 
@@ -434,7 +435,7 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     db.close();
   });
 
-  it("stops and alerts when a watched terminal is closed (absent from status)", async () => {
+  it("stops and alerts when a PREVIOUSLY-SEEN terminal is closed (absent from status)", async () => {
     const db = new Db(":memory:");
     const queue = new Queue(db);
     // Status call succeeds but returns NO terminals — the terminal is gone.
@@ -444,6 +445,10 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
       listTools: async () => [],
       callTool: async (name: string) => {
         if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        // A readable, empty inventory: the terminal really is gone.
+        if (name === "terminal.list") {
           return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
         }
         return { text: "", content: [], structuredContent: { content: "" }, isError: false };
@@ -459,6 +464,8 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
       modelTier: "small",
       status: "active",
       nextCheckAt: 0,
+      // It was observed on a prior check, so its disappearance is a real exit.
+      optionsJson: JSON.stringify({ perTerminal: { "term-x": { seen: true } } }),
     });
 
     const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
@@ -468,6 +475,343 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     expect(db.getWatcher(w.id)!.status).not.toBe("active");
     const events = queue.digest({ severityAtLeast: "info" });
     expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
+  it("does NOT declare exited while a just-spawned terminal is still registering (spawn grace)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Status call succeeds but the freshly-spawned terminal isn't listed yet.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        // A readable, empty inventory: the terminal really is gone.
+        if (name === "terminal.list") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "just spawned",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    // Fresh watcher (createdAt ≈ now), never-seen terminal → still registering.
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).not.toBe("terminal_exited");
+    expect(outcome.stop).toBe(false);
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    db.close();
+  });
+
+  it("declares exited if a never-seen terminal is still absent past the spawn grace", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        // A readable, empty inventory: the terminal really is gone.
+        if (name === "terminal.list") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "never came up",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    // Age the watcher past the grace: a terminal that never registered = failed launch.
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).toBe("terminal_exited");
+    expect(outcome.stop).toBe(true);
+    db.close();
+  });
+
+  it("treats a getStatus-absent terminal as ALIVE when terminal.list still reports it", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // getStatus omits the terminal, but terminal.list reports it alive + waiting.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "waiting" }] },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "alive in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    // Aged past the grace, so the only reason it isn't exited is the list cross-check.
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).toBe("waiting_for_input");
+    expect(outcome.stop).toBe(false);
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    // A supervisor-grade "waiting" surfaces to the inbox so the main loop can react.
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
+  it("declares exited only when terminal.list ALSO reports the terminal exited", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "exited", exitCode: 1 }] },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "exited in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("terminal_exited");
+    expect(outcome.stop).toBe(true);
+    db.close();
+  });
+
+  it("does NOT declare exited when getStatus omits the terminal AND terminal.list is unreadable", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // getStatus omits term-x; terminal.list ERRORS — we cannot prove an exit.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return { text: "boom", content: [], isError: true };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "list unreadable",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      // Already seen + aged past grace: only the unreadable-list guard keeps it alive.
+      optionsJson: JSON.stringify({ perTerminal: { "term-x": { seen: true } } }),
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).not.toBe("terminal_exited");
+    expect(outcome.stop).toBe(false);
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    db.close();
+  });
+
+  it("treats a non-errored but unparseable terminal.list as unreadable (stays alive)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // isError:false, but NO recognizable `terminals` array → ok:false → can't prove exit.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return { text: "not json", content: [], structuredContent: { stuff: 1 }, isError: false };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "unparseable list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ perTerminal: { "term-x": { seen: true } } }),
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).not.toBe("terminal_exited");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    db.close();
+  });
+
+  it("classifies a mixed batch: one present in getStatus, one only in terminal.list", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let listCalls = 0;
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = Array.isArray(args?.terminalIds)
+            ? (args!.terminalIds as unknown[]).map(String)
+            : [];
+          // Only term-a is reported by getStatus; term-b is omitted.
+          const terminals = ids
+            .filter((id) => id === "term-a")
+            .map((id) => ({ terminalId: id, agentState: "waiting" }));
+          return { text: "", content: [], structuredContent: { terminals }, isError: false };
+        }
+        if (name === "terminal.list") {
+          listCalls += 1;
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: [
+                { id: "term-a", agentState: "waiting" },
+                { id: "term-b", agentState: "waiting" },
+              ],
+            },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "mixed sources",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    // Neither terminal is exited; the watcher stays active.
+    expect(outcome.classification).not.toBe("terminal_exited");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    // terminal.list is consulted once for the whole batch, not per missing target.
+    expect(listCalls).toBe(1);
+    db.close();
+  });
+
+  it("promotes a supervisor's clean completion to attention so it surfaces", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // term-x completed cleanly; git pulse is clean → completed_success (severity "done").
+    const mcp = fakeMcp({ "term-x": { agentState: "completed" } });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "supervised done",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      isSupervisor: true,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    // "done" sits below the scheduler's surfacing threshold; the supervisor bump
+    // promotes the published event to >= attention so onAttention/the wake-up sees it.
+    const surfaced = queue.digest({ severityAtLeast: "attention" });
+    expect(surfaced.some((e) => e.target?.terminalId === "term-x")).toBe(true);
     db.close();
   });
 

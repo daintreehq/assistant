@@ -42,9 +42,14 @@ export class ModelRouter {
   ): Promise<ChatResult> {
     const model = this.modelFor(tier);
     this.logRequest("chat", tier, model, opts);
-    const res = await this.fw.chat({ ...opts, model });
-    this.logResponse("chat", tier, model, res);
-    return res;
+    try {
+      const res = await this.fw.chat({ ...opts, model });
+      this.logResponse("chat", tier, model, res);
+      return res;
+    } catch (err) {
+      this.logError("chat", tier, model, err);
+      throw err;
+    }
   }
 
   async stream(
@@ -54,9 +59,14 @@ export class ModelRouter {
   ): Promise<ChatResult> {
     const model = this.modelFor(tier);
     this.logRequest("stream", tier, model, opts);
-    const res = await this.fw.chatStream({ ...opts, model }, onToken);
-    this.logResponse("stream", tier, model, res);
-    return res;
+    try {
+      const res = await this.fw.chatStream({ ...opts, model }, onToken);
+      this.logResponse("stream", tier, model, res);
+      return res;
+    } catch (err) {
+      this.logError("stream", tier, model, err);
+      throw err;
+    }
   }
 
   async json<S extends z.ZodTypeAny>(
@@ -66,9 +76,25 @@ export class ModelRouter {
   ): Promise<z.infer<S>> {
     const model = this.modelFor(tier);
     this.logRequest("json", tier, model, opts);
-    const res = await this.fw.json({ ...opts, model }, schema);
-    logDebug(this.cfg, "model.response", { kind: "json", tier, model, result: res });
-    return res;
+    try {
+      const res = await this.fw.json({ ...opts, model }, schema);
+      logDebug(this.cfg, "model.response", { kind: "json", tier, model, result: res });
+      return res;
+    } catch (err) {
+      this.logError("json", tier, model, err);
+      throw err;
+    }
+  }
+
+  /** Trace a model call that threw, so the debug log shows failures, not just the
+   *  request that preceded them. Re-throwing is the caller's job. */
+  private logError(kind: string, tier: ModelTier, model: string, err: unknown): void {
+    logDebug(this.cfg, "model.error", {
+      kind,
+      tier,
+      model,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   /** Trace an outgoing model request (full message array included). Tool specs are

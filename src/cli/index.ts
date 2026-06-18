@@ -68,7 +68,7 @@ async function runInteractive(opts: CliOptions): Promise<void> {
     await startRepl(app);
     return;
   }
-  await startInkApp(app, { alternateScreen: opts.altScreen !== false });
+  await startInkApp(app, { alternateScreen: opts.altScreen === true });
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
     .option("--tier <tier>", "supervisor | operator | system")
     .option("--offline", "Do not make network calls")
     .option("--classic", "Use the legacy readline interface")
-    .option("--no-alt-screen", "Render Ink without the alternate (full-screen) buffer")
+    .option("--alt-screen", "Render Ink in the alternate (full-screen) buffer instead of inline native scrollback")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);

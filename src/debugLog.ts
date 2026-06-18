@@ -179,7 +179,12 @@ export function startDebugLog(cfg: AppConfig, sessionId?: string): string | unde
   return activeLogPath;
 }
 
-/** Delete `*.log` files in `dir` older than {@link MAX_LOG_AGE_MS} by mtime. Never throws. */
+/** Matches our session log filenames (`<YYYY-MM-DD>-<id>.log`) so pruning never
+ *  touches unrelated `*.log` files if logDir points at a shared directory. */
+const SESSION_LOG_RE = /^\d{4}-\d{2}-\d{2}-.+\.log$/;
+
+/** Delete our own session logs in `dir` older than {@link MAX_LOG_AGE_MS} by mtime.
+ *  Never throws; only files matching {@link SESSION_LOG_RE} are eligible. */
 function pruneOldLogs(dir: string): void {
   let entries: string[];
   try {
@@ -189,7 +194,7 @@ function pruneOldLogs(dir: string): void {
   }
   const cutoff = Date.now() - MAX_LOG_AGE_MS;
   for (const f of entries) {
-    if (!f.endsWith(".log")) continue;
+    if (!SESSION_LOG_RE.test(f)) continue;
     const p = path.join(dir, f);
     try {
       if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);

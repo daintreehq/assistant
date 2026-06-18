@@ -208,9 +208,12 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   );
 
   // Debug log dir is GLOBAL (not per-project), so one tail spans every session.
-  const logDir =
+  // Resolve to an absolute, normalized path so a relative or trailing-slash
+  // override doesn't break per-session file targeting in debugLog.ts.
+  const logDir = path.resolve(
     firstString(overrides.logDir, process.env.DAINTREE_ASSISTANT_LOG_DIR) ??
-    path.join(os.homedir(), ".daintree", "logs");
+      path.join(os.homedir(), ".daintree", "logs"),
+  );
 
   return {
     projectPath,

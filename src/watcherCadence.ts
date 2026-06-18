@@ -20,3 +20,15 @@ export const SUPERVISOR_DEFAULT_CADENCE_MS = 3_000;
 
 /** Default cadence for user-created background ("monitor") watchers. */
 export const MONITOR_DEFAULT_CADENCE_MS = 120_000;
+
+/**
+ * Grace window after a watcher is created during which a target terminal that is
+ * absent from terminal.getStatus is treated as "still registering", NOT exited.
+ * Right after agent.launch returns a terminalId, Daintree may not yet list the
+ * terminal; without this grace the first (near-immediate) check misreads that gap
+ * as `terminal_exited` and stops the watcher before it ever sees the agent. Once
+ * the terminal has been observed at least once, absence is a real exit regardless
+ * of this window. A terminal that never appears within the grace is treated as a
+ * genuinely failed launch.
+ */
+export const WATCHER_SPAWN_GRACE_MS = 20_000;

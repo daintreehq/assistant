@@ -117,9 +117,9 @@ export function Composer({
         <Box>
           <KeyHint keyName="/" action={compactHints ? "cmd" : "commands"} />
           <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="PgUp" action={compactHints ? "hist" : "history"} />
-          <Text dimColor>{" · "}</Text>
           <KeyHint keyName="^O" action="ops" />
+          <Text dimColor>{" · "}</Text>
+          <KeyHint keyName="^C" action="exit" />
         </Box>
         {contextHint ? <Text dimColor>{contextHint}</Text> : null}
       </Box>

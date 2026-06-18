@@ -1,7 +1,7 @@
 /**
- * A compact footer, not a second dashboard. The scrollable ledger owns work
- * detail; this line tells the user whether they are reading latest output or
- * history, then gives the smallest useful health rollup.
+ * A compact footer, not a second dashboard. The ledger owns work detail and the
+ * host terminal owns scrollback; this line just carries the tier and the
+ * smallest useful health rollup.
  */
 import { Box, Text } from "ink";
 import type { DashboardState } from "../types.js";
@@ -13,14 +13,11 @@ export function StatusLine({
   dashboard,
   tier,
   width = 80,
-  scrollOffset = 0,
 }: {
   dashboard: DashboardState;
   tier?: string;
   width?: number;
   now?: number;
-  /** Rendered-line history offset. 0 means pinned to latest. */
-  scrollOffset?: number;
 }) {
   const agents = buildAgentRows(dashboard.watchers);
   const attention = dashboard.inbox.length;
@@ -36,10 +33,7 @@ export function StatusLine({
     connected ? "MCP" : "DEGRADED",
   ].filter(Boolean);
   const rightText = rightParts.join(" · ");
-  const leftText =
-    scrollOffset > 0
-      ? `history -${scrollOffset} · PgDn/End`
-      : `latest · PgUp history${tier ? ` · ${tier.toUpperCase()}` : ""}`;
+  const leftText = `${tier ? `${tier.toUpperCase()} · ` : ""}scroll for history`;
   const leftRoom = Math.max(8, width - rightText.length - 3);
 
   return (

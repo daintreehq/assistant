@@ -5,24 +5,23 @@
  * the controller, the gallery feeds it from frozen fixtures, and golden-frame
  * tests feed it fixed timestamps.
  *
- * One intentional home layout: a vertical ledger with a fixed composer. Wider
- * terminals get longer lines, not side rails. Operational detail is still
- * available as a full-screen view, but the default surface stays Claude/Codex
+ * One intentional layout: a vertical ledger with a fixed composer. Wider
+ * terminals get longer lines, not side rails. The surface stays Claude/Codex
  * shaped: startup block at the top, history below, prompt at the bottom.
+ * Operational detail (`^O`, a `/panel` command) prints inline into the same
+ * stream rather than taking over a full screen — there's no alternate buffer to
+ * take over, the host terminal owns scrollback.
  */
 import { Box } from "ink";
 import type { DashboardState, PendingConfirm, TranscriptCell } from "./types.js";
 import type { TerminalPreview } from "./hooks/useTerminalPreview.js";
 import { Transcript } from "./components/Transcript.js";
-import { OperationsView } from "./components/OperationsView.js";
 import { StatusLine } from "./components/StatusLine.js";
 import { Composer } from "./components/Composer.js";
 import { ApprovalSheet } from "./components/ApprovalSheet.js";
-import { HelpOverlay } from "./components/HelpOverlay.js";
 import { buildAgentRows } from "./presentation/operations.js";
 
 export type LayoutMode = "sidebar" | "standard" | "wide";
-export type View = "home" | "operations" | "help";
 
 export function layoutFor(columns: number): LayoutMode {
   if (columns >= 116) return "wide";
@@ -53,11 +52,8 @@ export interface ControlRoomProps {
   previews?: TerminalPreview[];
   busy: boolean;
   stage: string;
-  view: View;
   expanded?: boolean;
   pending?: PendingConfirm | null;
-  /** Rendered-line offset into history. 0 means pinned to latest. */
-  scrollOffset?: number;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
   /** Debug logging is active — shown as a header badge so it's verifiable. */
@@ -80,10 +76,8 @@ export function ControlRoom({
   previews = [],
   busy,
   stage,
-  view,
   expanded = false,
   pending = null,
-  scrollOffset = 0,
   now = Date.now(),
   logging = false,
   logFile,
@@ -92,18 +86,30 @@ export function ControlRoom({
   onResolve = () => {},
 }: ControlRoomProps) {
   // One cell of breathing room around the whole surface, the way other CLIs sit
-  // a little inside the terminal edge. The interior dimensions below are the
-  // actual ledger/composer budget.
+  // a little inside the terminal edge. The interior width is the ledger budget.
   const columns = Math.max(1, outerColumns - 2);
-  const rows = Math.max(1, outerRows - 2);
   const agents = buildAgentRows(dashboard.watchers, previews);
   const runs = dashboard.workflowRuns ?? [];
 
-  // Composer is 4 rows: top rule, input, bottom rule, hint footer.
-  const composerH = 4;
+  // Finished turns commit to the terminal's own scrollback via <Static>, but the
+  // LIVE region (in-flight turn + footer) repaints in place. Ink falls back to a
+  // full clearTerminal — which wipes the user's scrollback (ESC[3J) and re-dumps
+  // all static history every frame — the moment that repainting frame exceeds
+  // the viewport (ink shouldClearTerminalForFrame). So the live tail must stay
+  // shorter than the rows left after the footer; the clipped-off top isn't lost,
+  // the whole turn re-renders in full once it commits to <Static>.
+  //
+  // We deliberately OVER-reserve chrome: under-reserving risks the scrollback
+  // wipe, over-reserving just clips a few more live lines (harmless — they
+  // commit in full on settle). The composer's slash palette (+6 rows) can't
+  // co-occur with a live tail (it needs focus, which requires !busy, but a live
+  // tail means a turn is in flight), so 4 covers it. The approval sheet can be
+  // taller than its collapsed 8 rows once args are expanded AND it shows while a
+  // tool-call turn streams, so we reserve generously for it.
+  const composerH = 4; // top rule + input + bottom rule + hint footer
   const statusH = 1;
-  const approvalH = pending ? 8 : 0;
-  const bodyHeight = Math.max(3, rows - composerH - statusH - approvalH);
+  const approvalH = pending ? 12 : 0; // collapsed sheet ~8 + headroom for expanded args
+  const liveHeight = Math.max(3, outerRows - composerH - statusH - approvalH - 2);
 
   const contextHint = connected
     ? columns < 64
@@ -112,49 +118,25 @@ export function ControlRoom({
     : "MCP degraded";
 
   return (
-    <Box
-      flexDirection="column"
-      height={outerRows}
-      width={outerColumns}
-      paddingX={1}
-      paddingY={1}
-    >
-      <Box height={bodyHeight} flexDirection="column" overflow="hidden">
-        {view === "help" ? (
-          <Box height={bodyHeight}>
-            <HelpOverlay width={Math.min(76, columns)} />
-          </Box>
-        ) : view === "operations" ? (
-          <Box height={bodyHeight} overflow="hidden">
-            <OperationsView
-              dashboard={dashboard}
-              previews={previews}
-              width={columns}
-              now={now}
-            />
-          </Box>
-        ) : (
-          <Transcript
-            cells={transcript}
-            height={bodyHeight}
-            width={columns}
-            now={now}
-            expanded={expanded}
-            scrollOffset={scrollOffset}
-            intro={{
-              project,
-              tier,
-              connected,
-              dashboard,
-              previews,
-              busy,
-              stage,
-              logging,
-              logFile,
-            }}
-          />
-        )}
-      </Box>
+    <Box flexDirection="column" paddingX={1}>
+      <Transcript
+        cells={transcript}
+        width={columns}
+        now={now}
+        expanded={expanded}
+        liveHeight={liveHeight}
+        intro={{
+          project,
+          tier,
+          connected,
+          dashboard,
+          previews,
+          busy,
+          stage,
+          logging,
+          logFile,
+        }}
+      />
 
       {pending ? (
         <ApprovalSheet
@@ -169,7 +151,6 @@ export function ControlRoom({
         tier={tier}
         width={columns}
         now={now}
-        scrollOffset={scrollOffset}
       />
 
       <Composer
