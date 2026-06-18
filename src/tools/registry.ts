@@ -3,7 +3,7 @@
  * dispatches calls through the safety policy with audit logging.
  */
 import type { ChatTool } from "../models/fireworks.js";
-import type { ToolResult } from "../schemas.js";
+import type { AutomationGrantRecord, ToolResult } from "../schemas.js";
 import { decide } from "../safety/policy.js";
 import { assertNoFileEditTools } from "../safety/policy.js";
 import { fail, type ToolContext, type ToolDef } from "./types.js";
@@ -173,7 +173,15 @@ export class ToolRegistry {
             started,
           );
           if (grant) {
-            return this.runHandler(tool, name, args, ctx, started, "grant_ok");
+            return this.runHandler(
+              tool,
+              name,
+              args,
+              ctx,
+              started,
+              "grant_ok",
+              grant,
+            );
           }
         }
         const res = fail(
@@ -239,10 +247,19 @@ export class ToolRegistry {
     ctx: ToolContext,
     started: number,
     okOutcome: "ok" | "grant_ok" = "ok",
+    grant?: AutomationGrantRecord,
   ): Promise<ToolResult> {
     try {
       const res = await tool.handler(args, ctx);
-      this.audit(ctx, name, args, res, started, res.ok ? okOutcome : "error");
+      this.audit(
+        ctx,
+        name,
+        args,
+        res,
+        started,
+        res.ok ? okOutcome : "error",
+        grant,
+      );
       return res;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -261,6 +278,7 @@ export class ToolRegistry {
     outcome: "ok" | "error" | "denied" | "dedup" | "grant_ok" = res.ok
       ? "ok"
       : "error",
+    grant?: AutomationGrantRecord,
   ): void {
     try {
       const row = ctx.db.insertAudit({
@@ -272,6 +290,10 @@ export class ToolRegistry {
         summary: res.summary,
         resultJson:
           res.result !== undefined ? capJson(safeJson(res.result)) : undefined,
+        // Stamp grant provenance only when a grant actually authorized the call,
+        // so a non-grant audit row never carries a misleading source.
+        grantSource: outcome === "grant_ok" ? grant?.source : undefined,
+        grantId: outcome === "grant_ok" ? grant?.id : undefined,
       });
       res.auditId = row.id;
     } catch {

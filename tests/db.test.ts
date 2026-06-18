@@ -60,7 +60,82 @@ describe("Db migration v2 -> v3 (isSupervisor)", () => {
       .raw()
       .prepare("PRAGMA user_version")
       .get() as { user_version: number };
-    expect(version.user_version).toBe(3);
+    expect(version.user_version).toBe(4);
+    db.close();
+  });
+});
+
+describe("Db migration v3 -> v4 (grant provenance)", () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "db-mig4-"));
+    path = join(dir, "state.db");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("backfills source='local' on grants and adds grant columns to audit_log", () => {
+    // Build a v3 database by hand: automation_grants WITHOUT the source column
+    // and audit_log WITHOUT grantSource/grantId, user_version pinned to 3.
+    const raw = new DatabaseSync(path);
+    raw.exec(`CREATE TABLE automation_grants (
+      id TEXT PRIMARY KEY, actorId TEXT NOT NULL, actorType TEXT NOT NULL,
+      allowedRiskClassesJson TEXT, allowedToolNamesJson TEXT,
+      expiresAt INTEGER NOT NULL, maxUses INTEGER NOT NULL,
+      usesRemaining INTEGER NOT NULL, revokedAt INTEGER, createdAt INTEGER NOT NULL
+    )`);
+    raw.exec(
+      `INSERT INTO automation_grants (id,actorId,actorType,allowedRiskClassesJson,allowedToolNamesJson,expiresAt,maxUses,usesRemaining,revokedAt,createdAt)
+       VALUES ('grt_old','wch_old','watcher','["git"]',NULL,9999999999999,3,3,NULL,0)`,
+    );
+    raw.exec(`CREATE TABLE audit_log (
+      id TEXT PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+      toolName TEXT NOT NULL, argsJson TEXT NOT NULL, outcome TEXT NOT NULL,
+      durationMs INTEGER NOT NULL, summary TEXT NOT NULL, resultJson TEXT
+    )`);
+    raw.exec("PRAGMA user_version = 3");
+    raw.close();
+
+    // Opening through Db runs the forward-only migrations.
+    const db = new Db(path);
+    const old = db.getGrant("grt_old");
+    expect(old?.source).toBe("local");
+    // The backfilled source also flows through the consume path, not just getGrant.
+    const consumed = db.consumeGrant("wch_old", "watcher", "git.commit", "git");
+    expect(consumed?.id).toBe("grt_old");
+    expect(consumed?.source).toBe("local");
+    // New inserts can carry an explicit source and audit grant provenance.
+    const fresh = db.insertGrant({
+      actorId: "wch_new",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["git"]),
+      allowedToolNamesJson: null,
+      expiresAt: 9999999999999,
+      maxUses: 1,
+    });
+    expect(db.getGrant(fresh.id)?.source).toBe("local");
+    const aud = db.insertAudit({
+      actor: "watcher",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 1,
+      summary: "ok",
+      grantSource: "local",
+      grantId: fresh.id,
+    });
+    const back = db.listAudit().find((r) => r.id === aud.id)!;
+    expect(back.grantSource).toBe("local");
+    expect(back.grantId).toBe(fresh.id);
+    const version = db
+      .raw()
+      .prepare("PRAGMA user_version")
+      .get() as { user_version: number };
+    expect(version.user_version).toBe(4);
     db.close();
   });
 });
@@ -308,6 +383,12 @@ describe("Db", () => {
       expect(fetched.usesRemaining).toBe(5);
       expect(fetched.revokedAt).toBeNull();
       expect(fetched.actorId).toBe("wch_abc");
+    });
+
+    it("insertGrant defaults source to 'local' and lists it", () => {
+      const g = grant();
+      expect(db.getGrant(g.id)?.source).toBe("local");
+      expect(db.listGrants("wch_abc", T0)[0]?.source).toBe("local");
     });
 
     it("listGrants returns only live grants, optionally scoped to an actor", () => {

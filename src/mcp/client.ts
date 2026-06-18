@@ -20,6 +20,35 @@ export interface McpToolInfo {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Daintree MCP tools that, when advertised by the live server, mean Daintree can
+ * back assistant automation grants with its own native session-scoped grants.
+ *
+ * Empty today: Daintree exposes its grant lifecycle only to its own renderer
+ * (via IPC), not over MCP, so there is nothing to probe for yet. This is the
+ * forward-compatible seam — populate it with the real tool names once Daintree
+ * ships an external grants API, and `hasDaintreeGrantSupport()` lights up with no
+ * other change. Kept as an exact allowlist (mirroring DOCUMENTED_MCP_TOOL_NAMES)
+ * rather than a name heuristic so it can never false-positive on an unrelated
+ * tool.
+ */
+export const DAINTREE_GRANT_TOOL_NAMES: readonly string[] = [];
+
+/**
+ * Pure predicate: do the given live tools advertise Daintree grant support?
+ * Exported so the seam's logic is unit-testable independently of a live
+ * connection. An empty `grantToolNames` always yields false — the honest current
+ * state — so this never bets on an API shape Daintree has not defined.
+ */
+export function toolsAdvertiseGrantSupport(
+  tools: readonly { name: string }[],
+  grantToolNames: readonly string[] = DAINTREE_GRANT_TOOL_NAMES,
+): boolean {
+  if (grantToolNames.length === 0) return false;
+  const live = new Set(tools.map((t) => t.name));
+  return grantToolNames.some((n) => live.has(n));
+}
+
 export interface McpCallResult {
   /** Flattened text from all text content blocks. */
   text: string;
@@ -88,6 +117,20 @@ export class DaintreeMcpClient {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * Whether the connected Daintree advertises native session-grant tools, so the
+   * assistant could anchor automation grants in Daintree instead of local SQLite.
+   *
+   * Purely observational — it reads the warmed tool cache and never opens a
+   * connection or mutates state. Returns false when disconnected, when the cache
+   * is cold, or (today, always) when DAINTREE_GRANT_TOOL_NAMES is empty. MUST NOT
+   * be used as an authorization gate: it only reports capability, not policy.
+   */
+  hasDaintreeGrantSupport(): boolean {
+    if (!this.connected) return false;
+    return toolsAdvertiseGrantSupport(this.toolCache ?? []);
   }
 
   status(): McpStatus {

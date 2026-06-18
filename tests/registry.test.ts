@@ -170,7 +170,7 @@ describe("ToolRegistry.dispatch", () => {
     const confirm = vi.fn();
     const ctx = makeCtx(db, config, confirm, "watcher");
     ctx.actorId = "wch_1";
-    db.insertGrant({
+    const grant = db.insertGrant({
       actorId: "wch_1",
       actorType: "watcher",
       allowedRiskClassesJson: JSON.stringify(["project"]),
@@ -187,10 +187,39 @@ describe("ToolRegistry.dispatch", () => {
     const audit = db.listAudit();
     expect(audit[0].toolName).toBe("test.project");
     expect(audit[0].outcome).toBe("grant_ok");
+    // The grant_ok row carries the authorizing grant's provenance + id so audit
+    // can distinguish a local grant from a (future) Daintree session grant.
+    expect(audit[0].grantSource).toBe("local");
+    expect(audit[0].grantId).toBe(grant.id);
 
     // The single use was consumed — the next call is denied as usual.
     const res2 = await reg.dispatch("test.project", { name: "y" }, ctx);
     expect(res2.error?.code).toBe("CONFIRMATION_REQUIRED");
+  });
+
+  it("stamps the grant's actual source on the audit row, not a hardcoded 'local'", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    const ctx = makeCtx(db, config, vi.fn(), "watcher");
+    ctx.actorId = "wch_d";
+    // A (future) Daintree-backed grant: prove audit provenance reflects it.
+    const grant = db.insertGrant({
+      actorId: "wch_d",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["project"]),
+      allowedToolNamesJson: null,
+      expiresAt: Date.now() + 60_000,
+      maxUses: 1,
+      source: "daintree",
+    });
+    expect(grant.source).toBe("daintree");
+
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    const audit = db.listAudit()[0];
+    expect(audit.outcome).toBe("grant_ok");
+    expect(audit.grantSource).toBe("daintree");
+    expect(audit.grantId).toBe(grant.id);
   });
 
   it("authorizes by tool name as well as risk class", async () => {
@@ -229,7 +258,11 @@ describe("ToolRegistry.dispatch", () => {
     const res = await reg.dispatch("test.project", { name: "x" }, ctx);
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
-    expect(db.listAudit()[0].outcome).toBe("denied");
+    const denied = db.listAudit()[0];
+    expect(denied.outcome).toBe("denied");
+    // A non-grant outcome never carries grant provenance.
+    expect(denied.grantSource ?? null).toBeNull();
+    expect(denied.grantId ?? null).toBeNull();
   });
 
   it("an expired grant does not authorize the call", async () => {

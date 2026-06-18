@@ -39,6 +39,9 @@ describe("grant tools", () => {
     expect(grants[0].maxUses).toBe(3);
     expect(grants[0].usesRemaining).toBe(3);
     expect(JSON.parse(grants[0].allowedRiskClassesJson!)).toEqual(["git"]);
+    // Grants minted by the assistant are local-only until Daintree exposes a
+    // native grants API; the source field makes that provenance explicit.
+    expect(grants[0].source).toBe("local");
   });
 
   it("grant.create is forbidden for a non-interactive actor", async () => {
@@ -80,7 +83,10 @@ describe("grant tools", () => {
     expect((all.result as { grants: unknown[] }).grants).toHaveLength(2);
 
     const scoped = await list.handler({ actorId: "wch_1" }, ctx());
-    expect((scoped.result as { grants: unknown[] }).grants).toHaveLength(1);
+    const items = (scoped.result as { grants: Array<{ source: string }> }).grants;
+    expect(items).toHaveLength(1);
+    // The listing exposes provenance so callers can tell local from Daintree grants.
+    expect(items[0].source).toBe("local");
   });
 
   it("rejects an over-long ttl via the schema, persisting no grant", async () => {

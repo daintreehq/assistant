@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
   outcome TEXT NOT NULL,
   durationMs INTEGER NOT NULL,
   summary TEXT NOT NULL,
-  resultJson TEXT
+  resultJson TEXT,
+  grantSource TEXT,
+  grantId TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
 
@@ -128,7 +130,8 @@ CREATE TABLE IF NOT EXISTS automation_grants (
   maxUses INTEGER NOT NULL,
   usesRemaining INTEGER NOT NULL,
   revokedAt INTEGER,
-  createdAt INTEGER NOT NULL
+  createdAt INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'local'
 );
 CREATE INDEX IF NOT EXISTS idx_grants_actor ON automation_grants (actorId, revokedAt, expiresAt);
 `;
@@ -251,6 +254,20 @@ export class Db {
           "isSupervisor",
           "INTEGER NOT NULL DEFAULT 0",
         );
+      },
+      // v4: grant provenance. automation_grants.source distinguishes a purely
+      // local grant from a (future) Daintree session grant; audit_log.grantSource
+      // / grantId carry that provenance onto each grant_ok row so the two grant
+      // lifecycles can be told apart in listings and audit. Existing rows default
+      // to "local" (the only kind that has ever been minted).
+      () => {
+        this.addColumnIfMissing(
+          "automation_grants",
+          "source",
+          "TEXT NOT NULL DEFAULT 'local'",
+        );
+        this.addColumnIfMissing("audit_log", "grantSource", "TEXT");
+        this.addColumnIfMissing("audit_log", "grantId", "TEXT");
       },
     ];
     const row = this.db.prepare("PRAGMA user_version").get() as
@@ -602,11 +619,13 @@ export class Db {
       durationMs: rec.durationMs,
       summary: rec.summary,
       resultJson: rec.resultJson,
+      grantSource: rec.grantSource,
+      grantId: rec.grantId,
     };
     this.db
       .prepare(
-        `INSERT INTO audit_log (id,ts,actor,toolName,argsJson,outcome,durationMs,summary,resultJson)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO audit_log (id,ts,actor,toolName,argsJson,outcome,durationMs,summary,resultJson,grantSource,grantId)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -618,6 +637,8 @@ export class Db {
         full.durationMs,
         full.summary,
         full.resultJson ?? null,
+        full.grantSource ?? null,
+        full.grantId ?? null,
       );
     return full;
   }
@@ -631,7 +652,10 @@ export class Db {
   /* ----------------------- automation grants ----------------------------- */
 
   insertGrant(
-    rec: Omit<AutomationGrantRecord, "id" | "createdAt" | "usesRemaining" | "revokedAt"> &
+    rec: Omit<
+      AutomationGrantRecord,
+      "id" | "createdAt" | "usesRemaining" | "revokedAt" | "source"
+    > &
       Partial<AutomationGrantRecord>,
   ): AutomationGrantRecord {
     const full: AutomationGrantRecord = {
@@ -645,11 +669,12 @@ export class Db {
       usesRemaining: rec.usesRemaining ?? rec.maxUses,
       revokedAt: rec.revokedAt ?? null,
       createdAt: rec.createdAt ?? Date.now(),
+      source: rec.source ?? "local",
     };
     this.db
       .prepare(
-        `INSERT INTO automation_grants (id,actorId,actorType,allowedRiskClassesJson,allowedToolNamesJson,expiresAt,maxUses,usesRemaining,revokedAt,createdAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO automation_grants (id,actorId,actorType,allowedRiskClassesJson,allowedToolNamesJson,expiresAt,maxUses,usesRemaining,revokedAt,createdAt,source)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -662,6 +687,7 @@ export class Db {
         full.usesRemaining,
         full.revokedAt,
         full.createdAt,
+        full.source,
       );
     return full;
   }

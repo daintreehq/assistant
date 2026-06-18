@@ -55,6 +55,51 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(r.title).toContain("Inbox");
   });
 
+  it("/audit tags a grant_ok row with the grant's source", async () => {
+    app.db.insertAudit({
+      actor: "watcher",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 5,
+      summary: "committed",
+      grantSource: "local",
+      grantId: "grt_x",
+    });
+    app.db.insertAudit({
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read",
+    });
+    const r = await handleUiCommand("/audit", app);
+    expect(r.switchPanel).toBe("audit");
+    expect(r.text).toContain("grant_ok[local]");
+    // A plain ok row is not tagged with a source bracket.
+    const readLine = r.text!.split("\n").find((l) => l.includes("fs.read"))!;
+    expect(readLine).toContain(" ok ");
+    expect(readLine).not.toContain("[");
+  });
+
+  it("/audit renders a sourceless grant_ok row (pre-v4 rows) without a bracket", async () => {
+    // A grant_ok row whose grantSource is absent (as migrated pre-v4 rows are)
+    // must render plain 'grant_ok', never 'grant_ok[undefined]'.
+    app.db.insertAudit({
+      actor: "watcher",
+      toolName: "git.push",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 2,
+      summary: "pushed",
+    });
+    const r = await handleUiCommand("/audit", app);
+    const line = r.text!.split("\n").find((l) => l.includes("git.push"))!;
+    expect(line).toContain("grant_ok ");
+    expect(line).not.toContain("grant_ok[");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);

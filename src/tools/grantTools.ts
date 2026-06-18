@@ -212,6 +212,9 @@ export const grantTools: ToolDef[] = [
           expiresAt: new Date(g.expiresAt).toISOString(),
           usesRemaining: g.usesRemaining,
           maxUses: g.maxUses,
+          // Provenance: "local" today; lets a future Daintree-backed grant be
+          // told apart in the model-readable listing.
+          source: g.source,
         }));
         const summary =
           items.length === 0
