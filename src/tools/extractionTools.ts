@@ -197,7 +197,12 @@ async function readSignals(
   const statuses = await readStatuses(ctx, terminalIds, true);
   let allExited = statuses.ok;
   let minMsSinceOutput = Number.POSITIVE_INFINITY;
-  const parts: { terminalId: string; tail: string; agentState?: string }[] = [];
+  const parts: {
+    terminalId: string;
+    tail: string;
+    agentState?: string;
+    exitCode?: number;
+  }[] = [];
 
   for (const id of terminalIds) {
     const entry = statuses.byId.get(id);
@@ -218,7 +223,7 @@ async function readSignals(
     states.set(id, out.state);
     minMsSinceOutput = Math.min(minMsSinceOutput, out.msSinceOutput);
     if (agentState !== "exited") allExited = false;
-    parts.push({ terminalId: id, tail, agentState });
+    parts.push({ terminalId: id, tail, agentState, exitCode: entry?.exitCode });
   }
 
   // Labelled tail goes to the model (so it knows which terminal said what); the
@@ -235,6 +240,9 @@ async function readSignals(
       : terminalIds.length === 1
         ? runtimeFromAgentState(parts[0]?.agentState)
         : "running",
+    // Only meaningful for a single target; aggregating exit codes across many
+    // terminals into one signal would be ambiguous.
+    exitCode: terminalIds.length === 1 ? parts[0]?.exitCode : undefined,
     tail: rawTail,
     msSinceOutput: Number.isFinite(minMsSinceOutput) ? minMsSinceOutput : 0,
   };

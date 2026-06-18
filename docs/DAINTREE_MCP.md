@@ -77,8 +77,10 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
-  → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, recentOutput? }] }`.
-  There is **no** flat `agentState`, **no** `runtimeStatus`, and **no** `exitCode`.
+  → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, recentOutput? }] }`.
+  There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` (numeric)
+  is present once a terminal has exited; `spawnedAt` / `lastTransitionAt` are epoch-ms
+  timestamps. All three are read defensively (absent/non-numeric → `undefined`).
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch(...)` → `{ terminalId, location }` **only** (no `worktreeId`, no `taskId`).
@@ -98,7 +100,9 @@ type AgentState = "idle" | "working" | "waiting" | "completed" | "exited";
 - `"directing"` exists in Daintree's renderer but is **renderer-only** — you will not see
   it over MCP, so the CLI must not depend on it.
 - When `agentState` is `"waiting"`, `waitingReason` is `"prompt"` or `"question"`.
-- Exit is the `"exited"` state; **no numeric exit code is exposed** (see gaps below).
+- Exit is the `"exited"` state; a numeric `exitCode` is then exposed. The CLI treats
+  a nonzero code as failure evidence, **not** as a completion trust gate (completion
+  trust still requires the git verification pass — see gaps below).
 - There is no `agent.getState` tool. Agent state is exposed as the subscribable resource
   `daintree://agent/{agentId}/state`, keyed by **agent** id (not terminal id).
 
@@ -132,11 +136,12 @@ These are limitations in Daintree's MCP surface that the CLI works around locall
 **not fixable in this repo** — they are tracked here so the workarounds can be retired if and
 when Daintree closes the gap.
 
-1. **No exit code / completion metadata.** `terminal.getStatus` exposes `agentState` but no
-   numeric exit code, so the watcher infers success purely from `agentState === "completed"`
-   (`src/daemon/watcherEngine.ts`). This is the shared root cause behind the irreversible-action
-   gate work in **issue #3** — if Daintree exposes a real exit code, both the watcher inference
-   and #3's gate can rely on it instead of the agentState heuristic.
+1. **No test/lint completion signal.** `terminal.getStatus` now exposes a numeric `exitCode`
+   (plus `spawnedAt` / `lastTransitionAt`), which the watcher consumes as signal evidence — a
+   nonzero exit is surfaced as failure evidence on a `terminal_exited` event
+   (`src/daemon/watcherEngine.ts`). It is **not** a completion trust gate: there is still no
+   test/lint runner signal, so the irreversible-action gate from **issue #3** continues to
+   derive completion trust from a deterministic git-cleanliness check, not the exit code.
 2. **`agent.launch` returns only `{ terminalId, location }`.** No `worktreeId` or `taskId`, so
    `src/tools/agentTaskTools.ts` degrades gracefully (caller-supplied `worktreeId`, `taskId`
    undefined). If Daintree returns these, the spawn tool can stop guessing.

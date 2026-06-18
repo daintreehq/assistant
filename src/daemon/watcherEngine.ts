@@ -33,6 +33,8 @@ export interface WatcherSignals {
   runtimeStatus?: string;
   /** Why the agent is waiting, when agentState === "waiting" ("prompt" | "question"). */
   waitingReason?: string;
+  /** Numeric process exit code, present once the terminal has exited. */
+  exitCode?: number;
   tail: string;
   msSinceOutput?: number;
   classification?: WatcherClassification;
@@ -197,6 +199,14 @@ export interface TerminalStatusEntry {
    *  absent even when requested (Daintree can omit it), so callers must fall
    *  back to terminal.getOutput when this is undefined. */
   recentOutput?: string;
+  /** Numeric process exit code, present once the terminal has exited. Used as
+   *  signal evidence (a nonzero code is failure evidence) — never as a trust gate;
+   *  completion trust still requires the deterministic git verification pass. */
+  exitCode?: number;
+  /** Epoch-ms timestamp the terminal/agent was spawned, when reported. */
+  spawnedAt?: number;
+  /** Epoch-ms timestamp of the last agentState transition, when reported. */
+  lastTransitionAt?: number;
 }
 
 /** Result of a batched status read: the per-terminal map plus whether the call
@@ -251,6 +261,19 @@ export async function readStatuses(
         error: typeof e.error === "string" ? e.error : undefined,
         recentOutput:
           typeof e.recentOutput === "string" ? e.recentOutput : undefined,
+        // New exit metadata — read defensively. Exit codes and epoch-ms
+        // timestamps are integers, so Number.isInteger rejects NaN, Infinity, and
+        // stray fractional values; null, strings, and absent values all fall
+        // through to undefined for backwards compat.
+        exitCode: Number.isInteger(e.exitCode as number)
+          ? (e.exitCode as number)
+          : undefined,
+        spawnedAt: Number.isInteger(e.spawnedAt as number)
+          ? (e.spawnedAt as number)
+          : undefined,
+        lastTransitionAt: Number.isInteger(e.lastTransitionAt as number)
+          ? (e.lastTransitionAt as number)
+          : undefined,
       });
     }
     return { ok: true, byId };
@@ -462,9 +485,10 @@ export function deriveVerification(
 }
 
 /**
- * Read-only post-completion reconciliation pass. When an agent reports completion
- * Daintree gives no exit code, so before any irreversible action is suggested we
- * deterministically check the worktree's git cleanliness via git.getProjectPulse
+ * Read-only post-completion reconciliation pass. A reported completion (and its
+ * exit code, when present) is only signal evidence, so before any irreversible
+ * action is suggested we deterministically check the worktree's git cleanliness
+ * via git.getProjectPulse
  * (a workbench-tier read tool — no confirmation, safe from watcher context). Never
  * throws: any failure (MCP down, errored call, unrecognized shape) yields verdict
  * "unknown", which the caller treats as not-yet-verified rather than clean.
@@ -697,6 +721,7 @@ export async function runTerminalWatcherCheck(
         agentState,
         runtimeStatus: runtimeFromAgentState(agentState),
         waitingReason,
+        exitCode: entry?.exitCode,
         tail,
         msSinceOutput: out.msSinceOutput,
       };
@@ -706,6 +731,12 @@ export async function runTerminalWatcherCheck(
         confidence = 0.95;
         summary = "Terminal exited.";
         evidence = ["agentState=exited"];
+        // A nonzero exit code is failure evidence worth surfacing; a clean exit
+        // (0) is silent to avoid noise. The classification stays terminal_exited
+        // either way — exit code enriches evidence, it does not reroute.
+        if (typeof signals.exitCode === "number" && signals.exitCode !== 0) {
+          evidence.push(`exitCode=${signals.exitCode} (nonzero)`);
+        }
       } else if (agentState === "waiting") {
         classification = "waiting_for_input";
         confidence = 0.9;
@@ -717,9 +748,10 @@ export async function runTerminalWatcherCheck(
           `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""}`,
         ];
       } else if (agentState === "completed") {
-        // The agent claims completion, but Daintree exposes no exit code — gate
-        // trust on a deterministic, read-only git check before any irreversible
-        // action can be suggested downstream.
+        // The agent claims completion. The exit code (when present) is signal
+        // evidence, not a trust gate — completion trust is gated on a
+        // deterministic, read-only git check before any irreversible action can
+        // be suggested downstream.
         ({ classification, confidence, summary, evidence } = await gateCompletion(
           ctx,
           options.verificationScope,

@@ -2,11 +2,26 @@ import { describe, it, expect } from "vitest";
 import {
   evaluateCondition,
   decideOutcome,
+  readStatuses,
   type WatcherSignals,
 } from "../src/daemon/watcherEngine.js";
+import type { ToolContext } from "../src/tools/types.js";
 
 function sig(overrides: Partial<WatcherSignals> = {}): WatcherSignals {
   return { tail: "", ...overrides };
+}
+
+/** A ToolContext whose terminal.getStatus returns the given raw entries. */
+function ctxWithStatus(entries: Array<Record<string, unknown>>): ToolContext {
+  return {
+    mcp: {
+      isConnected: () => true,
+      callTool: async (name: string) =>
+        name === "terminal.getStatus"
+          ? { isError: false, text: "", structuredContent: { terminals: entries } }
+          : { isError: true, text: "", structuredContent: {} },
+    },
+  } as unknown as ToolContext;
 }
 
 describe("evaluateCondition", () => {
@@ -122,5 +137,57 @@ describe("decideOutcome", () => {
     expect(out.stopReason).toBe("timeout");
     expect(out.shouldPublish).toBe(true);
     expect(out.severity).toBe("attention");
+  });
+});
+
+describe("readStatuses — exit metadata parsing (#22)", () => {
+  it("preserves numeric exitCode (including 0), spawnedAt, lastTransitionAt", async () => {
+    const ctx = ctxWithStatus([
+      {
+        terminalId: "t1",
+        agentState: "exited",
+        exitCode: 0,
+        spawnedAt: 1_700_000_000_000,
+        lastTransitionAt: 1_700_000_001_000,
+      },
+      { terminalId: "t2", agentState: "exited", exitCode: 1 },
+    ]);
+    const batch = await readStatuses(ctx, ["t1", "t2"]);
+    expect(batch.ok).toBe(true);
+    expect(batch.byId.get("t1")).toMatchObject({
+      exitCode: 0,
+      spawnedAt: 1_700_000_000_000,
+      lastTransitionAt: 1_700_000_001_000,
+    });
+    expect(batch.byId.get("t2")?.exitCode).toBe(1);
+  });
+
+  it("coerces null / string / NaN / Infinity / fractional exit metadata to undefined", async () => {
+    const ctx = ctxWithStatus([
+      { terminalId: "n", agentState: "exited", exitCode: null },
+      { terminalId: "s", agentState: "exited", exitCode: "1" },
+      { terminalId: "nan", agentState: "exited", exitCode: Number.NaN },
+      { terminalId: "inf", agentState: "exited", exitCode: Number.POSITIVE_INFINITY },
+      { terminalId: "frac", agentState: "exited", exitCode: 1.5 },
+      { terminalId: "tsStr", agentState: "exited", spawnedAt: "2024-01-01" },
+      { terminalId: "tsStr2", agentState: "exited", lastTransitionAt: "2026-06-17T10:00:00Z" },
+    ]);
+    const batch = await readStatuses(ctx, ["n", "s", "nan", "inf", "frac", "tsStr", "tsStr2"]);
+    expect(batch.byId.get("n")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("s")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("nan")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("inf")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("frac")?.exitCode).toBeUndefined();
+    expect(batch.byId.get("tsStr")?.spawnedAt).toBeUndefined();
+    expect(batch.byId.get("tsStr2")?.lastTransitionAt).toBeUndefined();
+  });
+
+  it("leaves exit metadata undefined when the fields are absent (backwards compat)", async () => {
+    const ctx = ctxWithStatus([{ terminalId: "t1", agentState: "working" }]);
+    const batch = await readStatuses(ctx, ["t1"]);
+    const e = batch.byId.get("t1")!;
+    expect(e.exitCode).toBeUndefined();
+    expect(e.spawnedAt).toBeUndefined();
+    expect(e.lastTransitionAt).toBeUndefined();
   });
 });
