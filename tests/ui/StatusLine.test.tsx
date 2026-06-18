@@ -34,10 +34,10 @@ function watcher(over: Partial<WatcherRecord> = {}): WatcherRecord {
 const event = (severity: string) => ({ id: severity, severity }) as any;
 
 describe("StatusLine", () => {
-  it("shows latest/history affordance, tier, and MCP health", () => {
+  it("shows the scrollback affordance, tier, and MCP health", () => {
     const frame = render(<StatusLine dashboard={dash()} tier="operator" />).lastFrame() ?? "";
-    expect(frame).toContain("latest");
-    expect(frame).toContain("PgUp history");
+    // Scrollback is the terminal's now, so the footer just points at it.
+    expect(frame).toContain("scroll for history");
     expect(frame).toContain("OPERATOR");
     expect(frame).toContain("MCP");
   });
@@ -62,12 +62,5 @@ describe("StatusLine", () => {
       render(<StatusLine dashboard={dash({ mcp: { connected: false } as any })} />).lastFrame() ??
       "";
     expect(frame).toContain("DEGRADED");
-  });
-
-  it("shows when the user is reading history", () => {
-    const frame =
-      render(<StatusLine dashboard={dash()} scrollOffset={24} />).lastFrame() ?? "";
-    expect(frame).toContain("history -24");
-    expect(frame).toContain("PgDn/End");
   });
 });

@@ -18,6 +18,8 @@
  */
 import { HostBridge } from "./bridge.js";
 import { installBootstrapErrorGuard } from "./errorGuard.js";
+import { isActionableWake, buildWakePrompt } from "../agent/wake.js";
+import type { QueueEvent } from "../schemas.js";
 import {
   PROTOCOL_VERSION,
   type HostCommand,
@@ -65,9 +67,39 @@ async function main(): Promise<void> {
   let bridge: HostBridge | null = null;
   // Set once the App is wired; `unknown` keeps this file free of a cycle into app.ts types.
   let app: {
-    session: { send(input: string): Promise<string> };
+    session: {
+      send(input: string, opts?: { readOnly?: boolean }): Promise<string>;
+    };
     shutdown(): Promise<void>;
   } | null = null;
+
+  // Autonomous wake-ups: the scheduler surfaces terminal-watcher events; when the
+  // host is idle we run a READ-ONLY turn so the model can read the terminal and
+  // report through the normal event stream. Serialized against command-driven
+  // turns by `busy`; one retry on failure so a transient error isn't stranded.
+  const pendingWake: QueueEvent[] = [];
+  let wakeRetried = false;
+  const reactWake = async (): Promise<void> => {
+    if (busy || !ready || !bridge || !app) return;
+    const events = pendingWake.splice(0);
+    if (events.length === 0) return;
+    busy = true;
+    bridge.startExchange();
+    try {
+      await app.session.send(buildWakePrompt(events), { readOnly: true });
+      wakeRetried = false;
+    } catch (err) {
+      post({ type: "host:error", sessionId, code: "wake-failed", message: errMessage(err) });
+      if (!wakeRetried) {
+        wakeRetried = true;
+        pendingWake.unshift(...events);
+      }
+    } finally {
+      bridge.settleTurn("answered");
+      busy = false;
+      if (pendingWake.length > 0) void reactWake();
+    }
+  };
 
   const teardown = async (reason: HostShutdownReason, resumeSessionId?: string): Promise<void> => {
     bridge?.settlePendingApprovals("rejected");
@@ -96,6 +128,7 @@ async function main(): Promise<void> {
     // Dynamic import AFTER the bootstrap guard, so a module-load failure (e.g.
     // node:sqlite, a native dep) is reported and exits instead of hanging.
     const { App } = await import("../cli/app.js");
+    const { startDebugLog } = await import("../debugLog.js");
     const appSessionId = descriptor.resumeSessionId ?? descriptor.sessionId;
     const instance = App.create({
       sessionId: appSessionId,
@@ -104,6 +137,8 @@ async function main(): Promise<void> {
       overrides: { projectPath: descriptor.cwd },
     });
     app = instance;
+    // Open this session's global debug log (prune old + header); no-op unless enabled.
+    startDebugLog(instance.config, appSessionId);
 
     bridge = new HostBridge({
       sessionId,
@@ -118,6 +153,18 @@ async function main(): Promise<void> {
     // Best-effort: a degraded MCP connection surfaces in the assistant's own
     // prompt context and tool results, not as a boot failure.
     await instance.connectMcp();
+
+    // Start the daemon so watchers/timers tick in the host runtime (the Ink path
+    // does this in its controller). Terminal-watcher events autonomously wake a
+    // read-only turn via reactWake; other sources stay in the attention queue.
+    instance.startScheduler((events) => {
+      const actionable = events.filter(isActionableWake);
+      if (actionable.length === 0) return;
+      // A burst starting from empty gets a fresh single-retry budget.
+      if (pendingWake.length === 0) wakeRetried = false;
+      pendingWake.push(...actionable);
+      void reactWake();
+    });
 
     // Hand off from the bootstrap guard to long-lived runtime handlers.
     disposeBootstrapGuard();
@@ -164,6 +211,9 @@ async function main(): Promise<void> {
           // assistantEnd); a normal completion already closed it, so this no-ops.
           bridge.settleTurn("answered");
           busy = false;
+          // A watcher may have surfaced something while this turn ran — react now
+          // that we're idle.
+          if (pendingWake.length > 0) void reactWake();
         }
         return;
       }

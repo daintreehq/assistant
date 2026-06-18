@@ -17,7 +17,8 @@ import {
 } from "react";
 import type { App } from "../../cli/app.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
-import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
+import { handleUiCommand } from "../../cli/commandData.js";
+import { buildAgentRows } from "../presentation/operations.js";
 import { presentTool } from "../presentation/tools.js";
 import type {
   ActivityItem,
@@ -27,8 +28,8 @@ import type {
   TurnCell,
 } from "../types.js";
 import type { QueueEvent } from "../../schemas.js";
-
-const MAX_CELLS = 200;
+import { logDebug } from "../../debugLog.js";
+import { isActionableWake, buildWakePrompt } from "../../agent/wake.js";
 
 let idCounter = 0;
 function uid(prefix: string): string {
@@ -77,7 +78,7 @@ function ensureActiveTurn(
   const idx = activeTurnIndex(cells);
   if (idx >= 0) return { cells, index: idx };
   const turn = newTurn("", now);
-  const next = [...cells, turn].slice(-MAX_CELLS);
+  const next = [...cells, turn];
   return { cells: next, index: next.length - 1 };
 }
 
@@ -98,7 +99,7 @@ export function transcriptReducer(
   const now = Date.now();
   switch (action.type) {
     case "user:add":
-      return [...cells, newTurn(action.text, now)].slice(-MAX_CELLS);
+      return [...cells, newTurn(action.text, now)];
 
     case "command:add":
       return [
@@ -110,7 +111,7 @@ export function transcriptReducer(
           text: action.text,
           ts: now,
         },
-      ].slice(-MAX_CELLS);
+      ];
 
     case "assistant:start": {
       const { cells: c, index } = ensureActiveTurn(cells, now);
@@ -136,7 +137,7 @@ export function transcriptReducer(
         return [
           ...cells,
           { ...turn, assistantText: action.content, state: "complete" as const },
-        ].slice(-MAX_CELLS);
+        ];
       }
       const turn = cells[idx] as TurnCell;
       return replaceAt(cells, idx, {
@@ -210,7 +211,7 @@ export function transcriptReducer(
           text: action.message,
           ts: now,
         },
-      ].slice(-MAX_CELLS);
+      ];
     }
 
     case "attention":
@@ -226,7 +227,7 @@ export function transcriptReducer(
             ts: now,
           };
         }),
-      ].slice(-MAX_CELLS);
+      ];
 
     default:
       return cells;
@@ -288,9 +289,11 @@ export interface DaintreeController {
   /** Live stage label for the composer (Inspecting, Delegating, Watching…). */
   stage: string;
   pendingConfirm: PendingConfirm | null;
-  activePanel: PanelKey | null;
-  setActivePanel: (panel: PanelKey | null) => void;
-  sendUserMessage: (text: string) => Promise<void>;
+  /** Submit user input. Returns false (synchronously) if rejected — empty, or a
+   *  turn is already in flight — so the composer can keep the text. */
+  sendUserMessage: (text: string) => boolean;
+  /** Print a one-shot operations snapshot inline (the `^O` key). */
+  openOps: () => void;
   resolveConfirm: (approved: boolean) => void;
 }
 
@@ -304,13 +307,64 @@ export function useDaintreeController(
     null,
   );
   const [busy, setBusy] = useState(false);
-  const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
   );
   // Synchronous serialization lock. `busy` is async React state and can't gate
   // back-to-back submits in the same tick; this ref can.
   const inFlight = useRef(false);
+
+  // Autonomous wake-ups: attention events the scheduler surfaces while idle are
+  // queued here, then fed to the model as a turn so it can decide to read a
+  // finished/blocked terminal and report back. Drained only when no turn is in
+  // flight; `reactToWakeRef` lets the (once-registered) scheduler callback and the
+  // turn-finished path invoke the latest reactor without re-registering.
+  const pendingWake = useRef<QueueEvent[]>([]);
+  const reactToWakeRef = useRef<() => void>(() => {});
+  // Whether the current burst has already been retried once after a failure —
+  // bounds retries so a persistently-failing model can't spin the wake loop.
+  const wakeRetried = useRef(false);
+
+  const reactToWake = useCallback(async () => {
+    if (inFlight.current) return; // a turn is running — drain when it finishes
+    const events = pendingWake.current;
+    if (events.length === 0) return;
+    pendingWake.current = [];
+    inFlight.current = true;
+    setBusy(true);
+    logDebug(app.config, "wake.react", {
+      count: events.length,
+      titles: events.map((e) => (e as { title?: string }).title),
+    });
+    try {
+      // readOnly: an autonomous turn the user didn't initiate must only be able to
+      // inspect (read the terminal) and report — never run a mutating tool.
+      await app.session.send(buildWakePrompt(events), { readOnly: true });
+      wakeRetried.current = false; // success resets the per-burst retry budget
+    } catch (err) {
+      bridge.emit({
+        type: "log",
+        level: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+      // Best-effort single retry so a transient model failure isn't stranded;
+      // capped to avoid a failure loop. The events also remain in the inbox.
+      if (!wakeRetried.current) {
+        wakeRetried.current = true;
+        pendingWake.current.unshift(...events);
+      }
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+      // More events may have arrived during the reaction (or a retry was queued) —
+      // drain them too.
+      if (pendingWake.current.length > 0) reactToWakeRef.current();
+    }
+  }, [app, bridge]);
+
+  useEffect(() => {
+    reactToWakeRef.current = () => void reactToWake();
+  }, [reactToWake]);
 
   // Subscribe to the bridge: confirms drive modal state, everything else reduces.
   useEffect(() => {
@@ -336,14 +390,28 @@ export function useDaintreeController(
       await app.connectMcp();
       if (disposed) return;
       app.startScheduler((events: QueueEvent[]) => {
+        // The scheduler outlives this hook (startScheduler is idempotent and keeps
+        // the first callback). After cleanup, do no UI/turn work against a dead
+        // closure.
+        if (disposed) return;
         bridge.emit({ type: "attention", events });
+        // Terminal-watcher events autonomously wake the model so it can read the
+        // terminal and report; other sources stay passive in the inbox.
+        const actionable = events.filter(isActionableWake);
+        if (actionable.length > 0) {
+          // A burst starting from empty gets a fresh single-retry budget.
+          if (pendingWake.current.length === 0) wakeRetried.current = false;
+          pendingWake.current.push(...actionable);
+          logDebug(app.config, "wake.enqueue", { count: actionable.length });
+          reactToWakeRef.current();
+        }
       });
       const st = app.mcp.status();
       bridge.emit({
         type: "log",
         level: st.connected ? "info" : "warn",
         message: st.connected
-          ? `Connected to Daintree MCP (${st.transport}, ${st.toolCount ?? "?"} tools).`
+          ? `Connected to Daintree MCP.`
           : `Daintree MCP not connected — ${st.error ?? "no url/token"}. Running degraded.`,
       });
       setDashboard(snapshot(app));
@@ -365,47 +433,54 @@ export function useDaintreeController(
   }, [app, bridge]);
 
   const sendUserMessage = useCallback(
-    async (text: string) => {
+    (text: string): boolean => {
       const trimmed = text.trim();
-      // The ref lock gates synchronously; this covers both model turns AND async
-      // slash commands (e.g. /compact) so they can't race app.session state.
-      if (!trimmed || inFlight.current) return;
+      // Decide acceptance SYNCHRONOUSLY so the composer can keep the typed text if
+      // we reject (e.g. an autonomous wake turn grabbed the lock in the same tick).
+      // The ref lock gates both model turns and async slash commands.
+      if (!trimmed) return false;
+      if (inFlight.current) return false;
       inFlight.current = true;
       setBusy(true);
-      try {
-        if (trimmed.startsWith("/")) {
-          const result = await handleUiCommand(trimmed, app);
-          if (result.quit) {
-            onExit?.();
+      // Run the turn in the background; acceptance is already decided.
+      void (async () => {
+        try {
+          if (trimmed.startsWith("/")) {
+            const result = await handleUiCommand(trimmed, app);
+            if (result.quit) {
+              onExit?.();
+              return;
+            }
+            // Every command prints its result inline into the stream (Claude Code
+            // shaped), where it commits to the terminal's scrollback — no
+            // full-screen panel takes over. `switchPanel` is now just metadata.
+            if (result.title || result.text) {
+              dispatch({
+                type: "command:add",
+                title: result.title ?? "",
+                text: result.text ?? "",
+              });
+            }
             return;
           }
-          if (result.switchPanel) {
-            // A panel command opens a purposeful view rather than dumping text
-            // into the transcript. Bump to a fresh object each time so re-running
-            // the same command re-opens the view even after it was closed.
-            setActivePanel(result.switchPanel);
-          } else if (result.title || result.text) {
-            dispatch({
-              type: "command:add",
-              title: result.title ?? "",
-              text: result.text ?? "",
-            });
-          }
-          return;
-        }
 
-        dispatch({ type: "user:add", text: trimmed });
-        await app.session.send(trimmed);
-      } catch (err) {
-        bridge.emit({
-          type: "log",
-          level: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      } finally {
-        inFlight.current = false;
-        setBusy(false);
-      }
+          dispatch({ type: "user:add", text: trimmed });
+          await app.session.send(trimmed);
+        } catch (err) {
+          bridge.emit({
+            type: "log",
+            level: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          inFlight.current = false;
+          setBusy(false);
+          // A watcher may have surfaced something while this turn ran — react now
+          // that we're idle, so it isn't stranded in the inbox.
+          if (pendingWake.current.length > 0) reactToWakeRef.current();
+        }
+      })();
+      return true;
     },
     [app, bridge, onExit],
   );
@@ -417,6 +492,17 @@ export function useDaintreeController(
     });
   }, []);
 
+  // `^O`: snapshot the current operational state into the stream as a command
+  // cell. Inline like Claude Code's /status — it scrolls away into history, it
+  // doesn't take over the screen. Reads the latest dashboard each press.
+  const openOps = useCallback(() => {
+    dispatch({
+      type: "command:add",
+      title: "Operations",
+      text: formatOpsSnapshot(snapshot(app)),
+    });
+  }, [app]);
+
   const stage = useMemo(() => deriveStage(transcript), [transcript]);
 
   return {
@@ -426,9 +512,34 @@ export function useDaintreeController(
     busy,
     stage,
     pendingConfirm,
-    activePanel,
-    setActivePanel,
     sendUserMessage,
+    openOps,
     resolveConfirm,
   };
+}
+
+/** Render the ops deck (agents · timers · runs · inbox) as a compact text block
+ *  for the inline `^O` snapshot. */
+function formatOpsSnapshot(dashboard: DashboardState): string {
+  const agents = buildAgentRows(dashboard.watchers);
+  const runs = dashboard.workflowRuns ?? [];
+  const { timers, inbox } = dashboard;
+  const out: string[] = [
+    `agents ${agents.length} · runs ${runs.length} · timers ${timers.length} · inbox ${inbox.length}`,
+  ];
+  for (const a of agents) {
+    out.push(`  ${a.id}  [${a.classification ?? "pending"}] ${a.goal || a.title}`);
+  }
+  for (const r of runs) {
+    const title = r.issueTitle ?? r.branch ?? r.worktreeId ?? r.id;
+    out.push(`  run ${r.status} — ${title}`);
+  }
+  for (const t of timers) {
+    out.push(`  timer ${t.title} — ${new Date(t.fireAt).toLocaleTimeString()}`);
+  }
+  for (const e of inbox.slice(0, 5)) {
+    const ev = e as { title?: string; summary?: string };
+    out.push(`  ! ${ev.title ?? "event"}${ev.summary ? ` — ${ev.summary}` : ""}`);
+  }
+  return out.join("\n");
 }

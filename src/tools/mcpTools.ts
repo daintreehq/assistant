@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ok, fail, NO_ARGS, type ToolDef } from "./types.js";
 import type { ToolContext } from "./types.js";
 import type { ToolResult } from "../schemas.js";
+import { isForbiddenToolName } from "../safety/policy.js";
 
 /**
  * Forward a call to a named Daintree MCP tool. Shared by the typed wrappers
@@ -94,6 +95,24 @@ const CallArgs = z.object({
   arguments: z.record(z.string(), z.unknown()).optional(),
   requestKey: z.string().optional(),
 });
+
+/**
+ * MCP tools that MUST go through a typed local wrapper instead of the raw
+ * daintree.call escape hatch. Each maps the raw MCP tool name to the wrapper(s)
+ * that cover it, with named, validated parameters. The escape hatch invites two
+ * recurring failure modes — reaching for it when a wrapper exists, then sending
+ * an empty `arguments: {}` and retrying the identical broken call — so for these
+ * tools daintree.call fails fast and redirects rather than forwarding a call the
+ * model already keeps fumbling. Keep this in sync with the wrappers and with the
+ * verified surface in daintreeMcp.ts.
+ */
+const WRAPPED_MCP_TOOLS: Record<string, string> = {
+  "agent.launch":
+    'agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)',
+  "terminal.getOutput":
+    "terminal.summarize (model summary of the tail) or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
+  "panel.focus": "terminal.focus",
+};
 
 const ForgeReadArgs = z
   .object({
@@ -292,7 +311,7 @@ export const mcpTools: ToolDef[] = [
   {
     name: "daintree.call",
     description:
-      "Raw passthrough to ANY Daintree MCP tool. Escape hatch — highest risk ('system'), always confirmed, requires the 'system' tier. Prefer purpose-built tools; use this only when no wrapper exists.",
+      "Raw passthrough to ANY Daintree MCP tool. Escape hatch — highest risk ('system'), always confirmed, requires the 'system' tier. Prefer purpose-built tools; use this only when no wrapper exists. Tools that already have a wrapper (e.g. agent.launch, terminal.getOutput, panel.focus) are refused here and redirected to the wrapper.",
     risk: "system",
     schema: CallArgs,
     parameters: {
@@ -313,6 +332,23 @@ export const mcpTools: ToolDef[] = [
       required: ["name"],
     },
     async handler(args, ctx) {
+      const wrapper = WRAPPED_MCP_TOOLS[args.name];
+      if (wrapper) {
+        return fail(
+          "USE_TYPED_WRAPPER",
+          `Do not call ${args.name} through daintree.call — use the typed wrapper instead: ${wrapper}. It takes named, validated parameters, so you can't drop a required argument. Switch tools; do not retry this raw call.`,
+        );
+      }
+      // The no-file-edit invariant is enforced on local tool NAMES at registration,
+      // but daintree.call forwards an arbitrary raw MCP name — apply the same guard
+      // here so a file-mutating MCP tool can't be reached through the escape hatch.
+      if (isForbiddenToolName(args.name)) {
+        return fail(
+          "FILE_EDIT_FORBIDDEN",
+          `Refusing to call ${args.name} via daintree.call — the assistant never edits files directly. Spawn a visible agent (agentTask.spawnForEdits) to make changes.`,
+          { recoverable: false },
+        );
+      }
       if (!ctx.mcp.isConnected()) {
         return fail(
           "MCP_UNAVAILABLE",

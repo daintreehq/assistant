@@ -18,14 +18,14 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await tick(); // let mount effects (connect + scheduler + first poll) settle
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("DAINTREE"); // brand identity bar
+    expect(frame).toContain("assistant"); // brand identity bar
     expect(frame).toContain("›"); // the composer prompt glyph
     // Offline → the connection badge degrades and the mount log lands in the
     // transcript (which is why the empty hint is gone by now).
     expect(frame).toContain("DEGRADED");
     expect(frame).toContain("not connected");
-    // The operations surface is never inline now — it lives behind ^O / a
-    // /panel command, covered by OperationsView.test.
+    // The operations surface is never a full-screen takeover now — `^O` prints
+    // it inline into the stream (covered below) and OperationsView is unused.
 
     unmount();
     // After teardown, a confirm requested by an in-flight tool call must
@@ -42,7 +42,7 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("scrolls history with the arrow keys (also the mouse wheel)", async () => {
+  it("prints an inline operations snapshot on ^O (no screen takeover)", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-ink-"));
     const app = App.create({
       overrides: { offline: true, stateDir, projectPath: stateDir, tier: "operator" },
@@ -51,19 +51,16 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     const { lastFrame, stdin, unmount } = render(<DaintreeInkApp app={app} />);
     await tick();
 
-    // Pinned to the latest output to start.
-    expect(lastFrame() ?? "").toContain("latest");
+    // No operations card until asked for it.
+    expect(lastFrame() ?? "").not.toContain("Operations");
 
-    // Up arrow scrolls back into history — on the alternate screen the terminal
-    // delivers mouse-wheel ticks here as arrow keys, so this is the wheel too.
-    stdin.write("[A");
+    // ^O (0x0f) prints the ops deck inline into the stream — it scrolls away
+    // like Claude Code's /status, it does not open a full-screen panel.
+    stdin.write("\x0f");
     await tick();
-    expect(lastFrame() ?? "").toContain("history -");
-
-    // End snaps back to the latest line.
-    stdin.write("[F");
-    await tick();
-    expect(lastFrame() ?? "").toContain("latest");
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Operations");
+    expect(frame).toContain("agents 0"); // offline → empty rollup, still inline
 
     unmount();
     await app.shutdown();

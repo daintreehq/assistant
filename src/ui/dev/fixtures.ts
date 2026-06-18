@@ -18,7 +18,6 @@ import type {
   PendingConfirm,
   TranscriptCell,
 } from "../types.js";
-import type { View } from "../ControlRoom.js";
 
 /** A fixed wall clock — fixtures are offsets from here. */
 export const FIXED_NOW = 1_700_000_000_000;
@@ -30,7 +29,6 @@ export interface Fixture {
   connected: boolean;
   busy: boolean;
   stage: string;
-  view: View;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
   previews: TerminalPreview[];
@@ -211,9 +209,7 @@ export function buildFixtures(): Fixture[] {
       label: "idle",
       connected: true,
       busy: false,
-      stage: "Thinking",
-      view: "home",
-      transcript: [],
+      stage: "Thinking",      transcript: [],
       dashboard: emptyDash(true),
       previews: [],
       pending: null,
@@ -223,9 +219,7 @@ export function buildFixtures(): Fixture[] {
       label: "active",
       connected: true,
       busy: true,
-      stage: "Watching",
-      view: "home",
-      transcript: activeRun(),
+      stage: "Watching",      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
         workflowRuns: [workflow({})],
@@ -253,9 +247,7 @@ export function buildFixtures(): Fixture[] {
       label: "attention",
       connected: true,
       busy: false,
-      stage: "Waiting",
-      view: "home",
-      transcript: activeRun(),
+      stage: "Waiting",      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
         workflowRuns: [
@@ -302,9 +294,7 @@ export function buildFixtures(): Fixture[] {
       label: "approval",
       connected: true,
       busy: false,
-      stage: "Waiting for approval",
-      view: "home",
-      transcript: activeRun(),
+      stage: "Waiting for approval",      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
         workflowRuns: [
@@ -337,9 +327,7 @@ export function buildFixtures(): Fixture[] {
       label: "degraded",
       connected: false,
       busy: false,
-      stage: "Thinking",
-      view: "home",
-      transcript: [
+      stage: "Thinking",      transcript: [
         {
           kind: "note",
           id: "note_1",
@@ -357,9 +345,7 @@ export function buildFixtures(): Fixture[] {
       label: "timers",
       connected: true,
       busy: false,
-      stage: "Thinking",
-      view: "home",
-      transcript: [],
+      stage: "Thinking",      transcript: [],
       dashboard: {
         ...emptyDash(true),
         timers: [
@@ -376,9 +362,7 @@ export function buildFixtures(): Fixture[] {
       label: "fleet",
       connected: true,
       busy: true,
-      stage: "Watching",
-      view: "home",
-      transcript: activeRun(),
+      stage: "Watching",      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
         workflowRuns: [
@@ -410,9 +394,7 @@ export function buildFixtures(): Fixture[] {
       label: "long message",
       connected: true,
       busy: true,
-      stage: "Delegating",
-      view: "home",
-      transcript: longUserRun(),
+      stage: "Delegating",      transcript: longUserRun(),
       dashboard: {
         ...emptyDash(true),
         workflowRuns: [workflow({})],

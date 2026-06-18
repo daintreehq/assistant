@@ -5,12 +5,7 @@ import { buildFixtures, FIXED_NOW } from "../../src/ui/dev/fixtures.js";
 const fixtures = buildFixtures();
 const byKey = (label: string) => fixtures.find((f) => f.label === label)!;
 
-function frameFor(
-  label: string,
-  columns: number,
-  rows = 24,
-  scrollOffset = 0,
-): string {
+function frameFor(label: string, columns: number, rows = 24): string {
   const f = byKey(label);
   const { lastFrame } = render(
     <ControlRoom
@@ -24,11 +19,9 @@ function frameFor(
       previews={f.previews}
       busy={f.busy}
       stage={f.stage}
-      view={f.view}
       pending={f.pending}
       now={FIXED_NOW}
       composerFocus={false}
-      scrollOffset={scrollOffset}
     />,
   );
   return lastFrame() ?? "";
@@ -40,10 +33,12 @@ const WIDTHS = [58, 80, 120];
 describe("ControlRoom stream frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle starts with the Daintree intro block at %i cols", (w) => {
     const frame = frameFor("idle", w, 32);
-    expect(frame).toContain("DAINTREE ASSISTANT");
-    expect(frame).toContain("MCP CONNECTED");
+    expect(frame).toContain("assistant");
+    // Connection status lives in the live StatusLine now (not the static intro,
+    // which would otherwise freeze a pre-connect status forever).
+    expect(frame).toContain("MCP");
     expect(frame).toContain("Standing by");
-    expect(frame).toContain("wheel scroll");
+    expect(frame).toContain("scroll the terminal"); // native scrollback hint
     expect(frame).toContain("Ask Daintree...");
   });
 
@@ -72,8 +67,9 @@ describe("ControlRoom stream frames (deterministic fixtures)", () => {
 
   it.each(WIDTHS)("degraded is unmistakable at %i cols", (w) => {
     const frame = frameFor("degraded", w, 32);
-    expect(frame).toContain("MCP DEGRADED");
+    // StatusLine shows DEGRADED; the composer context hint says "MCP degraded".
     expect(frame).toContain("DEGRADED");
+    expect(frame).toContain("MCP degraded");
   });
 
   it("never renders a wide right rail on the home surface", () => {
@@ -122,11 +118,5 @@ describe("ControlRoom sidebar (55-65 cols, the primary surface)", () => {
       if (prev === undefined) delete process.env.DAINTREE_ASCII;
       else process.env.DAINTREE_ASCII = prev;
     }
-  });
-
-  it("shows a history footer when scrolled away from latest", () => {
-    const frame = frameFor("active", 58, 18, 8);
-    expect(frame).toContain("history -8");
-    expect(frame).toContain("PgDn/End");
   });
 });

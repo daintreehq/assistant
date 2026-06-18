@@ -10,6 +10,7 @@ import { startRepl } from "./repl.js";
 import { render, c } from "./render.js";
 import { createConsoleSink } from "./consoleSink.js";
 import { startInkApp } from "../ui/runInkApp.js";
+import { startDebugLog } from "../debugLog.js";
 import type { ConfigOverrides } from "../config.js";
 import type { Tier } from "../schemas.js";
 
@@ -33,8 +34,16 @@ function overridesFromOptions(opts: CliOptions): ConfigOverrides {
   };
 }
 
+/** Start the debug log for this session and, when active, tell the user where it
+ *  is being written so they can tail it. */
+function announceDebugLog(app: App): void {
+  const logPath = startDebugLog(app.config, app.sessionId);
+  if (logPath) render.line(c.gray(`logging to ${logPath}`));
+}
+
 async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
+  announceDebugLog(app);
   app.setHooks({
     agentEvents: createConsoleSink(),
     // One-shot is non-interactive: auto-decline mutations rather than hang.
@@ -53,12 +62,13 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
 
 async function runInteractive(opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
+  announceDebugLog(app);
   const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (opts.classic || !ttyOk) {
     await startRepl(app);
     return;
   }
-  await startInkApp(app, { alternateScreen: opts.altScreen !== false });
+  await startInkApp(app, { alternateScreen: opts.altScreen === true });
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
@@ -87,7 +97,7 @@ async function main(): Promise<void> {
     .option("--tier <tier>", "supervisor | operator | system")
     .option("--offline", "Do not make network calls")
     .option("--classic", "Use the legacy readline interface")
-    .option("--no-alt-screen", "Render Ink without the alternate (full-screen) buffer")
+    .option("--alt-screen", "Render Ink in the alternate (full-screen) buffer instead of inline native scrollback")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);

@@ -150,18 +150,36 @@ export class App {
     this.session.refreshRuntimeContext(this.promptContext());
   }
 
-  /** Surface documented-vs-live MCP tool drift as a startup warning (non-fatal). */
+  /**
+   * Surface documented-vs-live MCP tool drift as a single, non-fatal startup line.
+   * Drift means a tool we document isn't advertised at the current tier / plugin
+   * config — a developer signal, never user-actionable — so we collapse the
+   * per-tool list into one rollup instead of flooding the ledger with a line each.
+   * `/doctor` keeps the full breakdown.
+   */
   private warnOnDrift(st: McpStatus): void {
-    if (!st.driftWarnings?.length) return;
+    const names = st.driftToolNames ?? [];
+    if (names.length === 0) return;
     const log = this.hooks.log ?? (() => {});
-    for (const w of st.driftWarnings) log(`⚠️  ${w}`);
+    const preview = names.slice(0, 3).join(", ");
+    const rest = names.length - Math.min(3, names.length);
+    const list = rest > 0 ? `${preview}, +${rest} more` : preview;
+    const noun = names.length === 1 ? "tool" : "tools";
+    log(
+      `⚠️  MCP drift: ${names.length} documented ${noun} not advertised by the live server (${list}). Run /doctor for the full list.`,
+    );
   }
 
   startScheduler(onAttention?: (events: QueueEvent[]) => void): Scheduler {
     // Idempotent: a React effect may run more than once (remount / future
     // StrictMode). Returning the existing scheduler avoids leaking a second
-    // interval that shutdown() would never stop.
-    if (this.scheduler) return this.scheduler;
+    // interval that shutdown() would never stop — but REBIND its attention
+    // callback so a remount's fresh closure replaces the (now-disposed) old one,
+    // rather than leaving the scheduler calling a dead hook forever.
+    if (this.scheduler) {
+      this.scheduler.setOnAttention(onAttention);
+      return this.scheduler;
+    }
     this.scheduler = new Scheduler({
       db: this.db,
       queue: this.queue,

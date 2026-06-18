@@ -11,8 +11,20 @@ const revoke = grantTools.find((t) => t.name === "grant.revoke")!;
 
 let db: Db;
 
-function ctx(actor: ToolActor = "main"): ToolContext {
-  return { db, actor } as unknown as ToolContext;
+function ctx(
+  actor: ToolActor = "main",
+  over: Partial<ToolContext> = {},
+): ToolContext {
+  // Mutating-scope grants now require confirmation; default the hook to approve so
+  // existing assertions about minting still hold. Tests that exercise the gate
+  // override `confirm`/`config`.
+  return {
+    db,
+    actor,
+    config: {} as ToolContext["config"],
+    confirm: async () => true,
+    ...over,
+  } as unknown as ToolContext;
 }
 
 const validArgs = {
@@ -49,6 +61,40 @@ describe("grant tools", () => {
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("GRANT_ACTOR_FORBIDDEN");
     expect(db.listGrants("wch_1")).toHaveLength(0);
+  });
+
+  it("grant.create with a MUTATING scope requires confirmation; declined → no grant", async () => {
+    const res = await create.handler(
+      validArgs, // allowedRiskClasses: ["git"] — mutating
+      ctx("main", { confirm: async () => false } as Partial<ToolContext>),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("USER_DECLINED");
+    expect(db.listGrants("wch_1")).toHaveLength(0);
+  });
+
+  it("grant.create with a READ-ONLY scope does not prompt for confirmation", async () => {
+    const confirm = async () => {
+      throw new Error("confirm should not be called for a read-only grant");
+    };
+    const res = await create.handler(
+      { actorId: "wch_1", actorType: "watcher", allowedRiskClasses: ["read"], ttlMs: 60_000, maxUses: 1 },
+      ctx("main", { confirm } as Partial<ToolContext>),
+    );
+    expect(res.ok).toBe(true);
+    expect(db.listGrants("wch_1")).toHaveLength(1);
+  });
+
+  it("auto-approve skips the mutating-grant confirmation", async () => {
+    const res = await create.handler(
+      validArgs,
+      ctx("main", {
+        config: { autoApprove: true } as ToolContext["config"],
+        confirm: async () => false,
+      } as Partial<ToolContext>),
+    );
+    expect(res.ok).toBe(true);
+    expect(db.listGrants("wch_1")).toHaveLength(1);
   });
 
   it("grant.create rejects an empty scope", async () => {

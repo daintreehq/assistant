@@ -116,6 +116,46 @@ describe("ToolRegistry.dispatch", () => {
     expect(confirm).toHaveBeenCalledTimes(1);
   });
 
+  it("auto-approves a confirm-required tool without prompting when autoApprove is on", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    config.autoApprove = true;
+    const confirm = vi.fn().mockResolvedValue(false);
+    const ctx = makeCtx(db, config, confirm);
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    // The confirm sheet is skipped entirely — no Y/N prompt.
+    expect(confirm).not.toHaveBeenCalled();
+    const audit = db.listAudit();
+    expect(audit[0].outcome).toBe("ok");
+  });
+
+  it("still TIER_DENIES under autoApprove — the tier gate runs before approval", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    config.autoApprove = true;
+    config.tier = "supervisor"; // supervisor cannot run a project-risk tool at all
+    const confirm = vi.fn();
+    const ctx = makeCtx(db, config, confirm);
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("TIER_DENIED");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("does NOT auto-approve for a non-main actor even with autoApprove on", async () => {
+    const reg = new ToolRegistry();
+    reg.register(projectTool);
+    config.autoApprove = true;
+    const confirm = vi.fn().mockResolvedValue(true);
+    const ctx = makeCtx(db, config, confirm, "timer");
+    const res = await reg.dispatch("test.project", { name: "x" }, ctx);
+    // Non-interactive actors are governed by scoped grants, not autoApprove.
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("CONFIRMATION_REQUIRED");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it("returns TIER_DENIED for a project tool under the supervisor tier", async () => {
     const reg = new ToolRegistry();
     reg.register(projectTool);

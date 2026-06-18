@@ -73,16 +73,44 @@ describe("agentTask.spawnForEdits", () => {
     expect(watchers.some((w) => w.targetsJson.includes("term_9"))).toBe(true);
 
     // agent.launch was called with the constraints block + an idempotency key,
-    // plus a human-readable name derived from the title (default agent → no suffix).
+    // plus a "<Agent>: <task>" name derived from the title (default agent → "Claude").
     const launch = c._calls.find((x) => x.name === "agent.launch");
     expect(launch).toBeDefined();
     expect(String(launch?.args.prompt)).toContain("only in this worktree");
     expect(typeof launch?.args.requestKey).toBe("string");
-    expect(launch?.args.name).toBe("Fix OAuth callback");
+    expect(launch?.args.name).toBe("Claude: Fix OAuth callback");
     db.close();
   });
 
-  it("tags the launch name with a non-default agentId and stays within the label cap", async () => {
+  it("uses a read-only constraints block in explore mode (no edit language)", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+    const c = ctx(db);
+
+    const res = await reg.dispatch(
+      "agentTask.spawnForEdits",
+      {
+        mode: "explore",
+        title: "Explore canopy-app",
+        taskPrompt: "Explore this entire project and report how it fits together.",
+        worktreeId: "wt-1",
+        watcher: { create: true },
+      },
+      c,
+    );
+
+    expect(res.ok).toBe(true);
+    const launch = c._calls.find((x) => x.name === "agent.launch");
+    const prompt = String(launch?.args.prompt);
+    // Read-only framing, and NONE of the edit-mode "make changes" language.
+    expect(prompt).toContain("READ-ONLY exploration");
+    expect(prompt).not.toContain("only in this worktree");
+    expect(prompt).not.toContain("changed files");
+    db.close();
+  });
+
+  it("prefixes the launch name with the agentId and stays within the label cap", async () => {
     const db = new Db(":memory:");
     const reg = new ToolRegistry();
     reg.registerAll(agentTaskTools);
@@ -100,7 +128,7 @@ describe("agentTask.spawnForEdits", () => {
     const launch = c._calls.find((x) => x.name === "agent.launch");
     expect(launch).toBeDefined();
     const name = String(launch?.args.name);
-    expect(name.endsWith(" (codex)")).toBe(true);
+    expect(name.startsWith("Codex: ")).toBe(true);
     expect(name.length).toBeLessThanOrEqual(60);
     // The idempotency key is still present alongside the new name field.
     expect(typeof launch?.args.requestKey).toBe("string");
@@ -119,7 +147,7 @@ describe("agentTask.spawnForEdits", () => {
       collapse,
     );
     const collapsed = collapse._calls.find((x) => x.name === "agent.launch");
-    expect(collapsed?.args.name).toBe("Fix OAuth callback");
+    expect(collapsed?.args.name).toBe("Claude: Fix OAuth callback");
 
     const blank = ctx(db);
     await reg.dispatch(
@@ -128,7 +156,7 @@ describe("agentTask.spawnForEdits", () => {
       blank,
     );
     const blanked = blank._calls.find((x) => x.name === "agent.launch");
-    expect(blanked?.args.name).toBe("agent");
+    expect(blanked?.args.name).toBe("Claude: task");
 
     db.close();
   });

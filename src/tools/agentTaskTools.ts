@@ -1,29 +1,45 @@
 /**
  * agentTaskTools — the no-file-edit escape hatch.
  *
- * The CLI never edits files itself. When a task needs code changes, it spawns a
- * visible Daintree agent in a worktree (via the `agent.launch` MCP tool) and,
+ * The CLI never edits files itself, and it never spawns agents via a raw
+ * `agent.launch` either. When a task needs code changes (mode "edit") OR a
+ * read-only investigation delegated to a visible agent (mode "explore"), it
+ * spawns a Daintree agent in a worktree (via the `agent.launch` MCP tool) and,
  * optionally, attaches a terminal watcher to supervise it. The agent prompt is
- * composed from the caller's task plus a standard constraints block so the agent
- * stays scoped to its worktree and reports back changed files, tests, and risks.
+ * composed from the caller's task plus a mode-specific constraints block: edit
+ * mode keeps the agent scoped to its worktree and reporting changed files/tests/
+ * risks; explore mode forbids file changes and asks for findings only.
  */
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { ok, fail, type ToolDef } from "./types.js";
 import { SUPERVISOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
+import { logDebug } from "../debugLog.js";
 
 /** Max length for the human-readable name passed to agent.launch (terminal/tab label). */
 const AGENT_LAUNCH_NAME_MAX_LEN = 60;
 
-/** Default agent id; its name suffix would be noise, so it is omitted. */
+/** Default agent id; used as the name prefix when the caller omits one. */
 const DEFAULT_AGENT_ID = "claude";
 
-/** Standard constraints appended to every spawned-agent prompt (docs §18). */
-const CONSTRAINTS_BLOCK = [
+/** Constraints appended to an edit-mode spawned-agent prompt (docs §18). */
+const EDIT_CONSTRAINTS_BLOCK = [
   "Make changes only in this worktree. Do not modify unrelated files.",
   "Run relevant tests if practical.",
   "Report back changed files, tests run, remaining risks.",
   "If you need clarification, stop and ask.",
+].join(" ");
+
+/**
+ * Constraints appended to an explore-mode spawned-agent prompt. The agent is
+ * supervising a read-only investigation, so it must NOT touch files — only
+ * report findings. This is what lets a "spawn an agent to explore X" request go
+ * through this wrapper instead of a hand-rolled raw agent.launch.
+ */
+const EXPLORE_CONSTRAINTS_BLOCK = [
+  "This is a READ-ONLY exploration: do not create, modify, or delete any files, and do not run commands that mutate state.",
+  "Investigate and report back: the project's structure, key components, how the pieces fit together, and anything notable (risks, tech debt, surprises).",
+  "If the task is ambiguous, state your assumptions and proceed; only stop to ask if you are genuinely blocked.",
 ].join(" ");
 
 /**
@@ -46,25 +62,30 @@ function buildAgentPrompt(args: SpawnForEditsArgs): string {
     );
   }
   if (ctxLines.length) lines.push(`\nContext:\n${ctxLines.join("\n")}`);
-  lines.push(`\n${CONSTRAINTS_BLOCK}`);
+  const constraints =
+    args.mode === "explore" ? EXPLORE_CONSTRAINTS_BLOCK : EDIT_CONSTRAINTS_BLOCK;
+  lines.push(`\n${constraints}`);
   return lines.join("\n");
 }
 
 /**
- * Derive a short, human-readable name for the spawned agent so it shows legibly
- * in Daintree's terminal/tab UI and stays distinguishable during parallel
- * orchestration. Built from the task title, with a ` (agentId)` suffix only for
- * non-default agents (the default "claude" suffix would just be noise). Collapses
- * whitespace, falls back to "agent" for a blank title, and truncates the whole
- * label to AGENT_LAUNCH_NAME_MAX_LEN so the suffix always survives.
+ * Derive a short, human-readable name for the spawned agent's terminal/tab in the
+ * canonical "<Agent>: <task>" format (e.g. "Claude: auth refactor") so parallel
+ * agents stay distinguishable at a glance in Daintree's UI. The prefix is always
+ * the launching agent id with its first letter capitalized — including the default
+ * "claude" — and the task half is the caller's title with whitespace collapsed,
+ * falling back to "task" when blank. The whole label is hard-capped at
+ * AGENT_LAUNCH_NAME_MAX_LEN, truncating the task half so the "<Agent>: " prefix
+ * always survives.
  */
 function buildAgentLaunchName(title: string, agentId: string): string {
-  const base = title.trim().replace(/\s+/g, " ") || "agent";
-  const suffix = agentId !== DEFAULT_AGENT_ID ? ` (${agentId})` : "";
-  const room = Math.max(0, AGENT_LAUNCH_NAME_MAX_LEN - suffix.length);
-  const head = base.length > room ? base.slice(0, room) : base;
+  const id = agentId.trim() || DEFAULT_AGENT_ID;
+  const prefix = `${id.charAt(0).toUpperCase()}${id.slice(1)}: `;
+  const task = title.trim().replace(/\s+/g, " ") || "task";
+  const room = Math.max(0, AGENT_LAUNCH_NAME_MAX_LEN - prefix.length);
+  const head = task.length > room ? task.slice(0, room) : task;
   // Final hard cap so the invariant holds even for a pathologically long agentId.
-  return `${head}${suffix}`.slice(0, AGENT_LAUNCH_NAME_MAX_LEN);
+  return `${prefix}${head}`.slice(0, AGENT_LAUNCH_NAME_MAX_LEN);
 }
 
 /**
@@ -106,6 +127,12 @@ const SpawnForEditsArgs = z.object({
     .string()
     .optional()
     .describe('Agent to launch (default "claude").'),
+  mode: z
+    .enum(["edit", "explore"])
+    .optional()
+    .describe(
+      'Spawn intent (default "edit"). "edit" tells the agent to make code changes; "explore" tells it to investigate read-only and not touch any files.',
+    ),
   title: z.string().describe("Short title for the task and any watcher."),
   taskPrompt: z
     .string()
@@ -132,7 +159,7 @@ export const agentTaskTools: ToolDef[] = [
   {
     name: "agentTask.spawnForEdits",
     description:
-      "Spawn a visible Daintree agent in a worktree to make code changes. The CLI never edits files itself — it delegates edits to a supervised agent. Optionally attaches a terminal watcher.",
+      "Spawn a visible Daintree agent in a worktree. Use mode:\"edit\" (default) to make code changes, or mode:\"explore\" for a read-only investigation (the agent is told not to touch files). This is the ONLY way to spawn an agent — never hand-roll a raw agent.launch via daintree.call. The CLI never edits files itself. Optionally attaches a terminal watcher.",
     risk: "project",
     schema: SpawnForEditsArgs,
     parameters: {
@@ -146,6 +173,12 @@ export const agentTaskTools: ToolDef[] = [
         agentId: {
           type: "string",
           description: 'Agent to launch (default "claude").',
+        },
+        mode: {
+          type: "string",
+          enum: ["edit", "explore"],
+          description:
+            'Spawn intent (default "edit"). "edit" tells the agent to make code changes; "explore" tells it to investigate read-only and not touch any files.',
         },
         title: {
           type: "string",
@@ -214,6 +247,19 @@ export const agentTaskTools: ToolDef[] = [
         const worktreeId = extractField(res, "worktreeId") ?? args.worktreeId;
         const taskId = extractField(res, "taskId");
 
+        logDebug(ctx.config, "spawn.launched", {
+          via: "agentTask.spawnForEdits",
+          agentId,
+          mode: args.mode ?? "edit",
+          name,
+          title: args.title,
+          terminalId,
+          worktreeId,
+          taskId,
+          requestKey,
+          watcherRequested: Boolean(args.watcher?.create),
+        });
+
         let watcherId: string | undefined;
         let watcherWarning: string | undefined;
         if (args.watcher?.create) {
@@ -238,6 +284,21 @@ export const agentTaskTools: ToolDef[] = [
                 : {}),
             });
             watcherId = watcher.id;
+            logDebug(ctx.config, "watcher.created", {
+              watcherId: watcher.id,
+              kind: "terminal",
+              isSupervisor: true,
+              via: "agentTask.spawnForEdits",
+              agentId,
+              mode: args.mode ?? "edit",
+              title: watcher.title,
+              goal: watcher.goal,
+              targets: [terminalId],
+              worktreeId,
+              cadenceMs: watcher.cadenceMs,
+              modelTier: watcher.modelTier,
+              nextCheckAt: watcher.nextCheckAt,
+            });
             if (!worktreeId) {
               // agent.launch doesn't return a worktreeId; without one the
               // post-completion git check falls back to the active worktree, which
@@ -251,6 +312,12 @@ export const agentTaskTools: ToolDef[] = [
             // id — surface this instead of silently dropping the supervision.
             watcherWarning =
               "watcher requested but agent.launch returned no terminalId, so no watcher was created";
+            logDebug(ctx.config, "watcher.create_skipped", {
+              via: "agentTask.spawnForEdits",
+              reason: "no terminalId from agent.launch",
+              agentId,
+              title: args.title,
+            });
           }
         }
 

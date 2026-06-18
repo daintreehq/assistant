@@ -26,6 +26,8 @@ import {
 } from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { WatcherRecord } from "../schemas.js";
+import { logDebug } from "../debugLog.js";
+import { WATCHER_SPAWN_GRACE_MS } from "../watcherCadence.js";
 
 export interface WatcherSignals {
   agentState?: string;
@@ -170,10 +172,14 @@ export function decideOutcome(args: {
         : undefined;
 
   // An explicitly matched alert/stop condition is always worth at least
-  // "attention" — never bury it at debug/info just because the underlying
-  // classification was low severity.
+  // "attention" — never bury it below the scheduler's surfacing threshold just
+  // because the underlying classification was low severity. "done" counts as below
+  // (a clean completion that matched an explicit stop/alert must still surface).
   let severity: Severity = args.timedOut ? "attention" : SEVERITY_MAP[classification];
-  if ((alertMatched || stopMatched) && (severity === "debug" || severity === "info")) {
+  if (
+    (alertMatched || stopMatched) &&
+    (severity === "debug" || severity === "info" || severity === "done")
+  ) {
     severity = "attention";
   }
 
@@ -245,9 +251,28 @@ export async function readStatuses(
       args.includeOutput = { lines: 50, stripAnsi: true };
     }
     const res = await ctx.mcp.callTool("terminal.getStatus", args);
-    if (res.isError) return { ok: false, byId };
+    if (res.isError) {
+      logDebug(ctx.config, "mcp.getStatus", {
+        requested: terminalIds,
+        ok: false,
+        error: typeof (res as { text?: string }).text === "string" ? (res as { text?: string }).text : undefined,
+      });
+      return { ok: false, byId };
+    }
     const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
     const terminals = Array.isArray(sc.terminals) ? sc.terminals : [];
+    // Diagnostic: record exactly which ids Daintree returned vs. which we asked
+    // for. A requested id that's missing here is what the watcher reads as
+    // "exited" — so this line distinguishes "wrong/foreign id namespace" (other
+    // ids present) from "truly nothing tracked" (empty), and "scoped out".
+    logDebug(ctx.config, "mcp.getStatus", {
+      requested: terminalIds,
+      ok: true,
+      returnedIds: terminals
+        .map((t) => (t && typeof t === "object" ? (t as Record<string, unknown>).terminalId : undefined))
+        .filter(Boolean),
+      rawTerminals: terminals,
+    });
     for (const t of terminals) {
       if (!t || typeof t !== "object") continue;
       const e = t as Record<string, unknown>;
@@ -297,11 +322,117 @@ export async function readOutput(
       terminalId,
       maxLines: 200,
     });
-    if (out.isError) return "";
     const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
-    return typeof sc.content === "string" ? sc.content.slice(-tailBytes) : "";
+    const content = typeof sc.content === "string" ? sc.content : "";
+    logDebug(ctx.config, "mcp.getOutput", {
+      terminalId,
+      isError: Boolean(out.isError),
+      contentLen: content.length,
+      error:
+        out.isError && typeof (out as { text?: string }).text === "string"
+          ? (out as { text?: string }).text
+          : undefined,
+    });
+    if (out.isError) return "";
+    return content.slice(-tailBytes);
   } catch {
     return "";
+  }
+}
+
+/** A terminal as reported by the authoritative `terminal.list` inventory. */
+export interface ListedTerminal {
+  agentState?: string;
+  waitingReason?: string;
+  exitCode?: number;
+}
+
+/**
+ * Result of reading the terminal.list inventory. `ok` is true ONLY when the call
+ * succeeded AND returned a recognizable `terminals` array (even an empty one) — so
+ * the caller can tell "inventory says the terminal is gone" (ok, id absent) from
+ * "inventory could not be read" (call errored / unparseable). An absent id must be
+ * treated as a real exit only when `ok` is true; otherwise the watcher stays alive.
+ */
+export interface TerminalListResult {
+  ok: boolean;
+  byId: Map<string, ListedTerminal>;
+}
+
+/**
+ * Read Daintree's authoritative terminal inventory via terminal.list, keyed by id.
+ * Used to cross-check a terminal that terminal.getStatus omitted: a terminal listed
+ * here is alive, regardless of getStatus. terminal.list may return its array under
+ * `structuredContent.terminals` AND/OR a JSON string in `text`, keyed by `id` (with
+ * a `terminalId` fallback) — read both shapes, merge by id. Never throws.
+ */
+export async function readTerminalList(
+  ctx: ToolContext,
+): Promise<TerminalListResult> {
+  const byId = new Map<string, ListedTerminal>();
+  try {
+    const res = await ctx.mcp.callTool("terminal.list", {});
+    if (res.isError) {
+      logDebug(ctx.config, "mcp.terminalList", { ok: false, isError: true });
+      return { ok: false, byId };
+    }
+    // Collect terminals from BOTH the structured payload and a JSON `text` body —
+    // either may be the one Daintree populated. A recognized array (even empty)
+    // means the inventory was readable.
+    const entries: unknown[] = [];
+    let foundArray = false;
+    const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
+    if (Array.isArray(sc.terminals)) {
+      entries.push(...sc.terminals);
+      foundArray = true;
+    }
+    const text = (res as { text?: string }).text;
+    if (typeof text === "string" && text.trim()) {
+      try {
+        const parsed = JSON.parse(text) as { terminals?: unknown };
+        if (Array.isArray(parsed?.terminals)) {
+          entries.push(...parsed.terminals);
+          foundArray = true;
+        }
+      } catch {
+        /* not JSON — ignore this source */
+      }
+    }
+    if (!foundArray) {
+      logDebug(ctx.config, "mcp.terminalList", { ok: false, reason: "no terminals array" });
+      return { ok: false, byId };
+    }
+    for (const t of entries) {
+      if (!t || typeof t !== "object") continue;
+      const e = t as Record<string, unknown>;
+      const id =
+        typeof e.id === "string"
+          ? e.id
+          : typeof e.terminalId === "string"
+            ? e.terminalId
+            : undefined;
+      if (!id) continue;
+      byId.set(id, {
+        agentState: typeof e.agentState === "string" ? e.agentState : undefined,
+        waitingReason:
+          typeof e.waitingReason === "string" ? e.waitingReason : undefined,
+        exitCode: Number.isInteger(e.exitCode as number)
+          ? (e.exitCode as number)
+          : undefined,
+      });
+    }
+    // A non-empty inventory whose entries yielded ZERO parseable ids is schema
+    // drift, not "everything is gone" — treat it as unreadable so a target absent
+    // from it is not falsely declared exited.
+    if (entries.length > 0 && byId.size === 0) {
+      logDebug(ctx.config, "mcp.terminalList", { ok: false, reason: "no parseable ids", entries: entries.length });
+      return { ok: false, byId };
+    }
+    logDebug(ctx.config, "mcp.terminalList", { ok: true, ids: [...byId.keys()] });
+    return { ok: true, byId };
+  } catch {
+    logDebug(ctx.config, "mcp.terminalList", { ok: false, threw: true });
+    return { ok: false, byId };
   }
 }
 
@@ -329,6 +460,10 @@ interface TerminalState {
   outHash?: string;
   /** Wall-clock ms when the tail last changed (for noOutputForMs). */
   outAt?: number;
+  /** Whether this terminal has ever been observed in terminal.getStatus. Until it
+   *  has (and within the spawn grace), an absent terminal is "still registering",
+   *  not exited — see WATCHER_SPAWN_GRACE_MS. */
+  seen?: boolean;
 }
 type WatcherOptions = {
   perTerminal?: Record<string, TerminalState>;
@@ -639,6 +774,12 @@ export async function runTerminalWatcherCheck(
   } catch (err) {
     // Disable the watcher and tell the user, instead of throwing silently every
     // tick (the scheduler swallows watcher errors).
+    logDebug(ctx.config, "watcher.disabled", {
+      watcherId: rec.id,
+      title: rec.title,
+      reason: "corrupt watcher state",
+      error: err instanceof Error ? err.message : String(err),
+    });
     ctx.db.updateWatcher(rec.id, { status: "error", lastCheckedAt: now });
     // A disabled watcher will never check again — release any scoped grants.
     ctx.db.revokeGrantsByActor(rec.id, now);
@@ -671,12 +812,35 @@ export async function runTerminalWatcherCheck(
   );
   const perTerminal: Record<string, TerminalState> = { ...options.perTerminal };
 
+  logDebug(ctx.config, "watcher.check.start", {
+    watcherId: rec.id,
+    title: rec.title,
+    targets,
+    isSupervisor: rec.isSupervisor,
+    cadenceMs: rec.cadenceMs,
+    ageMs: now - rec.createdAt,
+    timedOut,
+    mcpConnected: ctx.mcp.isConnected(),
+  });
+
   // One batched terminal.getStatus for ALL targets, instead of N per-terminal
   // status calls. includeOutput piggybacks a recent-output tail on the same
   // call so the common case needs zero per-terminal terminal.getOutput reads.
   const statuses: StatusBatch = ctx.mcp.isConnected()
     ? await readStatuses(ctx, targets, true)
     : { ok: false, byId: new Map<string, TerminalStatusEntry>() };
+
+  // terminal.getStatus has been observed to omit live agent terminals that
+  // terminal.list still reports (id-namespace / scope gap), so a missing id is NOT
+  // reliable proof of exit. When any target is absent from getStatus, cross-check
+  // the authoritative inventory ONCE this tick and trust it over getStatus.
+  // statuses.ok already implies the MCP call succeeded (i.e. connected), so no
+  // separate isConnected() gate — that would open a flap window where `list` is
+  // left undefined while we still enter the absent branch below.
+  let list: TerminalListResult | undefined;
+  if (statuses.ok && targets.some((t) => !statuses.byId.has(t))) {
+    list = await readTerminalList(ctx);
+  }
 
   const outcomes: CheckOutcome[] = [];
 
@@ -694,14 +858,77 @@ export async function runTerminalWatcherCheck(
       classification = "needs_large_model";
       summary = "Daintree MCP not connected; cannot read terminal.";
     } else if (statuses.ok && !entry) {
-      // The status call succeeded but this terminal isn't in the response — it
-      // has been closed/removed. Treat as exited so the watcher stops polling a
-      // terminal that no longer exists, instead of looping on empty no_change.
-      classification = "terminal_exited";
-      confidence = 0.9;
-      summary = "Terminal is no longer reported by Daintree (closed or removed).";
-      evidence = ["absent from terminal.getStatus response"];
-      signals = { agentState: "exited", runtimeStatus: "exited", tail: "" };
+      // Absent from terminal.getStatus. Don't trust that as "exited" — cross-check
+      // the authoritative inventory first (getStatus omits live agent terminals
+      // that terminal.list still reports).
+      const listed = list?.byId.get(terminalId);
+      if (listed) {
+        // Alive per terminal.list — getStatus simply didn't include it. Classify
+        // from the listed agentState (no scrollback is available via this path).
+        const agentState = listed.agentState;
+        signals = {
+          agentState,
+          runtimeStatus: runtimeFromAgentState(agentState),
+          waitingReason: listed.waitingReason,
+          exitCode: listed.exitCode,
+          tail: "",
+        };
+        if (agentState === "exited") {
+          classification = "terminal_exited";
+          confidence = 0.95;
+          summary = "Terminal exited.";
+          evidence = ["agentState=exited (terminal.list)"];
+          if (typeof listed.exitCode === "number" && listed.exitCode !== 0) {
+            evidence.push(`exitCode=${listed.exitCode} (nonzero)`);
+          }
+        } else if (agentState === "waiting") {
+          classification = "waiting_for_input";
+          confidence = 0.9;
+          summary =
+            listed.waitingReason === "question"
+              ? "Agent is asking a question."
+              : "Agent is waiting for input.";
+          evidence = [
+            `agentState=waiting${listed.waitingReason ? ` (${listed.waitingReason})` : ""} (terminal.list)`,
+          ];
+        } else if (agentState === "completed") {
+          ({ classification, confidence, summary, evidence } = await gateCompletion(
+            ctx,
+            options.verificationScope,
+            ["agentState=completed (terminal.list)"],
+          ));
+        } else {
+          classification = "no_change";
+          confidence = 0.5;
+          summary = `Agent ${agentState ?? "active"} (per terminal.list; getStatus omitted it).`;
+        }
+      } else if (!list || !list.ok) {
+        // getStatus omitted the terminal AND the inventory couldn't be read (errored,
+        // malformed, or never fetched) — we CANNOT prove it exited (this is exactly
+        // how the original false-exit bug arises). Stay alive and re-check rather
+        // than assert death.
+        classification = "no_change";
+        confidence = 0.4;
+        summary =
+          "Terminal absent from terminal.getStatus and terminal.list could not be read; will re-check.";
+        signals = { tail: "" };
+      } else if (!prevState?.seen && now - rec.createdAt < WATCHER_SPAWN_GRACE_MS) {
+        // Never observed yet and still inside the spawn grace: right after
+        // agent.launch the terminal may not be registered anywhere for a moment.
+        // Treat as still-registering so we don't stop before ever seeing it.
+        classification = "no_change";
+        confidence = 0.5;
+        summary = "Terminal not yet registered by Daintree (just spawned); will re-check.";
+        signals = { tail: "" };
+      } else {
+        // Absent from BOTH terminal.getStatus and a SUCCESSFULLY-READ terminal.list
+        // (or past the grace) — now it's a real exit.
+        classification = "terminal_exited";
+        confidence = 0.9;
+        summary = "Terminal is no longer reported by Daintree (closed or removed).";
+        evidence = ["absent from terminal.getStatus and terminal.list"];
+        signals = { agentState: "exited", runtimeStatus: "exited", tail: "" };
+      }
     } else {
       const agentState = entry?.agentState;
       const waitingReason = entry?.waitingReason;
@@ -799,12 +1026,54 @@ export async function runTerminalWatcherCheck(
     perTerminal[terminalId] = {
       ...(perTerminal[terminalId] ?? prevState ?? {}),
       prev: outcome.classification,
+      // Latch "seen" once Daintree reports the terminal anywhere (getStatus OR the
+      // terminal.list inventory), so a later absence from both counts as a real
+      // exit rather than re-entering the spawn grace.
+      seen: prevState?.seen || Boolean(entry) || Boolean(list?.byId.get(terminalId)),
     };
 
+    logDebug(ctx.config, "watcher.check.terminal", {
+      watcherId: rec.id,
+      terminalId,
+      present: Boolean(entry),
+      agentState: signals.agentState,
+      waitingReason: signals.waitingReason,
+      exitCode: signals.exitCode,
+      msSinceOutput: signals.msSinceOutput,
+      tailLen: signals.tail.length,
+      previous: prevState?.prev,
+      classification: outcome.classification,
+      confidence: outcome.confidence,
+      severity: outcome.severity,
+      summary: outcome.summary,
+      evidence: outcome.evidence,
+      shouldPublish: outcome.shouldPublish,
+      stop: outcome.stop,
+      stopReason: outcome.stopReason,
+    });
+
     if (outcome.shouldPublish) {
+      // A supervisor watcher exists to announce when its spawned agent is done. A
+      // clean completion is severity "done", which sits BELOW the scheduler's
+      // "attention" surfacing threshold and would never reach the inbox or wake the
+      // main loop. Promote a supervisor's terminal-ending outcome to at least
+      // "attention" so "the agent finished" actually surfaces.
+      const severity: Severity =
+        rec.isSupervisor &&
+        outcome.stop &&
+        SEVERITY_WEIGHT[outcome.severity] < SEVERITY_WEIGHT.attention
+          ? "attention"
+          : outcome.severity;
+      logDebug(ctx.config, "watcher.publish", {
+        watcherId: rec.id,
+        terminalId,
+        severity,
+        classification: outcome.classification,
+        dedupeKey: `watcher:${rec.id}:${terminalId}:${outcome.classification}`,
+      });
       ctx.queue.publish({
         source: "terminal_watcher",
-        severity: outcome.severity,
+        severity,
         title: `${rec.title}: ${humanize(outcome.classification)}`,
         summary:
           targets.length > 1 ? `[${terminalId}] ${outcome.summary}` : outcome.summary,
@@ -855,6 +1124,16 @@ export async function runTerminalWatcherCheck(
   // Once the watcher has stopped (timed out or its stop condition met) it will
   // never run again — release any scoped automation grants tied to it.
   if (stop) ctx.db.revokeGrantsByActor(rec.id, now);
+
+  logDebug(ctx.config, stop ? "watcher.stop" : "watcher.check.done", {
+    watcherId: rec.id,
+    title: rec.title,
+    headline: headline.classification,
+    severity: headline.severity,
+    stop,
+    stopReason,
+    nextCheckAt: stop ? undefined : now + rec.cadenceMs,
+  });
 
   return { ...headline, stop, stopReason };
 }

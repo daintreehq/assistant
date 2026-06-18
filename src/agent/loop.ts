@@ -195,20 +195,37 @@ export class AgentSession {
     }
   }
 
-  /** Run a full user turn. Returns the final assistant text. */
-  async send(userInput: string): Promise<string> {
+  /**
+   * Run a full turn. Returns the final assistant text.
+   *
+   * `opts.readOnly` is for AUTONOMOUS turns (e.g. a watcher wake-up) that were not
+   * initiated by the user: the model is given ONLY read-only/inspection tools, so a
+   * background trigger can inspect and report but can NEVER run a mutating tool
+   * unattended — the model literally isn't offered one. Recipe re-selection is also
+   * skipped so an automatic nudge doesn't churn the user's loaded recipes.
+   */
+  async send(userInput: string, opts: { readOnly?: boolean } = {}): Promise<string> {
     await this.maybeAutoCompact();
-    await this.maybeRefreshRecipes(userInput);
+    if (!opts.readOnly) await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });
 
     // Projection can throw if a registered tool produces an illegal or
     // colliding wire name (a registration-time programmer error). Surface it
     // through the event sink rather than letting it escape send() and strand
     // the session after the user message was already persisted. The per-turn
-    // filter narrows the projection to the core ∪ active-recipe tool subset.
+    // filter narrows the projection to the core ∪ active-recipe tool subset, or —
+    // for a read-only turn — to inspection tools only.
+    const allowedNames = opts.readOnly
+      ? this.readOnlyToolNames()
+      : this.buildToolFilter();
+    // On a read-only turn, ENFORCE the allowlist at dispatch too: the model could
+    // emit an internal tool name that isn't in the projection (resolveWireName then
+    // falls through to the raw name), so filtering the tool LIST alone isn't enough.
+    // Any call outside this set is refused before dispatch.
+    const allowedSet = opts.readOnly ? new Set(allowedNames) : undefined;
     let tools;
     try {
-      tools = this.deps.registry.toOpenAITools(this.buildToolFilter());
+      tools = this.deps.registry.toOpenAITools(allowedNames);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.events.error(`Tool projection failed: ${msg}`);
@@ -288,6 +305,20 @@ export class AgentSession {
               recoverable: true,
             },
           };
+        } else if (allowedSet && !allowedSet.has(internalName)) {
+          // Read-only (autonomous) turn: refuse any tool outside the read-only set,
+          // regardless of how the model named it. Mutation is impossible here.
+          this.events.toolCall({ id: call.id, name: internalName, args, startedAt });
+          res = {
+            ok: false,
+            summary: `${internalName} is not available on an autonomous read-only turn.`,
+            error: {
+              code: "READ_ONLY_TURN",
+              message:
+                "Mutating tools are disabled on autonomous wake-up turns; only read-only inspection is allowed.",
+              recoverable: false,
+            },
+          };
         } else {
           this.events.toolCall({ id: call.id, name: internalName, args, startedAt });
           res = await this.deps.registry.dispatch(
@@ -338,6 +369,22 @@ export class AgentSession {
         ...recipes.flatMap((r) => r.requiredTools),
       ]),
     ];
+  }
+
+  /**
+   * Tool names safe to offer on an autonomous (non-user-initiated) turn: STRICTLY
+   * read-only inspection. Everything else is withheld — not just terminal/project/
+   * git/external/system risk and "local" state changes (spawning agents, creating
+   * watchers/timers), but also "ui" risk: a "ui" tool like terminal.focus mutates
+   * Daintree's UI (panel.focus), which an unattended turn must not do. So a watcher
+   * wake-up can read a terminal and report, but cannot act. "read" is never in
+   * ALWAYS_CONFIRM, so a read-only turn also never blocks on a confirmation prompt.
+   */
+  private readOnlyToolNames(): string[] {
+    return this.deps.registry
+      .list()
+      .filter((t) => t.risk === "read")
+      .map((t) => t.name);
   }
 
   private pushMessage(m: ChatMessage): void {

@@ -1,10 +1,17 @@
 /**
  * The home surface is a Claude/Codex-style vertical ledger: an intro/work block
  * at the top, then chronological user + Daintree turns separated by horizontal
- * rules. The composer stays fixed below this component; this viewport can scroll
- * by rendered lines so alternate-screen users can still inspect history.
+ * rules. The composer stays fixed below this component.
+ *
+ * Scrollback is the host TERMINAL's, not ours: finalized turns/notes/commands
+ * are emitted through Ink's <Static>, which commits each block to the normal
+ * buffer exactly once and never repaints it — so wheel/trackpad scrolling works
+ * natively (this is how Claude Code behaves). Only the trailing live block (the
+ * in-flight turn) stays in the repainting frame. Static is append-only: a cell
+ * may move from "live" to "committed" but committed blocks never reorder or
+ * drop, which is why the live tail is everything from the active turn onward.
  */
-import { Box, Text } from "ink";
+import { Box, Static, Text } from "ink";
 import type { DashboardState, TranscriptCell, ActivityItem } from "../types.js";
 import type { TerminalPreview } from "../hooks/useTerminalPreview.js";
 import type { WorkflowRunRecord } from "../../schemas.js";
@@ -40,6 +47,10 @@ export interface IntroBlock {
   previews?: TerminalPreview[];
   busy: boolean;
   stage: string;
+  /** Debug logging is active — surfaced in the header so it's verifiable at a glance. */
+  logging?: boolean;
+  /** Path of the active debug log, shown under the header so it can be tailed. */
+  logFile?: string;
 }
 
 const line = (key: string, segments: Segment[] | string): LedgerLine => ({
@@ -210,7 +221,7 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
 
   out.push(
     line("intro-brand", [
-      { text: `${set.brand} DAINTREE ASSISTANT`, color: ui.color.accent, bold: true },
+      { text: `${set.brand} assistant`, color: ui.color.accent, bold: true },
     ]),
   );
   out.push(
@@ -219,12 +230,25 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
       { text: truncate(intro.project, Math.max(8, width - 46)) },
       { text: " · ", dimColor: true },
       { text: intro.tier.toUpperCase(), dimColor: true },
-      { text: " · ", dimColor: true },
-      intro.connected
-        ? { text: "MCP CONNECTED", color: ui.color.accent }
-        : { text: "MCP DEGRADED", color: ui.color.warning },
+      // NB: MCP connection status is deliberately NOT shown here. The intro commits
+      // to <Static> exactly once, so a status captured before connect would freeze
+      // stale forever; the live StatusLine below owns the connection indicator.
+      ...(intro.logging
+        ? ([
+            { text: " · ", dimColor: true },
+            { text: `${set.active} LOG`, color: ui.color.warning, bold: true },
+          ] as Segment[])
+        : []),
     ]),
   );
+  if (intro.logging && intro.logFile) {
+    out.push(
+      line("intro-logging", [
+        { text: "logging to ", dimColor: true },
+        { text: truncate(intro.logFile, Math.max(12, width - 12)), color: ui.color.warning },
+      ]),
+    );
+  }
   out.push(rule("intro-rule-a", width));
 
   if (topEvent) {
@@ -316,7 +340,7 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
   out.push(
     line("intro-keys", [
       { text: "KEYS      ", dimColor: true, bold: true },
-      { text: "↑/↓ or wheel scroll · End latest · ^O ops · / cmds", dimColor: true },
+      { text: "scroll the terminal for history · ^O ops · / cmds · ^C exit", dimColor: true },
     ]),
   );
   out.push(rule("intro-rule-b", width, ui.color.accent));
@@ -479,29 +503,6 @@ function buildCellLines(
   return out;
 }
 
-function buildLedgerLines({
-  cells,
-  width,
-  now,
-  expanded,
-  intro,
-}: {
-  cells: TranscriptCell[];
-  width: number;
-  now: number;
-  expanded: boolean;
-  intro?: IntroBlock;
-}): LedgerLine[] {
-  const lines = intro ? buildIntroLines(intro, width, now) : [];
-  if (!intro && cells.length === 0) {
-    lines.push(line("empty", [{ text: "Ask Daintree...", dimColor: true }]));
-  }
-  for (const cell of cells) {
-    lines.push(...buildCellLines(cell, width, now, expanded));
-  }
-  return lines;
-}
-
 function renderLine(l: LedgerLine, width: number) {
   const segments = clipSegments(l.segments, width);
   return (
@@ -521,37 +522,89 @@ function renderLine(l: LedgerLine, width: number) {
   );
 }
 
+/** The index of the active (still-mutating) turn, or -1. Everything from here
+ *  on is the live tail; everything before it is committed to <Static>. */
+function liveTailIndex(cells: TranscriptCell[]): number {
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const c = cells[i];
+    if (c.kind === "turn") return c.state === "active" ? i : -1;
+  }
+  return -1;
+}
+
+/** A committed block fed to <Static>: the intro banner, then each finalized cell.
+ *  Built lazily inside the Static child so buildCellLines runs once per block. */
+type StaticBlock =
+  | { key: string; kind: "intro"; intro: IntroBlock }
+  | { key: string; kind: "cell"; cell: TranscriptCell };
+
+function renderLedger(lines: LedgerLine[], width: number) {
+  return lines.map((l) => renderLine(l, width));
+}
+
 export function Transcript({
   cells,
-  height,
   width = 72,
   now = Date.now(),
   expanded = false,
-  scrollOffset = 0,
+  liveHeight,
   intro,
 }: {
   cells: TranscriptCell[];
-  height: number;
   width?: number;
   now?: number;
   expanded?: boolean;
-  /** Rendered lines above the newest line. 0 means pinned to latest. */
-  scrollOffset?: number;
-  /** Optional startup/work block rendered at the top of the scrollable stream. */
+  /**
+   * Max rendered lines for the inline live region. Ink wipes the terminal
+   * (scrollback included) and re-dumps all static history whenever the
+   * repainting frame overflows the viewport, so the caller bounds the live tail
+   * to the rows left below the footer. Omitted → unbounded (tests/non-TTY).
+   */
+  liveHeight?: number;
+  /** Optional startup/work block committed once at the top of the stream. */
   intro?: IntroBlock;
-  /** Kept for older callsites; ignored because the intro is the empty state. */
-  emptyText?: string;
 }) {
-  const allLines = buildLedgerLines({ cells, width, now, expanded, intro });
-  const viewport = Math.max(1, height);
-  const maxOffset = Math.max(0, allLines.length - viewport);
-  const offset = Math.min(Math.max(0, scrollOffset), maxOffset);
-  const start = Math.max(0, allLines.length - viewport - offset);
-  const visible = allLines.slice(start, start + viewport);
+  const tail = liveTailIndex(cells);
+  const committed = tail >= 0 ? cells.slice(0, tail) : cells;
+  const liveCells = tail >= 0 ? cells.slice(tail) : [];
+
+  // Static is append-only and renders each item exactly once; the intro is the
+  // first immutable block so it lands at the very top of the terminal scrollback.
+  const blocks: StaticBlock[] = [];
+  if (intro) blocks.push({ key: "intro", kind: "intro", intro });
+  for (const cell of committed) blocks.push({ key: cell.id, kind: "cell", cell });
+
+  // Show only the TAIL of the live block so the repainting frame stays within
+  // the viewport. The clipped-off top isn't lost — the moment this turn settles
+  // it leaves the live tail and commits to <Static> in full (buildCellLines,
+  // unclipped), landing the whole turn in the terminal's scrollback.
+  const allLiveLines = liveCells.flatMap((cell) =>
+    buildCellLines(cell, width, now, expanded),
+  );
+  const liveLines =
+    liveHeight != null && allLiveLines.length > liveHeight
+      ? allLiveLines.slice(allLiveLines.length - liveHeight)
+      : allLiveLines;
+  const showEmpty = !intro && committed.length === 0 && liveCells.length === 0;
 
   return (
-    <Box flexDirection="column" height={height} overflow="hidden">
-      {visible.map((l) => renderLine(l, width))}
+    <Box flexDirection="column">
+      <Static items={blocks}>
+        {(block) => (
+          <Box key={block.key} flexDirection="column">
+            {renderLedger(
+              block.kind === "intro"
+                ? buildIntroLines(block.intro, width, now)
+                : buildCellLines(block.cell, width, now, expanded),
+              width,
+            )}
+          </Box>
+        )}
+      </Static>
+      {liveLines.length > 0 ? (
+        <Box flexDirection="column">{renderLedger(liveLines, width)}</Box>
+      ) : null}
+      {showEmpty ? <Text dimColor>Ask Daintree...</Text> : null}
     </Box>
   );
 }

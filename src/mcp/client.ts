@@ -86,6 +86,12 @@ export interface McpStatus {
    * fails the connection, it only surfaces here for the UI/doctor to render.
    */
   driftWarnings?: string[];
+  /**
+   * The bare tool names behind `driftWarnings`, in the same order. Lets callers
+   * render a compact rollup ("23 tools not advertised: …") without re-parsing the
+   * human sentences. Undefined when there is no drift.
+   */
+  driftToolNames?: string[];
   /** The connected server's reported implementation info (name + version). */
   serverInfo?: { name?: string; version?: string };
 }
@@ -104,6 +110,7 @@ export class DaintreeMcpClient {
   private lastError?: string;
   private toolCache?: McpToolInfo[];
   private driftWarnings: string[] = [];
+  private driftToolNames: string[] = [];
   private serverInfo?: { name?: string; version?: string };
 
   constructor(cfg: AppConfig, opts: McpClientOptions = {}) {
@@ -142,6 +149,8 @@ export class DaintreeMcpClient {
       error: this.lastError,
       driftWarnings:
         this.driftWarnings.length > 0 ? [...this.driftWarnings] : undefined,
+      driftToolNames:
+        this.driftToolNames.length > 0 ? [...this.driftToolNames] : undefined,
       serverInfo: this.serverInfo ? { ...this.serverInfo } : undefined,
     };
   }
@@ -232,6 +241,7 @@ export class DaintreeMcpClient {
     this.transportKind = "none";
     this.lastError = undefined;
     this.driftWarnings = [];
+    this.driftToolNames = [];
     this.serverInfo = undefined;
     this.raw = undefined;
     return this.connect();
@@ -265,6 +275,7 @@ export class DaintreeMcpClient {
   private runDriftCheck(): void {
     try {
       this.driftWarnings = [];
+      this.driftToolNames = [];
       // Capture the server's reported implementation info if available. Isolated
       // so a metadata-fetch failure can never suppress the drift comparison below.
       try {
@@ -280,6 +291,7 @@ export class DaintreeMcpClient {
       if (live.size === 0) return;
       for (const name of DOCUMENTED_MCP_TOOL_NAMES) {
         if (!live.has(name)) {
+          this.driftToolNames.push(name);
           this.driftWarnings.push(
             `MCP drift: tool '${name}' is documented but missing from the live server`,
           );
@@ -288,6 +300,7 @@ export class DaintreeMcpClient {
     } catch {
       // Drift detection must never break startup.
       this.driftWarnings = [];
+      this.driftToolNames = [];
     }
   }
 
@@ -305,6 +318,7 @@ export class DaintreeMcpClient {
     this.connected = false;
     this.toolCache = undefined;
     this.driftWarnings = [];
+    this.driftToolNames = [];
     this.serverInfo = undefined;
     this.lastError = errMsg(e);
   }
