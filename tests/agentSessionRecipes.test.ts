@@ -167,7 +167,7 @@ describe("AgentSession control messages", () => {
     let captured: ChatOptions | undefined;
     const { session } = makeSession({ onStream: (o) => (captured = o) });
     await session.send("hi");
-    expect(captured?.promptCacheKey).toBe("daintree-main-system-v5");
+    expect(captured?.promptCacheKey).toBe("daintree-main-system-v6");
   });
 
   it("loads the recipe the small model selects and logs the decision", async () => {

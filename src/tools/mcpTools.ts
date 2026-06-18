@@ -115,6 +115,71 @@ const WorkflowMutationArgs = z
   })
   .strict();
 
+/* ----------------------------- forge wrappers ---------------------------- */
+
+/*
+ * The forge.* write tools below give the model a typed, field-level surface for
+ * issue/PR/review mutations instead of routing through the generic daintree.call
+ * escape hatch. Each is risk "external" (in ALWAYS_CONFIRM, so it always prompts)
+ * and forwards its parsed args to the same-named Daintree MCP action. They stay
+ * provider-agnostic — no GitHub/GitLab-specific logic lives here.
+ *
+ * The shapes mirror Daintree's forge action schemas: issue/PR numbers and review
+ * ids are positive integers, never strings.
+ */
+const cwdField = z
+  .string()
+  .optional()
+  .describe("Working directory / worktree path; Daintree resolves the active worktree when omitted.");
+const requestKeyField = z
+  .string()
+  .optional()
+  .describe("Optional idempotency key; Daintree strips it before validation and dedupes on it where supported.");
+const issueNumberField = z.number().int().positive().describe("Forge issue number.");
+const prNumberField = z.number().int().positive().describe("Forge pull/merge request number.");
+
+/** Reusable JSON-schema property fragments for the model-facing `parameters`. */
+const P_CWD = {
+  type: "string",
+  description: "Working directory / worktree path; Daintree resolves the active worktree when omitted.",
+};
+const P_REQUEST_KEY = { type: "string", description: "Optional idempotency key forwarded to Daintree." };
+const P_ISSUE_NUMBER = { type: "integer", minimum: 1, description: "Forge issue number." };
+const P_PR_NUMBER = { type: "integer", minimum: 1, description: "Forge pull/merge request number." };
+
+/** Build a flat object JSON-schema for the model from a property map + required list. */
+function forgeObjSchema(
+  properties: Record<string, Record<string, unknown>>,
+  required: string[],
+): Record<string, unknown> {
+  return { type: "object", additionalProperties: false, properties, required };
+}
+
+/**
+ * Build a forge WRITE wrapper. Every forge mutation shares one shape: risk
+ * "external" (always confirmed) and a handler that forwards the parsed args to
+ * the same-named Daintree MCP action — lifting requestKey out so it travels as
+ * the dedicated idempotency parameter rather than a forwarded field.
+ */
+function forgeWrite<A extends { requestKey?: string }>(
+  name: string,
+  description: string,
+  schema: z.ZodType<A>,
+  parameters: Record<string, unknown>,
+): ToolDef<A> {
+  return {
+    name,
+    description,
+    risk: "external",
+    schema,
+    parameters,
+    async handler(args, ctx) {
+      const { requestKey, ...rest } = args;
+      return passthrough(ctx, name, rest as Record<string, unknown>, requestKey);
+    },
+  };
+}
+
 export const mcpTools: ToolDef[] = [
   {
     name: "daintree.status",
@@ -439,6 +504,438 @@ export const mcpTools: ToolDef[] = [
       return passthrough(ctx, "forge.listPRs", args.arguments ?? {});
     },
   },
+  // ---- forge issue writes (#29) ----
+  forgeWrite(
+    "forge.createIssue",
+    "Create a forge issue (GitHub/GitLab) via Daintree. Mutates the forge, so it always confirms. Provider-agnostic.",
+    z.object({
+      cwd: cwdField,
+      title: z.string().trim().min(1).describe("Issue title."),
+      body: z.string().optional().describe("Issue body (markdown)."),
+      labels: z.array(z.string()).optional().describe("Label names to apply on creation."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        title: { type: "string", description: "Issue title." },
+        body: { type: "string", description: "Issue body (markdown)." },
+        labels: {
+          type: "array",
+          items: { type: "string" },
+          description: "Label names to apply on creation.",
+        },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["title"],
+    ),
+  ),
+  forgeWrite(
+    "forge.closeIssue",
+    "Close a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      stateReason: z
+        .enum(["completed", "not_planned", "duplicate"])
+        .optional()
+        .describe("Why the issue is being closed."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        stateReason: {
+          type: "string",
+          enum: ["completed", "not_planned", "duplicate"],
+          description: "Why the issue is being closed.",
+        },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.reopenIssue",
+    "Reopen a closed forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({ cwd: cwdField, issueNumber: issueNumberField, requestKey: requestKeyField }),
+    forgeObjSchema(
+      { cwd: P_CWD, issueNumber: P_ISSUE_NUMBER, requestKey: P_REQUEST_KEY },
+      ["issueNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.editIssue",
+    "Edit a forge issue's title and/or body via Daintree (provide at least one). Mutates the forge, so it always confirms.",
+    z
+      .object({
+        cwd: cwdField,
+        issueNumber: issueNumberField,
+        title: z.string().optional().describe("New issue title."),
+        body: z.string().optional().describe("New issue body (markdown)."),
+        requestKey: requestKeyField,
+      })
+      .refine((v) => v.title != null || v.body != null, {
+        message: "Provide at least one of title or body.",
+      }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        title: { type: "string", description: "New issue title." },
+        body: { type: "string", description: "New issue body (markdown)." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.addIssueComment",
+    "Add a comment to a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      body: z.string().trim().min(1).describe("Comment body (markdown)."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        body: { type: "string", description: "Comment body (markdown)." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber", "body"],
+    ),
+  ),
+  forgeWrite(
+    "forge.addIssueLabel",
+    "Add a label to a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      label: z.string().trim().min(1).describe("Label name to add."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        label: { type: "string", description: "Label name to add." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber", "label"],
+    ),
+  ),
+  forgeWrite(
+    "forge.removeIssueLabel",
+    "Remove a label from a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      label: z.string().trim().min(1).describe("Label name to remove."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        label: { type: "string", description: "Label name to remove." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber", "label"],
+    ),
+  ),
+  forgeWrite(
+    "forge.assignIssue",
+    "Assign a user to a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      username: z.string().trim().min(1).describe("Username to assign."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        username: { type: "string", description: "Username to assign." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber", "username"],
+    ),
+  ),
+  forgeWrite(
+    "forge.unassignIssue",
+    "Unassign a user from a forge issue via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      issueNumber: issueNumberField,
+      username: z.string().trim().min(1).describe("Username to unassign."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        issueNumber: P_ISSUE_NUMBER,
+        username: { type: "string", description: "Username to unassign." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["issueNumber", "username"],
+    ),
+  ),
+  // ---- forge PR read (#29) ----
+  {
+    name: "forge.getPR",
+    description:
+      "Fetch a single forge pull/merge request via Daintree (read-only). Typed wrapper around the Daintree forge.getPR MCP tool.",
+    risk: "read",
+    readOnly: true,
+    schema: z.object({ cwd: cwdField, prNumber: prNumberField }),
+    parameters: forgeObjSchema({ cwd: P_CWD, prNumber: P_PR_NUMBER }, ["prNumber"]),
+    async handler(args, ctx) {
+      return passthrough(ctx, "forge.getPR", args);
+    },
+  },
+  // ---- forge PR writes (#29) ----
+  forgeWrite(
+    "forge.createPR",
+    "Create a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      head: z.string().trim().min(1).describe("Source branch (the branch with changes)."),
+      base: z.string().trim().min(1).describe("Target branch to merge into."),
+      title: z.string().trim().min(1).describe("PR title."),
+      body: z.string().optional().describe("PR body (markdown)."),
+      draft: z.boolean().optional().describe("Open as a draft PR."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        head: { type: "string", description: "Source branch (the branch with changes)." },
+        base: { type: "string", description: "Target branch to merge into." },
+        title: { type: "string", description: "PR title." },
+        body: { type: "string", description: "PR body (markdown)." },
+        draft: { type: "boolean", description: "Open as a draft PR." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["head", "base", "title"],
+    ),
+  ),
+  forgeWrite(
+    "forge.closePR",
+    "Close a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({ cwd: cwdField, prNumber: prNumberField, requestKey: requestKeyField }),
+    forgeObjSchema(
+      { cwd: P_CWD, prNumber: P_PR_NUMBER, requestKey: P_REQUEST_KEY },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.reopenPR",
+    "Reopen a closed forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({ cwd: cwdField, prNumber: prNumberField, requestKey: requestKeyField }),
+    forgeObjSchema(
+      { cwd: P_CWD, prNumber: P_PR_NUMBER, requestKey: P_REQUEST_KEY },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.mergePR",
+    "Merge a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      prNumber: prNumberField,
+      mergeMethod: z
+        .enum(["merge", "squash", "rebase"])
+        .optional()
+        .describe("Merge strategy."),
+      commitTitle: z.string().optional().describe("Override the merge commit title."),
+      commitMessage: z.string().optional().describe("Override the merge commit message."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        mergeMethod: {
+          type: "string",
+          enum: ["merge", "squash", "rebase"],
+          description: "Merge strategy.",
+        },
+        commitTitle: { type: "string", description: "Override the merge commit title." },
+        commitMessage: { type: "string", description: "Override the merge commit message." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.convertPRToDraft",
+    "Convert a forge pull/merge request to draft via Daintree. Mutates the forge, so it always confirms.",
+    z.object({ cwd: cwdField, prNumber: prNumberField, requestKey: requestKeyField }),
+    forgeObjSchema(
+      { cwd: P_CWD, prNumber: P_PR_NUMBER, requestKey: P_REQUEST_KEY },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.markPRReadyForReview",
+    "Mark a draft forge pull/merge request ready for review via Daintree. Mutates the forge, so it always confirms.",
+    z.object({ cwd: cwdField, prNumber: prNumberField, requestKey: requestKeyField }),
+    forgeObjSchema(
+      { cwd: P_CWD, prNumber: P_PR_NUMBER, requestKey: P_REQUEST_KEY },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.commentOnPR",
+    "Add a comment to a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      prNumber: prNumberField,
+      body: z.string().trim().min(1).describe("Comment body (markdown)."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        body: { type: "string", description: "Comment body (markdown)." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber", "body"],
+    ),
+  ),
+  forgeWrite(
+    "forge.editPR",
+    "Edit a forge pull/merge request's title and/or body via Daintree (provide at least one). Mutates the forge, so it always confirms.",
+    z
+      .object({
+        cwd: cwdField,
+        prNumber: prNumberField,
+        title: z.string().optional().describe("New PR title."),
+        body: z.string().optional().describe("New PR body (markdown)."),
+        requestKey: requestKeyField,
+      })
+      .refine((v) => v.title != null || v.body != null, {
+        message: "Provide at least one of title or body.",
+      }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        title: { type: "string", description: "New PR title." },
+        body: { type: "string", description: "New PR body (markdown)." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber"],
+    ),
+  ),
+  // ---- forge review writes (#29) ----
+  forgeWrite(
+    "forge.approvePR",
+    "Approve a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      prNumber: prNumberField,
+      body: z.string().optional().describe("Optional approval comment (markdown)."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        body: { type: "string", description: "Optional approval comment (markdown)." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber"],
+    ),
+  ),
+  forgeWrite(
+    "forge.requestChanges",
+    "Request changes on a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      prNumber: prNumberField,
+      body: z.string().trim().min(1).describe("Review comment explaining the requested changes (markdown)."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        body: {
+          type: "string",
+          description: "Review comment explaining the requested changes (markdown).",
+        },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber", "body"],
+    ),
+  ),
+  forgeWrite(
+    "forge.dismissReview",
+    "Dismiss an existing review on a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
+    z.object({
+      cwd: cwdField,
+      prNumber: prNumberField,
+      reviewId: z.number().int().positive().describe("Id of the review to dismiss."),
+      message: z.string().trim().min(1).describe("Reason for dismissing the review."),
+      requestKey: requestKeyField,
+    }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        reviewId: { type: "integer", minimum: 1, description: "Id of the review to dismiss." },
+        message: { type: "string", description: "Reason for dismissing the review." },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber", "reviewId", "message"],
+    ),
+  ),
+  forgeWrite(
+    "forge.requestReviewers",
+    "Request reviewers on a forge pull/merge request via Daintree (provide at least one of users or teams). Mutates the forge, so it always confirms.",
+    z
+      .object({
+        cwd: cwdField,
+        prNumber: prNumberField,
+        users: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe("Usernames to request review from."),
+        teams: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe("Team slugs to request review from."),
+        requestKey: requestKeyField,
+      })
+      .refine((v) => (v.users?.length ?? 0) > 0 || (v.teams?.length ?? 0) > 0, {
+        message: "Provide at least one of users or teams.",
+      }),
+    forgeObjSchema(
+      {
+        cwd: P_CWD,
+        prNumber: P_PR_NUMBER,
+        users: {
+          type: "array",
+          items: { type: "string" },
+          description: "Usernames to request review from.",
+        },
+        teams: {
+          type: "array",
+          items: { type: "string" },
+          description: "Team slugs to request review from.",
+        },
+        requestKey: P_REQUEST_KEY,
+      },
+      ["prNumber"],
+    ),
+  ),
   {
     name: "workflow.startWorkOnIssue",
     description:

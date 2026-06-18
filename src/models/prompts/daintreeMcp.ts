@@ -33,7 +33,17 @@ Your local tools wrap Daintree:
   attention queue instead of blocking. Prefer these over dumping raw scrollback
   into context.
 - recipe.list / recipe.run, worktree.createWithRecipe — Daintree workspace recipes.
-- forge.listIssues / forge.getIssue / forge.listPRs — read forge issues and PRs.
+- forge.listIssues / forge.getIssue / forge.listPRs / forge.getPR — read forge
+  issues and PRs.
+- forge issue writes: forge.createIssue / closeIssue / reopenIssue / editIssue /
+  addIssueComment / addIssueLabel / removeIssueLabel / assignIssue / unassignIssue.
+- forge PR writes: forge.createPR / closePR / reopenPR / mergePR / convertPRToDraft /
+  markPRReadyForReview / commentOnPR / editPR.
+- forge review writes: forge.approvePR / requestChanges / dismissReview /
+  requestReviewers.
+  All forge writes are "external" risk — provider-agnostic and ALWAYS confirmed.
+  Issue/PR numbers and review ids are positive integers. Prefer these typed
+  wrappers over daintree.call for forge work.
   workflow.startWorkOnIssue / workflow.prepBranchForReview — high-level issue/PR
   orchestration (mutating, always confirmed). Prefer these over daintree.call for
   issue/PR work.
@@ -102,9 +112,31 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "actions.search",
   "actions.getSchema",
   "agent.launch",
+  "forge.addIssueComment",
+  "forge.addIssueLabel",
+  "forge.approvePR",
+  "forge.assignIssue",
+  "forge.closeIssue",
+  "forge.closePR",
+  "forge.commentOnPR",
+  "forge.convertPRToDraft",
+  "forge.createIssue",
+  "forge.createPR",
+  "forge.dismissReview",
+  "forge.editIssue",
+  "forge.editPR",
   "forge.getIssue",
+  "forge.getPR",
   "forge.listIssues",
   "forge.listPRs",
+  "forge.markPRReadyForReview",
+  "forge.mergePR",
+  "forge.removeIssueLabel",
+  "forge.reopenIssue",
+  "forge.reopenPR",
+  "forge.requestChanges",
+  "forge.requestReviewers",
+  "forge.unassignIssue",
   "git.getProjectPulse",
   "panel.focus",
   "recipe.list",
