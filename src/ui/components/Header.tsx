@@ -1,12 +1,14 @@
 import { Box, Text } from "ink";
 import { BrandMark } from "../primitives.js";
-import { glyphs, ui } from "../theme.js";
+import { glyphs, ui, unicodeOk } from "../theme.js";
 
 /**
- * The control-room identity bar. Left: the brand signature + the workspace it is
- * operating. Right: the operator tier and a live connection badge — the one
- * place the human confirms, at a glance, that Daintree is actually wired in.
- * A second line names the active run when there is one.
+ * The control-room identity bar, framed in a border so it reads as the masthead
+ * the rest of the cockpit hangs beneath (everything below is borderless). Left:
+ * the brand signature + the workspace it is operating. Right: the operator tier
+ * and a live connection badge — the one place the human confirms, at a glance,
+ * that Daintree is actually wired in. A second line names the active run when
+ * there is one; a third surfaces the debug log when active.
  */
 export function Header({
   project,
@@ -29,7 +31,13 @@ export function Header({
   const set = glyphs();
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Box justifyContent="space-between">
+      <Box
+        flexDirection="column"
+        borderStyle={unicodeOk() ? "round" : "classic"}
+        borderColor={ui.color.muted}
+        paddingX={1}
+      >
+        <Box justifyContent="space-between">
         {/* Left gives way first (the project name truncates); the right-hand
             tier + connection badge never shrinks. Without these guards a real
             terminal briefly narrower than the laid-out width (a resize/host
@@ -81,6 +89,7 @@ export function Header({
           ) : null}
         </Box>
       ) : null}
+      </Box>
     </Box>
   );
 }

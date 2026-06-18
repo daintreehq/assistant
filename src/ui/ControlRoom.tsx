@@ -119,17 +119,25 @@ export function ControlRoom({
       ? activeAgent?.goal ?? undefined
       : undefined;
 
-  // Header = identity bar (1) + marginBottom (1), plus an optional run subtitle
-  // and an optional one-row debug-log line (badge + truncated path); each grows
-  // the chrome by one row, so the body budget below must subtract them.
-  const headerH = 2 + (runTitle ? 1 : 0) + (logging ? 1 : 0);
-  const composerH = 3;
+  // Header = border (top+bottom = 2) + identity bar (1) + marginBottom (1),
+  // plus an optional run subtitle and an optional one-row debug-log line (badge
+  // + truncated path); each grows the chrome by one row, so the body budget
+  // below must subtract them.
+  const headerH = 4 + (runTitle ? 1 : 0) + (logging ? 1 : 0);
+  // Composer = top rule + input row + bottom rule + hints row. The input is
+  // bracketed both sides so it reads as a field.
+  const composerH = 4;
   const statusH = 1;
   const attentionH = showAttention ? 1 : 0;
   const opStripH = layout === "standard" && view === "home" && activeAgent ? 1 : 0;
   const approvalH = pending ? 8 : 0;
+  // Floor at 1, not 3: on a short terminal the body must be allowed to collapse
+  // so the chrome it shares the screen with — crucially the composer — is never
+  // pushed off the bottom. The flex priority below (body shrinks, footer never)
+  // is what actually guarantees the input stays on screen; this just keeps the
+  // budget we hand the body components honest.
   const bodyHeight = Math.max(
-    3,
+    1,
     rows - headerH - composerH - statusH - attentionH - opStripH - approvalH,
   );
 
@@ -152,14 +160,16 @@ export function ControlRoom({
       paddingX={1}
       paddingY={1}
     >
-      <Header
-        project={project}
-        tier={tier}
-        connected={connected}
-        runTitle={runTitle}
-        logging={logging}
-        logFile={logFile}
-      />
+      <Box flexShrink={0} flexDirection="column">
+        <Header
+          project={project}
+          tier={tier}
+          connected={connected}
+          runTitle={runTitle}
+          logging={logging}
+          logFile={logFile}
+        />
+      </Box>
 
       {opStripH > 0 && activeAgent ? (
         <Box justifyContent="space-between">
@@ -180,7 +190,13 @@ export function ControlRoom({
         </Box>
       ) : null}
 
-      <Box height={bodyHeight} flexDirection="column" overflow="hidden">
+      <Box
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        flexDirection="column"
+        overflow="hidden"
+      >
         {view === "help" ? (
           <Box height={bodyHeight}>
             <HelpOverlay width={Math.min(76, columns)} />
@@ -235,28 +251,33 @@ export function ControlRoom({
         )}
       </Box>
 
-      {showAttention ? (
-        <AttentionBanner events={dashboard.inbox} width={columns} />
-      ) : null}
+      {/* The footer never shrinks: the body above yields space first, so the
+          composer (and its input row) is always on screen, even when the
+          terminal is too short to honour every region's full budget. */}
+      <Box flexShrink={0} flexDirection="column">
+        {showAttention ? (
+          <AttentionBanner events={dashboard.inbox} width={columns} />
+        ) : null}
 
-      {pending ? (
-        <ApprovalSheet
-          pending={pending}
-          width={Math.min(80, columns)}
-          onResolve={onResolve}
+        {pending ? (
+          <ApprovalSheet
+            pending={pending}
+            width={Math.min(80, columns)}
+            onResolve={onResolve}
+          />
+        ) : null}
+
+        <StatusLine dashboard={dashboard} tier={tier} width={columns} now={now} />
+
+        <Composer
+          busy={busy}
+          stage={stage}
+          contextHint={contextHint}
+          width={columns}
+          focus={composerFocus}
+          onSubmit={onSubmit}
         />
-      ) : null}
-
-      <StatusLine dashboard={dashboard} tier={tier} width={columns} now={now} />
-
-      <Composer
-        busy={busy}
-        stage={stage}
-        contextHint={contextHint}
-        width={columns}
-        focus={composerFocus}
-        onSubmit={onSubmit}
-      />
+      </Box>
     </Box>
   );
 }

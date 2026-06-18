@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
 import { glyphs, ui } from "../theme.js";
+import { MultilineInput } from "./MultilineInput.js";
 
 /** Slash commands surfaced as a filterable palette — described by intent. */
 export const COMMAND_SUGGESTIONS: Array<[string, string]> = [
@@ -59,15 +59,15 @@ export function Composer({
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
   const set = glyphs();
 
-  useInput(
-    (_input, key) => {
-      // Tab completes the top suggestion.
-      if (key.tab && suggestions.length > 0) {
-        setValue(suggestions[0][0] + " ");
-      }
-    },
-    { isActive: focus && !busy },
-  );
+  function submit(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    // The controller returns false synchronously when it rejects the submit (a
+    // turn is already in flight). Keep the text so it isn't lost; any other
+    // result (void, or a Promise for an accepted turn) means it was taken.
+    if (onSubmit(trimmed) === false) return;
+    setValue("");
+  }
 
   return (
     <Box flexDirection="column">
@@ -85,23 +85,17 @@ export function Composer({
       <Divider width={width} />
 
       <Box>
-        <Text color={ui.color.accent}>{set.active === "◌" ? "›" : ">"} </Text>
         <Box flexGrow={1}>
-          <TextInput
+          <MultilineInput
             value={value}
             focus={focus}
-            showCursor={focus}
             onChange={setValue}
-            onSubmit={(text) => {
-              const trimmed = text.trim();
-              if (!trimmed) return;
-              // The controller returns false synchronously when it rejects the
-              // submit (a turn is already in flight). Keep the text so it isn't
-              // lost; any other result (void, or a Promise for an accepted
-              // turn) means the input was taken, so clear it.
-              if (onSubmit(trimmed) === false) return;
-              setValue("");
+            onSubmit={submit}
+            onCancel={() => setValue("")}
+            onTab={() => {
+              if (suggestions.length > 0) setValue(suggestions[0][0] + " ");
             }}
+            prompt={set.active === "◌" ? "› " : "> "}
             placeholder="Ask Daintree to supervise, delegate, or inspect…"
           />
         </Box>
@@ -114,9 +108,15 @@ export function Composer({
         ) : null}
       </Box>
 
+      {/* Bracket the input top AND bottom so the field reads unmistakably as the
+          place text goes — the hints below sit outside the rule. */}
+      <Divider width={width} />
+
       <Box justifyContent="space-between">
         <Box>
           <KeyHint keyName="/" action="commands" />
+          <Text dimColor>{" · "}</Text>
+          <KeyHint keyName="\\⏎" action="newline" />
           <Text dimColor>{" · "}</Text>
           <KeyHint keyName="^O" action="inspect ops" />
         </Box>

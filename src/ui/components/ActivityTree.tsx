@@ -83,9 +83,15 @@ export function ActivityTree({
               <Box>
                 <Text color={ui.color.muted}>{branch} </Text>
                 <Text color={toneColor(tone)}>{activityGlyph(a.state, set)} </Text>
-                <Text>{a.label.padEnd(LABEL_WIDTH)}</Text>
+                <Text>{a.label}</Text>
                 {detail ? (
-                  <Text dimColor>{truncate(detail, detailRoom)}</Text>
+                  // Always at least one space after the (white) label, and pad
+                  // short labels so details line up in a column. Labels longer
+                  // than the column just get the single separating space.
+                  <Text dimColor>
+                    {" ".repeat(Math.max(1, LABEL_WIDTH - a.label.length))}
+                    {truncate(detail, detailRoom)}
+                  </Text>
                 ) : null}
               </Box>
               {elapsed != null ? (
