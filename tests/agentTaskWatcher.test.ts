@@ -74,4 +74,23 @@ describe("agentTask.spawnForEdits watcher lifecycle notice", () => {
     expect(res.ok).toBe(true);
     expect(ctx.db.listWatchers()[0].cadenceMs).toBe(30_000);
   });
+
+  it("records spawnMode=edit in optionsJson by default (no mode arg)", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await spawn.handler(args, ctx);
+    expect(res.ok).toBe(true);
+    const opts = JSON.parse(ctx.db.listWatchers()[0].optionsJson!);
+    expect(opts.spawnMode).toBe("edit");
+  });
+
+  it("records spawnMode=explore in optionsJson for an explore spawn", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await spawn.handler({ ...args, mode: "explore" }, ctx);
+    expect(res.ok).toBe(true);
+    // The faked MCP returns no worktreeId, so optionsJson carries only spawnMode —
+    // verificationScope is absent, confirming the mode is recorded unconditionally.
+    const opts = JSON.parse(ctx.db.listWatchers()[0].optionsJson!);
+    expect(opts.spawnMode).toBe("explore");
+    expect(opts.verificationScope).toBeUndefined();
+  });
 });

@@ -273,15 +273,16 @@ export const agentTaskTools: ToolDef[] = [
               isSupervisor: true,
               modelTier: "small",
               nextCheckAt: Date.now(),
-              // Scope the post-completion git verification pass to this agent's
-              // worktree so the cleanliness check reads the right tree.
-              ...(worktreeId
-                ? {
-                    optionsJson: JSON.stringify({
-                      verificationScope: { worktreeId },
-                    }),
-                  }
-                : {}),
+              // Record the spawn mode so the watcher can tell a one-shot explore
+              // agent idling at the prompt (end-of-turn, = completion) from an edit
+              // agent genuinely waiting for input. Always set — a watcher created
+              // without a known worktreeId still needs the mode. Scope the
+              // post-completion git verification pass to this agent's worktree (when
+              // known) so the cleanliness check reads the right tree.
+              optionsJson: JSON.stringify({
+                ...(worktreeId ? { verificationScope: { worktreeId } } : {}),
+                spawnMode: args.mode ?? "edit",
+              }),
             });
             watcherId = watcher.id;
             logDebug(ctx.config, "watcher.created", {

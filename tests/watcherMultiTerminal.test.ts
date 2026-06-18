@@ -30,6 +30,7 @@ function fakeMcp(
     string,
     {
       agentState?: string;
+      waitingReason?: string;
       tail?: string;
       recentOutput?: string;
       exitCode?: number | null;
@@ -53,6 +54,7 @@ function fakeMcp(
           return {
             terminalId: tid,
             ...(cfg.agentState ? { agentState: cfg.agentState } : {}),
+            ...(cfg.waitingReason ? { waitingReason: cfg.waitingReason } : {}),
             ...(wantOutput && cfg.recentOutput !== undefined
               ? { recentOutput: cfg.recentOutput }
               : {}),
@@ -605,6 +607,138 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     // A supervisor-grade "waiting" surfaces to the inbox so the main loop can react.
     const events = queue.digest({ severityAtLeast: "attention" });
     expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
+  // #38: a one-shot explore agent goes agentState=waiting the instant it finishes
+  // its turn (idle at the prompt). For explore-mode watchers that end-of-turn wait
+  // is completion, not a human-input block — it must route through the verification
+  // gate, not fire a false attention wake. waitingReason="question" is the carve-out.
+  it("explore-mode + waitingReason=prompt (getStatus) → completion, no false wake", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = fakeMcp({ "term-x": { agentState: "waiting", waitingReason: "prompt" } });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "explore idle",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ spawnMode: "explore" }),
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    // Clean git pulse (fakeMcp default) → completed_success, severity "done".
+    expect(outcome.classification).toBe("completed_success");
+    // The bug was a spurious attention event — assert none surfaced.
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(false);
+    db.close();
+  });
+
+  it("explore-mode + absent waitingReason (getStatus) → completion (not waiting_for_input)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // No waitingReason at all — still "not a question", so still completion.
+    const mcp = fakeMcp({ "term-x": { agentState: "waiting" } });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "explore idle no reason",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ spawnMode: "explore" }),
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_success");
+    db.close();
+  });
+
+  it("explore-mode + waitingReason=question (getStatus) → still waiting_for_input", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // An explore agent CAN genuinely ask a question — that must still wake the user.
+    const mcp = fakeMcp({ "term-x": { agentState: "waiting", waitingReason: "question" } });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "explore question",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ spawnMode: "explore" }),
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("waiting_for_input");
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
+  it("explore-mode + waitingReason=prompt via terminal.list cross-check → completion", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // getStatus omits the terminal; terminal.list reports it waiting at the prompt.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: [{ id: "term-x", agentState: "waiting", waitingReason: "prompt" }],
+            },
+            isError: false,
+          };
+        }
+        if (name === "git.getProjectPulse") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { isDirty: false, changedFiles: 0 },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "explore idle in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ spawnMode: "explore" }),
+    });
+    // Aged past the grace, so the only reason it isn't exited is the list cross-check.
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).toBe("completed_success");
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(false);
     db.close();
   });
 
