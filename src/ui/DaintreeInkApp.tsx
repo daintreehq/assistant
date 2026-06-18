@@ -4,6 +4,7 @@ import type { App as DaintreeApp } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
 import { ControlRoom, type View } from "./ControlRoom.js";
+import { currentDebugLogPath } from "../debugLog.js";
 
 /**
  * The live shell. It owns the runtime wiring (controller, terminal previews,
@@ -115,6 +116,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       pending={controller.pendingConfirm}
       scrollOffset={scrollOffset}
       logging={app.config.debugLog}
+      logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
       composerFocus={
         view === "home" && !controller.busy && !controller.pendingConfirm
       }

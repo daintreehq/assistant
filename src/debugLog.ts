@@ -2,19 +2,23 @@
  * Full-fidelity debug trace — a pre-release observability aid.
  *
  * When `config.debugLog` is on (env `DAINTREE_ASSISTANT_DEBUG_LOG=1`), EVERYTHING
- * the assistant does is appended to a single human-readable file:
+ * the assistant does is appended to a per-session human-readable file:
  *
- *     <projectPath>/logs/debug.log
+ *     <logDir>/<YYYY-MM-DD>-<sessionId>.log   (logDir defaults to ~/.daintree/logs)
  *
  * That means every model request and response (full message arrays included),
  * every tool/function call with its arguments and result, and the whole watcher
  * lifecycle. These logs are intentionally large and complete — values are NOT
  * truncated — so you can reconstruct a session end to end.
  *
- * The `logs/` folder is git-ignored. The intent is interaction-by-interaction
- * debugging: each assistant start rotates the current `debug.log` out to a
- * timestamped archive (see {@link rotateDebugLog}) so a fresh run begins with a
- * clean file, while the previous {@link MAX_ARCHIVES} runs stay around.
+ * Each process gets its OWN dated+id file (no shared `debug.log`, no rotation): a
+ * new instance never clobbers a previous run's log. {@link startDebugLog} opens the
+ * file once at boot, writes a `session.start` header naming the project/tier/models,
+ * and returns the path so the caller can announce "logging to <file>". As part of
+ * boot it also deletes any log older than {@link MAX_LOG_AGE_MS} (7 days).
+ *
+ * The log directory is GLOBAL, not per-project, so one `tail -f` covers every
+ * session regardless of which project it was bound to.
  *
  * Logging is a no-op when disabled, and it NEVER throws into the caller: a write
  * failure warns once on stderr and is otherwise swallowed, because losing a debug
@@ -24,25 +28,18 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 
-/** Folder (under the project root) that holds the debug log + its archives. */
-export const DEBUG_LOG_DIRNAME = "logs";
-/** The single live human-readable log file. */
-export const DEBUG_LOG_FILE = "debug.log";
-/** How many rotated archives to retain (the "previous N" runs). */
-export const MAX_ARCHIVES = 20;
+/** Logs older than this (by mtime) are deleted at boot. */
+export const MAX_LOG_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** A field rendered inline (on the header line) must be a scalar this short. */
 const INLINE_MAX = 120;
 
 let warnedOnce = false;
+/** The file the current process writes to, once logging has started. */
+let activeLogPath: string | undefined;
 
 /** Just the config fields the logger needs — keeps call sites and tests light. */
-export type DebugLogConfig = Pick<AppConfig, "debugLog" | "projectPath">;
-
-/** Absolute path to the project-local `logs/` directory. */
-function logDir(projectPath: string): string {
-  return path.join(projectPath, DEBUG_LOG_DIRNAME);
-}
+export type DebugLogConfig = Pick<AppConfig, "debugLog" | "logDir">;
 
 function isoNow(): string {
   try {
@@ -50,6 +47,34 @@ function isoNow(): string {
   } catch {
     return String(Date.now());
   }
+}
+
+/** Session log filename: `<YYYY-MM-DD>-<id>.log`. */
+function sessionLogFileName(id: string): string {
+  const date = isoNow().slice(0, 10);
+  const safeId = id.replace(/[^\w.-]/g, "") || "session";
+  return `${date}-${safeId}.log`;
+}
+
+function randomId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * The file `logDebug` should append to within `logDir`. Reuses the session file
+ * opened by {@link startDebugLog}; if logging wrote before boot (e.g. a direct
+ * `logDebug` in a test) or the active path belongs to a different `logDir`, it
+ * lazily opens a fresh session file so writes still coalesce into one file.
+ */
+function resolveTarget(logDir: string): string {
+  if (activeLogPath && path.dirname(activeLogPath) === logDir) return activeLogPath;
+  activeLogPath = path.join(logDir, sessionLogFileName(randomId()));
+  return activeLogPath;
+}
+
+/** The log file the current process is writing to, once logging has started. */
+export function currentDebugLogPath(): string | undefined {
+  return activeLogPath;
 }
 
 function safeStringify(v: unknown, indent?: number): string {
@@ -88,8 +113,8 @@ function warnOnce(err: unknown): void {
 }
 
 /**
- * Append one event to `<projectPath>/logs/debug.log`. No-op unless `cfg.debugLog`
- * is on. `event` is a short dotted name (e.g. "model.request", "tool.call",
+ * Append one event to the current session log. No-op unless `cfg.debugLog` is on.
+ * `event` is a short dotted name (e.g. "model.request", "tool.call",
  * "watcher.stop"); `fields` carries the structured payload. Short scalars render
  * inline on the header line; objects, arrays, and multi-line strings render as
  * indented blocks below it — full and untruncated.
@@ -100,11 +125,11 @@ export function logDebug(
   fields: Record<string, unknown> = {},
 ): void {
   // Tolerate a missing/partial config — logging must never break the caller.
-  if (!cfg?.debugLog || !cfg.projectPath) return;
+  if (!cfg?.debugLog || !cfg.logDir) return;
   const ts = isoNow();
   try {
-    const dir = logDir(cfg.projectPath);
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(cfg.logDir, { recursive: true });
+    const target = resolveTarget(cfg.logDir);
 
     const inline: string[] = [];
     const blocks: string[] = [];
@@ -116,54 +141,60 @@ export function logDebug(
 
     let out = `${ts}  ${event}${inline.length ? `  ${inline.join(" ")}` : ""}\n`;
     if (blocks.length) out += `${blocks.join("\n")}\n`;
-    fs.appendFileSync(path.join(dir, DEBUG_LOG_FILE), out);
+    fs.appendFileSync(target, out);
   } catch (err) {
     warnOnce(err);
   }
 }
 
 /**
- * Rotate the debug log at assistant startup: rename the current `debug.log` to a
- * timestamped archive (`debug-<iso>.log`) so the new run starts clean, then prune
- * archives down to the most recent {@link MAX_ARCHIVES}.
- *
- * No-op when logging is disabled or there is no existing `debug.log` (it never
- * creates the directory itself — that is the logger's job on first write), so a
- * fresh checkout and the test suite never touch the project tree. Never throws.
+ * Begin a debug-log session at assistant startup. No-op (returns undefined) when
+ * logging is off. Otherwise:
+ *   1. delete any log older than {@link MAX_LOG_AGE_MS} (7 days);
+ *   2. open a fresh `<date>-<sessionId>.log`;
+ *   3. write a `session.start` header naming the project/tier/models/MCP;
+ * and return the file path so the caller can announce "logging to <path>". Call
+ * once per process, after config is loaded.
  */
-export function rotateDebugLog(cfg: DebugLogConfig | undefined): void {
-  if (!cfg?.debugLog || !cfg.projectPath) return;
-  try {
-    const dir = logDir(cfg.projectPath);
-    const live = path.join(dir, DEBUG_LOG_FILE);
-    if (fs.existsSync(live)) {
-      const stamp = isoNow().replace(/[:.]/g, "-");
-      fs.renameSync(live, path.join(dir, `debug-${stamp}.log`));
-    }
-    pruneArchives(dir);
-  } catch (err) {
-    warnOnce(err);
-  }
+export function startDebugLog(cfg: AppConfig, sessionId?: string): string | undefined {
+  if (!cfg.debugLog || !cfg.logDir) return undefined;
+  pruneOldLogs(cfg.logDir);
+  activeLogPath = path.join(cfg.logDir, sessionLogFileName(sessionId ?? randomId()));
+  logDebug(cfg, "session.start", {
+    project: cfg.projectPath,
+    projectId: cfg.projectId,
+    windowId: cfg.windowId,
+    tier: cfg.tier,
+    largeModel: cfg.largeModel,
+    mediumModel: cfg.mediumModel,
+    smallModel: cfg.smallModel,
+    mcpUrl: cfg.mcpUrl ?? "(unset)",
+    offline: cfg.offline,
+    autoApprove: cfg.autoApprove,
+    stateDir: cfg.stateDir,
+    logDir: cfg.logDir,
+    pid: process.pid,
+    node: process.version,
+  });
+  return activeLogPath;
 }
 
-/** Keep only the newest {@link MAX_ARCHIVES} `debug-*.log` files. */
-function pruneArchives(dir: string): void {
+/** Delete `*.log` files in `dir` older than {@link MAX_LOG_AGE_MS} by mtime. Never throws. */
+function pruneOldLogs(dir: string): void {
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);
   } catch {
     return; // directory doesn't exist yet — nothing to prune.
   }
-  // Names embed an ISO timestamp, so a descending lexicographic sort is newest-first.
-  const archives = entries
-    .filter((f) => /^debug-.*\.log$/.test(f))
-    .sort()
-    .reverse();
-  for (const stale of archives.slice(MAX_ARCHIVES)) {
+  const cutoff = Date.now() - MAX_LOG_AGE_MS;
+  for (const f of entries) {
+    if (!f.endsWith(".log")) continue;
+    const p = path.join(dir, f);
     try {
-      fs.unlinkSync(path.join(dir, stale));
+      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
     } catch {
-      // Best-effort cleanup — a failure to remove one stale archive is harmless.
+      // Best-effort cleanup — a failure to stat/remove one file is harmless.
     }
   }
 }

@@ -42,6 +42,8 @@ export interface IntroBlock {
   stage: string;
   /** Debug logging is active — surfaced in the header so it's verifiable at a glance. */
   logging?: boolean;
+  /** Path of the active debug log, shown under the header so it can be tailed. */
+  logFile?: string;
 }
 
 const line = (key: string, segments: Segment[] | string): LedgerLine => ({
@@ -233,6 +235,14 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
         : []),
     ]),
   );
+  if (intro.logging && intro.logFile) {
+    out.push(
+      line("intro-logging", [
+        { text: "logging to ", dimColor: true },
+        { text: truncate(intro.logFile, Math.max(12, width - 12)), color: ui.color.warning },
+      ]),
+    );
+  }
   out.push(rule("intro-rule-a", width));
 
   if (topEvent) {

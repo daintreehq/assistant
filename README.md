@@ -200,6 +200,34 @@ cached prefix doesn't churn each message. Drive it manually with `/recipes`
 | Queue        | `queue.publish` `queue.digest` `queue.resolve`                       |
 | Agent tasks  | `agentTask.spawnForEdits` (the no-file-edit escape hatch)            |
 
+## Debug logging
+
+A full-fidelity trace for debugging the assistant itself. When enabled, it appends
+**everything** — every model request and response (full message arrays), every
+tool/function call with its arguments and result, and the whole watcher lifecycle —
+to a single human-readable log. These logs are intentionally large and untruncated.
+
+**Enable it** by setting `DAINTREE_ASSISTANT_DEBUG_LOG=1`. The flag is read from the
+process environment, the bound project's `.env`, **or the assistant's own `.env`**
+(a low-precedence fallback), so it takes effect even when Daintree embeds the
+assistant against another project. It's already set in this repo's `.env`.
+
+**Where it writes:** a **global** directory (default `~/.daintree/logs`, override
+with `DAINTREE_ASSISTANT_LOG_DIR`), so one place covers every session regardless of
+which project it was bound to. Each run gets its **own** file named by session date
+and id — `<YYYY-MM-DD>-<sessionId>.log` — so a new instance never clobbers a previous
+run's log.
+
+```bash
+ls -t ~/.daintree/logs | head        # newest session logs
+tail -f ~/.daintree/logs/2026-06-18-ses_ab12cd34.log
+```
+
+**On startup** (when logging is on) the assistant prints `logging to <file>` and
+shows it in the cockpit header alongside a `◌ LOG` badge, the new file opens with a
+`session.start` header (the project it was launched in, tier, models, MCP target),
+and any log older than **7 days** is deleted as part of boot.
+
 ## Testing
 
 ```bash

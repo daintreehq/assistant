@@ -18,9 +18,15 @@ import { Tier } from "./schemas.js";
 export interface AppConfig {
   /** Working/project directory the CLI was launched in. */
   projectPath: string;
-  /** Where CLI state (db, indexes, logs) lives — never inside the repo. */
+  /** Where CLI state (db, indexes) lives — never inside the repo. */
   stateDir: string;
   dbPath: string;
+  /**
+   * Where the debug log lives. GLOBAL across all projects (default
+   * `~/.daintree/logs`), so a single tail covers every session regardless of which
+   * project it was bound to. Override with DAINTREE_ASSISTANT_LOG_DIR.
+   */
+  logDir: string;
 
   /** Fireworks. */
   fireworksApiKey: string;
@@ -60,10 +66,12 @@ export interface AppConfig {
   /**
    * When true, append a full-fidelity trace of EVERYTHING — every model request and
    * response, every tool/function call with its args and result, and the whole
-   * watcher lifecycle — to a human-readable `logs/debug.log` under {@link projectPath}
-   * (git-ignored). Each assistant start rotates the file to a timestamped archive
-   * (keeping the previous 20). Intentionally large; a pre-release debugging aid, off
-   * by default. Driven by `DAINTREE_ASSISTANT_DEBUG_LOG=1` (also settable in `.env`).
+   * watcher lifecycle — to a per-session `<date>-<sessionId>.log` under {@link logDir}
+   * (global, default `~/.daintree/logs`). Each start opens its own file (never
+   * clobbering a prior run), writes a `session.start` header (project, tier, models,
+   * MCP), and deletes logs older than 7 days. Intentionally large; a pre-release
+   * debugging aid, off by default. Driven by `DAINTREE_ASSISTANT_DEBUG_LOG=1` (also
+   * settable in `.env`).
    */
   debugLog: boolean;
 }
@@ -82,6 +90,7 @@ export interface ConfigOverrides {
   autoApprove?: boolean;
   offline?: boolean;
   debugLog?: boolean;
+  logDir?: string;
 }
 
 export const DEFAULTS = {
@@ -198,10 +207,16 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     overrides.tier ?? process.env.DAINTREE_ASSISTANT_TIER ?? "system",
   );
 
+  // Debug log dir is GLOBAL (not per-project), so one tail spans every session.
+  const logDir =
+    firstString(overrides.logDir, process.env.DAINTREE_ASSISTANT_LOG_DIR) ??
+    path.join(os.homedir(), ".daintree", "logs");
+
   return {
     projectPath,
     stateDir,
     dbPath: path.join(stateDir, "state.db"),
+    logDir,
     fireworksApiKey,
     fireworksBaseUrl:
       firstString(process.env.FIREWORKS_BASE_URL) ?? DEFAULTS.fireworksBaseUrl,
@@ -233,6 +248,7 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
   return {
     projectPath: cfg.projectPath,
     stateDir: cfg.stateDir,
+    logDir: cfg.logDir,
     projectId: cfg.projectId ?? "(unset)",
     windowId: cfg.windowId ?? "(unset)",
     largeModel: cfg.largeModel,

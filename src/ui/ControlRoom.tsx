@@ -62,6 +62,8 @@ export interface ControlRoomProps {
   now?: number;
   /** Debug logging is active — shown as a header badge so it's verifiable. */
   logging?: boolean;
+  /** Path of the active debug log, shown under the header so it can be tailed. */
+  logFile?: string;
   composerFocus?: boolean;
   onSubmit?: (value: string) => void | Promise<void>;
   onResolve?: (approved: boolean) => void;
@@ -84,6 +86,7 @@ export function ControlRoom({
   scrollOffset = 0,
   now = Date.now(),
   logging = false,
+  logFile,
   composerFocus = false,
   onSubmit = () => {},
   onResolve = () => {},
@@ -147,6 +150,7 @@ export function ControlRoom({
               busy,
               stage,
               logging,
+              logFile,
             }}
           />
         )}

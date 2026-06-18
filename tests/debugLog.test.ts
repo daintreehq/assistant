@@ -5,10 +5,9 @@ import path from "node:path";
 import { z } from "zod";
 import {
   logDebug,
-  rotateDebugLog,
-  DEBUG_LOG_DIRNAME,
-  DEBUG_LOG_FILE,
-  MAX_ARCHIVES,
+  startDebugLog,
+  currentDebugLogPath,
+  MAX_LOG_AGE_MS,
 } from "../src/debugLog.js";
 import { ModelRouter } from "../src/models/router.js";
 import { ToolRegistry } from "../src/tools/registry.js";
@@ -22,26 +21,25 @@ afterEach(() => {
   for (const d of created.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
-function project(): string {
-  const p = fs.mkdtempSync(path.join(os.tmpdir(), "daintree-debuglog-"));
-  created.push(p);
-  return p;
+/** A logDir path that does NOT exist yet, so we can assert it's only created on write. */
+function freshLogDir(): string {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "daintree-debuglog-"));
+  created.push(base);
+  return path.join(base, "logs");
 }
 
-const logsDir = (p: string) => path.join(p, DEBUG_LOG_DIRNAME);
-const liveLog = (p: string) => path.join(logsDir(p), DEBUG_LOG_FILE);
-const readLive = (p: string) => fs.readFileSync(liveLog(p), "utf8");
+const SESSION_RE = /\d{4}-\d{2}-\d{2}-[\w.-]+\.log$/;
 
 describe("logDebug", () => {
   it("is a no-op when debugLog is disabled", () => {
-    const projectPath = project();
-    logDebug({ debugLog: false, projectPath }, "tool.call", { tool: "fs.read" });
-    expect(fs.existsSync(logsDir(projectPath))).toBe(false);
+    const logDir = freshLogDir();
+    logDebug({ debugLog: false, logDir }, "tool.call", { tool: "fs.read" });
+    expect(fs.existsSync(logDir)).toBe(false);
   });
 
-  it("renders short scalars inline and structured values as untruncated blocks", () => {
-    const projectPath = project();
-    const cfg = { debugLog: true, projectPath };
+  it("writes to a dated session file and keeps short scalars inline / big values whole", () => {
+    const logDir = freshLogDir();
+    const cfg = { debugLog: true, logDir };
     const longContent = "y".repeat(5000);
 
     logDebug(cfg, "model.response", {
@@ -51,63 +49,79 @@ describe("logDebug", () => {
       toolCalls: [{ name: "fs.read", args: { path: "a.ts" } }],
     });
 
-    const txt = readLive(projectPath);
-    // Short scalars sit on the header line.
+    const file = currentDebugLogPath()!;
+    expect(path.basename(file)).toMatch(SESSION_RE);
+    const txt = fs.readFileSync(file, "utf8");
     expect(txt).toMatch(/model\.response  tier=large finishReason=stop/);
-    // Structured + long values become indented blocks, kept WHOLE (no truncation).
     expect(txt).toContain("  content:");
-    expect(txt).toContain(longContent);
-    expect(txt).toContain("  toolCalls:");
+    expect(txt).toContain(longContent); // untruncated
     expect(txt).toContain('"fs.read"');
   });
 });
 
-describe("rotateDebugLog", () => {
-  it("no-ops with nothing to rotate, then archives the live log on start", () => {
-    const projectPath = project();
-    const cfg = { debugLog: true, projectPath };
+describe("startDebugLog", () => {
+  function fullCfg(logDir: string): AppConfig {
+    return {
+      debugLog: true,
+      logDir,
+      projectPath: "/Users/dev/some-project",
+      projectId: "proj-7",
+      tier: "system",
+      largeModel: "L",
+      mediumModel: "M",
+      smallModel: "S",
+      mcpUrl: "http://127.0.0.1:45454/mcp",
+      offline: false,
+      autoApprove: false,
+      stateDir: "/state",
+    } as unknown as AppConfig;
+  }
 
-    rotateDebugLog(cfg); // nothing yet — must not create the dir
-    expect(fs.existsSync(logsDir(projectPath))).toBe(false);
+  it("opens a <date>-<id>.log, returns its path, and writes a session header", () => {
+    const logDir = freshLogDir();
+    const file = startDebugLog(fullCfg(logDir), "ses_ab12cd34");
 
-    logDebug(cfg, "tool.call", { tool: "fs.read" });
-    rotateDebugLog(cfg);
-
-    expect(fs.existsSync(liveLog(projectPath))).toBe(false);
-    const archives = fs
-      .readdirSync(logsDir(projectPath))
-      .filter((f) => /^debug-.*\.log$/.test(f));
-    expect(archives).toHaveLength(1);
+    expect(file).toBeTruthy();
+    expect(path.basename(file!)).toMatch(/^\d{4}-\d{2}-\d{2}-ses_ab12cd34\.log$/);
+    expect(file).toBe(currentDebugLogPath());
+    const txt = fs.readFileSync(file!, "utf8");
+    expect(txt).toContain("session.start");
+    expect(txt).toContain("project=/Users/dev/some-project");
+    expect(txt).toContain("tier=system");
+    expect(txt).toContain("smallModel=S");
   });
 
-  it(`keeps only the most recent ${MAX_ARCHIVES} archives`, () => {
-    const projectPath = project();
-    const dir = logsDir(projectPath);
-    fs.mkdirSync(dir, { recursive: true });
-    for (let i = 0; i < MAX_ARCHIVES + 5; i++) {
-      const n = String(i).padStart(3, "0");
-      fs.writeFileSync(path.join(dir, `debug-2026-01-01T00-00-${n}.log`), `old ${n}`);
-    }
-    logDebug({ debugLog: true, projectPath }, "tool.call", { marker: "fresh" });
-    rotateDebugLog({ debugLog: true, projectPath });
+  it("returns undefined and writes nothing when disabled", () => {
+    const logDir = freshLogDir();
+    const file = startDebugLog({ debugLog: false, logDir } as unknown as AppConfig);
+    expect(file).toBeUndefined();
+    expect(fs.existsSync(logDir)).toBe(false);
+  });
 
-    const archives = fs
-      .readdirSync(dir)
-      .filter((f) => /^debug-.*\.log$/.test(f));
-    expect(archives).toHaveLength(MAX_ARCHIVES);
-    expect(archives.some((f) => f.includes("00-000"))).toBe(false); // oldest pruned
-    const survivedFresh = archives.some((f) =>
-      fs.readFileSync(path.join(dir, f), "utf8").includes("fresh"),
-    );
-    expect(survivedFresh).toBe(true);
+  it("deletes logs older than 7 days at boot, keeps recent ones", () => {
+    const logDir = freshLogDir();
+    fs.mkdirSync(logDir, { recursive: true });
+    const stale = path.join(logDir, "2026-01-01-old.log");
+    const recent = path.join(logDir, "2026-06-17-recent.log");
+    fs.writeFileSync(stale, "old");
+    fs.writeFileSync(recent, "recent");
+    // Age the stale file well past the 7-day cutoff via mtime.
+    const old = new Date(Date.now() - MAX_LOG_AGE_MS - 86_400_000);
+    fs.utimesSync(stale, old, old);
+
+    startDebugLog(fullCfg(logDir), "ses_new");
+
+    expect(fs.existsSync(stale)).toBe(false); // pruned
+    expect(fs.existsSync(recent)).toBe(true); // within 7 days, kept
+    expect(SESSION_RE.test(currentDebugLogPath()!)).toBe(true);
   });
 });
 
 describe("ModelRouter tracing", () => {
-  function cfg(projectPath: string): AppConfig {
+  function cfg(logDir: string): AppConfig {
     return {
       debugLog: true,
-      projectPath,
+      logDir,
       largeModel: "L",
       mediumModel: "M",
       smallModel: "S",
@@ -115,11 +129,9 @@ describe("ModelRouter tracing", () => {
   }
 
   it("logs model.request and model.response for json calls", async () => {
-    const projectPath = project();
-    const fakeFw = {
-      json: async () => ({ verdict: "ok" }),
-    } as never;
-    const router = new ModelRouter(cfg(projectPath), fakeFw);
+    const logDir = freshLogDir();
+    const fakeFw = { json: async () => ({ verdict: "ok" }) } as never;
+    const router = new ModelRouter(cfg(logDir), fakeFw);
 
     await router.json(
       "small",
@@ -127,7 +139,7 @@ describe("ModelRouter tracing", () => {
       z.object({ verdict: z.string() }),
     );
 
-    const txt = readLive(projectPath);
+    const txt = fs.readFileSync(currentDebugLogPath()!, "utf8");
     expect(txt).toContain("model.request");
     expect(txt).toContain("kind=json");
     expect(txt).toContain("model=S");
@@ -139,7 +151,7 @@ describe("ModelRouter tracing", () => {
 
 describe("ToolRegistry tracing", () => {
   it("logs tool.call with args and result on every dispatch", async () => {
-    const projectPath = project();
+    const logDir = freshLogDir();
     const db = new Db(":memory:");
     const reg = new ToolRegistry();
     const tool: ToolDef = {
@@ -153,7 +165,7 @@ describe("ToolRegistry tracing", () => {
     reg.register(tool);
 
     const ctx = {
-      config: { tier: "system", debugLog: true, projectPath } as unknown as AppConfig,
+      config: { tier: "system", debugLog: true, logDir } as unknown as AppConfig,
       db,
       queue: new Queue(db),
       actor: "main",
@@ -163,7 +175,7 @@ describe("ToolRegistry tracing", () => {
 
     await reg.dispatch("demo.echo", { hello: "world" }, ctx);
 
-    const txt = readLive(projectPath);
+    const txt = fs.readFileSync(currentDebugLogPath()!, "utf8");
     expect(txt).toContain("tool.call");
     expect(txt).toContain("tool=demo.echo");
     expect(txt).toContain("outcome=ok");

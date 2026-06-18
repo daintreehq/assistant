@@ -96,6 +96,7 @@ async function main(): Promise<void> {
     // Dynamic import AFTER the bootstrap guard, so a module-load failure (e.g.
     // node:sqlite, a native dep) is reported and exits instead of hanging.
     const { App } = await import("../cli/app.js");
+    const { startDebugLog } = await import("../debugLog.js");
     const appSessionId = descriptor.resumeSessionId ?? descriptor.sessionId;
     const instance = App.create({
       sessionId: appSessionId,
@@ -104,6 +105,8 @@ async function main(): Promise<void> {
       overrides: { projectPath: descriptor.cwd },
     });
     app = instance;
+    // Open this session's global debug log (prune old + header); no-op unless enabled.
+    startDebugLog(instance.config, appSessionId);
 
     bridge = new HostBridge({
       sessionId,
