@@ -33,6 +33,10 @@ Your local tools wrap Daintree:
   attention queue instead of blocking. Prefer these over dumping raw scrollback
   into context.
 - recipe.list / recipe.run, worktree.createWithRecipe — Daintree workspace recipes.
+- forge.listIssues / forge.getIssue / forge.listPRs — read forge issues and PRs.
+  workflow.startWorkOnIssue / workflow.prepBranchForReview — high-level issue/PR
+  orchestration (mutating, always confirmed). Prefer these over daintree.call for
+  issue/PR work.
 - tool.search / daintree.listTools / daintree.status — discover Daintree tools and
   connection state. queue.* manage the attention queue. fs.list/read/search read
   the repo (read-only).
@@ -92,6 +96,9 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "actions.search",
   "actions.getSchema",
   "agent.launch",
+  "forge.getIssue",
+  "forge.listIssues",
+  "forge.listPRs",
   "git.getProjectPulse",
   "panel.focus",
   "recipe.list",
@@ -100,6 +107,8 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "terminal.getStatus",
   "terminal.list",
   "terminal.waitUntilIdle",
+  "workflow.prepBranchForReview",
+  "workflow.startWorkOnIssue",
   "worktree.createWithRecipe",
   "worktree.getCurrent",
   "worktree.list",

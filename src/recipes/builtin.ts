@@ -116,8 +116,70 @@ Confirmation: mutating actions require confirmation before execution.
 Report back: what was started, which worktree/terminal ids were created, and whether a watcher should be attached.`,
 };
 
+export const WORKFLOW_START_WORK_RECIPE: Recipe = {
+  id: "daintree.workflow.start-work-on-issue",
+  title: "Start work on a forge issue",
+  version: "0.1.0",
+  summary: "How to pick a forge issue and start work on it through Daintree workflow actions.",
+  whenToUse:
+    "Use when the user asks to start work on an issue, pick up a ticket, begin an issue/PR, or set up a worktree/branch for a forge issue.",
+  tags: ["issue", "forge", "workflow", "start-work", "worktree", "branch", "github", "gitlab"],
+  priority: 190,
+  maxTurns: 8,
+  risk: "external",
+  requiredTools: [
+    "context.snapshot",
+    "forge.listIssues",
+    "forge.getIssue",
+    "workflow.startWorkOnIssue",
+    "watcher.terminal.create",
+  ],
+  body: `Use when: the user wants to start work on a forge issue.
+Procedure:
+1. Inspect current Daintree context first if the project/worktree is ambiguous.
+2. If the issue is not identified, list candidates with forge.listIssues and confirm which one with the user.
+3. Read the chosen issue with forge.getIssue to ground the task before mutating anything.
+4. Start work with workflow.startWorkOnIssue, forwarding the issue identifier in arguments.
+5. Pass an idempotency requestKey on the mutating call when available.
+6. If the action creates a terminal/agent, attach a watcher with watcher.terminal.create rather than polling.
+7. Prefer these typed wrappers over the raw daintree.call escape hatch.
+Confirmation: workflow.startWorkOnIssue mutates real state and touches the forge — confirm before launch per the active tier.
+Report back: which issue was started, the worktree/branch/terminal ids created, the watcher id if attached, and the next checkpoint.`,
+};
+
+export const WORKFLOW_PREP_BRANCH_RECIPE: Recipe = {
+  id: "daintree.workflow.prep-branch-for-review",
+  title: "Prepare a branch for review",
+  version: "0.1.0",
+  summary: "How to ready the current branch for review through Daintree workflow actions.",
+  whenToUse:
+    "Use when the user asks to prepare a branch for review, open/ready a PR, or wrap up work on an issue for review.",
+  tags: ["review", "pr", "branch", "forge", "workflow", "prep", "github", "gitlab"],
+  priority: 185,
+  maxTurns: 8,
+  risk: "external",
+  requiredTools: [
+    "context.snapshot",
+    "forge.listPRs",
+    "workflow.prepBranchForReview",
+    "watcher.terminal.create",
+  ],
+  body: `Use when: the user wants to prepare the current branch for review.
+Procedure:
+1. Inspect current Daintree context first to confirm the active worktree/branch.
+2. Check existing PRs with forge.listPRs when relevant to avoid duplicates.
+3. Prepare the branch with workflow.prepBranchForReview, forwarding any required arguments (e.g. worktreeId).
+4. Pass an idempotency requestKey on the mutating call when available.
+5. If the action spawns a terminal/agent, attach a watcher with watcher.terminal.create rather than polling.
+6. Prefer these typed wrappers over the raw daintree.call escape hatch.
+Confirmation: workflow.prepBranchForReview mutates real state and touches the forge — confirm before launch per the active tier.
+Report back: what was prepared, the PR/branch/terminal ids involved, the watcher id if attached, and the next checkpoint.`,
+};
+
 export const BUILTIN_RECIPES: Recipe[] = [
   BASIC_DAINTREE_ORCHESTRATION_RECIPE,
   SPAWN_AGENT_FOR_EDITS_RECIPE,
   DAINTREE_RECIPE_RUNNER_RECIPE,
+  WORKFLOW_START_WORK_RECIPE,
+  WORKFLOW_PREP_BRANCH_RECIPE,
 ];

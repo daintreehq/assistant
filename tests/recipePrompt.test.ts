@@ -40,7 +40,7 @@ describe("base system prompt", () => {
   });
 
   it("pins the version used as the cache key", () => {
-    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v4");
+    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v5");
   });
 
   it("states the foreground-only scheduler lifecycle", () => {
