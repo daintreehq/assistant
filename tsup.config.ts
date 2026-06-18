@@ -1,7 +1,9 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: { index: "src/cli/index.ts" },
+  // `index` is the CLI/Ink bin; `host` is the Electron utility-process entry
+  // Daintree forks for the native assistant surface (#10649).
+  entry: { index: "src/cli/index.ts", host: "src/host/index.ts" },
   format: ["esm"],
   target: "node22",
   platform: "node",
