@@ -41,4 +41,32 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
+
+  it("scrolls history with the arrow keys (also the mouse wheel)", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-ink-"));
+    const app = App.create({
+      overrides: { offline: true, stateDir, projectPath: stateDir, tier: "operator" },
+    });
+
+    const { lastFrame, stdin, unmount } = render(<DaintreeInkApp app={app} />);
+    await tick();
+
+    // Pinned to the latest output to start.
+    expect(lastFrame() ?? "").toContain("latest");
+
+    // Up arrow scrolls back into history — on the alternate screen the terminal
+    // delivers mouse-wheel ticks here as arrow keys, so this is the wheel too.
+    stdin.write("[A");
+    await tick();
+    expect(lastFrame() ?? "").toContain("history -");
+
+    // End snaps back to the latest line.
+    stdin.write("[F");
+    await tick();
+    expect(lastFrame() ?? "").toContain("latest");
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
 });

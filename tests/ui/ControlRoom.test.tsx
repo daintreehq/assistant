@@ -43,7 +43,7 @@ describe("ControlRoom stream frames (deterministic fixtures)", () => {
     expect(frame).toContain("DAINTREE ASSISTANT");
     expect(frame).toContain("MCP CONNECTED");
     expect(frame).toContain("Standing by");
-    expect(frame).toContain("PgUp/PgDn");
+    expect(frame).toContain("wheel scroll");
     expect(frame).toContain("Ask Daintree...");
   });
 

@@ -17,7 +17,8 @@ const COMMANDS: Array<[string, string]> = [
 ];
 
 const KEYS: Array<[string, string]> = [
-  ["PgUp/PgDn", "scroll history"],
+  ["↑/↓ · wheel", "scroll history"],
+  ["PgUp/PgDn", "scroll a page"],
   ["Home/End", "top / latest"],
   ["^O", "full operations surface"],
   ["^X", "expand tool detail in the transcript"],

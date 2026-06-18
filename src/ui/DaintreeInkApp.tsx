@@ -36,6 +36,12 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   };
 
   const scrollPage = Math.max(6, rows - 8);
+  // Per-step line scroll for arrow keys. On the alternate screen the terminal
+  // has no native scrollback, so it converts mouse-wheel/trackpad ticks into
+  // Up/Down arrow keypresses ("alternate scroll mode"). Binding those arrows to
+  // the ledger is what makes the wheel scroll history; a few lines per event
+  // keeps a wheel notch feeling responsive without overshooting.
+  const scrollLine = 3;
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -48,6 +54,18 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     }
     if (view === "home" && key.pageDown) {
       setScrollOffset((n) => Math.max(0, n - scrollPage));
+      return;
+    }
+    // Up/Down scroll the ledger a few lines at a time. This is also the wheel:
+    // alternate-scroll mode delivers wheel ticks here as arrow keys. The
+    // composer is single-line (only left/right move its cursor), so up/down are
+    // free to own history scrolling.
+    if (view === "home" && key.upArrow) {
+      setScrollOffset((n) => n + scrollLine);
+      return;
+    }
+    if (view === "home" && key.downArrow) {
+      setScrollOffset((n) => Math.max(0, n - scrollLine));
       return;
     }
     if (view === "home" && key.home) {

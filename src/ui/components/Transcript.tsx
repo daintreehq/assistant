@@ -316,7 +316,7 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
   out.push(
     line("intro-keys", [
       { text: "KEYS      ", dimColor: true, bold: true },
-      { text: "PgUp/PgDn · End latest · ^O ops · / cmds", dimColor: true },
+      { text: "↑/↓ or wheel scroll · End latest · ^O ops · / cmds", dimColor: true },
     ]),
   );
   out.push(rule("intro-rule-b", width, ui.color.accent));
