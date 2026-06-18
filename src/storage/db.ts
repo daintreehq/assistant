@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS events (
   recommendedActionsJson TEXT,
   dedupeKey TEXT,
   createdAt INTEGER NOT NULL,
+  updatedAt INTEGER,
+  notifiedAt INTEGER,
   expiresAt INTEGER,
   resolvedAt INTEGER,
   count INTEGER NOT NULL DEFAULT 1
@@ -249,85 +251,20 @@ export class Db {
   }
 
   /**
-   * Forward-only schema migrations keyed on `PRAGMA user_version`. The base
-   * SCHEMA above uses CREATE TABLE IF NOT EXISTS for a fresh database; these
-   * incremental steps evolve a database that predates a column. Each step is
-   * idempotent and runs only when user_version is below its index+1.
+   * Schema migrations keyed on `PRAGMA user_version`. The base SCHEMA above is
+   * the single source of truth: it uses CREATE TABLE IF NOT EXISTS to build the
+   * complete current schema for a fresh database. This collection is therefore
+   * reduced to a single baseline migration that simply lands user_version at 1
+   * for a newly-built DB; the SCHEMA exec has already created every table,
+   * column, and index. Incremental migrations will be reintroduced at release —
+   * during development the DB is hard-reset (delete the local file).
    */
   private migrate(): void {
     const migrations: Array<() => void> = [
-      // v1: events.updatedAt — recency that advances on dedupe bumps while
-      // createdAt stays fixed (so a recurring event doesn't re-notify forever).
-      () => {
-        this.addColumnIfMissing("events", "updatedAt", "INTEGER");
-        this.db.exec(
-          "UPDATE events SET updatedAt = createdAt WHERE updatedAt IS NULL",
-        );
-      },
-      // v2: events.notifiedAt — set once when an event is first pushed to the
-      // attention notifier, so a deduped event neither re-notifies forever nor
-      // misses a genuine escalation. Existing rows are treated as already
-      // notified so a restart doesn't replay history.
-      () => {
-        this.addColumnIfMissing("events", "notifiedAt", "INTEGER");
-        this.db.exec(
-          "UPDATE events SET notifiedAt = createdAt WHERE notifiedAt IS NULL",
-        );
-      },
-      // v3: watchers.isSupervisor — distinguishes fast supervisor watchers
-      // (attached to CLI-spawned worker terminals) from slow user-created
-      // monitor watchers. Existing rows default to 0 (monitor), which is the
-      // correct classification for any watcher created before this column.
-      () => {
-        this.addColumnIfMissing(
-          "watchers",
-          "isSupervisor",
-          "INTEGER NOT NULL DEFAULT 0",
-        );
-      },
-      // v4: grant provenance. automation_grants.source distinguishes a purely
-      // local grant from a (future) Daintree session grant; audit_log.grantSource
-      // / grantId carry that provenance onto each grant_ok row so the two grant
-      // lifecycles can be told apart in listings and audit. Existing rows default
-      // to "local" (the only kind that has ever been minted).
-      () => {
-        this.addColumnIfMissing(
-          "automation_grants",
-          "source",
-          "TEXT NOT NULL DEFAULT 'local'",
-        );
-        this.addColumnIfMissing("audit_log", "grantSource", "TEXT");
-        this.addColumnIfMissing("audit_log", "grantId", "TEXT");
-      },
-      // v5: workflow_runs — a durable ledger tying together the terminals,
-      // watchers, and queue events of one unit of issue/PR work, plus its next
-      // required action. The base SCHEMA already creates this for fresh DBs; this
-      // step creates it for databases that predate the table. CREATE TABLE IF NOT
-      // EXISTS makes it a harmless no-op when SCHEMA already ran it.
-      () => {
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS workflow_runs (
-            id TEXT PRIMARY KEY,
-            issueNumber INTEGER,
-            issueUrl TEXT,
-            issueTitle TEXT,
-            branch TEXT,
-            worktreeId TEXT,
-            prNumber INTEGER,
-            prUrl TEXT,
-            terminalIdsJson TEXT,
-            watcherIdsJson TEXT,
-            queueEventIdsJson TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            nextActionJson TEXT,
-            notesJson TEXT,
-            createdAt INTEGER NOT NULL,
-            updatedAt INTEGER NOT NULL,
-            completedAt INTEGER
-          );
-          CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status, updatedAt);
-        `);
-      },
+      // v1: baseline — the complete initial schema. SCHEMA (run in the
+      // constructor) creates every table/column/index, so this step is a
+      // marker that brings a freshly-built database up to user_version 1.
+      () => {},
     ];
     const row = this.db.prepare("PRAGMA user_version").get() as
       | { user_version?: number }
@@ -336,15 +273,6 @@ export class Db {
     for (let v = current; v < migrations.length; v++) migrations[v]();
     // PRAGMA values can't be bound as parameters; the count is an internal int.
     this.db.exec(`PRAGMA user_version = ${migrations.length}`);
-  }
-
-  private addColumnIfMissing(table: string, column: string, type: string): void {
-    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
-      name: string;
-    }>;
-    if (!cols.some((c) => c.name === column)) {
-      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    }
   }
 
   close(): void {

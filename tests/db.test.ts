@@ -1,19 +1,14 @@
-import { createRequire } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Db } from "../src/storage/db.js";
 
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
-  DatabaseSync: typeof import("node:sqlite").DatabaseSync;
-};
-
-describe("Db migration v2 -> v3 (isSupervisor)", () => {
+describe("Db fresh schema (single baseline migration)", () => {
   let dir: string;
   let path: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "db-mig-"));
+    dir = mkdtempSync(join(tmpdir(), "db-fresh-"));
     path = join(dir, "state.db");
   });
 
@@ -21,177 +16,33 @@ describe("Db migration v2 -> v3 (isSupervisor)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("adds isSupervisor=false to rows from a pre-isSupervisor schema", () => {
-    // Build a v2 database by hand: watchers table WITHOUT the isSupervisor
-    // column, user_version pinned to 2 (the two pre-existing event migrations).
-    const raw = new DatabaseSync(path);
-    raw.exec(`CREATE TABLE watchers (
-      id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
-      goal TEXT NOT NULL, targetsJson TEXT NOT NULL, cadenceMs INTEGER NOT NULL,
-      modelTier TEXT NOT NULL, startAfterMs INTEGER, stopAfterMs INTEGER,
-      stopWhenJson TEXT, alertWhenJson TEXT, optionsJson TEXT,
-      status TEXT NOT NULL DEFAULT 'created', lastClassification TEXT,
-      lastCheckedAt INTEGER, nextCheckAt INTEGER NOT NULL, createdAt INTEGER NOT NULL
-    )`);
-    raw.exec(
-      `INSERT INTO watchers (id,kind,title,goal,targetsJson,cadenceMs,modelTier,status,nextCheckAt,createdAt)
-       VALUES ('wch_old','terminal','old','g','[]',120000,'small','active',0,0)`,
-    );
-    raw.exec("PRAGMA user_version = 2");
-    raw.close();
-
-    // Opening through Db runs the forward-only migrations.
+  it("builds the complete schema and lands user_version at 1", () => {
+    // A fresh DB file gets the entire current schema from the SCHEMA constant;
+    // the single baseline migration simply stamps user_version = 1.
     const db = new Db(path);
-    const old = db.getWatcher("wch_old");
-    expect(old?.isSupervisor).toBe(false);
-    // New inserts work against the migrated schema.
-    const fresh = db.insertWatcher({
-      kind: "terminal",
-      title: "new",
-      goal: "g",
-      targetsJson: "[]",
-      cadenceMs: 3000,
-      modelTier: "small",
-      nextCheckAt: 0,
-      isSupervisor: true,
-    });
-    expect(db.getWatcher(fresh.id)?.isSupervisor).toBe(true);
-    // Opening runs the full forward-only ladder, so user_version lands on the
-    // current migration count (now 5 with grant provenance + workflow_runs),
-    // not just 3.
-    const version = db
-      .raw()
-      .prepare("PRAGMA user_version")
-      .get() as { user_version: number };
-    expect(version.user_version).toBe(5);
-    db.close();
-  });
-});
+    const raw = db.raw();
 
-describe("Db migration v3 -> v4 (grant provenance)", () => {
-  let dir: string;
-  let path: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "db-mig4-"));
-    path = join(dir, "state.db");
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("backfills source='local' on grants and adds grant columns to audit_log", () => {
-    // Build a v3 database by hand: automation_grants WITHOUT the source column
-    // and audit_log WITHOUT grantSource/grantId, user_version pinned to 3.
-    const raw = new DatabaseSync(path);
-    raw.exec(`CREATE TABLE automation_grants (
-      id TEXT PRIMARY KEY, actorId TEXT NOT NULL, actorType TEXT NOT NULL,
-      allowedRiskClassesJson TEXT, allowedToolNamesJson TEXT,
-      expiresAt INTEGER NOT NULL, maxUses INTEGER NOT NULL,
-      usesRemaining INTEGER NOT NULL, revokedAt INTEGER, createdAt INTEGER NOT NULL
-    )`);
-    raw.exec(
-      `INSERT INTO automation_grants (id,actorId,actorType,allowedRiskClassesJson,allowedToolNamesJson,expiresAt,maxUses,usesRemaining,revokedAt,createdAt)
-       VALUES ('grt_old','wch_old','watcher','["git"]',NULL,9999999999999,3,3,NULL,0)`,
-    );
-    raw.exec(`CREATE TABLE audit_log (
-      id TEXT PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT NOT NULL,
-      toolName TEXT NOT NULL, argsJson TEXT NOT NULL, outcome TEXT NOT NULL,
-      durationMs INTEGER NOT NULL, summary TEXT NOT NULL, resultJson TEXT
-    )`);
-    raw.exec("PRAGMA user_version = 3");
-    raw.close();
-
-    // Opening through Db runs the forward-only migrations.
-    const db = new Db(path);
-    const old = db.getGrant("grt_old");
-    expect(old?.source).toBe("local");
-    // The backfilled source also flows through the consume path, not just getGrant.
-    const consumed = db.consumeGrant("wch_old", "watcher", "git.commit", "git");
-    expect(consumed?.id).toBe("grt_old");
-    expect(consumed?.source).toBe("local");
-    // New inserts can carry an explicit source and audit grant provenance.
-    const fresh = db.insertGrant({
-      actorId: "wch_new",
-      actorType: "watcher",
-      allowedRiskClassesJson: JSON.stringify(["git"]),
-      allowedToolNamesJson: null,
-      expiresAt: 9999999999999,
-      maxUses: 1,
-    });
-    expect(db.getGrant(fresh.id)?.source).toBe("local");
-    const aud = db.insertAudit({
-      actor: "watcher",
-      toolName: "git.commit",
-      argsJson: "{}",
-      outcome: "grant_ok",
-      durationMs: 1,
-      summary: "ok",
-      grantSource: "local",
-      grantId: fresh.id,
-    });
-    const back = db.listAudit().find((r) => r.id === aud.id)!;
-    expect(back.grantSource).toBe("local");
-    expect(back.grantId).toBe(fresh.id);
-    // Opening a pre-current (v3) DB runs the full forward-only ladder, so
-    // user_version lands on the current migration count (now 5 with the
-    // workflow_runs step appended after grant provenance).
-    const version = db
-      .raw()
-      .prepare("PRAGMA user_version")
-      .get() as { user_version: number };
-    expect(version.user_version).toBe(5);
-    db.close();
-  });
-});
-
-describe("Db migration v4 -> v5 (workflow_runs)", () => {
-  let dir: string;
-  let path: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "db-mig-wf-"));
-    path = join(dir, "state.db");
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("creates the workflow_runs table for a pre-workflow (v4) database", () => {
-    // Build a v4 database by hand: a watchers table WITH isSupervisor (the v3
-    // schema) but NO workflow_runs table, user_version pinned to 4 (after the
-    // grant-provenance migration but before workflow_runs).
-    const raw = new DatabaseSync(path);
-    raw.exec(`CREATE TABLE watchers (
-      id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
-      goal TEXT NOT NULL, targetsJson TEXT NOT NULL, cadenceMs INTEGER NOT NULL,
-      isSupervisor INTEGER NOT NULL DEFAULT 0, modelTier TEXT NOT NULL,
-      startAfterMs INTEGER, stopAfterMs INTEGER, stopWhenJson TEXT,
-      alertWhenJson TEXT, optionsJson TEXT, status TEXT NOT NULL DEFAULT 'created',
-      lastClassification TEXT, lastCheckedAt INTEGER, nextCheckAt INTEGER NOT NULL,
-      createdAt INTEGER NOT NULL
-    )`);
-    raw.exec("PRAGMA user_version = 4");
-    // No workflow_runs table exists yet.
-    const before = raw
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_runs'",
-      )
-      .all();
-    expect(before).toHaveLength(0);
-    raw.close();
-
-    // Opening through Db runs the forward-only migrations.
-    const db = new Db(path);
-    // The migrated schema carries every workflow_runs column and the status index.
-    const cols = (
-      db.raw().prepare("PRAGMA table_info(workflow_runs)").all() as Array<{
+    const colNames = (table: string) =>
+      (raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{
         name: string;
-      }>
-    ).map((c) => c.name);
-    expect(cols).toEqual(
+      }>).map((c) => c.name);
+    const indexNames = (table: string) =>
+      (raw.prepare(`PRAGMA index_list(${table})`).all() as Array<{
+        name: string;
+      }>).map((i) => i.name);
+
+    // Columns folded in from the former incremental migrations.
+    expect(colNames("events")).toEqual(
+      expect.arrayContaining(["updatedAt", "notifiedAt"]),
+    );
+    expect(colNames("watchers")).toContain("isSupervisor");
+    expect(colNames("automation_grants")).toContain("source");
+    expect(colNames("audit_log")).toEqual(
+      expect.arrayContaining(["grantSource", "grantId"]),
+    );
+
+    // workflow_runs table + its index exist on a fresh DB.
+    expect(colNames("workflow_runs")).toEqual(
       expect.arrayContaining([
         "id",
         "issueNumber",
@@ -206,21 +57,25 @@ describe("Db migration v4 -> v5 (workflow_runs)", () => {
         "completedAt",
       ]),
     );
-    const indexes = (
-      db.raw().prepare("PRAGMA index_list(workflow_runs)").all() as Array<{
-        name: string;
-      }>
-    ).map((i) => i.name);
-    expect(indexes).toContain("idx_workflow_runs_status");
-    // The table accepts inserts and the run round-trips.
-    const rec = db.insertWorkflowRun({ issueNumber: 25, status: "active" });
-    expect(rec.id).toMatch(/^wfr_[0-9a-f]{8}$/);
-    expect(db.getWorkflowRun(rec.id)?.issueNumber).toBe(25);
-    const version = db
-      .raw()
-      .prepare("PRAGMA user_version")
-      .get() as { user_version: number };
-    expect(version.user_version).toBe(5);
+    expect(indexNames("workflow_runs")).toContain("idx_workflow_runs_status");
+
+    const version = raw.prepare("PRAGMA user_version").get() as {
+      user_version: number;
+    };
+    expect(version.user_version).toBe(1);
+
+    // A fresh grant defaults its source to 'local' (the column default backfill
+    // behaviour now lives entirely in SCHEMA).
+    const grant = db.insertGrant({
+      actorId: "wch_fresh",
+      actorType: "watcher",
+      allowedRiskClassesJson: JSON.stringify(["git"]),
+      allowedToolNamesJson: null,
+      expiresAt: 9999999999999,
+      maxUses: 1,
+    });
+    expect(db.getGrant(grant.id)?.source).toBe("local");
+
     db.close();
   });
 });
