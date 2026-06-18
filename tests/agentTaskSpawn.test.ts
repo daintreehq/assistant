@@ -72,11 +72,80 @@ describe("agentTask.spawnForEdits", () => {
     const watchers = db.dueWatchers(Date.now() + 1_000_000);
     expect(watchers.some((w) => w.targetsJson.includes("term_9"))).toBe(true);
 
-    // agent.launch was called with the constraints block + an idempotency key.
+    // agent.launch was called with the constraints block + an idempotency key,
+    // plus a human-readable name derived from the title (default agent → no suffix).
     const launch = c._calls.find((x) => x.name === "agent.launch");
     expect(launch).toBeDefined();
     expect(String(launch?.args.prompt)).toContain("only in this worktree");
     expect(typeof launch?.args.requestKey).toBe("string");
+    expect(launch?.args.name).toBe("Fix OAuth callback");
+    db.close();
+  });
+
+  it("tags the launch name with a non-default agentId and stays within the label cap", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+    const c = ctx(db);
+
+    const title =
+      "Refactor the authentication middleware and tighten its error handling paths";
+    const res = await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title, taskPrompt: "Refactor it.", agentId: "codex" },
+      c,
+    );
+    expect(res.ok).toBe(true);
+
+    const launch = c._calls.find((x) => x.name === "agent.launch");
+    expect(launch).toBeDefined();
+    const name = String(launch?.args.name);
+    expect(name.endsWith(" (codex)")).toBe(true);
+    expect(name.length).toBeLessThanOrEqual(60);
+    // The idempotency key is still present alongside the new name field.
+    expect(typeof launch?.args.requestKey).toBe("string");
+    db.close();
+  });
+
+  it("normalizes whitespace and falls back to a non-empty name", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+
+    const collapse = ctx(db);
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "  Fix\n\nOAuth\t callback  ", taskPrompt: "go" },
+      collapse,
+    );
+    const collapsed = collapse._calls.find((x) => x.name === "agent.launch");
+    expect(collapsed?.args.name).toBe("Fix OAuth callback");
+
+    const blank = ctx(db);
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "   ", taskPrompt: "go" },
+      blank,
+    );
+    const blanked = blank._calls.find((x) => x.name === "agent.launch");
+    expect(blanked?.args.name).toBe("agent");
+
+    db.close();
+  });
+
+  it("hard-caps the launch name at 60 chars even for a long agentId", async () => {
+    const db = new Db(":memory:");
+    const reg = new ToolRegistry();
+    reg.registerAll(agentTaskTools);
+    const c = ctx(db);
+
+    await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "Refactor", taskPrompt: "go", agentId: "x".repeat(100) },
+      c,
+    );
+    const launch = c._calls.find((x) => x.name === "agent.launch");
+    expect(String(launch?.args.name).length).toBeLessThanOrEqual(60);
     db.close();
   });
 

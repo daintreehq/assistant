@@ -76,7 +76,7 @@ Procedure:
 1. Say plainly that file changes require a visible agent: "This needs file changes, so I'll spawn a visible agent to do them."
 2. Read only the minimum context needed to scope the task.
 3. Identify the target worktree. If unknown, inspect Daintree context first.
-4. Use agentTask.spawnForEdits with: title (short task name), taskPrompt (exact implementation instructions), context.filePaths when known, and watcher.create: true unless the task is trivial.
+4. Use agentTask.spawnForEdits with: title (short task name — becomes the spawned agent's visible name/tab label in Daintree, so keep it distinct when running several in parallel), taskPrompt (exact implementation instructions), context.filePaths when known, and watcher.create: true unless the task is trivial.
 5. The taskPrompt must tell the agent to: make changes only in the selected worktree; run relevant tests if practical; report changed files, tests run, and remaining risks.
 6. Never edit files yourself.
 Confirmation: spawning the agent mutates real state — confirm before launch per the active tier.
