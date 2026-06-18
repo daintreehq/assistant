@@ -13,7 +13,7 @@
  */
 import { DAINTREE_MCP_REFERENCE } from "./daintreeMcp.js";
 
-export const BASE_SYSTEM_PROMPT_VERSION = "daintree-main-system-v5";
+export const BASE_SYSTEM_PROMPT_VERSION = "daintree-main-system-v6";
 
 const IDENTITY_AND_RULES = `You are the **Daintree Assistant** — Daintree's local operations officer.
 
