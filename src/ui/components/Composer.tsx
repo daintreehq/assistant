@@ -52,7 +52,7 @@ export function Composer({
   /** Right-aligned context summary on the second line. */
   contextHint?: string;
   width?: number;
-  onSubmit: (value: string) => void | Promise<void>;
+  onSubmit: (value: string) => boolean | void | Promise<void>;
 }) {
   const [value, setValue] = useState("");
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
@@ -70,11 +70,11 @@ export function Composer({
   );
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width} overflowY="hidden">
       {suggestions.length > 0 ? (
-        <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+        <Box flexDirection="column" marginBottom={1} paddingLeft={2} overflowY="hidden">
           {suggestions.map(([cmd, desc]) => (
-            <Text key={cmd}>
+            <Text key={cmd} wrap="truncate">
               <Text color={ui.color.info}>{cmd.padEnd(14)}</Text>
               <Text dimColor>{desc}</Text>
             </Text>
@@ -84,9 +84,9 @@ export function Composer({
 
       <Divider width={width} />
 
-      <Box>
+      <Box height={1} overflow="hidden">
         <Text color={ui.color.accent}>{set.active === "◌" ? "›" : ">"} </Text>
-        <Box flexGrow={1}>
+        <Box flexGrow={1} height={1} overflow="hidden">
           <TextInput
             value={value}
             focus={focus}
@@ -95,8 +95,10 @@ export function Composer({
             onSubmit={(text) => {
               const trimmed = text.trim();
               if (!trimmed) return;
-              setValue("");
-              void onSubmit(trimmed);
+              // Clear only if the submit was accepted — if a turn is already in
+              // flight (e.g. an autonomous wake-up), keep the text so it isn't lost.
+              const accepted = onSubmit(trimmed);
+              if (accepted !== false) setValue("");
             }}
             placeholder="Ask Daintree..."
           />
@@ -113,7 +115,7 @@ export function Composer({
       {/* Bracket the input row top and bottom so it's unmistakable where text goes. */}
       <Divider width={width} />
 
-      <Box justifyContent="space-between">
+      <Box justifyContent="space-between" height={1} overflow="hidden">
         <Box>
           <KeyHint keyName="/" action={compactHints ? "cmd" : "commands"} />
           <Text dimColor>{" · "}</Text>
@@ -121,7 +123,7 @@ export function Composer({
           <Text dimColor>{" · "}</Text>
           <KeyHint keyName="^C" action="exit" />
         </Box>
-        {contextHint ? <Text dimColor>{contextHint}</Text> : null}
+        {contextHint ? <Text dimColor wrap="truncate">{contextHint}</Text> : null}
       </Box>
     </Box>
   );

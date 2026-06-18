@@ -35,14 +35,26 @@ export class Scheduler {
   private running = false;
   private current?: Promise<void>;
   private readonly tickMs: number;
+  /** Mutable so a UI remount can rebind a fresh callback (see App.startScheduler). */
+  private onAttention?: (events: QueueEvent[]) => void;
 
   constructor(private deps: SchedulerDeps) {
     this.tickMs = deps.tickMs ?? SCHEDULER_TICK_MS;
+    this.onAttention = deps.onAttention;
+  }
+
+  /** Replace the attention callback (e.g. when the UI controller remounts). */
+  setOnAttention(onAttention?: (events: QueueEvent[]) => void): void {
+    this.onAttention = onAttention;
   }
 
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
+      // Don't replace `this.current` while a tick is still in flight — otherwise a
+      // skipped (early-returning) tick would overwrite the handle drain() awaits,
+      // letting stop()/drain() return before the real tick releases MCP/DB.
+      if (this.running) return;
       this.current = this.tick().catch(() => {});
     }, this.tickMs);
     // Don't keep the process alive solely for the scheduler.
@@ -68,14 +80,18 @@ export class Scheduler {
         await this.fireTimer(t, now);
       }
       for (const w of this.deps.db.dueWatchers(now)) {
-        if (w.kind === "terminal") {
-          await runTerminalWatcherCheck(
-            w,
-            this.deps.ctxFor("watcher", w.id),
-          ).catch(() => {});
-        } else {
-          // Worktree watchers: reschedule (full git-state checks land in a later phase).
-          this.deps.db.updateWatcher(w.id, { nextCheckAt: now + w.cadenceMs });
+        // Isolate per-watcher failures — including a throwing ctxFor(), which sits
+        // OUTSIDE a promise .catch — so one bad watcher can't abort the whole tick
+        // (which would also skip notify()).
+        try {
+          if (w.kind === "terminal") {
+            await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
+          } else {
+            // Worktree watchers: reschedule (full git-state checks land later).
+            this.deps.db.updateWatcher(w.id, { nextCheckAt: now + w.cadenceMs });
+          }
+        } catch {
+          /* one watcher's failure must not starve the others or skip notify */
         }
       }
       this.notify();
@@ -85,7 +101,8 @@ export class Scheduler {
   }
 
   private notify(): void {
-    if (!this.deps.onAttention) return;
+    const onAttention = this.onAttention;
+    if (!onAttention) return;
     // Push each attention+ event exactly once: select those never notified, then
     // stamp them. This survives the dedupe path (which pins createdAt) and still
     // catches a below-threshold event that later escalates to attention+.
@@ -95,7 +112,13 @@ export class Scheduler {
       maxItems: 20,
     });
     if (fresh.length > 0) {
-      this.deps.onAttention(fresh);
+      // Best-effort delivery: a throwing onAttention must NOT skip markNotified, or
+      // the same events would re-fire every tick forever. Mark them regardless.
+      try {
+        onAttention(fresh);
+      } catch {
+        /* delivery failed; we still mark notified to avoid a re-notify loop */
+      }
       this.deps.queue.markNotified(fresh.map((e) => e.id));
     }
   }

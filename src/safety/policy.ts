@@ -124,16 +124,24 @@ export function assertNoFileEditTools(toolNames: string[]): void {
  */
 const SECRET_BASENAMES: ReadonlySet<string> = new Set([
   ".env",
+  ".envrc",
   ".npmrc",
   ".netrc",
   ".pgpass",
   ".htpasswd",
   "credentials",
+  "credentials.json",
   "id_rsa",
   "id_dsa",
   "id_ecdsa",
   "id_ed25519",
   ".dockercfg",
+  ".git-credentials",
+  "secrets.json",
+  "secrets.yaml",
+  "secrets.yml",
+  "service-account.json",
+  "serviceaccount.json",
 ]);
 
 const SECRET_SUFFIXES: readonly string[] = [
@@ -153,7 +161,15 @@ const SECRET_SUFFIXES: readonly string[] = [
  * keys, cloud/credential stores, SSH keys). Matches `.env`, `.env.local`, etc.,
  * known credential basenames, and key/cert suffixes — anywhere in the path.
  */
-const SECRET_DIR_SEGMENTS: ReadonlySet<string> = new Set([".ssh", ".aws", ".gnupg"]);
+const SECRET_DIR_SEGMENTS: ReadonlySet<string> = new Set([
+  ".ssh",
+  ".aws",
+  ".gnupg",
+  ".kube",
+  ".azure",
+  ".gcloud",
+  ".docker",
+]);
 
 /** A single path segment that signals secrets (env file/dir or credential dir). */
 function isSensitiveSegment(seg: string): boolean {

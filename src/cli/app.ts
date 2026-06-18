@@ -173,8 +173,13 @@ export class App {
   startScheduler(onAttention?: (events: QueueEvent[]) => void): Scheduler {
     // Idempotent: a React effect may run more than once (remount / future
     // StrictMode). Returning the existing scheduler avoids leaking a second
-    // interval that shutdown() would never stop.
-    if (this.scheduler) return this.scheduler;
+    // interval that shutdown() would never stop — but REBIND its attention
+    // callback so a remount's fresh closure replaces the (now-disposed) old one,
+    // rather than leaving the scheduler calling a dead hook forever.
+    if (this.scheduler) {
+      this.scheduler.setOnAttention(onAttention);
+      return this.scheduler;
+    }
     this.scheduler = new Scheduler({
       db: this.db,
       queue: this.queue,

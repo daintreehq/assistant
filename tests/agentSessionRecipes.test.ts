@@ -344,3 +344,60 @@ describe("AgentSession control messages", () => {
     expect((captured?.tools ?? []).length).toBe(REGISTERED_TOOLS.length);
   });
 });
+
+describe("AgentSession read-only (wake) turn", () => {
+  function mixedTool(name: string, risk: ToolDef["risk"]): ToolDef {
+    return {
+      name,
+      description: `t ${name}`,
+      risk,
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async handler() {
+        return ok("ok");
+      },
+    };
+  }
+
+  function session(onStream: (o: ChatOptions) => void) {
+    const db = new Db(":memory:");
+    const registry = new ToolRegistry();
+    registry.register(mixedTool("inspect.read", "read"));
+    registry.register(mixedTool("term.focus", "ui"));
+    registry.register(mixedTool("agentTask.spawnForEdits", "project"));
+    registry.register(mixedTool("git.commit", "git"));
+    const router = {
+      json: async () => NO_RECIPES,
+      stream: async (_tier: string, o: ChatOptions) => {
+        onStream(o);
+        return { content: "ok", reasoning: "", toolCalls: [], finishReason: "stop" };
+      },
+    } as unknown as ModelRouter;
+    return new AgentSession({
+      router,
+      registry,
+      recipeRegistry: new RecipeRegistry(),
+      ctx: { db, actor: "main" } as unknown as ToolContext,
+      promptContext: promptCtx(),
+      sessionId: "ses_ro",
+    });
+  }
+
+  it("offers ONLY read tools on a readOnly turn — no ui/mutating tools", async () => {
+    let captured: ChatOptions | undefined;
+    await session((o) => (captured = o)).send("[wake]", { readOnly: true });
+    const names = (captured?.tools ?? []).map((t) => fromWire(t.function.name));
+    expect(names).toEqual(["inspect.read"]);
+    // "ui" risk (terminal.focus → panel.focus) mutates Daintree UI; excluded too.
+    expect(names).not.toContain("term.focus");
+    expect(names).not.toContain("agentTask.spawnForEdits");
+    expect(names).not.toContain("git.commit");
+  });
+
+  it("offers the full tool set on a normal (non-readOnly) turn", async () => {
+    let captured: ChatOptions | undefined;
+    await session((o) => (captured = o)).send("do the thing");
+    const names = (captured?.tools ?? []).map((t) => fromWire(t.function.name));
+    expect(names).toContain("agentTask.spawnForEdits");
+    expect(names).toContain("git.commit");
+  });
+});

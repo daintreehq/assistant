@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ok, fail, NO_ARGS, type ToolDef } from "./types.js";
 import type { ToolContext } from "./types.js";
 import type { ToolResult } from "../schemas.js";
+import { isForbiddenToolName } from "../safety/policy.js";
 
 /**
  * Forward a call to a named Daintree MCP tool. Shared by the typed wrappers
@@ -336,6 +337,16 @@ export const mcpTools: ToolDef[] = [
         return fail(
           "USE_TYPED_WRAPPER",
           `Do not call ${args.name} through daintree.call — use the typed wrapper instead: ${wrapper}. It takes named, validated parameters, so you can't drop a required argument. Switch tools; do not retry this raw call.`,
+        );
+      }
+      // The no-file-edit invariant is enforced on local tool NAMES at registration,
+      // but daintree.call forwards an arbitrary raw MCP name — apply the same guard
+      // here so a file-mutating MCP tool can't be reached through the escape hatch.
+      if (isForbiddenToolName(args.name)) {
+        return fail(
+          "FILE_EDIT_FORBIDDEN",
+          `Refusing to call ${args.name} via daintree.call — the assistant never edits files directly. Spawn a visible agent (agentTask.spawnForEdits) to make changes.`,
+          { recoverable: false },
         );
       }
       if (!ctx.mcp.isConnected()) {

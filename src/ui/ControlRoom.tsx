@@ -61,7 +61,7 @@ export interface ControlRoomProps {
   /** Path of the active debug log, shown under the header so it can be tailed. */
   logFile?: string;
   composerFocus?: boolean;
-  onSubmit?: (value: string) => void | Promise<void>;
+  onSubmit?: (value: string) => boolean | void | Promise<void>;
   onResolve?: (approved: boolean) => void;
 }
 
@@ -87,29 +87,28 @@ export function ControlRoom({
 }: ControlRoomProps) {
   // One cell of breathing room around the whole surface, the way other CLIs sit
   // a little inside the terminal edge. The interior width is the ledger budget.
-  const columns = Math.max(1, outerColumns - 2);
+  const frameWidth = Math.max(1, outerColumns);
+  const columns = Math.max(1, frameWidth - 2);
   const agents = buildAgentRows(dashboard.watchers, previews);
   const runs = dashboard.workflowRuns ?? [];
 
   // Finished turns commit to the terminal's own scrollback via <Static>, but the
-  // LIVE region (in-flight turn + footer) repaints in place. Ink falls back to a
-  // full clearTerminal — which wipes the user's scrollback (ESC[3J) and re-dumps
-  // all static history every frame — the moment that repainting frame exceeds
-  // the viewport (ink shouldClearTerminalForFrame). So the live tail must stay
-  // shorter than the rows left after the footer; the clipped-off top isn't lost,
-  // the whole turn re-renders in full once it commits to <Static>.
+  // LIVE region (in-flight turn + footer) repaints in place. Ink does a full
+  // clearTerminal — wiping scrollback (ESC[3J) and re-dumping static history, or
+  // stacking un-erased frames — the moment that repainting frame exceeds the
+  // viewport (ink shouldClearTerminalForFrame). So we HARD-BOUND the whole live
+  // frame: the outer Box caps at the viewport with overflow hidden, and each
+  // section caps at its own budget. The clipped-off top of the live tail isn't
+  // lost — the whole turn re-renders in full once it commits to <Static>.
   //
-  // We deliberately OVER-reserve chrome: under-reserving risks the scrollback
-  // wipe, over-reserving just clips a few more live lines (harmless — they
-  // commit in full on settle). The composer's slash palette (+6 rows) can't
-  // co-occur with a live tail (it needs focus, which requires !busy, but a live
-  // tail means a turn is in flight), so 4 covers it. The approval sheet can be
-  // taller than its collapsed 8 rows once args are expanded AND it shows while a
-  // tool-call turn streams, so we reserve generously for it.
-  const composerH = 4; // top rule + input + bottom rule + hint footer
+  // composerH must cover the worst case: the slash palette adds up to 5 rows + a
+  // gap on top of the bracketed input (rule + input + rule + hints), so 10. The
+  // approval sheet grows past its collapsed ~8 rows when args are expanded.
+  const frameHeight = Math.max(1, outerRows - 1);
+  const composerH = 10; // 5 suggestions + gap + top rule + input + bottom rule + hints
   const statusH = 1;
   const approvalH = pending ? 12 : 0; // collapsed sheet ~8 + headroom for expanded args
-  const liveHeight = Math.max(3, outerRows - composerH - statusH - approvalH - 2);
+  const liveHeight = Math.max(0, frameHeight - composerH - statusH - approvalH);
 
   const contextHint = connected
     ? columns < 64
@@ -118,49 +117,58 @@ export function ControlRoom({
     : "MCP degraded";
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Transcript
-        cells={transcript}
-        width={columns}
-        now={now}
-        expanded={expanded}
-        liveHeight={liveHeight}
-        intro={{
-          project,
-          tier,
-          connected,
-          dashboard,
-          previews,
-          busy,
-          stage,
-          logging,
-          logFile,
-        }}
-      />
+    <Box
+      flexDirection="column"
+      paddingX={1}
+      width={frameWidth}
+      maxHeight={frameHeight}
+      overflow="hidden"
+    >
+      <Box flexDirection="column" maxHeight={liveHeight} overflowY="hidden">
+        <Transcript
+          cells={transcript}
+          width={columns}
+          now={now}
+          expanded={expanded}
+          liveHeight={liveHeight}
+          intro={{
+            project,
+            tier,
+            connected,
+            dashboard,
+            previews,
+            busy,
+            stage,
+            logging,
+            logFile,
+          }}
+        />
+      </Box>
 
       {pending ? (
-        <ApprovalSheet
-          pending={pending}
-          width={Math.min(80, columns)}
-          onResolve={onResolve}
-        />
+        <Box flexShrink={0} maxHeight={approvalH} overflowY="hidden">
+          <ApprovalSheet
+            pending={pending}
+            width={Math.min(80, columns)}
+            onResolve={onResolve}
+          />
+        </Box>
       ) : null}
 
-      <StatusLine
-        dashboard={dashboard}
-        tier={tier}
-        width={columns}
-        now={now}
-      />
+      <Box flexShrink={0} maxHeight={statusH} overflowY="hidden">
+        <StatusLine dashboard={dashboard} tier={tier} width={columns} now={now} />
+      </Box>
 
-      <Composer
-        busy={busy}
-        stage={stage}
-        contextHint={contextHint}
-        width={columns}
-        focus={composerFocus}
-        onSubmit={onSubmit}
-      />
+      <Box flexShrink={0} maxHeight={composerH} overflowY="hidden">
+        <Composer
+          busy={busy}
+          stage={stage}
+          contextHint={contextHint}
+          width={columns}
+          focus={composerFocus}
+          onSubmit={onSubmit}
+        />
+      </Box>
     </Box>
   );
 }

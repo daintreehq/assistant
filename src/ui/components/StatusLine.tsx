@@ -37,7 +37,7 @@ export function StatusLine({
   const leftRoom = Math.max(8, width - rightText.length - 3);
 
   return (
-    <Box justifyContent="space-between">
+    <Box justifyContent="space-between" width={width} height={1} overflow="hidden">
       <Text dimColor wrap="truncate">
         {truncate(leftText, leftRoom)}
       </Text>

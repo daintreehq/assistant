@@ -29,40 +29,7 @@ import type {
 } from "../types.js";
 import type { QueueEvent } from "../../schemas.js";
 import { logDebug } from "../../debugLog.js";
-
-/**
- * Which surfaced attention events should autonomously wake the model (run a turn)
- * versus just appear in the inbox. Terminal-watcher events mean a supervised agent
- * finished, is waiting, or failed — exactly when the assistant should look and
- * report. Other sources (e.g. plain timer reminders) stay passive in the inbox.
- */
-function isActionableWake(e: QueueEvent): boolean {
-  const ev = e as { source?: string; target?: { terminalId?: string } };
-  // Only a terminal-watcher event with a real terminal target wakes the model —
-  // so model/user-published queue events can't trigger an autonomous turn.
-  return ev.source === "terminal_watcher" && Boolean(ev.target?.terminalId);
-}
-
-/** Build the internal nudge fed to the model when a watcher wakes it. Not shown as
- *  a user message — the model's reaction is what surfaces in the transcript. */
-function buildWakePrompt(events: QueueEvent[]): string {
-  const lines = events.map((e) => {
-    const ev = e as {
-      title?: string;
-      summary?: string;
-      target?: { terminalId?: string };
-    };
-    const term = ev.target?.terminalId ? ` [terminal ${ev.target.terminalId}]` : "";
-    return `- ${ev.title ?? "event"}${ev.summary ? `: ${ev.summary}` : ""}${term}`;
-  });
-  return [
-    "[automatic wake-up] A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
-    "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it with terminal.summarize or terminal.extract and give the user a concise update. If it isn't worth acting on, say so in one line.",
-    "",
-    "New events:",
-    ...lines,
-  ].join("\n");
-}
+import { isActionableWake, buildWakePrompt } from "../../agent/wake.js";
 
 let idCounter = 0;
 function uid(prefix: string): string {
@@ -322,7 +289,9 @@ export interface DaintreeController {
   /** Live stage label for the composer (Inspecting, Delegating, Watching…). */
   stage: string;
   pendingConfirm: PendingConfirm | null;
-  sendUserMessage: (text: string) => Promise<void>;
+  /** Submit user input. Returns false (synchronously) if rejected — empty, or a
+   *  turn is already in flight — so the composer can keep the text. */
+  sendUserMessage: (text: string) => boolean;
   /** Print a one-shot operations snapshot inline (the `^O` key). */
   openOps: () => void;
   resolveConfirm: (approved: boolean) => void;
@@ -352,6 +321,9 @@ export function useDaintreeController(
   // turn-finished path invoke the latest reactor without re-registering.
   const pendingWake = useRef<QueueEvent[]>([]);
   const reactToWakeRef = useRef<() => void>(() => {});
+  // Whether the current burst has already been retried once after a failure —
+  // bounds retries so a persistently-failing model can't spin the wake loop.
+  const wakeRetried = useRef(false);
 
   const reactToWake = useCallback(async () => {
     if (inFlight.current) return; // a turn is running — drain when it finishes
@@ -365,17 +337,27 @@ export function useDaintreeController(
       titles: events.map((e) => (e as { title?: string }).title),
     });
     try {
-      await app.session.send(buildWakePrompt(events));
+      // readOnly: an autonomous turn the user didn't initiate must only be able to
+      // inspect (read the terminal) and report — never run a mutating tool.
+      await app.session.send(buildWakePrompt(events), { readOnly: true });
+      wakeRetried.current = false; // success resets the per-burst retry budget
     } catch (err) {
       bridge.emit({
         type: "log",
         level: "error",
         message: err instanceof Error ? err.message : String(err),
       });
+      // Best-effort single retry so a transient model failure isn't stranded;
+      // capped to avoid a failure loop. The events also remain in the inbox.
+      if (!wakeRetried.current) {
+        wakeRetried.current = true;
+        pendingWake.current.unshift(...events);
+      }
     } finally {
       inFlight.current = false;
       setBusy(false);
-      // More events may have arrived during the reaction — drain them too.
+      // More events may have arrived during the reaction (or a retry was queued) —
+      // drain them too.
       if (pendingWake.current.length > 0) reactToWakeRef.current();
     }
   }, [app, bridge]);
@@ -417,6 +399,8 @@ export function useDaintreeController(
         // terminal and report; other sources stay passive in the inbox.
         const actionable = events.filter(isActionableWake);
         if (actionable.length > 0) {
+          // A burst starting from empty gets a fresh single-retry budget.
+          if (pendingWake.current.length === 0) wakeRetried.current = false;
           pendingWake.current.push(...actionable);
           logDebug(app.config, "wake.enqueue", { count: actionable.length });
           reactToWakeRef.current();
@@ -449,48 +433,54 @@ export function useDaintreeController(
   }, [app, bridge]);
 
   const sendUserMessage = useCallback(
-    async (text: string) => {
+    (text: string): boolean => {
       const trimmed = text.trim();
-      // The ref lock gates synchronously; this covers both model turns AND async
-      // slash commands (e.g. /compact) so they can't race app.session state.
-      if (!trimmed || inFlight.current) return;
+      // Decide acceptance SYNCHRONOUSLY so the composer can keep the typed text if
+      // we reject (e.g. an autonomous wake turn grabbed the lock in the same tick).
+      // The ref lock gates both model turns and async slash commands.
+      if (!trimmed) return false;
+      if (inFlight.current) return false;
       inFlight.current = true;
       setBusy(true);
-      try {
-        if (trimmed.startsWith("/")) {
-          const result = await handleUiCommand(trimmed, app);
-          if (result.quit) {
-            onExit?.();
+      // Run the turn in the background; acceptance is already decided.
+      void (async () => {
+        try {
+          if (trimmed.startsWith("/")) {
+            const result = await handleUiCommand(trimmed, app);
+            if (result.quit) {
+              onExit?.();
+              return;
+            }
+            // Every command prints its result inline into the stream (Claude Code
+            // shaped), where it commits to the terminal's scrollback — no
+            // full-screen panel takes over. `switchPanel` is now just metadata.
+            if (result.title || result.text) {
+              dispatch({
+                type: "command:add",
+                title: result.title ?? "",
+                text: result.text ?? "",
+              });
+            }
             return;
           }
-          // Every command prints its result inline into the stream (Claude Code
-          // shaped), where it commits to the terminal's scrollback — no
-          // full-screen panel takes over. `switchPanel` is now just metadata.
-          if (result.title || result.text) {
-            dispatch({
-              type: "command:add",
-              title: result.title ?? "",
-              text: result.text ?? "",
-            });
-          }
-          return;
-        }
 
-        dispatch({ type: "user:add", text: trimmed });
-        await app.session.send(trimmed);
-      } catch (err) {
-        bridge.emit({
-          type: "log",
-          level: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      } finally {
-        inFlight.current = false;
-        setBusy(false);
-        // A watcher may have surfaced something while this turn ran — react now
-        // that we're idle, so it isn't stranded in the inbox.
-        if (pendingWake.current.length > 0) reactToWakeRef.current();
-      }
+          dispatch({ type: "user:add", text: trimmed });
+          await app.session.send(trimmed);
+        } catch (err) {
+          bridge.emit({
+            type: "log",
+            level: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          inFlight.current = false;
+          setBusy(false);
+          // A watcher may have surfaced something while this turn ran — react now
+          // that we're idle, so it isn't stranded in the inbox.
+          if (pendingWake.current.length > 0) reactToWakeRef.current();
+        }
+      })();
+      return true;
     },
     [app, bridge, onExit],
   );

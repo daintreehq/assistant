@@ -156,6 +156,14 @@ export function projectIdToDir(rawId: string): string {
 export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   const projectPath = path.resolve(overrides.projectPath ?? process.cwd());
 
+  // Snapshot the REAL process environment BEFORE loading any .env file. Security-
+  // sensitive controls (permission tier, auto-approve, offline) are read ONLY from
+  // here or from explicit overrides — never from a loaded .env. The bound project
+  // is arbitrary/untrusted code; without this, a repo-local `.env` could set
+  // DAINTREE_ASSISTANT_AUTO_APPROVE=1 or _TIER=system and silently escalate the
+  // assistant into running mutations unattended.
+  const trustedEnv: Record<string, string | undefined> = { ...process.env };
+
   // Load .env from the project root (does not override already-set env vars).
   const envPath = path.join(projectPath, ".env");
   if (fs.existsSync(envPath)) {
@@ -190,7 +198,9 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   // read and surfaced on the config but does not yet affect the path.
   const stateRoot = path.join(os.homedir(), ".daintree", "assistant-cli");
   const stateDir =
-    firstString(overrides.stateDir, process.env.DAINTREE_ASSISTANT_STATE_DIR) ??
+    // Trusted-env only: a bound project's .env must not be able to redirect where
+    // the transcript/audit DB is written (same exfiltration class as the log dir).
+    firstString(overrides.stateDir, trustedEnv.DAINTREE_ASSISTANT_STATE_DIR) ??
     (projectId ? path.join(stateRoot, projectIdToDir(projectId)) : stateRoot);
 
   fs.mkdirSync(stateDir, { recursive: true });
@@ -202,16 +212,20 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   // defaults to the highest tier — full access to every Daintree action. The
   // confirmation matrix (ALWAYS_CONFIRM in safety/policy.ts) still gates mutating
   // actions, so "system by default" grants reach, not unattended execution. Lower
-  // it explicitly via `--tier` / DAINTREE_ASSISTANT_TIER when sandboxing is wanted.
-  const tier = Tier.safeParse(
-    overrides.tier ?? process.env.DAINTREE_ASSISTANT_TIER ?? "system",
-  );
+  // it explicitly via `--tier` / DAINTREE_ASSISTANT_TIER (trusted env only — see
+  // trustedEnv). Fail CLOSED: if a tier was explicitly given but is invalid, drop
+  // to the least-privileged tier rather than silently defaulting to system.
+  const rawTier = overrides.tier ?? trustedEnv.DAINTREE_ASSISTANT_TIER;
+  const tierParsed = Tier.safeParse(rawTier ?? "system");
+  const tier = tierParsed.success ? tierParsed.data : "supervisor";
 
   // Debug log dir is GLOBAL (not per-project), so one tail spans every session.
   // Resolve to an absolute, normalized path so a relative or trailing-slash
-  // override doesn't break per-session file targeting in debugLog.ts.
+  // override doesn't break per-session file targeting in debugLog.ts. Read the
+  // override from the TRUSTED env only: a bound project's .env must not be able to
+  // redirect the full-fidelity log into a path it can read (exfiltration).
   const logDir = path.resolve(
-    firstString(overrides.logDir, process.env.DAINTREE_ASSISTANT_LOG_DIR) ??
+    firstString(overrides.logDir, trustedEnv.DAINTREE_ASSISTANT_LOG_DIR) ??
       path.join(os.homedir(), ".daintree", "logs"),
   );
 
@@ -235,10 +249,16 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     mcpToken: firstString(overrides.mcpToken, process.env.DAINTREE_MCP_TOKEN),
     projectId,
     windowId,
-    tier: tier.success ? tier.data : "system",
+    tier,
+    // Permission/exec controls come from the TRUSTED env only (see trustedEnv) —
+    // never from a bound project's .env, which could otherwise escalate us.
     autoApprove:
-      overrides.autoApprove ?? process.env.DAINTREE_ASSISTANT_AUTO_APPROVE === "1",
-    offline: overrides.offline ?? process.env.DAINTREE_ASSISTANT_OFFLINE === "1",
+      overrides.autoApprove ?? trustedEnv.DAINTREE_ASSISTANT_AUTO_APPROVE === "1",
+    offline: overrides.offline ?? trustedEnv.DAINTREE_ASSISTANT_OFFLINE === "1",
+    // debugLog may come from the assistant's own (trusted) .env fallback, so read
+    // the merged env. It's safe because logs can only ever go to the trusted-only
+    // logDir above — a project .env can at worst enable logging into the user's own
+    // home dir, never redirect it.
     debugLog:
       overrides.debugLog ?? process.env.DAINTREE_ASSISTANT_DEBUG_LOG === "1",
   };

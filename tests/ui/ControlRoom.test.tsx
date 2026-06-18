@@ -34,7 +34,9 @@ describe("ControlRoom stream frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle starts with the Daintree intro block at %i cols", (w) => {
     const frame = frameFor("idle", w, 32);
     expect(frame).toContain("assistant");
-    expect(frame).toContain("MCP CONNECTED");
+    // Connection status lives in the live StatusLine now (not the static intro,
+    // which would otherwise freeze a pre-connect status forever).
+    expect(frame).toContain("MCP");
     expect(frame).toContain("Standing by");
     expect(frame).toContain("scroll the terminal"); // native scrollback hint
     expect(frame).toContain("Ask Daintree...");
@@ -65,8 +67,9 @@ describe("ControlRoom stream frames (deterministic fixtures)", () => {
 
   it.each(WIDTHS)("degraded is unmistakable at %i cols", (w) => {
     const frame = frameFor("degraded", w, 32);
-    expect(frame).toContain("MCP DEGRADED");
+    // StatusLine shows DEGRADED; the composer context hint says "MCP degraded".
     expect(frame).toContain("DEGRADED");
+    expect(frame).toContain("MCP degraded");
   });
 
   it("never renders a wide right rail on the home surface", () => {

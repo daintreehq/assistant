@@ -128,7 +128,9 @@ export function logDebug(
   if (!cfg?.debugLog || !cfg.logDir) return;
   const ts = isoNow();
   try {
-    fs.mkdirSync(cfg.logDir, { recursive: true });
+    // Full-fidelity logs can contain model messages, tool args, and terminal
+    // output — keep them owner-only (0700 dir / 0600 file).
+    fs.mkdirSync(cfg.logDir, { recursive: true, mode: 0o700 });
     const target = resolveTarget(cfg.logDir);
 
     const inline: string[] = [];
@@ -141,7 +143,7 @@ export function logDebug(
 
     let out = `${ts}  ${event}${inline.length ? `  ${inline.join(" ")}` : ""}\n`;
     if (blocks.length) out += `${blocks.join("\n")}\n`;
-    fs.appendFileSync(target, out);
+    fs.appendFileSync(target, out, { mode: 0o600 });
   } catch (err) {
     warnOnce(err);
   }

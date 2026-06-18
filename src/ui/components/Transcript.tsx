@@ -230,10 +230,9 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
       { text: truncate(intro.project, Math.max(8, width - 46)) },
       { text: " · ", dimColor: true },
       { text: intro.tier.toUpperCase(), dimColor: true },
-      { text: " · ", dimColor: true },
-      intro.connected
-        ? { text: "MCP CONNECTED", color: ui.color.accent }
-        : { text: "MCP DEGRADED", color: ui.color.warning },
+      // NB: MCP connection status is deliberately NOT shown here. The intro commits
+      // to <Static> exactly once, so a status captured before connect would freeze
+      // stale forever; the live StatusLine below owns the connection indicator.
       ...(intro.logging
         ? ([
             { text: " · ", dimColor: true },

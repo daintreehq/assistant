@@ -172,10 +172,14 @@ export function decideOutcome(args: {
         : undefined;
 
   // An explicitly matched alert/stop condition is always worth at least
-  // "attention" — never bury it at debug/info just because the underlying
-  // classification was low severity.
+  // "attention" — never bury it below the scheduler's surfacing threshold just
+  // because the underlying classification was low severity. "done" counts as below
+  // (a clean completion that matched an explicit stop/alert must still surface).
   let severity: Severity = args.timedOut ? "attention" : SEVERITY_MAP[classification];
-  if ((alertMatched || stopMatched) && (severity === "debug" || severity === "info")) {
+  if (
+    (alertMatched || stopMatched) &&
+    (severity === "debug" || severity === "info" || severity === "done")
+  ) {
     severity = "attention";
   }
 
@@ -416,6 +420,13 @@ export async function readTerminalList(
           ? (e.exitCode as number)
           : undefined,
       });
+    }
+    // A non-empty inventory whose entries yielded ZERO parseable ids is schema
+    // drift, not "everything is gone" — treat it as unreadable so a target absent
+    // from it is not falsely declared exited.
+    if (entries.length > 0 && byId.size === 0) {
+      logDebug(ctx.config, "mcp.terminalList", { ok: false, reason: "no parseable ids", entries: entries.length });
+      return { ok: false, byId };
     }
     logDebug(ctx.config, "mcp.terminalList", { ok: true, ids: [...byId.keys()] });
     return { ok: true, byId };

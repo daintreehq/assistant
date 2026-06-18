@@ -21,6 +21,16 @@ const UNGRANTABLE_TOOLS: ReadonlySet<string> = new Set([
   "grant.revoke",
 ]);
 
+/** Risk classes whose grant pre-authorizes a real mutation — minting one needs
+ *  user confirmation (mirrors ALWAYS_CONFIRM in safety/policy.ts). */
+const MUTATING_GRANT_RISKS: ReadonlySet<string> = new Set([
+  "terminal",
+  "project",
+  "git",
+  "external",
+  "system",
+]);
+
 const CreateArgs = z.object({
   actorId: z
     .string()
@@ -143,6 +153,42 @@ export const grantTools: ToolDef[] = [
           `These tools cannot be granted: ${ungrantable.join(", ")}.`,
           { recoverable: false },
         );
+      }
+
+      // Minting a grant whose scope includes a MUTATING risk pre-authorizes
+      // unattended mutations — exactly the kind of thing the confirmation matrix
+      // exists to gate. Since grant.create is "local" (never auto-confirmed by the
+      // registry), gate it here so the model can't quietly self-escalate a
+      // watcher/timer into running git/system/etc. without the user's say-so.
+      // Granting specific tool names is also gated (we can't cheaply prove they're
+      // read-only). Auto-approve opts the whole main actor out of prompts, so honor
+      // that — consistent with how the registry treats mutating tools.
+      const grantScopeMutates =
+        tools.length > 0 || risks.some((r) => MUTATING_GRANT_RISKS.has(r));
+      if (grantScopeMutates && !ctx.config?.autoApprove) {
+        let approved = false;
+        try {
+          approved = await ctx.confirm({
+            toolName: "grant.create",
+            risk: "system",
+            summary: `Pre-authorize ${args.actorType} ${args.actorId} to run [${
+              [
+                risks.length ? `risk: ${risks.join(", ")}` : "",
+                tools.length ? `tools: ${tools.join(", ")}` : "",
+              ]
+                .filter(Boolean)
+                .join("; ")
+            }] unattended (${args.maxUses} use(s), TTL ${args.ttlMs}ms)?`,
+            args,
+          });
+        } catch {
+          approved = false; // a failed prompt is a decline
+        }
+        if (!approved) {
+          return fail("USER_DECLINED", "Automation grant declined by the user.", {
+            recoverable: true,
+          });
+        }
       }
 
       try {
