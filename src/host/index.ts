@@ -79,6 +79,10 @@ async function main(): Promise<void> {
   // turns by `busy`; one retry on failure so a transient error isn't stranded.
   const pendingWake: QueueEvent[] = [];
   let wakeRetried = false;
+  // Terminal IDs already summarized this session — see the Ink controller for the
+  // rationale. Kept in sync with useDaintreeController so both surfaces avoid
+  // re-summarizing a terminal on each lifecycle event.
+  const summarizedTerminals = new Set<string>();
   const reactWake = async (): Promise<void> => {
     if (busy || !ready || !bridge || !app) return;
     const events = pendingWake.splice(0);
@@ -86,8 +90,18 @@ async function main(): Promise<void> {
     busy = true;
     bridge.startExchange();
     try {
-      await app.session.send(buildWakePrompt(events), { readOnly: true });
+      await app.session.send(
+        buildWakePrompt(events, { alreadySummarized: summarizedTerminals }),
+        { readOnly: true },
+      );
       wakeRetried = false;
+      // Record only on success: later lifecycle events for these terminals become
+      // one-line acks instead of repeat summaries.
+      for (const e of events) {
+        const terminalId = (e as { target?: { terminalId?: string } }).target
+          ?.terminalId;
+        if (terminalId) summarizedTerminals.add(terminalId);
+      }
     } catch (err) {
       post({ type: "host:error", sessionId, code: "wake-failed", message: errMessage(err) });
       if (!wakeRetried) {

@@ -325,6 +325,12 @@ export function useDaintreeController(
   // Whether the current burst has already been retried once after a failure —
   // bounds retries so a persistently-failing model can't spin the wake loop.
   const wakeRetried = useRef(false);
+  // Terminal IDs the assistant has already summarized this session. A terminal's
+  // lifecycle surfaces several events (e.g. waiting_for_input then terminal_exited);
+  // without this memory the model re-summarizes the same terminal on each wake. We
+  // feed it to buildWakePrompt so follow-up events downgrade to a one-line ack, and
+  // only record IDs on the success path (a failed turn delivered no summary).
+  const summarizedTerminals = useRef<Set<string>>(new Set());
 
   const reactToWake = useCallback(async () => {
     if (inFlight.current) return; // a turn is running — drain when it finishes
@@ -340,8 +346,20 @@ export function useDaintreeController(
     try {
       // readOnly: an autonomous turn the user didn't initiate must only be able to
       // inspect (read the terminal) and report — never run a mutating tool.
-      await app.session.send(buildWakePrompt(events), { readOnly: true });
+      await app.session.send(
+        buildWakePrompt(events, {
+          alreadySummarized: summarizedTerminals.current,
+        }),
+        { readOnly: true },
+      );
       wakeRetried.current = false; // success resets the per-burst retry budget
+      // Record only on success: the model has now reported these terminals, so their
+      // later lifecycle events become one-line acks instead of repeat summaries.
+      for (const e of events) {
+        const terminalId = (e as { target?: { terminalId?: string } }).target
+          ?.terminalId;
+        if (terminalId) summarizedTerminals.current.add(terminalId);
+      }
     } catch (err) {
       bridge.emit({
         type: "log",

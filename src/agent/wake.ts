@@ -24,20 +24,48 @@ export function isActionableWake(e: QueueEvent): boolean {
 /**
  * Build the internal nudge fed to the model when a watcher wakes it. It is sent as
  * a read-only turn; the model's reaction is what surfaces, not this prompt.
+ *
+ * `opts.alreadySummarized` carries the set of terminal IDs the assistant has
+ * already reported on earlier this session. A terminal's lifecycle surfaces
+ * several events (e.g. `waiting_for_input` then `terminal_exited`); without this
+ * memory the model would re-run `terminal.summarize` on every one and the user
+ * would see the same terminal reported two or three times. For a terminal already
+ * in this set, the per-event line is downgraded to a one-line acknowledgement so
+ * the model treats it as a lifecycle transition, not fresh content to summarize.
  */
-export function buildWakePrompt(events: QueueEvent[]): string {
+export function buildWakePrompt(
+  events: QueueEvent[],
+  opts?: { alreadySummarized?: ReadonlySet<string> },
+): string {
+  // Seed from the caller's cross-burst memory, then grow locally so a terminal that
+  // appears twice within THIS batch only earns a full summary on its first line.
+  const seen = new Set<string>(opts?.alreadySummarized ?? []);
+  let anyFollowUp = false;
   const lines = events.map((e) => {
     const ev = e as {
       title?: string;
       summary?: string;
       target?: { terminalId?: string };
     };
-    const term = ev.target?.terminalId ? ` [terminal ${ev.target.terminalId}]` : "";
-    return `- ${ev.title ?? "event"}${ev.summary ? `: ${ev.summary}` : ""}${term}`;
+    const terminalId = ev.target?.terminalId;
+    const term = terminalId ? ` [terminal ${terminalId}]` : "";
+    const base = `- ${ev.title ?? "event"}${ev.summary ? `: ${ev.summary}` : ""}${term}`;
+    if (terminalId && seen.has(terminalId)) {
+      // Already reported this terminal — a follow-up lifecycle event, not new content.
+      anyFollowUp = true;
+      return `${base} (already reported — acknowledge in one line, do NOT call terminal.summarize/terminal.extract again)`;
+    }
+    if (terminalId) seen.add(terminalId);
+    return base;
   });
   return [
     "[automatic wake-up] A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
     "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it with terminal.summarize or terminal.extract and give the user a concise update. If it isn't worth acting on, say so in one line.",
+    ...(anyFollowUp
+      ? [
+          "Some events below are marked (already reported): you have already summarized that terminal this session. For those, do NOT summarize again — just acknowledge the transition in one short line.",
+        ]
+      : []),
     "",
     "New events:",
     ...lines,
