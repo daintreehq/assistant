@@ -242,6 +242,11 @@ export const workflowTools: ToolDef[] = [
             ? JSON.stringify(args.queueEventIds)
             : undefined,
           status: args.status,
+          // A run created directly in a terminal status is born complete.
+          completedAt:
+            args.status && TERMINAL_STATUSES.has(args.status)
+              ? Date.now()
+              : undefined,
           nextActionJson: args.nextAction
             ? JSON.stringify(args.nextAction)
             : undefined,

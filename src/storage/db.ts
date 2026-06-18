@@ -969,6 +969,12 @@ export class Db {
   }
 
   updateWorkflowRun(id: string, patch: Partial<WorkflowRunRecord>): void {
+    // No-op patches must not advance recency, so only touch the row when the
+    // caller actually changes an allowed column (updatedAt itself doesn't count).
+    const changesSomething = Object.keys(patch).some(
+      (k) => k !== "updatedAt" && WORKFLOW_UPDATE_COLS.has(k),
+    );
+    if (!changesSomething) return;
     // updatedAt is always advanced by the store and never taken from a caller's
     // patch, so an update can't write a stale recency value. completedAt IS
     // caller-settable (the tool layer stamps it on terminal transitions).

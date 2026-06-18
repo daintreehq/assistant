@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { workflowTools } from "../src/tools/workflowTools.js";
 import { Db } from "../src/storage/db.js";
 import type { ToolContext } from "../src/tools/types.js";
@@ -12,6 +12,11 @@ function ctx(): ToolContext {
   const db = new Db(":memory:");
   return { db, actor: "main" } as unknown as ToolContext;
 }
+
+afterEach(() => {
+  // Some tests opt into fake timers; never leak them into the next test.
+  vi.useRealTimers();
+});
 
 type CreateResult = { result: { id: string; workflow: Record<string, unknown> } };
 type GetResult = { result: { workflow: Record<string, unknown> } };
@@ -46,6 +51,18 @@ describe("workflow.create", () => {
     const c = ctx();
     const res = await create.handler({ issueNumber: 1, status: "active" }, c);
     expect((res as CreateResult).result.workflow.status).toBe("active");
+  });
+
+  it("stamps completedAt when created directly in a terminal status", async () => {
+    const c = ctx();
+    const res = await create.handler({ issueNumber: 1, status: "done" }, c);
+    expect((res as CreateResult).result.workflow.completedAt).toBeGreaterThan(0);
+  });
+
+  it("leaves completedAt unset for a non-terminal initial status", async () => {
+    const c = ctx();
+    const res = await create.handler({ issueNumber: 1, status: "active" }, c);
+    expect((res as CreateResult).result.workflow.completedAt).toBeUndefined();
   });
 });
 
@@ -116,17 +133,23 @@ describe("workflow.update", () => {
   });
 
   it("stamps completedAt the first time a run reaches a terminal status", async () => {
+    // Fake timers give the two transitions distinct timestamps, so a buggy
+    // re-stamp on the second transition would change the value and fail.
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
     const c = ctx();
     const created = (await create.handler({ issueNumber: 5, status: "active" }, c)) as CreateResult;
     const id = created.result.id;
 
+    vi.setSystemTime(2000);
     const done = await update.handler({ id, status: "done" }, c);
     const completedAt = (done as GetResult).result.workflow.completedAt as number;
-    expect(completedAt).toBeGreaterThan(0);
+    expect(completedAt).toBe(2000);
 
-    // A later status change does not overwrite the original completion stamp.
+    // A later status change at a different time does not overwrite the stamp.
+    vi.setSystemTime(3000);
     const reopened = await update.handler({ id, status: "failed" }, c);
-    expect((reopened as GetResult).result.workflow.completedAt).toBe(completedAt);
+    expect((reopened as GetResult).result.workflow.completedAt).toBe(2000);
   });
 
   it("does not stamp completedAt for a non-terminal status", async () => {

@@ -134,11 +134,14 @@ describe("Db migration v3 -> v4 (grant provenance)", () => {
     const back = db.listAudit().find((r) => r.id === aud.id)!;
     expect(back.grantSource).toBe("local");
     expect(back.grantId).toBe(fresh.id);
+    // Opening a pre-current (v3) DB runs the full forward-only ladder, so
+    // user_version lands on the current migration count (now 5 with the
+    // workflow_runs step appended after grant provenance).
     const version = db
       .raw()
       .prepare("PRAGMA user_version")
       .get() as { user_version: number };
-    expect(version.user_version).toBe(4);
+    expect(version.user_version).toBe(5);
     db.close();
   });
 });
@@ -182,7 +185,34 @@ describe("Db migration v4 -> v5 (workflow_runs)", () => {
 
     // Opening through Db runs the forward-only migrations.
     const db = new Db(path);
-    // The table now exists and accepts inserts.
+    // The migrated schema carries every workflow_runs column and the status index.
+    const cols = (
+      db.raw().prepare("PRAGMA table_info(workflow_runs)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        "id",
+        "issueNumber",
+        "terminalIdsJson",
+        "watcherIdsJson",
+        "queueEventIdsJson",
+        "status",
+        "nextActionJson",
+        "notesJson",
+        "createdAt",
+        "updatedAt",
+        "completedAt",
+      ]),
+    );
+    const indexes = (
+      db.raw().prepare("PRAGMA index_list(workflow_runs)").all() as Array<{
+        name: string;
+      }>
+    ).map((i) => i.name);
+    expect(indexes).toContain("idx_workflow_runs_status");
+    // The table accepts inserts and the run round-trips.
     const rec = db.insertWorkflowRun({ issueNumber: 25, status: "active" });
     expect(rec.id).toMatch(/^wfr_[0-9a-f]{8}$/);
     expect(db.getWorkflowRun(rec.id)?.issueNumber).toBe(25);
@@ -601,6 +631,22 @@ describe("Db", () => {
       // updatedAt advances past the seeded createdAt; createdAt is unchanged.
       expect(fetched.updatedAt).toBeGreaterThan(1000);
       expect(fetched.createdAt).toBe(1000);
+    });
+
+    it("updateWorkflowRun does not advance updatedAt for a no-op patch", () => {
+      const rec = db.insertWorkflowRun({ issueNumber: 7, createdAt: 1000 });
+      const before = db.getWorkflowRun(rec.id)!.updatedAt;
+      // An empty patch (and a patch of only-unknown keys) is a no-op.
+      db.updateWorkflowRun(rec.id, {});
+      db.updateWorkflowRun(rec.id, { bogus: "x" } as Record<string, unknown>);
+      expect(db.getWorkflowRun(rec.id)!.updatedAt).toBe(before);
+    });
+
+    it("listWorkflowRuns orders by updatedAt descending", () => {
+      const a = db.insertWorkflowRun({ issueNumber: 1, createdAt: 100, updatedAt: 100 });
+      const b = db.insertWorkflowRun({ issueNumber: 2, createdAt: 300, updatedAt: 300 });
+      const c = db.insertWorkflowRun({ issueNumber: 3, createdAt: 200, updatedAt: 200 });
+      expect(db.listWorkflowRuns().map((r) => r.id)).toEqual([b.id, c.id, a.id]);
     });
 
     it("updateWorkflowRun ignores unknown / immutable columns", () => {
