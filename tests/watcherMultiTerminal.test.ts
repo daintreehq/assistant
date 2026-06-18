@@ -742,6 +742,69 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     db.close();
   });
 
+  it("explore-mode completion is terminal even when the worktree is dirty (no infinite poll)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Pre-existing dirty worktree: an explore agent is read-only and can never clean
+    // it, so routing through git-verification would loop on completed_unverified
+    // forever. Explore completion must be terminal regardless of git state.
+    const mcp = fakeMcp({ "term-x": { agentState: "waiting", waitingReason: "prompt" } });
+    const origCall = mcp.callTool;
+    mcp.callTool = async (name: string, a?: Record<string, unknown>) => {
+      if (name === "git.getProjectPulse") {
+        return {
+          text: "",
+          content: [],
+          structuredContent: { isDirty: true, changedFiles: 3 },
+          isError: false,
+        };
+      }
+      return origCall(name, a);
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "explore dirty",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({
+        spawnMode: "explore",
+        verificationScope: { worktreeId: "wt-x" },
+      }),
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    // Terminal completion — NOT completed_unverified (which would keep polling).
+    expect(outcome.classification).toBe("completed_success");
+    db.close();
+  });
+
+  it("edit-mode + waitingReason=prompt stays waiting_for_input (explore routing does not leak)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = fakeMcp({ "term-x": { agentState: "waiting", waitingReason: "prompt" } });
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "edit idle",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      optionsJson: JSON.stringify({ spawnMode: "edit" }),
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("waiting_for_input");
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.some((e) => e.target?.terminalId === "term-x")).toBe(true);
+    db.close();
+  });
+
   it("declares exited only when terminal.list ALSO reports the terminal exited", async () => {
     const db = new Db(":memory:");
     const queue = new Queue(db);
