@@ -805,6 +805,121 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     db.close();
   });
 
+  it("reads scrollback via getOutput and model-classifies a listed-but-omitted WORKING terminal", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let getOutputCalls = 0;
+    // getStatus omits the terminal; terminal.list reports it alive and plain
+    // "working" (the case the old code short-circuited to no_change without ever
+    // reading output). terminal.getOutput still has the scrollback.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          getOutputCalls += 1;
+          return {
+            text: "",
+            content: [],
+            structuredContent: { content: "npm ERR! command failed\n" },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    // A distinctive model verdict proves classifyWithModel was actually reached —
+    // the prior bug never consulted the model for these terminals (it returned
+    // no_change with tail: "").
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => ({
+        classification: "command_failed",
+        confidence: 0.9,
+        summary: "A command failed.",
+        evidence: ["npm ERR!"],
+        recommendedAction: "none",
+      }),
+    } as unknown as ModelRouter;
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "working in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    // Scrollback was read once and fed through the small model.
+    expect(getOutputCalls).toBe(1);
+    expect(outcome.classification).toBe("command_failed");
+    db.close();
+  });
+
+  it("falls back to no_change when getOutput is empty for a listed-but-omitted WORKING terminal", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Same listed-but-omitted working terminal, but Daintree returns no scrollback
+    // even via getOutput. The watcher must degrade gracefully to no_change rather
+    // than invent a classification — the model is never consulted on empty output.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "working in list, no scrollback",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).toBe("no_change");
+    db.close();
+  });
+
   it("declares exited only when terminal.list ALSO reports the terminal exited", async () => {
     const db = new Db(":memory:");
     const queue = new Queue(db);

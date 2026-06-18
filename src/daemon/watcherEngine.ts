@@ -870,7 +870,9 @@ export async function runTerminalWatcherCheck(
       const listed = list?.byId.get(terminalId);
       if (listed) {
         // Alive per terminal.list — getStatus simply didn't include it. Classify
-        // from the listed agentState (no scrollback is available via this path).
+        // from the listed agentState; for the plain "working" case (the `else`
+        // below) read scrollback directly via terminal.getOutput, since getStatus
+        // dropped the inline tail along with the terminal.
         const agentState = listed.agentState;
         signals = {
           agentState,
@@ -921,9 +923,51 @@ export async function runTerminalWatcherCheck(
             ["agentState=completed (terminal.list)"],
           ));
         } else {
-          classification = "no_change";
-          confidence = 0.5;
-          summary = `Agent ${agentState ?? "active"} (per terminal.list; getStatus omitted it).`;
+          // Alive and "working" per terminal.list, but getStatus omitted it — so
+          // the cheap inline-tail path never ran for this terminal. Read the
+          // scrollback directly so the small-model content classifier
+          // (tests_passed/failed, command_failed, merge_conflict, …) can actually
+          // fire; without this the entire output-based path is dead for spawned
+          // agent terminals. readOutput never throws — an empty read degrades to
+          // no_change, exactly the prior behavior.
+          const tail = await readOutput(ctx, terminalId);
+          const out = nextOutputState(prevState, tail, now);
+          perTerminal[terminalId] = out.state;
+          signals.tail = tail;
+          signals.msSinceOutput = out.msSinceOutput;
+          if (tail.trim().length > 0) {
+            const verdict = await classifyWithModel(
+              rec,
+              signals,
+              ctx,
+              judge,
+              prevState?.prev,
+            );
+            classification = verdict.classification;
+            confidence = verdict.confidence;
+            summary = verdict.summary;
+            evidence = verdict.evidence;
+            // A model-claimed completion must still pass the read-only git gate,
+            // exactly as on the normal path — never let it bypass verification.
+            if (classification === "completed_success") {
+              ({ classification, confidence, summary, evidence } =
+                await gateCompletion(
+                  ctx,
+                  options.verificationScope,
+                  evidence,
+                ));
+            }
+          } else {
+            // Alive and working but Daintree returns no scrollback even via
+            // getOutput — surface the limitation rather than silently degrading.
+            classification = "no_change";
+            confidence = 0.5;
+            summary = `Agent ${agentState ?? "active"} (per terminal.list; getStatus omitted it).`;
+            logDebug(ctx.config, "watcher.listed.no_scrollback", {
+              terminalId,
+              agentState,
+            });
+          }
         }
       } else if (!list || !list.ok) {
         // getStatus omitted the terminal AND the inventory couldn't be read (errored,
