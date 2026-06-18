@@ -37,31 +37,55 @@ npm run dev -- "which worktrees are ready for review?"
 npm run dev -- doctor
 ```
 
-The default interactive experience is the **Daintree Control Room** — a living
-orchestration surface, not a chat box. Delegated work forms a visible tree
-(request → decision → agent → watcher → outcome), and it adapts to the terminal
-width because Daintree usually hosts it in a narrow side panel:
+The default interactive experience is the **Daintree Control Room** — a live
+operations surface with conversation integrated, not a chat box. The primary
+target is the **55–65 column Daintree sidebar**: it is operations-first
+(NOW → WATCHING → TIMERS → ATTENTION, then RECENT conversation), because the
+value is knowing what is running, what is watched, what is scheduled, and what
+needs intervention — before any chat history:
 
 ```
-◆ DAINTREE  assistant-main                         OPERATOR  ● CONNECTED
+◆ DAINTREE  assistant-main           OPERATOR  ● CONNECTED
+NOW
+◌ WORKING term_8                                       18s
+  repair watcher tests
+  42 passed · running WatcherPanel…
+WATCHING
+◌ term_8   tests running                               18s
+✓ term_4   branch ready                               08:51
+TIMERS
+◷ 09:30  check CI
+RECENT
 YOU
-Fix the watcher tests and tell me when the branch is ready.
+╭────────────────────────────────────────────────────────╮
+│ Fix the watcher tests and tell me when the branch is … │
+╰────────────────────────────────────────────────────────╯
 ◆ DAINTREE
 I'll delegate the edit and supervise the result.
-├─ ✓ Inspected   tests/ui                                      180ms
 ├─ ✓ Delegated   term_8 · repair watcher tests
-╰─ ◌ Watching    tests running · 42 passed                      18s
-──────────────────────────────────────────────────────────────────────
-› Ask Daintree to supervise, delegate, or inspect…
-  / commands   ^O operations                    1 agent active · MCP
+╰─ ◌ Watching    tests running · 42 passed              18s
+──────────────────────────────────────────────────────────
+◌ Watching term_8 · 18s                    agents 1 · MCP
+› Ask Daintree…
+  / commands · ^O inspect ops               agents 1 · tmr 1
 ```
 
+Wider terminals progressively add more transcript space and, at wide widths, a
+secondary operations rail. They are enhancements, not the design baseline.
+
+- **sidebar** (<72 cols): the canonical surface — operations-first sections
+  (NOW / WATCHING / TIMERS / ATTENTION) above a short RECENT conversation strip.
+  Optimized for the 55–65 "comfortable" band; below 55 it drops to survival
+  density (fewer labels and previews).
+- **standard** (72–115 cols): conversation-first, with a one-line current-operation
+  strip and an attention banner below the header.
 - **wide** (≥116 cols): the run-oriented transcript on the left, a quiet
   **operations rail** on the right (NOW / ATTENTION / NEXT).
-- **standard** (72–115 cols): conversation-first, with a one-line current-operation
-  strip below the header.
-- **narrow** (<72 cols): a compact identity row, current-operation strip,
-  transcript, and an attention line above the composer.
+
+User messages render as a distinct, dimmer **boxed card** (theme-aware via
+`DAINTREE_THEME=dark|light|ansi|none`, never a hard-coded bright block) while
+Daintree's own prose stays unboxed under a `◆ DAINTREE` marker — so "who said
+what" is unmistakable even with color stripped.
 
 Operational detail is a purposeful **view**, not a text dump: `^O` opens the
 operations surface (NOW → NEEDS ATTENTION → AGENTS → SCHEDULED → RECENT, with
@@ -80,8 +104,9 @@ invocations use the console renderer instead.
 Iterate on the surface without a live model, scheduler, or MCP connection:
 
 ```bash
-npm run ui:gallery   # 1 idle · 2 active · 3 attention · 4 approval · 5 degraded
-                     # w cycle width (52/80/120) · o operations · x detail · q quit
+npm run ui:gallery   # number keys switch fixtures (idle · active · attention ·
+                     # approval · degraded · timers · fleet · long message)
+                     # w width (55/58/62/65/80/120) · h height · o ops · x detail · q quit
 ```
 
 Fixtures use a frozen clock, so screenshots and golden-frame tests stay stable.

@@ -113,8 +113,8 @@ export function Composer({
       <Box justifyContent="space-between">
         <Box>
           <KeyHint keyName="/" action="commands" />
-          <Text dimColor>{"   "}</Text>
-          <KeyHint keyName="^O" action="operations" />
+          <Text dimColor>{" · "}</Text>
+          <KeyHint keyName="^O" action="inspect ops" />
         </Box>
         {contextHint ? <Text dimColor>{contextHint}</Text> : null}
       </Box>

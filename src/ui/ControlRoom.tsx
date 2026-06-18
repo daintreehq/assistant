@@ -5,14 +5,18 @@
  * the controller, the gallery feeds it from frozen fixtures, and golden-frame
  * tests feed it fixed timestamps.
  *
- * Three intentional layouts (narrow / standard / wide) chosen by width; chrome
- * is budgeted so the transcript never pushes the composer off a short terminal.
+ * Three intentional layouts chosen by width. The 55–65 column SIDEBAR is the
+ * canonical Daintree surface (it usually lives in a host side panel), so it is
+ * operations-first with conversation integrated; standard/wide are progressive
+ * enhancements that hand more room to the transcript. Chrome is budgeted so the
+ * operations sections and composer are never pushed off a short terminal.
  */
 import { Box, Text } from "ink";
 import type { DashboardState, PendingConfirm, TranscriptCell } from "./types.js";
 import type { TerminalPreview } from "./hooks/useTerminalPreview.js";
 import { Header } from "./components/Header.js";
 import { Transcript } from "./components/Transcript.js";
+import { SidebarHome } from "./components/SidebarHome.js";
 import { OperationsView } from "./components/OperationsView.js";
 import { OpsRail } from "./components/OpsRail.js";
 import { StatusLine } from "./components/StatusLine.js";
@@ -24,13 +28,25 @@ import { StateBadge, formatDuration } from "./primitives.js";
 import { buildAgentRows } from "./presentation/operations.js";
 import { truncate } from "../utils/text.js";
 
-export type LayoutMode = "narrow" | "standard" | "wide";
+export type LayoutMode = "sidebar" | "standard" | "wide";
 export type View = "home" | "operations" | "help";
 
 export function layoutFor(columns: number): LayoutMode {
   if (columns >= 116) return "wide";
   if (columns >= 72) return "standard";
-  return "narrow";
+  return "sidebar";
+}
+
+/**
+ * Width bands inside sidebar mode. The design is optimized for "comfortable"
+ * (55–65); below that is survival (fewer labels/previews), above it is the same
+ * layout with slightly richer text.
+ */
+export type SidebarDensity = "compact" | "comfortable" | "roomy";
+export function sidebarDensity(columns: number): SidebarDensity {
+  if (columns < 55) return "compact";
+  if (columns <= 65) return "comfortable";
+  return "roomy";
 }
 
 export interface ControlRoomProps {
@@ -78,16 +94,23 @@ export function ControlRoom({
   const activeAgent =
     agents.find((a) => a.classification === "still_working") ?? agents[0];
 
+  // Sidebar home owns its own attention + current-operation rows (SidebarHome);
+  // wide shows them in the rail. Only standard layout gets the bottom banner and
+  // the one-line operation strip below the header.
   const showAttention =
-    !pending && layout !== "wide" && dashboard.inbox.length > 0 && view === "home";
+    !pending && layout === "standard" && dashboard.inbox.length > 0 && view === "home";
+  // Sidebar's NOW section already names the active run, so the header subtitle
+  // is reserved for standard layout (which has no NOW section).
   const runTitle =
-    busy && view === "home" ? activeAgent?.goal ?? undefined : undefined;
+    busy && view === "home" && layout === "standard"
+      ? activeAgent?.goal ?? undefined
+      : undefined;
 
   const headerH = runTitle ? 3 : 2;
   const composerH = 3;
   const statusH = 1;
   const attentionH = showAttention ? 1 : 0;
-  const opStripH = layout !== "wide" && view === "home" && activeAgent ? 1 : 0;
+  const opStripH = layout === "standard" && view === "home" && activeAgent ? 1 : 0;
   const approvalH = pending ? 8 : 0;
   const bodyHeight = Math.max(
     3,
@@ -102,7 +125,7 @@ export function ControlRoom({
     layout === "wide" ? Math.max(40, columns - railWidth - 1) : columns;
 
   const contextHint = connected
-    ? `${agents.length} agent${agents.length === 1 ? "" : "s"} active · MCP`
+    ? `agents ${agents.length} · tmr ${dashboard.timers.length}`
     : "MCP degraded";
 
   return (
@@ -167,6 +190,16 @@ export function ControlRoom({
               />
             </Box>
           </Box>
+        ) : layout === "sidebar" ? (
+          <SidebarHome
+            dashboard={dashboard}
+            previews={previews}
+            transcript={transcript}
+            width={columns}
+            height={bodyHeight}
+            now={now}
+            expanded={expanded}
+          />
         ) : (
           <Transcript
             cells={transcript}

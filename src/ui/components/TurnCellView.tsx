@@ -7,6 +7,7 @@ import { Box, Text } from "ink";
 import type { TurnCell } from "../types.js";
 import { glyphs, toneColor, ui } from "../theme.js";
 import { ActivityTree } from "./ActivityTree.js";
+import { UserMessageCard } from "./UserMessageCard.js";
 
 export function TurnCellView({
   turn,
@@ -23,12 +24,7 @@ export function TurnCellView({
   return (
     <Box flexDirection="column" marginBottom={1}>
       {turn.userText ? (
-        <Box flexDirection="column">
-          <Text dimColor bold>
-            YOU
-          </Text>
-          <Text>{turn.userText}</Text>
-        </Box>
+        <UserMessageCard text={turn.userText} width={width} />
       ) : null}
 
       {turn.assistantText || turn.streaming ? (

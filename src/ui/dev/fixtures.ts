@@ -112,6 +112,36 @@ function activity(over: Partial<ActivityItem> & Pick<ActivityItem, "id" | "name"
   };
 }
 
+/** A long user prompt — exercises the boxed UserMessageCard's vertical cost. */
+function longUserRun(): TranscriptCell[] {
+  return [
+    {
+      kind: "turn",
+      id: "turn_long",
+      userText:
+        "Fix the watcher tests, then once they pass open a PR against main with a " +
+        "summary of the race condition we found, link the failing run, and schedule " +
+        "a follow-up to prune stale terminals tomorrow morning.",
+      assistantText: "On it — delegating the repair and attaching a watcher.",
+      streaming: false,
+      state: "active",
+      ts: FIXED_NOW - s(28),
+      notes: [],
+      activities: [
+        activity({ id: "c1", name: "fs.search", label: "Inspected", detail: "tests/ui", summary: "8 matches" }),
+        activity({
+          id: "c2",
+          name: "agentTask.spawnForEdits",
+          label: "Delegated",
+          detail: "term_8 · repair watcher tests",
+          state: "active",
+          endedAt: undefined,
+        }),
+      ],
+    },
+  ];
+}
+
 /** A representative in-flight run: inspect → delegate → watch. */
 function activeRun(): TranscriptCell[] {
   return [
@@ -278,6 +308,65 @@ export function buildFixtures(): Fixture[] {
       ],
       dashboard: emptyDash(false),
       previews: [],
+      pending: null,
+    },
+    {
+      key: "6",
+      label: "timers",
+      connected: true,
+      busy: false,
+      stage: "Thinking",
+      view: "home",
+      transcript: [],
+      dashboard: {
+        ...emptyDash(true),
+        timers: [
+          timer({ id: "tmr_1", title: "check CI", fireAt: FIXED_NOW + s(60 * 45) }),
+          timer({ id: "tmr_2", title: "review stale terminals", fireAt: FIXED_NOW + s(60 * 120) }),
+          timer({ id: "tmr_3", title: "prune old watchers", fireAt: FIXED_NOW + s(60 * 60 * 26) }),
+        ],
+      },
+      previews: [],
+      pending: null,
+    },
+    {
+      key: "7",
+      label: "fleet",
+      connected: true,
+      busy: true,
+      stage: "Watching",
+      view: "home",
+      transcript: activeRun(),
+      dashboard: {
+        ...emptyDash(true),
+        watchers: [
+          watcher({ id: "wch_1", targetsJson: JSON.stringify(["term_8"]), lastClassification: "still_working", createdAt: FIXED_NOW - s(134) }),
+          watcher({ id: "wch_2", title: "ship the branch", goal: "branch ready for review", targetsJson: JSON.stringify(["term_4"]), lastClassification: "tests_passed", createdAt: FIXED_NOW - s(531) }),
+          watcher({ id: "wch_3", title: "resolve permission prompt", goal: "waiting for input", targetsJson: JSON.stringify(["term_2"]), lastClassification: "waiting_for_input", createdAt: FIXED_NOW - s(786) }),
+        ],
+        timers: [timer({ id: "tmr_1", title: "check CI", fireAt: FIXED_NOW + s(60 * 45) })],
+      },
+      previews: [
+        { terminalId: "term_8", watcherId: "wch_1", title: "repair watcher tests", agentState: "working", tail: "RUN  tests/ui/WatcherPanel.test.tsx\n  42 passed", updatedAt: FIXED_NOW },
+      ],
+      pending: null,
+    },
+    {
+      key: "8",
+      label: "long message",
+      connected: true,
+      busy: true,
+      stage: "Delegating",
+      view: "home",
+      transcript: longUserRun(),
+      dashboard: {
+        ...emptyDash(true),
+        watchers: [watcher({})],
+        timers: [timer({ id: "tmr_1", title: "prune stale terminals", fireAt: FIXED_NOW + s(60 * 60 * 18) })],
+      },
+      previews: [
+        { terminalId: "term_8", watcherId: "wch_1", title: "repair watcher tests", agentState: "working", tail: "RUN  tests/ui/WatcherPanel.test.tsx\n  42 passed", updatedAt: FIXED_NOW },
+      ],
       pending: null,
     },
   ];

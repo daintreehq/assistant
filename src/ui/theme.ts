@@ -25,6 +25,15 @@ export const ui = {
     danger: "#FB7185",
     blocked: "#C4B5FD",
     muted: "gray",
+    // Transcript user-message surfaces. A boxed, dimmer card separates what the
+    // human said from Daintree's prose — but the fill is theme-aware (never a
+    // hard-coded bright block, which is jarring on a dark terminal).
+    userMessageBgDark: "#1F2937",
+    userMessageBgLight: "#E5E7EB",
+    userMessageTextDark: "#D1D5DB",
+    userMessageTextLight: "#374151",
+    userMessageBorderDark: "#374151",
+    userMessageBorderLight: "#CBD5E1",
   },
   /** Unicode signature glyphs. Use {@link glyphs} when ASCII fallback matters. */
   glyph: {
@@ -138,6 +147,69 @@ export function toneGlyph(tone: Tone, set: GlyphSet = glyphs()): string {
     default:
       return set.bullet;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Terminal theme (light / dark) for transcript surfaces                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How the host terminal is themed. We resolve this from explicit config/env
+ * rather than fragile background probing: a wrong guess here paints a bright
+ * block on a dark terminal (a real Claude Code regression we deliberately avoid).
+ *   dark  — light text on a dim fill (the default)
+ *   light — dark text on a pale fill
+ *   ansi  — no fill, borders only, lean on the 16-color palette
+ *   none  — no color at all (rely on glyphs + borders)
+ */
+export type TerminalThemeMode = "dark" | "light" | "ansi" | "none";
+
+/**
+ * Resolve the terminal theme. Daintree can inject `DAINTREE_TERMINAL_THEME`
+ * when it knows the host panel's appearance; `DAINTREE_THEME` is the manual
+ * override. Defaults to dark — the common case for a hosted side panel.
+ */
+export function terminalThemeMode(): TerminalThemeMode {
+  const v = (
+    process.env.DAINTREE_THEME ||
+    process.env.DAINTREE_TERMINAL_THEME ||
+    ""
+  ).toLowerCase();
+  if (v === "light" || v === "dark" || v === "ansi" || v === "none") return v;
+  return "dark";
+}
+
+export interface MessageSurface {
+  borderColor: string;
+  textColor?: string;
+  backgroundColor?: string;
+  dimText: boolean;
+}
+
+/** The surface (border / text / fill) for a boxed user message, theme-aware. */
+export function userMessageSurface(
+  mode: TerminalThemeMode = terminalThemeMode(),
+): MessageSurface {
+  if (mode === "none") {
+    return { borderColor: ui.color.muted, dimText: true };
+  }
+  if (mode === "ansi") {
+    return { borderColor: "gray", dimText: true };
+  }
+  if (mode === "light") {
+    return {
+      borderColor: ui.color.userMessageBorderLight,
+      textColor: ui.color.userMessageTextLight,
+      backgroundColor: ui.color.userMessageBgLight,
+      dimText: false,
+    };
+  }
+  return {
+    borderColor: ui.color.userMessageBorderDark,
+    textColor: ui.color.userMessageTextDark,
+    backgroundColor: ui.color.userMessageBgDark,
+    dimText: false,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

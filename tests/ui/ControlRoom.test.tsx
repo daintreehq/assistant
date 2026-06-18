@@ -28,44 +28,85 @@ function frameFor(label: string, columns: number, rows = 24): string {
   return lastFrame() ?? "";
 }
 
-const WIDTHS = [52, 80, 120];
+// The sidebar (55–65) is the design target; 80/120 are wider-layout regressions.
+const SIDEBAR_WIDTHS = [55, 58, 62, 65];
+const WIDTHS = [58, 80, 120];
 
 describe("ControlRoom golden frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle reads as connected + standing by at %i cols", (w) => {
-    const frame = frameFor("idle", w);
+    const frame = frameFor("idle", w, 32);
     expect(frame).toContain("DAINTREE"); // is this Daintree?
     expect(frame).toContain("CONNECTED"); // is it connected?
     expect(frame).toContain("Standing by"); // what is it doing?
-    expect(frame).toContain("operations"); // what key reveals more?
+    expect(frame).toContain("ops"); // what key reveals more?
   });
 
   it.each(WIDTHS)("active run shows the supervised work at %i cols", (w) => {
-    const frame = frameFor("active", w);
+    const frame = frameFor("active", w, 32);
     expect(frame).toContain("DAINTREE");
     expect(frame).toContain("term_8"); // which operation is active?
-    expect(frame).toMatch(/Watching|WORKING/); // what is Daintree doing?
+    expect(frame).toMatch(/Watching|WORKING|WATCHING/); // what is Daintree doing?
   });
 
   it.each(WIDTHS)("attention surfaces the urgent title at %i cols", (w) => {
-    const frame = frameFor("attention", w);
+    const frame = frameFor("attention", w, 32);
     expect(frame).toContain("term_8"); // the urgent agent is visible
     expect(frame.toLowerCase()).toContain("fail"); // failure is communicated
   });
 
   it.each(WIDTHS)("approval shows a risk-specific sheet at %i cols", (w) => {
-    const frame = frameFor("approval", w);
+    const frame = frameFor("approval", w, 32);
     expect(frame).toContain("Push branch to origin?");
     expect(frame).toContain("approve");
   });
 
   it.each(WIDTHS)("degraded is unmistakable at %i cols", (w) => {
-    const frame = frameFor("degraded", w);
+    const frame = frameFor("degraded", w, 32);
     expect(frame).toContain("DEGRADED");
   });
 
   it("renders a quiet ops rail only at wide widths", () => {
-    expect(frameFor("active", 120)).toContain("NOW");
-    // Narrow has no rail; the current-operation strip carries NOW instead.
-    expect(frameFor("active", 52)).not.toContain("NEXT");
+    expect(frameFor("active", 120, 32)).toContain("NOW");
+    // The sidebar carries NOW itself; the wide-only NEXT rail label is absent.
+    expect(frameFor("active", 58, 32)).not.toContain("NEXT");
+  });
+});
+
+describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
+  it.each(SIDEBAR_WIDTHS)(
+    "shows operations before recent transcript at %i cols",
+    (w) => {
+      const frame = frameFor("active", w, 36);
+      expect(frame).toContain("NOW");
+      expect(frame).toContain("WATCHING");
+      expect(frame).toContain("TIMERS");
+      expect(frame).toContain("RECENT");
+      // The product is operations-first: monitoring precedes chat history.
+      expect(frame.indexOf("WATCHING")).toBeLessThan(frame.indexOf("RECENT"));
+    },
+  );
+
+  it.each(SIDEBAR_WIDTHS)(
+    "renders user messages as a distinct card at %i cols",
+    (w) => {
+      const frame = frameFor("active", w, 36);
+      expect(frame).toContain("YOU");
+      expect(frame).toMatch(/[╭┌].*[╮┐]/); // a boxed card around the prompt
+      expect(frame).toContain("DAINTREE");
+    },
+  );
+
+  it("keeps user and Daintree distinguishable without color", () => {
+    const prev = process.env.DAINTREE_THEME;
+    process.env.DAINTREE_THEME = "none";
+    try {
+      const frame = frameFor("active", 58, 36);
+      expect(frame).toContain("YOU");
+      expect(frame).toContain("◆ DAINTREE");
+      expect(frame).toContain("WATCHING");
+    } finally {
+      if (prev === undefined) delete process.env.DAINTREE_THEME;
+      else process.env.DAINTREE_THEME = prev;
+    }
   });
 });

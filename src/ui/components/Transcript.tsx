@@ -102,21 +102,22 @@ export function Transcript({
   width = 72,
   now,
   expanded = false,
+  emptyText = "Ask Daintree to inspect worktrees, delegate edits, or watch terminals.",
 }: {
   cells: TranscriptCell[];
   height: number;
   width?: number;
   now?: number;
   expanded?: boolean;
+  /** Override the empty-state line (the sidebar uses a shorter one). */
+  emptyText?: string;
 }) {
   const visible = fitCells(cells, Math.max(1, height), width);
   return (
     <Box flexDirection="column" height={height} overflow="hidden">
       {visible.length === 0 ? (
         <Box flexGrow={1} alignItems="center" justifyContent="center">
-          <Text dimColor>
-            Ask Daintree to inspect worktrees, delegate edits, or watch terminals.
-          </Text>
+          <Text dimColor>{emptyText}</Text>
         </Box>
       ) : (
         visible.map((cell) =>
