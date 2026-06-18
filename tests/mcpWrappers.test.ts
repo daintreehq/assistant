@@ -202,15 +202,57 @@ describe("forge write + getPR wrappers (#29)", () => {
     }
   });
 
-  it("forge.getPR forwards flat args (no nested bag) at supervisor tier", async () => {
+  it("forge.getPR forwards flat args (no nested bag, incl. cwd) at supervisor tier", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
     const c = ctx("supervisor") as ToolContext & {
       _calls: Array<{ name: string; args: Record<string, unknown> }>;
     };
-    const res = await reg.dispatch("forge.getPR", { prNumber: 7 }, c);
+    const res = await reg.dispatch("forge.getPR", { cwd: "/repo", prNumber: 7 }, c);
     expect(res.ok).toBe(true);
-    expect(c._calls.find((x) => x.name === "forge.getPR")?.args).toEqual({ prNumber: 7 });
+    expect(c._calls.find((x) => x.name === "forge.getPR")?.args).toEqual({
+      cwd: "/repo",
+      prNumber: 7,
+    });
+  });
+
+  it("each forge write forwards exactly the expected field names to its MCP action", async () => {
+    // Guards against a field-name typo (e.g. reviewID vs reviewId, prNumber vs
+    // issueNumber) silently shipping. One representative valid payload per tool.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["forge.createIssue", { title: "t" }],
+      ["forge.closeIssue", { issueNumber: 1, stateReason: "completed" }],
+      ["forge.reopenIssue", { issueNumber: 1 }],
+      ["forge.editIssue", { issueNumber: 1, title: "t" }],
+      ["forge.addIssueComment", { issueNumber: 1, body: "b" }],
+      ["forge.addIssueLabel", { issueNumber: 1, label: "bug" }],
+      ["forge.removeIssueLabel", { issueNumber: 1, label: "bug" }],
+      ["forge.assignIssue", { issueNumber: 1, username: "me" }],
+      ["forge.unassignIssue", { issueNumber: 1, username: "me" }],
+      ["forge.createPR", { head: "feat", base: "main", title: "t" }],
+      ["forge.closePR", { prNumber: 2 }],
+      ["forge.reopenPR", { prNumber: 2 }],
+      ["forge.mergePR", { prNumber: 2, mergeMethod: "squash" }],
+      ["forge.convertPRToDraft", { prNumber: 2 }],
+      ["forge.markPRReadyForReview", { prNumber: 2 }],
+      ["forge.commentOnPR", { prNumber: 2, body: "b" }],
+      ["forge.editPR", { prNumber: 2, body: "b" }],
+      ["forge.approvePR", { prNumber: 2 }],
+      ["forge.requestChanges", { prNumber: 2, body: "fix" }],
+      ["forge.dismissReview", { prNumber: 2, reviewId: 5, message: "stale" }],
+      ["forge.requestReviewers", { prNumber: 2, users: ["me"] }],
+    ];
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("operator") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const [name, args] of cases) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(true);
+      // Args reach the same-named MCP action verbatim (no nested bag wrapper).
+      expect(c._calls.find((x) => x.name === name)?.args, name).toEqual(args);
+    }
   });
 
   it("forge writes forward flat args to the same-named MCP action (with confirmation)", async () => {
@@ -249,7 +291,11 @@ describe("forge write + getPR wrappers (#29)", () => {
     expect(c._calls.find((x) => x.name === "forge.approvePR")?.args).toEqual({ prNumber: 12 });
   });
 
-  it("lifts requestKey out of the forwarded args object", async () => {
+  it("forwards requestKey via passthrough's dedicated param, not as a payload field", async () => {
+    // The handler destructures requestKey out of the forwarded payload and hands
+    // it to passthrough(), which re-attaches it as the idempotency key. End result
+    // at callTool: the user payload plus requestKey — but it never travels as a
+    // forge field the action schema would have to know about.
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
     const c = ctx("operator") as ToolContext & {
@@ -263,6 +309,24 @@ describe("forge write + getPR wrappers (#29)", () => {
     expect(res.ok).toBe(true);
     const call = c._calls.find((x) => x.name === "forge.commentOnPR");
     expect(call?.args).toEqual({ prNumber: 3, body: "lgtm", requestKey: "rk-test" });
+  });
+
+  it("rejects whitespace-only required text locally (matches Daintree's trim().min(1))", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("operator") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const [name, args] of [
+      ["forge.requestChanges", { prNumber: 1, body: "   " }],
+      ["forge.dismissReview", { prNumber: 1, reviewId: 2, message: "  " }],
+      ["forge.requestReviewers", { prNumber: 1, users: [""] }],
+    ] as const) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("INVALID_ARGS");
+    }
+    expect(c._calls.length).toBe(0);
   });
 
   it("rejects edit/requestReviewers calls that satisfy no field-presence constraint", async () => {

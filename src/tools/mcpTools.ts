@@ -134,7 +134,7 @@ const cwdField = z
 const requestKeyField = z
   .string()
   .optional()
-  .describe("Optional idempotency key; Daintree dedupes on it and strips it before validation.");
+  .describe("Optional idempotency key; Daintree strips it before validation and dedupes on it where supported.");
 const issueNumberField = z.number().int().positive().describe("Forge issue number.");
 const prNumberField = z.number().int().positive().describe("Forge pull/merge request number.");
 
@@ -144,8 +144,8 @@ const P_CWD = {
   description: "Working directory / worktree path; Daintree resolves the active worktree when omitted.",
 };
 const P_REQUEST_KEY = { type: "string", description: "Optional idempotency key forwarded to Daintree." };
-const P_ISSUE_NUMBER = { type: "number", description: "Forge issue number." };
-const P_PR_NUMBER = { type: "number", description: "Forge pull/merge request number." };
+const P_ISSUE_NUMBER = { type: "integer", minimum: 1, description: "Forge issue number." };
+const P_PR_NUMBER = { type: "integer", minimum: 1, description: "Forge pull/merge request number." };
 
 /** Build a flat object JSON-schema for the model from a property map + required list. */
 function forgeObjSchema(
@@ -510,7 +510,7 @@ export const mcpTools: ToolDef[] = [
     "Create a forge issue (GitHub/GitLab) via Daintree. Mutates the forge, so it always confirms. Provider-agnostic.",
     z.object({
       cwd: cwdField,
-      title: z.string().min(1).describe("Issue title."),
+      title: z.string().trim().min(1).describe("Issue title."),
       body: z.string().optional().describe("Issue body (markdown)."),
       labels: z.array(z.string()).optional().describe("Label names to apply on creation."),
       requestKey: requestKeyField,
@@ -596,7 +596,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       issueNumber: issueNumberField,
-      body: z.string().min(1).describe("Comment body (markdown)."),
+      body: z.string().trim().min(1).describe("Comment body (markdown)."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -615,7 +615,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       issueNumber: issueNumberField,
-      label: z.string().min(1).describe("Label name to add."),
+      label: z.string().trim().min(1).describe("Label name to add."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -634,7 +634,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       issueNumber: issueNumberField,
-      label: z.string().min(1).describe("Label name to remove."),
+      label: z.string().trim().min(1).describe("Label name to remove."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -653,7 +653,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       issueNumber: issueNumberField,
-      username: z.string().min(1).describe("Username to assign."),
+      username: z.string().trim().min(1).describe("Username to assign."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -672,7 +672,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       issueNumber: issueNumberField,
-      username: z.string().min(1).describe("Username to unassign."),
+      username: z.string().trim().min(1).describe("Username to unassign."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -704,9 +704,9 @@ export const mcpTools: ToolDef[] = [
     "Create a forge pull/merge request via Daintree. Mutates the forge, so it always confirms.",
     z.object({
       cwd: cwdField,
-      head: z.string().min(1).describe("Source branch (the branch with changes)."),
-      base: z.string().min(1).describe("Target branch to merge into."),
-      title: z.string().min(1).describe("PR title."),
+      head: z.string().trim().min(1).describe("Source branch (the branch with changes)."),
+      base: z.string().trim().min(1).describe("Target branch to merge into."),
+      title: z.string().trim().min(1).describe("PR title."),
       body: z.string().optional().describe("PR body (markdown)."),
       draft: z.boolean().optional().describe("Open as a draft PR."),
       requestKey: requestKeyField,
@@ -796,7 +796,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       prNumber: prNumberField,
-      body: z.string().min(1).describe("Comment body (markdown)."),
+      body: z.string().trim().min(1).describe("Comment body (markdown)."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -860,7 +860,7 @@ export const mcpTools: ToolDef[] = [
     z.object({
       cwd: cwdField,
       prNumber: prNumberField,
-      body: z.string().min(1).describe("Review comment explaining the requested changes (markdown)."),
+      body: z.string().trim().min(1).describe("Review comment explaining the requested changes (markdown)."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
@@ -883,14 +883,14 @@ export const mcpTools: ToolDef[] = [
       cwd: cwdField,
       prNumber: prNumberField,
       reviewId: z.number().int().positive().describe("Id of the review to dismiss."),
-      message: z.string().min(1).describe("Reason for dismissing the review."),
+      message: z.string().trim().min(1).describe("Reason for dismissing the review."),
       requestKey: requestKeyField,
     }),
     forgeObjSchema(
       {
         cwd: P_CWD,
         prNumber: P_PR_NUMBER,
-        reviewId: { type: "number", description: "Id of the review to dismiss." },
+        reviewId: { type: "integer", minimum: 1, description: "Id of the review to dismiss." },
         message: { type: "string", description: "Reason for dismissing the review." },
         requestKey: P_REQUEST_KEY,
       },
@@ -904,8 +904,14 @@ export const mcpTools: ToolDef[] = [
       .object({
         cwd: cwdField,
         prNumber: prNumberField,
-        users: z.array(z.string()).optional().describe("Usernames to request review from."),
-        teams: z.array(z.string()).optional().describe("Team slugs to request review from."),
+        users: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe("Usernames to request review from."),
+        teams: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe("Team slugs to request review from."),
         requestKey: requestKeyField,
       })
       .refine((v) => (v.users?.length ?? 0) > 0 || (v.teams?.length ?? 0) > 0, {
