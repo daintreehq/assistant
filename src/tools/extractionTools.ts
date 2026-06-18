@@ -194,7 +194,7 @@ async function readSignals(
   states: Map<string, TerminalState>,
   now: number,
 ): Promise<ReadResult> {
-  const statuses = await readStatuses(ctx, terminalIds);
+  const statuses = await readStatuses(ctx, terminalIds, true);
   let allExited = statuses.ok;
   let minMsSinceOutput = Number.POSITIVE_INFINITY;
   const parts: { terminalId: string; tail: string; agentState?: string }[] = [];
@@ -204,7 +204,16 @@ async function readSignals(
     // A successful status read that omits this id means the terminal is gone.
     const absent = statuses.ok && !entry;
     const agentState = absent ? "exited" : entry?.agentState;
-    const tail = absent ? "" : await readOutput(ctx, id, tailBytes);
+    // The inline recentOutput tail is capped at 50 lines, so it can satisfy
+    // extraction only when it already covers the requested tailBytes; otherwise
+    // fall back to the deep terminal.getOutput read so contains/regex matching
+    // never silently runs against a truncated tail.
+    const inline = entry?.recentOutput;
+    const tail = absent
+      ? ""
+      : inline !== undefined && inline.length >= tailBytes
+        ? inline.slice(-tailBytes)
+        : await readOutput(ctx, id, tailBytes);
     const out = nextOutputState(states.get(id), tail, now);
     states.set(id, out.state);
     minMsSinceOutput = Math.min(minMsSinceOutput, out.msSinceOutput);

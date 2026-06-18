@@ -193,6 +193,10 @@ export interface TerminalStatusEntry {
   agentState?: string;
   waitingReason?: string;
   error?: string;
+  /** Recent output tail returned inline when includeOutput is requested. May be
+   *  absent even when requested (Daintree can omit it), so callers must fall
+   *  back to terminal.getOutput when this is undefined. */
+  recentOutput?: string;
 }
 
 /** Result of a batched status read: the per-terminal map plus whether the call
@@ -211,15 +215,26 @@ export interface StatusBatch {
  * shape silently never detects state, so the watcher would fall through to the
  * model every tick. `ok` is false when the call failed (so a missing terminal
  * id is NOT mistaken for "closed"); on success an absent id means it is gone.
+ *
+ * When `includeOutput` is true, the call also requests a bounded recent-output
+ * tail (capped at the Daintree-documented max of 50 lines) inline on each entry,
+ * so the common watcher/extraction poll needs only this ONE call instead of an
+ * additional per-terminal terminal.getOutput. `recentOutput` may still be absent
+ * per entry — callers fall back to readOutput in that case.
  */
 export async function readStatuses(
   ctx: ToolContext,
   terminalIds: string[],
+  includeOutput = false,
 ): Promise<StatusBatch> {
   const byId = new Map<string, TerminalStatusEntry>();
   if (terminalIds.length === 0) return { ok: true, byId };
   try {
-    const res = await ctx.mcp.callTool("terminal.getStatus", { terminalIds });
+    const args: Record<string, unknown> = { terminalIds };
+    if (includeOutput) {
+      args.includeOutput = { lines: 50, stripAnsi: true };
+    }
+    const res = await ctx.mcp.callTool("terminal.getStatus", args);
     if (res.isError) return { ok: false, byId };
     const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
     const terminals = Array.isArray(sc.terminals) ? sc.terminals : [];
@@ -234,6 +249,8 @@ export async function readStatuses(
         waitingReason:
           typeof e.waitingReason === "string" ? e.waitingReason : undefined,
         error: typeof e.error === "string" ? e.error : undefined,
+        recentOutput:
+          typeof e.recentOutput === "string" ? e.recentOutput : undefined,
       });
     }
     return { ok: true, byId };
@@ -325,6 +342,22 @@ export function findModelJudge(cond?: WatchCondition): string | undefined {
   if ("any" in cond) return cond.any.map((c) => findModelJudge(c)).find(Boolean);
   if ("not" in cond) return findModelJudge(cond.not);
   return undefined;
+}
+
+/**
+ * Whether a (possibly composite) condition matches against terminal output text
+ * (`contains`/`regex`). Such conditions need the full scrollback window, so when
+ * one is present the watcher reads the deep terminal.getOutput tail instead of
+ * trusting the bounded inline recentOutput tail — a 50-line tail could otherwise
+ * silently miss a match that lives deeper in the output.
+ */
+export function hasTextCondition(cond?: WatchCondition): boolean {
+  if (!cond) return false;
+  if ("contains" in cond || "regex" in cond) return true;
+  if ("all" in cond) return cond.all.some((c) => hasTextCondition(c));
+  if ("any" in cond) return cond.any.some((c) => hasTextCondition(c));
+  if ("not" in cond) return hasTextCondition(cond.not);
+  return false;
 }
 
 /**
@@ -604,15 +637,21 @@ export async function runTerminalWatcherCheck(
   }
 
   const judge = findModelJudge(alertWhen) ?? findModelJudge(stopWhen);
+  // A deterministic contains/regex condition must see the full scrollback the
+  // user expects, so the bounded inline tail isn't enough — read deep in that
+  // case. Pure state/model watchers (the common supervisor) keep the cheap tail.
+  const needsDeepTail =
+    hasTextCondition(alertWhen) || hasTextCondition(stopWhen);
   const timedOut = Boolean(
     rec.stopAfterMs && now - rec.createdAt >= rec.stopAfterMs,
   );
   const perTerminal: Record<string, TerminalState> = { ...options.perTerminal };
 
   // One batched terminal.getStatus for ALL targets, instead of N per-terminal
-  // status calls. The deep scrollback tail is still read per terminal below.
+  // status calls. includeOutput piggybacks a recent-output tail on the same
+  // call so the common case needs zero per-terminal terminal.getOutput reads.
   const statuses: StatusBatch = ctx.mcp.isConnected()
-    ? await readStatuses(ctx, targets)
+    ? await readStatuses(ctx, targets, true)
     : { ok: false, byId: new Map<string, TerminalStatusEntry>() };
 
   const outcomes: CheckOutcome[] = [];
@@ -642,7 +681,16 @@ export async function runTerminalWatcherCheck(
     } else {
       const agentState = entry?.agentState;
       const waitingReason = entry?.waitingReason;
-      const tail = await readOutput(ctx, terminalId);
+      // Prefer the inline tail from terminal.getStatus (includeOutput). It is
+      // bounded to 50 lines — enough for the watcher to classify — and saves a
+      // per-terminal terminal.getOutput. Fall back to the deep read when Daintree
+      // omitted recentOutput, or when a contains/regex condition needs the full
+      // scrollback window. An empty-string tail is a valid "no output yet", so we
+      // fall back on undefined, not on falsiness.
+      const tail =
+        !needsDeepTail && entry?.recentOutput !== undefined
+          ? entry.recentOutput
+          : await readOutput(ctx, terminalId);
       const out = nextOutputState(prevState, tail, now);
       perTerminal[terminalId] = out.state;
       signals = {
