@@ -40,7 +40,7 @@ const WIDTHS = [58, 80, 120];
 describe("ControlRoom stream frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle starts with the Daintree intro block at %i cols", (w) => {
     const frame = frameFor("idle", w, 32);
-    expect(frame).toContain("DAINTREE ASSISTANT");
+    expect(frame).toContain("assistant");
     expect(frame).toContain("MCP CONNECTED");
     expect(frame).toContain("Standing by");
     expect(frame).toContain("wheel scroll");

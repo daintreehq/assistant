@@ -110,6 +110,9 @@ export function Composer({
         ) : null}
       </Box>
 
+      {/* Bracket the input row top and bottom so it's unmistakable where text goes. */}
+      <Divider width={width} />
+
       <Box justifyContent="space-between">
         <Box>
           <KeyHint keyName="/" action={compactHints ? "cmd" : "commands"} />

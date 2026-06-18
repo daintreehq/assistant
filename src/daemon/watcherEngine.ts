@@ -26,6 +26,7 @@ import {
 } from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { WatcherRecord } from "../schemas.js";
+import { logDebug } from "../debugLog.js";
 
 export interface WatcherSignals {
   agentState?: string;
@@ -639,6 +640,12 @@ export async function runTerminalWatcherCheck(
   } catch (err) {
     // Disable the watcher and tell the user, instead of throwing silently every
     // tick (the scheduler swallows watcher errors).
+    logDebug(ctx.config, "watcher.disabled", {
+      watcherId: rec.id,
+      title: rec.title,
+      reason: "corrupt watcher state",
+      error: err instanceof Error ? err.message : String(err),
+    });
     ctx.db.updateWatcher(rec.id, { status: "error", lastCheckedAt: now });
     // A disabled watcher will never check again — release any scoped grants.
     ctx.db.revokeGrantsByActor(rec.id, now);
@@ -670,6 +677,17 @@ export async function runTerminalWatcherCheck(
     rec.stopAfterMs && now - rec.createdAt >= rec.stopAfterMs,
   );
   const perTerminal: Record<string, TerminalState> = { ...options.perTerminal };
+
+  logDebug(ctx.config, "watcher.check.start", {
+    watcherId: rec.id,
+    title: rec.title,
+    targets,
+    isSupervisor: rec.isSupervisor,
+    cadenceMs: rec.cadenceMs,
+    ageMs: now - rec.createdAt,
+    timedOut,
+    mcpConnected: ctx.mcp.isConnected(),
+  });
 
   // One batched terminal.getStatus for ALL targets, instead of N per-terminal
   // status calls. includeOutput piggybacks a recent-output tail on the same
@@ -801,7 +819,34 @@ export async function runTerminalWatcherCheck(
       prev: outcome.classification,
     };
 
+    logDebug(ctx.config, "watcher.check.terminal", {
+      watcherId: rec.id,
+      terminalId,
+      present: Boolean(entry),
+      agentState: signals.agentState,
+      waitingReason: signals.waitingReason,
+      exitCode: signals.exitCode,
+      msSinceOutput: signals.msSinceOutput,
+      tailLen: signals.tail.length,
+      previous: prevState?.prev,
+      classification: outcome.classification,
+      confidence: outcome.confidence,
+      severity: outcome.severity,
+      summary: outcome.summary,
+      evidence: outcome.evidence,
+      shouldPublish: outcome.shouldPublish,
+      stop: outcome.stop,
+      stopReason: outcome.stopReason,
+    });
+
     if (outcome.shouldPublish) {
+      logDebug(ctx.config, "watcher.publish", {
+        watcherId: rec.id,
+        terminalId,
+        severity: outcome.severity,
+        classification: outcome.classification,
+        dedupeKey: `watcher:${rec.id}:${terminalId}:${outcome.classification}`,
+      });
       ctx.queue.publish({
         source: "terminal_watcher",
         severity: outcome.severity,
@@ -855,6 +900,16 @@ export async function runTerminalWatcherCheck(
   // Once the watcher has stopped (timed out or its stop condition met) it will
   // never run again — release any scoped automation grants tied to it.
   if (stop) ctx.db.revokeGrantsByActor(rec.id, now);
+
+  logDebug(ctx.config, stop ? "watcher.stop" : "watcher.check.done", {
+    watcherId: rec.id,
+    title: rec.title,
+    headline: headline.classification,
+    severity: headline.severity,
+    stop,
+    stopReason,
+    nextCheckAt: stop ? undefined : now + rec.cadenceMs,
+  });
 
   return { ...headline, stop, stopReason };
 }

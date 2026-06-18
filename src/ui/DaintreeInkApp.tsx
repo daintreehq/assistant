@@ -114,6 +114,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       expanded={expanded}
       pending={controller.pendingConfirm}
       scrollOffset={scrollOffset}
+      logging={app.config.debugLog}
       composerFocus={
         view === "home" && !controller.busy && !controller.pendingConfirm
       }

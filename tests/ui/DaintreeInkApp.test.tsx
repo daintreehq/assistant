@@ -18,7 +18,7 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await tick(); // let mount effects (connect + scheduler + first poll) settle
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("DAINTREE"); // brand identity bar
+    expect(frame).toContain("assistant"); // brand identity bar
     expect(frame).toContain("›"); // the composer prompt glyph
     // Offline → the connection badge degrades and the mount log lands in the
     // transcript (which is why the empty hint is gone by now).

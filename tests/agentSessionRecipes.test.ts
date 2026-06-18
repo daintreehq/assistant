@@ -141,7 +141,7 @@ describe("AgentSession control messages", () => {
     const after = session.getMessages();
     expect(after[0].content).toBe(base);
     expect(after[1].content).toBe(runtime);
-    expect(after[2].content).toContain("Spawn a visible agent for file changes");
+    expect(after[2].content).toContain("Spawn a visible agent for edits or exploration");
     expect(session.getActiveRecipeIds()).toEqual([
       "daintree.edits.spawn-visible-agent",
     ]);
@@ -167,7 +167,7 @@ describe("AgentSession control messages", () => {
     let captured: ChatOptions | undefined;
     const { session } = makeSession({ onStream: (o) => (captured = o) });
     await session.send("hi");
-    expect(captured?.promptCacheKey).toBe("daintree-main-system-v6");
+    expect(captured?.promptCacheKey).toBe("daintree-main-system-v7");
   });
 
   it("loads the recipe the small model selects and logs the decision", async () => {

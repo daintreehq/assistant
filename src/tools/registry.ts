@@ -7,6 +7,7 @@ import type { AutomationGrantRecord, ToolResult } from "../schemas.js";
 import { decide } from "../safety/policy.js";
 import { assertNoFileEditTools } from "../safety/policy.js";
 import { fail, type ToolContext, type ToolDef } from "./types.js";
+import { logDebug } from "../debugLog.js";
 
 /**
  * OpenAI (and the Fireworks OpenAI-compatible endpoint) constrains function
@@ -209,6 +210,14 @@ export class ToolRegistry {
         }
         return res;
       }
+      // Auto-approve mode: the user has opted to skip the assistant's own confirm
+      // sheet (DAINTREE_ASSISTANT_AUTO_APPROVE), so a confirm-required tool runs
+      // straight through for the interactive actor. The tier check above already
+      // gated what's permitted at all; this only removes the Y/N step. Audited as
+      // a normal "ok" call so the action is still visible in the ledger.
+      if (ctx.config.autoApprove) {
+        return this.runHandler(tool, name, args, ctx, started);
+      }
       let approved = false;
       try {
         approved = await ctx.confirm({
@@ -280,6 +289,19 @@ export class ToolRegistry {
       : "error",
     grant?: AutomationGrantRecord,
   ): void {
+    // Full-fidelity debug trace of every dispatch — args + result untruncated.
+    logDebug(ctx.config, "tool.call", {
+      tool: name,
+      actor: ctx.actor,
+      actorId: ctx.actorId,
+      outcome,
+      ok: res.ok,
+      durationMs: Date.now() - started,
+      summary: res.summary,
+      args,
+      result: res.result,
+      error: res.error,
+    });
     try {
       const row = ctx.db.insertAudit({
         actor: ctx.actor,

@@ -26,6 +26,18 @@ describe("loadConfig", () => {
     expect(cfg.stateDir).toBe(stateDir);
   });
 
+  it("defaults autoApprove off and reads DAINTREE_ASSISTANT_AUTO_APPROVE=1", () => {
+    expect(loadConfig({ stateDir }).autoApprove).toBe(false);
+    vi.stubEnv("DAINTREE_ASSISTANT_AUTO_APPROVE", "1");
+    try {
+      expect(loadConfig({ stateDir }).autoApprove).toBe(true);
+      // An explicit override beats the env.
+      expect(loadConfig({ stateDir, autoApprove: false }).autoApprove).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("falls back to defaults for largeModel", () => {
     const cfg = loadConfig({ stateDir });
 

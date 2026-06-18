@@ -56,12 +56,12 @@ Report back: a concise status, any watcher/timer ids, and the next checkpoint.`,
 
 export const SPAWN_AGENT_FOR_EDITS_RECIPE: Recipe = {
   id: "daintree.edits.spawn-visible-agent",
-  title: "Spawn a visible agent for file changes",
+  title: "Spawn a visible agent for edits or exploration",
   version: "0.1.0",
-  summary: "How to handle requests that require changing files.",
+  summary: "How to handle requests that need a visible agent — to change files or to explore read-only.",
   whenToUse:
-    "Use whenever the user asks to implement, refactor, fix, add tests, update docs, or otherwise change project files.",
-  tags: ["edits", "agent", "worktree", "supervision", "implement", "fix", "refactor", "test"],
+    "Use whenever the user asks to implement, refactor, fix, add tests, update docs, or otherwise change project files — OR to spawn/launch a visible agent to explore, investigate, or survey a project read-only.",
+  tags: ["edits", "agent", "worktree", "supervision", "implement", "fix", "refactor", "test", "explore", "investigate", "spawn", "launch"],
   priority: 200,
   maxTurns: 8,
   risk: "project",
@@ -71,14 +71,15 @@ export const SPAWN_AGENT_FOR_EDITS_RECIPE: Recipe = {
     "watcher.terminal.create",
     "queue.digest",
   ],
-  body: `Use when: the task requires file changes (implement, refactor, fix, tests, docs).
+  body: `Use when: the task needs a visible agent — either to change files (implement, refactor, fix, tests, docs) or to explore/investigate a project read-only.
 Procedure:
-1. Say plainly that file changes require a visible agent: "This needs file changes, so I'll spawn a visible agent to do them."
+1. Say plainly that the work needs a visible agent: for edits, "This needs file changes, so I'll spawn a visible agent to do them"; for exploration, "I'll spawn a visible agent to explore this and watch it."
 2. Read only the minimum context needed to scope the task.
 3. Identify the target worktree. If unknown, inspect Daintree context first.
-4. Use agentTask.spawnForEdits with: title (short task name — becomes the spawned agent's visible name/tab label in Daintree, so keep it distinct when running several in parallel), taskPrompt (exact implementation instructions), context.filePaths when known, and watcher.create: true unless the task is trivial.
-5. The taskPrompt must tell the agent to: make changes only in the selected worktree; run relevant tests if practical; report changed files, tests run, and remaining risks.
+4. Use agentTask.spawnForEdits — NEVER a raw agent.launch via daintree.call — with: mode ("edit" to change files, "explore" for a read-only investigation), title (short task name — becomes the spawned agent's visible name/tab label in Daintree, so keep it distinct when running several in parallel), taskPrompt (exact instructions), context.filePaths when known, and watcher.create: true unless the task is trivial.
+5. For edit mode the taskPrompt must tell the agent to: make changes only in the selected worktree; run relevant tests if practical; report changed files, tests run, and remaining risks. For explore mode: investigate without touching files and report findings. (The wrapper appends the matching constraints automatically.)
 6. Never edit files yourself.
+7. After the call returns, report what actually happened: quote the real terminalId/watcherId from the result. If the launch errored or returned no terminalId, or the watcher reports the terminal exited, say so — do not claim a clean launch.
 Confirmation: spawning the agent mutates real state — confirm before launch per the active tier.
 Report back: the terminal id, the watcher id if created, and the expected next update.`,
 };

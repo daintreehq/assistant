@@ -10,6 +10,7 @@ import { startRepl } from "./repl.js";
 import { render, c } from "./render.js";
 import { createConsoleSink } from "./consoleSink.js";
 import { startInkApp } from "../ui/runInkApp.js";
+import { rotateDebugLog } from "../debugLog.js";
 import type { ConfigOverrides } from "../config.js";
 import type { Tier } from "../schemas.js";
 
@@ -35,6 +36,7 @@ function overridesFromOptions(opts: CliOptions): ConfigOverrides {
 
 async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
+  rotateDebugLog(app.config);
   app.setHooks({
     agentEvents: createConsoleSink(),
     // One-shot is non-interactive: auto-decline mutations rather than hang.
@@ -53,6 +55,7 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
 
 async function runInteractive(opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
+  rotateDebugLog(app.config);
   const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (opts.classic || !ttyOk) {
     await startRepl(app);

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
 import { WatchCondition, type WatcherRecord } from "../schemas.js";
 import { MONITOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
+import { logDebug } from "../debugLog.js";
 
 const CreateArgs = z.object({
   terminalIds: z
@@ -129,6 +130,22 @@ export const watcherTools: ToolDef[] = [
             ? JSON.stringify(args.alertWhen)
             : undefined,
           nextCheckAt: Date.now() + (args.startAfterMs ?? 0),
+        });
+        logDebug(ctx.config, "watcher.created", {
+          watcherId: w.id,
+          kind: "terminal",
+          isSupervisor: false,
+          via: "watcher.terminal.create",
+          title: args.title,
+          goal: args.goal,
+          targets: args.terminalIds,
+          cadenceMs: w.cadenceMs,
+          modelTier: w.modelTier,
+          startAfterMs: args.startAfterMs,
+          stopAfterMs: args.stopAfterMs,
+          stopWhen: args.stopWhen,
+          alertWhen: args.alertWhen,
+          nextCheckAt: w.nextCheckAt,
         });
         // Always surface the foreground-only lifecycle, even when the scheduler
         // is running: supervision pauses the moment the assistant is closed.

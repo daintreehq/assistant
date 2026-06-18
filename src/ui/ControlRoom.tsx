@@ -60,6 +60,8 @@ export interface ControlRoomProps {
   scrollOffset?: number;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
+  /** Debug logging is active — shown as a header badge so it's verifiable. */
+  logging?: boolean;
   composerFocus?: boolean;
   onSubmit?: (value: string) => void | Promise<void>;
   onResolve?: (approved: boolean) => void;
@@ -81,6 +83,7 @@ export function ControlRoom({
   pending = null,
   scrollOffset = 0,
   now = Date.now(),
+  logging = false,
   composerFocus = false,
   onSubmit = () => {},
   onResolve = () => {},
@@ -93,7 +96,8 @@ export function ControlRoom({
   const agents = buildAgentRows(dashboard.watchers, previews);
   const runs = dashboard.workflowRuns ?? [];
 
-  const composerH = 3;
+  // Composer is 4 rows: top rule, input, bottom rule, hint footer.
+  const composerH = 4;
   const statusH = 1;
   const approvalH = pending ? 8 : 0;
   const bodyHeight = Math.max(3, rows - composerH - statusH - approvalH);
@@ -142,6 +146,7 @@ export function ControlRoom({
               previews,
               busy,
               stage,
+              logging,
             }}
           />
         )}

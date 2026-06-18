@@ -56,6 +56,46 @@ describe("typed Daintree wrappers vs daintree.call (#2)", () => {
     expect(call?.args.recipeId).toBe("pr-review");
   });
 
+  it("daintree.call refuses tools that have a typed wrapper and names the wrapper", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+
+    // The two recurring footguns: agent.launch and terminal.getOutput via the
+    // raw escape hatch (with empty args). Both must redirect, not forward.
+    for (const [name, hint] of [
+      ["agent.launch", "agentTask.spawnForEdits"],
+      ["terminal.getOutput", "terminal.summarize"],
+      ["panel.focus", "terminal.focus"],
+    ] as const) {
+      const res = await reg.dispatch("daintree.call", { name, arguments: {} }, c);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code).toBe("USE_TYPED_WRAPPER");
+        expect(res.error.message).toContain(hint);
+      }
+    }
+    // The redirect happens before MCP is touched — no raw call was forwarded.
+    expect(c._calls.length).toBe(0);
+  });
+
+  it("daintree.call still forwards tools that have no wrapper", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch(
+      "daintree.call",
+      { name: "git.getProjectPulse", arguments: {} },
+      c,
+    );
+    expect(res.ok).toBe(true);
+    expect(c._calls.some((x) => x.name === "git.getProjectPulse")).toBe(true);
+  });
+
   it("terminal.focus maps to panel.focus({ panelId }) at operator tier", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);

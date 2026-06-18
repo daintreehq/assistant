@@ -10,6 +10,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import dotenv from "dotenv";
 import { Tier } from "./schemas.js";
@@ -42,8 +43,29 @@ export interface AppConfig {
   /** Permission tier the CLI operates at. */
   tier: Tier;
 
+  /**
+   * When true, the assistant skips its OWN per-action confirm sheet for the
+   * interactive `main` actor — mutating tools run without a Y/N prompt. The
+   * capability {@link tier} is the only remaining safeguard (it still gates what
+   * is permitted at all). Driven by `DAINTREE_ASSISTANT_AUTO_APPROVE=1`, which
+   * Daintree injects when the user enables "bypass permissions" for the
+   * assistant. Non-interactive actors (timer/watcher/workflow) are unaffected —
+   * they always need a scoped grant regardless of this flag.
+   */
+  autoApprove: boolean;
+
   /** When true, never actually call the network (used by tests / --offline). */
   offline: boolean;
+
+  /**
+   * When true, append a full-fidelity trace of EVERYTHING — every model request and
+   * response, every tool/function call with its args and result, and the whole
+   * watcher lifecycle — to a human-readable `logs/debug.log` under {@link projectPath}
+   * (git-ignored). Each assistant start rotates the file to a timestamped archive
+   * (keeping the previous 20). Intentionally large; a pre-release debugging aid, off
+   * by default. Driven by `DAINTREE_ASSISTANT_DEBUG_LOG=1` (also settable in `.env`).
+   */
+  debugLog: boolean;
 }
 
 export interface ConfigOverrides {
@@ -57,7 +79,9 @@ export interface ConfigOverrides {
   largeModel?: string;
   smallModel?: string;
   tier?: Tier;
+  autoApprove?: boolean;
   offline?: boolean;
+  debugLog?: boolean;
 }
 
 export const DEFAULTS = {
@@ -70,6 +94,30 @@ export const DEFAULTS = {
 
 function firstString(...vals: Array<string | undefined>): string | undefined {
   for (const v of vals) if (v && v.trim().length > 0) return v.trim();
+  return undefined;
+}
+
+/**
+ * Resolve the `.env` that ships next to the assistant itself, by walking up from
+ * this module to the nearest package.json. In dev that is the repo root; in a
+ * `tsup` build it is the parent of `dist/`. Used as a low-precedence fallback so
+ * dev/debug flags set beside the assistant apply regardless of which project's
+ * cwd the session is bound to. Best-effort — returns undefined if nothing resolves.
+ */
+function assistantOwnEnvPath(): string | undefined {
+  try {
+    let dir = path.dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 8; i++) {
+      if (fs.existsSync(path.join(dir, "package.json"))) {
+        return path.join(dir, ".env");
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break; // reached the filesystem root
+      dir = parent;
+    }
+  } catch {
+    /* best-effort — never block config load on this */
+  }
   return undefined;
 }
 
@@ -104,6 +152,16 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   if (fs.existsSync(envPath)) {
     dotenv.config({ path: envPath });
   }
+  // Also load the assistant's OWN package .env as a lower-precedence fallback.
+  // When Daintree embeds us, projectPath is the *bound project's* cwd, so a flag
+  // set next to the assistant (e.g. DAINTREE_ASSISTANT_DEBUG_LOG) would otherwise
+  // never be read. dotenv never overrides an already-set var, so the real env and
+  // the project .env above still win; this only fills gaps. A no-op in a published
+  // install (no .env ships there) and when it resolves to the same project .env.
+  const ownEnvPath = assistantOwnEnvPath();
+  if (ownEnvPath && ownEnvPath !== envPath && fs.existsSync(ownEnvPath)) {
+    dotenv.config({ path: ownEnvPath });
+  }
 
   const projectId = firstString(
     overrides.projectId,
@@ -131,8 +189,13 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
   const fireworksApiKey =
     firstString(overrides.fireworksApiKey, process.env.FIREWORKS_API_KEY) ?? "";
 
+  // The Daintree Assistant is the workspace's own first-class orchestrator, so it
+  // defaults to the highest tier — full access to every Daintree action. The
+  // confirmation matrix (ALWAYS_CONFIRM in safety/policy.ts) still gates mutating
+  // actions, so "system by default" grants reach, not unattended execution. Lower
+  // it explicitly via `--tier` / DAINTREE_ASSISTANT_TIER when sandboxing is wanted.
   const tier = Tier.safeParse(
-    overrides.tier ?? process.env.DAINTREE_ASSISTANT_TIER ?? "operator",
+    overrides.tier ?? process.env.DAINTREE_ASSISTANT_TIER ?? "system",
   );
 
   return {
@@ -154,8 +217,12 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     mcpToken: firstString(overrides.mcpToken, process.env.DAINTREE_MCP_TOKEN),
     projectId,
     windowId,
-    tier: tier.success ? tier.data : "operator",
+    tier: tier.success ? tier.data : "system",
+    autoApprove:
+      overrides.autoApprove ?? process.env.DAINTREE_ASSISTANT_AUTO_APPROVE === "1",
     offline: overrides.offline ?? process.env.DAINTREE_ASSISTANT_OFFLINE === "1",
+    debugLog:
+      overrides.debugLog ?? process.env.DAINTREE_ASSISTANT_DEBUG_LOG === "1",
   };
 }
 
@@ -174,6 +241,8 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
     mcpUrl: cfg.mcpUrl ?? "(unset → degraded local mode)",
     mcpToken: redact(cfg.mcpToken),
     tier: cfg.tier,
+    autoApprove: String(cfg.autoApprove),
     offline: String(cfg.offline),
+    debugLog: String(cfg.debugLog),
   };
 }

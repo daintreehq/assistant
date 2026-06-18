@@ -40,6 +40,8 @@ export interface IntroBlock {
   previews?: TerminalPreview[];
   busy: boolean;
   stage: string;
+  /** Debug logging is active — surfaced in the header so it's verifiable at a glance. */
+  logging?: boolean;
 }
 
 const line = (key: string, segments: Segment[] | string): LedgerLine => ({
@@ -210,7 +212,7 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
 
   out.push(
     line("intro-brand", [
-      { text: `${set.brand} DAINTREE ASSISTANT`, color: ui.color.accent, bold: true },
+      { text: `${set.brand} assistant`, color: ui.color.accent, bold: true },
     ]),
   );
   out.push(
@@ -223,6 +225,12 @@ function buildIntroLines(intro: IntroBlock, width: number, now: number): LedgerL
       intro.connected
         ? { text: "MCP CONNECTED", color: ui.color.accent }
         : { text: "MCP DEGRADED", color: ui.color.warning },
+      ...(intro.logging
+        ? ([
+            { text: " · ", dimColor: true },
+            { text: `${set.active} LOG`, color: ui.color.warning, bold: true },
+          ] as Segment[])
+        : []),
     ]),
   );
   out.push(rule("intro-rule-a", width));

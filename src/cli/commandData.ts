@@ -146,6 +146,14 @@ export async function runDoctor(app: App): Promise<DoctorCheck[]> {
     detail: cfg.projectPath,
     fix: projOk ? undefined : "pass --project <dir> or run from the project root",
   });
+  if (st.connected && st.driftToolNames?.length) {
+    const names = st.driftToolNames;
+    checks.push({
+      label: "mcp drift",
+      ok: true,
+      detail: `${names.length} documented tool(s) not advertised at this tier/plugin config: ${names.join(", ")}`,
+    });
+  }
   checks.push({ label: "tier", ok: true, detail: cfg.tier });
   checks.push({ label: "tools loaded", ok: app.registry.list().length > 0, detail: String(app.registry.list().length) });
   return checks;
