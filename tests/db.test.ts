@@ -56,11 +56,14 @@ describe("Db migration v2 -> v3 (isSupervisor)", () => {
       isSupervisor: true,
     });
     expect(db.getWatcher(fresh.id)?.isSupervisor).toBe(true);
+    // Opening runs the full forward-only ladder, so user_version lands on the
+    // current migration count (now 5 with grant provenance + workflow_runs),
+    // not just 3.
     const version = db
       .raw()
       .prepare("PRAGMA user_version")
       .get() as { user_version: number };
-    expect(version.user_version).toBe(4);
+    expect(version.user_version).toBe(5);
     db.close();
   });
 });
@@ -131,11 +134,93 @@ describe("Db migration v3 -> v4 (grant provenance)", () => {
     const back = db.listAudit().find((r) => r.id === aud.id)!;
     expect(back.grantSource).toBe("local");
     expect(back.grantId).toBe(fresh.id);
+    // Opening a pre-current (v3) DB runs the full forward-only ladder, so
+    // user_version lands on the current migration count (now 5 with the
+    // workflow_runs step appended after grant provenance).
     const version = db
       .raw()
       .prepare("PRAGMA user_version")
       .get() as { user_version: number };
-    expect(version.user_version).toBe(4);
+    expect(version.user_version).toBe(5);
+    db.close();
+  });
+});
+
+describe("Db migration v4 -> v5 (workflow_runs)", () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "db-mig-wf-"));
+    path = join(dir, "state.db");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates the workflow_runs table for a pre-workflow (v4) database", () => {
+    // Build a v4 database by hand: a watchers table WITH isSupervisor (the v3
+    // schema) but NO workflow_runs table, user_version pinned to 4 (after the
+    // grant-provenance migration but before workflow_runs).
+    const raw = new DatabaseSync(path);
+    raw.exec(`CREATE TABLE watchers (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
+      goal TEXT NOT NULL, targetsJson TEXT NOT NULL, cadenceMs INTEGER NOT NULL,
+      isSupervisor INTEGER NOT NULL DEFAULT 0, modelTier TEXT NOT NULL,
+      startAfterMs INTEGER, stopAfterMs INTEGER, stopWhenJson TEXT,
+      alertWhenJson TEXT, optionsJson TEXT, status TEXT NOT NULL DEFAULT 'created',
+      lastClassification TEXT, lastCheckedAt INTEGER, nextCheckAt INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL
+    )`);
+    raw.exec("PRAGMA user_version = 4");
+    // No workflow_runs table exists yet.
+    const before = raw
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_runs'",
+      )
+      .all();
+    expect(before).toHaveLength(0);
+    raw.close();
+
+    // Opening through Db runs the forward-only migrations.
+    const db = new Db(path);
+    // The migrated schema carries every workflow_runs column and the status index.
+    const cols = (
+      db.raw().prepare("PRAGMA table_info(workflow_runs)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        "id",
+        "issueNumber",
+        "terminalIdsJson",
+        "watcherIdsJson",
+        "queueEventIdsJson",
+        "status",
+        "nextActionJson",
+        "notesJson",
+        "createdAt",
+        "updatedAt",
+        "completedAt",
+      ]),
+    );
+    const indexes = (
+      db.raw().prepare("PRAGMA index_list(workflow_runs)").all() as Array<{
+        name: string;
+      }>
+    ).map((i) => i.name);
+    expect(indexes).toContain("idx_workflow_runs_status");
+    // The table accepts inserts and the run round-trips.
+    const rec = db.insertWorkflowRun({ issueNumber: 25, status: "active" });
+    expect(rec.id).toMatch(/^wfr_[0-9a-f]{8}$/);
+    expect(db.getWorkflowRun(rec.id)?.issueNumber).toBe(25);
+    const version = db
+      .raw()
+      .prepare("PRAGMA user_version")
+      .get() as { user_version: number };
+    expect(version.user_version).toBe(5);
     db.close();
   });
 });
@@ -463,6 +548,136 @@ describe("Db", () => {
       expect(db.revokeGrantsByActor("wch_x", T0)).toBe(2);
       expect(db.listGrants("wch_x", T0)).toHaveLength(0);
       expect(db.listGrants("wch_y", T0)).toHaveLength(1);
+    });
+  });
+
+  describe("workflow runs", () => {
+    it("insertWorkflowRun applies defaults (wfr_ id, pending status, timestamps)", () => {
+      const rec = db.insertWorkflowRun({ issueNumber: 25 });
+      expect(rec.id).toMatch(/^wfr_[0-9a-f]{8}$/);
+      expect(rec.status).toBe("pending");
+      expect(rec.createdAt).toBeGreaterThan(0);
+      expect(rec.updatedAt).toBe(rec.createdAt);
+      expect(rec.completedAt).toBeUndefined();
+    });
+
+    it("round-trips every optional JSON column through getWorkflowRun", () => {
+      const rec = db.insertWorkflowRun({
+        issueNumber: 25,
+        issueUrl: "https://example.test/issues/25",
+        issueTitle: "Add a durable workflow ledger",
+        branch: "feature/issue-25",
+        worktreeId: "wt_abc",
+        prNumber: 99,
+        prUrl: "https://example.test/pull/99",
+        terminalIdsJson: JSON.stringify(["term_1", "term_2"]),
+        watcherIdsJson: JSON.stringify(["wch_1"]),
+        queueEventIdsJson: JSON.stringify(["evt_1"]),
+        status: "active",
+        nextActionJson: JSON.stringify({
+          label: "Open the PR",
+          toolName: "workflow.update",
+        }),
+        notesJson: JSON.stringify(["seeded from issue body"]),
+      });
+      const fetched = db.getWorkflowRun(rec.id)!;
+      expect(fetched.issueNumber).toBe(25);
+      expect(fetched.prNumber).toBe(99);
+      expect(JSON.parse(fetched.terminalIdsJson!)).toEqual(["term_1", "term_2"]);
+      expect(JSON.parse(fetched.watcherIdsJson!)).toEqual(["wch_1"]);
+      expect(JSON.parse(fetched.queueEventIdsJson!)).toEqual(["evt_1"]);
+      expect(JSON.parse(fetched.nextActionJson!).label).toBe("Open the PR");
+      expect(JSON.parse(fetched.notesJson!)).toEqual(["seeded from issue body"]);
+    });
+
+    it("getWorkflowRun returns undefined for an unknown id", () => {
+      expect(db.getWorkflowRun("wfr_missing")).toBeUndefined();
+    });
+
+    it("maps SQL NULL columns to undefined, not null", () => {
+      const rec = db.insertWorkflowRun({});
+      const fetched = db.getWorkflowRun(rec.id)!;
+      expect(fetched.issueNumber).toBeUndefined();
+      expect(fetched.terminalIdsJson).toBeUndefined();
+      expect(fetched.nextActionJson).toBeUndefined();
+      expect(fetched.completedAt).toBeUndefined();
+    });
+
+    it("listWorkflowRuns filters by status and returns all when unfiltered", () => {
+      db.insertWorkflowRun({ issueNumber: 1, status: "active" });
+      db.insertWorkflowRun({ issueNumber: 2, status: "blocked" });
+      db.insertWorkflowRun({ issueNumber: 3, status: "active" });
+
+      expect(db.listWorkflowRuns("active")).toHaveLength(2);
+      expect(db.listWorkflowRuns("blocked")).toHaveLength(1);
+      expect(db.listWorkflowRuns("done")).toHaveLength(0);
+      expect(db.listWorkflowRuns()).toHaveLength(3);
+      expect(
+        db.listWorkflowRuns("active").every((r) => r.status === "active"),
+      ).toBe(true);
+    });
+
+    it("updateWorkflowRun patches allowed columns and advances updatedAt", () => {
+      const rec = db.insertWorkflowRun({ issueNumber: 7, createdAt: 1000 });
+      db.updateWorkflowRun(rec.id, {
+        status: "active",
+        prNumber: 42,
+        terminalIdsJson: JSON.stringify(["term_9"]),
+      });
+      const fetched = db.getWorkflowRun(rec.id)!;
+      expect(fetched.status).toBe("active");
+      expect(fetched.prNumber).toBe(42);
+      expect(JSON.parse(fetched.terminalIdsJson!)).toEqual(["term_9"]);
+      // updatedAt advances past the seeded createdAt; createdAt is unchanged.
+      expect(fetched.updatedAt).toBeGreaterThan(1000);
+      expect(fetched.createdAt).toBe(1000);
+    });
+
+    it("updateWorkflowRun does not advance updatedAt for a no-op patch", () => {
+      const rec = db.insertWorkflowRun({ issueNumber: 7, createdAt: 1000 });
+      const before = db.getWorkflowRun(rec.id)!.updatedAt;
+      // An empty patch (and a patch of only-unknown keys) is a no-op.
+      db.updateWorkflowRun(rec.id, {});
+      db.updateWorkflowRun(rec.id, { bogus: "x" } as Record<string, unknown>);
+      expect(db.getWorkflowRun(rec.id)!.updatedAt).toBe(before);
+    });
+
+    it("listWorkflowRuns orders by updatedAt descending", () => {
+      const a = db.insertWorkflowRun({ issueNumber: 1, createdAt: 100, updatedAt: 100 });
+      const b = db.insertWorkflowRun({ issueNumber: 2, createdAt: 300, updatedAt: 300 });
+      const c = db.insertWorkflowRun({ issueNumber: 3, createdAt: 200, updatedAt: 200 });
+      expect(db.listWorkflowRuns().map((r) => r.id)).toEqual([b.id, c.id, a.id]);
+    });
+
+    it("updateWorkflowRun ignores unknown / immutable columns", () => {
+      const rec = db.insertWorkflowRun({ issueNumber: 7, createdAt: 1000 });
+      db.updateWorkflowRun(rec.id, {
+        id: "wfr_hacked",
+        createdAt: 5,
+        bogus: "nope",
+      } as Record<string, unknown>);
+      const fetched = db.getWorkflowRun(rec.id)!;
+      expect(fetched.id).toBe(rec.id);
+      expect(fetched.createdAt).toBe(1000);
+    });
+
+    it("persists completedAt and survives a close + reopen", () => {
+      const dir = mkdtempSync(join(tmpdir(), "db-wf-"));
+      const path = join(dir, "state.db");
+      try {
+        const first = new Db(path);
+        const rec = first.insertWorkflowRun({ issueNumber: 11, status: "active" });
+        first.updateWorkflowRun(rec.id, { status: "done", completedAt: 7777 });
+        first.close();
+
+        const second = new Db(path);
+        const fetched = second.getWorkflowRun(rec.id)!;
+        expect(fetched.status).toBe("done");
+        expect(fetched.completedAt).toBe(7777);
+        second.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

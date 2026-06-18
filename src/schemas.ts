@@ -409,6 +409,63 @@ export interface RecipeSelectionLogRecord {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Workflow ledger                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Lifecycle of a single unit of orchestrated work (one issue/PR). Mirrors the
+ * status conventions already used by timers and watchers:
+ *   - pending   — created, work not yet started
+ *   - active    — work in progress (a terminal/worker is running)
+ *   - blocked   — stalled on a human decision or external dependency
+ *   - done      — completed successfully (terminal)
+ *   - cancelled — abandoned on purpose (terminal)
+ *   - failed    — ended unsuccessfully (terminal)
+ */
+export type WorkflowRunStatus =
+  | "pending"
+  | "active"
+  | "blocked"
+  | "done"
+  | "cancelled"
+  | "failed";
+
+/**
+ * A durable ledger row tying together the terminals, watchers, and queue events
+ * that make up one unit of issue/PR work, plus the single next required action.
+ * Lets the assistant answer "what is this terminal working on and what is the
+ * next required action" without re-inferring state from scratch after a restart.
+ *
+ * The `*Json` columns hold serialized data (matching the store-wide convention,
+ * e.g. WatcherRecord.targetsJson):
+ *   - terminalIdsJson / watcherIdsJson / queueEventIdsJson — JSON `string[]` of
+ *     the linked Daintree/daemon ids
+ *   - notesJson — JSON `string[]` of freeform context notes
+ *   - nextActionJson — a single serialized {@link RecommendedAction}
+ */
+export interface WorkflowRunRecord {
+  id: string; // wfr_<uuid8>
+  issueNumber?: number;
+  issueUrl?: string;
+  issueTitle?: string;
+  branch?: string;
+  worktreeId?: string;
+  prNumber?: number;
+  prUrl?: string;
+  terminalIdsJson?: string; // JSON string[]
+  watcherIdsJson?: string; // JSON string[]
+  queueEventIdsJson?: string; // JSON string[]
+  status: WorkflowRunStatus;
+  nextActionJson?: string; // serialized RecommendedAction
+  notesJson?: string; // JSON string[]
+  createdAt: number;
+  /** Advances on every update; createdAt stays fixed. Used for recency ordering. */
+  updatedAt: number;
+  /** Stamped once when status first reaches a terminal state. */
+  completedAt?: number;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 

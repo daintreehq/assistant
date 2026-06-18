@@ -22,6 +22,8 @@ import type {
   RecipeSelectionLogRecord,
   TimerRecord,
   WatcherRecord,
+  WorkflowRunRecord,
+  WorkflowRunStatus,
 } from "../schemas.js";
 import { SCHEDULER_TICK_MS } from "../watcherCadence.js";
 
@@ -134,6 +136,27 @@ CREATE TABLE IF NOT EXISTS automation_grants (
   source TEXT NOT NULL DEFAULT 'local'
 );
 CREATE INDEX IF NOT EXISTS idx_grants_actor ON automation_grants (actorId, revokedAt, expiresAt);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  issueNumber INTEGER,
+  issueUrl TEXT,
+  issueTitle TEXT,
+  branch TEXT,
+  worktreeId TEXT,
+  prNumber INTEGER,
+  prUrl TEXT,
+  terminalIdsJson TEXT,
+  watcherIdsJson TEXT,
+  queueEventIdsJson TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  nextActionJson TEXT,
+  notesJson TEXT,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  completedAt INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status, updatedAt);
 `;
 
 export interface QueueDigestOptions {
@@ -168,6 +191,13 @@ const WATCHER_UPDATE_COLS: ReadonlySet<string> = new Set([
   "title", "goal", "targetsJson", "cadenceMs", "isSupervisor", "modelTier", "startAfterMs",
   "stopAfterMs", "stopWhenJson", "alertWhenJson", "optionsJson", "status",
   "lastClassification", "lastCheckedAt", "nextCheckAt",
+]);
+// `id`/`createdAt` are immutable; `updatedAt` is in the list but always forced by
+// the store (never taken from a caller patch — see updateWorkflowRun).
+const WORKFLOW_UPDATE_COLS: ReadonlySet<string> = new Set([
+  "issueNumber", "issueUrl", "issueTitle", "branch", "worktreeId", "prNumber", "prUrl",
+  "terminalIdsJson", "watcherIdsJson", "queueEventIdsJson", "status",
+  "nextActionJson", "notesJson", "updatedAt", "completedAt",
 ]);
 
 type SqlIn = string | number | bigint | null | Uint8Array;
@@ -268,6 +298,35 @@ export class Db {
         );
         this.addColumnIfMissing("audit_log", "grantSource", "TEXT");
         this.addColumnIfMissing("audit_log", "grantId", "TEXT");
+      },
+      // v5: workflow_runs — a durable ledger tying together the terminals,
+      // watchers, and queue events of one unit of issue/PR work, plus its next
+      // required action. The base SCHEMA already creates this for fresh DBs; this
+      // step creates it for databases that predate the table. CREATE TABLE IF NOT
+      // EXISTS makes it a harmless no-op when SCHEMA already ran it.
+      () => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            issueNumber INTEGER,
+            issueUrl TEXT,
+            issueTitle TEXT,
+            branch TEXT,
+            worktreeId TEXT,
+            prNumber INTEGER,
+            prUrl TEXT,
+            terminalIdsJson TEXT,
+            watcherIdsJson TEXT,
+            queueEventIdsJson TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            nextActionJson TEXT,
+            notesJson TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            completedAt INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status, updatedAt);
+        `);
       },
     ];
     const row = this.db.prepare("PRAGMA user_version").get() as
@@ -836,5 +895,120 @@ export class Db {
     return this.db
       .prepare("SELECT * FROM recipe_selection_log ORDER BY ts DESC LIMIT ?")
       .all(limit) as unknown as RecipeSelectionLogRecord[];
+  }
+
+  /* -------------------------- workflow runs ------------------------------ */
+
+  insertWorkflowRun(
+    rec: Omit<WorkflowRunRecord, "id" | "status" | "createdAt" | "updatedAt"> &
+      Partial<WorkflowRunRecord>,
+  ): WorkflowRunRecord {
+    const now = rec.createdAt ?? Date.now();
+    const full: WorkflowRunRecord = {
+      id: rec.id ?? `wfr_${randomUUID().slice(0, 8)}`,
+      issueNumber: rec.issueNumber,
+      issueUrl: rec.issueUrl,
+      issueTitle: rec.issueTitle,
+      branch: rec.branch,
+      worktreeId: rec.worktreeId,
+      prNumber: rec.prNumber,
+      prUrl: rec.prUrl,
+      terminalIdsJson: rec.terminalIdsJson,
+      watcherIdsJson: rec.watcherIdsJson,
+      queueEventIdsJson: rec.queueEventIdsJson,
+      status: rec.status ?? "pending",
+      nextActionJson: rec.nextActionJson,
+      notesJson: rec.notesJson,
+      createdAt: now,
+      updatedAt: rec.updatedAt ?? now,
+      completedAt: rec.completedAt,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO workflow_runs (id,issueNumber,issueUrl,issueTitle,branch,worktreeId,prNumber,prUrl,terminalIdsJson,watcherIdsJson,queueEventIdsJson,status,nextActionJson,notesJson,createdAt,updatedAt,completedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.issueNumber ?? null,
+        full.issueUrl ?? null,
+        full.issueTitle ?? null,
+        full.branch ?? null,
+        full.worktreeId ?? null,
+        full.prNumber ?? null,
+        full.prUrl ?? null,
+        full.terminalIdsJson ?? null,
+        full.watcherIdsJson ?? null,
+        full.queueEventIdsJson ?? null,
+        full.status,
+        full.nextActionJson ?? null,
+        full.notesJson ?? null,
+        full.createdAt,
+        full.updatedAt,
+        full.completedAt ?? null,
+      );
+    return full;
+  }
+
+  getWorkflowRun(id: string): WorkflowRunRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM workflow_runs WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToWorkflowRun(row) : undefined;
+  }
+
+  listWorkflowRuns(status?: WorkflowRunStatus): WorkflowRunRecord[] {
+    const rows = (status
+      ? this.db
+          .prepare("SELECT * FROM workflow_runs WHERE status = ? ORDER BY updatedAt DESC")
+          .all(status)
+      : this.db
+          .prepare("SELECT * FROM workflow_runs ORDER BY updatedAt DESC")
+          .all()) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToWorkflowRun(r));
+  }
+
+  updateWorkflowRun(id: string, patch: Partial<WorkflowRunRecord>): void {
+    // No-op patches must not advance recency, so only touch the row when the
+    // caller actually changes an allowed column (updatedAt itself doesn't count).
+    const changesSomething = Object.keys(patch).some(
+      (k) => k !== "updatedAt" && WORKFLOW_UPDATE_COLS.has(k),
+    );
+    if (!changesSomething) return;
+    // updatedAt is always advanced by the store and never taken from a caller's
+    // patch, so an update can't write a stale recency value. completedAt IS
+    // caller-settable (the tool layer stamps it on terminal transitions).
+    const next = { ...patch, updatedAt: Date.now() };
+    this.applyUpdate(
+      "workflow_runs",
+      WORKFLOW_UPDATE_COLS,
+      id,
+      next as Record<string, unknown>,
+    );
+  }
+
+  /** Coerce a raw workflow_runs row into a record, mapping SQL NULL → undefined
+   * for optional columns (the `*Json` fields stay raw JSON strings — the tool
+   * layer deserializes them). */
+  private rowToWorkflowRun(r: Record<string, unknown>): WorkflowRunRecord {
+    return {
+      id: r.id as string,
+      issueNumber: (r.issueNumber as number) ?? undefined,
+      issueUrl: (r.issueUrl as string) ?? undefined,
+      issueTitle: (r.issueTitle as string) ?? undefined,
+      branch: (r.branch as string) ?? undefined,
+      worktreeId: (r.worktreeId as string) ?? undefined,
+      prNumber: (r.prNumber as number) ?? undefined,
+      prUrl: (r.prUrl as string) ?? undefined,
+      terminalIdsJson: (r.terminalIdsJson as string) ?? undefined,
+      watcherIdsJson: (r.watcherIdsJson as string) ?? undefined,
+      queueEventIdsJson: (r.queueEventIdsJson as string) ?? undefined,
+      status: r.status as WorkflowRunStatus,
+      nextActionJson: (r.nextActionJson as string) ?? undefined,
+      notesJson: (r.notesJson as string) ?? undefined,
+      createdAt: r.createdAt as number,
+      updatedAt: r.updatedAt as number,
+      completedAt: (r.completedAt as number) ?? undefined,
+    };
   }
 }
