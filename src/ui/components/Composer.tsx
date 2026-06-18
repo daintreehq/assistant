@@ -31,10 +31,11 @@ function suggestionsFor(value: string): Array<[string, string]> {
 }
 
 /**
- * The composer is always fixed to the bottom. Guidance stays short here; the
- * scrollable intro/help surfaces carry the long explanations. Typing `/` opens a
- * command palette; Tab completes the top match. While busy, the actual stage is
- * shown, not a generic "thinking".
+ * The composer. Two visual layers: the input line (a single `›` — Daintree is
+ * already named in the header) and a context line whose right side reflects the
+ * session, not a fixed shortcut string. Typing `/` opens a command palette;
+ * Tab completes the top match. While busy, the actual stage is shown, not a
+ * generic "thinking".
  */
 export function Composer({
   busy,
@@ -57,7 +58,6 @@ export function Composer({
   const [value, setValue] = useState("");
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
   const set = glyphs();
-  const compactHints = width < 64;
 
   useInput(
     (_input, key) => {
@@ -70,11 +70,11 @@ export function Composer({
   );
 
   return (
-    <Box flexDirection="column" width={width} overflowY="hidden">
+    <Box flexDirection="column">
       {suggestions.length > 0 ? (
-        <Box flexDirection="column" marginBottom={1} paddingLeft={2} overflowY="hidden">
+        <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {suggestions.map(([cmd, desc]) => (
-            <Text key={cmd} wrap="truncate">
+            <Text key={cmd}>
               <Text color={ui.color.info}>{cmd.padEnd(14)}</Text>
               <Text dimColor>{desc}</Text>
             </Text>
@@ -84,9 +84,9 @@ export function Composer({
 
       <Divider width={width} />
 
-      <Box height={1} overflow="hidden">
+      <Box>
         <Text color={ui.color.accent}>{set.active === "◌" ? "›" : ">"} </Text>
-        <Box flexGrow={1} height={1} overflow="hidden">
+        <Box flexGrow={1}>
           <TextInput
             value={value}
             focus={focus}
@@ -95,12 +95,14 @@ export function Composer({
             onSubmit={(text) => {
               const trimmed = text.trim();
               if (!trimmed) return;
-              // Clear only if the submit was accepted — if a turn is already in
-              // flight (e.g. an autonomous wake-up), keep the text so it isn't lost.
-              const accepted = onSubmit(trimmed);
-              if (accepted !== false) setValue("");
+              // The controller returns false synchronously when it rejects the
+              // submit (a turn is already in flight). Keep the text so it isn't
+              // lost; any other result (void, or a Promise for an accepted
+              // turn) means the input was taken, so clear it.
+              if (onSubmit(trimmed) === false) return;
+              setValue("");
             }}
-            placeholder="Ask Daintree..."
+            placeholder="Ask Daintree to supervise, delegate, or inspect…"
           />
         </Box>
         {busy ? (
@@ -112,18 +114,13 @@ export function Composer({
         ) : null}
       </Box>
 
-      {/* Bracket the input row top and bottom so it's unmistakable where text goes. */}
-      <Divider width={width} />
-
-      <Box justifyContent="space-between" height={1} overflow="hidden">
+      <Box justifyContent="space-between">
         <Box>
-          <KeyHint keyName="/" action={compactHints ? "cmd" : "commands"} />
+          <KeyHint keyName="/" action="commands" />
           <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="^O" action="ops" />
-          <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="^C" action="exit" />
+          <KeyHint keyName="^O" action="inspect ops" />
         </Box>
-        {contextHint ? <Text dimColor wrap="truncate">{contextHint}</Text> : null}
+        {contextHint ? <Text dimColor>{contextHint}</Text> : null}
       </Box>
     </Box>
   );

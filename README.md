@@ -27,8 +27,8 @@ npm run dev
 # Legacy readline REPL / non-TTY-safe
 npm run dev -- --classic
 
-# Ink without the alternate (full-screen) buffer — keeps scrollback
-npm run dev -- --no-alt-screen
+# Ink rendered inline instead of the full-screen buffer — keeps native scrollback
+npm run dev -- --inline
 
 # One-shot (console output)
 npm run dev -- "which worktrees are ready for review?"

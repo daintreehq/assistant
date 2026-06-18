@@ -13,12 +13,18 @@ export function Header({
   tier,
   connected,
   runTitle,
+  logging = false,
+  logFile,
 }: {
   project: string;
   tier: string;
   connected: boolean;
   /** Subtitle: the in-flight run's intent, when a turn is active. */
   runTitle?: string;
+  /** Debug logging is active — surfaced as a badge so it's verifiable at a glance. */
+  logging?: boolean;
+  /** Path of the active debug log, shown dim under the bar so it can be tailed. */
+  logFile?: string;
 }) {
   const set = glyphs();
   return (
@@ -52,7 +58,27 @@ export function Header({
       {runTitle ? (
         <Box>
           <Text dimColor>{"  "}</Text>
-          <Text dimColor>{runTitle}</Text>
+          <Text dimColor wrap="truncate">
+            {runTitle}
+          </Text>
+        </Box>
+      ) : null}
+      {/* The debug-log indicator lives on its own line — kept off the identity
+          row so its width can't push the non-shrinking tier/connection cluster
+          into a second row on a narrow terminal. The badge is the warning glyph;
+          the path (when known) truncates so this stays exactly one row. */}
+      {logging ? (
+        <Box>
+          <Text dimColor>{"  "}</Text>
+          <Text color={ui.color.warning}>
+            {set.active} LOG
+          </Text>
+          {logFile ? (
+            <Text dimColor wrap="truncate">
+              {" · "}
+              {logFile}
+            </Text>
+          ) : null}
         </Box>
       ) : null}
     </Box>

@@ -5,11 +5,12 @@ import { DaintreeInkApp } from "./DaintreeInkApp.js";
 
 export interface InkAppOptions {
   /**
-   * Opt INTO the full-screen alternate buffer. Default is inline rendering so
-   * the cockpit shares the host terminal's native scrollback — inside Daintree
-   * (and any normal terminal) the wheel/trackpad scrolls history for free, the
-   * same way Claude Code's agent panes do. The alternate buffer has no
-   * scrollback, so it's now strictly opt-in (`--alt-screen`).
+   * Render in the full-screen alternate buffer (the DEFAULT). The control room
+   * is a fixed, full-screen layout — header, bounded body, status line and
+   * composer each own a budgeted region — so it needs the alternate buffer to
+   * paint a stable frame and restore the terminal on exit. Pass `false`
+   * (`--inline`) to fall back to inline rendering for hosts that can't allocate
+   * an alternate buffer.
    */
   alternateScreen?: boolean;
 }
@@ -18,7 +19,7 @@ export async function startInkApp(
   app: App,
   opts: InkAppOptions = {},
 ): Promise<void> {
-  const alternateScreen = opts.alternateScreen === true;
+  const alternateScreen = opts.alternateScreen !== false;
   const instance = render(createElement(DaintreeInkApp, { app }), {
     // We handle Ctrl+C ourselves so shutdown drains the scheduler/MCP/DB.
     exitOnCtrlC: false,

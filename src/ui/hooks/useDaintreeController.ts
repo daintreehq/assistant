@@ -17,8 +17,7 @@ import {
 } from "react";
 import type { App } from "../../cli/app.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
-import { handleUiCommand } from "../../cli/commandData.js";
-import { buildAgentRows } from "../presentation/operations.js";
+import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
 import { presentTool } from "../presentation/tools.js";
 import type {
   ActivityItem,
@@ -292,8 +291,9 @@ export interface DaintreeController {
   /** Submit user input. Returns false (synchronously) if rejected — empty, or a
    *  turn is already in flight — so the composer can keep the text. */
   sendUserMessage: (text: string) => boolean;
-  /** Print a one-shot operations snapshot inline (the `^O` key). */
-  openOps: () => void;
+  /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
+  activePanel: PanelKey | null;
+  setActivePanel: (panel: PanelKey | null) => void;
   resolveConfirm: (approved: boolean) => void;
 }
 
@@ -307,6 +307,7 @@ export function useDaintreeController(
     null,
   );
   const [busy, setBusy] = useState(false);
+  const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
   );
@@ -451,10 +452,12 @@ export function useDaintreeController(
               onExit?.();
               return;
             }
-            // Every command prints its result inline into the stream (Claude Code
-            // shaped), where it commits to the terminal's scrollback — no
-            // full-screen panel takes over. `switchPanel` is now just metadata.
-            if (result.title || result.text) {
+            if (result.switchPanel) {
+              // A panel command opens a purposeful VIEW rather than dumping text
+              // into the transcript — the multi-layout owns a dedicated screen
+              // for operations/help. Re-running the same command re-opens it.
+              setActivePanel(result.switchPanel);
+            } else if (result.title || result.text) {
               dispatch({
                 type: "command:add",
                 title: result.title ?? "",
@@ -492,17 +495,6 @@ export function useDaintreeController(
     });
   }, []);
 
-  // `^O`: snapshot the current operational state into the stream as a command
-  // cell. Inline like Claude Code's /status — it scrolls away into history, it
-  // doesn't take over the screen. Reads the latest dashboard each press.
-  const openOps = useCallback(() => {
-    dispatch({
-      type: "command:add",
-      title: "Operations",
-      text: formatOpsSnapshot(snapshot(app)),
-    });
-  }, [app]);
-
   const stage = useMemo(() => deriveStage(transcript), [transcript]);
 
   return {
@@ -513,33 +505,8 @@ export function useDaintreeController(
     stage,
     pendingConfirm,
     sendUserMessage,
-    openOps,
+    activePanel,
+    setActivePanel,
     resolveConfirm,
   };
-}
-
-/** Render the ops deck (agents · timers · runs · inbox) as a compact text block
- *  for the inline `^O` snapshot. */
-function formatOpsSnapshot(dashboard: DashboardState): string {
-  const agents = buildAgentRows(dashboard.watchers);
-  const runs = dashboard.workflowRuns ?? [];
-  const { timers, inbox } = dashboard;
-  const out: string[] = [
-    `agents ${agents.length} · runs ${runs.length} · timers ${timers.length} · inbox ${inbox.length}`,
-  ];
-  for (const a of agents) {
-    out.push(`  ${a.id}  [${a.classification ?? "pending"}] ${a.goal || a.title}`);
-  }
-  for (const r of runs) {
-    const title = r.issueTitle ?? r.branch ?? r.worktreeId ?? r.id;
-    out.push(`  run ${r.status} — ${title}`);
-  }
-  for (const t of timers) {
-    out.push(`  timer ${t.title} — ${new Date(t.fireAt).toLocaleTimeString()}`);
-  }
-  for (const e of inbox.slice(0, 5)) {
-    const ev = e as { title?: string; summary?: string };
-    out.push(`  ! ${ev.title ?? "event"}${ev.summary ? ` — ${ev.summary}` : ""}`);
-  }
-  return out.join("\n");
 }

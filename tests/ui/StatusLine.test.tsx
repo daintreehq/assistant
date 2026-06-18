@@ -34,19 +34,18 @@ function watcher(over: Partial<WatcherRecord> = {}): WatcherRecord {
 const event = (severity: string) => ({ id: severity, severity }) as any;
 
 describe("StatusLine", () => {
-  it("shows the scrollback affordance, tier, and MCP health", () => {
+  it("stands by when nothing is active, surfacing the tier", () => {
     const frame = render(<StatusLine dashboard={dash()} tier="operator" />).lastFrame() ?? "";
-    // Scrollback is the terminal's now, so the footer just points at it.
-    expect(frame).toContain("scroll for history");
+    expect(frame).toContain("Standing by");
     expect(frame).toContain("OPERATOR");
     expect(frame).toContain("MCP");
   });
 
-  it("keeps work detail out of the footer and shows only inventory counts", () => {
+  it("prefers the current active agent over inventory counts", () => {
     const frame =
       render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
-    expect(frame).not.toContain("WORKING"); // work detail belongs in the ledger
-    expect(frame).not.toContain("term_8");
+    expect(frame).toContain("WORKING"); // active agent badge
+    expect(frame).toContain("term_8"); // the supervised terminal
     expect(frame).toContain("agents 1"); // compact rollup on the right
   });
 

@@ -12,8 +12,7 @@ describe("Composer", () => {
     expect(frame).toContain("›"); // the one prompt glyph (no repeated branding)
     expect(frame).not.toContain("daintree ❯");
     expect(frame).toContain("commands"); // / commands hint
-    expect(frame).toContain("ops"); // ^O prints an operations snapshot inline
-    expect(frame).toContain("exit"); // ^C exits
+    expect(frame).toContain("inspect ops"); // ^O opens operations as inspect mode
     expect(frame).toContain("2 agents active");
   });
 

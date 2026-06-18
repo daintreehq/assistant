@@ -1,37 +1,53 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp, useInput, useWindowSize } from "ink";
 import type { App as DaintreeApp } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
-import { ControlRoom } from "./ControlRoom.js";
+import { ControlRoom, type View } from "./ControlRoom.js";
 import { currentDebugLogPath } from "../debugLog.js";
 
 /**
  * The live shell. It owns the runtime wiring (controller, terminal previews,
  * window size, key handling) and feeds a pure {@link ControlRoom} the resulting
- * state.
+ * state. One centralized UI mode (home / operations / help) keeps key handlers
+ * from overlapping, and the composer is focusable only when home owns the
+ * screen.
  *
- * Scrollback belongs to the host terminal now — the cockpit renders inline (no
- * alternate buffer), so the wheel/trackpad and PgUp scroll history natively,
- * the same way Claude Code's panes do. We don't intercept arrow/page keys for
- * scrolling. Operational detail prints inline via `^O` (or a `/panel` command),
- * and `^X` toggles raw tool detail for the still-streaming turn.
+ * Operational detail is a purposeful VIEW (`^O`, or a `/panel` command), never a
+ * text dump. Esc returns home; `^X` toggles raw tool detail in the transcript.
  */
 export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
+  const [view, setView] = useState<View>("home");
   const [expanded, setExpanded] = useState(false);
   const controller = useDaintreeController(app, exit);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
+
+  // A `/panel` command opens the matching purposeful view.
+  useEffect(() => {
+    if (controller.activePanel === "help") setView("help");
+    else if (controller.activePanel) setView("operations");
+  }, [controller.activePanel]);
+
+  const returnHome = () => {
+    setView("home");
+    controller.setActivePanel(null);
+  };
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
       return;
     }
+    if (key.escape) {
+      if (view !== "home") returnHome();
+      return;
+    }
     // Ctrl chords only — these never collide with composing text.
     if (key.ctrl && input === "o") {
-      controller.openOps();
+      if (view === "operations") returnHome();
+      else setView("operations");
       return;
     }
     if (key.ctrl && input === "x") {
@@ -54,11 +70,14 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       previews={previews}
       busy={controller.busy}
       stage={controller.stage}
+      view={view}
       expanded={expanded}
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}
       logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
-      composerFocus={!controller.busy && !controller.pendingConfirm}
+      composerFocus={
+        view === "home" && !controller.busy && !controller.pendingConfirm
+      }
       onSubmit={controller.sendUserMessage}
       onResolve={controller.resolveConfirm}
     />

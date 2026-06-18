@@ -9,7 +9,6 @@ import type {
   QueueEvent,
   TimerRecord,
   WatcherRecord,
-  WorkflowRunRecord,
 } from "../../schemas.js";
 import type { TerminalPreview } from "../hooks/useTerminalPreview.js";
 import type {
@@ -18,6 +17,7 @@ import type {
   PendingConfirm,
   TranscriptCell,
 } from "../types.js";
+import type { View } from "../ControlRoom.js";
 
 /** A fixed wall clock — fixtures are offsets from here. */
 export const FIXED_NOW = 1_700_000_000_000;
@@ -29,6 +29,7 @@ export interface Fixture {
   connected: boolean;
   busy: boolean;
   stage: string;
+  view: View;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
   previews: TerminalPreview[];
@@ -95,30 +96,10 @@ function audit(id: string, toolName: string, ok: boolean, ms: number): AuditReco
 function emptyDash(connected: boolean): DashboardState {
   return {
     mcp: { connected } as DashboardState["mcp"],
-    workflowRuns: [],
     watchers: [],
     timers: [],
     inbox: [],
     audit: [],
-  };
-}
-
-function workflow(over: Partial<WorkflowRunRecord>): WorkflowRunRecord {
-  return {
-    id: "wfr_1",
-    issueNumber: 1842,
-    issueTitle: "Repair watcher test race",
-    branch: "fix/watcher-race",
-    terminalIdsJson: JSON.stringify(["term_8"]),
-    watcherIdsJson: JSON.stringify(["wch_1"]),
-    status: "active",
-    nextActionJson: JSON.stringify({
-      label: "wait for tests",
-      toolName: "watcher.terminal.create",
-    }),
-    createdAt: FIXED_NOW - s(28),
-    updatedAt: FIXED_NOW - s(2),
-    ...over,
   };
 }
 
@@ -209,7 +190,9 @@ export function buildFixtures(): Fixture[] {
       label: "idle",
       connected: true,
       busy: false,
-      stage: "Thinking",      transcript: [],
+      stage: "Thinking",
+      view: "home",
+      transcript: [],
       dashboard: emptyDash(true),
       previews: [],
       pending: null,
@@ -219,10 +202,11 @@ export function buildFixtures(): Fixture[] {
       label: "active",
       connected: true,
       busy: true,
-      stage: "Watching",      transcript: activeRun(),
+      stage: "Watching",
+      view: "home",
+      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
-        workflowRuns: [workflow({})],
         watchers: [watcher({})],
         timers: [timer({})],
         audit: [
@@ -247,18 +231,11 @@ export function buildFixtures(): Fixture[] {
       label: "attention",
       connected: true,
       busy: false,
-      stage: "Waiting",      transcript: activeRun(),
+      stage: "Waiting",
+      view: "home",
+      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
-        workflowRuns: [
-          workflow({
-            status: "blocked",
-            nextActionJson: JSON.stringify({
-              label: "resolve failed tests",
-              toolName: "terminal.focus",
-            }),
-          }),
-        ],
         watchers: [
           watcher({ lastClassification: "tests_failed" }),
           watcher({
@@ -294,20 +271,11 @@ export function buildFixtures(): Fixture[] {
       label: "approval",
       connected: true,
       busy: false,
-      stage: "Waiting for approval",      transcript: activeRun(),
+      stage: "Waiting for approval",
+      view: "home",
+      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
-        workflowRuns: [
-          workflow({
-            status: "active",
-            nextActionJson: JSON.stringify({
-              label: "approve git push",
-              toolName: "git.push",
-              risk: "external",
-              requiresConfirmation: true,
-            }),
-          }),
-        ],
         watchers: [watcher({ lastClassification: "tests_passed" })],
       },
       previews: [],
@@ -327,7 +295,9 @@ export function buildFixtures(): Fixture[] {
       label: "degraded",
       connected: false,
       busy: false,
-      stage: "Thinking",      transcript: [
+      stage: "Thinking",
+      view: "home",
+      transcript: [
         {
           kind: "note",
           id: "note_1",
@@ -345,7 +315,9 @@ export function buildFixtures(): Fixture[] {
       label: "timers",
       connected: true,
       busy: false,
-      stage: "Thinking",      transcript: [],
+      stage: "Thinking",
+      view: "home",
+      transcript: [],
       dashboard: {
         ...emptyDash(true),
         timers: [
@@ -362,21 +334,11 @@ export function buildFixtures(): Fixture[] {
       label: "fleet",
       connected: true,
       busy: true,
-      stage: "Watching",      transcript: activeRun(),
+      stage: "Watching",
+      view: "home",
+      transcript: activeRun(),
       dashboard: {
         ...emptyDash(true),
-        workflowRuns: [
-          workflow({
-            issueNumber: 1844,
-            issueTitle: "Coordinate terminal fleet",
-            branch: "ship/assistant-fleet",
-            status: "active",
-            nextActionJson: JSON.stringify({
-              label: "watch all terminals",
-              toolName: "watcher.terminal.create",
-            }),
-          }),
-        ],
         watchers: [
           watcher({ id: "wch_1", targetsJson: JSON.stringify(["term_8"]), lastClassification: "still_working", createdAt: FIXED_NOW - s(134) }),
           watcher({ id: "wch_2", title: "ship the branch", goal: "branch ready for review", targetsJson: JSON.stringify(["term_4"]), lastClassification: "tests_passed", createdAt: FIXED_NOW - s(531) }),
@@ -394,10 +356,11 @@ export function buildFixtures(): Fixture[] {
       label: "long message",
       connected: true,
       busy: true,
-      stage: "Delegating",      transcript: longUserRun(),
+      stage: "Delegating",
+      view: "home",
+      transcript: longUserRun(),
       dashboard: {
         ...emptyDash(true),
-        workflowRuns: [workflow({})],
         watchers: [watcher({})],
         timers: [timer({ id: "tmr_1", title: "prune stale terminals", fireAt: FIXED_NOW + s(60 * 60 * 18) })],
       },

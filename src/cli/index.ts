@@ -21,7 +21,7 @@ interface CliOptions {
   tier?: string;
   offline?: boolean;
   classic?: boolean;
-  altScreen?: boolean;
+  inline?: boolean;
 }
 
 function overridesFromOptions(opts: CliOptions): ConfigOverrides {
@@ -68,7 +68,7 @@ async function runInteractive(opts: CliOptions): Promise<void> {
     await startRepl(app);
     return;
   }
-  await startInkApp(app, { alternateScreen: opts.altScreen === true });
+  await startInkApp(app, { alternateScreen: opts.inline !== true });
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
     .option("--tier <tier>", "supervisor | operator | system")
     .option("--offline", "Do not make network calls")
     .option("--classic", "Use the legacy readline interface")
-    .option("--alt-screen", "Render Ink in the alternate (full-screen) buffer instead of inline native scrollback")
+    .option("--inline", "Render Ink inline (native scrollback) instead of the default full-screen control room")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);
