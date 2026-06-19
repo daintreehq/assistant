@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { App } from "../src/cli/app.js";
 import { handleUiCommand, runDoctor } from "../src/cli/commandData.js";
-import { COMMAND_REGISTRY } from "../src/commandRegistry.js";
+import { handleSlashCommand } from "../src/cli/commands.js";
+import { render } from "../src/cli/render.js";
+import { COMMAND_REGISTRY, helpLines } from "../src/commandRegistry.js";
 import type { LowLevelMcpClient } from "../src/mcp/client.js";
 
 let lastStateDir = "";
@@ -186,21 +188,62 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect((r.text ?? "").length).toBeGreaterThan(0);
   });
 
-  it("/help opens the help panel and lists /models", async () => {
+  it("/help opens the help panel and lists every registry command", async () => {
     const r = await handleUiCommand("/help", app);
     expect(r.switchPanel).toBe("help");
+    // The whole point of #50: the help surface enumerates exactly the registry,
+    // so a check for one or two commands can't pass while others are dropped.
+    for (const line of helpLines()) expect(r.text).toContain(line);
     expect(r.text).toContain("/models");
-    expect(r.text).toContain("/help");
   });
 
-  it("every registry command is actually handled (no drift between list and switch)", async () => {
-    for (const c of COMMAND_REGISTRY) {
-      const r = await handleUiCommand(`/${c.name}`, app);
+  it("every registry command is actually handled by the Ink handler (no list/switch drift)", async () => {
+    for (const cmd of COMMAND_REGISTRY) {
+      const r = await handleUiCommand(`/${cmd.name}`, app);
       expect(r.handled).toBe(true);
       // The switch's default branch reports unknowns; a registered command must
       // never fall through to it.
       expect(r.title).not.toBe("Unknown command");
     }
+  });
+});
+
+describe("handleSlashCommand (REPL slash commands)", () => {
+  let app: App;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    app = makeApp();
+    // Funnel every render method through a silenced line() so the drift loop
+    // doesn't spew to stdout, while still recording warn() calls.
+    vi.spyOn(render, "line").mockImplementation(() => {});
+    warnSpy = vi.spyOn(render, "warn");
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await app.shutdown();
+    fs.rmSync(lastStateDir, { recursive: true, force: true });
+  });
+
+  it("every registry command is actually handled by the REPL handler (no list/switch drift)", async () => {
+    for (const cmd of COMMAND_REGISTRY) {
+      warnSpy.mockClear();
+      const r = await handleSlashCommand(`/${cmd.name}`, app);
+      expect(r.handled).toBe(true);
+      // The REPL default branch warns "Unknown command /x" — a registered
+      // command must never trigger it (other warns, e.g. offline reconnect, ok).
+      const unknownWarned = warnSpy.mock.calls.some(([m]) =>
+        String(m).includes("Unknown command"),
+      );
+      expect(unknownWarned).toBe(false);
+    }
+  });
+
+  it("an unregistered command warns Unknown command", async () => {
+    await handleSlashCommand("/frobnicate", app);
+    const unknownWarned = warnSpy.mock.calls.some(([m]) =>
+      String(m).includes("Unknown command"),
+    );
+    expect(unknownWarned).toBe(true);
   });
 });
 

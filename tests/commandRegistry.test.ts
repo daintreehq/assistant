@@ -11,11 +11,25 @@ describe("command registry (single source of truth for slash commands)", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it("includes the previously-undiscoverable commands (issue #50)", () => {
-    const names = COMMAND_REGISTRY.map((c) => c.name);
-    // /models was handled but listed nowhere; /help was missing from the overlay.
-    expect(names).toContain("models");
-    expect(names).toContain("help");
+  it("is the exact, ordered set of commands the handlers accept (issue #50)", () => {
+    // Pinned so silently dropping a command (e.g. /models, the original bug, or
+    // /doctor) fails here rather than only surfacing as a missing palette entry.
+    expect(COMMAND_REGISTRY.map((c) => c.name)).toEqual([
+      "status",
+      "inbox",
+      "tools",
+      "timers",
+      "watchers",
+      "audit",
+      "models",
+      "permissions",
+      "recipes",
+      "compact",
+      "doctor",
+      "reconnect",
+      "help",
+      "quit",
+    ]);
   });
 
   it("every entry carries non-empty palette, syntax, and help text", () => {

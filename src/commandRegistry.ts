@@ -44,7 +44,9 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     name: "inbox",
     palette: "items requiring attention",
     syntax: "/inbox [sev]",
-    help: "queued watcher/timer events (info|attention|urgent|blocked)",
+    // Help text is kept within the help overlay's ~46-char right column so it
+    // renders on one line at the default 72-wide overlay (issue #50 review).
+    help: "watcher/timer events (info|attention|urgent)",
   },
   {
     name: "tools",
@@ -68,13 +70,15 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     name: "audit",
     palette: "recent tool calls · export",
     syntax: "/audit [n]",
-    help: "recent tool calls (default 15); export <json|csv> [actor= tool= outcome= from= to= limit=]",
+    // Keep the overlay's right column one-line at width=72 (≤~46 chars); the full
+    // export filter syntax is surfaced by `/audit export` itself on a usage error.
+    help: "recent calls (def 15); export <json|csv>",
   },
   {
     name: "models",
     palette: "model routing",
     syntax: "/models",
-    help: "model routing across the large/medium/small tiers",
+    help: "model routing (large/medium/small tiers)",
   },
   {
     name: "permissions",
@@ -92,13 +96,13 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     name: "compact",
     palette: "summarize the conversation",
     syntax: "/compact",
-    help: "summarize + condense the conversation",
+    help: "summarize + reset the conversation",
   },
   {
     name: "doctor",
     palette: "environment check",
     syntax: "/doctor",
-    help: "check MCP / config / project mapping (with fixes)",
+    help: "check MCP / config / project (with fixes)",
   },
   {
     name: "reconnect",
