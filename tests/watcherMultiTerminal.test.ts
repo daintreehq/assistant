@@ -805,6 +805,205 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     db.close();
   });
 
+  it("reads scrollback via getOutput and model-classifies a listed-but-omitted WORKING terminal", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let getOutputCalls = 0;
+    // getStatus omits the terminal; terminal.list reports it alive and plain
+    // "working" (the case the old code short-circuited to no_change without ever
+    // reading output). terminal.getOutput still has the scrollback.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          getOutputCalls += 1;
+          return {
+            text: "",
+            content: [],
+            structuredContent: { content: "npm ERR! command failed\n" },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    // A distinctive model verdict proves classifyWithModel was actually reached —
+    // the prior bug never consulted the model for these terminals (it returned
+    // no_change with tail: "").
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => ({
+        classification: "command_failed",
+        confidence: 0.9,
+        summary: "A command failed.",
+        evidence: ["npm ERR!"],
+        recommendedAction: "none",
+      }),
+    } as unknown as ModelRouter;
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "working in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    // Scrollback was read once and fed through the small model.
+    expect(getOutputCalls).toBe(1);
+    expect(outcome.classification).toBe("command_failed");
+    db.close();
+  });
+
+  it("falls back to no_change when getOutput is empty for a listed-but-omitted WORKING terminal", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let getOutputCalls = 0;
+    // Same listed-but-omitted working terminal, but Daintree returns no scrollback
+    // even via getOutput. The watcher must still ATTEMPT the read (proving the new
+    // path was entered, not the old tail: "" short-circuit) yet degrade gracefully
+    // to no_change without ever consulting the model on empty output.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          getOutputCalls += 1;
+          return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    // The model guard (tail.trim().length > 0) must prevent any model call when the
+    // scrollback is empty — make that explicit by throwing if json() is reached.
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        throw new Error("model must not be consulted on empty scrollback");
+      },
+    } as unknown as ModelRouter;
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "working in list, no scrollback",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    // The read was attempted (the new code path), but the model guard held.
+    expect(getOutputCalls).toBe(1);
+    expect(outcome.classification).toBe("no_change");
+    db.close();
+  });
+
+  it("routes a model-claimed completion through the git gate on the listed-but-omitted path", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Listed-but-omitted working terminal whose scrollback makes the small model
+    // claim completed_success. The git gate must still run (and, finding a dirty
+    // tree, demote to completed_unverified) — a model claim cannot bypass it here
+    // any more than it can on the normal path.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          return { text: "", content: [], structuredContent: { content: "All done.\n" }, isError: false };
+        }
+        if (name === "git.getProjectPulse") {
+          // Uncommitted work remains — completion is NOT yet trustworthy.
+          return {
+            text: "",
+            content: [],
+            structuredContent: { isDirty: true, changedFiles: 2 },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => ({
+        classification: "completed_success",
+        confidence: 0.9,
+        summary: "Agent reports done.",
+        evidence: [],
+        recommendedAction: "none",
+      }),
+    } as unknown as ModelRouter;
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "claims done in list",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    db.close();
+  });
+
   it("declares exited only when terminal.list ALSO reports the terminal exited", async () => {
     const db = new Db(":memory:");
     const queue = new Queue(db);
