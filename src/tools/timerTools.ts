@@ -87,7 +87,7 @@ export const timerTools: ToolDef[] = [
   {
     name: "timer.schedule",
     description:
-      "Schedule a durable one-shot or repeating timer. When it fires it can enqueue an attention event, run a check, or call a safe tool.",
+      "Schedule a durable one-shot or repeating timer. When it fires it can enqueue an attention event or call a safe tool.",
     risk: "local",
     schema: ScheduleArgs,
     parameters: {

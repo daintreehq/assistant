@@ -348,13 +348,30 @@ describe("Scheduler.tick", () => {
 
   it("fires a legacy run_check timer as a deprecated reminder without calling the model", async () => {
     const deps = makeDeps();
-    // Spy on the model: the grounded-reminder fallback must NOT consult it.
-    let chatCalls = 0;
-    (deps.router as { chat: ModelRouter["chat"] }).chat = (async () => {
-      chatCalls++;
-      return { content: "(no change) nothing" };
-    }) as ModelRouter["chat"];
-    const scheduler = new Scheduler(deps);
+    // Count EVERY model path, not just chat — the grounded-reminder fallback must
+    // consult none of them. A regression that reached for router.json would
+    // otherwise slip past a chat-only spy.
+    let modelCalls = 0;
+    const countModel =
+      (real: (...a: unknown[]) => unknown) =>
+      (...args: unknown[]) => {
+        modelCalls++;
+        return real(...args);
+      };
+    (deps.router as unknown as Record<string, unknown>).chat = countModel(
+      deps.router.chat as unknown as (...a: unknown[]) => unknown,
+    );
+    (deps.router as unknown as Record<string, unknown>).json = countModel(
+      deps.router.json as unknown as (...a: unknown[]) => unknown,
+    );
+
+    const delivered: QueueEvent[] = [];
+    const scheduler = new Scheduler({
+      ...deps,
+      onAttention: (events) => {
+        delivered.push(...events);
+      },
+    });
     const now = 8_000_000;
 
     // A legacy row: the tool can no longer create run_check, but old DB rows must
@@ -368,20 +385,47 @@ describe("Scheduler.tick", () => {
 
     await scheduler.tick(now);
 
-    // No ungrounded model call.
-    expect(chatCalls).toBe(0);
+    // No ungrounded model call on any router method.
+    expect(modelCalls).toBe(0);
 
-    // The prompt is surfaced as a single attention reminder that flags deprecation.
+    // The prompt is surfaced as a single reminder published at exactly "attention".
     const digest = deps.queue.digest({ severityAtLeast: "attention" });
     expect(digest).toHaveLength(1);
     expect(digest[0].source).toBe("timer");
+    expect(digest[0].severity).toBe("attention");
     expect(digest[0].summary).toContain("is the build done?");
     expect(digest[0].summary.toLowerCase()).toContain("deprecated");
+
+    // notify() must still deliver it — the whole point of the isolation fix.
+    expect(delivered.some((e) => e.summary.includes("is the build done?"))).toBe(true);
 
     // And the timer advances normally.
     const after = deps.db.getTimer(timer.id)!;
     expect(after.status).toBe("fired");
     expect(after.runCount).toBe(1);
+  });
+
+  it("fires a legacy run_check row whose JSON omits `type`, dispatching on the DB column", async () => {
+    const deps = makeDeps();
+    const scheduler = new Scheduler(deps);
+    const now = 8_500_000;
+
+    // Pathological row: payloadType column says run_check but the JSON blob has no
+    // `type`. Dispatching on the column (not payload.type) keeps it from firing as
+    // a silent no-op.
+    const timer = deps.db.insertTimer({
+      title: "typeless legacy check",
+      fireAt: now - 1000,
+      payloadType: "run_check",
+      payloadJson: JSON.stringify({ checkPrompt: "did it deploy?" }),
+    });
+
+    await scheduler.tick(now);
+
+    const digest = deps.queue.digest({ severityAtLeast: "attention" });
+    expect(digest).toHaveLength(1);
+    expect(digest[0].summary).toContain("did it deploy?");
+    expect(deps.db.getTimer(timer.id)!.status).toBe("fired");
   });
 
   it("threads the timer id as actorId so a scoped grant authorizes its call_safe_tool", async () => {
