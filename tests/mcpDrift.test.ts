@@ -39,9 +39,22 @@ describe("DOCUMENTED_MCP_TOOL_NAMES (#7)", () => {
       "terminal.listStatus",
       "terminal.waitForAny",
       "terminal.focus",
+      // fleet.armByState is an internal store call, not a callable MCP tool — the
+      // exposed id is terminal.armByState. Guard against it ever being listed.
+      "fleet.armByState",
     ]) {
       expect(DOCUMENTED_MCP_TOOL_NAMES).not.toContain(bogus);
     }
+  });
+
+  it("documents terminal.armByState as the correct exposed arm-by-state id", () => {
+    expect(DOCUMENTED_MCP_TOOL_NAMES).toContain("terminal.armByState");
+  });
+
+  it("has no duplicate entries (duplicates would emit duplicate drift warnings)", () => {
+    expect(new Set(DOCUMENTED_MCP_TOOL_NAMES).size).toBe(
+      DOCUMENTED_MCP_TOOL_NAMES.length,
+    );
   });
 });
 
