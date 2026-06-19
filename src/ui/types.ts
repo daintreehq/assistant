@@ -92,6 +92,30 @@ export interface PendingConfirm {
   resolve: (approved: boolean) => void;
 }
 
+/**
+ * Ephemeral per-session token accounting shown in the status line. Lives in React
+ * state (not {@link DashboardState}, which is SQLite-backed) because it is reset
+ * each session and accumulated from the agent's `usage` events. `costUsd` stays
+ * undefined until a priced model reports usage; `contextTokens` /
+ * `contextThreshold` carry the latest context-pressure reading (threshold 0 means
+ * "no reading yet").
+ */
+export interface SessionUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** Accumulated USD across priced calls; undefined until one is priced. */
+  costUsd: number | undefined;
+  /** Latest estimated conversation size — the context-pressure numerator. */
+  contextTokens: number;
+  /** Auto-compact threshold — the context-pressure denominator (0 = no reading). */
+  contextThreshold: number;
+  /** Tier of the most recent call, e.g. "large". */
+  lastTier?: string;
+  /** Concrete model id of the most recent call. */
+  lastModel?: string;
+}
+
 export interface DashboardState {
   mcp: McpStatus;
   /** Durable issue/PR/work ledger rows. Optional for older tests/callers. */

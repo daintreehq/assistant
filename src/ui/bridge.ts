@@ -5,7 +5,7 @@
  * and nothing writes to stdout — that's what keeps the frame from being corrupted.
  */
 import { EventEmitter } from "node:events";
-import type { AgentEventSink } from "../agent/events.js";
+import type { AgentEventSink, AgentUsageEvent } from "../agent/events.js";
 import type { ConfirmRequest } from "../tools/types.js";
 import type { ToolResult } from "../schemas.js";
 import type { PendingConfirm } from "./types.js";
@@ -19,6 +19,7 @@ export type UiBridgeEvent =
   | { type: "tool:result"; id: string; name: string; result: ToolResult; endedAt: number }
   | { type: "log"; level: "info" | "warn" | "error"; message: string }
   | { type: "confirm"; pending: PendingConfirm }
+  | { type: "usage"; usage: AgentUsageEvent }
   | { type: "attention"; events: unknown[] };
 
 let confirmCounter = 0;
@@ -56,6 +57,7 @@ export class UiBridge {
         this.emit({ type: "tool:result", id, name, result, endedAt }),
       error: (message) => this.emit({ type: "log", level: "error", message }),
       info: (message) => this.emit({ type: "log", level: "info", message }),
+      usage: (event) => this.emit({ type: "usage", usage: event }),
     };
   }
 

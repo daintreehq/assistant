@@ -23,6 +23,7 @@ import {
 } from "../recipes/render.js";
 import type { RecipeSelection } from "../recipes/types.js";
 import { type AgentEventSink, type RunIdRef, noopAgentEvents } from "./events.js";
+import { bareModelId, estimateCostUsd } from "../models/pricing.js";
 
 const MAX_TOOL_ITERATIONS = 12;
 /**
@@ -326,6 +327,38 @@ export class AgentSession {
         this.events.error(`Model error: ${msg}`);
         return `Model error: ${msg}`;
       }
+
+      // Surface token usage, cost, and context pressure to the cockpit. Measured
+      // here — after the call returns, before the assistant message is appended —
+      // so contextTokens reflects the prompt that was actually sent this round.
+      // The context gauge is always meaningful (it's an estimate over our own
+      // message buffer), but cost is only real when the provider actually reported
+      // usage — otherwise we leave costUsd undefined so the UI shows "no data"
+      // rather than a misleading $0.000.
+      const promptTokens = result.usage?.promptTokens ?? 0;
+      const completionTokens = result.usage?.completionTokens ?? 0;
+      // The router always resolves a concrete model id in production; fall back to
+      // the tier name so a partial test double can't break a turn over a side-channel.
+      // Use the bare id so the long Fireworks account path never reaches the UI.
+      const model = bareModelId(this.deps.router.modelFor?.("large") ?? "large");
+      this.events.usage?.({
+        promptTokens,
+        completionTokens,
+        totalTokens: result.usage?.totalTokens ?? promptTokens + completionTokens,
+        cachedTokens: result.usage?.cachedTokens,
+        contextTokens: estimateTokens(this.messages),
+        contextThreshold: AUTO_COMPACT_TOKEN_THRESHOLD,
+        costUsd: result.usage
+          ? estimateCostUsd(
+              model,
+              promptTokens,
+              completionTokens,
+              result.usage.cachedTokens,
+            )
+          : undefined,
+        tier: "large",
+        model,
+      });
 
       // Record the assistant turn (with any tool calls).
       this.pushMessage({

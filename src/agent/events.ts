@@ -25,6 +25,32 @@ export interface ToolResultEvent {
   endedAt: number;
 }
 
+/**
+ * Token usage, cost, and context pressure for one completed main-thread model
+ * call. The cockpit accumulates these into a live session rollup (tokens + cost)
+ * and a context-pressure gauge; nothing in the runtime depends on them.
+ */
+export interface AgentUsageEvent {
+  /** Prompt (input) tokens billed for this call. */
+  promptTokens: number;
+  /** Completion (output) tokens billed for this call. */
+  completionTokens: number;
+  /** Total tokens as reported by the provider (prompt + completion). */
+  totalTokens: number;
+  /** Cached prompt tokens (billed at a discount), when the provider reports them. */
+  cachedTokens?: number;
+  /** Estimated tokens in the conversation now — the context-pressure numerator. */
+  contextTokens: number;
+  /** Auto-compact threshold — the context-pressure denominator. */
+  contextThreshold: number;
+  /** Estimated USD cost of this call, or undefined when the model has no rate. */
+  costUsd: number | undefined;
+  /** Routed tier for the call, e.g. "large". */
+  tier: string;
+  /** Concrete model id the tier resolved to. */
+  model: string;
+}
+
 export interface AgentEventSink {
   /** A new assistant turn is about to stream. */
   assistantStart(): void;
@@ -46,6 +72,13 @@ export interface AgentEventSink {
   error(message: string): void;
   /** An informational note from the loop. */
   info(message: string): void;
+  /**
+   * Token usage / cost / context pressure for a completed main-thread model call.
+   * Optional: most sinks ignore it, and making it required would force a no-op
+   * onto every existing adapter. Emitted once per streamed round, after the model
+   * call returns and before the assistant message is appended.
+   */
+  usage?(event: AgentUsageEvent): void;
 }
 
 export const noopAgentEvents: AgentEventSink = {
@@ -57,6 +90,7 @@ export const noopAgentEvents: AgentEventSink = {
   toolResult() {},
   error() {},
   info() {},
+  usage() {},
 };
 
 /**
@@ -79,8 +113,11 @@ export type RunIdRef = { current: string | undefined };
  * the live UI sink, and vice versa.
  */
 export function multiSink(...sinks: AgentEventSink[]): AgentEventSink {
+  // The optional `usage` method is fanned out separately (below); restrict the
+  // generic helper to the required methods so `Parameters<…>` stays a function type.
+  type RequiredSinkMethod = Exclude<keyof AgentEventSink, "usage">;
   const fan =
-    <K extends keyof AgentEventSink>(method: K) =>
+    <K extends RequiredSinkMethod>(method: K) =>
     (...args: Parameters<AgentEventSink[K]>): void => {
       for (const sink of sinks) {
         try {
@@ -99,6 +136,17 @@ export function multiSink(...sinks: AgentEventSink[]): AgentEventSink {
     toolResult: fan("toolResult"),
     error: fan("error"),
     info: fan("info"),
+    // `usage` is optional on the interface, so a sink may not implement it —
+    // guard each call rather than blindly invoking it.
+    usage: (event: AgentUsageEvent) => {
+      for (const sink of sinks) {
+        try {
+          sink.usage?.(event);
+        } catch {
+          /* one sink's failure must not affect the others */
+        }
+      }
+    },
   };
 }
 
@@ -186,6 +234,25 @@ export class RunEventSink implements AgentEventSink {
 
   info(message: string): void {
     this.write("info", { message });
+  }
+
+  usage(event: AgentUsageEvent): void {
+    // Any prose streamed this round precedes the usage row — flush it first so the
+    // replayed log keeps content/usage in the order they actually occurred.
+    this.flushContent();
+    // Token accounting for this round; persisted so a replayed log carries the
+    // same cost/context-pressure signal the live cockpit showed.
+    this.write("usage", {
+      promptTokens: event.promptTokens,
+      completionTokens: event.completionTokens,
+      totalTokens: event.totalTokens,
+      cachedTokens: event.cachedTokens,
+      contextTokens: event.contextTokens,
+      contextThreshold: event.contextThreshold,
+      costUsd: event.costUsd,
+      tier: event.tier,
+      model: event.model,
+    });
   }
 
   /** Write buffered round prose as one row, if any, then clear the buffer. */

@@ -15,6 +15,7 @@ import type {
   ActivityItem,
   DashboardState,
   PendingConfirm,
+  SessionUsage,
   TranscriptCell,
 } from "../types.js";
 import type { View } from "../ControlRoom.js";
@@ -34,6 +35,22 @@ export interface Fixture {
   dashboard: DashboardState;
   previews: TerminalPreview[];
   pending: PendingConfirm | null;
+  sessionUsage: SessionUsage;
+}
+
+/** Build a session-usage rollup at a given context-pressure level (0–1). */
+function usage(pressure: number, costUsd: number | undefined = 0.012): SessionUsage {
+  const contextThreshold = 60_000;
+  return {
+    promptTokens: 18_400,
+    completionTokens: 2_600,
+    totalTokens: 21_000,
+    costUsd,
+    contextTokens: Math.round(contextThreshold * pressure),
+    contextThreshold,
+    lastTier: "large",
+    lastModel: "minimax-m3",
+  };
 }
 
 function watcher(over: Partial<WatcherRecord>): WatcherRecord {
@@ -187,6 +204,7 @@ export function buildFixtures(): Fixture[] {
   return [
     {
       key: "1",
+      sessionUsage: usage(0.08, undefined),
       label: "idle",
       connected: true,
       busy: false,
@@ -199,6 +217,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "2",
+      sessionUsage: usage(0.42),
       label: "active",
       connected: true,
       busy: true,
@@ -228,6 +247,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "3",
+      sessionUsage: usage(0.8, 0.181),
       label: "attention",
       connected: true,
       busy: false,
@@ -268,6 +288,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "4",
+      sessionUsage: usage(0.93, 0.244),
       label: "approval",
       connected: true,
       busy: false,
@@ -292,6 +313,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "5",
+      sessionUsage: { ...usage(0), contextThreshold: 0, costUsd: undefined },
       label: "degraded",
       connected: false,
       busy: false,
@@ -312,6 +334,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "6",
+      sessionUsage: usage(0.3),
       label: "timers",
       connected: true,
       busy: false,
@@ -331,6 +354,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "7",
+      sessionUsage: usage(0.66, 0.135),
       label: "fleet",
       connected: true,
       busy: true,
@@ -353,6 +377,7 @@ export function buildFixtures(): Fixture[] {
     },
     {
       key: "8",
+      sessionUsage: usage(0.88, 0.207),
       label: "long message",
       connected: true,
       busy: true,

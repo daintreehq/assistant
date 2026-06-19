@@ -59,6 +59,29 @@ describe("UiBridge", () => {
     expect(log.type === "log" && log.level).toBe("error");
   });
 
+  it("republishes usage events onto the bridge", () => {
+    const bridge = new UiBridge();
+    const seen: UiBridgeEvent[] = [];
+    bridge.subscribe((e) => seen.push(e));
+
+    bridge.agentEvents().usage?.({
+      promptTokens: 1000,
+      completionTokens: 200,
+      totalTokens: 1200,
+      contextTokens: 25_200,
+      contextThreshold: 60_000,
+      costUsd: 0.012,
+      tier: "large",
+      model: "minimax-m3",
+    });
+
+    expect(seen).toHaveLength(1);
+    const ev = seen[0];
+    expect(ev.type).toBe("usage");
+    expect(ev.type === "usage" && ev.usage.model).toBe("minimax-m3");
+    expect(ev.type === "usage" && ev.usage.contextTokens).toBe(25_200);
+  });
+
   it("settlePendingConfirms unblocks outstanding confirms (teardown safety)", async () => {
     const bridge = new UiBridge();
     bridge.subscribe(() => {});
