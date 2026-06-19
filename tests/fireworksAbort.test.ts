@@ -78,13 +78,16 @@ describe("FireworksClient non-streaming abort (chat/json)", () => {
       messages: [{ role: "user", content: "hi" }],
       signal: controller.signal,
     });
-    expect(optionsSeen[0]).toEqual({ signal: controller.signal });
+    // The signal still rides as RequestOptions, now alongside a per-attempt timeout.
+    expect(optionsSeen[0]).toMatchObject({ signal: controller.signal });
+    expect((optionsSeen[0] as { timeout?: unknown }).timeout).toBeTypeOf("number");
   });
 
-  it("chat() omits RequestOptions when no signal is provided", async () => {
+  it("chat() still bounds the request with a timeout when no signal is provided", async () => {
     const { fw, optionsSeen } = nonStreamingClient("ok");
     await fw.chat({ model: "m", messages: [{ role: "user", content: "hi" }] });
-    expect(optionsSeen[0]).toBeUndefined();
+    expect(optionsSeen[0]).not.toHaveProperty("signal");
+    expect((optionsSeen[0] as { timeout?: unknown }).timeout).toBeTypeOf("number");
   });
 
   it("chat() normalises an abort into CancelledError", async () => {
@@ -102,7 +105,8 @@ describe("FireworksClient non-streaming abort (chat/json)", () => {
       { model: "m", messages: [{ role: "user", content: "hi" }], signal: controller.signal },
       schema,
     );
-    expect(ok.optionsSeen[0]).toEqual({ signal: controller.signal });
+    expect(ok.optionsSeen[0]).toMatchObject({ signal: controller.signal });
+    expect((ok.optionsSeen[0] as { timeout?: unknown }).timeout).toBeTypeOf("number");
 
     const aborted = nonStreamingClient("abort");
     await expect(
@@ -120,13 +124,15 @@ describe("FireworksClient streaming abort", () => {
       messages: [{ role: "user", content: "hi" }],
       signal: controller.signal,
     });
-    expect(optionsSeen[0]).toEqual({ signal: controller.signal });
+    expect(optionsSeen[0]).toMatchObject({ signal: controller.signal });
+    expect((optionsSeen[0] as { timeout?: unknown }).timeout).toBeTypeOf("number");
   });
 
-  it("omits RequestOptions when no signal is provided", async () => {
+  it("still bounds the stream with a timeout when no signal is provided", async () => {
     const { fw, optionsSeen } = clientWithRecorder("ok");
     await fw.chatStream({ model: "m", messages: [{ role: "user", content: "hi" }] });
-    expect(optionsSeen[0]).toBeUndefined();
+    expect(optionsSeen[0]).not.toHaveProperty("signal");
+    expect((optionsSeen[0] as { timeout?: unknown }).timeout).toBeTypeOf("number");
   });
 
   it("normalises an APIUserAbortError before streaming into CancelledError", async () => {

@@ -13,6 +13,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { AppConfig } from "../config.js";
 import { DOCUMENTED_MCP_TOOL_NAMES } from "../models/prompts/daintreeMcp.js";
+import {
+  abortableSleep,
+  fullJitterDelay,
+  isRetriableMcpError,
+  MCP_READ_RETRY_POLICY,
+} from "../reliability.js";
 
 export interface McpToolInfo {
   name: string;
@@ -58,12 +64,26 @@ export interface McpCallResult {
 }
 
 /**
- * Request options the SDK accepts on its read/call methods. We only thread
- * `signal` (the rest — timeout, progress — we don't drive). Matches the shape of
+ * Request options the SDK accepts on its read/call methods. We thread `signal`
+ * (cancel) and `timeout` (ms — abandon a hung request). Matches the shape of
  * `@modelcontextprotocol/sdk`'s `RequestOptions` for the fields we pass.
  */
 export interface McpRequestOptions {
   signal?: AbortSignal;
+  /** Per-request timeout in ms. Maps directly to the SDK's RequestOptions.timeout
+   *  (a request that exceeds it rejects with a -32001 RequestTimeout McpError). */
+  timeout?: number;
+}
+
+/**
+ * Caller-facing knobs for a single MCP call: a per-request `timeoutMs` and, for
+ * READ-ONLY tools only, a transient-failure `retries` budget. Retries are opt-in
+ * and default to 0 so a mutating tool (sendInput, git ops) is never silently
+ * re-issued — a retried mutation could double-apply.
+ */
+export interface McpCallOptions {
+  timeoutMs?: number;
+  retries?: number;
 }
 
 /** The subset of the MCP SDK client we depend on (also what test fakes implement). */
@@ -339,14 +359,19 @@ export class DaintreeMcpClient {
     this.lastError = errMsg(e);
   }
 
-  async listTools(force = false, signal?: AbortSignal): Promise<McpToolInfo[]> {
+  async listTools(
+    force = false,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<McpToolInfo[]> {
     if (this.toolCache && !force) return this.toolCache;
+    const reqOpts: McpRequestOptions | undefined =
+      signal || timeoutMs !== undefined
+        ? { ...(signal ? { signal } : {}), ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}) }
+        : undefined;
     let res: Awaited<ReturnType<LowLevelMcpClient["listTools"]>>;
     try {
-      res = await this.ensure().listTools(
-        undefined,
-        signal ? { signal } : undefined,
-      );
+      res = await this.ensure().listTools(undefined, reqOpts);
     } catch (e) {
       // A user-aborted call surfaces the same way a real transport failure does
       // (the SDK wraps both as a timeout-shaped McpError), but an abort says
@@ -371,23 +396,49 @@ export class DaintreeMcpClient {
     name: string,
     args: Record<string, unknown> = {},
     signal?: AbortSignal,
+    opts: McpCallOptions = {},
   ): Promise<McpCallResult> {
+    const reqOpts: McpRequestOptions | undefined =
+      signal || opts.timeoutMs !== undefined
+        ? { ...(signal ? { signal } : {}), ...(opts.timeoutMs !== undefined ? { timeout: opts.timeoutMs } : {}) }
+        : undefined;
+    const retries = Math.max(0, opts.retries ?? 0);
     let res: Awaited<ReturnType<LowLevelMcpClient["callTool"]>>;
-    try {
-      res = await this.ensure().callTool(
-        { name, arguments: args },
-        undefined,
-        signal ? { signal } : undefined,
-      );
-    } catch (e) {
-      // When the user aborted the turn the SDK rejects with a timeout-shaped
-      // McpError — same shape as a real transport failure. An abort is not a
-      // connection-health signal, so don't degrade the connection for it;
-      // callers check `signal.aborted` to map it to a CANCELLED tool result.
-      if (!(e instanceof McpUnavailableError) && !signal?.aborted) {
-        this.markDegraded(e);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await this.ensure().callTool({ name, arguments: args }, undefined, reqOpts);
+        break;
+      } catch (e) {
+        // When the user aborted the turn the SDK rejects with a timeout-shaped
+        // McpError — same shape as a real transport failure. An abort is not a
+        // connection-health signal, so don't degrade the connection for it;
+        // callers check `signal.aborted` to map it to a CANCELLED tool result.
+        const aborted = signal?.aborted;
+        // Retry a transient transport hiccup (opt-in, read-only callers only)
+        // BEFORE degrading: marking the connection down on the first blip would
+        // make the next attempt's ensure() throw, defeating the retry. Only after
+        // the budget is spent do we degrade and surface the failure.
+        if (
+          !aborted &&
+          !(e instanceof McpUnavailableError) &&
+          attempt < retries &&
+          isRetriableMcpError(e)
+        ) {
+          await abortableSleep(
+            fullJitterDelay(
+              attempt,
+              MCP_READ_RETRY_POLICY.baseDelayMs,
+              MCP_READ_RETRY_POLICY.maxDelayMs,
+            ),
+            signal,
+          );
+          continue;
+        }
+        if (!(e instanceof McpUnavailableError) && !aborted) {
+          this.markDegraded(e);
+        }
+        throw e;
       }
-      throw e;
     }
     const content = (res.content as unknown[]) ?? [];
     const text = content

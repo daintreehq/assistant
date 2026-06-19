@@ -330,6 +330,8 @@ export function watcherBadge(classification?: string): WatcherBadge {
       return make("blocked", "blocked", set.attention, 1);
     case "needs_large_model":
       return make("escalated", "warning", set.attention, 2);
+    case "rate_limited":
+      return make("rate-limited", "warning", set.attention, 1);
     case "still_working":
       return make("working", "active", set.active, 3);
     case "tests_passed":

@@ -34,6 +34,26 @@ import type { WatcherRecord } from "../schemas.js";
 import { logDebug } from "../debugLog.js";
 import { WATCHER_SPAWN_GRACE_MS } from "../watcherCadence.js";
 import { parseMcpArray, parseMcpString } from "../mcp/resultHelpers.js";
+import {
+  detectRateLimitSignature,
+  MCP_READ_RETRY_POLICY,
+  MCP_READ_TIMEOUT_MS,
+  RATE_LIMIT_TAIL_WINDOW,
+} from "../reliability.js";
+
+/** Read-only MCP call opts for watcher ticks: bound each read with a timeout and
+ *  retry a transient transport hiccup, so one blip doesn't stall a check or flip
+ *  the connection to degraded. Read-only tools only (getStatus/getOutput/list/
+ *  git pulse) — never a mutating call. */
+const MCP_READ_OPTS = {
+  timeoutMs: MCP_READ_TIMEOUT_MS,
+  retries: MCP_READ_RETRY_POLICY.maxRetries,
+} as const;
+
+/** How far out to push the next check after a terminal is seen rate-limited:
+ *  hammering a throttled provider helps nobody, so back the watcher off to at
+ *  least this cooldown before re-reading (issue #123). */
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
 
 export interface WatcherSignals {
   agentState?: string;
@@ -66,6 +86,7 @@ const MEANINGFUL: ReadonlySet<WatcherClassification> = new Set([
   "completed_unverified",
   "completed_unknown",
   "terminal_exited",
+  "rate_limited",
 ]);
 
 /** Classifications that mean the watcher's job is done and it should stop.
@@ -94,6 +115,9 @@ const SEVERITY_MAP: Record<WatcherClassification, Severity> = {
   completed_unverified: "attention",
   completed_unknown: "info",
   terminal_exited: "urgent",
+  // A throttled agent isn't broken — it's blocked on its provider. Surface it
+  // (above the scheduler's threshold) without the alarm of an "error".
+  rate_limited: "attention",
   needs_large_model: "attention",
   unknown: "info",
 };
@@ -289,7 +313,12 @@ export async function readStatuses(
     // Thread the turn signal (extraction polls supply it; watcher/timer contexts
     // leave it undefined) so an in-flight status read is torn down on Escape
     // instead of completing after the user has already cancelled.
-    const res = await ctx.mcp.callTool("terminal.getStatus", args, ctx.signal);
+    const res = await ctx.mcp.callTool(
+      "terminal.getStatus",
+      args,
+      ctx.signal,
+      MCP_READ_OPTS,
+    );
     if (res.isError) {
       logDebug(ctx.config, "mcp.getStatus", {
         requested: terminalIds,
@@ -382,6 +411,7 @@ export async function readOutput(
       // Carry the turn signal so a cancelled extraction poll tears this read down;
       // undefined for watcher/timer contexts, preserving their behaviour.
       ctx.signal,
+      MCP_READ_OPTS,
     );
     // Scrollback lives in structuredContent.content OR the raw text body —
     // Daintree populates the latter. Fall back to text so a real read is never
@@ -434,7 +464,7 @@ export async function readTerminalList(
 ): Promise<TerminalListResult> {
   const byId = new Map<string, ListedTerminal>();
   try {
-    const res = await ctx.mcp.callTool("terminal.list", {});
+    const res = await ctx.mcp.callTool("terminal.list", {}, undefined, MCP_READ_OPTS);
     if (res.isError) {
       logDebug(ctx.config, "mcp.terminalList", { ok: false, isError: true });
       return { ok: false, byId };
@@ -784,9 +814,14 @@ export async function runVerificationPass(
     return unverifiable("Daintree MCP not connected; could not verify git state");
   }
   try {
-    const res = await ctx.mcp.callTool("git.getProjectPulse", {
-      ...(scope?.worktreeId ? { worktreeId: scope.worktreeId } : {}),
-    });
+    const res = await ctx.mcp.callTool(
+      "git.getProjectPulse",
+      {
+        ...(scope?.worktreeId ? { worktreeId: scope.worktreeId } : {}),
+      },
+      undefined,
+      MCP_READ_OPTS,
+    );
     if (res.isError) return unverifiable("git.getProjectPulse reported an error");
     const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
     return deriveVerification(sc, typeof res.text === "string" ? res.text : "");
@@ -1195,7 +1230,16 @@ export async function runTerminalWatcherCheck(
               // noOutputForMs condition is evaluated deterministically, not by the
               // model, so folding time in would re-invoke it every tick.
               const classifyKey = `${agentState ?? ""}|${listed.exitCode ?? ""}|${out.state.outHash ?? ""}`;
-              if (prevState?.lastClassifyKey === classifyKey) {
+              if (detectRateLimitSignature(tail.slice(-RATE_LIMIT_TAIL_WINDOW))) {
+                // Deterministic, model-free: recent output shows the agent is being
+                // throttled by its provider. A distinct blocking state, not a stall
+                // — surfaced as its own attention event, watcher backs off below.
+                classification = "rate_limited";
+                confidence = 0.9;
+                summary =
+                  "Agent appears rate-limited by its model provider (API limit in recent output).";
+                evidence = ["rate-limit signature in recent output"];
+              } else if (prevState?.lastClassifyKey === classifyKey) {
                 classification = "no_change";
                 confidence = 0.5;
                 summary = "No change in terminal signals since last classification.";
@@ -1216,10 +1260,13 @@ export async function runTerminalWatcherCheck(
                 // claim: that routes through gateCompletion, whose git-cleanliness
                 // check is a hidden input NOT in the key. Latching it would dedupe a
                 // demoted completed_unverified into no_change forever, so the gate
-                // could never re-run once the worktree is later cleaned.
+                // could never re-run once the worktree is later cleaned. Skip
+                // "rate_limited" too: latching it would dedupe the next identical-
+                // input tick to no_change, dropping the cooldown before it recovers.
                 if (
                   verdict.classification !== "unknown" &&
-                  verdict.classification !== "completed_success"
+                  verdict.classification !== "completed_success" &&
+                  verdict.classification !== "rate_limited"
                 ) {
                   perTerminal[terminalId] = {
                     ...perTerminal[terminalId],
@@ -1392,7 +1439,16 @@ export async function runTerminalWatcherCheck(
         // is evaluated deterministically, so folding time in would re-invoke the
         // model every tick once any time threshold drifts.
         const classifyKey = `${agentState ?? ""}|${entry?.exitCode ?? ""}|${outHash ?? ""}`;
-        if (prevState?.lastClassifyKey === classifyKey) {
+        if (detectRateLimitSignature(tail.slice(-RATE_LIMIT_TAIL_WINDOW))) {
+          // Deterministic, model-free: recent output shows the agent is being
+          // throttled by its provider. A distinct blocking state, not a stall —
+          // surfaced as its own attention event, watcher backs off below.
+          classification = "rate_limited";
+          confidence = 0.9;
+          summary =
+            "Agent appears rate-limited by its model provider (API limit in recent output).";
+          evidence = ["rate-limit signature in recent output"];
+        } else if (prevState?.lastClassifyKey === classifyKey) {
           classification = "no_change";
           confidence = 0.5;
           summary = "No change in terminal signals since last classification.";
@@ -1408,10 +1464,13 @@ export async function runTerminalWatcherCheck(
           // claim: that routes through gateCompletion, whose git-cleanliness check
           // is a hidden input NOT in the key. Latching it would dedupe a demoted
           // completed_unverified into no_change forever, so the gate could never
-          // re-run once the worktree is later cleaned.
+          // re-run once the worktree is later cleaned. Skip "rate_limited" too:
+          // latching it would dedupe the next identical-input tick to no_change,
+          // dropping the cooldown back-off before it recovers.
           if (
             verdict.classification !== "unknown" &&
-            verdict.classification !== "completed_success"
+            verdict.classification !== "completed_success" &&
+            verdict.classification !== "rate_limited"
           ) {
             perTerminal[terminalId] = {
               ...perTerminal[terminalId],
@@ -1567,11 +1626,19 @@ export async function runTerminalWatcherCheck(
   else if (outcomes.length > 0 && outcomes.every((o) => o.stop)) stopReason = "terminal";
   const stop = stopReason !== undefined;
 
+  // Back off the next check when any terminal is rate-limited: re-reading on the
+  // normal cadence would only hammer an already-throttled provider. The deterministic
+  // signature re-fires each tick until the agent produces non-throttled output, so
+  // this cooldown naturally lifts once the agent recovers (issue #123).
+  const rateLimited = outcomes.some((o) => o.classification === "rate_limited");
+  const nextCheckAt =
+    now + (rateLimited ? Math.max(rec.cadenceMs, RATE_LIMIT_COOLDOWN_MS) : rec.cadenceMs);
+
   ctx.db.updateWatcher(rec.id, {
     lastClassification: headline.classification,
     lastEpistemicKind: headline.epistemicKind,
     lastCheckedAt: now,
-    nextCheckAt: now + rec.cadenceMs,
+    nextCheckAt,
     optionsJson: JSON.stringify({ ...options, perTerminal }),
     status: stop ? (stopReason === "timeout" ? "timeout" : "condition_met") : "active",
   });
@@ -1587,7 +1654,7 @@ export async function runTerminalWatcherCheck(
     severity: headline.severity,
     stop,
     stopReason,
-    nextCheckAt: stop ? undefined : now + rec.cadenceMs,
+    nextCheckAt: stop ? undefined : nextCheckAt,
   });
 
   return { ...headline, stop, stopReason };
