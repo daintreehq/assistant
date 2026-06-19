@@ -20,6 +20,10 @@ export const ui = {
   color: {
     accent: "#6EE7B7",
     accentQuiet: "#A7F3D0",
+    // The Daintree brand green, used by the masthead logo + wordmark. Deliberately
+    // distinct from `accent` (which carries the success/focus semantics across the
+    // whole cockpit): the masthead is identity, not state, so it owns its own hue.
+    brand: "#36CE94",
     info: "#67E8F9",
     warning: "#F6C85F",
     danger: "#FB7185",

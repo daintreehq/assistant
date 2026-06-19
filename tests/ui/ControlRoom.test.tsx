@@ -35,15 +35,15 @@ const WIDTHS = [58, 80, 120];
 describe("ControlRoom golden frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle reads as connected + standing by at %i cols", (w) => {
     const frame = frameFor("idle", w, 32);
-    expect(frame).toContain("DAINTREE"); // is this Daintree?
-    expect(frame).toContain("CONNECTED"); // is it connected?
+    expect(frame).toContain("Daintree assistant"); // the masthead wordmark
+    expect(frame).toContain("MCP"); // connection lives in the status line now
     expect(frame).toContain("Standing by"); // what is it doing?
     expect(frame).toContain("ops"); // what key reveals more?
   });
 
   it.each(WIDTHS)("active run shows the supervised work at %i cols", (w) => {
     const frame = frameFor("active", w, 32);
-    expect(frame).toContain("DAINTREE");
+    expect(frame).toContain("Daintree assistant"); // the masthead wordmark
     expect(frame).toContain("term_8"); // which operation is active?
     expect(frame).toMatch(/Watching|WORKING|WATCHING/); // what is Daintree doing?
   });
@@ -89,7 +89,10 @@ describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
   it.each(SIDEBAR_WIDTHS)(
     "renders user messages as a distinct card at %i cols",
     (w) => {
-      const frame = frameFor("active", w, 36);
+      // 40 rows, not 36: the masthead is two rows taller than the old identity
+      // bar, so the Daintree response label needs a realistic terminal height to
+      // sit inside the visible transcript window on the narrow sidebar.
+      const frame = frameFor("active", w, 40);
       expect(frame).toContain("YOU");
       expect(frame).toMatch(/[╭┌].*[╮┐]/); // a boxed card around the prompt
       expect(frame).toContain("DAINTREE");
@@ -100,7 +103,7 @@ describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
     const prev = process.env.DAINTREE_THEME;
     process.env.DAINTREE_THEME = "none";
     try {
-      const frame = frameFor("active", 58, 36);
+      const frame = frameFor("active", 58, 40);
       expect(frame).toContain("YOU");
       expect(frame).toContain("◆ DAINTREE");
       expect(frame).toContain("WATCHING");

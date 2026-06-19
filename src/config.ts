@@ -107,18 +107,16 @@ function firstString(...vals: Array<string | undefined>): string | undefined {
 }
 
 /**
- * Resolve the `.env` that ships next to the assistant itself, by walking up from
- * this module to the nearest package.json. In dev that is the repo root; in a
- * `tsup` build it is the parent of `dist/`. Used as a low-precedence fallback so
- * dev/debug flags set beside the assistant apply regardless of which project's
- * cwd the session is bound to. Best-effort — returns undefined if nothing resolves.
+ * Walk up from this module to the directory holding the assistant's own
+ * `package.json`. In dev that is the repo root; in a `tsup` build it is the
+ * parent of `dist/`. Best-effort — returns undefined if nothing resolves.
  */
-function assistantOwnEnvPath(): string | undefined {
+function assistantPackageRoot(): string | undefined {
   try {
     let dir = path.dirname(fileURLToPath(import.meta.url));
     for (let i = 0; i < 8; i++) {
       if (fs.existsSync(path.join(dir, "package.json"))) {
-        return path.join(dir, ".env");
+        return dir;
       }
       const parent = path.dirname(dir);
       if (parent === dir) break; // reached the filesystem root
@@ -128,6 +126,42 @@ function assistantOwnEnvPath(): string | undefined {
     /* best-effort — never block config load on this */
   }
   return undefined;
+}
+
+/**
+ * Resolve the `.env` that ships next to the assistant itself. Used as a
+ * low-precedence fallback so dev/debug flags set beside the assistant apply
+ * regardless of which project's cwd the session is bound to.
+ */
+function assistantOwnEnvPath(): string | undefined {
+  const root = assistantPackageRoot();
+  return root ? path.join(root, ".env") : undefined;
+}
+
+let cachedVersion: string | undefined;
+
+/**
+ * The assistant's own version, read from its `package.json` at runtime. Read via
+ * an `fs` walk rather than a TS `import ... with { type: "json" }`: the latter
+ * escapes `rootDir: "src"` and trips a tsc error from deep UI modules. Cached
+ * after the first lookup; falls back to "0.0.0" if the file can't be read.
+ */
+export function assistantVersion(): string {
+  if (cachedVersion !== undefined) return cachedVersion;
+  cachedVersion = "0.0.0";
+  try {
+    const root = assistantPackageRoot();
+    if (root) {
+      const raw = fs.readFileSync(path.join(root, "package.json"), "utf8");
+      const parsed = JSON.parse(raw) as { version?: unknown };
+      if (typeof parsed.version === "string" && parsed.version.length > 0) {
+        cachedVersion = parsed.version;
+      }
+    }
+  } catch {
+    /* best-effort — a missing/unreadable package.json yields the fallback */
+  }
+  return cachedVersion;
 }
 
 /**
