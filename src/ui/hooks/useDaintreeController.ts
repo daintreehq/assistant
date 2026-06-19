@@ -16,10 +16,12 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { useStdout } from "ink";
 import type { App } from "../../cli/app.js";
 import type { ComposerHandle } from "../components/Composer.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
 import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
+import { clearHostTerminal } from "../../cli/terminalClear.js";
 import { presentTool } from "../presentation/tools.js";
 import type {
   ActivityItem,
@@ -497,6 +499,9 @@ export function useDaintreeController(
   onExit?: () => void,
 ): DaintreeController {
   const bridge = useMemo(() => new UiBridge(), []);
+  // Raw managed stdout for terminal side-channels (e.g. wiping host scrollback on
+  // /clear). Stable across renders; written to only outside the render body.
+  const { stdout } = useStdout();
   const [transcript, dispatch] = useReducer(transcriptReducer, []);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(
     null,
@@ -806,10 +811,15 @@ export function useDaintreeController(
               // for operations/help. Re-running the same command re-opens it.
               setActivePanel(result.switchPanel);
             } else if (result.clearTranscript) {
-              // /clear: wipe the live transcript, then remount <Static> (bump the
-              // key) so committed cells don't ghost back, and finally drop a single
-              // confirmation card into the now-empty transcript so the user sees it
-              // ran. Order matters: clear → remount → add the success card.
+              // /clear: wipe the host terminal's scrollback FIRST (synchronously,
+              // before any React dispatch) so the OS drops the committed cells that
+              // already flowed into native scrollback — otherwise the user can wheel
+              // back up into the "cleared" conversation. Then wipe the live
+              // transcript, remount <Static> (bump the key) so committed cells don't
+              // ghost back, and finally drop a single confirmation card into the
+              // now-empty transcript so the user sees it ran. Order matters:
+              // scrollback wipe → clear → remount → add the success card.
+              clearHostTerminal(stdout);
               dispatch({ type: "transcript:clear" });
               setStaticKey((k) => k + 1);
               dispatch({
@@ -853,7 +863,7 @@ export function useDaintreeController(
       })();
       return true;
     },
-    [app, bridge, onExit, drainPending],
+    [app, bridge, onExit, drainPending, stdout],
   );
 
   // Keep the ref pointing at the latest sendUserMessage so drainPending can

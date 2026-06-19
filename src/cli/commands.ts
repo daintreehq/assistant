@@ -4,6 +4,7 @@
  */
 import type { App } from "./app.js";
 import { render, c } from "./render.js";
+import { clearHostTerminal } from "./terminalClear.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 import { runDoctor, formatRunTimeline, formatRunList } from "./commandData.js";
@@ -234,6 +235,9 @@ export async function handleSlashCommand(
 
     case "clear": {
       app.session.clear();
+      // Also drop the host terminal's scrollback so the visual reset matches the
+      // logical one — otherwise the user can scroll back into the cleared turns.
+      clearHostTerminal(process.stdout);
       render.success("Conversation cleared — starting fresh.");
       return { handled: true };
     }
