@@ -46,6 +46,11 @@ export interface WatcherSignals {
   confidence?: number;
 }
 
+/** Minimum judge confidence for a modelJudge condition to fire (and for its
+ *  reason to be worth surfacing as evidence). A confident YES below this floor is
+ *  treated as too uncertain to act on. */
+const JUDGE_CONFIDENCE_FLOOR = 0.6;
+
 /** Classifications that are worth interrupting the user about. */
 const MEANINGFUL: ReadonlySet<WatcherClassification> = new Set([
   "waiting_for_input",
@@ -126,7 +131,7 @@ export function evaluateCondition(
     // Look up the precomputed answer to THIS specific question. A confident YES
     // satisfies the condition; a missing answer, a NO, or low confidence does not.
     const r = judgeResults?.get(cond.modelJudge);
-    return !!r && r.matched && r.confidence >= 0.6;
+    return !!r && r.matched && r.confidence >= JUDGE_CONFIDENCE_FLOOR;
   }
   if ("all" in cond)
     return cond.all.every((c) => evaluateCondition(c, s, judgeResults));
@@ -1266,10 +1271,12 @@ export async function runTerminalWatcherCheck(
       judgeQuestions.length > 0 && ctx.mcp.isConnected()
         ? await runModelJudges(judgeQuestions, rec, signals, ctx)
         : new Map<string, ModelJudgeAnswer>();
-    // Surface why a judge fired (matched only — unmatched answers would be noise)
-    // so the published event explains the condition that triggered it.
+    // Surface why a judge fired so the published event explains the condition
+    // that triggered it. Mirror the exact firing test (matched AND confident) —
+    // a low-confidence match does NOT fire the condition, so attaching its reason
+    // would be misleading evidence on an event published for some other reason.
     for (const [question, answer] of judgeResults) {
-      if (answer.matched) {
+      if (answer.matched && answer.confidence >= JUDGE_CONFIDENCE_FLOOR) {
         evidence = [...evidence, `judge[${question}]: ${answer.reason}`];
       }
     }
