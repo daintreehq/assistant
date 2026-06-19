@@ -222,7 +222,16 @@ export function ControlRoom({
       {/* The live region (repaints): the in-flight turn and the status line are
           always shown; only the bottom slot swaps the composer for an on-demand
           operations/help panel. Nothing here is pinned across the scrollback — it
-          is simply the bottom of the stream. */}
+          is simply the bottom of the stream.
+
+          INVARIANT (#138): nothing in this subtree may set a Box's layout `width`
+          to a number derived from the lagged `columns` prop — yoga would size it to
+          a stale value that briefly exceeds a just-shrunk terminal and orphan a
+          wrapped row into scrollback. The numeric `contentWidth` handed to the
+          children below is a content-budget hint for truncation math ONLY; their
+          boxes size by yoga (`width="100%"` / `flexShrink`, capped with `maxWidth`)
+          so a live line can never out-run the real width. The `<Static>` cells
+          above are exempt — they print once and scroll away. */}
       <Box flexDirection="column">
         {live.map((cell) => (
           <CellView

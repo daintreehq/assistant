@@ -100,12 +100,22 @@ export function ApprovalSheet({
   const req = pending.request;
   const set = glyphs();
   return (
+    // Size by yoga against the LIVE terminal, not the numeric `width` prop. The
+    // sheet lives in the repainting region, and `width` derives from ControlRoom's
+    // `columns` prop, which lags the real width by a render tick while Daintree
+    // animates the pane on show/hide (#138). An explicit `width={width}` would
+    // momentarily exceed a just-shrunk terminal, wrap the bordered row, and orphan
+    // a stale copy into scrollback (Ink erases by logical line count and only
+    // clears on shrink, never on grow). `width="100%"` resolves against the live
+    // width on every relayout; `maxWidth` keeps the numeric prop as the readability
+    // cap. Fields below already `wrap="truncate"`, so the body clips to match.
     <Box
       flexDirection="column"
       borderStyle="round"
       borderColor={ui.color.warning}
       paddingX={1}
-      width={width}
+      width="100%"
+      maxWidth={width}
     >
       <Text color={ui.color.warning} bold wrap="truncate">
         {set.attention} {titleFor(req)}
