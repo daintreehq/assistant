@@ -1,52 +1,16 @@
 /**
- * The run-oriented transcript. Folds completed turns and the one in-flight turn
- * into a single column, budgeting by RENDERED line count (not item count) so a
- * long answer doesn't silently push the active run off-screen. Committed turns
- * read as stable cells; only the last turn mutates.
+ * The run-oriented transcript renderer. In the inline cockpit the transcript is
+ * NOT a fixed-height viewport any more — completed turns are committed to the
+ * terminal's native scrollback (via <Static> in ControlRoom) and only the
+ * in-flight turn lives in the repainting region. So this file's job shrank to two
+ * things: a single-cell renderer ({@link CellView}) shared by both regions, and a
+ * thin list wrapper kept for the gallery/tests. Committed turns read as stable
+ * cells; only the last turn mutates.
  */
 import { Box, Text } from "ink";
 import type { TranscriptCell } from "../types.js";
 import { TurnCellView } from "./TurnCellView.js";
 import { glyphs, toneColor, ui } from "../theme.js";
-
-function wrapLines(text: string, width: number): number {
-  if (!text) return 0;
-  const w = Math.max(1, width);
-  return text
-    .split("\n")
-    .reduce((n, l) => n + Math.max(1, Math.ceil(l.length / w)), 0);
-}
-
-/** Rough rendered-height estimate for a cell, used only for the viewport budget. */
-function estimateLines(cell: TranscriptCell, width: number): number {
-  if (cell.kind === "note") return wrapLines(cell.text, width);
-  if (cell.kind === "command")
-    return 1 + Math.min(8, wrapLines(cell.text, width));
-  let n = 1; // bottom margin
-  if (cell.userText) n += 1 + wrapLines(cell.userText, width);
-  if (cell.assistantText) n += 1 + wrapLines(cell.assistantText, width - 2);
-  else if (cell.streaming) n += 2;
-  n += cell.activities.length;
-  n += cell.notes.length;
-  return Math.max(1, n);
-}
-
-/** Take the most recent cells that fit within `height` rendered lines. */
-function fitCells(
-  cells: TranscriptCell[],
-  height: number,
-  width: number,
-): TranscriptCell[] {
-  const out: TranscriptCell[] = [];
-  let used = 0;
-  for (let i = cells.length - 1; i >= 0; i--) {
-    const cost = estimateLines(cells[i], width);
-    if (out.length > 0 && used + cost > height) break;
-    out.unshift(cells[i]);
-    used += cost;
-  }
-  return out;
-}
 
 function NoteView({
   cell,
@@ -96,45 +60,66 @@ function CommandView({
   );
 }
 
+/**
+ * Render a single transcript cell. Used directly by ControlRoom for both the
+ * committed (<Static>) history and the live tail, so a cell looks identical
+ * whether it has scrolled into terminal scrollback or is still repainting.
+ */
+export function CellView({
+  cell,
+  width,
+  now,
+  expanded = false,
+}: {
+  cell: TranscriptCell;
+  width: number;
+  now?: number;
+  expanded?: boolean;
+}) {
+  if (cell.kind === "turn")
+    return (
+      <TurnCellView turn={cell} width={width} now={now} expanded={expanded} />
+    );
+  if (cell.kind === "note") return <NoteView cell={cell} />;
+  return <CommandView cell={cell} />;
+}
+
+/**
+ * A plain top-to-bottom list of cells with an empty-state hint. No height budget
+ * or tail-clipping: the inline cockpit relies on native scrollback, so every cell
+ * is rendered and the terminal owns what's off-screen. Retained for the gallery
+ * and component tests.
+ */
 export function Transcript({
   cells,
-  height,
   width = 72,
   now,
   expanded = false,
   emptyText = "Ask Daintree to inspect worktrees, delegate edits, or watch terminals.",
 }: {
   cells: TranscriptCell[];
-  height: number;
+  /** Accepted for back-compat; the inline transcript no longer clips by height. */
+  height?: number;
   width?: number;
   now?: number;
   expanded?: boolean;
   /** Override the empty-state line (the sidebar uses a shorter one). */
   emptyText?: string;
 }) {
-  const visible = fitCells(cells, Math.max(1, height), width);
   return (
-    <Box flexDirection="column" height={height} overflow="hidden">
-      {visible.length === 0 ? (
-        <Box flexGrow={1} alignItems="center" justifyContent="center">
-          <Text dimColor>{emptyText}</Text>
-        </Box>
+    <Box flexDirection="column">
+      {cells.length === 0 ? (
+        <Text dimColor>{emptyText}</Text>
       ) : (
-        visible.map((cell) =>
-          cell.kind === "turn" ? (
-            <TurnCellView
-              key={cell.id}
-              turn={cell}
-              width={width}
-              now={now}
-              expanded={expanded}
-            />
-          ) : cell.kind === "note" ? (
-            <NoteView key={cell.id} cell={cell} />
-          ) : (
-            <CommandView key={cell.id} cell={cell} />
-          ),
-        )
+        cells.map((cell) => (
+          <CellView
+            key={cell.id}
+            cell={cell}
+            width={width}
+            now={now}
+            expanded={expanded}
+          />
+        ))
       )}
     </Box>
   );

@@ -1,18 +1,23 @@
 /**
- * The control room as a PURE presentational component: everything it needs is a
- * prop, nothing is fetched or subscribed. This is what makes the surface
- * deterministically renderable — the live shell (DaintreeInkApp) feeds it from
- * the controller, the gallery feeds it from frozen fixtures, and golden-frame
- * tests feed it fixed timestamps.
+ * The cockpit as a PURE presentational component: everything it needs is a prop,
+ * nothing is fetched or subscribed. The live shell (DaintreeInkApp) feeds it from
+ * the controller, the gallery feeds it from frozen fixtures, and tests feed it
+ * fixed timestamps.
  *
- * Three intentional layouts chosen by width. The 55–65 column SIDEBAR is the
- * canonical Daintree surface (it usually lives in a host side panel), so it is
- * operations-first with conversation integrated; standard/wide are progressive
- * enhancements that hand more room to the transcript. Chrome is budgeted so the
- * operations sections and composer are never pushed off a short terminal.
+ * INLINE MODEL (Claude Code style). The cockpit renders into the terminal's MAIN
+ * screen buffer, not the alternate buffer, so the terminal's own scrollback /
+ * mouse wheel / selection work natively. Completed turns are committed permanently
+ * above the live region with Ink's <Static> (they flow into native scrollback and
+ * never repaint); only the in-flight turn, the status line and the composer live
+ * in the repainting region pinned at the bottom. The header is printed ONCE at the
+ * top and is allowed to scroll away with the history — it is not sticky.
+ *
+ * Operations and help are momentary, on-demand views rendered in place of the
+ * composer (Esc returns), never a pinned panel — a pinned panel is impossible in
+ * the main buffer without re-taking the alternate screen and losing scrollback.
  */
 import type { Ref } from "react";
-import { Box, Text } from "ink";
+import { Box, Static, Text } from "ink";
 import type {
   DashboardState,
   PendingConfirm,
@@ -21,39 +26,37 @@ import type {
 } from "./types.js";
 import type { TerminalPreview } from "./hooks/useTerminalPreview.js";
 import { Header } from "./components/Header.js";
-import { Transcript } from "./components/Transcript.js";
-import { SidebarHome } from "./components/SidebarHome.js";
+import { CellView } from "./components/Transcript.js";
 import { OperationsView } from "./components/OperationsView.js";
-import { OpsRail } from "./components/OpsRail.js";
 import { StatusLine } from "./components/StatusLine.js";
-import { AttentionBanner } from "./components/AttentionBanner.js";
 import { Composer, type ComposerHandle } from "./components/Composer.js";
 import { ApprovalSheet } from "./components/ApprovalSheet.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
-import { StateBadge, formatDuration } from "./primitives.js";
-import { buildAgentRows } from "./presentation/operations.js";
-import { truncate } from "../utils/text.js";
 import type { PanelKey } from "../cli/commandData.js";
 
-export type LayoutMode = "sidebar" | "standard" | "wide";
 export type View = "home" | "operations" | "help";
 
-export function layoutFor(columns: number): LayoutMode {
-  if (columns >= 116) return "wide";
-  if (columns >= 72) return "standard";
-  return "sidebar";
-}
+/**
+ * Cap the content width even in a very wide terminal: long lines that run the
+ * full width of a maximised window are hard to read, so prose and run cells wrap
+ * at a comfortable measure the way other conversational CLIs do.
+ */
+const CONTENT_MAX = 100;
 
 /**
- * Width bands inside sidebar mode. The design is optimized for "comfortable"
- * (55–65); below that is survival (fewer labels/previews), above it is the same
- * layout with slightly richer text.
+ * Index in `cells` where the live (repainting) tail begins. Everything before it
+ * is immutable and committed to <Static>; everything at/after it is re-rendered
+ * each pass. Only the trailing turn — and then only while it is still `active` —
+ * mutates (the reducer attaches tokens/tools/notes to it). A background note can
+ * land *after* the active turn, so the tail is "the active turn and anything after
+ * it", which all commits together once the turn finishes.
  */
-export type SidebarDensity = "compact" | "comfortable" | "roomy";
-export function sidebarDensity(columns: number): SidebarDensity {
-  if (columns < 55) return "compact";
-  if (columns <= 65) return "comfortable";
-  return "roomy";
+function liveTailStart(cells: TranscriptCell[]): number {
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const c = cells[i];
+    if (c.kind === "turn") return c.state === "active" ? i : cells.length;
+  }
+  return cells.length;
 }
 
 export interface ControlRoomProps {
@@ -61,7 +64,8 @@ export interface ControlRoomProps {
   project: string;
   tier: string;
   columns: number;
-  rows: number;
+  /** Accepted for back-compat (gallery/tests); the inline cockpit ignores it. */
+  rows?: number;
   connected: boolean;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
@@ -73,15 +77,14 @@ export interface ControlRoomProps {
   view: View;
   /**
    * Which `/panel` command opened the operations view, so it can focus that one
-   * section. `help` is rendered by its own `view` branch, so it never reaches
-   * OperationsView. Null shows the full deck (e.g. opened via `^O`).
+   * section. `help` is rendered by its own `view` branch. Null shows the full deck.
    */
   activePanel?: PanelKey | null;
   expanded?: boolean;
   pending?: PendingConfirm | null;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
-  /** Debug logging is active — shown as a header badge so it's verifiable. */
+  /** Debug logging is active — shown in the one-time header banner. */
   logging?: boolean;
   /** Path of the active debug log, shown under the header so it can be tailed. */
   logFile?: string;
@@ -96,11 +99,13 @@ export interface ControlRoomProps {
   onResolve?: (approved: boolean) => void;
 }
 
+/** A <Static> item: the one-time header (no cell) or a committed transcript cell. */
+type StaticItem = { key: string; cell?: TranscriptCell };
+
 export function ControlRoom({
   project,
   tier,
-  columns: outerColumns,
-  rows: outerRows,
+  columns,
   connected,
   transcript,
   dashboard,
@@ -122,176 +127,74 @@ export function ControlRoom({
   composerRef,
   onResolve = () => {},
 }: ControlRoomProps) {
-  // One cell of breathing room around the whole surface, the way other CLIs
-  // sit a little inside the terminal edge. The outer padding consumes one
-  // column/row on each edge, so the interior lays out at the host size minus
-  // two in each axis — every width/height calculation below uses these
-  // interior dimensions.
-  const columns = Math.max(1, outerColumns - 2);
-  const rows = Math.max(1, outerRows - 2);
-  const layout = layoutFor(columns);
-  const agents = buildAgentRows(dashboard.watchers, previews);
-  const activeAgent =
-    agents.find((a) => a.classification === "still_working") ?? agents[0];
+  const contentWidth = Math.max(20, Math.min(columns, CONTENT_MAX));
 
-  // Sidebar home owns its own attention + current-operation rows (SidebarHome);
-  // wide shows them in the rail. Only standard layout gets the bottom banner and
-  // the one-line operation strip below the header.
-  const showAttention =
-    !pending && layout === "standard" && dashboard.inbox.length > 0 && view === "home";
-  // Sidebar's NOW section already names the active run, so the header subtitle
-  // is reserved for standard layout (which has no NOW section). Collapse any
-  // whitespace (a goal with an embedded newline would render as two rows while
-  // headerH budgets one, overlapping the body).
-  const runTitle =
-    busy && view === "home" && layout === "standard"
-      ? activeAgent?.goal?.replace(/\s+/g, " ").trim() || undefined
-      : undefined;
+  // Split history (committed -> Static -> native scrollback) from the live tail.
+  const liveStart = liveTailStart(transcript);
+  const committed = transcript.slice(0, liveStart);
+  const live = transcript.slice(liveStart);
 
-  // Header = the identity text rows (wordmark; + project name and/or run subtitle
-  // when present) + a blank line, the always-on rule, and a blank line below
-  // (marginBottom 1). Debug logging, when on, adds one line under the rule.
-  const headerTextRows = 1 + (project ? 1 : 0) + (runTitle ? 1 : 0);
-  const headerH = headerTextRows + 3 + (logging ? 1 : 0);
-  // Composer = top rule + input row + bottom rule + hints row. The input is
-  // bracketed both sides so it reads as a field.
-  const composerH = 4;
-  const statusH = 1;
-  const attentionH = showAttention ? 1 : 0;
-  const opStripH = layout === "standard" && view === "home" && activeAgent ? 1 : 0;
-  const approvalH = pending ? 8 : 0;
-  // Floor at 1, not 3: on a short terminal the body must be allowed to collapse
-  // so the chrome it shares the screen with — crucially the composer — is never
-  // pushed off the bottom. The flex priority below (body shrinks, footer never)
-  // is what actually guarantees the input stays on screen; this just keeps the
-  // budget we hand the body components honest.
-  const bodyHeight = Math.max(
-    1,
-    rows - headerH - composerH - statusH - attentionH - opStripH - approvalH,
-  );
-
-  const railWidth =
-    layout === "wide"
-      ? Math.min(40, Math.max(26, Math.floor(columns * 0.28)))
-      : 0;
-  const transcriptWidth =
-    layout === "wide" ? Math.max(40, columns - railWidth - 1) : columns;
+  // <Static> renders items once and prints them permanently above the live tree;
+  // it only emits items appended since the last pass. `committed` is append-only
+  // (it never shrinks or reorders — pull-back only ever drops the live turn), so
+  // each completed turn is committed exactly once and the terminal keeps the rest.
+  // The header is item 0: printed once, then free to scroll away with the history.
+  const staticItems: StaticItem[] = [
+    { key: "__header" },
+    ...committed.map((c) => ({ key: c.id, cell: c })),
+  ];
 
   const contextHint = connected
-    ? `agents ${agents.length} · tmr ${dashboard.timers.length}`
+    ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
     : "MCP degraded";
 
+  // A confirmation is interactive and must surface in every view; while it is
+  // pending the on-demand panels yield so the approval (and composer) stay live.
+  const showPanel = !pending && view !== "home";
+
   return (
-    <Box
-      flexDirection="column"
-      height={outerRows}
-      width={outerColumns}
-      paddingX={1}
-      paddingY={1}
-    >
-      <Box flexShrink={0} flexDirection="column">
-        <Header
-          columns={columns}
-          project={project}
-          runTitle={runTitle}
-          logging={logging}
-          logFile={logFile}
-        />
-      </Box>
-
-      {opStripH > 0 && activeAgent ? (
-        <Box justifyContent="space-between">
-          <Text wrap="truncate">
-            <StateBadge
-              tone={activeAgent.badge.tone}
-              label={activeAgent.badge.label}
-            />
-            <Text dimColor>
-              {" "}
-              {activeAgent.id} ·{" "}
-              {truncate(activeAgent.goal || activeAgent.title, Math.max(8, columns - 30))}
-            </Text>
-          </Text>
-          <Text dimColor>
-            {formatDuration(Math.max(0, now - activeAgent.startedAt))}
-          </Text>
-        </Box>
-      ) : null}
-
-      <Box
-        flexGrow={1}
-        flexShrink={1}
-        minHeight={0}
-        flexDirection="column"
-        overflow="hidden"
-      >
-        {view === "help" ? (
-          <Box height={bodyHeight}>
-            <HelpOverlay width={Math.min(76, columns)} />
-          </Box>
-        ) : view === "operations" ? (
-          <Box height={bodyHeight} overflow="hidden">
-            <OperationsView
-              dashboard={dashboard}
-              previews={previews}
-              width={columns}
+    <Box flexDirection="column" width={contentWidth}>
+      <Static items={staticItems}>
+        {(item) =>
+          item.cell ? (
+            <CellView
+              key={item.key}
+              cell={item.cell}
+              width={contentWidth}
               now={now}
-              activePanel={activePanel === "help" ? null : activePanel}
+              expanded={expanded}
             />
-          </Box>
-        ) : layout === "wide" ? (
-          <Box height={bodyHeight}>
-            <Box width={transcriptWidth} overflow="hidden">
-              <Transcript
-                cells={transcript}
-                height={bodyHeight}
-                width={transcriptWidth}
-                now={now}
-                expanded={expanded}
-              />
-            </Box>
-            <Box width={railWidth} marginLeft={1}>
-              <OpsRail
-                dashboard={dashboard}
-                previews={previews}
-                width={railWidth}
-                now={now}
-              />
-            </Box>
-          </Box>
-        ) : layout === "sidebar" ? (
-          <SidebarHome
-            dashboard={dashboard}
-            previews={previews}
-            transcript={transcript}
-            width={columns}
-            height={bodyHeight}
-            now={now}
-            expanded={expanded}
-          />
-        ) : (
-          <Transcript
-            cells={transcript}
-            height={bodyHeight}
-            width={columns}
-            now={now}
-            expanded={expanded}
-          />
-        )}
-      </Box>
+          ) : (
+            <Header
+              key="__header"
+              columns={contentWidth}
+              project={project}
+              logging={logging}
+              logFile={logFile}
+            />
+          )
+        }
+      </Static>
 
-      {/* The footer never shrinks: the body above yields space first, so the
-          composer (and its input row) is always on screen, even when the
-          terminal is too short to honour every region's full budget. */}
-      <Box flexShrink={0} flexDirection="column">
-        {showAttention ? (
-          <AttentionBanner events={dashboard.inbox} width={columns} />
-        ) : null}
+      {/* The live region (repaints): the in-flight turn and the status line are
+          always shown; only the bottom slot swaps the composer for an on-demand
+          operations/help panel. Nothing here is pinned across the scrollback — it
+          is simply the bottom of the stream. */}
+      <Box flexDirection="column">
+        {live.map((cell) => (
+          <CellView
+            key={cell.id}
+            cell={cell}
+            width={contentWidth}
+            now={now}
+            expanded={expanded}
+          />
+        ))}
 
         {pending ? (
           <ApprovalSheet
             pending={pending}
-            width={Math.min(80, columns)}
+            width={Math.min(80, contentWidth)}
             onResolve={onResolve}
           />
         ) : null}
@@ -300,21 +203,43 @@ export function ControlRoom({
           dashboard={dashboard}
           tier={tier}
           sessionUsage={sessionUsage}
-          width={columns}
+          width={contentWidth}
           now={now}
         />
 
-        <Composer
-          busy={busy}
-          stage={stage}
-          contextHint={contextHint}
-          width={columns}
-          focus={composerFocus}
-          cancellable={cancellable}
-          onSubmit={onSubmit}
-          onCancel={onCancel}
-          ref={composerRef}
-        />
+        {/* Breathing room between the conversation and the input, the way other
+            conversational CLIs sit the prompt off the content above it. */}
+        <Box height={1} flexShrink={0} />
+
+        {showPanel && view === "operations" ? (
+          <Box flexDirection="column">
+            <OperationsView
+              dashboard={dashboard}
+              previews={previews}
+              width={contentWidth}
+              now={now}
+              activePanel={activePanel === "help" ? null : activePanel}
+            />
+            <Text dimColor>Esc to return</Text>
+          </Box>
+        ) : showPanel && view === "help" ? (
+          <Box flexDirection="column">
+            <HelpOverlay width={Math.min(76, contentWidth)} />
+            <Text dimColor>Esc to return</Text>
+          </Box>
+        ) : (
+          <Composer
+            busy={busy}
+            stage={stage}
+            contextHint={contextHint}
+            width={contentWidth}
+            focus={composerFocus}
+            cancellable={cancellable}
+            onSubmit={onSubmit}
+            onCancel={onCancel}
+            ref={composerRef}
+          />
+        )}
       </Box>
     </Box>
   );
