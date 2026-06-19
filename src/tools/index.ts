@@ -16,6 +16,7 @@ import { workflowTools } from "./workflowTools.js";
 import { recipeRunTools } from "./recipeRunTools.js";
 import { auditTools } from "./auditTools.js";
 import { memoryTools } from "./memoryTools.js";
+import { artifactTools } from "./artifactTools.js";
 
 export function buildAllTools(): ToolDef[] {
   return [
@@ -32,5 +33,6 @@ export function buildAllTools(): ToolDef[] {
     ...recipeRunTools,
     ...auditTools,
     ...memoryTools,
+    ...artifactTools,
   ];
 }

@@ -55,6 +55,14 @@ export class App {
   readonly sessionId: string;
   /** Holds the id of the run currently streaming; set per-turn by AgentSession. */
   readonly runIdRef: RunIdRef = { current: undefined };
+  /**
+   * In-memory, session-scoped store for oversized tool results. The agent loop
+   * stashes the full serialized envelope here when it overflows the inline limit
+   * and the `artifact.read` tool pages it back. One App ≈ one session, so this map
+   * shares the session's lifetime and is dropped on process exit — artifact ids are
+   * only ever dereferenced within the same session.
+   */
+  private readonly artifactStore = new Map<string, string>();
   session!: AgentSession;
   scheduler?: Scheduler;
 
@@ -121,6 +129,7 @@ export class App {
       sessionId: this.sessionId,
       actor,
       actorId,
+      artifactStore: this.artifactStore,
       // Read hooks live so setHooks() updates take effect without rebuilding the
       // session (which would drop conversation history).
       confirm:
