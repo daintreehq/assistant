@@ -5,7 +5,11 @@
  * concepts. Rows are ordered by human urgency (needs-input first), so an urgent
  * approval never gets the same weight as idle work.
  */
-import type { WatcherRecord } from "../../schemas.js";
+import {
+  classificationEpistemicKind,
+  type EpistemicKind,
+  type WatcherRecord,
+} from "../../schemas.js";
 import type { TerminalPreview } from "../hooks/useTerminalPreview.js";
 import { watcherBadge, type WatcherBadge } from "../theme.js";
 
@@ -17,6 +21,11 @@ export interface AgentRow {
   goal: string;
   badge: WatcherBadge;
   classification?: string;
+  /** Epistemic provenance of the last verdict (issue #85) — whether this row's
+   * state is an observed fact, a model inference, or unverified. Taken from the
+   * watcher's persisted `lastEpistemicKind`, with a classification-derived fallback
+   * for rows stored before that field existed. */
+  epistemicKind: EpistemicKind;
   /** Last non-empty preview line, when a terminal preview is available. */
   preview?: string;
   /** Live agent/runtime state from the preview, if any. */
@@ -57,6 +66,8 @@ export function buildAgentRows(
       goal: w.goal,
       badge,
       classification: w.lastClassification,
+      epistemicKind:
+        w.lastEpistemicKind ?? classificationEpistemicKind(w.lastClassification),
       preview: lastLine(preview?.tail),
       agentState: preview?.agentState ?? preview?.runtimeStatus,
       startedAt: w.createdAt,

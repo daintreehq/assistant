@@ -257,18 +257,32 @@ export function buildFixtures(): Fixture[] {
       dashboard: {
         ...emptyDash(true),
         watchers: [
-          watcher({ lastClassification: "tests_failed" }),
+          // inferred: a small-model content classification.
+          watcher({ lastClassification: "tests_failed", lastEpistemicKind: "inferred" }),
           watcher({
             id: "wch_2",
             title: "repair authentication flow",
             goal: "resolve the permission prompt",
             targetsJson: JSON.stringify(["term_12"]),
             lastClassification: "permission_prompt",
+            lastEpistemicKind: "inferred",
             createdAt: FIXED_NOW - s(40),
+          }),
+          watcher({
+            id: "wch_3",
+            title: "build the release bundle",
+            goal: "wait for the build to exit",
+            targetsJson: JSON.stringify(["term_15"]),
+            // observed: a deterministic terminal exit (no model consulted).
+            lastClassification: "terminal_exited",
+            lastEpistemicKind: "observed",
+            createdAt: FIXED_NOW - s(70),
           }),
         ],
         inbox: [
           event({
+            // inferred: published off a model classification.
+            epistemicKind: "inferred",
             recommendedActions: [
               { label: "focus terminal", toolName: "terminal.focus", args: { terminalId: "term_8" } },
               { label: "rerun", toolName: "recipe.run" },
@@ -280,6 +294,8 @@ export function buildFixtures(): Fixture[] {
             severity: "attention",
             title: "term_12 awaiting input",
             summary: "permission prompt: allow git push?",
+            // observed: agentState=waiting read straight from Daintree.
+            epistemicKind: "observed",
           }),
         ],
       },

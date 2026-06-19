@@ -91,6 +91,22 @@ export const EventSource = z.enum([
 ]);
 export type EventSource = z.infer<typeof EventSource>;
 
+/**
+ * Epistemic provenance of a surfaced fact — how much authority a human should
+ * place in it (issue #85). The Control Room renders all watcher/attention items
+ * identically today, masking the gap between a measured fact and a model's guess.
+ *   - "observed"   — a deterministic, measured signal set WITHOUT the model:
+ *                    a terminal exit code, agentState from terminal.getStatus/list.
+ *   - "inferred"   — a model judgment (the small classifier, an acceptance judge,
+ *                    or a completion conclusion drawn from git state). Plausible,
+ *                    not certain.
+ *   - "unverified" — no trustworthy signal: read failures, unknown classifications,
+ *                    no-MCP, or a completion that could not be verified.
+ * Optional everywhere so legacy/fixture rows and non-watcher sources stay valid.
+ */
+export const EpistemicKind = z.enum(["observed", "inferred", "unverified"]);
+export type EpistemicKind = z.infer<typeof EpistemicKind>;
+
 export const EventTarget = z
   .object({
     projectId: z.string().optional(),
@@ -123,6 +139,9 @@ export const QueuePublishArgs = z
     recommendedActions: z.array(RecommendedAction).optional(),
     dedupeKey: z.string().optional(),
     ttlMs: z.number().optional(),
+    // Provenance of this event's claim (issue #85). `.strict()` would strip an
+    // unknown key, so it must be declared here or it never reaches the DB.
+    epistemicKind: EpistemicKind.optional(),
   })
   .strict();
 export type QueuePublishArgs = z.infer<typeof QueuePublishArgs>;
@@ -137,6 +156,8 @@ export interface QueueEvent {
   evidence?: string[];
   recommendedActions?: RecommendedAction[];
   dedupeKey?: string;
+  /** Epistemic provenance of this event's claim — see {@link EpistemicKind}. */
+  epistemicKind?: EpistemicKind;
   createdAt: number;
   /** Advances on each dedupe bump; createdAt stays fixed. Used for recency. */
   updatedAt?: number;
@@ -390,6 +411,11 @@ export interface WatcherRecord {
     | "cancelled"
     | "error";
   lastClassification?: string;
+  /** Epistemic provenance of the last verdict — see {@link EpistemicKind}.
+   * Stored authoritatively by the engine so the Agents section need not re-derive
+   * it from `lastClassification` alone (which is ambiguous: e.g. waiting_for_input
+   * can be an observed agentState or a model inference). */
+  lastEpistemicKind?: EpistemicKind;
   lastCheckedAt?: number;
   nextCheckAt: number;
   createdAt: number;
@@ -847,6 +873,48 @@ export interface AgentLaunchRecord {
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Map a watcher classification to its epistemic provenance (issue #85). The single
+ * source of truth shared by the watcher engine (which knows authoritatively whether
+ * the model was consulted, via `usedModel`) and the UI's fallback for rows persisted
+ * before `lastEpistemicKind` existed.
+ *
+ *   - `terminal_exited` is the one purely-measured class → always "observed".
+ *   - `waiting_for_input` is the only ambiguous class: the engine sets it both
+ *     deterministically (from agentState=waiting) and from the small model, so its
+ *     kind depends on `usedModel`. The UI fallback (no flag) treats it as observed,
+ *     since the deterministic agentState path is the dominant source.
+ *   - `permission_prompt` and the content classes (`tests_*`, `command_failed`,
+ *     `merge_conflict`, `still_working`) are only ever produced by the model, and
+ *     any `completed_*` conclusion is an inference drawn from git state → "inferred".
+ *   - Everything else (`no_change`, `unknown`, `needs_large_model`) carries no
+ *     trustworthy signal → "unverified".
+ */
+export function classificationEpistemicKind(
+  classification: WatcherClassification | string | undefined,
+  usedModel = false,
+): EpistemicKind {
+  switch (classification) {
+    case "terminal_exited":
+      return "observed";
+    case "waiting_for_input":
+      return usedModel ? "inferred" : "observed";
+    case "permission_prompt":
+    case "still_working":
+    case "tests_failed":
+    case "tests_passed":
+    case "command_failed":
+    case "merge_conflict":
+    case "completed_success":
+    case "completed_unverified":
+    case "completed_unknown":
+      return "inferred";
+    default:
+      // no_change, unknown, needs_large_model, or anything unrecognized.
+      return "unverified";
+  }
+}
 
 /** Evaluate the leaf/composite parts of a WatchCondition that are deterministic. */
 export function isCompositeCondition(

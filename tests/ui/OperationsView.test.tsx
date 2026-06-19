@@ -76,6 +76,48 @@ describe("OperationsView", () => {
     expect(frame).not.toContain("[R rerun]");
   });
 
+  it("marks an agent row with its epistemic provenance (#85)", () => {
+    const frame =
+      render(
+        <OperationsView
+          dashboard={dash({
+            watchers: [
+              watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
+            ],
+          })}
+          width={72}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    // The 3-letter tag is glyph-set independent (survives the ASCII fallback).
+    expect(frame).toContain("obs");
+  });
+
+  it("marks an attention event with its epistemic provenance (#85)", () => {
+    const frame =
+      render(
+        <OperationsView
+          dashboard={dash({
+            inbox: [
+              {
+                id: "e1",
+                source: "terminal_watcher",
+                severity: "error",
+                title: "Tests failed in term_8",
+                summary: "3 failures",
+                epistemicKind: "inferred",
+                createdAt: 0,
+                count: 1,
+              } as any,
+            ],
+          })}
+          width={72}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("inf");
+  });
+
   it("hides empty sections (no audit/timers shown when there are none)", () => {
     const frame =
       render(<OperationsView dashboard={dash()} width={72} now={0} />).lastFrame() ?? "";

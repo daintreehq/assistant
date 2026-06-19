@@ -212,6 +212,38 @@ describe("decideOutcome", () => {
     expect(out.shouldPublish).toBe(true);
     expect(out.severity).toBe("attention");
   });
+
+  // Issue #85 — the outcome carries epistemic provenance derived from the
+  // classification and whether the small model was consulted.
+  it("tags a deterministic terminal_exited outcome observed", () => {
+    const out = decideOutcome({ ...base, classification: "terminal_exited", confidence: 0.95 });
+    expect(out.epistemicKind).toBe("observed");
+  });
+
+  it("tags a model-derived waiting_for_input inferred but a deterministic one observed", () => {
+    expect(
+      decideOutcome({ ...base, classification: "waiting_for_input", confidence: 0.9 })
+        .epistemicKind,
+    ).toBe("observed");
+    expect(
+      decideOutcome({
+        ...base,
+        classification: "waiting_for_input",
+        confidence: 0.85,
+        usedModel: true,
+      }).epistemicKind,
+    ).toBe("inferred");
+  });
+
+  it("tags a model classification inferred and an unknown outcome unverified", () => {
+    expect(
+      decideOutcome({ ...base, classification: "tests_failed", confidence: 0.85, usedModel: true })
+        .epistemicKind,
+    ).toBe("inferred");
+    expect(
+      decideOutcome({ ...base, classification: "unknown", confidence: 0.4 }).epistemicKind,
+    ).toBe("unverified");
+  });
 });
 
 describe("readStatuses — exit metadata parsing (#22)", () => {

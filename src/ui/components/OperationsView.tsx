@@ -11,6 +11,7 @@ import type { TerminalPreview } from "../hooks/useTerminalPreview.js";
 import type { AuditRecord, QueueEvent, TimerRecord } from "../../schemas.js";
 import { SectionLabel, StateBadge, formatDuration } from "../primitives.js";
 import {
+  epistemicMark,
   glyphs,
   severityTone,
   toneColor,
@@ -22,6 +23,22 @@ import {
   type AgentRow,
 } from "../presentation/operations.js";
 import type { PanelKey } from "../../cli/commandData.js";
+
+/**
+ * A compact epistemic-provenance mark (issue #85): a colored glyph + 3-letter tag
+ * telling the user whether a row's state is an observed fact, a model inference, or
+ * unverified. Renders nothing when the kind is absent so legacy/non-watcher rows
+ * stay unchanged. Carries its own color, so it stays legible nested inside a dim line.
+ */
+function EpistemicTag({ kind }: { kind?: string }) {
+  const mark = epistemicMark(kind);
+  if (!mark) return null;
+  return (
+    <Text color={mark.color}>
+      {mark.symbol} {mark.label}{" "}
+    </Text>
+  );
+}
 
 function clock(ms: number): string {
   try {
@@ -90,7 +107,11 @@ function AttentionSection({
               {e.count > 1 ? <Text dimColor> ×{e.count}</Text> : null}
             </Text>
             {e.summary ? (
-              <Text dimColor>{"  "}{truncate(e.summary, width - 4)}</Text>
+              <Text dimColor>
+                {"  "}
+                <EpistemicTag kind={e.epistemicKind} />
+                {truncate(e.summary, width - 4)}
+              </Text>
             ) : null}
           </Box>
         );
@@ -126,6 +147,7 @@ function AgentsSection({
           </Box>
           <Text dimColor>
             {"  "}
+            <EpistemicTag kind={a.epistemicKind} />
             {a.id}
             {a.agentState ? ` · ${a.agentState}` : ""}
             {a.preview ? ` · ${truncate(a.preview, Math.max(8, width - 30))}` : ""}

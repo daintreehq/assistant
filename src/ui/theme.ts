@@ -62,6 +62,12 @@ export const ui = {
     bullet: "·",
     connected: "●",
     clock: "◷",
+    // Epistemic-provenance marks (issue #85): a solid disc for a measured fact, a
+    // hollow ring for a model inference, a query for unverified. The solid/hollow
+    // contrast reads at a glance as "certain vs guessed".
+    observed: "●",
+    inferred: "○",
+    unverified: "?",
   },
   spacing: {
     section: 1,
@@ -116,6 +122,11 @@ const ASCII_GLYPHS = {
   bullet: "-",
   connected: "*",
   clock: "@",
+  // ASCII fallbacks for the epistemic marks; must stay shape-parallel with the
+  // Unicode set above (DAINTREE_ASCII=1 path).
+  observed: "*",
+  inferred: "o",
+  unverified: "?",
 } as const;
 
 export type GlyphSet = typeof UNICODE_GLYPHS;
@@ -332,6 +343,60 @@ export function watcherBadge(classification?: string): WatcherBadge {
       return make("exited", "neutral", set.failed, 6);
     default:
       return make(classification ?? "pending", "neutral", set.pending, 4);
+  }
+}
+
+/** A glyph + tone + short label conveying a fact's epistemic provenance (#85). */
+export interface EpistemicMark {
+  /** Signature glyph: solid disc / hollow ring / query. */
+  symbol: string;
+  tone: Tone;
+  color: string;
+  /** Three-letter scan label: "obs" / "inf" / "unv". */
+  label: string;
+  /** Spelled-out form for tooltips / accessibility. */
+  full: string;
+}
+
+/**
+ * Map an epistemic kind to its render mark. `inferred` and `unverified` are
+ * deliberately dimmed (neutral tone) so an inference never visually outweighs the
+ * observed facts beside it; an observed fact gets the confident accent color.
+ * Returns null for an absent kind so callers can render nothing rather than a
+ * placeholder. `ascii` honors the DAINTREE_ASCII fallback like every other glyph.
+ */
+export function epistemicMark(
+  kind: string | undefined,
+  ascii: boolean = !unicodeOk(),
+): EpistemicMark | null {
+  const set = glyphs(ascii);
+  switch (kind) {
+    case "observed":
+      return {
+        symbol: set.observed,
+        tone: "success",
+        color: toneColor("success"),
+        label: "obs",
+        full: "observed",
+      };
+    case "inferred":
+      return {
+        symbol: set.inferred,
+        tone: "neutral",
+        color: toneColor("neutral"),
+        label: "inf",
+        full: "inferred",
+      };
+    case "unverified":
+      return {
+        symbol: set.unverified,
+        tone: "neutral",
+        color: toneColor("neutral"),
+        label: "unv",
+        full: "unverified",
+      };
+    default:
+      return null;
   }
 }
 

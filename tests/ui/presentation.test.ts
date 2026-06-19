@@ -62,6 +62,27 @@ describe("buildAgentRows", () => {
     expect(rows[0].watcherId).toBe("wch_input");
     expect(rows[0].needsAttention).toBe(true);
   });
+
+  it("prefers the persisted lastEpistemicKind over the classification fallback (#85)", () => {
+    // still_working would derive "inferred", but a stored kind is authoritative.
+    const rows = buildAgentRows([
+      watcher({ lastClassification: "still_working", lastEpistemicKind: "observed" }),
+    ]);
+    expect(rows[0].epistemicKind).toBe("observed");
+  });
+
+  it("falls back to a classification-derived kind for rows without lastEpistemicKind (#85)", () => {
+    const [exited] = buildAgentRows([
+      watcher({ id: "a", lastClassification: "terminal_exited" }),
+    ]);
+    const [working] = buildAgentRows([
+      watcher({ id: "b", lastClassification: "still_working" }),
+    ]);
+    const [unknown] = buildAgentRows([watcher({ id: "c", lastClassification: "unknown" })]);
+    expect(exited.epistemicKind).toBe("observed");
+    expect(working.epistemicKind).toBe("inferred");
+    expect(unknown.epistemicKind).toBe("unverified");
+  });
 });
 
 describe("actionKey", () => {
