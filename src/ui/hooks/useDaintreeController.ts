@@ -62,23 +62,37 @@ function activeTurnIndex(cells: TranscriptCell[]): number {
 }
 
 /**
- * The trailing cell IF it is a just-submitted, pre-stream user turn — the only
- * state from which Escape can pull the message back into the composer (issue #61).
- * A turn qualifies only before any assistant output has landed: active, not
- * streaming, and with empty `assistantText` (assistant:start/token both flip
- * `streaming` true, closing the window). Returns null otherwise, so callers fall
- * back to plain cancel. Checked against the LAST cell only: pull-back acts on the
- * message the user just sent, never an earlier turn.
+ * The most recent turn AND its index IF it is a just-submitted, pre-stream turn —
+ * the only state from which Escape can pull the message back into the composer
+ * (issue #61). A turn qualifies only before any assistant work has landed:
+ *   - active, with empty `assistantText`, and
+ *   - not streaming, and
+ *   - no tool activities.
+ * The `activities` check is load-bearing, not redundant with `!streaming`: a
+ * `tool:call` runs `stopCaret`, which resets `streaming` to false, and tool calls
+ * never set `assistantText` — so a turn that already spawned an agent or scheduled
+ * a timer would otherwise look pre-stream and be silently erased.
+ *
+ * Scans back past trailing non-turn cells (a background attention note can land
+ * between the user message and the Escape press) to the most recent turn, then
+ * checks only that one: pull-back acts on the message the user just sent, never an
+ * earlier turn. Returns null otherwise, so callers fall back to plain cancel.
  */
-export function pullbackCandidate(cells: TranscriptCell[]): TurnCell | null {
-  const last = cells[cells.length - 1];
-  if (
-    last?.kind === "turn" &&
-    last.state === "active" &&
-    !last.streaming &&
-    last.assistantText === ""
-  ) {
-    return last;
+export function pullbackCandidate(
+  cells: TranscriptCell[],
+): { turn: TurnCell; index: number } | null {
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const c = cells[i];
+    if (c.kind !== "turn") continue;
+    if (
+      c.state === "active" &&
+      !c.streaming &&
+      c.assistantText === "" &&
+      c.activities.length === 0
+    ) {
+      return { turn: c, index: i };
+    }
+    return null; // the newest turn isn't pre-stream — nothing to pull back
   }
   return null;
 }
@@ -140,13 +154,18 @@ export function transcriptReducer(
     case "user:add":
       return [...cells, newTurn(action.text, now)];
 
-    case "user:pullback":
+    case "user:pullback": {
       // Escape pressed before any assistant output landed: drop the just-added
       // turn so the transcript shows no trace of it and the text returns to the
-      // composer for editing. The guard is the source of truth for the race with
-      // assistant:start — if the turn already began streaming, this is a no-op and
-      // the in-flight turn stays put (the caller then applies plain-cancel instead).
-      return pullbackCandidate(cells) ? cells.slice(0, -1) : cells;
+      // composer for editing. Remove that turn by index (not just the tail) so a
+      // background attention note that landed after it survives. The guard is the
+      // source of truth for the race with assistant:start — if the turn already
+      // began streaming or ran a tool, this is a no-op and the in-flight turn stays
+      // put (the caller then applies plain-cancel instead).
+      const c = pullbackCandidate(cells);
+      if (!c) return cells;
+      return [...cells.slice(0, c.index), ...cells.slice(c.index + 1)];
+    }
 
     case "command:add":
       return [
@@ -795,10 +814,12 @@ export function useDaintreeController(
   }, [sendUserMessage]);
 
   // Mirror the live transcript into a ref so pullBackTurn (an Escape-event
-  // callback) can read the newest cells without capturing a stale closure.
-  useEffect(() => {
-    transcriptRef.current = transcript;
-  }, [transcript]);
+  // callback) can read the newest cells without a stale closure. Assigned during
+  // render, not in an effect: an effect runs a tick later, leaving a window where
+  // an assistant:start has already reduced but the ref still shows the pre-stream
+  // turn — pullBackTurn would then fire its side effects against stale state. Only
+  // event handlers read this ref, never the render output, so the write is safe.
+  transcriptRef.current = transcript;
 
   // Abort the in-flight user turn (Escape on an empty composer while busy).
   // Idempotent and a no-op when nothing is running.
@@ -824,7 +845,7 @@ export function useDaintreeController(
     queuedInput.current = [];
     dispatch({ type: "user:pullback" });
     abortController.current?.abort();
-    composerRef.current?.restore(candidate.userText);
+    composerRef.current?.restore(candidate.turn.userText);
   }, [cancelTurn]);
 
   const resolveConfirm = useCallback((approved: boolean) => {

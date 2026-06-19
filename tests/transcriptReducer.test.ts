@@ -152,6 +152,33 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(turns(out)[0].assistantText).toBe("On it");
   });
 
+  it("user:pullback is a no-op once the turn has run a tool, despite the stopped caret (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "spawn an agent" },
+      { type: "assistant:start" },
+      // A tool:call runs stopCaret (streaming → false) and never sets assistantText,
+      // so the turn must NOT read as pre-stream — the tool already executed and
+      // erasing the turn would hide it.
+      { type: "tool:call", id: "c1", name: "agentTask.spawnForEdits", args: { title: "x" }, startedAt: 0 },
+      { type: "user:pullback" },
+    ]);
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].activities).toHaveLength(1);
+  });
+
+  it("user:pullback removes the pre-stream turn but keeps a later attention note (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "watch it" },
+      // A background watcher event lands after the user message but before any reply.
+      { type: "attention", events: [{ title: "Tests failed", summary: "term_8" }] },
+      { type: "user:pullback" },
+    ]);
+    // The turn is pulled back; the unrelated note survives (removed by index, not tail).
+    expect(turns(out)).toHaveLength(0);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("note");
+  });
+
   it("user:pullback only removes the trailing turn, never an earlier one (#61)", () => {
     const out = run([
       { type: "user:add", text: "first" },
