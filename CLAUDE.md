@@ -94,6 +94,22 @@ thread.
   never inherits a prior session's watchers. Never imply background supervision.
 - **UI boundary.** Only `src/ui` imports Ink. The runtime emits structured events via
   `AgentEventSink`, consumed by the Ink `UiBridge` or the console sink.
+- **Inline cockpit, native scrollback (Claude Code model).** The cockpit renders into the
+  terminal's **main** screen buffer (NOT the alternate buffer — `runInkApp.tsx` no longer
+  passes `alternateScreen`), so the host terminal's own scrollback / mouse wheel / selection
+  work natively. `ControlRoom.tsx` splits the transcript at the trailing **active** turn:
+  completed cells (immutable per `transcriptReducer`) are committed once via Ink **`<Static>`**
+  — they flow into native scrollback and never repaint — while the in-flight turn, status line
+  and composer are the repainting region pinned at the bottom. The header (`Header`) is printed
+  ONCE as Static item 0 and is allowed to scroll away; it is NOT sticky. This supersedes the
+  earlier "full-screen multi-layout is canonical" decision: the pinned sidebar/standard/wide
+  banding and `SidebarHome`/`OpsRail`/`AttentionBanner` are gone from the live shell. Operations
+  and help are **on-demand** views (`^O` / `/panel`, Esc returns) rendered in place of the
+  composer — never pinned, since a pinned full-screen panel is mutually exclusive with native
+  scrollback. Do NOT reintroduce the alternate buffer or raw-parse SGR mouse mode (it fights
+  Ink's stdin; see `useAttentionSignal.ts`). "DEC 2026" = synchronized output (flicker), not
+  scrolling. `<Static>` requires committed cells stay append-only — keep the reducer mutating
+  only the trailing active turn.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcherEngine.ts`):
   deterministic signals (agentState, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated

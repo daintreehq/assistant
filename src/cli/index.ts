@@ -145,7 +145,7 @@ async function runInteractive(opts: CliOptions): Promise<void> {
     await startRepl(app);
     return;
   }
-  await startInkApp(app, { alternateScreen: opts.inline !== true });
+  await startInkApp(app);
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
     .option("--tier <tier>", "supervisor | operator | system")
     .option("--offline", "Do not make network calls")
     .option("--classic", "Use the legacy readline interface")
-    .option("--inline", "Render Ink inline (native scrollback) instead of the default full-screen control room")
+    .option("--inline", "Deprecated no-op: the cockpit is always inline now (native scrollback)")
     .option("--json", "One-shot only: stream JSONL events to stdout; the final line is a result envelope (see docs). Diagnostics go to stderr.")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {

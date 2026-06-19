@@ -256,6 +256,12 @@ export function transcriptReducer(
         if (c.kind !== "turn") continue;
         const ai = c.activities.findIndex((a) => a.id === action.id);
         if (ai >= 0) {
+          // Only the active turn is still live; a completed/cancelled turn has
+          // already been committed to native scrollback via <Static>, which never
+          // repaints. The loop feeds every tool result back before the turn ends,
+          // so this only fires on a stray late/duplicate result — drop it rather
+          // than mutate an immutable committed cell (would desync Ink's <Static>).
+          if (c.state !== "active") return cells;
           const activities = [...c.activities];
           activities[ai] = {
             ...activities[ai],
