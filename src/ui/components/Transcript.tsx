@@ -23,12 +23,12 @@ function estimateLines(cell: TranscriptCell, width: number): number {
   if (cell.kind === "command")
     return 1 + Math.min(8, wrapLines(cell.text, width));
   let n = 1; // bottom margin
-  // The user card (UserMessageCard) is a YOU label + a rounded border (top+bottom)
-  // + its own bottom margin around the text — 4 rows of chrome — and it truncates
-  // each source line to one row rather than wrapping, so cost is line count + 4.
-  // Counting only `1 + wrapLines` undercounts the chrome and lets a short turn
-  // estimate under the compact threshold yet render over it (the clipping bug).
-  if (cell.userText) n += 4 + cell.userText.split("\n").length;
+  // The user card (UserMessageCard) is a YOU label + its own bottom margin around
+  // the text — 2 rows of chrome — and it truncates each source line to one row (the
+  // accent-bar gutter is one bar glyph per line) rather than wrapping, so cost is
+  // line count + 2. Counting only `1 + wrapLines` undercounts the YOU label/margin
+  // and could let a turn estimate under the compact threshold yet render over it.
+  if (cell.userText) n += 2 + cell.userText.split("\n").length;
   if (cell.assistantText) n += 1 + wrapLines(cell.assistantText, width - 2);
   else if (cell.streaming) n += 2;
   n += cell.activities.length;

@@ -76,8 +76,8 @@ describe("Transcript", () => {
     expect(frame).toContain("result:");
   });
 
-  // A plain short turn, ~8 estimated rows (YOU card border + DAINTREE line): one
-  // fits in height=10, two don't.
+  // A plain short turn, ~6 estimated rows (YOU label + accent-bar line + DAINTREE
+  // line + margins): one fits in height=10, two don't.
   function turn(id: string, user: string, assistant: string): TranscriptCell {
     return {
       kind: "turn",
@@ -153,12 +153,13 @@ describe("Transcript", () => {
     // Markers survive so "who said what" still reads...
     expect(frame).toContain("YOU");
     expect(frame).toContain("DAINTREE");
-    // ...with the scroll hint, and crucially NO torn round-border card.
+    // ...with the scroll hint, and crucially NO accent-bar card (the full card,
+    // which renders the ▏ bar, would overflow and clip; the flat fallback doesn't).
     expect(frame).toContain("truncated");
-    expect(frame).not.toContain("╭");
+    expect(frame).not.toContain("▏");
   });
 
-  it("compacts the newest turn AND shows the older-turns indicator without a torn card", () => {
+  it("compacts the newest turn AND shows the older-turns indicator without overflow", () => {
     const long = "word ".repeat(400).trim();
     const cells: TranscriptCell[] = [
       turn("old", "Earlier question.", "Earlier answer."),
@@ -172,19 +173,22 @@ describe("Transcript", () => {
     expect(frame).not.toContain("Earlier question."); // older turn is hidden above
     expect(frame).toContain("↑ 1 older turn");
     expect(frame).toContain("truncated");
-    expect(frame).not.toContain("╭"); // compact has no border to tear
+    expect(frame).not.toContain("▏"); // compact has no accent-bar card
   });
 
-  it("compacts a short turn whose real card height overflows a tight viewport", () => {
-    // A single-line turn estimates ~8 rows once the YOU card border is counted, so
-    // at height=7 it must collapse rather than render a full card that overflows and
-    // clips its bottom border. Guards against the estimateLines undercount.
-    const cells: TranscriptCell[] = [turn("t", "Short ask.", "Short reply.")];
+  it("compacts a multi-line turn whose real card height overflows a tight viewport", () => {
+    // A 4-line user message + 3-line reply estimates ~11 rows once the YOU label and
+    // per-line accent bars are counted, so at height=9 it must collapse rather than
+    // render a full card that overflows and clips. Guards against an estimateLines
+    // undercount of the user-card chrome.
+    const cells: TranscriptCell[] = [
+      turn("t", "line one\nline two\nline three\nline four", "alpha\nbeta\ngamma"),
+    ];
     const frame =
       render(
-        <Transcript cells={cells} height={7} width={72} now={FIXED} />,
+        <Transcript cells={cells} height={9} width={72} now={FIXED} />,
       ).lastFrame() ?? "";
     expect(frame).toContain("truncated to fit");
-    expect(frame).not.toContain("╭");
+    expect(frame).not.toContain("▏");
   });
 });

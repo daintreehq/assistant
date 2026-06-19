@@ -23,8 +23,9 @@ export const COMPACT_TURN_LINES = 6;
  * A turn that is too tall for the viewport, rendered as a fixed-height summary
  * instead of being clipped mid-card. Shows the same YOU / DAINTREE markers (so the
  * "who said what" signal and existing assertions survive) with a single truncated
- * line each, then a dim hint that the full turn is scrollable. No border (a clipped
- * round border is exactly the bug we're avoiding), no activity tree, no notes.
+ * line each, then a dim hint that the full turn is scrollable. No accent-bar card,
+ * no activity tree, no notes — a card that overflows the viewport is exactly the
+ * bug we're avoiding, so the fallback is deliberately flat and fixed-height.
  */
 function CompactTurnCellView({ turn, width }: { turn: TurnCell; width: number }) {
   const set = glyphs();
