@@ -125,11 +125,11 @@ export function ControlRoom({
       ? activeAgent?.goal ?? undefined
       : undefined;
 
-  // Header = border (top+bottom = 2) + identity bar (1) + marginBottom (1),
-  // plus an optional run subtitle and an optional one-row debug-log line (badge
-  // + truncated path); each grows the chrome by one row, so the body budget
-  // below must subtract them.
-  const headerH = 4 + (runTitle ? 1 : 0) + (logging ? 1 : 0);
+  // Header = border (top+bottom = 2) + the identity block (2-row logo beside the
+  // wordmark/version) + a full-width rule (1) + marginBottom (1) = 6. A run
+  // subtitle adds a third text row beside the 2-row logo; an active debug-log line
+  // adds its own row. Each grows the chrome by one, so subtract them here.
+  const headerH = 6 + (runTitle ? 1 : 0) + (logging ? 1 : 0);
   // Composer = top rule + input row + bottom rule + hints row. The input is
   // bracketed both sides so it reads as a field.
   const composerH = 4;
@@ -168,9 +168,7 @@ export function ControlRoom({
     >
       <Box flexShrink={0} flexDirection="column">
         <Header
-          project={project}
-          tier={tier}
-          connected={connected}
+          columns={columns}
           runTitle={runTitle}
           logging={logging}
           logFile={logFile}
