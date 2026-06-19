@@ -347,7 +347,7 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
     offline: String(cfg.offline),
     debugLog: String(cfg.debugLog),
     projectInstructions: cfg.projectInstructions
-      ? `${cfg.projectInstructions.length} bytes`
+      ? `${Buffer.byteLength(cfg.projectInstructions, "utf8")} bytes`
       : "(none)",
   };
 }

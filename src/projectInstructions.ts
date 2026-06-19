@@ -57,6 +57,15 @@ export async function loadProjectInstructions(
       };
     }
     const raw = await readFile(file, "utf8");
+    // Re-check the actual byte length after reading: stat() and readFile() are two
+    // syscalls, so a file that grew between them (or whose multibyte content the
+    // stat size under-counts) must not slip past the cap. Belt-and-suspenders with
+    // the stat() guard above.
+    if (Buffer.byteLength(raw, "utf8") > PROJECT_INSTRUCTIONS_MAX_BYTES) {
+      return {
+        warning: `Skipping ${PROJECT_INSTRUCTIONS_FILENAME}: exceeds the ${PROJECT_INSTRUCTIONS_MAX_BYTES}-byte limit.`,
+      };
+    }
     const trimmed = raw.trim();
     if (trimmed.length === 0) return {};
     return { content: trimmed };

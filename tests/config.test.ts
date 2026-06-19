@@ -125,6 +125,14 @@ describe("describeConfig", () => {
   it("shows (none) for projectInstructions when absent", () => {
     expect(describeConfig(loadConfig({ stateDir })).projectInstructions).toBe("(none)");
   });
+
+  it("reports projectInstructions size in UTF-8 bytes, not UTF-16 code units", () => {
+    // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes; the label must reflect bytes.
+    const content = "é".repeat(100);
+    const described = describeConfig(loadConfig({ stateDir, projectInstructions: content }));
+    expect(described.projectInstructions).toBe("200 bytes");
+    expect(described.projectInstructions).not.toBe("100 bytes");
+  });
 });
 
 describe("projectIdToDir", () => {

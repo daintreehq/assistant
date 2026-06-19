@@ -157,7 +157,7 @@ async function runDoctor(opts: CliOptions): Promise<void> {
   render.line(`  mcp url        : ${app.config.mcpUrl ?? c.yellow("(unset)")}`);
   render.line(`  mcp connection : ${st.connected ? c.green(`ok (${st.transport}, ${st.toolCount} tools)`) : c.yellow(st.error ?? "not connected")}`);
   render.line(`  project        : ${app.config.projectPath}`);
-  render.line(`  instructions   : ${app.config.projectInstructions ? c.green(`DAINTREE.md (${app.config.projectInstructions.length} bytes)`) : c.gray("(none)")}`);
+  render.line(`  instructions   : ${app.config.projectInstructions ? c.green(`DAINTREE.md (${Buffer.byteLength(app.config.projectInstructions, "utf8")} bytes)`) : c.gray("(none)")}`);
   render.line(`  tools loaded   : ${app.registry.list().length}`);
   render.line(`  tier           : ${app.config.tier}`);
   await app.shutdown();

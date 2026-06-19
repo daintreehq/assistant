@@ -70,6 +70,15 @@ describe("loadProjectInstructions", () => {
     expect(res.warning).toContain("limit");
   });
 
+  it("caps on UTF-8 byte length, not character count", async () => {
+    // Each "é" is 2 UTF-8 bytes; half-the-cap-plus-one characters overruns the
+    // byte cap even though the character count is well under it.
+    fs.writeFileSync(file(), "é".repeat(PROJECT_INSTRUCTIONS_MAX_BYTES / 2 + 1));
+    const res = await loadProjectInstructions(dir);
+    expect(res.content).toBeUndefined();
+    expect(res.warning).toContain("limit");
+  });
+
   it("resolves the file against the given project path, not cwd", async () => {
     fs.writeFileSync(file(), "scoped to this dir");
     // A sibling dir with no instruction file must yield nothing.
