@@ -12,6 +12,15 @@
 import OpenAI, { APIUserAbortError } from "openai";
 import type { z } from "zod";
 import type { AppConfig } from "../config.js";
+import {
+  abortableSleep,
+  isRetriableModelError,
+  modelRetryDelayMs,
+  retryModelCall,
+  MODEL_RETRY_POLICY,
+  MODEL_REQUEST_TIMEOUT_MS,
+  MODEL_STREAM_TIMEOUT_MS,
+} from "../reliability.js";
 
 export interface ToolCallRequest {
   id: string;
@@ -176,6 +185,10 @@ export class FireworksClient {
     this.client = new OpenAI({
       baseURL: cfg.fireworksBaseUrl,
       apiKey: cfg.fireworksApiKey || "missing-key",
+      // Own all retry logic explicitly (see reliability.ts) instead of letting the
+      // SDK silently retry — its default maxRetries:2 would stack on top of ours,
+      // making the real attempt count unpredictable and ignoring our backoff.
+      maxRetries: 0,
     });
   }
 
@@ -185,23 +198,45 @@ export class FireworksClient {
       throw new FireworksUnavailableError("FIREWORKS_API_KEY not set");
   }
 
+  /**
+   * Build the SDK RequestOptions for one attempt: the turn's abort signal (so a
+   * cancel tears the request down) plus a per-attempt `timeout` (so a hung attempt
+   * is abandoned and retried). We pass `timeout` as a plain number rather than
+   * combining signals per attempt — AbortSignal.any leaks listeners onto the long-
+   * lived turn signal (Node #54614), so we let the SDK race its own timeout.
+   */
+  private requestOptions(
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+  ): { signal?: AbortSignal; timeout: number } {
+    return signal ? { signal, timeout: timeoutMs } : { timeout: timeoutMs };
+  }
+
   async chat(opts: ChatOptions): Promise<ChatResult> {
     this.guard();
+    const payload = {
+      model: opts.model,
+      messages: toWireMessages(opts.messages) as never,
+      tools: opts.tools as never,
+      tool_choice: opts.toolChoice as never,
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.maxTokens,
+      ...(opts.promptCacheKey
+        ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
+        : {}),
+    };
     let resp;
     try {
-      resp = await this.client.chat.completions.create(
-        {
-          model: opts.model,
-          messages: toWireMessages(opts.messages) as never,
-          tools: opts.tools as never,
-          tool_choice: opts.toolChoice as never,
-          temperature: opts.temperature ?? 0.3,
-          max_tokens: opts.maxTokens,
-          ...(opts.promptCacheKey
-            ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
-            : {}),
-        },
-        opts.signal ? { signal: opts.signal } : undefined,
+      // Retry transient 5xx / rate-limit / connection failures with backoff so a
+      // single blip doesn't break the call; a per-attempt timeout abandons a hung
+      // request. A user abort is never retried (isRetriableModelError excludes it).
+      resp = await retryModelCall(
+        () =>
+          this.client.chat.completions.create(
+            payload,
+            this.requestOptions(opts.signal, MODEL_REQUEST_TIMEOUT_MS),
+          ),
+        { signal: opts.signal },
       );
     } catch (err) {
       // Normalise a user abort the same way chatStream does, so a cancel during a
@@ -237,92 +272,125 @@ export class FireworksClient {
     onToken?: (visible: string) => void,
   ): Promise<ChatResult> {
     this.guard();
-    // The abort signal rides as the second RequestOptions arg; the SDK forwards it
-    // to fetch so the connection is actually torn down, not just abandoned.
-    try {
-      const stream = await this.client.chat.completions.create(
-        {
-          model: opts.model,
-          messages: toWireMessages(opts.messages) as never,
-          tools: opts.tools as never,
-          tool_choice: opts.toolChoice as never,
-          temperature: opts.temperature ?? 0.3,
-          max_tokens: opts.maxTokens,
-          stream: true,
-          // Ask the streaming endpoint to emit a final usage-only chunk; without
-          // this the OpenAI-compatible API reports no usage on streamed calls.
-          stream_options: { include_usage: true },
-          ...(opts.promptCacheKey
-            ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
-            : {}),
-        },
-        opts.signal ? { signal: opts.signal } : undefined,
-      );
+    const payload = {
+      model: opts.model,
+      messages: toWireMessages(opts.messages) as never,
+      tools: opts.tools as never,
+      tool_choice: opts.toolChoice as never,
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.maxTokens,
+      // `as const` keeps this a literal `true` so the SDK's create() overload
+      // resolves to the streaming (Stream<…>) return, not the union — a plain
+      // const payload would widen it to `boolean` and break `for await`.
+      stream: true as const,
+      // Ask the streaming endpoint to emit a final usage-only chunk; without
+      // this the OpenAI-compatible API reports no usage on streamed calls.
+      stream_options: { include_usage: true },
+      ...(opts.promptCacheKey
+        ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
+        : {}),
+    };
 
+    // The abort signal rides as the second RequestOptions arg; the SDK forwards it
+    // to fetch so the connection is actually torn down, not just abandoned. A
+    // per-attempt timeout abandons a stream that never produces tokens.
+    //
+    // Retry is PRE-TOKEN ONLY: a transient failure while acquiring the stream (or
+    // before the first visible token reaches the caller) is retried with backoff,
+    // but once any token has been emitted, retrying would duplicate output into the
+    // immutable transcript (see CLAUDE.md <Static> invariant), so a later failure
+    // propagates unchanged.
+    let emitted = false;
+    for (let attempt = 0; ; attempt++) {
+      // Fresh accumulators per attempt — a retry restarts the stream from scratch.
       const filter = new ThinkFilter();
       const toolAcc = new Map<number, { id: string; name: string; args: string }>();
       let finishReason = "stop";
       let usage: ChatResult["usage"];
+      try {
+        const stream = await this.client.chat.completions.create(
+          payload,
+          this.requestOptions(opts.signal, MODEL_STREAM_TIMEOUT_MS),
+        );
 
-      for await (const chunk of stream) {
-        // The usage-only chunk (sent because of stream_options.include_usage)
-        // carries token counts and an empty `choices` array. Capture it whenever
-        // present — some providers also attach usage to the final content chunk —
-        // then fall through; the choice guard below skips the empty-choices case.
-        if (chunk.usage) {
-          usage = {
-            promptTokens: chunk.usage.prompt_tokens,
-            completionTokens: chunk.usage.completion_tokens,
-            totalTokens: chunk.usage.total_tokens,
-            cachedTokens: (
-              chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }
-            ).prompt_tokens_details?.cached_tokens,
-          };
-        }
-        const choice = chunk.choices[0];
-        if (!choice) continue;
-        const delta = choice.delta;
-        if (delta?.content) {
-          const visible = filter.push(delta.content);
-          if (visible && onToken) onToken(visible);
-        }
-        if (delta?.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index ?? 0;
-            const cur = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
-            if (tc.id) cur.id = tc.id;
-            if (tc.function?.name) cur.name = tc.function.name;
-            if (tc.function?.arguments) cur.args += tc.function.arguments;
-            toolAcc.set(idx, cur);
+        for await (const chunk of stream) {
+          // The usage-only chunk (sent because of stream_options.include_usage)
+          // carries token counts and an empty `choices` array. Capture it whenever
+          // present — some providers also attach usage to the final content chunk —
+          // then fall through; the choice guard below skips the empty-choices case.
+          if (chunk.usage) {
+            usage = {
+              promptTokens: chunk.usage.prompt_tokens,
+              completionTokens: chunk.usage.completion_tokens,
+              totalTokens: chunk.usage.total_tokens,
+              cachedTokens: (
+                chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }
+              ).prompt_tokens_details?.cached_tokens,
+            };
           }
+          const choice = chunk.choices[0];
+          if (!choice) continue;
+          const delta = choice.delta;
+          if (delta?.content) {
+            const visible = filter.push(delta.content);
+            if (visible) {
+              // A token has reached the caller — past this point a failure can no
+              // longer be retried without duplicating output.
+              emitted = true;
+              if (onToken) onToken(visible);
+            }
+          }
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              const cur = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
+              if (tc.id) cur.id = tc.id;
+              if (tc.function?.name) cur.name = tc.function.name;
+              if (tc.function?.arguments) cur.args += tc.function.arguments;
+              toolAcc.set(idx, cur);
+            }
+          }
+          if (choice.finish_reason) finishReason = choice.finish_reason;
         }
-        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const tail = filter.end();
+        if (tail) {
+          emitted = true;
+          if (onToken) onToken(tail);
+        }
+
+        const toolCalls: ToolCallRequest[] = [...toolAcc.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, v]) => ({
+            id: v.id || `call_${Math.abs(hashString(v.name + v.args))}`,
+            type: "function" as const,
+            function: { name: v.name, arguments: v.args || "{}" },
+          }))
+          .filter((t) => t.function.name);
+
+        return {
+          content: filter.visible.trim(),
+          reasoning: filter.reasoning.trim(),
+          toolCalls,
+          finishReason,
+          usage,
+        };
+      } catch (err) {
+        // A user-initiated abort is a clean cancellation, not a model failure —
+        // normalise it to CancelledError so callers don't have to know about the
+        // SDK's transport-level abort representation.
+        if (isAbortError(err)) throw new CancelledError();
+        // Only the pre-token window is retriable; after that a retry would
+        // duplicate already-emitted output. Otherwise honour the bounded budget.
+        if (
+          emitted ||
+          attempt >= MODEL_RETRY_POLICY.maxRetries ||
+          opts.signal?.aborted ||
+          !isRetriableModelError(err)
+        ) {
+          throw err;
+        }
+        await abortableSleep(modelRetryDelayMs(attempt, err), opts.signal);
       }
-      const tail = filter.end();
-      if (tail && onToken) onToken(tail);
-
-      const toolCalls: ToolCallRequest[] = [...toolAcc.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(([, v]) => ({
-          id: v.id || `call_${Math.abs(hashString(v.name + v.args))}`,
-          type: "function" as const,
-          function: { name: v.name, arguments: v.args || "{}" },
-        }))
-        .filter((t) => t.function.name);
-
-      return {
-        content: filter.visible.trim(),
-        reasoning: filter.reasoning.trim(),
-        toolCalls,
-        finishReason,
-        usage,
-      };
-    } catch (err) {
-      // A user-initiated abort is a clean cancellation, not a model failure —
-      // normalise it to CancelledError so callers don't have to know about the
-      // SDK's transport-level abort representation.
-      if (isAbortError(err)) throw new CancelledError();
-      throw err;
     }
   }
 
@@ -332,17 +400,25 @@ export class FireworksClient {
     schema: S,
   ): Promise<z.infer<S>> {
     this.guard();
+    const payload = {
+      model: opts.model,
+      messages: toWireMessages(opts.messages) as never,
+      temperature: opts.temperature ?? 0,
+      max_tokens: opts.maxTokens,
+      response_format: { type: "json_object" } as never,
+    };
     let resp;
     try {
-      resp = await this.client.chat.completions.create(
-        {
-          model: opts.model,
-          messages: toWireMessages(opts.messages) as never,
-          temperature: opts.temperature ?? 0,
-          max_tokens: opts.maxTokens,
-          response_format: { type: "json_object" } as never,
-        },
-        opts.signal ? { signal: opts.signal } : undefined,
+      // Same bounded retry + per-attempt timeout as chat(): a transient 5xx on a
+      // watcher classification or recipe-selection call now rides out instead of
+      // collapsing the call to an "unknown" verdict on the first blip.
+      resp = await retryModelCall(
+        () =>
+          this.client.chat.completions.create(
+            payload,
+            this.requestOptions(opts.signal, MODEL_REQUEST_TIMEOUT_MS),
+          ),
+        { signal: opts.signal },
       );
     } catch (err) {
       // A cancel during a pre-turn json() (e.g. recipe selection) is a clean abort,

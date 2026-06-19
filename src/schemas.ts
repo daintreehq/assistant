@@ -264,6 +264,11 @@ export const WatcherClassification = z.enum([
   "completed_unverified",
   "completed_unknown",
   "terminal_exited",
+  // The agent is being throttled by its model provider (HTTP 429/529, quota, or
+  // retry-after in recent output) — a distinct, transient blocking state, NOT a
+  // stall or an exit. Detected from a rate-limit output signature; the watcher
+  // keeps polling on a cooldown rather than stopping (issue #123).
+  "rate_limited",
   "needs_large_model",
   "unknown",
 ]);
@@ -913,6 +918,10 @@ export function classificationEpistemicKind(
   switch (classification) {
     case "terminal_exited":
     case "waiting_for_input":
+    // rate_limited is observed when the engine matched a deterministic output
+    // signature (the dominant path), but a model-claimed throttle is an inference
+    // — so its kind tracks `usedModel`, exactly like the other dual-source classes.
+    case "rate_limited":
       return usedModel ? "inferred" : "observed";
     case "permission_prompt":
     case "still_working":
