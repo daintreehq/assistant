@@ -76,6 +76,16 @@ export interface ToolContext {
    * implying they'll be monitored. Absent ⇒ assume active.
    */
   daemonActive?: () => boolean;
+  /**
+   * Session-scoped store for oversized tool results. When a serialized tool result
+   * exceeds the inline size limit, the agent loop stashes the full JSON envelope
+   * here under a generated `artifact_…` id and hands the model a compact, valid-JSON
+   * stub instead of a string sliced mid-structure. The `artifact.read` tool pages
+   * back through it. In-memory and session-lived by design — the ids are only
+   * meaningful within the turn sequence that produced them. Absent in stripped-down
+   * test/scheduler contexts; `artifact.read` fails gracefully when it is missing.
+   */
+  artifactStore?: Map<string, string>;
 }
 
 export interface ToolDef<A = any> {

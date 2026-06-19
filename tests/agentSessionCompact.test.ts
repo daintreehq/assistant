@@ -118,19 +118,42 @@ describe("AgentSession auto-compaction (#7)", () => {
   });
 });
 
-describe("serializeToolResult truncation (#7)", () => {
-  it("appends an explicit truncation marker when the payload is too large", () => {
+describe("serializeToolResult truncation (#78)", () => {
+  it("returns a valid JSON stub and stores the full envelope when the payload is too large", () => {
+    const store = new Map<string, string>();
     const big = "z".repeat(20_000);
-    const s = serializeToolResult({ ok: true, summary: "big", result: big });
-    expect(s).toContain("[output truncated:");
-    expect(s).toContain("chars omitted]");
-    // The marker reports how many characters were dropped.
-    expect(s).toMatch(/\[output truncated: \d+ chars omitted\]/);
+    const s = serializeToolResult({ ok: true, summary: "big", result: big }, store);
+    // Regression for #78: the old code sliced mid-JSON and appended a plain-text
+    // marker, so the model received unparseable JSON. The stub must now parse.
+    expect(s).not.toContain("[output truncated:");
+    const parsed = JSON.parse(s);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.summary).toBe("big");
+    expect(parsed.result.truncated).toBe(true);
+    expect(typeof parsed.result.artifactId).toBe("string");
+    expect(typeof parsed.result.preview).toBe("string");
+    expect(parsed.result.totalChars).toBeGreaterThan(20_000);
+    // The stub itself stays small enough to be worth inlining.
+    expect(s.length).toBeLessThan(8000);
+    // The full serialized envelope is retrievable from the store under that id.
+    const stored = store.get(parsed.result.artifactId);
+    expect(stored).toBeDefined();
+    expect(JSON.parse(stored!)).toMatchObject({ ok: true, summary: "big", result: big });
   });
 
-  it("leaves small payloads untouched (no marker)", () => {
-    const s = serializeToolResult({ ok: true, summary: "tiny", result: "hello" });
+  it("still returns valid JSON (without an artifactId) when no store is provided", () => {
+    const big = "z".repeat(20_000);
+    const s = serializeToolResult({ ok: true, summary: "big", result: big });
     expect(s).not.toContain("[output truncated:");
-    expect(JSON.parse(s)).toMatchObject({ ok: true, summary: "tiny", result: "hello" });
+    const parsed = JSON.parse(s);
+    expect(parsed.result.truncated).toBe(true);
+    expect(parsed.result.artifactId).toBeUndefined();
+  });
+
+  it("leaves small payloads untouched (no truncation stub)", () => {
+    const s = serializeToolResult({ ok: true, summary: "tiny", result: "hello" });
+    const parsed = JSON.parse(s);
+    expect(parsed).toMatchObject({ ok: true, summary: "tiny", result: "hello" });
+    expect(parsed.result?.truncated).toBeUndefined();
   });
 });

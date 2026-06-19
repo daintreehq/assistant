@@ -43,6 +43,13 @@ const RECIPE_TRIGGER_RE =
   /\b(recipe|worktree|agent|edit|fix|implement|refactor|test|monitor|watch|terminal)\b/i;
 const MAX_TOOL_RESULT_CHARS = 8000;
 /**
+ * How much of the overflowing output to inline as a preview inside the truncation
+ * stub. Enough for the model to see the shape of the data and decide whether to
+ * page the rest via `artifact.read`; small enough that the stub stays well under
+ * MAX_TOOL_RESULT_CHARS even after JSON escaping.
+ */
+const TRUNCATION_PREVIEW_CHARS = 1500;
+/**
  * Auto-compact the conversation once the estimated prompt size crosses this many
  * tokens. Conservative — well under a typical 128k context window, but high
  * enough that ordinary sessions never trip it. Tune here if the window changes.
@@ -89,6 +96,9 @@ const CORE_TOOL_NAMES = [
   "recipe.run.get",
   "memory.recall",
   "memory.list",
+  // Always available so the model can page through any tool result that overflowed
+  // the inline limit and was stashed as an artifact (see serializeToolResult).
+  "artifact.read",
 ];
 
 export interface AgentSessionDeps {
@@ -453,7 +463,7 @@ export class AgentSession {
           role: "tool",
           tool_call_id: call.id,
           name: internalName,
-          content: serializeToolResult(res),
+          content: serializeToolResult(res, runCtx.artifactStore),
         });
 
         // The user cancelled during (or just before) this dispatch — now that the
@@ -475,15 +485,18 @@ export class AgentSession {
               role: "tool",
               tool_call_id: pending.id,
               name: pendingName,
-              content: serializeToolResult({
-                ok: false,
-                summary: "Turn cancelled before this tool was executed.",
-                error: {
-                  code: "CANCELLED",
-                  message: "Turn cancelled.",
-                  recoverable: false,
+              content: serializeToolResult(
+                {
+                  ok: false,
+                  summary: "Turn cancelled before this tool was executed.",
+                  error: {
+                    code: "CANCELLED",
+                    message: "Turn cancelled.",
+                    recoverable: false,
+                  },
                 },
-              }),
+                runCtx.artifactStore,
+              ),
             });
           }
           this.events.assistantCancelled("");
@@ -703,12 +716,15 @@ export class AgentSession {
   }
 }
 
-export function serializeToolResult(res: {
-  ok: boolean;
-  summary: string;
-  result?: unknown;
-  error?: unknown;
-}): string {
+export function serializeToolResult(
+  res: {
+    ok: boolean;
+    summary: string;
+    result?: unknown;
+    error?: unknown;
+  },
+  artifactStore?: Map<string, string>,
+): string {
   const payload = {
     ok: res.ok,
     summary: res.summary,
@@ -722,7 +738,37 @@ export function serializeToolResult(res: {
     s = JSON.stringify({ ok: res.ok, summary: res.summary });
   }
   if (s.length <= MAX_TOOL_RESULT_CHARS) return s;
-  const omitted = s.length - MAX_TOOL_RESULT_CHARS;
-  // Explicit marker so the model knows output was clipped (vs. a silent ellipsis).
-  return `${s.slice(0, MAX_TOOL_RESULT_CHARS)}\n[output truncated: ${omitted} chars omitted]`;
+
+  // Overflow path. The old behaviour sliced `s` at MAX_TOOL_RESULT_CHARS and
+  // appended a plain-text marker, handing the model a JSON string cut mid-structure
+  // (issue #78) — closing braces/quotes gone, unparseable. Instead, mirror the audit
+  // path's capJson: stash the full serialized envelope as a session artifact and
+  // return a compact, VALID JSON stub describing it. The model keeps `ok`/`summary`
+  // and gets a preview plus an `artifactId` it can page through with `artifact.read`,
+  // rather than a corrupt blob it has to guess at. When no store is wired (e.g. unit
+  // tests calling this directly), we still return valid JSON — just without a
+  // retrievable id.
+  const totalChars = s.length;
+  const totalBytes = Buffer.byteLength(s, "utf8");
+  const preview = s.slice(0, TRUNCATION_PREVIEW_CHARS);
+  let artifactId: string | undefined;
+  if (artifactStore) {
+    artifactId = `artifact_${randomUUID().slice(0, 8)}`;
+    artifactStore.set(artifactId, s);
+  }
+  const note = artifactId
+    ? `Output truncated to a ${preview.length}-char preview of ${totalChars} total. Call the artifact.read tool with artifactId "${artifactId}" (and offset/limit) to page through the full result.`
+    : `Output truncated to a ${preview.length}-char preview of ${totalChars} total; the full result is not retrievable in this context.`;
+  return JSON.stringify({
+    ok: res.ok,
+    summary: res.summary,
+    result: {
+      truncated: true,
+      ...(artifactId ? { artifactId } : {}),
+      totalChars,
+      totalBytes,
+      preview,
+      note,
+    },
+  });
 }
