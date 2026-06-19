@@ -5,6 +5,7 @@ import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useAttentionSignal } from "./hooks/useAttentionSignal.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
 import { ControlRoom, type View } from "./ControlRoom.js";
+import { StartupSplash } from "./components/StartupSplash.js";
 import { currentDebugLogPath } from "../debugLog.js";
 
 /**
@@ -71,6 +72,19 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   // directory leaf and upgrades it to Daintree's authoritative project name (via the
   // MCP `actions.getContext`) once that resolves — see useDaintreeController.
   const project = controller.projectName ?? "";
+
+  // While the session connects/loads in the background, the centered logo-reveal owns
+  // the screen; it dissolves into the cockpit once startup has settled and the draw
+  // has finished (see useDaintreeController's boot gate).
+  if (controller.booting) {
+    return (
+      <StartupSplash
+        columns={columns}
+        rows={rows}
+        onComplete={controller.notifyAnimationDone}
+      />
+    );
+  }
 
   return (
     <ControlRoom

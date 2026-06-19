@@ -391,6 +391,10 @@ export interface DaintreeController {
   resolveConfirm: (approved: boolean) => void;
   /** The bound project's display name (from Daintree's MCP, basename fallback). */
   projectName?: string;
+  /** True while the boot splash should own the screen (startup loading in background). */
+  booting: boolean;
+  /** Called by the splash when its draw has finished — one half of the dismiss gate. */
+  notifyAnimationDone: () => void;
 }
 
 export function useDaintreeController(
@@ -417,6 +421,21 @@ export function useDaintreeController(
   const [projectName, setProjectName] = useState<string | undefined>(() =>
     provisionalProjectName(app.config.projectPath),
   );
+  // Boot splash gate. We leave the splash up until BOTH the draw has finished AND
+  // startup has settled (MCP connect resolved — connected or degraded — and the first
+  // dashboard snapshot is in), so a fast connect can't cut the animation short and a
+  // slow one can't flash a half-built cockpit. A hard max-timeout guarantees we never
+  // get stuck on the splash if startup stalls. Disabled entirely via config.splash.
+  const [booting, setBooting] = useState(() => app.config.splash);
+  const startupSettled = useRef(false);
+  const animationDone = useRef(false);
+  const finishBootIfReady = useCallback(() => {
+    if (startupSettled.current && animationDone.current) setBooting(false);
+  }, []);
+  const notifyAnimationDone = useCallback(() => {
+    animationDone.current = true;
+    finishBootIfReady();
+  }, [finishBootIfReady]);
   // Synchronous serialization lock. `busy` is async React state and can't gate
   // back-to-back submits in the same tick; this ref can.
   const inFlight = useRef(false);
@@ -572,6 +591,11 @@ export function useDaintreeController(
           : `Daintree MCP not connected — ${st.error ?? "no url/token"}. Running degraded.`,
       });
       setDashboard(snapshot(app));
+      // Startup has settled (connect resolved — connected or degraded — and the first
+      // snapshot is in): the other half of the splash dismiss gate. The project-name
+      // fetch below is non-blocking and deliberately does NOT hold the splash.
+      startupSettled.current = true;
+      finishBootIfReady();
       // Async, non-blocking: ask Daintree for the authoritative project name and
       // fill it into the header when it arrives. Never blocks startup; a miss just
       // leaves the provisional name in place. Retry a few times — right after connect
@@ -594,9 +618,16 @@ export function useDaintreeController(
       if (!disposed) setDashboard(snapshot(app));
     }, 1000);
 
+    // Safety net: never strand the user on the splash if startup stalls (e.g. a hung
+    // MCP). After this cap we drop into the cockpit regardless of readiness.
+    const bootCap = app.config.splash
+      ? setTimeout(() => setBooting(false), 8000)
+      : undefined;
+
     return () => {
       disposed = true;
       clearInterval(timer);
+      if (bootCap) clearTimeout(bootCap);
       // Unblock anything already awaiting ctx.confirm(), AND route any future
       // confirm (e.g. an in-flight tool call during ^C) to an auto-decline so a
       // dispatch can never block on a modal that no longer has a UI subscriber.
@@ -709,5 +740,7 @@ export function useDaintreeController(
     setActivePanel,
     resolveConfirm,
     projectName,
+    booting,
+    notifyAnimationDone,
   };
 }

@@ -74,6 +74,15 @@ export interface AppConfig {
    * settable in `.env`).
    */
   debugLog: boolean;
+
+  /**
+   * When true (the default), the Ink cockpit plays the centered Daintree logo-reveal
+   * splash while the session connects/loads in the background, then dissolves into the
+   * UI. Disable with `DAINTREE_ASSISTANT_NO_SPLASH=1` (reduced motion / fastest start);
+   * tests pin it off. Only ever applies to the TUI — the classic/non-TTY REPL never
+   * shows it.
+   */
+  splash: boolean;
 }
 
 export interface ConfigOverrides {
@@ -90,6 +99,7 @@ export interface ConfigOverrides {
   autoApprove?: boolean;
   offline?: boolean;
   debugLog?: boolean;
+  splash?: boolean;
   logDir?: string;
 }
 
@@ -295,6 +305,10 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     // home dir, never redirect it.
     debugLog:
       overrides.debugLog ?? process.env.DAINTREE_ASSISTANT_DEBUG_LOG === "1",
+    // On by default; opt out with NO_SPLASH=1. A UI-only cosmetic, so the merged env
+    // is fine (it can't affect safety or where anything is written).
+    splash:
+      overrides.splash ?? process.env.DAINTREE_ASSISTANT_NO_SPLASH !== "1",
   };
 }
 
@@ -314,6 +328,7 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
     mcpUrl: cfg.mcpUrl ?? "(unset → degraded local mode)",
     mcpToken: redact(cfg.mcpToken),
     tier: cfg.tier,
+    splash: String(cfg.splash),
     autoApprove: String(cfg.autoApprove),
     offline: String(cfg.offline),
     debugLog: String(cfg.debugLog),

@@ -41,4 +41,36 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
+
+  it("plays the boot splash, then dissolves into the cockpit", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-splash-"));
+    const app = App.create({
+      // splash:true overrides the test-pinned NO_SPLASH so we exercise the boot gate.
+      overrides: {
+        offline: true,
+        stateDir,
+        projectPath: stateDir,
+        tier: "operator",
+        splash: true,
+      },
+    });
+
+    const { lastFrame, unmount } = render(<DaintreeInkApp app={app} />);
+    await tick(60); // a frame or two into the draw
+    const booting = lastFrame() ?? "";
+    // The splash owns the screen: the cockpit is not rendered behind it.
+    expect(booting).not.toContain("Daintree Assistant");
+    expect(booting).not.toContain("›");
+
+    // The draw finishes (~1s) AND offline startup settles immediately, so the gate
+    // opens and the cockpit takes over.
+    await tick(1400);
+    const cockpit = lastFrame() ?? "";
+    expect(cockpit).toContain("Daintree Assistant");
+    expect(cockpit).toContain("›");
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
 });
