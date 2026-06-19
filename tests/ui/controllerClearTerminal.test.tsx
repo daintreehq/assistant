@@ -52,6 +52,8 @@ describe("useDaintreeController /clear wipes host scrollback (#137)", () => {
     (r.stdout as unknown as { isTTY: boolean }).isTTY = true;
     await tick();
 
+    const staticKeyBefore = controller.staticKey;
+
     const before = r.stdout.frames.length;
     expect(controller.sendUserMessage("/clear")).toBe(true);
     await tick();
@@ -60,8 +62,21 @@ describe("useDaintreeController /clear wipes host scrollback (#137)", () => {
     expect(written(r.stdout.frames.slice(before))).toContain(
       HOST_TERMINAL_CLEAR,
     );
-    // ...and the transcript was reset to just the single confirmation card.
+    // ...the transcript was reset to just the single confirmation card...
     expect(controller.transcript).toHaveLength(1);
+    // ...and <Static> was remounted (staticKey bumped) so committed cells can't
+    // ghost back into native scrollback after the OS-level wipe.
+    expect(controller.staticKey).toBe(staticKeyBefore + 1);
+
+    // A second /clear emits the escape again and bumps the key again — the wipe
+    // is not accidentally de-duped.
+    const before2 = r.stdout.frames.length;
+    controller.sendUserMessage("/clear");
+    await tick();
+    expect(written(r.stdout.frames.slice(before2))).toContain(
+      HOST_TERMINAL_CLEAR,
+    );
+    expect(controller.staticKey).toBe(staticKeyBefore + 2);
 
     r.unmount();
     await app.shutdown();

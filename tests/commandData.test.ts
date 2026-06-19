@@ -5,6 +5,7 @@ import { App } from "../src/cli/app.js";
 import { handleUiCommand, runDoctor } from "../src/cli/commandData.js";
 import { handleSlashCommand } from "../src/cli/commands.js";
 import { render } from "../src/cli/render.js";
+import { HOST_TERMINAL_CLEAR } from "../src/cli/terminalClear.js";
 import { COMMAND_REGISTRY, helpLines } from "../src/commandRegistry.js";
 import type { LowLevelMcpClient } from "../src/mcp/client.js";
 
@@ -337,6 +338,49 @@ describe("handleSlashCommand (REPL slash commands)", () => {
     expect(r.handled).toBe(true);
     expect(app.session.getMessages().length).toBe(3);
     expect(successSpy.mock.calls.some(([m]) => String(m).includes("cleared"))).toBe(true);
+  });
+
+  it("/clear wipes the host terminal scrollback on a TTY (#137)", async () => {
+    vi.spyOn(render, "success").mockImplementation(() => {});
+    const realIsTTY = process.stdout.isTTY;
+    // Force a TTY so the scrollback wipe isn't gated out, then capture writes.
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+    const writeSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+
+    try {
+      await handleSlashCommand("/clear", app);
+      const wroteClear = writeSpy.mock.calls.some(([chunk]) =>
+        String(chunk).includes(HOST_TERMINAL_CLEAR),
+      );
+      expect(wroteClear).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+      (process.stdout as unknown as { isTTY: boolean }).isTTY = realIsTTY;
+    }
+  });
+
+  it("/clear writes no scrollback escape when stdout is not a TTY (#137)", async () => {
+    vi.spyOn(render, "success").mockImplementation(() => {});
+    const realIsTTY = process.stdout.isTTY;
+    (process.stdout as unknown as { isTTY: boolean | undefined }).isTTY =
+      undefined;
+    const writeSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+
+    try {
+      await handleSlashCommand("/clear", app);
+      const wroteClear = writeSpy.mock.calls.some(([chunk]) =>
+        String(chunk).includes(HOST_TERMINAL_CLEAR),
+      );
+      expect(wroteClear).toBe(false);
+    } finally {
+      writeSpy.mockRestore();
+      (process.stdout as unknown as { isTTY: boolean | undefined }).isTTY =
+        realIsTTY;
+    }
   });
 
   it("an unregistered command warns Unknown command", async () => {
