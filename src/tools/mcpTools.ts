@@ -19,7 +19,7 @@ import { isForbiddenToolName } from "../safety/policy.js";
  * `callable: false` entry as "known but not offered this turn", not "broken".
  */
 const CALLABLE_NOTE =
-  "`callable: false` means the tool exists but is not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset) — only `callable: true` tools can be invoked now.";
+  "`callable: false` means the tool exists but is not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset) — only `callable: true` tools can be invoked directly now. An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered.";
 
 /**
  * Build a predicate that reports whether a discovered MCP tool is actually offered

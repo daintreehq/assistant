@@ -144,8 +144,8 @@ export const fsTools: ToolDef[] = [
 
 ### mcpTools.ts — Daintree MCP access
 - `daintree.status` (read) — return `ctx.mcp.status()` plus a one-line summary. Works even when disconnected (report it).
-- `daintree.listTools` (read) — `await ctx.mcp.listTools()`; return names + descriptions. If disconnected, `fail("MCP_UNAVAILABLE", ...)`.
-- `tool.search` (read) — search BOTH local registry tools and Daintree MCP tools by keyword. Args `{query: string, max?: number}`. (It can read the registry via... it cannot; instead search MCP tools by substring + return a note that local tools are always available. Keep it simple: search MCP tool names/descriptions.)
+- `daintree.listTools` (read) — `await ctx.mcp.listTools()`; return names + descriptions, each annotated with a `callable` flag (membership in `ctx.activeToolNames`, the turn's projection; absent ⇒ all callable). If disconnected, `fail("MCP_UNAVAILABLE", ...)`.
+- `tool.search` (read) — search Daintree MCP tools by keyword (substring on name/description). Args `{query: string, max?: number}`. Each match carries `callable: boolean` (whether it's offered in this turn's tool spec, `ctx.activeToolNames`) so it never advertises a tool the model can't invoke now; annotate rather than filter so discovery still works.
 - `daintree.call` (depends → mark risk `"project"`) — raw passthrough. Args `{name: string, arguments?: object, requestKey?: string}`. Call `ctx.mcp.callTool(name, {...arguments, requestKey})`. Return `{text, structuredContent, isError}`. This is the escape hatch; it is risk "project" so it always confirms. If `isError`, return `fail`.
 
 ### timerTools.ts — durable timers (CLI-local, risk "local")

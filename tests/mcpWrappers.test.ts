@@ -289,12 +289,16 @@ describe("tool.search / daintree.listTools callable annotation (#80)", () => {
     const res = await reg.dispatch("tool.search", { query: "recipe" }, c);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    const matches = (res.result as { matches: Array<{ name: string; callable: boolean }> })
-      .matches;
-    const byName = Object.fromEntries(matches.map((m) => [m.name, m.callable]));
+    const result = res.result as {
+      matches: Array<{ name: string; callable: boolean }>;
+      note: string;
+    };
+    const byName = Object.fromEntries(result.matches.map((m) => [m.name, m.callable]));
     // Substring "recipe" matches recipe.run + recipe.list; only recipe.run is offered.
     expect(byName["recipe.run"]).toBe(true);
     expect(byName["recipe.list"]).toBe(false);
+    // The note explains the callable flag so the model treats false as "not offered".
+    expect(result.note).toContain("callable: false");
   });
 
   it("tool.search marks everything callable when the turn is unconstrained (undefined)", async () => {
@@ -333,6 +337,39 @@ describe("tool.search / daintree.listTools callable annotation (#80)", () => {
     const tools = (res.result as { tools: Array<{ callable: boolean }> }).tools;
     expect(tools.length).toBe(MCP_TOOLS.length);
     expect(tools.every((t) => !t.callable)).toBe(true);
+  });
+
+  it("marks an unwrapped MCP tool callable:false even when daintree.call is offered (pins escape-hatch semantics)", async () => {
+    // `callable` reflects DIRECT invocability — membership in the turn's tool spec.
+    // git.getProjectPulse is not offered directly even though daintree.call (offered
+    // here) could reach it; the note carries that nuance. This pins the deliberately
+    // simple predicate so a future change to "reachable via escape hatch" is visible.
+    const mcp = {
+      isConnected: () => true,
+      listTools: async () => [
+        { name: "git.getProjectPulse", description: "Project pulse." },
+      ],
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "system" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+      activeToolNames: ["tool.search", "daintree.call"],
+    } as ToolContext;
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const res = await reg.dispatch("tool.search", { query: "pulse" }, c);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const matches = (res.result as { matches: Array<{ name: string; callable: boolean }> })
+      .matches;
+    expect(matches.find((m) => m.name === "git.getProjectPulse")?.callable).toBe(false);
   });
 });
 

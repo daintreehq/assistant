@@ -323,7 +323,7 @@ export class AgentSession {
       ...this.deps.ctx,
       runId,
       signal: opts.signal,
-      activeToolNames: allowedNames ?? undefined,
+      activeToolNames: allowedNames,
     };
     // On a read-only turn, ENFORCE the allowlist at dispatch too: the model could
     // emit an internal tool name that isn't in the projection (resolveWireName then
