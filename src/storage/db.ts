@@ -299,6 +299,46 @@ export class Db {
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.cancelStaleWatchers();
+  }
+
+  /**
+   * Watchers are session-scoped: they supervise terminals that only exist for
+   * the life of the session that spawned them. Unlike timers (which legitimately
+   * persist and resume), an active watcher inherited by a *new* session points
+   * at terminals that are gone — it would immediately fire false alerts
+   * (e.g. `terminal_exited`). So on every DB open we treat construction as a
+   * fresh session boundary and discard any watcher left non-terminal by a prior
+   * session, whether it shut down cleanly or was SIGKILL'd (no shutdown hook
+   * required — startup is the single, reliable invalidation point).
+   *
+   * Order matters: revoke the stale watchers' automation grants *before*
+   * flipping their status, so no grant is ever live for a cancelled watcher.
+   * Grant revocation is filtered to `actorType = 'watcher'` so a timer grant is
+   * never collaterally revoked. Only the non-terminal statuses are swept —
+   * `condition_met`/`timeout`/`cancelled`/`error` are already terminal and may
+   * back the UI's history view, so they are left untouched.
+   *
+   * Assumes a single assistant process owns the DB at a time (the foreground-only
+   * daemon invariant). DatabaseSync is synchronous, so the two statements run
+   * without interleaving and need no transaction wrapper.
+   */
+  private cancelStaleWatchers(now = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE automation_grants SET revokedAt = ?
+         WHERE actorType = 'watcher'
+           AND revokedAt IS NULL
+           AND actorId IN (
+             SELECT id FROM watchers WHERE status IN ('active','created','paused')
+           )`,
+      )
+      .run(now);
+    this.db
+      .prepare(
+        "UPDATE watchers SET status = 'cancelled' WHERE status IN ('active','created','paused')",
+      )
+      .run();
   }
 
   /**

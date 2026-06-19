@@ -32,11 +32,12 @@ const args = {
 };
 
 describe("agentTask.spawnForEdits watcher lifecycle notice", () => {
-  it("warns supervision pauses on close when a watcher is created and the scheduler runs", async () => {
+  it("warns the watcher is discarded on close when created and the scheduler runs", async () => {
     const res = await spawn.handler(args, ctxWith(() => true));
     expect(res.ok).toBe(true);
     expect(res.summary).toContain("watcher");
-    expect(res.summary).toContain("pauses when you close the assistant");
+    expect(res.summary).toContain("discarded when you close the assistant");
+    expect(res.summary).toContain("does not resume on the next launch");
   });
 
   it("warns the watcher will not check when no scheduler is running", async () => {
@@ -52,7 +53,7 @@ describe("agentTask.spawnForEdits watcher lifecycle notice", () => {
       ctxWith(() => true),
     );
     expect(res.ok).toBe(true);
-    expect(res.summary).not.toContain("pauses when you close the assistant");
+    expect(res.summary).not.toContain("discarded when you close the assistant");
   });
 
   it("attaches a fast supervisor watcher (3s cadence, isSupervisor true)", async () => {

@@ -33,10 +33,11 @@ const args = {
 };
 
 describe("watcher.terminal.create lifecycle notice", () => {
-  it("warns that supervision pauses on close when the scheduler is running", async () => {
+  it("warns the watcher is discarded on close when the scheduler is running", async () => {
     const res = await create.handler(args, ctxWith(() => true));
     expect(res.ok).toBe(true);
-    expect(res.summary).toContain("pauses when you close the assistant");
+    expect(res.summary).toContain("discarded when you close the assistant");
+    expect(res.summary).toContain("does not resume on the next launch");
     expect(res.summary).not.toContain("no scheduler is running");
   });
 
@@ -47,10 +48,10 @@ describe("watcher.terminal.create lifecycle notice", () => {
     expect(res.summary).toContain("will not check");
   });
 
-  it("assumes the scheduler is active (pauses-on-close wording) when daemonActive is absent", async () => {
+  it("assumes the scheduler is active (discarded-on-close wording) when daemonActive is absent", async () => {
     const res = await create.handler(args, ctxWith(undefined));
     expect(res.ok).toBe(true);
-    expect(res.summary).toContain("pauses when you close the assistant");
+    expect(res.summary).toContain("discarded when you close the assistant");
   });
 });
 

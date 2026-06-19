@@ -323,11 +323,12 @@ export const agentTaskTools: ToolDef[] = [
         }
 
         // When a supervising watcher was created, surface the same
-        // foreground-only lifecycle caveat the watcher tools emit: it pauses
-        // when the assistant is closed and resumes on the next launch.
+        // foreground-only lifecycle caveat the watcher tools emit: it is
+        // discarded when the assistant is closed and does not resume on the
+        // next launch (watchers are session-scoped).
         const lifecycleNote = watcherId
           ? (ctx.daemonActive ? ctx.daemonActive() : true)
-            ? " NOTE: supervision runs only while this assistant is open; this watcher pauses when you close the assistant and resumes on the next launch."
+            ? " NOTE: supervision runs only while this assistant is open; this watcher is discarded when you close the assistant and does not resume on the next launch (watchers are session-scoped)."
             : " NOTE: no scheduler is running in this session, so this watcher will not check until the assistant runs interactively."
           : "";
 

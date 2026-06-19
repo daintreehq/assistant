@@ -87,8 +87,11 @@ thread.
   the cached prefix — keep it byte-stable; dynamic facts live in later control
   messages. `BASE_SYSTEM_PROMPT_VERSION` is the cache key (pre-release: we don't
   churn it on every edit).
-- **Foreground-only daemon.** Watchers/timers tick only while the assistant is open;
-  they persist in SQLite and resume next launch. Never imply background supervision.
+- **Foreground-only daemon.** Watchers/timers tick only while the assistant is open.
+  Timers persist in SQLite and resume next launch. Watchers are **session-scoped**:
+  they supervise terminals that live only for the session, so any left non-terminal
+  are cancelled on the next `Db` construction (`cancelStaleWatchers`) — a new session
+  never inherits a prior session's watchers. Never imply background supervision.
 - **UI boundary.** Only `src/ui` imports Ink. The runtime emits structured events via
   `AgentEventSink`, consumed by the Ink `UiBridge` or the console sink.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcherEngine.ts`):

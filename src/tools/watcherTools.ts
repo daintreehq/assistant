@@ -151,7 +151,7 @@ export const watcherTools: ToolDef[] = [
         // is running: supervision pauses the moment the assistant is closed.
         const schedulerRunning = ctx.daemonActive ? ctx.daemonActive() : true;
         const lifecycleNote = schedulerRunning
-          ? " NOTE: supervision runs only while this assistant is open; this watcher pauses when you close the assistant and resumes on the next launch."
+          ? " NOTE: supervision runs only while this assistant is open; this watcher is discarded when you close the assistant and does not resume on the next launch (watchers are session-scoped)."
           : " NOTE: no scheduler is running in this session, so it will not check until the assistant runs interactively.";
         return ok(
           `Created terminal watcher ${w.id} for ${args.terminalIds.length} terminal(s).${lifecycleNote}`,

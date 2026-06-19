@@ -40,7 +40,7 @@ describe("base system prompt", () => {
   });
 
   it("pins the version used as the cache key", () => {
-    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v7");
+    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v8");
   });
 
   it("states the foreground-only scheduler lifecycle", () => {
@@ -48,7 +48,10 @@ describe("base system prompt", () => {
     expect(BASE_SYSTEM_PROMPT).toContain("ONLY while this assistant is open");
     expect(BASE_SYSTEM_PROMPT).toContain("watchers");
     expect(BASE_SYSTEM_PROMPT).toContain("timers");
+    // Timers resume on the next launch; watchers are session-scoped and do not.
     expect(BASE_SYSTEM_PROMPT).toContain("resume on the next launch");
+    expect(BASE_SYSTEM_PROMPT).toContain("session-scoped");
+    expect(BASE_SYSTEM_PROMPT).toContain("do not carry over into a new session");
   });
 });
 
