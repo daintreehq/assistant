@@ -186,7 +186,7 @@ export class AgentSession {
    * base prefix and recipe state survive. Best-effort: any failure (or no real
    * history to compact) leaves the conversation untouched and the turn proceeds.
    */
-  private async maybeAutoCompact(): Promise<void> {
+  private async maybeAutoCompact(signal?: AbortSignal): Promise<void> {
     if (estimateTokens(this.messages) <= AUTO_COMPACT_TOKEN_THRESHOLD) return;
     // Need real working history beyond the controls + any prior summary note.
     if (this.messages.length <= CONTROL_MESSAGE_COUNT + 1) return;
@@ -202,6 +202,7 @@ export class AgentSession {
           },
           ...history,
         ],
+        signal,
       });
       const summary = result.content.trim();
       if (!summary) {
@@ -262,10 +263,20 @@ export class AgentSession {
       return CANCELLED_REPLY;
     }
     // Tool dispatches in this turn carry the run id so their audit rows group with
-    // the run's event log. Derived per-turn; the base ctx stays run-agnostic.
-    const runCtx: ToolContext = { ...this.deps.ctx, runId };
-    await this.maybeAutoCompact();
-    if (!opts.readOnly) await this.maybeRefreshRecipes(userInput);
+    // the run's event log, and the abort signal so long-running handlers (MCP
+    // calls, extraction polls, agent launches) stop when the user cancels instead
+    // of running to completion in the background. Derived per-turn; the base ctx
+    // stays run-agnostic and signal-free (watcher/timer contexts never cancel).
+    const runCtx: ToolContext = { ...this.deps.ctx, runId, signal: opts.signal };
+    await this.maybeAutoCompact(opts.signal);
+    if (!opts.readOnly) await this.maybeRefreshRecipes(userInput, opts.signal);
+    // The pre-turn model calls above (auto-compact summary, recipe selection) honour
+    // the signal and swallow a cancel internally; catch the abort here before we
+    // push the user message so a cancel during them leaves no orphan turn in history.
+    if (opts.signal?.aborted) {
+      this.events.assistantCancelled("");
+      return CANCELLED_REPLY;
+    }
     this.pushMessage({ role: "user", content: userInput });
 
     // Projection can throw if a registered tool produces an illegal or
@@ -373,7 +384,9 @@ export class AgentSession {
       }
 
       // Execute each requested tool call.
-      for (const call of result.toolCalls) {
+      const calls = result.toolCalls;
+      for (let c = 0; c < calls.length; c++) {
+        const call = calls[c];
         // The model echoes back the OpenAI-legal wire name (e.g. `fs__read`);
         // translate it to the internal dotted name (`fs.read`) for dispatch,
         // events, and audit. Fall back to the raw name if it's unrecognized so
@@ -439,6 +452,40 @@ export class AgentSession {
           name: internalName,
           content: serializeToolResult(res),
         });
+
+        // The user cancelled during (or just before) this dispatch — now that the
+        // signal carries into handlers, a long MCP/extraction call returns a
+        // CANCELLED result rather than completing in the background. Stop the loop
+        // here. The assistant message already references EVERY tool_call id in this
+        // batch, so leaving the remaining calls without a matching tool reply would
+        // make the persisted history structurally invalid for the next turn
+        // (assistant tool_calls with no tool result → a Fireworks 400 on replay).
+        // Push a CANCELLED stub for each un-dispatched call to keep the transcript
+        // well-formed, then return the cancelled sentinel.
+        if (opts.signal?.aborted) {
+          for (let r = c + 1; r < calls.length; r++) {
+            const pending = calls[r];
+            const pendingName =
+              this.deps.registry.resolveWireName(pending.function.name) ??
+              pending.function.name;
+            this.pushMessage({
+              role: "tool",
+              tool_call_id: pending.id,
+              name: pendingName,
+              content: serializeToolResult({
+                ok: false,
+                summary: "Turn cancelled before this tool was executed.",
+                error: {
+                  code: "CANCELLED",
+                  message: "Turn cancelled.",
+                  recoverable: false,
+                },
+              }),
+            });
+          }
+          this.events.assistantCancelled("");
+          return CANCELLED_REPLY;
+        }
       }
     }
 
@@ -525,7 +572,10 @@ export class AgentSession {
    * we only ask the small model on the first turn, every Nth turn, or when the
    * input contains a strong trigger term.
    */
-  private async maybeRefreshRecipes(userInput: string): Promise<void> {
+  private async maybeRefreshRecipes(
+    userInput: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const shouldCheck =
       this.turnSinceRecipeRefresh === 0 ||
       this.turnSinceRecipeRefresh >= RECIPE_REFRESH_INTERVAL ||
@@ -534,7 +584,7 @@ export class AgentSession {
       this.turnSinceRecipeRefresh++;
       return;
     }
-    await this.runSelection(userInput);
+    await this.runSelection(userInput, signal);
   }
 
   /**
@@ -549,7 +599,10 @@ export class AgentSession {
    * Run the small-model selector and apply the result. Returns false if the
    * selector errored and we fell back to keeping the existing recipes.
    */
-  private async runSelection(userInput: string): Promise<boolean> {
+  private async runSelection(
+    userInput: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     let selection: RecipeSelection;
     let ok = true;
     try {
@@ -559,6 +612,7 @@ export class AgentSession {
         userInput,
         recentMessages: this.messages.slice(CONTROL_MESSAGE_COUNT),
         activeRecipeIds: [...this.activeRecipeIds],
+        signal,
       });
     } catch {
       ok = false;

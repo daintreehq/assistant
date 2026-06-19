@@ -41,6 +41,12 @@ export interface SelectRecipesArgs {
   userInput: string;
   recentMessages: ReadonlyArray<ChatMessage>;
   activeRecipeIds: string[];
+  /**
+   * Abort signal for the in-flight turn. When the user cancels while this pre-turn
+   * selection call is running, the request is torn down (the small model rejects
+   * with CancelledError) instead of completing in the background.
+   */
+  signal?: AbortSignal;
 }
 
 export async function selectRecipes(
@@ -79,6 +85,7 @@ Return the JSON object now.`,
       ],
       temperature: 0,
       maxTokens: 500,
+      signal: args.signal,
     },
     RecipeSelection,
   );

@@ -218,27 +218,63 @@ export const agentTaskTools: ToolDef[] = [
         );
       }
 
+      // The user already cancelled before we issued the launch — don't spawn an
+      // agent the turn no longer wants.
+      if (ctx.signal?.aborted) {
+        return fail("CANCELLED", "Turn cancelled before the agent was launched.", {
+          recoverable: false,
+        });
+      }
+
       const agentId = args.agentId?.trim() || DEFAULT_AGENT_ID;
       const name = buildAgentLaunchName(args.title, agentId);
       const prompt = buildAgentPrompt(args);
       const requestKey = randomUUID();
 
+      // Scope the abort→CANCELLED mapping to the launch call ALONE. The launch is
+      // the only cancellable (awaited) step; the bookkeeping after it (watcher
+      // insert, event push) is synchronous and runs once the agent already exists.
+      // Folding that bookkeeping into this catch would let a post-launch failure
+      // (e.g. an insertWatcher SQLite error) racing a user abort masquerade as
+      // CANCELLED — hiding that the agent WAS launched. So the catch wraps only the
+      // await, and a bookkeeping throw surfaces honestly via the registry.
+      let res: Awaited<ReturnType<typeof ctx.mcp.callTool>>;
       try {
-        const res = await ctx.mcp.callTool("agent.launch", {
-          agentId,
-          name,
-          ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
-          prompt,
-          requestKey,
-        });
-        if (res.isError) {
-          return fail(
-            "AGENT_LAUNCH_FAILED",
-            `agent.launch reported an error: ${res.text || "(no detail)"}`,
-            { details: res.structuredContent },
-          );
+        res = await ctx.mcp.callTool(
+          "agent.launch",
+          {
+            agentId,
+            name,
+            ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
+            prompt,
+            requestKey,
+          },
+          ctx.signal,
+        );
+      } catch (e) {
+        // A user abort tears the launch request down with a timeout-shaped error;
+        // report it as a clean cancellation, not a launch failure. Reaching here
+        // means the launch never returned, so no agent was spawned.
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while launching the agent.", {
+            recoverable: false,
+          });
         }
+        return fail(
+          "AGENT_LAUNCH_FAILED",
+          `Could not spawn agent for "${args.title}": ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
 
+      if (res.isError) {
+        return fail(
+          "AGENT_LAUNCH_FAILED",
+          `agent.launch reported an error: ${res.text || "(no detail)"}`,
+          { details: res.structuredContent },
+        );
+      }
+
+      {
         const terminalId = extractField(res, "terminalId");
         // Daintree gap: agent.launch returns only { terminalId, location } — it
         // never carries worktreeId/taskId, so these reads degrade gracefully to
@@ -345,11 +381,6 @@ export const agentTaskTools: ToolDef[] = [
             ...(watcherId ? { watcherId } : {}),
             ...(watcherWarning ? { watcherWarning } : {}),
           },
-        );
-      } catch (e) {
-        return fail(
-          "AGENT_LAUNCH_FAILED",
-          `Could not spawn agent for "${args.title}": ${e instanceof Error ? e.message : String(e)}`,
         );
       }
     },

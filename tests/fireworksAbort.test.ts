@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { z } from "zod";
 import { APIUserAbortError } from "openai";
 import { CancelledError, FireworksClient } from "../src/models/fireworks.js";
 import type { AppConfig } from "../src/config.js";
@@ -43,6 +44,72 @@ function clientWithRecorder(
   };
   return { fw, optionsSeen };
 }
+
+/**
+ * Build a FireworksClient whose non-streaming create() resolves to a plain
+ * completion (chat/json), or throws an abort when asked. Captures the second
+ * RequestOptions arg so we can assert the signal is forwarded.
+ */
+function nonStreamingClient(
+  behaviour: "ok" | "abort" = "ok",
+  content = "hello",
+) {
+  const optionsSeen: Array<unknown> = [];
+  const create = vi.fn(
+    async (_payload: Record<string, unknown>, options?: unknown) => {
+      optionsSeen.push(options);
+      if (behaviour === "abort") throw new APIUserAbortError();
+      return { choices: [{ message: { content }, finish_reason: "stop" }] };
+    },
+  );
+  const fw = new FireworksClient(CFG);
+  (fw as unknown as { client: unknown }).client = {
+    chat: { completions: { create } },
+  };
+  return { fw, optionsSeen };
+}
+
+describe("FireworksClient non-streaming abort (chat/json)", () => {
+  it("chat() forwards the abort signal as the second RequestOptions argument", async () => {
+    const { fw, optionsSeen } = nonStreamingClient("ok");
+    const controller = new AbortController();
+    await fw.chat({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      signal: controller.signal,
+    });
+    expect(optionsSeen[0]).toEqual({ signal: controller.signal });
+  });
+
+  it("chat() omits RequestOptions when no signal is provided", async () => {
+    const { fw, optionsSeen } = nonStreamingClient("ok");
+    await fw.chat({ model: "m", messages: [{ role: "user", content: "hi" }] });
+    expect(optionsSeen[0]).toBeUndefined();
+  });
+
+  it("chat() normalises an abort into CancelledError", async () => {
+    const { fw } = nonStreamingClient("abort");
+    await expect(
+      fw.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toBeInstanceOf(CancelledError);
+  });
+
+  it("json() forwards the abort signal and normalises an abort into CancelledError", async () => {
+    const ok = nonStreamingClient("ok", '{"value":1}');
+    const controller = new AbortController();
+    const schema = z.object({ value: z.number() });
+    await ok.fw.json(
+      { model: "m", messages: [{ role: "user", content: "hi" }], signal: controller.signal },
+      schema,
+    );
+    expect(ok.optionsSeen[0]).toEqual({ signal: controller.signal });
+
+    const aborted = nonStreamingClient("abort");
+    await expect(
+      aborted.fw.json({ model: "m", messages: [{ role: "user", content: "hi" }] }, schema),
+    ).rejects.toBeInstanceOf(CancelledError);
+  });
+});
 
 describe("FireworksClient streaming abort", () => {
   it("forwards the abort signal as the second RequestOptions argument", async () => {

@@ -155,12 +155,24 @@ export type ExtractAsyncArgs = z.infer<typeof ExtractAsyncArgs>;
 
 type TerminalState = ReturnType<typeof nextOutputState>["state"];
 
-const delay = (ms: number): Promise<void> =>
+const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
+    // Already cancelled — don't even arm the timer; the next poll-loop check exits.
+    if (signal?.aborted) return resolve();
     // unref so a pending poll delay never keeps the process alive at shutdown
     // (mirrors the scheduler's interval — supervision pauses when the CLI exits).
-    const t = setTimeout(resolve, ms);
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     t.unref?.();
+    // An Escape-to-cancel mid-wait resolves the delay early so the poll loop can
+    // stop on its next iteration instead of sleeping out the full interval.
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 
 /** Map Daintree's agentState onto the coarse runtimeStatus the DSL exposes. */
@@ -294,6 +306,11 @@ async function pollUntil(
   let read: ReadResult | undefined;
 
   while (attempts < args.maxAttempts) {
+    // The user cancelled the turn mid-wait: stop polling now rather than burning
+    // the remaining attempts (each a model/MCP read) in the background after the
+    // turn is already gone. Reports matched=false; the caller maps it to a clean
+    // CANCELLED/timeout result.
+    if (ctx.signal?.aborted) break;
     attempts++;
     read = await readSignals(
       ctx,
@@ -311,7 +328,7 @@ async function pollUntil(
       };
     }
     if (attempts < args.maxAttempts && args.pollIntervalMs > 0) {
-      await delay(args.pollIntervalMs);
+      await delay(args.pollIntervalMs, ctx.signal);
     }
   }
 
@@ -358,12 +375,16 @@ async function runExtract(
     // where the object lands in reasoning_content instead of content.
     const out = await ctx.router.json(
       "small",
-      { messages, maxTokens: args.maxTokens },
+      { messages, maxTokens: args.maxTokens, signal: ctx.signal },
       ExtractionResult,
     );
     return { json: out.result };
   }
-  const res = await ctx.router.chat("small", { messages, maxTokens: args.maxTokens });
+  const res = await ctx.router.chat("small", {
+    messages,
+    maxTokens: args.maxTokens,
+    signal: ctx.signal,
+  });
   return { text: res.content.trim() };
 }
 
@@ -648,8 +669,11 @@ export const extractionTools: ToolDef[] = [
       if (rejected) return rejected;
 
       const requestId = randomUUID();
-      // Fire in the background; the result lands in the attention queue.
-      void runAsyncExtraction(ctx, args, requestId);
+      // Fire in the background; the result lands in the attention queue. This work
+      // is deliberately fire-and-forget and OUTLIVES the turn, so it must NOT carry
+      // the turn's abort signal — cancelling the spawning turn must not abort an
+      // already-detached background extraction. Strip the signal from its context.
+      void runAsyncExtraction({ ...ctx, signal: undefined }, args, requestId);
       return ok(
         `Started background extraction ${requestId}; the result will land in the attention queue.`,
         { requestId, terminalIds: args.terminalIds },

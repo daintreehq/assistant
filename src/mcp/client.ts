@@ -57,10 +57,26 @@ export interface McpCallResult {
   isError: boolean;
 }
 
+/**
+ * Request options the SDK accepts on its read/call methods. We only thread
+ * `signal` (the rest — timeout, progress — we don't drive). Matches the shape of
+ * `@modelcontextprotocol/sdk`'s `RequestOptions` for the fields we pass.
+ */
+export interface McpRequestOptions {
+  signal?: AbortSignal;
+}
+
 /** The subset of the MCP SDK client we depend on (also what test fakes implement). */
 export interface LowLevelMcpClient {
-  listTools(): Promise<{ tools: Array<{ name: string; description?: string; inputSchema?: unknown }> }>;
-  callTool(args: { name: string; arguments?: Record<string, unknown> }): Promise<{
+  listTools(
+    params?: unknown,
+    options?: McpRequestOptions,
+  ): Promise<{ tools: Array<{ name: string; description?: string; inputSchema?: unknown }> }>;
+  callTool(
+    args: { name: string; arguments?: Record<string, unknown> },
+    resultSchema?: unknown,
+    options?: McpRequestOptions,
+  ): Promise<{
     content?: unknown[];
     structuredContent?: unknown;
     isError?: boolean;
@@ -323,13 +339,21 @@ export class DaintreeMcpClient {
     this.lastError = errMsg(e);
   }
 
-  async listTools(force = false): Promise<McpToolInfo[]> {
+  async listTools(force = false, signal?: AbortSignal): Promise<McpToolInfo[]> {
     if (this.toolCache && !force) return this.toolCache;
     let res: Awaited<ReturnType<LowLevelMcpClient["listTools"]>>;
     try {
-      res = await this.ensure().listTools();
+      res = await this.ensure().listTools(
+        undefined,
+        signal ? { signal } : undefined,
+      );
     } catch (e) {
-      if (!(e instanceof McpUnavailableError)) this.markDegraded(e);
+      // A user-aborted call surfaces the same way a real transport failure does
+      // (the SDK wraps both as a timeout-shaped McpError), but an abort says
+      // nothing about the connection's health — don't flip it to degraded.
+      if (!(e instanceof McpUnavailableError) && !signal?.aborted) {
+        this.markDegraded(e);
+      }
       throw e;
     }
     this.toolCache = res.tools.map((t) => ({
@@ -346,12 +370,23 @@ export class DaintreeMcpClient {
   async callTool(
     name: string,
     args: Record<string, unknown> = {},
+    signal?: AbortSignal,
   ): Promise<McpCallResult> {
     let res: Awaited<ReturnType<LowLevelMcpClient["callTool"]>>;
     try {
-      res = await this.ensure().callTool({ name, arguments: args });
+      res = await this.ensure().callTool(
+        { name, arguments: args },
+        undefined,
+        signal ? { signal } : undefined,
+      );
     } catch (e) {
-      if (!(e instanceof McpUnavailableError)) this.markDegraded(e);
+      // When the user aborted the turn the SDK rejects with a timeout-shaped
+      // McpError — same shape as a real transport failure. An abort is not a
+      // connection-health signal, so don't degrade the connection for it;
+      // callers check `signal.aborted` to map it to a CANCELLED tool result.
+      if (!(e instanceof McpUnavailableError) && !signal?.aborted) {
+        this.markDegraded(e);
+      }
       throw e;
     }
     const content = (res.content as unknown[]) ?? [];

@@ -48,6 +48,12 @@ export class ModelRouter {
       this.logResponse("chat", tier, model, res);
       return res;
     } catch (err) {
+      // A cancelled turn is a clean user abort, not a model error — trace it under
+      // a distinct key so it doesn't read as a failure (mirrors stream()).
+      if (err instanceof CancelledError) {
+        logDebug(this.cfg, "model.cancelled", { kind: "chat", tier, model });
+        throw err;
+      }
       this.logError("chat", tier, model, err);
       throw err;
     }
@@ -88,6 +94,10 @@ export class ModelRouter {
       logDebug(this.cfg, "model.response", { kind: "json", tier, model, result: res });
       return res;
     } catch (err) {
+      if (err instanceof CancelledError) {
+        logDebug(this.cfg, "model.cancelled", { kind: "json", tier, model });
+        throw err;
+      }
       this.logError("json", tier, model, err);
       throw err;
     }

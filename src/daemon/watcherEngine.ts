@@ -274,7 +274,10 @@ export async function readStatuses(
     if (includeOutput) {
       args.includeOutput = { lines: 50, stripAnsi: true };
     }
-    const res = await ctx.mcp.callTool("terminal.getStatus", args);
+    // Thread the turn signal (extraction polls supply it; watcher/timer contexts
+    // leave it undefined) so an in-flight status read is torn down on Escape
+    // instead of completing after the user has already cancelled.
+    const res = await ctx.mcp.callTool("terminal.getStatus", args, ctx.signal);
     if (res.isError) {
       logDebug(ctx.config, "mcp.getStatus", {
         requested: terminalIds,
@@ -355,10 +358,16 @@ export async function readOutput(
   tailBytes = 12000,
 ): Promise<ReadOutputResult> {
   try {
-    const out = await ctx.mcp.callTool("terminal.getOutput", {
-      terminalId,
-      maxLines: 200,
-    });
+    const out = await ctx.mcp.callTool(
+      "terminal.getOutput",
+      {
+        terminalId,
+        maxLines: 200,
+      },
+      // Carry the turn signal so a cancelled extraction poll tears this read down;
+      // undefined for watcher/timer contexts, preserving their behaviour.
+      ctx.signal,
+    );
     const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
     const content = typeof sc.content === "string" ? sc.content : "";
     logDebug(ctx.config, "mcp.getOutput", {

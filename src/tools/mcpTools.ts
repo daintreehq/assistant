@@ -34,7 +34,7 @@ async function passthrough(
       ...args,
       ...(requestKey ? { requestKey } : {}),
     };
-    const res = await ctx.mcp.callTool(mcpName, callArgs);
+    const res = await ctx.mcp.callTool(mcpName, callArgs, ctx.signal);
     if (res.isError) {
       // Carry Daintree's own refusal text into the failure summary so a denied
       // grant-authorized mutation surfaces *why* it was refused (e.g. a revoked
@@ -52,6 +52,13 @@ async function passthrough(
       structuredContent: res.structuredContent,
     });
   } catch (e) {
+    // A user abort surfaces as a timeout-shaped MCP error; report it as a clean
+    // cancellation rather than a tool failure.
+    if (ctx.signal?.aborted) {
+      return fail("CANCELLED", `Turn cancelled during ${mcpName}.`, {
+        recoverable: false,
+      });
+    }
     return fail(
       "MCP_TOOL_ERROR",
       `Daintree call ${mcpName} failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -240,13 +247,18 @@ export const mcpTools: ToolDef[] = [
         );
       }
       try {
-        const tools = await ctx.mcp.listTools();
+        const tools = await ctx.mcp.listTools(false, ctx.signal);
         const list = tools.map((t) => ({
           name: t.name,
           description: t.description ?? "",
         }));
         return ok(`Found ${list.length} Daintree MCP tool(s).`, { tools: list });
       } catch (e) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while listing MCP tools.", {
+            recoverable: false,
+          });
+        }
         return fail(
           "MCP_UNAVAILABLE",
           `Could not list Daintree MCP tools: ${e instanceof Error ? e.message : String(e)}`,
@@ -283,7 +295,7 @@ export const mcpTools: ToolDef[] = [
       try {
         const max = args.max ?? 20;
         const q = args.query.toLowerCase();
-        const tools = await ctx.mcp.listTools();
+        const tools = await ctx.mcp.listTools(false, ctx.signal);
         const matches = tools
           .filter(
             (t) =>
@@ -301,6 +313,11 @@ export const mcpTools: ToolDef[] = [
           },
         );
       } catch (e) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while searching MCP tools.", {
+            recoverable: false,
+          });
+        }
         return fail(
           "MCP_UNAVAILABLE",
           `Could not search Daintree MCP tools: ${e instanceof Error ? e.message : String(e)}`,
@@ -360,7 +377,7 @@ export const mcpTools: ToolDef[] = [
           ...(args.arguments ?? {}),
           ...(args.requestKey ? { requestKey: args.requestKey } : {}),
         };
-        const res = await ctx.mcp.callTool(args.name, callArgs);
+        const res = await ctx.mcp.callTool(args.name, callArgs, ctx.signal);
         if (res.isError) {
           return fail(
             "MCP_TOOL_ERROR",
@@ -374,6 +391,11 @@ export const mcpTools: ToolDef[] = [
           isError: res.isError,
         });
       } catch (e) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", `Turn cancelled during ${args.name}.`, {
+            recoverable: false,
+          });
+        }
         return fail(
           "MCP_TOOL_ERROR",
           `Daintree MCP call ${args.name} failed: ${e instanceof Error ? e.message : String(e)}`,

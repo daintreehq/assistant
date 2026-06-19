@@ -405,3 +405,130 @@ describe("terminal.extract.async — background", () => {
     expect(arg.summary).toContain("model exploded");
   });
 });
+
+describe("terminal extraction — cancellation (#81)", () => {
+  it("threads the turn signal into the terminal.getStatus / getOutput MCP reads", async () => {
+    const controller = new AbortController();
+    const { ctx } = ctxWith({
+      // recentOutput shorter than tailBytes forces the deep getOutput fallback too.
+      status: () => [{ terminalId: "t1", agentState: "working", recentOutput: "hi" }],
+      output: () => "deep output",
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "x",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 1,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    const callMock = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    const statusCall = callMock.mock.calls.find((c) => c[0] === "terminal.getStatus");
+    const outputCall = callMock.mock.calls.find((c) => c[0] === "terminal.getOutput");
+    // The signal rides as the 3rd arg of callTool, so a slow Daintree read is
+    // torn down on Escape rather than completing in the background.
+    expect(statusCall?.[2]).toBe(controller.signal);
+    expect(outputCall?.[2]).toBe(controller.signal);
+  });
+
+  it("threads the turn signal into the extraction model call", async () => {
+    const controller = new AbortController();
+    const chat = vi.fn().mockResolvedValue({ content: "extracted" });
+    const { ctx } = ctxWith({ chat });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "x",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 1,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    expect(chat).toHaveBeenCalled();
+    expect(chat.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
+  it("stops polling promptly when the turn signal aborts mid-wait", async () => {
+    const controller = new AbortController();
+    let statusReads = 0;
+    const { ctx } = ctxWith({
+      status: () => {
+        statusReads++;
+        // Simulate the user cancelling after a couple of polls.
+        if (statusReads >= 2) controller.abort();
+        return [{ terminalId: "t1", agentState: "working", recentOutput: "still running" }];
+      },
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    const res = await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "did it pass",
+        format: "text",
+        wait: { contains: "NEVER MATCHES" },
+        pollIntervalMs: 0,
+        maxAttempts: 30,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    // The wait never matched and the turn was cancelled — a clean WAIT_TIMEOUT,
+    // and crucially the poll did NOT run out all 30 attempts: it halted on abort.
+    expect(res.ok).toBe(false);
+    expect((res as { error?: { code?: string } }).error?.code).toBe("WAIT_TIMEOUT");
+    expect(statusReads).toBeLessThan(5);
+  });
+
+  it("the fire-and-forget async path strips the turn signal so it outlives the turn", async () => {
+    // An already-aborted turn must NOT short-circuit a detached background poll.
+    const controller = new AbortController();
+    controller.abort();
+    let statusReads = 0;
+    const publish = vi.fn().mockReturnValue({ id: "evt", count: 1 });
+    const { ctx } = ctxWith({
+      publish,
+      status: () => {
+        statusReads++;
+        return [{ terminalId: "t1", agentState: "exited", recentOutput: "done" }];
+      },
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    const res = await extractAsync.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "summarize",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 5,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    // Let the detached promise settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Had the signal NOT been stripped, pollUntil would break before any read
+    // (aborted at entry) — statusReads would be 0. It actually polled and published.
+    expect(statusReads).toBeGreaterThanOrEqual(1);
+    expect(publish).toHaveBeenCalled();
+  });
+});
