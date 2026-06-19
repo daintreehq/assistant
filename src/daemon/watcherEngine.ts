@@ -33,6 +33,7 @@ import type { ToolContext } from "../tools/types.js";
 import type { WatcherRecord } from "../schemas.js";
 import { logDebug } from "../debugLog.js";
 import { WATCHER_SPAWN_GRACE_MS } from "../watcherCadence.js";
+import { parseMcpArray, parseMcpString } from "../mcp/resultHelpers.js";
 
 export interface WatcherSignals {
   agentState?: string;
@@ -297,8 +298,10 @@ export async function readStatuses(
       });
       return { ok: false, byId };
     }
-    const sc = (res.structuredContent ?? {}) as Record<string, unknown>;
-    const terminals = Array.isArray(sc.terminals) ? sc.terminals : [];
+    // Daintree returns the terminals array in the `text` content blocks, not in
+    // structuredContent — read BOTH and merge (see parseMcpArray / SEP-2200).
+    // Reading structuredContent alone silently saw zero terminals every tick.
+    const terminals = parseMcpArray(res, "terminals");
     // Diagnostic: record exactly which ids Daintree returned vs. which we asked
     // for. A requested id that's missing here is what the watcher reads as
     // "exited" — so this line distinguishes "wrong/foreign id namespace" (other
@@ -357,11 +360,12 @@ export type ReadOutputResult =
   | { ok: false; value: "" };
 
 /**
- * Read a bounded tail of one terminal via terminal.getOutput. The scrollback is
- * in `structuredContent.content` (a string), NOT the JSON-serialized `text`. A
- * failed read returns `{ ok: false }` rather than an empty string, so the caller
- * can tell a read failure apart from a genuinely silent terminal — and never
- * leaks the error JSON in as fake output.
+ * Read a bounded tail of one terminal via terminal.getOutput. The scrollback may
+ * arrive in `structuredContent.content` OR the raw `text` body — Daintree uses
+ * the latter — so read both (see parseMcpString). A failed read returns
+ * `{ ok: false }` rather than an empty string, so the caller can tell a read
+ * failure apart from a genuinely silent terminal — and the `isError` guard runs
+ * before the value is used so the error JSON never leaks in as fake output.
  */
 export async function readOutput(
   ctx: ToolContext,
@@ -379,8 +383,10 @@ export async function readOutput(
       // undefined for watcher/timer contexts, preserving their behaviour.
       ctx.signal,
     );
-    const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
-    const content = typeof sc.content === "string" ? sc.content : "";
+    // Scrollback lives in structuredContent.content OR the raw text body —
+    // Daintree populates the latter. Fall back to text so a real read is never
+    // mistaken for a silent terminal (see parseMcpString).
+    const content = parseMcpString(out, "content") ?? "";
     logDebug(ctx.config, "mcp.getOutput", {
       terminalId,
       isError: Boolean(out.isError),

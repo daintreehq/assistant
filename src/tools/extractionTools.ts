@@ -207,7 +207,11 @@ async function readSignals(
   now: number,
 ): Promise<ReadResult> {
   const statuses = await readStatuses(ctx, terminalIds, true);
-  let allExited = statuses.ok;
+  // "All exited" requires a successful read that ACTUALLY returned terminals. A
+  // total miss (ok:true but an empty byId) is otherwise indistinguishable from
+  // every terminal cleanly exiting — that false "finished" silently hid the
+  // empty-read bug (#108). Require byId to be non-empty before trusting exit.
+  let allExited = statuses.ok && statuses.byId.size > 0;
   let minMsSinceOutput = Number.POSITIVE_INFINITY;
   const parts: {
     terminalId: string;

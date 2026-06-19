@@ -36,6 +36,9 @@ function fakeMcp(
       exitCode?: number | null;
     }
   >,
+  // When true, deliver status/output payloads ONLY in the text body with no
+  // structuredContent — Daintree's real shape (#108). Exercises the fallback.
+  textOnly = false,
 ) {
   return {
     isConnected: () => true,
@@ -61,18 +64,22 @@ function fakeMcp(
             ...(cfg.exitCode !== undefined ? { exitCode: cfg.exitCode } : {}),
           };
         });
-        return { text: "", content: [], structuredContent: { terminals }, isError: false };
+        return textOnly
+          ? { text: JSON.stringify({ terminals }), content: [], structuredContent: undefined, isError: false }
+          : { text: "", content: [], structuredContent: { terminals }, isError: false };
       }
       // terminal.getOutput returns scrollback under structuredContent.content.
       if (name === "terminal.getOutput") {
         const tid = String(args?.terminalId ?? "");
         const cfg = perTerminal[tid] ?? {};
-        return {
-          text: "",
-          content: [],
-          structuredContent: { terminalId: tid, content: cfg.tail ?? "" },
-          isError: false,
-        };
+        return textOnly
+          ? { text: cfg.tail ?? "", content: [], structuredContent: undefined, isError: false }
+          : {
+              text: "",
+              content: [],
+              structuredContent: { terminalId: tid, content: cfg.tail ?? "" },
+              isError: false,
+            };
       }
       // Post-completion verification reads git cleanliness; default to clean so a
       // "completed" agent resolves to completed_success unless a test overrides.
@@ -427,6 +434,36 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     const after = db.getWatcher(w.id)!;
     const options = JSON.parse(after.optionsJson!);
     expect(Object.keys(options.perTerminal).sort()).toEqual(["term-a", "term-b"]);
+    db.close();
+  });
+
+  it("reads status AND output through the text body when structuredContent is absent (#108)", async () => {
+    // Daintree returns payloads only in the text body. Before the fallback, the
+    // watcher saw no agentState and an empty tail, so this alert never fired.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp(
+        { "term-a": { agentState: "waiting", tail: "Continue? NEEDS INPUT" } },
+        true, // textOnly
+      ),
+    );
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "text-fallback",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      alertWhenJson: JSON.stringify({ contains: "NEEDS INPUT" }),
+    });
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.map((e) => e.target?.terminalId)).toEqual(["term-a"]);
     db.close();
   });
 

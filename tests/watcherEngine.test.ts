@@ -3,6 +3,7 @@ import {
   evaluateCondition,
   decideOutcome,
   readStatuses,
+  readOutput,
   type WatcherSignals,
 } from "../src/daemon/watcherEngine.js";
 import type { ModelJudgeAnswer } from "../src/schemas.js";
@@ -32,6 +33,35 @@ function ctxWithStatus(entries: Array<Record<string, unknown>>): ToolContext {
         name === "terminal.getStatus"
           ? { isError: false, text: "", structuredContent: { terminals: entries } }
           : { isError: true, text: "", structuredContent: {} },
+    },
+  } as unknown as ToolContext;
+}
+
+/**
+ * A ToolContext that returns its terminal payloads ONLY in the `text` body with
+ * NO structuredContent — Daintree's real shape (#108). Status is JSON-encoded,
+ * output is raw scrollback text.
+ */
+function ctxTextOnly(
+  statusEntries: Array<Record<string, unknown>>,
+  outputText = "",
+): ToolContext {
+  return {
+    mcp: {
+      isConnected: () => true,
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return {
+            isError: false,
+            text: JSON.stringify({ terminals: statusEntries }),
+            structuredContent: undefined,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          return { isError: false, text: outputText, structuredContent: undefined };
+        }
+        return { isError: true, text: "", structuredContent: {} };
+      },
     },
   } as unknown as ToolContext;
 }
@@ -295,5 +325,38 @@ describe("readStatuses — exit metadata parsing (#22)", () => {
     expect(e.exitCode).toBeUndefined();
     expect(e.spawnedAt).toBeUndefined();
     expect(e.lastTransitionAt).toBeUndefined();
+  });
+});
+
+describe("readStatuses / readOutput — text-body fallback (#108)", () => {
+  it("readStatuses parses terminals from the text body when structuredContent is absent", async () => {
+    const ctx = ctxTextOnly([
+      { terminalId: "t1", agentState: "waiting", exitCode: 0 },
+      { terminalId: "t2", agentState: "working" },
+    ]);
+    const batch = await readStatuses(ctx, ["t1", "t2"]);
+    expect(batch.ok).toBe(true);
+    expect(batch.byId.get("t1")).toMatchObject({ agentState: "waiting", exitCode: 0 });
+    expect(batch.byId.get("t2")?.agentState).toBe("working");
+  });
+
+  it("readOutput returns the raw text body when structuredContent is absent (not an empty string)", async () => {
+    const ctx = ctxTextOnly([], "build finished\nall green");
+    const res = await readOutput(ctx, "t1");
+    expect(res.ok).toBe(true);
+    expect(res.value).toBe("build finished\nall green");
+  });
+
+  it("readStatuses still returns ok with an empty byId when neither source has terminals", async () => {
+    const ctx = {
+      mcp: {
+        isConnected: () => true,
+        callTool: async () => ({ isError: false, text: "", structuredContent: undefined }),
+      },
+    } as unknown as ToolContext;
+    const batch = await readStatuses(ctx, ["t1"]);
+    // ok reflects call success, not byId population — the caller interprets empty.
+    expect(batch.ok).toBe(true);
+    expect(batch.byId.size).toBe(0);
   });
 });
