@@ -51,7 +51,7 @@ export function buildRuntimeContextMessage(ctx: MainPromptContext): string {
   }
   if (!ctx.schedulerActive) {
     lines.push(
-      "NOTE: the scheduler is NOT running in this session. Timers, watchers, and automatic reactions are persisted but dormant; they will not fire now and will resume and catch up on the next interactive launch. Tell the user rather than implying anything is being supervised.",
+      "NOTE: the scheduler is NOT running in this session, so everything is dormant — nothing is being supervised right now. Timers are persisted and will resume and catch up on the next interactive launch. Watchers are session-scoped: any created here are discarded when this session ends and do NOT resume on the next launch. Tell the user rather than implying anything is being supervised.",
     );
   }
   return lines.join("\n");

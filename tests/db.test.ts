@@ -104,6 +104,137 @@ describe("Db fresh schema (single baseline migration)", () => {
   });
 });
 
+describe("Db startup watcher invalidation", () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "db-watcher-invalidate-"));
+    path = join(dir, "state.db");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const insertWatcherWithStatus = (
+    db: Db,
+    id: string,
+    status:
+      | "active"
+      | "created"
+      | "paused"
+      | "condition_met"
+      | "timeout"
+      | "cancelled"
+      | "error",
+  ) =>
+    db.insertWatcher({
+      id,
+      kind: "terminal",
+      title: `watcher ${id}`,
+      goal: "supervise",
+      targetsJson: JSON.stringify(["term_1"]),
+      cadenceMs: 5000,
+      modelTier: "small",
+      nextCheckAt: 0,
+      status,
+    });
+
+  it("cancels non-terminal watchers from a prior session and revokes their grants on reopen", () => {
+    // Watchers are session-scoped: a new session must never inherit a prior
+    // session's watchers (their terminals are gone). The terminal statuses
+    // (condition_met/timeout/cancelled/error) back the UI history and must
+    // survive untouched.
+    const nonTerminal = ["active", "created", "paused"] as const;
+    const terminal = ["condition_met", "timeout", "cancelled", "error"] as const;
+
+    {
+      const db = new Db(path);
+
+      for (const s of nonTerminal) insertWatcherWithStatus(db, `wch_${s}`, s);
+      for (const s of terminal) insertWatcherWithStatus(db, `wch_${s}`, s);
+
+      // A live grant for EACH stale (non-terminal) watcher — all must be
+      // revoked, so the subquery is exercised across active/created/paused, not
+      // just the one status.
+      for (const s of nonTerminal) {
+        db.insertGrant({
+          id: `grt_${s}`,
+          actorId: `wch_${s}`,
+          actorType: "watcher",
+          allowedRiskClassesJson: JSON.stringify(["terminal"]),
+          allowedToolNamesJson: null,
+          expiresAt: 9999999999999,
+          maxUses: 5,
+        });
+      }
+      // A live grant for a terminal-state (condition_met) watcher — that watcher
+      // is NOT swept, so its grant must survive (the subquery is bounded to
+      // non-terminal statuses).
+      db.insertGrant({
+        id: "grt_terminal_state",
+        actorId: "wch_condition_met",
+        actorType: "watcher",
+        allowedRiskClassesJson: JSON.stringify(["terminal"]),
+        allowedToolNamesJson: null,
+        expiresAt: 9999999999999,
+        maxUses: 5,
+      });
+      // A live timer grant that shares the same actorId — must NOT be revoked,
+      // proving the sweep is scoped by actorType.
+      db.insertGrant({
+        id: "grt_timer",
+        actorId: "wch_active",
+        actorType: "timer",
+        allowedRiskClassesJson: JSON.stringify(["terminal"]),
+        allowedToolNamesJson: null,
+        expiresAt: 9999999999999,
+        maxUses: 5,
+      });
+      // A persistent timer — must survive the reopen untouched.
+      db.insertTimer({
+        id: "tmr_keep",
+        title: "keep me",
+        fireAt: 9999999999999,
+        payloadType: "enqueue",
+        payloadJson: "{}",
+      });
+
+      db.close();
+    }
+
+    // Reopen on the same file: construction runs cancelStaleWatchers().
+    const db = new Db(path);
+
+    // Non-terminal watchers are now cancelled...
+    for (const s of nonTerminal) {
+      expect(db.getWatcher(`wch_${s}`)?.status).toBe("cancelled");
+    }
+    // ...terminal-state watchers are untouched.
+    for (const s of terminal) {
+      expect(db.getWatcher(`wch_${s}`)?.status).toBe(s);
+    }
+
+    // Nothing is due — the scheduler sees no inherited watchers.
+    expect(db.dueWatchers(Date.now())).toHaveLength(0);
+
+    // Every stale watcher's grant is revoked (active/created/paused)...
+    for (const s of nonTerminal) {
+      expect(db.getGrant(`grt_${s}`)?.revokedAt).toBeTruthy();
+    }
+    // ...the terminal-state watcher's grant survives (not swept)...
+    expect(db.getGrant("grt_terminal_state")?.revokedAt).toBeFalsy();
+    // ...and the timer grant (same actorId as wch_active) is untouched.
+    expect(db.getGrant("grt_timer")?.revokedAt).toBeFalsy();
+
+    // The persistent timer is untouched.
+    expect(db.getTimer("tmr_keep")?.status).toBe("scheduled");
+
+    db.close();
+  });
+});
+
 describe("Db", () => {
   let db: Db;
 
