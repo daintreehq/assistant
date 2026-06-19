@@ -254,6 +254,88 @@ describe("typed forge + workflow wrappers (#26)", () => {
   });
 });
 
+describe("tool.search / daintree.listTools callable annotation (#80)", () => {
+  const MCP_TOOLS = [
+    { name: "recipe.run", description: "Run a recipe by id." },
+    { name: "recipe.list", description: "List available recipes." },
+    { name: "timer.schedule", description: "Schedule a timer." },
+  ];
+
+  /** A read-tier ctx whose MCP returns a fixed tool list; carries activeToolNames. */
+  function discoveryCtx(activeToolNames?: string[]): ToolContext {
+    const mcp = {
+      isConnected: () => true,
+      listTools: async () => MCP_TOOLS,
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "supervisor" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+    if (activeToolNames !== undefined) c.activeToolNames = activeToolNames;
+    return c;
+  }
+
+  it("tool.search marks only projected tools callable when a recipe narrows the turn", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = discoveryCtx(["tool.search", "recipe.run"]);
+    const res = await reg.dispatch("tool.search", { query: "recipe" }, c);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const matches = (res.result as { matches: Array<{ name: string; callable: boolean }> })
+      .matches;
+    const byName = Object.fromEntries(matches.map((m) => [m.name, m.callable]));
+    // Substring "recipe" matches recipe.run + recipe.list; only recipe.run is offered.
+    expect(byName["recipe.run"]).toBe(true);
+    expect(byName["recipe.list"]).toBe(false);
+  });
+
+  it("tool.search marks everything callable when the turn is unconstrained (undefined)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = discoveryCtx(undefined);
+    const res = await reg.dispatch("tool.search", { query: "recipe" }, c);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const matches = (res.result as { matches: Array<{ callable: boolean }> }).matches;
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches.every((m) => m.callable)).toBe(true);
+  });
+
+  it("daintree.listTools annotates each tool against the active projection", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = discoveryCtx(["recipe.run"]);
+    const res = await reg.dispatch("daintree.listTools", {}, c);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const tools = (res.result as { tools: Array<{ name: string; callable: boolean }> }).tools;
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t.callable]));
+    expect(byName["recipe.run"]).toBe(true);
+    expect(byName["recipe.list"]).toBe(false);
+    expect(byName["timer.schedule"]).toBe(false);
+  });
+
+  it("daintree.listTools marks all tools uncallable for an empty projection (boundary)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = discoveryCtx([]);
+    const res = await reg.dispatch("daintree.listTools", {}, c);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const tools = (res.result as { tools: Array<{ callable: boolean }> }).tools;
+    expect(tools.length).toBe(MCP_TOOLS.length);
+    expect(tools.every((t) => !t.callable)).toBe(true);
+  });
+});
+
 describe("forge write + getPR wrappers (#29)", () => {
   const FORGE_WRITE_NAMES = [
     "forge.createIssue",
