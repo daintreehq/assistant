@@ -214,14 +214,31 @@ async function readSignals(
     // fall back to the deep terminal.getOutput read so contains/regex matching
     // never silently runs against a truncated tail.
     const inline = entry?.recentOutput;
-    const tail = absent
-      ? ""
-      : inline !== undefined && inline.length >= tailBytes
-        ? inline.slice(-tailBytes)
-        : await readOutput(ctx, id, tailBytes);
-    const out = nextOutputState(states.get(id), tail, now);
-    states.set(id, out.state);
-    minMsSinceOutput = Math.min(minMsSinceOutput, out.msSinceOutput);
+    // Only the deep terminal.getOutput fallback can fail; the inline tail and the
+    // absent case are both already-known reads. On a failed deep read fall back to
+    // the inline tail (if any) for content matching, but DON'T advance the
+    // output-tracking state — a transport hiccup must not read as silence and
+    // falsely advance noOutputForMs.
+    const prev = states.get(id);
+    let tail: string;
+    let readFailed = false;
+    if (absent) {
+      tail = "";
+    } else if (inline !== undefined && inline.length >= tailBytes) {
+      tail = inline.slice(-tailBytes);
+    } else {
+      const read = await readOutput(ctx, id, tailBytes);
+      readFailed = !read.ok;
+      tail = read.ok ? read.value : (inline ?? "");
+    }
+    if (readFailed) {
+      // Preserve prior state and skip this terminal's noOutputForMs contribution.
+      if (prev) states.set(id, prev);
+    } else {
+      const out = nextOutputState(prev, tail, now);
+      states.set(id, out.state);
+      minMsSinceOutput = Math.min(minMsSinceOutput, out.msSinceOutput);
+    }
     if (agentState !== "exited") allExited = false;
     parts.push({ terminalId: id, tail, agentState, exitCode: entry?.exitCode });
   }

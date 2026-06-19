@@ -1322,3 +1322,476 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     db.close();
   });
 });
+
+// A read failure (Daintree errored / the call threw) must be distinguishable from
+// a genuinely silent terminal: it must not advance noOutputForMs, must not invoke
+// the small model on stale/empty output, and must be counted so the engine can
+// back off. Separately, the model must be skipped entirely when the inputs that
+// determine its answer (agentState, exitCode, output hash) are unchanged.
+describe("watcher read-failure vs silence + classify dedup (#56)", () => {
+  /** A working terminal present in getStatus but with no inline tail, so the
+   *  watcher takes the deep terminal.getOutput path — whose result we control. */
+  function mcpDeepRead(getOutput: () => { content?: string; isError?: boolean }) {
+    return {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({ terminalId, agentState: "working" })),
+            },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          const r = getOutput();
+          return {
+            text: "",
+            content: [],
+            structuredContent: r.isError ? {} : { content: r.content ?? "" },
+            isError: Boolean(r.isError),
+          };
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+  }
+
+  function insertTermWatcher(db: Db, extra?: Record<string, unknown>) {
+    return db.insertWatcher({
+      kind: "terminal",
+      title: "t",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 3_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      ...extra,
+    });
+  }
+
+  const termState = (db: Db, id: string) =>
+    JSON.parse(db.getWatcher(id)!.optionsJson!).perTerminal["term-x"];
+
+  it("a failed deep read is a re-check, not silence: skips the model and counts the failure", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let jsonCalls = 0;
+    const ctx = ctxWith(db, queue, mcpDeepRead(() => ({ isError: true })));
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        jsonCalls += 1;
+        throw new Error("model must not be consulted on a failed read");
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    expect(jsonCalls).toBe(0);
+    expect(outcome.classification).toBe("no_change");
+    expect(termState(db, w.id).readFailures).toBe(1);
+    db.close();
+  });
+
+  it("read failures freeze outAt and accumulate, then reset on a successful read", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let mode: "ok" | "fail" = "ok";
+    const ctx = ctxWith(
+      db,
+      queue,
+      mcpDeepRead(() => (mode === "fail" ? { isError: true } : { content: "building..." })),
+    );
+    const w = insertTermWatcher(db);
+
+    // 1) Successful read records outAt and a zero failure count.
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    const after1 = termState(db, w.id);
+    expect(after1.readFailures).toBe(0);
+    const frozenOutAt = after1.outAt;
+    expect(typeof frozenOutAt).toBe("number");
+
+    // 2+3) Consecutive failures accumulate and do NOT advance outAt.
+    mode = "fail";
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(termState(db, w.id).readFailures).toBe(1);
+    expect(termState(db, w.id).outAt).toBe(frozenOutAt);
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(termState(db, w.id).readFailures).toBe(2);
+    expect(termState(db, w.id).outAt).toBe(frozenOutAt);
+
+    // 4) A successful read clears the counter.
+    mode = "ok";
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(termState(db, w.id).readFailures).toBe(0);
+    db.close();
+  });
+
+  it("repeated read failures do not trip a noOutputForMs stop condition", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(db, queue, mcpDeepRead(() => ({ isError: true })));
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        throw new Error("model must not be consulted on a failed read");
+      },
+    } as unknown as ModelRouter;
+    // A 1ms silence threshold would trip on the SECOND consecutive empty read if a
+    // read failure were treated as silence (the pre-fix bug).
+    const w = insertTermWatcher(db, { stopWhenJson: JSON.stringify({ noOutputForMs: 1 }) });
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+    expect(termState(db, w.id).readFailures).toBe(2);
+    db.close();
+  });
+
+  it("skips the model when agentState, exitCode and output hash are unchanged", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let jsonCalls = 0;
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-x": { agentState: "working", recentOutput: "compiling module..." } }),
+    );
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        jsonCalls += 1;
+        return {
+          classification: "still_working",
+          confidence: 0.7,
+          summary: "still",
+          evidence: [],
+          recommendedAction: "none",
+        };
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(1);
+    expect(typeof termState(db, w.id).lastClassifyKey).toBe("string");
+
+    // Identical inputs on the next tick → the model is not consulted again.
+    const outcome2 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(1);
+    expect(outcome2.classification).toBe("no_change");
+    db.close();
+  });
+
+  it("re-invokes the model when the output changes (hash component of the key)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let jsonCalls = 0;
+    let recent = "line one";
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({
+                terminalId,
+                agentState: "working",
+                recentOutput: recent,
+              })),
+            },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        jsonCalls += 1;
+        return {
+          classification: "still_working",
+          confidence: 0.7,
+          summary: "still",
+          evidence: [],
+          recommendedAction: "none",
+        };
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(1);
+    // New output → key changes → the model runs again.
+    recent = "line two";
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(2);
+    db.close();
+  });
+
+  it("re-invokes the model when agentState changes even if output is unchanged", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let jsonCalls = 0;
+    let agentState = "working";
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({
+                terminalId,
+                agentState,
+                recentOutput: "same output",
+              })),
+            },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], structuredContent: { content: "" }, isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        jsonCalls += 1;
+        return {
+          classification: "still_working",
+          confidence: 0.7,
+          summary: "still",
+          evidence: [],
+          recommendedAction: "none",
+        };
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(1);
+    // Same output but a different agentState (still non-terminal) → re-classify.
+    agentState = "busy";
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(jsonCalls).toBe(2);
+    db.close();
+  });
+
+  it("a failed deep read on the listed-but-omitted path skips the model and counts the failure", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let jsonCalls = 0;
+    // getStatus omits the terminal; terminal.list reports it working; the deep
+    // getOutput read then fails — the listed-but-omitted path must treat that as a
+    // re-check, not classify on an empty tail.
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string) => {
+        if (name === "terminal.getStatus") {
+          return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          return { text: "", content: [], structuredContent: {}, isError: true };
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        jsonCalls += 1;
+        throw new Error("model must not be consulted on a failed read");
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+    const aged = {
+      ...db.getWatcher(w.id)!,
+      createdAt: Date.now() - WATCHER_SPAWN_GRACE_MS - 1_000,
+    };
+
+    const outcome = await runTerminalWatcherCheck(aged, ctx);
+
+    expect(jsonCalls).toBe(0);
+    expect(outcome.classification).toBe("no_change");
+    expect(termState(db, w.id).readFailures).toBe(1);
+    db.close();
+  });
+
+  it("a thrown deep read (not just isError) is counted as a failure", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({ terminalId, agentState: "working" })),
+            },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          throw new Error("transport blew up");
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        throw new Error("model must not be consulted on a failed read");
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    expect(outcome.classification).toBe("no_change");
+    expect(termState(db, w.id).readFailures).toBe(1);
+    db.close();
+  });
+
+  /** getStatus reports the terminal working with a tail the model calls done; the
+   *  git pulse cleanliness is controlled per call so a completed_unverified can
+   *  later resolve to completed_success without any new terminal output. */
+  function mcpCompletion(getStatusShape: "normal" | "listed", dirty: () => boolean) {
+    return {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          if (getStatusShape === "listed") {
+            return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+          }
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({
+                terminalId,
+                agentState: "working",
+                recentOutput: "all done!",
+              })),
+            },
+            isError: false,
+          };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          return { text: "", content: [], structuredContent: { content: "all done!" }, isError: false };
+        }
+        if (name === "git.getProjectPulse") {
+          const d = dirty();
+          return {
+            text: "",
+            content: [],
+            structuredContent: { isDirty: d, changedFiles: d ? 2 : 0 },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+  }
+
+  const completionRouter = () =>
+    ({
+      chat: async () => ({ content: "" }),
+      json: async () => ({
+        classification: "completed_success",
+        confidence: 0.9,
+        summary: "done",
+        evidence: ["all done"],
+        recommendedAction: "none",
+      }),
+    }) as unknown as ModelRouter;
+
+  it("re-runs the git gate when a completed_unverified worktree is later cleaned (normal path)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let dirty = true;
+    const ctx = ctxWith(db, queue, mcpCompletion("normal", () => dirty));
+    ctx.router = completionRouter();
+    const w = insertTermWatcher(db);
+
+    // Tick 1: dirty worktree → gate demotes completed_success → completed_unverified,
+    // watcher stays active (completion is not yet trusted).
+    const o1 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o1.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    // Tick 2: identical tail but the tree is now clean. The dedup must NOT suppress
+    // this — the key was deliberately not latched on a completed_success verdict —
+    // so the gate re-runs and the watcher reaches completed_success.
+    dirty = false;
+    const o2 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o2.classification).toBe("completed_success");
+    db.close();
+  });
+
+  it("re-runs the git gate when a completed_unverified worktree is cleaned (listed-but-omitted path)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let dirty = true;
+    const ctx = ctxWith(db, queue, mcpCompletion("listed", () => dirty));
+    ctx.router = completionRouter();
+    const w = insertTermWatcher(db);
+
+    const o1 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o1.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    dirty = false;
+    const o2 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o2.classification).toBe("completed_success");
+    db.close();
+  });
+});
