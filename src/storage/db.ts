@@ -18,6 +18,8 @@ import type {
   AuditRecord,
   AutomationGrantRecord,
   ConversationMessageRecord,
+  MemoryRecord,
+  MemorySource,
   QueueEvent,
   RecipeRunStateRecord,
   RecipeSelectionLogRecord,
@@ -205,6 +207,43 @@ CREATE TABLE IF NOT EXISTS recipe_run_state (
 -- One run per (session, recipe): the selector caps a session at three mutually
 -- exclusive recipes, so the natural key is unique and lets the tool upsert by it.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_recipe_run_state_key ON recipe_run_state (sessionId, recipeId);
+
+-- Cross-session project memory. Each row is one durable fact/decision/procedure
+-- scoped to this (already per-project) database. forget = soft delete (deletedAt);
+-- recall/list filter deletedAt IS NULL so a dropped fact isn't re-derived blind.
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  category TEXT,
+  source TEXT NOT NULL DEFAULT 'assistant',
+  pinnedAt INTEGER,
+  deletedAt INTEGER,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories (category, deletedAt);
+CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories (pinnedAt) WHERE pinnedAt IS NOT NULL AND deletedAt IS NULL;
+
+-- FTS5 external-content index over memories.content for cross-session recall
+-- (BM25-ranked). External content (content='memories') keeps the base table the
+-- single source of truth — no duplicated text — and the triggers below keep the
+-- index in lockstep with INSERT/UPDATE/DELETE. Soft-deleted rows stay indexed but
+-- are filtered out by the recall JOIN's m.deletedAt IS NULL.
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+  content,
+  content='memories',
+  content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+  INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
 `;
 
 export interface QueueDigestOptions {
@@ -1149,6 +1188,49 @@ export class Db {
     return full;
   }
 
+  /* ----------------------------- memories -------------------------------- */
+
+  insertMemory(
+    rec: Omit<
+      MemoryRecord,
+      "id" | "source" | "pinnedAt" | "deletedAt" | "createdAt" | "updatedAt"
+    > &
+      Partial<
+        Pick<
+          MemoryRecord,
+          "id" | "source" | "pinnedAt" | "deletedAt" | "createdAt" | "updatedAt"
+        >
+      >,
+  ): MemoryRecord {
+    const now = rec.createdAt ?? Date.now();
+    const full: MemoryRecord = {
+      id: rec.id ?? `mem_${randomUUID().slice(0, 8)}`,
+      content: rec.content,
+      category: rec.category,
+      source: rec.source ?? "assistant",
+      pinnedAt: rec.pinnedAt,
+      deletedAt: rec.deletedAt,
+      createdAt: now,
+      updatedAt: rec.updatedAt ?? now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO memories (id,content,category,source,pinnedAt,deletedAt,createdAt,updatedAt)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.content,
+        full.category ?? null,
+        full.source,
+        full.pinnedAt ?? null,
+        full.deletedAt ?? null,
+        full.createdAt,
+        full.updatedAt,
+      );
+    return full;
+  }
+
   /** Look up the single run for a (session, recipe) pair — the natural key. */
   getRecipeRunState(
     sessionId: string,
@@ -1202,6 +1284,136 @@ export class Db {
       startedAt: r.startedAt as number,
       updatedAt: r.updatedAt as number,
       completedAt: (r.completedAt as number) ?? undefined,
+    };
+  }
+
+  /* ----------------------------- memories -------------------------------- */
+
+  /** Fetch one memory by id. Soft-deleted rows are hidden unless includeDeleted. */
+  getMemory(id: string, opts: { includeDeleted?: boolean } = {}): MemoryRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return undefined;
+    const mem = this.rowToMemory(row);
+    // Explicit null check (not falsy): a soft-delete at epoch ms 0 is still deleted.
+    if (mem.deletedAt != null && !opts.includeDeleted) return undefined;
+    return mem;
+  }
+
+  /** Browse memories (pinned first, then most-recently-touched). */
+  listMemories(
+    opts: {
+      category?: string;
+      pinnedOnly?: boolean;
+      includeDeleted?: boolean;
+      limit?: number;
+    } = {},
+  ): MemoryRecord[] {
+    const where: string[] = [];
+    const params: SqlIn[] = [];
+    if (!opts.includeDeleted) where.push("deletedAt IS NULL");
+    if (opts.category) {
+      where.push("category = ?");
+      params.push(opts.category);
+    }
+    if (opts.pinnedOnly) where.push("pinnedAt IS NOT NULL");
+    const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    // Pinned rows float to the top; within each group, most-recent first.
+    const sql = `SELECT * FROM memories ${whereSql} ORDER BY (pinnedAt IS NOT NULL) DESC, COALESCE(pinnedAt, updatedAt) DESC LIMIT ?`;
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToMemory(r));
+  }
+
+  /**
+   * Full-text recall, BM25-ranked (best match first), excluding soft-deleted rows.
+   *
+   * The user's query is wrapped as a single FTS5 quoted phrase (doubling any
+   * internal `"`). This is a hard safety boundary, not a nicety: a bare FTS5
+   * MATCH string is a query *expression*, so unescaped input containing `"`,
+   * `(`, `*`, or a bare keyword like `OR`/`NEAR` raises a SQLite syntax error
+   * (crashing the call), not an empty result. Escaping lives here — inside the
+   * store — so no tool/caller can bypass it. An empty/whitespace query short-
+   * circuits to `[]` because `MATCH ""` is itself a syntax error.
+   */
+  recallMemories(
+    query: string,
+    opts: { category?: string; limit?: number } = {},
+  ): MemoryRecord[] {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    // Tokenize on whitespace and quote EACH term (doubling internal quotes), then
+    // space-join. FTS5's implicit AND across terms gives keyword search — every
+    // word must appear, in any order. Quoting the whole string instead would make
+    // it one rigid phrase, so "vitest tsc" would only match those words adjacent
+    // (and usually return nothing). Per-token quoting still neutralizes every FTS5
+    // operator/punctuation char, so arbitrary input can't raise a syntax error.
+    const match = trimmed
+      .split(/\s+/)
+      .map((tok) => `"${tok.replaceAll('"', '""')}"`)
+      .join(" ");
+    const where = ["m.deletedAt IS NULL", "memories_fts MATCH ?"];
+    const params: SqlIn[] = [match];
+    if (opts.category) {
+      where.push("m.category = ?");
+      params.push(opts.category);
+    }
+    const limit = Math.max(1, Math.min(opts.limit ?? 10, 50));
+    const sql = `SELECT m.* FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE ${where.join(
+      " AND ",
+    )} ORDER BY bm25(memories_fts) LIMIT ?`;
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToMemory(r));
+  }
+
+  /** Soft-delete ("forget") a memory. Returns true if a live row was stamped. */
+  forgetMemory(id: string, now = Date.now()): boolean {
+    const res = this.db
+      .prepare(
+        "UPDATE memories SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL",
+      )
+      .run(now, now, id);
+    return Number(res.changes) > 0;
+  }
+
+  /** Pin a memory (idempotent). Returns the updated row, or undefined if absent/deleted.
+   * The `pinnedAt IS NULL` guard makes re-pinning a true no-op — otherwise each
+   * repeat call would rewrite pinnedAt to `now` and jump the row ahead of other
+   * pinned rows in listMemories' pinnedAt-desc ordering. */
+  pinMemory(id: string, now = Date.now()): MemoryRecord | undefined {
+    this.db
+      .prepare(
+        "UPDATE memories SET pinnedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL",
+      )
+      .run(now, now, id);
+    return this.getMemory(id);
+  }
+
+  /** Unpin a memory (idempotent). Returns the updated row, or undefined if absent/deleted.
+   * The `pinnedAt IS NOT NULL` guard avoids bumping updatedAt on an already-unpinned row. */
+  unpinMemory(id: string, now = Date.now()): MemoryRecord | undefined {
+    this.db
+      .prepare(
+        "UPDATE memories SET pinnedAt = NULL, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NOT NULL",
+      )
+      .run(now, id);
+    return this.getMemory(id);
+  }
+
+  /** Coerce a raw memories row, mapping SQL NULL → undefined for optional columns. */
+  private rowToMemory(r: Record<string, unknown>): MemoryRecord {
+    return {
+      id: r.id as string,
+      content: r.content as string,
+      category: (r.category as string) ?? undefined,
+      source: r.source as MemorySource,
+      pinnedAt: (r.pinnedAt as number) ?? undefined,
+      deletedAt: (r.deletedAt as number) ?? undefined,
+      createdAt: r.createdAt as number,
+      updatedAt: r.updatedAt as number,
     };
   }
 }

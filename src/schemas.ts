@@ -492,6 +492,42 @@ export interface WorkflowRunRecord {
   completedAt?: number;
 }
 
+/**
+ * Where a memory came from:
+ *   - user      — the human stated it explicitly ("always deploy from main").
+ *   - assistant — the assistant derived/confirmed it during a session.
+ *   - compact   — reserved for facts distilled by auto-compaction. Not yet
+ *                 written by any tool; held open so a later issue can wire
+ *                 `compact()` to persist key facts without an API change.
+ */
+export type MemorySource = "user" | "assistant" | "compact";
+
+/**
+ * A single durable, project-scoped fact / decision / procedure the assistant can
+ * recall across sessions. The DB file is already per-project (config.ts diverges
+ * stateDir on DAINTREE_PROJECT_ID), so there is no projectId column — one DB is
+ * one project's memory.
+ *
+ * Recall is backed by an FTS5 external-content virtual table (`memories_fts`)
+ * shadowing this row's `content`, kept in sync by triggers. `forget` is a soft
+ * delete (stamps `deletedAt`) so a fact the assistant drops isn't immediately
+ * re-derived and re-saved; recall/list filter `deletedAt IS NULL`. `pinnedAt`
+ * marks a memory the user wants kept regardless of any future pruning.
+ */
+export interface MemoryRecord {
+  id: string; // mem_<uuid8>
+  content: string;
+  /** Optional free tag for filtered recall, e.g. "convention", "decision", "fix". */
+  category?: string;
+  source: MemorySource;
+  /** Non-null ⇒ pinned. */
+  pinnedAt?: number;
+  /** Non-null ⇒ soft-deleted ("forgotten"); excluded from recall/list. */
+  deletedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Recipe run state (step-level progress + checkpoints)                        */
 /* -------------------------------------------------------------------------- */

@@ -86,6 +86,8 @@ const CORE_TOOL_NAMES = [
   // no-op when no recipe is active (the model has nothing to advance).
   "recipe.step.advance",
   "recipe.run.get",
+  "memory.recall",
+  "memory.list",
 ];
 
 export interface AgentSessionDeps {
