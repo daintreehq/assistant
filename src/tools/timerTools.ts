@@ -12,20 +12,19 @@ import { ok, fail, type ToolDef } from "./types.js";
  * Discriminated by `type` so a payload that omits its required field is rejected
  * at schedule time rather than silently doing nothing when the timer fires:
  *   - enqueue       → optional message (falls back to the timer title)
- *   - run_check     → requires checkPrompt
  *   - call_safe_tool→ requires toolCall
+ *
+ * `run_check` is intentionally absent: it asked the small model to judge a prompt
+ * with no terminal output, git state, or queue attached, so its verdicts were pure
+ * priors. Grounded supervision belongs to watchers. Legacy `run_check` rows still
+ * deserialize (the payloadType union in schemas.ts keeps the literal) and fire as a
+ * plain reminder, but no new ones can be created here.
  */
 const TimerPayload = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("enqueue"),
       message: z.string().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("run_check"),
-      checkPrompt: z.string().min(1, "run_check requires a non-empty checkPrompt"),
     })
     .strict(),
   z
@@ -122,11 +121,10 @@ export const timerTools: ToolDef[] = [
           properties: {
             type: {
               type: "string",
-              enum: ["enqueue", "run_check", "call_safe_tool"],
+              enum: ["enqueue", "call_safe_tool"],
               description: "Action kind.",
             },
             message: { type: "string", description: "Message text for an enqueue payload." },
-            checkPrompt: { type: "string", description: "Prompt for a run_check payload." },
             toolCall: {
               type: "object",
               additionalProperties: false,

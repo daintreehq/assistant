@@ -44,3 +44,33 @@ describe("timer.schedule lifecycle notice", () => {
     expect(res.summary).toContain("pauses when you close the assistant");
   });
 });
+
+describe("timer.schedule payload validation", () => {
+  it("rejects a run_check payload — the ungrounded timer type is no longer creatable", () => {
+    // run_check was dropped from the discriminated union: it never observed real
+    // state. The schema must reject it so the model can't schedule new ones.
+    const parsed = schedule.schema!.safeParse({
+      title: "check the build",
+      delayMs: 1000,
+      payload: { type: "run_check", checkPrompt: "is the build done?" },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("still accepts enqueue and call_safe_tool payloads", () => {
+    expect(
+      schedule.schema!.safeParse({
+        title: "remind",
+        delayMs: 1000,
+        payload: { type: "enqueue", message: "hi" },
+      }).success,
+    ).toBe(true);
+    expect(
+      schedule.schema!.safeParse({
+        title: "run tool",
+        delayMs: 1000,
+        payload: { type: "call_safe_tool", toolCall: { toolName: "x.y" } },
+      }).success,
+    ).toBe(true);
+  });
+});

@@ -7,9 +7,6 @@
  * architecture (state in SQLite, idempotent ticks) is ready to split into a
  * detached process later.
  */
-import {
-  TIMER_CHECK_SYSTEM_PROMPT,
-} from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { Db } from "../storage/db.js";
@@ -77,7 +74,16 @@ export class Scheduler {
     this.running = true;
     try {
       for (const t of this.deps.db.dueTimers(now)) {
-        await this.fireTimer(t, now);
+        // Isolate per-timer failures the same way the watcher loop below does.
+        // fireTimer's inner try/catch only covers payload execution; reschedule()
+        // (and any publish path) runs OUTSIDE it, so a SQLite throw there would
+        // otherwise abort the whole loop — starving later timers AND skipping the
+        // notify() that delivers this tick's attention events.
+        try {
+          await this.fireTimer(t, now);
+        } catch {
+          /* one timer's failure must not starve the others or skip notify */
+        }
       }
       for (const w of this.deps.db.dueWatchers(now)) {
         // Isolate per-watcher failures — including a throwing ctxFor(), which sits
@@ -164,13 +170,18 @@ export class Scheduler {
           dedupeKey,
         });
       } else if (payload.type === "run_check") {
-        const summary = await this.runCheck(payload.checkPrompt ?? rec.title);
-        const noChange = summary.toLowerCase().startsWith("(no change)");
+        // run_check is deprecated and no longer creatable (removed from the
+        // timer.schedule tool). It never observed real state — it asked the small
+        // model to judge a prompt with no terminal output, git state, or queue
+        // attached, so its verdicts were pure priors. Legacy DB rows still fire:
+        // surface the prompt as a plain reminder and point at watchers, which DO
+        // ground their checks in read-only observations.
+        const prompt = payload.checkPrompt ?? rec.title;
         this.deps.queue.publish({
           source: "timer",
-          severity: noChange ? "debug" : "attention",
+          severity: "attention",
           title: rec.title,
-          summary,
+          summary: `Reminder (run_check is deprecated — use a watcher to observe real state): ${prompt}`,
           target,
           dedupeKey,
         });
@@ -206,22 +217,6 @@ export class Scheduler {
     }
 
     this.reschedule(rec, now);
-  }
-
-  private async runCheck(checkPrompt: string): Promise<string> {
-    try {
-      const res = await this.deps.router.chat("small", {
-        messages: [
-          { role: "system", content: TIMER_CHECK_SYSTEM_PROMPT },
-          { role: "user", content: checkPrompt },
-        ],
-        temperature: 0,
-        maxTokens: 200,
-      });
-      return res.content || "(no change) check returned no content.";
-    } catch (err) {
-      return `Check could not run: ${err instanceof Error ? err.message : String(err)}`;
-    }
   }
 
   /** Advance a fired timer: reschedule repeats (with sleep catch-up) or finish. */

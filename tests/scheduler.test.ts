@@ -5,7 +5,7 @@ import { Queue } from "../src/queue.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { ok, type ToolContext, type ToolDef } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
-import type { WatcherVerdict } from "../src/schemas.js";
+import type { QueueEvent, WatcherVerdict } from "../src/schemas.js";
 
 /** A mutating tool that a non-interactive actor can never run unattended. */
 const projectTool: ToolDef = {
@@ -297,6 +297,91 @@ describe("Scheduler.tick", () => {
     expect(
       events.some((e) => e.source === "timer" && e.severity === "error"),
     ).toBe(true);
+  });
+
+  it("isolates a throwing timer so later timers still fire and notify() still delivers", async () => {
+    const deps = makeDeps();
+    const delivered: QueueEvent[] = [];
+    const scheduler = new Scheduler({
+      ...deps,
+      onAttention: (events) => {
+        delivered.push(...events);
+      },
+    });
+    const now = 7_000_000;
+
+    // `bad` is due earlier, so dueTimers (ORDER BY fireAt) fires it FIRST — proving
+    // the loop continues to `good` after `bad` throws, rather than aborting.
+    const bad = deps.db.insertTimer({
+      title: "boom",
+      fireAt: now - 5000,
+      payloadType: "enqueue",
+      payloadJson: JSON.stringify({ type: "enqueue", message: "boom" }),
+    });
+    const good = deps.db.insertTimer({
+      title: "survivor",
+      fireAt: now - 4000,
+      payloadType: "enqueue",
+      payloadJson: JSON.stringify({ type: "enqueue", message: "survived" }),
+    });
+
+    // Force reschedule() to throw for the bad timer only. reschedule() calls
+    // updateTimer OUTSIDE fireTimer's inner try/catch, so the throw escapes
+    // fireTimer entirely — exactly the path the tick-loop guard must contain.
+    const realUpdate = deps.db.updateTimer.bind(deps.db);
+    deps.db.updateTimer = ((id: string, patch: Partial<Parameters<typeof realUpdate>[1]>) => {
+      if (id === bad.id) throw new Error("simulated sqlite failure");
+      return realUpdate(id, patch);
+    }) as typeof deps.db.updateTimer;
+
+    // The whole tick must resolve, not reject.
+    await expect(scheduler.tick(now)).resolves.toBeUndefined();
+
+    // The later timer still fired and finished despite the earlier one throwing.
+    const survivor = deps.db.getTimer(good.id)!;
+    expect(survivor.status).toBe("fired");
+    expect(survivor.runCount).toBe(1);
+
+    // notify() still ran and delivered the surviving timer's attention event.
+    expect(delivered.some((e) => e.summary === "survived")).toBe(true);
+  });
+
+  it("fires a legacy run_check timer as a deprecated reminder without calling the model", async () => {
+    const deps = makeDeps();
+    // Spy on the model: the grounded-reminder fallback must NOT consult it.
+    let chatCalls = 0;
+    (deps.router as { chat: ModelRouter["chat"] }).chat = (async () => {
+      chatCalls++;
+      return { content: "(no change) nothing" };
+    }) as ModelRouter["chat"];
+    const scheduler = new Scheduler(deps);
+    const now = 8_000_000;
+
+    // A legacy row: the tool can no longer create run_check, but old DB rows must
+    // still fire gracefully rather than crash or silently vanish.
+    const timer = deps.db.insertTimer({
+      title: "legacy check",
+      fireAt: now - 1000,
+      payloadType: "run_check",
+      payloadJson: JSON.stringify({ type: "run_check", checkPrompt: "is the build done?" }),
+    });
+
+    await scheduler.tick(now);
+
+    // No ungrounded model call.
+    expect(chatCalls).toBe(0);
+
+    // The prompt is surfaced as a single attention reminder that flags deprecation.
+    const digest = deps.queue.digest({ severityAtLeast: "attention" });
+    expect(digest).toHaveLength(1);
+    expect(digest[0].source).toBe("timer");
+    expect(digest[0].summary).toContain("is the build done?");
+    expect(digest[0].summary.toLowerCase()).toContain("deprecated");
+
+    // And the timer advances normally.
+    const after = deps.db.getTimer(timer.id)!;
+    expect(after.status).toBe("fired");
+    expect(after.runCount).toBe(1);
   });
 
   it("threads the timer id as actorId so a scoped grant authorizes its call_safe_tool", async () => {
