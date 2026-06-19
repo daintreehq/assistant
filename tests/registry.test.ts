@@ -121,6 +121,24 @@ describe("ToolRegistry.dispatch", () => {
     expect(unstamped!.runId ?? undefined).toBeUndefined();
   });
 
+  it("forwards the tool's consequence to confirm() for the approval sheet", async () => {
+    const reg = new ToolRegistry();
+    const tool: ToolDef = {
+      ...projectTool,
+      name: "test.project.consequence",
+      consequence: "Creates a worktree on disk that you may later need to clean up.",
+    };
+    reg.register(tool);
+    const confirm = vi.fn().mockResolvedValue(true);
+    const ctx = makeCtx(db, config, confirm);
+    await reg.dispatch("test.project.consequence", { name: "x" }, ctx);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatchObject({
+      toolName: "test.project.consequence",
+      consequence: "Creates a worktree on disk that you may later need to clean up.",
+    });
+  });
+
   it("returns USER_DECLINED when confirm() returns false for a project tool", async () => {
     const reg = new ToolRegistry();
     reg.register(projectTool);

@@ -189,6 +189,42 @@ function forgeObjSchema(
 }
 
 /**
+ * Per-tool, user-facing consequence lines for the forge writes. The approval
+ * sheet leads with these instead of the raw "external" risk class. Kept short
+ * (one truncatable line) and phrased around what happens to the user's resources
+ * — what's published and whether it's reversible — not how the registry gates it.
+ */
+const FORGE_WRITE_CONSEQUENCES: Record<string, string> = {
+  "forge.createIssue":
+    "Opens a new issue on the remote forge (GitHub/GitLab). Publicly visible to everyone with repo access.",
+  "forge.closeIssue": "Closes an issue on the remote forge. Reversible — it can be reopened.",
+  "forge.reopenIssue": "Reopens a closed issue on the remote forge.",
+  "forge.editIssue": "Edits an issue's title or body on the remote forge.",
+  "forge.addIssueComment":
+    "Posts a comment on an issue on the remote forge. Visible to everyone with repo access.",
+  "forge.addIssueLabel": "Adds a label to an issue on the remote forge.",
+  "forge.removeIssueLabel": "Removes a label from an issue on the remote forge.",
+  "forge.assignIssue": "Assigns a user to an issue on the remote forge.",
+  "forge.unassignIssue": "Removes an assignee from an issue on the remote forge.",
+  "forge.createPR":
+    "Opens a pull request on the remote forge. Visible to everyone with repo access.",
+  "forge.closePR": "Closes a pull request without merging. Reversible — it can be reopened.",
+  "forge.reopenPR": "Reopens a closed pull request on the remote forge.",
+  "forge.mergePR":
+    "Merges a pull request into its base branch on the remote forge. Hard to undo once merged.",
+  "forge.convertPRToDraft": "Converts a pull request back to draft on the remote forge.",
+  "forge.markPRReadyForReview": "Marks a draft pull request ready for review on the remote forge.",
+  "forge.commentOnPR":
+    "Posts a comment on a pull request on the remote forge. Visible to everyone with repo access.",
+  "forge.editPR": "Edits a pull request's title or body on the remote forge.",
+  "forge.approvePR": "Submits an approving review on a pull request on the remote forge.",
+  "forge.requestChanges":
+    "Submits a changes-requested review on a pull request on the remote forge.",
+  "forge.dismissReview": "Dismisses an existing review on a pull request on the remote forge.",
+  "forge.requestReviewers": "Requests reviewers on a pull request on the remote forge.",
+};
+
+/**
  * Build a forge WRITE wrapper. Every forge mutation shares one shape: risk
  * "external" (always confirmed) and a handler that forwards the parsed args to
  * the same-named Daintree MCP action — lifting requestKey out so it travels as
@@ -203,6 +239,7 @@ function forgeWrite<A extends { requestKey?: string }>(
   return {
     name,
     description,
+    consequence: FORGE_WRITE_CONSEQUENCES[name],
     risk: "external",
     schema,
     parameters,
@@ -329,6 +366,8 @@ export const mcpTools: ToolDef[] = [
     name: "daintree.call",
     description:
       "Raw passthrough to ANY Daintree MCP tool. Escape hatch — highest risk ('system'), always confirmed, requires the 'system' tier. Prefer purpose-built tools; use this only when no wrapper exists. Tools that already have a wrapper (e.g. agent.launch, terminal.getOutput, panel.focus) are refused here and redirected to the wrapper.",
+    consequence:
+      "Runs an arbitrary Daintree MCP tool with the arguments shown. Effect depends entirely on the named tool — inspect the args before approving.",
     risk: "system",
     schema: CallArgs,
     parameters: {
@@ -430,6 +469,8 @@ export const mcpTools: ToolDef[] = [
     name: "recipe.run",
     description:
       "Run a Daintree workspace recipe against the current/active context. Mutates real workspace state, so it always confirms.",
+    consequence:
+      "Runs a workspace recipe that changes real project state (e.g. files, branches, or worktrees). May not be reversible.",
     risk: "project",
     schema: RecipeRunArgs,
     parameters: {
@@ -461,6 +502,8 @@ export const mcpTools: ToolDef[] = [
     name: "worktree.createWithRecipe",
     description:
       "Create a new Daintree worktree with a startup recipe. Mutates real workspace state, so it always confirms.",
+    consequence:
+      "Creates a new git worktree on disk and runs its startup recipe. Adds a checkout you may later need to clean up.",
     risk: "project",
     schema: WorktreeCreateArgs,
     parameters: {
@@ -1005,6 +1048,8 @@ export const mcpTools: ToolDef[] = [
     name: "workflow.startWorkOnIssue",
     description:
       "Start work on a forge issue via Daintree — sets up a worktree/branch for the issue. Mutates real workspace state and touches the forge, so it always confirms. Pass an idempotency requestKey when available.",
+    consequence:
+      "Sets up a worktree and branch for a forge issue, and touches the remote forge. Creates local checkout state.",
     risk: "external",
     schema: WorkflowMutationArgs,
     parameters: {
@@ -1028,6 +1073,8 @@ export const mcpTools: ToolDef[] = [
     name: "workflow.prepBranchForReview",
     description:
       "Prepare the current branch for review via Daintree — readies the branch/PR for review. Mutates real workspace state and touches the forge, so it always confirms. Pass an idempotency requestKey when available.",
+    consequence:
+      "Readies the current branch and its pull request for review on the remote forge. Pushes branch state outward.",
     risk: "external",
     schema: WorkflowMutationArgs,
     parameters: {

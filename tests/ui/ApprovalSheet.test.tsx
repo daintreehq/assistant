@@ -4,13 +4,18 @@ import type { PendingConfirm } from "../../src/ui/types.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-function pending(toolName: string, risk: string): PendingConfirm {
+function pending(
+  toolName: string,
+  risk: string,
+  extra: { id?: string; consequence?: string } = {},
+): PendingConfirm {
   return {
-    id: "cfm_1",
+    id: extra.id ?? "cfm_1",
     request: {
       toolName,
       risk: risk as any,
       summary: "the branch is ready for review",
+      consequence: extra.consequence,
       args: { branch: "fix/x", remote: "origin" },
     },
     resolve: () => {},
@@ -18,16 +23,101 @@ function pending(toolName: string, risk: string): PendingConfirm {
 }
 
 describe("ApprovalSheet", () => {
-  it("uses a risk-specific title and states action/risk/reason", () => {
+  it("leads with the consequence, keeps the tool name as a dim secondary label", () => {
+    const { lastFrame } = render(
+      <ApprovalSheet
+        pending={pending("git.push", "external", {
+          consequence: "Pushes your branch to the remote, visible to collaborators.",
+        })}
+        onResolve={() => {}}
+      />,
+    );
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Push branch to origin?");
+    expect(frame).toContain("affects");
+    expect(frame).toContain("Pushes your branch to the remote");
+    // The tool name stays visible (dim) so the sheet is never a black box.
+    expect(frame).toContain("git.push");
+    expect(frame).toContain("approve");
+    expect(frame).toContain("decline");
+  });
+
+  it("never renders the raw risk class as a labelled field", () => {
     const { lastFrame } = render(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={() => {}} />,
     );
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Push branch to origin?");
-    expect(frame).toContain("git.push");
+    // The old `risk  external` row is gone — consequence language replaces it.
+    expect(frame).not.toMatch(/risk\s+external/);
+  });
+
+  it("falls back to a per-risk consequence when the tool gives none", () => {
+    const { lastFrame } = render(
+      <ApprovalSheet pending={pending("daintree.call", "system")} onResolve={() => {}} />,
+    );
+    expect(lastFrame() ?? "").toContain("system-level action");
+  });
+
+  it("falls back when the consequence is blank rather than rendering an empty line", () => {
+    const { lastFrame } = render(
+      <ApprovalSheet
+        pending={pending("daintree.call", "system", { consequence: "   " })}
+        onResolve={() => {}}
+      />,
+    );
+    expect(lastFrame() ?? "").toContain("system-level action");
+  });
+
+  it("renders a non-empty consequence for every risk class", () => {
+    const RISKS = ["read", "local", "ui", "terminal", "project", "git", "external", "system"];
+    for (const risk of RISKS) {
+      const { lastFrame } = render(
+        <ApprovalSheet pending={pending("some.tool", risk)} onResolve={() => {}} />,
+      );
+      const frame = lastFrame() ?? "";
+      const affects = (frame.split("\n").find((l) => l.includes("affects")) ?? "").trim();
+      // The affects row must carry prose, never just the bare risk-class word.
+      expect(affects, risk).toContain("affects");
+      expect(affects.replace("affects", "").trim().length, risk).toBeGreaterThan(0);
+      expect(affects.replace("affects", "").trim(), risk).not.toBe(risk);
+    }
+  });
+
+  it("hides the raw reason and args until V is pressed, then reveals them", async () => {
+    const { lastFrame, stdin } = render(
+      <ApprovalSheet pending={pending("git.push", "external")} onResolve={() => {}} />,
+    );
+    // Collapsed by default: the LLM-facing summary and args are not shown.
+    expect(lastFrame() ?? "").not.toContain("ready for review");
+    expect(lastFrame() ?? "").not.toContain("fix/x");
+
+    stdin.write("v");
+    await tick();
+    const frame = lastFrame() ?? "";
     expect(frame).toContain("ready for review");
-    expect(frame).toContain("approve");
-    expect(frame).toContain("decline");
+    expect(frame).toContain("fix/x");
+  });
+
+  it("collapses the inspect panel when a new request takes the sheet", async () => {
+    const { lastFrame, stdin, rerender } = render(
+      <ApprovalSheet
+        pending={pending("git.push", "external", { id: "cfm_1" })}
+        onResolve={() => {}}
+      />,
+    );
+    stdin.write("v");
+    await tick();
+    expect(lastFrame() ?? "").toContain("ready for review");
+
+    rerender(
+      <ApprovalSheet
+        pending={pending("git.push", "external", { id: "cfm_2" })}
+        onResolve={() => {}}
+      />,
+    );
+    // No await: the reset happens during render, so even the very first frame of
+    // the new request must not flash the previous one's expanded raw args.
+    expect(lastFrame() ?? "").not.toContain("ready for review");
   });
 
   it("titles a terminal-input request distinctly", () => {
