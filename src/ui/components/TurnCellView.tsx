@@ -1,5 +1,6 @@
 /**
- * One turn rendered as a run cell: a quiet YOU marker, Daintree's prose under a
+ * One turn rendered as a run cell: the human's message under a dim YOU label +
+ * left accent bar, Daintree's prose under a
  * DAINTREE marker (never the word "assistant"), then the activity branch tree and
  * any in-turn notes. Body prose uses the terminal's own foreground.
  */

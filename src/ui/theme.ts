@@ -29,15 +29,18 @@ export const ui = {
     danger: "#FB7185",
     blocked: "#C4B5FD",
     muted: "gray",
-    // Transcript user-message surfaces. A boxed, dimmer card separates what the
-    // human said from Daintree's prose — but the fill is theme-aware (never a
-    // hard-coded bright block, which is jarring on a dark terminal).
-    userMessageBgDark: "#1F2937",
-    userMessageBgLight: "#E5E7EB",
-    userMessageTextDark: "#D1D5DB",
-    userMessageTextLight: "#374151",
-    userMessageBorderDark: "#374151",
-    userMessageBorderLight: "#CBD5E1",
+    // Transcript user-message surfaces. The human's turn is marked by a left
+    // accent bar over a *subtle* fill (only a few percent above terminal black),
+    // not a four-sided box — the bar is the "who said what" anchor, the fill just
+    // groups the text. Theme-aware so we never paint a bright block on a dark
+    // terminal. The bar reads brighter than the fill to draw the eye; it is a
+    // cool neutral (not Daintree's accent green, which is reserved for identity).
+    userMessageBgDark: "#181D26",
+    userMessageBgLight: "#EAEDF1",
+    userMessageTextDark: "#E5E7EB",
+    userMessageTextLight: "#1F2937",
+    userMessageBarDark: "#6B7280",
+    userMessageBarLight: "#94A3B8",
   },
   /** Unicode signature glyphs. Use {@link glyphs} when ASCII fallback matters. */
   glyph: {
@@ -189,32 +192,38 @@ export function terminalThemeMode(): TerminalThemeMode {
 }
 
 export interface MessageSurface {
-  borderColor: string;
+  /** Color of the left accent bar (the human's "who said what" anchor). */
+  barColor: string;
   textColor?: string;
+  /** Subtle fill behind the text; omitted in ansi/none modes (unreliable). */
   backgroundColor?: string;
   dimText: boolean;
 }
 
-/** The surface (border / text / fill) for a boxed user message, theme-aware. */
+/**
+ * The surface (left bar / text / fill) for a user message, theme-aware. In
+ * truecolor themes the bar sits over a faint fill; in ansi/none we drop the fill
+ * (16-color backgrounds clash unpredictably) and lean on the bar alone.
+ */
 export function userMessageSurface(
   mode: TerminalThemeMode = terminalThemeMode(),
 ): MessageSurface {
   if (mode === "none") {
-    return { borderColor: ui.color.muted, dimText: true };
+    return { barColor: ui.color.muted, dimText: true };
   }
   if (mode === "ansi") {
-    return { borderColor: "gray", dimText: true };
+    return { barColor: "gray", dimText: false };
   }
   if (mode === "light") {
     return {
-      borderColor: ui.color.userMessageBorderLight,
+      barColor: ui.color.userMessageBarLight,
       textColor: ui.color.userMessageTextLight,
       backgroundColor: ui.color.userMessageBgLight,
       dimText: false,
     };
   }
   return {
-    borderColor: ui.color.userMessageBorderDark,
+    barColor: ui.color.userMessageBarDark,
     textColor: ui.color.userMessageTextDark,
     backgroundColor: ui.color.userMessageBgDark,
     dimText: false,

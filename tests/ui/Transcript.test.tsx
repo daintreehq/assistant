@@ -53,7 +53,8 @@ describe("Transcript", () => {
       render(
         <Transcript cells={activeRun()} height={20} width={72} now={FIXED} />,
       ).lastFrame() ?? "";
-    expect(frame).toContain("YOU");
+    expect(frame).toContain("YOU"); // quiet who-said-what label
+    expect(frame).toContain("▏"); // the human's left accent bar marks the turn
     expect(frame).toContain("DAINTREE");
     expect(frame).not.toContain("assistant"); // no role label
     // Human verbs, not raw fn() syntax or JSON.

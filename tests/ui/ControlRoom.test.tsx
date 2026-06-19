@@ -93,8 +93,9 @@ describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
       // bar, so the Daintree response label needs a realistic terminal height to
       // sit inside the visible transcript window on the narrow sidebar.
       const frame = frameFor("active", w, 40);
-      expect(frame).toContain("YOU");
-      expect(frame).toMatch(/[╭┌].*[╮┐]/); // a boxed card around the prompt
+      expect(frame).toContain("YOU"); // quiet who-said-what label
+      expect(frame).toContain("▏"); // the human's left accent bar marks the turn
+      expect(frame).not.toMatch(/[╭┌].*[╮┐]/); // no box — the redesign drops it
       expect(frame).toContain("DAINTREE");
     },
   );
@@ -133,7 +134,8 @@ describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
     process.env.DAINTREE_THEME = "none";
     try {
       const frame = frameFor("active", 58, 40);
-      expect(frame).toContain("YOU");
+      expect(frame).toContain("YOU"); // label + bar glyph both survive color strip
+      expect(frame).toContain("▏");
       expect(frame).toContain("◆ DAINTREE");
       expect(frame).toContain("WATCHING");
     } finally {
