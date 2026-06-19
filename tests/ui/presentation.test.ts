@@ -83,6 +83,15 @@ describe("buildAgentRows", () => {
     expect(working.epistemicKind).toBe("inferred");
     expect(unknown.epistemicKind).toBe("unverified");
   });
+
+  it("passes a raw (unvalidated) lastEpistemicKind straight through (#85)", () => {
+    // rowToWatcher doesn't re-validate the stored string; a corrupt value degrades
+    // safely downstream (epistemicMark returns null → no tag), so the row keeps it.
+    const rows = buildAgentRows([
+      watcher({ lastEpistemicKind: "bogus" as any }),
+    ]);
+    expect(rows[0].epistemicKind).toBe("bogus");
+  });
 });
 
 describe("actionKey", () => {

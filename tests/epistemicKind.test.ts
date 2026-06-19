@@ -8,10 +8,12 @@ import { Queue } from "../src/queue.js";
 // published event and a watcher record carry the kind back to the UI.
 
 describe("classificationEpistemicKind", () => {
-  it("maps a deterministic terminal exit to observed", () => {
+  it("maps a deterministic terminal exit to observed, a model-claimed one to inferred", () => {
     expect(classificationEpistemicKind("terminal_exited")).toBe("observed");
-    // even if (hypothetically) the model produced it, an exit is a measured fact.
-    expect(classificationEpistemicKind("terminal_exited", true)).toBe("observed");
+    expect(classificationEpistemicKind("terminal_exited", false)).toBe("observed");
+    // The small model can also emit terminal_exited from tail text — that is a
+    // claim, not a measured exit, so it must read as an inference.
+    expect(classificationEpistemicKind("terminal_exited", true)).toBe("inferred");
   });
 
   it("disambiguates waiting_for_input by whether the model was consulted", () => {
@@ -100,26 +102,44 @@ describe("event epistemicKind persistence", () => {
     expect(bumped.epistemicKind).toBe("inferred");
   });
 
-  it("refreshes epistemicKind on a dedupe bump that supplies a new one", () => {
+  it("refreshes epistemicKind on a dedupe bump in either direction", () => {
     const db = new Db(":memory:");
     const queue = new Queue(db);
-    queue.publish({
+    const pub = (summary: string, kind: "observed" | "inferred") =>
+      queue.publish({
+        source: "terminal_watcher",
+        severity: "attention",
+        title: "term_8",
+        summary,
+        dedupeKey: "watcher:w:term_8",
+        epistemicKind: kind,
+      });
+    pub("first", "inferred");
+    expect(pub("now exited", "observed").epistemicKind).toBe("observed");
+    // ...and back the other way (an observed row re-classified by the model).
+    expect(pub("model re-read", "inferred").epistemicKind).toBe("inferred");
+  });
+
+  it("leaves epistemicKind null when a first publish omits it, then adopts a later bump's kind", () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const first = queue.publish({
+      source: "terminal_watcher",
+      severity: "info",
+      title: "term_8",
+      summary: "no kind yet",
+      dedupeKey: "watcher:w:term_8",
+    });
+    expect(first.epistemicKind).toBeUndefined();
+    const bumped = queue.publish({
       source: "terminal_watcher",
       severity: "attention",
       title: "term_8",
-      summary: "first",
+      summary: "now classified",
       dedupeKey: "watcher:w:term_8",
       epistemicKind: "inferred",
     });
-    const bumped = queue.publish({
-      source: "terminal_watcher",
-      severity: "done",
-      title: "term_8",
-      summary: "now exited",
-      dedupeKey: "watcher:w:term_8",
-      epistemicKind: "observed",
-    });
-    expect(bumped.epistemicKind).toBe("observed");
+    expect(bumped.epistemicKind).toBe("inferred");
   });
 });
 

@@ -1011,6 +1011,8 @@ export async function runTerminalWatcherCheck(
       severity: "error",
       title: `${rec.title}: watcher disabled`,
       summary: `Corrupt watcher state for ${rec.id}: ${err instanceof Error ? err.message : String(err)}`,
+      // The watcher could not check the terminal at all — its state is unknown.
+      epistemicKind: "unverified",
     });
     return {
       classification: "unknown",

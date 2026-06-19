@@ -118,6 +118,30 @@ describe("OperationsView", () => {
     expect(frame).toContain("inf");
   });
 
+  it("renders the ASCII fallback glyph for epistemic marks when DAINTREE_ASCII=1 (#85)", () => {
+    const prev = process.env.DAINTREE_ASCII;
+    process.env.DAINTREE_ASCII = "1";
+    try {
+      const frame =
+        render(
+          <OperationsView
+            dashboard={dash({
+              watchers: [
+                watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
+              ],
+            })}
+            width={72}
+            now={0}
+          />,
+        ).lastFrame() ?? "";
+      // ASCII observed glyph is "*", label "obs".
+      expect(frame).toContain("* obs");
+    } finally {
+      if (prev === undefined) delete process.env.DAINTREE_ASCII;
+      else process.env.DAINTREE_ASCII = prev;
+    }
+  });
+
   it("hides empty sections (no audit/timers shown when there are none)", () => {
     const frame =
       render(<OperationsView dashboard={dash()} width={72} now={0} />).lastFrame() ?? "";

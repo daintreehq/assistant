@@ -880,11 +880,12 @@ export interface AgentLaunchRecord {
  * the model was consulted, via `usedModel`) and the UI's fallback for rows persisted
  * before `lastEpistemicKind` existed.
  *
- *   - `terminal_exited` is the one purely-measured class → always "observed".
- *   - `waiting_for_input` is the only ambiguous class: the engine sets it both
- *     deterministically (from agentState=waiting) and from the small model, so its
- *     kind depends on `usedModel`. The UI fallback (no flag) treats it as observed,
- *     since the deterministic agentState path is the dominant source.
+ *   - `terminal_exited` and `waiting_for_input` are the two ambiguous classes: the
+ *     engine sets them deterministically (from agentState / a closed terminal) but
+ *     the small model can also emit them from tail text, so their kind depends on
+ *     `usedModel` — a model-claimed exit is an inference, not a measured fact. The
+ *     UI fallback (no flag) treats them as observed, since the deterministic
+ *     agentState path is the dominant source.
  *   - `permission_prompt` and the content classes (`tests_*`, `command_failed`,
  *     `merge_conflict`, `still_working`) are only ever produced by the model, and
  *     any `completed_*` conclusion is an inference drawn from git state → "inferred".
@@ -897,7 +898,6 @@ export function classificationEpistemicKind(
 ): EpistemicKind {
   switch (classification) {
     case "terminal_exited":
-      return "observed";
     case "waiting_for_input":
       return usedModel ? "inferred" : "observed";
     case "permission_prompt":
