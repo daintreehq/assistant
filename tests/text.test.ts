@@ -20,6 +20,18 @@ describe("wrapText", () => {
   it("always returns at least one (possibly empty) line", () => {
     expect(wrapText("", 10)).toEqual([""]);
   });
+
+  it("preserves leading indentation (split would otherwise eat it)", () => {
+    expect(wrapText("    code", 80)).toEqual(["    code"]);
+  });
+
+  it("keeps indentation on the first row only when the line wraps", () => {
+    expect(wrapText("  alpha beta gamma", 11)).toEqual(["  alpha beta", "gamma"]);
+  });
+
+  it("preserves an all-whitespace line instead of flattening it", () => {
+    expect(wrapText("a\n   \nb", 10)).toEqual(["a", "   ", "b"]);
+  });
 });
 
 describe("collapseLines", () => {
@@ -59,6 +71,13 @@ describe("snipRule", () => {
     expect(rule).toContain("+12 lines");
     expect(rule.startsWith("─")).toBe(true);
     expect(rule.endsWith("─")).toBe(true);
+  });
+
+  it("spans the full width when the label fits exactly (no trim)", () => {
+    const label = " +12 lines ";
+    const rule = snipRule(12, label.length);
+    expect(rule).toBe(label);
+    expect(rule).toHaveLength(label.length);
   });
 
   it("falls back to the trimmed label when it cannot fit", () => {

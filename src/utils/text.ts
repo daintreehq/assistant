@@ -22,17 +22,27 @@ export function wrapText(s: string, n: number): string[] {
       out.push("");
       continue;
     }
+    // `split(" ")` collapses leading and standalone spaces, which silently eats
+    // the indentation of pasted code (and flattens all-whitespace lines). Capture
+    // the leading run, wrap the remainder, then re-apply the indent to the
+    // paragraph's first row so indentation survives the echo. Continuation rows
+    // stay flush, the way a soft-wrapped paragraph reads. (A deep indent + long
+    // first word can nudge that first row past `n`; the card's wrap="truncate"
+    // clips it, same as any other overflow — column-exactness isn't load-bearing.)
+    const indent = para.slice(0, para.length - para.trimStart().length);
+    const body = para.slice(indent.length);
+    const wrapped: string[] = [];
     let line = "";
-    for (const word of para.split(" ")) {
+    for (const word of body.split(" ")) {
       // A word that can't fit on a line of its own is hard-split into chunks.
       if (word.length > n) {
         if (line) {
-          out.push(line);
+          wrapped.push(line);
           line = "";
         }
         let rest = word;
         while (rest.length > n) {
-          out.push(rest.slice(0, n));
+          wrapped.push(rest.slice(0, n));
           rest = rest.slice(n);
         }
         line = rest;
@@ -40,13 +50,15 @@ export function wrapText(s: string, n: number): string[] {
       }
       const candidate = line ? line + " " + word : word;
       if (candidate.length > n) {
-        out.push(line);
+        wrapped.push(line);
         line = word;
       } else {
         line = candidate;
       }
     }
-    out.push(line);
+    wrapped.push(line);
+    if (indent) wrapped[0] = indent + wrapped[0];
+    out.push(...wrapped);
   }
   return out.length ? out : [""];
 }
@@ -83,11 +95,12 @@ export function collapseLines(
 /**
  * A centered `+N lines` rule for a collapsed block — the snip marker, doubling as
  * the horizontal divider. Padded out to `width` with `─`; if the label alone can't
- * fit, just the trimmed label is returned.
+ * fit, just the trimmed label is returned. When the label fits `width` exactly we
+ * still take the padding branch (zero dashes) so the divider spans the full width.
  */
 export function snipRule(hidden: number, width: number): string {
   const label = ` +${hidden} lines `;
-  if (label.length >= width) return label.trim();
+  if (label.length > width) return label.trim();
   const dashes = width - label.length;
   const left = Math.floor(dashes / 2);
   return "─".repeat(left) + label + "─".repeat(dashes - left);
