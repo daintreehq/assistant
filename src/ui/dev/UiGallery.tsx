@@ -56,7 +56,7 @@ export function UiGallery() {
         borderColor="gray"
       >
         <ControlRoom
-          folder="~/Projects/Daintree/assistant"
+          project="assistant"
           tier="operator"
           columns={columns}
           rows={rows}

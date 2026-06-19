@@ -272,6 +272,76 @@ function snapshot(app: App): DashboardState {
   };
 }
 
+// Opaque ids Daintree may name a bound directory with — long hex (e.g.
+// `ad92568c236b3a18`) or a UUID. We never show these as a "project name"; we wait
+// for the real name from the MCP instead of flashing a meaningless string.
+const ID_LIKE = /^(?:[0-9a-f]{12,}|[0-9a-f-]{32,})$/i;
+
+/**
+ * A provisional project name from the bound directory, shown immediately so the
+ * header isn't blank before the MCP answers. The leaf of the project path is a good
+ * human name for a plainly-named repo ("assistant"), but when Daintree binds us to a
+ * directory named by opaque id we return undefined and let the async MCP fetch fill
+ * the real name in.
+ */
+function provisionalProjectName(projectPath: string): string | undefined {
+  const leaf = projectPath.split("/").filter(Boolean).pop();
+  if (!leaf || ID_LIKE.test(leaf)) return undefined;
+  return leaf;
+}
+
+/** Pull a project name out of a getContext payload — either the top-level
+ *  `projectName` or a nested `project.name`. Returns a trimmed non-empty string.
+ *  Exported for unit tests; this parse is the seam the header name depends on. */
+export function readProjectName(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  const direct = rec.projectName;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const proj = rec.project;
+  if (proj && typeof proj === "object") {
+    const nested = (proj as Record<string, unknown>).name;
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+  }
+  return undefined;
+}
+
+/**
+ * The authoritative project name from Daintree: `actions.getContext` returns a
+ * context object whose `projectName` is the bound project's display name. Daintree
+ * only emits `structuredContent` when an action declares an output schema (see
+ * buildStructuredContent in the daintree repo), and the assistant's MCP SDK doesn't
+ * always surface it — but the same object is ALWAYS serialized into the result's
+ * text content, so we read structuredContent first and fall back to parsing the
+ * text JSON. Best-effort and non-blocking: any failure resolves to undefined so the
+ * caller keeps whatever provisional name it already had.
+ */
+async function fetchProjectName(app: App): Promise<string | undefined> {
+  try {
+    if (!app.mcp.status().connected) return undefined;
+    const res = await app.mcp.callTool("actions.getContext");
+    let name = readProjectName(res?.structuredContent);
+    if (!name && typeof res?.text === "string" && res.text.trim()) {
+      try {
+        name = readProjectName(JSON.parse(res.text));
+      } catch {
+        /* text wasn't JSON — ignore */
+      }
+    }
+    logDebug(app.config, "header.projectName", {
+      isError: res?.isError ?? null,
+      hasStructured: res?.structuredContent != null,
+      textPreview:
+        typeof res?.text === "string" ? res.text.slice(0, 400) : null,
+      resolved: name ?? null,
+    });
+    return name;
+  } catch (e) {
+    logDebug(app.config, "header.projectName.error", { error: String(e) });
+    return undefined;
+  }
+}
+
 /** The composer's live-stage label — derived from the active run, not random. */
 function deriveStage(cells: TranscriptCell[]): string {
   const idx = activeTurnIndex(cells);
@@ -319,6 +389,8 @@ export interface DaintreeController {
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
   resolveConfirm: (approved: boolean) => void;
+  /** The bound project's display name (from Daintree's MCP, basename fallback). */
+  projectName?: string;
 }
 
 export function useDaintreeController(
@@ -338,6 +410,12 @@ export function useDaintreeController(
   const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
+  );
+  // The bound project's name. Seeded from the directory leaf (when it's human, not
+  // an opaque id) so the header isn't blank, then upgraded to Daintree's real
+  // project name once the MCP answers (see the connect effect below).
+  const [projectName, setProjectName] = useState<string | undefined>(() =>
+    provisionalProjectName(app.config.projectPath),
   );
   // Synchronous serialization lock. `busy` is async React state and can't gate
   // back-to-back submits in the same tick; this ref can.
@@ -494,6 +572,22 @@ export function useDaintreeController(
           : `Daintree MCP not connected — ${st.error ?? "no url/token"}. Running degraded.`,
       });
       setDashboard(snapshot(app));
+      // Async, non-blocking: ask Daintree for the authoritative project name and
+      // fill it into the header when it arrives. Never blocks startup; a miss just
+      // leaves the provisional name in place. Retry a few times — right after connect
+      // the renderer may not have a project bound yet — but stop the moment we're
+      // offline (getContext needs the link) or disposed.
+      void (async () => {
+        for (let attempt = 0; attempt < 4 && !disposed; attempt++) {
+          if (!app.mcp.status().connected) return;
+          const name = await fetchProjectName(app);
+          if (name) {
+            if (!disposed) setProjectName(name);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      })();
     })();
 
     const timer = setInterval(() => {
@@ -614,5 +708,6 @@ export function useDaintreeController(
     activePanel,
     setActivePanel,
     resolveConfirm,
+    projectName,
   };
 }

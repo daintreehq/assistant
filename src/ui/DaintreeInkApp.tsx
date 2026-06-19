@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { useEffect, useState } from "react";
 import { useApp, useInput, useWindowSize } from "ink";
 import type { App as DaintreeApp } from "../cli/app.js";
@@ -68,17 +67,14 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     }
   });
 
-  // The masthead shows the full working folder, tilde-abbreviated like a shell
-  // prompt (~/Projects/… rather than /Users/<name>/Projects/…).
-  const home = homedir();
-  const folder =
-    home && app.config.projectPath.startsWith(home)
-      ? `~${app.config.projectPath.slice(home.length)}`
-      : app.config.projectPath;
+  // The masthead shows the bound project's name. The controller seeds it from the
+  // directory leaf and upgrades it to Daintree's authoritative project name (via the
+  // MCP `actions.getContext`) once that resolves — see useDaintreeController.
+  const project = controller.projectName ?? "";
 
   return (
     <ControlRoom
-      folder={folder}
+      project={project}
       tier={app.config.tier}
       columns={columns}
       rows={rows}

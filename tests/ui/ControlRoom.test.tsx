@@ -9,7 +9,7 @@ function frameFor(label: string, columns: number, rows = 24): string {
   const f = byKey(label);
   const { lastFrame } = render(
     <ControlRoom
-      folder="~/Projects/Daintree/assistant"
+      project="assistant"
       tier="operator"
       columns={columns}
       rows={rows}

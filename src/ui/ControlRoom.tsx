@@ -50,8 +50,8 @@ export function sidebarDensity(columns: number): SidebarDensity {
 }
 
 export interface ControlRoomProps {
-  /** Working folder, tilde-abbreviated, shown in the masthead beneath the wordmark. */
-  folder: string;
+  /** Name of the bound project, shown in the masthead beneath the wordmark. */
+  project: string;
   tier: string;
   columns: number;
   rows: number;
@@ -80,7 +80,7 @@ export interface ControlRoomProps {
 }
 
 export function ControlRoom({
-  folder,
+  project,
   tier,
   columns: outerColumns,
   rows: outerRows,
@@ -128,11 +128,11 @@ export function ControlRoom({
       ? activeAgent?.goal?.replace(/\s+/g, " ").trim() || undefined
       : undefined;
 
-  // Header (borderless now) = the 3-row identity block (icon beside the wordmark +
-  // folder) + a double blank line below (marginBottom 2) = 5. A run subtitle fits
-  // as the icon's third row, so it costs no extra height. Active debug logging adds
-  // its own section (marginTop 1 + rule 1 + log line 1 = 3), so add that when on.
-  const headerH = 5 + (logging ? 3 : 0);
+  // Header (borderless now) = the 4-row identity block (tree icon beside the
+  // wordmark + project name) + a double blank line below (marginBottom 2) = 6. A run
+  // subtitle fits within the icon's height, so it costs no extra rows. Active debug
+  // logging adds its own section (marginTop 1 + rule 1 + log line 1 = 3) when on.
+  const headerH = 6 + (logging ? 3 : 0);
   // Composer = top rule + input row + bottom rule + hints row. The input is
   // bracketed both sides so it reads as a field.
   const composerH = 4;
@@ -172,7 +172,7 @@ export function ControlRoom({
       <Box flexShrink={0} flexDirection="column">
         <Header
           columns={columns}
-          folder={folder}
+          project={project}
           runTitle={runTitle}
           logging={logging}
           logFile={logFile}

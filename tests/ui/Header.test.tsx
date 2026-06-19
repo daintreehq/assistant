@@ -17,12 +17,12 @@ describe("Header", () => {
     expect(frame).toMatch(/Daintree Assistant\s+v0\.1\.0/);
   });
 
-  it("shows the working folder beneath the wordmark", () => {
+  it("shows the project name beneath the wordmark", () => {
     const frame =
       render(
-        <Header columns={60} version="0.1.0" folder="~/Projects/Daintree/assistant" />,
+        <Header columns={60} version="0.1.0" project="assistant" />,
       ).lastFrame() ?? "";
-    expect(frame).toContain("~/Projects/Daintree/assistant");
+    expect(frame).toContain("assistant");
   });
 
   it("drops the operational badges from the masthead", () => {
@@ -63,20 +63,20 @@ describe("Header", () => {
   });
 
   // The rendered row count is the contract behind ControlRoom's headerH budget
-  // (5 + 3 when logging). If the layout drifts, this guard fails before the body
+  // (6 + 3 when logging). If the layout drifts, this guard fails before the body
   // silently overlaps the header on short terminals.
   it("renders a stable row count matching the headerH budget", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(5);
-    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(8);
-    // A run subtitle fits as the icon's third row, so it costs no extra height.
-    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(5);
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(6);
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(9);
+    // A run subtitle fits within the 4-row icon, so it costs no extra height.
+    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(6);
     expect(
       rows(
         <Header columns={60} version="0.1.0" runTitle="busy" logging logFile="/t.log" />,
       ),
-    ).toBe(8);
+    ).toBe(9);
   });
 
   it("falls back to ASCII glyphs when unicode is disabled", () => {
@@ -88,7 +88,7 @@ describe("Header", () => {
           <Header columns={60} version="0.1.0" logging logFile="/tmp/t.log" />,
         ).lastFrame() ?? "";
       expect(frame).toContain("Daintree Assistant");
-      expect(frame).toContain("/##\\"); // ASCII canopy, not the block logo
+      expect(frame).toContain("/####\\"); // ASCII canopy, not the block logo
       expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
       expect(frame).not.toContain("█"); // no unicode block glyph leaks through
       expect(frame).not.toContain("·"); // log separator uses the ASCII bullet
