@@ -3,23 +3,14 @@ import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
 import { glyphs, ui } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
+import { paletteEntries } from "../../commandRegistry.js";
 
-/** Slash commands surfaced as a filterable palette — described by intent. */
-export const COMMAND_SUGGESTIONS: Array<[string, string]> = [
-  ["/status", "connection and session"],
-  ["/inbox", "items requiring attention"],
-  ["/watchers", "supervised agents"],
-  ["/timers", "scheduled operations"],
-  ["/audit", "recent tool calls"],
-  ["/tools", "list / search tools"],
-  ["/permissions", "supervisor | operator | system"],
-  ["/recipes", "loaded · reload · load · clear"],
-  ["/compact", "summarize the conversation"],
-  ["/doctor", "environment check"],
-  ["/reconnect", "retry the Daintree connection"],
-  ["/help", "all commands and keys"],
-  ["/quit", "exit"],
-];
+/**
+ * Slash commands surfaced as a filterable palette — described by intent. Derived
+ * from the shared command registry so the palette can't drift from the commands
+ * the handlers actually accept (issue #50).
+ */
+export const COMMAND_SUGGESTIONS: Array<[string, string]> = paletteEntries();
 
 /** Cap on the recallable prompt history kept for ↑/↓ during a session. */
 const HISTORY_LIMIT = 200;

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { App } from "../src/cli/app.js";
 import { handleUiCommand, runDoctor } from "../src/cli/commandData.js";
+import { COMMAND_REGISTRY } from "../src/commandRegistry.js";
 import type { LowLevelMcpClient } from "../src/mcp/client.js";
 
 let lastStateDir = "";
@@ -176,6 +177,30 @@ describe("handleUiCommand (structured slash commands)", () => {
     const r = await handleUiCommand("/tools", app);
     expect(r.title).toMatch(/^Tools/);
     expect((r.text ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("/models reports model routing (issue #50: was handled but undiscoverable)", async () => {
+    const r = await handleUiCommand("/models", app);
+    expect(r.handled).toBe(true);
+    expect(r.title).toBe("Models");
+    expect((r.text ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("/help opens the help panel and lists /models", async () => {
+    const r = await handleUiCommand("/help", app);
+    expect(r.switchPanel).toBe("help");
+    expect(r.text).toContain("/models");
+    expect(r.text).toContain("/help");
+  });
+
+  it("every registry command is actually handled (no drift between list and switch)", async () => {
+    for (const c of COMMAND_REGISTRY) {
+      const r = await handleUiCommand(`/${c.name}`, app);
+      expect(r.handled).toBe(true);
+      // The switch's default branch reports unknowns; a registered command must
+      // never fall through to it.
+      expect(r.title).not.toBe("Unknown command");
+    }
   });
 });
 

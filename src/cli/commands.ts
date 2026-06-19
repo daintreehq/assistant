@@ -8,30 +8,19 @@ import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 import { runDoctor } from "./commandData.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
+import { helpLines } from "../commandRegistry.js";
 
 export interface CommandResult {
   handled: boolean;
   quit?: boolean;
 }
 
-const HELP = `${c.bold("Commands")}
-  /status                 Daintree connection, project, models, tier
-  /inbox [sev]            queued watcher/timer events (sev: info|attention|urgent)
-  /tools [query]          list/search available tools
-  /timers                 scheduled timers
-  /watchers               active watchers
-  /audit [n]              recent tool calls (default 15)
-  /audit export <fmt>     export audit log (fmt: json|csv) [actor= tool= outcome= from= to= limit=]
-  /models                 model routing
-  /recipes [sub]          assistant recipes (loaded|reload|load <id…>|clear)
-  /permissions [tier]     show or set tier (supervisor|operator|system)
-  /compact                summarize + reset the conversation
-  /doctor                 check MCP / config / project mapping (with fixes)
-  /reconnect              retry the Daintree MCP connection
-  /help                   this help
-  /quit                   exit
-
-Anything else is sent to the assistant.`;
+const HELP = [
+  c.bold("Commands"),
+  ...helpLines().map((l) => `  ${l}`),
+  "",
+  "Anything else is sent to the assistant.",
+].join("\n");
 
 export async function handleSlashCommand(
   line: string,
