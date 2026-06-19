@@ -282,6 +282,42 @@ describe("Db startup watcher invalidation", () => {
     db.close();
   });
 
+  it("cancels a prior session's pr_state watcher and revokes its grant on reopen", () => {
+    // PR watchers are session-scoped like terminal ones — the kind-agnostic row
+    // sweep must cancel them and revoke their grants, never carry them over.
+    {
+      const db = new Db(path);
+      db.insertWatcher({
+        id: "wch_pr",
+        kind: "pr_state",
+        title: "PR #5",
+        goal: "watch pr",
+        targetsJson: JSON.stringify(["PR #5"]),
+        cadenceMs: 60_000,
+        modelTier: "small",
+        optionsJson: JSON.stringify({ prNumber: 5, lastState: "open" }),
+        nextCheckAt: 0,
+        status: "active",
+      });
+      db.insertGrant({
+        id: "grt_pr",
+        actorId: "wch_pr",
+        actorType: "watcher",
+        allowedRiskClassesJson: JSON.stringify(["read"]),
+        allowedToolNamesJson: null,
+        expiresAt: 9999999999999,
+        maxUses: 5,
+      });
+      db.close();
+    }
+
+    const db = new Db(path);
+    expect(db.getWatcher("wch_pr")?.status).toBe("cancelled");
+    expect(db.getGrant("grt_pr")?.revokedAt).toBeTruthy();
+    expect(db.dueWatchers(Date.now())).toHaveLength(0);
+    db.close();
+  });
+
   it("resolves open watcher-sourced inbox events on reopen, sparing other sources", () => {
     // The events table is not session-scoped and watcher publishes carry no TTL,
     // so a prior session's watcher alert would otherwise resurface in the inbox
@@ -302,6 +338,15 @@ describe("Db startup watcher invalidation", () => {
         severity: "attention",
         title: "worktree gone",
         summary: "Worktree is no longer present.",
+      });
+      // PR watchers are session-scoped too — a leftover "PR updated" alert from a
+      // prior session must be swept, or it resurfaces in every new inbox.
+      db.upsertEvent({
+        source: "pr_watcher",
+        severity: "attention",
+        title: "PR #7 merged",
+        summary: "PR #7 is merged.",
+        dedupeKey: "pr_watcher:wch_old:state_change",
       });
       // Non-watcher sources must survive the session boundary.
       db.upsertEvent({
@@ -337,6 +382,7 @@ describe("Db startup watcher invalidation", () => {
     const openSources = open.map((e) => e.source);
     expect(openSources).not.toContain("terminal_watcher");
     expect(openSources).not.toContain("worktree_watcher");
+    expect(openSources).not.toContain("pr_watcher");
     // ...while timer and system events are untouched.
     expect(openSources).toContain("timer");
     expect(openSources).toContain("system");
@@ -346,10 +392,12 @@ describe("Db startup watcher invalidation", () => {
     const all = db.listEvents({ includeResolved: true });
     const sweptWatcherEvents = all.filter(
       (e) =>
-        (e.source === "terminal_watcher" || e.source === "worktree_watcher") &&
+        (e.source === "terminal_watcher" ||
+          e.source === "worktree_watcher" ||
+          e.source === "pr_watcher") &&
         e.title !== "earlier alert",
     );
-    expect(sweptWatcherEvents.length).toBe(2);
+    expect(sweptWatcherEvents.length).toBe(3);
     for (const e of sweptWatcherEvents) expect(e.resolvedAt).toBeTruthy();
 
     // The already-resolved watcher event keeps its ORIGINAL resolvedAt — the

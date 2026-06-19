@@ -14,6 +14,7 @@ import type { Queue } from "../queue.js";
 import type { ModelRouter } from "../models/router.js";
 import type { EventTarget, QueueEvent, TimerRecord } from "../schemas.js";
 import { runTerminalWatcherCheck } from "./watcherEngine.js";
+import { runPrWatcherCheck } from "./prWatcherEngine.js";
 import { SCHEDULER_TICK_MS } from "../watcherCadence.js";
 
 export interface SchedulerDeps {
@@ -90,10 +91,25 @@ export class Scheduler {
         // OUTSIDE a promise .catch — so one bad watcher can't abort the whole tick
         // (which would also skip notify()).
         try {
-          // All watchers are terminal watchers — the worktree kind was removed
-          // because nothing ever performed a real check for it (it merely
-          // rescheduled forever, implying a supervision that never happened).
-          await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
+          // Route by kind. "terminal" watchers run the small-model FSM; "pr_state"
+          // watchers poll forge.getPR deterministically. An unknown kind fails
+          // closed to `error` (the worktree kind was removed precisely because it
+          // silently rescheduled forever, implying supervision that never happened
+          // — a misrouted unknown kind would do the same, or worse, run the
+          // terminal check against a record with no terminal targets).
+          switch (w.kind) {
+            case "terminal":
+              await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
+              break;
+            case "pr_state":
+              await runPrWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
+              break;
+            default:
+              this.deps.db.updateWatcher(w.id, {
+                status: "error",
+                lastCheckedAt: now,
+              });
+          }
         } catch {
           /* one watcher's failure must not starve the others or skip notify */
         }

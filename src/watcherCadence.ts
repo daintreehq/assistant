@@ -22,6 +22,14 @@ export const SUPERVISOR_DEFAULT_CADENCE_MS = 3_000;
 export const MONITOR_DEFAULT_CADENCE_MS = 120_000;
 
 /**
+ * Fixed cadence for "pr_state" watchers. Not user-configurable: a PR's state
+ * changes on the order of minutes, and every check is a `forge.getPR` API call,
+ * so 60s keeps the watcher responsive without hammering the forge's rate limit
+ * (60 req/hr per watcher, far inside GitHub/GitLab authenticated limits).
+ */
+export const PR_WATCHER_CADENCE_MS = 60_000;
+
+/**
  * Grace window after a watcher is created during which a target terminal that is
  * absent from terminal.getStatus is treated as "still registering", NOT exited.
  * Right after agent.launch returns a terminalId, Daintree may not yet list the

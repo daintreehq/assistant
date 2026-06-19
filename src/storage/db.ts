@@ -409,8 +409,8 @@ export class Db {
    * renders the event, not the watcher. Since every watcher is now cancelled,
    * every open watcher-sourced event is by definition orphaned, so the whole set
    * is resolved at the same session boundary. Scoped to the watcher sources only
-   * (`terminal_watcher`/`worktree_watcher`) so timer/system/user events — which
-   * legitimately persist — are never collaterally resolved.
+   * (`terminal_watcher`/`worktree_watcher`/`pr_watcher`) so timer/system/user
+   * events — which legitimately persist — are never collaterally resolved.
    *
    * Assumes a single assistant process owns the DB at a time (the foreground-only
    * daemon invariant). DatabaseSync is synchronous, so the statements run
@@ -436,7 +436,7 @@ export class Db {
       .prepare(
         `UPDATE events SET resolvedAt = ?
          WHERE resolvedAt IS NULL
-           AND source IN ('terminal_watcher','worktree_watcher')`,
+           AND source IN ('terminal_watcher','worktree_watcher','pr_watcher')`,
       )
       .run(now);
   }

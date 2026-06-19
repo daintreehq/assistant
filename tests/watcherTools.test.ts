@@ -6,6 +6,10 @@ import type { ToolContext } from "../src/tools/types.js";
 
 const create = watcherTools.find((t) => t.name === "watcher.terminal.create")!;
 const cancel = watcherTools.find((t) => t.name === "watcher.cancel")!;
+const watchPR = watcherTools.find((t) => t.name === "watcher.watchPR")!;
+const list = watcherTools.find((t) => t.name === "watcher.list")!;
+
+const PR_WATCHER_CADENCE_MS = 60_000;
 
 function ctxWith(daemonActive?: () => boolean): ToolContext {
   const db = new Db(":memory:");
@@ -195,6 +199,65 @@ describe("watcher.terminal.create parameters schema surfaces the WatchCondition 
     const json = JSON.stringify(params);
     expect(json).not.toContain("oneOf");
     expect(json).not.toContain("$ref");
+  });
+});
+
+describe("watcher.watchPR", () => {
+  it("creates a pr_state watcher at the fixed 60s cadence with a PR label target", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await watchPR.handler({ prNumber: 42 }, ctx);
+    expect(res.ok).toBe(true);
+    const w = ctx.db.getWatcher((res as { result: { id: string } }).result.id);
+    expect(w?.kind).toBe("pr_state");
+    expect(w?.cadenceMs).toBe(PR_WATCHER_CADENCE_MS);
+    expect(w?.isSupervisor).toBe(false);
+    expect(JSON.parse(w!.targetsJson)).toEqual(["PR #42"]);
+    // The first check has no baseline yet — options carry the prNumber only.
+    const opts = JSON.parse(w!.optionsJson!);
+    expect(opts.prNumber).toBe(42);
+    expect(opts.lastState).toBeUndefined();
+  });
+
+  it("persists cwd and stopAfterMs into the watcher options/record", async () => {
+    const ctx = ctxWith(() => true);
+    const res = await watchPR.handler(
+      { prNumber: 7, cwd: "/repo", title: "my pr", stopAfterMs: 5000 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    const w = ctx.db.getWatcher((res as { result: { id: string } }).result.id);
+    expect(w?.title).toBe("my pr");
+    expect(w?.stopAfterMs).toBe(5000);
+    expect(JSON.parse(w!.optionsJson!).cwd).toBe("/repo");
+  });
+
+  it("warns it is session-scoped and cannot read review comments when the scheduler runs", async () => {
+    const res = await watchPR.handler({ prNumber: 1 }, ctxWith(() => true));
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain("polls only while the assistant is open");
+    expect(res.summary).toContain("does not resume on the next launch");
+    expect(res.summary).toContain("cannot read review comments");
+  });
+
+  it("warns it will not poll when no scheduler is running", async () => {
+    const res = await watchPR.handler({ prNumber: 1 }, ctxWith(() => false));
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain("no scheduler is running");
+  });
+
+  it("requires prNumber and forbids extra properties in the JSON schema", () => {
+    const params = watchPR.parameters as Record<string, any>;
+    expect(params.required).toContain("prNumber");
+    expect(params.additionalProperties).toBe(false);
+  });
+
+  it("is rendered by watcher.list as a pr_state row without a model tier", async () => {
+    const ctx = ctxWith(() => true);
+    await watchPR.handler({ prNumber: 99 }, ctx);
+    const res = await list.handler({}, ctx);
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain("pr_state");
+    expect(res.summary).toContain("PR #99");
   });
 });
 

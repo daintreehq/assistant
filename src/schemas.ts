@@ -84,6 +84,7 @@ export const EventSource = z.enum([
   "timer",
   "terminal_watcher",
   "worktree_watcher",
+  "pr_watcher",
   "workflow",
   "model_worker",
   "system",
@@ -387,10 +388,23 @@ export interface TimerRecord {
 
 export interface WatcherRecord {
   id: string;
-  kind: "terminal";
+  /**
+   * Discriminator for the watcher subsystem. "terminal" watchers supervise
+   * CLI-spawned terminals via the small model (see {@link daemon/watcherEngine}).
+   * "pr_state" watchers poll `forge.getPR` deterministically (no model) and
+   * surface PR transitions while the assistant is open — they cannot see review
+   * comments, only state/draft transitions (see {@link daemon/prWatcherEngine}).
+   * The scheduler routes by this field; unknown kinds fail closed to `error`.
+   */
+  kind: "terminal" | "pr_state";
   title: string;
   goal: string;
-  targetsJson: string; // string[] of terminalIds
+  /**
+   * JSON string[]. For "terminal" watchers these are terminalIds. For "pr_state"
+   * watchers this holds a single display label (`"PR #N"`) so the column stays
+   * non-null and `watcher.list` can render the row — there is no terminal target.
+   */
+  targetsJson: string;
   cadenceMs: number;
   /** True for supervisor watchers attached to CLI-spawned worker terminals.
    * These default to a fast cadence and are floored at the scheduler tick so a

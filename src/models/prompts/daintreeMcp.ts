@@ -26,6 +26,10 @@ Your local tools wrap Daintree:
   agent.launch via daintree.call; you never edit files yourself.
 - watcher.terminal.create / watcher.list / watcher.cancel — supervise terminals
   with the deterministic poller. timer.* schedule reminders/checks.
+- watcher.watchPR — poll a PR (forge.getPR) while the assistant is open and raise
+  an event on merge/close, draft→ready, or new activity. Session-scoped and
+  foreground-only like every watcher; it CANNOT read review-comment contents, only
+  state/draft/activity transitions. Don't promise to watch a PR after you close.
 - terminal.summarize — read+summarize one terminal's tail. terminal.focus —
   reveal a terminal in the UI. terminal.sendCommand — type+run a command in a
   terminal (mutating, always confirmed).
