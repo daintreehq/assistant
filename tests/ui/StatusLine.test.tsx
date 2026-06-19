@@ -73,6 +73,43 @@ describe("StatusLine", () => {
     expect(frame).toContain("MCP"); // right-side rollup still intact
   });
 
+  it("uses the short tier label for operator and supervisor during a run", () => {
+    const op =
+      render(
+        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="operator" now={0} />,
+      ).lastFrame() ?? "";
+    expect(op).toContain("op");
+    expect(op).not.toContain("OPERATOR"); // short form on the right, not the idle label
+    const sup =
+      render(
+        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="supervisor" now={0} />,
+      ).lastFrame() ?? "";
+    expect(sup).toContain("sup");
+  });
+
+  it("keeps the tier visible even when the model id is suppressed on a narrow line", () => {
+    const frame =
+      render(
+        <StatusLine
+          dashboard={dash({ watchers: [watcher()] })}
+          sessionUsage={usage()}
+          tier="operator"
+          width={50}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).not.toContain("minimax-m3"); // model dropped on a narrow line
+    expect(frame).toContain("op"); // tier survives the squeeze
+    expect(frame).toContain("MCP");
+  });
+
+  it("leaves no orphan separator when no tier is provided during a run", () => {
+    const frame =
+      render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
+    expect(frame).toContain("MCP");
+    expect(frame).not.toMatch(/·\s+·/); // no dangling " ·  · " from an empty tier badge
+  });
+
   it("shows an attention chip when the inbox is non-empty", () => {
     const frame =
       render(<StatusLine dashboard={dash({ inbox: [event("error"), event("attention")] })} />)
