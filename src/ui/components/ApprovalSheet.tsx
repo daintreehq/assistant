@@ -6,7 +6,7 @@
  * class. The tool name stays as a dim secondary label; `V` reveals the raw
  * reason + args. It stays understandable with color stripped.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { PendingConfirm } from "../types.js";
 import type { ConfirmRequest } from "../../tools/types.js";
@@ -45,9 +45,11 @@ const RISK_CONSEQUENCE: Record<RiskClass, string> = {
   ui: "Changes the Daintree UI state.",
 };
 
-/** The consequence to lead with: the tool's own phrasing, else the risk fallback. */
+/** The consequence to lead with: the tool's own phrasing, else the risk fallback.
+ * `||` (not `??`) so an empty/blank string also falls back rather than rendering
+ * a blank `affects` row. */
 function consequenceFor(req: ConfirmRequest): string {
-  return req.consequence ?? RISK_CONSEQUENCE[req.risk];
+  return req.consequence?.trim() || RISK_CONSEQUENCE[req.risk];
 }
 
 function Field({
@@ -80,8 +82,15 @@ export function ApprovalSheet({
 }) {
   const [showArgs, setShowArgs] = useState(false);
   // Collapse the inspect panel whenever a different request takes the sheet, so
-  // a fresh prompt never inherits the previous one's expanded raw view.
-  useEffect(() => setShowArgs(false), [pending.id]);
+  // a fresh prompt never inherits the previous one's expanded raw view. Done by
+  // adjusting state *during render* (the React-sanctioned pattern for resetting
+  // state on a prop change) rather than in an effect — an effect would let the
+  // new request's first frame flash the previous one's raw args before clearing.
+  const [shownFor, setShownFor] = useState(pending.id);
+  if (shownFor !== pending.id) {
+    setShownFor(pending.id);
+    setShowArgs(false);
+  }
   useInput((input, key) => {
     if (/^y$/i.test(input)) onResolve(true);
     else if (/^n$/i.test(input) || key.escape) onResolve(false);

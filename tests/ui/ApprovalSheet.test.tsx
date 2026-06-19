@@ -58,6 +58,31 @@ describe("ApprovalSheet", () => {
     expect(lastFrame() ?? "").toContain("system-level action");
   });
 
+  it("falls back when the consequence is blank rather than rendering an empty line", () => {
+    const { lastFrame } = render(
+      <ApprovalSheet
+        pending={pending("daintree.call", "system", { consequence: "   " })}
+        onResolve={() => {}}
+      />,
+    );
+    expect(lastFrame() ?? "").toContain("system-level action");
+  });
+
+  it("renders a non-empty consequence for every risk class", () => {
+    const RISKS = ["read", "local", "ui", "terminal", "project", "git", "external", "system"];
+    for (const risk of RISKS) {
+      const { lastFrame } = render(
+        <ApprovalSheet pending={pending("some.tool", risk)} onResolve={() => {}} />,
+      );
+      const frame = lastFrame() ?? "";
+      const affects = (frame.split("\n").find((l) => l.includes("affects")) ?? "").trim();
+      // The affects row must carry prose, never just the bare risk-class word.
+      expect(affects, risk).toContain("affects");
+      expect(affects.replace("affects", "").trim().length, risk).toBeGreaterThan(0);
+      expect(affects.replace("affects", "").trim(), risk).not.toBe(risk);
+    }
+  });
+
   it("hides the raw reason and args until V is pressed, then reveals them", async () => {
     const { lastFrame, stdin } = render(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={() => {}} />,
@@ -90,8 +115,8 @@ describe("ApprovalSheet", () => {
         onResolve={() => {}}
       />,
     );
-    await tick();
-    // A fresh prompt must not inherit the previous one's expanded view.
+    // No await: the reset happens during render, so even the very first frame of
+    // the new request must not flash the previous one's expanded raw args.
     expect(lastFrame() ?? "").not.toContain("ready for review");
   });
 
