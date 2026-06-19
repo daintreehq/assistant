@@ -155,10 +155,26 @@ describe("Db startup watcher invalidation", () => {
       for (const s of nonTerminal) insertWatcherWithStatus(db, `wch_${s}`, s);
       for (const s of terminal) insertWatcherWithStatus(db, `wch_${s}`, s);
 
-      // A live grant for one of the stale (active) watchers — must be revoked.
+      // A live grant for EACH stale (non-terminal) watcher — all must be
+      // revoked, so the subquery is exercised across active/created/paused, not
+      // just the one status.
+      for (const s of nonTerminal) {
+        db.insertGrant({
+          id: `grt_${s}`,
+          actorId: `wch_${s}`,
+          actorType: "watcher",
+          allowedRiskClassesJson: JSON.stringify(["terminal"]),
+          allowedToolNamesJson: null,
+          expiresAt: 9999999999999,
+          maxUses: 5,
+        });
+      }
+      // A live grant for a terminal-state (condition_met) watcher — that watcher
+      // is NOT swept, so its grant must survive (the subquery is bounded to
+      // non-terminal statuses).
       db.insertGrant({
-        id: "grt_watcher",
-        actorId: "wch_active",
+        id: "grt_terminal_state",
+        actorId: "wch_condition_met",
         actorType: "watcher",
         allowedRiskClassesJson: JSON.stringify(["terminal"]),
         allowedToolNamesJson: null,
@@ -203,8 +219,13 @@ describe("Db startup watcher invalidation", () => {
     // Nothing is due — the scheduler sees no inherited watchers.
     expect(db.dueWatchers(Date.now())).toHaveLength(0);
 
-    // The watcher grant is revoked; the timer grant (same actorId) is not.
-    expect(db.getGrant("grt_watcher")?.revokedAt).toBeTruthy();
+    // Every stale watcher's grant is revoked (active/created/paused)...
+    for (const s of nonTerminal) {
+      expect(db.getGrant(`grt_${s}`)?.revokedAt).toBeTruthy();
+    }
+    // ...the terminal-state watcher's grant survives (not swept)...
+    expect(db.getGrant("grt_terminal_state")?.revokedAt).toBeFalsy();
+    // ...and the timer grant (same actorId as wch_active) is untouched.
     expect(db.getGrant("grt_timer")?.revokedAt).toBeFalsy();
 
     // The persistent timer is untouched.

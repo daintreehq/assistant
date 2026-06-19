@@ -81,6 +81,10 @@ describe("runtime context message", () => {
     });
     expect(dormant).toContain("the scheduler is NOT running");
     expect(dormant).toContain("dormant");
+    // Timers resume; watchers are session-scoped and must not be described as
+    // resuming on the next launch.
+    expect(dormant).toContain("Watchers are session-scoped");
+    expect(dormant).toContain("do NOT resume on the next launch");
   });
 });
 
