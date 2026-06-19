@@ -211,6 +211,46 @@ describe("rehydrateSession (#77)", () => {
     expect(out.restoredMessages.some((m) => m.content?.includes("FIRST"))).toBe(false);
   });
 
+  it("restores an empty history after a clear marker (#114)", () => {
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "[system event]\nbefore clear" }),
+      rec({ seq: 4, role: "system", content: "[conversation cleared — context reset to initial state]" }),
+    ];
+    const out = rehydrateSession(rows)!;
+    expect(out.initialSeq).toBe(5);
+    // Nothing lives after a clear marker: a resumed session starts genuinely fresh.
+    expect(out.restoredMessages).toHaveLength(0);
+    expect(out.restoredMessages.some((m) => m.content?.includes("before clear"))).toBe(false);
+  });
+
+  it("restores only post-clear turns when a clear is followed by new activity (#114)", () => {
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "[system event]\nold" }),
+      rec({ seq: 4, role: "system", content: "[conversation cleared — context reset to initial state]" }),
+      rec({ seq: 5, role: "user", content: "[system event]\nafter clear" }),
+    ];
+    const out = rehydrateSession(rows)!;
+    expect(out.restoredMessages).toHaveLength(1);
+    expect(out.restoredMessages[0].content).toContain("after clear");
+    expect(out.restoredMessages.some((m) => m.content?.includes("old"))).toBe(false);
+  });
+
+  it("treats the last marker as the boundary regardless of kind — clear after compact (#114)", () => {
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "turn one" }),
+      rec({ seq: 4, role: "system", content: "[conversation compacted — earlier turns dropped from context]" }),
+      rec({ seq: 5, role: "user", content: "[compacted summary of earlier conversation]\nSUMMARY" }),
+      rec({ seq: 6, role: "system", content: "[conversation cleared — context reset to initial state]" }),
+    ];
+    const out = rehydrateSession(rows)!;
+    // The clear is the LAST marker, so even the compaction summary is dropped.
+    expect(out.restoredMessages).toHaveLength(0);
+    expect(out.restoredMessages.some((m) => m.content?.includes("SUMMARY"))).toBe(false);
+  });
+
   it("returns an empty history (not undefined) for a session with only control rows", () => {
     const out = rehydrateSession(controlRows())!;
     expect(out).toBeDefined();
@@ -279,6 +319,26 @@ describe("AgentSession resume integration (#77)", () => {
     expect(msgs.some((m) => m.content?.includes("pre-compaction turn"))).toBe(false);
     // The compaction marker row is never replayed as a model message.
     expect(msgs.some((m) => m.content?.includes("earlier turns dropped"))).toBe(false);
+  });
+
+  it("resumes a cleared session to controls only — no restored turns (#114)", () => {
+    const db = new Db(":memory:");
+    const sid = "ses_resume_clear";
+
+    const first = makeSession(db, sid);
+    first.injectNote("pre-clear turn");
+    first.clear();
+
+    const restore = rehydrateSession(db.listMessages(sid));
+    const resumed = makeSession(db, sid, { restoredMessages: restore });
+
+    const msgs = resumed.getMessages();
+    // Just the 3 fresh control messages; the cleared turn is gone, no summary note.
+    expect(msgs).toHaveLength(3);
+    expect(msgs.some((m) => m.content?.includes("pre-clear turn"))).toBe(false);
+    expect(msgs.some((m) => m.content?.includes("compacted summary"))).toBe(false);
+    // The clear marker row is never replayed as a model message.
+    expect(msgs.some((m) => m.content?.includes("context reset to initial state"))).toBe(false);
   });
 
   it("is idempotent: resuming twice yields the same history without growing the DB", () => {

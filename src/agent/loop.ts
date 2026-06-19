@@ -34,6 +34,13 @@ const MAX_TOOL_ITERATIONS = 12;
 export const CANCELLED_REPLY = "Turn cancelled";
 /** How many control messages always sit at the front of the conversation. */
 const CONTROL_MESSAGE_COUNT = 3;
+/**
+ * Durable-log breadcrumb written by clear(). Recognised by rehydrateSession() as a
+ * reset boundary — like the compaction marker, but with nothing live after it, so
+ * a resumed session restores zero working turns. A named constant keeps the marker
+ * text and the resume-side prefix check from drifting apart.
+ */
+export const CLEAR_MARKER = "[conversation cleared — context reset to initial state]";
 /** Re-run recipe selection at least this often even without trigger terms. */
 const RECIPE_REFRESH_INTERVAL = 4;
 /**
@@ -214,12 +221,17 @@ export function rehydrateSession(
   // rows than the engine's argument-count limit, which would throw on spread.
   const initialSeq = rows.reduce((m, r) => Math.max(m, r.seq), 0) + 1;
 
-  // If the prior run was compacted, only the rows after the LAST compaction
-  // marker are live context (the summary note + anything since). The marker row
+  // If the prior run was compacted OR cleared, only the rows after the LAST such
+  // marker are live context (a compaction summary note + anything since, or — for
+  // a clear — nothing, which restores an empty working history). The marker row
   // itself is a durable-log breadcrumb, not a model message — skip it.
   const markerIdx = rows.reduce(
     (last, r, i) =>
-      r.role === "system" && r.content.startsWith("[conversation compacted") ? i : last,
+      r.role === "system" &&
+      (r.content.startsWith("[conversation compacted") ||
+        r.content.startsWith("[conversation cleared"))
+        ? i
+        : last,
     -1,
   );
   const working =
@@ -341,6 +353,22 @@ export class AgentSession {
       content: "[conversation compacted — earlier turns dropped from context]",
     });
     this.persistMessage(note);
+  }
+
+  /**
+   * Clear the conversation: drop the working history entirely, keeping only the
+   * three control messages (base prompt, runtime context, loaded recipes) so the
+   * prompt-cache prefix and recipe state survive. Unlike compact(), no summary
+   * note is injected — the next turn starts a genuinely fresh thread with no
+   * memory of what came before. A marker is appended to the durable log so the
+   * persisted transcript records the reset, and rehydrateSession() treats it as a
+   * boundary (a resumed session restores nothing after it). The recipe-refresh
+   * counter resets to 0 so the next turn re-selects recipes like a fresh session.
+   */
+  clear(): void {
+    this.messages = this.messages.slice(0, CONTROL_MESSAGE_COUNT);
+    this.turnSinceRecipeRefresh = 0;
+    this.persistMessage({ role: "system", content: CLEAR_MARKER });
   }
 
   /**

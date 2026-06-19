@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentSession, serializeToolResult } from "../src/agent/loop.js";
+import { AgentSession, serializeToolResult, CLEAR_MARKER } from "../src/agent/loop.js";
 import { RecipeRegistry } from "../src/recipes/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
@@ -64,6 +64,53 @@ describe("AgentSession.compact (#7)", () => {
     expect(msgs[3].content).toContain("goals: X");
     // The old turns are gone from context.
     expect(msgs.some((m) => m.content?.includes("first"))).toBe(false);
+  });
+});
+
+describe("AgentSession.clear (#114)", () => {
+  it("drops working history to the 3 control messages with no summary note", () => {
+    const { session } = makeSession();
+    session.injectNote("alpha");
+    session.injectNote("beta");
+    expect(session.getMessages().length).toBeGreaterThan(3);
+
+    session.clear();
+
+    const msgs = session.getMessages();
+    // Exactly the 3 control messages — and, unlike compact(), NO 4th summary note.
+    expect(msgs.length).toBe(3);
+    expect(msgs[0].role).toBe("system");
+    expect(msgs[1].content).toContain("# Runtime context");
+    expect(msgs[2].content).toContain("# Loaded recipes");
+    // Old turns and any compaction summary are gone from context.
+    expect(msgs.some((m) => m.content?.includes("alpha"))).toBe(false);
+    expect(msgs.some((m) => m.content?.includes("compacted summary"))).toBe(false);
+  });
+
+  it("appends a clear marker to the durable log without resetting seq", () => {
+    const { session, db } = makeSession();
+    session.injectNote("history-row");
+    const before = db.listMessages("ses_compact");
+    const maxSeqBefore = before.reduce((m, r) => Math.max(m, r.seq), 0);
+
+    session.clear();
+
+    const rows = db.listMessages("ses_compact");
+    const marker = rows.find((r) => r.content === CLEAR_MARKER);
+    expect(marker).toBeDefined();
+    // seq keeps climbing — never reset (a reset would collide on the UNIQUE
+    // (sessionId, seq) index and corrupt resume). The marker sits above prior rows.
+    expect(marker!.seq).toBeGreaterThan(maxSeqBefore);
+    // The history row is still in the durable log — clear is append-only, not a DELETE.
+    expect(rows.some((r) => r.content === "[system event]\nhistory-row")).toBe(true);
+  });
+
+  it("is idempotent — a second clear keeps exactly the 3 control messages", () => {
+    const { session } = makeSession();
+    session.injectNote("once");
+    session.clear();
+    session.clear();
+    expect(session.getMessages().length).toBe(3);
   });
 });
 

@@ -313,6 +313,12 @@ export interface UiCommandResult {
   title?: string;
   text?: string;
   switchPanel?: PanelKey;
+  /**
+   * Set by `/clear`: the conversation state was reset to its initial controls, so
+   * the controller should also wipe the in-flight transcript and remount `<Static>`
+   * (committed scrollback already in the host terminal stays — same as shell clear).
+   */
+  clearTranscript?: boolean;
 }
 
 const HELP_TEXT = [
@@ -651,6 +657,16 @@ export async function handleUiCommand(
           text: `Compaction failed: ${e instanceof Error ? e.message : String(e)}`,
         };
       }
+    }
+
+    case "clear": {
+      app.session.clear();
+      return {
+        handled: true,
+        title: "Clear",
+        text: "Conversation cleared — starting fresh.",
+        clearTranscript: true,
+      };
     }
 
     default:

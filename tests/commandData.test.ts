@@ -271,6 +271,21 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(r.text).toContain("/models");
   });
 
+  it("/clear resets the session and flags the transcript for clearing (#114)", async () => {
+    app.session.injectNote("some history");
+    expect(app.session.getMessages().length).toBeGreaterThan(3);
+
+    const r = await handleUiCommand("/clear", app);
+
+    expect(r.handled).toBe(true);
+    expect(r.title).toBe("Clear");
+    expect(r.clearTranscript).toBe(true);
+    expect(r.text).toContain("starting fresh");
+    // The session really reset to its 3 control messages — no leftover history.
+    expect(app.session.getMessages().length).toBe(3);
+    expect(app.session.getMessages().some((m) => m.content?.includes("some history"))).toBe(false);
+  });
+
   it("every registry command is actually handled by the Ink handler (no list/switch drift)", async () => {
     for (const cmd of COMMAND_REGISTRY) {
       const r = await handleUiCommand(`/${cmd.name}`, app);
@@ -310,6 +325,18 @@ describe("handleSlashCommand (REPL slash commands)", () => {
       );
       expect(unknownWarned).toBe(false);
     }
+  });
+
+  it("/clear resets the session and reports success (#114)", async () => {
+    const successSpy = vi.spyOn(render, "success").mockImplementation(() => {});
+    app.session.injectNote("repl history");
+    expect(app.session.getMessages().length).toBeGreaterThan(3);
+
+    const r = await handleSlashCommand("/clear", app);
+
+    expect(r.handled).toBe(true);
+    expect(app.session.getMessages().length).toBe(3);
+    expect(successSpy.mock.calls.some(([m]) => String(m).includes("cleared"))).toBe(true);
   });
 
   it("an unregistered command warns Unknown command", async () => {

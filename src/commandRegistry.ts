@@ -106,6 +106,12 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     help: "summarize + reset the conversation",
   },
   {
+    name: "clear",
+    palette: "reset the conversation",
+    syntax: "/clear",
+    help: "drop the conversation — start fresh",
+  },
+  {
     name: "doctor",
     palette: "environment check",
     syntax: "/doctor",
