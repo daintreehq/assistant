@@ -143,6 +143,38 @@ describe("Scheduler.tick", () => {
     expect(after.fireAt).toBeGreaterThan(now);
   });
 
+  // #60 regression: a repeating timer's dedupeKey is stable across firings
+  // (`timer:<id>`, NOT keyed by runCount), so successive fires update ONE live
+  // inbox item in place instead of leaving a stale row behind on every tick.
+  it("repeating timer updates one live inbox item across fires (#60)", async () => {
+    const deps = makeDeps();
+    const scheduler = new Scheduler(deps);
+    const now = 3_000_000;
+    const repeatEveryMs = 60_000;
+
+    const timer = deps.db.insertTimer({
+      title: "heartbeat",
+      fireAt: now - 1000,
+      repeatEveryMs,
+      payloadType: "enqueue",
+      payloadJson: JSON.stringify({ type: "enqueue", message: "beat" }),
+    });
+
+    // First fire (runCount → 1), then the rescheduled fire (runCount → 2).
+    await scheduler.tick(now);
+    expect(deps.db.getTimer(timer.id)!.runCount).toBe(1);
+    await scheduler.tick(now + repeatEveryMs);
+    expect(deps.db.getTimer(timer.id)!.runCount).toBe(2);
+
+    // Exactly ONE open inbox item — the second fire bumped the first, it didn't
+    // spawn a stale duplicate. The dedupeKey carries no run-count segment.
+    const digest = deps.queue.digest();
+    expect(digest).toHaveLength(1);
+    expect(digest[0].source).toBe("timer");
+    expect(digest[0].count).toBe(2);
+    expect(digest[0].dedupeKey).toBe(`timer:${timer.id}`);
+  });
+
   it("runs a due terminal watcher through fake MCP and sets lastClassification", async () => {
     const deps = makeDeps();
     // Watcher path needs a connected MCP reporting agentState=waiting.

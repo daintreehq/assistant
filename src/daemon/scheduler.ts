@@ -148,6 +148,10 @@ export class Scheduler {
       return;
     }
 
+    // Stable across every firing of this timer (NOT keyed by runCount) so a
+    // repeating timer updates one live inbox item in place instead of leaving a
+    // stale open row behind on each tick. Shared by the success and catch paths.
+    const dedupeKey = `timer:${rec.id}`;
     try {
       if (payload.type === "enqueue") {
         // A scheduled enqueue is a user-requested reminder. Publish at
@@ -159,7 +163,7 @@ export class Scheduler {
           title: rec.title,
           summary: payload.message ?? rec.title,
           target,
-          dedupeKey: `timer:${rec.id}:${rec.runCount}`,
+          dedupeKey,
         });
       } else if (payload.type === "run_check") {
         const summary = await this.runCheck(payload.checkPrompt ?? rec.title);
@@ -170,7 +174,7 @@ export class Scheduler {
           title: rec.title,
           summary,
           target,
-          dedupeKey: `timer:${rec.id}:${rec.runCount}`,
+          dedupeKey,
         });
       } else if (payload.type === "call_safe_tool" && payload.toolCall) {
         const res = await this.deps.registry.dispatch(
@@ -188,7 +192,7 @@ export class Scheduler {
             title: rec.title,
             summary: res.summary,
             target,
-            dedupeKey: `timer:${rec.id}:${rec.runCount}`,
+            dedupeKey,
           });
         }
       }
@@ -199,6 +203,7 @@ export class Scheduler {
         title: rec.title,
         summary: `Timer check failed: ${err instanceof Error ? err.message : String(err)}`,
         target,
+        dedupeKey,
       });
     }
 
