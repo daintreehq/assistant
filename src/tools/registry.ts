@@ -316,6 +316,8 @@ export class ToolRegistry {
         // so a non-grant audit row never carries a misleading source.
         grantSource: outcome === "grant_ok" ? grant?.source : undefined,
         grantId: outcome === "grant_ok" ? grant?.id : undefined,
+        // Group every dispatch within a turn under the run that triggered it.
+        runId: ctx.runId,
       });
       res.auditId = row.id;
     } catch {

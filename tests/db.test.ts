@@ -38,8 +38,14 @@ describe("Db fresh schema (single baseline migration)", () => {
     expect(colNames("watchers")).toContain("isSupervisor");
     expect(colNames("automation_grants")).toContain("source");
     expect(colNames("audit_log")).toEqual(
-      expect.arrayContaining(["grantSource", "grantId"]),
+      expect.arrayContaining(["grantSource", "grantId", "runId"]),
     );
+
+    // run_events table + its unique (runId, seq) index exist on a fresh DB.
+    expect(colNames("run_events")).toEqual(
+      expect.arrayContaining(["id", "runId", "seq", "ts", "type", "payload"]),
+    );
+    expect(indexNames("run_events")).toContain("idx_run_events_run");
 
     // workflow_runs table + its index exist on a fresh DB.
     expect(colNames("workflow_runs")).toEqual(
@@ -690,6 +696,86 @@ describe("Db", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("audit runId", () => {
+    it("stamps and round-trips runId on an audit row", () => {
+      const row = db.insertAudit({
+        actor: "main",
+        toolName: "fs.read",
+        argsJson: "{}",
+        outcome: "ok",
+        durationMs: 5,
+        summary: "ok",
+        runId: "run_abc123",
+      });
+      expect(row.runId).toBe("run_abc123");
+      expect(db.listAudit().find((r) => r.id === row.id)?.runId).toBe("run_abc123");
+    });
+
+    it("maps an absent runId to undefined (e.g. the scheduler path)", () => {
+      const row = db.insertAudit({
+        actor: "timer",
+        toolName: "fs.read",
+        argsJson: "{}",
+        outcome: "ok",
+        durationMs: 5,
+        summary: "ok",
+      });
+      expect(db.listAudit().find((r) => r.id === row.id)?.runId ?? undefined).toBeUndefined();
+    });
+  });
+
+  describe("run events", () => {
+    it("insertRunEvent applies defaults (rne_ id, ts) and round-trips", () => {
+      const rec = db.insertRunEvent({
+        runId: "run_1",
+        seq: 0,
+        type: "assistant:start",
+      });
+      expect(rec.id).toMatch(/^rne_[0-9a-f]{8}$/);
+      expect(rec.ts).toBeGreaterThan(0);
+      const fetched = db.listRunEvents("run_1");
+      expect(fetched).toHaveLength(1);
+      expect(fetched[0].type).toBe("assistant:start");
+      expect(fetched[0].payload ?? undefined).toBeUndefined();
+    });
+
+    it("preserves a JSON payload verbatim", () => {
+      db.insertRunEvent({
+        runId: "run_1",
+        seq: 0,
+        type: "tool:call",
+        payload: JSON.stringify({ name: "fs.read", id: "c1" }),
+      });
+      const fetched = db.listRunEvents("run_1");
+      expect(JSON.parse(fetched[0].payload!)).toEqual({ name: "fs.read", id: "c1" });
+    });
+
+    it("listRunEvents returns rows oldest-first by seq, scoped to one run", () => {
+      db.insertRunEvent({ runId: "run_a", seq: 2, type: "assistant:end" });
+      db.insertRunEvent({ runId: "run_a", seq: 0, type: "assistant:start" });
+      db.insertRunEvent({ runId: "run_a", seq: 1, type: "tool:call" });
+      db.insertRunEvent({ runId: "run_b", seq: 0, type: "assistant:start" });
+
+      const a = db.listRunEvents("run_a");
+      expect(a.map((e) => e.seq)).toEqual([0, 1, 2]);
+      expect(a.map((e) => e.type)).toEqual([
+        "assistant:start",
+        "tool:call",
+        "assistant:end",
+      ]);
+      // A separate run's events never leak into another run's log.
+      expect(db.listRunEvents("run_b")).toHaveLength(1);
+      expect(db.listRunEvents("run_missing")).toEqual([]);
+    });
+
+    it("enforces the UNIQUE (runId, seq) backstop against a duplicated seq", () => {
+      db.insertRunEvent({ runId: "run_dup", seq: 0, type: "assistant:start" });
+      expect(() =>
+        db.insertRunEvent({ runId: "run_dup", seq: 0, type: "assistant:end" }),
+      ).toThrow();
     });
   });
 });

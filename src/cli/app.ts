@@ -17,7 +17,12 @@ import { buildAllTools } from "../tools/index.js";
 import type { ConfirmRequest, ToolActor, ToolContext } from "../tools/types.js";
 import { RecipeRegistry } from "../recipes/registry.js";
 import { AgentSession } from "../agent/loop.js";
-import type { AgentEventSink } from "../agent/events.js";
+import {
+  type AgentEventSink,
+  type RunIdRef,
+  multiSink,
+  RunEventSink,
+} from "../agent/events.js";
 import type { MainPromptContext } from "../models/prompts/index.js";
 import { Scheduler } from "../daemon/scheduler.js";
 import type { QueueEvent } from "../schemas.js";
@@ -48,6 +53,8 @@ export class App {
   readonly registry: ToolRegistry;
   readonly recipes: RecipeRegistry;
   readonly sessionId: string;
+  /** Holds the id of the run currently streaming; set per-turn by AgentSession. */
+  readonly runIdRef: RunIdRef = { current: undefined };
   session!: AgentSession;
   scheduler?: Scheduler;
 
@@ -76,9 +83,12 @@ export class App {
       ctx: app.buildContext("main"),
       promptContext: app.promptContext(),
       sessionId: app.sessionId,
-      // Forward to whatever sink is currently registered via setHooks(); reading
-      // this.hooks live means the UI can attach after the session is built.
-      events: app.agentEventProxy(),
+      // Compose two sinks: a durable one that records the run to `run_events`, and
+      // the live proxy that forwards to whatever UI sink is registered via
+      // setHooks(). multiSink isolates each, so a DB write failure can't break the
+      // UI stream. The session stamps the current run id onto runIdRef per turn.
+      events: multiSink(new RunEventSink(app.db, app.runIdRef), app.agentEventProxy()),
+      runIdRef: app.runIdRef,
     });
     return app;
   }
