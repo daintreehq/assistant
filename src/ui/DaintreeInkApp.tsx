@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useApp, useInput, useWindowSize } from "ink";
 import type { App as DaintreeApp } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
+import { useAttentionSignal } from "./hooks/useAttentionSignal.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
 import { ControlRoom, type View } from "./ControlRoom.js";
 import { currentDebugLogPath } from "../debugLog.js";
@@ -23,6 +24,13 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   const [expanded, setExpanded] = useState(false);
   const controller = useDaintreeController(app, exit);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
+
+  // Out-of-band cue (BEL + window-title badge) so a fresh attention event reaches
+  // the user even when they've switched focus away from the cockpit.
+  useAttentionSignal({
+    bridge: controller.bridge,
+    inboxCount: controller.dashboard.inbox.length,
+  });
 
   // A `/panel` command opens the matching purposeful view.
   useEffect(() => {
