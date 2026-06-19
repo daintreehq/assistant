@@ -252,34 +252,53 @@ export type WatcherClassification = z.infer<typeof WatcherClassification>;
 /* -------------------------------------------------------------------------- */
 
 /**
- * Deterministic verdict of a post-completion reconciliation pass.
- *   - "clean"   — the worktree has no uncommitted changes; completion is trustworthy.
- *   - "dirty"   — uncommitted changes remain; the agent's work needs review first.
- *   - "unknown" — the git state could not be read (MCP down / unrecognized shape);
- *                 treat as not-yet-verified, never as clean.
+ * Three-state verdict of a post-completion verification pass. Completion is judged
+ * from evidence of correctness against a task's acceptance contract, NOT from git
+ * cleanliness alone (a clean tree can mean the agent did nothing, never committed,
+ * or never ran — see issue #83). Thin evidence is never silently upgraded to
+ * success.
+ *   - "verified" — the worktree is clean AND the acceptance contract is met
+ *                  (or, absent a contract, the worktree is clean — legacy gate).
+ *   - "failed"   — the acceptance contract was confidently NOT met.
+ *   - "unknown"  — the evidence is inconclusive: uncommitted work remains, the
+ *                  git state could not be read, or the acceptance judge was not
+ *                  confident. A first-class, legitimate outcome — never treated as
+ *                  success.
  */
-export const VerificationVerdict = z.enum(["clean", "dirty", "unknown"]);
+export const VerificationVerdict = z.enum(["verified", "failed", "unknown"]);
 export type VerificationVerdict = z.infer<typeof VerificationVerdict>;
 
 /**
- * Structured result of the read-only post-completion verification pass. The exit
- * code is now available as signal evidence, but Daintree exposes no test/lint
- * runner, so the verdict is still derived solely from the worktree's git
- * cleanliness (via git.getProjectPulse). This is attached as queue-event evidence
- * so the conductor can require a clean result before ever suggesting irreversible
- * git operations.
+ * Structured evidence bundle from the read-only post-completion verification pass.
+ * Beyond the deterministic git artifact state (via git.getProjectPulse) it can
+ * carry the task's acceptance contract and the model judge's assessment of whether
+ * the agent's terminal output satisfied it. Attached as queue-event evidence so the
+ * conductor can require a `verified` result — not mere git cleanliness — before
+ * ever suggesting irreversible git operations.
+ *
+ * `verdict` uses `.catch("unknown")` so a legacy persisted blob (old enum values
+ * "clean"/"dirty") deserializes to the safe `unknown`, never a false `verified`.
+ * New fields are optional so old blobs still parse.
  */
 export const VerificationResult = z
   .object({
-    verdict: VerificationVerdict,
-    /** True when the worktree has uncommitted changes. */
+    verdict: VerificationVerdict.catch("unknown"),
+    /** True when the worktree has uncommitted changes (artifact state). */
     hasGitChanges: z.boolean(),
     /** Count of changed files when derivable from the pulse, else 0. */
     changedFiles: z.number().int().min(0).default(0),
+    /** Changed-file paths when the pulse exposes them, else empty. */
+    changedFileList: z.array(z.string()).default([]),
     /** One-line human/LLM-facing description of the git state observed. */
     gitSummary: z.string(),
+    /** The task-specific acceptance contract the verdict was judged against. */
+    acceptanceCriteria: z.string().optional(),
+    /** The model judge's one-line rationale for whether the contract was met. */
+    criteriaMetSummary: z.string().optional(),
+    /** Unresolved warnings surfaced during verification (non-fatal). */
+    unresolvedWarnings: z.array(z.string()).default([]),
   })
-  .strict();
+  .strip();
 export type VerificationResult = z.infer<typeof VerificationResult>;
 
 /** Evidence-string prefix that carries a serialized VerificationResult. */

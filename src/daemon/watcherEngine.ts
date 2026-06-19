@@ -530,6 +530,13 @@ type WatcherOptions = {
    *  through the completion gate instead of waking the main thread. Absent for
    *  manual watchers and treated as "edit" (genuine waiting_for_input). */
   spawnMode?: "edit" | "explore";
+  /** The task-specific acceptance contract this supervisor verifies completion
+   *  against (issue #83). When present, a reported completion is gated not on git
+   *  cleanliness alone but on a model judge deciding whether the agent's terminal
+   *  output satisfies these criteria — so thin evidence (a clean tree) is never
+   *  silently upgraded to success. Absent for manual watchers and legacy spawns,
+   *  which fall back to the git-cleanliness gate. */
+  acceptanceCriteria?: string;
 };
 
 /**
@@ -619,18 +626,51 @@ function countChangedFiles(sc: Record<string, unknown>): number | undefined {
 }
 
 /**
- * Derive a VerificationResult from a git.getProjectPulse result. The pulse shape
- * is not strictly documented, so this is defensive: prefer an explicit dirty/clean
- * flag, then a changed-file count, then text markers from a `git status`-style
- * body. When nothing is conclusive the verdict is "unknown" — never a false
- * "clean" — so the conductor stays on the safe (review-first) path. Pure +
- * exported for unit testing without MCP.
+ * Pull the changed-file PATHS from a git.getProjectPulse structuredContent when it
+ * exposes them as string arrays — so the evidence bundle can list what changed, not
+ * just count it. Tolerates the same shapes countChangedFiles recognizes (a flat
+ * changed-files array, or grouped staged/unstaged/untracked collections). Returns
+ * an empty list when no array of paths is present (the count may still be known).
+ */
+function extractChangedFileList(sc: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (typeof item === "string" && item.trim()) out.push(item);
+        else if (item && typeof item === "object") {
+          // Grouped pulses sometimes carry { path: "x.ts" } entries.
+          const p = (item as Record<string, unknown>).path;
+          if (typeof p === "string" && p.trim()) out.push(p);
+        }
+      }
+    }
+  };
+  for (const k of ["changedFiles", "changed_files"]) push(sc[k]);
+  for (const k of ["staged", "unstaged", "untracked", "modified", "added", "deleted"]) {
+    push(sc[k]);
+  }
+  // Dedupe while preserving first-seen order (a path can appear staged+unstaged).
+  return [...new Set(out)];
+}
+
+/**
+ * Derive the git artifact state of a VerificationResult from a git.getProjectPulse
+ * result. The pulse shape is not strictly documented, so this is defensive: prefer
+ * an explicit dirty/clean flag, then a changed-file count, then text markers from a
+ * `git status`-style body. Verdict mapping (issue #83): a clean tree is "verified"
+ * git artifact state, a dirty tree is "unknown" (uncommitted work is the NORMAL
+ * state after an agent edits — not a failure, but not proof of success either), and
+ * an unreadable state is "unknown". This never returns "failed" — only the
+ * acceptance judge in gateCompletion can confidently fail a task. Pure + exported
+ * for unit testing without MCP.
  */
 export function deriveVerification(
   sc: Record<string, unknown>,
   text: string,
 ): VerificationResult {
   const changedFiles = countChangedFiles(sc);
+  const changedFileList = extractChangedFileList(sc);
 
   const dirtyFlag =
     typeof sc.isDirty === "boolean"
@@ -669,26 +709,36 @@ export function deriveVerification(
       verdict: "unknown",
       hasGitChanges: false,
       changedFiles: 0,
+      changedFileList: [],
       gitSummary: "git state could not be determined from the project pulse",
+      unresolvedWarnings: [],
     };
   }
   if (hasGitChanges) {
-    const count = changedFiles ?? 0;
+    const count = changedFiles ?? changedFileList.length;
+    // A dirty tree is the normal state after an agent edits files (issue #83): it
+    // is NOT a failure and NOT a verified success — it is uncommitted work whose
+    // correctness is still unproven. Verdict "unknown" keeps the conductor on the
+    // review-first path; the acceptance judge (if any) refines it in gateCompletion.
     return {
-      verdict: "dirty",
+      verdict: "unknown",
       hasGitChanges: true,
       changedFiles: count,
+      changedFileList,
       gitSummary:
         count > 0
           ? `${count} uncommitted file change(s) in the worktree`
           : "uncommitted changes present in the worktree",
+      unresolvedWarnings: [],
     };
   }
   return {
-    verdict: "clean",
+    verdict: "verified",
     hasGitChanges: false,
     changedFiles: 0,
+    changedFileList: [],
     gitSummary: "working tree clean (no uncommitted changes)",
+    unresolvedWarnings: [],
   };
 }
 
@@ -709,7 +759,9 @@ export async function runVerificationPass(
     verdict: "unknown",
     hasGitChanges: false,
     changedFiles: 0,
+    changedFileList: [],
     gitSummary,
+    unresolvedWarnings: [],
   });
   if (!ctx.mcp.isConnected()) {
     return unverifiable("Daintree MCP not connected; could not verify git state");
@@ -735,41 +787,128 @@ interface GatedCompletion {
 }
 
 /**
- * Resolve a tentative "the agent is done" signal into a trustworthy outcome by
- * running the read-only verification pass. A clean worktree promotes to
- * `completed_success` (terminal, severity done); a dirty or unverifiable tree
- * demotes to `completed_unverified` (non-terminal, attention) so no irreversible
- * action is suggested off an unverified completion. Called from BOTH the Daintree
- * FSM `completed` path and the small-model `completed_success` path, so the gate
- * cannot be bypassed by the model independently classifying completion from tail
- * text while the FSM is still `working`.
+ * Resolve a tentative "the agent is done" signal into a trustworthy outcome
+ * (issue #83). Completion is judged from evidence of correctness, not git
+ * cleanliness alone:
+ *
+ *  - When the supervisor carries an acceptance contract, the agent's terminal
+ *    output is judged against it by a model call. A confident match on a CLEAN
+ *    worktree promotes to `completed_success` (verdict "verified"); a confident
+ *    non-match demotes to `completed_unverified` (verdict "failed"); a met
+ *    contract on a dirty/unreadable tree, or a non-confident judge, stays
+ *    `completed_unverified` (verdict "unknown") — thin evidence is never silently
+ *    upgraded to success.
+ *  - Absent a contract (manual watchers, legacy spawns), the git-cleanliness gate
+ *    applies: a clean tree promotes, anything else stays review-first.
+ *
+ * Called from BOTH the Daintree FSM `completed` path and the small-model
+ * `completed_success` path, so the gate cannot be bypassed by the model
+ * independently classifying completion from tail text while the FSM is still
+ * `working`.
  */
 async function gateCompletion(
   ctx: ToolContext,
   scope: { worktreeId?: string } | undefined,
   baseEvidence: string[],
+  gate?: { rec: WatcherRecord; signals: WatcherSignals; acceptanceCriteria?: string },
 ): Promise<GatedCompletion> {
   const verification = await runVerificationPass(ctx, scope);
-  const evidence = [
-    ...baseEvidence,
-    `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify(verification)}`,
-  ];
-  if (verification.verdict === "clean") {
-    return {
-      classification: "completed_success",
-      confidence: 0.85,
-      summary: "Agent completed; worktree clean and verified.",
-      evidence,
-    };
-  }
-  return {
-    classification: "completed_unverified",
-    confidence: 0.8,
-    summary:
-      verification.verdict === "dirty"
+  const isClean = verification.verdict === "verified" && !verification.hasGitChanges;
+  const criteria = gate?.acceptanceCriteria?.trim();
+
+  // No acceptance contract → legacy git-cleanliness gate. A clean tree is the best
+  // evidence available, so it promotes; a dirty or unreadable tree stays review-first.
+  if (!criteria) {
+    if (isClean) {
+      return finalizeGate(verification, baseEvidence, {
+        classification: "completed_success",
+        confidence: 0.85,
+        summary: "Agent completed; worktree clean and verified.",
+      });
+    }
+    return finalizeGate(verification, baseEvidence, {
+      classification: "completed_unverified",
+      confidence: 0.8,
+      summary: verification.hasGitChanges
         ? `Agent completed but ${verification.gitSummary} — review before commit/push.`
         : `Agent completed but git state is unverified (${verification.gitSummary}).`,
-    evidence,
+    });
+  }
+
+  // Acceptance contract present → judge the agent's output against it. The contract
+  // and the judge's rationale ride along in the evidence bundle either way.
+  verification.acceptanceCriteria = criteria;
+  let answer: ModelJudgeAnswer | undefined;
+  // Only judge when there is actual terminal evidence to judge. An empty tail means
+  // we have NO evidence (e.g. a failed terminal.getOutput read, or the list-fallback
+  // path that never reads scrollback) — running the judge on nothing could return a
+  // confident "not met" and harden a transport hiccup into a false "failed". No
+  // evidence → leave the verdict "unknown".
+  if (gate && ctx.mcp.isConnected() && gate.signals.tail.trim().length > 0) {
+    const question = `Did the agent satisfy this acceptance contract for the task? Contract: ${criteria}`;
+    try {
+      const results = await runModelJudges([question], gate.rec, gate.signals, ctx);
+      answer = results.get(question);
+    } catch {
+      // runModelJudges already degrades per-question, but never let a verification
+      // failure throw out of the gate — an unevaluable contract is just "unknown".
+      answer = undefined;
+    }
+  }
+  const confident = !!answer && answer.confidence >= JUDGE_CONFIDENCE_FLOOR;
+  if (answer) verification.criteriaMetSummary = answer.reason;
+
+  // Confident YES on a clean tree is the only path to a verified success: the
+  // contract is met AND there is no uncommitted work left to review.
+  if (confident && answer!.matched && isClean) {
+    verification.verdict = "verified";
+    return finalizeGate(verification, baseEvidence, {
+      classification: "completed_success",
+      confidence: Math.max(0.85, answer!.confidence),
+      summary: `Agent completed; acceptance contract met and worktree clean. ${answer!.reason}`.trim(),
+    });
+  }
+  // Confident NO → the contract was not satisfied. A genuine failure, surfaced for
+  // review (non-terminal: a later attempt can still satisfy the contract).
+  if (confident && !answer!.matched) {
+    verification.verdict = "failed";
+    return finalizeGate(verification, baseEvidence, {
+      classification: "completed_unverified",
+      confidence: answer!.confidence,
+      summary: `Agent stopped but the acceptance contract was not met — review. ${answer!.reason}`.trim(),
+    });
+  }
+  // Everything else is inconclusive: the contract was met but the tree is still
+  // dirty/unreadable (uncommitted work), or the judge was not confident. Keep it
+  // first-class "unknown" — never upgrade thin evidence to success.
+  verification.verdict = "unknown";
+  const why =
+    confident && answer!.matched
+      ? `acceptance contract met but ${verification.gitSummary} — review before commit/push`
+      : `acceptance contract could not be confidently verified (${verification.gitSummary})`;
+  return finalizeGate(verification, baseEvidence, {
+    classification: "completed_unverified",
+    confidence: 0.8,
+    summary: `Agent completed but ${why}.`,
+  });
+}
+
+/**
+ * Attach the (possibly mutated) VerificationResult bundle as serialized evidence
+ * and return the gated completion. Centralizes the evidence-string construction so
+ * every gateCompletion branch emits the final verdict, never a stale snapshot.
+ */
+function finalizeGate(
+  verification: VerificationResult,
+  baseEvidence: string[],
+  outcome: Omit<GatedCompletion, "evidence">,
+): GatedCompletion {
+  return {
+    ...outcome,
+    evidence: [
+      ...baseEvidence,
+      `${VERIFICATION_EVIDENCE_PREFIX}${JSON.stringify(verification)}`,
+    ],
   };
 }
 
@@ -992,6 +1131,7 @@ export async function runTerminalWatcherCheck(
             ctx,
             options.verificationScope,
             ["agentState=completed (terminal.list)"],
+            { rec, signals, acceptanceCriteria: options.acceptanceCriteria },
           ));
         } else {
           // Alive and "working" per terminal.list, but getStatus omitted it — so
@@ -1070,6 +1210,7 @@ export async function runTerminalWatcherCheck(
                       ctx,
                       options.verificationScope,
                       evidence,
+                      { rec, signals, acceptanceCriteria: options.acceptanceCriteria },
                     ));
                 }
               }
@@ -1206,6 +1347,7 @@ export async function runTerminalWatcherCheck(
           ctx,
           options.verificationScope,
           ["agentState=completed"],
+          { rec, signals, acceptanceCriteria: options.acceptanceCriteria },
         ));
       } else if (readFailed) {
         // The deep read failed while the agent is still working — not silence.
@@ -1259,6 +1401,7 @@ export async function runTerminalWatcherCheck(
               ctx,
               options.verificationScope,
               evidence,
+              { rec, signals, acceptanceCriteria: options.acceptanceCriteria },
             ));
           }
         }
