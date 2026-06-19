@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { watcherTools } from "../src/tools/watcherTools.js";
 import { Db } from "../src/storage/db.js";
-import { WatchCondition } from "../src/schemas.js";
+import { WatchCondition, AgentState } from "../src/schemas.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 const create = watcherTools.find((t) => t.name === "watcher.terminal.create")!;
@@ -117,6 +117,84 @@ describe("WatchCondition rejects degenerate conditions", () => {
     expect(
       WatchCondition.safeParse({ all: [{ contains: "done" }, { runtimeStatusIs: "exited" }] }).success,
     ).toBe(true);
+  });
+});
+
+describe("watcher.terminal.create parameters schema surfaces the WatchCondition DSL", () => {
+  // The hand-written JSON Schema in `parameters` is what Fireworks sees; these
+  // tests guard the Fireworks-incompatible patterns and the modelJudge surfacing.
+  const params = create.parameters as Record<string, any>;
+  const stopWhen = params.properties.stopWhen as Record<string, any>;
+  const alertWhen = params.properties.alertWhen as Record<string, any>;
+  const branches = stopWhen.anyOf as Record<string, any>[];
+
+  const leafFor = (key: string) =>
+    branches.find((b) => b.properties && key in b.properties);
+
+  it("describes stopWhen and alertWhen as a 9-branch anyOf (6 leaves + all/any/not)", () => {
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches).toHaveLength(9);
+    expect(Array.isArray(alertWhen.anyOf)).toBe(true);
+    expect((alertWhen.anyOf as unknown[]).length).toBe(9);
+    for (const key of [
+      "stateIs",
+      "runtimeStatusIs",
+      "contains",
+      "regex",
+      "noOutputForMs",
+      "modelJudge",
+      "all",
+      "any",
+      "not",
+    ]) {
+      expect(leafFor(key), `missing branch for ${key}`).toBeDefined();
+    }
+  });
+
+  it("mirrors the AgentState enum on the stateIs leaf (catches drift from schemas.ts)", () => {
+    const stateIs = leafFor("stateIs")!;
+    // Compare against the authoritative Zod enum so a new state in schemas.ts
+    // breaks this test rather than letting the hand-written schema drift.
+    expect(stateIs.properties.stateIs.enum).toEqual([...AgentState.options]);
+  });
+
+  it("documents the modelJudge per-check cost at the watcher's configured tier", () => {
+    const modelJudge = leafFor("modelJudge")!;
+    const desc = modelJudge.properties.modelJudge.description as string;
+    expect(desc).toMatch(/model call/i);
+    // Cost must reference the configurable tier, not a blanket "small-model".
+    expect(desc).toMatch(/tier/i);
+  });
+
+  it("flattens all and any combinators to an anyOf of atomic leaves with minItems", () => {
+    for (const key of ["all", "any"] as const) {
+      const combinator = leafFor(key)!;
+      const arr = combinator.properties[key];
+      expect(Array.isArray(arr.items.anyOf)).toBe(true);
+      expect(arr.minItems).toBe(1);
+      // Children are the atomic leaf set only — no nested all/any/not branch.
+      const childKeys = (arr.items.anyOf as Record<string, any>[]).flatMap(
+        (b) => Object.keys(b.properties ?? {}),
+      );
+      expect(childKeys).not.toContain("all");
+      expect(childKeys).not.toContain("any");
+      expect(childKeys).not.toContain("not");
+    }
+  });
+
+  it("expresses the DSL `not` as a property, not the JSON-Schema `not` keyword", () => {
+    const notBranch = leafFor("not")!;
+    expect(notBranch.properties.not.anyOf).toBeDefined();
+    expect(notBranch.required).toContain("not");
+    // The schema object itself must never carry a top-level JSON-Schema `not`.
+    expect("not" in notBranch).toBe(false);
+    expect("not" in stopWhen).toBe(false);
+  });
+
+  it("uses no Fireworks-incompatible keywords (oneOf / $ref) anywhere", () => {
+    const json = JSON.stringify(params);
+    expect(json).not.toContain("oneOf");
+    expect(json).not.toContain("$ref");
   });
 });
 
