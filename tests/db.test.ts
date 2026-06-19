@@ -260,6 +260,84 @@ describe("Db startup watcher invalidation", () => {
 
     db.close();
   });
+
+  it("resolves open watcher-sourced inbox events on reopen, sparing other sources", () => {
+    // The events table is not session-scoped and watcher publishes carry no TTL,
+    // so a prior session's watcher alert would otherwise resurface in the inbox
+    // on every launch (reading as a stale watch that escaped the sweep). Both
+    // watcher sources are swept; timer/system/user events legitimately persist.
+    let resolvedWatcherAt: number | undefined;
+    {
+      const db = new Db(path);
+      db.upsertEvent({
+        source: "terminal_watcher",
+        severity: "attention",
+        title: "Claude: terminal exited",
+        summary: "Terminal is no longer reported by Daintree (closed or removed).",
+        dedupeKey: "watcher:wch_old:term_1",
+      });
+      db.upsertEvent({
+        source: "worktree_watcher",
+        severity: "attention",
+        title: "worktree gone",
+        summary: "Worktree is no longer present.",
+      });
+      // Non-watcher sources must survive the session boundary.
+      db.upsertEvent({
+        source: "timer",
+        severity: "info",
+        title: "timer fired",
+        summary: "A scheduled timer fired.",
+      });
+      db.upsertEvent({
+        source: "system",
+        severity: "info",
+        title: "system note",
+        summary: "A system event.",
+      });
+      // An already-resolved watcher event must stay resolved, not be re-stamped:
+      // the sweep is guarded on `resolvedAt IS NULL`, so its original timestamp
+      // must survive the reopen unchanged.
+      const resolved = db.upsertEvent({
+        source: "terminal_watcher",
+        severity: "done",
+        title: "earlier alert",
+        summary: "Already handled.",
+      });
+      db.resolveEvent(resolved.id);
+      resolvedWatcherAt = db.getEvent(resolved.id)!.resolvedAt;
+      db.close();
+    }
+
+    const db = new Db(path);
+
+    // Open watcher events are gone from the default (unresolved) digest...
+    const open = db.listEvents();
+    const openSources = open.map((e) => e.source);
+    expect(openSources).not.toContain("terminal_watcher");
+    expect(openSources).not.toContain("worktree_watcher");
+    // ...while timer and system events are untouched.
+    expect(openSources).toContain("timer");
+    expect(openSources).toContain("system");
+
+    // The watcher events are resolved, not deleted: they remain retrievable for
+    // the UI history view, now stamped with a resolvedAt.
+    const all = db.listEvents({ includeResolved: true });
+    const sweptWatcherEvents = all.filter(
+      (e) =>
+        (e.source === "terminal_watcher" || e.source === "worktree_watcher") &&
+        e.title !== "earlier alert",
+    );
+    expect(sweptWatcherEvents.length).toBe(2);
+    for (const e of sweptWatcherEvents) expect(e.resolvedAt).toBeTruthy();
+
+    // The already-resolved watcher event keeps its ORIGINAL resolvedAt — the
+    // `resolvedAt IS NULL` guard means the sweep never re-stamps it.
+    const earlier = all.find((e) => e.title === "earlier alert");
+    expect(earlier?.resolvedAt).toBe(resolvedWatcherAt);
+
+    db.close();
+  });
 });
 
 describe("Db", () => {
