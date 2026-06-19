@@ -69,6 +69,10 @@ describe("WatchCondition rejects degenerate conditions", () => {
     expect(WatchCondition.safeParse({ regex: "[" }).success).toBe(false);
   });
 
+  it("rejects an empty regex pattern (matches everything)", () => {
+    expect(WatchCondition.safeParse({ regex: "" }).success).toBe(false);
+  });
+
   it("accepts a valid regex pattern", () => {
     expect(WatchCondition.safeParse({ regex: "done|failed" }).success).toBe(true);
   });
@@ -78,12 +82,26 @@ describe("WatchCondition rejects degenerate conditions", () => {
     expect(WatchCondition.safeParse({ noOutputForMs: -1 }).success).toBe(false);
   });
 
+  it("rejects a non-finite or non-integer noOutputForMs", () => {
+    expect(WatchCondition.safeParse({ noOutputForMs: Infinity }).success).toBe(false);
+    expect(WatchCondition.safeParse({ noOutputForMs: 0.5 }).success).toBe(false);
+  });
+
   it("accepts a positive noOutputForMs", () => {
     expect(WatchCondition.safeParse({ noOutputForMs: 1 }).success).toBe(true);
   });
 
-  it("rejects an empty modelJudge string", () => {
+  it("rejects an empty or whitespace-only modelJudge string", () => {
     expect(WatchCondition.safeParse({ modelJudge: "" }).success).toBe(false);
+    expect(WatchCondition.safeParse({ modelJudge: "  " }).success).toBe(false);
+  });
+
+  it("rejects a whitespace-only contains string", () => {
+    expect(WatchCondition.safeParse({ contains: "   " }).success).toBe(false);
+  });
+
+  it("rejects an invalid leaf wrapped in not", () => {
+    expect(WatchCondition.safeParse({ not: { contains: "" } }).success).toBe(false);
   });
 
   it("rejects empty all/any groups", () => {
