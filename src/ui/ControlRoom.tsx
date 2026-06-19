@@ -11,6 +11,7 @@
  * enhancements that hand more room to the transcript. Chrome is budgeted so the
  * operations sections and composer are never pushed off a short terminal.
  */
+import type { Ref } from "react";
 import { Box, Text } from "ink";
 import type {
   DashboardState,
@@ -26,7 +27,7 @@ import { OperationsView } from "./components/OperationsView.js";
 import { OpsRail } from "./components/OpsRail.js";
 import { StatusLine } from "./components/StatusLine.js";
 import { AttentionBanner } from "./components/AttentionBanner.js";
-import { Composer } from "./components/Composer.js";
+import { Composer, type ComposerHandle } from "./components/Composer.js";
 import { ApprovalSheet } from "./components/ApprovalSheet.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
 import { StateBadge, formatDuration } from "./primitives.js";
@@ -90,6 +91,8 @@ export interface ControlRoomProps {
   onSubmit?: (value: string) => boolean | void | Promise<void>;
   /** Abort the in-flight turn (Escape on an empty composer while busy). */
   onCancel?: () => void;
+  /** Handle the composer registers so a pulled-back message can be restored (#61). */
+  composerRef?: Ref<ComposerHandle>;
   onResolve?: (approved: boolean) => void;
 }
 
@@ -116,6 +119,7 @@ export function ControlRoom({
   cancellable = false,
   onSubmit = () => {},
   onCancel,
+  composerRef,
   onResolve = () => {},
 }: ControlRoomProps) {
   // One cell of breathing room around the whole surface, the way other CLIs
@@ -309,6 +313,7 @@ export function ControlRoom({
           cancellable={cancellable}
           onSubmit={onSubmit}
           onCancel={onCancel}
+          ref={composerRef}
         />
       </Box>
     </Box>

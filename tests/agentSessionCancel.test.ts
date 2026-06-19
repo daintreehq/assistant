@@ -304,4 +304,40 @@ describe("AgentSession cancellation (#45)", () => {
     // The user message was never pushed into model history (no orphan turn).
     expect(session.getMessages().some((m) => m.content === "hi")).toBe(false);
   });
+
+  it("does NOT push the user message when aborted during the pre-turn awaits (#61)", async () => {
+    const { events, sink } = recordingEvents();
+    const controller = new AbortController();
+    let streamCalls = 0;
+    const { session } = makeSession(
+      {
+        // The recipe selector runs in the pre-turn window. Abort mid-flight to
+        // mimic an Escape (pull-back) landing after send() began but before the
+        // user message is committed to history.
+        json: async () => {
+          controller.abort();
+          return {
+            recipeIds: [],
+            confidence: 0,
+            reason: "",
+            taskType: "qa",
+            keepExisting: false,
+          };
+        },
+        stream: async () => {
+          streamCalls++;
+          return { content: "x", reasoning: "", toolCalls: [], finishReason: "stop" };
+        },
+      },
+      sink,
+    );
+
+    const reply = await session.send("hi", { signal: controller.signal });
+
+    expect(reply).toBe(CANCELLED_REPLY);
+    expect(streamCalls).toBe(0); // never reached the model
+    expect(events).toContain("cancelled:");
+    // A pulled-back message must leave no trace in model history.
+    expect(session.getMessages().some((m) => m.content === "hi")).toBe(false);
+  });
 });

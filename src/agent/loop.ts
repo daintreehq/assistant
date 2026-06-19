@@ -271,8 +271,11 @@ export class AgentSession {
     await this.maybeAutoCompact(opts.signal);
     if (!opts.readOnly) await this.maybeRefreshRecipes(userInput, opts.signal);
     // The pre-turn model calls above (auto-compact summary, recipe selection) honour
-    // the signal and swallow a cancel internally; catch the abort here before we
-    // push the user message so a cancel during them leaves no orphan turn in history.
+    // the signal and swallow a cancel internally, and they await/yield long enough
+    // for an Escape to land. Re-check before committing the user message so a cancel
+    // arriving in THIS window also leaves no orphan turn — the same guarantee as the
+    // entry check. Pull-back (issue #61) depends on this: a message yanked back before
+    // any assistant output must never enter model history.
     if (opts.signal?.aborted) {
       this.events.assistantCancelled("");
       return CANCELLED_REPLY;

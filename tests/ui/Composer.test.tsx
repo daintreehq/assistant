@@ -1,5 +1,9 @@
+import { createRef } from "react";
 import { render } from "ink-testing-library";
-import { Composer } from "../../src/ui/components/Composer.js";
+import {
+  Composer,
+  type ComposerHandle,
+} from "../../src/ui/components/Composer.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
@@ -146,6 +150,37 @@ describe("Composer", () => {
     // The buffer is cleared (cancel-edit gesture), and the turn is NOT aborted.
     expect(cancelled).toBe(0);
     expect(lastFrame() ?? "").not.toContain("half typed");
+  });
+
+  it("restore() pushes a pulled-back message back into the buffer (#61)", async () => {
+    const ref = createRef<ComposerHandle>();
+    const { lastFrame } = render(
+      <Composer busy={false} focus onSubmit={() => {}} ref={ref} />,
+    );
+    await tick();
+    // Buffer starts empty (the placeholder shows, not real text).
+    expect(lastFrame() ?? "").toContain("supervise");
+
+    ref.current!.restore("pulled back message");
+    await tick();
+    expect(lastFrame() ?? "").toContain("pulled back message");
+  });
+
+  it("restored text can be edited and submitted (#61)", async () => {
+    let submitted: string | undefined;
+    const ref = createRef<ComposerHandle>();
+    const { stdin } = render(
+      <Composer busy={false} focus onSubmit={(v) => (submitted = v)} ref={ref} />,
+    );
+    await tick();
+    ref.current!.restore("edit me");
+    await tick();
+    // The cursor parks at the end after an external replacement, so typing appends.
+    stdin.write("!");
+    await tick();
+    stdin.write(ENTER);
+    await tick();
+    expect(submitted).toBe("edit me!");
   });
 
   it("Escape when idle does not invoke onCancel (#45)", async () => {

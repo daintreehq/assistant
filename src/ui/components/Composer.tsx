@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useImperativeHandle, useState, type Ref } from "react";
 import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
 import { glyphs, ui } from "../theme.js";
@@ -14,6 +14,17 @@ export const COMMAND_SUGGESTIONS: Array<[string, string]> = paletteEntries();
 
 /** Cap on the recallable prompt history kept for ↑/↓ during a session. */
 const HISTORY_LIMIT = 200;
+
+/**
+ * Imperative handle the controller uses to push text back into the composer when
+ * a just-sent message is pulled back with Escape (issue #61). The buffer stays
+ * owned by the composer (lifting it would re-render the whole tree on every
+ * keystroke), so the one out-of-band write is exposed as a method instead.
+ */
+export interface ComposerHandle {
+  /** Replace the composer buffer (cursor parks at end via MultilineInput). */
+  restore(text: string): void;
+}
 
 function suggestionsFor(value: string): Array<[string, string]> {
   if (!value.startsWith("/")) return [];
@@ -40,6 +51,7 @@ export function Composer({
   cancellable,
   onSubmit,
   onCancel,
+  ref,
 }: {
   busy: boolean;
   /** When false the input ignores keystrokes (e.g. during a turn or a modal). */
@@ -56,8 +68,14 @@ export function Composer({
   /** Abort the in-flight turn — invoked on Escape when the composer is empty and
    *  busy. With text present, Escape clears the buffer instead (no cancel). */
   onCancel?: () => void;
+  /** Imperative handle (React 19 ref-as-prop) exposing {@link ComposerHandle} so
+   *  the controller can restore a pulled-back message into the buffer. */
+  ref?: Ref<ComposerHandle>;
 }) {
   const [value, setValue] = useState("");
+  // The one out-of-band write into the otherwise composer-owned buffer: restoring
+  // a message the user pulled back with Escape before any assistant output (#61).
+  useImperativeHandle(ref, () => ({ restore: (text: string) => setValue(text) }), []);
   // Session prompt history (oldest first) for ↑/↓ recall in the input. Lives
   // here because this is where accepted submits are observed.
   const [history, setHistory] = useState<string[]>([]);
