@@ -125,7 +125,8 @@ const WATCH_CONDITION_LEAVES: Record<string, unknown>[] = [
     additionalProperties: false,
     properties: {
       noOutputForMs: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
         description:
           "Fire when the terminal has produced no output for this many ms (positive integer). Free, deterministic.",
       },
@@ -139,7 +140,7 @@ const WATCH_CONDITION_LEAVES: Record<string, unknown>[] = [
       modelJudge: {
         type: "string",
         description:
-          "Fire when the small model answers yes to this natural-language yes/no question about the terminal's output. Use only when the deterministic leaves (contains/regex/stateIs/runtimeStatusIs/noOutputForMs) cannot express the condition: each distinct question costs one small-model call per cadence tick (deduped across stopWhen and alertWhen; multiple distinct questions run in parallel). Example: \"Did the build finish successfully?\"",
+          "Fire when a model answers yes to this natural-language yes/no question about the terminal's output. Use only when the deterministic leaves (contains/regex/stateIs/runtimeStatusIs/noOutputForMs) cannot express the condition: each distinct question costs one model call at the watcher's configured tier (modelTier, default small) per cadence tick (deduped across stopWhen and alertWhen; multiple distinct questions run in parallel). Example: \"Did the build finish successfully?\"",
       },
     },
     required: ["modelJudge"],
@@ -207,7 +208,7 @@ export const watcherTools: ToolDef[] = [
   {
     name: "watcher.terminal.create",
     description:
-      "Create a terminal watcher that periodically classifies one or more Daintree terminals and raises attention events. Read-only orchestration; never edits files. The optional stopWhen/alertWhen conditions use the WatchCondition DSL: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, modelJudge, plus one level of all/any/not combinators. Prefer the deterministic leaves (free); modelJudge runs a small-model call per check.",
+      "Create a terminal watcher that periodically classifies one or more Daintree terminals and raises attention events. Read-only orchestration; never edits files. The optional stopWhen/alertWhen conditions use the WatchCondition DSL: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, modelJudge, plus one level of all/any/not combinators. Prefer the deterministic leaves (free); modelJudge runs a model call per check at the watcher's configured tier (default small).",
     risk: "local",
     schema: CreateArgs,
     parameters: {

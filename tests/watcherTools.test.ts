@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { watcherTools } from "../src/tools/watcherTools.js";
 import { Db } from "../src/storage/db.js";
-import { WatchCondition } from "../src/schemas.js";
+import { WatchCondition, AgentState } from "../src/schemas.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 const create = watcherTools.find((t) => t.name === "watcher.terminal.create")!;
@@ -151,33 +151,35 @@ describe("watcher.terminal.create parameters schema surfaces the WatchCondition 
     }
   });
 
-  it("exposes the full AgentState enum on the stateIs leaf", () => {
+  it("mirrors the AgentState enum on the stateIs leaf (catches drift from schemas.ts)", () => {
     const stateIs = leafFor("stateIs")!;
-    expect(stateIs.properties.stateIs.enum).toEqual([
-      "idle",
-      "working",
-      "waiting",
-      "directing",
-      "completed",
-      "exited",
-    ]);
+    // Compare against the authoritative Zod enum so a new state in schemas.ts
+    // breaks this test rather than letting the hand-written schema drift.
+    expect(stateIs.properties.stateIs.enum).toEqual([...AgentState.options]);
   });
 
-  it("documents the modelJudge per-check model cost", () => {
+  it("documents the modelJudge per-check cost at the watcher's configured tier", () => {
     const modelJudge = leafFor("modelJudge")!;
-    expect(modelJudge.properties.modelJudge.description).toMatch(/model call/i);
+    const desc = modelJudge.properties.modelJudge.description as string;
+    expect(desc).toMatch(/model call/i);
+    // Cost must reference the configurable tier, not a blanket "small-model".
+    expect(desc).toMatch(/tier/i);
   });
 
-  it("flattens all/any combinators to an anyOf of atomic leaves (no deep recursion)", () => {
-    const all = leafFor("all")!;
-    expect(Array.isArray(all.properties.all.items.anyOf)).toBe(true);
-    // Children are the atomic leaf set only — no nested all/any/not branch.
-    const childKeys = (all.properties.all.items.anyOf as Record<string, any>[]).flatMap(
-      (b) => Object.keys(b.properties ?? {}),
-    );
-    expect(childKeys).not.toContain("all");
-    expect(childKeys).not.toContain("any");
-    expect(childKeys).not.toContain("not");
+  it("flattens all and any combinators to an anyOf of atomic leaves with minItems", () => {
+    for (const key of ["all", "any"] as const) {
+      const combinator = leafFor(key)!;
+      const arr = combinator.properties[key];
+      expect(Array.isArray(arr.items.anyOf)).toBe(true);
+      expect(arr.minItems).toBe(1);
+      // Children are the atomic leaf set only — no nested all/any/not branch.
+      const childKeys = (arr.items.anyOf as Record<string, any>[]).flatMap(
+        (b) => Object.keys(b.properties ?? {}),
+      );
+      expect(childKeys).not.toContain("all");
+      expect(childKeys).not.toContain("any");
+      expect(childKeys).not.toContain("not");
+    }
   });
 
   it("expresses the DSL `not` as a property, not the JSON-Schema `not` keyword", () => {
