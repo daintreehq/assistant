@@ -375,12 +375,16 @@ async function runExtract(
     // where the object lands in reasoning_content instead of content.
     const out = await ctx.router.json(
       "small",
-      { messages, maxTokens: args.maxTokens },
+      { messages, maxTokens: args.maxTokens, signal: ctx.signal },
       ExtractionResult,
     );
     return { json: out.result };
   }
-  const res = await ctx.router.chat("small", { messages, maxTokens: args.maxTokens });
+  const res = await ctx.router.chat("small", {
+    messages,
+    maxTokens: args.maxTokens,
+    signal: ctx.signal,
+  });
   return { text: res.content.trim() };
 }
 

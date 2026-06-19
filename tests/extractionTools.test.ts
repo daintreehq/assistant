@@ -407,6 +407,60 @@ describe("terminal.extract.async — background", () => {
 });
 
 describe("terminal extraction — cancellation (#81)", () => {
+  it("threads the turn signal into the terminal.getStatus / getOutput MCP reads", async () => {
+    const controller = new AbortController();
+    const { ctx } = ctxWith({
+      // recentOutput shorter than tailBytes forces the deep getOutput fallback too.
+      status: () => [{ terminalId: "t1", agentState: "working", recentOutput: "hi" }],
+      output: () => "deep output",
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "x",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 1,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    const callMock = ctx.mcp.callTool as unknown as ReturnType<typeof vi.fn>;
+    const statusCall = callMock.mock.calls.find((c) => c[0] === "terminal.getStatus");
+    const outputCall = callMock.mock.calls.find((c) => c[0] === "terminal.getOutput");
+    // The signal rides as the 3rd arg of callTool, so a slow Daintree read is
+    // torn down on Escape rather than completing in the background.
+    expect(statusCall?.[2]).toBe(controller.signal);
+    expect(outputCall?.[2]).toBe(controller.signal);
+  });
+
+  it("threads the turn signal into the extraction model call", async () => {
+    const controller = new AbortController();
+    const chat = vi.fn().mockResolvedValue({ content: "extracted" });
+    const { ctx } = ctxWith({ chat });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "x",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 1,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    expect(chat).toHaveBeenCalled();
+    expect(chat.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
   it("stops polling promptly when the turn signal aborts mid-wait", async () => {
     const controller = new AbortController();
     let statusReads = 0;
