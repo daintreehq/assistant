@@ -470,6 +470,12 @@ type WatcherOptions = {
   /** Scopes the post-completion git verification pass to a specific worktree.
    *  Absent for manual watchers — verification then uses the active context. */
   verificationScope?: { worktreeId?: string };
+  /** The agentTask spawn mode that created this watcher. For a one-shot
+   *  "explore" agent, an `agentState=waiting` (idle at the prompt, not a real
+   *  question) is end-of-turn completion — not a human-input block — so it routes
+   *  through the completion gate instead of waking the main thread. Absent for
+   *  manual watchers and treated as "edit" (genuine waiting_for_input). */
+  spawnMode?: "edit" | "explore";
 };
 
 /**
@@ -882,15 +888,32 @@ export async function runTerminalWatcherCheck(
             evidence.push(`exitCode=${listed.exitCode} (nonzero)`);
           }
         } else if (agentState === "waiting") {
-          classification = "waiting_for_input";
-          confidence = 0.9;
-          summary =
-            listed.waitingReason === "question"
-              ? "Agent is asking a question."
-              : "Agent is waiting for input.";
-          evidence = [
-            `agentState=waiting${listed.waitingReason ? ` (${listed.waitingReason})` : ""} (terminal.list)`,
-          ];
+          if (options.spawnMode === "explore" && listed.waitingReason !== "question") {
+            // A one-shot explore agent idle at the prompt (no real question) has
+            // finished its turn — that's completion, not a human-input block. Explore
+            // is read-only, so there is nothing to git-verify and no irreversible
+            // action to gate: classify completed_success directly (terminal). Routing
+            // through gateCompletion would loop forever on a pre-existing dirty
+            // worktree, since explore can never clean it. We rely on Daintree marking
+            // a genuine interactive question as waitingReason="question"; any other or
+            // absent reason is treated as idle/end-of-turn.
+            classification = "completed_success";
+            confidence = 0.85;
+            summary = "Explore agent finished its turn (idle at prompt).";
+            evidence = [
+              `agentState=waiting${listed.waitingReason ? ` (${listed.waitingReason})` : ""} (explore-idle, terminal.list)`,
+            ];
+          } else {
+            classification = "waiting_for_input";
+            confidence = 0.9;
+            summary =
+              listed.waitingReason === "question"
+                ? "Agent is asking a question."
+                : "Agent is waiting for input.";
+            evidence = [
+              `agentState=waiting${listed.waitingReason ? ` (${listed.waitingReason})` : ""} (terminal.list)`,
+            ];
+          }
         } else if (agentState === "completed") {
           ({ classification, confidence, summary, evidence } = await gateCompletion(
             ctx,
@@ -965,15 +988,32 @@ export async function runTerminalWatcherCheck(
           evidence.push(`exitCode=${signals.exitCode} (nonzero)`);
         }
       } else if (agentState === "waiting") {
-        classification = "waiting_for_input";
-        confidence = 0.9;
-        summary =
-          waitingReason === "question"
-            ? "Agent is asking a question."
-            : "Agent is waiting for input.";
-        evidence = [
-          `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""}`,
-        ];
+        if (options.spawnMode === "explore" && waitingReason !== "question") {
+          // A one-shot explore agent idle at the prompt (no real question) has
+          // finished its turn — that's completion, not a human-input block. Explore
+          // is read-only, so there is nothing to git-verify and no irreversible
+          // action to gate: classify completed_success directly (terminal). Routing
+          // through gateCompletion would loop forever on a pre-existing dirty
+          // worktree, since explore can never clean it. We rely on Daintree marking
+          // a genuine interactive question as waitingReason="question"; any other or
+          // absent reason is treated as idle/end-of-turn.
+          classification = "completed_success";
+          confidence = 0.85;
+          summary = "Explore agent finished its turn (idle at prompt).";
+          evidence = [
+            `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""} (explore-idle)`,
+          ];
+        } else {
+          classification = "waiting_for_input";
+          confidence = 0.9;
+          summary =
+            waitingReason === "question"
+              ? "Agent is asking a question."
+              : "Agent is waiting for input.";
+          evidence = [
+            `agentState=waiting${waitingReason ? ` (${waitingReason})` : ""}`,
+          ];
+        }
       } else if (agentState === "completed") {
         // The agent claims completion. The exit code (when present) is signal
         // evidence, not a trust gate — completion trust is gated on a
