@@ -99,6 +99,35 @@ describe("ControlRoom sidebar (55–65 cols, the primary surface)", () => {
     },
   );
 
+  it("focuses one section when a panel command set activePanel", () => {
+    const f = byKey("active"); // has watchers (AGENTS), timers (SCHEDULED), audit (RECENT)
+    const frame =
+      render(
+        <ControlRoom
+          project="assistant"
+          tier="operator"
+          columns={80}
+          rows={32}
+          connected={f.connected}
+          transcript={f.transcript}
+          dashboard={f.dashboard}
+          previews={f.previews}
+          busy={f.busy}
+          stage={f.stage}
+          view="operations"
+          activePanel="timers"
+          pending={f.pending}
+          now={FIXED_NOW}
+          composerFocus={false}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("SCHEDULED");
+    // The deck is filtered to the requested panel — other sections are absent.
+    expect(frame).not.toContain("AGENTS");
+    expect(frame).not.toContain("RECENT");
+    expect(frame).not.toContain("NOW");
+  });
+
   it("keeps user and Daintree distinguishable without color", () => {
     const prev = process.env.DAINTREE_THEME;
     process.env.DAINTREE_THEME = "none";

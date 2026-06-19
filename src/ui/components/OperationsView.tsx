@@ -18,10 +18,10 @@ import {
 } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import {
-  actionKey,
   buildAgentRows,
   type AgentRow,
 } from "../presentation/operations.js";
+import type { PanelKey } from "../../cli/commandData.js";
 
 function clock(ms: number): string {
   try {
@@ -91,16 +91,6 @@ function AttentionSection({
             </Text>
             {e.summary ? (
               <Text dimColor>{"  "}{truncate(e.summary, width - 4)}</Text>
-            ) : null}
-            {e.recommendedActions && e.recommendedActions.length > 0 ? (
-              <Box>
-                <Text>{"  "}</Text>
-                {e.recommendedActions.map((a, i) => (
-                  <Text key={i} color={ui.color.info}>
-                    [{actionKey(a.label, i)} {a.label}]{"  "}
-                  </Text>
-                ))}
-              </Box>
             ) : null}
           </Box>
         );
@@ -207,13 +197,51 @@ export function OperationsView({
   previews = [],
   width = 72,
   now = Date.now(),
+  activePanel = null,
 }: {
   dashboard: DashboardState;
   previews?: TerminalPreview[];
   width?: number;
   now?: number;
+  /**
+   * When a `/panel` command focuses one section, render ONLY that section so the
+   * command lands on what it named instead of the whole deck. Ink has no native
+   * scroll-to, so "focus" is a filter, not a viewport jump. `null` (or the `help`
+   * panel, which ControlRoom renders separately) shows the full five-section deck.
+   */
+  activePanel?: Exclude<PanelKey, "help"> | null;
 }) {
   const agents = buildAgentRows(dashboard.watchers, previews);
+
+  if (activePanel) {
+    // Each section returns null when its data is empty, so render an honest
+    // "nothing here" line rather than a blank body when a focused panel is empty.
+    const panels = {
+      watchers: {
+        node: <AgentsSection agents={agents} now={now} width={width} />,
+        empty: agents.length === 0,
+      },
+      inbox: {
+        node: <AttentionSection events={dashboard.inbox} width={width} />,
+        empty: dashboard.inbox.length === 0,
+      },
+      timers: {
+        node: <ScheduledSection timers={dashboard.timers} width={width} />,
+        empty: dashboard.timers.length === 0,
+      },
+      audit: {
+        node: <RecentSection audit={dashboard.audit} width={width} />,
+        empty: dashboard.audit.length === 0,
+      },
+    };
+    const { node, empty } = panels[activePanel];
+    return (
+      <Box flexDirection="column" gap={1}>
+        {empty ? <Text dimColor>Nothing here yet.</Text> : node}
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" gap={1}>
       <NowSection agents={agents} now={now} width={width} />
