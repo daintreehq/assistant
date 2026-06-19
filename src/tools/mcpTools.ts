@@ -146,7 +146,7 @@ const CopyTreeGenerateArgs = z.object({
 });
 
 const CopyTreeInjectToTerminalArgs = z.object({
-  terminalId: z.string().min(1).describe("Terminal to inject the generated copy tree into."),
+  terminalId: z.string().trim().min(1).describe("Terminal to inject the generated copy tree into."),
   worktreeId: z
     .string()
     .optional()
@@ -157,12 +157,12 @@ const CopyTreeInjectToTerminalArgs = z.object({
 });
 
 const TerminalSendCommandArgs = z.object({
-  terminalId: z.string().min(1).describe("Terminal to send the command to."),
-  command: z.string().min(1).describe("Shell command text to type into the terminal and run."),
+  terminalId: z.string().trim().min(1).describe("Terminal to send the command to."),
+  command: z.string().trim().min(1).describe("Shell command text to type into the terminal and run."),
 });
 
 const SnapshotWorktreeArgs = z.object({
-  worktreeId: z.string().min(1).describe("Worktree whose pre-agent git snapshot to act on."),
+  worktreeId: z.string().trim().min(1).describe("Worktree whose pre-agent git snapshot to act on."),
 });
 
 /**

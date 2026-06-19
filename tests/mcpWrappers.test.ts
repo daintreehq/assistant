@@ -777,7 +777,7 @@ describe("typed copyTree / terminal-input / agent-focus / git-snapshot wrappers 
     expect(sys._calls.length).toBe(0);
   });
 
-  it("validates required args and rejects unknown top-level fields", async () => {
+  it("rejects missing, empty, and whitespace-only required fields locally", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
     const c = ctx("system") as ToolContext & {
@@ -786,14 +786,17 @@ describe("typed copyTree / terminal-input / agent-focus / git-snapshot wrappers 
     for (const [name, args] of [
       ["terminal.sendCommand", { command: "npm test" }], // missing terminalId
       ["terminal.sendCommand", { terminalId: "t", command: "" }], // empty command
+      ["terminal.sendCommand", { terminalId: "   ", command: "npm test" }], // whitespace terminalId
       ["copyTree.injectToTerminal", { worktreeId: "wt" }], // missing terminalId
       ["git.snapshotRevert", {}], // missing worktreeId
       ["git.snapshotDelete", { worktreeId: "" }], // empty worktreeId
+      ["git.snapshotDelete", { worktreeId: "   " }], // whitespace worktreeId
     ] as const) {
       const res = await reg.dispatch(name, args, c);
       expect(res.ok, name).toBe(false);
       if (!res.ok) expect(res.error.code, name).toBe("INVALID_ARGS");
     }
+    // No invalid call ever reached MCP.
     expect(c._calls.length).toBe(0);
   });
 
