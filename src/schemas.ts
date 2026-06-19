@@ -661,6 +661,103 @@ export interface RecipeRunStateRecord {
 }
 
 /* -------------------------------------------------------------------------- */
+/* One-shot structured (JSONL) output                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Schema version for the one-shot `--json` output contract. A plain integer, not
+ * semver: this is a pre-release tool whose only structured-output consumers are
+ * scripts/CI, so one monotonic number is enough — bump it only on a *breaking*
+ * change to the line shape (renamed/removed field, changed type), never on an
+ * additive one.
+ */
+export const JSON_OUTPUT_SCHEMA_VERSION = 1;
+
+/**
+ * Exit-code contract for one-shot mode. Defined here (not buried in the CLI) so
+ * scripts can depend on a documented, stable mapping:
+ *   - 0 success   — the turn completed and the assistant replied.
+ *   - 1 error     — a model/general error ended the turn (stream error, max
+ *                   iterations, or an unexpected throw). This is also the
+ *                   process-wide catch-all that already existed.
+ *   - 2 cancelled — the turn was cancelled mid-flight.
+ *   - 3 toolFailure — RESERVED. The agent loop has no terminal tool-failure
+ *                   signal today: failed tool calls are fed back to the model as
+ *                   recoverable context and the turn continues, so a turn that
+ *                   ends after a tool error still exits 0 (the model chose to
+ *                   stop). Kept in the contract so a future loop change can adopt
+ *                   it without renumbering the codes scripts already rely on.
+ */
+export const ONE_SHOT_EXIT_CODE = {
+  success: 0,
+  error: 1,
+  cancelled: 2,
+  toolFailure: 3,
+} as const;
+
+/** Terminal status of a one-shot turn, mirrored in the `result` envelope. */
+export const JsonOutputStatus = z.enum(["success", "error", "cancelled"]);
+export type JsonOutputStatus = z.infer<typeof JsonOutputStatus>;
+
+/**
+ * Event `type` strings emitted on the one-shot JSONL stream. These deliberately
+ * reuse the durable {@link RunEventRecord} type strings (`assistant:start`,
+ * `tool:call`, …) so the live stream and the replayable DB log describe a run the
+ * same way — one vocabulary, two transports. `result` is the extra terminal line
+ * unique to this stream (the DB log ends a run differently).
+ */
+export const JsonlEventType = z.enum([
+  "assistant:start",
+  "assistant:content",
+  "assistant:end",
+  "assistant:cancelled",
+  "tool:call",
+  "tool:result",
+  "error",
+  "info",
+  "result",
+]);
+export type JsonlEventType = z.infer<typeof JsonlEventType>;
+
+/**
+ * Fields every JSONL line carries. Per-type payload fields ride alongside these
+ * (the schema is permissive on extras via `passthrough`), so a consumer can
+ * always read `type`/`ts`/`seq` without knowing the specific event shape.
+ * `seq` is monotonic within a single run, starting at 0.
+ */
+export const JsonlEventSchema = z
+  .object({
+    type: JsonlEventType,
+    ts: z.number(),
+    seq: z.number().int().min(0),
+  })
+  .passthrough();
+export type JsonlEvent = z.infer<typeof JsonlEventSchema>;
+
+/**
+ * The final line of every one-shot `--json` run: a self-contained summary of the
+ * outcome. Callers that only want the result can read this last line and ignore
+ * the streamed events. `exitCode` mirrors the process exit code so a consumer
+ * parsing stdout never has to also capture `$?`.
+ */
+export const JsonResultEnvelopeSchema = z
+  .object({
+    type: z.literal("result"),
+    ts: z.number(),
+    seq: z.number().int().min(0),
+    schemaVersion: z.literal(JSON_OUTPUT_SCHEMA_VERSION),
+    status: JsonOutputStatus,
+    // 0 | 1 | 2 today; 3 (toolFailure) is reserved (see ONE_SHOT_EXIT_CODE).
+    exitCode: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    /** The final assistant text (empty string if the turn produced none). */
+    content: z.string(),
+    /** Present only when `status` is "error"; null otherwise. */
+    error: z.object({ message: z.string() }).nullable(),
+  })
+  .strict();
+export type JsonResultEnvelope = z.infer<typeof JsonResultEnvelopeSchema>;
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 

@@ -9,6 +9,7 @@ import { App } from "./app.js";
 import { startRepl } from "./repl.js";
 import { render, c } from "./render.js";
 import { createConsoleSink } from "./consoleSink.js";
+import { createJsonSink } from "./jsonSink.js";
 import { startInkApp } from "../ui/runInkApp.js";
 import { startDebugLog } from "../debugLog.js";
 import type { ConfigOverrides } from "../config.js";
@@ -22,6 +23,7 @@ interface CliOptions {
   offline?: boolean;
   classic?: boolean;
   inline?: boolean;
+  json?: boolean;
 }
 
 function overridesFromOptions(opts: CliOptions): ConfigOverrides {
@@ -43,21 +45,51 @@ function announceDebugLog(app: App): void {
 
 async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: overridesFromOptions(opts) });
-  announceDebugLog(app);
+  // In `--json` mode stdout carries ONLY the JSONL stream, so every human-facing
+  // line (debug-log notice, confirm-skip warning, loop log) is routed to stderr;
+  // otherwise the existing console UX is preserved unchanged.
+  const json = opts.json === true;
+  const jsonSink = json ? createJsonSink() : undefined;
+
+  if (json) {
+    const logPath = startDebugLog(app.config, app.sessionId);
+    if (logPath) process.stderr.write(`logging to ${logPath}\n`);
+  } else {
+    announceDebugLog(app);
+  }
+
   app.setHooks({
-    agentEvents: createConsoleSink(),
+    agentEvents: jsonSink ? jsonSink.sink : createConsoleSink(),
     // One-shot is non-interactive: auto-decline mutations rather than hang.
     confirm: async (req) => {
-      render.warn(
-        `Skipping ${req.toolName} (${req.risk}) — confirmation needed; run interactively to approve.`,
-      );
+      const msg = `Skipping ${req.toolName} (${req.risk}) — confirmation needed; run interactively to approve.`;
+      if (json) process.stderr.write(`${msg}\n`);
+      else render.warn(msg);
       return false;
     },
-    log: (m) => render.line(c.gray(`  · ${m}`)),
+    log: (m) => (json ? process.stderr.write(`  · ${m}\n`) : render.line(c.gray(`  · ${m}`))),
   });
-  await app.connectMcp();
-  await app.session.send(prompt);
-  await app.shutdown();
+
+  try {
+    await app.connectMcp();
+    await app.session.send(prompt);
+  } catch (err) {
+    // send() handles its own model errors (emitting an `error` event and returning
+    // a string); this catches genuinely unexpected throws (e.g. MCP connect). Route
+    // them through the active sink so JSON consumers still get a terminal envelope.
+    const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    if (jsonSink) jsonSink.sink.error(message);
+    else {
+      render.error(message);
+      process.exitCode = 1;
+    }
+  } finally {
+    await app.shutdown();
+  }
+
+  // Emit the terminal `result` envelope last (after shutdown, so no further events
+  // can interleave) and adopt its exit code as the process exit code.
+  if (jsonSink) process.exitCode = jsonSink.finish().exitCode;
 }
 
 async function runInteractive(opts: CliOptions): Promise<void> {
@@ -98,6 +130,7 @@ async function main(): Promise<void> {
     .option("--offline", "Do not make network calls")
     .option("--classic", "Use the legacy readline interface")
     .option("--inline", "Render Ink inline (native scrollback) instead of the default full-screen control room")
+    .option("--json", "One-shot only: stream JSONL events to stdout; the final line is a result envelope (see docs). Diagnostics go to stderr.")
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);
