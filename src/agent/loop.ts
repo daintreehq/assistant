@@ -392,7 +392,14 @@ export class AgentSession {
     // Need real working history beyond the controls + any prior summary note.
     if (this.messages.length <= CONTROL_MESSAGE_COUNT + 1) return;
 
-    const history = this.messages.slice(CONTROL_MESSAGE_COUNT);
+    // Flatten any multimodal content to text before summarising: the small model
+    // (deepseek-v4-flash) is text-only, so an image-bearing turn would otherwise
+    // trip the router's vision tier gate and make every subsequent auto-compact
+    // silently fail — letting history grow unbounded. Images collapse to an
+    // "[image omitted]" marker (contentToText), matching how they're persisted.
+    const history = this.messages
+      .slice(CONTROL_MESSAGE_COUNT)
+      .map((m) => ({ ...m, content: contentToText(m.content) }));
     try {
       const result = await this.deps.router.chat("small", {
         messages: [

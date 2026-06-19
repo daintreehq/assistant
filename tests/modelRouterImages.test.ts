@@ -37,12 +37,24 @@ const IMG_MSGS: ChatMessage[] = [
 ];
 
 describe("ModelRouter image tier gate", () => {
-  it("allows image content on the large tier", async () => {
+  it("allows image content on the large tier and forwards it undistorted", async () => {
     const { fw, chat } = fakeClient();
     const router = new ModelRouter(CFG, fw);
     await router.chat("large", { messages: IMG_MSGS });
     expect(chat).toHaveBeenCalledOnce();
-    expect((chat.mock.calls[0][0] as { model: string }).model).toBe("minimax-m3");
+    const sent = chat.mock.calls[0][0] as { model: string; messages: ChatMessage[] };
+    expect(sent.model).toBe("minimax-m3");
+    // The router must not mutate the content parts on the way through.
+    expect(sent.messages).toEqual(IMG_MSGS);
+  });
+
+  it("forwards image content undistorted on the large tier via stream()", async () => {
+    const { fw, chatStream } = fakeClient();
+    const router = new ModelRouter(CFG, fw);
+    await router.stream("large", { messages: IMG_MSGS });
+    expect((chatStream.mock.calls[0][0] as { messages: ChatMessage[] }).messages).toEqual(
+      IMG_MSGS,
+    );
   });
 
   it("rejects image content on the small tier before any wire call", async () => {
@@ -63,15 +75,17 @@ describe("ModelRouter image tier gate", () => {
     expect(chat).not.toHaveBeenCalled();
   });
 
-  it("gates stream() and json() the same way", async () => {
+  it("gates stream() and json() the same way on small and medium", async () => {
     const { fw, chatStream, json } = fakeClient();
     const router = new ModelRouter(CFG, fw);
-    await expect(router.stream("small", { messages: IMG_MSGS })).rejects.toBeInstanceOf(
-      ImageInputNotSupportedError,
-    );
-    await expect(
-      router.json("small", { messages: IMG_MSGS }, { parse: (x: unknown) => x } as never),
-    ).rejects.toBeInstanceOf(ImageInputNotSupportedError);
+    for (const tier of ["small", "medium"] as const) {
+      await expect(router.stream(tier, { messages: IMG_MSGS })).rejects.toBeInstanceOf(
+        ImageInputNotSupportedError,
+      );
+      await expect(
+        router.json(tier, { messages: IMG_MSGS }, { parse: (x: unknown) => x } as never),
+      ).rejects.toBeInstanceOf(ImageInputNotSupportedError);
+    }
     expect(chatStream).not.toHaveBeenCalled();
     expect(json).not.toHaveBeenCalled();
   });

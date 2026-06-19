@@ -190,9 +190,15 @@ export class ModelRouter {
 function redactImageData(m: ChatOptions["messages"][number]): ChatOptions["messages"][number] {
   if (!Array.isArray(m.content)) return m;
   const parts: ChatContentPart[] = m.content.map((part) => {
-    if (part.type !== "image_url" || !part.image_url.url.startsWith("data:")) return part;
-    const kb = Math.ceil((part.image_url.url.length * 3) / 4 / 1024);
-    return { type: "image_url", image_url: { url: `<redacted base64 ~${kb}kb>` } };
+    if (part.type !== "image_url") return part;
+    const url = part.image_url.url;
+    // `data:` URIs carry the (large) base64 bytes — report a rough size and drop
+    // them. Any other scheme (e.g. a remote https URL) isn't produced today, but
+    // redact it too rather than leak a value the log boundary didn't anticipate.
+    const marker = url.startsWith("data:")
+      ? `<redacted base64 ~${Math.ceil((url.length * 3) / 4 / 1024)}kb>`
+      : "<redacted image url>";
+    return { type: "image_url", image_url: { url: marker } };
   });
   return { ...m, content: parts };
 }

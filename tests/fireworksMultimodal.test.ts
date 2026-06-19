@@ -94,4 +94,29 @@ describe("toWireMessages multimodal passthrough", () => {
     await fw.chat({ model: "m", messages: [{ role: "user", content: "hi" }] });
     expect(calls[0].messages).toEqual([{ role: "user", content: "hi" }]);
   });
+
+  it("forwards a content-part array through json() and still requests a json_object", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const create = vi.fn(async (payload: Record<string, unknown>) => {
+      calls.push(payload);
+      return { choices: [{ message: { content: '{"ok":true}' } }] };
+    });
+    const fw = new FireworksClient(CFG);
+    (fw as unknown as { client: unknown }).client = { chat: { completions: { create } } };
+    const schema = { parse: (x: unknown) => x } as unknown as Parameters<typeof fw.json>[1];
+    await fw.json(
+      { model: "m", messages: [{ role: "user", content: [textPart("read this"), imageDataPart("p")] }] },
+      schema,
+    );
+    expect(calls[0].response_format).toEqual({ type: "json_object" });
+    expect(calls[0].messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "read this" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,p" } },
+        ],
+      },
+    ]);
+  });
 });

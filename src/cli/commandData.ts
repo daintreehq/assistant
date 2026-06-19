@@ -15,6 +15,7 @@ import type {
 } from "../schemas.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 import { helpLines } from "../commandRegistry.js";
+import { contentToText } from "../models/fireworks.js";
 
 /** Bound an MCP call so a stalled server can't hang a diagnostic command. */
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -630,7 +631,7 @@ export async function handleUiCommand(
           .getMessages()
           .filter((m) => m.role !== "system");
         const transcript = msgs
-          .map((m) => `${m.role}: ${m.content ?? "[tool call]"}`)
+          .map((m) => `${m.role}: ${contentToText(m.content) || "[tool call]"}`)
           .join("\n")
           .slice(0, 12000);
         const res = await app.router.chat("small", {

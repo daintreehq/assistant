@@ -9,6 +9,7 @@ import { Tier } from "../schemas.js";
 import { runDoctor, formatRunTimeline, formatRunList } from "./commandData.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 import { helpLines } from "../commandRegistry.js";
+import { contentToText } from "../models/fireworks.js";
 
 export interface CommandResult {
   handled: boolean;
@@ -213,7 +214,7 @@ export async function handleSlashCommand(
       try {
         const msgs = app.session.getMessages().filter((m) => m.role !== "system");
         const transcript = msgs
-          .map((m) => `${m.role}: ${m.content ?? "[tool call]"}`)
+          .map((m) => `${m.role}: ${contentToText(m.content) || "[tool call]"}`)
           .join("\n")
           .slice(0, 12000);
         const res = await app.router.chat("small", {
