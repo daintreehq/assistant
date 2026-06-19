@@ -280,6 +280,88 @@ describe("agentTask.spawnForEdits", () => {
     db.close();
   });
 
+  it("escapes the ambiguous deadlock: a retry with a still-empty inventory launches fresh", async () => {
+    const db = new Db(":memory:");
+    const reg = registry();
+    const args = { title: "Fix OAuth", taskPrompt: "go", worktreeId: "wt-1" };
+
+    // First attempt: no terminalId, empty inventory → ambiguous, record parked.
+    const first = ctx(db, { launchResult: launchNoTerminal() });
+    const r1 = await reg.dispatch("agentTask.spawnForEdits", args, first);
+    expect(r1.ok).toBe(false);
+    expect(r1.error?.code).toBe("AGENT_LAUNCH_AMBIGUOUS");
+
+    // Retry, inventory STILL empty (no agent ever started). Reconciliation finds
+    // nothing, so the dead-end record is retired and a fresh launch proceeds —
+    // rather than returning AMBIGUOUS forever until the session restarts.
+    const second = ctx(db, { launchResult: launchOk("term_fresh") });
+    const r2 = await reg.dispatch("agentTask.spawnForEdits", args, second);
+    expect(r2.ok).toBe(true);
+    expect((r2.result as { terminalId?: string }).terminalId).toBe("term_fresh");
+    expect(second._calls.filter((x) => x.name === "agent.launch")).toHaveLength(1);
+    db.close();
+  });
+
+  it("refuses to bind when two terminals share the deterministic launch name", async () => {
+    const db = new Db(":memory:");
+    const reg = registry();
+    const c = ctx(db, {
+      launchResult: launchNoTerminal(),
+      terminalListResult: terminalList([
+        { id: "term_a", name: "Claude: Fix OAuth" },
+        { id: "term_b", name: "Claude: Fix OAuth" },
+      ]),
+    });
+    const res = await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "Fix OAuth", taskPrompt: "go" },
+      c,
+    );
+    // A multi-match is itself ambiguous — no false-positive bind.
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("AGENT_LAUNCH_AMBIGUOUS");
+    db.close();
+  });
+
+  it("reconciles a transport throw when the terminal appears in the inventory", async () => {
+    const db = new Db(":memory:");
+    const reg = registry();
+    const c = ctx(db, {
+      launchThrows: true,
+      // Entry keyed by `terminalId` (not `id`) exercises the parser's fallback.
+      terminalListResult: terminalList([
+        { terminalId: "term_88", name: "Claude: Fix OAuth", agentId: "claude" },
+      ]),
+    });
+    const res = await reg.dispatch(
+      "agentTask.spawnForEdits",
+      { title: "Fix OAuth", taskPrompt: "go" },
+      c,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { terminalId?: string }).terminalId).toBe("term_88");
+    db.close();
+  });
+
+  it("does not block a fresh run of the same task after a prior launch FAILED", async () => {
+    const db = new Db(":memory:");
+    const reg = registry();
+    const args = { title: "Fix OAuth", taskPrompt: "go" };
+
+    // First attempt fails with an explicit error response (terminal `failed`).
+    const a = ctx(db, {
+      launchResult: { text: "no worktree", content: [], structuredContent: {}, isError: true },
+    });
+    expect((await reg.dispatch("agentTask.spawnForEdits", args, a)).ok).toBe(false);
+
+    // The same task can be launched again — agent.launch IS called.
+    const b = ctx(db, { launchResult: launchOk("term_retry") });
+    const r2 = await reg.dispatch("agentTask.spawnForEdits", args, b);
+    expect(r2.ok).toBe(true);
+    expect(b._calls.filter((x) => x.name === "agent.launch")).toHaveLength(1);
+    db.close();
+  });
+
   it("treats a transport throw as AMBIGUOUS (the request may have reached Daintree)", async () => {
     const db = new Db(":memory:");
     const reg = registry();

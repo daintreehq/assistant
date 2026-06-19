@@ -221,13 +221,16 @@ async function reconcileViaTerminalList(
     const res = await ctx.mcp.callTool("terminal.list", {});
     if (res.isError) return undefined;
     const terminals = parseTerminalList(res);
-    const match = terminals.find(
+    const matches = terminals.filter(
       (t) =>
         t.name === name &&
         (t.agentId == null || t.agentId === agentId) &&
         (worktreeId == null || t.worktreeId == null || t.worktreeId === worktreeId),
     );
-    return match?.id;
+    // Bind only on an UNAMBIGUOUS match. Two terminals sharing the deterministic
+    // launch name (same title+agent for genuinely different tasks) can't be told
+    // apart, so a multi-match is itself ambiguous — don't risk binding the wrong one.
+    return matches.length === 1 ? matches[0].id : undefined;
   } catch {
     return undefined;
   }
@@ -484,12 +487,16 @@ export const agentTaskTools: ToolDef[] = [
       const mode = args.mode ?? "edit";
       const name = buildAgentLaunchName(args.title, agentId);
       const prompt = buildAgentPrompt(args);
+      // Normalize the worktree once: an explicit empty string must be treated like
+      // an omitted worktree so it doesn't hash to a different idempotency key (and
+      // isn't forwarded as a bogus worktreeId to agent.launch).
+      const worktreeId = args.worktreeId?.trim() || undefined;
       // Deterministic key over the task's identity, so a retry reconciles with the
       // in-flight saga record instead of launching a second agent. Reused as the
       // agent.launch requestKey so Daintree can dedupe on its side too.
       const idempotencyKey = computeIdempotencyKey({
         taskPrompt: args.taskPrompt,
-        worktreeId: args.worktreeId ?? "",
+        worktreeId: worktreeId ?? "",
         agentId,
         mode,
       });
@@ -514,7 +521,7 @@ export const agentTaskTools: ToolDef[] = [
             args,
             existing,
             existing.terminalId,
-            existing.worktreeId ?? args.worktreeId,
+            existing.worktreeId ?? worktreeId,
             undefined,
             "idempotent",
           );
@@ -525,7 +532,7 @@ export const agentTaskTools: ToolDef[] = [
           ctx,
           existing.name,
           agentId,
-          existing.worktreeId ?? args.worktreeId,
+          existing.worktreeId ?? worktreeId,
         );
         if (reconciled) {
           ctx.db.updateAgentLaunch(existing.id, {
@@ -545,16 +552,28 @@ export const agentTaskTools: ToolDef[] = [
             args,
             existing,
             reconciled,
-            existing.worktreeId ?? args.worktreeId,
+            existing.worktreeId ?? worktreeId,
             undefined,
             "reconciled",
           );
         }
-        return fail(
-          "AGENT_LAUNCH_AMBIGUOUS",
-          `A prior launch for "${args.title}" is unresolved (stage ${existing.stage}) and no matching terminal was found, so it is unknown whether an agent started. Check Daintree's terminals before retrying.`,
-          { recoverable: true, details: { launchId: existing.id } },
-        );
+        // Reconciliation found no matching terminal — this explicit retry is the
+        // caller's signal to try again, and we just confirmed no agent is running
+        // under this identity. Retire the dead-end record as failed (so it stops
+        // blocking) and fall through to a fresh launch, rather than deadlocking on
+        // `ambiguous` until the session restarts.
+        ctx.db.updateAgentLaunch(existing.id, {
+          stage: "failed",
+          errorCode: "LAUNCH_NOT_FOUND",
+          errorMessage:
+            "retry found no matching terminal; retired so a fresh launch can proceed",
+        });
+        logDebug(ctx.config, "spawn.retire_unresolved", {
+          via: "agentTask.spawnForEdits",
+          launchId: existing.id,
+          idempotencyKey,
+          priorStage: existing.stage,
+        });
       }
 
       // --- Fresh launch: write the saga record BEFORE the side-effecting call ---
@@ -563,7 +582,7 @@ export const agentTaskTools: ToolDef[] = [
       const record = ctx.db.insertAgentLaunch({
         idempotencyKey,
         agentId,
-        worktreeId: args.worktreeId,
+        worktreeId,
         mode,
         title: args.title,
         name,
@@ -575,7 +594,7 @@ export const agentTaskTools: ToolDef[] = [
         res = await ctx.mcp.callTool("agent.launch", {
           agentId,
           name,
-          ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
+          ...(worktreeId ? { worktreeId } : {}),
           prompt,
           requestKey: idempotencyKey,
         });
@@ -588,7 +607,7 @@ export const agentTaskTools: ToolDef[] = [
           errorCode: "AGENT_LAUNCH_THREW",
           errorMessage: msg,
         });
-        const reconciled = await reconcileViaTerminalList(ctx, name, agentId, args.worktreeId);
+        const reconciled = await reconcileViaTerminalList(ctx, name, agentId, worktreeId);
         if (reconciled) {
           ctx.db.updateAgentLaunch(record.id, {
             stage: "terminal_bound",
@@ -596,7 +615,7 @@ export const agentTaskTools: ToolDef[] = [
             errorCode: undefined,
             errorMessage: undefined,
           });
-          return finishBoundLaunch(ctx, args, record, reconciled, args.worktreeId, undefined, "reconciled");
+          return finishBoundLaunch(ctx, args, record, reconciled, worktreeId, undefined, "reconciled");
         }
         return fail(
           "AGENT_LAUNCH_AMBIGUOUS",
@@ -627,7 +646,7 @@ export const agentTaskTools: ToolDef[] = [
       // never carries worktreeId/taskId, so these reads degrade gracefully to the
       // caller-supplied worktreeId / undefined. Tracked in docs/DAINTREE_MCP.md
       // ("Known Daintree-side gaps") and issue #9; revisit if Daintree adds them.
-      const worktreeId = extractField(res, "worktreeId") ?? args.worktreeId;
+      const resolvedWorktreeId = extractField(res, "worktreeId") ?? worktreeId;
       const taskId = extractField(res, "taskId");
 
       logDebug(ctx.config, "spawn.launched", {
@@ -637,7 +656,7 @@ export const agentTaskTools: ToolDef[] = [
         name,
         title: args.title,
         terminalId,
-        worktreeId,
+        worktreeId: resolvedWorktreeId,
         taskId,
         idempotencyKey,
         launchId: record.id,
@@ -654,7 +673,7 @@ export const agentTaskTools: ToolDef[] = [
           errorCode: "NO_TERMINAL_ID",
           errorMessage: "agent.launch returned no terminalId",
         });
-        const reconciled = await reconcileViaTerminalList(ctx, name, agentId, worktreeId);
+        const reconciled = await reconcileViaTerminalList(ctx, name, agentId, resolvedWorktreeId);
         if (reconciled) {
           ctx.db.updateAgentLaunch(record.id, {
             stage: "terminal_bound",
@@ -662,7 +681,7 @@ export const agentTaskTools: ToolDef[] = [
             errorCode: undefined,
             errorMessage: undefined,
           });
-          return finishBoundLaunch(ctx, args, record, reconciled, worktreeId, taskId, "reconciled");
+          return finishBoundLaunch(ctx, args, record, reconciled, resolvedWorktreeId, taskId, "reconciled");
         }
         logDebug(ctx.config, "spawn.ambiguous", {
           via: "agentTask.spawnForEdits",
@@ -678,7 +697,7 @@ export const agentTaskTools: ToolDef[] = [
       }
 
       ctx.db.updateAgentLaunch(record.id, { stage: "terminal_bound", terminalId });
-      return finishBoundLaunch(ctx, args, record, terminalId, worktreeId, taskId, "fresh");
+      return finishBoundLaunch(ctx, args, record, terminalId, resolvedWorktreeId, taskId, "fresh");
     },
   },
 ];
