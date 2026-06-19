@@ -32,7 +32,7 @@ Your local tools wrap Daintree:
 - agent.focusNextWaiting / agent.focusNextWorking / agent.focusNextAgent /
   agent.focusPreviousAgent — move UI focus across agent terminals (UI only, no
   mutation, no confirmation). workflow.focusNextAttention — focus the next agent
-  needing attention (waiting first, then working) and report the queue counts.
+  needing attention (waiting agents before working ones) and report the queue counts.
 - copyTree.generate — build a worktree's file digest as text (read-only).
   copyTree.injectToTerminal — inject that digest into a terminal (mutating,
   always confirmed). copyTree.generateAndCopyFile — copy it to the OS clipboard

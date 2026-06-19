@@ -769,7 +769,7 @@ export const mcpTools: ToolDef[] = [
   {
     name: "workflow.focusNextAttention",
     description:
-      "Focus the next agent needing attention (waiting agents first, then working) and report the queue counts (UI focus change; no state mutation). Typed wrapper around the Daintree workflow.focusNextAttention MCP tool — returns { focused, state, waitingCount, workingCount }.",
+      "Focus the next agent needing attention (waiting agents before working ones) and report the queue counts (UI focus change; no state mutation). Typed wrapper around the Daintree workflow.focusNextAttention MCP tool — returns { focused, state, waitingCount, workingCount }.",
     risk: "ui",
     schema: ListToolsArgs,
     parameters: NO_ARGS,
