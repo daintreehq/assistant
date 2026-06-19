@@ -32,6 +32,7 @@ import { HelpOverlay } from "./components/HelpOverlay.js";
 import { StateBadge, formatDuration } from "./primitives.js";
 import { buildAgentRows } from "./presentation/operations.js";
 import { truncate } from "../utils/text.js";
+import type { PanelKey } from "../cli/commandData.js";
 
 export type LayoutMode = "sidebar" | "standard" | "wide";
 export type View = "home" | "operations" | "help";
@@ -69,6 +70,12 @@ export interface ControlRoomProps {
   busy: boolean;
   stage: string;
   view: View;
+  /**
+   * Which `/panel` command opened the operations view, so it can focus that one
+   * section. `help` is rendered by its own `view` branch, so it never reaches
+   * OperationsView. Null shows the full deck (e.g. opened via `^O`).
+   */
+  activePanel?: PanelKey | null;
   expanded?: boolean;
   pending?: PendingConfirm | null;
   /** Frozen clock for deterministic rendering; defaults to live time. */
@@ -99,6 +106,7 @@ export function ControlRoom({
   busy,
   stage,
   view,
+  activePanel = null,
   expanded = false,
   pending = null,
   now = Date.now(),
@@ -224,6 +232,7 @@ export function ControlRoom({
               previews={previews}
               width={columns}
               now={now}
+              activePanel={activePanel === "help" ? null : activePanel}
             />
           </Box>
         ) : layout === "wide" ? (

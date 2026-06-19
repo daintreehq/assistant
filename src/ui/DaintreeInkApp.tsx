@@ -60,7 +60,12 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     // Ctrl chords only — these never collide with composing text.
     if (key.ctrl && input === "o") {
       if (view === "operations") returnHome();
-      else setView("operations");
+      else {
+        // ^O opens the full operations deck. Clear any panel left set by a prior
+        // `/watchers`-style command so the deck isn't still filtered to one section.
+        controller.setActivePanel(null);
+        setView("operations");
+      }
       return;
     }
     if (key.ctrl && input === "x") {
@@ -100,6 +105,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       busy={controller.busy}
       stage={controller.stage}
       view={view}
+      activePanel={controller.activePanel}
       expanded={expanded}
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}
