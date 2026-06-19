@@ -21,6 +21,7 @@ export class Queue {
       evidence: parsed.evidence,
       recommendedActions: parsed.recommendedActions,
       dedupeKey: parsed.dedupeKey,
+      epistemicKind: parsed.epistemicKind,
       expiresAt,
     });
   }

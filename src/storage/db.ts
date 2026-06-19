@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS watchers (
   optionsJson TEXT,
   status TEXT NOT NULL DEFAULT 'created',
   lastClassification TEXT,
+  lastEpistemicKind TEXT,
   lastCheckedAt INTEGER,
   nextCheckAt INTEGER NOT NULL,
   createdAt INTEGER NOT NULL
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS events (
   evidenceJson TEXT,
   recommendedActionsJson TEXT,
   dedupeKey TEXT,
+  epistemicKind TEXT,
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER,
   notifiedAt INTEGER,
@@ -305,7 +307,7 @@ const TIMER_UPDATE_COLS: ReadonlySet<string> = new Set([
 const WATCHER_UPDATE_COLS: ReadonlySet<string> = new Set([
   "title", "goal", "targetsJson", "cadenceMs", "isSupervisor", "modelTier", "startAfterMs",
   "stopAfterMs", "stopWhenJson", "alertWhenJson", "optionsJson", "status",
-  "lastClassification", "lastCheckedAt", "nextCheckAt",
+  "lastClassification", "lastEpistemicKind", "lastCheckedAt", "nextCheckAt",
 ]);
 // `id`/`createdAt` are immutable; `updatedAt` is in the list but always forced by
 // the store (never taken from a caller patch — see updateWorkflowRun).
@@ -599,14 +601,15 @@ export class Db {
       optionsJson: rec.optionsJson,
       status: rec.status ?? "active",
       lastClassification: rec.lastClassification,
+      lastEpistemicKind: rec.lastEpistemicKind,
       lastCheckedAt: rec.lastCheckedAt,
       nextCheckAt: rec.nextCheckAt,
       createdAt: rec.createdAt ?? Date.now(),
     };
     this.db
       .prepare(
-        `INSERT INTO watchers (id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastCheckedAt,nextCheckAt,createdAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO watchers (id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastEpistemicKind,lastCheckedAt,nextCheckAt,createdAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -624,6 +627,7 @@ export class Db {
         full.optionsJson ?? null,
         full.status,
         full.lastClassification ?? null,
+        full.lastEpistemicKind ?? null,
         full.lastCheckedAt ?? null,
         full.nextCheckAt,
         full.createdAt,
@@ -691,7 +695,7 @@ export class Db {
         // VerificationResult and feed the conductor stale git state.
         this.db
           .prepare(
-            "UPDATE events SET count = count + 1, title = ?, summary = ?, severity = ?, evidenceJson = ?, recommendedActionsJson = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
+            "UPDATE events SET count = count + 1, title = ?, summary = ?, severity = ?, evidenceJson = ?, recommendedActionsJson = ?, epistemicKind = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
           )
           .run(
             ev.title,
@@ -699,6 +703,10 @@ export class Db {
             ev.severity,
             ev.evidence ? JSON.stringify(ev.evidence) : (existing.evidenceJson as string | null) ?? null,
             ev.recommendedActions ? JSON.stringify(ev.recommendedActions) : null,
+            // epistemicKind follows the same fall-back-to-existing rule as evidence:
+            // a deduped publish that omits it must not erase the provenance the
+            // event was first classified with.
+            ev.epistemicKind ?? (existing.epistemicKind as string | null) ?? null,
             now,
             ev.expiresAt ?? null,
             id,
@@ -716,6 +724,7 @@ export class Db {
       evidence: ev.evidence,
       recommendedActions: ev.recommendedActions,
       dedupeKey: ev.dedupeKey,
+      epistemicKind: ev.epistemicKind,
       createdAt: now,
       expiresAt: ev.expiresAt,
       resolvedAt: ev.resolvedAt,
@@ -723,8 +732,8 @@ export class Db {
     };
     this.db
       .prepare(
-        `INSERT INTO events (id,source,severity,title,summary,targetJson,evidenceJson,recommendedActionsJson,dedupeKey,createdAt,updatedAt,expiresAt,resolvedAt,count)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO events (id,source,severity,title,summary,targetJson,evidenceJson,recommendedActionsJson,dedupeKey,epistemicKind,createdAt,updatedAt,expiresAt,resolvedAt,count)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -736,6 +745,7 @@ export class Db {
         full.evidence ? JSON.stringify(full.evidence) : null,
         full.recommendedActions ? JSON.stringify(full.recommendedActions) : null,
         full.dedupeKey ?? null,
+        full.epistemicKind ?? null,
         full.createdAt,
         full.createdAt,
         full.expiresAt ?? null,
@@ -804,6 +814,7 @@ export class Db {
         ? JSON.parse(r.recommendedActionsJson as string)
         : undefined,
       dedupeKey: (r.dedupeKey as string) ?? undefined,
+      epistemicKind: (r.epistemicKind as QueueEvent["epistemicKind"]) ?? undefined,
       createdAt: r.createdAt as number,
       updatedAt: (r.updatedAt as number) ?? (r.createdAt as number),
       expiresAt: (r.expiresAt as number) ?? undefined,

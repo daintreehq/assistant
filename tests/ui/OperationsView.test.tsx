@@ -76,6 +76,72 @@ describe("OperationsView", () => {
     expect(frame).not.toContain("[R rerun]");
   });
 
+  it("marks an agent row with its epistemic provenance (#85)", () => {
+    const frame =
+      render(
+        <OperationsView
+          dashboard={dash({
+            watchers: [
+              watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
+            ],
+          })}
+          width={72}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    // The 3-letter tag is glyph-set independent (survives the ASCII fallback).
+    expect(frame).toContain("obs");
+  });
+
+  it("marks an attention event with its epistemic provenance (#85)", () => {
+    const frame =
+      render(
+        <OperationsView
+          dashboard={dash({
+            inbox: [
+              {
+                id: "e1",
+                source: "terminal_watcher",
+                severity: "error",
+                title: "Tests failed in term_8",
+                summary: "3 failures",
+                epistemicKind: "inferred",
+                createdAt: 0,
+                count: 1,
+              } as any,
+            ],
+          })}
+          width={72}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("inf");
+  });
+
+  it("renders the ASCII fallback glyph for epistemic marks when DAINTREE_ASCII=1 (#85)", () => {
+    const prev = process.env.DAINTREE_ASCII;
+    process.env.DAINTREE_ASCII = "1";
+    try {
+      const frame =
+        render(
+          <OperationsView
+            dashboard={dash({
+              watchers: [
+                watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
+              ],
+            })}
+            width={72}
+            now={0}
+          />,
+        ).lastFrame() ?? "";
+      // ASCII observed glyph is "*", label "obs".
+      expect(frame).toContain("* obs");
+    } finally {
+      if (prev === undefined) delete process.env.DAINTREE_ASCII;
+      else process.env.DAINTREE_ASCII = prev;
+    }
+  });
+
   it("hides empty sections (no audit/timers shown when there are none)", () => {
     const frame =
       render(<OperationsView dashboard={dash()} width={72} now={0} />).lastFrame() ?? "";

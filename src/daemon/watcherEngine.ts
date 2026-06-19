@@ -15,11 +15,13 @@ import {
   WatcherVerdict,
   ModelJudgeAnswer,
   VERIFICATION_EVIDENCE_PREFIX,
+  classificationEpistemicKind,
   type Severity,
   type WatchCondition,
   type WatcherClassification,
   type VerificationResult,
   type RecommendedAction,
+  type EpistemicKind,
 } from "../schemas.js";
 import {
   WATCHER_SYSTEM_PROMPT,
@@ -146,6 +148,10 @@ export interface CheckOutcome {
   confidence: number;
   summary: string;
   evidence: string[];
+  /** Epistemic provenance of this outcome (issue #85) — observed fact, model
+   * inference, or unverified. Derived in decideOutcome from the classification and
+   * whether the small model was consulted this tick. */
+  epistemicKind: EpistemicKind;
   /** Whether this check warrants a queue event. */
   shouldPublish: boolean;
   severity: Severity;
@@ -167,6 +173,10 @@ export function decideOutcome(args: {
   /** Precomputed answers to any modelJudge questions, keyed by question string. */
   judgeResults?: Map<string, ModelJudgeAnswer>;
   timedOut?: boolean;
+  /** True when the small model was consulted to reach this classification — the
+   * one signal that disambiguates a model-inferred `waiting_for_input` from a
+   * deterministic agentState one (issue #85). */
+  usedModel?: boolean;
 }): CheckOutcome {
   const { classification, confidence, summary, evidence } = args;
   const sig = { ...args.signals, classification, confidence };
@@ -212,6 +222,7 @@ export function decideOutcome(args: {
     confidence,
     summary,
     evidence,
+    epistemicKind: classificationEpistemicKind(classification, args.usedModel),
     severity,
     shouldPublish,
     stop,
@@ -1000,12 +1011,15 @@ export async function runTerminalWatcherCheck(
       severity: "error",
       title: `${rec.title}: watcher disabled`,
       summary: `Corrupt watcher state for ${rec.id}: ${err instanceof Error ? err.message : String(err)}`,
+      // The watcher could not check the terminal at all — its state is unknown.
+      epistemicKind: "unverified",
     });
     return {
       classification: "unknown",
       confidence: 0,
       summary: "Watcher disabled due to corrupt state.",
       evidence: [],
+      epistemicKind: "unverified",
       severity: "error",
       shouldPublish: false,
       stop: true,
@@ -1067,6 +1081,9 @@ export async function runTerminalWatcherCheck(
     let confidence = 0.4;
     let summary = "Watcher check.";
     let evidence: string[] = [];
+    // True once the small model is consulted this tick — disambiguates a
+    // model-inferred verdict from a deterministic one for epistemicKind (#85).
+    let usedModel = false;
 
     const entry = statuses.byId.get(terminalId);
 
@@ -1177,6 +1194,7 @@ export async function runTerminalWatcherCheck(
                 confidence = 0.5;
                 summary = "No change in terminal signals since last classification.";
               } else {
+                usedModel = true;
                 const verdict = await classifyWithModel(
                   rec,
                   signals,
@@ -1373,6 +1391,7 @@ export async function runTerminalWatcherCheck(
           confidence = 0.5;
           summary = "No change in terminal signals since last classification.";
         } else {
+          usedModel = true;
           const verdict = await classifyWithModel(rec, signals, ctx, prevState?.prev);
           classification = verdict.classification;
           confidence = verdict.confidence;
@@ -1444,6 +1463,7 @@ export async function runTerminalWatcherCheck(
       alertWhen,
       judgeResults,
       timedOut,
+      usedModel,
     });
     // Preserve any output-tracking state captured above (absent when MCP is
     // disconnected, since we never read the terminal) and record the new prev.
@@ -1503,6 +1523,7 @@ export async function runTerminalWatcherCheck(
           targets.length > 1 ? `[${terminalId}] ${outcome.summary}` : outcome.summary,
         target: { terminalId },
         evidence: outcome.evidence,
+        epistemicKind: outcome.epistemicKind,
         // Keyed by terminal (NOT classification) so concurrent terminals stay
         // distinct while a single terminal's evolving state updates one live
         // inbox item in place rather than spawning a fresh row per transition.
@@ -1521,6 +1542,7 @@ export async function runTerminalWatcherCheck(
       confidence: 0.4,
       summary: "No terminals to check.",
       evidence: [],
+      epistemicKind: "unverified" as EpistemicKind,
       severity: "debug" as Severity,
       shouldPublish: false,
       stop: false,
@@ -1541,6 +1563,7 @@ export async function runTerminalWatcherCheck(
 
   ctx.db.updateWatcher(rec.id, {
     lastClassification: headline.classification,
+    lastEpistemicKind: headline.epistemicKind,
     lastCheckedAt: now,
     nextCheckAt: now + rec.cadenceMs,
     optionsJson: JSON.stringify({ ...options, perTerminal }),
