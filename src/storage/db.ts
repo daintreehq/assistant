@@ -28,6 +28,20 @@ import type {
 } from "../schemas.js";
 import { SCHEDULER_TICK_MS } from "../watcherCadence.js";
 
+/**
+ * Optional, AND-combined filters for {@link Db.queryAudit}. Time bounds are
+ * inclusive Unix-ms integers (matching the `ts` column); omit any field to leave
+ * that dimension unconstrained. `limit` defaults to 200 when absent.
+ */
+export interface AuditFilters {
+  actor?: string;
+  toolName?: string;
+  outcome?: string;
+  tsFrom?: number;
+  tsTo?: number;
+  limit?: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS timers (
   id TEXT PRIMARY KEY,
@@ -655,6 +669,50 @@ export class Db {
     return this.db
       .prepare("SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?")
       .all(limit) as unknown as AuditRecord[];
+  }
+
+  /**
+   * Filtered audit query backing the export feature. Every filter is optional and
+   * AND-combined; an omitted filter is bound as SQL NULL so the matching
+   * `(? IS NULL OR col = ?)` clause short-circuits to true. Rows are returned
+   * newest-first (matching `listAudit`) and always bounded by `limit`.
+   *
+   * node:sqlite throws if a bound parameter is `undefined`, so every optional is
+   * coerced with `?? null` before binding. The `?` placeholders that test a
+   * filter for NULL and compare it are bound to the same value, hence each filter
+   * appears twice in the argument list.
+   */
+  queryAudit(filters: AuditFilters = {}): AuditRecord[] {
+    const limit = filters.limit ?? 200;
+    const actor = filters.actor ?? null;
+    const toolName = filters.toolName ?? null;
+    const outcome = filters.outcome ?? null;
+    const tsFrom = filters.tsFrom ?? null;
+    const tsTo = filters.tsTo ?? null;
+    return this.db
+      .prepare(
+        `SELECT * FROM audit_log
+         WHERE (? IS NULL OR actor = ?)
+           AND (? IS NULL OR toolName = ?)
+           AND (? IS NULL OR outcome = ?)
+           AND (? IS NULL OR ts >= ?)
+           AND (? IS NULL OR ts <= ?)
+         ORDER BY ts DESC
+         LIMIT ?`,
+      )
+      .all(
+        actor,
+        actor,
+        toolName,
+        toolName,
+        outcome,
+        outcome,
+        tsFrom,
+        tsFrom,
+        tsTo,
+        tsTo,
+        limit,
+      ) as unknown as AuditRecord[];
   }
 
   /* ----------------------- automation grants ----------------------------- */

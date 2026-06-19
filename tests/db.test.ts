@@ -693,3 +693,100 @@ describe("Db", () => {
     });
   });
 });
+
+describe("Db.queryAudit (filtered audit export query)", () => {
+  let dir: string;
+  let db: Db;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "db-audit-"));
+    db = new Db(join(dir, "state.db"));
+    // Three rows spanning actors, tools, outcomes and timestamps.
+    db.insertAudit({
+      ts: 1000,
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read a",
+    });
+    db.insertAudit({
+      ts: 2000,
+      actor: "watcher",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "grant_ok",
+      durationMs: 2,
+      summary: "committed",
+    });
+    db.insertAudit({
+      ts: 3000,
+      actor: "main",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "error",
+      durationMs: 3,
+      summary: "commit failed",
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns all rows newest-first when no filters are given", () => {
+    const rows = db.queryAudit();
+    expect(rows.map((r) => r.ts)).toEqual([3000, 2000, 1000]);
+  });
+
+  it("filters by actor", () => {
+    const rows = db.queryAudit({ actor: "main" });
+    expect(rows.map((r) => r.ts)).toEqual([3000, 1000]);
+  });
+
+  it("filters by toolName", () => {
+    const rows = db.queryAudit({ toolName: "git.commit" });
+    expect(rows.map((r) => r.ts)).toEqual([3000, 2000]);
+  });
+
+  it("filters by outcome", () => {
+    const rows = db.queryAudit({ outcome: "ok" });
+    expect(rows.map((r) => r.summary)).toEqual(["read a"]);
+  });
+
+  it("AND-combines multiple filters", () => {
+    const rows = db.queryAudit({ actor: "main", toolName: "git.commit" });
+    expect(rows.map((r) => r.ts)).toEqual([3000]);
+  });
+
+  it("filters by an inclusive time range", () => {
+    expect(db.queryAudit({ tsFrom: 2000 }).map((r) => r.ts)).toEqual([3000, 2000]);
+    expect(db.queryAudit({ tsTo: 2000 }).map((r) => r.ts)).toEqual([2000, 1000]);
+    expect(db.queryAudit({ tsFrom: 2000, tsTo: 2000 }).map((r) => r.ts)).toEqual([2000]);
+  });
+
+  it("bounds the result set by limit", () => {
+    expect(db.queryAudit({ limit: 1 }).map((r) => r.ts)).toEqual([3000]);
+  });
+
+  it("returns an empty array when nothing matches", () => {
+    expect(db.queryAudit({ actor: "system" })).toEqual([]);
+  });
+
+  it("orders strictly by ts DESC, not insertion order", () => {
+    // A separate DB so insertion order (4000 then 500) differs from ts order.
+    const d2 = mkdtempSync(join(tmpdir(), "db-audit-ord-"));
+    const db2 = new Db(join(d2, "state.db"));
+    try {
+      db2.insertAudit({ ts: 4000, actor: "main", toolName: "a", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "x" });
+      db2.insertAudit({ ts: 500, actor: "main", toolName: "b", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "y" });
+      db2.insertAudit({ ts: 2500, actor: "main", toolName: "c", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "z" });
+      expect(db2.queryAudit().map((r) => r.ts)).toEqual([4000, 2500, 500]);
+    } finally {
+      db2.close();
+      rmSync(d2, { recursive: true, force: true });
+    }
+  });
+});

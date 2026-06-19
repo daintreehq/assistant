@@ -14,6 +14,7 @@ import { agentTaskTools } from "./agentTaskTools.js";
 import { grantTools } from "./grantTools.js";
 import { workflowTools } from "./workflowTools.js";
 import { recipeRunTools } from "./recipeRunTools.js";
+import { auditTools } from "./auditTools.js";
 
 export function buildAllTools(): ToolDef[] {
   return [
@@ -28,5 +29,6 @@ export function buildAllTools(): ToolDef[] {
     ...grantTools,
     ...workflowTools,
     ...recipeRunTools,
+    ...auditTools,
   ];
 }

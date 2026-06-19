@@ -100,6 +100,68 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(line).not.toContain("grant_ok[");
   });
 
+  it("/audit export json returns a filtered JSON array", async () => {
+    app.db.insertAudit({
+      ts: 1000,
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read",
+    });
+    app.db.insertAudit({
+      ts: 2000,
+      actor: "watcher",
+      toolName: "git.commit",
+      argsJson: "{}",
+      outcome: "error",
+      durationMs: 2,
+      summary: "boom",
+    });
+    const r = await handleUiCommand("/audit export json actor=main", app);
+    expect(r.switchPanel).toBe("audit");
+    expect(r.title).toContain("json");
+    const parsed = JSON.parse(r.text!) as Array<{ toolName: string }>;
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].toolName).toBe("fs.read");
+  });
+
+  it("/audit export csv returns a header and data rows", async () => {
+    app.db.insertAudit({
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read",
+    });
+    const r = await handleUiCommand("/audit export csv", app);
+    expect(r.title).toContain("csv");
+    expect(r.text!.split("\r\n")[0]).toContain("id,ts,actor,toolName");
+    expect(r.text).toContain("fs.read");
+  });
+
+  it("/audit export reports a usage error for a bad format", async () => {
+    const r = await handleUiCommand("/audit export xml", app);
+    expect(r.switchPanel).toBe("audit");
+    expect(r.text).toContain("Usage");
+  });
+
+  it("/audit [n] still lists recent calls, unaffected by export", async () => {
+    app.db.insertAudit({
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "read",
+    });
+    const r = await handleUiCommand("/audit 5", app);
+    expect(r.title).toContain("last");
+    expect(r.text).toContain("fs.read");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);
