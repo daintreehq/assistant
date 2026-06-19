@@ -65,6 +65,15 @@ export interface ToolContext {
    * rather than running to completion in the background after the user has moved on.
    */
   signal?: AbortSignal;
+  /**
+   * Tool names offered to the model in the current turn's tool spec — the core ∪
+   * active-recipe projection (or the read-only inspection set). Discovery tools
+   * (`tool.search`, `daintree.listTools`) cross-reference this to mark whether each
+   * tool they surface is actually `callable` this turn, so they never advertise a
+   * tool the model can't invoke. `undefined` ⇒ unconstrained (all tools callable).
+   * Set per-turn by `AgentSession.runTurn`; absent for watcher/timer contexts.
+   */
+  activeToolNames?: string[];
   /** Ask the user to approve a mutating action. Returns true if approved. */
   confirm: (req: ConfirmRequest) => Promise<boolean>;
   /** Print an out-of-band line to the user (e.g. "spawned watcher wch_..."). */

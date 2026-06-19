@@ -287,12 +287,6 @@ export class AgentSession {
       this.events.assistantCancelled("");
       return CANCELLED_REPLY;
     }
-    // Tool dispatches in this turn carry the run id so their audit rows group with
-    // the run's event log, and the abort signal so long-running handlers (MCP
-    // calls, extraction polls, agent launches) stop when the user cancels instead
-    // of running to completion in the background. Derived per-turn; the base ctx
-    // stays run-agnostic and signal-free (watcher/timer contexts never cancel).
-    const runCtx: ToolContext = { ...this.deps.ctx, runId, signal: opts.signal };
     await this.maybeAutoCompact(opts.signal);
     if (!opts.readOnly) await this.maybeRefreshRecipes(userInput, opts.signal);
     // The pre-turn model calls above (auto-compact summary, recipe selection) honour
@@ -316,6 +310,21 @@ export class AgentSession {
     const allowedNames = opts.readOnly
       ? this.readOnlyToolNames()
       : this.buildToolFilter();
+    // Tool dispatches in this turn carry the run id so their audit rows group with
+    // the run's event log, and the abort signal so long-running handlers (MCP
+    // calls, extraction polls, agent launches) stop when the user cancels instead
+    // of running to completion in the background. They also carry the turn's tool
+    // projection (`activeToolNames`) so discovery tools (`tool.search`,
+    // `daintree.listTools`) only advertise tools the model can actually call this
+    // turn — `undefined` means unconstrained (all callable). Built after the
+    // projection is computed; the base ctx stays run-agnostic and signal-free
+    // (watcher/timer contexts never cancel and have no projection).
+    const runCtx: ToolContext = {
+      ...this.deps.ctx,
+      runId,
+      signal: opts.signal,
+      activeToolNames: allowedNames,
+    };
     // On a read-only turn, ENFORCE the allowlist at dispatch too: the model could
     // emit an internal tool name that isn't in the projection (resolveWireName then
     // falls through to the raw name), so filtering the tool LIST alone isn't enough.

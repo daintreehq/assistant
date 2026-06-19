@@ -14,6 +14,29 @@ import type { ToolResult } from "../schemas.js";
 import { isForbiddenToolName } from "../safety/policy.js";
 
 /**
+ * Shared `note` for the discovery tools (`tool.search`, `daintree.listTools`),
+ * explaining what the per-result `callable` flag means so the model treats a
+ * `callable: false` entry as "known but not offered this turn", not "broken".
+ */
+const CALLABLE_NOTE =
+  "`callable: false` means the tool exists but is not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset) — only `callable: true` tools can be invoked directly now. An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered.";
+
+/**
+ * Build a predicate that reports whether a discovered MCP tool is actually offered
+ * in the current turn's tool projection. `activeToolNames` is the core ∪ active-recipe
+ * (or read-only) tool set stamped onto the context per-turn by `AgentSession.runTurn`;
+ * `undefined` means the turn is unconstrained, so every tool is callable. Uses a Set
+ * for O(1) membership across all results.
+ */
+function makeCallablePredicate(
+  activeToolNames: string[] | undefined,
+): (name: string) => boolean {
+  if (activeToolNames === undefined) return () => true;
+  const offered = new Set(activeToolNames);
+  return (name) => offered.has(name);
+}
+
+/**
  * Forward a call to a named Daintree MCP tool. Shared by the typed wrappers
  * below and structurally identical to daintree.call — but each wrapper carries an
  * accurate risk class, so operators can run recipes / focus terminals without the
@@ -271,7 +294,7 @@ export const mcpTools: ToolDef[] = [
   {
     name: "daintree.listTools",
     description:
-      "List the Daintree MCP tools available, with their names and descriptions.",
+      "List the Daintree MCP tools, with their names and descriptions. Each entry carries a `callable` flag: tools marked `callable: false` are known to exist but are not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset), so calling them would do nothing.",
     risk: "read",
     readOnly: true,
     schema: ListToolsArgs,
@@ -285,11 +308,19 @@ export const mcpTools: ToolDef[] = [
       }
       try {
         const tools = await ctx.mcp.listTools(false, ctx.signal);
+        // `activeToolNames` is the turn's tool projection; `undefined` ⇒ unconstrained
+        // (everything callable). Annotate rather than filter so the model still learns
+        // a tool exists even when the current recipe doesn't offer it.
+        const callableOf = makeCallablePredicate(ctx.activeToolNames);
         const list = tools.map((t) => ({
           name: t.name,
           description: t.description ?? "",
+          callable: callableOf(t.name),
         }));
-        return ok(`Found ${list.length} Daintree MCP tool(s).`, { tools: list });
+        return ok(`Found ${list.length} Daintree MCP tool(s).`, {
+          tools: list,
+          note: CALLABLE_NOTE,
+        });
       } catch (e) {
         if (ctx.signal?.aborted) {
           return fail("CANCELLED", "Turn cancelled while listing MCP tools.", {
@@ -306,7 +337,7 @@ export const mcpTools: ToolDef[] = [
   {
     name: "tool.search",
     description:
-      "Search Daintree MCP tools by keyword (substring match on name/description). Local CLI tools are always available regardless of results.",
+      "Search Daintree MCP tools by keyword (substring match on name/description). Each match carries a `callable` flag: tools marked `callable: false` exist but are not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset), so calling them would do nothing — only `callable: true` results can be invoked now.",
     risk: "read",
     readOnly: true,
     schema: SearchArgs,
@@ -333,6 +364,11 @@ export const mcpTools: ToolDef[] = [
         const max = args.max ?? 20;
         const q = args.query.toLowerCase();
         const tools = await ctx.mcp.listTools(false, ctx.signal);
+        // Annotate each match with whether it's actually offered in this turn's tool
+        // spec (`ctx.activeToolNames`; `undefined` ⇒ unconstrained, all callable) so we
+        // never advertise a tool the model can't invoke right now. Annotate, don't
+        // filter — the model still needs to learn a tool exists to reason about it.
+        const callableOf = makeCallablePredicate(ctx.activeToolNames);
         const matches = tools
           .filter(
             (t) =>
@@ -340,13 +376,17 @@ export const mcpTools: ToolDef[] = [
               (t.description ?? "").toLowerCase().includes(q),
           )
           .slice(0, max)
-          .map((t) => ({ name: t.name, description: t.description ?? "" }));
+          .map((t) => ({
+            name: t.name,
+            description: t.description ?? "",
+            callable: callableOf(t.name),
+          }));
         return ok(
-          `Found ${matches.length} Daintree MCP tool(s) matching "${args.query}". Local CLI tools are always available.`,
+          `Found ${matches.length} Daintree MCP tool(s) matching "${args.query}".`,
           {
             query: args.query,
             matches,
-            note: "Local CLI tools are always available regardless of these results.",
+            note: CALLABLE_NOTE,
           },
         );
       } catch (e) {
