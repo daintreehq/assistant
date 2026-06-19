@@ -25,6 +25,7 @@ function frameFor(
       previews={f.previews}
       busy={f.busy}
       stage={f.stage}
+      queueDepth={f.queueDepth}
       view={over.view ?? f.view}
       activePanel={over.activePanel}
       pending={f.pending}
@@ -75,6 +76,14 @@ describe("ControlRoom inline cockpit (golden frames)", () => {
 
   it.each(WIDTHS)("degraded is unmistakable (%i cols)", (w) => {
     expect(frameFor("degraded", w)).toContain("DEGRADED");
+  });
+
+  it("threads the queued follow-up count into the composer (#95)", () => {
+    // The "active" fixture queues two follow-ups; the count must reach the
+    // Composer busy indicator. Guards against a dropped queueDepth prop.
+    expect(frameFor("active", 120, 32)).toContain("2 queued");
+    // The idle fixture has nothing queued — no hint.
+    expect(frameFor("idle", 120, 32)).not.toContain("queued");
   });
 });
 
