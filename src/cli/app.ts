@@ -89,6 +89,8 @@ export class App {
       assistantStart: () => this.hooks.agentEvents?.assistantStart(),
       assistantToken: (token) => this.hooks.agentEvents?.assistantToken(token),
       assistantEnd: (content) => this.hooks.agentEvents?.assistantEnd(content),
+      assistantCancelled: (content) =>
+        this.hooks.agentEvents?.assistantCancelled(content),
       toolCall: (event) => this.hooks.agentEvents?.toolCall(event),
       toolResult: (event) => this.hooks.agentEvents?.toolResult(event),
       error: (message) => this.hooks.agentEvents?.error(message),

@@ -17,6 +17,10 @@ export function createConsoleSink(): AgentEventSink {
     assistantEnd() {
       render.assistantEnd();
     },
+    assistantCancelled() {
+      render.info("Turn cancelled");
+      render.assistantEnd();
+    },
     toolCall({ name, args }) {
       render.line();
       render.toolCall(name, args);

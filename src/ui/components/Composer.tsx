@@ -46,7 +46,9 @@ export function Composer({
   stage = "Thinking",
   contextHint,
   width = 72,
+  cancellable,
   onSubmit,
+  onCancel,
 }: {
   busy: boolean;
   /** When false the input ignores keystrokes (e.g. during a turn or a modal). */
@@ -56,7 +58,13 @@ export function Composer({
   /** Right-aligned context summary on the second line. */
   contextHint?: string;
   width?: number;
+  /** Whether the in-flight turn can be aborted; gates the "Esc cancel" hint.
+   *  Defaults to `busy` so callers that don't distinguish turn kinds still show it. */
+  cancellable?: boolean;
   onSubmit: (value: string) => boolean | void | Promise<void>;
+  /** Abort the in-flight turn — invoked on Escape when the composer is empty and
+   *  busy. With text present, Escape clears the buffer instead (no cancel). */
+  onCancel?: () => void;
 }) {
   const [value, setValue] = useState("");
   // Session prompt history (oldest first) for ↑/↓ recall in the input. Lives
@@ -104,7 +112,14 @@ export function Composer({
             history={history}
             onChange={setValue}
             onSubmit={submit}
-            onCancel={() => setValue("")}
+            onCancel={() => {
+              // Escape: while busy with an empty composer, abort the in-flight turn;
+              // otherwise just clear the buffer (the long-standing cancel-edit gesture).
+              // Treat a whitespace-only buffer as empty so a stray space doesn't swallow
+              // the cancel gesture.
+              if (busy && value.trim() === "") onCancel?.();
+              else setValue("");
+            }}
             onTab={() => {
               if (suggestions.length > 0) setValue(suggestions[0][0] + " ");
             }}
@@ -132,6 +147,15 @@ export function Composer({
           <KeyHint keyName="↑" action="history" />
           <Text dimColor>{" · "}</Text>
           <KeyHint keyName="^O" action="inspect ops" />
+          {/* Surfaced only while a cancellable turn runs, so the gesture is
+              discoverable exactly when it applies (Escape on the empty composer).
+              Falls back to `busy` when the caller doesn't distinguish turn kinds. */}
+          {(cancellable ?? busy) ? (
+            <>
+              <Text dimColor>{" · "}</Text>
+              <KeyHint keyName="Esc" action="cancel" />
+            </>
+          ) : null}
         </Box>
         {contextHint ? <Text dimColor>{contextHint}</Text> : null}
       </Box>

@@ -94,6 +94,10 @@ const WAKE_FAILURE_PREFIXES = [
   "Model error:",
   "Tool projection failed:",
   "Reached the tool-iteration limit",
+  // A cancelled turn delivered no summary either — treat it as a non-result so a
+  // wake's terminals aren't recorded as reported. (Wake turns aren't user-cancellable
+  // today, but this keeps the sentinel set complete and future-proof.)
+  "Turn cancelled",
 ] as const;
 
 export function isWakeFailureReply(reply: string): boolean {

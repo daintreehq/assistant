@@ -3,6 +3,7 @@ import { Composer } from "../../src/ui/components/Composer.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
+const ESC = "\x1b";
 const ENTER = "\r";
 const UP = "[A";
 const CTRL_U = ""; // delete the whole line
@@ -92,6 +93,60 @@ describe("Composer", () => {
     stdin.write(UP); // older
     await tick();
     expect(lastFrame() ?? "").toContain("alpha");
+  });
+
+  it("stays focused while busy so a follow-up can be typed and queued (#45)", async () => {
+    let submitted: string | undefined;
+    const { stdin } = render(
+      <Composer busy focus onSubmit={(v) => (submitted = v)} />,
+    );
+    stdin.write("next task");
+    await tick();
+    stdin.write(ENTER);
+    await tick();
+    // Busy no longer blocks the composer — the keystrokes land and submit.
+    expect(submitted).toBe("next task");
+  });
+
+  it("shows the Esc-cancel hint only while busy (#45)", () => {
+    const idle = render(<Composer busy={false} focus onSubmit={() => {}} />);
+    expect(idle.lastFrame() ?? "").not.toContain("cancel");
+    const busy = render(<Composer busy focus onSubmit={() => {}} />);
+    expect(busy.lastFrame() ?? "").toContain("cancel");
+  });
+
+  it("Escape on an empty composer while busy aborts the turn (#45)", async () => {
+    let cancelled = 0;
+    const { stdin } = render(
+      <Composer busy focus onSubmit={() => {}} onCancel={() => cancelled++} />,
+    );
+    stdin.write(ESC);
+    await tick();
+    expect(cancelled).toBe(1);
+  });
+
+  it("Escape with text in the buffer clears it instead of cancelling (#45)", async () => {
+    let cancelled = 0;
+    const { stdin, lastFrame } = render(
+      <Composer busy focus onSubmit={() => {}} onCancel={() => cancelled++} />,
+    );
+    stdin.write("half typed");
+    await tick();
+    stdin.write(ESC);
+    await tick();
+    // The buffer is cleared (cancel-edit gesture), and the turn is NOT aborted.
+    expect(cancelled).toBe(0);
+    expect(lastFrame() ?? "").not.toContain("half typed");
+  });
+
+  it("Escape when idle does not invoke onCancel (#45)", async () => {
+    let cancelled = 0;
+    const { stdin } = render(
+      <Composer busy={false} focus onSubmit={() => {}} onCancel={() => cancelled++} />,
+    );
+    stdin.write(ESC);
+    await tick();
+    expect(cancelled).toBe(0);
   });
 
   it("does not record a rejected submit in history", async () => {

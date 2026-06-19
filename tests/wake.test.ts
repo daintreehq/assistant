@@ -156,6 +156,7 @@ describe("isWakeFailureReply", () => {
     expect(
       isWakeFailureReply("Reached the tool-iteration limit without a final answer."),
     ).toBe(true);
+    expect(isWakeFailureReply("Turn cancelled")).toBe(true);
   });
 
   it("treats a real model reply as success", () => {

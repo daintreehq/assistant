@@ -8,6 +8,7 @@ import type { AppConfig } from "../config.js";
 import type { ModelTier } from "../schemas.js";
 import {
   FireworksClient,
+  CancelledError,
   type ChatOptions,
   type ChatResult,
   type ChatTool,
@@ -64,6 +65,12 @@ export class ModelRouter {
       this.logResponse("stream", tier, model, res);
       return res;
     } catch (err) {
+      // A cancelled turn is a clean user abort, not a model error — trace it under
+      // a distinct key so it doesn't pollute the error log or read as a failure.
+      if (err instanceof CancelledError) {
+        logDebug(this.cfg, "model.cancelled", { kind: "stream", tier, model });
+        throw err;
+      }
       this.logError("stream", tier, model, err);
       throw err;
     }
