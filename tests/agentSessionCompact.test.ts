@@ -112,6 +112,21 @@ describe("AgentSession.clear (#114)", () => {
     session.clear();
     expect(session.getMessages().length).toBe(3);
   });
+
+  it("drops a prior compaction summary too — clear after compact leaves no 4th note", () => {
+    const { session } = makeSession();
+    session.injectNote("pre");
+    session.compact("goals: X. open: none. next: Y.");
+    // compact() leaves controls + 1 summary note.
+    expect(session.getMessages().length).toBe(4);
+
+    session.clear();
+
+    const msgs = session.getMessages();
+    expect(msgs.length).toBe(3);
+    expect(msgs.some((m) => m.content?.includes("compacted summary"))).toBe(false);
+    expect(msgs.some((m) => m.content?.includes("goals: X"))).toBe(false);
+  });
 });
 
 describe("AgentSession auto-compaction (#7)", () => {

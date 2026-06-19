@@ -228,8 +228,7 @@ export function rehydrateSession(
   const markerIdx = rows.reduce(
     (last, r, i) =>
       r.role === "system" &&
-      (r.content.startsWith("[conversation compacted") ||
-        r.content.startsWith("[conversation cleared"))
+      (r.content.startsWith("[conversation compacted") || r.content === CLEAR_MARKER)
         ? i
         : last,
     -1,

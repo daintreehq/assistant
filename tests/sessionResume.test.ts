@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentSession, rehydrateSession } from "../src/agent/loop.js";
+import { AgentSession, rehydrateSession, CLEAR_MARKER } from "../src/agent/loop.js";
 import { RecipeRegistry } from "../src/recipes/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
@@ -209,6 +209,18 @@ describe("rehydrateSession (#77)", () => {
     expect(out.restoredMessages).toHaveLength(1);
     expect(out.restoredMessages[0].content).toContain("SECOND");
     expect(out.restoredMessages.some((m) => m.content?.includes("FIRST"))).toBe(false);
+  });
+
+  it("recognises the exact CLEAR_MARKER as the durable-log breadcrumb (#114)", () => {
+    // Canary: rehydrateSession() matches the clear marker by the same constant
+    // clear() writes, so the two sides cannot drift. If the marker text changes,
+    // this fails loudly rather than silently breaking post-clear resume.
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "[system event]\nold" }),
+      rec({ seq: 4, role: "system", content: CLEAR_MARKER }),
+    ];
+    expect(rehydrateSession(rows)!.restoredMessages).toHaveLength(0);
   });
 
   it("restores an empty history after a clear marker (#114)", () => {
