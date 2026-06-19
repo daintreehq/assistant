@@ -734,11 +734,17 @@ export class AgentSession {
    * Daintree's UI (panel.focus), which an unattended turn must not do. So a watcher
    * wake-up can read a terminal and report, but cannot act. "read" is never in
    * ALWAYS_CONFIRM, so a read-only turn also never blocks on a confirmation prompt.
+   *
+   * `recipe.load` is the one `risk: "read"` tool excluded here: its read is only an
+   * id lookup, but its *effect* is a write to the live loaded-recipe set (it rewrites
+   * messages[2] and mutates activeRecipeIds via loadRecipes). An autonomous wake turn
+   * must not reshape the interactive session's context, so it is withheld despite the
+   * risk class.
    */
   private readOnlyToolNames(): string[] {
     return this.deps.registry
       .list()
-      .filter((t) => t.risk === "read")
+      .filter((t) => t.risk === "read" && t.name !== "recipe.load")
       .map((t) => t.name);
   }
 

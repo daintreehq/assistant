@@ -428,6 +428,9 @@ describe("AgentSession read-only (wake) turn", () => {
     registry.register(mixedTool("term.focus", "ui"));
     registry.register(mixedTool("agentTask.spawnForEdits", "project"));
     registry.register(mixedTool("git.commit", "git"));
+    // risk:"read" but its effect is a write to the live recipe set — must be
+    // withheld on autonomous wake turns despite the risk class.
+    registry.register(mixedTool("recipe.load", "read"));
     const router = {
       json: async () => NO_RECIPES,
       stream: async (_tier: string, o: ChatOptions) => {
@@ -454,6 +457,9 @@ describe("AgentSession read-only (wake) turn", () => {
     expect(names).not.toContain("term.focus");
     expect(names).not.toContain("agentTask.spawnForEdits");
     expect(names).not.toContain("git.commit");
+    // recipe.load is risk:"read" but mutates the live recipe set; an autonomous
+    // wake turn must not reshape the interactive session, so it is withheld.
+    expect(names).not.toContain("recipe.load");
   });
 
   it("offers the full tool set on a normal (non-readOnly) turn", async () => {
