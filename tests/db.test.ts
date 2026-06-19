@@ -83,6 +83,27 @@ describe("Db fresh schema (single baseline migration)", () => {
       "idx_recipe_run_state_key",
     );
 
+    // agent_launches table + its idempotency-key index exist on a fresh DB.
+    expect(colNames("agent_launches")).toEqual(
+      expect.arrayContaining([
+        "id",
+        "idempotencyKey",
+        "agentId",
+        "worktreeId",
+        "mode",
+        "title",
+        "name",
+        "terminalId",
+        "watcherId",
+        "stage",
+        "errorCode",
+        "errorMessage",
+        "createdAt",
+        "updatedAt",
+      ]),
+    );
+    expect(indexNames("agent_launches")).toContain("idx_agent_launches_key");
+
     // memories table + its FTS5 index and triggers exist on a fresh DB.
     expect(colNames("memories")).toEqual(
       expect.arrayContaining([
@@ -816,6 +837,162 @@ describe("Db", () => {
         const fetched = second.getWorkflowRun(rec.id)!;
         expect(fetched.status).toBe("done");
         expect(fetched.completedAt).toBe(7777);
+        second.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("agent launches", () => {
+    it("insertAgentLaunch applies defaults (agt_ id, launch_requested stage, timestamps)", () => {
+      const rec = db.insertAgentLaunch({
+        idempotencyKey: "k1",
+        agentId: "claude",
+        mode: "edit",
+        title: "Fix OAuth",
+        name: "Claude: Fix OAuth",
+      });
+      expect(rec.id).toMatch(/^agt_[0-9a-f]{8}$/);
+      expect(rec.stage).toBe("launch_requested");
+      expect(rec.createdAt).toBeGreaterThan(0);
+      expect(rec.updatedAt).toBe(rec.createdAt);
+      expect(rec.terminalId).toBeUndefined();
+    });
+
+    it("maps SQL NULL columns to undefined, not null", () => {
+      const rec = db.insertAgentLaunch({
+        idempotencyKey: "k2",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+      });
+      const fetched = db.getAgentLaunch(rec.id)!;
+      expect(fetched.worktreeId).toBeUndefined();
+      expect(fetched.terminalId).toBeUndefined();
+      expect(fetched.watcherId).toBeUndefined();
+      expect(fetched.errorCode).toBeUndefined();
+      expect(fetched.errorMessage).toBeUndefined();
+    });
+
+    it("updateAgentLaunch advances the stage and forces updatedAt; createdAt is immutable", () => {
+      const rec = db.insertAgentLaunch({
+        idempotencyKey: "k3",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+        createdAt: 1000,
+      });
+      db.updateAgentLaunch(rec.id, { stage: "terminal_bound", terminalId: "term_9" });
+      const fetched = db.getAgentLaunch(rec.id)!;
+      expect(fetched.stage).toBe("terminal_bound");
+      expect(fetched.terminalId).toBe("term_9");
+      expect(fetched.updatedAt).toBeGreaterThan(1000);
+      expect(fetched.createdAt).toBe(1000);
+    });
+
+    it("updateAgentLaunch ignores unknown / immutable columns", () => {
+      const rec = db.insertAgentLaunch({
+        idempotencyKey: "k4",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+        createdAt: 1000,
+      });
+      db.updateAgentLaunch(rec.id, {
+        id: "agt_hacked",
+        idempotencyKey: "rekeyed",
+        createdAt: 5,
+      } as Record<string, unknown>);
+      const fetched = db.getAgentLaunch(rec.id)!;
+      expect(fetched.id).toBe(rec.id);
+      expect(fetched.idempotencyKey).toBe("k4");
+      expect(fetched.createdAt).toBe(1000);
+    });
+
+    it("findActiveAgentLaunch returns the in-flight record but excludes terminal stages", () => {
+      const rec = db.insertAgentLaunch({
+        idempotencyKey: "dup",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+      });
+      // In-flight (ambiguous) → found.
+      db.updateAgentLaunch(rec.id, { stage: "ambiguous" });
+      expect(db.findActiveAgentLaunch("dup")?.id).toBe(rec.id);
+      // Confirmed → terminal, no longer blocks a fresh launch of the same task.
+      db.updateAgentLaunch(rec.id, { stage: "confirmed" });
+      expect(db.findActiveAgentLaunch("dup")).toBeUndefined();
+      // Failed is likewise terminal.
+      const rec2 = db.insertAgentLaunch({
+        idempotencyKey: "dup2",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+      });
+      db.updateAgentLaunch(rec2.id, { stage: "failed" });
+      expect(db.findActiveAgentLaunch("dup2")).toBeUndefined();
+    });
+
+    it("findActiveAgentLaunch returns the most recently touched in-flight record", () => {
+      const a = db.insertAgentLaunch({
+        idempotencyKey: "same",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+        createdAt: 100,
+        updatedAt: 100,
+      });
+      const b = db.insertAgentLaunch({
+        idempotencyKey: "same",
+        agentId: "claude",
+        mode: "edit",
+        title: "t",
+        name: "Claude: t",
+        createdAt: 200,
+        updatedAt: 200,
+      });
+      expect(db.findActiveAgentLaunch("same")?.id).toBe(b.id);
+      void a;
+    });
+
+    it("cancelStaleAgentLaunches retires non-terminal records from a prior session on reopen", () => {
+      const dir = mkdtempSync(join(tmpdir(), "db-agt-"));
+      const path = join(dir, "state.db");
+      try {
+        const first = new Db(path);
+        const inflight = first.insertAgentLaunch({
+          idempotencyKey: "stale",
+          agentId: "claude",
+          mode: "edit",
+          title: "t",
+          name: "Claude: t",
+        });
+        first.updateAgentLaunch(inflight.id, { stage: "ambiguous" });
+        const done = first.insertAgentLaunch({
+          idempotencyKey: "done",
+          agentId: "claude",
+          mode: "edit",
+          title: "t",
+          name: "Claude: t",
+        });
+        first.updateAgentLaunch(done.id, { stage: "confirmed" });
+        first.close();
+
+        // New session: the in-flight row is marked failed (session-scoped), so its
+        // key no longer blocks a fresh launch; the confirmed row is untouched.
+        const second = new Db(path);
+        expect(second.findActiveAgentLaunch("stale")).toBeUndefined();
+        const fetched = second.getAgentLaunch(inflight.id)!;
+        expect(fetched.stage).toBe("failed");
+        expect(fetched.errorCode).toBe("SESSION_ENDED");
+        expect(second.getAgentLaunch(done.id)!.stage).toBe("confirmed");
         second.close();
       } finally {
         rmSync(dir, { recursive: true, force: true });

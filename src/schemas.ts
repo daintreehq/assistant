@@ -777,6 +777,74 @@ export const JsonResultEnvelopeSchema = z
 export type JsonResultEnvelope = z.infer<typeof JsonResultEnvelopeSchema>;
 
 /* -------------------------------------------------------------------------- */
+/* Agent launch operations (idempotent spawn saga)                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Stages a spawned-agent launch advances through. Spawning is a multi-step
+ * external operation (MCP `agent.launch` → bind terminal → attach watcher) with
+ * no transactional guarantee, so the durable record below tracks where a launch
+ * got to. This lets a retry reconcile a partial failure instead of blindly
+ * launching a second agent.
+ *
+ *   - launch_requested — row written *before* the MCP call (write-ahead); a crash
+ *                        here leaves a recoverable record, not a ghost agent.
+ *   - agent_started    — `agent.launch` returned without error.
+ *   - terminal_bound   — a terminalId was extracted from the response.
+ *   - watcher_attached — the supervising watcher was inserted.
+ *   - confirmed        — full success (terminal).
+ *   - failed           — `agent.launch` returned an explicit error, or the
+ *                        session ended before confirmation (terminal).
+ *   - ambiguous        — the launch outcome is unknown: the response carried no
+ *                        terminalId, or the transport threw (the request may have
+ *                        reached Daintree). Needs reconciliation before retry.
+ *
+ * Only `confirmed` and `failed` are terminal; an `ambiguous` record stays live so
+ * a retry can reconcile it (via `terminal.list`) within the same session.
+ */
+export type AgentLaunchStage =
+  | "launch_requested"
+  | "agent_started"
+  | "terminal_bound"
+  | "watcher_attached"
+  | "confirmed"
+  | "failed"
+  | "ambiguous";
+
+/**
+ * A durable record of one `agentTask.spawnForEdits` launch, keyed by a
+ * deterministic `idempotencyKey` (a hash of the task's identity — taskPrompt,
+ * worktreeId, agentId, mode). A retry of the same logical task finds the in-flight
+ * record and reconciles instead of duplicating; a completed (`confirmed`/`failed`)
+ * record never blocks a fresh run of the same task later.
+ *
+ * `name` is the deterministic launch name passed to `agent.launch` (e.g.
+ * "Claude: auth refactor"); it is stored so an ambiguous launch can be
+ * reconciled by matching it against `terminal.list`. Records are session-scoped:
+ * `cancelStaleAgentLaunches()` marks any non-terminal row `failed` on DB open,
+ * since the terminals/watchers they reference live only for the session.
+ */
+export interface AgentLaunchRecord {
+  id: string; // agt_<uuid8>
+  /** Deterministic content hash of the task identity; the dedup key. */
+  idempotencyKey: string;
+  agentId: string;
+  worktreeId?: string;
+  mode: string; // "edit" | "explore"
+  title: string;
+  /** Deterministic launch name, for terminal.list reconciliation. */
+  name: string;
+  terminalId?: string;
+  watcherId?: string;
+  stage: AgentLaunchStage;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: number;
+  /** Advances on every stage transition; createdAt stays fixed. */
+  updatedAt: number;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
