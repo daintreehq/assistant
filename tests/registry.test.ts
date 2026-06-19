@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { buildAllTools } from "../src/tools/index.js";
 import { ok, fail, type ToolContext, type ToolDef } from "../src/tools/types.js";
+import { WatchCondition } from "../src/schemas.js";
 import { Db } from "../src/storage/db.js";
 import { Queue } from "../src/queue.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
@@ -88,6 +89,74 @@ describe("ToolRegistry.dispatch", () => {
     const res = await reg.dispatch("test.project", { name: 123 }, ctx);
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("INVALID_ARGS");
+  });
+
+  it("turns a failed union into the menu of valid keys, not 'Invalid input'", async () => {
+    // Regression for the watcher loop: passing an empty object for a union-typed
+    // arg used to surface only "field: Invalid input", giving the model nothing to
+    // correct toward. It must now list the discriminating keys to pick from.
+    const UnionArgs = z.object({
+      when: z.union([
+        z.object({ stateIs: z.string() }).strict(),
+        z.object({ contains: z.string() }).strict(),
+      ]),
+    });
+    const unionTool: ToolDef = {
+      name: "test.union",
+      description: "A tool with a union-typed arg.",
+      risk: "read",
+      readOnly: true,
+      schema: UnionArgs,
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async handler() {
+        return ok("ran");
+      },
+    };
+    const reg = new ToolRegistry();
+    reg.register(unionTool);
+    const ctx = makeCtx(db, config, vi.fn());
+    const res = await reg.dispatch("test.union", { when: {} }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("INVALID_ARGS");
+    expect(res.summary).toContain("when: the value matched none of the allowed shapes");
+    expect(res.summary).toContain("stateIs");
+    expect(res.summary).toContain("contains");
+    expect(res.summary).not.toContain("Invalid input");
+  });
+
+  it("lists the full WatchCondition menu for an empty condition (the real failure)", async () => {
+    // Exercise the actual recursive WatchCondition union (not a toy 2-branch stand-in)
+    // so the menu stays in sync with the DSL: all leaves plus the all/any/not combinators.
+    const WatcherArgs = z.object({ stopWhen: WatchCondition.optional() });
+    const watcherTool: ToolDef = {
+      name: "test.watch",
+      description: "Tool carrying the real WatchCondition union.",
+      risk: "read",
+      readOnly: true,
+      schema: WatcherArgs,
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async handler() {
+        return ok("ran");
+      },
+    };
+    const reg = new ToolRegistry();
+    reg.register(watcherTool);
+    const ctx = makeCtx(db, config, vi.fn());
+    const res = await reg.dispatch("test.watch", { stopWhen: {} }, ctx);
+    expect(res.ok).toBe(false);
+    for (const key of [
+      "stateIs",
+      "runtimeStatusIs",
+      "contains",
+      "regex",
+      "noOutputForMs",
+      "modelJudge",
+      "all",
+      "any",
+      "not",
+    ]) {
+      expect(res.summary).toContain(key);
+    }
   });
 
   it("runs a read tool and writes an audit row", async () => {

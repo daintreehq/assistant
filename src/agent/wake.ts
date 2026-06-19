@@ -94,6 +94,10 @@ const WAKE_FAILURE_PREFIXES = [
   "Model error:",
   "Tool projection failed:",
   "Reached the tool-iteration limit",
+  // The circuit breaker stops a turn that hammered one failing tool call with
+  // identical args (see loop.ts REPEAT_FAILURE_ABORT). Like the iteration limit, it
+  // delivered no summary — a wake must not record its terminals as reported.
+  "Stopped: called ",
   // A cancelled turn delivered no summary either — treat it as a non-result so a
   // wake's terminals aren't recorded as reported. (Wake turns aren't user-cancellable
   // today, but this keeps the sentinel set complete and future-proof.)

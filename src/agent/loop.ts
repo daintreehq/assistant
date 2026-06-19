@@ -31,6 +31,17 @@ import { bareModelId, estimateCostUsd } from "../models/pricing.js";
 
 const MAX_TOOL_ITERATIONS = 12;
 /**
+ * Circuit breaker for a model that hammers the same broken tool call. A watcher
+ * create once failed 11× on byte-identical arguments and burned the whole
+ * iteration budget, ending the turn with no answer for the user. We key failures
+ * by tool name + exact argument JSON: after WARN identical failures we inject one
+ * corrective nudge, and after ABORT we stop the turn and report what's blocking,
+ * rather than looping to MAX_TOOL_ITERATIONS. Only IDENTICAL repeated failures
+ * trip it — a call whose arguments change (the model making progress) never does.
+ */
+const REPEAT_FAILURE_WARN = 2;
+const REPEAT_FAILURE_ABORT = 3;
+/**
  * Sentinel returned by send() when a turn is cancelled by the user (Escape-to-
  * cancel). Like the other non-throwing failure replies, the wake reactors must not
  * treat a cancelled turn as a delivered summary — see WAKE_FAILURE_PREFIXES.
@@ -513,6 +524,12 @@ export class AgentSession {
     // falls through to the raw name), so filtering the tool LIST alone isn't enough.
     // Any call outside this set is refused before dispatch.
     const allowedSet = opts.readOnly ? new Set(allowedNames) : undefined;
+    // Circuit-breaker state for this turn: how many times each (tool, exact-args)
+    // signature has failed, and whether we've already spent our one corrective
+    // nudge. Persists across iterations so a per-iteration single-call loop is
+    // still caught (the failure log showed exactly that shape).
+    const failureCounts = new Map<string, number>();
+    let stuckNudged = false;
     let tools;
     try {
       tools = this.deps.registry.toOpenAITools(allowedNames);
@@ -605,6 +622,9 @@ export class AgentSession {
 
       // Execute each requested tool call.
       const calls = result.toolCalls;
+      // Worst (most-repeated) identical failure seen in THIS batch, used to drive
+      // the circuit breaker once every call in the batch has a tool result.
+      let worstRepeat: { name: string; count: number; res: ToolResult } | undefined;
       for (let c = 0; c < calls.length; c++) {
         const call = calls[c];
         // The model echoes back the OpenAI-legal wire name (e.g. `fs__read`);
@@ -673,6 +693,25 @@ export class AgentSession {
           content: serializeToolResult(res, runCtx.artifactStore),
         });
 
+        // Track identical repeated failures for the circuit breaker. The signature
+        // is the tool name + the EXACT argument JSON the model emitted + the error
+        // code, JSON-encoded so the delimiter is printable and collision-proof. Only
+        // a byte-for-byte repeat that fails the SAME way counts — a changed argument
+        // (the model making progress) or a different failure resets to its own
+        // signature, keeping the "each failing the same way" abort message honest.
+        if (!res.ok) {
+          const sig = JSON.stringify([
+            internalName,
+            call.function.arguments ?? "",
+            res.error?.code ?? "",
+          ]);
+          const count = (failureCounts.get(sig) ?? 0) + 1;
+          failureCounts.set(sig, count);
+          if (!worstRepeat || count > worstRepeat.count) {
+            worstRepeat = { name: internalName, count, res };
+          }
+        }
+
         // The user cancelled during (or just before) this dispatch — now that the
         // signal carries into handlers, a long MCP/extraction call returns a
         // CANCELLED result rather than completing in the background. Stop the loop
@@ -709,6 +748,29 @@ export class AgentSession {
           this.events.assistantCancelled("");
           return CANCELLED_REPLY;
         }
+      }
+
+      // Circuit breaker: every call in this batch now has a tool result, so the
+      // transcript is well-formed and it's safe to stop or nudge.
+      if (worstRepeat && worstRepeat.count >= REPEAT_FAILURE_ABORT) {
+        const e = worstRepeat.res.error as
+          | { code?: string; message?: string }
+          | undefined;
+        const detail = e?.code ? `${e.code}: ${e.message ?? ""}`.trim() : worstRepeat.res.summary;
+        const msg = `Stopped: called ${worstRepeat.name} ${worstRepeat.count} times this turn with identical arguments, each failing the same way (${detail}). Tell the user what's blocking and what you tried rather than repeating the call.`;
+        this.events.error(msg);
+        return msg;
+      }
+      if (worstRepeat && worstRepeat.count >= REPEAT_FAILURE_WARN && !stuckNudged) {
+        stuckNudged = true;
+        const e = worstRepeat.res.error as { code?: string } | undefined;
+        // One corrective nudge, surfaced like other system events so the model
+        // sees it on the next iteration. If it repeats the call anyway, the ABORT
+        // threshold ends the turn cleanly instead of looping to the iteration cap.
+        this.pushMessage({
+          role: "user",
+          content: `[system event]\nYou have called ${worstRepeat.name} ${worstRepeat.count} times this turn with byte-identical arguments and it failed the same way each time${e?.code ? ` (${e.code})` : ""}. Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again.`,
+        });
       }
     }
 

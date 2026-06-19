@@ -157,6 +157,11 @@ describe("isWakeFailureReply", () => {
       isWakeFailureReply("Reached the tool-iteration limit without a final answer."),
     ).toBe(true);
     expect(isWakeFailureReply("Turn cancelled")).toBe(true);
+    expect(
+      isWakeFailureReply(
+        "Stopped: called watcher.terminal.create 3 times this turn with identical arguments, each failing the same way (INVALID_ARGS: ...).",
+      ),
+    ).toBe(true);
   });
 
   it("treats a real model reply as success", () => {

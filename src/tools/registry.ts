@@ -21,6 +21,44 @@ function toWireName(name: string): string {
   return name.replaceAll(".", "__");
 }
 
+/**
+ * Render one Zod issue as an actionable, single-line message for the model.
+ *
+ * Zod collapses a failed `z.union(...)` to the useless "Invalid input" — which is
+ * exactly what stranded the watcher loop: the model passed `stopWhen: {}` (an empty
+ * object matching no union member), saw only "stopWhen: Invalid input", and had
+ * nothing to steer on, so it repeated the identical broken call until the turn died.
+ * For a union failure we instead drill into the per-branch errors and surface the
+ * MENU of keys each branch wanted at the union's own depth (`stateIs`, `contains`,
+ * `all`, `not`, …) so the model can pick exactly one. The wording stays generic —
+ * this formatter runs for every union-typed arg, so it must not assume the field is
+ * optional or that the value was specifically an empty object. Everything else falls
+ * back to Zod's own message (a partially-valid object yields specific field issues,
+ * not invalid_union, so those keep their precise messages).
+ */
+function summarizeIssue(issue: {
+  code: string;
+  path: (string | number)[];
+  message: string;
+  unionErrors?: { issues: { path: (string | number)[] }[] }[];
+}): string {
+  const path = issue.path.join(".");
+  if (issue.code === "invalid_union" && issue.unionErrors) {
+    const depth = issue.path.length;
+    // Collect the discriminating key each branch expected at the union's depth.
+    const keys = new Set<string>();
+    for (const branch of issue.unionErrors) {
+      for (const sub of branch.issues) {
+        if (sub.path.length > depth) keys.add(String(sub.path[depth]));
+      }
+    }
+    if (keys.size > 0) {
+      return `${path}: the value matched none of the allowed shapes — provide an object with exactly one of these keys: ${[...keys].sort().join(", ")}`;
+    }
+  }
+  return `${path}: ${issue.message}`;
+}
+
 export class ToolRegistry {
   private tools = new Map<string, ToolDef>();
   // Bidirectional alias maps between internal dotted names and OpenAI-legal
@@ -133,7 +171,7 @@ export class ToolRegistry {
         const res = fail(
           "INVALID_ARGS",
           `Invalid arguments for ${name}: ${parsed.error.issues
-            .map((i) => `${i.path.join(".")}: ${i.message}`)
+            .map(summarizeIssue)
             .join("; ")}`,
           { recoverable: true, details: parsed.error.issues },
         );
