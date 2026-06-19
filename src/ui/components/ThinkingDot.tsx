@@ -42,14 +42,18 @@ export function ThinkingDot({ ascii = false }: { ascii?: boolean }) {
   const frames = ascii ? ASCII_FRAMES : BRAILLE_FRAMES;
   const [idx, setIdx] = useState(0);
   useEffect(() => {
+    // Restart from frame 0 whenever the set changes size. `ascii` is fixed for a
+    // session in production (derived from env once), so this only matters if a
+    // caller ever flips it: the shorter ASCII set would otherwise leave a stale
+    // out-of-range `idx` rendering a blank glyph for one tick.
+    setIdx(0);
     const id = setInterval(
       () => setIdx((i) => (i + 1) % frames.length),
       INTERVAL_MS,
     );
     return () => clearInterval(id);
-    // `frames.length` (not the array ref) is the only thing the timer reads that
-    // can change — flipping `ascii` resets the cycle cleanly; a stable length
-    // never restarts the interval mid-turn.
+    // Keyed on `frames.length` (not the array ref): a stable length never
+    // restarts the interval mid-turn, while a size change resets it cleanly.
   }, [frames.length]);
   return <Text>{frames[idx]}</Text>;
 }

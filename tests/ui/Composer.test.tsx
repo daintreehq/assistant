@@ -1,11 +1,17 @@
 import { createRef } from "react";
-import { render } from "ink-testing-library";
+import { cleanup, render } from "ink-testing-library";
 import {
   Composer,
   type ComposerHandle,
 } from "../../src/ui/components/Composer.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
+
+// Unmount every rendered Composer after each test. A *busy* Composer mounts the
+// animated ThinkingDot, which holds a live setInterval; without teardown those
+// intervals keep firing setState across later tests and race the stdin-driven
+// input assertions (a leaked spinner reorders keystrokes / repaints mid-tick).
+afterEach(cleanup);
 
 const ESC = "\x1b";
 const ENTER = "\r";
@@ -30,6 +36,24 @@ describe("Composer", () => {
       <Composer busy stage="Delegating" onSubmit={() => {}} />,
     );
     expect(lastFrame() ?? "").toContain("Delegating");
+  });
+
+  it("renders the animated spinner glyph beside the busy stage (#115)", () => {
+    const { lastFrame } = render(
+      <Composer busy stage="Thinking" onSubmit={() => {}} />,
+    );
+    // The first braille frame is on screen before any tick — proves the spinner
+    // node is actually mounted in the busy line, not silently absent.
+    expect(lastFrame() ?? "").toContain("⠋");
+  });
+
+  it("renders no spinner glyph or queued suffix when idle (#115)", () => {
+    const { lastFrame } = render(
+      <Composer busy={false} stage="Thinking" queueDepth={2} onSubmit={() => {}} />,
+    );
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("⠋");
+    expect(frame).not.toContain("queued");
   });
 
   it("appends the queued follow-up count to the busy stage (#95)", () => {
