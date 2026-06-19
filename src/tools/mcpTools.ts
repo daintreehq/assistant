@@ -126,6 +126,45 @@ const CallArgs = z.object({
   requestKey: z.string().optional(),
 });
 
+/* ---- copyTree / terminal-input / agent-focus / git-snapshot wrappers (#120) ---- */
+
+/**
+ * copyTree options are an opaque bag Daintree owns — we forward them verbatim and
+ * deliberately do NOT model the keys here, so the assistant never invents option
+ * names. A `z.record` keeps validation permissive while still rejecting non-objects.
+ */
+const CopyTreeOptionsSchema = z.record(z.string(), z.unknown());
+
+const CopyTreeGenerateArgs = z.object({
+  worktreeId: z
+    .string()
+    .optional()
+    .describe("Worktree to generate the copy tree for; Daintree uses the active worktree when omitted."),
+  options: CopyTreeOptionsSchema.optional().describe(
+    "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys).",
+  ),
+});
+
+const CopyTreeInjectToTerminalArgs = z.object({
+  terminalId: z.string().min(1).describe("Terminal to inject the generated copy tree into."),
+  worktreeId: z
+    .string()
+    .optional()
+    .describe("Worktree to generate the copy tree from; Daintree uses the active worktree when omitted."),
+  options: CopyTreeOptionsSchema.optional().describe(
+    "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys).",
+  ),
+});
+
+const TerminalSendCommandArgs = z.object({
+  terminalId: z.string().min(1).describe("Terminal to send the command to."),
+  command: z.string().min(1).describe("Shell command text to type into the terminal and run."),
+});
+
+const SnapshotWorktreeArgs = z.object({
+  worktreeId: z.string().min(1).describe("Worktree whose pre-agent git snapshot to act on."),
+});
+
 /**
  * MCP tools that MUST go through a typed local wrapper instead of the raw
  * daintree.call escape hatch. Each maps the raw MCP tool name to the wrapper(s)
@@ -142,6 +181,14 @@ const WRAPPED_MCP_TOOLS: Record<string, string> = {
   "terminal.getOutput":
     "terminal.summarize (model summary of the tail) or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
   "panel.focus": "terminal.focus",
+  "terminal.sendCommand":
+    "terminal.sendCommand (typed wrapper — pass terminalId and command)",
+  "copyTree.injectToTerminal":
+    "copyTree.injectToTerminal (typed wrapper — pass terminalId)",
+  "copyTree.generateAndCopyFile":
+    "copyTree.generateAndCopyFile (typed wrapper — pass an optional worktreeId)",
+  "git.snapshotRevert": "git.snapshotRevert (typed wrapper — pass worktreeId)",
+  "git.snapshotDelete": "git.snapshotDelete (typed wrapper — pass worktreeId)",
 };
 
 const ForgeReadArgs = z
@@ -581,6 +628,228 @@ export const mcpTools: ToolDef[] = [
       // Daintree has no `terminal.focus` MCP tool — terminals are panels, so the
       // correct call is `panel.focus` with the terminal id as the panelId.
       return passthrough(ctx, "panel.focus", { panelId: args.terminalId });
+    },
+  },
+  /* ---- copyTree / terminal-input / agent-focus / git-snapshot wrappers (#120) ----
+   * These cover Daintree actions that were previously reachable only through the raw
+   * daintree.call escape hatch. Each carries the same risk class Daintree gates the
+   * action at (verified against helpAssistantTierAllowlists.ts), so reads/UI focus run
+   * without the system-tier confirmation the escape hatch always forces. The fleet.*
+   * arming ops and terminal.armByState are intentionally NOT wrapped — they are
+   * renderer-only UI gestures with no MCP surface. */
+  {
+    name: "copyTree.generate",
+    description:
+      "Generate a Daintree 'copy tree' — a concatenated digest of a worktree's files — and return it as text (read-only). Typed wrapper around the Daintree copyTree.generate MCP tool. 'options' is forwarded verbatim; don't invent keys.",
+    risk: "read",
+    readOnly: true,
+    schema: CopyTreeGenerateArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        worktreeId: {
+          type: "string",
+          description:
+            "Worktree to generate the copy tree for; Daintree uses the active worktree when omitted.",
+        },
+        options: {
+          type: "object",
+          additionalProperties: true,
+          description: "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "copyTree.generate", args);
+    },
+  },
+  {
+    name: "terminal.sendCommand",
+    description:
+      "Send a command line to a Daintree terminal — types it into the terminal's input and runs it. Mutating, so it always confirms. Typed wrapper around the Daintree terminal.sendCommand MCP tool.",
+    consequence:
+      "Runs a shell command in the named terminal as if you typed it. Effects depend on the command and may not be reversible.",
+    risk: "terminal",
+    schema: TerminalSendCommandArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: { type: "string", description: "Terminal to send the command to." },
+        command: {
+          type: "string",
+          description: "Shell command text to type into the terminal and run.",
+        },
+      },
+      required: ["terminalId", "command"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "terminal.sendCommand", args);
+    },
+  },
+  {
+    name: "copyTree.injectToTerminal",
+    description:
+      "Generate a worktree's copy tree and inject it into a Daintree terminal's input. Mutating (writes into a terminal), so it always confirms. Typed wrapper around the Daintree copyTree.injectToTerminal MCP tool. 'options' is forwarded verbatim.",
+    consequence:
+      "Pastes a generated file digest into the named terminal's input. May be large; review the target terminal before approving.",
+    risk: "terminal",
+    schema: CopyTreeInjectToTerminalArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: {
+          type: "string",
+          description: "Terminal to inject the generated copy tree into.",
+        },
+        worktreeId: {
+          type: "string",
+          description:
+            "Worktree to generate the copy tree from; Daintree uses the active worktree when omitted.",
+        },
+        options: {
+          type: "object",
+          additionalProperties: true,
+          description: "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys).",
+        },
+      },
+      required: ["terminalId"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "copyTree.injectToTerminal", args);
+    },
+  },
+  {
+    name: "agent.focusNextWaiting",
+    description:
+      "Focus the next agent terminal that is waiting for input or a decision (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextWaiting MCP tool.",
+    risk: "ui",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return passthrough(ctx, "agent.focusNextWaiting", {});
+    },
+  },
+  {
+    name: "agent.focusNextWorking",
+    description:
+      "Focus the next agent terminal that is actively working (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextWorking MCP tool.",
+    risk: "ui",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return passthrough(ctx, "agent.focusNextWorking", {});
+    },
+  },
+  {
+    name: "agent.focusNextAgent",
+    description:
+      "Focus the next agent terminal in order (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextAgent MCP tool.",
+    risk: "ui",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return passthrough(ctx, "agent.focusNextAgent", {});
+    },
+  },
+  {
+    name: "agent.focusPreviousAgent",
+    description:
+      "Focus the previous agent terminal in order (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusPreviousAgent MCP tool.",
+    risk: "ui",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return passthrough(ctx, "agent.focusPreviousAgent", {});
+    },
+  },
+  {
+    name: "workflow.focusNextAttention",
+    description:
+      "Focus the next agent needing attention (waiting agents first, then working) and report the queue counts (UI focus change; no state mutation). Typed wrapper around the Daintree workflow.focusNextAttention MCP tool — returns { focused, state, waitingCount, workingCount }.",
+    risk: "ui",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return passthrough(ctx, "workflow.focusNextAttention", {});
+    },
+  },
+  {
+    name: "copyTree.generateAndCopyFile",
+    description:
+      "Generate a worktree's copy tree and copy it to the OS clipboard as a file. System tier — always confirms. Typed wrapper around the Daintree copyTree.generateAndCopyFile MCP tool. 'options' is forwarded verbatim.",
+    consequence:
+      "Writes the generated file digest to the operating-system clipboard, replacing its current contents.",
+    risk: "system",
+    schema: CopyTreeGenerateArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        worktreeId: {
+          type: "string",
+          description:
+            "Worktree to generate the copy tree for; Daintree uses the active worktree when omitted.",
+        },
+        options: {
+          type: "object",
+          additionalProperties: true,
+          description: "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys).",
+        },
+      },
+      required: [],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "copyTree.generateAndCopyFile", args);
+    },
+  },
+  {
+    name: "git.snapshotRevert",
+    description:
+      "Revert a worktree to its pre-agent git snapshot via Daintree. System tier — always confirms. Typed wrapper around the Daintree git.snapshotRevert MCP tool.",
+    consequence:
+      "Resets the worktree to its pre-agent snapshot. Uncommitted changes are irrecoverable — this cannot be undone.",
+    risk: "git",
+    schema: SnapshotWorktreeArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        worktreeId: {
+          type: "string",
+          description: "Worktree whose pre-agent git snapshot to revert to.",
+        },
+      },
+      required: ["worktreeId"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "git.snapshotRevert", args);
+    },
+  },
+  {
+    name: "git.snapshotDelete",
+    description:
+      "Permanently delete a worktree's pre-agent git snapshot via Daintree. System tier — always confirms. Typed wrapper around the Daintree git.snapshotDelete MCP tool.",
+    consequence:
+      "Permanently deletes the worktree's pre-agent snapshot. There is no recovery once deleted.",
+    risk: "git",
+    schema: SnapshotWorktreeArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        worktreeId: {
+          type: "string",
+          description: "Worktree whose pre-agent git snapshot to delete.",
+        },
+      },
+      required: ["worktreeId"],
+    },
+    async handler(args, ctx) {
+      return passthrough(ctx, "git.snapshotDelete", args);
     },
   },
   {
