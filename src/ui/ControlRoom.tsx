@@ -140,22 +140,31 @@ export function ControlRoom({
   composerRef,
   onResolve = () => {},
 }: ControlRoomProps) {
-  // Reserve the terminal's last column. The cockpit renders inline (main buffer,
-  // no alternate screen), so the repainting region is erased and redrawn with
-  // cursor moves whose count comes from Ink's own layout — NOT the terminal's
-  // actual wrapping. If any dynamic line fills the full width its final glyph
-  // lands in the autowrap (DECAWM) column, where many terminals wrap it onto a
-  // second physical row. That row is invisible to Ink's height accounting, so on
-  // the next repaint the cursor moves up one row short, the top row is never
-  // erased, and a stale copy is orphaned into scrollback (the status line "ghosts"
-  // we saw triplicated). Keeping content one column shy of the edge means nothing
-  // ever occupies the autowrap column, so every repaint erases cleanly.
+  // Reserve the terminal's last column AND keep the repainting region pinned to the
+  // terminal's *live* width. The cockpit renders inline (main buffer, no alternate
+  // screen), so the bottom region is erased and redrawn by moving the cursor up by
+  // Ink's logical line count — NOT the terminal's physical wrapping. Two distinct
+  // failure modes orphan a stale copy into scrollback:
   //
-  // The reserve is a HARD ceiling: clamp strictly below the terminal width even on
-  // a tiny pane. A naive `Math.max(20, …)` readability floor would defeat it — at
-  // columns ≤ 20 it pins contentWidth to 20, back onto (or past) the real edge,
-  // reintroducing the very overflow we're avoiding. So `columns - 1` always wins;
-  // the floor (1) only guards against a zero/negative width breaking Ink's layout.
+  //  1. Steady state: if a dynamic line fills the full width its final glyph lands
+  //     in the autowrap (DECAWM) column, where many terminals wrap it onto a second
+  //     physical row invisible to Ink's height accounting; the next repaint then
+  //     moves up one row short and orphans the top row. `paddingRight={1}` keeps the
+  //     content one column shy of the edge so nothing ever sits in that column.
+  //  2. Resize (e.g. Daintree animating the pane width on show/hide): Ink repaints
+  //     SYNCHRONOUSLY on every SIGWINCH using the CURRENT React tree, but
+  //     `useWindowSize` only updates `columns` a tick LATER. An explicit
+  //     `width={columns - 1}` is therefore momentarily WIDER than the just-shrunk
+  //     terminal, wraps, and — because Ink only auto-clears when shrinking, not when
+  //     it grows back — leaves one orphaned row per show/hide cycle. So the root is
+  //     sized `width="100%"`: yoga resolves that against the live terminal width on
+  //     every resize relayout, never a lagged prop. `maxWidth` caps it at the
+  //     readability ceiling / lagged-prop width. The live full-width children (status
+  //     line, composer rules) likewise fill via flex, so they can't overflow mid-resize.
+  //
+  // `contentWidth` is the content-area width — one shy of the terminal, never past the
+  // readability cap — used for the static/committed cells and as the maxWidth cap.
+  // The floor (1) only guards against a zero/negative width breaking Ink's layout.
   const contentWidth = Math.max(1, Math.min(columns - 1, CONTENT_MAX));
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
@@ -182,7 +191,12 @@ export function ControlRoom({
   const showPanel = !pending && view !== "home";
 
   return (
-    <Box flexDirection="column" width={contentWidth}>
+    <Box
+      flexDirection="column"
+      width="100%"
+      maxWidth={contentWidth + 1}
+      paddingRight={1}
+    >
       <Static key={staticKey} items={staticItems}>
         {(item) =>
           item.cell ? (
@@ -267,7 +281,6 @@ export function ControlRoom({
             stage={stage}
             queueDepth={queueDepth}
             contextHint={contextHint}
-            width={contentWidth}
             focus={composerFocus}
             cancellable={cancellable}
             onSubmit={onSubmit}

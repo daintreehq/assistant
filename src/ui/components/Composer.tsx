@@ -49,7 +49,6 @@ export function Composer({
   stage = "Thinking",
   queueDepth = 0,
   contextHint,
-  width = 72,
   cancellable,
   onSubmit,
   onCancel,
@@ -65,7 +64,6 @@ export function Composer({
   queueDepth?: number;
   /** Right-aligned context summary on the second line. */
   contextHint?: string;
-  width?: number;
   /** Whether the in-flight turn can be aborted; gates the "Esc cancel" hint.
    *  Defaults to `busy` so callers that don't distinguish turn kinds still show it. */
   cancellable?: boolean;
@@ -119,7 +117,7 @@ export function Composer({
         </Box>
       ) : null}
 
-      <Divider width={width} />
+      <Divider />
 
       <Box>
         <Box flexGrow={1}>
@@ -156,7 +154,7 @@ export function Composer({
 
       {/* Bracket the input top AND bottom so the field reads unmistakably as the
           place text goes — the hints below sit outside the rule. */}
-      <Divider width={width} />
+      <Divider />
 
       <Box justifyContent="space-between">
         <Box>

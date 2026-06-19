@@ -90,10 +90,13 @@ export function StatusLine({
   const leftRoom = Math.max(12, width - rightLen);
 
   return (
-    // Pin to the given width rather than leaning on parent stretch, so the
-    // space-between layout (and the rightLen reservation above) is computed against
-    // the same width the line actually renders at — the basis of the no-wrap guard.
-    <Box width={width} justifyContent="space-between">
+    // Fill the parent's LIVE width (`width="100%"`) rather than an explicit number:
+    // yoga resolves it against the real terminal on every resize relayout, so the
+    // space-between line can't momentarily exceed a just-shrunk terminal and orphan a
+    // wrapped row into scrollback during a pane show/hide. The `width` prop still
+    // drives the right-hand reservation math above; the left side is `wrap="truncate"`,
+    // so even if that estimate lags a resize the line never actually overflows.
+    <Box width="100%" justifyContent="space-between">
       <Box>
         {active ? (
           <Text wrap="truncate">

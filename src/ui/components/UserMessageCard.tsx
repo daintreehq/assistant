@@ -47,7 +47,15 @@ export function UserMessageCard({
           flexDirection="column"
           paddingX={1}
           backgroundColor={s.backgroundColor}
-          flexShrink={0}
+          // Must stay shrinkable. `inner` is budgeted from the `width` prop, which
+          // lags the live terminal during a resize (Daintree animates the pane on
+          // show/hide). If this filled body could NOT shrink, a stale-wide card would
+          // overflow the live edge and the terminal would autowrap the *filled* row —
+          // orphaning a copy into scrollback the same way the status line used to.
+          // Letting yoga shrink it to the live parent keeps the fill within bounds;
+          // wrap="truncate" on the lines below clips the text. In steady state the
+          // content already fits, so this never engages and the card looks identical.
+          flexShrink={1}
         >
           {lines.map((line, i) => (
             <Text

@@ -68,15 +68,55 @@ export function KeyHint({
   );
 }
 
+/**
+ * A custom Ink border whose only meaningful edge is the top — the horizontal rule
+ * character. Used by the flex {@link Divider}: a top-border-only box yoga-sizes the
+ * rule to the live width. Corners/sides are set to the same glyph so a seamless rule
+ * results even if Ink draws a corner; the disabled edges (left/right/bottom) keep
+ * them out of the render.
+ */
+const RULE_BORDER = (ch: string) => ({
+  topLeft: ch,
+  top: ch,
+  topRight: ch,
+  right: ch,
+  bottomRight: ch,
+  bottom: ch,
+  bottomLeft: ch,
+  left: ch,
+});
+
 /** A full-width horizontal rule. */
 export function Divider({
   width,
   color,
 }: {
-  width: number;
+  /** Fixed rule length. Omit in the repainting region to fill the live width. */
+  width?: number;
   color?: string;
 }) {
   const ch = unicodeOk() ? "─" : "-";
+  // Flex rule: when no width is given, fill the parent's CURRENT laid-out width via
+  // yoga instead of a fixed character count. During a resize, React's width prop
+  // lags the real terminal by a tick, so a char-counted rule would momentarily run
+  // past the edge, wrap, and orphan a row into scrollback (the live region is
+  // erased by Ink's logical line count, which can't see the wrap). A top-border-only
+  // box draws a clean rule that yoga sizes to the live width — no fixed count, and
+  // no ellipsis (which `wrap="truncate"` would leave on a clipped run).
+  if (width === undefined) {
+    return (
+      <Box
+        width="100%"
+        borderStyle={RULE_BORDER(ch)}
+        borderTop
+        borderBottom={false}
+        borderLeft={false}
+        borderRight={false}
+        borderColor={color}
+        borderDimColor={!color}
+      />
+    );
+  }
   return (
     <Text color={color} dimColor={!color}>
       {ch.repeat(Math.max(1, width))}
