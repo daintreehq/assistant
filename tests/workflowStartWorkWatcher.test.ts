@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { mcpTools } from "../src/tools/mcpTools.js";
+import { WORKFLOW_START_WORK_RECIPE } from "../src/recipes/builtin.js";
 import { Db } from "../src/storage/db.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -15,14 +16,19 @@ type Calls = Array<{ name: string; args: Record<string, unknown> }>;
 
 function ctx(
   structuredContent: unknown,
-  opts: { daemonActive?: () => boolean } = {},
+  opts: { daemonActive?: () => boolean; isError?: boolean } = {},
 ): ToolContext & { _calls: Calls; db: Db } {
   const calls: Calls = [];
   const mcp = {
     isConnected: () => true,
     callTool: async (name: string, args: Record<string, unknown>) => {
       calls.push({ name, args });
-      return { text: "ok", content: [], structuredContent, isError: false };
+      return {
+        text: opts.isError ? "denied" : "ok",
+        content: [],
+        structuredContent,
+        isError: Boolean(opts.isError),
+      };
     },
   } as unknown as ToolContext["mcp"];
   const c = {
@@ -76,6 +82,16 @@ describe("workflow.startWorkOnIssue atomic supervisor watcher (#126)", () => {
     if (res.ok) expect((res.result as { watcherId?: string }).watcherId).toBe(w.id);
   });
 
+  it("creates an active, immediately-schedulable terminal watcher", async () => {
+    const c = ctx(RESULT);
+    await start(reg(), c);
+    const w = c.db.listWatchers()[0];
+    expect(w.kind).toBe("terminal");
+    expect(w.status).toBe("active");
+    // nextCheckAt is "now", so the scheduler will pick it up on its next tick.
+    expect(c.db.dueWatchers(Date.now() + 1).map((x) => x.id)).toContain(w.id);
+  });
+
   it("records spawnMode=edit and scopes verification to the worktree", async () => {
     const c = ctx(RESULT);
     await start(reg(), c);
@@ -127,6 +143,22 @@ describe("workflow.startWorkOnIssue atomic supervisor watcher (#126)", () => {
     expect(c.db.listWatchers()).toHaveLength(0);
   });
 
+  it("does NOT attach a watcher when terminalId is whitespace only", async () => {
+    const c = ctx({ ...RESULT, terminalId: "   " });
+    const res = await start(reg(), c);
+    expect(res.ok).toBe(true);
+    expect(c.db.listWatchers()).toHaveLength(0);
+  });
+
+  it("returns the passthrough failure and attaches nothing when the MCP call errors", async () => {
+    // Even with a terminalId in structuredContent, a failed passthrough must not
+    // spawn a watcher — the early !res.ok guard returns the failure untouched.
+    const c = ctx(RESULT, { isError: true });
+    const res = await start(reg(), c);
+    expect(res.ok).toBe(false);
+    expect(c.db.listWatchers()).toHaveLength(0);
+  });
+
   it("skips attachment when attachWatcher:false", async () => {
     const c = ctx(RESULT);
     const res = await start(reg(), c, {
@@ -162,6 +194,32 @@ describe("workflow.startWorkOnIssue atomic supervisor watcher (#126)", () => {
     expect(res.ok).toBe(true);
     expect(c.db.listWatchers()).toHaveLength(1);
     if (res.ok) expect((res.result as { watcherId?: string }).watcherId).toBe(firstId);
+  });
+
+  it("does not let a cancelled supervisor suppress a fresh attachment", async () => {
+    const c = ctx(RESULT);
+    // A stale, cancelled supervisor for this terminal must not block a new one —
+    // the dedupe scan is restricted to active watchers.
+    c.db.insertWatcher({
+      kind: "terminal",
+      title: "stale",
+      goal: "stale",
+      targetsJson: JSON.stringify(["term_abc"]),
+      cadenceMs: 3000,
+      isSupervisor: true,
+      modelTier: "small",
+      nextCheckAt: Date.now(),
+      status: "cancelled",
+    });
+    const res = await start(reg(), c);
+    expect(res.ok).toBe(true);
+    expect(c.db.listWatchers("active")).toHaveLength(1);
+  });
+
+  it("the start-work recipe no longer requires watcher.terminal.create", async () => {
+    // Attachment is automatic now; guard against the recipe change being reverted.
+    expect(WORKFLOW_START_WORK_RECIPE.requiredTools).toContain("workflow.startWorkOnIssue");
+    expect(WORKFLOW_START_WORK_RECIPE.requiredTools).not.toContain("watcher.terminal.create");
   });
 
   it("never forwards attachWatcher to the Daintree MCP call", async () => {

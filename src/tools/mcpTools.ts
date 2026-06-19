@@ -255,12 +255,17 @@ const WorkflowStartWorkArgs = z
 function attachSupervisorWatcher(ctx: ToolContext, res: ToolResult): ToolResult {
   const sc = (res.result as { structuredContent?: unknown } | undefined)?.structuredContent;
   const obj = sc && typeof sc === "object" ? (sc as Record<string, unknown>) : {};
-  const terminalId = typeof obj.terminalId === "string" && obj.terminalId ? obj.terminalId : undefined;
+  // Trim before the falsy guard so a whitespace-only id (never expected from
+  // Daintree, but cheap to harden against) doesn't spawn a watcher targeting a
+  // terminal that can't exist.
+  const terminalId =
+    typeof obj.terminalId === "string" && obj.terminalId.trim() ? obj.terminalId.trim() : undefined;
   // No terminal launched (terminalId null/absent) → nothing to supervise. The
   // workflow setup still succeeded, so return its result untouched.
   if (!terminalId) return res;
 
-  const worktreeId = typeof obj.worktreeId === "string" && obj.worktreeId ? obj.worktreeId : undefined;
+  const worktreeId =
+    typeof obj.worktreeId === "string" && obj.worktreeId.trim() ? obj.worktreeId.trim() : undefined;
   const issueTitle = typeof obj.issueTitle === "string" && obj.issueTitle ? obj.issueTitle : undefined;
   const issueLabel =
     typeof obj.issueNumber === "number"
