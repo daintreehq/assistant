@@ -30,6 +30,9 @@ export interface Fixture {
   connected: boolean;
   busy: boolean;
   stage: string;
+  /** User follow-ups queued behind the in-flight turn; exercises the "· N queued"
+   *  busy-indicator hint in the gallery (#95). Omitted/0 means none waiting. */
+  queueDepth?: number;
   view: View;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
@@ -222,6 +225,8 @@ export function buildFixtures(): Fixture[] {
       connected: true,
       busy: true,
       stage: "Watching",
+      // Two follow-ups typed while the turn runs — exercises the "· 2 queued" hint.
+      queueDepth: 2,
       view: "home",
       transcript: activeRun(),
       dashboard: {

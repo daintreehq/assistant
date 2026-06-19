@@ -32,6 +32,24 @@ describe("Composer", () => {
     expect(lastFrame() ?? "").toContain("Delegating");
   });
 
+  it("appends the queued follow-up count to the busy stage (#95)", () => {
+    const { lastFrame } = render(
+      <Composer busy stage="Watching" queueDepth={2} onSubmit={() => {}} />,
+    );
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Watching");
+    expect(frame).toContain("2 queued");
+  });
+
+  it("omits the queued count when nothing is waiting (#95)", () => {
+    const { lastFrame } = render(
+      <Composer busy stage="Watching" queueDepth={0} onSubmit={() => {}} />,
+    );
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Watching");
+    expect(frame).not.toContain("queued");
+  });
+
   it("opens a filtered slash palette as you type a command", () => {
     const { lastFrame } = render(
       <Composer busy={false} focus onSubmit={() => {}} />,

@@ -74,6 +74,9 @@ export interface ControlRoomProps {
   previews?: TerminalPreview[];
   busy: boolean;
   stage: string;
+  /** User follow-ups queued behind the in-flight turn; surfaced in the composer
+   *  busy indicator as "· N queued" (#95). Defaults to 0. */
+  queueDepth?: number;
   view: View;
   /**
    * Which `/panel` command opened the operations view, so it can focus that one
@@ -113,6 +116,7 @@ export function ControlRoom({
   previews = [],
   busy,
   stage,
+  queueDepth = 0,
   view,
   activePanel = null,
   expanded = false,
@@ -231,6 +235,7 @@ export function ControlRoom({
           <Composer
             busy={busy}
             stage={stage}
+            queueDepth={queueDepth}
             contextHint={contextHint}
             width={contentWidth}
             focus={composerFocus}

@@ -122,6 +122,74 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("tracks queueDepth as follow-ups enqueue and drain (#95)", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { finish } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    // Idle: nothing queued.
+    expect(controller.queueDepth).toBe(0);
+
+    // First send is the active turn, not queued.
+    controller.sendUserMessage("first");
+    await tick();
+    expect(controller.queueDepth).toBe(0);
+
+    // Two follow-ups typed while busy → both queue, depth tracks each push.
+    controller.sendUserMessage("second");
+    await tick();
+    expect(controller.queueDepth).toBe(1);
+    controller.sendUserMessage("third");
+    await tick();
+    expect(controller.queueDepth).toBe(2);
+
+    // First turn ends → "second" drains and becomes active; depth drops to 1
+    // (not 2 — the drained item must not still count as queued while it runs).
+    finish(0);
+    await tick();
+    expect(controller.queueDepth).toBe(1);
+
+    // "second" ends → "third" drains; queue empties.
+    finish(1);
+    await tick();
+    expect(controller.queueDepth).toBe(0);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("resets queueDepth to 0 when a pre-stream turn is pulled back (#95)", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("first");
+    await tick();
+    controller.sendUserMessage("queued");
+    await tick();
+    expect(controller.queueDepth).toBe(1);
+
+    // Pull-back clears the queue → the depth hint must clear with it.
+    controller.pullBackTurn();
+    await tick();
+    expect(controller.queueDepth).toBe(0);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("cancelTurn aborts the in-flight turn's signal", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);

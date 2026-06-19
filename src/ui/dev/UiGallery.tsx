@@ -59,6 +59,7 @@ export function UiGallery() {
         previews={f.previews}
         busy={f.busy}
         stage={f.stage}
+        queueDepth={f.queueDepth}
         view={effectiveView}
         expanded={expanded}
         pending={f.pending}
