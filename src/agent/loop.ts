@@ -5,12 +5,12 @@
  * be inspected/compacted later.
  */
 import { randomUUID } from "node:crypto";
-import type { ChatMessage } from "../models/fireworks.js";
+import type { ChatMessage, ToolCallRequest } from "../models/fireworks.js";
 import { CancelledError, FireworksUnavailableError } from "../models/fireworks.js";
 import type { ModelRouter } from "../models/router.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
-import type { ToolResult } from "../schemas.js";
+import type { ConversationMessageRecord, ToolResult } from "../schemas.js";
 import { BASE_SYSTEM_PROMPT, BASE_SYSTEM_PROMPT_VERSION } from "../models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../models/prompts/runtimeContext.js";
 import { buildLoadedRecipesMessage } from "../models/prompts/recipes.js";
@@ -116,6 +116,97 @@ const CORE_TOOL_NAMES = [
   "artifact.read",
 ];
 
+/**
+ * Map a persisted conversation row back to a model ChatMessage — the inverse of
+ * how persistMessage() writes one. Tool-call JSON is rehydrated only on assistant
+ * turns and tool_call_id only on tool turns, so the reconstructed sequence is one
+ * Fireworks (OpenAI-compatible) accepts. Empty stored content becomes null (an
+ * assistant tool-call turn carries no text). Malformed tool-call JSON is dropped
+ * rather than thrown, so one bad row never aborts a whole resume.
+ */
+function recordToChatMessage(r: ConversationMessageRecord): ChatMessage {
+  const m: ChatMessage = { role: r.role, content: r.content === "" ? null : r.content };
+  if (r.role === "assistant" && r.toolCallsJson) {
+    try {
+      m.tool_calls = JSON.parse(r.toolCallsJson) as ToolCallRequest[];
+    } catch {
+      /* malformed tool-call JSON: keep the message text, drop the calls */
+    }
+  }
+  if (r.role === "tool" && r.toolCallId) m.tool_call_id = r.toolCallId;
+  return m;
+}
+
+/**
+ * Trim an incomplete tool-call exchange from the tail of a restored history.
+ *
+ * If the prior session shut down mid-turn, its last assistant message may carry
+ * tool_calls whose matching `tool` result rows were never written. Fireworks
+ * rejects an assistant tool-call turn that lacks a result for every id, so we cut
+ * back to before that assistant message. Only the tail is checked: a broken
+ * exchange in the middle implies an earlier crash and an already-unusable DB, and
+ * scanning the whole history for it isn't worth the cost.
+ */
+function dropOrphanToolCallTail(messages: ChatMessage[]): ChatMessage[] {
+  let lastCall = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant" && (messages[i].tool_calls?.length ?? 0) > 0) {
+      lastCall = i;
+      break;
+    }
+  }
+  if (lastCall === -1) return messages;
+  const answered = new Set<string>();
+  for (let i = lastCall + 1; i < messages.length; i++) {
+    const id = messages[i].role === "tool" ? messages[i].tool_call_id : undefined;
+    if (id) answered.add(id);
+  }
+  const complete = messages[lastCall].tool_calls!.every((tc) => answered.has(tc.id));
+  return complete ? messages : messages.slice(0, lastCall);
+}
+
+/**
+ * Reconstruct a resumed session's working history from its persisted rows.
+ *
+ * On resume the AgentSession constructor rewrites the three control messages
+ * fresh (keeping the cached base prefix byte-stable). This helper returns the
+ * messages that belong AFTER those controls, plus the seq the session must keep
+ * numbering from so newly appended rows never collide with stored ones.
+ *
+ * Returns undefined — "start fresh" — when there is nothing safe to restore: no
+ * rows, or rows whose seq values are not unique (the fingerprint of the pre-fix
+ * bug that wrote a second run of seq 0,1,2… into one session). A fresh start is
+ * the safe fallback; replaying garbled context is worse than losing it.
+ */
+export function rehydrateSession(
+  rows: ConversationMessageRecord[],
+): { restoredMessages: ChatMessage[]; initialSeq: number } | undefined {
+  if (rows.length === 0) return undefined;
+  // Duplicate seqs ⇒ a prior buggy resume already double-wrote this session. We
+  // can't trust the ordering; start clean rather than replay a tangle.
+  if (new Set(rows.map((r) => r.seq)).size !== rows.length) return undefined;
+
+  const initialSeq = Math.max(...rows.map((r) => r.seq)) + 1;
+
+  // If the prior run was compacted, only the rows after the LAST compaction
+  // marker are live context (the summary note + anything since). The marker row
+  // itself is a durable-log breadcrumb, not a model message — skip it.
+  const markerIdx = rows.reduce(
+    (last, r, i) =>
+      r.role === "system" && r.content.startsWith("[conversation compacted") ? i : last,
+    -1,
+  );
+  const working =
+    markerIdx >= 0
+      ? rows.slice(markerIdx + 1)
+      : // No compaction: drop the three control rows (seq 0,1,2) the constructor
+        // always writes first and re-creates fresh on resume.
+        rows.filter((r) => r.seq >= CONTROL_MESSAGE_COUNT);
+
+  const restoredMessages = dropOrphanToolCallTail(working.map(recordToChatMessage));
+  return { restoredMessages, initialSeq };
+}
+
 export interface AgentSessionDeps {
   router: ModelRouter;
   registry: ToolRegistry;
@@ -123,6 +214,16 @@ export interface AgentSessionDeps {
   ctx: ToolContext;
   promptContext: MainPromptContext;
   sessionId: string;
+  /**
+   * Prior conversation turns to restore on resume (everything after the three
+   * control messages). Present (even if empty) ⇒ this is a resumed session: the
+   * constructor rebuilds the controls fresh but does NOT re-persist them, since
+   * they already exist in the DB. Absent ⇒ a fresh session that persists its
+   * controls. Produced by rehydrateSession().
+   */
+  restoredMessages?: ChatMessage[];
+  /** seq to continue numbering from on resume (max stored seq + 1). */
+  initialSeq?: number;
   /** Where streamed tokens, tool calls, and errors go. Defaults to a no-op sink. */
   events?: AgentEventSink;
   /**
@@ -150,12 +251,22 @@ export class AgentSession {
   constructor(deps: AgentSessionDeps) {
     this.deps = deps;
     this.events = deps.events ?? noopAgentEvents;
-    this.messages = [
+    const control: ChatMessage[] = [
       { role: "system", content: BASE_SYSTEM_PROMPT },
       { role: "system", content: buildRuntimeContextMessage(deps.promptContext) },
       { role: "system", content: buildLoadedRecipesMessage(this.recipeBundle) },
     ];
-    for (const m of this.messages) this.persistMessage(m);
+    if (deps.restoredMessages !== undefined) {
+      // Resume: the control rows already exist in the DB from the prior run, so
+      // rebuild them fresh for the prompt (keeping the cached prefix byte-stable)
+      // but do NOT re-persist them. Continue seq numbering past the stored rows so
+      // appended turns never collide with the restored history.
+      this.messages = [...control, ...deps.restoredMessages];
+      this.seq = deps.initialSeq ?? control.length;
+    } else {
+      this.messages = control;
+      for (const m of this.messages) this.persistMessage(m);
+    }
   }
 
   /**
