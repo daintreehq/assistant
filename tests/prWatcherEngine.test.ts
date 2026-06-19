@@ -100,7 +100,69 @@ describe("runPrWatcherCheck transitions", () => {
     expect(opts.lastState).toBe("open");
     expect(opts.lastIsDraft).toBe(false);
     expect(opts.lastUpdatedAt).toBe("2026-01-01T00:00:00Z");
-    expect(after.nextCheckAt).toBeGreaterThan(Date.now() - 1000);
+    // Scheduled exactly one cadence ahead — a weaker `> now - 1000` would pass
+    // even if nextCheckAt were left at 0.
+    expect(after.nextCheckAt).toBeCloseTo(Date.now() + PR_WATCHER_CADENCE_MS, -3);
+  });
+
+  it("calls forge.getPR with the watcher's prNumber and cwd", async () => {
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: "", content: [], structuredContent: { state: "open" }, isError: false };
+      },
+    };
+    const { ctx, db } = (() => {
+      const database = new Db(":memory:");
+      const queue = new Queue(database);
+      const context = {
+        config: {} as ToolContext["config"],
+        mcp: mcp as unknown as ToolContext["mcp"],
+        db: database,
+        queue,
+        projectPath: "/tmp/project",
+        actor: "watcher",
+        confirm: async () => true,
+        log: () => {},
+      } as unknown as ToolContext;
+      return { ctx: context, db: database };
+    })();
+    const w = insertPrWatcher(db, { prNumber: 77, cwd: "/my/repo", lastState: "open" });
+
+    await runPrWatcherCheck(w, ctx);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe("forge.getPR");
+    expect(calls[0].args).toEqual({ cwd: "/my/repo", prNumber: 77 });
+  });
+
+  it("falls back to ctx.projectPath when the watcher has no cwd", async () => {
+    const calls: Array<{ args?: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (_name: string, args?: Record<string, unknown>) => {
+        calls.push({ args });
+        return { text: "", content: [], structuredContent: { state: "open" }, isError: false };
+      },
+    };
+    const database = new Db(":memory:");
+    const ctx = {
+      config: {} as ToolContext["config"],
+      mcp: mcp as unknown as ToolContext["mcp"],
+      db: database,
+      queue: new Queue(database),
+      projectPath: "/default/project",
+      actor: "watcher",
+      confirm: async () => true,
+      log: () => {},
+    } as unknown as ToolContext;
+    const w = insertPrWatcher(database, { prNumber: 5, lastState: "open" });
+
+    await runPrWatcherCheck(w, ctx);
+
+    expect(calls[0].args).toEqual({ cwd: "/default/project", prNumber: 5 });
   });
 
   it("publishes an attention event and stops the watcher when the PR merges", async () => {
@@ -239,6 +301,40 @@ describe("runPrWatcherCheck payload shapes", () => {
     const res = await runPrWatcherCheck(w, ctx);
     expect(res.transition).toBe("state_change");
     expect(res.state).toBe("closed");
+  });
+
+  it("ignores an envelope's unrecognized `state` and reads the nested PR object", async () => {
+    // A response wrapped as { state: "ok", pr: { state: "merged" } } must not let
+    // the envelope's non-PR `state` short-circuit detection of the nested merge.
+    const database = new Db(":memory:");
+    const queue = new Queue(database);
+    const mcp = {
+      isConnected: () => true,
+      callTool: async () => ({
+        text: "",
+        content: [],
+        structuredContent: { state: "ok", pr: { state: "merged" } },
+        isError: false,
+      }),
+    };
+    const ctx = {
+      config: {} as ToolContext["config"],
+      mcp: mcp as unknown as ToolContext["mcp"],
+      db: database,
+      queue,
+      projectPath: "/tmp/project",
+      actor: "watcher",
+      confirm: async () => true,
+      log: () => {},
+    } as unknown as ToolContext;
+    const w = insertPrWatcher(database, { prNumber: 12, lastState: "open" });
+
+    const res = await runPrWatcherCheck(w, ctx);
+
+    expect(res.transition).toBe("state_change");
+    expect(res.state).toBe("merged");
+    expect(queue.digest({ severityAtLeast: "attention" })).toHaveLength(1);
+    database.close();
   });
 
   it("treats GitLab-style state/work_in_progress fields correctly", async () => {

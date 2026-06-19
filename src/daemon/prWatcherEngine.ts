@@ -119,7 +119,14 @@ function extractPrFields(res: McpCallResult): PrFields | undefined {
     if (merged) state = "merged";
     else if (rawState === "closed") state = "closed";
     else if (rawState === "open" || rawState === "opened") state = "open";
-    else state = undefined; // unrecognized — don't guess a transition from it
+    else {
+      // This object has a `state` we don't recognize as a PR lifecycle value —
+      // it's likely an envelope/metadata field (e.g. `{ state: "ok", pr: {...} }`),
+      // not the PR itself. Fall through to the next candidate (the unwrapped PR)
+      // rather than returning an unusable `{ state: undefined }` and masking the
+      // real merge/close transition nested below.
+      continue;
+    }
 
     const isDraft =
       asBool(obj.isDraft) ??

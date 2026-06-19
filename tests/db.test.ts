@@ -282,6 +282,42 @@ describe("Db startup watcher invalidation", () => {
     db.close();
   });
 
+  it("cancels a prior session's pr_state watcher and revokes its grant on reopen", () => {
+    // PR watchers are session-scoped like terminal ones — the kind-agnostic row
+    // sweep must cancel them and revoke their grants, never carry them over.
+    {
+      const db = new Db(path);
+      db.insertWatcher({
+        id: "wch_pr",
+        kind: "pr_state",
+        title: "PR #5",
+        goal: "watch pr",
+        targetsJson: JSON.stringify(["PR #5"]),
+        cadenceMs: 60_000,
+        modelTier: "small",
+        optionsJson: JSON.stringify({ prNumber: 5, lastState: "open" }),
+        nextCheckAt: 0,
+        status: "active",
+      });
+      db.insertGrant({
+        id: "grt_pr",
+        actorId: "wch_pr",
+        actorType: "watcher",
+        allowedRiskClassesJson: JSON.stringify(["read"]),
+        allowedToolNamesJson: null,
+        expiresAt: 9999999999999,
+        maxUses: 5,
+      });
+      db.close();
+    }
+
+    const db = new Db(path);
+    expect(db.getWatcher("wch_pr")?.status).toBe("cancelled");
+    expect(db.getGrant("grt_pr")?.revokedAt).toBeTruthy();
+    expect(db.dueWatchers(Date.now())).toHaveLength(0);
+    db.close();
+  });
+
   it("resolves open watcher-sourced inbox events on reopen, sparing other sources", () => {
     // The events table is not session-scoped and watcher publishes carry no TTL,
     // so a prior session's watcher alert would otherwise resurface in the inbox

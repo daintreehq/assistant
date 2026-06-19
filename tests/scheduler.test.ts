@@ -530,6 +530,60 @@ describe("Scheduler.tick", () => {
     expect(digest.some((e) => e.source === "pr_watcher")).toBe(true);
   });
 
+  it("isolates a failing pr_state watcher (throwing ctxFor) so other due watchers still run", async () => {
+    const deps = makeDeps();
+    const now = 6_000_000;
+    // The PR watcher is due first; its context construction throws. The scheduler
+    // wraps ctxFor in the per-watcher try/catch, so the later terminal watcher
+    // must still run.
+    const termMcp = fakeMcp({ connected: true, getStatus: { agentState: "exited", exitCode: 0 } });
+
+    const throwing = deps.db.insertWatcher({
+      kind: "pr_state",
+      title: "PR #1",
+      goal: "watch pr",
+      targetsJson: JSON.stringify(["PR #1"]),
+      cadenceMs: 60_000,
+      modelTier: "small",
+      status: "active",
+      optionsJson: JSON.stringify({ prNumber: 1, lastState: "open" }),
+      nextCheckAt: now - 2000, // due earliest → processed first
+    });
+    const terminal = deps.db.insertWatcher({
+      kind: "terminal",
+      title: "term watcher",
+      goal: "wait",
+      targetsJson: JSON.stringify(["term-9"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: now - 1000,
+    });
+
+    const ctxFor = (actor: ToolContext["actor"], actorId?: string): ToolContext => {
+      if (actorId === throwing.id) throw new Error("ctx build boom");
+      return {
+        config: {} as ToolContext["config"],
+        mcp: termMcp as unknown as ToolContext["mcp"],
+        db: deps.db,
+        queue: deps.queue,
+        router: deps.router,
+        projectPath: "/tmp/project",
+        actor,
+        actorId,
+        confirm: async () => true,
+        log: () => {},
+        daemonActive: () => true,
+      } as ToolContext;
+    };
+    const scheduler = new Scheduler({ ...deps, ctxFor });
+
+    await scheduler.tick(now);
+
+    // The terminal watcher still ran to a verdict despite the PR watcher throwing.
+    expect(deps.db.getWatcher(terminal.id)!.lastCheckedAt).toBeTypeOf("number");
+  });
+
   it("fails an unknown watcher kind closed to error instead of running a check", async () => {
     const deps = makeDeps();
     const scheduler = new Scheduler(deps);
