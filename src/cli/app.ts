@@ -16,7 +16,7 @@ import { ToolRegistry } from "../tools/registry.js";
 import { buildAllTools } from "../tools/index.js";
 import type { ConfirmRequest, ToolActor, ToolContext } from "../tools/types.js";
 import { RecipeRegistry } from "../recipes/registry.js";
-import { AgentSession } from "../agent/loop.js";
+import { AgentSession, rehydrateSession } from "../agent/loop.js";
 import {
   type AgentEventSink,
   type RunIdRef,
@@ -84,6 +84,10 @@ export class App {
 
   static create(opts: AppCreateOptions = {}): App {
     const app = new App(opts);
+    // Restore prior turns when this sessionId already has persisted history (a
+    // resumed/hibernated session). rehydrateSession returns undefined for a fresh
+    // session, which leaves the constructor on its from-scratch path.
+    const restore = rehydrateSession(app.db.listMessages(app.sessionId));
     app.session = new AgentSession({
       router: app.router,
       registry: app.registry,
@@ -91,6 +95,8 @@ export class App {
       ctx: app.buildContext("main"),
       promptContext: app.promptContext(),
       sessionId: app.sessionId,
+      restoredMessages: restore?.restoredMessages,
+      initialSeq: restore?.initialSeq,
       // Compose two sinks: a durable one that records the run to `run_events`, and
       // the live proxy that forwards to whatever UI sink is registered via
       // setHooks(). multiSink isolates each, so a DB write failure can't break the
