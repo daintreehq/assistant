@@ -39,16 +39,15 @@ describe("DOCUMENTED_MCP_TOOL_NAMES (#7)", () => {
       "terminal.listStatus",
       "terminal.waitForAny",
       "terminal.focus",
-      // fleet.armByState is an internal store call, not a callable MCP tool — the
-      // exposed id is terminal.armByState. Guard against it ever being listed.
+      // Fleet arming is a renderer-only UI gesture with no MCP surface. Neither
+      // fleet.armByState (an internal store call) nor terminal.armByState (its
+      // action id, scope: "renderer") is advertised by the live server, so listing
+      // either here would emit a permanent false-positive drift warning.
       "fleet.armByState",
+      "terminal.armByState",
     ]) {
       expect(DOCUMENTED_MCP_TOOL_NAMES).not.toContain(bogus);
     }
-  });
-
-  it("documents terminal.armByState as the correct exposed arm-by-state id", () => {
-    expect(DOCUMENTED_MCP_TOOL_NAMES).toContain("terminal.armByState");
   });
 
   it("has no duplicate entries (duplicates would emit duplicate drift warnings)", () => {

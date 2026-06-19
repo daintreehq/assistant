@@ -19,7 +19,8 @@ it spawns a *visible* Daintree agent in a worktree (`agentTask.spawnForEdits`) a
 supervises it. This is a hard, enforced invariant (see below) — don't add a tool
 that writes/edits files.
 
-The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`).
+The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`)
+and on GitHub at <https://github.com/daintreehq/daintree>.
 
 Powered by **Fireworks AI** (OpenAI-compatible). Three model tiers: `large`
 (`minimax-m3`, main thread), `small` (`deepseek-v4-flash`, watchers/summaries/
