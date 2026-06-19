@@ -44,12 +44,35 @@ function announceDebugLog(app: App): void {
 }
 
 async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
-  const app = App.create({ overrides: overridesFromOptions(opts) });
   // In `--json` mode stdout carries ONLY the JSONL stream, so every human-facing
-  // line (debug-log notice, confirm-skip warning, loop log) is routed to stderr;
-  // otherwise the existing console UX is preserved unchanged.
+  // line (debug-log notice, confirm-skip warning, loop log, *and any error*) is
+  // routed to stderr; otherwise the existing console UX is preserved unchanged.
   const json = opts.json === true;
   const jsonSink = json ? createJsonSink() : undefined;
+
+  // Reports an unexpected failure through the active surface: the JSON sink (so
+  // stdout still ends with a `result` envelope) or the console. Centralised so the
+  // boot path and the run path can't pollute stdout differently in JSON mode.
+  const reportError = (err: unknown): void => {
+    const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    if (jsonSink) jsonSink.sink.error(message);
+    else {
+      render.error(message);
+      process.exitCode = 1;
+    }
+  };
+
+  // App.create() can throw (bad config, DB/registry init). Keep it inside the
+  // error funnel so a boot failure in JSON mode still yields a `result` envelope
+  // on stdout rather than an ANSI stack trace via main().catch().
+  let app: App;
+  try {
+    app = App.create({ overrides: overridesFromOptions(opts) });
+  } catch (err) {
+    reportError(err);
+    if (jsonSink) process.exitCode = jsonSink.finish().exitCode;
+    return;
+  }
 
   if (json) {
     const logPath = startDebugLog(app.config, app.sessionId);
@@ -75,21 +98,24 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
     await app.session.send(prompt);
   } catch (err) {
     // send() handles its own model errors (emitting an `error` event and returning
-    // a string); this catches genuinely unexpected throws (e.g. MCP connect). Route
-    // them through the active sink so JSON consumers still get a terminal envelope.
-    const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
-    if (jsonSink) jsonSink.sink.error(message);
-    else {
-      render.error(message);
-      process.exitCode = 1;
-    }
+    // a string); this catches genuinely unexpected throws (e.g. MCP connect).
+    reportError(err);
   } finally {
-    await app.shutdown();
+    // shutdown() (mcp.close / db.close) can throw, but it must never prevent the
+    // terminal `result` envelope from being written or the exit code from being
+    // set — swallow its failure as best-effort cleanup, surfaced off stdout.
+    try {
+      await app.shutdown();
+    } catch (err) {
+      if (json) {
+        const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        process.stderr.write(`shutdown error: ${message}\n`);
+      } else render.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    }
+    // Emit the terminal `result` envelope last (after shutdown, so no further
+    // events can interleave) and adopt its exit code as the process exit code.
+    if (jsonSink) process.exitCode = jsonSink.finish().exitCode;
   }
-
-  // Emit the terminal `result` envelope last (after shutdown, so no further events
-  // can interleave) and adopt its exit code as the process exit code.
-  if (jsonSink) process.exitCode = jsonSink.finish().exitCode;
 }
 
 async function runInteractive(opts: CliOptions): Promise<void> {
@@ -134,7 +160,12 @@ async function main(): Promise<void> {
     .argument("[prompt]", "Run a single prompt non-interactively, then exit")
     .action(async (prompt: string | undefined, opts: CliOptions) => {
       if (prompt) await runOneShot(prompt, opts);
-      else await runInteractive(opts);
+      else if (opts.json) {
+        // `--json` is a one-shot contract; without a prompt it would otherwise
+        // launch the interactive TUI and write non-JSONL output to stdout.
+        process.stderr.write("--json requires a prompt argument (one-shot mode only).\n");
+        process.exitCode = 1;
+      } else await runInteractive(opts);
     });
 
   program

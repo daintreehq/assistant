@@ -61,8 +61,20 @@ export function createJsonSink(opts: JsonSinkOptions = {}): JsonSinkHandle {
   let finished = false;
 
   function emit(type: string, payload?: Record<string, unknown>): void {
+    // Nothing may follow the terminal `result` envelope: once finished, drop any
+    // late event (e.g. an info emitted after shutdown) so the stream stays well-formed.
+    if (finished) return;
     const line = { type, ts: now(), seq: seq++, ...(payload ?? {}) };
-    write(JSON.stringify(line) + "\n");
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(line);
+    } catch {
+      // A payload field (notably a ToolError's `details: unknown`) can be circular
+      // or otherwise unserializable. Never drop the line — that would leave a seq
+      // gap; emit a valid degraded line keeping the envelope fields intact.
+      serialized = JSON.stringify({ type, ts: line.ts, seq: line.seq, serializationError: true });
+    }
+    write(serialized + "\n");
   }
 
   /** Write buffered round prose as one line, if any, then clear the buffer. */
@@ -133,9 +145,9 @@ export function createJsonSink(opts: JsonSinkOptions = {}): JsonSinkHandle {
 
   function finish(): { exitCode: number } {
     if (finished) return { exitCode };
-    finished = true;
-    // A turn may end with prose still buffered if no terminal event flushed it
-    // (e.g. a degenerate stream). Don't lose it.
+    // Flush + emit the envelope while `finished` is still false (emit() drops lines
+    // once it flips). A turn may end with prose still buffered if no terminal event
+    // flushed it (e.g. a degenerate stream) — don't lose it.
     flushContent();
     emit("result", {
       schemaVersion: JSON_OUTPUT_SCHEMA_VERSION,
@@ -144,6 +156,7 @@ export function createJsonSink(opts: JsonSinkOptions = {}): JsonSinkHandle {
       content,
       error: errorMessage === null ? null : { message: errorMessage },
     });
+    finished = true;
     return { exitCode };
   }
 

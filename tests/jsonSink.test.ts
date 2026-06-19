@@ -209,6 +209,52 @@ describe("createJsonSink", () => {
     });
   });
 
+  it("drops events emitted after finish() so nothing follows the result line", () => {
+    const { sink, finish, parsed } = makeSink();
+    sink.assistantStart();
+    sink.assistantEnd("hi");
+    finish();
+    // A late event from the loop (e.g. after shutdown) must not append past the
+    // terminal envelope.
+    sink.info("late");
+    sink.toolCall({ id: "c9", name: "t", args: {}, startedAt: 0 });
+
+    const events = parsed();
+    expect(events.at(-1).type).toBe("result");
+    expect(events.filter((e) => e.type === "result")).toHaveLength(1);
+    expect(events.some((e) => e.type === "info")).toBe(false);
+  });
+
+  it("does not throw or drop a line on an unserializable tool error detail", () => {
+    const { sink, finish, parsed } = makeSink();
+    sink.assistantStart();
+    sink.toolCall({ id: "c1", name: "t", args: {}, startedAt: 0 });
+    // BigInt is not JSON-serializable; the sink must degrade the line, not throw.
+    expect(() =>
+      sink.toolResult({
+        id: "c1",
+        name: "t",
+        result: toolResult({
+          ok: false,
+          summary: "boom",
+          error: { code: "x", message: "m", recoverable: false, details: 1n },
+        }),
+        endedAt: 1,
+      }),
+    ).not.toThrow();
+    sink.assistantStart();
+    sink.assistantEnd("ok");
+    finish();
+
+    const events = parsed();
+    // The stream is still well-formed JSONL with contiguous seq, and the degraded
+    // tool:result line is marked rather than missing.
+    events.forEach((e, i) => expect(e.seq).toBe(i));
+    const degraded = events.find((e) => e.type === "tool:result");
+    expect(degraded.serializationError).toBe(true);
+    expect(JsonResultEnvelopeSchema.parse(events.at(-1)).status).toBe("success");
+  });
+
   it("defaults to error/exit 1 when a turn ends with no terminal event", () => {
     // Defensive contract: a degenerate run that never reaches end/cancel/error
     // must still exit non-zero so a script treats it as failure.
