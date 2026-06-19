@@ -10,7 +10,7 @@
  */
 import { Box, Text } from "ink";
 import { userMessageSurface } from "../theme.js";
-import { truncate } from "../../utils/text.js";
+import { collapseLines, snipRule, wrapText } from "../../utils/text.js";
 
 /** U+258F LEFT ONE EIGHTH BLOCK — sits flush against the left edge of the cell. */
 const BAR = "▏";
@@ -27,7 +27,11 @@ export function UserMessageCard({
   // so the fill is a card, not an edge-to-edge band; never narrower than a few
   // words so a tight sidebar still reads.
   const inner = Math.max(10, width - 4);
-  const lines = text.split("\n");
+  // Wrap the full message into visual lines, then collapse a long one to a
+  // head/snip/tail view (first few + a "+N lines" rule + last few), the way Claude
+  // Code abbreviates a long block. Short messages pass through untouched. One bar
+  // is rendered per row below, so the gutter stays aligned with whatever we show.
+  const rows = collapseLines(wrapText(text, inner));
   return (
     <Box flexDirection="column" marginBottom={1}>
       {/* Quiet who-said-what anchor. Dim so it never competes with the bar. */}
@@ -35,9 +39,9 @@ export function UserMessageCard({
         YOU
       </Text>
       <Box flexDirection="row">
-        {/* One bar glyph per visual line, as a 1-cell unfilled gutter. */}
+        {/* One bar glyph per rendered row, as a 1-cell unfilled gutter. */}
         <Box flexDirection="column" flexShrink={0}>
-          {lines.map((_, i) => (
+          {rows.map((_, i) => (
             <Text key={i} color={s.barColor}>
               {BAR}
             </Text>
@@ -57,16 +61,23 @@ export function UserMessageCard({
           // content already fits, so this never engages and the card looks identical.
           flexShrink={1}
         >
-          {lines.map((line, i) => (
-            <Text
-              key={i}
-              color={s.textColor}
-              dimColor={s.dimText}
-              wrap="truncate"
-            >
-              {truncate(line, inner)}
-            </Text>
-          ))}
+          {rows.map((row, i) =>
+            row.kind === "snip" ? (
+              // The snip marker is the divider: a dim, centered "+N lines" rule.
+              <Text key={i} color={s.textColor} dimColor wrap="truncate">
+                {snipRule(row.hidden, inner)}
+              </Text>
+            ) : (
+              <Text
+                key={i}
+                color={s.textColor}
+                dimColor={s.dimText}
+                wrap="truncate"
+              >
+                {row.text}
+              </Text>
+            ),
+          )}
         </Box>
       </Box>
     </Box>
