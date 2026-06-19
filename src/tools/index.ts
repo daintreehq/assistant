@@ -15,6 +15,7 @@ import { grantTools } from "./grantTools.js";
 import { workflowTools } from "./workflowTools.js";
 import { recipeRunTools } from "./recipeRunTools.js";
 import { auditTools } from "./auditTools.js";
+import { memoryTools } from "./memoryTools.js";
 
 export function buildAllTools(): ToolDef[] {
   return [
@@ -30,5 +31,6 @@ export function buildAllTools(): ToolDef[] {
     ...workflowTools,
     ...recipeRunTools,
     ...auditTools,
+    ...memoryTools,
   ];
 }

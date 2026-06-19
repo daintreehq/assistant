@@ -83,6 +83,33 @@ describe("Db fresh schema (single baseline migration)", () => {
       "idx_recipe_run_state_key",
     );
 
+    // memories table + its FTS5 index and triggers exist on a fresh DB.
+    expect(colNames("memories")).toEqual(
+      expect.arrayContaining([
+        "id",
+        "content",
+        "category",
+        "source",
+        "pinnedAt",
+        "deletedAt",
+        "createdAt",
+        "updatedAt",
+      ]),
+    );
+    const tableNames = (
+      raw
+        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','trigger')")
+        .all() as Array<{ name: string }>
+    ).map((t) => t.name);
+    expect(tableNames).toEqual(
+      expect.arrayContaining([
+        "memories_fts",
+        "memories_ai",
+        "memories_au",
+        "memories_ad",
+      ]),
+    );
+
     const version = raw.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
@@ -909,6 +936,115 @@ describe("Db", () => {
       expect(() =>
         db.insertRunEvent({ runId: "run_dup", seq: 0, type: "assistant:end" }),
       ).toThrow();
+    });
+  });
+
+  describe("memories", () => {
+    it("insertMemory + getMemory round-trips with defaults", () => {
+      const rec = db.insertMemory({ content: "deploy from main only" });
+      expect(rec.id).toMatch(/^mem_[0-9a-f]{8}$/);
+      expect(rec.source).toBe("assistant");
+      const got = db.getMemory(rec.id)!;
+      expect(got.content).toBe("deploy from main only");
+      expect(got.pinnedAt).toBeUndefined();
+      expect(got.deletedAt).toBeUndefined();
+    });
+
+    it("recallMemories returns BM25-ranked matches and excludes soft-deleted", () => {
+      db.insertMemory({ content: "the CI pipeline runs vitest and tsc" });
+      const drop = db.insertMemory({ content: "vitest config pins the debug log off" });
+      let hits = db.recallMemories("vitest");
+      expect(hits.length).toBe(2);
+      db.forgetMemory(drop.id);
+      hits = db.recallMemories("vitest");
+      expect(hits.map((m) => m.id)).not.toContain(drop.id);
+      expect(hits.length).toBe(1);
+    });
+
+    it("recallMemories filters by category", () => {
+      db.insertMemory({ content: "use NodeNext imports", category: "convention" });
+      db.insertMemory({ content: "NodeNext is also fine here", category: "note" });
+      const hits = db.recallMemories("NodeNext", { category: "convention" });
+      expect(hits.length).toBe(1);
+      expect(hits[0].category).toBe("convention");
+    });
+
+    it("recallMemories does not throw on FTS operator / quote injection", () => {
+      db.insertMemory({ content: "watch out for quotes and operators" });
+      for (const q of ['"', 'a "b" c', "watch OR operators", "near NEAR(x)", "watch*", "(unbalanced"]) {
+        expect(() => db.recallMemories(q)).not.toThrow();
+      }
+    });
+
+    it("recallMemories returns [] for a blank/whitespace query", () => {
+      db.insertMemory({ content: "something" });
+      expect(db.recallMemories("")).toEqual([]);
+      expect(db.recallMemories("   ")).toEqual([]);
+    });
+
+    it("listMemories honors pinnedOnly, category, soft-delete, and limit", () => {
+      const a = db.insertMemory({ content: "alpha", category: "x" });
+      db.insertMemory({ content: "beta", category: "y" });
+      const gone = db.insertMemory({ content: "gamma", category: "x" });
+      db.forgetMemory(gone.id);
+      db.pinMemory(a.id);
+
+      expect(db.listMemories({ pinnedOnly: true }).map((m) => m.id)).toEqual([a.id]);
+      expect(db.listMemories({ category: "x" }).map((m) => m.id)).toEqual([a.id]);
+      expect(db.listMemories().length).toBe(2); // gone is excluded
+      expect(db.listMemories({ includeDeleted: true }).length).toBe(3);
+      expect(db.listMemories({ limit: 1 }).length).toBe(1);
+    });
+
+    it("listMemories floats pinned rows to the top", () => {
+      db.insertMemory({ content: "first" });
+      const second = db.insertMemory({ content: "second" });
+      db.pinMemory(second.id);
+      expect(db.listMemories()[0].id).toBe(second.id);
+    });
+
+    it("forgetMemory soft-deletes and is not repeatable", () => {
+      const rec = db.insertMemory({ content: "temporary" });
+      expect(db.forgetMemory(rec.id)).toBe(true);
+      expect(db.forgetMemory(rec.id)).toBe(false); // already gone
+      expect(db.getMemory(rec.id)).toBeUndefined();
+      expect(db.getMemory(rec.id, { includeDeleted: true })?.deletedAt).toBeGreaterThan(0);
+    });
+
+    it("forgetMemory on an unknown id returns false", () => {
+      expect(db.forgetMemory("mem_deadbeef")).toBe(false);
+    });
+
+    it("pinMemory / unpinMemory are idempotent and reversible", () => {
+      const rec = db.insertMemory({ content: "pinnable" });
+      expect(db.pinMemory(rec.id)?.pinnedAt).toBeGreaterThan(0);
+      expect(db.pinMemory(rec.id)?.pinnedAt).toBeGreaterThan(0); // idempotent
+      expect(db.unpinMemory(rec.id)?.pinnedAt).toBeUndefined();
+      expect(db.unpinMemory(rec.id)?.pinnedAt).toBeUndefined(); // idempotent
+    });
+
+    it("pin/unpin/forget on a forgotten memory yield no live row", () => {
+      const rec = db.insertMemory({ content: "doomed" });
+      db.forgetMemory(rec.id);
+      expect(db.pinMemory(rec.id)).toBeUndefined();
+      expect(db.unpinMemory(rec.id)).toBeUndefined();
+    });
+
+    it("recall survives close + reopen (FTS index persists)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "db-mem-"));
+      const path = join(dir, "state.db");
+      try {
+        const first = new Db(path);
+        const rec = first.insertMemory({ content: "persisted fact about widgets" });
+        first.close();
+
+        const second = new Db(path);
+        const hits = second.recallMemories("widgets");
+        expect(hits.map((m) => m.id)).toContain(rec.id);
+        second.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });
