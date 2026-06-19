@@ -68,8 +68,16 @@ for r in range(H):
 # rest are roots.
 canopy = {comp[r][c] for r in range(2) for c in range(W) if fill[r][c]}
 trunk = {comp[r][c] for r in range(H) for c in (C - 1, C) if fill[r][c] and comp[r][c] not in canopy}
+roots = set(range(cid)) - canopy - trunk
+# These hold for the current art; if the ASCII mark is edited, fail loudly rather than
+# emit a silently-miscategorised reveal (e.g. a trunk swallowed into the canopy).
+assert len(canopy) >= 1, f"no canopy component touching the top rows: {canopy}"
+assert len(trunk) == 1, f"expected exactly one trunk component, got {trunk}"
+assert len(roots) >= 2, f"expected at least two roots, got {roots}"
+assert canopy | trunk | roots == set(range(cid)), "some components went unclassified"
 projs = [c - r for r in range(H) for c in range(C) if fill[r][c] and comp[r][c] in canopy]
 pmin, pmax = min(projs), max(projs)
+assert pmax > pmin, "canopy diagonal projection is degenerate (no spread to reveal)"
 
 def ease(t):  # ease-out
     t = max(0.0, min(1.0, t))

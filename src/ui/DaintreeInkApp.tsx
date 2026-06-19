@@ -49,6 +49,10 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       exit();
       return;
     }
+    // While the boot splash owns the screen, only Ctrl-C (quit) is live — swallow the
+    // view/expand chords so the cockpit can't surface mid-animation in a non-home
+    // state (e.g. a stray ^O leaving it on the operations deck once boot finishes).
+    if (controller.booting) return;
     if (key.escape) {
       // On home the composer owns Escape (clear buffer, or cancel the turn when
       // empty+busy) — handled by MultilineInput, which is focused there. Ink has no

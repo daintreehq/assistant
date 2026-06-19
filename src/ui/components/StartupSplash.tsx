@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SPLASH_FRAMES,
   SPLASH_HEIGHT,
@@ -53,19 +53,44 @@ export function StartupSplash({
   const [index, setIndex] = useState(0);
   const last = SPLASH_FRAMES.length - 1;
 
+  // Fire `onComplete` at most once, reading its latest identity through a ref so the
+  // timer effect needn't depend on it: a changed callback during the linger still
+  // fires the current one, and a callback supplied late still fires. The ref is kept
+  // current in an effect (concurrent-safe — no ref writes during render).
+  const onCompleteRef = useRef(onComplete);
   useEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
+  const fired = useRef(false);
+  const fireOnce = useCallback(() => {
+    if (fired.current) return;
+    fired.current = true;
+    onCompleteRef.current?.();
+  }, []);
+
+  // The mark is a fixed SPLASH_WIDTH x SPLASH_HEIGHT block. On a terminal too small to
+  // hold it a clipped logo just looks broken, so skip the animation entirely and let
+  // boot proceed at once (fireOnce satisfies the controller's draw-done gate).
+  const tooSmall = columns < SPLASH_WIDTH || rows < SPLASH_HEIGHT;
+
+  useEffect(() => {
+    if (tooSmall) {
+      fireOnce();
+      return;
+    }
     // At the last frame, hold the completed logo for `lingerMs`, THEN signal done —
     // so the splash dissolves a beat after the draw lands, not the same instant.
     if (index >= last) {
-      const id = setTimeout(() => onComplete?.(), lingerMs);
+      const id = setTimeout(fireOnce, lingerMs);
       return () => clearTimeout(id);
     }
     const id = setTimeout(() => setIndex((i) => Math.min(last, i + 1)), 1000 / fps);
     return () => clearTimeout(id);
-    // onComplete is intentionally omitted: it fires exactly once after the linger,
-    // and re-subscribing on a new callback identity would risk a double-fire.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, last, fps, lingerMs]);
+  }, [tooSmall, index, last, fps, lingerMs, fireOnce]);
+
+  // Render an empty full-size box so the layout stays stable for the instant before
+  // boot dissolves it.
+  if (tooSmall) return <Box width={columns} height={rows} />;
 
   const frameRows = (SPLASH_FRAMES[index] ?? "").split("\n");
 

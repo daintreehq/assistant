@@ -62,10 +62,15 @@ describe("DaintreeInkApp (full mount, offline)", () => {
     expect(booting).not.toContain("Daintree Assistant");
     expect(booting).not.toContain("›");
 
-    // The draw finishes (~1s) AND offline startup settles immediately, so the gate
-    // opens and the cockpit takes over.
-    await tick(1400);
-    const cockpit = lastFrame() ?? "";
+    // The draw finishes (~1.1s) AND offline startup settles immediately, so the gate
+    // opens and the cockpit takes over. Poll for it (rather than one fixed wait) so a
+    // slow CI just takes more iterations instead of flaking.
+    let cockpit = "";
+    for (let i = 0; i < 100; i++) {
+      cockpit = lastFrame() ?? "";
+      if (cockpit.includes("Daintree Assistant") && cockpit.includes("›")) break;
+      await tick(50);
+    }
     expect(cockpit).toContain("Daintree Assistant");
     expect(cockpit).toContain("›");
 

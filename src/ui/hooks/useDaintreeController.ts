@@ -723,7 +723,9 @@ export function useDaintreeController(
     // Safety net: never strand the user on the splash if startup stalls (e.g. a hung
     // MCP). After this cap we drop into the cockpit regardless of readiness.
     const bootCap = app.config.splash
-      ? setTimeout(() => setBooting(false), 8000)
+      ? setTimeout(() => {
+          if (!disposed) setBooting(false);
+        }, 8000)
       : undefined;
 
     return () => {
