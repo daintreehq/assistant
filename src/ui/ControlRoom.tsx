@@ -119,10 +119,12 @@ export function ControlRoom({
   const showAttention =
     !pending && layout === "standard" && dashboard.inbox.length > 0 && view === "home";
   // Sidebar's NOW section already names the active run, so the header subtitle
-  // is reserved for standard layout (which has no NOW section).
+  // is reserved for standard layout (which has no NOW section). Collapse any
+  // whitespace (a goal with an embedded newline would render as two rows while
+  // headerH budgets one, overlapping the body).
   const runTitle =
     busy && view === "home" && layout === "standard"
-      ? activeAgent?.goal ?? undefined
+      ? activeAgent?.goal?.replace(/\s+/g, " ").trim() || undefined
       : undefined;
 
   // Header = border (top+bottom = 2) + the identity block (2-row logo beside the

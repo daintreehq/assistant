@@ -1,3 +1,4 @@
+import type { ReactElement } from "react";
 import { render } from "ink-testing-library";
 import { Header } from "../../src/ui/components/Header.js";
 
@@ -41,5 +42,40 @@ describe("Header", () => {
       ).lastFrame() ?? "";
     expect(frame).toContain("LOG");
     expect(frame).toContain("/tmp/daintree.log");
+  });
+
+  // The rendered row count is the contract behind ControlRoom's headerH budget
+  // (6 + runTitle + logging). If the layout drifts, this guard fails before the
+  // body silently overlaps the header on short terminals.
+  it("renders a stable row count matching the headerH budget", () => {
+    const rows = (el: ReactElement) =>
+      (render(el).lastFrame() ?? "").split("\n").length;
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(6);
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(7);
+    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(7);
+    expect(
+      rows(
+        <Header columns={60} version="0.1.0" runTitle="busy" logging logFile="/t.log" />,
+      ),
+    ).toBe(8);
+  });
+
+  it("falls back to ASCII glyphs when unicode is disabled", () => {
+    const prev = process.env.DAINTREE_ASCII;
+    process.env.DAINTREE_ASCII = "1";
+    try {
+      const frame =
+        render(
+          <Header columns={60} version="0.1.0" logging logFile="/tmp/t.log" />,
+        ).lastFrame() ?? "";
+      expect(frame).toContain("Daintree assistant");
+      expect(frame).toContain("/^\\"); // ASCII canopy, not the block logo
+      expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
+      expect(frame).not.toContain("▟"); // no unicode block glyph leaks through
+      expect(frame).not.toContain("·"); // log separator uses the ASCII bullet
+    } finally {
+      if (prev === undefined) delete process.env.DAINTREE_ASCII;
+      else process.env.DAINTREE_ASCII = prev;
+    }
   });
 });

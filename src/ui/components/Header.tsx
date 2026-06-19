@@ -91,7 +91,7 @@ export function Header({
             <Text color={ui.color.warning}>{set.active} LOG</Text>
             {logFile ? (
               <Text dimColor wrap="truncate">
-                {" · "}
+                {` ${set.bullet} `}
                 {logFile}
               </Text>
             ) : null}
