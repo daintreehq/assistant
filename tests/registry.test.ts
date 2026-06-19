@@ -105,6 +105,22 @@ describe("ToolRegistry.dispatch", () => {
     expect(audit[0].outcome).toBe("ok");
   });
 
+  it("stamps ctx.runId onto the audit row, and leaves it absent when unset", async () => {
+    const reg = new ToolRegistry();
+    reg.register(readTool);
+    // A dispatch within a run carries the run id through to its audit row.
+    const withRun = { ...makeCtx(db, config, vi.fn()), runId: "run_dead00" };
+    await reg.dispatch("test.read", {}, withRun);
+    // A scheduler-built ctx has no runId, so the row's runId stays absent.
+    await reg.dispatch("test.read", {}, makeCtx(db, config, vi.fn()));
+
+    const audit = db.listAudit();
+    const stamped = audit.find((r) => r.runId === "run_dead00");
+    expect(stamped).toBeDefined();
+    const unstamped = audit.find((r) => r.id !== stamped!.id);
+    expect(unstamped!.runId ?? undefined).toBeUndefined();
+  });
+
   it("returns USER_DECLINED when confirm() returns false for a project tool", async () => {
     const reg = new ToolRegistry();
     reg.register(projectTool);

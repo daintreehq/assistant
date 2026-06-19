@@ -42,6 +42,13 @@ export interface ToolContext {
    * the main (interactive) actor.
    */
   actorId?: string;
+  /**
+   * Id of the run (one `AgentSession.send()` turn) this dispatch belongs to.
+   * Stamped onto each audit row so every tool call in a turn can be grouped with
+   * the run's event log. Set per-turn via a derived context in `AgentSession.send()`;
+   * absent for the base context and for scheduler-built (watcher/timer) contexts.
+   */
+  runId?: string;
   /** Ask the user to approve a mutating action. Returns true if approved. */
   confirm: (req: ConfirmRequest) => Promise<boolean>;
   /** Print an out-of-band line to the user (e.g. "spawned watcher wch_..."). */

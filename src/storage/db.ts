@@ -21,6 +21,7 @@ import type {
   QueueEvent,
   RecipeRunStateRecord,
   RecipeSelectionLogRecord,
+  RunEventRecord,
   TimerRecord,
   WatcherRecord,
   WorkflowRunRecord,
@@ -111,9 +112,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
   summary TEXT NOT NULL,
   resultJson TEXT,
   grantSource TEXT,
-  grantId TEXT
+  grantId TEXT,
+  runId TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
+
+-- Append-only event log per run (one AgentSession.send() turn). Rows are written
+-- in seq order by a single-writer sink so a finished run can be replayed. The
+-- UNIQUE (runId, seq) index is the DB backstop against a duplicated seq if the
+-- per-run counter is ever shared across concurrent writers.
+CREATE TABLE IF NOT EXISTS run_events (
+  id TEXT PRIMARY KEY,
+  runId TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  payload TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run ON run_events (runId, seq);
 
 CREATE TABLE IF NOT EXISTS conversation (
   id TEXT PRIMARY KEY,
@@ -643,11 +659,12 @@ export class Db {
       resultJson: rec.resultJson,
       grantSource: rec.grantSource,
       grantId: rec.grantId,
+      runId: rec.runId,
     };
     this.db
       .prepare(
-        `INSERT INTO audit_log (id,ts,actor,toolName,argsJson,outcome,durationMs,summary,resultJson,grantSource,grantId)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO audit_log (id,ts,actor,toolName,argsJson,outcome,durationMs,summary,resultJson,grantSource,grantId,runId)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
@@ -661,6 +678,7 @@ export class Db {
         full.resultJson ?? null,
         full.grantSource ?? null,
         full.grantId ?? null,
+        full.runId ?? null,
       );
     return full;
   }
@@ -713,6 +731,35 @@ export class Db {
         tsTo,
         limit,
       ) as unknown as AuditRecord[];
+  }
+
+  /* --------------------------- run events -------------------------------- */
+
+  insertRunEvent(
+    rec: Omit<RunEventRecord, "id" | "ts"> & Partial<RunEventRecord>,
+  ): RunEventRecord {
+    const full: RunEventRecord = {
+      id: rec.id ?? `rne_${randomUUID().slice(0, 8)}`,
+      ts: rec.ts ?? Date.now(),
+      runId: rec.runId,
+      seq: rec.seq,
+      type: rec.type,
+      payload: rec.payload,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO run_events (id,runId,seq,ts,type,payload)
+         VALUES (?,?,?,?,?,?)`,
+      )
+      .run(full.id, full.runId, full.seq, full.ts, full.type, full.payload ?? null);
+    return full;
+  }
+
+  /** All events for a run, oldest first — the replay order. */
+  listRunEvents(runId: string): RunEventRecord[] {
+    return this.db
+      .prepare("SELECT * FROM run_events WHERE runId = ? ORDER BY seq ASC")
+      .all(runId) as unknown as RunEventRecord[];
   }
 
   /* ----------------------- automation grants ----------------------------- */

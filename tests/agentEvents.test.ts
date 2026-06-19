@@ -1,5 +1,11 @@
 import { AgentSession } from "../src/agent/loop.js";
-import type { AgentEventSink } from "../src/agent/events.js";
+import {
+  type AgentEventSink,
+  type RunIdRef,
+  multiSink,
+  RunEventSink,
+} from "../src/agent/events.js";
+import { Db } from "../src/storage/db.js";
 import type { MainPromptContext } from "../src/models/prompts/index.js";
 import { RecipeRegistry } from "../src/recipes/registry.js";
 
@@ -154,5 +160,210 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const out = await session.send("hi");
     expect(out).toContain("Model error: boom");
     expect(events.some((e) => e.startsWith("error:"))).toBe(true);
+  });
+});
+
+describe("multiSink", () => {
+  it("delivers to a healthy sink even when another sink throws", () => {
+    const healthy = recordingSink();
+    const throwing: AgentEventSink = {
+      assistantStart: () => {
+        throw new Error("boom");
+      },
+      assistantToken: () => {
+        throw new Error("boom");
+      },
+      assistantEnd: () => {
+        throw new Error("boom");
+      },
+      toolCall: () => {
+        throw new Error("boom");
+      },
+      toolResult: () => {
+        throw new Error("boom");
+      },
+      error: () => {
+        throw new Error("boom");
+      },
+      info: () => {
+        throw new Error("boom");
+      },
+    };
+    // Throwing sink first, so its failure can't short-circuit the healthy one.
+    const fan = multiSink(throwing, healthy.sink);
+    expect(() => {
+      fan.assistantStart();
+      fan.assistantEnd("hi");
+      fan.info("note");
+    }).not.toThrow();
+    expect(healthy.events).toEqual(["start", "end:hi", "info:note"]);
+  });
+});
+
+describe("RunEventSink", () => {
+  let db: Db;
+  beforeEach(() => {
+    db = new Db(":memory:");
+  });
+  afterEach(() => {
+    db.close();
+  });
+
+  it("is a no-op when no run is active (writes no rows at all)", () => {
+    const ref: RunIdRef = { current: undefined };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantStart();
+    sink.assistantToken("hi");
+    sink.assistantEnd("hi");
+    const count = db.raw().prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+      n: number;
+    };
+    expect(count.n).toBe(0);
+  });
+
+  it("writes typed, seq-ordered rows scoped to the active run", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantStart();
+    sink.toolCall({ id: "c1", name: "fs.read", args: { path: "a" }, startedAt: 0 });
+    sink.toolResult({
+      id: "c1",
+      name: "fs.read",
+      result: { ok: true, summary: "read a" },
+      endedAt: 1,
+    });
+    sink.assistantEnd("done");
+
+    const rows = db.listRunEvents("run_1");
+    expect(rows.map((r) => r.type)).toEqual([
+      "assistant:start",
+      "tool:call",
+      "tool:result",
+      "assistant:end",
+    ]);
+    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2, 3]);
+    expect(JSON.parse(rows[1].payload!)).toEqual({
+      id: "c1",
+      name: "fs.read",
+      args: { path: "a" },
+    });
+    expect(JSON.parse(rows[2].payload!)).toEqual({
+      id: "c1",
+      name: "fs.read",
+      ok: true,
+      summary: "read a",
+    });
+    expect(JSON.parse(rows[3].payload!)).toEqual({ content: "done" });
+  });
+
+  it("does not persist tokens of the final round (assistant:end carries them)", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantStart();
+    sink.assistantToken("Hel");
+    sink.assistantToken("lo");
+    sink.assistantEnd("Hello");
+    // The buffered tokens are dropped — assistant:end is authoritative, so no
+    // duplicate assistant:content row, and no per-token rows.
+    expect(db.listRunEvents("run_1").map((r) => r.type)).toEqual([
+      "assistant:start",
+      "assistant:end",
+    ]);
+  });
+
+  it("flushes intermediate prose (tokens before a tool call) as one assistant:content row", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    // Round 1: the model says something, then calls a tool — no assistantEnd fires.
+    sink.assistantStart();
+    sink.assistantToken("Let me ");
+    sink.assistantToken("check.");
+    sink.toolCall({ id: "c1", name: "fs.read", args: {}, startedAt: 0 });
+    sink.toolResult({
+      id: "c1",
+      name: "fs.read",
+      result: { ok: true, summary: "ok" },
+      endedAt: 1,
+    });
+    // Round 2: the final answer.
+    sink.assistantStart();
+    sink.assistantEnd("done");
+
+    const rows = db.listRunEvents("run_1");
+    expect(rows.map((r) => r.type)).toEqual([
+      "assistant:start",
+      "assistant:content",
+      "tool:call",
+      "tool:result",
+      "assistant:start",
+      "assistant:end",
+    ]);
+    // The interstitial prose survives, scoped to the run, ahead of the tool call.
+    expect(JSON.parse(rows[1].payload!)).toEqual({ content: "Let me check." });
+  });
+
+  it("records tool:result with the auditId cross-reference into audit_log", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.toolResult({
+      id: "c1",
+      name: "fs.read",
+      result: { ok: true, summary: "ok", auditId: "aud_1234" },
+      endedAt: 0,
+    });
+    expect(JSON.parse(db.listRunEvents("run_1")[0].payload!).auditId).toBe("aud_1234");
+  });
+
+  it("caps an oversized payload to a valid-JSON truncation marker", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantEnd("x".repeat(100_000));
+    const payload = JSON.parse(db.listRunEvents("run_1")[0].payload!);
+    expect(payload.truncated).toBe(true);
+    expect(payload.bytes).toBeGreaterThan(100_000);
+    expect(typeof payload.preview).toBe("string");
+  });
+
+  it("resets the seq counter when the run id changes", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantStart();
+    sink.assistantEnd("a");
+    ref.current = "run_2";
+    sink.assistantStart();
+    sink.assistantEnd("b");
+    expect(db.listRunEvents("run_1").map((r) => r.seq)).toEqual([0, 1]);
+    expect(db.listRunEvents("run_2").map((r) => r.seq)).toEqual([0, 1]);
+  });
+
+  it("swallows a DB write failure rather than breaking the turn", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const brokenDb = {
+      insertRunEvent: () => {
+        throw new Error("disk full");
+      },
+    } as unknown as Db;
+    const sink = new RunEventSink(brokenDb, ref);
+    expect(() => {
+      sink.assistantStart();
+      sink.assistantEnd("done");
+    }).not.toThrow();
+  });
+
+  it("writes a fallback payload for an unserializable value", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    // A cyclic object can't be JSON.stringify'd; the sink must still record a row.
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    sink.toolResult({
+      id: "c1",
+      name: "weird",
+      result: { ok: true, summary: cyclic as unknown as string },
+      endedAt: 0,
+    });
+    const rows = db.listRunEvents("run_1");
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].payload!)).toEqual({ error: "unserializable" });
   });
 });

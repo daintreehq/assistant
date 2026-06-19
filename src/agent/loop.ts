@@ -4,6 +4,7 @@
  * produces a final answer. Conversation is persisted to SQLite so a session can
  * be inspected/compacted later.
  */
+import { randomUUID } from "node:crypto";
 import type { ChatMessage } from "../models/fireworks.js";
 import { CancelledError, FireworksUnavailableError } from "../models/fireworks.js";
 import type { ModelRouter } from "../models/router.js";
@@ -21,7 +22,7 @@ import {
   type RenderedRecipeBundle,
 } from "../recipes/render.js";
 import type { RecipeSelection } from "../recipes/types.js";
-import { type AgentEventSink, noopAgentEvents } from "./events.js";
+import { type AgentEventSink, type RunIdRef, noopAgentEvents } from "./events.js";
 
 const MAX_TOOL_ITERATIONS = 12;
 /**
@@ -96,6 +97,12 @@ export interface AgentSessionDeps {
   sessionId: string;
   /** Where streamed tokens, tool calls, and errors go. Defaults to a no-op sink. */
   events?: AgentEventSink;
+  /**
+   * Shared holder the session stamps with the current run id at the top of each
+   * turn, so a durable event sink can scope its rows to the run without the
+   * session knowing that sink exists. Absent ⇒ run-event persistence is off.
+   */
+  runIdRef?: RunIdRef;
 }
 
 export class AgentSession {
@@ -225,6 +232,25 @@ export class AgentSession {
     userInput: string,
     opts: { readOnly?: boolean; signal?: AbortSignal } = {},
   ): Promise<string> {
+    // Each send() is one "run" — a coherent causal unit (user input → assistant
+    // streaming → tool calls → result). Mint a run id and publish it on the shared
+    // ref for the duration of the turn so durable event logging and audit rows can
+    // group everything in this turn under one id. Cleared in finally so events
+    // emitted between turns aren't mis-scoped to a stale run.
+    const runId = `run_${randomUUID().slice(0, 8)}`;
+    if (this.deps.runIdRef) this.deps.runIdRef.current = runId;
+    try {
+      return await this.runTurn(userInput, opts, runId);
+    } finally {
+      if (this.deps.runIdRef) this.deps.runIdRef.current = undefined;
+    }
+  }
+
+  private async runTurn(
+    userInput: string,
+    opts: { readOnly?: boolean; signal?: AbortSignal },
+    runId: string,
+  ): Promise<string> {
     // Already aborted before we began: do NO model work (not even the pre-turn
     // recipe-select / auto-compact calls) and don't push the user message into
     // history — so a cancel that lands at the very start leaves no orphan turn.
@@ -232,6 +258,9 @@ export class AgentSession {
       this.events.assistantCancelled("");
       return CANCELLED_REPLY;
     }
+    // Tool dispatches in this turn carry the run id so their audit rows group with
+    // the run's event log. Derived per-turn; the base ctx stays run-agnostic.
+    const runCtx: ToolContext = { ...this.deps.ctx, runId };
     await this.maybeAutoCompact();
     if (!opts.readOnly) await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });
@@ -360,11 +389,7 @@ export class AgentSession {
           };
         } else {
           this.events.toolCall({ id: call.id, name: internalName, args, startedAt });
-          res = await this.deps.registry.dispatch(
-            internalName,
-            args,
-            this.deps.ctx,
-          );
+          res = await this.deps.registry.dispatch(internalName, args, runCtx);
         }
         this.events.toolResult({
           id: call.id,

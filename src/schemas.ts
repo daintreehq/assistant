@@ -334,6 +334,33 @@ export interface AuditRecord {
   grantSource?: AutomationGrantSource;
   /** Id of the grant consumed for a "grant_ok" outcome. Absent otherwise. */
   grantId?: string;
+  /**
+   * Id of the run (one `AgentSession.send()` turn) that triggered this dispatch,
+   * so every tool call in a turn can be grouped with the run's event log in
+   * `run_events`. Absent for dispatches outside a run (e.g. the scheduler-driven
+   * watcher/timer paths that build their own context).
+   */
+  runId?: string;
+}
+
+/**
+ * One append-only entry in a run's event log. A "run" is a single
+ * `AgentSession.send()` turn; its events (assistant start/end, tool call/result,
+ * errors, info) are recorded in `seq` order so a finished run can be replayed
+ * faithfully. Cross-references `AuditRecord.runId` for the tool-dispatch detail.
+ */
+export interface RunEventRecord {
+  /** `rne_<uuid8>` — unique per event. */
+  id: string;
+  /** The run this event belongs to (`AuditRecord.runId`). */
+  runId: string;
+  /** Monotonic position within the run, starting at 0. */
+  seq: number;
+  ts: number;
+  /** Event kind, e.g. "assistant:start" | "tool:call" | "tool:result". */
+  type: string;
+  /** JSON-serialized payload, or absent for zero-payload events. */
+  payload?: string;
 }
 
 /* -------------------------------------------------------------------------- */
