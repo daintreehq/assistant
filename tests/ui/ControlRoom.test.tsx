@@ -59,7 +59,7 @@ const STATIC_SEED_COLUMNS = 40;
 const renderControlRoom = (
   label: string,
   columns: number,
-  over: { view?: View; activePanel?: PanelKey | null },
+  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean },
 ) => {
   const f = byKey(label);
   return (
@@ -77,6 +77,7 @@ const renderControlRoom = (
       queueDepth={f.queueDepth}
       view={over.view ?? f.view}
       activePanel={over.activePanel}
+      expanded={over.expanded ?? false}
       pending={f.pending}
       now={FIXED_NOW}
       composerFocus={false}
@@ -103,7 +104,7 @@ function liveFrame(
   label: string,
   propColumns: number,
   liveColumns: number,
-  over: { view?: View; activePanel?: PanelKey | null } = {},
+  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean } = {},
 ): string {
   // First render at the narrow seed so the <Static> region commits (once) at a
   // width that fits every live value below — keeping the exempt header/history out
@@ -152,6 +153,31 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
     "help overlay fits the terminal when prop lags (prop=$prop, live=$live)",
     ({ prop, live }) => {
       const frame = liveFrame("idle", prop, live, { view: "help" });
+      const overflowing = frame
+        .split("\n")
+        .filter((line) => visibleWidth(line) > live);
+      expect(overflowing).toEqual([]);
+    },
+  );
+
+  it.each(OSCILLATION)(
+    "operations deck fits the terminal when prop lags (prop=$prop, live=$live)",
+    ({ prop, live }) => {
+      // The "active" fixture carries watchers/timers/audit, so every operations
+      // section (Now/Attention/Agents/Scheduled/Recent) renders and is measured.
+      const frame = liveFrame("active", prop, live, { view: "operations" });
+      const overflowing = frame
+        .split("\n")
+        .filter((line) => visibleWidth(line) > live);
+      expect(overflowing).toEqual([]);
+    },
+  );
+
+  it.each(OSCILLATION)(
+    "expanded activity tree fits the terminal when prop lags (prop=$prop, live=$live)",
+    ({ prop, live }) => {
+      // ^X expands raw args/result rows in the live turn — the widest live content.
+      const frame = liveFrame("active", prop, live, { expanded: true });
       const overflowing = frame
         .split("\n")
         .filter((line) => visibleWidth(line) > live);

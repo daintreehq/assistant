@@ -67,13 +67,16 @@ function NowSection({
       {active ? (
         <Box flexDirection="column">
           <Box justifyContent="space-between">
-            <Text>
+            {/* truncate so the left content yields rather than widening this
+                space-between row past the live terminal during a pane resize (#138);
+                `width` here is a lagged content-budget hint, not the live width. */}
+            <Text wrap="truncate">
               <StateBadge tone={active.badge.tone} label={active.badge.label} />
               <Text dimColor> {truncate(active.goal || active.title, width - 20)}</Text>
             </Text>
             <Text dimColor>{formatDuration(Math.max(0, now - active.startedAt))}</Text>
           </Box>
-          <Text dimColor>
+          <Text dimColor wrap="truncate">
             {"  "}
             {active.id}
             {active.preview ? ` · ${truncate(active.preview, width - active.id.length - 6)}` : ""}
@@ -102,12 +105,12 @@ function AttentionSection({
         const tone = severityTone(e.severity);
         return (
           <Box key={e.id} flexDirection="column" marginBottom={1}>
-            <Text color={toneColor(tone)}>
+            <Text color={toneColor(tone)} wrap="truncate">
               {set.attention} {truncate(e.title, width - 4)}
               {e.count > 1 ? <Text dimColor> ×{e.count}</Text> : null}
             </Text>
             {e.summary ? (
-              <Text dimColor>
+              <Text dimColor wrap="truncate">
                 {"  "}
                 <EpistemicTag kind={e.epistemicKind} />
                 {truncate(e.summary, width - 4)}
@@ -139,13 +142,13 @@ function AgentsSection({
       {shown.map((a) => (
         <Box key={a.watcherId} flexDirection="column">
           <Box justifyContent="space-between">
-            <Text>
+            <Text wrap="truncate">
               <StateBadge tone={a.badge.tone} label={a.badge.label} />
               <Text dimColor> {truncate(a.title, width - 22)}</Text>
             </Text>
             <Text dimColor>{formatDuration(Math.max(0, now - a.startedAt))}</Text>
           </Box>
-          <Text dimColor>
+          <Text dimColor wrap="truncate">
             {"  "}
             <EpistemicTag kind={a.epistemicKind} />
             {a.id}
@@ -175,7 +178,7 @@ function ScheduledSection({
     <Box flexDirection="column">
       <SectionLabel>Scheduled</SectionLabel>
       {timers.slice(0, max).map((t) => (
-        <Text key={t.id}>
+        <Text key={t.id} wrap="truncate">
           <Text color={ui.color.accent}>{clock(t.fireAt)}</Text>{" "}
           <Text dimColor>{truncate(t.title, width - 10)}</Text>
         </Text>
@@ -201,7 +204,7 @@ function RecentSection({
       {audit.slice(0, max).map((r) => {
         const ok = r.outcome === "ok" || r.outcome === "grant_ok";
         return (
-          <Text key={r.id}>
+          <Text key={r.id} wrap="truncate">
             <Text color={ok ? ui.color.accent : ui.color.danger}>
               {ok ? set.done : set.failed}
             </Text>{" "}
