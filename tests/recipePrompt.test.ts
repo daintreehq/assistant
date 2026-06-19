@@ -97,6 +97,16 @@ describe("loaded recipes message", () => {
     expect(msg).toContain("recipe.run.get");
   });
 
+  it("instructs the spawn recipe to ask when the target worktree is ambiguous", () => {
+    // Guards issue #55: step 3 must branch on ambiguity instead of silently
+    // picking a worktree. Proceed when exactly one matches; stop and ask when
+    // multiple candidates exist (or none) and the user named none.
+    const body = SPAWN_AGENT_FOR_EDITS_RECIPE.body;
+    expect(body).toContain("if exactly one worktree plausibly matches");
+    expect(body).toContain("STOP, list the candidates, and ask the user");
+    expect(body).toContain("Do not silently fall back to the active worktree");
+  });
+
   it("renders a safe fallback for an empty bundle", () => {
     const msg = buildLoadedRecipesMessage(renderRecipeBundle([]));
     expect(msg).toContain("# Loaded recipes");
