@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   runTerminalWatcherCheck,
   nextOutputState,
-  findModelJudge,
+  collectModelJudges,
   hasTextCondition,
   hashTail,
 } from "../src/daemon/watcherEngine.js";
@@ -89,18 +89,61 @@ function fakeMcp(
   };
 }
 
-function ctxWith(db: Db, queue: Queue, mcp: unknown): ToolContext {
+function ctxWith(
+  db: Db,
+  queue: Queue,
+  mcp: unknown,
+  router: ModelRouter = fakeRouter(),
+): ToolContext {
   return {
     config: {} as ToolContext["config"],
     mcp: mcp as ToolContext["mcp"],
     db,
     queue,
-    router: fakeRouter(),
+    router,
     projectPath: "/tmp/p",
     actor: "watcher",
     confirm: async () => true,
     log: () => {},
   } as ToolContext;
+}
+
+/**
+ * A router that answers modelJudge calls and classification calls differently,
+ * distinguished by the system prompt. `judge` decides each yes/no answer from the
+ * question and the full user prompt (which carries that terminal's tail), so a
+ * test can prove per-terminal isolation; `classify` overrides the verdict shape.
+ */
+function judgeRouter(opts: {
+  classify?: Record<string, unknown>;
+  judge?: (question: string, userPrompt: string) => Record<string, unknown>;
+}): ModelRouter {
+  return {
+    chat: async () => ({ content: "(no change)" }),
+    json: async (_tier: unknown, req: unknown) => {
+      const r = req as { messages?: Array<{ content?: string }> };
+      const sys = String(r.messages?.[0]?.content ?? "");
+      const user = String(r.messages?.[1]?.content ?? "");
+      if (sys.includes("terminal judge")) {
+        const m = user.match(/Question to answer \(yes\/no\): (.*)/);
+        const question = m ? m[1].trim() : "";
+        return {
+          reason: "judged",
+          confidence: 0.9,
+          matched: false,
+          ...(opts.judge ? opts.judge(question, user) : {}),
+        };
+      }
+      return {
+        classification: "still_working",
+        confidence: 0.7,
+        summary: "still working",
+        evidence: [],
+        recommendedAction: "none",
+        ...(opts.classify ?? {}),
+      };
+    },
+  } as unknown as ModelRouter;
 }
 
 describe("nextOutputState (#4)", () => {
@@ -122,13 +165,223 @@ describe("nextOutputState (#4)", () => {
   });
 });
 
-describe("findModelJudge (#15)", () => {
-  it("locates a modelJudge inside composite conditions", () => {
-    expect(findModelJudge({ modelJudge: "done?" })).toBe("done?");
-    expect(findModelJudge({ any: [{ contains: "x" }, { modelJudge: "ready?" }] })).toBe("ready?");
-    expect(findModelJudge({ not: { all: [{ modelJudge: "ok?" }] } })).toBe("ok?");
-    expect(findModelJudge({ contains: "x" })).toBeUndefined();
-    expect(findModelJudge(undefined)).toBeUndefined();
+describe("collectModelJudges (#57)", () => {
+  it("collects a single judge from a leaf or composite condition", () => {
+    expect(collectModelJudges({ modelJudge: "done?" })).toEqual(["done?"]);
+    expect(
+      collectModelJudges({ any: [{ contains: "x" }, { modelJudge: "ready?" }] }),
+    ).toEqual(["ready?"]);
+    expect(collectModelJudges({ not: { all: [{ modelJudge: "ok?" }] } })).toEqual(["ok?"]);
+  });
+
+  it("collects EVERY judge in a multi-judge group, in first-seen order", () => {
+    expect(
+      collectModelJudges({ all: [{ modelJudge: "a?" }, { modelJudge: "b?" }] }),
+    ).toEqual(["a?", "b?"]);
+    expect(
+      collectModelJudges({
+        any: [
+          { all: [{ modelJudge: "a?" }, { contains: "x" }] },
+          { not: { modelJudge: "b?" } },
+        ],
+      }),
+    ).toEqual(["a?", "b?"]);
+  });
+
+  it("deduplicates repeated questions across and within conditions", () => {
+    expect(
+      collectModelJudges({ any: [{ modelJudge: "q?" }, { modelJudge: "q?" }] }),
+    ).toEqual(["q?"]);
+    // Across both conditions passed as separate arguments (alertWhen + stopWhen).
+    expect(
+      collectModelJudges({ modelJudge: "shared?" }, { modelJudge: "shared?" }),
+    ).toEqual(["shared?"]);
+    expect(
+      collectModelJudges({ modelJudge: "a?" }, { modelJudge: "b?" }),
+    ).toEqual(["a?", "b?"]);
+  });
+
+  it("returns an empty array when there is no judge", () => {
+    expect(collectModelJudges({ contains: "x" })).toEqual([]);
+    expect(collectModelJudges(undefined)).toEqual([]);
+    expect(collectModelJudges(undefined, undefined)).toEqual([]);
+  });
+});
+
+describe("runTerminalWatcherCheck modelJudge end-to-end (#57)", () => {
+  const Q = "Did the migration finish?";
+
+  it("alertWhen modelJudge publishes on YES and stays silent on NO", async () => {
+    // YES → the judge fires the alert and an attention-level event is published.
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "working", recentOutput: "Running migration..." } }),
+        judgeRouter({ judge: () => ({ matched: true, confidence: 0.9, reason: "migration done" }) }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "judge-alert",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+        alertWhenJson: JSON.stringify({ modelJudge: Q }),
+      });
+      await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      const events = queue.digest({ severityAtLeast: "attention" });
+      expect(events.length).toBe(1);
+      // The matched judge's reason is surfaced as evidence on the published event.
+      expect(events[0].evidence?.some((e) => e.includes(`judge[${Q}]`))).toBe(true);
+      db.close();
+    }
+    // NO → the judge does not fire; with only a still_working change there is
+    // nothing meaningful to surface.
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "working", recentOutput: "Running migration..." } }),
+        judgeRouter({ judge: () => ({ matched: false, confidence: 0.9, reason: "still running" }) }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "judge-alert-no",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+        alertWhenJson: JSON.stringify({ modelJudge: Q }),
+      });
+      await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(queue.digest({ severityAtLeast: "attention" }).length).toBe(0);
+      db.close();
+    }
+  });
+
+  it("does not fire (nor attach evidence) for a matched judge below the confidence floor", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-a": { agentState: "working", recentOutput: "Running migration..." } }),
+      // matched=true but confidence 0.4 < 0.6 floor → must not fire the alert.
+      judgeRouter({ judge: () => ({ matched: true, confidence: 0.4, reason: "maybe done" }) }),
+    );
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "judge-lowconf",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      alertWhenJson: JSON.stringify({ modelJudge: Q }),
+    });
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(queue.digest({ severityAtLeast: "attention" }).length).toBe(0);
+    db.close();
+  });
+
+  it("stopWhen modelJudge stops the watcher on YES, stays active on NO", async () => {
+    // YES → condition_met.
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "working", recentOutput: "Running migration..." } }),
+        judgeRouter({ judge: () => ({ matched: true, confidence: 0.9, reason: "done" }) }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "judge-stop",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+        stopWhenJson: JSON.stringify({ modelJudge: Q }),
+      });
+      const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(outcome.stopReason).toBe("condition_met");
+      expect(db.getWatcher(w.id)!.status).toBe("condition_met");
+      db.close();
+    }
+    // NO → still active.
+    {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "working", recentOutput: "Running migration..." } }),
+        judgeRouter({ judge: () => ({ matched: false, confidence: 0.9, reason: "not yet" }) }),
+      );
+      const w = db.insertWatcher({
+        kind: "terminal",
+        title: "judge-stop-no",
+        goal: "g",
+        targetsJson: JSON.stringify(["term-a"]),
+        cadenceMs: 10_000,
+        modelTier: "small",
+        status: "active",
+        nextCheckAt: 0,
+        stopWhenJson: JSON.stringify({ modelJudge: Q }),
+      });
+      await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      expect(db.getWatcher(w.id)!.status).toBe("active");
+      db.close();
+    }
+  });
+
+  it("answers the same judge per-terminal against each terminal's own tail", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({
+        "term-a": { agentState: "working", recentOutput: "migration DONE" },
+        "term-b": { agentState: "working", recentOutput: "still working" },
+      }),
+      // The judge says YES only when THIS terminal's tail contains "DONE", so a
+      // shared/cached answer would wrongly fire term-b too.
+      judgeRouter({
+        judge: (_q, user) =>
+          user.includes("DONE")
+            ? { matched: true, confidence: 0.9, reason: "tail says DONE" }
+            : { matched: false, confidence: 0.9, reason: "not done" },
+      }),
+    );
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "judge-per-terminal",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a", "term-b"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      alertWhenJson: JSON.stringify({ modelJudge: Q }),
+    });
+    await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    const events = queue.digest({ severityAtLeast: "attention" });
+    expect(events.map((e) => e.target?.terminalId)).toEqual(["term-a"]);
+    db.close();
   });
 });
 
