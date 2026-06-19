@@ -28,12 +28,79 @@ export interface ToolCallRequest {
   function: { name: string; arguments: string };
 }
 
+/**
+ * Multimodal content parts. A narrow local mirror of the OpenAI content-part
+ * shape — only the two kinds we actually send (text + image_url) — kept
+ * deliberately decoupled from the `openai` SDK's `ChatCompletionContentPart`
+ * union. `toWireMessages()` already bridges to the SDK with an `as never` cast,
+ * so there's no value in leaking SDK types into every call site, and a wide
+ * union (audio, file, …) would only invite content we can't actually forward.
+ */
+export interface ChatTextPart {
+  type: "text";
+  text: string;
+}
+export interface ChatImageUrlPart {
+  type: "image_url";
+  /** `detail` is intentionally omitted — Fireworks ignores it (see image helpers). */
+  image_url: { url: string };
+}
+export type ChatContentPart = ChatTextPart | ChatImageUrlPart;
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  /**
+   * Plain text, `null` (e.g. an assistant tool-call turn with no prose), or a
+   * multimodal content-part array. Image parts are only valid on `user`
+   * messages bound for a vision-capable tier — the router enforces the tier
+   * gate (see ImageInputNotSupportedError) before any wire call.
+   */
+  content: string | ChatContentPart[] | null;
   tool_calls?: ToolCallRequest[];
   tool_call_id?: string;
   name?: string;
+}
+
+/** Build a text content part. */
+export function textPart(text: string): ChatTextPart {
+  return { type: "text", text };
+}
+
+/**
+ * Build an image content part from raw base64 image bytes, wrapped as the
+ * `data:` URI the OpenAI-compatible wire format expects. `mimeType` defaults to
+ * PNG (what Daintree's `browser.captureScreenshot` emits). No `detail` field —
+ * Fireworks ignores it.
+ */
+export function imageDataPart(
+  base64: string,
+  mimeType = "image/png",
+): ChatImageUrlPart {
+  return { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64}` } };
+}
+
+/** Whether any message carries an image content part (drives the tier gate). */
+export function hasImageContent(messages: ChatMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      m.content.some((part) => part.type === "image_url"),
+  );
+}
+
+/**
+ * Flatten a message's content to plain text for the string-only paths (token
+ * estimation, durable persistence, recipe-selection context). Image parts are
+ * never stringified to their (huge) base64 URI — they collapse to an
+ * `[image omitted]` marker so callers never write `[object Object]` or megabytes
+ * of base64 into SQLite.
+ */
+export function contentToText(content: string | ChatContentPart[] | null): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => (part.type === "text" ? part.text : "[image omitted]"))
+    .join("\n");
 }
 
 export interface ChatTool {
@@ -83,6 +150,23 @@ export class FireworksUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FireworksUnavailableError";
+  }
+}
+
+/**
+ * Raised when a request carries image content but is routed to a tier whose
+ * model can't see images. Only the `large` tier (minimax-m3) is vision-capable;
+ * the `small` tier (deepseek-v4-flash) is text-only, and `medium` routes
+ * through, so both reject. The router enforces this before any wire call so the
+ * failure is a clear local error, not an opaque provider 400 (or worse, a silent
+ * drop). The gate is on tier semantics, not the resolved model id — `medium`
+ * rejects even though it currently happens to route to the large model.
+ */
+export class ImageInputNotSupportedError extends Error {
+  readonly code = "IMAGE_INPUT_NOT_SUPPORTED";
+  constructor(message: string) {
+    super(message);
+    this.name = "ImageInputNotSupportedError";
   }
 }
 
@@ -447,13 +531,23 @@ export class FireworksClient {
  * Fireworks API accepts. Notably: drop our `name` helper field on tool messages
  * and emit tool_calls as only {id,type,function} — extra fields cause a 400 on
  * replay.
+ *
+ * A `user`/`system` message's content may be a multimodal `ChatContentPart[]`;
+ * those parts already match the OpenAI wire shape ({type:"text",text} /
+ * {type:"image_url",image_url:{url}}), so the array is forwarded verbatim — never
+ * collapsed to a string. Tool and assistant turns carry text-only content.
  */
 function toWireMessages(
   messages: ChatMessage[],
 ): Array<Record<string, unknown>> {
   return messages.map((m) => {
     if (m.role === "tool") {
-      return { role: "tool", content: m.content ?? "", tool_call_id: m.tool_call_id };
+      // Tool results are always text; flatten defensively in case an array slips in.
+      return {
+        role: "tool",
+        content: contentToText(m.content),
+        tool_call_id: m.tool_call_id,
+      };
     }
     if (m.role === "assistant") {
       const base: Record<string, unknown> = { role: "assistant", content: m.content };
@@ -466,6 +560,7 @@ function toWireMessages(
       }
       return base;
     }
+    // user / system: preserve a content-part array as-is; coalesce null to "".
     return { role: m.role, content: m.content ?? "" };
   });
 }

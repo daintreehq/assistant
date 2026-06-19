@@ -9,7 +9,10 @@ import type { ModelTier } from "../schemas.js";
 import {
   FireworksClient,
   CancelledError,
+  ImageInputNotSupportedError,
+  hasImageContent,
   type ChatOptions,
+  type ChatContentPart,
   type ChatResult,
   type ChatTool,
 } from "./fireworks.js";
@@ -23,6 +26,22 @@ export class ModelRouter {
   constructor(cfg: AppConfig, fw?: FireworksClient) {
     this.cfg = cfg;
     this.fw = fw ?? new FireworksClient(cfg);
+  }
+
+  /**
+   * Reject image content on any tier but `large`. Only the large model
+   * (minimax-m3) is vision-capable; `small` is text-only and `medium` routes
+   * through, so an image bound for either would either 400 at the provider or be
+   * silently dropped. Gate on tier semantics (the stable contract), not the
+   * resolved model id, and fail before any wire call so the error is a clear
+   * local one. Called at the top of every model path.
+   */
+  private assertImageTier(tier: ModelTier, messages: ChatOptions["messages"]): void {
+    if (tier !== "large" && hasImageContent(messages)) {
+      throw new ImageInputNotSupportedError(
+        `Image inputs require the large tier; got "${tier}" (only the large model is vision-capable).`,
+      );
+    }
   }
 
   modelFor(tier: ModelTier): string {
@@ -41,6 +60,7 @@ export class ModelRouter {
     tier: ModelTier,
     opts: Omit<ChatOptions, "model">,
   ): Promise<ChatResult> {
+    this.assertImageTier(tier, opts.messages);
     const model = this.modelFor(tier);
     this.logRequest("chat", tier, model, opts);
     try {
@@ -64,6 +84,7 @@ export class ModelRouter {
     opts: Omit<ChatOptions, "model">,
     onToken?: (t: string) => void,
   ): Promise<ChatResult> {
+    this.assertImageTier(tier, opts.messages);
     const model = this.modelFor(tier);
     this.logRequest("stream", tier, model, opts);
     try {
@@ -87,6 +108,7 @@ export class ModelRouter {
     opts: Omit<ChatOptions, "model" | "tools" | "toolChoice">,
     schema: S,
   ): Promise<z.infer<S>> {
+    this.assertImageTier(tier, opts.messages);
     const model = this.modelFor(tier);
     this.logRequest("json", tier, model, opts);
     try {
@@ -129,7 +151,7 @@ export class ModelRouter {
       temperature: opts.temperature,
       toolChoice: opts.toolChoice,
       toolNames: opts.tools?.map((t) => t.function?.name),
-      messages: opts.messages,
+      messages: opts.messages.map(redactImageData),
     });
   }
 
@@ -157,4 +179,20 @@ export class ModelRouter {
       small: this.cfg.smallModel,
     };
   }
+}
+
+/**
+ * Replace base64 image-data URIs in a message's content parts with a short size
+ * marker before the message is written to the debug log. A captured screenshot
+ * is hundreds of KB of base64 — logging it verbatim would bloat the trace and
+ * leak the raw bytes. Text parts and string content pass through untouched.
+ */
+function redactImageData(m: ChatOptions["messages"][number]): ChatOptions["messages"][number] {
+  if (!Array.isArray(m.content)) return m;
+  const parts: ChatContentPart[] = m.content.map((part) => {
+    if (part.type !== "image_url" || !part.image_url.url.startsWith("data:")) return part;
+    const kb = Math.ceil((part.image_url.url.length * 3) / 4 / 1024);
+    return { type: "image_url", image_url: { url: `<redacted base64 ~${kb}kb>` } };
+  });
+  return { ...m, content: parts };
 }

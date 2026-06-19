@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { FireworksClient } from "../src/models/fireworks.js";
+import { FireworksClient, imageDataPart, textPart } from "../src/models/fireworks.js";
 import type { AppConfig } from "../src/config.js";
 
 const CFG = {
@@ -60,6 +60,23 @@ describe("Fireworks streaming usage capture", () => {
       totalTokens: 150,
       cachedTokens: 40,
     });
+  });
+
+  it("forwards a multimodal content-part array through the streaming path unchanged", async () => {
+    const { fw, calls } = clientWithUsageStream();
+    await fw.chatStream({
+      model: "m",
+      messages: [{ role: "user", content: [textPart("see this"), imageDataPart("b64")] }],
+    });
+    expect(calls[0].messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "see this" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,b64" } },
+        ],
+      },
+    ]);
   });
 
   it("returns undefined usage when no usage chunk arrives", async () => {
