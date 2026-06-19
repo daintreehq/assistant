@@ -56,6 +56,16 @@ const GetArgs = z.object({
     .describe("Id of the recipe whose checkpoint to read."),
 });
 
+const LoadArgs = z.object({
+  recipeId: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      "Id of the recipe to load (the stable dotted id, e.g. 'daintree.edits.spawn-visible-agent'). Use tool.search or the loaded-recipes header to discover ids.",
+    ),
+});
+
 /** Parse the stored step array, tolerating null/garbage. */
 function parseSteps(s: string | undefined): RecipeStepProgress[] {
   if (!s) return [];
@@ -265,6 +275,62 @@ export const recipeRunTools: ToolDef[] = [
           : `at step ${rec.currentStep}`;
       return ok(`Recipe ${args.recipeId}: ${rec.status} (${where}).`, {
         state: toView(rec),
+      });
+    },
+  },
+  {
+    name: "recipe.load",
+    description:
+      "Load a specific recipe (procedural runbook) by id into your context right now, when you already know which runbook you need rather than waiting for automatic selection. The recipe's body becomes available to you on your next step this turn. The loaded set is capped; an explicit load takes priority over auto-selected recipes. Read-only — pulls the recipe into context, never edits files.",
+    risk: "read",
+    readOnly: true,
+    schema: LoadArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        recipeId: {
+          type: "string",
+          description:
+            "Id of the recipe to load (the stable dotted id, e.g. 'daintree.edits.spawn-visible-agent'). Use tool.search or the loaded-recipes header to discover ids.",
+        },
+      },
+      required: ["recipeId"],
+    },
+    async handler(args: z.infer<typeof LoadArgs>, ctx) {
+      // The registry view is needed to validate the id and read back a label;
+      // absent only in stripped-down contexts that don't wire the recipe seam.
+      if (!ctx.recipeSource) {
+        return fail(
+          "RECIPE_SOURCE_UNAVAILABLE",
+          "No recipe source is bound to this context, so recipes cannot be loaded here.",
+          { recoverable: false },
+        );
+      }
+      const recipe = ctx.recipeSource.get(args.recipeId);
+      if (!recipe) {
+        // A wrong id is recoverable: the model can retry with a valid one.
+        return fail(
+          "RECIPE_NOT_FOUND",
+          `No recipe with id '${args.recipeId}' is registered. Use tool.search to find a valid recipe id.`,
+          { recoverable: true },
+        );
+      }
+      // loadRecipes performs the actual context rewrite; it's wired only for the
+      // interactive main actor (watcher/timer turns have no live recipe set).
+      if (!ctx.loadRecipes) {
+        return fail(
+          "RECIPE_LOAD_UNAVAILABLE",
+          "Recipe loading is not available in this context.",
+          { recoverable: false },
+        );
+      }
+      const activeRecipeIds = ctx.loadRecipes([recipe.id]);
+      return ok(`Recipe ${recipe.id} loaded.`, {
+        id: recipe.id,
+        title: recipe.title,
+        summary: recipe.summary,
+        activeRecipeIds,
       });
     },
   },

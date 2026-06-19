@@ -146,6 +146,16 @@ export class App {
       // Read live: the scheduler is started later (interactive paths) and never
       // in a one-shot run, so timers/watchers can warn honestly.
       daemonActive: () => Boolean(this.scheduler),
+      // The recipe library satisfies the narrow RecipeSource seam directly.
+      recipeSource: this.recipes,
+      // Recipe loading mutates the live session's loaded set, so it is wired only
+      // for the interactive main actor; watcher/timer turns have no recipe set and
+      // the tool fails gracefully when this is absent. Read this.session lazily —
+      // buildContext("main") runs while the session is being constructed.
+      loadRecipes:
+        actor === "main"
+          ? (ids) => this.session.loadAdditionalRecipes(ids)
+          : undefined,
     };
   }
 

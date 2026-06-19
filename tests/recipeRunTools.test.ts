@@ -5,6 +5,7 @@ import type { ToolContext } from "../src/tools/types.js";
 
 const advance = recipeRunTools.find((t) => t.name === "recipe.step.advance")!;
 const get = recipeRunTools.find((t) => t.name === "recipe.run.get")!;
+const load = recipeRunTools.find((t) => t.name === "recipe.load")!;
 
 function ctx(sessionId = "ses_test"): ToolContext {
   const db = new Db(":memory:");
@@ -238,5 +239,74 @@ describe("recipe.run.get", () => {
     const res = await get.handler({ recipeId: "r.flow" }, noSessionCtx());
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("RECIPE_RUN_NO_SESSION");
+  });
+});
+
+describe("recipe.load", () => {
+  const recipe = {
+    id: "r.known",
+    title: "Known Recipe",
+    summary: "A recipe that exists in the source.",
+  };
+
+  /** A context with a recipe source and a spy loadRecipes callback. */
+  function loadCtx(opts: { hasSource?: boolean; hasCallback?: boolean } = {}) {
+    const { hasSource = true, hasCallback = true } = opts;
+    const loadRecipes = vi.fn((ids: string[]) => ids);
+    const recipeSource = {
+      has: (id: string) => id === recipe.id,
+      get: (id: string) => (id === recipe.id ? (recipe as never) : undefined),
+    };
+    const c = {
+      actor: "main",
+      recipeSource: hasSource ? recipeSource : undefined,
+      loadRecipes: hasCallback ? loadRecipes : undefined,
+    } as unknown as ToolContext;
+    return { c, loadRecipes };
+  }
+
+  type LoadResult = {
+    result: {
+      id: string;
+      title: string;
+      summary: string;
+      activeRecipeIds: string[];
+    };
+  };
+
+  it("loads a known recipe: calls loadRecipes with its id and returns its label", async () => {
+    const { c, loadRecipes } = loadCtx();
+    const res = await load.handler({ recipeId: "r.known" }, c);
+    expect(res.ok).toBe(true);
+    expect(loadRecipes).toHaveBeenCalledWith(["r.known"]);
+    const { result } = res as LoadResult;
+    expect(result.id).toBe("r.known");
+    expect(result.title).toBe("Known Recipe");
+    expect(result.summary).toBe("A recipe that exists in the source.");
+    // The callback echoes the resulting active set back to the tool.
+    expect(result.activeRecipeIds).toEqual(["r.known"]);
+  });
+
+  it("returns a recoverable RECIPE_NOT_FOUND for an unknown id and never loads", async () => {
+    const { c, loadRecipes } = loadCtx();
+    const res = await load.handler({ recipeId: "r.missing" }, c);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("RECIPE_NOT_FOUND");
+    expect(res.error?.recoverable).toBe(true);
+    expect(loadRecipes).not.toHaveBeenCalled();
+  });
+
+  it("fails cleanly when no recipe source is bound to the context", async () => {
+    const { c } = loadCtx({ hasSource: false });
+    const res = await load.handler({ recipeId: "r.known" }, c);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("RECIPE_SOURCE_UNAVAILABLE");
+  });
+
+  it("fails cleanly when recipe loading is unavailable (e.g. a watcher context)", async () => {
+    const { c } = loadCtx({ hasCallback: false });
+    const res = await load.handler({ recipeId: "r.known" }, c);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("RECIPE_LOAD_UNAVAILABLE");
   });
 });
