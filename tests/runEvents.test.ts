@@ -134,6 +134,73 @@ describe("AgentSession persists a run's event log", () => {
     expect(runIds[0]).not.toBe(runIds[1]);
   });
 
+  it("stamps the same run id on audit_log and run_events for a dispatched tool", async () => {
+    const ref: RunIdRef = { current: undefined };
+    const responses = [
+      chatResult({
+        toolCalls: [
+          { id: "c1", type: "function", function: { name: "fs__search", arguments: "{}" } },
+        ],
+      }),
+      chatResult({ content: "done" }),
+    ];
+    let n = 0;
+    const router = { stream: async () => responses[n++], json: selectNone } as any;
+    // A registry stub that writes a real audit row carrying ctx.runId, so the
+    // cross-layer correlation (audit_log.runId === run_events.runId) is exercised.
+    const registry = {
+      toOpenAITools: () => [],
+      resolveWireName: (w: string) => w.replaceAll("__", "."),
+      dispatch: async (_name: string, _args: unknown, ctx: any) => {
+        const row = db.insertAudit({
+          actor: "main",
+          toolName: "fs.search",
+          argsJson: "{}",
+          outcome: "ok",
+          durationMs: 1,
+          summary: "ok",
+          runId: ctx.runId,
+        });
+        return { ok: true, summary: "ok", auditId: row.id };
+      },
+    } as any;
+    const session = new AgentSession({
+      router,
+      registry,
+      recipeRegistry,
+      ctx: { db } as any,
+      promptContext: PROMPT_CTX,
+      sessionId: "ses_x",
+      events: multiSink(new RunEventSink(db, ref), {
+        assistantStart() {},
+        assistantToken() {},
+        assistantEnd() {},
+        toolCall() {},
+        toolResult() {},
+        error() {},
+        info() {},
+      }),
+      runIdRef: ref,
+    });
+
+    await session.send("search");
+
+    const auditRunId = db.listAudit()[0].runId;
+    const eventRunIds = (
+      db
+        .raw()
+        .prepare("SELECT DISTINCT runId FROM run_events")
+        .all() as Array<{ runId: string }>
+    ).map((r) => r.runId);
+    expect(auditRunId).toBeDefined();
+    expect(eventRunIds).toEqual([auditRunId]);
+    // The tool:result event carries the audit row id for a precise join.
+    const toolResult = db
+      .listRunEvents(auditRunId!)
+      .find((e) => e.type === "tool:result");
+    expect(JSON.parse(toolResult!.payload!).auditId).toBe(db.listAudit()[0].id);
+  });
+
   it("clears the run id even when the model errors mid-turn", async () => {
     const router = {
       stream: async () => {

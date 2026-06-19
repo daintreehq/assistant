@@ -94,6 +94,7 @@ export function multiSink(...sinks: AgentEventSink[]): AgentEventSink {
     assistantStart: fan("assistantStart"),
     assistantToken: fan("assistantToken"),
     assistantEnd: fan("assistantEnd"),
+    assistantCancelled: fan("assistantCancelled"),
     toolCall: fan("toolCall"),
     toolResult: fan("toolResult"),
     error: fan("error"),
@@ -106,9 +107,15 @@ export function multiSink(...sinks: AgentEventSink[]): AgentEventSink {
  * each run (one `AgentSession.send()` turn) a typed, ordered log that can be
  * replayed after the fact. The current run id comes from the shared {@link RunIdRef}.
  *
- * Token-level events are deliberately not persisted — `assistant:end` already
- * carries the full think-stripped content, so logging every streamed token would
- * add hundreds of rows per turn with no extra replay fidelity.
+ * Individual streamed tokens are not written one-per-row — that would add hundreds
+ * of rows per turn. Instead they are buffered and flushed as a single
+ * `assistant:content` row when the round ends (a tool call begins, an error fires,
+ * or a new round starts). This captures *intermediate* assistant prose — text the
+ * model emits in the same round as a tool call — which never reaches
+ * `assistantEnd` (that only fires on the final, tool-free round) and would
+ * otherwise be lost from the log. The final round's content still arrives via
+ * `assistantEnd` as `assistant:end`; the streamed buffer for that round is dropped
+ * to avoid duplicating it.
  *
  * The `seq` counter is monotonic within a run and resets whenever the ref points
  * at a new run id. All writes are best-effort: a DB failure is swallowed so it can
@@ -117,6 +124,8 @@ export function multiSink(...sinks: AgentEventSink[]): AgentEventSink {
 export class RunEventSink implements AgentEventSink {
   private seq = 0;
   private seqRunId: string | undefined = undefined;
+  /** Streamed tokens for the current round, flushed as one `assistant:content` row. */
+  private contentBuffer = "";
 
   constructor(
     private readonly db: Db,
@@ -124,18 +133,35 @@ export class RunEventSink implements AgentEventSink {
   ) {}
 
   assistantStart(): void {
+    // Defensive: a round normally flushes via toolCall/assistantEnd before the
+    // next start, but if any buffered prose remains, record it rather than lose it.
+    this.flushContent();
     this.write("assistant:start");
   }
 
-  assistantToken(): void {
-    /* not persisted — assistant:end carries the full content (see class doc) */
+  assistantToken(token: string): void {
+    this.contentBuffer += token;
   }
 
   assistantEnd(content: string): void {
+    // `content` is authoritative for this (final) round, so drop the streamed
+    // buffer instead of flushing it as a duplicate assistant:content row.
+    this.contentBuffer = "";
     this.write("assistant:end", { content });
   }
 
+  assistantCancelled(content: string): void {
+    // A user abort ends the run mid-flight. `content` is authoritative for whatever
+    // was streamed before the cancel, so drop the buffer (same reasoning as
+    // assistantEnd) and record the cancellation so the replayed log shows the run
+    // stopped on purpose rather than simply trailing off.
+    this.contentBuffer = "";
+    this.write("assistant:cancelled", { content });
+  }
+
   toolCall(event: ToolCallEvent): void {
+    // Any prose streamed in this round precedes the tool call — record it first.
+    this.flushContent();
     this.write("tool:call", { id: event.id, name: event.name, args: event.args });
   }
 
@@ -145,10 +171,16 @@ export class RunEventSink implements AgentEventSink {
       name: event.name,
       ok: event.result.ok,
       summary: event.result.summary,
+      // The audit row id is the precise cross-reference into audit_log; it is set
+      // on the result by the registry before this event fires (absent if the call
+      // never reached dispatch, e.g. a refused or unparsable call).
+      auditId: event.result.auditId,
     });
   }
 
   error(message: string): void {
+    // Preserve any partial prose streamed before the failure.
+    this.flushContent();
     this.write("error", { message });
   }
 
@@ -156,10 +188,18 @@ export class RunEventSink implements AgentEventSink {
     this.write("info", { message });
   }
 
+  /** Write buffered round prose as one row, if any, then clear the buffer. */
+  private flushContent(): void {
+    if (this.contentBuffer.length === 0) return;
+    const content = this.contentBuffer;
+    this.contentBuffer = "";
+    this.write("assistant:content", { content });
+  }
+
   private write(type: string, payload?: unknown): void {
     const runId = this.ref.current;
     if (!runId) return; // emitted outside a run — nothing to scope it to
-    // A new run resets the monotonic seq counter.
+    // A new run resets the monotonic seq counter (and any stale buffered prose).
     if (runId !== this.seqRunId) {
       this.seqRunId = runId;
       this.seq = 0;
@@ -177,11 +217,27 @@ export class RunEventSink implements AgentEventSink {
   }
 }
 
-/** Serialize a payload defensively — never throw on a cyclic/unserializable value. */
+/** Largest serialized run-event payload we persist, mirroring the audit-log cap. */
+const MAX_RUN_EVENT_PAYLOAD = 8000;
+
+/**
+ * Serialize a payload defensively: never throw on a cyclic/unserializable value,
+ * and bound the size so a large tool result or long assistant turn can't write an
+ * unbounded BLOB on the live turn's synchronous path. Oversized payloads are
+ * replaced with a still-valid-JSON truncation marker carrying a preview.
+ */
 function serializePayload(payload: unknown): string {
+  let json: string;
   try {
-    return JSON.stringify(payload) ?? "null";
+    json = JSON.stringify(payload) ?? "null";
   } catch {
     return JSON.stringify({ error: "unserializable" });
   }
+  if (json.length <= MAX_RUN_EVENT_PAYLOAD) return json;
+  return JSON.stringify({
+    truncated: true,
+    bytes: Buffer.byteLength(json, "utf8"),
+    // Leave headroom for the wrapper + JSON escaping so the row stays near the cap.
+    preview: json.slice(0, MAX_RUN_EVENT_PAYLOAD - 200),
+  });
 }

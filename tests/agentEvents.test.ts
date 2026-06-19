@@ -209,12 +209,16 @@ describe("RunEventSink", () => {
     db.close();
   });
 
-  it("is a no-op when no run is active", () => {
+  it("is a no-op when no run is active (writes no rows at all)", () => {
     const ref: RunIdRef = { current: undefined };
     const sink = new RunEventSink(db, ref);
     sink.assistantStart();
+    sink.assistantToken("hi");
     sink.assistantEnd("hi");
-    expect(db.listRunEvents("run_x")).toEqual([]);
+    const count = db.raw().prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+      n: number;
+    };
+    expect(count.n).toBe(0);
   });
 
   it("writes typed, seq-ordered rows scoped to the active run", () => {
@@ -252,17 +256,72 @@ describe("RunEventSink", () => {
     expect(JSON.parse(rows[3].payload!)).toEqual({ content: "done" });
   });
 
-  it("does not persist token events", () => {
+  it("does not persist tokens of the final round (assistant:end carries them)", () => {
     const ref: RunIdRef = { current: "run_1" };
     const sink = new RunEventSink(db, ref);
     sink.assistantStart();
     sink.assistantToken("Hel");
     sink.assistantToken("lo");
     sink.assistantEnd("Hello");
+    // The buffered tokens are dropped — assistant:end is authoritative, so no
+    // duplicate assistant:content row, and no per-token rows.
     expect(db.listRunEvents("run_1").map((r) => r.type)).toEqual([
       "assistant:start",
       "assistant:end",
     ]);
+  });
+
+  it("flushes intermediate prose (tokens before a tool call) as one assistant:content row", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    // Round 1: the model says something, then calls a tool — no assistantEnd fires.
+    sink.assistantStart();
+    sink.assistantToken("Let me ");
+    sink.assistantToken("check.");
+    sink.toolCall({ id: "c1", name: "fs.read", args: {}, startedAt: 0 });
+    sink.toolResult({
+      id: "c1",
+      name: "fs.read",
+      result: { ok: true, summary: "ok" },
+      endedAt: 1,
+    });
+    // Round 2: the final answer.
+    sink.assistantStart();
+    sink.assistantEnd("done");
+
+    const rows = db.listRunEvents("run_1");
+    expect(rows.map((r) => r.type)).toEqual([
+      "assistant:start",
+      "assistant:content",
+      "tool:call",
+      "tool:result",
+      "assistant:start",
+      "assistant:end",
+    ]);
+    // The interstitial prose survives, scoped to the run, ahead of the tool call.
+    expect(JSON.parse(rows[1].payload!)).toEqual({ content: "Let me check." });
+  });
+
+  it("records tool:result with the auditId cross-reference into audit_log", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.toolResult({
+      id: "c1",
+      name: "fs.read",
+      result: { ok: true, summary: "ok", auditId: "aud_1234" },
+      endedAt: 0,
+    });
+    expect(JSON.parse(db.listRunEvents("run_1")[0].payload!).auditId).toBe("aud_1234");
+  });
+
+  it("caps an oversized payload to a valid-JSON truncation marker", () => {
+    const ref: RunIdRef = { current: "run_1" };
+    const sink = new RunEventSink(db, ref);
+    sink.assistantEnd("x".repeat(100_000));
+    const payload = JSON.parse(db.listRunEvents("run_1")[0].payload!);
+    expect(payload.truncated).toBe(true);
+    expect(payload.bytes).toBeGreaterThan(100_000);
+    expect(typeof payload.preview).toBe("string");
   });
 
   it("resets the seq counter when the run id changes", () => {
