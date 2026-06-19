@@ -7,6 +7,7 @@ import { render, c } from "./render.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 import { runDoctor } from "./commandData.js";
+import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 
 export interface CommandResult {
   handled: boolean;
@@ -20,6 +21,7 @@ const HELP = `${c.bold("Commands")}
   /timers                 scheduled timers
   /watchers               active watchers
   /audit [n]              recent tool calls (default 15)
+  /audit export <fmt>     export audit log (fmt: json|csv) [actor= tool= outcome= from= to= limit=]
   /models                 model routing
   /recipes [sub]          assistant recipes (loaded|reload|load <id…>|clear)
   /permissions [tier]     show or set tier (supervisor|operator|system)
@@ -112,6 +114,22 @@ export async function handleSlashCommand(
     }
 
     case "audit": {
+      // `/audit export <json|csv> [filters]` prints the serialized export;
+      // plain `/audit [n]` keeps the existing recent-calls listing.
+      if (rest[0] === "export") {
+        const parsed = parseAuditExportArgs(rest.slice(1));
+        if ("error" in parsed) {
+          render.line(c.yellow(parsed.error));
+          return { handled: true };
+        }
+        const rows = app.db.queryAudit(parsed.filters);
+        const content = serializeAudit(rows, parsed.format);
+        render.line(
+          c.bold(`\nAudit export (${parsed.format}, ${rows.length} row${rows.length === 1 ? "" : "s"})`),
+        );
+        render.line(content || c.gray("(none)"));
+        return { handled: true };
+      }
       const n = Number(arg) || 15;
       const rows = app.db.listAudit(n);
       render.line(c.bold(`\nAudit (last ${rows.length})`));

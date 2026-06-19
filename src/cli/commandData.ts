@@ -8,6 +8,7 @@ import fs from "node:fs";
 import type { App } from "./app.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
+import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 
 /** Bound an MCP call so a stalled server can't hang a diagnostic command. */
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -184,6 +185,7 @@ const HELP_TEXT = [
   "/timers                 scheduled timers",
   "/watchers               active watchers",
   "/audit [n]              recent tool calls (default 15)",
+  "/audit export <fmt>     export log (json|csv) [actor= tool= outcome= from= to= limit=]",
   "/models                 model routing",
   "/permissions [tier]     show or set tier (supervisor|operator|system)",
   "/recipes [sub]          loaded | reload | load <id…> | clear",
@@ -295,6 +297,22 @@ export async function handleUiCommand(
     }
 
     case "audit": {
+      // `/audit export <json|csv> [filters]` returns the serialized export as the
+      // panel text; plain `/audit [n]` keeps the existing recent-calls listing.
+      if (rest[0] === "export") {
+        const parsed = parseAuditExportArgs(rest.slice(1));
+        if ("error" in parsed) {
+          return { handled: true, switchPanel: "audit", title: "Audit export", text: parsed.error };
+        }
+        const rows = app.db.queryAudit(parsed.filters);
+        const content = serializeAudit(rows, parsed.format);
+        return {
+          handled: true,
+          switchPanel: "audit",
+          title: `Audit export (${parsed.format}, ${rows.length} row${rows.length === 1 ? "" : "s"})`,
+          text: content || "(none)",
+        };
+      }
       const n = Number(arg) || 15;
       const rows = app.db.listAudit(n);
       return {
