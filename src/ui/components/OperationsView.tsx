@@ -234,7 +234,9 @@ export function OperationsView({
         empty: dashboard.audit.length === 0,
       },
     };
-    const { node, empty } = panels[activePanel];
+    // The `Exclude<PanelKey, "help">` type makes any other key unreachable through
+    // normal wiring; the fallback just keeps an out-of-contract caller from crashing.
+    const { node, empty } = panels[activePanel] ?? { node: null, empty: true };
     return (
       <Box flexDirection="column" gap={1}>
         {empty ? <Text dimColor>Nothing here yet.</Text> : node}

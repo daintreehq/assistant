@@ -84,29 +84,48 @@ describe("OperationsView", () => {
     expect(frame).toContain("Standing by");
   });
 
-  it("focuses a single section when a panel command set activePanel", () => {
-    const frame =
-      render(
-        <OperationsView
-          dashboard={dash({
-            watchers: [watcher({})],
-            timers: [{ id: "t1", title: "nudge", fireAt: 0, createdAt: 0 } as any],
-            audit: [
-              { id: "a1", toolName: "git.push", outcome: "ok", durationMs: 5 } as any,
-            ],
-          })}
-          width={72}
-          now={0}
-          activePanel="timers"
-        />,
-      ).lastFrame() ?? "";
-    // Only the timers panel renders; the other sections are filtered out.
-    expect(frame).toContain("SCHEDULED");
-    expect(frame).toContain("nudge");
-    expect(frame).not.toContain("NOW");
-    expect(frame).not.toContain("AGENTS");
-    expect(frame).not.toContain("RECENT");
-  });
+  // A fully-populated deck so every panel has data to focus on; each case asserts
+  // only its own section renders, catching a wrong panel→section mapping.
+  const fullDash = () =>
+    dash({
+      watchers: [watcher({})],
+      inbox: [
+        {
+          id: "e1",
+          source: "terminal_watcher",
+          severity: "error",
+          title: "Tests failed in term_8",
+          summary: "3 failures",
+          createdAt: 0,
+          count: 1,
+        } as any,
+      ],
+      timers: [{ id: "t1", title: "nudge", fireAt: 0, createdAt: 0 } as any],
+      audit: [{ id: "a1", toolName: "git.push", outcome: "ok", durationMs: 5 } as any],
+    });
+
+  const ALL_LABELS = ["NOW", "NEEDS ATTENTION", "AGENTS", "SCHEDULED", "RECENT"];
+  const PANEL_CASES = [
+    { panel: "watchers", label: "AGENTS", marker: "term_8" },
+    { panel: "inbox", label: "NEEDS ATTENTION", marker: "Tests failed in term_8" },
+    { panel: "timers", label: "SCHEDULED", marker: "nudge" },
+    { panel: "audit", label: "RECENT", marker: "git.push" },
+  ] as const;
+
+  it.each(PANEL_CASES)(
+    "focuses only the $label section when activePanel=$panel",
+    ({ panel, label, marker }) => {
+      const frame =
+        render(
+          <OperationsView dashboard={fullDash()} width={72} now={0} activePanel={panel} />,
+        ).lastFrame() ?? "";
+      expect(frame).toContain(label);
+      expect(frame).toContain(marker);
+      for (const other of ALL_LABELS) {
+        if (other !== label) expect(frame).not.toContain(other);
+      }
+    },
+  );
 
   it("renders the full deck when activePanel is null (unchanged behavior)", () => {
     const frame =
