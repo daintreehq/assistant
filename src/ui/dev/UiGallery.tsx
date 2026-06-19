@@ -63,6 +63,7 @@ export function UiGallery() {
           connected={f.connected}
           transcript={f.transcript}
           dashboard={f.dashboard}
+          sessionUsage={f.sessionUsage}
           previews={f.previews}
           busy={f.busy}
           stage={f.stage}

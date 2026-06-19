@@ -12,7 +12,12 @@
  * operations sections and composer are never pushed off a short terminal.
  */
 import { Box, Text } from "ink";
-import type { DashboardState, PendingConfirm, TranscriptCell } from "./types.js";
+import type {
+  DashboardState,
+  PendingConfirm,
+  SessionUsage,
+  TranscriptCell,
+} from "./types.js";
 import type { TerminalPreview } from "./hooks/useTerminalPreview.js";
 import { Header } from "./components/Header.js";
 import { Transcript } from "./components/Transcript.js";
@@ -58,6 +63,8 @@ export interface ControlRoomProps {
   connected: boolean;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
+  /** Live token/cost/context-pressure rollup, rendered in the status line. */
+  sessionUsage?: SessionUsage;
   previews?: TerminalPreview[];
   busy: boolean;
   stage: string;
@@ -87,6 +94,7 @@ export function ControlRoom({
   connected,
   transcript,
   dashboard,
+  sessionUsage,
   previews = [],
   busy,
   stage,
@@ -275,7 +283,13 @@ export function ControlRoom({
           />
         ) : null}
 
-        <StatusLine dashboard={dashboard} tier={tier} width={columns} now={now} />
+        <StatusLine
+          dashboard={dashboard}
+          tier={tier}
+          sessionUsage={sessionUsage}
+          width={columns}
+          now={now}
+        />
 
         <Composer
           busy={busy}

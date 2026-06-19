@@ -23,6 +23,7 @@ import type {
   ActivityItem,
   DashboardState,
   PendingConfirm,
+  SessionUsage,
   TranscriptCell,
   TurnCell,
 } from "../types.js";
@@ -38,6 +39,16 @@ let idCounter = 0;
 function uid(prefix: string): string {
   return `${prefix}_${(idCounter++).toString(36)}`;
 }
+
+/** A fresh session-usage rollup: zeroed counters, no cost or context reading yet. */
+const INITIAL_SESSION_USAGE: SessionUsage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  costUsd: undefined,
+  contextTokens: 0,
+  contextThreshold: 0,
+};
 
 /** Index of the last turn cell when it is still active, else -1. */
 function activeTurnIndex(cells: TranscriptCell[]): number {
@@ -374,6 +385,8 @@ export interface DaintreeController {
   bridge: UiBridge;
   transcript: TranscriptCell[];
   dashboard: DashboardState;
+  /** Live token/cost/context-pressure rollup for the status line. */
+  sessionUsage: SessionUsage;
   busy: boolean;
   /** Live stage label for the composer (Inspecting, Delegating, Watching…). */
   stage: string;
@@ -414,6 +427,11 @@ export function useDaintreeController(
   const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
+  );
+  // Live token/cost/context-pressure rollup for the status line, accumulated from
+  // the agent's `usage` events (see the bridge subscription below).
+  const [sessionUsage, setSessionUsage] = useState<SessionUsage>(
+    INITIAL_SESSION_USAGE,
   );
   // The bound project's name. Seeded from the directory leaf (when it's human, not
   // an opaque id) so the header isn't blank, then upgraded to Daintree's real
@@ -542,11 +560,30 @@ export function useDaintreeController(
     reactToWakeRef.current = () => void reactToWake();
   }, [reactToWake]);
 
-  // Subscribe to the bridge: confirms drive modal state, everything else reduces.
+  // Subscribe to the bridge: confirms drive modal state, usage updates the session
+  // rollup, everything else reduces into the transcript.
   useEffect(() => {
     return bridge.subscribe((event) => {
       if (event.type === "confirm") {
         setPendingConfirm(event.pending);
+      } else if (event.type === "usage") {
+        const u = event.usage;
+        setSessionUsage((prev) => ({
+          promptTokens: prev.promptTokens + u.promptTokens,
+          completionTokens: prev.completionTokens + u.completionTokens,
+          totalTokens: prev.totalTokens + u.totalTokens,
+          // Keep the prior total when this call's model has no rate, so one
+          // unpriced call doesn't blank an already-accumulated cost.
+          costUsd:
+            u.costUsd === undefined
+              ? prev.costUsd
+              : (prev.costUsd ?? 0) + u.costUsd,
+          // Context pressure is the latest reading, not a sum.
+          contextTokens: u.contextTokens,
+          contextThreshold: u.contextThreshold,
+          lastTier: u.tier,
+          lastModel: u.model,
+        }));
       } else {
         dispatch(event);
       }
@@ -730,6 +767,7 @@ export function useDaintreeController(
     bridge,
     transcript,
     dashboard,
+    sessionUsage,
     busy,
     stage,
     pendingConfirm,

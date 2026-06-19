@@ -95,6 +95,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       connected={controller.dashboard.mcp.connected}
       transcript={controller.transcript}
       dashboard={controller.dashboard}
+      sessionUsage={controller.sessionUsage}
       previews={previews}
       busy={controller.busy}
       stage={controller.stage}

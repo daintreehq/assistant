@@ -98,16 +98,20 @@ describe("AgentSession persists a run's event log", () => {
     expect(runIds[0]).toMatch(/^run_[0-9a-f]{8}$/);
 
     // The loop emits assistantStart per model round, so the tool round and the
-    // final answer round each open with an "assistant:start".
+    // final answer round each open with an "assistant:start". Each round also
+    // records a "usage" row (token/cost/context accounting) right after the model
+    // call returns, before any tool calls or the final answer.
     const rows = db.listRunEvents(runIds[0]);
     expect(rows.map((r) => r.type)).toEqual([
       "assistant:start",
+      "usage",
       "tool:call",
       "tool:result",
       "assistant:start",
+      "usage",
       "assistant:end",
     ]);
-    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2, 3, 4]);
+    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 
   it("mints a distinct run id per send() and clears the ref after each turn", async () => {

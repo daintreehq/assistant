@@ -59,7 +59,13 @@ export interface ChatResult {
   reasoning: string;
   toolCalls: ToolCallRequest[];
   finishReason: string;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    /** Cached prompt tokens (billed at a discount), when the provider reports them. */
+    cachedTokens?: number;
+  };
 }
 
 export class FireworksUnavailableError extends Error {
@@ -205,6 +211,9 @@ export class FireworksClient {
             promptTokens: resp.usage.prompt_tokens,
             completionTokens: resp.usage.completion_tokens,
             totalTokens: resp.usage.total_tokens,
+            cachedTokens: (
+              resp.usage as { prompt_tokens_details?: { cached_tokens?: number } }
+            ).prompt_tokens_details?.cached_tokens,
           }
         : undefined,
     };
@@ -227,6 +236,9 @@ export class FireworksClient {
           temperature: opts.temperature ?? 0.3,
           max_tokens: opts.maxTokens,
           stream: true,
+          // Ask the streaming endpoint to emit a final usage-only chunk; without
+          // this the OpenAI-compatible API reports no usage on streamed calls.
+          stream_options: { include_usage: true },
           ...(opts.promptCacheKey
             ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
             : {}),
@@ -237,8 +249,23 @@ export class FireworksClient {
       const filter = new ThinkFilter();
       const toolAcc = new Map<number, { id: string; name: string; args: string }>();
       let finishReason = "stop";
+      let usage: ChatResult["usage"];
 
       for await (const chunk of stream) {
+        // The usage-only chunk (sent because of stream_options.include_usage)
+        // carries token counts and an empty `choices` array. Capture it whenever
+        // present — some providers also attach usage to the final content chunk —
+        // then fall through; the choice guard below skips the empty-choices case.
+        if (chunk.usage) {
+          usage = {
+            promptTokens: chunk.usage.prompt_tokens,
+            completionTokens: chunk.usage.completion_tokens,
+            totalTokens: chunk.usage.total_tokens,
+            cachedTokens: (
+              chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }
+            ).prompt_tokens_details?.cached_tokens,
+          };
+        }
         const choice = chunk.choices[0];
         if (!choice) continue;
         const delta = choice.delta;
@@ -275,6 +302,7 @@ export class FireworksClient {
         reasoning: filter.reasoning.trim(),
         toolCalls,
         finishReason,
+        usage,
       };
     } catch (err) {
       // A user-initiated abort is a clean cancellation, not a model failure —

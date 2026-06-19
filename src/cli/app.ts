@@ -105,6 +105,7 @@ export class App {
       toolResult: (event) => this.hooks.agentEvents?.toolResult(event),
       error: (message) => this.hooks.agentEvents?.error(message),
       info: (message) => this.hooks.agentEvents?.info(message),
+      usage: (event) => this.hooks.agentEvents?.usage?.(event),
     };
   }
 

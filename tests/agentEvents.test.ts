@@ -133,6 +133,62 @@ describe("AgentSession emits structured events instead of rendering", () => {
     expect(events[events.length - 1]).toBe("end:done");
   });
 
+  it("emits a usage event with context pressure and a priced cost", async () => {
+    const usageEvents: any[] = [];
+    const sink: AgentEventSink = {
+      assistantStart: () => {},
+      assistantToken: () => {},
+      assistantEnd: () => {},
+      assistantCancelled: () => {},
+      toolCall: () => {},
+      toolResult: () => {},
+      error: () => {},
+      info: () => {},
+      usage: (e) => usageEvents.push(e),
+    };
+    const router = {
+      modelFor: () => "minimax-m3",
+      stream: async () => ({
+        content: "hi",
+        reasoning: "",
+        toolCalls: [],
+        finishReason: "stop",
+        usage: { promptTokens: 1000, completionTokens: 200, totalTokens: 1200 },
+      }),
+      json: selectNone,
+    } as any;
+    const registry = {
+      toOpenAITools: () => [],
+      resolveWireName: () => undefined,
+      dispatch: async () => ({}),
+    } as any;
+
+    const session = new AgentSession({
+      router,
+      registry,
+      recipeRegistry,
+      ctx,
+      promptContext: PROMPT_CTX,
+      sessionId: "tu",
+      events: sink,
+    });
+
+    await session.send("hi");
+    expect(usageEvents).toHaveLength(1);
+    const u = usageEvents[0];
+    expect(u.promptTokens).toBe(1000);
+    expect(u.completionTokens).toBe(200);
+    expect(u.totalTokens).toBe(1200);
+    expect(u.model).toBe("minimax-m3");
+    expect(u.tier).toBe("large");
+    // Context pressure is measured against the auto-compact threshold.
+    expect(u.contextThreshold).toBe(60_000);
+    expect(u.contextTokens).toBeGreaterThan(0);
+    // minimax-m3 has a known rate, so cost is a concrete number.
+    expect(typeof u.costUsd).toBe("number");
+    expect(u.costUsd).toBeGreaterThan(0);
+  });
+
   it("reports model errors through the sink", async () => {
     const { events, sink } = recordingSink();
     const router = {
