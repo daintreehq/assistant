@@ -147,7 +147,7 @@ export async function handleSlashCommand(
         render.line(c.gray("\n  /explain <runId> to replay one."));
         return { handled: true };
       }
-      const runId = rest[0];
+      const runId = arg;
       const events = app.db.listRunEvents(runId);
       if (events.length === 0) {
         render.warn(

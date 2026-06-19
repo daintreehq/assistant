@@ -81,6 +81,15 @@ export function formatRunTimeline(
   const lines: string[] = [];
   for (const ev of events) {
     const p = parseEventPayload(ev.payload);
+    // An oversized row is stored as a `{truncated, bytes, preview}` wrapper (see
+    // serializePayload), so its `content`/`reasoning`/`summary` fields are gone.
+    // Surface the truncation + preview rather than rendering an empty entry.
+    if (p.truncated === true) {
+      lines.push(`… [truncated ${ev.type} — ${p.bytes ?? "?"} bytes]`);
+      const preview = String(p.preview ?? "").trim();
+      if (preview) lines.push(indent(preview));
+      continue;
+    }
     switch (ev.type) {
       case "assistant:start":
         lines.push("▸ assistant");
@@ -460,7 +469,7 @@ export async function handleUiCommand(
           text: `${formatRunList(runs)}\n\n/explain <runId> to replay one.`,
         };
       }
-      const runId = rest[0];
+      const runId = arg;
       const events = app.db.listRunEvents(runId);
       if (events.length === 0) {
         return {

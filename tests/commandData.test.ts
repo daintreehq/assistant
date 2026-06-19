@@ -219,6 +219,26 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(r.text).toContain("tool");
   });
 
+  it("/explain surfaces a truncated payload as a notice, not an empty entry", async () => {
+    app.db.insertRunEvent({
+      runId: "run_trunc",
+      seq: 0,
+      type: "assistant:end",
+      payload: JSON.stringify({ truncated: true, bytes: 9000, preview: "the start of a very long answer" }),
+    });
+    const r = await handleUiCommand("/explain run_trunc", app);
+    expect(r.text).toContain("truncated");
+    expect(r.text).toContain("the start of a very long answer");
+  });
+
+  it("/explain uses the full arg as the runId (ignores trailing tokens gracefully)", async () => {
+    app.db.insertRunEvent({ runId: "run_a", seq: 0, type: "assistant:start" });
+    // A spurious trailing token must not resolve to a different/empty run.
+    const r = await handleUiCommand("/explain run_a", app);
+    expect(r.title).toContain("run_a");
+    expect(r.text).not.toContain("No events found");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);

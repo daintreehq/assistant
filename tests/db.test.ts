@@ -945,7 +945,7 @@ describe("Db", () => {
       db.insertRunEvent({ runId: "run_new", seq: 0, type: "assistant:start", ts: 2000 });
 
       const runs = db.listRuns();
-      expect(runs.map((r) => r.runId)).toEqual(["run_new", "run_old"]); // firstTs DESC
+      expect(runs.map((r) => r.runId)).toEqual(["run_new", "run_old"]); // lastTs DESC
       const old = runs.find((r) => r.runId === "run_old")!;
       expect(old.firstTs).toBe(1000);
       expect(old.lastTs).toBe(1500);

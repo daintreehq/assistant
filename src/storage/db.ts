@@ -852,6 +852,8 @@ export class Db {
    * The most recent runs, newest first — an index over `run_events` so a user can
    * discover run ids for `/explain` without already knowing one. Aggregated on the
    * fly (there is no run table); `firstTs`/`lastTs` bracket each run's lifetime.
+   * Ordered by `lastTs` (most-recently-active first) so a long run that ended
+   * recently isn't buried beneath one that merely started later.
    */
   listRuns(limit = 20): RunSummaryRecord[] {
     return this.db
@@ -862,7 +864,7 @@ export class Db {
                 COUNT(*) AS eventCount
            FROM run_events
           GROUP BY runId
-          ORDER BY firstTs DESC
+          ORDER BY lastTs DESC
           LIMIT ?`,
       )
       .all(limit) as unknown as RunSummaryRecord[];
