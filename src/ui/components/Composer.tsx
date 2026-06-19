@@ -1,8 +1,9 @@
 import { useImperativeHandle, useState, type Ref } from "react";
 import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
-import { glyphs, ui } from "../theme.js";
+import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
+import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
 
 /**
@@ -84,7 +85,10 @@ export function Composer({
   // here because this is where accepted submits are observed.
   const [history, setHistory] = useState<string[]>([]);
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
-  const set = glyphs();
+  // Resolve the ASCII fallback once so the prompt glyph and the busy spinner agree
+  // on the same character set (no mixed Unicode/ASCII within one composer line).
+  const ascii = !unicodeOk();
+  const set = glyphs(ascii);
 
   function submit(text: string) {
     const trimmed = text.trim();
@@ -143,7 +147,7 @@ export function Composer({
         {busy ? (
           <Box marginLeft={1}>
             <Text color={ui.color.info}>
-              {set.active} {stage}
+              <ThinkingDot ascii={ascii} /> {stage}
               {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
             </Text>
           </Box>
