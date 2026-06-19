@@ -51,7 +51,8 @@ clients get an `external` tier (~70 read-safe + creation tools, no dangerous mut
 ## Representative action / tool ids (call via `daintree.call`)
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
-`terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`.
+`terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
+`terminal.armByState`.
 
 > `terminal.waitUntilIdle` blocks on **one** terminal — targeted use only; never fan out
 > many concurrent waits. Batch reads by passing several `terminalIds` to
@@ -64,8 +65,14 @@ Worktrees: `worktree.list`, `worktree.getCurrent`, `worktree.createWithRecipe`,
 Git: `git.getProjectPulse`, `git.getStagingStatus`, `git.commit`, `git.push`,
 `git.stageFile`, `git.unstageFile`, `git.snapshotList`, `git.snapshotRevert`.
 
-Forge: `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.openIssue`,
-`forge.openPR`, `forge.assignIssue`.
+Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`.
+Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssue`,
+`forge.editIssue`, `forge.addIssueComment`, `forge.addIssueLabel`,
+`forge.removeIssueLabel`, `forge.assignIssue`, `forge.unassignIssue`.
+Forge (PR writes): `forge.createPR`, `forge.closePR`, `forge.reopenPR`, `forge.mergePR`,
+`forge.convertPRToDraft`, `forge.markPRReadyForReview`, `forge.commentOnPR`, `forge.editPR`.
+Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismissReview`,
+`forge.requestReviewers`. All forge writes are `external`-risk and always confirmed.
 
 Agents/Recipes: `agent.launch`, `agent.terminal`, `recipe.list`, `recipe.run`.
 
@@ -83,7 +90,14 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
   timestamps. All three are read defensively (absent/non-numeric → `undefined`).
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
-- `agent.launch(...)` → `{ terminalId, location }` **only** (no `worktreeId`, no `taskId`).
+- `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
+  `{ terminalId, location }` **only** (no `worktreeId`, no `taskId` in the response).
+  `model?` (optional string) overrides the model the spawned agent runs under; omit
+  it to use the agent's default.
+- `terminal.armByState({ state: "working"|"waiting"|"finished", scope?: "current"|"all"
+  (default "current"), extend?: boolean })` arms every eligible agent terminal in the
+  given state. The exposed action id is `terminal.armByState`, **not** `fleet.armByState`
+  (the latter is an internal store call, not a callable tool).
 - Terminal focus is **not** a `terminal.focus` MCP tool — Daintree uses
   `panel.focus({ panelId })` where the terminal id *is* the `panelId`. The local
   `terminal.focus` wrapper maps onto it.

@@ -70,11 +70,17 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - There is NO terminal.listStatus and NO terminal.waitForAny. Batch by passing
   several terminalIds to terminal.getStatus. terminal.waitUntilIdle blocks on ONE
   terminal — targeted use only, never fan out many concurrent waits.
-- agent.launch({ agentId, name?, worktreeId?, prompt, requestKey }) -> { terminalId,
-  location } ONLY (no worktreeId, no taskId). "name" is a short human-readable label
-  for the spawned agent's terminal/tab so parallel agents stay distinguishable.
+- agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey }) -> {
+  terminalId, location } ONLY (no worktreeId, no taskId). "name" is a short
+  human-readable label for the spawned agent's terminal/tab so parallel agents stay
+  distinguishable. "model" (optional string) overrides the model the spawned agent
+  runs under — omit it to use the agent's default.
 - To focus a terminal, Daintree uses panel.focus({ panelId }) — the terminal id IS
   the panelId. There is NO terminal.focus MCP tool (the local wrapper maps to it).
+- terminal.armByState({ state: "working"|"waiting"|"finished", scope?: "current"|"all"
+  (default "current"), extend?: boolean }) arms every eligible agent terminal in a
+  given state. The exposed action id is terminal.armByState — NOT fleet.armByState
+  (that name is an internal store call, not a callable tool).
 - Read tools (workbench tier, no confirmation): actions.getContext / list / search /
   getSchema, worktree.list, worktree.getCurrent, git.getProjectPulse, terminal.list.
   agent.launch and terminal.waitUntilIdle are action tier (mutations confirm).
@@ -152,6 +158,7 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "panel.focus",
   "recipe.list",
   "recipe.run",
+  "terminal.armByState",
   "terminal.getOutput",
   "terminal.getStatus",
   "terminal.list",
