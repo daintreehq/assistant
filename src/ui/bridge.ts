@@ -14,6 +14,7 @@ export type UiBridgeEvent =
   | { type: "assistant:start" }
   | { type: "assistant:token"; token: string }
   | { type: "assistant:end"; content: string }
+  | { type: "assistant:cancelled"; content: string }
   | { type: "tool:call"; id: string; name: string; args: unknown; startedAt: number }
   | { type: "tool:result"; id: string; name: string; result: ToolResult; endedAt: number }
   | { type: "log"; level: "info" | "warn" | "error"; message: string }
@@ -47,6 +48,8 @@ export class UiBridge {
       assistantStart: () => this.emit({ type: "assistant:start" }),
       assistantToken: (token) => this.emit({ type: "assistant:token", token }),
       assistantEnd: (content) => this.emit({ type: "assistant:end", content }),
+      assistantCancelled: (content) =>
+        this.emit({ type: "assistant:cancelled", content }),
       toolCall: ({ id, name, args, startedAt }) =>
         this.emit({ type: "tool:call", id, name, args, startedAt }),
       toolResult: ({ id, name, result, endedAt }) =>

@@ -71,6 +71,8 @@ export interface ControlRoomProps {
   logFile?: string;
   composerFocus?: boolean;
   onSubmit?: (value: string) => boolean | void | Promise<void>;
+  /** Abort the in-flight turn (Escape on an empty composer while busy). */
+  onCancel?: () => void;
   onResolve?: (approved: boolean) => void;
 }
 
@@ -93,6 +95,7 @@ export function ControlRoom({
   logFile,
   composerFocus = false,
   onSubmit = () => {},
+  onCancel,
   onResolve = () => {},
 }: ControlRoomProps) {
   // One cell of breathing room around the whole surface, the way other CLIs
@@ -276,6 +279,7 @@ export function ControlRoom({
           width={columns}
           focus={composerFocus}
           onSubmit={onSubmit}
+          onCancel={onCancel}
         />
       </Box>
     </Box>

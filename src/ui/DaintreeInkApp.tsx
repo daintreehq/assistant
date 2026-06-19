@@ -41,6 +41,10 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       return;
     }
     if (key.escape) {
+      // On home the composer owns Escape (clear buffer, or cancel the turn when
+      // empty+busy) — handled by MultilineInput, which is focused there. Ink has no
+      // stop-propagation, so this handler must act ONLY off-home to avoid double-
+      // firing on the same keypress.
       if (view !== "home") returnHome();
       return;
     }
@@ -75,10 +79,9 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}
       logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
-      composerFocus={
-        view === "home" && !controller.busy && !controller.pendingConfirm
-      }
+      composerFocus={view === "home" && !controller.pendingConfirm}
       onSubmit={controller.sendUserMessage}
+      onCancel={controller.cancelTurn}
       onResolve={controller.resolveConfirm}
     />
   );

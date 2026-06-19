@@ -43,7 +43,7 @@ export interface ActivityItem {
   endedAt?: number;
 }
 
-export type TurnState = "active" | "complete" | "failed";
+export type TurnState = "active" | "complete" | "failed" | "cancelled";
 
 export interface SystemNote {
   id: string;

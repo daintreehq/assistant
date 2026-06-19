@@ -9,7 +9,7 @@
  * Reasoning models can emit <think>…</think> in delta.content; ThinkFilter keeps
  * that out of user-facing output while preserving the final answer.
  */
-import OpenAI from "openai";
+import OpenAI, { APIUserAbortError } from "openai";
 import type { z } from "zod";
 import type { AppConfig } from "../config.js";
 
@@ -45,6 +45,13 @@ export interface ChatOptions {
   maxTokens?: number;
   /** Cache a static system-prompt prefix on the Fireworks side. */
   promptCacheKey?: string;
+  /**
+   * Abort the in-flight request. Used by the UI's Escape-to-cancel path: when the
+   * user cancels a turn, the signal fires and the streaming call rejects. Only the
+   * streaming path honours it — the one-shot chat()/json() calls are short and
+   * uncancelled.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ChatResult {
@@ -61,6 +68,33 @@ export class FireworksUnavailableError extends Error {
     super(message);
     this.name = "FireworksUnavailableError";
   }
+}
+
+/**
+ * A streaming turn the caller aborted (the UI's Escape-to-cancel). Distinct from a
+ * model failure: the agent loop treats it as a clean stop (an info note, not a red
+ * error) rather than surfacing it as a broken turn. Raised by chatStream() when the
+ * abort signal fires, so the SDK's transport-level AbortError never leaks upward.
+ */
+export class CancelledError extends Error {
+  readonly code = "CANCELLED";
+  constructor(message = "Turn cancelled") {
+    super(message);
+    this.name = "CancelledError";
+  }
+}
+
+/**
+ * Whether an error thrown out of the OpenAI SDK is an abort. The SDK wraps a fired
+ * AbortSignal as APIUserAbortError, but a raw `for await` interruption can surface
+ * as a DOMException/Error named "AbortError" — accept both so cancellation is never
+ * misclassified as a model error.
+ */
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof APIUserAbortError ||
+    (err instanceof Error && err.name === "AbortError")
+  );
 }
 
 /** Incrementally separates <think>…</think> reasoning from visible content. */
@@ -181,61 +215,74 @@ export class FireworksClient {
     onToken?: (visible: string) => void,
   ): Promise<ChatResult> {
     this.guard();
-    const stream = await this.client.chat.completions.create({
-      model: opts.model,
-      messages: toWireMessages(opts.messages) as never,
-      tools: opts.tools as never,
-      tool_choice: opts.toolChoice as never,
-      temperature: opts.temperature ?? 0.3,
-      max_tokens: opts.maxTokens,
-      stream: true,
-      ...(opts.promptCacheKey
-        ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
-        : {}),
-    });
+    // The abort signal rides as the second RequestOptions arg; the SDK forwards it
+    // to fetch so the connection is actually torn down, not just abandoned.
+    try {
+      const stream = await this.client.chat.completions.create(
+        {
+          model: opts.model,
+          messages: toWireMessages(opts.messages) as never,
+          tools: opts.tools as never,
+          tool_choice: opts.toolChoice as never,
+          temperature: opts.temperature ?? 0.3,
+          max_tokens: opts.maxTokens,
+          stream: true,
+          ...(opts.promptCacheKey
+            ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
+            : {}),
+        },
+        opts.signal ? { signal: opts.signal } : undefined,
+      );
 
-    const filter = new ThinkFilter();
-    const toolAcc = new Map<number, { id: string; name: string; args: string }>();
-    let finishReason = "stop";
+      const filter = new ThinkFilter();
+      const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+      let finishReason = "stop";
 
-    for await (const chunk of stream) {
-      const choice = chunk.choices[0];
-      if (!choice) continue;
-      const delta = choice.delta;
-      if (delta?.content) {
-        const visible = filter.push(delta.content);
-        if (visible && onToken) onToken(visible);
-      }
-      if (delta?.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          const cur = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) cur.name = tc.function.name;
-          if (tc.function?.arguments) cur.args += tc.function.arguments;
-          toolAcc.set(idx, cur);
+      for await (const chunk of stream) {
+        const choice = chunk.choices[0];
+        if (!choice) continue;
+        const delta = choice.delta;
+        if (delta?.content) {
+          const visible = filter.push(delta.content);
+          if (visible && onToken) onToken(visible);
         }
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            const cur = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.name = tc.function.name;
+            if (tc.function?.arguments) cur.args += tc.function.arguments;
+            toolAcc.set(idx, cur);
+          }
+        }
+        if (choice.finish_reason) finishReason = choice.finish_reason;
       }
-      if (choice.finish_reason) finishReason = choice.finish_reason;
+      const tail = filter.end();
+      if (tail && onToken) onToken(tail);
+
+      const toolCalls: ToolCallRequest[] = [...toolAcc.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, v]) => ({
+          id: v.id || `call_${Math.abs(hashString(v.name + v.args))}`,
+          type: "function" as const,
+          function: { name: v.name, arguments: v.args || "{}" },
+        }))
+        .filter((t) => t.function.name);
+
+      return {
+        content: filter.visible.trim(),
+        reasoning: filter.reasoning.trim(),
+        toolCalls,
+        finishReason,
+      };
+    } catch (err) {
+      // A user-initiated abort is a clean cancellation, not a model failure —
+      // normalise it to CancelledError so callers don't have to know about the
+      // SDK's transport-level abort representation.
+      if (isAbortError(err)) throw new CancelledError();
+      throw err;
     }
-    const tail = filter.end();
-    if (tail && onToken) onToken(tail);
-
-    const toolCalls: ToolCallRequest[] = [...toolAcc.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([, v]) => ({
-        id: v.id || `call_${Math.abs(hashString(v.name + v.args))}`,
-        type: "function" as const,
-        function: { name: v.name, arguments: v.args || "{}" },
-      }))
-      .filter((t) => t.function.name);
-
-    return {
-      content: filter.visible.trim(),
-      reasoning: filter.reasoning.trim(),
-      toolCalls,
-      finishReason,
-    };
   }
 
   /** Strict JSON-object completion validated against a Zod schema. */

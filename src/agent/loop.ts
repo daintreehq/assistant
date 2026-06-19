@@ -5,7 +5,7 @@
  * be inspected/compacted later.
  */
 import type { ChatMessage } from "../models/fireworks.js";
-import { FireworksUnavailableError } from "../models/fireworks.js";
+import { CancelledError, FireworksUnavailableError } from "../models/fireworks.js";
 import type { ModelRouter } from "../models/router.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
@@ -24,6 +24,12 @@ import type { RecipeSelection } from "../recipes/types.js";
 import { type AgentEventSink, noopAgentEvents } from "./events.js";
 
 const MAX_TOOL_ITERATIONS = 12;
+/**
+ * Sentinel returned by send() when a turn is cancelled by the user (Escape-to-
+ * cancel). Like the other non-throwing failure replies, the wake reactors must not
+ * treat a cancelled turn as a delivered summary — see WAKE_FAILURE_PREFIXES.
+ */
+export const CANCELLED_REPLY = "Turn cancelled";
 /** How many control messages always sit at the front of the conversation. */
 const CONTROL_MESSAGE_COUNT = 3;
 /** Re-run recipe selection at least this often even without trigger terms. */
@@ -203,8 +209,17 @@ export class AgentSession {
    * background trigger can inspect and report but can NEVER run a mutating tool
    * unattended — the model literally isn't offered one. Recipe re-selection is also
    * skipped so an automatic nudge doesn't churn the user's loaded recipes.
+   *
+   * `opts.signal` lets the UI cancel an in-flight turn (Escape-to-cancel). When it
+   * fires mid-stream the model call rejects with CancelledError; we catch it, mark
+   * the turn cancelled (an info-level stop, not an error), and return the
+   * CANCELLED_REPLY sentinel. The signal is checked between tool iterations too, so
+   * an abort that lands during tool dispatch stops the loop before the next stream.
    */
-  async send(userInput: string, opts: { readOnly?: boolean } = {}): Promise<string> {
+  async send(
+    userInput: string,
+    opts: { readOnly?: boolean; signal?: AbortSignal } = {},
+  ): Promise<string> {
     await this.maybeAutoCompact();
     if (!opts.readOnly) await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });
@@ -233,6 +248,12 @@ export class AgentSession {
     }
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+      // An abort that arrived during the previous iteration's tool dispatch (which
+      // isn't itself cancellable) stops the loop here, before another model call.
+      if (opts.signal?.aborted) {
+        this.events.assistantCancelled("");
+        return CANCELLED_REPLY;
+      }
       this.events.assistantStart();
       let result;
       try {
@@ -243,10 +264,16 @@ export class AgentSession {
             tools,
             toolChoice: "auto",
             promptCacheKey: MAIN_PROMPT_CACHE_KEY,
+            signal: opts.signal,
           },
           (tok) => this.events.assistantToken(tok),
         );
       } catch (err) {
+        if (err instanceof CancelledError) {
+          // Clean user abort: mark the (partially streamed) turn cancelled and stop.
+          this.events.assistantCancelled("");
+          return CANCELLED_REPLY;
+        }
         if (err instanceof FireworksUnavailableError) {
           const msg = `Model unavailable: ${err.message}`;
           this.events.error(msg);

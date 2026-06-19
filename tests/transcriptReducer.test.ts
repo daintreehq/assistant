@@ -76,6 +76,35 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(t.notes.some((n) => n.level === "error")).toBe(true);
   });
 
+  it("marks the active turn cancelled, keeps partial text, and stops the caret (#45)", () => {
+    const out = run([
+      { type: "user:add", text: "do the thing" },
+      { type: "assistant:start" },
+      { type: "assistant:token", token: "Wor" },
+      { type: "assistant:token", token: "king" },
+      { type: "assistant:cancelled", content: "" },
+    ]);
+    const t = turns(out)[0];
+    expect(t.state).toBe("cancelled");
+    expect(t.streaming).toBe(false);
+    // The partial stream is preserved, not discarded.
+    expect(t.assistantText).toBe("Working");
+    expect(t.notes.some((n) => n.text === "Turn cancelled")).toBe(true);
+  });
+
+  it("a cancelled turn is not active, so a later assistant:end can't resurrect it (#45)", () => {
+    const out = run([
+      { type: "user:add", text: "go" },
+      { type: "assistant:start" },
+      { type: "assistant:cancelled", content: "" },
+      // A stray end arriving after cancellation must not reopen the turn; with no
+      // content it is dropped entirely (no new cell), leaving the cancel intact.
+      { type: "assistant:end", content: "" },
+    ]);
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].state).toBe("cancelled");
+  });
+
   it("routes attention events to standalone note cells", () => {
     const out = run([
       { type: "attention", events: [{ title: "Tests failed", summary: "term_8" }] },

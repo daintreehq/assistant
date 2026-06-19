@@ -89,6 +89,10 @@ export class HostBridge {
       if (!this.activeTurnId) return;
       this.closeTurn(content.trim().length > 0 ? "answered" : "unknown");
     },
+    assistantCancelled: () => {
+      // User aborted the turn — close it as a clean cancellation, not a failure.
+      if (this.activeTurnId) this.closeTurn("cancelled");
+    },
     toolCall: (event) => {
       if (this.interrupted) return;
       this.toolStartedAt.set(event.id, event.startedAt);

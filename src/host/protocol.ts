@@ -41,6 +41,7 @@ export type TurnOutcomeClass =
   | "tool-error"
   | "reasoning-loop"
   | "hibernate-resume-stale"
+  | "cancelled"
   | "unknown";
 
 export type TurnRole = "user" | "assistant";

@@ -20,6 +20,7 @@ function recordingSink() {
     assistantStart: () => events.push("start"),
     assistantToken: (t) => events.push(`tok:${t}`),
     assistantEnd: (c) => events.push(`end:${c}`),
+    assistantCancelled: (c) => events.push(`cancelled:${c}`),
     toolCall: ({ id, name }) => events.push(`call:${name}:${id}`),
     toolResult: ({ id, name, result }) =>
       events.push(`result:${name}:${result.ok}:${id}`),

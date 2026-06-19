@@ -31,6 +31,12 @@ export interface AgentEventSink {
   assistantToken(token: string): void;
   /** The assistant turn finished with this final (think-stripped) content. */
   assistantEnd(content: string): void;
+  /**
+   * The assistant turn was cancelled by the user mid-flight. `content` is whatever
+   * was streamed before the abort (often empty); the UI keeps the partial text but
+   * stops the caret and marks the turn cancelled rather than failed.
+   */
+  assistantCancelled(content: string): void;
   /** The model requested a tool call. Carries the call id so results match by id. */
   toolCall(event: ToolCallEvent): void;
   /** A tool call completed. Resolve the activity by {@link ToolResultEvent.id}. */
@@ -45,6 +51,7 @@ export const noopAgentEvents: AgentEventSink = {
   assistantStart() {},
   assistantToken() {},
   assistantEnd() {},
+  assistantCancelled() {},
   toolCall() {},
   toolResult() {},
   error() {},
