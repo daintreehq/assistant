@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
-import { resolveInsideProject, isSensitivePath } from "../safety/policy.js";
+import { resolveInsideProject, isSensitivePath, isSensitiveSegment } from "../safety/policy.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -99,6 +99,16 @@ async function walkFiles(
     }
     for (const dirent of dirents) {
       if (dirent.isDirectory() && SKIP_DIRS.has(dirent.name)) continue;
+      // Never descend into credential stores (.ssh, .aws, .env dirs, …). Prune
+      // them at walk time so their paths are never enumerated into memory — the
+      // post-hoc isSensitivePath filter in fs.search is a second layer, not the
+      // first. Guard isSymbolicLink too: on POSIX a symlink named .ssh reports
+      // isDirectory() === false, so the name check alone would miss it.
+      if (
+        (dirent.isDirectory() || dirent.isSymbolicLink()) &&
+        isSensitiveSegment(dirent.name.toLowerCase())
+      )
+        continue;
       const childAbs = path.join(dirAbs, dirent.name);
       const childRel = dirRel ? path.join(dirRel, dirent.name) : dirent.name;
       if (dirent.isDirectory()) {
@@ -141,6 +151,16 @@ export const fsTools: ToolDef[] = [
       const rel = args.path ?? ".";
       const depth = args.depth ?? 1;
       try {
+        // Refuse to list a credential store directly, mirroring fs.read. An
+        // empty success could be misread as "directory is empty"; a refusal is
+        // unambiguous.
+        if (isSensitivePath(rel)) {
+          return fail(
+            "FS_SENSITIVE",
+            `Refusing to list ${rel}: it looks like a sensitive credential directory. Ask the user for only the specific files you need.`,
+            { recoverable: false },
+          );
+        }
         const abs = resolveInsideProject(ctx.projectPath, rel);
         const entries: Array<{ name: string; type: "file" | "dir" }> = [];
         async function recurse(
@@ -157,6 +177,14 @@ export const fsTools: ToolDef[] = [
           for (const dirent of dirents) {
             const isDir = dirent.isDirectory();
             if (isDir && SKIP_DIRS.has(dirent.name)) continue;
+            // Omit credential dirs from the listing entirely (not just skip
+            // descent): surfacing `.ssh` as a dir entry still leaks that the
+            // store exists into the model's context.
+            if (
+              (isDir || dirent.isSymbolicLink()) &&
+              isSensitiveSegment(dirent.name.toLowerCase())
+            )
+              continue;
             if (!isDir && !dirent.isFile()) continue;
             const childRel = dirRel
               ? `${dirRel}/${dirent.name}`
