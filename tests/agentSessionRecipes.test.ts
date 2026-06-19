@@ -105,6 +105,8 @@ const REGISTERED_TOOLS = [
   // can checkpoint/resume without re-declaring them
   "recipe.step.advance",
   "recipe.run.get",
+  // recipe.load is core too — the model can pull a recipe on demand in any context
+  "recipe.load",
   // extra tools a recipe may require
   "agentTask.spawnForEdits",
   "watcher.terminal.create",
@@ -149,6 +151,54 @@ describe("AgentSession control messages", () => {
     expect(session.getActiveRecipeIds()).toEqual([
       "daintree.edits.spawn-visible-agent",
     ]);
+  });
+
+  it("loadAdditionalRecipes loads a recipe on demand and rewrites only message index 2", () => {
+    const { session } = makeSession();
+    const before = session.getMessages();
+    const base = before[0].content;
+    const runtime = before[1].content;
+    const active = session.loadAdditionalRecipes([
+      "daintree.edits.spawn-visible-agent",
+    ]);
+    const after = session.getMessages();
+    expect(after[0].content).toBe(base);
+    expect(after[1].content).toBe(runtime);
+    expect(after[2].content).toContain(
+      "Recipe id: daintree.edits.spawn-visible-agent",
+    );
+    expect(active).toEqual(["daintree.edits.spawn-visible-agent"]);
+    expect(session.getActiveRecipeIds()).toEqual([
+      "daintree.edits.spawn-visible-agent",
+    ]);
+  });
+
+  it("loadAdditionalRecipes prioritizes the explicit id over an auto-selected one at the cap", () => {
+    const { session } = makeSession();
+    // Fill the loaded set to the cap of three. (The active set is rendered in a
+    // stable id order, so the prior set is [edits, orchestration, recipe.run].)
+    session.setRecipes([
+      "daintree.orchestration.basic",
+      "daintree.recipe.run-or-create",
+      "daintree.edits.spawn-visible-agent",
+    ]);
+    expect(session.getActiveRecipeIds()).toHaveLength(3);
+    // A fourth explicit load goes FIRST in the merge, so it survives the cap and
+    // evicts the lowest-priority prior id rather than being dropped itself.
+    const active = session.loadAdditionalRecipes([
+      "daintree.workflow.start-work-on-issue",
+    ]);
+    expect(active).toHaveLength(3);
+    expect(active).toContain("daintree.workflow.start-work-on-issue");
+    // The id that fell off the end of the pre-cap merge is the one evicted.
+    expect(active).not.toContain("daintree.recipe.run-or-create");
+  });
+
+  it("loadAdditionalRecipes drops unknown ids and keeps the current set", () => {
+    const { session } = makeSession();
+    session.setRecipes(["daintree.orchestration.basic"]);
+    const active = session.loadAdditionalRecipes(["nope.not.real"]);
+    expect(active).toEqual(["daintree.orchestration.basic"]);
   });
 
   it("drops unknown recipe ids and falls back to the empty bundle", () => {
@@ -317,6 +367,8 @@ describe("AgentSession control messages", () => {
     // active recipe (the model needs them to checkpoint a multi-step runbook).
     expect(names.has("recipe.step.advance")).toBe(true);
     expect(names.has("recipe.run.get")).toBe(true);
+    // recipe.load is core too, so the model can pull another recipe mid-task.
+    expect(names.has("recipe.load")).toBe(true);
     // The active recipe's required tools are present.
     expect(names.has("agentTask.spawnForEdits")).toBe(true);
     expect(names.has("watcher.terminal.create")).toBe(true);
@@ -335,6 +387,7 @@ describe("AgentSession control messages", () => {
       "tool.search",
       "recipe.step.advance",
       "recipe.run.get",
+      "recipe.load",
       "agentTask.spawnForEdits",
       "watcher.terminal.create",
     ]);

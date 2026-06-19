@@ -9,6 +9,7 @@ import type { DaintreeMcpClient } from "../mcp/client.js";
 import type { Db } from "../storage/db.js";
 import type { Queue } from "../queue.js";
 import type { ModelRouter } from "../models/router.js";
+import type { RecipeSource } from "../recipes/source.js";
 import type { RiskClass, ToolResult } from "../schemas.js";
 
 export type ToolActor = "main" | "watcher" | "timer" | "workflow" | "system";
@@ -95,6 +96,23 @@ export interface ToolContext {
    * test/scheduler contexts; `artifact.read` fails gracefully when it is missing.
    */
   artifactStore?: Map<string, string>;
+  /**
+   * Read-only view of the recipe library, for the model-facing `recipe.load`
+   * tool to validate an id and read a recipe's title/summary back. Typed as the
+   * narrow `RecipeSource` seam (not the concrete registry) so the backing store
+   * can later become a hosted service without touching the tool. Absent in
+   * stripped-down test/scheduler contexts; the tool fails gracefully when missing.
+   */
+  recipeSource?: RecipeSource;
+  /**
+   * Merge additional recipe ids into the loaded set mid-turn (the `recipe.load`
+   * tool). Explicit ids take priority over auto-selected ones and the loaded set
+   * stays capped; returns the resulting active ids so the tool can report what is
+   * now loaded. Rewrites the loaded-recipes control message so later iterations in
+   * the same turn see the recipe. Wired only for the interactive `main` actor;
+   * absent for watcher/timer contexts, where the tool fails gracefully.
+   */
+  loadRecipes?: (ids: string[]) => string[];
 }
 
 export interface ToolDef<A = any> {

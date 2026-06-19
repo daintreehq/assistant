@@ -122,6 +122,9 @@ const CORE_TOOL_NAMES = [
   // no-op when no recipe is active (the model has nothing to advance).
   "recipe.step.advance",
   "recipe.run.get",
+  // Always available so the model can pull a specific recipe into context on
+  // demand even when an active recipe's allowlist would otherwise filter it out.
+  "recipe.load",
   "memory.recall",
   "memory.list",
   // Always available so the model can page through any tool result that overflowed
@@ -856,6 +859,23 @@ export class AgentSession {
     );
     // Manual selection should persist; defer the next automatic check.
     this.turnSinceRecipeRefresh = 1;
+  }
+
+  /**
+   * Merge additional recipe ids into the loaded set on demand — the model-facing
+   * `recipe.load` tool path. The new ids go *first* so they survive the cap-of-3
+   * slice even when three recipes are already loaded (an explicit load evicts the
+   * lowest-priority auto-selected recipe rather than being dropped). Rewriting the
+   * loaded-recipes control message here means later iterations in the same turn see
+   * the recipe. Defers the next automatic re-selection (turnSinceRecipeRefresh = 1)
+   * so the small-model selector doesn't immediately overwrite the model's explicit
+   * choice on the following turn. Returns the resulting active ids.
+   */
+  loadAdditionalRecipes(ids: string[]): string[] {
+    const merged = this.resolveKnownIds([...ids, ...this.activeRecipeIds]);
+    this.applyRecipeBundle(this.deps.recipeRegistry.getMany(merged));
+    this.turnSinceRecipeRefresh = 1;
+    return [...this.activeRecipeIds];
   }
 
   /**
