@@ -1260,10 +1260,13 @@ export async function runTerminalWatcherCheck(
                 // claim: that routes through gateCompletion, whose git-cleanliness
                 // check is a hidden input NOT in the key. Latching it would dedupe a
                 // demoted completed_unverified into no_change forever, so the gate
-                // could never re-run once the worktree is later cleaned.
+                // could never re-run once the worktree is later cleaned. Skip
+                // "rate_limited" too: latching it would dedupe the next identical-
+                // input tick to no_change, dropping the cooldown before it recovers.
                 if (
                   verdict.classification !== "unknown" &&
-                  verdict.classification !== "completed_success"
+                  verdict.classification !== "completed_success" &&
+                  verdict.classification !== "rate_limited"
                 ) {
                   perTerminal[terminalId] = {
                     ...perTerminal[terminalId],
@@ -1461,10 +1464,13 @@ export async function runTerminalWatcherCheck(
           // claim: that routes through gateCompletion, whose git-cleanliness check
           // is a hidden input NOT in the key. Latching it would dedupe a demoted
           // completed_unverified into no_change forever, so the gate could never
-          // re-run once the worktree is later cleaned.
+          // re-run once the worktree is later cleaned. Skip "rate_limited" too:
+          // latching it would dedupe the next identical-input tick to no_change,
+          // dropping the cooldown back-off before it recovers.
           if (
             verdict.classification !== "unknown" &&
-            verdict.classification !== "completed_success"
+            verdict.classification !== "completed_success" &&
+            verdict.classification !== "rate_limited"
           ) {
             perTerminal[terminalId] = {
               ...perTerminal[terminalId],

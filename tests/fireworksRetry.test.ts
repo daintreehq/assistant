@@ -117,6 +117,37 @@ describe("FireworksClient streaming retry", () => {
     expect(create).toHaveBeenCalledTimes(2);
   });
 
+  it("normalises a cancel that lands mid-backoff into CancelledError", async () => {
+    const ctrl = new AbortController();
+    let calls = 0;
+    const create = vi.fn(async () => {
+      calls++;
+      // Fire the cancel as soon as the first attempt fails, so the abort lands
+      // while the retry backoff is sleeping.
+      ctrl.abort();
+      throw new APIError(503, undefined, "unavailable", undefined);
+    });
+    await expect(
+      clientWith(create).chatStream({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        signal: ctrl.signal,
+      }),
+    ).rejects.toBeInstanceOf(CancelledError);
+    // The cancel ends the loop — no second attempt.
+    expect(calls).toBe(1);
+  });
+
+  it("gives up streaming after exhausting the retry budget", async () => {
+    const create = vi.fn(async () => {
+      throw new APIError(503, undefined, "always down", undefined);
+    });
+    await expect(
+      clientWith(create).chatStream({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toThrow("always down");
+    expect(create).toHaveBeenCalledTimes(4); // 1 + 3 retries
+  });
+
   it("does NOT retry once a token has already been emitted", async () => {
     let calls = 0;
     const create = vi.fn(async () => {

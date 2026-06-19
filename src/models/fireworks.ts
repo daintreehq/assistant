@@ -379,17 +379,26 @@ export class FireworksClient {
         // normalise it to CancelledError so callers don't have to know about the
         // SDK's transport-level abort representation.
         if (isAbortError(err)) throw new CancelledError();
+        // A cancel that landed concurrently with a transient error is still a
+        // clean stop, not a model failure.
+        if (opts.signal?.aborted) throw new CancelledError();
         // Only the pre-token window is retriable; after that a retry would
         // duplicate already-emitted output. Otherwise honour the bounded budget.
         if (
           emitted ||
           attempt >= MODEL_RETRY_POLICY.maxRetries ||
-          opts.signal?.aborted ||
           !isRetriableModelError(err)
         ) {
           throw err;
         }
-        await abortableSleep(modelRetryDelayMs(attempt, err), opts.signal);
+        try {
+          await abortableSleep(modelRetryDelayMs(attempt, err), opts.signal);
+        } catch {
+          // Only abortableSleep's own AbortError reaches here — the turn was
+          // cancelled mid-backoff. Normalise it to a clean cancellation so the
+          // caller sees CancelledError, not a raw transport AbortError.
+          throw new CancelledError();
+        }
       }
     }
   }

@@ -240,7 +240,7 @@ export function isRetriableMcpError(err: unknown): boolean {
  *  Intentionally broad (Anthropic/OpenAI/generic CLI wording) — this is interim
  *  local detection from stdout, pending an authoritative Daintree-side signal. */
 const RATE_LIMIT_SIGNATURE =
-  /\b(?:429|529)\b|too many requests|rate[ _-]?limit(?:ed|ing|s)?|quota (?:exceeded|exhausted)|insufficient[_ ]quota|retry[ _-]?after|resource (?:exhausted|temporarily unavailable)|server is temporarily limiting|overloaded|you(?:'ve| have) hit your limit|exceed (?:your|the) .{0,40}rate limit/i;
+  /\b(?:429|529)\b|too many requests|rate[ _-]?limit(?:ed|ing|s)?|quota (?:exceeded|exhausted)|insufficient[_ ]quota|retry[ -]?after\b|resource (?:exhausted|temporarily unavailable)|server is temporarily limiting|\boverloaded\b|you(?:'ve| have) hit your limit|exceed (?:your|the) .{0,40}rate limit/i;
 
 /** Whether recent terminal output shows a rate-limit / API-throttle signature.
  *  Pass a bounded RECENT slice (see RATE_LIMIT_TAIL_WINDOW) — scanning deep

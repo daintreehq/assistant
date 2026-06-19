@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { APIError, APIUserAbortError } from "openai";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
+  abortableSleep,
   detectRateLimitSignature,
   fullJitterDelay,
   isRateLimitModelError,
@@ -104,5 +105,33 @@ describe("detectRateLimitSignature", () => {
     expect(detectRateLimitSignature(undefined)).toBe(false);
     expect(detectRateLimitSignature("Running tests... 42 passed")).toBe(false);
     expect(detectRateLimitSignature("Compiling module rate_calculator.ts")).toBe(false);
+  });
+
+  it("does NOT false-positive on identifiers that merely contain the words", () => {
+    // Tightened fingerprints: word-bounded "overloaded" and a "retry-after" that
+    // must be header-shaped, so code identifiers / config keys don't trip it.
+    expect(detectRateLimitSignature("calling overloaded_function() in queue")).toBe(false);
+    expect(detectRateLimitSignature("config: { retry_after_ms: 0 }")).toBe(false);
+  });
+});
+
+describe("abortableSleep", () => {
+  it("rejects immediately with an AbortError when the signal is already fired", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(abortableSleep(1000, ctrl.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+  });
+
+  it("rejects with an AbortError when the signal fires during the wait", async () => {
+    const ctrl = new AbortController();
+    const p = abortableSleep(1000, ctrl.signal);
+    ctrl.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("resolves normally when never aborted", async () => {
+    await expect(abortableSleep(1)).resolves.toBeUndefined();
   });
 });

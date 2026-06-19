@@ -18,7 +18,7 @@ function throwingRouter(): ModelRouter {
   } as unknown as ModelRouter;
 }
 
-function fakeMcp(recentOutput: string) {
+function fakeMcp(recentOutput: string, textOnly = false) {
   return {
     isConnected: () => true,
     status: () => ({ connected: true, transport: "injected" as const }),
@@ -33,7 +33,11 @@ function fakeMcp(recentOutput: string) {
           agentState: "working",
           recentOutput,
         }));
-        return { text: "", content: [], structuredContent: { terminals }, isError: false };
+        // Daintree's real shape delivers the array in the text body, not
+        // structuredContent (#108) — exercise that path too.
+        return textOnly
+          ? { text: JSON.stringify({ terminals }), content: [], structuredContent: undefined, isError: false }
+          : { text: "", content: [], structuredContent: { terminals }, isError: false };
       }
       return { text: "", content: [], isError: false };
     },
@@ -92,6 +96,30 @@ describe("runTerminalWatcherCheck rate-limit classification (#123)", () => {
     expect(rec.lastClassification).toBe("rate_limited");
     expect(rec.status).toBe("active"); // rate_limited does NOT stop the watcher
 
+    db.close();
+  });
+
+  it("detects rate_limited via Daintree's text-body JSON shape too", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp("Error: 429 Too Many Requests — quota exceeded", true),
+    );
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "supervisor",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-a"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+      isSupervisor: true,
+    });
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("rate_limited");
     db.close();
   });
 
