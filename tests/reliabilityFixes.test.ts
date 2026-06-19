@@ -147,7 +147,11 @@ describe("agentTask.spawnForEdits robustness (#8)", () => {
     db.close();
   });
 
-  it("warns instead of silently skipping when a watcher is requested but no terminalId is returned", async () => {
+  it("classifies a launch with no terminalId as ambiguous, not a success (#79)", async () => {
+    // #79 supersedes the prior warn-and-succeed behavior: a launch that returns no
+    // terminalId is ambiguous (we don't know whether an agent started), so the tool
+    // must return a recoverable failure rather than ok(). The same empty result is
+    // returned for the terminal.list reconciliation read, so no match is found.
     const db = new Db(":memory:");
     const mcp = {
       isConnected: () => true,
@@ -157,9 +161,9 @@ describe("agentTask.spawnForEdits robustness (#8)", () => {
       { title: "fix", taskPrompt: "do it", watcher: { create: true } },
       ctxFor(db, mcp),
     );
-    expect(res.ok).toBe(true);
-    expect((res.result as { watcherWarning?: string }).watcherWarning).toBeTruthy();
-    expect((res.result as { watcherId?: string }).watcherId).toBeUndefined();
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("AGENT_LAUNCH_AMBIGUOUS");
+    expect(res.error?.recoverable).toBe(true);
     db.close();
   });
 });

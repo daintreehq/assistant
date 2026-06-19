@@ -15,6 +15,8 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: typeof import("node:sqlite").DatabaseSync;
 };
 import type {
+  AgentLaunchRecord,
+  AgentLaunchStage,
   AuditRecord,
   AutomationGrantRecord,
   ConversationMessageRecord,
@@ -194,6 +196,31 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status, updatedAt);
 
+-- Durable saga record for one agentTask.spawnForEdits launch. Spawning is a
+-- multi-step external op (agent.launch → bind terminal → attach watcher) with no
+-- transaction; this row tracks the stage reached so a retry reconciles a partial
+-- failure instead of launching a second agent. idempotencyKey is a deterministic
+-- hash of the task identity; the partial-style index keys the "is there an active
+-- op for this task?" lookup. Records are session-scoped (cancelStaleAgentLaunches
+-- on DB open marks any non-terminal row failed), mirroring watchers.
+CREATE TABLE IF NOT EXISTS agent_launches (
+  id TEXT PRIMARY KEY,
+  idempotencyKey TEXT NOT NULL,
+  agentId TEXT NOT NULL,
+  worktreeId TEXT,
+  mode TEXT NOT NULL,
+  title TEXT NOT NULL,
+  name TEXT NOT NULL,
+  terminalId TEXT,
+  watcherId TEXT,
+  stage TEXT NOT NULL DEFAULT 'launch_requested',
+  errorCode TEXT,
+  errorMessage TEXT,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_launches_key ON agent_launches (idempotencyKey, stage, updatedAt);
+
 CREATE TABLE IF NOT EXISTS recipe_run_state (
   id TEXT PRIMARY KEY,
   sessionId TEXT NOT NULL,
@@ -292,6 +319,12 @@ const WORKFLOW_UPDATE_COLS: ReadonlySet<string> = new Set([
 const RECIPE_RUN_UPDATE_COLS: ReadonlySet<string> = new Set([
   "currentStep", "stepsJson", "status", "updatedAt", "completedAt",
 ]);
+// `id`/`idempotencyKey`/`createdAt` are immutable; `updatedAt` is always forced
+// by the store (see updateAgentLaunch). The stage advances through the launch saga.
+const AGENT_LAUNCH_UPDATE_COLS: ReadonlySet<string> = new Set([
+  "agentId", "worktreeId", "mode", "title", "name", "terminalId", "watcherId",
+  "stage", "errorCode", "errorMessage", "updatedAt",
+]);
 
 type SqlIn = string | number | bigint | null | Uint8Array;
 function toSqlValue(v: unknown): SqlIn {
@@ -345,6 +378,7 @@ export class Db {
     this.db.exec(SCHEMA);
     this.migrate();
     this.cancelStaleWatchers();
+    this.cancelStaleAgentLaunches();
   }
 
   /**
@@ -401,6 +435,30 @@ export class Db {
         `UPDATE events SET resolvedAt = ?
          WHERE resolvedAt IS NULL
            AND source IN ('terminal_watcher','worktree_watcher')`,
+      )
+      .run(now);
+  }
+
+  /**
+   * Agent-launch saga records are session-scoped, for the same reason watchers
+   * are: an in-flight launch points at a terminal/watcher that only existed for
+   * the session that spawned it. So on every DB open (a fresh session boundary)
+   * we mark any launch left non-terminal by a prior session as `failed` — its
+   * idempotency key must not match and silently block a legitimate fresh launch
+   * of the same task, and its `ambiguous` state can never be reconciled against a
+   * terminal that is already gone. `confirmed`/`failed` are already terminal and
+   * left untouched (they back no live reconciliation). Single-writer store, so
+   * the one statement runs without interleaving.
+   */
+  private cancelStaleAgentLaunches(now = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE agent_launches
+           SET stage = 'failed',
+               errorCode = COALESCE(errorCode, 'SESSION_ENDED'),
+               errorMessage = COALESCE(errorMessage, 'session ended before confirmation'),
+               updatedAt = ?
+         WHERE stage NOT IN ('confirmed','failed')`,
       )
       .run(now);
   }
@@ -1344,6 +1402,111 @@ export class Db {
       startedAt: r.startedAt as number,
       updatedAt: r.updatedAt as number,
       completedAt: (r.completedAt as number) ?? undefined,
+    };
+  }
+
+  /* -------------------------- agent launches ----------------------------- */
+
+  insertAgentLaunch(
+    rec: Omit<AgentLaunchRecord, "id" | "stage" | "createdAt" | "updatedAt"> &
+      Partial<AgentLaunchRecord>,
+  ): AgentLaunchRecord {
+    const now = rec.createdAt ?? Date.now();
+    const full: AgentLaunchRecord = {
+      id: rec.id ?? `agt_${randomUUID().slice(0, 8)}`,
+      idempotencyKey: rec.idempotencyKey,
+      agentId: rec.agentId,
+      worktreeId: rec.worktreeId,
+      mode: rec.mode,
+      title: rec.title,
+      name: rec.name,
+      terminalId: rec.terminalId,
+      watcherId: rec.watcherId,
+      stage: rec.stage ?? "launch_requested",
+      errorCode: rec.errorCode,
+      errorMessage: rec.errorMessage,
+      createdAt: now,
+      updatedAt: rec.updatedAt ?? now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO agent_launches (id,idempotencyKey,agentId,worktreeId,mode,title,name,terminalId,watcherId,stage,errorCode,errorMessage,createdAt,updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.idempotencyKey,
+        full.agentId,
+        full.worktreeId ?? null,
+        full.mode,
+        full.title,
+        full.name,
+        full.terminalId ?? null,
+        full.watcherId ?? null,
+        full.stage,
+        full.errorCode ?? null,
+        full.errorMessage ?? null,
+        full.createdAt,
+        full.updatedAt,
+      );
+    return full;
+  }
+
+  getAgentLaunch(id: string): AgentLaunchRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM agent_launches WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToAgentLaunch(row) : undefined;
+  }
+
+  /**
+   * Find the live launch saga for an idempotency key, if any. Only non-terminal
+   * records match — a `confirmed`/`failed` row never blocks a fresh launch of the
+   * same task, so the same `{taskPrompt, worktreeId, agentId, mode}` can be run
+   * again later (its prior record is terminal). Most-recent first so a re-attempt
+   * reconciles against the latest in-flight record. Mirrors the events-dedupe
+   * pattern (`WHERE dedupeKey = ? AND resolvedAt IS NULL`).
+   */
+  findActiveAgentLaunch(idempotencyKey: string): AgentLaunchRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM agent_launches
+         WHERE idempotencyKey = ? AND stage NOT IN ('confirmed','failed')
+         ORDER BY updatedAt DESC LIMIT 1`,
+      )
+      .get(idempotencyKey) as Record<string, unknown> | undefined;
+    return row ? this.rowToAgentLaunch(row) : undefined;
+  }
+
+  updateAgentLaunch(id: string, patch: Partial<AgentLaunchRecord>): void {
+    // updatedAt is always advanced by the store, never taken from a caller's
+    // patch, so a stage transition can't write a stale recency value.
+    const next = { ...patch, updatedAt: Date.now() };
+    this.applyUpdate(
+      "agent_launches",
+      AGENT_LAUNCH_UPDATE_COLS,
+      id,
+      next as Record<string, unknown>,
+    );
+  }
+
+  /** Coerce a raw agent_launches row, mapping SQL NULL → undefined for optionals. */
+  private rowToAgentLaunch(r: Record<string, unknown>): AgentLaunchRecord {
+    return {
+      id: r.id as string,
+      idempotencyKey: r.idempotencyKey as string,
+      agentId: r.agentId as string,
+      worktreeId: (r.worktreeId as string) ?? undefined,
+      mode: r.mode as string,
+      title: r.title as string,
+      name: r.name as string,
+      terminalId: (r.terminalId as string) ?? undefined,
+      watcherId: (r.watcherId as string) ?? undefined,
+      stage: r.stage as AgentLaunchStage,
+      errorCode: (r.errorCode as string) ?? undefined,
+      errorMessage: (r.errorMessage as string) ?? undefined,
+      createdAt: r.createdAt as number,
+      updatedAt: r.updatedAt as number,
     };
   }
 
