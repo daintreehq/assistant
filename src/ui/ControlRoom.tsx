@@ -83,6 +83,14 @@ export interface ControlRoomProps {
    * section. `help` is rendered by its own `view` branch. Null shows the full deck.
    */
   activePanel?: PanelKey | null;
+  /**
+   * Bumped by `/clear` to force the `<Static>` region to remount. Ink caches all
+   * static output in `fullStaticOutput` and replays it on resize/overflow, so
+   * clearing the transcript without changing this key leaves cleared cells able to
+   * ghost back. Using it as the `<Static>` `key` unmounts/remounts and purges that
+   * cache. Defaults to 0 (gallery/tests that never clear).
+   */
+  staticKey?: number;
   expanded?: boolean;
   pending?: PendingConfirm | null;
   /** Frozen clock for deterministic rendering; defaults to live time. */
@@ -119,6 +127,7 @@ export function ControlRoom({
   queueDepth = 0,
   view,
   activePanel = null,
+  staticKey = 0,
   expanded = false,
   pending = null,
   now = Date.now(),
@@ -174,7 +183,7 @@ export function ControlRoom({
 
   return (
     <Box flexDirection="column" width={contentWidth}>
-      <Static items={staticItems}>
+      <Static key={staticKey} items={staticItems}>
         {(item) =>
           item.cell ? (
             <CellView

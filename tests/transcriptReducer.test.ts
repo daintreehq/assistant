@@ -206,6 +206,26 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(out[0].kind).toBe("note");
   });
 
+  it("wipes the transcript on transcript:clear, then accepts a fresh confirmation card (#114)", () => {
+    const out = run([
+      { type: "user:add", text: "old turn" },
+      { type: "assistant:end", content: "old reply" },
+      { type: "attention", events: [{ title: "note", summary: "n" }] },
+      { type: "transcript:clear" },
+      { type: "command:add", title: "Clear", text: "Conversation cleared — starting fresh." },
+    ]);
+    // Everything before the clear is gone; only the post-clear confirmation remains.
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("command");
+    expect((out[0] as Extract<TranscriptCell, { kind: "command" }>).text).toContain(
+      "starting fresh",
+    );
+  });
+
+  it("transcript:clear on an empty transcript stays empty (#114)", () => {
+    expect(run([{ type: "transcript:clear" }])).toHaveLength(0);
+  });
+
   it("retains every cell (no front-pruning) so <Static> stays append-only", () => {
     // Finished turns are committed to the terminal's scrollback via <Static>,
     // which renders each item exactly once by COUNT — dropping cells off the

@@ -112,6 +112,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       queueDepth={controller.queueDepth}
       view={view}
       activePanel={controller.activePanel}
+      staticKey={controller.staticKey}
       expanded={expanded}
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}

@@ -231,6 +231,12 @@ export async function handleSlashCommand(
       return { handled: true };
     }
 
+    case "clear": {
+      app.session.clear();
+      render.success("Conversation cleared — starting fresh.");
+      return { handled: true };
+    }
+
     case "recipes": {
       const sub = rest[0];
       if (!sub) {

@@ -143,7 +143,8 @@ export type ControllerAction =
   | UiBridgeEvent
   | { type: "user:add"; text: string }
   | { type: "user:pullback" }
-  | { type: "command:add"; title: string; text: string };
+  | { type: "command:add"; title: string; text: string }
+  | { type: "transcript:clear" };
 
 export function transcriptReducer(
   cells: TranscriptCell[],
@@ -153,6 +154,13 @@ export function transcriptReducer(
   switch (action.type) {
     case "user:add":
       return [...cells, newTurn(action.text, now)];
+
+    case "transcript:clear":
+      // /clear reset the session to its initial controls — drop every in-flight
+      // cell so the live region starts empty. Cells already committed to native
+      // scrollback via <Static> stay there (same as a shell `clear`); the caller
+      // also bumps staticKey to remount <Static> so they don't ghost on resize.
+      return [];
 
     case "user:pullback": {
       // Escape pressed before any assistant output landed: drop the just-added
@@ -469,6 +477,12 @@ export interface DaintreeController {
   /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
+  /**
+   * Monotonic counter bumped by `/clear`. Used as the `key` on the `<Static>`
+   * element so a clear forces it to remount and purge Ink's internal
+   * `fullStaticOutput` cache — otherwise committed cells ghost back on resize.
+   */
+  staticKey: number;
   resolveConfirm: (approved: boolean) => void;
   /** The bound project's display name (from Daintree's MCP, basename fallback). */
   projectName?: string;
@@ -493,6 +507,7 @@ export function useDaintreeController(
   // and autonomous wake turns, neither of which Escape can abort.
   const [canCancel, setCanCancel] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
+  const [staticKey, setStaticKey] = useState(0);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
   );
@@ -790,6 +805,18 @@ export function useDaintreeController(
               // into the transcript — the multi-layout owns a dedicated screen
               // for operations/help. Re-running the same command re-opens it.
               setActivePanel(result.switchPanel);
+            } else if (result.clearTranscript) {
+              // /clear: wipe the live transcript, then remount <Static> (bump the
+              // key) so committed cells don't ghost back, and finally drop a single
+              // confirmation card into the now-empty transcript so the user sees it
+              // ran. Order matters: clear → remount → add the success card.
+              dispatch({ type: "transcript:clear" });
+              setStaticKey((k) => k + 1);
+              dispatch({
+                type: "command:add",
+                title: result.title ?? "Clear",
+                text: result.text ?? "Conversation cleared — starting fresh.",
+              });
             } else if (result.title || result.text) {
               dispatch({
                 type: "command:add",
@@ -896,6 +923,7 @@ export function useDaintreeController(
     queueDepth,
     activePanel,
     setActivePanel,
+    staticKey,
     resolveConfirm,
     projectName,
     booting,
