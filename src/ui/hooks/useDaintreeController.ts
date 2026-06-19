@@ -14,8 +14,10 @@ import {
   useReducer,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import type { App } from "../../cli/app.js";
+import type { ComposerHandle } from "../components/Composer.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
 import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
 import { presentTool } from "../presentation/tools.js";
@@ -57,6 +59,28 @@ function activeTurnIndex(cells: TranscriptCell[]): number {
     if (c.kind === "turn") return c.state === "active" ? i : -1;
   }
   return -1;
+}
+
+/**
+ * The trailing cell IF it is a just-submitted, pre-stream user turn — the only
+ * state from which Escape can pull the message back into the composer (issue #61).
+ * A turn qualifies only before any assistant output has landed: active, not
+ * streaming, and with empty `assistantText` (assistant:start/token both flip
+ * `streaming` true, closing the window). Returns null otherwise, so callers fall
+ * back to plain cancel. Checked against the LAST cell only: pull-back acts on the
+ * message the user just sent, never an earlier turn.
+ */
+export function pullbackCandidate(cells: TranscriptCell[]): TurnCell | null {
+  const last = cells[cells.length - 1];
+  if (
+    last?.kind === "turn" &&
+    last.state === "active" &&
+    !last.streaming &&
+    last.assistantText === ""
+  ) {
+    return last;
+  }
+  return null;
 }
 
 /** Immutably replace the cell at `index`. */
@@ -104,6 +128,7 @@ function stopCaret(turn: TurnCell): TurnCell {
 export type ControllerAction =
   | UiBridgeEvent
   | { type: "user:add"; text: string }
+  | { type: "user:pullback" }
   | { type: "command:add"; title: string; text: string };
 
 export function transcriptReducer(
@@ -114,6 +139,14 @@ export function transcriptReducer(
   switch (action.type) {
     case "user:add":
       return [...cells, newTurn(action.text, now)];
+
+    case "user:pullback":
+      // Escape pressed before any assistant output landed: drop the just-added
+      // turn so the transcript shows no trace of it and the text returns to the
+      // composer for editing. The guard is the source of truth for the race with
+      // assistant:start — if the turn already began streaming, this is a no-op and
+      // the in-flight turn stays put (the caller then applies plain-cancel instead).
+      return pullbackCandidate(cells) ? cells.slice(0, -1) : cells;
 
     case "command:add":
       return [
@@ -396,6 +429,13 @@ export interface DaintreeController {
   sendUserMessage: (text: string) => boolean;
   /** Abort the in-flight user turn (Escape-to-cancel). No-op when idle. */
   cancelTurn: () => void;
+  /** Escape handler for the composer: pulls a just-sent message back into the
+   *  input when still pre-stream (abort + remove the turn + restore the text),
+   *  else falls back to {@link cancelTurn}. No-op when idle (issue #61). */
+  pullBackTurn: () => void;
+  /** Imperative handle the composer registers so a pulled-back message can be
+   *  pushed back into its buffer. Wired to the rendered `<Composer ref>`. */
+  composerRef: RefObject<ComposerHandle | null>;
   /** True only while a cancellable user model turn is in flight (drives the hint). */
   canCancel: boolean;
   /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
@@ -462,6 +502,12 @@ export function useDaintreeController(
   // inherits a stale, already-aborted signal. Autonomous wake turns are not wired
   // to this — they run their own short read-only inspections.
   const abortController = useRef<AbortController | null>(null);
+  // The composer's imperative handle (registered via its `ref`) and a live mirror
+  // of the transcript. pullBackTurn is an Escape-event callback that must read the
+  // newest cells and push text back into the composer without capturing a stale
+  // closure — refs give it both. The transcript mirror is synced in an effect below.
+  const composerRef = useRef<ComposerHandle | null>(null);
+  const transcriptRef = useRef<TranscriptCell[]>([]);
   // Follow-ups typed while a turn is in flight queue here (FIFO) and drain one at a
   // time once the lock clears — user input is drained before any pending wake. The
   // ref (not state) keeps enqueue/drain synchronous with the inFlight lock so a
@@ -748,11 +794,38 @@ export function useDaintreeController(
     sendUserMessageRef.current = sendUserMessage;
   }, [sendUserMessage]);
 
+  // Mirror the live transcript into a ref so pullBackTurn (an Escape-event
+  // callback) can read the newest cells without capturing a stale closure.
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
+
   // Abort the in-flight user turn (Escape on an empty composer while busy).
   // Idempotent and a no-op when nothing is running.
   const cancelTurn = useCallback(() => {
     abortController.current?.abort();
   }, []);
+
+  // Escape on an empty composer while busy. When the just-sent turn is still
+  // pre-stream (no assistant output yet), pull it back: remove the transcript
+  // turn, abort the request, and restore the original text into the composer for
+  // editing. Once any output has streamed the window is closed, so fall through to
+  // plain cancel (the turn stays in the transcript, marked cancelled). Issue #61.
+  const pullBackTurn = useCallback(() => {
+    const candidate = pullbackCandidate(transcriptRef.current);
+    if (!candidate) {
+      cancelTurn();
+      return;
+    }
+    // Drop follow-ups typed while waiting so the drained queue can't fire a new
+    // turn while the user is editing the pulled-back text. Dispatch BEFORE the
+    // abort: the reducer removes the turn synchronously, so the assistant:cancelled
+    // the abort triggers finds no active turn and is a no-op (no phantom left).
+    queuedInput.current = [];
+    dispatch({ type: "user:pullback" });
+    abortController.current?.abort();
+    composerRef.current?.restore(candidate.userText);
+  }, [cancelTurn]);
 
   const resolveConfirm = useCallback((approved: boolean) => {
     setPendingConfirm((cur) => {
@@ -773,6 +846,8 @@ export function useDaintreeController(
     pendingConfirm,
     sendUserMessage,
     cancelTurn,
+    pullBackTurn,
+    composerRef,
     canCancel,
     activePanel,
     setActivePanel,

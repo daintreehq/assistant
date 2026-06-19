@@ -113,7 +113,8 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       composerFocus={view === "home" && !controller.pendingConfirm}
       cancellable={controller.canCancel}
       onSubmit={controller.sendUserMessage}
-      onCancel={controller.cancelTurn}
+      onCancel={controller.pullBackTurn}
+      composerRef={controller.composerRef}
       onResolve={controller.resolveConfirm}
     />
   );

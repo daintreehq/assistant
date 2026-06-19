@@ -174,3 +174,93 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 });
+
+const onlyTurns = (c: DaintreeController) =>
+  c.transcript.filter((cell) => cell.kind === "turn");
+
+describe("useDaintreeController pull-back (#61)", () => {
+  it("pulls a pre-stream message back: removes the turn, aborts, clears canCancel", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { calls } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("hello");
+    await tick();
+    // A just-sent, pre-stream turn exists and is cancellable.
+    expect(onlyTurns(controller)).toHaveLength(1);
+    expect(controller.canCancel).toBe(true);
+    expect(calls[0].signal?.aborted).toBe(false);
+
+    controller.pullBackTurn();
+    await tick();
+    // The turn is gone, the request was aborted, and the composer is idle again.
+    expect(onlyTurns(controller)).toHaveLength(0);
+    expect(calls[0].signal?.aborted).toBe(true);
+    expect(controller.canCancel).toBe(false);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("clears queued follow-ups on pull-back so none drains while editing", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { calls } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("first");
+    await tick();
+    controller.sendUserMessage("queued"); // typed while busy → queued
+    await tick();
+    expect(calls.map((c) => c.input)).toEqual(["first"]);
+
+    controller.pullBackTurn();
+    await tick();
+    // The abort resolves "first"; the queue was cleared, so "queued" never starts —
+    // the user is back to editing, not racing a drained follow-up.
+    expect(calls.map((c) => c.input)).toEqual(["first"]);
+    expect(onlyTurns(controller)).toHaveLength(0);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("falls back to plain cancel once the turn is streaming", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { calls } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("hello");
+    await tick();
+    // Assistant output starts → the pull-back window closes.
+    controller.bridge.emit({ type: "assistant:start" });
+    await tick();
+
+    controller.pullBackTurn();
+    await tick();
+    // Plain-cancel path: the request is aborted but the turn stays in the transcript
+    // (it produced output, so it isn't silently erased).
+    expect(calls[0].signal?.aborted).toBe(true);
+    expect(onlyTurns(controller)).toHaveLength(1);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+});

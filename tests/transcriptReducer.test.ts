@@ -119,6 +119,58 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(turns(out)[0].assistantText).not.toContain("late answer");
   });
 
+  it("user:pullback removes a just-added pre-stream turn (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "draft the release notes" },
+      { type: "user:pullback" },
+    ]);
+    // The turn is gone entirely — pull-back leaves no trace in the transcript.
+    expect(turns(out)).toHaveLength(0);
+    expect(out).toHaveLength(0);
+  });
+
+  it("user:pullback is a no-op once the turn is streaming (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "go" },
+      { type: "assistant:start" },
+      { type: "user:pullback" },
+    ]);
+    // The window closed when assistant:start flipped streaming true — the turn stays.
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].userText).toBe("go");
+    expect(turns(out)[0].state).toBe("active");
+  });
+
+  it("user:pullback is a no-op once assistant text has landed (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "go" },
+      { type: "assistant:start" },
+      { type: "assistant:token", token: "On it" },
+      { type: "user:pullback" },
+    ]);
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].assistantText).toBe("On it");
+  });
+
+  it("user:pullback only removes the trailing turn, never an earlier one (#61)", () => {
+    const out = run([
+      { type: "user:add", text: "first" },
+      { type: "assistant:start" },
+      { type: "assistant:end", content: "done" },
+      { type: "user:add", text: "second" },
+      { type: "user:pullback" },
+    ]);
+    // The completed first turn is untouched; only the fresh second turn is pulled.
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].userText).toBe("first");
+    expect(turns(out)[0].state).toBe("complete");
+  });
+
+  it("user:pullback with no turns is a no-op (#61)", () => {
+    const out = run([{ type: "user:pullback" }]);
+    expect(out).toHaveLength(0);
+  });
+
   it("routes attention events to standalone note cells", () => {
     const out = run([
       { type: "attention", events: [{ title: "Tests failed", summary: "term_8" }] },
