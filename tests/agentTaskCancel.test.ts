@@ -30,7 +30,20 @@ function ctxWith(
     }));
   const ctx = {
     mcp: { isConnected: () => opts.connected ?? true, callTool },
-    db: { insertWatcher },
+    db: {
+      insertWatcher,
+      // #98's launch saga: spawnForEdits now records a durable launch row before
+      // calling agent.launch. Stub the saga methods so the cancellation tests
+      // exercise the fresh-launch path against this fake db — no active record
+      // (so it takes the fresh branch), insert hands back an id, updates are no-ops.
+      findActiveAgentLaunch: () => undefined,
+      insertAgentLaunch: (rec: Record<string, unknown>) => ({
+        id: "launch_1",
+        stage: "launch_requested",
+        ...rec,
+      }),
+      updateAgentLaunch: () => {},
+    },
     config: { tier: "system" },
     actor: "main",
     signal: opts.signal,
@@ -85,9 +98,11 @@ describe("agentTask.spawnForEdits cancellation (#81)", () => {
 
   it("does NOT mask a post-launch bookkeeping failure as CANCELLED", async () => {
     // Launch SUCCEEDS (the agent is really spawned), then the watcher insert throws
-    // while the signal happens to be aborted. The old broad catch would have
-    // reported CANCELLED, hiding the launched agent; the scoped catch lets the real
-    // error propagate (the registry wraps it as TOOL_THREW) instead.
+    // while the signal happens to be aborted. The abort handling is scoped to the
+    // launch call, so it must NOT report CANCELLED here — that would hide the agent
+    // that is actually running. The launch saga (#98) treats a watcher-attach failure
+    // as non-fatal: the result stays a success (the agent IS up) but surfaces the
+    // problem as a watcherWarning, leaving the saga recoverable for a re-attach.
     const controller = new AbortController();
     const callTool = vi.fn(async () => {
       controller.abort();
@@ -98,8 +113,19 @@ describe("agentTask.spawnForEdits cancellation (#81)", () => {
     });
     const { ctx } = ctxWith({ signal: controller.signal, callTool, insertWatcher });
 
-    await expect(
-      spawn.handler({ ...(baseArgs as object), watcher: { create: true } } as never, ctx),
-    ).rejects.toThrow("sqlite boom");
+    const res = await spawn.handler(
+      { ...(baseArgs as object), watcher: { create: true } } as never,
+      ctx,
+    );
+
+    // The launched agent is not hidden, and the abort is not masking the failure.
+    expect(res.ok).toBe(true);
+    expect((res as { error?: { code?: string } }).error?.code).not.toBe("CANCELLED");
+    const payload = (res as { result?: Record<string, unknown> }).result ?? {};
+    expect(payload.terminalId).toBe("term_1");
+    expect(payload.watcherId).toBeUndefined();
+    expect(payload.watcherWarning).toContain(
+      "watcher could not be attached: sqlite boom",
+    );
   });
 });

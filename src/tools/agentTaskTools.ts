@@ -591,14 +591,34 @@ export const agentTaskTools: ToolDef[] = [
 
       let res: Awaited<ReturnType<ToolContext["mcp"]["callTool"]>>;
       try {
-        res = await ctx.mcp.callTool("agent.launch", {
-          agentId,
-          name,
-          ...(worktreeId ? { worktreeId } : {}),
-          prompt,
-          requestKey: idempotencyKey,
-        });
+        res = await ctx.mcp.callTool(
+          "agent.launch",
+          {
+            agentId,
+            name,
+            ...(worktreeId ? { worktreeId } : {}),
+            prompt,
+            requestKey: idempotencyKey,
+          },
+          // Forward the turn's signal so pressing Escape aborts the in-flight
+          // agent.launch MCP call rather than letting it run to completion.
+          ctx.signal,
+        );
       } catch (e) {
+        // If the user cancelled mid-launch, the signal aborts and callTool rejects.
+        // That is a cancellation, not an ambiguous launch — map it to CANCELLED
+        // (matching the pre-launch abort check above) instead of treating an aborted
+        // request as a transport failure that needs reconciliation.
+        if (ctx.signal?.aborted) {
+          ctx.db.updateAgentLaunch(record.id, {
+            stage: "failed",
+            errorCode: "CANCELLED",
+            errorMessage: "Turn cancelled during agent launch.",
+          });
+          return fail("CANCELLED", "Turn cancelled during agent launch.", {
+            details: { launchId: record.id },
+          });
+        }
         // The transport threw — the request MAY have reached Daintree, so this is
         // ambiguous, not a clean failure. Mark it and try to reconcile.
         const msg = e instanceof Error ? e.message : String(e);
