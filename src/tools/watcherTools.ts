@@ -171,7 +171,7 @@ export const watcherTools: ToolDef[] = [
   },
   {
     name: "watcher.list",
-    description: "List active terminal/worktree watchers (read-only).",
+    description: "List active terminal watchers (read-only).",
     risk: "read",
     readOnly: true,
     parameters: {

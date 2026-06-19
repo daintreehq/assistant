@@ -169,12 +169,32 @@ export const WatchCondition: z.ZodType<WatchCondition> = z.lazy(() =>
         runtimeStatusIs: z.enum(["running", "exited"]),
       })
       .strict(),
-    z.object({ contains: z.string() }).strict(),
-    z.object({ regex: z.string() }).strict(),
-    z.object({ noOutputForMs: z.number() }).strict(),
-    z.object({ modelJudge: z.string() }).strict(),
-    z.object({ all: z.array(WatchCondition) }).strict(),
-    z.object({ any: z.array(WatchCondition) }).strict(),
+    // Reject degenerate conditions at creation time rather than letting them
+    // fail silently at evaluation: an empty `contains` matches every frame, an
+    // invalid regex is caught-and-false'd by the engine so it never fires, a
+    // non-positive `noOutputForMs` is nonsensical, and an empty `all`/`any`
+    // group is vacuously true/false. Each would persist a watcher that can
+    // never do its job — the exact false-supervision this guards against.
+    z.object({ contains: z.string().min(1, "contains must be a non-empty string") }).strict(),
+    z
+      .object({
+        regex: z.string().refine(
+          (val) => {
+            try {
+              new RegExp(val);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          { message: "regex must be a valid regular expression" },
+        ),
+      })
+      .strict(),
+    z.object({ noOutputForMs: z.number().positive("noOutputForMs must be a positive number") }).strict(),
+    z.object({ modelJudge: z.string().min(1, "modelJudge must be a non-empty string") }).strict(),
+    z.object({ all: z.array(WatchCondition).min(1, "all must contain at least one condition") }).strict(),
+    z.object({ any: z.array(WatchCondition).min(1, "any must contain at least one condition") }).strict(),
     z.object({ not: WatchCondition }).strict(),
   ]),
 );
@@ -287,10 +307,10 @@ export interface TimerRecord {
 
 export interface WatcherRecord {
   id: string;
-  kind: "terminal" | "worktree";
+  kind: "terminal";
   title: string;
   goal: string;
-  targetsJson: string; // string[] of terminalIds / worktreeIds
+  targetsJson: string; // string[] of terminalIds
   cadenceMs: number;
   /** True for supervisor watchers attached to CLI-spawned worker terminals.
    * These default to a fast cadence and are floored at the scheduler tick so a
