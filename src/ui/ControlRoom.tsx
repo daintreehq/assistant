@@ -128,11 +128,11 @@ export function ControlRoom({
       ? activeAgent?.goal?.replace(/\s+/g, " ").trim() || undefined
       : undefined;
 
-  // Header (borderless now) = the 4-row identity block (tree icon beside the
-  // wordmark + project name) + a double blank line below (marginBottom 2) = 6. A run
-  // subtitle fits within the icon's height, so it costs no extra rows. Active debug
-  // logging adds its own section (marginTop 1 + rule 1 + log line 1 = 3) when on.
-  const headerH = 6 + (logging ? 3 : 0);
+  // Header = the identity text rows (wordmark; + project name and/or run subtitle
+  // when present) + a blank line, the always-on rule, and a blank line below
+  // (marginBottom 1). Debug logging, when on, adds one line under the rule.
+  const headerTextRows = 1 + (project ? 1 : 0) + (runTitle ? 1 : 0);
+  const headerH = headerTextRows + 3 + (logging ? 1 : 0);
   // Composer = top rule + input row + bottom rule + hints row. The input is
   // bracketed both sides so it reads as a field.
   const composerH = 4;

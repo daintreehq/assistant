@@ -33,11 +33,16 @@ describe("Header", () => {
     expect(frame).not.toContain("OPERATOR");
   });
 
-  it("has no rule when logging is off", () => {
-    // The masthead is borderless and frameless now — the only horizontal rule
-    // belongs to the debug-log section, which is absent unless logging is on.
+  it("always closes the header with a full-width rule", () => {
+    // The rule is always present now (it closes the header off from the body),
+    // not just when logging is active.
     const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
-    expect(frame).not.toMatch(/[─-]{10,}/);
+    expect(frame).toMatch(/[─-]{10,}/);
+  });
+
+  it("shows no emoji or brand mark — plain text only", () => {
+    const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
+    expect(frame).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
   it("names the active run when one is supplied", () => {
@@ -63,23 +68,22 @@ describe("Header", () => {
   });
 
   // The rendered row count is the contract behind ControlRoom's headerH budget
-  // (6 + 3 when logging). If the layout drifts, this guard fails before the body
-  // silently overlaps the header on short terminals.
+  // (text rows + 3, plus 1 when logging). If the layout drifts, this guard fails
+  // before the body silently overlaps the header on short terminals.
   it("renders a stable row count matching the headerH budget", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(6);
-    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(9);
-    // A run subtitle fits within the 4-row icon, so it costs no extra height.
-    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(6);
+    // wordmark (1) + blank + rule + blank below = 4.
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(4);
+    // + the logging line under the rule = 5.
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(5);
+    // wordmark + project + run subtitle = 3 text rows: 3 + 3 = 6.
     expect(
-      rows(
-        <Header columns={60} version="0.1.0" runTitle="busy" logging logFile="/t.log" />,
-      ),
-    ).toBe(9);
+      rows(<Header columns={60} version="0.1.0" project="p" runTitle="busy" />),
+    ).toBe(6);
   });
 
-  it("falls back to ASCII glyphs when unicode is disabled", () => {
+  it("keeps an ASCII rule and bullet when unicode is disabled", () => {
     const prev = process.env.DAINTREE_ASCII;
     process.env.DAINTREE_ASCII = "1";
     try {
@@ -88,9 +92,7 @@ describe("Header", () => {
           <Header columns={60} version="0.1.0" logging logFile="/tmp/t.log" />,
         ).lastFrame() ?? "";
       expect(frame).toContain("Daintree Assistant");
-      expect(frame).toContain("/####\\"); // ASCII canopy, not the block logo
       expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
-      expect(frame).not.toContain("█"); // no unicode block glyph leaks through
       expect(frame).not.toContain("·"); // log separator uses the ASCII bullet
     } finally {
       if (prev === undefined) delete process.env.DAINTREE_ASCII;
