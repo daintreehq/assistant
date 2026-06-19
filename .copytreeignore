@@ -1,0 +1,12 @@
+# copytree ignore — gitignore semantics, applied on top of .gitignore.
+# Keep the AI context compact by excluding tests, which dominate the tree.
+
+# The entire test suite lives here (vitest: tests/**/*.test.{ts,tsx}).
+tests/
+
+# Defensive: catch test files placed anywhere else in the tree.
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__/
