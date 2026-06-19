@@ -4,6 +4,11 @@ Guidance for working in this repository.
 
 ## What this is
 
+> **Active development, pre-release.** Nothing is shipped yet. Don't preserve
+> backward compatibility or version stable surfaces for their own sake — prefer
+> the simplest thing. We deliberately do NOT version the system prompt (the
+> cache key is a plain, unversioned identifier); just edit the prompt directly.
+
 `@daintreehq/daintree-assistant` — a local CLI **orchestration assistant for
 Daintree** ("Daintree's local operations officer"). It plans Daintree operations,
 spawns and supervises visible agent terminals, watches them with cheap models,
@@ -85,8 +90,10 @@ thread.
   actors (watcher/timer/workflow) need a scoped **automation grant**.
 - **Prompt-cache stability.** The base system prompt (`models/prompts/base.ts`) is
   the cached prefix — keep it byte-stable; dynamic facts live in later control
-  messages. `BASE_SYSTEM_PROMPT_VERSION` is the cache key (pre-release: we don't
-  churn it on every edit).
+  messages. The Fireworks `prompt_cache_key` is a plain, unversioned constant
+  (`MAIN_PROMPT_CACHE_KEY = "daintree-main"` in `agent/loop.ts`); it only groups
+  requests onto a cache node. Editing the prefix just misses on the changed tokens
+  — it never serves stale content — so there's no version to bump.
 - **Foreground-only daemon.** Watchers/timers tick only while the assistant is open.
   Timers persist in SQLite and resume next launch. Watchers are **session-scoped**:
   they supervise terminals that live only for the session, so any left non-terminal

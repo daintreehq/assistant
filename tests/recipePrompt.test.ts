@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  BASE_SYSTEM_PROMPT,
-  BASE_SYSTEM_PROMPT_VERSION,
-} from "../src/models/prompts/base.js";
+import { BASE_SYSTEM_PROMPT } from "../src/models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../src/models/prompts/runtimeContext.js";
 import { buildLoadedRecipesMessage } from "../src/models/prompts/recipes.js";
 import { renderRecipeBundle } from "../src/recipes/render.js";
@@ -37,10 +34,6 @@ describe("base system prompt", () => {
     expect(BASE_SYSTEM_PROMPT).not.toContain("# Loaded recipes");
     expect(BASE_SYSTEM_PROMPT).not.toContain("Recipe id:");
     expect(BASE_SYSTEM_PROMPT).not.toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
-  });
-
-  it("pins the version used as the cache key", () => {
-    expect(BASE_SYSTEM_PROMPT_VERSION).toBe("daintree-main-system-v8");
   });
 
   it("states the foreground-only scheduler lifecycle", () => {

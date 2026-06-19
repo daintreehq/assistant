@@ -10,10 +10,7 @@
  * here. buildMainSystemPrompt() composes the three layers into one string and is
  * kept for callers/tests that want the legacy single-prompt view.
  */
-export {
-  BASE_SYSTEM_PROMPT,
-  BASE_SYSTEM_PROMPT_VERSION,
-} from "./base.js";
+export { BASE_SYSTEM_PROMPT } from "./base.js";
 export {
   buildRuntimeContextMessage,
   type MainPromptContext,

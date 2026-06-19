@@ -6,8 +6,7 @@
  * via actions.search / actions.getSchema every session. These facts were checked
  * against the Daintree (Canopy) source — keep them in sync if the app changes.
  *
- * This text is static, so it stays in the cached prompt prefix. If you edit it,
- * bump BASE_SYSTEM_PROMPT_VERSION in base.ts so the prompt cache key changes.
+ * This text is static, so it stays in the cached prompt prefix.
  */
 export const DAINTREE_MCP_REFERENCE = `# Daintree integration reference (verified)
 

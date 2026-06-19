@@ -11,7 +11,7 @@ import type { ModelRouter } from "../models/router.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
 import type { ConversationMessageRecord, ToolResult } from "../schemas.js";
-import { BASE_SYSTEM_PROMPT, BASE_SYSTEM_PROMPT_VERSION } from "../models/prompts/base.js";
+import { BASE_SYSTEM_PROMPT } from "../models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../models/prompts/runtimeContext.js";
 import { buildLoadedRecipesMessage } from "../models/prompts/recipes.js";
 import type { MainPromptContext } from "../models/prompts/runtimeContext.js";
@@ -36,8 +36,14 @@ export const CANCELLED_REPLY = "Turn cancelled";
 const CONTROL_MESSAGE_COUNT = 3;
 /** Re-run recipe selection at least this often even without trigger terms. */
 const RECIPE_REFRESH_INTERVAL = 4;
-/** Stable Fireworks cache key for the main-thread prefix (see docs §9). */
-const MAIN_PROMPT_CACHE_KEY = BASE_SYSTEM_PROMPT_VERSION;
+/**
+ * Stable Fireworks cache key for the main-thread prefix (see docs §9). A plain,
+ * unversioned identifier: it only groups requests that share the cached base
+ * prefix onto the same cache node. When the prefix text changes during active
+ * development the cache simply misses on the changed tokens — it never serves
+ * stale content — so there's no version to bump.
+ */
+const MAIN_PROMPT_CACHE_KEY = "daintree-main";
 /** Strong terms that justify re-selecting recipes mid-conversation. */
 const RECIPE_TRIGGER_RE =
   /\b(recipe|worktree|agent|edit|fix|implement|refactor|test|monitor|watch|terminal)\b/i;

@@ -7,7 +7,6 @@ import { ok, type ToolDef } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { ChatOptions } from "../src/models/fireworks.js";
-import { BASE_SYSTEM_PROMPT_VERSION } from "../src/models/prompts/base.js";
 import type { MainPromptContext } from "../src/models/prompts/runtimeContext.js";
 import type { RecipeSelection } from "../src/recipes/types.js";
 
@@ -172,7 +171,7 @@ describe("AgentSession control messages", () => {
     let captured: ChatOptions | undefined;
     const { session } = makeSession({ onStream: (o) => (captured = o) });
     await session.send("hi");
-    expect(captured?.promptCacheKey).toBe(BASE_SYSTEM_PROMPT_VERSION);
+    expect(captured?.promptCacheKey).toBe("daintree-main");
   });
 
   it("loads the recipe the small model selects and logs the decision", async () => {

@@ -19,11 +19,11 @@
  * rule); only inline/section spans get a hue. reflowText:false hands wrapping
  * to Ink rather than hard-wrapping to 80 columns.
  */
-import { Marked, type MarkedExtension } from "marked";
+import { Marked, type MarkedExtension, type Token, type Tokens } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { Chalk } from "chalk";
 import stripAnsi from "strip-ansi";
-import { ui, terminalThemeMode } from "./theme.js";
+import { ui, terminalThemeMode, glyphs } from "./theme.js";
 
 // marked-terminal emits ANSI even at chalk level 0, and Ink passes text-child
 // escapes straight through (it never strips them), so color has to be decided
@@ -61,6 +61,44 @@ md.use(
     href: k.hex(ui.color.info).underline,
   }) as unknown as MarkedExtension,
 );
+
+// Tables are the one markdown construct that assumes a wide, fixed canvas:
+// marked-terminal renders them as a cli-table3 grid sized to the content, and in
+// the narrow inline cockpit that grid is wider than the column, so Ink hard-wraps
+// every cell and the borders shred (see the bug report). We override ONLY the
+// table renderer (registered after markedTerminal so this wins per-method while
+// its inline/block styling is untouched) to emit a width-agnostic record list
+// instead: the first column becomes a bulleted heading and the remaining columns
+// render as indented `Header: value` lines. We re-render each cell with
+// `this.parser.parseInline` so inline styling inside a cell (e.g. `code` → cyan)
+// survives the transform. A prompt rule also nudges the model away from tables;
+// this is the deterministic backstop for tables it emits anyway or quotes
+// verbatim from MCP docs.
+function tableToList(
+  this: { parser: { parseInline(tokens: Token[]): string } },
+  token: Tokens.Table,
+): string {
+  const bullet = glyphs().bullet;
+  const headers = token.header.map((cell) => this.parser.parseInline(cell.tokens));
+  const records = token.rows.map((row) => {
+    const cells = row.map((cell) => this.parser.parseInline(cell.tokens));
+    const lines: string[] = [];
+    cells.forEach((value, i) => {
+      const text = value.trim();
+      if (i === 0) {
+        // First column is the record's identity → bulleted heading line.
+        lines.push(`${bullet} ${text}`);
+      } else if (text) {
+        // Skip empty cells so a sparse row doesn't sprout blank `Header:` lines.
+        const label = headers[i]?.trim();
+        lines.push(`  ${label ? `${k.bold(label)}: ` : ""}${text}`);
+      }
+    });
+    return lines.join("\n");
+  });
+  return `${records.join("\n")}\n`;
+}
+md.use({ renderer: { table: tableToList } });
 
 /**
  * Render finalized assistant markdown to a styled ANSI string for an Ink

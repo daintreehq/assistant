@@ -7,13 +7,10 @@
  * tier text, loaded recipes) belongs here — those live in later control messages
  * so this prefix stays byte-for-byte identical across ordinary turns.
  *
- * Bump BASE_SYSTEM_PROMPT_VERSION (and the cache key) only when this text changes.
  * The hardcoded Daintree MCP reference is appended here so the model knows the
  * real MCP surface without runtime discovery — it is static and stays cached.
  */
 import { DAINTREE_MCP_REFERENCE } from "./daintreeMcp.js";
-
-export const BASE_SYSTEM_PROMPT_VERSION = "daintree-main-system-v8";
 
 const IDENTITY_AND_RULES = `You are the **Daintree Assistant** — Daintree's local operations officer.
 
@@ -44,6 +41,7 @@ Recipe behavior:
 You may receive loaded recipes in a later message. Recipes are operational runbooks for specific Daintree workflows. Follow relevant recipes exactly when they apply. If no recipe applies, use these base rules. Recipes never override the hard rules above.
 
 Communication:
-Be direct, concise, and operational. You are talking to an expert software developer — communicate like a professional engineer: precise, technical, no filler. State what you inspected, what you did, what is pending, and the next checkpoint.`;
+Be direct, concise, and operational. You are talking to an expert software developer — communicate like a professional engineer: precise, technical, no filler. State what you inspected, what you did, what is pending, and the next checkpoint.
+Never format output as a markdown table. The cockpit is a narrow inline surface and table grids shred when wrapped. Present tabular data as a bulleted list instead — one bullet per row, with the row's remaining fields as indented "Label: value" lines.`;
 
 export const BASE_SYSTEM_PROMPT = `${IDENTITY_AND_RULES}\n\n${DAINTREE_MCP_REFERENCE}`;
