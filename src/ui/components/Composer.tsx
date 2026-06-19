@@ -21,6 +21,9 @@ export const COMMAND_SUGGESTIONS: Array<[string, string]> = [
   ["/quit", "exit"],
 ];
 
+/** Cap on the recallable prompt history kept for ↑/↓ during a session. */
+const HISTORY_LIMIT = 200;
+
 function suggestionsFor(value: string): Array<[string, string]> {
   if (!value.startsWith("/")) return [];
   const q = value.slice(1).toLowerCase();
@@ -56,6 +59,9 @@ export function Composer({
   onSubmit: (value: string) => boolean | void | Promise<void>;
 }) {
   const [value, setValue] = useState("");
+  // Session prompt history (oldest first) for ↑/↓ recall in the input. Lives
+  // here because this is where accepted submits are observed.
+  const [history, setHistory] = useState<string[]>([]);
   const suggestions = focus && !busy ? suggestionsFor(value) : [];
   const set = glyphs();
 
@@ -66,6 +72,12 @@ export function Composer({
     // turn is already in flight). Keep the text so it isn't lost; any other
     // result (void, or a Promise for an accepted turn) means it was taken.
     if (onSubmit(trimmed) === false) return;
+    // Record the accepted prompt for recall, collapsing immediate repeats and
+    // bounding the buffer so a long session (or pasted prompts) can't grow it
+    // without limit.
+    setHistory((h) =>
+      h[h.length - 1] === trimmed ? h : [...h, trimmed].slice(-HISTORY_LIMIT),
+    );
     setValue("");
   }
 
@@ -89,6 +101,7 @@ export function Composer({
           <MultilineInput
             value={value}
             focus={focus}
+            history={history}
             onChange={setValue}
             onSubmit={submit}
             onCancel={() => setValue("")}
@@ -116,7 +129,7 @@ export function Composer({
         <Box>
           <KeyHint keyName="/" action="commands" />
           <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="\\⏎" action="newline" />
+          <KeyHint keyName="↑" action="history" />
           <Text dimColor>{" · "}</Text>
           <KeyHint keyName="^O" action="inspect ops" />
         </Box>

@@ -24,6 +24,18 @@ const KEYS: Array<[string, string]> = [
   ["^C", "shut down cleanly"],
 ];
 
+// Composer editing — the readline/native-text-field set the input understands.
+const EDIT_KEYS: Array<[string, string]> = [
+  ["↑ ↓", "recall previous prompts (at line edges)"],
+  ["⌥← ⌥→", "move by word (also ^← ^→)"],
+  ["Home End", "start / end of line (also ^A ^E)"],
+  ["⌥⌫", "delete previous word (also ^W)"],
+  ["^U", "delete the whole line (also ⌘⌫)"],
+  ["^K", "delete to end of line"],
+  ["^Y", "restore the last killed text"],
+  ["\\ ⏎", "newline without sending"],
+];
+
 export function HelpOverlay({ width = 72 }: { width?: number }) {
   return (
     <Box
@@ -45,6 +57,17 @@ export function HelpOverlay({ width = 72 }: { width?: number }) {
       </Box>
       <Box marginTop={1} flexDirection="column">
         {KEYS.map(([k, v]) => (
+          <Box key={k}>
+            <Box width={20}>
+              <KeyHint keyName={k} action="" />
+            </Box>
+            <Text dimColor>{v}</Text>
+          </Box>
+        ))}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={ui.color.muted}>editing</Text>
+        {EDIT_KEYS.map(([k, v]) => (
           <Box key={k}>
             <Box width={20}>
               <KeyHint keyName={k} action="" />

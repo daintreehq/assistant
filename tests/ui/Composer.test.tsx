@@ -3,6 +3,10 @@ import { Composer } from "../../src/ui/components/Composer.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
+const ENTER = "\r";
+const UP = "[A";
+const CTRL_U = ""; // delete the whole line
+
 describe("Composer", () => {
   it("renders the single prompt glyph and the context hints", () => {
     const { lastFrame } = render(
@@ -38,7 +42,7 @@ describe("Composer", () => {
     );
     stdin.write("hello");
     await tick();
-    stdin.write("\r");
+    stdin.write(ENTER);
     await tick();
     expect(submitted).toBe("hello");
   });
@@ -49,8 +53,62 @@ describe("Composer", () => {
       <Composer busy focus={false} onSubmit={(v) => (submitted = v)} />,
     );
     stdin.write("nope");
-    stdin.write("\r");
+    stdin.write(ENTER);
     await tick();
     expect(submitted).toBeUndefined();
+  });
+
+  it("places the cursor at the end after a Tab completion", async () => {
+    let submitted: string | undefined;
+    const { stdin } = render(
+      <Composer busy={false} focus onSubmit={(v) => (submitted = v)} />,
+    );
+    stdin.write("/stat");
+    await tick();
+    stdin.write("\t"); // completes to "/status " (cursor must follow to the end)
+    await tick();
+    stdin.write("now");
+    await tick();
+    stdin.write(ENTER);
+    await tick();
+    expect(submitted).toBe("/status now"); // not "/statnow us"
+  });
+
+  it("records accepted prompts and recalls them with ↑", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer busy={false} focus onSubmit={() => {}} />,
+    );
+    stdin.write("alpha");
+    await tick();
+    stdin.write(ENTER); // accepted (onSubmit returns void) → recorded, cleared
+    await tick();
+    stdin.write("beta");
+    await tick();
+    stdin.write(ENTER);
+    await tick();
+    stdin.write(UP); // newest
+    await tick();
+    expect(lastFrame() ?? "").toContain("beta");
+    stdin.write(UP); // older
+    await tick();
+    expect(lastFrame() ?? "").toContain("alpha");
+  });
+
+  it("does not record a rejected submit in history", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer busy={false} focus onSubmit={() => false} />,
+    );
+    stdin.write("nope");
+    await tick();
+    stdin.write(ENTER); // rejected → text kept, NOT recorded
+    await tick();
+    expect(lastFrame() ?? "").toContain("nope");
+    stdin.write(CTRL_U); // clear the kept draft
+    await tick();
+    stdin.write(UP); // nothing to recall — history is empty
+    await tick();
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("nope");
+    expect(frame).toContain("supervise"); // the empty-draft placeholder
   });
 });
