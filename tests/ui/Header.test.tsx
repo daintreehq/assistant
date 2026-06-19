@@ -3,11 +3,26 @@ import { render } from "ink-testing-library";
 import { Header } from "../../src/ui/components/Header.js";
 
 describe("Header", () => {
-  it("renders the product wordmark and version", () => {
+  // Styling splits the wordmark and version into separate <Text> spans, so the
+  // rendered frame carries ANSI escapes between them; strip those before asserting
+  // they sit on the same row.
+  const stripAnsi = (s: string) => s.replace(/\[[0-9;]*m/g, "");
+
+  it("renders the product wordmark and version on one line", () => {
     const { lastFrame } = render(<Header columns={60} version="0.1.0" />);
-    const frame = lastFrame() ?? "";
-    expect(frame).toContain("Daintree assistant"); // brand wordmark
+    const frame = stripAnsi(lastFrame() ?? "");
+    expect(frame).toContain("Daintree Assistant"); // brand wordmark, capital A
     expect(frame).toContain("v0.1.0"); // version beside the name
+    // Wordmark and version share a row (Claude-Code style).
+    expect(frame).toMatch(/Daintree Assistant\s+v0\.1\.0/);
+  });
+
+  it("shows the working folder beneath the wordmark", () => {
+    const frame =
+      render(
+        <Header columns={60} version="0.1.0" folder="~/Projects/Daintree/assistant" />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("~/Projects/Daintree/assistant");
   });
 
   it("drops the operational badges from the masthead", () => {
@@ -18,9 +33,11 @@ describe("Header", () => {
     expect(frame).not.toContain("OPERATOR");
   });
 
-  it("closes the box with a full-width rule", () => {
+  it("has no rule when logging is off", () => {
+    // The masthead is borderless and frameless now — the only horizontal rule
+    // belongs to the debug-log section, which is absent unless logging is on.
     const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
-    expect(frame).toMatch(/[─-]{10,}/); // a long horizontal rule
+    expect(frame).not.toMatch(/[─-]{10,}/);
   });
 
   it("names the active run when one is supplied", () => {
@@ -30,7 +47,7 @@ describe("Header", () => {
     expect(lastFrame() ?? "").toContain("repair watcher tests");
   });
 
-  it("surfaces the debug log on its own line when active", () => {
+  it("surfaces the debug log under a rule when active", () => {
     const frame =
       render(
         <Header
@@ -40,19 +57,21 @@ describe("Header", () => {
           logFile="/tmp/daintree.log"
         />,
       ).lastFrame() ?? "";
-    expect(frame).toContain("LOG");
+    expect(frame).toMatch(/[─-]{10,}/); // the rule that opens the log section
+    expect(frame).toContain("logging"); // spelled out, not "LO"
     expect(frame).toContain("/tmp/daintree.log");
   });
 
   // The rendered row count is the contract behind ControlRoom's headerH budget
-  // (6 + runTitle + logging). If the layout drifts, this guard fails before the
-  // body silently overlaps the header on short terminals.
+  // (5 + 3 when logging). If the layout drifts, this guard fails before the body
+  // silently overlaps the header on short terminals.
   it("renders a stable row count matching the headerH budget", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(6);
-    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(7);
-    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(7);
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(5);
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(8);
+    // A run subtitle fits as the icon's third row, so it costs no extra height.
+    expect(rows(<Header columns={60} version="0.1.0" runTitle="busy" />)).toBe(5);
     expect(
       rows(
         <Header columns={60} version="0.1.0" runTitle="busy" logging logFile="/t.log" />,
@@ -68,10 +87,10 @@ describe("Header", () => {
         render(
           <Header columns={60} version="0.1.0" logging logFile="/tmp/t.log" />,
         ).lastFrame() ?? "";
-      expect(frame).toContain("Daintree assistant");
-      expect(frame).toContain("/^\\"); // ASCII canopy, not the block logo
+      expect(frame).toContain("Daintree Assistant");
+      expect(frame).toContain("/##\\"); // ASCII canopy, not the block logo
       expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
-      expect(frame).not.toContain("▟"); // no unicode block glyph leaks through
+      expect(frame).not.toContain("█"); // no unicode block glyph leaks through
       expect(frame).not.toContain("·"); // log separator uses the ASCII bullet
     } finally {
       if (prev === undefined) delete process.env.DAINTREE_ASCII;

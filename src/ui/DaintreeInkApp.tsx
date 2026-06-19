@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { useEffect, useState } from "react";
 import { useApp, useInput, useWindowSize } from "ink";
 import type { App as DaintreeApp } from "../cli/app.js";
@@ -67,12 +68,17 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     }
   });
 
-  const project =
-    app.config.projectPath.split("/").pop() || app.config.projectPath;
+  // The masthead shows the full working folder, tilde-abbreviated like a shell
+  // prompt (~/Projects/… rather than /Users/<name>/Projects/…).
+  const home = homedir();
+  const folder =
+    home && app.config.projectPath.startsWith(home)
+      ? `~${app.config.projectPath.slice(home.length)}`
+      : app.config.projectPath;
 
   return (
     <ControlRoom
-      project={project}
+      folder={folder}
       tier={app.config.tier}
       columns={columns}
       rows={rows}

@@ -9,7 +9,7 @@ function frameFor(label: string, columns: number, rows = 24): string {
   const f = byKey(label);
   const { lastFrame } = render(
     <ControlRoom
-      project="assistant-main"
+      folder="~/Projects/Daintree/assistant"
       tier="operator"
       columns={columns}
       rows={rows}
@@ -35,7 +35,7 @@ const WIDTHS = [58, 80, 120];
 describe("ControlRoom golden frames (deterministic fixtures)", () => {
   it.each(WIDTHS)("idle reads as connected + standing by at %i cols", (w) => {
     const frame = frameFor("idle", w, 32);
-    expect(frame).toContain("Daintree assistant"); // the masthead wordmark
+    expect(frame).toContain("Daintree Assistant"); // the masthead wordmark
     expect(frame).toContain("MCP"); // connection lives in the status line now
     expect(frame).toContain("Standing by"); // what is it doing?
     expect(frame).toContain("ops"); // what key reveals more?
@@ -43,7 +43,7 @@ describe("ControlRoom golden frames (deterministic fixtures)", () => {
 
   it.each(WIDTHS)("active run shows the supervised work at %i cols", (w) => {
     const frame = frameFor("active", w, 32);
-    expect(frame).toContain("Daintree assistant"); // the masthead wordmark
+    expect(frame).toContain("Daintree Assistant"); // the masthead wordmark
     expect(frame).toContain("term_8"); // which operation is active?
     expect(frame).toMatch(/Watching|WORKING|WATCHING/); // what is Daintree doing?
   });
