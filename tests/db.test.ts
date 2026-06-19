@@ -262,13 +262,15 @@ describe("Db", () => {
       const second = db.upsertEvent({
         source: "watcher",
         severity: "urgent",
-        title: "ignored on bump",
+        title: "refreshed on bump",
         summary: "second summary",
         dedupeKey: "dup-1",
       });
       expect(second.id).toBe(first.id);
       expect(second.count).toBe(2);
-      // The bump updates summary + severity.
+      // The bump refreshes title + summary + severity in place so a stable
+      // dedupeKey's live item tracks the latest state instead of freezing.
+      expect(second.title).toBe("refreshed on bump");
       expect(second.summary).toBe("second summary");
       expect(second.severity).toBe("urgent");
 

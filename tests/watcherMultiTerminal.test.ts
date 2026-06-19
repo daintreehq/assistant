@@ -1321,6 +1321,49 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     expect(errs.some((e) => e.title.includes("watcher disabled"))).toBe(true);
     db.close();
   });
+
+  // #60 regression: a single watcher+terminal whose classification evolves across
+  // check cycles must update ONE live inbox item in place — not leave a stale row
+  // per classification. The dedupeKey is keyed on watcher+terminal only, so the
+  // second publish bumps the first row's count and refreshes its title/summary.
+  it("updates one live inbox item in place as a terminal's classification changes (#60)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    // Mutable per-terminal config so we can flip the terminal's state between cycles.
+    const cfg: Record<string, { agentState?: string; waitingReason?: string }> = {
+      "term-x": { agentState: "waiting", waitingReason: "question" },
+    };
+    const ctx = ctxWith(db, queue, fakeMcp(cfg));
+    const w = db.insertWatcher({
+      kind: "terminal",
+      title: "evolving",
+      goal: "g",
+      targetsJson: JSON.stringify(["term-x"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: 0,
+    });
+
+    // Cycle 1: the agent is waiting on a question → waiting_for_input.
+    const first = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(first.classification).toBe("waiting_for_input");
+
+    // Cycle 2: the agent has now completed → completed_success (clean git pulse).
+    cfg["term-x"] = { agentState: "completed" };
+    const second = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(second.classification).toBe("completed_success");
+
+    // Exactly ONE open inbox item for the terminal — the classification change
+    // updated it in place rather than spawning a second stale row.
+    const events = queue.digest().filter((e) => e.target?.terminalId === "term-x");
+    expect(events.length).toBe(1);
+    expect(events[0].count).toBe(2);
+    // Title tracks the latest state, not the first classification.
+    expect(events[0].title).toBe("evolving: completed success");
+    expect(events[0].title).not.toContain("waiting");
+    db.close();
+  });
 });
 
 // A read failure (Daintree errored / the call threw) must be distinguishable from

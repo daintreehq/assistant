@@ -307,7 +307,7 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     // the first publish.
     const db = new Db(":memory:");
     const queue = new Queue(db);
-    const key = "watcher:w1:term-a:completed_unverified";
+    const key = "watcher:w1:term-a";
     queue.publish({
       source: "terminal_watcher",
       severity: "attention",

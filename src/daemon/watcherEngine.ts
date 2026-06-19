@@ -1285,7 +1285,7 @@ export async function runTerminalWatcherCheck(
         terminalId,
         severity,
         classification: outcome.classification,
-        dedupeKey: `watcher:${rec.id}:${terminalId}:${outcome.classification}`,
+        dedupeKey: `watcher:${rec.id}:${terminalId}`,
       });
       ctx.queue.publish({
         source: "terminal_watcher",
@@ -1295,8 +1295,10 @@ export async function runTerminalWatcherCheck(
           targets.length > 1 ? `[${terminalId}] ${outcome.summary}` : outcome.summary,
         target: { terminalId },
         evidence: outcome.evidence,
-        // Keyed by terminal so concurrent terminals don't collapse together.
-        dedupeKey: `watcher:${rec.id}:${terminalId}:${outcome.classification}`,
+        // Keyed by terminal (NOT classification) so concurrent terminals stay
+        // distinct while a single terminal's evolving state updates one live
+        // inbox item in place rather than spawning a fresh row per transition.
+        dedupeKey: `watcher:${rec.id}:${terminalId}`,
         recommendedActions: recommendedActionsFor(outcome.classification, terminalId),
       });
     }

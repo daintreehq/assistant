@@ -520,11 +520,16 @@ export class Db {
         // a repeated completed_unverified poll) must carry the latest structured
         // payload — a frozen VerificationResult would feed the conductor stale git
         // state. Falls back to the existing value when the new event omits them.
+        // Title is refreshed too: now that dedupeKeys are stable across state
+        // transitions (a watcher's classification / a timer's run-count no longer
+        // live in the key), a frozen title would show e.g. "Still Working" forever
+        // while summary moved on to "Completed Success".
         this.db
           .prepare(
-            "UPDATE events SET count = count + 1, summary = ?, severity = ?, evidenceJson = ?, recommendedActionsJson = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
+            "UPDATE events SET count = count + 1, title = ?, summary = ?, severity = ?, evidenceJson = ?, recommendedActionsJson = ?, updatedAt = ?, expiresAt = ? WHERE id = ?",
           )
           .run(
+            ev.title,
             ev.summary,
             ev.severity,
             ev.evidence ? JSON.stringify(ev.evidence) : (existing.evidenceJson as string | null) ?? null,
