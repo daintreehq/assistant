@@ -80,6 +80,11 @@ const CORE_TOOL_NAMES = [
   "daintree.status",
   "tool.search",
   "terminal.extract",
+  // Recipe step-progress tools are always available so any loaded multi-step
+  // recipe can checkpoint and resume without each recipe re-declaring them. They
+  // no-op when no recipe is active (the model has nothing to advance).
+  "recipe.step.advance",
+  "recipe.run.get",
 ];
 
 export interface AgentSessionDeps {

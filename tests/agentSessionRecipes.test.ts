@@ -101,6 +101,10 @@ const REGISTERED_TOOLS = [
   "queue.digest",
   "daintree.status",
   "tool.search",
+  // recipe step-progress tools are core — always available so any loaded recipe
+  // can checkpoint/resume without re-declaring them
+  "recipe.step.advance",
+  "recipe.run.get",
   // extra tools a recipe may require
   "agentTask.spawnForEdits",
   "watcher.terminal.create",
@@ -309,6 +313,10 @@ describe("AgentSession control messages", () => {
     // Core tools are always present.
     expect(names.has("context.snapshot")).toBe(true);
     expect(names.has("tool.search")).toBe(true);
+    // Recipe step-progress tools are core, so they survive pruning for any
+    // active recipe (the model needs them to checkpoint a multi-step runbook).
+    expect(names.has("recipe.step.advance")).toBe(true);
+    expect(names.has("recipe.run.get")).toBe(true);
     // The active recipe's required tools are present.
     expect(names.has("agentTask.spawnForEdits")).toBe(true);
     expect(names.has("watcher.terminal.create")).toBe(true);
@@ -325,6 +333,8 @@ describe("AgentSession control messages", () => {
       "queue.digest",
       "daintree.status",
       "tool.search",
+      "recipe.step.advance",
+      "recipe.run.get",
       "agentTask.spawnForEdits",
       "watcher.terminal.create",
     ]);

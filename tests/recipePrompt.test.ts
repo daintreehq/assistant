@@ -90,10 +90,19 @@ describe("loaded recipes message", () => {
     expect(msg).toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
   });
 
+  it("instructs the model to checkpoint steps via recipe.step.advance", () => {
+    const bundle = renderRecipeBundle([SPAWN_AGENT_FOR_EDITS_RECIPE]);
+    const msg = buildLoadedRecipesMessage(bundle);
+    expect(msg).toContain("recipe.step.advance");
+    expect(msg).toContain("recipe.run.get");
+  });
+
   it("renders a safe fallback for an empty bundle", () => {
     const msg = buildLoadedRecipesMessage(renderRecipeBundle([]));
     expect(msg).toContain("# Loaded recipes");
     expect(msg).toContain("No task-specific recipes");
+    // No recipe loaded ⇒ nothing to checkpoint ⇒ no step-tracking directive.
+    expect(msg).not.toContain("recipe.step.advance");
   });
 
   it("orders recipes deterministically by id (stable cache hash)", () => {

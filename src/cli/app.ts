@@ -106,6 +106,7 @@ export class App {
       queue: this.queue,
       router: this.router,
       projectPath: this.config.projectPath,
+      sessionId: this.sessionId,
       actor,
       actorId,
       // Read hooks live so setHooks() updates take effect without rebuilding the
