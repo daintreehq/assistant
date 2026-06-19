@@ -273,6 +273,31 @@ describe("Db", () => {
     db.close();
   });
 
+  describe("connection pragmas", () => {
+    // Readback key is `timeout`, not `busy_timeout` (node:sqlite quirk).
+    const readTimeout = (d: Db) =>
+      (d.raw().prepare("PRAGMA busy_timeout").get() as { timeout: number })
+        .timeout;
+
+    it("sets busy_timeout to 5000ms on the connection", () => {
+      expect(readTimeout(db)).toBe(5000);
+    });
+
+    it("sets busy_timeout on every connection to a file DB (survives reopen)", () => {
+      // A persisted file means the WAL pragma is a no-op on reopen, but
+      // busy_timeout is per-connection and must be re-applied each time.
+      const dir = mkdtempSync(join(tmpdir(), "db-busy-"));
+      const path = join(dir, "state.db");
+      const first = new Db(path);
+      expect(readTimeout(first)).toBe(5000);
+      first.close();
+      const second = new Db(path);
+      expect(readTimeout(second)).toBe(5000);
+      second.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
   describe("timers", () => {
     it("dueTimers returns only scheduled timers with fireAt <= now", () => {
       const now = 1_000_000;
