@@ -27,7 +27,20 @@ Your local tools wrap Daintree:
 - watcher.terminal.create / watcher.list / watcher.cancel — supervise terminals
   with the deterministic poller. timer.* schedule reminders/checks.
 - terminal.summarize — read+summarize one terminal's tail. terminal.focus —
-  reveal a terminal in the UI.
+  reveal a terminal in the UI. terminal.sendCommand — type+run a command in a
+  terminal (mutating, always confirmed).
+- agent.focusNextWaiting / agent.focusNextWorking / agent.focusNextAgent /
+  agent.focusPreviousAgent — move UI focus across agent terminals (UI only, no
+  mutation, no confirmation). workflow.focusNextAttention — focus the next agent
+  needing attention (waiting agents before working ones) and report the queue counts.
+- copyTree.generate — build a worktree's file digest as text (read-only).
+  copyTree.injectToTerminal — inject that digest into a terminal (mutating,
+  always confirmed). copyTree.generateAndCopyFile — copy it to the OS clipboard
+  as a file (system tier, always confirmed).
+- git.snapshotRevert / git.snapshotDelete — revert a worktree to, or delete, its
+  pre-agent git snapshot (system tier, always confirmed, IRREVERSIBLE). Daintree's
+  fleet.* arming ops and terminal.armByState are renderer-only UI gestures with no
+  MCP surface — they have no wrapper and can't be reached via daintree.call.
 - terminal.extract — read terminal tail(s) and extract caller-specified content
   (text or JSON) with the small model; an optional wait mode polls until a
   condition is met before extracting. terminal.extract.async runs it in the
@@ -56,7 +69,10 @@ Your local tools wrap Daintree:
   confirmed). Use ONLY for a Daintree tool with no local wrapper above. Tools that
   HAVE a wrapper are refused here and redirected: agent.launch ->
   agentTask.spawnForEdits; terminal.getOutput -> terminal.summarize /
-  terminal.extract; panel.focus -> terminal.focus. Reach for the wrapper, not this.
+  terminal.extract; panel.focus -> terminal.focus; terminal.sendCommand,
+  copyTree.injectToTerminal, copyTree.generateAndCopyFile, git.snapshotRevert,
+  git.snapshotDelete -> their same-named typed wrappers. Reach for the wrapper,
+  not this.
 
 ## Daintree MCP surface (what the wrappers call; verified shapes)
 Use this when building daintree.call args or reasoning about what a wrapper does.
@@ -128,7 +144,14 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "actions.list",
   "actions.search",
   "actions.getSchema",
+  "agent.focusNextAgent",
+  "agent.focusNextWaiting",
+  "agent.focusNextWorking",
+  "agent.focusPreviousAgent",
   "agent.launch",
+  "copyTree.generate",
+  "copyTree.generateAndCopyFile",
+  "copyTree.injectToTerminal",
   "forge.addIssueComment",
   "forge.addIssueLabel",
   "forge.approvePR",
@@ -155,6 +178,8 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "forge.requestReviewers",
   "forge.unassignIssue",
   "git.getProjectPulse",
+  "git.snapshotDelete",
+  "git.snapshotRevert",
   "panel.focus",
   "recipe.list",
   "recipe.run",
@@ -162,7 +187,9 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "terminal.getOutput",
   "terminal.getStatus",
   "terminal.list",
+  "terminal.sendCommand",
   "terminal.waitUntilIdle",
+  "workflow.focusNextAttention",
   "workflow.prepBranchForReview",
   "workflow.startWorkOnIssue",
   "worktree.createWithRecipe",

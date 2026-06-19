@@ -600,3 +600,224 @@ describe("forge write + getPR wrappers (#29)", () => {
     expect(c._calls.some((x) => x.name === "forge.closePR")).toBe(false);
   });
 });
+
+describe("typed copyTree / terminal-input / agent-focus / git-snapshot wrappers (#120)", () => {
+  function tool(name: string) {
+    const def = mcpTools.find((t) => t.name === name);
+    if (!def) throw new Error(`missing tool ${name}`);
+    return def;
+  }
+
+  const UI_FOCUS_NAMES = [
+    "agent.focusNextWaiting",
+    "agent.focusNextWorking",
+    "agent.focusNextAgent",
+    "agent.focusPreviousAgent",
+    "workflow.focusNextAttention",
+  ];
+
+  it("registers each new wrapper with its verified risk class", () => {
+    expect(tool("copyTree.generate").risk).toBe("read");
+    expect(tool("copyTree.generate").readOnly).toBe(true);
+    expect(tool("terminal.sendCommand").risk).toBe("terminal");
+    expect(tool("copyTree.injectToTerminal").risk).toBe("terminal");
+    for (const name of UI_FOCUS_NAMES) expect(tool(name).risk, name).toBe("ui");
+    expect(tool("copyTree.generateAndCopyFile").risk).toBe("system");
+    expect(tool("git.snapshotRevert").risk).toBe("git");
+    expect(tool("git.snapshotDelete").risk).toBe("git");
+  });
+
+  it("gives every mutating new wrapper a user-facing consequence line", () => {
+    for (const name of [
+      "terminal.sendCommand",
+      "copyTree.injectToTerminal",
+      "copyTree.generateAndCopyFile",
+      "git.snapshotRevert",
+      "git.snapshotDelete",
+    ]) {
+      const def = tool(name);
+      expect(def.consequence, name).toBeTruthy();
+      expect((def.consequence ?? "").length, name).toBeGreaterThan(10);
+      expect(def.consequence, name).not.toBe(def.risk);
+    }
+  });
+
+  it("copyTree.generate is a read wrapper that forwards args at supervisor tier", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("supervisor") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch(
+      "copyTree.generate",
+      { worktreeId: "wt-1", options: { maxFiles: 10 } },
+      c,
+    );
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "copyTree.generate")?.args).toEqual({
+      worktreeId: "wt-1",
+      options: { maxFiles: 10 },
+    });
+  });
+
+  it("UI focus wrappers forward an empty payload and run at supervisor tier (no confirmation)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("supervisor", async () => false) as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const name of UI_FOCUS_NAMES) {
+      const res = await reg.dispatch(name, {}, c);
+      expect(res.ok, name).toBe(true);
+      expect(c._calls.find((x) => x.name === name)?.args, name).toEqual({});
+    }
+  });
+
+  it("terminal.sendCommand forwards terminalId+command at operator tier (with confirmation)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("operator") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch(
+      "terminal.sendCommand",
+      { terminalId: "term_1", command: "npm test" },
+      c,
+    );
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "terminal.sendCommand")?.args).toEqual({
+      terminalId: "term_1",
+      command: "npm test",
+    });
+  });
+
+  it("copyTree.injectToTerminal forwards its args at operator tier (with confirmation)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("operator") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch(
+      "copyTree.injectToTerminal",
+      { terminalId: "term_2", worktreeId: "wt-1" },
+      c,
+    );
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "copyTree.injectToTerminal")?.args).toEqual({
+      terminalId: "term_2",
+      worktreeId: "wt-1",
+    });
+  });
+
+  it("git snapshot wrappers forward worktreeId at system tier (with confirmation)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const name of ["git.snapshotRevert", "git.snapshotDelete"]) {
+      const res = await reg.dispatch(name, { worktreeId: "wt-9" }, c);
+      expect(res.ok, name).toBe(true);
+      expect(c._calls.find((x) => x.name === name)?.args, name).toEqual({ worktreeId: "wt-9" });
+    }
+  });
+
+  it("copyTree.generateAndCopyFile forwards args at system tier (with confirmation)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    const res = await reg.dispatch("copyTree.generateAndCopyFile", { worktreeId: "wt-3" }, c);
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "copyTree.generateAndCopyFile")?.args).toEqual({
+      worktreeId: "wt-3",
+    });
+  });
+
+  it("tier-gates terminal/system/git wrappers below their required tier", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    // terminal risk: denied at supervisor.
+    let c = ctx("supervisor");
+    let res = await reg.dispatch("terminal.sendCommand", { terminalId: "t", command: "x" }, c);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("TIER_DENIED");
+    // system + git risk: denied at operator.
+    c = ctx("operator");
+    for (const [name, args] of [
+      ["copyTree.generateAndCopyFile", {}],
+      ["git.snapshotRevert", { worktreeId: "w" }],
+      ["git.snapshotDelete", { worktreeId: "w" }],
+    ] as const) {
+      res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("TIER_DENIED");
+    }
+  });
+
+  it("declining confirmation on a mutating new wrapper blocks the MCP call", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const term = ctx("operator", async () => false) as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    let res = await reg.dispatch("terminal.sendCommand", { terminalId: "t", command: "x" }, term);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("USER_DECLINED");
+
+    const sys = ctx("system", async () => false) as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    res = await reg.dispatch("git.snapshotRevert", { worktreeId: "w" }, sys);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("USER_DECLINED");
+
+    expect(term._calls.length).toBe(0);
+    expect(sys._calls.length).toBe(0);
+  });
+
+  it("rejects missing, empty, and whitespace-only required fields locally", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const [name, args] of [
+      ["terminal.sendCommand", { command: "npm test" }], // missing terminalId
+      ["terminal.sendCommand", { terminalId: "t", command: "" }], // empty command
+      ["terminal.sendCommand", { terminalId: "   ", command: "npm test" }], // whitespace terminalId
+      ["copyTree.injectToTerminal", { worktreeId: "wt" }], // missing terminalId
+      ["git.snapshotRevert", {}], // missing worktreeId
+      ["git.snapshotDelete", { worktreeId: "" }], // empty worktreeId
+      ["git.snapshotDelete", { worktreeId: "   " }], // whitespace worktreeId
+    ] as const) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("INVALID_ARGS");
+    }
+    // No invalid call ever reached MCP.
+    expect(c._calls.length).toBe(0);
+  });
+
+  it("daintree.call refuses the new wrappers' tools and redirects to them", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const name of [
+      "terminal.sendCommand",
+      "copyTree.injectToTerminal",
+      "copyTree.generateAndCopyFile",
+      "git.snapshotRevert",
+      "git.snapshotDelete",
+    ]) {
+      const res = await reg.dispatch("daintree.call", { name, arguments: {} }, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("USE_TYPED_WRAPPER");
+    }
+    // All redirected before MCP was touched.
+    expect(c._calls.length).toBe(0);
+  });
+});
