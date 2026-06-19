@@ -113,6 +113,12 @@ describe("parseAuditExportArgs", () => {
     const r = parseAuditExportArgs(["csv", "limit=99999"]);
     expect("error" in r && r.error).toContain("limit must be");
   });
+
+  it("rejects an empty filter value (e.g. from=)", () => {
+    expect("error" in parseAuditExportArgs(["json", "from="])).toBe(true);
+    expect("error" in parseAuditExportArgs(["json", "to="])).toBe(true);
+    expect("error" in parseAuditExportArgs(["json", "actor="])).toBe(true);
+  });
 });
 
 describe("audit.export tool", () => {

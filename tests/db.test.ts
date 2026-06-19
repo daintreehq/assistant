@@ -774,4 +774,19 @@ describe("Db.queryAudit (filtered audit export query)", () => {
   it("returns an empty array when nothing matches", () => {
     expect(db.queryAudit({ actor: "system" })).toEqual([]);
   });
+
+  it("orders strictly by ts DESC, not insertion order", () => {
+    // A separate DB so insertion order (4000 then 500) differs from ts order.
+    const d2 = mkdtempSync(join(tmpdir(), "db-audit-ord-"));
+    const db2 = new Db(join(d2, "state.db"));
+    try {
+      db2.insertAudit({ ts: 4000, actor: "main", toolName: "a", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "x" });
+      db2.insertAudit({ ts: 500, actor: "main", toolName: "b", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "y" });
+      db2.insertAudit({ ts: 2500, actor: "main", toolName: "c", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "z" });
+      expect(db2.queryAudit().map((r) => r.ts)).toEqual([4000, 2500, 500]);
+    } finally {
+      db2.close();
+      rmSync(d2, { recursive: true, force: true });
+    }
+  });
 });

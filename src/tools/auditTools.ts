@@ -73,6 +73,9 @@ export function parseAuditExportArgs(
     if (eq <= 0) return { error: `Bad filter '${tok}'. Use key=value (e.g. actor=main).` };
     const key = tok.slice(0, eq);
     const value = tok.slice(eq + 1);
+    // Reject empty values up front: `from=` would otherwise coerce to 0 (the
+    // Unix epoch) via Number(""), silently producing a valid-looking export.
+    if (value === "") return { error: `Empty value for '${key}'. Use key=value (e.g. actor=main).` };
     switch (key) {
       case "actor":
         filters.actor = value;
