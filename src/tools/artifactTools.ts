@@ -14,12 +14,15 @@ import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
 
 /**
- * Default and ceiling on how many characters one read returns. The ceiling is kept
- * below MAX_TOOL_RESULT_CHARS so a single read's own result doesn't overflow and get
- * re-stashed as yet another artifact; the model pages large artifacts across calls.
+ * Default and ceiling on how many characters one read returns. The ceiling is set so
+ * a single read's own result can't itself overflow MAX_TOOL_RESULT_CHARS (8000) and
+ * get re-stashed as a nested artifact. The stored artifact is already-escaped JSON,
+ * so wrapping a slice of it in this tool's result re-escapes every quote/backslash —
+ * up to a 2× expansion. 3500 chars therefore serialize to ≤ ~7200 worst-case, with
+ * headroom; the model pages large artifacts across multiple calls.
  */
-const DEFAULT_READ_CHARS = 4000;
-const MAX_READ_CHARS = 6000;
+const DEFAULT_READ_CHARS = 3500;
+const MAX_READ_CHARS = 3500;
 
 const ReadArgs = z.object({
   artifactId: z

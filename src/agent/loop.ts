@@ -50,6 +50,21 @@ const MAX_TOOL_RESULT_CHARS = 8000;
  */
 const TRUNCATION_PREVIEW_CHARS = 1500;
 /**
+ * Cap on the summary echoed inside the truncation stub. An oversized result almost
+ * always carries a normal-length summary, but nothing in the ToolResult contract
+ * bounds it, and a multi-KB summary alone would push the stub itself back over
+ * MAX_TOOL_RESULT_CHARS. The full summary survives in the stored artifact.
+ */
+const TRUNCATION_SUMMARY_CHARS = 500;
+/**
+ * How many artifacts a session retains before oldest-first eviction. The store
+ * lives for the whole session; a run that repeatedly overflows (large file reads,
+ * big MCP responses) would otherwise grow it without bound. A just-stashed artifact
+ * is read almost immediately, long before this many newer ones could evict it, and
+ * a stale id simply yields ARTIFACT_NOT_FOUND (handled gracefully).
+ */
+const MAX_STORED_ARTIFACTS = 64;
+/**
  * Auto-compact the conversation once the estimated prompt size crosses this many
  * tokens. Conservative — well under a typical 128k context window, but high
  * enough that ordinary sessions never trip it. Tune here if the window changes.
@@ -753,18 +768,28 @@ export function serializeToolResult(
   const preview = s.slice(0, TRUNCATION_PREVIEW_CHARS);
   let artifactId: string | undefined;
   if (artifactStore) {
+    while (artifactStore.size >= MAX_STORED_ARTIFACTS) {
+      // Map iterates in insertion order, so the first key is the oldest.
+      const oldest = artifactStore.keys().next().value;
+      if (oldest === undefined) break;
+      artifactStore.delete(oldest);
+    }
     artifactId = `artifact_${randomUUID().slice(0, 8)}`;
     artifactStore.set(artifactId, s);
   }
   const note = artifactId
     ? `Output truncated to a ${preview.length}-char preview of ${totalChars} total. Call the artifact.read tool with artifactId "${artifactId}" (and offset/limit) to page through the full result.`
     : `Output truncated to a ${preview.length}-char preview of ${totalChars} total; the full result is not retrievable in this context.`;
+  // Surface the error class on a failed-and-oversized result so the model can make
+  // its retry decision from the inline stub, without first paging the artifact.
+  const err = res.error as { code?: unknown; recoverable?: unknown } | undefined;
   return JSON.stringify({
     ok: res.ok,
-    summary: res.summary,
+    summary: res.summary.slice(0, TRUNCATION_SUMMARY_CHARS),
     result: {
       truncated: true,
       ...(artifactId ? { artifactId } : {}),
+      ...(err ? { errorCode: err.code, recoverable: err.recoverable } : {}),
       totalChars,
       totalBytes,
       preview,

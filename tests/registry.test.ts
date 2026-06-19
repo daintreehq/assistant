@@ -105,6 +105,27 @@ describe("ToolRegistry.dispatch", () => {
     expect(audit[0].outcome).toBe("ok");
   });
 
+  it("dispatches artifact.read through the full registry and enforces its limit cap", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(buildAllTools());
+    reg.assertSafe(); // artifact.read is read-only, so it must pass the no-file-edit guard.
+    const store = new Map<string, string>([["artifact_x", "0123456789"]]);
+    const ctx = { ...makeCtx(db, config, vi.fn()), artifactStore: store };
+
+    const ok = await reg.dispatch("artifact.read", { artifactId: "artifact_x", limit: 4 }, ctx);
+    expect(ok.ok).toBe(true);
+    expect((ok.result as { content: string }).content).toBe("0123");
+
+    // The schema caps limit at MAX_READ_CHARS (3500) so a read can't itself overflow.
+    const tooBig = await reg.dispatch(
+      "artifact.read",
+      { artifactId: "artifact_x", limit: 7000 },
+      ctx,
+    );
+    expect(tooBig.ok).toBe(false);
+    expect(tooBig.error?.code).toBe("INVALID_ARGS");
+  });
+
   it("stamps ctx.runId onto the audit row, and leaves it absent when unset", async () => {
     const reg = new ToolRegistry();
     reg.register(readTool);

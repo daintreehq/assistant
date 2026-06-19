@@ -156,4 +156,49 @@ describe("serializeToolResult truncation (#78)", () => {
     expect(parsed).toMatchObject({ ok: true, summary: "tiny", result: "hello" });
     expect(parsed.result?.truncated).toBeUndefined();
   });
+
+  it("caps an oversized summary so the stub itself stays within the inline limit", () => {
+    // A huge summary with a tiny result still overflows; the stub must not echo it whole.
+    const s = serializeToolResult({ ok: true, summary: "S".repeat(8000), result: "tiny" });
+    expect(s.length).toBeLessThan(8000);
+    const parsed = JSON.parse(s);
+    expect(parsed.result.truncated).toBe(true);
+    expect(parsed.summary.length).toBeLessThanOrEqual(500);
+  });
+
+  it("surfaces the error class in the stub for a failed oversized result", () => {
+    const s = serializeToolResult({
+      ok: false,
+      summary: "failed",
+      result: "x".repeat(9000),
+      error: { code: "DB_ERROR", message: "boom", recoverable: false },
+    });
+    const parsed = JSON.parse(s);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.result.errorCode).toBe("DB_ERROR");
+    expect(parsed.result.recoverable).toBe(false);
+  });
+
+  it("a re-paged slice of a stored artifact does not itself re-overflow (escape amplification)", () => {
+    // Escape-heavy content (backslashes) doubles under each JSON.stringify. Storing it
+    // and then paging a MAX_READ_CHARS slice back through serializeToolResult must stay
+    // valid and within the inline limit — not produce a second, nested artifact stub.
+    const store = new Map<string, string>();
+    const heavy = "\\".repeat(8000);
+    const stub = serializeToolResult({ ok: true, summary: "heavy", result: heavy }, store);
+    const id = JSON.parse(stub).result.artifactId as string;
+    const full = store.get(id)!;
+    // Simulate artifact.read returning its largest possible slice, then re-serializing it.
+    const slice = full.slice(0, 3500);
+    const reSerialized = serializeToolResult({
+      ok: true,
+      summary: "page",
+      result: { artifactId: id, content: slice, offset: 0, eof: false },
+    });
+    expect(reSerialized.length).toBeLessThanOrEqual(8000);
+    // It stayed inline (no nested truncation) — parses to the real content, not another stub.
+    const parsed = JSON.parse(reSerialized);
+    expect(parsed.result.truncated).toBeUndefined();
+    expect(parsed.result.content).toBe(slice);
+  });
 });
