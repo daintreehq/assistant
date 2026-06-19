@@ -7,12 +7,19 @@ import {
 } from "../splash/frames.js";
 
 /**
- * The boot splash: the Daintree mark drawing itself in, centered on an otherwise
- * empty screen, played while the session connects/loads in the background and then
- * dissolved into the cockpit. The frames (scripts/gen-splash.py) reproduce the app's
- * own logo-reveal — trunk, then legs, then canopy arches — as an anti-aliased ASCII
- * coverage ramp; here we just step through them and tint each row with a top-to-base
- * green gradient so the canopy reads lit and the trunk grounded.
+ * The boot splash: the Daintree mark drawing itself in, played while the session
+ * connects/loads in the background and then dissolved into the cockpit. The frames
+ * (scripts/gen-splash.py) reproduce the app's own logo-reveal — trunk, then legs,
+ * then canopy arches — as an anti-aliased ASCII coverage ramp; here we just step
+ * through them and tint each row with a top-to-base green gradient so the canopy
+ * reads lit and the trunk grounded.
+ *
+ * INLINE SIZING. The cockpit renders into the terminal's MAIN buffer (see
+ * ControlRoom), so the splash does NOT fill and vertically-center the screen — a
+ * screen-high frame in the main buffer just pushes scrollback around and risks
+ * leaving artifacts when it dissolves. Instead it draws at its NATURAL size, left-
+ * aligned, after a couple of blank lines for breathing room, and Ink cleanly erases
+ * those rows when the cockpit takes over.
  *
  * It self-advances and holds on the final frame, calling `onComplete` once when the
  * draw finishes. It does NOT decide when to leave — the controller owns that (it
@@ -38,10 +45,10 @@ export function StartupSplash({
   lingerMs = 420,
   onComplete,
 }: {
-  /** Available width to center the mark within. */
+  /** Available width; only used to skip the mark on a terminal too narrow to hold it. */
   columns: number;
-  /** Available height to center the mark within. */
-  rows: number;
+  /** Accepted for call-site compat; the inline splash no longer centers vertically. */
+  rows?: number;
   /** Playback rate; 28fps over 20 frames is a ~0.7s draw. */
   fps?: number;
   /** How long to hold the finished logo before signalling completion, so it doesn't
@@ -68,10 +75,12 @@ export function StartupSplash({
     onCompleteRef.current?.();
   }, []);
 
-  // The mark is a fixed SPLASH_WIDTH x SPLASH_HEIGHT block. On a terminal too small to
-  // hold it a clipped logo just looks broken, so skip the animation entirely and let
-  // boot proceed at once (fireOnce satisfies the controller's draw-done gate).
-  const tooSmall = columns < SPLASH_WIDTH || rows < SPLASH_HEIGHT;
+  // The mark is a fixed SPLASH_WIDTH-wide block. On a terminal too narrow to hold it
+  // (with a column of margin so the mark never sits in the autowrap column and ghosts
+  // each animation frame) a clipped logo just looks broken, so skip the animation
+  // entirely and let boot proceed at once (fireOnce satisfies the draw-done gate). We
+  // no longer gate on rows — the splash draws at its natural height, not the screen's.
+  const tooSmall = columns <= SPLASH_WIDTH;
 
   useEffect(() => {
     if (tooSmall) {
@@ -88,26 +97,20 @@ export function StartupSplash({
     return () => clearTimeout(id);
   }, [tooSmall, index, last, fps, lingerMs, fireOnce]);
 
-  // Render an empty full-size box so the layout stays stable for the instant before
-  // boot dissolves it.
-  if (tooSmall) return <Box width={columns} height={rows} />;
+  // Nothing to draw on a too-narrow terminal — boot proceeds immediately.
+  if (tooSmall) return null;
 
   const frameRows = (SPLASH_FRAMES[index] ?? "").split("\n");
 
+  // Natural size, left-aligned, a couple of blank lines down for breathing room.
+  // No screen-filling box: the inline main buffer keeps it small and erases cleanly.
   return (
-    <Box
-      width={columns}
-      height={rows}
-      alignItems="center"
-      justifyContent="center"
-    >
-      <Box flexDirection="column" width={SPLASH_WIDTH} height={SPLASH_HEIGHT}>
-        {frameRows.map((line, i) => (
-          <Text key={i} color={rowColor(i, SPLASH_HEIGHT)}>
-            {line}
-          </Text>
-        ))}
-      </Box>
+    <Box flexDirection="column" width={SPLASH_WIDTH} marginTop={2}>
+      {frameRows.map((line, i) => (
+        <Text key={i} color={rowColor(i, SPLASH_HEIGHT)}>
+          {line}
+        </Text>
+      ))}
     </Box>
   );
 }

@@ -131,7 +131,17 @@ export function ControlRoom({
   composerRef,
   onResolve = () => {},
 }: ControlRoomProps) {
-  const contentWidth = Math.max(20, Math.min(columns, CONTENT_MAX));
+  // Reserve the terminal's last column. The cockpit renders inline (main buffer,
+  // no alternate screen), so the repainting region is erased and redrawn with
+  // cursor moves whose count comes from Ink's own layout — NOT the terminal's
+  // actual wrapping. If any dynamic line fills the full width its final glyph
+  // lands in the autowrap (DECAWM) column, where many terminals wrap it onto a
+  // second physical row. That row is invisible to Ink's height accounting, so on
+  // the next repaint the cursor moves up one row short, the top row is never
+  // erased, and a stale copy is orphaned into scrollback (the status line "ghosts"
+  // we saw triplicated). Keeping content one column shy of the edge means nothing
+  // ever occupies the autowrap column, so every repaint erases cleanly.
+  const contentWidth = Math.max(20, Math.min(columns - 1, CONTENT_MAX));
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
   const liveStart = liveTailStart(transcript);
