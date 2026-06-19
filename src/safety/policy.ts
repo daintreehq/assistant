@@ -171,8 +171,12 @@ const SECRET_DIR_SEGMENTS: ReadonlySet<string> = new Set([
   ".docker",
 ]);
 
-/** A single path segment that signals secrets (env file/dir or credential dir). */
-function isSensitiveSegment(seg: string): boolean {
+/**
+ * A single path segment that signals secrets (env file/dir or credential dir).
+ * Callers pass a lowercased segment — `isSensitivePath` lowercases before
+ * splitting, and the fs walkers lowercase `dirent.name` at the call site.
+ */
+export function isSensitiveSegment(seg: string): boolean {
   if (SECRET_DIR_SEGMENTS.has(seg)) return true;
   // .env, prod.env, .env.local, an `.env/` secrets dir, etc.
   if (seg === ".env" || seg.endsWith(".env") || seg.startsWith(".env.")) return true;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +22,34 @@ beforeAll(async () => {
   await fs.writeFile(path.join(tempDir, "app.ts"), "const apiKey = readEnv();\n", "utf8");
   // A "binary" file with NUL bytes.
   await fs.writeFile(path.join(tempDir, "blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x00, 0x42]));
+  // Credential stores nested under the project root. Each holds a file with a
+  // unique marker so a search/list that descended into them would surface it.
+  await fs.mkdir(path.join(tempDir, ".ssh"), { recursive: true });
+  await fs.writeFile(path.join(tempDir, ".ssh", "id_ed25519"), "SSH_MARKER_aaa\n", "utf8");
+  await fs.mkdir(path.join(tempDir, "nested", ".aws"), { recursive: true });
+  await fs.writeFile(
+    path.join(tempDir, "nested", ".aws", "credentials"),
+    "AWS_MARKER_bbb\n",
+    "utf8",
+  );
+  // An ordinary sibling in nested/ so list tests prove ordinary entries survive.
+  await fs.writeFile(path.join(tempDir, "nested", "readme.txt"), "ORDINARY\n", "utf8");
+  await fs.mkdir(path.join(tempDir, ".env.local"), { recursive: true });
+  await fs.writeFile(path.join(tempDir, ".env.local", "secret.txt"), "ENV_MARKER_ccc\n", "utf8");
+  // Uppercase credential dir: prune lowercases dirent.name before matching.
+  await fs.mkdir(path.join(tempDir, ".KUBE"), { recursive: true });
+  await fs.writeFile(path.join(tempDir, ".KUBE", "config"), "KUBE_MARKER_ddd\n", "utf8");
+  // Benign-named symlink pointing at a credential dir (cloud -> .aws). Skipped
+  // on platforms where symlink creation fails (e.g. Windows without privilege).
+  try {
+    await fs.symlink(
+      path.join(tempDir, "nested", ".aws"),
+      path.join(tempDir, "cloud"),
+      "dir",
+    );
+  } catch {
+    /* symlinks unsupported here; the symlink-specific test handles absence */
+  }
   ctx = { projectPath: tempDir } as unknown as ToolContext;
 });
 
@@ -82,5 +110,87 @@ describe("fs.search skips secrets and binaries (#1, #13)", () => {
     expect(res.ok).toBe(true);
     const matches = (res.result as { matches: Array<{ file: string }> }).matches;
     expect(matches.some((m) => m.file === ".env")).toBe(false);
+  });
+});
+
+describe("fs.search does not descend into credential dirs (#122)", () => {
+  it.each([
+    ["SSH_MARKER_aaa", ".ssh/id_ed25519"],
+    ["AWS_MARKER_bbb", "nested/.aws/credentials"],
+    ["ENV_MARKER_ccc", ".env.local/secret.txt"],
+    ["KUBE_MARKER_ddd", ".KUBE/config"],
+  ])("finds no match for %s inside %s", async (marker) => {
+    const res = await tool("fs.search").handler({ query: marker }, ctx);
+    expect(res.ok).toBe(true);
+    const matches = (res.result as { matches: Array<{ file: string }> }).matches;
+    expect(matches).toHaveLength(0);
+  });
+
+  it("never reads inside a credential dir (prune fires at walk time, not post-hoc)", async () => {
+    // The post-hoc isSensitivePath filter would hide the matches above even if
+    // the walk descended. Spying on readdir proves the dir is never opened — so
+    // this asserts the walk-time prune, not just the filtered outcome.
+    const spy = vi.spyOn(fs, "readdir");
+    try {
+      await tool("fs.search").handler({ query: "anything" }, ctx);
+      const dirsRead = spy.mock.calls.map((c) => path.basename(String(c[0])));
+      expect(dirsRead).not.toContain(".ssh");
+      expect(dirsRead).not.toContain(".aws");
+      expect(dirsRead).not.toContain(".env.local");
+      expect(dirsRead).not.toContain(".KUBE");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("fs.list omits credential dirs (#122)", () => {
+  it("does not surface .ssh, .aws, or .env.local at any depth", async () => {
+    const res = await tool("fs.list").handler({ depth: 10 }, ctx);
+    expect(res.ok).toBe(true);
+    const entries = (res.result as { entries: Array<{ name: string }> }).entries;
+    for (const e of entries) {
+      const segs = e.name.split("/");
+      expect(segs).not.toContain(".ssh");
+      expect(segs).not.toContain(".aws");
+      expect(segs).not.toContain(".env.local");
+    }
+  });
+
+  it("refuses to list a credential dir directly with FS_SENSITIVE", async () => {
+    const res = await tool("fs.list").handler({ path: ".ssh" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("FS_SENSITIVE");
+  });
+
+  it("refuses to list a nested credential path with FS_SENSITIVE", async () => {
+    const res = await tool("fs.list").handler({ path: "nested/.aws" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("FS_SENSITIVE");
+  });
+
+  it("still lists ordinary nested directories", async () => {
+    const res = await tool("fs.list").handler({ path: "nested", depth: 1 }, ctx);
+    expect(res.ok).toBe(true);
+    const entries = (res.result as { entries: Array<{ name: string }> }).entries;
+    // `nested` itself is fine; its .aws child is pruned but readme.txt survives.
+    expect(entries.some((e) => e.name === ".aws")).toBe(false);
+    expect(entries.some((e) => e.name === "readme.txt")).toBe(true);
+  });
+
+  it("refuses a benign-named symlink that resolves to a credential dir", async () => {
+    // The symlink fixture may not exist if the platform blocked creation; only
+    // assert when it's present so the suite stays portable.
+    let symlinkExists = false;
+    try {
+      await fs.lstat(path.join(tempDir, "cloud"));
+      symlinkExists = true;
+    } catch {
+      /* symlink not created on this platform */
+    }
+    if (!symlinkExists) return;
+    const res = await tool("fs.list").handler({ path: "cloud" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("FS_SENSITIVE");
   });
 });
