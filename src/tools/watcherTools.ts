@@ -52,6 +52,147 @@ const CancelArgs = z.object({
   id: z.string().describe("Watcher id to cancel."),
 });
 
+/*
+ * JSON Schema for the WatchCondition DSL surfaced to the model on
+ * `watcher.terminal.create`. The Zod `WatchCondition` union in schemas.ts is the
+ * runtime authority — this hand-written shape is what Fireworks actually sees, so
+ * the model can discover the full DSL (especially the `modelJudge` leaf, which is
+ * otherwise invisible behind an opaque `{ type: "object" }`).
+ *
+ * Fireworks tool-calling constraints shape this schema — do not "clean it up":
+ *  - Use `anyOf`, NEVER `oneOf` (Fireworks does not support `oneOf`).
+ *  - No `$ref`/recursive schemas: grammar-guided decoding degrades on deeply
+ *    recursive `anyOf`, so the combinators (all/any/not) are flattened to a single
+ *    level — their children are atomic leaves only, which covers all real usage.
+ *  - The DSL `not` member is a *property literally named "not"*, NOT the JSON-Schema
+ *    `not` keyword (also unsupported by Fireworks, and a silent-drop hazard). Never
+ *    hoist it to a top-level `not` key on a schema object.
+ *
+ * The `stateIs` enum mirrors `AgentState` in schemas.ts — keep the two in sync.
+ */
+const WATCH_CONDITION_LEAVES: Record<string, unknown>[] = [
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      // Mirror of AgentState in schemas.ts — keep in sync if the enum changes.
+      stateIs: {
+        type: "string",
+        enum: ["idle", "working", "waiting", "directing", "completed", "exited"],
+        description: "Fire when the watched terminal's agent reaches this lifecycle state.",
+      },
+    },
+    required: ["stateIs"],
+  },
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      runtimeStatusIs: {
+        type: "string",
+        enum: ["running", "exited"],
+        description: "Fire on the terminal process runtime status. Free, deterministic.",
+      },
+    },
+    required: ["runtimeStatusIs"],
+  },
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      contains: {
+        type: "string",
+        description:
+          "Fire when recent terminal output contains this substring (non-empty). Free, deterministic — prefer this over modelJudge when it suffices.",
+      },
+    },
+    required: ["contains"],
+  },
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      regex: {
+        type: "string",
+        description:
+          "Fire when recent terminal output matches this regular expression (non-empty, valid). Free, deterministic.",
+      },
+    },
+    required: ["regex"],
+  },
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      noOutputForMs: {
+        type: "number",
+        description:
+          "Fire when the terminal has produced no output for this many ms (positive integer). Free, deterministic.",
+      },
+    },
+    required: ["noOutputForMs"],
+  },
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      modelJudge: {
+        type: "string",
+        description:
+          "Fire when the small model answers yes to this natural-language yes/no question about the terminal's output. Use only when the deterministic leaves (contains/regex/stateIs/runtimeStatusIs/noOutputForMs) cannot express the condition: each distinct question costs one small-model call per cadence tick (deduped across stopWhen and alertWhen; multiple distinct questions run in parallel). Example: \"Did the build finish successfully?\"",
+      },
+    },
+    required: ["modelJudge"],
+  },
+];
+
+// One level of combinators over atomic leaves. Children reference the leaf list
+// only (no nested combinators) — see the recursion note above.
+const WATCH_CONDITION_SCHEMA: Record<string, unknown> = {
+  anyOf: [
+    ...WATCH_CONDITION_LEAVES,
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        all: {
+          type: "array",
+          minItems: 1,
+          items: { anyOf: WATCH_CONDITION_LEAVES },
+          description: "Fire only when every child condition is met. Children are atomic leaves.",
+        },
+      },
+      required: ["all"],
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        any: {
+          type: "array",
+          minItems: 1,
+          items: { anyOf: WATCH_CONDITION_LEAVES },
+          description: "Fire when at least one child condition is met. Children are atomic leaves.",
+        },
+      },
+      required: ["any"],
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      // `not` is a property NAME here, not the JSON-Schema `not` keyword. Never
+      // hoist it to a top-level `not` on this object — Fireworks would drop it.
+      properties: {
+        not: {
+          anyOf: WATCH_CONDITION_LEAVES,
+          description: "Fire when the child condition is NOT met. Child is an atomic leaf.",
+        },
+      },
+      required: ["not"],
+    },
+  ],
+};
+
 function summarizeWatcher(w: WatcherRecord): string {
   let targets: string[] = [];
   try {
@@ -66,7 +207,7 @@ export const watcherTools: ToolDef[] = [
   {
     name: "watcher.terminal.create",
     description:
-      "Create a terminal watcher that periodically classifies one or more Daintree terminals and raises attention events. Read-only orchestration; never edits files.",
+      "Create a terminal watcher that periodically classifies one or more Daintree terminals and raises attention events. Read-only orchestration; never edits files. The optional stopWhen/alertWhen conditions use the WatchCondition DSL: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, modelJudge, plus one level of all/any/not combinators. Prefer the deterministic leaves (free); modelJudge runs a small-model call per check.",
     risk: "local",
     schema: CreateArgs,
     parameters: {
@@ -96,12 +237,14 @@ export const watcherTools: ToolDef[] = [
           description: "Stop watching after this many ms (timeout).",
         },
         stopWhen: {
-          type: "object",
-          description: "Condition that ends the watcher when met.",
+          ...WATCH_CONDITION_SCHEMA,
+          description:
+            "Condition that ends the watcher when met. WatchCondition DSL — pick exactly one member per object (see the per-branch descriptions).",
         },
         alertWhen: {
-          type: "object",
-          description: "Condition that raises an attention event when met.",
+          ...WATCH_CONDITION_SCHEMA,
+          description:
+            "Condition that raises an attention event when met. Same WatchCondition DSL as stopWhen.",
         },
         modelTier: {
           type: "string",

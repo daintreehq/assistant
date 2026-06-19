@@ -120,6 +120,82 @@ describe("WatchCondition rejects degenerate conditions", () => {
   });
 });
 
+describe("watcher.terminal.create parameters schema surfaces the WatchCondition DSL", () => {
+  // The hand-written JSON Schema in `parameters` is what Fireworks sees; these
+  // tests guard the Fireworks-incompatible patterns and the modelJudge surfacing.
+  const params = create.parameters as Record<string, any>;
+  const stopWhen = params.properties.stopWhen as Record<string, any>;
+  const alertWhen = params.properties.alertWhen as Record<string, any>;
+  const branches = stopWhen.anyOf as Record<string, any>[];
+
+  const leafFor = (key: string) =>
+    branches.find((b) => b.properties && key in b.properties);
+
+  it("describes stopWhen and alertWhen as a 9-branch anyOf (6 leaves + all/any/not)", () => {
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches).toHaveLength(9);
+    expect(Array.isArray(alertWhen.anyOf)).toBe(true);
+    expect((alertWhen.anyOf as unknown[]).length).toBe(9);
+    for (const key of [
+      "stateIs",
+      "runtimeStatusIs",
+      "contains",
+      "regex",
+      "noOutputForMs",
+      "modelJudge",
+      "all",
+      "any",
+      "not",
+    ]) {
+      expect(leafFor(key), `missing branch for ${key}`).toBeDefined();
+    }
+  });
+
+  it("exposes the full AgentState enum on the stateIs leaf", () => {
+    const stateIs = leafFor("stateIs")!;
+    expect(stateIs.properties.stateIs.enum).toEqual([
+      "idle",
+      "working",
+      "waiting",
+      "directing",
+      "completed",
+      "exited",
+    ]);
+  });
+
+  it("documents the modelJudge per-check model cost", () => {
+    const modelJudge = leafFor("modelJudge")!;
+    expect(modelJudge.properties.modelJudge.description).toMatch(/model call/i);
+  });
+
+  it("flattens all/any combinators to an anyOf of atomic leaves (no deep recursion)", () => {
+    const all = leafFor("all")!;
+    expect(Array.isArray(all.properties.all.items.anyOf)).toBe(true);
+    // Children are the atomic leaf set only — no nested all/any/not branch.
+    const childKeys = (all.properties.all.items.anyOf as Record<string, any>[]).flatMap(
+      (b) => Object.keys(b.properties ?? {}),
+    );
+    expect(childKeys).not.toContain("all");
+    expect(childKeys).not.toContain("any");
+    expect(childKeys).not.toContain("not");
+  });
+
+  it("expresses the DSL `not` as a property, not the JSON-Schema `not` keyword", () => {
+    const notBranch = leafFor("not")!;
+    expect(notBranch.properties.not.anyOf).toBeDefined();
+    expect(notBranch.required).toContain("not");
+    // The schema object itself must never carry a top-level JSON-Schema `not`.
+    expect("not" in notBranch).toBe(false);
+    expect("not" in stopWhen).toBe(false);
+  });
+
+  it("uses no Fireworks-incompatible keywords (oneOf / $ref) anywhere", () => {
+    const json = JSON.stringify(params);
+    expect(json).not.toContain("oneOf");
+    expect(json).not.toContain("$ref");
+  });
+});
+
 describe("watcher.cancel revokes scoped grants", () => {
   it("cancels the watcher and revokes its live automation grants", async () => {
     const db = new Db(":memory:");
