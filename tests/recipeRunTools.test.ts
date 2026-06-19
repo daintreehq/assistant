@@ -130,6 +130,53 @@ describe("recipe.step.advance", () => {
     expect((res as { summary: string }).summary).toContain("skipped");
   });
 
+  it("does not regress currentStep on a stale lower-numbered replay", async () => {
+    const c = ctx();
+    await advance.handler({ recipeId: "r.flow", completedStep: 1, nextStep: 2 }, c);
+    await advance.handler({ recipeId: "r.flow", completedStep: 2, nextStep: 3 }, c);
+    // A late replay of an earlier step must not pull the live pointer back.
+    const res = await advance.handler(
+      { recipeId: "r.flow", completedStep: 1, nextStep: 2 },
+      c,
+    );
+    expect((res as AdvanceResult).result.state.currentStep).toBe(3);
+  });
+
+  it("preserves completedAt when a finished run is touched again by a non-final replay", async () => {
+    const c = ctx();
+    await advance.handler({ recipeId: "r.flow", completedStep: 1, nextStep: 2 }, c);
+    const done = await advance.handler(
+      { recipeId: "r.flow", completedStep: 2 },
+      c,
+    );
+    const completedAt = (done as AdvanceResult).result.state.completedAt;
+    expect(completedAt).toBeGreaterThan(0);
+    // A later non-final advance must not wipe the original completion stamp.
+    const replay = await advance.handler(
+      { recipeId: "r.flow", completedStep: 1, nextStep: 2 },
+      c,
+    );
+    expect((replay as AdvanceResult).result.state.completedAt).toBe(completedAt);
+  });
+
+  it("drops corrupted stored step entries and still records the new step", async () => {
+    const c = ctx();
+    c.db.insertRecipeRunState({
+      sessionId: "ses_test",
+      recipeId: "r.corrupt",
+      currentStep: 1,
+      // An invalid status and a non-object entry — both must be tolerated.
+      stepsJson: JSON.stringify([{ index: 1, status: "blocked", ts: 1 }, "garbage"]),
+    });
+    const res = await advance.handler(
+      { recipeId: "r.corrupt", completedStep: 2, nextStep: 3 },
+      c,
+    );
+    const { state } = (res as AdvanceResult).result;
+    expect(state.steps.map((s) => s.index)).toEqual([2]);
+    expect(state.steps[0].status).toBe("done");
+  });
+
   it("keeps separate runs per recipe within the same session", async () => {
     const c = ctx();
     await advance.handler({ recipeId: "r.a", completedStep: 1, nextStep: 2 }, c);
@@ -157,6 +204,17 @@ describe("recipe.run.get", () => {
     expect(state).not.toBeNull();
     expect(state!.currentStep).toBe(2);
     expect(state!.status).toBe("active");
+  });
+
+  it("reports completed status and completedAt for a finished run", async () => {
+    const c = ctx();
+    await advance.handler({ recipeId: "r.flow", completedStep: 1, nextStep: 2 }, c);
+    await advance.handler({ recipeId: "r.flow", completedStep: 2 }, c);
+    const res = await get.handler({ recipeId: "r.flow" }, c);
+    const { state } = (res as GetResult).result;
+    expect(state).not.toBeNull();
+    expect(state!.status).toBe("completed");
+    expect(state!.completedAt).toBeGreaterThan(0);
   });
 
   it("returns ok with a null state (not a failure) when no checkpoint exists", async () => {

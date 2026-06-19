@@ -173,21 +173,29 @@ export const recipeRunTools: ToolDef[] = [
           notes: args.notes,
           ts: now,
         });
-        const currentStep = finished ? args.completedStep : args.nextStep!;
+        // A stale, lower-numbered replay must not regress the live-step pointer:
+        // clamp the next step to what's already been reached. When finishing,
+        // currentStep rests on the final step the model reported.
+        const currentStep = finished
+          ? args.completedStep
+          : Math.max(args.nextStep!, existing?.currentStep ?? 0);
         const stepsJson = JSON.stringify(steps);
 
         let rec: RecipeRunStateRecord;
         if (existing) {
-          ctx.db.updateRecipeRunState(existing.id, {
+          // Build the patch conditionally: an explicit `completedAt: undefined`
+          // would make applyUpdate write SQL NULL (undefined keys are still
+          // enumerable), wiping the stamp on a non-final replay of a finished
+          // run. Only touch completedAt when the run is actually finishing.
+          const patch: Partial<RecipeRunStateRecord> = {
             currentStep,
             stepsJson,
             status: finished ? "completed" : "active",
-            // Stamp completedAt the first time the run finishes; preserve the
-            // original stamp if it completed once and is being touched again.
-            completedAt: finished
-              ? (existing.completedAt ?? now)
-              : undefined,
-          });
+          };
+          // Stamp completedAt the first time the run finishes; preserve the
+          // original stamp if it completed once and is being touched again.
+          if (finished) patch.completedAt = existing.completedAt ?? now;
+          ctx.db.updateRecipeRunState(existing.id, patch);
           rec = ctx.db.getRecipeRunState(sessionId, args.recipeId)!;
         } else {
           rec = ctx.db.insertRecipeRunState({
