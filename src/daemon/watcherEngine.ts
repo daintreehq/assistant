@@ -102,8 +102,11 @@ export function evaluateCondition(
       return false;
     }
   }
+  // Only fire when we actually know how long the terminal has been quiet. An
+  // undefined msSinceOutput means "not observed this tick" (e.g. a failed read or
+  // a disconnected MCP) — never proof of silence, so it must not trip.
   if ("noOutputForMs" in cond)
-    return (s.msSinceOutput ?? 0) >= cond.noOutputForMs;
+    return s.msSinceOutput !== undefined && s.msSinceOutput >= cond.noOutputForMs;
   if ("modelJudge" in cond) {
     // The classifier ran against the watcher goal; treat a confident, meaningful
     // classification as the judge being satisfied.
@@ -998,9 +1001,16 @@ export async function runTerminalWatcherCheck(
                 confidence = verdict.confidence;
                 summary = verdict.summary;
                 evidence = verdict.evidence;
-                // Only latch the key on a real verdict; an "unknown" (model error)
-                // must be retried next tick, not remembered as already classified.
-                if (verdict.classification !== "unknown") {
+                // Only latch the key on a verdict the key fully determines. Skip an
+                // "unknown" (model error — retry next tick) AND a "completed_success"
+                // claim: that routes through gateCompletion, whose git-cleanliness
+                // check is a hidden input NOT in the key. Latching it would dedupe a
+                // demoted completed_unverified into no_change forever, so the gate
+                // could never re-run once the worktree is later cleaned.
+                if (
+                  verdict.classification !== "unknown" &&
+                  verdict.classification !== "completed_success"
+                ) {
                   perTerminal[terminalId] = {
                     ...perTerminal[terminalId],
                     lastClassifyKey: classifyKey,
@@ -1180,9 +1190,16 @@ export async function runTerminalWatcherCheck(
           confidence = verdict.confidence;
           summary = verdict.summary;
           evidence = verdict.evidence;
-          // Only latch the key on a real verdict; an "unknown" (model error) must
-          // be retried next tick, not remembered as already classified.
-          if (verdict.classification !== "unknown") {
+          // Only latch the key on a verdict the key fully determines. Skip an
+          // "unknown" (model error — retry next tick) AND a "completed_success"
+          // claim: that routes through gateCompletion, whose git-cleanliness check
+          // is a hidden input NOT in the key. Latching it would dedupe a demoted
+          // completed_unverified into no_change forever, so the gate could never
+          // re-run once the worktree is later cleaned.
+          if (
+            verdict.classification !== "unknown" &&
+            verdict.classification !== "completed_success"
+          ) {
             perTerminal[terminalId] = {
               ...perTerminal[terminalId],
               lastClassifyKey: classifyKey,

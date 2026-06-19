@@ -1648,4 +1648,150 @@ describe("watcher read-failure vs silence + classify dedup (#56)", () => {
     expect(termState(db, w.id).readFailures).toBe(1);
     db.close();
   });
+
+  it("a thrown deep read (not just isError) is counted as a failure", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const mcp = {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({ terminalId, agentState: "working" })),
+            },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          throw new Error("transport blew up");
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+    const ctx = ctxWith(db, queue, mcp);
+    ctx.router = {
+      chat: async () => ({ content: "" }),
+      json: async () => {
+        throw new Error("model must not be consulted on a failed read");
+      },
+    } as unknown as ModelRouter;
+    const w = insertTermWatcher(db);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+
+    expect(outcome.classification).toBe("no_change");
+    expect(termState(db, w.id).readFailures).toBe(1);
+    db.close();
+  });
+
+  /** getStatus reports the terminal working with a tail the model calls done; the
+   *  git pulse cleanliness is controlled per call so a completed_unverified can
+   *  later resolve to completed_success without any new terminal output. */
+  function mcpCompletion(getStatusShape: "normal" | "listed", dirty: () => boolean) {
+    return {
+      isConnected: () => true,
+      status: () => ({ connected: true, transport: "injected" as const }),
+      listTools: async () => [],
+      callTool: async (name: string, args?: Record<string, unknown>) => {
+        if (name === "terminal.getStatus") {
+          if (getStatusShape === "listed") {
+            return { text: "", content: [], structuredContent: { terminals: [] }, isError: false };
+          }
+          const ids = (args!.terminalIds as string[]).map(String);
+          return {
+            text: "",
+            content: [],
+            structuredContent: {
+              terminals: ids.map((terminalId) => ({
+                terminalId,
+                agentState: "working",
+                recentOutput: "all done!",
+              })),
+            },
+            isError: false,
+          };
+        }
+        if (name === "terminal.list") {
+          return {
+            text: "",
+            content: [],
+            structuredContent: { terminals: [{ id: "term-x", agentState: "working" }] },
+            isError: false,
+          };
+        }
+        if (name === "terminal.getOutput") {
+          return { text: "", content: [], structuredContent: { content: "all done!" }, isError: false };
+        }
+        if (name === "git.getProjectPulse") {
+          const d = dirty();
+          return {
+            text: "",
+            content: [],
+            structuredContent: { isDirty: d, changedFiles: d ? 2 : 0 },
+            isError: false,
+          };
+        }
+        return { text: "", content: [], isError: false };
+      },
+    };
+  }
+
+  const completionRouter = () =>
+    ({
+      chat: async () => ({ content: "" }),
+      json: async () => ({
+        classification: "completed_success",
+        confidence: 0.9,
+        summary: "done",
+        evidence: ["all done"],
+        recommendedAction: "none",
+      }),
+    }) as unknown as ModelRouter;
+
+  it("re-runs the git gate when a completed_unverified worktree is later cleaned (normal path)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let dirty = true;
+    const ctx = ctxWith(db, queue, mcpCompletion("normal", () => dirty));
+    ctx.router = completionRouter();
+    const w = insertTermWatcher(db);
+
+    // Tick 1: dirty worktree → gate demotes completed_success → completed_unverified,
+    // watcher stays active (completion is not yet trusted).
+    const o1 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o1.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    // Tick 2: identical tail but the tree is now clean. The dedup must NOT suppress
+    // this — the key was deliberately not latched on a completed_success verdict —
+    // so the gate re-runs and the watcher reaches completed_success.
+    dirty = false;
+    const o2 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o2.classification).toBe("completed_success");
+    db.close();
+  });
+
+  it("re-runs the git gate when a completed_unverified worktree is cleaned (listed-but-omitted path)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    let dirty = true;
+    const ctx = ctxWith(db, queue, mcpCompletion("listed", () => dirty));
+    ctx.router = completionRouter();
+    const w = insertTermWatcher(db);
+
+    const o1 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o1.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    dirty = false;
+    const o2 = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(o2.classification).toBe("completed_success");
+    db.close();
+  });
 });
