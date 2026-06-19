@@ -273,6 +273,16 @@ describe("Db", () => {
     db.close();
   });
 
+  describe("connection pragmas", () => {
+    it("sets busy_timeout to 5000ms on every connection", () => {
+      // Readback key is `timeout`, not `busy_timeout` (node:sqlite quirk).
+      const row = db.raw().prepare("PRAGMA busy_timeout").get() as {
+        timeout: number;
+      };
+      expect(row.timeout).toBe(5000);
+    });
+  });
+
   describe("timers", () => {
     it("dueTimers returns only scheduled timers with fireAt <= now", () => {
       const now = 1_000_000;

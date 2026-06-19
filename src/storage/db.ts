@@ -336,6 +336,10 @@ export class Db {
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
+    // 5 s — generous for a single-writer local CLI; without it SQLite fails a
+    // contended lock immediately (0 ms wait) instead of retrying. Set per
+    // connection (busy_timeout is not persisted in the file).
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
     this.migrate();
