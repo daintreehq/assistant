@@ -11,7 +11,7 @@
 import { Box, Text } from "ink";
 import type { DashboardState, SessionUsage } from "../types.js";
 import { StateBadge, formatDuration } from "../primitives.js";
-import { severityTone, toneColor, ui } from "../theme.js";
+import { severityTone, toneColor, tierShort, ui } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
 
@@ -69,6 +69,11 @@ export function StatusLine({
   const ctxText = pressure !== undefined ? `CTX ${pressure}%` : "";
   const costText = cost !== undefined ? formatCost(cost) : "";
   const modelText = showModel && model ? model : "";
+  // Keep the permission tier visible at all times — including during active runs,
+  // when the left side carries agent context instead of the idle "Standing by"
+  // label. The `system` tier (git/system powers unlocked) gets a saturated danger
+  // color so the elevated risk reads at a glance; lower tiers stay dim.
+  const tierText = tier ? tierShort(tier) : "";
 
   // Reserve room for the right-hand rollup so the line never wraps to 2 rows
   // (which would overflow the fixed-height shell and overlap the row above). Each
@@ -78,6 +83,7 @@ export function StatusLine({
     seg(ctxText) +
     seg(costText) +
     seg(modelText) +
+    seg(tierText) +
     (attention > 0 ? 6 : 0) +
     (agents.length > 0 ? 10 : 0) +
     10;
@@ -119,6 +125,15 @@ export function StatusLine({
         ) : null}
         {agents.length > 0 ? (
           <Text dimColor>agents {agents.length} · </Text>
+        ) : null}
+        {tierText ? (
+          <Text
+            color={tier === "system" ? ui.color.danger : undefined}
+            dimColor={tier !== "system"}
+          >
+            {tierText}
+            <Text dimColor> · </Text>
+          </Text>
         ) : null}
         {connected ? (
           <Text color={ui.color.accent}>MCP</Text>
