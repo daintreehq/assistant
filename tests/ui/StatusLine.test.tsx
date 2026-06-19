@@ -63,6 +63,16 @@ describe("StatusLine", () => {
     expect(frame).toContain("agents 1"); // compact rollup on the right
   });
 
+  it("keeps the tier visible during an active run", () => {
+    const frame =
+      render(
+        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="system" now={0} />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("WORKING"); // active agent occupies the left side
+    expect(frame).toContain("sys"); // tier badge persists on the right
+    expect(frame).toContain("MCP"); // right-side rollup still intact
+  });
+
   it("shows an attention chip when the inbox is non-empty", () => {
     const frame =
       render(<StatusLine dashboard={dash({ inbox: [event("error"), event("attention")] })} />)
