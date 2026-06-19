@@ -141,7 +141,13 @@ export function ControlRoom({
   // erased, and a stale copy is orphaned into scrollback (the status line "ghosts"
   // we saw triplicated). Keeping content one column shy of the edge means nothing
   // ever occupies the autowrap column, so every repaint erases cleanly.
-  const contentWidth = Math.max(20, Math.min(columns - 1, CONTENT_MAX));
+  //
+  // The reserve is a HARD ceiling: clamp strictly below the terminal width even on
+  // a tiny pane. A naive `Math.max(20, …)` readability floor would defeat it — at
+  // columns ≤ 20 it pins contentWidth to 20, back onto (or past) the real edge,
+  // reintroducing the very overflow we're avoiding. So `columns - 1` always wins;
+  // the floor (1) only guards against a zero/negative width breaking Ink's layout.
+  const contentWidth = Math.max(1, Math.min(columns - 1, CONTENT_MAX));
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
   const liveStart = liveTailStart(transcript);
@@ -213,13 +219,18 @@ export function ControlRoom({
           />
         ) : null}
 
-        <StatusLine
-          dashboard={dashboard}
-          tier={tier}
-          sessionUsage={sessionUsage}
-          width={contentWidth}
-          now={now}
-        />
+        {/* Cells own only their leading gap now, so the live turn no longer carries
+            a bottom margin; this marginTop keeps one blank line between the
+            conversation and the status chrome below it. */}
+        <Box marginTop={1} flexDirection="column">
+          <StatusLine
+            dashboard={dashboard}
+            tier={tier}
+            sessionUsage={sessionUsage}
+            width={contentWidth}
+            now={now}
+          />
+        </Box>
 
         {/* Breathing room between the conversation and the input, the way other
             conversational CLIs sit the prompt off the content above it. */}

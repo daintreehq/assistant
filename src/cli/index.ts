@@ -139,12 +139,18 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
 
 async function runInteractive(opts: CliOptions): Promise<void> {
   const app = App.create({ overrides: await buildOverrides(opts) });
-  announceDebugLog(app);
   const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (opts.classic || !ttyOk) {
+    // Classic REPL has no header, so the console "logging to …" line is the only
+    // place the path surfaces — keep it.
+    announceDebugLog(app);
     await startRepl(app);
     return;
   }
+  // Ink cockpit: still open the log (so currentDebugLogPath() resolves for the
+  // header), but print nothing — the header's "◌ logging · <path>" badge already
+  // shows it, and a console line above the cockpit would just duplicate it.
+  startDebugLog(app.config, app.sessionId);
   await startInkApp(app);
 }
 

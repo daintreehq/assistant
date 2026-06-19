@@ -82,9 +82,10 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   // MCP `actions.getContext`) once that resolves — see useDaintreeController.
   const project = controller.projectName ?? "";
 
-  // While the session connects/loads in the background, the centered logo-reveal owns
-  // the screen; it dissolves into the cockpit once startup has settled and the draw
-  // has finished (see useDaintreeController's boot gate).
+  // While the session connects/loads in the background, the horizontally-centered
+  // logo-reveal plays inline (natural height, not a full-screen takeover); it
+  // dissolves into the cockpit once startup has settled and the draw has finished
+  // (see useDaintreeController's boot gate).
   if (controller.booting) {
     return (
       <StartupSplash

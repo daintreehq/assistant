@@ -17,9 +17,11 @@ import {
  * INLINE SIZING. The cockpit renders into the terminal's MAIN buffer (see
  * ControlRoom), so the splash does NOT fill and vertically-center the screen — a
  * screen-high frame in the main buffer just pushes scrollback around and risks
- * leaving artifacts when it dissolves. Instead it draws at its NATURAL size, left-
- * aligned, after a couple of blank lines for breathing room, and Ink cleanly erases
- * those rows when the cockpit takes over.
+ * leaving artifacts when it dissolves. Instead it draws at its NATURAL height,
+ * after a couple of blank lines for breathing room, and Ink cleanly erases those
+ * rows when the cockpit takes over. It is still HORIZONTALLY centered across the
+ * terminal — within `columns - 1`, so the mark's right edge can never reach the
+ * autowrap column and ghost an animation frame (see ControlRoom for that hazard).
  *
  * It self-advances and holds on the final frame, calling `onComplete` once when the
  * draw finishes. It does NOT decide when to leave — the controller owns that (it
@@ -102,15 +104,22 @@ export function StartupSplash({
 
   const frameRows = (SPLASH_FRAMES[index] ?? "").split("\n");
 
-  // Natural size, left-aligned, a couple of blank lines down for breathing room.
-  // No screen-filling box: the inline main buffer keeps it small and erases cleanly.
+  // Natural height, a couple of blank lines down for breathing room, horizontally
+  // centered. The centering track is `columns - 1` so the mark stays one column shy
+  // of the terminal edge (no autowrap ghosting); `tooSmall` guarantees there's room.
   return (
-    <Box flexDirection="column" width={SPLASH_WIDTH} marginTop={2}>
-      {frameRows.map((line, i) => (
-        <Text key={i} color={rowColor(i, SPLASH_HEIGHT)}>
-          {line}
-        </Text>
-      ))}
+    <Box
+      width={Math.max(SPLASH_WIDTH, columns - 1)}
+      justifyContent="center"
+      marginTop={2}
+    >
+      <Box flexDirection="column" width={SPLASH_WIDTH}>
+        {frameRows.map((line, i) => (
+          <Text key={i} color={rowColor(i, SPLASH_HEIGHT)}>
+            {line}
+          </Text>
+        ))}
+      </Box>
     </Box>
   );
 }

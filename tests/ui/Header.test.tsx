@@ -67,20 +67,20 @@ describe("Header", () => {
     expect(frame).toContain("/tmp/daintree.log");
   });
 
-  // The rendered row count is the contract behind ControlRoom's headerH budget
-  // (text rows + 3, plus 1 when logging). If the layout drifts, this guard fails
-  // before the body silently overlaps the header on short terminals.
-  it("renders a stable row count matching the headerH budget", () => {
+  // Guards the header's rendered row count. The header owns the blank line ABOVE
+  // its rule (marginTop) but NOT a trailing blank — the first transcript cell owns
+  // the gap below the header via its own marginTop, so the two never double up.
+  it("renders a stable row count", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    // wordmark (1) + blank + rule + blank below = 4.
-    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(4);
-    // + the logging line under the rule = 5.
-    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(5);
-    // wordmark + project + run subtitle = 3 text rows: 3 + 3 = 6.
+    // wordmark (1) + blank above rule + rule = 3.
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(3);
+    // + the logging line under the rule = 4.
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(4);
+    // wordmark + project + run subtitle = 3 text rows + blank + rule = 5.
     expect(
       rows(<Header columns={60} version="0.1.0" project="p" runTitle="busy" />),
-    ).toBe(6);
+    ).toBe(5);
   });
 
   it("keeps an ASCII rule and bullet when unicode is disabled", () => {

@@ -90,7 +90,10 @@ export function StatusLine({
   const leftRoom = Math.max(12, width - rightLen);
 
   return (
-    <Box justifyContent="space-between">
+    // Pin to the given width rather than leaning on parent stretch, so the
+    // space-between layout (and the rightLen reservation above) is computed against
+    // the same width the line actually renders at — the basis of the no-wrap guard.
+    <Box width={width} justifyContent="space-between">
       <Box>
         {active ? (
           <Text wrap="truncate">

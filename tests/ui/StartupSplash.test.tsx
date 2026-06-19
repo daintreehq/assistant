@@ -37,10 +37,33 @@ describe("StartupSplash", () => {
     expect(lines.length).toBeLessThan(24);
   });
 
-  it("skips the mark on a terminal too narrow to hold it (no clipped logo)", () => {
+  // Smallest left-pad across the drawn rows. The mark is horizontally centered, so
+  // this pad is `floor((track - SPLASH_WIDTH) / 2)` plus a constant intrinsic offset
+  // — left-alignment would make it constant regardless of width. Reading the minimum
+  // is robust to color stripping and to sparse early frames (it just tracks the
+  // least-indented rendered row, which shifts by exactly the centering pad).
+  const minLeftPad = (columns: number): number => {
+    const lines = (render(<StartupSplash columns={columns} rows={40} />).lastFrame() ?? "")
+      .split("\n")
+      .filter((l) => l.trim() !== "");
+    return Math.min(...lines.map((l) => l.length - l.trimStart().length));
+  };
+
+  it("centers the mark horizontally — the inset grows with the terminal width", () => {
+    // Left-alignment would hold the inset constant; centering widens it as the
+    // terminal does. Proves the mark tracks the middle, not the left edge.
+    expect(minLeftPad(80)).toBeGreaterThan(minLeftPad(60));
+  });
+
+  it("skips the mark on a terminal too narrow to hold it, but still unblocks boot", () => {
+    // A clipped logo looks broken, so the mark is dropped — yet onComplete MUST
+    // still fire, because that callback is the controller's draw-done gate; not
+    // firing it would hang boot forever on a narrow pane.
+    const onComplete = vi.fn();
     const { lastFrame } = render(
-      <StartupSplash columns={SPLASH_WIDTH} rows={24} />,
+      <StartupSplash columns={SPLASH_WIDTH} rows={24} onComplete={onComplete} />,
     );
     expect((lastFrame() ?? "").trim()).toBe("");
+    expect(onComplete).toHaveBeenCalledTimes(1);
   });
 });

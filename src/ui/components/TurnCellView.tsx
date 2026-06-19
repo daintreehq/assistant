@@ -33,8 +33,14 @@ export function TurnCellView({
   expanded?: boolean;
 }) {
   const set = glyphs();
+  // Each transcript cell owns the single blank line ABOVE it (marginTop), never
+  // below. A leading blank is deterministic — Ink only trims trailing whitespace,
+  // so a bottom margin on the last committed cell collapses at the <Static>→live
+  // boundary (the gap between startup notes and the first turn vanished). Owning
+  // the gap as a leading margin keeps exactly one blank line before every turn,
+  // including the first live one, and never doubles with a neighbour's margin.
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginTop={1}>
       {turn.userText ? (
         <UserMessageCard text={turn.userText} width={width} />
       ) : null}

@@ -39,8 +39,10 @@ export function Header({
   const set = glyphs();
   const ver = version ?? assistantVersion();
   const ruleWidth = Math.max(1, columns);
+  // No trailing margin: the first transcript cell owns the blank line below the
+  // header via its own marginTop, so the gap is contributed by exactly one side.
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column">
       {/* Identity: wordmark + version on one line, project name beneath it.
           minWidth=0 + truncate so a briefly-narrow terminal (a resize/host race)
           can't detonate the wordmark into a vertical char stack. */}
@@ -60,10 +62,11 @@ export function Header({
           </Text>
         ) : null}
       </Box>
-      {/* The rule (blank line above via marginTop, blank line below via the outer
-          marginBottom) closes the header. The debug-log line — when active — sits
-          under it as a status strip; "logging" is pinned (flexShrink 0) so it is
-          never clipped to "loggin", and only the path truncates on a narrow term. */}
+      {/* The rule (blank line above via marginTop; the blank below is owned by the
+          first transcript cell's marginTop) closes the header. The debug-log line —
+          when active — sits under it as a status strip; "logging" is pinned
+          (flexShrink 0) so it is never clipped to "loggin", and only the path
+          truncates on a narrow term. */}
       <Box flexDirection="column" marginTop={1}>
         <Divider width={ruleWidth} />
         {logging ? (

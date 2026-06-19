@@ -30,8 +30,10 @@ function NoteView({
       : cell.level === "warn"
         ? set.attention
         : set.bullet;
+  // Leading gap (marginTop), matching every other cell — see TurnCellView for why
+  // the blank line is owned above the cell rather than below it.
   return (
-    <Box marginBottom={1}>
+    <Box marginTop={1}>
       <Text>
         <Text color={toneColor(tone)}>
           {set.continuation}
@@ -49,7 +51,7 @@ function CommandView({
   cell: Extract<TranscriptCell, { kind: "command" }>;
 }) {
   return (
-    <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
+    <Box flexDirection="column" marginTop={1} paddingLeft={1}>
       {cell.title ? (
         <Text bold color={ui.color.info}>
           {cell.title}
