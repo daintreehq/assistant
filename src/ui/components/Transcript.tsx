@@ -23,7 +23,12 @@ function estimateLines(cell: TranscriptCell, width: number): number {
   if (cell.kind === "command")
     return 1 + Math.min(8, wrapLines(cell.text, width));
   let n = 1; // bottom margin
-  if (cell.userText) n += 1 + wrapLines(cell.userText, width);
+  // The user card (UserMessageCard) is a YOU label + a rounded border (top+bottom)
+  // + its own bottom margin around the text — 4 rows of chrome — and it truncates
+  // each source line to one row rather than wrapping, so cost is line count + 4.
+  // Counting only `1 + wrapLines` undercounts the chrome and lets a short turn
+  // estimate under the compact threshold yet render over it (the clipping bug).
+  if (cell.userText) n += 4 + cell.userText.split("\n").length;
   if (cell.assistantText) n += 1 + wrapLines(cell.assistantText, width - 2);
   else if (cell.streaming) n += 2;
   n += cell.activities.length;
@@ -93,9 +98,14 @@ function fitCells(
   };
 
   // Recompute against a one-row-smaller budget once we know the indicator is needed,
-  // so reserving its row can never push the topmost cell into the clip region.
+  // so reserving its row can never push the topmost cell into the clip region. Skip
+  // it when the window is a single oversized anchor: it's force-included regardless
+  // of budget, so reserving achieves nothing — and a compact summary has no border
+  // to tear, so its benign trailing margin clipping below the indicator is fine.
   let result = computeWindow(viewport);
-  if (result.hiddenOlderCount > 0) {
+  const onlyCompactAnchor =
+    result.visible.length === 1 && result.visible[0].compact;
+  if (result.hiddenOlderCount > 0 && !onlyCompactAnchor) {
     result = computeWindow(Math.max(1, viewport - 1));
   }
   return result;

@@ -76,7 +76,8 @@ describe("Transcript", () => {
     expect(frame).toContain("result:");
   });
 
-  // A plain short turn, ~5 estimated rows: one fits in height=6, two don't.
+  // A plain short turn, ~8 estimated rows (YOU card border + DAINTREE line): one
+  // fits in height=10, two don't.
   function turn(id: string, user: string, assistant: string): TranscriptCell {
     return {
       kind: "turn",
@@ -102,7 +103,7 @@ describe("Transcript", () => {
   it("anchors on the newest turn and counts the older ones above it", () => {
     const frame =
       render(
-        <Transcript cells={threeTurns()} height={6} width={72} now={FIXED} />,
+        <Transcript cells={threeTurns()} height={10} width={72} now={FIXED} />,
       ).lastFrame() ?? "";
     expect(frame).toContain("Third question.");
     expect(frame).not.toContain("First question.");
@@ -114,7 +115,7 @@ describe("Transcript", () => {
       render(
         <Transcript
           cells={threeTurns()}
-          height={6}
+          height={10}
           width={72}
           now={FIXED}
           scrollOffset={1}
@@ -131,7 +132,7 @@ describe("Transcript", () => {
       render(
         <Transcript
           cells={threeTurns()}
-          height={6}
+          height={10}
           width={72}
           now={FIXED}
           scrollOffset={99}
@@ -154,6 +155,36 @@ describe("Transcript", () => {
     expect(frame).toContain("DAINTREE");
     // ...with the scroll hint, and crucially NO torn round-border card.
     expect(frame).toContain("truncated");
+    expect(frame).not.toContain("╭");
+  });
+
+  it("compacts the newest turn AND shows the older-turns indicator without a torn card", () => {
+    const long = "word ".repeat(400).trim();
+    const cells: TranscriptCell[] = [
+      turn("old", "Earlier question.", "Earlier answer."),
+      turn("big", "Tell me everything.", long),
+    ];
+    const frame =
+      render(
+        <Transcript cells={cells} height={8} width={72} now={FIXED} />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("Tell me everything."); // compact summary of newest
+    expect(frame).not.toContain("Earlier question."); // older turn is hidden above
+    expect(frame).toContain("↑ 1 older turn");
+    expect(frame).toContain("truncated");
+    expect(frame).not.toContain("╭"); // compact has no border to tear
+  });
+
+  it("compacts a short turn whose real card height overflows a tight viewport", () => {
+    // A single-line turn estimates ~8 rows once the YOU card border is counted, so
+    // at height=7 it must collapse rather than render a full card that overflows and
+    // clips its bottom border. Guards against the estimateLines undercount.
+    const cells: TranscriptCell[] = [turn("t", "Short ask.", "Short reply.")];
+    const frame =
+      render(
+        <Transcript cells={cells} height={7} width={72} now={FIXED} />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("truncated to fit");
     expect(frame).not.toContain("╭");
   });
 });
