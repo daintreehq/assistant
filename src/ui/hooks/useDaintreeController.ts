@@ -463,6 +463,9 @@ export interface DaintreeController {
   composerRef: RefObject<ComposerHandle | null>;
   /** True only while a cancellable user model turn is in flight (drives the hint). */
   canCancel: boolean;
+  /** Number of user follow-ups queued behind the in-flight turn (drives the
+   *  "· N queued" hint in the busy indicator). Zero when nothing is waiting. */
+  queueDepth: number;
   /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
@@ -539,6 +542,12 @@ export function useDaintreeController(
   // re-render can't double-submit. sendUserMessageRef lets the drain re-enter the
   // latest callback without threading it through every closure.
   const queuedInput = useRef<string[]>([]);
+  // Render-visible mirror of `queuedInput.current.length`. The ref stays the
+  // source of truth (synchronous with the inFlight lock); this state only exists
+  // to re-render the busy indicator when the queue grows or drains. Always set
+  // from the ref's length (never ±1) so it can't drift if a future change pushes
+  // or shifts more than one item in a single call.
+  const [queueDepth, setQueueDepth] = useState(0);
   const sendUserMessageRef = useRef<(text: string) => boolean>(() => false);
 
   // Autonomous wake-ups: attention events the scheduler surfaces while idle are
@@ -567,6 +576,10 @@ export function useDaintreeController(
     if (inFlight.current) return;
     const next = queuedInput.current.shift();
     if (next !== undefined) {
+      // Update the count BEFORE the drained item re-enters as a new turn:
+      // otherwise the indicator would briefly read "1 queued" while that item is
+      // already the active turn — the exact stale-count confusion issue #95 fixes.
+      setQueueDepth(queuedInput.current.length);
       sendUserMessageRef.current(next);
       return;
     }
@@ -758,6 +771,7 @@ export function useDaintreeController(
       // typing stays live while the assistant works.
       if (inFlight.current) {
         queuedInput.current.push(trimmed);
+        setQueueDepth(queuedInput.current.length);
         return true;
       }
       inFlight.current = true;
@@ -851,6 +865,7 @@ export function useDaintreeController(
     // abort: the reducer removes the turn synchronously, so the assistant:cancelled
     // the abort triggers finds no active turn and is a no-op (no phantom left).
     queuedInput.current = [];
+    setQueueDepth(0);
     dispatch({ type: "user:pullback" });
     abortController.current?.abort();
     composerRef.current?.restore(candidate.turn.userText);
@@ -878,6 +893,7 @@ export function useDaintreeController(
     pullBackTurn,
     composerRef,
     canCancel,
+    queueDepth,
     activePanel,
     setActivePanel,
     resolveConfirm,

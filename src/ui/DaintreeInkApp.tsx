@@ -108,6 +108,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       previews={previews}
       busy={controller.busy}
       stage={controller.stage}
+      queueDepth={controller.queueDepth}
       view={view}
       activePanel={controller.activePanel}
       expanded={expanded}

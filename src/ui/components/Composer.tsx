@@ -46,6 +46,7 @@ export function Composer({
   busy,
   focus = true,
   stage = "Thinking",
+  queueDepth = 0,
   contextHint,
   width = 72,
   cancellable,
@@ -58,6 +59,9 @@ export function Composer({
   focus?: boolean;
   /** Live stage label shown while busy (Inspecting, Delegating, Watching…). */
   stage?: string;
+  /** User follow-ups queued behind the in-flight turn. When >0 the busy
+   *  indicator appends "· N queued" so silently-queued input is visible (#95). */
+  queueDepth?: number;
   /** Right-aligned context summary on the second line. */
   contextHint?: string;
   width?: number;
@@ -140,6 +144,7 @@ export function Composer({
           <Box marginLeft={1}>
             <Text color={ui.color.info}>
               {set.active} {stage}
+              {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
             </Text>
           </Box>
         ) : null}
