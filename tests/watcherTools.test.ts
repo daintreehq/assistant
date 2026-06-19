@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { watcherTools } from "../src/tools/watcherTools.js";
 import { Db } from "../src/storage/db.js";
+import { WatchCondition } from "../src/schemas.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 const create = watcherTools.find((t) => t.name === "watcher.terminal.create")!;
@@ -52,6 +53,70 @@ describe("watcher.terminal.create lifecycle notice", () => {
     const res = await create.handler(args, ctxWith(undefined));
     expect(res.ok).toBe(true);
     expect(res.summary).toContain("discarded when you close the assistant");
+  });
+});
+
+describe("WatchCondition rejects degenerate conditions", () => {
+  it("rejects an empty contains string", () => {
+    expect(WatchCondition.safeParse({ contains: "" }).success).toBe(false);
+  });
+
+  it("accepts a non-empty contains string", () => {
+    expect(WatchCondition.safeParse({ contains: "done" }).success).toBe(true);
+  });
+
+  it("rejects an invalid regex pattern", () => {
+    expect(WatchCondition.safeParse({ regex: "[" }).success).toBe(false);
+  });
+
+  it("rejects an empty regex pattern (matches everything)", () => {
+    expect(WatchCondition.safeParse({ regex: "" }).success).toBe(false);
+  });
+
+  it("accepts a valid regex pattern", () => {
+    expect(WatchCondition.safeParse({ regex: "done|failed" }).success).toBe(true);
+  });
+
+  it("rejects a zero or negative noOutputForMs", () => {
+    expect(WatchCondition.safeParse({ noOutputForMs: 0 }).success).toBe(false);
+    expect(WatchCondition.safeParse({ noOutputForMs: -1 }).success).toBe(false);
+  });
+
+  it("rejects a non-finite or non-integer noOutputForMs", () => {
+    expect(WatchCondition.safeParse({ noOutputForMs: Infinity }).success).toBe(false);
+    expect(WatchCondition.safeParse({ noOutputForMs: 0.5 }).success).toBe(false);
+  });
+
+  it("accepts a positive noOutputForMs", () => {
+    expect(WatchCondition.safeParse({ noOutputForMs: 1 }).success).toBe(true);
+  });
+
+  it("rejects an empty or whitespace-only modelJudge string", () => {
+    expect(WatchCondition.safeParse({ modelJudge: "" }).success).toBe(false);
+    expect(WatchCondition.safeParse({ modelJudge: "  " }).success).toBe(false);
+  });
+
+  it("rejects a whitespace-only contains string", () => {
+    expect(WatchCondition.safeParse({ contains: "   " }).success).toBe(false);
+  });
+
+  it("rejects an invalid leaf wrapped in not", () => {
+    expect(WatchCondition.safeParse({ not: { contains: "" } }).success).toBe(false);
+  });
+
+  it("rejects empty all/any groups", () => {
+    expect(WatchCondition.safeParse({ all: [] }).success).toBe(false);
+    expect(WatchCondition.safeParse({ any: [] }).success).toBe(false);
+  });
+
+  it("rejects a nested invalid condition inside all", () => {
+    expect(WatchCondition.safeParse({ all: [{ any: [] }] }).success).toBe(false);
+  });
+
+  it("accepts a well-formed nested group", () => {
+    expect(
+      WatchCondition.safeParse({ all: [{ contains: "done" }, { runtimeStatusIs: "exited" }] }).success,
+    ).toBe(true);
   });
 });
 

@@ -84,12 +84,10 @@ export class Scheduler {
         // OUTSIDE a promise .catch — so one bad watcher can't abort the whole tick
         // (which would also skip notify()).
         try {
-          if (w.kind === "terminal") {
-            await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
-          } else {
-            // Worktree watchers: reschedule (full git-state checks land later).
-            this.deps.db.updateWatcher(w.id, { nextCheckAt: now + w.cadenceMs });
-          }
+          // All watchers are terminal watchers — the worktree kind was removed
+          // because nothing ever performed a real check for it (it merely
+          // rescheduled forever, implying a supervision that never happened).
+          await runTerminalWatcherCheck(w, this.deps.ctxFor("watcher", w.id));
         } catch {
           /* one watcher's failure must not starve the others or skip notify */
         }
