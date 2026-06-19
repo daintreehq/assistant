@@ -252,6 +252,19 @@ describe("terminal.extract — inline", () => {
     expect((res.result as { finished: boolean }).finished).toBe(true);
   });
 
+  it("does NOT satisfy a runtimeStatusIs:exited wait on a total status miss (#108)", async () => {
+    // A total miss must not promote the (absent) terminal to runtimeStatus
+    // "exited" — otherwise a wait on exit would fire against an empty tail.
+    const { ctx } = ctxWith({ status: () => [] });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", wait: { runtimeStatusIs: "exited" }, pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { matched: boolean }).matched).toBe(false);
+    expect((res.result as { finished: boolean }).finished).toBe(false);
+  });
+
   it("does NOT report finished on a total status miss — empty byId is not a clean exit (#108)", async () => {
     // readStatuses returns ok:true but zero terminals (the pre-fix empty-read
     // symptom). That must NOT be reported as every terminal having exited.

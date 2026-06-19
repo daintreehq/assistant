@@ -222,8 +222,12 @@ async function readSignals(
 
   for (const id of terminalIds) {
     const entry = statuses.byId.get(id);
-    // A successful status read that omits this id means the terminal is gone.
-    const absent = statuses.ok && !entry;
+    // A terminal is "gone" only when the read returned OTHER terminals but not
+    // this one — the namespace is confirmed live, so the omission is a real exit.
+    // A TOTAL miss (ok read, empty byId) is the #108 empty-read symptom, NOT a
+    // clean exit, so don't promote it to "exited" — that would leak through
+    // agentState/runtimeStatus and falsely satisfy a runtimeStatusIs:"exited" wait.
+    const absent = statuses.ok && !entry && statuses.byId.size > 0;
     const agentState = absent ? "exited" : entry?.agentState;
     // The inline recentOutput tail is capped at 50 lines, so it can satisfy
     // extraction only when it already covers the requested tailBytes; otherwise

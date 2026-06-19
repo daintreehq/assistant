@@ -25,6 +25,12 @@ export interface ParsableMcpResult {
  * either may be the one the server populated. Mirrors `readTerminalList`'s
  * merged-parse path. Returns `[]` when neither source yields a recognizable
  * array. Never throws (non-JSON `text` is ignored).
+ *
+ * Order: structuredContent entries first, then text entries. In practice Daintree
+ * populates exactly one source, so the order only matters if both ever carry the
+ * same id — callers that key by id (e.g. a Map in readStatuses) then take the
+ * LAST occurrence (text), while a `.find()` takes the FIRST (structuredContent).
+ * Don't rely on the merged order for conflicting duplicates.
  */
 export function parseMcpArray(res: ParsableMcpResult, field: string): unknown[] {
   const entries: unknown[] = [];

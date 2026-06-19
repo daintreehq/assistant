@@ -156,7 +156,8 @@ export const contextTools: ToolDef[] = [
             `Could not read output for terminal ${args.terminalId}: ${out.text || "terminal returned an error"}`,
           );
         }
-        // Scrollback is in structuredContent.content; text is JSON-serialized.
+        // Scrollback may arrive in structuredContent.content OR the raw text body
+        // (Daintree uses the latter) — read both, falling back to raw text.
         const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
         tail = typeof sc.content === "string" ? sc.content : out.text;
       } catch (e) {

@@ -347,6 +347,15 @@ describe("readStatuses / readOutput — text-body fallback (#108)", () => {
     expect(res.value).toBe("build finished\nall green");
   });
 
+  it("readOutput reports ok with an empty value for a genuinely silent terminal (text:'')", async () => {
+    // An empty text body is real silence, not a read failure — must stay ok:true
+    // so the caller does not advance noOutputForMs against a phantom failure.
+    const ctx = ctxTextOnly([], "");
+    const res = await readOutput(ctx, "t1");
+    expect(res.ok).toBe(true);
+    expect(res.value).toBe("");
+  });
+
   it("readStatuses still returns ok with an empty byId when neither source has terminals", async () => {
     const ctx = {
       mcp: {
