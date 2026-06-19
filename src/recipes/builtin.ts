@@ -137,7 +137,6 @@ export const WORKFLOW_START_WORK_RECIPE: Recipe = {
     "forge.listIssues",
     "forge.getIssue",
     "workflow.startWorkOnIssue",
-    "watcher.terminal.create",
   ],
   body: `Use when: the user wants to start work on a forge issue.
 Procedure:
@@ -146,10 +145,10 @@ Procedure:
 3. Read the chosen issue with forge.getIssue to ground the task before mutating anything.
 4. Start work with workflow.startWorkOnIssue, forwarding the issue identifier in arguments.
 5. Pass an idempotency requestKey on the mutating call when available.
-6. If the action creates a terminal/agent, attach a watcher with watcher.terminal.create rather than polling.
+6. workflow.startWorkOnIssue attaches a supervising watcher to the launched terminal automatically — no separate watcher.terminal.create step. Report the returned watcherId; do not poll.
 7. Prefer these typed wrappers over the raw daintree.call escape hatch.
 Confirmation: workflow.startWorkOnIssue mutates real state and touches the forge — confirm before launch per the active tier.
-Report back: which issue was started, the worktree/branch/terminal ids created, the watcher id if attached, and the next checkpoint.`,
+Report back: which issue was started, the worktree/branch/terminal ids created, the watcher id attached, and the next checkpoint.`,
 };
 
 export const WORKFLOW_PREP_BRANCH_RECIPE: Recipe = {

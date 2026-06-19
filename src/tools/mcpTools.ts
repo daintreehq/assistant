@@ -12,6 +12,8 @@ import { ok, fail, NO_ARGS, type ToolDef } from "./types.js";
 import type { ToolContext } from "./types.js";
 import type { ToolResult } from "../schemas.js";
 import { isForbiddenToolName } from "../safety/policy.js";
+import { SUPERVISOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
+import { logDebug } from "../debugLog.js";
 
 /**
  * Shared `note` for the discovery tools (`tool.search`, `daintree.listTools`),
@@ -217,6 +219,146 @@ const WorkflowMutationArgs = z
     requestKey: z.string().optional(),
   })
   .strict();
+
+/**
+ * workflow.startWorkOnIssue has its own schema (not the shared WorkflowMutationArgs)
+ * because it carries `attachWatcher` — a knob meaningless to the other workflow
+ * mutations like prepBranchForReview, which return no terminal to supervise. The
+ * field is assistant-side only: the handler never forwards it to Daintree.
+ */
+const WorkflowStartWorkArgs = z
+  .object({
+    arguments: z
+      .record(z.string(), z.unknown())
+      .describe("Arguments forwarded to the Daintree workflow action (e.g. issueId)."),
+    requestKey: z.string().optional(),
+    attachWatcher: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true (the default), atomically attach a supervising watcher to the terminal the workflow launches. Set false to skip supervision.",
+      ),
+  })
+  .strict();
+
+/**
+ * Best-effort: atomically attach a supervising watcher to the terminal that
+ * workflow.startWorkOnIssue just launched, so the spawned agent is never left
+ * running unsupervised through a separate, racy follow-up call (issue #126). The
+ * Daintree action returns terminalId (nullable — null when the agent launch
+ * failed on a partial-success path), worktreeId, issueNumber and issueTitle at
+ * the top level of structuredContent. When no terminal was launched we silently
+ * skip: the worktree/branch setup itself still succeeded, so the overall call
+ * stays ok. A watcher-insert failure degrades to a warning, never a failed call,
+ * mirroring finishBoundLaunch in agentTaskTools.ts.
+ */
+function attachSupervisorWatcher(ctx: ToolContext, res: ToolResult): ToolResult {
+  const sc = (res.result as { structuredContent?: unknown } | undefined)?.structuredContent;
+  const obj = sc && typeof sc === "object" ? (sc as Record<string, unknown>) : {};
+  // Trim before the falsy guard so a whitespace-only id (never expected from
+  // Daintree, but cheap to harden against) doesn't spawn a watcher targeting a
+  // terminal that can't exist.
+  const terminalId =
+    typeof obj.terminalId === "string" && obj.terminalId.trim() ? obj.terminalId.trim() : undefined;
+  // No terminal launched (terminalId null/absent) → nothing to supervise. The
+  // workflow setup still succeeded, so return its result untouched.
+  if (!terminalId) return res;
+
+  const worktreeId =
+    typeof obj.worktreeId === "string" && obj.worktreeId.trim() ? obj.worktreeId.trim() : undefined;
+  const issueTitle = typeof obj.issueTitle === "string" && obj.issueTitle ? obj.issueTitle : undefined;
+  const issueLabel =
+    typeof obj.issueNumber === "number"
+      ? `issue #${obj.issueNumber}`
+      : typeof obj.issueNumber === "string" && obj.issueNumber
+        ? `issue #${obj.issueNumber}`
+        : "issue";
+
+  // Retry safety: if an active supervisor already targets this terminal (e.g. the
+  // tool call was retried after a transient error), don't create a duplicate.
+  // This scan-then-insert is intentionally non-atomic — adequate for a local
+  // SQLite write with no concurrent writers in a single-session daemon.
+  const existing = ctx.db.listWatchers("active").find((w) => {
+    if (!w.isSupervisor) return false;
+    try {
+      return (JSON.parse(w.targetsJson) as unknown[]).includes(terminalId);
+    } catch {
+      return false;
+    }
+  });
+  if (existing) {
+    return ok(`${res.summary} Supervisor watcher ${existing.id} already attached to terminal ${terminalId}.`, {
+      ...(res.result as object),
+      watcherId: existing.id,
+    });
+  }
+
+  const title = issueTitle ? `watch ${issueTitle}` : `watch ${issueLabel}`;
+  const goal = `Supervise work on ${issueLabel}${issueTitle ? `: ${issueTitle}` : ""}`;
+
+  let watcherId: string | undefined;
+  let watcherWarning: string | undefined;
+  try {
+    const watcher = ctx.db.insertWatcher({
+      kind: "terminal",
+      title,
+      goal,
+      targetsJson: JSON.stringify([terminalId]),
+      cadenceMs: SUPERVISOR_DEFAULT_CADENCE_MS,
+      isSupervisor: true,
+      modelTier: "small",
+      nextCheckAt: Date.now(),
+      // workflow.startWorkOnIssue always launches an edit agent; record the mode
+      // so the watcher reads an idle prompt as "waiting for input", not "done",
+      // and scope the post-completion git check to the agent's worktree when known.
+      optionsJson: JSON.stringify({
+        ...(worktreeId ? { verificationScope: { worktreeId } } : {}),
+        spawnMode: "edit",
+      }),
+    });
+    watcherId = watcher.id;
+    logDebug(ctx.config, "watcher.created", {
+      watcherId: watcher.id,
+      kind: "terminal",
+      isSupervisor: true,
+      via: "workflow.startWorkOnIssue",
+      title,
+      goal,
+      targets: [terminalId],
+      worktreeId,
+      cadenceMs: watcher.cadenceMs,
+      modelTier: watcher.modelTier,
+      nextCheckAt: watcher.nextCheckAt,
+    });
+  } catch (e) {
+    // The agent IS running; surface the supervision gap instead of failing a
+    // successful workflow launch.
+    watcherWarning = `supervising watcher could not be attached: ${e instanceof Error ? e.message : String(e)}`;
+    logDebug(ctx.config, "watcher.create_failed", {
+      via: "workflow.startWorkOnIssue",
+      title,
+      error: watcherWarning,
+    });
+  }
+
+  // Mirror the foreground-only lifecycle caveat the watcher/spawn tools emit.
+  const lifecycleNote = watcherId
+    ? (ctx.daemonActive ? ctx.daemonActive() : true)
+      ? " NOTE: supervision runs only while this assistant is open; this watcher is discarded when you close the assistant and does not resume on the next launch (watchers are session-scoped)."
+      : " NOTE: no scheduler is running in this session, so this watcher will not check until the assistant runs interactively."
+    : "";
+
+  return ok(
+    `${res.summary}${
+      watcherId ? ` Attached supervisor watcher ${watcherId} to terminal ${terminalId}.` : ""
+    }${watcherWarning ? ` — ${watcherWarning}` : ""}${lifecycleNote}`,
+    {
+      ...(res.result as object),
+      ...(watcherId ? { watcherId } : {}),
+      ...(watcherWarning ? { watcherWarning } : {}),
+    },
+  );
+}
 
 /* ----------------------------- forge wrappers ---------------------------- */
 
@@ -1360,7 +1502,7 @@ export const mcpTools: ToolDef[] = [
     consequence:
       "Sets up a worktree and branch for a forge issue, and touches the remote forge. Creates local checkout state.",
     risk: "external",
-    schema: WorkflowMutationArgs,
+    schema: WorkflowStartWorkArgs,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1371,11 +1513,21 @@ export const mcpTools: ToolDef[] = [
           description: "Arguments for workflow.startWorkOnIssue (e.g. issueId).",
         },
         requestKey: { type: "string", description: "Optional idempotency key." },
+        attachWatcher: {
+          type: "boolean",
+          description:
+            "When true (the default), atomically attach a supervising watcher to the launched terminal. Set false to skip supervision.",
+        },
       },
       required: ["arguments"],
     },
     async handler(args, ctx) {
-      return passthrough(ctx, "workflow.startWorkOnIssue", args.arguments, args.requestKey);
+      const res = await passthrough(ctx, "workflow.startWorkOnIssue", args.arguments, args.requestKey);
+      // Atomically supervise the launched terminal in the same call (issue #126),
+      // so the agent is never left unsupervised through a separate follow-up step.
+      // A failed passthrough is already shaped correctly; opt-out skips entirely.
+      if (!res.ok || args.attachWatcher === false) return res;
+      return attachSupervisorWatcher(ctx, res);
     },
   },
   {
