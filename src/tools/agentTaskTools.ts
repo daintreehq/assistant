@@ -218,19 +218,31 @@ export const agentTaskTools: ToolDef[] = [
         );
       }
 
+      // The user already cancelled before we issued the launch — don't spawn an
+      // agent the turn no longer wants.
+      if (ctx.signal?.aborted) {
+        return fail("CANCELLED", "Turn cancelled before the agent was launched.", {
+          recoverable: false,
+        });
+      }
+
       const agentId = args.agentId?.trim() || DEFAULT_AGENT_ID;
       const name = buildAgentLaunchName(args.title, agentId);
       const prompt = buildAgentPrompt(args);
       const requestKey = randomUUID();
 
       try {
-        const res = await ctx.mcp.callTool("agent.launch", {
-          agentId,
-          name,
-          ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
-          prompt,
-          requestKey,
-        });
+        const res = await ctx.mcp.callTool(
+          "agent.launch",
+          {
+            agentId,
+            name,
+            ...(args.worktreeId ? { worktreeId: args.worktreeId } : {}),
+            prompt,
+            requestKey,
+          },
+          ctx.signal,
+        );
         if (res.isError) {
           return fail(
             "AGENT_LAUNCH_FAILED",
@@ -347,6 +359,15 @@ export const agentTaskTools: ToolDef[] = [
           },
         );
       } catch (e) {
+        // A user abort tears the launch request down with a timeout-shaped error;
+        // report it as a clean cancellation, not a launch failure. (If the launch
+        // had already returned a terminal id, control never reached here — the
+        // bookkeeping above completes and the agent stays as launched.)
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while launching the agent.", {
+            recoverable: false,
+          });
+        }
         return fail(
           "AGENT_LAUNCH_FAILED",
           `Could not spawn agent for "${args.title}": ${e instanceof Error ? e.message : String(e)}`,

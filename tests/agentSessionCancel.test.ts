@@ -102,6 +102,166 @@ describe("AgentSession cancellation (#45)", () => {
     expect(seenSignal).toBe(controller.signal);
   });
 
+  it("stamps the turn signal onto the dispatch context (ctx.signal)", async () => {
+    const { sink } = recordingEvents();
+    const controller = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "probe",
+      description: "records the signal it was dispatched with",
+      risk: "read",
+      readOnly: true,
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async handler(_args, ctx) {
+        seen.push(ctx.signal);
+        return { ok: true, summary: "ok" };
+      },
+    });
+
+    let streamCalls = 0;
+    const db = new Db(":memory:");
+    const router = {
+      json: async () => ({
+        recipeIds: [],
+        confidence: 0,
+        reason: "",
+        taskType: "qa",
+        keepExisting: false,
+      }),
+      chat: async () => ({ content: "S", reasoning: "", toolCalls: [], finishReason: "stop" }),
+      stream: async () => {
+        streamCalls++;
+        // First turn: ask for the probe tool. Second turn: finish.
+        if (streamCalls === 1) {
+          return {
+            content: "",
+            reasoning: "",
+            toolCalls: [
+              { id: "c1", type: "function" as const, function: { name: "probe", arguments: "{}" } },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        return { content: "done", reasoning: "", toolCalls: [], finishReason: "stop" };
+      },
+    } as unknown as ModelRouter;
+    const ctx = { db, actor: "main", config: { tier: "system" } } as unknown as ToolContext;
+    const promptContext: MainPromptContext = {
+      tier: "system",
+      projectPath: "/proj",
+      mcpConnected: true,
+      mcpStatusLine: "connected",
+      largeModel: "L",
+      smallModel: "S",
+      schedulerActive: true,
+    };
+    const session = new AgentSession({
+      router,
+      registry,
+      recipeRegistry: new RecipeRegistry(),
+      ctx,
+      promptContext,
+      sessionId: "ses_probe",
+      events: sink,
+    });
+
+    await session.send("go", { signal: controller.signal });
+
+    // The handler saw the exact turn signal — proof it propagates past router.stream
+    // all the way into registry.dispatch (the gap #81 was about).
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(controller.signal);
+  });
+
+  it("stubs remaining tool calls as CANCELLED when the abort lands mid-dispatch (no dangling tool_calls)", async () => {
+    const { events, sink } = recordingEvents();
+    const controller = new AbortController();
+    let dispatchCount = 0;
+
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "abortertool",
+      description: "aborts the turn from inside the first dispatch",
+      risk: "read",
+      readOnly: true,
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async handler() {
+        dispatchCount++;
+        // Simulate the user hitting Escape while this tool is executing.
+        controller.abort();
+        return { ok: true, summary: "did work before the cancel landed" };
+      },
+    });
+
+    let streamCalls = 0;
+    const db = new Db(":memory:");
+    const router = {
+      json: async () => ({
+        recipeIds: [],
+        confidence: 0,
+        reason: "",
+        taskType: "qa",
+        keepExisting: false,
+      }),
+      chat: async () => ({ content: "S", reasoning: "", toolCalls: [], finishReason: "stop" }),
+      stream: async () => {
+        streamCalls++;
+        return {
+          content: "",
+          reasoning: "",
+          toolCalls: [
+            { id: "call_a", type: "function" as const, function: { name: "abortertool", arguments: "{}" } },
+            { id: "call_b", type: "function" as const, function: { name: "abortertool", arguments: "{}" } },
+          ],
+          finishReason: "tool_calls",
+        };
+      },
+    } as unknown as ModelRouter;
+    const ctx = { db, actor: "main", config: { tier: "system" } } as unknown as ToolContext;
+    const promptContext: MainPromptContext = {
+      tier: "system",
+      projectPath: "/proj",
+      mcpConnected: true,
+      mcpStatusLine: "connected",
+      largeModel: "L",
+      smallModel: "S",
+      schedulerActive: true,
+    };
+    const session = new AgentSession({
+      router,
+      registry,
+      recipeRegistry: new RecipeRegistry(),
+      ctx,
+      promptContext,
+      sessionId: "ses_midloop",
+      events: sink,
+    });
+
+    const reply = await session.send("go", { signal: controller.signal });
+
+    expect(reply).toBe(CANCELLED_REPLY);
+    // Only the first tool ran; the second was stubbed, never dispatched.
+    expect(dispatchCount).toBe(1);
+    // The model was not called a second time after the cancel.
+    expect(streamCalls).toBe(1);
+
+    const msgs = session.getMessages();
+    const assistant = msgs.find((m) => m.role === "assistant" && m.tool_calls?.length);
+    expect(assistant?.tool_calls?.map((t) => t.id)).toEqual(["call_a", "call_b"]);
+    // History integrity: BOTH tool_call ids have a matching tool reply, so the
+    // persisted transcript replays cleanly next turn (no Fireworks 400).
+    const replies = msgs.filter((m) => m.role === "tool");
+    expect(replies.map((m) => m.tool_call_id).sort()).toEqual(["call_a", "call_b"]);
+    // The stubbed reply for the un-run call is explicitly marked CANCELLED.
+    const stub = replies.find((m) => m.tool_call_id === "call_b");
+    expect(stub?.content).toContain("CANCELLED");
+
+    expect(events).toContain("cancelled:");
+    expect(events.some((e) => e.startsWith("error:"))).toBe(false);
+  });
+
   it("does NO model work when the signal is already aborted at entry", async () => {
     const { events, sink } = recordingEvents();
     let streamCalls = 0;

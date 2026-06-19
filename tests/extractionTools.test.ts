@@ -405,3 +405,76 @@ describe("terminal.extract.async — background", () => {
     expect(arg.summary).toContain("model exploded");
   });
 });
+
+describe("terminal extraction — cancellation (#81)", () => {
+  it("stops polling promptly when the turn signal aborts mid-wait", async () => {
+    const controller = new AbortController();
+    let statusReads = 0;
+    const { ctx } = ctxWith({
+      status: () => {
+        statusReads++;
+        // Simulate the user cancelling after a couple of polls.
+        if (statusReads >= 2) controller.abort();
+        return [{ terminalId: "t1", agentState: "working", recentOutput: "still running" }];
+      },
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    const res = await extract.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "did it pass",
+        format: "text",
+        wait: { contains: "NEVER MATCHES" },
+        pollIntervalMs: 0,
+        maxAttempts: 30,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+
+    // The wait never matched and the turn was cancelled — a clean WAIT_TIMEOUT,
+    // and crucially the poll did NOT run out all 30 attempts: it halted on abort.
+    expect(res.ok).toBe(false);
+    expect((res as { error?: { code?: string } }).error?.code).toBe("WAIT_TIMEOUT");
+    expect(statusReads).toBeLessThan(5);
+  });
+
+  it("the fire-and-forget async path strips the turn signal so it outlives the turn", async () => {
+    // An already-aborted turn must NOT short-circuit a detached background poll.
+    const controller = new AbortController();
+    controller.abort();
+    let statusReads = 0;
+    const publish = vi.fn().mockReturnValue({ id: "evt", count: 1 });
+    const { ctx } = ctxWith({
+      publish,
+      status: () => {
+        statusReads++;
+        return [{ terminalId: "t1", agentState: "exited", recentOutput: "done" }];
+      },
+    });
+    (ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+    const res = await extractAsync.handler(
+      {
+        terminalIds: ["t1"],
+        instruction: "summarize",
+        format: "text",
+        pollIntervalMs: 0,
+        maxAttempts: 5,
+        tailBytes: 12000,
+        maxTokens: 400,
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    // Let the detached promise settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Had the signal NOT been stripped, pollUntil would break before any read
+    // (aborted at entry) — statusReads would be 0. It actually polled and published.
+    expect(statusReads).toBeGreaterThanOrEqual(1);
+    expect(publish).toHaveBeenCalled();
+  });
+});

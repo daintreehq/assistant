@@ -49,6 +49,15 @@ export interface ToolContext {
    * absent for the base context and for scheduler-built (watcher/timer) contexts.
    */
   runId?: string;
+  /**
+   * Abort signal for the turn this dispatch belongs to (the UI's Escape-to-cancel).
+   * Stamped per-turn by `AgentSession.send()`; absent for non-interactive actors
+   * (watcher/timer/workflow build their own context and never set it). Long-running
+   * handlers — MCP calls, terminal-extraction polls, agent launches — thread it into
+   * their blocking work and, when it fires, stop early and return `fail("CANCELLED", …)`
+   * rather than running to completion in the background after the user has moved on.
+   */
+  signal?: AbortSignal;
   /** Ask the user to approve a mutating action. Returns true if approved. */
   confirm: (req: ConfirmRequest) => Promise<boolean>;
   /** Print an out-of-band line to the user (e.g. "spawned watcher wch_..."). */

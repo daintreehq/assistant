@@ -47,9 +47,10 @@ export interface ChatOptions {
   promptCacheKey?: string;
   /**
    * Abort the in-flight request. Used by the UI's Escape-to-cancel path: when the
-   * user cancels a turn, the signal fires and the streaming call rejects. Only the
-   * streaming path honours it — the one-shot chat()/json() calls are short and
-   * uncancelled.
+   * user cancels a turn, the signal fires and the in-flight call rejects. Honoured
+   * by all three paths — streaming and the one-shot chat()/json() — so a cancel
+   * that lands during a pre-turn auto-compact or recipe-selection call tears the
+   * request down instead of running it to completion in the background.
    */
   signal?: AbortSignal;
 }
@@ -186,17 +187,29 @@ export class FireworksClient {
 
   async chat(opts: ChatOptions): Promise<ChatResult> {
     this.guard();
-    const resp = await this.client.chat.completions.create({
-      model: opts.model,
-      messages: toWireMessages(opts.messages) as never,
-      tools: opts.tools as never,
-      tool_choice: opts.toolChoice as never,
-      temperature: opts.temperature ?? 0.3,
-      max_tokens: opts.maxTokens,
-      ...(opts.promptCacheKey
-        ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
-        : {}),
-    });
+    let resp;
+    try {
+      resp = await this.client.chat.completions.create(
+        {
+          model: opts.model,
+          messages: toWireMessages(opts.messages) as never,
+          tools: opts.tools as never,
+          tool_choice: opts.toolChoice as never,
+          temperature: opts.temperature ?? 0.3,
+          max_tokens: opts.maxTokens,
+          ...(opts.promptCacheKey
+            ? ({ prompt_cache_key: opts.promptCacheKey } as Record<string, unknown>)
+            : {}),
+        },
+        opts.signal ? { signal: opts.signal } : undefined,
+      );
+    } catch (err) {
+      // Normalise a user abort the same way chatStream does, so a cancel during a
+      // pre-turn chat() (e.g. auto-compact summary) surfaces as CancelledError
+      // rather than the SDK's transport-level abort representation.
+      if (isAbortError(err)) throw new CancelledError();
+      throw err;
+    }
     const choice = resp.choices[0];
     const filter = new ThinkFilter();
     filter.push(choice.message.content ?? "");
@@ -319,13 +332,24 @@ export class FireworksClient {
     schema: S,
   ): Promise<z.infer<S>> {
     this.guard();
-    const resp = await this.client.chat.completions.create({
-      model: opts.model,
-      messages: toWireMessages(opts.messages) as never,
-      temperature: opts.temperature ?? 0,
-      max_tokens: opts.maxTokens,
-      response_format: { type: "json_object" } as never,
-    });
+    let resp;
+    try {
+      resp = await this.client.chat.completions.create(
+        {
+          model: opts.model,
+          messages: toWireMessages(opts.messages) as never,
+          temperature: opts.temperature ?? 0,
+          max_tokens: opts.maxTokens,
+          response_format: { type: "json_object" } as never,
+        },
+        opts.signal ? { signal: opts.signal } : undefined,
+      );
+    } catch (err) {
+      // A cancel during a pre-turn json() (e.g. recipe selection) is a clean abort,
+      // not a model failure — normalise it like the other paths.
+      if (isAbortError(err)) throw new CancelledError();
+      throw err;
+    }
     const raw = resp.choices[0].message.content ?? "{}";
     const cleaned = stripThink(raw);
     const json = JSON.parse(extractJson(cleaned));

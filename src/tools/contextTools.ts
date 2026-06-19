@@ -22,10 +22,13 @@ async function tryCall(
 ): Promise<{ text: string; structuredContent?: unknown } | undefined> {
   if (!ctx.mcp.isConnected()) return undefined;
   try {
-    const res = await ctx.mcp.callTool(name, args);
+    const res = await ctx.mcp.callTool(name, args, ctx.signal);
     if (res.isError) return undefined;
     return { text: res.text, structuredContent: res.structuredContent };
   } catch {
+    // Best-effort: any failure (including a user abort tearing the request down)
+    // degrades this read to "unavailable". context.snapshot must never throw; the
+    // agent loop catches the abort after dispatch returns and ends the turn cleanly.
     return undefined;
   }
 }
@@ -139,10 +142,14 @@ export const contextTools: ToolDef[] = [
 
       let tail: string;
       try {
-        const out = await ctx.mcp.callTool("terminal.getOutput", {
-          terminalId: args.terminalId,
-          maxLines: 200,
-        });
+        const out = await ctx.mcp.callTool(
+          "terminal.getOutput",
+          {
+            terminalId: args.terminalId,
+            maxLines: 200,
+          },
+          ctx.signal,
+        );
         if (out.isError) {
           return fail(
             "TERMINAL_OUTPUT",
@@ -153,6 +160,11 @@ export const contextTools: ToolDef[] = [
         const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
         tail = typeof sc.content === "string" ? sc.content : out.text;
       } catch (e) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while reading terminal output.", {
+            recoverable: false,
+          });
+        }
         return fail(
           "TERMINAL_OUTPUT",
           `Could not read output for terminal ${args.terminalId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -172,6 +184,7 @@ export const contextTools: ToolDef[] = [
             { role: "user", content: buildSummarizerUserPrompt({ purpose, tail }) },
           ],
           maxTokens: 300,
+          signal: ctx.signal,
         });
         const summary = res.content.trim() || "(no summary produced)";
         return ok(summary, {
@@ -180,6 +193,11 @@ export const contextTools: ToolDef[] = [
           summary,
         });
       } catch (e) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while summarizing terminal.", {
+            recoverable: false,
+          });
+        }
         return fail(
           "SUMMARIZE",
           `Failed to summarize terminal ${args.terminalId}: ${e instanceof Error ? e.message : String(e)}`,
