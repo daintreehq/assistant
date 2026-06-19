@@ -379,7 +379,7 @@ export class AgentSession {
       });
 
       if (result.toolCalls.length === 0) {
-        this.events.assistantEnd(result.content);
+        this.events.assistantEnd(result.content, result.reasoning || undefined);
         return result.content;
       }
 

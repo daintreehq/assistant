@@ -21,6 +21,7 @@ describe("command registry (single source of truth for slash commands)", () => {
       "timers",
       "watchers",
       "audit",
+      "explain",
       "models",
       "permissions",
       "recipes",

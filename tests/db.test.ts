@@ -937,6 +937,38 @@ describe("Db", () => {
         db.insertRunEvent({ runId: "run_dup", seq: 0, type: "assistant:end" }),
       ).toThrow();
     });
+
+    it("listRuns aggregates per run, newest-first, with first/last/count", () => {
+      expect(db.listRuns()).toEqual([]);
+      db.insertRunEvent({ runId: "run_old", seq: 0, type: "assistant:start", ts: 1000 });
+      db.insertRunEvent({ runId: "run_old", seq: 1, type: "assistant:end", ts: 1500 });
+      db.insertRunEvent({ runId: "run_new", seq: 0, type: "assistant:start", ts: 2000 });
+
+      const runs = db.listRuns();
+      expect(runs.map((r) => r.runId)).toEqual(["run_new", "run_old"]); // lastTs DESC
+      const old = runs.find((r) => r.runId === "run_old")!;
+      expect(old.firstTs).toBe(1000);
+      expect(old.lastTs).toBe(1500);
+      expect(old.eventCount).toBe(2);
+    });
+
+    it("listRuns honors the limit", () => {
+      for (let i = 0; i < 5; i++) {
+        db.insertRunEvent({ runId: `run_${i}`, seq: 0, type: "assistant:start", ts: 1000 + i });
+      }
+      expect(db.listRuns(2)).toHaveLength(2);
+    });
+
+    it("listAuditByRunId returns a run's audit rows oldest-first, scoped to the run", () => {
+      db.insertAudit({ ts: 200, actor: "main", toolName: "fs.read", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "b", runId: "run_x" });
+      db.insertAudit({ ts: 100, actor: "main", toolName: "fs.list", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "a", runId: "run_x" });
+      db.insertAudit({ ts: 150, actor: "main", toolName: "git.commit", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "c", runId: "run_y" });
+
+      const rows = db.listAuditByRunId("run_x");
+      expect(rows.map((r) => r.toolName)).toEqual(["fs.list", "fs.read"]); // ts ASC
+      expect(db.listAuditByRunId("run_y").map((r) => r.toolName)).toEqual(["git.commit"]);
+      expect(db.listAuditByRunId("run_none")).toEqual([]);
+    });
   });
 
   describe("memories", () => {

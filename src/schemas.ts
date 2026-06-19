@@ -423,6 +423,22 @@ export interface RunEventRecord {
   payload?: string;
 }
 
+/**
+ * One row of the run index — an aggregate over `run_events` grouped by run. Backs
+ * the no-argument `/explain` listing so a user can discover recent run ids without
+ * already knowing one. Not persisted directly; computed on demand by `Db.listRuns`.
+ */
+export interface RunSummaryRecord {
+  /** The run id (`AgentSession.send()` turn). */
+  runId: string;
+  /** Timestamp of the run's first event (its start). */
+  firstTs: number;
+  /** Timestamp of the run's last event (its end). */
+  lastTs: number;
+  /** How many events the run recorded. */
+  eventCount: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Automation grants                                                           */
 /* -------------------------------------------------------------------------- */

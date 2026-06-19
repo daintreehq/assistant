@@ -24,6 +24,7 @@ import type {
   RecipeRunStateRecord,
   RecipeSelectionLogRecord,
   RunEventRecord,
+  RunSummaryRecord,
   TimerRecord,
   WatcherRecord,
   WorkflowRunRecord,
@@ -845,6 +846,41 @@ export class Db {
     return this.db
       .prepare("SELECT * FROM run_events WHERE runId = ? ORDER BY seq ASC")
       .all(runId) as unknown as RunEventRecord[];
+  }
+
+  /**
+   * The most recent runs, newest first — an index over `run_events` so a user can
+   * discover run ids for `/explain` without already knowing one. Aggregated on the
+   * fly (there is no run table); `firstTs`/`lastTs` bracket each run's lifetime.
+   * Ordered by `lastTs` (most-recently-active first) so a long run that ended
+   * recently isn't buried beneath one that merely started later.
+   */
+  listRuns(limit = 20): RunSummaryRecord[] {
+    return this.db
+      .prepare(
+        `SELECT runId,
+                MIN(ts) AS firstTs,
+                MAX(ts) AS lastTs,
+                COUNT(*) AS eventCount
+           FROM run_events
+          GROUP BY runId
+          ORDER BY lastTs DESC
+          LIMIT ?`,
+      )
+      .all(limit) as unknown as RunSummaryRecord[];
+  }
+
+  /**
+   * The audit rows for one run, oldest first. `audit_log.runId` is stamped by the
+   * registry on every dispatched tool call, so this is the precise tool-dispatch
+   * detail for a run — cross-referenced from `tool:result` events when `/explain`
+   * reconstructs a timeline. Calls that never reached dispatch (refused, unparsable)
+   * leave no audit row, so a run's event log may reference more calls than this returns.
+   */
+  listAuditByRunId(runId: string): AuditRecord[] {
+    return this.db
+      .prepare("SELECT * FROM audit_log WHERE runId = ? ORDER BY ts ASC")
+      .all(runId) as unknown as AuditRecord[];
   }
 
   /* ----------------------- automation grants ----------------------------- */

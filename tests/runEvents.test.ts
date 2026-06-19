@@ -27,10 +27,12 @@ const PROMPT_CTX: MainPromptContext = {
   schedulerActive: true,
 };
 
-function chatResult(over: Partial<{ content: string; toolCalls: any[] }>) {
+function chatResult(
+  over: Partial<{ content: string; reasoning: string; toolCalls: any[] }>,
+) {
   return {
     content: over.content ?? "",
-    reasoning: "",
+    reasoning: over.reasoning ?? "",
     toolCalls: over.toolCalls ?? [],
     finishReason: "stop",
   };
@@ -203,6 +205,51 @@ describe("AgentSession persists a run's event log", () => {
       .listRunEvents(auditRunId!)
       .find((e) => e.type === "tool:result");
     expect(JSON.parse(toolResult!.payload!).auditId).toBe(db.listAudit()[0].id);
+  });
+
+  it("persists the model's final-round reasoning into the assistant:end payload", async () => {
+    const ref: RunIdRef = { current: undefined };
+    const router = {
+      stream: async () =>
+        chatResult({ content: "answer", reasoning: "step-by-step rationale" }),
+      json: selectNone,
+    } as any;
+    const session = buildSession(db, ref, router);
+
+    await session.send("think");
+
+    const runId = (
+      db
+        .raw()
+        .prepare("SELECT DISTINCT runId FROM run_events")
+        .all() as Array<{ runId: string }>
+    )[0].runId;
+    const end = db.listRunEvents(runId).find((e) => e.type === "assistant:end")!;
+    const payload = JSON.parse(end.payload!);
+    expect(payload.content).toBe("answer");
+    expect(payload.reasoning).toBe("step-by-step rationale");
+  });
+
+  it("omits reasoning from assistant:end when the model produced none", async () => {
+    const ref: RunIdRef = { current: undefined };
+    const router = {
+      stream: async () => chatResult({ content: "answer" }), // reasoning: ""
+      json: selectNone,
+    } as any;
+    const session = buildSession(db, ref, router);
+
+    await session.send("answer");
+
+    const runId = (
+      db
+        .raw()
+        .prepare("SELECT DISTINCT runId FROM run_events")
+        .all() as Array<{ runId: string }>
+    )[0].runId;
+    const end = db.listRunEvents(runId).find((e) => e.type === "assistant:end")!;
+    const payload = JSON.parse(end.payload!);
+    expect(payload.content).toBe("answer");
+    expect("reasoning" in payload).toBe(false); // no spurious reasoning: "" key
   });
 
   it("clears the run id even when the model errors mid-turn", async () => {

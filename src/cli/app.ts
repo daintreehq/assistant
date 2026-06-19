@@ -98,7 +98,8 @@ export class App {
     return {
       assistantStart: () => this.hooks.agentEvents?.assistantStart(),
       assistantToken: (token) => this.hooks.agentEvents?.assistantToken(token),
-      assistantEnd: (content) => this.hooks.agentEvents?.assistantEnd(content),
+      assistantEnd: (content, reasoning) =>
+        this.hooks.agentEvents?.assistantEnd(content, reasoning),
       assistantCancelled: (content) =>
         this.hooks.agentEvents?.assistantCancelled(content),
       toolCall: (event) => this.hooks.agentEvents?.toolCall(event),
