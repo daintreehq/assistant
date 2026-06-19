@@ -162,6 +162,23 @@ export const fsTools: ToolDef[] = [
           );
         }
         const abs = resolveInsideProject(ctx.projectPath, rel);
+        // Re-check the symlink-resolved target: a project-local symlink with a
+        // benign name (e.g. cloud -> .aws) would pass the lexical check above
+        // but still expose a credential store on descent. resolveInsideProject
+        // already guarantees containment; this guards content sensitivity.
+        let realAbs = abs;
+        try {
+          realAbs = await fs.realpath(abs);
+        } catch {
+          /* path may not exist; the readdir below reports it */
+        }
+        if (isSensitivePath(realAbs)) {
+          return fail(
+            "FS_SENSITIVE",
+            `Refusing to list ${rel}: it resolves to a sensitive credential directory. Ask the user for only the specific files you need.`,
+            { recoverable: false },
+          );
+        }
         const entries: Array<{ name: string; type: "file" | "dir" }> = [];
         async function recurse(
           dirAbs: string,
