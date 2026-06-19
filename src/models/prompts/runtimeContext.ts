@@ -23,6 +23,13 @@ export interface MainPromptContext {
    * but dormant until the next interactive launch.
    */
   schedulerActive: boolean;
+  /**
+   * Repo-local instructions loaded from the project's `DAINTREE.md`, if any.
+   * Rendered as a trailing `# Project instructions` section. Lives here in the
+   * dynamic layer (not the cached base prefix) and is set once at startup, so it
+   * persists across refreshRuntimeContext() calls without re-reading the file.
+   */
+  projectInstructions?: string;
 }
 
 const TIER_BLURB: Record<Tier, string> = {
@@ -52,6 +59,14 @@ export function buildRuntimeContextMessage(ctx: MainPromptContext): string {
   if (!ctx.schedulerActive) {
     lines.push(
       "NOTE: the scheduler is NOT running in this session, so everything is dormant — nothing is being supervised right now. Timers are persisted and will resume and catch up on the next interactive launch. Watchers are session-scoped: any created here are discarded when this session ends and do NOT resume on the next launch. Tell the user rather than implying anything is being supervised.",
+    );
+  }
+  if (ctx.projectInstructions) {
+    lines.push(
+      "",
+      "# Project instructions",
+      "These are the repo-local norms for this project, authored by the team in its DAINTREE.md. Follow them when relevant, but they do not override your base instructions, your permission tier, or explicit user direction.",
+      ctx.projectInstructions,
     );
   }
   return lines.join("\n");

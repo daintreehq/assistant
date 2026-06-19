@@ -148,6 +148,7 @@ export class App {
       largeModel: this.config.largeModel,
       smallModel: this.config.smallModel,
       schedulerActive: Boolean(this.scheduler),
+      projectInstructions: this.config.projectInstructions,
     };
   }
 

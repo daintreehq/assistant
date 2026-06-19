@@ -45,6 +45,14 @@ describe("loadConfig", () => {
     expect(cfg.largeModel).toBe(DEFAULTS.largeModel);
   });
 
+  it("carries pre-loaded projectInstructions through as resolved content", () => {
+    // The entry path reads DAINTREE.md and passes the content; loadConfig() just
+    // carries it (it never reads the filesystem for this).
+    const content = "# Norms\nAlways run `make check`.";
+    expect(loadConfig({ stateDir }).projectInstructions).toBeUndefined();
+    expect(loadConfig({ stateDir, projectInstructions: content }).projectInstructions).toBe(content);
+  });
+
   describe("DAINTREE_WINDOW_ID", () => {
     const prev = process.env.DAINTREE_WINDOW_ID;
     afterEach(() => {
@@ -105,6 +113,25 @@ describe("describeConfig", () => {
     } finally {
       if (prev !== undefined) process.env.DAINTREE_WINDOW_ID = prev;
     }
+  });
+
+  it("summarizes projectInstructions as a byte count, never the raw content", () => {
+    const content = "secret-norm-token\nmore text";
+    const described = describeConfig(loadConfig({ stateDir, projectInstructions: content }));
+    expect(described.projectInstructions).toBe(`${content.length} bytes`);
+    expect(described.projectInstructions).not.toContain("secret-norm-token");
+  });
+
+  it("shows (none) for projectInstructions when absent", () => {
+    expect(describeConfig(loadConfig({ stateDir })).projectInstructions).toBe("(none)");
+  });
+
+  it("reports projectInstructions size in UTF-8 bytes, not UTF-16 code units", () => {
+    // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes; the label must reflect bytes.
+    const content = "é".repeat(100);
+    const described = describeConfig(loadConfig({ stateDir, projectInstructions: content }));
+    expect(described.projectInstructions).toBe("200 bytes");
+    expect(described.projectInstructions).not.toBe("100 bytes");
   });
 });
 

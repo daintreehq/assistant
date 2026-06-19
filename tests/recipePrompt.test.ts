@@ -86,6 +86,24 @@ describe("runtime context message", () => {
     expect(dormant).toContain("Watchers are session-scoped");
     expect(dormant).toContain("do NOT resume on the next launch");
   });
+
+  it("renders a project-instructions section when present", () => {
+    const msg = buildRuntimeContextMessage({
+      ...CTX,
+      projectInstructions: "Always run `make check` before committing.",
+    });
+    expect(msg).toContain("# Project instructions");
+    expect(msg).toContain("Always run `make check` before committing.");
+    // The priority caveat must be present so the model never treats repo-local
+    // norms as overriding base rules / tier / explicit user direction.
+    expect(msg).toContain("do not override your base instructions");
+  });
+
+  it("omits the project-instructions section when absent", () => {
+    expect(buildRuntimeContextMessage(CTX)).not.toContain(
+      "# Project instructions",
+    );
+  });
 });
 
 describe("loaded recipes message", () => {

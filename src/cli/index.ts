@@ -4,6 +4,7 @@
  * exits. `--classic` forces the legacy readline REPL; non-TTY stdin/stdout also
  * falls back to it. `doctor` checks the environment.
  */
+import path from "node:path";
 import { Command } from "commander";
 import { App } from "./app.js";
 import { startRepl } from "./repl.js";
@@ -12,6 +13,7 @@ import { createConsoleSink } from "./consoleSink.js";
 import { createJsonSink } from "./jsonSink.js";
 import { startInkApp } from "../ui/runInkApp.js";
 import { startDebugLog } from "../debugLog.js";
+import { loadProjectInstructions } from "../projectInstructions.js";
 import type { ConfigOverrides } from "../config.js";
 import type { Tier } from "../schemas.js";
 
@@ -34,6 +36,22 @@ function overridesFromOptions(opts: CliOptions): ConfigOverrides {
     tier: opts.tier as Tier | undefined,
     offline: opts.offline,
   };
+}
+
+/**
+ * Build the config overrides AND load the project-level instruction file
+ * (`DAINTREE.md`) before App.create(). The read is async and best-effort, so it
+ * happens here in the entry path rather than inside the synchronous loadConfig().
+ * A non-fatal warning (oversized/unreadable file) is surfaced once at startup.
+ */
+async function buildOverrides(opts: CliOptions): Promise<ConfigOverrides> {
+  const overrides = overridesFromOptions(opts);
+  // Mirror loadConfig()'s project-root resolution so we read the same DAINTREE.md
+  // the session will report as its project path.
+  const projectPath = path.resolve(opts.project ?? process.cwd());
+  const { content, warning } = await loadProjectInstructions(projectPath);
+  if (warning) render.warn(warning);
+  return { ...overrides, projectInstructions: content };
 }
 
 /** Start the debug log for this session and, when active, tell the user where it
@@ -62,12 +80,13 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
     }
   };
 
-  // App.create() can throw (bad config, DB/registry init). Keep it inside the
-  // error funnel so a boot failure in JSON mode still yields a `result` envelope
-  // on stdout rather than an ANSI stack trace via main().catch().
+  // App.create() can throw (bad config, DB/registry init). buildOverrides() also
+  // reads the project-level DAINTREE.md before boot. Keep both inside the error
+  // funnel so a boot failure in JSON mode still yields a `result` envelope on
+  // stdout rather than an ANSI stack trace via main().catch().
   let app: App;
   try {
-    app = App.create({ overrides: overridesFromOptions(opts) });
+    app = App.create({ overrides: await buildOverrides(opts) });
   } catch (err) {
     reportError(err);
     if (jsonSink) process.exitCode = jsonSink.finish().exitCode;
@@ -119,7 +138,7 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
 }
 
 async function runInteractive(opts: CliOptions): Promise<void> {
-  const app = App.create({ overrides: overridesFromOptions(opts) });
+  const app = App.create({ overrides: await buildOverrides(opts) });
   announceDebugLog(app);
   const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (opts.classic || !ttyOk) {
@@ -130,7 +149,7 @@ async function runInteractive(opts: CliOptions): Promise<void> {
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {
-  const app = App.create({ overrides: overridesFromOptions(opts) });
+  const app = App.create({ overrides: await buildOverrides(opts) });
   await app.connectMcp();
   const st = app.mcp.status();
   render.line(c.bold("Daintree Assistant — doctor"));
@@ -138,6 +157,7 @@ async function runDoctor(opts: CliOptions): Promise<void> {
   render.line(`  mcp url        : ${app.config.mcpUrl ?? c.yellow("(unset)")}`);
   render.line(`  mcp connection : ${st.connected ? c.green(`ok (${st.transport}, ${st.toolCount} tools)`) : c.yellow(st.error ?? "not connected")}`);
   render.line(`  project        : ${app.config.projectPath}`);
+  render.line(`  instructions   : ${app.config.projectInstructions ? c.green(`DAINTREE.md (${Buffer.byteLength(app.config.projectInstructions, "utf8")} bytes)`) : c.gray("(none)")}`);
   render.line(`  tools loaded   : ${app.registry.list().length}`);
   render.line(`  tier           : ${app.config.tier}`);
   await app.shutdown();
