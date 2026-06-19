@@ -466,6 +466,62 @@ export interface WorkflowRunRecord {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Recipe run state (step-level progress + checkpoints)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Lifecycle of one recipe's step-level execution within a session:
+ *   - active    — the recipe is mid-run; `currentStep` points at the live step
+ *   - completed — the model advanced past the final step (terminal)
+ *   - abandoned — the run was explicitly closed without finishing (terminal)
+ *
+ * Recipes themselves stay stateless prompt injections; this record is the only
+ * place runtime progress lives, so a multi-step recipe can be supervised as it
+ * runs and resumed (via recipe.run.get) if a turn is interrupted.
+ */
+export type RecipeRunStatus = "active" | "completed" | "abandoned";
+
+/** Outcome the model reports for a single numbered step. */
+export type RecipeStepStatus = "done" | "skipped";
+
+/**
+ * One checkpoint entry: a numbered step the model has reported on. `index` is
+ * 1-based (matching the runbook's numbered steps), `ts` is when the transition
+ * was recorded, and `notes` is an optional freeform checkpoint note.
+ */
+export interface RecipeStepProgress {
+  index: number;
+  status: RecipeStepStatus;
+  notes?: string;
+  ts: number;
+}
+
+/**
+ * Durable step-level progress for one (session, recipe) pair. The natural key is
+ * `(sessionId, recipeId)` — the selector caps a session at three mutually
+ * exclusive recipes, so a single active run per recipe is sufficient.
+ *
+ * `stepsJson` holds a serialized {@link RecipeStepProgress}`[]` (matching the
+ * store-wide `*Json` convention); the tool layer deserializes it. `currentStep`
+ * is denormalized for a fast "where did we leave off" read without parsing JSON
+ * (0 = not started).
+ */
+export interface RecipeRunStateRecord {
+  id: string; // rrs_<uuid8>
+  sessionId: string;
+  recipeId: string;
+  /** The step now active. 0 = not started; stays at the final step once done. */
+  currentStep: number;
+  stepsJson: string; // JSON RecipeStepProgress[]
+  status: RecipeRunStatus;
+  startedAt: number;
+  /** Advances on every transition; startedAt stays fixed. Used for recency. */
+  updatedAt: number;
+  /** Stamped once when status first reaches a terminal state. */
+  completedAt?: number;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 

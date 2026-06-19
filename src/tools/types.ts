@@ -28,6 +28,12 @@ export interface ToolContext {
   queue: Queue;
   router: ModelRouter;
   projectPath: string;
+  /**
+   * Id of the conversation session this dispatch belongs to. Used by recipe
+   * step-progress tools to key durable checkpoints to the live session. Absent
+   * in stripped-down test contexts; tools that need it fail gracefully.
+   */
+  sessionId?: string;
   actor: ToolActor;
   /**
    * Entity id of the non-interactive actor behind this dispatch — the watcher

@@ -23,5 +23,7 @@ ${r.body}`,
     .join("\n\n");
   return `# Loaded recipes
 The following recipes are task-specific operating instructions. Apply them when relevant; they never override the hard rules.
+
+Step tracking: when a recipe has numbered steps, call \`recipe.step.advance\` after finishing each one (give the recipe id, the completed step number, and the step starting next; omit "nextStep" on the final step). If you are resuming a recipe or unsure where you left off, call \`recipe.run.get\` first to read the saved checkpoint.
 ${body}`;
 }

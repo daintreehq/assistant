@@ -19,6 +19,7 @@ import type {
   AutomationGrantRecord,
   ConversationMessageRecord,
   QueueEvent,
+  RecipeRunStateRecord,
   RecipeSelectionLogRecord,
   TimerRecord,
   WatcherRecord,
@@ -159,6 +160,21 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   completedAt INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status, updatedAt);
+
+CREATE TABLE IF NOT EXISTS recipe_run_state (
+  id TEXT PRIMARY KEY,
+  sessionId TEXT NOT NULL,
+  recipeId TEXT NOT NULL,
+  currentStep INTEGER NOT NULL DEFAULT 0,
+  stepsJson TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active',
+  startedAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  completedAt INTEGER
+);
+-- One run per (session, recipe): the selector caps a session at three mutually
+-- exclusive recipes, so the natural key is unique and lets the tool upsert by it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recipe_run_state_key ON recipe_run_state (sessionId, recipeId);
 `;
 
 export interface QueueDigestOptions {
@@ -200,6 +216,11 @@ const WORKFLOW_UPDATE_COLS: ReadonlySet<string> = new Set([
   "issueNumber", "issueUrl", "issueTitle", "branch", "worktreeId", "prNumber", "prUrl",
   "terminalIdsJson", "watcherIdsJson", "queueEventIdsJson", "status",
   "nextActionJson", "notesJson", "updatedAt", "completedAt",
+]);
+// `id`/`sessionId`/`recipeId`/`startedAt` are immutable; `updatedAt` is always
+// forced by the store (see updateRecipeRunState).
+const RECIPE_RUN_UPDATE_COLS: ReadonlySet<string> = new Set([
+  "currentStep", "stepsJson", "status", "updatedAt", "completedAt",
 ]);
 
 type SqlIn = string | number | bigint | null | Uint8Array;
@@ -935,6 +956,99 @@ export class Db {
       nextActionJson: (r.nextActionJson as string) ?? undefined,
       notesJson: (r.notesJson as string) ?? undefined,
       createdAt: r.createdAt as number,
+      updatedAt: r.updatedAt as number,
+      completedAt: (r.completedAt as number) ?? undefined,
+    };
+  }
+
+  /* ------------------------ recipe run state ----------------------------- */
+
+  insertRecipeRunState(
+    rec: Omit<RecipeRunStateRecord, "id" | "status" | "startedAt" | "updatedAt"> &
+      Partial<RecipeRunStateRecord>,
+  ): RecipeRunStateRecord {
+    const now = rec.startedAt ?? Date.now();
+    const full: RecipeRunStateRecord = {
+      id: rec.id ?? `rrs_${randomUUID().slice(0, 8)}`,
+      sessionId: rec.sessionId,
+      recipeId: rec.recipeId,
+      currentStep: rec.currentStep ?? 0,
+      stepsJson: rec.stepsJson ?? "[]",
+      status: rec.status ?? "active",
+      startedAt: now,
+      updatedAt: rec.updatedAt ?? now,
+      completedAt: rec.completedAt,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO recipe_run_state (id,sessionId,recipeId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        full.id,
+        full.sessionId,
+        full.recipeId,
+        full.currentStep,
+        full.stepsJson,
+        full.status,
+        full.startedAt,
+        full.updatedAt,
+        full.completedAt ?? null,
+      );
+    return full;
+  }
+
+  /** Look up the single run for a (session, recipe) pair — the natural key. */
+  getRecipeRunState(
+    sessionId: string,
+    recipeId: string,
+  ): RecipeRunStateRecord | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM recipe_run_state WHERE sessionId = ? AND recipeId = ?",
+      )
+      .get(sessionId, recipeId) as Record<string, unknown> | undefined;
+    return row ? this.rowToRecipeRunState(row) : undefined;
+  }
+
+  /** All runs for a session (most-recently-touched first), or every run. */
+  listRecipeRunStates(sessionId?: string): RecipeRunStateRecord[] {
+    const rows = (sessionId
+      ? this.db
+          .prepare(
+            "SELECT * FROM recipe_run_state WHERE sessionId = ? ORDER BY updatedAt DESC",
+          )
+          .all(sessionId)
+      : this.db
+          .prepare("SELECT * FROM recipe_run_state ORDER BY updatedAt DESC")
+          .all()) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToRecipeRunState(r));
+  }
+
+  updateRecipeRunState(id: string, patch: Partial<RecipeRunStateRecord>): void {
+    // updatedAt is always advanced by the store and never taken from a caller's
+    // patch, so an update can't write a stale recency value. completedAt IS
+    // caller-settable (the tool stamps it on the terminal transition).
+    const next = { ...patch, updatedAt: Date.now() };
+    this.applyUpdate(
+      "recipe_run_state",
+      RECIPE_RUN_UPDATE_COLS,
+      id,
+      next as Record<string, unknown>,
+    );
+  }
+
+  /** Coerce a raw recipe_run_state row into a record (SQL NULL → undefined for
+   * the only optional column, completedAt; stepsJson stays raw JSON). */
+  private rowToRecipeRunState(r: Record<string, unknown>): RecipeRunStateRecord {
+    return {
+      id: r.id as string,
+      sessionId: r.sessionId as string,
+      recipeId: r.recipeId as string,
+      currentStep: r.currentStep as number,
+      stepsJson: r.stepsJson as string,
+      status: r.status as RecipeRunStateRecord["status"],
+      startedAt: r.startedAt as number,
       updatedAt: r.updatedAt as number,
       completedAt: (r.completedAt as number) ?? undefined,
     };
