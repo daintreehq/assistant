@@ -237,6 +237,9 @@ export class RunEventSink implements AgentEventSink {
   }
 
   usage(event: AgentUsageEvent): void {
+    // Any prose streamed this round precedes the usage row — flush it first so the
+    // replayed log keeps content/usage in the order they actually occurred.
+    this.flushContent();
     // Token accounting for this round; persisted so a replayed log carries the
     // same cost/context-pressure signal the live cockpit showed.
     this.write("usage", {

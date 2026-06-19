@@ -126,4 +126,17 @@ describe("StatusLine", () => {
     expect(frame).not.toContain("CTX");
     expect(frame).not.toContain("$");
   });
+
+  it("shows context pressure but hides cost when cost is unknown", () => {
+    const frame =
+      render(
+        <StatusLine
+          dashboard={dash()}
+          sessionUsage={usage({ costUsd: undefined })}
+          width={80}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("CTX 42%");
+    expect(frame).not.toContain("$");
+  });
 });

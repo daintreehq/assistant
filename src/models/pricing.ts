@@ -28,11 +28,17 @@ const RATES: Array<{ prefix: string; rate: ModelRate }> = [
 /** Cached prompt tokens bill at half rate (Fireworks prompt-cache discount). */
 const CACHED_INPUT_DISCOUNT = 0.5;
 
+/**
+ * The bare model id: strip any `accounts/<x>/models/<id>` Fireworks path so both
+ * pricing and the cockpit display work with the short, human-readable id (e.g.
+ * `minimax-m3`) rather than the full 36-char account path.
+ */
+export function bareModelId(model: string): string {
+  return model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+}
+
 function rateFor(model: string): ModelRate | undefined {
-  const id = model.toLowerCase();
-  // Strip any `accounts/<x>/models/<id>` Fireworks path so the bare model id is
-  // what we prefix-match against.
-  const bare = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+  const bare = bareModelId(model.toLowerCase());
   let best: { len: number; rate: ModelRate } | undefined;
   for (const { prefix, rate } of RATES) {
     if (bare.startsWith(prefix) && (!best || prefix.length > best.len)) {
