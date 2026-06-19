@@ -80,6 +80,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       logging={app.config.debugLog}
       logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
       composerFocus={view === "home" && !controller.pendingConfirm}
+      cancellable={controller.canCancel}
       onSubmit={controller.sendUserMessage}
       onCancel={controller.cancelTurn}
       onResolve={controller.resolveConfirm}

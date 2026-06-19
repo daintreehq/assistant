@@ -70,6 +70,8 @@ export interface ControlRoomProps {
   /** Path of the active debug log, shown under the header so it can be tailed. */
   logFile?: string;
   composerFocus?: boolean;
+  /** Whether the in-flight turn can be aborted (drives the composer's Esc hint). */
+  cancellable?: boolean;
   onSubmit?: (value: string) => boolean | void | Promise<void>;
   /** Abort the in-flight turn (Escape on an empty composer while busy). */
   onCancel?: () => void;
@@ -94,6 +96,7 @@ export function ControlRoom({
   logging = false,
   logFile,
   composerFocus = false,
+  cancellable = false,
   onSubmit = () => {},
   onCancel,
   onResolve = () => {},
@@ -278,6 +281,7 @@ export function ControlRoom({
           contextHint={contextHint}
           width={columns}
           focus={composerFocus}
+          cancellable={cancellable}
           onSubmit={onSubmit}
           onCancel={onCancel}
         />

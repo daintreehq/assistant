@@ -220,6 +220,13 @@ export class AgentSession {
     userInput: string,
     opts: { readOnly?: boolean; signal?: AbortSignal } = {},
   ): Promise<string> {
+    // Already aborted before we began: do NO model work (not even the pre-turn
+    // recipe-select / auto-compact calls) and don't push the user message into
+    // history — so a cancel that lands at the very start leaves no orphan turn.
+    if (opts.signal?.aborted) {
+      this.events.assistantCancelled("");
+      return CANCELLED_REPLY;
+    }
     await this.maybeAutoCompact();
     if (!opts.readOnly) await this.maybeRefreshRecipes(userInput);
     this.pushMessage({ role: "user", content: userInput });

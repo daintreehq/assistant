@@ -134,14 +134,11 @@ export function transcriptReducer(
 
     case "assistant:end": {
       const idx = activeTurnIndex(cells);
-      if (idx < 0) {
-        if (!action.content) return cells;
-        const turn = newTurn("", now);
-        return [
-          ...cells,
-          { ...turn, assistantText: action.content, state: "complete" as const },
-        ];
-      }
+      // Only an ACTIVE turn can be completed. A stray end with no active turn —
+      // e.g. arriving after the turn was already cancelled — must not manufacture a
+      // phantom turn. Turns are born from user:add, or from the loop's own
+      // start/token/tool events via ensureActiveTurn; a terminal event never is.
+      if (idx < 0) return cells;
       const turn = cells[idx] as TurnCell;
       return replaceAt(cells, idx, {
         ...turn,
@@ -316,6 +313,8 @@ export interface DaintreeController {
   sendUserMessage: (text: string) => boolean;
   /** Abort the in-flight user turn (Escape-to-cancel). No-op when idle. */
   cancelTurn: () => void;
+  /** True only while a cancellable user model turn is in flight (drives the hint). */
+  canCancel: boolean;
   /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
@@ -332,6 +331,10 @@ export function useDaintreeController(
     null,
   );
   const [busy, setBusy] = useState(false);
+  // True only while a cancellable USER model turn is in flight — drives the
+  // "Esc cancel" hint. Distinct from `busy`, which is also set for slash commands
+  // and autonomous wake turns, neither of which Escape can abort.
+  const [canCancel, setCanCancel] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
@@ -550,9 +553,11 @@ export function useDaintreeController(
 
           dispatch({ type: "user:add", text: trimmed });
           // Fresh controller per turn so Escape-to-cancel aborts THIS turn only;
-          // cleared in the finally so a queued follow-up starts uncancelled.
+          // cleared in the finally so a queued follow-up starts uncancelled. Only
+          // now (not for slash commands) is the turn actually cancellable.
           const controller = new AbortController();
           abortController.current = controller;
+          setCanCancel(true);
           await app.session.send(trimmed, { signal: controller.signal });
         } catch (err) {
           bridge.emit({
@@ -564,6 +569,7 @@ export function useDaintreeController(
           abortController.current = null;
           inFlight.current = false;
           setBusy(false);
+          setCanCancel(false);
           // Drain a queued user follow-up first, else react to any watcher that
           // surfaced while this turn ran — neither should be stranded.
           drainPending();
@@ -604,6 +610,7 @@ export function useDaintreeController(
     pendingConfirm,
     sendUserMessage,
     cancelTurn,
+    canCancel,
     activePanel,
     setActivePanel,
     resolveConfirm,

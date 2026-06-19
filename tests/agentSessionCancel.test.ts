@@ -102,9 +102,11 @@ describe("AgentSession cancellation (#45)", () => {
     expect(seenSignal).toBe(controller.signal);
   });
 
-  it("stops before calling the model when the signal is already aborted", async () => {
+  it("does NO model work when the signal is already aborted at entry", async () => {
     const { events, sink } = recordingEvents();
     let streamCalls = 0;
+    let jsonCalls = 0;
+    let chatCalls = 0;
     const controller = new AbortController();
     controller.abort();
     const { session } = makeSession(
@@ -113,6 +115,20 @@ describe("AgentSession cancellation (#45)", () => {
           streamCalls++;
           return { content: "x", reasoning: "", toolCalls: [], finishReason: "stop" };
         },
+        json: async () => {
+          jsonCalls++;
+          return {
+            recipeIds: [],
+            confidence: 0,
+            reason: "",
+            taskType: "qa",
+            keepExisting: false,
+          };
+        },
+        chat: async () => {
+          chatCalls++;
+          return { content: "S", reasoning: "", toolCalls: [], finishReason: "stop" };
+        },
       },
       sink,
     );
@@ -120,7 +136,12 @@ describe("AgentSession cancellation (#45)", () => {
     const reply = await session.send("hi", { signal: controller.signal });
 
     expect(reply).toBe(CANCELLED_REPLY);
+    // Not the stream, nor the recipe selector (json), nor auto-compact (chat).
     expect(streamCalls).toBe(0);
+    expect(jsonCalls).toBe(0);
+    expect(chatCalls).toBe(0);
     expect(events).toContain("cancelled:");
+    // The user message was never pushed into model history (no orphan turn).
+    expect(session.getMessages().some((m) => m.content === "hi")).toBe(false);
   });
 });

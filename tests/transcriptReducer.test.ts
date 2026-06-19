@@ -105,6 +105,20 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(turns(out)[0].state).toBe("cancelled");
   });
 
+  it("a late assistant:end with content after cancel does not manufacture a phantom turn (#45)", () => {
+    const out = run([
+      { type: "user:add", text: "go" },
+      { type: "assistant:start" },
+      { type: "assistant:cancelled", content: "" },
+      // Even WITH content, a terminal event with no active turn must be a no-op —
+      // only user:add (and the loop's own start/token/tool events) create turns.
+      { type: "assistant:end", content: "late answer" },
+    ]);
+    expect(turns(out)).toHaveLength(1);
+    expect(turns(out)[0].state).toBe("cancelled");
+    expect(turns(out)[0].assistantText).not.toContain("late answer");
+  });
+
   it("routes attention events to standalone note cells", () => {
     const out = run([
       { type: "attention", events: [{ title: "Tests failed", summary: "term_8" }] },

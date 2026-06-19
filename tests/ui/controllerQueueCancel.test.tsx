@@ -32,21 +32,34 @@ function makeOfflineApp() {
   return { app, stateDir };
 }
 
+/**
+ * Replace the streaming turn with a deferred we control: each send() records its
+ * input + signal and parks until we resolve it (or until its signal aborts, which
+ * resolves it with the cancelled sentinel — mirroring the real loop).
+ */
+function deferredSession(app: App) {
+  const calls: Array<{ input: string; signal?: AbortSignal }> = [];
+  const resolvers: Array<() => void> = [];
+  (app.session as unknown as { send: unknown }).send = vi.fn(
+    (input: string, opts: { signal?: AbortSignal } = {}) => {
+      calls.push({ input, signal: opts.signal });
+      return new Promise<string>((res) => {
+        resolvers.push(() => res("done"));
+        opts.signal?.addEventListener("abort", () => res("Turn cancelled"));
+      });
+    },
+  );
+  return {
+    calls,
+    /** Resolve the i-th started turn. */
+    finish: (i: number) => resolvers[i]?.(),
+  };
+}
+
 describe("useDaintreeController queue + cancel (#45)", () => {
   it("queues a follow-up while busy and drains it in order once the turn ends", async () => {
     const { app, stateDir } = makeOfflineApp();
-    const calls: Array<{ input: string; signal?: AbortSignal }> = [];
-    let resolveCurrent: (() => void) | undefined;
-    // Replace the real streaming turn with a deferred we control, so we can hold a
-    // turn "in flight" and observe what the second submit does.
-    (app.session as unknown as { send: unknown }).send = vi.fn(
-      (input: string, opts: { signal?: AbortSignal } = {}) => {
-        calls.push({ input, signal: opts.signal });
-        return new Promise<string>((res) => {
-          resolveCurrent = () => res("done");
-        });
-      },
-    );
+    const { calls, finish } = deferredSession(app);
 
     let controller!: DaintreeController;
     const { unmount } = render(
@@ -54,21 +67,18 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     );
     await tick();
 
-    // First message starts a turn.
     expect(controller.sendUserMessage("first")).toBe(true);
     await tick();
     expect(calls.map((c) => c.input)).toEqual(["first"]);
 
-    // Second message arrives while busy → accepted (true) and queued, NOT sent yet.
+    // Arrives while busy → accepted (true) and queued, NOT sent yet.
     expect(controller.sendUserMessage("second")).toBe(true);
     await tick();
     expect(calls.map((c) => c.input)).toEqual(["first"]);
 
-    // Finishing the first turn drains the queued follow-up automatically.
-    resolveCurrent?.();
+    finish(0);
     await tick();
     expect(calls.map((c) => c.input)).toEqual(["first", "second"]);
-    // Each turn gets its own abort signal.
     expect(calls[0].signal).toBeInstanceOf(AbortSignal);
     expect(calls[1].signal).toBeInstanceOf(AbortSignal);
     expect(calls[1].signal).not.toBe(calls[0].signal);
@@ -78,15 +88,43 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("drains a strictly FIFO three-deep queue, each with a distinct signal", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { calls, finish } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("first");
+    await tick();
+    controller.sendUserMessage("second");
+    controller.sendUserMessage("third");
+    await tick();
+    // Only the first is running; the rest are queued.
+    expect(calls.map((c) => c.input)).toEqual(["first"]);
+
+    finish(0);
+    await tick();
+    expect(calls.map((c) => c.input)).toEqual(["first", "second"]);
+    finish(1);
+    await tick();
+    expect(calls.map((c) => c.input)).toEqual(["first", "second", "third"]);
+
+    // Every turn ran on its own controller.
+    const signals = calls.map((c) => c.signal);
+    expect(new Set(signals).size).toBe(3);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("cancelTurn aborts the in-flight turn's signal", async () => {
     const { app, stateDir } = makeOfflineApp();
-    let captured: AbortSignal | undefined;
-    (app.session as unknown as { send: unknown }).send = vi.fn(
-      (_input: string, opts: { signal?: AbortSignal } = {}) => {
-        captured = opts.signal;
-        return new Promise<string>(() => {}); // never resolves on its own
-      },
-    );
+    const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
     const { unmount } = render(
@@ -96,11 +134,40 @@ describe("useDaintreeController queue + cancel (#45)", () => {
 
     controller.sendUserMessage("long running");
     await tick();
-    expect(captured?.aborted).toBe(false);
+    expect(calls[0].signal?.aborted).toBe(false);
+    expect(controller.canCancel).toBe(true);
 
     controller.cancelTurn();
     await tick();
-    expect(captured?.aborted).toBe(true);
+    expect(calls[0].signal?.aborted).toBe(true);
+
+    unmount();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("after cancelling the in-flight turn, a queued follow-up still drains", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    const { calls } = deferredSession(app);
+
+    let controller!: DaintreeController;
+    const { unmount } = render(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+    );
+    await tick();
+
+    controller.sendUserMessage("first");
+    await tick();
+    controller.sendUserMessage("queued");
+    await tick();
+    expect(calls.map((c) => c.input)).toEqual(["first"]);
+
+    // Cancel the in-flight turn — its send() resolves via the abort listener, the
+    // finally runs, and the queued follow-up drains with a fresh, un-aborted signal.
+    controller.cancelTurn();
+    await tick();
+    expect(calls.map((c) => c.input)).toEqual(["first", "queued"]);
+    expect(calls[1].signal?.aborted).toBe(false);
 
     unmount();
     await app.shutdown();
