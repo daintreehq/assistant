@@ -961,6 +961,15 @@ describe("Db", () => {
       expect(hits.length).toBe(1);
     });
 
+    it("recallMemories matches multi-word queries as AND-of-terms (not a rigid phrase)", () => {
+      const rec = db.insertMemory({ content: "the CI pipeline runs vitest and tsc" });
+      // Words present but non-adjacent — must still match (regression: whole-query
+      // phrase quoting returned []).
+      expect(db.recallMemories("vitest tsc").map((m) => m.id)).toContain(rec.id);
+      // A term absent from the row excludes it (AND semantics).
+      expect(db.recallMemories("vitest playwright")).toEqual([]);
+    });
+
     it("recallMemories filters by category", () => {
       db.insertMemory({ content: "use NodeNext imports", category: "convention" });
       db.insertMemory({ content: "NodeNext is also fine here", category: "note" });
@@ -1001,6 +1010,26 @@ describe("Db", () => {
       const second = db.insertMemory({ content: "second" });
       db.pinMemory(second.id);
       expect(db.listMemories()[0].id).toBe(second.id);
+    });
+
+    it("re-pinning is a true no-op and keeps pinned ordering stable", () => {
+      const a = db.insertMemory({ content: "alpha" });
+      const b = db.insertMemory({ content: "beta" });
+      db.pinMemory(a.id, 100);
+      db.pinMemory(b.id, 200);
+      // Most-recently-pinned first.
+      expect(db.listMemories().map((m) => m.id)).toEqual([b.id, a.id]);
+      // Re-pinning A must NOT rewrite its pinnedAt and jump it ahead of B.
+      db.pinMemory(a.id, 300);
+      expect(db.listMemories().map((m) => m.id)).toEqual([b.id, a.id]);
+    });
+
+    it("recall survives a pin/unpin update cycle (AFTER UPDATE trigger keeps FTS in sync)", () => {
+      const rec = db.insertMemory({ content: "uniqueterm about deployment" });
+      expect(db.recallMemories("uniqueterm").map((m) => m.id)).toContain(rec.id);
+      db.pinMemory(rec.id);
+      db.unpinMemory(rec.id);
+      expect(db.recallMemories("uniqueterm").map((m) => m.id)).toContain(rec.id);
     });
 
     it("forgetMemory soft-deletes and is not repeatable", () => {

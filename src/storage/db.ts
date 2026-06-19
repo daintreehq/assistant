@@ -1296,7 +1296,8 @@ export class Db {
       | undefined;
     if (!row) return undefined;
     const mem = this.rowToMemory(row);
-    if (mem.deletedAt && !opts.includeDeleted) return undefined;
+    // Explicit null check (not falsy): a soft-delete at epoch ms 0 is still deleted.
+    if (mem.deletedAt != null && !opts.includeDeleted) return undefined;
     return mem;
   }
 
@@ -1343,9 +1344,18 @@ export class Db {
   ): MemoryRecord[] {
     const trimmed = query.trim();
     if (!trimmed) return [];
-    const phrase = `"${trimmed.replaceAll('"', '""')}"`;
+    // Tokenize on whitespace and quote EACH term (doubling internal quotes), then
+    // space-join. FTS5's implicit AND across terms gives keyword search — every
+    // word must appear, in any order. Quoting the whole string instead would make
+    // it one rigid phrase, so "vitest tsc" would only match those words adjacent
+    // (and usually return nothing). Per-token quoting still neutralizes every FTS5
+    // operator/punctuation char, so arbitrary input can't raise a syntax error.
+    const match = trimmed
+      .split(/\s+/)
+      .map((tok) => `"${tok.replaceAll('"', '""')}"`)
+      .join(" ");
     const where = ["m.deletedAt IS NULL", "memories_fts MATCH ?"];
-    const params: SqlIn[] = [phrase];
+    const params: SqlIn[] = [match];
     if (opts.category) {
       where.push("m.category = ?");
       params.push(opts.category);
@@ -1369,21 +1379,25 @@ export class Db {
     return Number(res.changes) > 0;
   }
 
-  /** Pin a memory (idempotent). Returns the updated row, or undefined if absent/deleted. */
+  /** Pin a memory (idempotent). Returns the updated row, or undefined if absent/deleted.
+   * The `pinnedAt IS NULL` guard makes re-pinning a true no-op — otherwise each
+   * repeat call would rewrite pinnedAt to `now` and jump the row ahead of other
+   * pinned rows in listMemories' pinnedAt-desc ordering. */
   pinMemory(id: string, now = Date.now()): MemoryRecord | undefined {
     this.db
       .prepare(
-        "UPDATE memories SET pinnedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL",
+        "UPDATE memories SET pinnedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL",
       )
       .run(now, now, id);
     return this.getMemory(id);
   }
 
-  /** Unpin a memory (idempotent). Returns the updated row, or undefined if absent/deleted. */
+  /** Unpin a memory (idempotent). Returns the updated row, or undefined if absent/deleted.
+   * The `pinnedAt IS NOT NULL` guard avoids bumping updatedAt on an already-unpinned row. */
   unpinMemory(id: string, now = Date.now()): MemoryRecord | undefined {
     this.db
       .prepare(
-        "UPDATE memories SET pinnedAt = NULL, updatedAt = ? WHERE id = ? AND deletedAt IS NULL",
+        "UPDATE memories SET pinnedAt = NULL, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NOT NULL",
       )
       .run(now, id);
     return this.getMemory(id);
