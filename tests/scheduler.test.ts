@@ -5,7 +5,7 @@ import { Queue } from "../src/queue.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { ok, type ToolContext, type ToolDef } from "../src/tools/types.js";
 import type { ModelRouter } from "../src/models/router.js";
-import type { WatcherVerdict } from "../src/schemas.js";
+import type { QueueEvent, WatcherVerdict } from "../src/schemas.js";
 
 /** A mutating tool that a non-interactive actor can never run unattended. */
 const projectTool: ToolDef = {
@@ -297,6 +297,135 @@ describe("Scheduler.tick", () => {
     expect(
       events.some((e) => e.source === "timer" && e.severity === "error"),
     ).toBe(true);
+  });
+
+  it("isolates a throwing timer so later timers still fire and notify() still delivers", async () => {
+    const deps = makeDeps();
+    const delivered: QueueEvent[] = [];
+    const scheduler = new Scheduler({
+      ...deps,
+      onAttention: (events) => {
+        delivered.push(...events);
+      },
+    });
+    const now = 7_000_000;
+
+    // `bad` is due earlier, so dueTimers (ORDER BY fireAt) fires it FIRST — proving
+    // the loop continues to `good` after `bad` throws, rather than aborting.
+    const bad = deps.db.insertTimer({
+      title: "boom",
+      fireAt: now - 5000,
+      payloadType: "enqueue",
+      payloadJson: JSON.stringify({ type: "enqueue", message: "boom" }),
+    });
+    const good = deps.db.insertTimer({
+      title: "survivor",
+      fireAt: now - 4000,
+      payloadType: "enqueue",
+      payloadJson: JSON.stringify({ type: "enqueue", message: "survived" }),
+    });
+
+    // Force reschedule() to throw for the bad timer only. reschedule() calls
+    // updateTimer OUTSIDE fireTimer's inner try/catch, so the throw escapes
+    // fireTimer entirely — exactly the path the tick-loop guard must contain.
+    const realUpdate = deps.db.updateTimer.bind(deps.db);
+    deps.db.updateTimer = ((id: string, patch: Partial<Parameters<typeof realUpdate>[1]>) => {
+      if (id === bad.id) throw new Error("simulated sqlite failure");
+      return realUpdate(id, patch);
+    }) as typeof deps.db.updateTimer;
+
+    // The whole tick must resolve, not reject.
+    await expect(scheduler.tick(now)).resolves.toBeUndefined();
+
+    // The later timer still fired and finished despite the earlier one throwing.
+    const survivor = deps.db.getTimer(good.id)!;
+    expect(survivor.status).toBe("fired");
+    expect(survivor.runCount).toBe(1);
+
+    // notify() still ran and delivered the surviving timer's attention event.
+    expect(delivered.some((e) => e.summary === "survived")).toBe(true);
+  });
+
+  it("fires a legacy run_check timer as a deprecated reminder without calling the model", async () => {
+    const deps = makeDeps();
+    // Count EVERY model path, not just chat — the grounded-reminder fallback must
+    // consult none of them. A regression that reached for router.json would
+    // otherwise slip past a chat-only spy.
+    let modelCalls = 0;
+    const countModel =
+      (real: (...a: unknown[]) => unknown) =>
+      (...args: unknown[]) => {
+        modelCalls++;
+        return real(...args);
+      };
+    (deps.router as unknown as Record<string, unknown>).chat = countModel(
+      deps.router.chat as unknown as (...a: unknown[]) => unknown,
+    );
+    (deps.router as unknown as Record<string, unknown>).json = countModel(
+      deps.router.json as unknown as (...a: unknown[]) => unknown,
+    );
+
+    const delivered: QueueEvent[] = [];
+    const scheduler = new Scheduler({
+      ...deps,
+      onAttention: (events) => {
+        delivered.push(...events);
+      },
+    });
+    const now = 8_000_000;
+
+    // A legacy row: the tool can no longer create run_check, but old DB rows must
+    // still fire gracefully rather than crash or silently vanish.
+    const timer = deps.db.insertTimer({
+      title: "legacy check",
+      fireAt: now - 1000,
+      payloadType: "run_check",
+      payloadJson: JSON.stringify({ type: "run_check", checkPrompt: "is the build done?" }),
+    });
+
+    await scheduler.tick(now);
+
+    // No ungrounded model call on any router method.
+    expect(modelCalls).toBe(0);
+
+    // The prompt is surfaced as a single reminder published at exactly "attention".
+    const digest = deps.queue.digest({ severityAtLeast: "attention" });
+    expect(digest).toHaveLength(1);
+    expect(digest[0].source).toBe("timer");
+    expect(digest[0].severity).toBe("attention");
+    expect(digest[0].summary).toContain("is the build done?");
+    expect(digest[0].summary.toLowerCase()).toContain("deprecated");
+
+    // notify() must still deliver it — the whole point of the isolation fix.
+    expect(delivered.some((e) => e.summary.includes("is the build done?"))).toBe(true);
+
+    // And the timer advances normally.
+    const after = deps.db.getTimer(timer.id)!;
+    expect(after.status).toBe("fired");
+    expect(after.runCount).toBe(1);
+  });
+
+  it("fires a legacy run_check row whose JSON omits `type`, dispatching on the DB column", async () => {
+    const deps = makeDeps();
+    const scheduler = new Scheduler(deps);
+    const now = 8_500_000;
+
+    // Pathological row: payloadType column says run_check but the JSON blob has no
+    // `type`. Dispatching on the column (not payload.type) keeps it from firing as
+    // a silent no-op.
+    const timer = deps.db.insertTimer({
+      title: "typeless legacy check",
+      fireAt: now - 1000,
+      payloadType: "run_check",
+      payloadJson: JSON.stringify({ checkPrompt: "did it deploy?" }),
+    });
+
+    await scheduler.tick(now);
+
+    const digest = deps.queue.digest({ severityAtLeast: "attention" });
+    expect(digest).toHaveLength(1);
+    expect(digest[0].summary).toContain("did it deploy?");
+    expect(deps.db.getTimer(timer.id)!.status).toBe("fired");
   });
 
   it("threads the timer id as actorId so a scoped grant authorizes its call_safe_tool", async () => {

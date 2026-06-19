@@ -118,5 +118,3 @@ ${args.tail || "(no output captured)"}
 
 Extract now.`;
 }
-
-export const TIMER_CHECK_SYSTEM_PROMPT = `You are a Daintree timer check sub-agent. A scheduled check has fired. Using the provided context (and any state you were given), decide whether something the user cares about has happened — completion, failure, a blocker, or a needed decision. Return a single short sentence suitable for a notification queue. If nothing noteworthy changed, say so plainly with the prefix "(no change)".`;
