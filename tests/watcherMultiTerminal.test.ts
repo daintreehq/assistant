@@ -1362,6 +1362,9 @@ describe("runTerminalWatcherCheck multi-terminal (#3)", () => {
     // Title tracks the latest state, not the first classification.
     expect(events[0].title).toBe("evolving: completed success");
     expect(events[0].title).not.toContain("waiting");
+    // The stale "Focus terminal" action from waiting_for_input must not cling to
+    // the now-completed item — completed_success carries no recommended actions.
+    expect(events[0].recommendedActions ?? []).toEqual([]);
     db.close();
   });
 });
