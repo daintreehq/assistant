@@ -6,7 +6,11 @@
  */
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, ToolCallRequest } from "../models/fireworks.js";
-import { CancelledError, FireworksUnavailableError } from "../models/fireworks.js";
+import {
+  CancelledError,
+  FireworksUnavailableError,
+  contentToText,
+} from "../models/fireworks.js";
 import type { ModelRouter } from "../models/router.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
@@ -95,7 +99,10 @@ const CHARS_PER_TOKEN = 4;
  */
 function estimateTokens(messages: ChatMessage[]): number {
   const chars = messages.reduce((n, m) => {
-    let c = m.content?.length ?? 0;
+    // Flatten multimodal content to text first — a content-part array's own
+    // `.length` is the part count, not chars, and image base64 is excluded from
+    // the estimate (contentToText collapses it to an "[image omitted]" marker).
+    let c = contentToText(m.content).length;
     for (const tc of m.tool_calls ?? []) c += tc.function.arguments?.length ?? 0;
     return n + c;
   }, 0);
@@ -385,7 +392,14 @@ export class AgentSession {
     // Need real working history beyond the controls + any prior summary note.
     if (this.messages.length <= CONTROL_MESSAGE_COUNT + 1) return;
 
-    const history = this.messages.slice(CONTROL_MESSAGE_COUNT);
+    // Flatten any multimodal content to text before summarising: the small model
+    // (deepseek-v4-flash) is text-only, so an image-bearing turn would otherwise
+    // trip the router's vision tier gate and make every subsequent auto-compact
+    // silently fail — letting history grow unbounded. Images collapse to an
+    // "[image omitted]" marker (contentToText), matching how they're persisted.
+    const history = this.messages
+      .slice(CONTROL_MESSAGE_COUNT)
+      .map((m) => ({ ...m, content: contentToText(m.content) }));
     try {
       const result = await this.deps.router.chat("small", {
         messages: [
@@ -765,7 +779,11 @@ export class AgentSession {
         sessionId: this.deps.sessionId,
         seq: this.seq++,
         role: m.role,
-        content: m.content ?? "",
+        // Flatten multimodal content: persist the text + an "[image omitted]"
+        // marker, never the raw base64 (megabytes of bytes in a TEXT column) and
+        // never "[object Object]". Image input is ephemeral — it doesn't survive
+        // into the durable conversation log.
+        content: contentToText(m.content),
         toolCallsJson: m.tool_calls ? JSON.stringify(m.tool_calls) : undefined,
         toolCallId: m.tool_call_id,
       });

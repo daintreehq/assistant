@@ -6,7 +6,7 @@
  * bodies — so selection stays cheap. Output is validated against RecipeSelection.
  */
 import type { ModelRouter } from "../models/router.js";
-import type { ChatMessage } from "../models/fireworks.js";
+import { contentToText, type ChatMessage } from "../models/fireworks.js";
 import type { RecipeRegistry } from "./registry.js";
 import { RecipeSelection } from "./types.js";
 
@@ -57,7 +57,7 @@ export async function selectRecipes(
   const recent = args.recentMessages
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-8)
-    .map((m) => `${m.role}: ${(m.content ?? "").slice(0, 800)}`)
+    .map((m) => `${m.role}: ${contentToText(m.content).slice(0, 800)}`)
     .join("\n");
 
   return args.router.json(
