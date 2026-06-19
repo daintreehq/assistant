@@ -71,6 +71,43 @@ ${args.tail || "(no output captured)"}
 Classify now. Return only the JSON object.`;
 }
 
+export const JUDGE_SYSTEM_PROMPT = `You are a Daintree terminal judge — a small, cheap sub-agent. You do NOT talk to the user and you cannot run tools. Your only job is to answer ONE specific yes/no question about a terminal's recent output.
+
+You are NOT classifying the terminal's overall state. You are answering the exact question you are given, and nothing else. Base your answer ONLY on the goal, the known terminal state, and the bounded tail provided — never invent output that is not present.
+
+Return ONLY a JSON object with this exact shape:
+{
+  "reason": one short sentence (active voice, <= 20 words) justifying your answer by quoting the tail or state,
+  "confidence": number between 0 and 1,
+  "matched": true if the answer to the question is clearly YES, false otherwise
+}
+
+Rules:
+- Write the "reason" first, then commit to "matched" — think before you answer.
+- Answer "matched": true ONLY when the tail/state clearly supports a YES. When unsure, the output is ambiguous, or there is no evidence either way, answer "matched": false with low confidence.
+- "matched" is about the SPECIFIC question, not whether anything noteworthy is happening.`;
+
+export function buildJudgeUserPrompt(args: {
+  question: string;
+  goal: string;
+  agentState?: string;
+  runtimeStatus?: string;
+  waitingReason?: string;
+  lastOutputAt?: string;
+  tail: string;
+}): string {
+  return `Watcher goal (context): ${args.goal}
+Question to answer (yes/no): ${args.question}
+Known terminal state: agentState=${args.agentState ?? "unknown"}, runtimeStatus=${args.runtimeStatus ?? "unknown"}, waitingReason=${args.waitingReason ?? "none"}, lastOutputAt=${args.lastOutputAt ?? "unknown"}
+
+Terminal tail (most recent output, bounded):
+"""
+${args.tail || "(no output captured)"}
+"""
+
+Answer the question now. Return only the JSON object.`;
+}
+
 export const SUMMARIZER_SYSTEM_PROMPT = `You summarize terminal output for a developer's supervisor view. Be terse and factual. Never dump raw logs. Focus on: what the process is doing, any errors, any question it is asking, test results, and changed files. Output 1-4 short sentences plus, if relevant, a short bullet list of errors/files. Do not speculate beyond the provided text.`;
 
 export function buildSummarizerUserPrompt(args: {

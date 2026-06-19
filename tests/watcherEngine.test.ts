@@ -5,7 +5,19 @@ import {
   readStatuses,
   type WatcherSignals,
 } from "../src/daemon/watcherEngine.js";
+import type { ModelJudgeAnswer } from "../src/schemas.js";
 import type { ToolContext } from "../src/tools/types.js";
+
+/** Build a judge-answer map keyed by question. */
+function judges(
+  entries: Record<string, Partial<ModelJudgeAnswer>>,
+): Map<string, ModelJudgeAnswer> {
+  const m = new Map<string, ModelJudgeAnswer>();
+  for (const [q, a] of Object.entries(entries)) {
+    m.set(q, { reason: "r", confidence: 0.9, matched: true, ...a });
+  }
+  return m;
+}
 
 function sig(overrides: Partial<WatcherSignals> = {}): WatcherSignals {
   return { tail: "", ...overrides };
@@ -70,6 +82,68 @@ describe("evaluateCondition", () => {
   it("negates with not", () => {
     expect(evaluateCondition({ not: { contains: "y/n" } }, sig({ tail: "clean" }))).toBe(true);
     expect(evaluateCondition({ not: { contains: "y/n" } }, sig({ tail: "y/n" }))).toBe(false);
+  });
+
+  describe("modelJudge (#57)", () => {
+    const q = "Did the migration finish?";
+
+    it("evaluates each judge against its OWN precomputed answer, not the classification", () => {
+      // A confident, MEANINGFUL classification used to make any modelJudge fire.
+      // Now the judge's own answer is what matters: a NO must stay false even when
+      // the general classification is meaningful and confident.
+      const meaningful = sig({ classification: "tests_failed", confidence: 0.95 });
+      expect(
+        evaluateCondition({ modelJudge: q }, meaningful, judges({ [q]: { matched: false } })),
+      ).toBe(false);
+      expect(
+        evaluateCondition({ modelJudge: q }, meaningful, judges({ [q]: { matched: true } })),
+      ).toBe(true);
+    });
+
+    it("fires only on a confident match", () => {
+      expect(
+        evaluateCondition({ modelJudge: q }, sig(), judges({ [q]: { matched: true, confidence: 0.9 } })),
+      ).toBe(true);
+      expect(
+        evaluateCondition({ modelJudge: q }, sig(), judges({ [q]: { matched: false, confidence: 0.9 } })),
+      ).toBe(false);
+      // Below the 0.6 confidence floor → no fire even when matched.
+      expect(
+        evaluateCondition({ modelJudge: q }, sig(), judges({ [q]: { matched: true, confidence: 0.59 } })),
+      ).toBe(false);
+      // Exactly at the floor → fires.
+      expect(
+        evaluateCondition({ modelJudge: q }, sig(), judges({ [q]: { matched: true, confidence: 0.6 } })),
+      ).toBe(true);
+    });
+
+    it("is false when the question has no answer (no judge run / model failure / empty map)", () => {
+      expect(evaluateCondition({ modelJudge: q }, sig(), new Map())).toBe(false);
+      expect(evaluateCondition({ modelJudge: q }, sig())).toBe(false);
+      expect(
+        evaluateCondition({ modelJudge: q }, sig(), judges({ "other?": { matched: true } })),
+      ).toBe(false);
+    });
+
+    it("evaluates multiple judges independently inside all/any", () => {
+      const cond = { all: [{ modelJudge: "a?" }, { modelJudge: "b?" }] };
+      expect(
+        evaluateCondition(cond, sig(), judges({ "a?": { matched: true }, "b?": { matched: true } })),
+      ).toBe(true);
+      // One judge says no → the `all` fails (the old single-answer behavior could
+      // not even see the second question).
+      expect(
+        evaluateCondition(cond, sig(), judges({ "a?": { matched: true }, "b?": { matched: false } })),
+      ).toBe(false);
+
+      const anyCond = { any: [{ modelJudge: "a?" }, { modelJudge: "b?" }] };
+      expect(
+        evaluateCondition(anyCond, sig(), judges({ "a?": { matched: false }, "b?": { matched: true } })),
+      ).toBe(true);
+      expect(
+        evaluateCondition(anyCond, sig(), judges({ "a?": { matched: false }, "b?": { matched: false } })),
+      ).toBe(false);
+    });
   });
 });
 

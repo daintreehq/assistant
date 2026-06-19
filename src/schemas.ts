@@ -306,6 +306,25 @@ export const WatcherVerdict = z
   .strict();
 export type WatcherVerdict = z.infer<typeof WatcherVerdict>;
 
+/**
+ * Answer to a single `modelJudge` condition — a binary yes/no predicate about the
+ * terminal, evaluated against the judge's own question. This is deliberately NOT
+ * the WatcherVerdict classification enum: that enum carries operational terminal
+ * semantics ("tests_failed", "waiting_for_input"), whereas a judge asks a specific
+ * logical question ("did the migration finish?") whose answer is just true/false.
+ * `reason` is placed BEFORE `matched` on purpose: emitting the rationale first
+ * gives the small model an implicit chain-of-thought, which measurably improves the
+ * accuracy of the boolean it then commits to.
+ */
+export const ModelJudgeAnswer = z
+  .object({
+    reason: z.string(),
+    confidence: z.number().min(0).max(1),
+    matched: z.boolean(),
+  })
+  .strict();
+export type ModelJudgeAnswer = z.infer<typeof ModelJudgeAnswer>;
+
 /* -------------------------------------------------------------------------- */
 /* Persisted records (DB rows)                                                 */
 /* -------------------------------------------------------------------------- */

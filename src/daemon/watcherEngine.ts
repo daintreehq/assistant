@@ -13,6 +13,7 @@
  */
 import {
   WatcherVerdict,
+  ModelJudgeAnswer,
   VERIFICATION_EVIDENCE_PREFIX,
   type Severity,
   type WatchCondition,
@@ -22,7 +23,9 @@ import {
 } from "../schemas.js";
 import {
   WATCHER_SYSTEM_PROMPT,
+  JUDGE_SYSTEM_PROMPT,
   buildWatcherUserPrompt,
+  buildJudgeUserPrompt,
 } from "../models/prompts/index.js";
 import type { ToolContext } from "../tools/types.js";
 import type { WatcherRecord } from "../schemas.js";
@@ -87,10 +90,22 @@ const SEVERITY_MAP: Record<WatcherClassification, Severity> = {
   unknown: "info",
 };
 
-/** Pure evaluation of a WatchCondition against deterministic signals. */
+/**
+ * Pure evaluation of a WatchCondition against deterministic signals.
+ *
+ * `modelJudge` leaves are NOT evaluated here against the live model — that would
+ * make this function async and untestable. Instead each judge question is answered
+ * upfront (see runModelJudges) and the results are threaded in as `judgeResults`,
+ * keyed by the exact question string. A `modelJudge` whose answer is missing (no
+ * judge run / model failure) evaluates to false. Note the `not: { modelJudge }`
+ * edge: a failed-or-unmatched judge is `false`, so `not` flips it to `true` — a
+ * minor semantic wart we accept rather than introduce three-valued logic for an
+ * unusual pattern.
+ */
 export function evaluateCondition(
   cond: WatchCondition,
   s: WatcherSignals,
+  judgeResults?: Map<string, ModelJudgeAnswer>,
 ): boolean {
   if ("stateIs" in cond) return s.agentState === cond.stateIs;
   if ("runtimeStatusIs" in cond) return s.runtimeStatus === cond.runtimeStatusIs;
@@ -108,17 +123,16 @@ export function evaluateCondition(
   if ("noOutputForMs" in cond)
     return s.msSinceOutput !== undefined && s.msSinceOutput >= cond.noOutputForMs;
   if ("modelJudge" in cond) {
-    // The classifier ran against the watcher goal; treat a confident, meaningful
-    // classification as the judge being satisfied.
-    return (
-      !!s.classification &&
-      MEANINGFUL.has(s.classification) &&
-      (s.confidence ?? 0) >= 0.6
-    );
+    // Look up the precomputed answer to THIS specific question. A confident YES
+    // satisfies the condition; a missing answer, a NO, or low confidence does not.
+    const r = judgeResults?.get(cond.modelJudge);
+    return !!r && r.matched && r.confidence >= 0.6;
   }
-  if ("all" in cond) return cond.all.every((c) => evaluateCondition(c, s));
-  if ("any" in cond) return cond.any.some((c) => evaluateCondition(c, s));
-  if ("not" in cond) return !evaluateCondition(cond.not, s);
+  if ("all" in cond)
+    return cond.all.every((c) => evaluateCondition(c, s, judgeResults));
+  if ("any" in cond)
+    return cond.any.some((c) => evaluateCondition(c, s, judgeResults));
+  if ("not" in cond) return !evaluateCondition(cond.not, s, judgeResults);
   return false;
 }
 
@@ -145,15 +159,17 @@ export function decideOutcome(args: {
   signals: WatcherSignals;
   stopWhen?: WatchCondition;
   alertWhen?: WatchCondition;
+  /** Precomputed answers to any modelJudge questions, keyed by question string. */
+  judgeResults?: Map<string, ModelJudgeAnswer>;
   timedOut?: boolean;
 }): CheckOutcome {
   const { classification, confidence, summary, evidence } = args;
   const sig = { ...args.signals, classification, confidence };
   const alertMatched = args.alertWhen
-    ? evaluateCondition(args.alertWhen, sig)
+    ? evaluateCondition(args.alertWhen, sig, args.judgeResults)
     : false;
   const stopMatched = args.stopWhen
-    ? evaluateCondition(args.stopWhen, sig)
+    ? evaluateCondition(args.stopWhen, sig, args.judgeResults)
     : false;
   const changed = classification !== args.previous;
   const isTerminal = TERMINAL_CLASS.has(classification);
@@ -522,14 +538,27 @@ export function nextOutputState(
   };
 }
 
-/** Find the first modelJudge question inside a (possibly composite) condition. */
-export function findModelJudge(cond?: WatchCondition): string | undefined {
-  if (!cond) return undefined;
-  if ("modelJudge" in cond) return cond.modelJudge;
-  if ("all" in cond) return cond.all.map((c) => findModelJudge(c)).find(Boolean);
-  if ("any" in cond) return cond.any.map((c) => findModelJudge(c)).find(Boolean);
-  if ("not" in cond) return findModelJudge(cond.not);
-  return undefined;
+/**
+ * Collect EVERY distinct modelJudge question across one or more (possibly
+ * composite) conditions, in first-seen order and deduplicated. Replaces the old
+ * findModelJudge, which returned only the first question and so silently dropped
+ * the rest in an `all`/`any` group with multiple judges — making multi-judge
+ * boolean expressions evaluate against a single answer. The `not` case wraps a
+ * single condition (not an array), so it recurses into `cond.not` directly.
+ */
+export function collectModelJudges(
+  ...conds: Array<WatchCondition | undefined>
+): string[] {
+  const seen = new Set<string>();
+  const walk = (cond?: WatchCondition): void => {
+    if (!cond) return;
+    if ("modelJudge" in cond) seen.add(cond.modelJudge);
+    else if ("all" in cond) cond.all.forEach(walk);
+    else if ("any" in cond) cond.any.forEach(walk);
+    else if ("not" in cond) walk(cond.not);
+  };
+  for (const c of conds) walk(c);
+  return [...seen];
 }
 
 /**
@@ -831,7 +860,11 @@ export async function runTerminalWatcherCheck(
     };
   }
 
-  const judge = findModelJudge(alertWhen) ?? findModelJudge(stopWhen);
+  // Every distinct modelJudge question across both conditions, deduped so a
+  // question shared by alertWhen and stopWhen costs a single model call. Each is
+  // answered per-terminal below (the tail is terminal-specific) and the answers
+  // are threaded into the pure condition evaluator.
+  const judgeQuestions = collectModelJudges(alertWhen, stopWhen);
   // A deterministic contains/regex condition must see the full scrollback the
   // user expects, so the bounded inline tail isn't enough — read deep in that
   // case. Pure state/model watchers (the common supervisor) keep the cheap tail.
@@ -994,7 +1027,6 @@ export async function runTerminalWatcherCheck(
                   rec,
                   signals,
                   ctx,
-                  judge,
                   prevState?.prev,
                 );
                 classification = verdict.classification;
@@ -1185,7 +1217,7 @@ export async function runTerminalWatcherCheck(
           confidence = 0.5;
           summary = "No change in terminal signals since last classification.";
         } else {
-          const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
+          const verdict = await classifyWithModel(rec, signals, ctx, prevState?.prev);
           classification = verdict.classification;
           confidence = verdict.confidence;
           summary = verdict.summary;
@@ -1226,6 +1258,22 @@ export async function runTerminalWatcherCheck(
       if (entry?.error) evidence = [...evidence, `status error: ${entry.error}`];
     }
 
+    // Answer each modelJudge question against THIS terminal's tail/state before
+    // deciding the outcome. Each question is its own focused yes/no model call;
+    // they run in parallel and are bounded by the slowest single call. Skipped
+    // entirely when there are no judges (the common supervisor case).
+    const judgeResults =
+      judgeQuestions.length > 0 && ctx.mcp.isConnected()
+        ? await runModelJudges(judgeQuestions, rec, signals, ctx)
+        : new Map<string, ModelJudgeAnswer>();
+    // Surface why a judge fired (matched only — unmatched answers would be noise)
+    // so the published event explains the condition that triggered it.
+    for (const [question, answer] of judgeResults) {
+      if (answer.matched) {
+        evidence = [...evidence, `judge[${question}]: ${answer.reason}`];
+      }
+    }
+
     const outcome = decideOutcome({
       classification,
       confidence,
@@ -1235,6 +1283,7 @@ export async function runTerminalWatcherCheck(
       signals,
       stopWhen,
       alertWhen,
+      judgeResults,
       timedOut,
     });
     // Preserve any output-tracking state captured above (absent when MCP is
@@ -1375,12 +1424,8 @@ async function classifyWithModel(
   rec: WatcherRecord,
   signals: WatcherSignals,
   ctx: ToolContext,
-  modelJudge?: string,
   previous?: string,
 ): Promise<WatcherVerdict> {
-  // Fold the goal and any modelJudge question into one focus line so the
-  // classifier actually evaluates the specific condition the watcher asked for.
-  const goal = modelJudge ? `${rec.goal}\nSpecifically decide: ${modelJudge}` : rec.goal;
   try {
     return await ctx.router.json(
       rec.modelTier,
@@ -1390,7 +1435,7 @@ async function classifyWithModel(
           {
             role: "user",
             content: buildWatcherUserPrompt({
-              goal,
+              goal: rec.goal,
               agentState: signals.agentState,
               runtimeStatus: signals.runtimeStatus,
               lastOutputAt:
@@ -1415,6 +1460,63 @@ async function classifyWithModel(
       recommendedAction: "none",
     };
   }
+}
+
+/**
+ * Answer each modelJudge question independently against the terminal's current
+ * tail/state, returning a map keyed by the exact question string. Every question
+ * is its own focused yes/no model call (a judge asks "did X happen?", which is a
+ * different task from the general state classification), and the calls run in
+ * parallel so total latency is bounded by the slowest single call rather than the
+ * sum. A failed individual call degrades to an unmatched, zero-confidence answer
+ * so one bad question never aborts the whole map — the condition simply doesn't
+ * fire on that judge.
+ */
+async function runModelJudges(
+  questions: string[],
+  rec: WatcherRecord,
+  signals: WatcherSignals,
+  ctx: ToolContext,
+): Promise<Map<string, ModelJudgeAnswer>> {
+  const lastOutputAt =
+    signals.msSinceOutput !== undefined
+      ? `${Math.floor(signals.msSinceOutput / 1000)}s ago`
+      : undefined;
+  const entries = await Promise.all(
+    questions.map(async (question): Promise<[string, ModelJudgeAnswer]> => {
+      try {
+        const answer = await ctx.router.json(
+          rec.modelTier,
+          {
+            messages: [
+              { role: "system", content: JUDGE_SYSTEM_PROMPT },
+              {
+                role: "user",
+                content: buildJudgeUserPrompt({
+                  question,
+                  goal: rec.goal,
+                  agentState: signals.agentState,
+                  runtimeStatus: signals.runtimeStatus,
+                  waitingReason: signals.waitingReason,
+                  lastOutputAt,
+                  tail: signals.tail,
+                }),
+              },
+            ],
+            temperature: 0,
+          },
+          ModelJudgeAnswer,
+        );
+        return [question, answer];
+      } catch {
+        return [
+          question,
+          { reason: "Could not evaluate the question.", confidence: 0, matched: false },
+        ];
+      }
+    }),
+  );
+  return new Map(entries);
 }
 
 function humanize(c: WatcherClassification): string {

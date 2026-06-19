@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   runTerminalWatcherCheck,
   nextOutputState,
-  findModelJudge,
+  collectModelJudges,
   hasTextCondition,
   hashTail,
 } from "../src/daemon/watcherEngine.js";
@@ -122,13 +122,46 @@ describe("nextOutputState (#4)", () => {
   });
 });
 
-describe("findModelJudge (#15)", () => {
-  it("locates a modelJudge inside composite conditions", () => {
-    expect(findModelJudge({ modelJudge: "done?" })).toBe("done?");
-    expect(findModelJudge({ any: [{ contains: "x" }, { modelJudge: "ready?" }] })).toBe("ready?");
-    expect(findModelJudge({ not: { all: [{ modelJudge: "ok?" }] } })).toBe("ok?");
-    expect(findModelJudge({ contains: "x" })).toBeUndefined();
-    expect(findModelJudge(undefined)).toBeUndefined();
+describe("collectModelJudges (#57)", () => {
+  it("collects a single judge from a leaf or composite condition", () => {
+    expect(collectModelJudges({ modelJudge: "done?" })).toEqual(["done?"]);
+    expect(
+      collectModelJudges({ any: [{ contains: "x" }, { modelJudge: "ready?" }] }),
+    ).toEqual(["ready?"]);
+    expect(collectModelJudges({ not: { all: [{ modelJudge: "ok?" }] } })).toEqual(["ok?"]);
+  });
+
+  it("collects EVERY judge in a multi-judge group, in first-seen order", () => {
+    expect(
+      collectModelJudges({ all: [{ modelJudge: "a?" }, { modelJudge: "b?" }] }),
+    ).toEqual(["a?", "b?"]);
+    expect(
+      collectModelJudges({
+        any: [
+          { all: [{ modelJudge: "a?" }, { contains: "x" }] },
+          { not: { modelJudge: "b?" } },
+        ],
+      }),
+    ).toEqual(["a?", "b?"]);
+  });
+
+  it("deduplicates repeated questions across and within conditions", () => {
+    expect(
+      collectModelJudges({ any: [{ modelJudge: "q?" }, { modelJudge: "q?" }] }),
+    ).toEqual(["q?"]);
+    // Across both conditions passed as separate arguments (alertWhen + stopWhen).
+    expect(
+      collectModelJudges({ modelJudge: "shared?" }, { modelJudge: "shared?" }),
+    ).toEqual(["shared?"]);
+    expect(
+      collectModelJudges({ modelJudge: "a?" }, { modelJudge: "b?" }),
+    ).toEqual(["a?", "b?"]);
+  });
+
+  it("returns an empty array when there is no judge", () => {
+    expect(collectModelJudges({ contains: "x" })).toEqual([]);
+    expect(collectModelJudges(undefined)).toEqual([]);
+    expect(collectModelJudges(undefined, undefined)).toEqual([]);
   });
 });
 

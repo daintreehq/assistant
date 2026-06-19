@@ -31,7 +31,7 @@ import {
   readOutput,
   readStatuses,
   nextOutputState,
-  findModelJudge,
+  collectModelJudges,
   type WatcherSignals,
 } from "../daemon/watcherEngine.js";
 import {
@@ -392,7 +392,7 @@ async function runVerdict(
 
 /** modelJudge would re-run the classifier every poll tick — reject it up front. */
 function rejectModelJudge(wait?: WatchCondition) {
-  if (wait && findModelJudge(wait)) {
+  if (wait && collectModelJudges(wait).length > 0) {
     return fail(
       "UNSUPPORTED_CONDITION",
       "modelJudge is not supported in terminal extraction wait conditions; use contains, regex, noOutputForMs, runtimeStatusIs, or stateIs.",
