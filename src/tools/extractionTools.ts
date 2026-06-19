@@ -207,7 +207,11 @@ async function readSignals(
   now: number,
 ): Promise<ReadResult> {
   const statuses = await readStatuses(ctx, terminalIds, true);
-  let allExited = statuses.ok;
+  // "All exited" requires a successful read that ACTUALLY returned terminals. A
+  // total miss (ok:true but an empty byId) is otherwise indistinguishable from
+  // every terminal cleanly exiting — that false "finished" silently hid the
+  // empty-read bug (#108). Require byId to be non-empty before trusting exit.
+  let allExited = statuses.ok && statuses.byId.size > 0;
   let minMsSinceOutput = Number.POSITIVE_INFINITY;
   const parts: {
     terminalId: string;
@@ -218,8 +222,12 @@ async function readSignals(
 
   for (const id of terminalIds) {
     const entry = statuses.byId.get(id);
-    // A successful status read that omits this id means the terminal is gone.
-    const absent = statuses.ok && !entry;
+    // A terminal is "gone" only when the read returned OTHER terminals but not
+    // this one — the namespace is confirmed live, so the omission is a real exit.
+    // A TOTAL miss (ok read, empty byId) is the #108 empty-read symptom, NOT a
+    // clean exit, so don't promote it to "exited" — that would leak through
+    // agentState/runtimeStatus and falsely satisfy a runtimeStatusIs:"exited" wait.
+    const absent = statuses.ok && !entry && statuses.byId.size > 0;
     const agentState = absent ? "exited" : entry?.agentState;
     // The inline recentOutput tail is capped at 50 lines, so it can satisfy
     // extraction only when it already covers the requested tailBytes; otherwise

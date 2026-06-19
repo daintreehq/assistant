@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import type { App } from "../../cli/app.js";
 import type { WatcherRecord } from "../../schemas.js";
+import { parseMcpArray, parseMcpString } from "../../mcp/resultHelpers.js";
 
 export interface TerminalPreview {
   terminalId: string;
@@ -73,19 +74,19 @@ export function useTerminalPreview(
             app.mcp.callTool("terminal.getOutput", { terminalId, maxLines: 40 }),
           ]);
           // terminal.getStatus -> { terminals: [{ terminalId, agentState, ... }] }.
-          // Only attribute status when the returned id matches the one we asked
-          // for — never guess from terminals[0].
-          const statusSc = (status.structuredContent ?? {}) as Record<string, unknown>;
-          const terminals = Array.isArray(statusSc.terminals)
-            ? (statusSc.terminals as Array<Record<string, unknown>>)
-            : [];
+          // Daintree returns this in the text body, not structuredContent, so read
+          // both (parseMcpArray). Only attribute status when the returned id
+          // matches the one we asked for — never guess from terminals[0].
+          const terminals = parseMcpArray(status, "terminals") as Array<
+            Record<string, unknown>
+          >;
           const entry = terminals.find((t) => t?.terminalId === terminalId);
           const agentState =
             entry && typeof entry.agentState === "string" ? entry.agentState : undefined;
-          // terminal.getOutput -> { content }; ignore errored reads.
-          const outSc = (output.structuredContent ?? {}) as Record<string, unknown>;
-          const content =
-            !output.isError && typeof outSc.content === "string" ? outSc.content : "";
+          // terminal.getOutput -> { content } or raw text; ignore errored reads.
+          const content = output.isError
+            ? ""
+            : (parseMcpString(output, "content") ?? "");
           next.push({
             terminalId,
             watcherId: watcher.id,

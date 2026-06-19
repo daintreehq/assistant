@@ -21,13 +21,21 @@ type StatusEntry = {
   spawnedAt?: number;
   lastTransitionAt?: number;
 };
-/** A status result shaped like Daintree's terminal.getStatus. */
-function statusRes(entries: Array<StatusEntry>) {
-  return { isError: false, text: "", structuredContent: { terminals: entries } };
+/**
+ * A status result shaped like Daintree's terminal.getStatus. When `textOnly` the
+ * payload lands ONLY in the text body with no structuredContent — Daintree's real
+ * shape (#108) — exercising the parse-fallback path.
+ */
+function statusRes(entries: Array<StatusEntry>, textOnly = false) {
+  return textOnly
+    ? { isError: false, text: JSON.stringify({ terminals: entries }), structuredContent: undefined }
+    : { isError: false, text: "", structuredContent: { terminals: entries } };
 }
-/** An output result shaped like Daintree's terminal.getOutput. */
-function outputRes(content: string) {
-  return { isError: false, text: "", structuredContent: { content } };
+/** An output result shaped like Daintree's terminal.getOutput (text-only when set). */
+function outputRes(content: string, textOnly = false) {
+  return textOnly
+    ? { isError: false, text: content, structuredContent: undefined }
+    : { isError: false, text: "", structuredContent: { content } };
 }
 
 interface CtxParts {
@@ -37,6 +45,8 @@ interface CtxParts {
   chat?: ReturnType<typeof vi.fn>;
   json?: ReturnType<typeof vi.fn>;
   publish?: ReturnType<typeof vi.fn>;
+  /** Deliver terminal payloads only in the text body (Daintree's real shape). */
+  textOnly?: boolean;
 }
 
 function ctxWith(parts: CtxParts = {}): {
@@ -58,11 +68,11 @@ function ctxWith(parts: CtxParts = {}): {
           const entries = parts.status
             ? parts.status(statusCall++)
             : [{ terminalId: "t1", agentState: "working" }];
-          return statusRes(entries);
+          return statusRes(entries, parts.textOnly);
         }
         if (name === "terminal.getOutput") {
           const content = parts.output ? parts.output(outputCall++) : "log line";
-          return outputRes(content);
+          return outputRes(content, parts.textOnly);
         }
         return { isError: true, text: "", structuredContent: {} };
       }),
@@ -223,6 +233,48 @@ describe("terminal.extract — inline", () => {
     expect(res.ok).toBe(true);
     expect((res.result as { attempts: number }).attempts).toBe(2);
     expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("classifies correctly when Daintree returns status/output only in the text body (#108)", async () => {
+    // No structuredContent at all — the real Daintree shape. The fallback parse
+    // must still surface the exited state and the scrollback tail.
+    const { ctx } = ctxWith({
+      textOnly: true,
+      status: () => [{ terminalId: "t1", agentState: "exited" }],
+      output: () => "BUILD OK done",
+    });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", wait: { all: [{ runtimeStatusIs: "exited" }, { contains: "BUILD OK" }] }, pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { matched: boolean }).matched).toBe(true);
+    expect((res.result as { finished: boolean }).finished).toBe(true);
+  });
+
+  it("does NOT satisfy a runtimeStatusIs:exited wait on a total status miss (#108)", async () => {
+    // A total miss must not promote the (absent) terminal to runtimeStatus
+    // "exited" — otherwise a wait on exit would fire against an empty tail.
+    const { ctx } = ctxWith({ status: () => [] });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", wait: { runtimeStatusIs: "exited" }, pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { matched: boolean }).matched).toBe(false);
+    expect((res.result as { finished: boolean }).finished).toBe(false);
+  });
+
+  it("does NOT report finished on a total status miss — empty byId is not a clean exit (#108)", async () => {
+    // readStatuses returns ok:true but zero terminals (the pre-fix empty-read
+    // symptom). That must NOT be reported as every terminal having exited.
+    const { ctx } = ctxWith({ status: () => [] });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], format: "text", pollIntervalMs: 0, maxAttempts: 2, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { finished: boolean }).finished).toBe(false);
   });
 
   it("feeds the instruction and terminal tail to the extraction model", async () => {
