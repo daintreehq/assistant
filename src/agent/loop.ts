@@ -138,6 +138,24 @@ function recordToChatMessage(r: ConversationMessageRecord): ChatMessage {
 }
 
 /**
+ * Drop `tool` result messages with no parent assistant tool-call.
+ *
+ * A tool result whose id was never declared by a preceding assistant `tool_calls`
+ * is an orphan Fireworks rejects. This happens when the parent assistant row's
+ * `toolCallsJson` was malformed (recordToChatMessage drops the calls but keeps the
+ * row) or otherwise lost. A single forward pass tracks every declared id and
+ * filters out tool messages that reference none of them.
+ */
+function dropOrphanToolResults(messages: ChatMessage[]): ChatMessage[] {
+  const declared = new Set<string>();
+  return messages.filter((m) => {
+    for (const tc of m.tool_calls ?? []) declared.add(tc.id);
+    if (m.role === "tool") return m.tool_call_id ? declared.has(m.tool_call_id) : false;
+    return true;
+  });
+}
+
+/**
  * Trim an incomplete tool-call exchange from the tail of a restored history.
  *
  * If the prior session shut down mid-turn, its last assistant message may carry
@@ -186,7 +204,9 @@ export function rehydrateSession(
   // can't trust the ordering; start clean rather than replay a tangle.
   if (new Set(rows.map((r) => r.seq)).size !== rows.length) return undefined;
 
-  const initialSeq = Math.max(...rows.map((r) => r.seq)) + 1;
+  // reduce, not Math.max(...spread): a long pre-compaction session can hold more
+  // rows than the engine's argument-count limit, which would throw on spread.
+  const initialSeq = rows.reduce((m, r) => Math.max(m, r.seq), 0) + 1;
 
   // If the prior run was compacted, only the rows after the LAST compaction
   // marker are live context (the summary note + anything since). The marker row
@@ -203,7 +223,9 @@ export function rehydrateSession(
         // always writes first and re-creates fresh on resume.
         rows.filter((r) => r.seq >= CONTROL_MESSAGE_COUNT);
 
-  const restoredMessages = dropOrphanToolCallTail(working.map(recordToChatMessage));
+  const restoredMessages = dropOrphanToolCallTail(
+    dropOrphanToolResults(working.map(recordToChatMessage)),
+  );
   return { restoredMessages, initialSeq };
 }
 

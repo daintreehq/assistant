@@ -157,6 +157,74 @@ describe("rehydrateSession (#77)", () => {
     expect(out.restoredMessages[0]).toMatchObject({ role: "assistant", content: "text" });
     expect(out.restoredMessages[0].tool_calls).toBeUndefined();
   });
+
+  it("drops an orphan tool result left by a malformed parent tool-call row", () => {
+    const rows = [
+      ...controlRows(),
+      // Parent assistant's tool-call JSON is corrupt, so its calls are lost…
+      rec({ seq: 3, role: "assistant", content: "text", toolCallsJson: "{not json" }),
+      // …leaving this tool result with no declared parent id (Fireworks rejects it).
+      rec({ seq: 4, role: "tool", content: "result", toolCallId: "call_1" }),
+    ];
+    const out = rehydrateSession(rows)!;
+    expect(out.restoredMessages).toHaveLength(1);
+    expect(out.restoredMessages[0]).toMatchObject({ role: "assistant", content: "text" });
+    expect(out.restoredMessages.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("trims a whole multi-tool batch when only some results were persisted", () => {
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "do both" }),
+      rec({
+        seq: 4,
+        role: "assistant",
+        content: "",
+        toolCallsJson: JSON.stringify([
+          { id: "call_1", type: "function", function: { name: "fs.read", arguments: "{}" } },
+          { id: "call_2", type: "function", function: { name: "fs.list", arguments: "{}" } },
+        ]),
+      }),
+      rec({ seq: 5, role: "tool", content: "r1", toolCallId: "call_1" }),
+      // call_2 result never written — the assistant turn is incomplete.
+    ];
+    const out = rehydrateSession(rows)!;
+    // The incomplete assistant turn AND its partial result are trimmed.
+    expect(out.restoredMessages).toHaveLength(1);
+    expect(out.restoredMessages[0]).toMatchObject({ role: "user", content: "do both" });
+  });
+
+  it("keeps only the latest summary across two compaction cycles", () => {
+    const rows = [
+      ...controlRows(),
+      rec({ seq: 3, role: "user", content: "turn one" }),
+      rec({ seq: 4, role: "system", content: "[conversation compacted — earlier turns dropped from context]" }),
+      rec({ seq: 5, role: "user", content: "[compacted summary of earlier conversation]\nFIRST" }),
+      rec({ seq: 6, role: "user", content: "turn two" }),
+      rec({ seq: 7, role: "system", content: "[conversation compacted — earlier turns dropped from context]" }),
+      rec({ seq: 8, role: "user", content: "[compacted summary of earlier conversation]\nSECOND" }),
+    ];
+    const out = rehydrateSession(rows)!;
+    expect(out.initialSeq).toBe(9);
+    expect(out.restoredMessages).toHaveLength(1);
+    expect(out.restoredMessages[0].content).toContain("SECOND");
+    expect(out.restoredMessages.some((m) => m.content?.includes("FIRST"))).toBe(false);
+  });
+
+  it("returns an empty history (not undefined) for a session with only control rows", () => {
+    const out = rehydrateSession(controlRows())!;
+    expect(out).toBeDefined();
+    expect(out.restoredMessages).toHaveLength(0);
+    expect(out.initialSeq).toBe(3);
+  });
+
+  it("seeds initialSeq correctly over a large row set (no spread overflow)", () => {
+    const rows = controlRows();
+    for (let i = 3; i < 1500; i++) rows.push(rec({ seq: i, role: "user", content: `n${i}` }));
+    const out = rehydrateSession(rows)!;
+    expect(out.initialSeq).toBe(1500);
+    expect(out.restoredMessages).toHaveLength(1497);
+  });
 });
 
 describe("AgentSession resume integration (#77)", () => {
