@@ -49,6 +49,12 @@ function activityGlyph(state: ActivityState, set: GlyphSet): string {
 }
 
 const LABEL_WIDTH = 11;
+// Fixed left prefix: branch glyph + space + badge glyph + space ("├─ ✓ ").
+const PREFIX_COLS = 5;
+// Reserve for the right-aligned duration ("9999ms" ≈ 6) plus a one-column gap,
+// so a long detail is truncated *before* it collides with the timing — the
+// `space-between` row otherwise leaves zero gap when the content fills the width.
+const DURATION_COLS = 8;
 
 export function ActivityTree({
   activities,
@@ -63,7 +69,6 @@ export function ActivityTree({
 }) {
   if (activities.length === 0) return null;
   const set = glyphs();
-  const detailRoom = Math.max(8, width - LABEL_WIDTH - 12);
   return (
     <Box flexDirection="column">
       {activities.map((a, i) => {
@@ -77,6 +82,15 @@ export function ActivityTree({
               ? Math.max(0, now - a.startedAt)
               : undefined;
         const detail = a.detail ?? (a.state === "done" ? a.summary : undefined);
+        // Detail shares the row with the label and the right-aligned duration.
+        // The label column is its real width (padded up to LABEL_WIDTH for short
+        // verbs), plus one separating space — budget the remainder so a long
+        // detail truncates instead of shoving into the timing.
+        const labelCols = Math.max(a.label.length + 1, LABEL_WIDTH);
+        const detailRoom = Math.max(
+          8,
+          width - PREFIX_COLS - labelCols - DURATION_COLS,
+        );
         return (
           <Box key={a.id} flexDirection="column">
             <Box justifyContent="space-between">
@@ -95,7 +109,9 @@ export function ActivityTree({
                 ) : null}
               </Box>
               {elapsed != null ? (
-                <Text dimColor>{formatDuration(elapsed)}</Text>
+                <Box marginLeft={1}>
+                  <Text dimColor>{formatDuration(elapsed)}</Text>
+                </Box>
               ) : null}
             </Box>
             {expanded ? (

@@ -59,17 +59,17 @@ const MAP: Record<string, (a: Args) => ToolPresentation> = {
     detail: str(a.goal) ?? str(a.title) ?? ids(a.terminalIds),
   }),
   "watcher.list": () => ({ label: "Listed watchers" }),
-  "watcher.cancel": (a) => ({ label: "Stopped watcher", detail: str(a.watcherId) }),
+  "watcher.cancel": (a) => ({ label: "Stopped watcher", detail: str(a.id) }),
   "timer.schedule": (a) => ({ label: "Scheduled", detail: str(a.title) }),
   "timer.list": () => ({ label: "Listed timers" }),
-  "timer.cancel": (a) => ({ label: "Cancelled timer", detail: str(a.timerId) }),
+  "timer.cancel": (a) => ({ label: "Cancelled timer", detail: str(a.id) }),
   "terminal.focus": (a) => ({ label: "Focused", detail: str(a.terminalId) }),
   "terminal.extract": (a) => ({ label: "Extracted", detail: str(a.terminalId) }),
   "terminal.extract.async": (a) => ({ label: "Extracting", detail: str(a.terminalId) }),
   "terminal.summarize": (a) => ({ label: "Summarized", detail: str(a.terminalId) }),
   "queue.publish": (a) => ({ label: "Raised", detail: str(a.title) }),
   "queue.digest": () => ({ label: "Read inbox" }),
-  "queue.resolve": (a) => ({ label: "Resolved", detail: str(a.eventId) }),
+  "queue.resolve": (a) => ({ label: "Resolved", detail: str(a.id) }),
   "recipe.list": () => ({ label: "Listed recipes" }),
   "recipe.run": (a) => ({ label: "Ran recipe", detail: str(a.recipeId) }),
   "worktree.createWithRecipe": (a) => ({
@@ -89,9 +89,13 @@ const MAP: Record<string, (a: Args) => ToolPresentation> = {
   }),
   "grant.create": () => ({ label: "Granted automation" }),
   "grant.list": () => ({ label: "Listed grants" }),
-  "grant.revoke": (a) => ({ label: "Revoked grant", detail: str(a.grantId) }),
-  "daintree.status": () => ({ label: "Checked Daintree" }),
-  "daintree.listTools": () => ({ label: "Listed Daintree tools" }),
+  "grant.revoke": (a) => ({ label: "Revoked grant", detail: str(a.id) }),
+  // The result summary already starts with "Daintree MCP …", so the label must
+  // not repeat "Daintree" (it would read "Checked Daintree Daintree MCP …").
+  // "Checked status" still stands on its own on active/failed rows that have no
+  // summary yet, and the listTools label likewise drops the redundant "Daintree".
+  "daintree.status": () => ({ label: "Checked status" }),
+  "daintree.listTools": () => ({ label: "Listed tools" }),
   "daintree.call": (a) => ({ label: "Called", detail: str(a.toolName) ?? str(a.name) }),
 };
 

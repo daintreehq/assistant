@@ -45,7 +45,12 @@ export const ui = {
     waiting: "◷",
     pending: "◦",
     branch: "├─",
-    lastBranch: "╰─",
+    // Square sibling of `branch` (U+2514, not the rounded arc U+2570). The arc
+    // glyphs ╭╮╯╰ are missing from many terminal monospace fonts and get
+    // substituted from a fallback font at a *different* advance width, which
+    // shifts the whole row by a cell and breaks badge alignment. `└` ships in
+    // every font that has `├`, so the two branch rows stay column-aligned.
+    lastBranch: "└─",
     continuation: "│ ",
     bullet: "·",
     connected: "●",

@@ -62,7 +62,7 @@ describe("Transcript", () => {
     expect(frame).not.toContain("watcher.terminal.create(");
     expect(frame).not.toContain('"query"');
     // Branch grammar + a settled duration.
-    expect(frame).toMatch(/[├╰]/);
+    expect(frame).toMatch(/[├└]/);
     expect(frame).toContain("180ms");
   });
 
