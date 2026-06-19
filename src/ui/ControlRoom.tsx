@@ -78,6 +78,12 @@ export interface ControlRoomProps {
    */
   activePanel?: PanelKey | null;
   expanded?: boolean;
+  /**
+   * How many turns back the transcript is scrolled (0 = latest). Owned by the
+   * shell's key handler; this component only threads it to the Transcript. Pure
+   * presentational — ControlRoom never mutates it.
+   */
+  transcriptScrollOffset?: number;
   pending?: PendingConfirm | null;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
@@ -111,6 +117,7 @@ export function ControlRoom({
   view,
   activePanel = null,
   expanded = false,
+  transcriptScrollOffset = 0,
   pending = null,
   now = Date.now(),
   logging = false,
@@ -248,6 +255,7 @@ export function ControlRoom({
                 width={transcriptWidth}
                 now={now}
                 expanded={expanded}
+                scrollOffset={transcriptScrollOffset}
               />
             </Box>
             <Box width={railWidth} marginLeft={1}>
@@ -268,6 +276,7 @@ export function ControlRoom({
             height={bodyHeight}
             now={now}
             expanded={expanded}
+            scrollOffset={transcriptScrollOffset}
           />
         ) : (
           <Transcript
@@ -276,6 +285,7 @@ export function ControlRoom({
             width={columns}
             now={now}
             expanded={expanded}
+            scrollOffset={transcriptScrollOffset}
           />
         )}
       </Box>

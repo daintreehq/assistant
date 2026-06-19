@@ -6,7 +6,7 @@
  */
 import { Box, Text } from "ink";
 import type { TranscriptCell } from "../types.js";
-import { TurnCellView } from "./TurnCellView.js";
+import { TurnCellView, COMPACT_TURN_LINES } from "./TurnCellView.js";
 import { glyphs, toneColor, ui } from "../theme.js";
 
 function wrapLines(text: string, width: number): number {
@@ -31,21 +31,74 @@ function estimateLines(cell: TranscriptCell, width: number): number {
   return Math.max(1, n);
 }
 
-/** Take the most recent cells that fit within `height` rendered lines. */
+/** A cell selected for display, plus whether it must render as a compact summary. */
+interface VisibleCell {
+  cell: TranscriptCell;
+  compact: boolean;
+}
+
+interface FitResult {
+  visible: VisibleCell[];
+  /** Older cells above the window the user can still page up to reach. */
+  hiddenOlderCount: number;
+}
+
+/**
+ * Choose the cells to show, anchored `scrollOffset` turns back from the newest.
+ *
+ * Two guarantees beyond "take the most recent that fit":
+ *  - The anchor (newest visible turn) is NEVER sliced. When it alone overflows the
+ *    viewport it renders as a fixed-height summary (`compact`) instead — a clipped
+ *    round border with no scrollback is exactly the bug this fixes (#97).
+ *  - When older cells remain above the window we reserve one row for the
+ *    "↑ N older turns" indicator so it never displaces a visible cell.
+ */
 function fitCells(
   cells: TranscriptCell[],
   height: number,
   width: number,
-): TranscriptCell[] {
-  const out: TranscriptCell[] = [];
-  let used = 0;
-  for (let i = cells.length - 1; i >= 0; i--) {
-    const cost = estimateLines(cells[i], width);
-    if (out.length > 0 && used + cost > height) break;
-    out.unshift(cells[i]);
-    used += cost;
+  scrollOffset = 0,
+): FitResult {
+  if (cells.length === 0) return { visible: [], hiddenOlderCount: 0 };
+  const viewport = Math.max(1, height);
+  const clamped = Math.min(
+    Math.max(0, Math.floor(scrollOffset)),
+    cells.length - 1,
+  );
+  const anchorIdx = cells.length - 1 - clamped;
+
+  const computeWindow = (budget: number): FitResult => {
+    const out: VisibleCell[] = [];
+    let used = 0;
+    for (let i = anchorIdx; i >= 0; i--) {
+      const cell = cells[i];
+      // Only the anchor can overflow the whole viewport; collapse it rather than
+      // letting overflow:hidden tear its card. Judged against the full viewport
+      // (not `budget`, which may be a row smaller to make room for the indicator)
+      // so an exactly-fitting turn is never needlessly compacted. `>=` is
+      // deliberately conservative — estimateLines can undercount, and a compact
+      // summary is a far better failure mode than a clipped card. Older cells that
+      // don't fit are dropped (and counted), as before.
+      const oversized =
+        i === anchorIdx &&
+        cell.kind === "turn" &&
+        estimateLines(cell, width) >= viewport;
+      const cost = oversized ? COMPACT_TURN_LINES : estimateLines(cell, width);
+      if (out.length > 0 && used + cost > budget) break;
+      out.unshift({ cell, compact: oversized });
+      used += cost;
+    }
+    const topIdx = anchorIdx - out.length + 1;
+    return { visible: out, hiddenOlderCount: topIdx };
+  };
+
+  // Recompute against a one-row-smaller budget once we know the indicator is needed,
+  // so reserving its row can never push the topmost cell into the clip region.
+  let result = computeWindow(viewport);
+  if (result.hiddenOlderCount > 0) {
+    result = computeWindow(Math.max(1, viewport - 1));
   }
-  return out;
+  return result;
 }
 
 function NoteView({
@@ -102,6 +155,7 @@ export function Transcript({
   width = 72,
   now,
   expanded = false,
+  scrollOffset = 0,
   emptyText = "Ask Daintree to inspect worktrees, delegate edits, or watch terminals.",
 }: {
   cells: TranscriptCell[];
@@ -109,10 +163,21 @@ export function Transcript({
   width?: number;
   now?: number;
   expanded?: boolean;
+  /**
+   * Turns back from the newest to anchor the view (0 = latest). State lives in the
+   * shell (DaintreeInkApp) so this stays a pure presentational component; clamping
+   * is internal so an out-of-range value is harmless.
+   */
+  scrollOffset?: number;
   /** Override the empty-state line (the sidebar uses a shorter one). */
   emptyText?: string;
 }) {
-  const visible = fitCells(cells, Math.max(1, height), width);
+  const { visible, hiddenOlderCount } = fitCells(
+    cells,
+    Math.max(1, height),
+    width,
+    scrollOffset,
+  );
   return (
     <Box flexDirection="column" height={height} overflow="hidden">
       {visible.length === 0 ? (
@@ -120,21 +185,30 @@ export function Transcript({
           <Text dimColor>{emptyText}</Text>
         </Box>
       ) : (
-        visible.map((cell) =>
-          cell.kind === "turn" ? (
-            <TurnCellView
-              key={cell.id}
-              turn={cell}
-              width={width}
-              now={now}
-              expanded={expanded}
-            />
-          ) : cell.kind === "note" ? (
-            <NoteView key={cell.id} cell={cell} />
-          ) : (
-            <CommandView key={cell.id} cell={cell} />
-          ),
-        )
+        <>
+          {hiddenOlderCount > 0 ? (
+            <Text dimColor wrap="truncate">
+              ↑ {hiddenOlderCount} older{" "}
+              {hiddenOlderCount === 1 ? "turn" : "turns"} — PgUp
+            </Text>
+          ) : null}
+          {visible.map(({ cell, compact }) =>
+            cell.kind === "turn" ? (
+              <TurnCellView
+                key={cell.id}
+                turn={cell}
+                width={width}
+                now={now}
+                expanded={expanded}
+                compact={compact}
+              />
+            ) : cell.kind === "note" ? (
+              <NoteView key={cell.id} cell={cell} />
+            ) : (
+              <CommandView key={cell.id} cell={cell} />
+            ),
+          )}
+        </>
       )}
     </Box>
   );

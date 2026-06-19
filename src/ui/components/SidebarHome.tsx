@@ -196,12 +196,14 @@ function RecentTranscript({
   width,
   now,
   expanded,
+  scrollOffset,
 }: {
   cells: TranscriptCell[];
   height: number;
   width: number;
   now: number;
   expanded?: boolean;
+  scrollOffset?: number;
 }) {
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -212,6 +214,7 @@ function RecentTranscript({
         width={width}
         now={now}
         expanded={expanded}
+        scrollOffset={scrollOffset}
         emptyText="No recent conversation."
       />
     </Box>
@@ -226,6 +229,7 @@ export function SidebarHome({
   height,
   now,
   expanded,
+  scrollOffset,
 }: {
   dashboard: DashboardState;
   previews?: TerminalPreview[];
@@ -234,6 +238,7 @@ export function SidebarHome({
   height: number;
   now: number;
   expanded?: boolean;
+  scrollOffset?: number;
 }) {
   const agents = buildAgentRows(dashboard.watchers, previews);
   const active =
@@ -265,6 +270,7 @@ export function SidebarHome({
         width={width}
         now={now}
         expanded={expanded}
+        scrollOffset={scrollOffset}
       />
     </Box>
   );

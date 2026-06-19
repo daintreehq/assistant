@@ -23,6 +23,10 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
   const { columns, rows } = useWindowSize();
   const [view, setView] = useState<View>("home");
   const [expanded, setExpanded] = useState(false);
+  // How many turns back the transcript is scrolled (0 = latest). Owned here, not in
+  // the pure-presentational ControlRoom/Transcript; paged with PageUp/PageDown and
+  // snapped to 0 whenever a new message is accepted (see handleSubmit).
+  const [scrollOffset, setScrollOffset] = useState(0);
   const controller = useDaintreeController(app, exit);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
 
@@ -44,6 +48,15 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     controller.setActivePanel(null);
   };
 
+  // Submitting a message always returns to the latest turn so the user sees their
+  // new turn land, even if they'd paged back into history. Only snap back when the
+  // controller actually accepts the message (an empty buffer returns false).
+  const handleSubmit = (value: string) => {
+    const accepted = controller.sendUserMessage(value);
+    if (accepted) setScrollOffset(0);
+    return accepted;
+  };
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
@@ -53,6 +66,20 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     // view/expand chords so the cockpit can't surface mid-animation in a non-home
     // state (e.g. a stray ^O leaving it on the operations deck once boot finishes).
     if (controller.booting) return;
+    // PageUp/PageDown page the transcript one turn at a time — only on the home
+    // screen, and not while an approval modal owns the keys. The offset is clamped
+    // on the way into ControlRoom, so over-paging past the oldest turn is harmless.
+    if (key.pageUp || key.pageDown) {
+      if (view !== "home" || controller.pendingConfirm) return;
+      if (key.pageUp) {
+        setScrollOffset((o) =>
+          Math.min(o + 1, Math.max(0, controller.transcript.length - 1)),
+        );
+      } else {
+        setScrollOffset((o) => Math.max(0, o - 1));
+      }
+      return;
+    }
     if (key.escape) {
       // On home the composer owns Escape (clear buffer, or cancel the turn when
       // empty+busy) — handled by MultilineInput, which is focused there. Ink has no
@@ -111,12 +138,16 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       view={view}
       activePanel={controller.activePanel}
       expanded={expanded}
+      transcriptScrollOffset={Math.min(
+        scrollOffset,
+        Math.max(0, controller.transcript.length - 1),
+      )}
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}
       logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
       composerFocus={view === "home" && !controller.pendingConfirm}
       cancellable={controller.canCancel}
-      onSubmit={controller.sendUserMessage}
+      onSubmit={handleSubmit}
       onCancel={controller.pullBackTurn}
       composerRef={controller.composerRef}
       onResolve={controller.resolveConfirm}

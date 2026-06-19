@@ -75,4 +75,85 @@ describe("Transcript", () => {
     expect(frame).toContain("fs.search args:");
     expect(frame).toContain("result:");
   });
+
+  // A plain short turn, ~5 estimated rows: one fits in height=6, two don't.
+  function turn(id: string, user: string, assistant: string): TranscriptCell {
+    return {
+      kind: "turn",
+      id,
+      userText: user,
+      assistantText: assistant,
+      streaming: false,
+      state: "complete",
+      ts: FIXED,
+      notes: [],
+      activities: [],
+    };
+  }
+
+  function threeTurns(): TranscriptCell[] {
+    return [
+      turn("a", "First question.", "First answer."),
+      turn("b", "Second question.", "Second answer."),
+      turn("c", "Third question.", "Third answer."),
+    ];
+  }
+
+  it("anchors on the newest turn and counts the older ones above it", () => {
+    const frame =
+      render(
+        <Transcript cells={threeTurns()} height={6} width={72} now={FIXED} />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("Third question.");
+    expect(frame).not.toContain("First question.");
+    expect(frame).toContain("↑ 2 older turns");
+  });
+
+  it("pages back to older turns with scrollOffset", () => {
+    const frame =
+      render(
+        <Transcript
+          cells={threeTurns()}
+          height={6}
+          width={72}
+          now={FIXED}
+          scrollOffset={1}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("Second question.");
+    expect(frame).not.toContain("Third question.");
+    // One older turn ("a") still sits above the window.
+    expect(frame).toContain("↑ 1 older turn");
+  });
+
+  it("clamps an out-of-range scrollOffset to the oldest turn without throwing", () => {
+    const frame =
+      render(
+        <Transcript
+          cells={threeTurns()}
+          height={6}
+          width={72}
+          now={FIXED}
+          scrollOffset={99}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("First question.");
+    // Nothing is older than the oldest, so no indicator.
+    expect(frame).not.toContain("older turn");
+  });
+
+  it("collapses an oversized newest turn to a compact summary instead of clipping", () => {
+    const long = "word ".repeat(400).trim(); // wraps far past a 6-row viewport
+    const cells: TranscriptCell[] = [turn("big", "Tell me everything.", long)];
+    const frame =
+      render(
+        <Transcript cells={cells} height={6} width={72} now={FIXED} />,
+      ).lastFrame() ?? "";
+    // Markers survive so "who said what" still reads...
+    expect(frame).toContain("YOU");
+    expect(frame).toContain("DAINTREE");
+    // ...with the scroll hint, and crucially NO torn round-border card.
+    expect(frame).toContain("truncated");
+    expect(frame).not.toContain("╭");
+  });
 });
