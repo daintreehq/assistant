@@ -4,7 +4,11 @@ import {
   runVerificationPass,
   deriveVerification,
 } from "../src/daemon/watcherEngine.js";
-import { VERIFICATION_EVIDENCE_PREFIX, VerificationResult } from "../src/schemas.js";
+import {
+  VERIFICATION_EVIDENCE_PREFIX,
+  VerificationResult,
+  ModelJudgeAnswer,
+} from "../src/schemas.js";
 import { Db } from "../src/storage/db.js";
 import { Queue } from "../src/queue.js";
 import type { ToolContext } from "../src/tools/types.js";
@@ -126,6 +130,30 @@ function fakeJudgeRouter(
   return {
     chat: async () => ({ content: "(no change)" }),
     json: async () => ({ reason, confidence, matched }),
+  } as unknown as ModelRouter;
+}
+
+/** Router that serves BOTH the tail classifier (a WatcherVerdict) and the acceptance
+ *  judge (a ModelJudgeAnswer) from one fake, branching on the requested schema — so a
+ *  model-CLAIMED completion can be routed through the contract gate in one test. */
+function fakeClassifyAndJudgeRouter(
+  judgeMatched: boolean,
+  judgeConfidence = 0.9,
+): ModelRouter {
+  return {
+    chat: async () => ({ content: "(no change)" }),
+    json: async (_tier: unknown, _opts: unknown, schema: unknown) => {
+      if (schema === ModelJudgeAnswer) {
+        return { reason: "judged", confidence: judgeConfidence, matched: judgeMatched };
+      }
+      return {
+        classification: "completed_success",
+        confidence: 0.7,
+        summary: "looks done",
+        evidence: [],
+        recommendedAction: "none",
+      };
+    },
   } as unknown as ModelRouter;
 }
 
@@ -413,7 +441,7 @@ describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
     const ctx = ctxWith(
       db,
       queue,
-      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeMcp({ "term-a": { agentState: "completed", tail: "All tests pass. Done." } }),
       fakeJudgeRouter(true, 0.92, "Tests pass; bug fixed."),
     );
     const w = makeWatcher(db, ["term-a"], criteriaOptions);
@@ -441,7 +469,7 @@ describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
     const ctx = ctxWith(
       db,
       queue,
-      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeMcp({ "term-a": { agentState: "completed", tail: "Ran the suite." } }),
       fakeJudgeRouter(false, 0.9, "Two tests still failing."),
     );
     const w = makeWatcher(db, ["term-a"], criteriaOptions);
@@ -467,7 +495,7 @@ describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
     const ctx = ctxWith(
       db,
       queue,
-      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeMcp({ "term-a": { agentState: "completed", tail: "Finished, I think." } }),
       fakeJudgeRouter(true, 0.3, "Not sure the bug is actually fixed."),
     );
     const w = makeWatcher(db, ["term-a"], criteriaOptions);
@@ -496,7 +524,7 @@ describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
       db,
       queue,
       fakeMcp(
-        { "term-a": { agentState: "completed" } },
+        { "term-a": { agentState: "completed", tail: "Done with the changes." } },
         { structuredContent: { isDirty: true, changedFiles: 3 } },
       ),
       fakeJudgeRouter(true, 0.95, "Criteria satisfied."),
@@ -516,6 +544,126 @@ describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
     );
     expect(parsed.verdict).toBe("unknown");
     expect(parsed.hasGitChanges).toBe(true);
+    db.close();
+  });
+
+  it("empty tail (no evidence to judge) -> unknown, never a false failed", async () => {
+    // A completed agent with no readable scrollback (transport hiccup / list
+    // fallback) must NOT be judged against the contract — judging zero evidence
+    // could harden into a confident "failed". No evidence → "unknown".
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      // No tail configured → getOutput returns "" → empty signals.tail.
+      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeJudgeRouter(false, 0.95, "Would say not met if asked."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("unknown");
+    // The judge never ran, so no criteriaMetSummary was recorded.
+    expect(parsed.criteriaMetSummary).toBeUndefined();
+    db.close();
+  });
+
+  it("confidence floor boundary: 0.6 is confident, 0.599 is not", async () => {
+    for (const [confidence, expected] of [
+      [0.6, "verified"],
+      [0.599, "unknown"],
+    ] as const) {
+      const db = new Db(":memory:");
+      const queue = new Queue(db);
+      const ctx = ctxWith(
+        db,
+        queue,
+        fakeMcp({ "term-a": { agentState: "completed", tail: "All done." } }),
+        fakeJudgeRouter(true, confidence, "Met."),
+      );
+      const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+      const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+      void outcome;
+      // "done" threshold captures both the verified (done) and the unknown
+      // (attention) case, since this non-supervisor watcher does not promote.
+      const evt = queue
+        .digest({ severityAtLeast: "done" })
+        .find((e) => e.target?.terminalId === "term-a");
+      const blob = evt?.evidence?.find((e) =>
+        e.startsWith(VERIFICATION_EVIDENCE_PREFIX),
+      );
+      const parsed = VerificationResult.parse(
+        JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+      );
+      expect(parsed.verdict, `confidence ${confidence}`).toBe(expected);
+      db.close();
+    }
+  });
+
+  it("confident non-match on a dirty tree still -> failed (not unknown)", async () => {
+    // The non-match branch fires before the dirty-tree fallthrough: a confidently
+    // unmet contract is a failure regardless of git state.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp(
+        { "term-a": { agentState: "completed", tail: "Gave up." } },
+        { structuredContent: { isDirty: true, changedFiles: 2 } },
+      ),
+      fakeJudgeRouter(false, 0.9, "Contract not satisfied."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("failed");
+    db.close();
+  });
+
+  it("model-claimed completion (FSM still working) is gated by the contract", async () => {
+    // The small model concludes completion from tail text while the FSM is still
+    // "working"; the contract gate must still run and, on a confident match + clean
+    // tree, promote to verified — proving the call site passes acceptanceCriteria.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-a": { agentState: "working", tail: "All done! Task complete." } }),
+      fakeClassifyAndJudgeRouter(true, 0.9),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_success");
+    const evt = queue
+      .digest({ severityAtLeast: "done" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("verified");
     db.close();
   });
 });

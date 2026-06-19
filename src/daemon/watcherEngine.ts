@@ -839,7 +839,12 @@ async function gateCompletion(
   // and the judge's rationale ride along in the evidence bundle either way.
   verification.acceptanceCriteria = criteria;
   let answer: ModelJudgeAnswer | undefined;
-  if (gate && ctx.mcp.isConnected()) {
+  // Only judge when there is actual terminal evidence to judge. An empty tail means
+  // we have NO evidence (e.g. a failed terminal.getOutput read, or the list-fallback
+  // path that never reads scrollback) — running the judge on nothing could return a
+  // confident "not met" and harden a transport hiccup into a false "failed". No
+  // evidence → leave the verdict "unknown".
+  if (gate && ctx.mcp.isConnected() && gate.signals.tail.trim().length > 0) {
     const question = `Did the agent satisfy this acceptance contract for the task? Contract: ${criteria}`;
     try {
       const results = await runModelJudges([question], gate.rec, gate.signals, ctx);

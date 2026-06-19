@@ -149,7 +149,7 @@ const SpawnForEditsArgs = z.object({
     .string()
     .optional()
     .describe(
-      "Task-specific contract that defines 'done'. When set, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success — so thin evidence is never upgraded to success. Provide it whenever there is a concrete, checkable definition of done.",
+      "Task-specific contract that defines 'done'. When set on an edit-mode task, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success — so thin evidence is never upgraded to success. Provide it whenever there is a concrete, checkable definition of done. (Ignored for mode:\"explore\", which is read-only and ends at the prompt.)",
     ),
   context: z
     .object({
@@ -206,7 +206,7 @@ export const agentTaskTools: ToolDef[] = [
         acceptanceCriteria: {
           type: "string",
           description:
-            "Task-specific contract that defines 'done'. When set, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success. Provide it whenever there is a concrete, checkable definition of done.",
+            "Task-specific contract that defines 'done'. When set on an edit-mode task, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success. Provide it whenever there is a concrete, checkable definition of done. Ignored for mode:\"explore\".",
         },
         context: {
           type: "object",
