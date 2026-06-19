@@ -174,6 +174,8 @@ export const agentTaskTools: ToolDef[] = [
     name: "agentTask.spawnForEdits",
     description:
       "Spawn a visible Daintree agent in a worktree. Use mode:\"edit\" (default) to make code changes, or mode:\"explore\" for a read-only investigation (the agent is told not to touch files). This is the ONLY way to spawn an agent — never hand-roll a raw agent.launch via daintree.call. The CLI never edits files itself. Optionally attaches a terminal watcher.",
+    consequence:
+      "Opens a visible agent terminal in a worktree that can edit project files. Changes stay in the worktree until you commit them.",
     risk: "project",
     schema: SpawnForEditsArgs,
     parameters: {

@@ -224,6 +224,7 @@ export class ToolRegistry {
           toolName: name,
           risk: tool.risk,
           summary: tool.description,
+          consequence: tool.consequence,
           args,
         });
       } catch {

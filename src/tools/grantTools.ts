@@ -171,6 +171,8 @@ export const grantTools: ToolDef[] = [
           approved = await ctx.confirm({
             toolName: "grant.create",
             risk: "system",
+            consequence:
+              "Pre-authorizes an automation actor to run mutating actions unattended, with no future prompt. Scoped, expiring, and limited-use; stored locally.",
             summary: `Pre-authorize ${args.actorType} ${args.actorId} to run [${
               [
                 risks.length ? `risk: ${risks.join(", ")}` : "",

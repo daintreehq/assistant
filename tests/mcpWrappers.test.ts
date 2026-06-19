@@ -299,6 +299,16 @@ describe("forge write + getPR wrappers (#29)", () => {
     }
   });
 
+  it("gives every forge write a user-facing consequence, not the raw risk class", () => {
+    for (const name of FORGE_WRITE_NAMES) {
+      const def = tool(name);
+      expect(def.consequence, name).toBeTruthy();
+      expect((def.consequence ?? "").length, name).toBeGreaterThan(10);
+      // The consequence must be prose, never just the risk class word.
+      expect(def.consequence, name).not.toBe("external");
+    }
+  });
+
   it("forge.getPR forwards flat args (no nested bag, incl. cwd) at supervisor tier", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);

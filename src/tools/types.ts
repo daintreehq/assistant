@@ -18,6 +18,13 @@ export interface ConfirmRequest {
   risk: RiskClass;
   summary: string;
   args: unknown;
+  /**
+   * Plain-English statement of what approving will actually do — the *consequence*
+   * (what's touched, whether it's reversible, any network/secret exposure), not the
+   * raw risk class. The approval sheet leads with this; when absent it falls back to
+   * a per-risk-class phrase. Keep it to one short, user-facing line (it's truncated).
+   */
+  consequence?: string;
 }
 
 /** Everything a tool handler can reach. Built once at startup. */
@@ -75,6 +82,14 @@ export interface ToolDef<A = any> {
   name: string;
   description: string;
   risk: RiskClass;
+  /**
+   * Optional one-line, user-facing consequence shown on the approval sheet (what
+   * this action does to the user's resources, and whether it's reversible). Unlike
+   * `description` (which is written for the model and can be long/instructional),
+   * this is short prose for a human deciding Y/N. Worth setting for any tool whose
+   * risk class always confirms; the UI falls back to a per-risk phrase otherwise.
+   */
+  consequence?: string;
   /** JSON Schema for the OpenAI function `parameters` field. */
   parameters: Record<string, unknown>;
   /** Optional Zod schema for runtime validation of parsed args. */
