@@ -36,6 +36,15 @@ describe("Composer", () => {
     expect(lastFrame() ?? "").not.toContain("supervised agents");
   });
 
+  it("surfaces /models in the palette as you type (issue #50)", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer busy={false} focus onSubmit={() => {}} />,
+    );
+    stdin.write("/mod");
+    await tick();
+    expect(lastFrame() ?? "").toContain("/models");
+  });
+
   it("submits typed input on Enter when focused", async () => {
     let submitted: string | undefined;
     const { stdin } = render(

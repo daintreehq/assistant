@@ -9,6 +9,7 @@ import type { App } from "./app.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
+import { helpLines } from "../commandRegistry.js";
 
 /** Bound an MCP call so a stalled server can't hang a diagnostic command. */
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -179,21 +180,7 @@ export interface UiCommandResult {
 }
 
 const HELP_TEXT = [
-  "/status                 Daintree connection, project, models, tier",
-  "/inbox [sev]            queued watcher/timer events (info|attention|urgent)",
-  "/tools [query]          list/search available tools",
-  "/timers                 scheduled timers",
-  "/watchers               active watchers",
-  "/audit [n]              recent tool calls (default 15)",
-  "/audit export <fmt>     export log (json|csv) [actor= tool= outcome= from= to= limit=]",
-  "/models                 model routing",
-  "/permissions [tier]     show or set tier (supervisor|operator|system)",
-  "/recipes [sub]          loaded | reload | load <id…> | clear",
-  "/compact                summarize + condense the conversation",
-  "/doctor                 check MCP / config / project mapping (with fixes)",
-  "/reconnect              retry the Daintree MCP connection",
-  "/help                   this help",
-  "/quit                   exit",
+  ...helpLines(),
   "",
   "Keys: ? help · ^O toggle ops deck · ^C exit. Anything else goes to the assistant.",
 ].join("\n");

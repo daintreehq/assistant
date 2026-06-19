@@ -1,20 +1,11 @@
 import { Box, Text } from "ink";
 import { BrandMark, KeyHint } from "../primitives.js";
 import { ui } from "../theme.js";
+import { overlayEntries } from "../../commandRegistry.js";
 
-const COMMANDS: Array<[string, string]> = [
-  ["/status", "connection, project, models, tier"],
-  ["/inbox [sev]", "queued watcher/timer events"],
-  ["/watchers /timers", "supervised agents / scheduled ops"],
-  ["/audit [n]", "recent tool calls"],
-  ["/tools [q]", "list/search tools"],
-  ["/permissions <tier>", "supervisor | operator | system"],
-  ["/recipes [sub]", "loaded · reload · load <id…> · clear"],
-  ["/compact", "summarize the conversation"],
-  ["/doctor", "environment check"],
-  ["/reconnect", "retry the Daintree connection"],
-  ["/quit", "exit"],
-];
+// Derived from the shared command registry so the overlay can't drift from the
+// commands the handlers actually accept (issue #50).
+const COMMANDS: Array<[string, string]> = overlayEntries();
 
 const KEYS: Array<[string, string]> = [
   ["^O", "operations surface"],
