@@ -65,6 +65,14 @@ function buildAgentPrompt(args: SpawnForEditsArgs): string {
   const constraints =
     args.mode === "explore" ? EXPLORE_CONSTRAINTS_BLOCK : EDIT_CONSTRAINTS_BLOCK;
   lines.push(`\n${constraints}`);
+  // The acceptance contract is what completion is judged against (issue #83), so the
+  // agent must see it up front — it states what "done" means for this task.
+  const criteria = args.acceptanceCriteria?.trim();
+  if (criteria) {
+    lines.push(
+      `\nAcceptance criteria (your work is verified against these — state clearly when each is met):\n${criteria}`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -137,6 +145,12 @@ const SpawnForEditsArgs = z.object({
   taskPrompt: z
     .string()
     .describe("The instructions for the agent. Constraints are appended automatically."),
+  acceptanceCriteria: z
+    .string()
+    .optional()
+    .describe(
+      "Task-specific contract that defines 'done'. When set, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success — so thin evidence is never upgraded to success. Provide it whenever there is a concrete, checkable definition of done.",
+    ),
   context: z
     .object({
       filePaths: z.array(z.string()).optional(),
@@ -188,6 +202,11 @@ export const agentTaskTools: ToolDef[] = [
           type: "string",
           description:
             "The instructions for the agent. Constraints are appended automatically.",
+        },
+        acceptanceCriteria: {
+          type: "string",
+          description:
+            "Task-specific contract that defines 'done'. When set, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success. Provide it whenever there is a concrete, checkable definition of done.",
         },
         context: {
           type: "object",
@@ -318,6 +337,11 @@ export const agentTaskTools: ToolDef[] = [
               optionsJson: JSON.stringify({
                 ...(worktreeId ? { verificationScope: { worktreeId } } : {}),
                 spawnMode: args.mode ?? "edit",
+                // Persist the acceptance contract so the supervisor gates completion
+                // on evidence the work was actually done, not git cleanliness alone.
+                ...(args.acceptanceCriteria?.trim()
+                  ? { acceptanceCriteria: args.acceptanceCriteria.trim() }
+                  : {}),
               }),
             });
             watcherId = watcher.id;

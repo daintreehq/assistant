@@ -102,7 +102,7 @@ function ctxWith(
   } as ToolContext;
 }
 
-function makeWatcher(db: Db, targets: string[]) {
+function makeWatcher(db: Db, targets: string[], optionsJson?: string) {
   return db.insertWatcher({
     kind: "terminal",
     title: "verify",
@@ -112,64 +112,84 @@ function makeWatcher(db: Db, targets: string[]) {
     modelTier: "small",
     status: "active",
     nextCheckAt: 0,
+    ...(optionsJson ? { optionsJson } : {}),
   });
 }
 
+/** Router whose json() answers a modelJudge with a fixed ModelJudgeAnswer shape —
+ *  used to drive the acceptance-contract gate deterministically. */
+function fakeJudgeRouter(
+  matched: boolean,
+  confidence = 0.9,
+  reason = "Acceptance judged.",
+): ModelRouter {
+  return {
+    chat: async () => ({ content: "(no change)" }),
+    json: async () => ({ reason, confidence, matched }),
+  } as unknown as ModelRouter;
+}
+
 describe("deriveVerification (#3)", () => {
-  it("reads an explicit dirty/clean flag", () => {
-    expect(deriveVerification({ isDirty: false }, "").verdict).toBe("clean");
-    expect(deriveVerification({ isDirty: true }, "").verdict).toBe("dirty");
-    expect(deriveVerification({ clean: true }, "").verdict).toBe("clean");
-    expect(deriveVerification({ clean: false }, "").verdict).toBe("dirty");
+  it("reads an explicit dirty/clean flag (clean -> verified, dirty -> unknown)", () => {
+    // A clean tree is "verified" git artifact state; a dirty tree is "unknown"
+    // (uncommitted work is normal after edits, not a failure) — issue #83.
+    expect(deriveVerification({ isDirty: false }, "").verdict).toBe("verified");
+    expect(deriveVerification({ isDirty: true }, "").verdict).toBe("unknown");
+    expect(deriveVerification({ clean: true }, "").verdict).toBe("verified");
+    expect(deriveVerification({ clean: false }, "").verdict).toBe("unknown");
   });
 
   it("derives dirtiness from a changed-file count or arrays", () => {
-    expect(deriveVerification({ changedFiles: 0 }, "").verdict).toBe("clean");
+    expect(deriveVerification({ changedFiles: 0 }, "").verdict).toBe("verified");
     const dirty = deriveVerification({ changedFiles: 3 }, "");
-    expect(dirty.verdict).toBe("dirty");
+    expect(dirty.verdict).toBe("unknown");
+    expect(dirty.hasGitChanges).toBe(true);
     expect(dirty.changedFiles).toBe(3);
     const grouped = deriveVerification(
       { staged: ["a.ts"], unstaged: ["b.ts", "c.ts"] },
       "",
     );
-    expect(grouped.verdict).toBe("dirty");
+    expect(grouped.verdict).toBe("unknown");
     expect(grouped.changedFiles).toBe(3);
+    // The evidence bundle lists the changed paths, deduped in first-seen order.
+    expect(grouped.changedFileList).toEqual(["a.ts", "b.ts", "c.ts"]);
   });
 
   it("falls back to git status text markers", () => {
     expect(
       deriveVerification({}, "nothing to commit, working tree clean").verdict,
-    ).toBe("clean");
+    ).toBe("verified");
     expect(
       deriveVerification({}, "Changes not staged for commit:\n  modified: x.ts")
         .verdict,
-    ).toBe("dirty");
+    ).toBe("unknown");
   });
 
-  it("returns unknown when nothing is conclusive (never a false clean)", () => {
+  it("returns unknown when nothing is conclusive (never a false verified)", () => {
     const r = deriveVerification({}, "");
     expect(r.verdict).toBe("unknown");
     expect(r.hasGitChanges).toBe(false);
   });
 
   it("dirty wins over a contradictory clean flag (count > 0)", () => {
-    // A self-contradictory pulse must never be read as clean.
+    // A self-contradictory pulse must never be read as clean/verified.
     const r = deriveVerification({ isDirty: false, changedFiles: 3 }, "");
-    expect(r.verdict).toBe("dirty");
+    expect(r.verdict).toBe("unknown");
+    expect(r.hasGitChanges).toBe(true);
     expect(r.changedFiles).toBe(3);
   });
 });
 
 describe("runVerificationPass (#3)", () => {
-  it("returns clean for a clean pulse", async () => {
+  it("returns verified for a clean pulse", async () => {
     const db = new Db(":memory:");
     const ctx = ctxWith(db, new Queue(db), fakeMcp({}));
     const r = await runVerificationPass(ctx);
-    expect(r.verdict).toBe("clean");
+    expect(r.verdict).toBe("verified");
     db.close();
   });
 
-  it("returns dirty for a dirty pulse", async () => {
+  it("returns unknown (with git changes) for a dirty pulse", async () => {
     const db = new Db(":memory:");
     const ctx = ctxWith(
       db,
@@ -177,7 +197,8 @@ describe("runVerificationPass (#3)", () => {
       fakeMcp({}, { structuredContent: { isDirty: true, changedFiles: 2 } }),
     );
     const r = await runVerificationPass(ctx);
-    expect(r.verdict).toBe("dirty");
+    expect(r.verdict).toBe("unknown");
+    expect(r.hasGitChanges).toBe(true);
     expect(r.changedFiles).toBe(2);
     db.close();
   });
@@ -206,7 +227,7 @@ describe("runVerificationPass (#3)", () => {
       fakeMcp({}, { structuredContent: undefined, text: "working tree clean" }),
     );
     const r = await runVerificationPass(ctx);
-    expect(r.verdict).toBe("clean");
+    expect(r.verdict).toBe("verified");
     db.close();
   });
 });
@@ -232,7 +253,7 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     const parsed = VerificationResult.parse(
       JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
     );
-    expect(parsed.verdict).toBe("clean");
+    expect(parsed.verdict).toBe("verified");
     db.close();
   });
 
@@ -296,7 +317,8 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     );
     expect(verEvidence).toBeDefined();
     const parsed = JSON.parse(verEvidence!.slice(VERIFICATION_EVIDENCE_PREFIX.length));
-    expect(parsed.verdict).toBe("dirty");
+    expect(parsed.verdict).toBe("unknown");
+    expect(parsed.hasGitChanges).toBe(true);
     expect(parsed.changedFiles).toBe(4);
     db.close();
   });
@@ -353,6 +375,147 @@ describe("post-completion gate in runTerminalWatcherCheck (#3)", () => {
     const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
     expect(outcome.classification).toBe("completed_unverified");
     expect(db.getWatcher(w.id)!.status).toBe("active");
+    db.close();
+  });
+});
+
+describe("VerificationResult backward-compat (#83)", () => {
+  it("deserializes a legacy clean/dirty blob to unknown (never a false verified)", () => {
+    // Events persisted before #83 carry the old enum values. They must parse — and
+    // must NEVER promote to verified — so old evidence can't be read as success.
+    const legacyClean = VerificationResult.parse({
+      verdict: "clean",
+      hasGitChanges: false,
+      gitSummary: "working tree clean",
+    });
+    expect(legacyClean.verdict).toBe("unknown");
+    const legacyDirty = VerificationResult.parse({
+      verdict: "dirty",
+      hasGitChanges: true,
+      changedFiles: 2,
+      gitSummary: "2 uncommitted file change(s)",
+    });
+    expect(legacyDirty.verdict).toBe("unknown");
+    // New optional bundle fields default rather than throwing on an old blob.
+    expect(legacyClean.changedFileList).toEqual([]);
+    expect(legacyClean.unresolvedWarnings).toEqual([]);
+  });
+});
+
+describe("acceptance-contract gate in runTerminalWatcherCheck (#83)", () => {
+  const criteriaOptions = JSON.stringify({
+    acceptanceCriteria: "All tests pass and the bug is fixed.",
+  });
+
+  it("clean tree + confident contract match -> completed_success (verified)", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeJudgeRouter(true, 0.92, "Tests pass; bug fixed."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_success");
+    expect(db.getWatcher(w.id)!.status).toBe("condition_met");
+
+    const evt = queue
+      .digest({ severityAtLeast: "done" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("verified");
+    expect(parsed.acceptanceCriteria).toBe("All tests pass and the bug is fixed.");
+    expect(parsed.criteriaMetSummary).toBe("Tests pass; bug fixed.");
+    db.close();
+  });
+
+  it("confident contract non-match -> completed_unverified (failed), keeps polling", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeJudgeRouter(false, 0.9, "Two tests still failing."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("failed");
+    db.close();
+  });
+
+  it("low-confidence judge -> completed_unverified (unknown), never upgraded", async () => {
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp({ "term-a": { agentState: "completed" } }),
+      fakeJudgeRouter(true, 0.3, "Not sure the bug is actually fixed."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("unknown");
+    db.close();
+  });
+
+  it("contract met but dirty tree -> completed_unverified (unknown), not success", async () => {
+    // The work satisfies the contract but uncommitted changes remain — there is
+    // still something to review, so it must not promote to a clean success.
+    const db = new Db(":memory:");
+    const queue = new Queue(db);
+    const ctx = ctxWith(
+      db,
+      queue,
+      fakeMcp(
+        { "term-a": { agentState: "completed" } },
+        { structuredContent: { isDirty: true, changedFiles: 3 } },
+      ),
+      fakeJudgeRouter(true, 0.95, "Criteria satisfied."),
+    );
+    const w = makeWatcher(db, ["term-a"], criteriaOptions);
+
+    const outcome = await runTerminalWatcherCheck(db.getWatcher(w.id)!, ctx);
+    expect(outcome.classification).toBe("completed_unverified");
+    expect(db.getWatcher(w.id)!.status).toBe("active");
+
+    const evt = queue
+      .digest({ severityAtLeast: "attention" })
+      .find((e) => e.target?.terminalId === "term-a");
+    const blob = evt?.evidence?.find((e) => e.startsWith(VERIFICATION_EVIDENCE_PREFIX));
+    const parsed = VerificationResult.parse(
+      JSON.parse(blob!.slice(VERIFICATION_EVIDENCE_PREFIX.length)),
+    );
+    expect(parsed.verdict).toBe("unknown");
+    expect(parsed.hasGitChanges).toBe(true);
     db.close();
   });
 });
