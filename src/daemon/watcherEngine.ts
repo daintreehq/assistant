@@ -308,15 +308,28 @@ export async function readStatuses(
 }
 
 /**
+ * Outcome of a bounded terminal read. `ok:false` means the read itself failed
+ * (Daintree returned an error, or the call threw) — which is DISTINCT from
+ * `ok:true` with an empty `value`, a terminal that genuinely produced no output.
+ * Callers must not conflate the two: treating a failed read as silence would
+ * falsely advance `noOutputForMs` and re-invoke the classifier on stale inputs.
+ */
+export type ReadOutputResult =
+  | { ok: true; value: string }
+  | { ok: false; value: "" };
+
+/**
  * Read a bounded tail of one terminal via terminal.getOutput. The scrollback is
- * in `structuredContent.content` (a string), NOT the JSON-serialized `text`. An
- * errored read returns "" rather than leaking the error JSON in as fake output.
+ * in `structuredContent.content` (a string), NOT the JSON-serialized `text`. A
+ * failed read returns `{ ok: false }` rather than an empty string, so the caller
+ * can tell a read failure apart from a genuinely silent terminal — and never
+ * leaks the error JSON in as fake output.
  */
 export async function readOutput(
   ctx: ToolContext,
   terminalId: string,
   tailBytes = 12000,
-): Promise<string> {
+): Promise<ReadOutputResult> {
   try {
     const out = await ctx.mcp.callTool("terminal.getOutput", {
       terminalId,
@@ -333,10 +346,10 @@ export async function readOutput(
           ? (out as { text?: string }).text
           : undefined,
     });
-    if (out.isError) return "";
-    return content.slice(-tailBytes);
+    if (out.isError) return { ok: false, value: "" };
+    return { ok: true, value: content.slice(-tailBytes) };
   } catch {
-    return "";
+    return { ok: false, value: "" };
   }
 }
 
@@ -464,6 +477,14 @@ interface TerminalState {
    *  has (and within the spawn grace), an absent terminal is "still registering",
    *  not exited — see WATCHER_SPAWN_GRACE_MS. */
   seen?: boolean;
+  /** Count of consecutive failed reads (Daintree error / thrown call). Reset to 0
+   *  on any successful read. Lets the engine treat an unreadable terminal as a
+   *  transport hiccup to re-check, not as silence, and back off the classifier. */
+  readFailures?: number;
+  /** Fingerprint (`agentState|exitCode|outHash`) of the inputs at the last model
+   *  classification. When the next tick's inputs are identical the small-model
+   *  call is skipped — re-classifying the same inputs every tick is pure waste. */
+  lastClassifyKey?: string;
 }
 type WatcherOptions = {
   perTerminal?: Record<string, TerminalState>;
@@ -930,43 +951,83 @@ export async function runTerminalWatcherCheck(
           // fire; without this the entire output-based path is dead for spawned
           // agent terminals. readOutput never throws — an empty read degrades to
           // no_change, exactly the prior behavior.
-          const tail = await readOutput(ctx, terminalId);
-          const out = nextOutputState(prevState, tail, now);
-          perTerminal[terminalId] = out.state;
-          signals.tail = tail;
-          signals.msSinceOutput = out.msSinceOutput;
-          if (tail.trim().length > 0) {
-            const verdict = await classifyWithModel(
-              rec,
-              signals,
-              ctx,
-              judge,
-              prevState?.prev,
-            );
-            classification = verdict.classification;
-            confidence = verdict.confidence;
-            summary = verdict.summary;
-            evidence = verdict.evidence;
-            // A model-claimed completion must still pass the read-only git gate,
-            // exactly as on the normal path — never let it bypass verification.
-            if (classification === "completed_success") {
-              ({ classification, confidence, summary, evidence } =
-                await gateCompletion(
-                  ctx,
-                  options.verificationScope,
-                  evidence,
-                ));
-            }
-          } else {
-            // Alive and working but Daintree returns no scrollback even via
-            // getOutput — surface the limitation rather than silently degrading.
+          const read = await readOutput(ctx, terminalId);
+          if (!read.ok) {
+            // The read itself failed (transport error / exception) — this is NOT
+            // silence. Freeze the prior output-tracking state (don't advance
+            // outAt) and leave msSinceOutput unset so a hiccup can't trip
+            // noOutputForMs, count the failure, and skip the model entirely.
+            const readFailures = (prevState?.readFailures ?? 0) + 1;
+            perTerminal[terminalId] = { ...prevState, readFailures };
             classification = "no_change";
-            confidence = 0.5;
-            summary = `Agent ${agentState ?? "active"} (per terminal.list; getStatus omitted it).`;
-            logDebug(ctx.config, "watcher.listed.no_scrollback", {
+            confidence = 0.4;
+            summary = `Could not read terminal output (${readFailures} consecutive ${readFailures === 1 ? "failure" : "failures"}); will re-check.`;
+            logDebug(ctx.config, "watcher.read.failed", {
               terminalId,
               agentState,
+              readFailures,
             });
+          } else {
+            const tail = read.value;
+            const out = nextOutputState(prevState, tail, now);
+            // Spread prevState first so seen / lastClassifyKey survive the tick;
+            // a successful read clears the consecutive-failure counter.
+            perTerminal[terminalId] = { ...prevState, ...out.state, readFailures: 0 };
+            signals.tail = tail;
+            signals.msSinceOutput = out.msSinceOutput;
+            if (tail.trim().length > 0) {
+              // Skip the small model when the inputs that determine its answer —
+              // terminal state, exit code, output hash — are unchanged since the
+              // last classification. msSinceOutput is intentionally excluded: the
+              // noOutputForMs condition is evaluated deterministically, not by the
+              // model, so folding time in would re-invoke it every tick.
+              const classifyKey = `${agentState ?? ""}|${listed.exitCode ?? ""}|${out.state.outHash ?? ""}`;
+              if (prevState?.lastClassifyKey === classifyKey) {
+                classification = "no_change";
+                confidence = 0.5;
+                summary = "No change in terminal signals since last classification.";
+              } else {
+                const verdict = await classifyWithModel(
+                  rec,
+                  signals,
+                  ctx,
+                  judge,
+                  prevState?.prev,
+                );
+                classification = verdict.classification;
+                confidence = verdict.confidence;
+                summary = verdict.summary;
+                evidence = verdict.evidence;
+                // Only latch the key on a real verdict; an "unknown" (model error)
+                // must be retried next tick, not remembered as already classified.
+                if (verdict.classification !== "unknown") {
+                  perTerminal[terminalId] = {
+                    ...perTerminal[terminalId],
+                    lastClassifyKey: classifyKey,
+                  };
+                }
+                // A model-claimed completion must still pass the read-only git gate,
+                // exactly as on the normal path — never let it bypass verification.
+                if (classification === "completed_success") {
+                  ({ classification, confidence, summary, evidence } =
+                    await gateCompletion(
+                      ctx,
+                      options.verificationScope,
+                      evidence,
+                    ));
+                }
+              }
+            } else {
+              // Alive and working but Daintree returns no scrollback even via
+              // getOutput — surface the limitation rather than silently degrading.
+              classification = "no_change";
+              confidence = 0.5;
+              summary = `Agent ${agentState ?? "active"} (per terminal.list; getStatus omitted it).`;
+              logDebug(ctx.config, "watcher.listed.no_scrollback", {
+                terminalId,
+                agentState,
+              });
+            }
           }
         }
       } else if (!list || !list.ok) {
@@ -1005,19 +1066,41 @@ export async function runTerminalWatcherCheck(
       // omitted recentOutput, or when a contains/regex condition needs the full
       // scrollback window. An empty-string tail is a valid "no output yet", so we
       // fall back on undefined, not on falsiness.
-      const tail =
-        !needsDeepTail && entry?.recentOutput !== undefined
-          ? entry.recentOutput
-          : await readOutput(ctx, terminalId);
-      const out = nextOutputState(prevState, tail, now);
-      perTerminal[terminalId] = out.state;
+      // The inline tail from getStatus is an already-successful read; only the
+      // deep terminal.getOutput fallback can fail. `readFailed` flags that case
+      // so the content-classify branch below treats it as a transport hiccup
+      // (re-check), never as silence.
+      let readFailed = false;
+      let tail: string;
+      if (!needsDeepTail && entry?.recentOutput !== undefined) {
+        tail = entry.recentOutput;
+      } else {
+        const read = await readOutput(ctx, terminalId);
+        readFailed = !read.ok;
+        tail = read.value;
+      }
+      // On a failed read keep the prior output-tracking state frozen (don't
+      // advance outAt) and leave msSinceOutput unset, so a hiccup can't trip
+      // noOutputForMs. A successful read clears the consecutive-failure counter.
+      let outHash: string | undefined;
+      let msSinceOutput: number | undefined;
+      if (readFailed) {
+        const readFailures = (prevState?.readFailures ?? 0) + 1;
+        perTerminal[terminalId] = { ...prevState, readFailures };
+        outHash = prevState?.outHash;
+      } else {
+        const out = nextOutputState(prevState, tail, now);
+        perTerminal[terminalId] = { ...prevState, ...out.state, readFailures: 0 };
+        outHash = out.state.outHash;
+        msSinceOutput = out.msSinceOutput;
+      }
       signals = {
         agentState,
         runtimeStatus: runtimeFromAgentState(agentState),
         waitingReason,
         exitCode: entry?.exitCode,
         tail,
-        msSinceOutput: out.msSinceOutput,
+        msSinceOutput,
       };
 
       if (agentState === "exited") {
@@ -1068,21 +1151,53 @@ export async function runTerminalWatcherCheck(
           options.verificationScope,
           ["agentState=completed"],
         ));
+      } else if (readFailed) {
+        // The deep read failed while the agent is still working — not silence.
+        // Skip the model and re-check; the failure counter is already recorded.
+        classification = "no_change";
+        confidence = 0.4;
+        const readFailures = perTerminal[terminalId]?.readFailures ?? 0;
+        summary = `Could not read terminal output (${readFailures} consecutive ${readFailures === 1 ? "failure" : "failures"}); will re-check.`;
+        logDebug(ctx.config, "watcher.read.failed", {
+          terminalId,
+          agentState,
+          readFailures,
+        });
       } else if (tail.trim().length > 0) {
-        const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
-        classification = verdict.classification;
-        confidence = verdict.confidence;
-        summary = verdict.summary;
-        evidence = verdict.evidence;
-        // The small model can also conclude completion from tail text while the
-        // FSM is still "working". Route that through the SAME verification gate so
-        // a model-claimed completion can never bypass the git-cleanliness check.
-        if (classification === "completed_success") {
-          ({ classification, confidence, summary, evidence } = await gateCompletion(
-            ctx,
-            options.verificationScope,
-            evidence,
-          ));
+        // Skip the small model when the inputs that determine its answer —
+        // terminal state, exit code, output hash — are unchanged since the last
+        // classification. msSinceOutput is intentionally excluded: noOutputForMs
+        // is evaluated deterministically, so folding time in would re-invoke the
+        // model every tick once any time threshold drifts.
+        const classifyKey = `${agentState ?? ""}|${entry?.exitCode ?? ""}|${outHash ?? ""}`;
+        if (prevState?.lastClassifyKey === classifyKey) {
+          classification = "no_change";
+          confidence = 0.5;
+          summary = "No change in terminal signals since last classification.";
+        } else {
+          const verdict = await classifyWithModel(rec, signals, ctx, judge, prevState?.prev);
+          classification = verdict.classification;
+          confidence = verdict.confidence;
+          summary = verdict.summary;
+          evidence = verdict.evidence;
+          // Only latch the key on a real verdict; an "unknown" (model error) must
+          // be retried next tick, not remembered as already classified.
+          if (verdict.classification !== "unknown") {
+            perTerminal[terminalId] = {
+              ...perTerminal[terminalId],
+              lastClassifyKey: classifyKey,
+            };
+          }
+          // The small model can also conclude completion from tail text while the
+          // FSM is still "working". Route that through the SAME verification gate so
+          // a model-claimed completion can never bypass the git-cleanliness check.
+          if (classification === "completed_success") {
+            ({ classification, confidence, summary, evidence } = await gateCompletion(
+              ctx,
+              options.verificationScope,
+              evidence,
+            ));
+          }
         }
       } else {
         classification = "no_change";
