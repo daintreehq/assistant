@@ -75,6 +75,13 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     help: "recent calls (def 15); export <json|csv>",
   },
   {
+    name: "explain",
+    palette: "reconstruct a run's timeline",
+    syntax: "/explain [runId]",
+    // Keep the overlay's right column one-line at width=72 (≤~46 chars).
+    help: "replay a run; no id lists recent runs",
+  },
+  {
     name: "models",
     palette: "model routing",
     syntax: "/models",

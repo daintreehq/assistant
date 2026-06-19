@@ -6,7 +6,7 @@ import type { App } from "./app.js";
 import { render, c } from "./render.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
-import { runDoctor } from "./commandData.js";
+import { runDoctor, formatRunTimeline, formatRunList } from "./commandData.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 import { helpLines } from "../commandRegistry.js";
 
@@ -134,6 +134,30 @@ export async function handleSlashCommand(
           `  ${c.gray(new Date(r.ts).toLocaleTimeString())} ${r.toolName.padEnd(22)} ${mark} ${c.gray(`${r.durationMs}ms`)} — ${r.summary}`,
         );
       }
+      return { handled: true };
+    }
+
+    case "explain": {
+      // Mirror the Ink handler: no id lists recent runs; an id replays one via the
+      // shared timeline formatter so both surfaces read identically.
+      if (!arg) {
+        const runs = app.db.listRuns(10);
+        render.line(c.bold(`\nExplain — recent runs (${runs.length})`));
+        render.line(formatRunList(runs));
+        render.line(c.gray("\n  /explain <runId> to replay one."));
+        return { handled: true };
+      }
+      const runId = rest[0];
+      const events = app.db.listRunEvents(runId);
+      if (events.length === 0) {
+        render.warn(
+          `No events found for run '${runId}'. Use /explain to list recent runs.`,
+        );
+        return { handled: true };
+      }
+      const auditRows = app.db.listAuditByRunId(runId);
+      render.line(c.bold(`\nExplain ${runId} (${events.length} events)`));
+      render.line(formatRunTimeline(events, auditRows));
       return { handled: true };
     }
 

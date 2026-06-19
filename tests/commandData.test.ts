@@ -165,6 +165,60 @@ describe("handleUiCommand (structured slash commands)", () => {
     expect(r.text).toContain("fs.read");
   });
 
+  it("/explain with no runs reports the empty index", async () => {
+    const r = await handleUiCommand("/explain", app);
+    expect(r.handled).toBe(true);
+    expect(r.title).toContain("recent runs");
+    expect(r.text).toContain("no runs recorded");
+  });
+
+  it("/explain lists recent run ids when runs exist", async () => {
+    app.db.insertRunEvent({ runId: "run_a", seq: 0, type: "assistant:start" });
+    app.db.insertRunEvent({ runId: "run_a", seq: 1, type: "assistant:end", payload: JSON.stringify({ content: "hi" }) });
+    const r = await handleUiCommand("/explain", app);
+    expect(r.text).toContain("run_a");
+    expect(r.text).toContain("/explain <runId>");
+  });
+
+  it("/explain <runId> reconstructs the timeline with reasoning, tool call, and audit detail", async () => {
+    app.db.insertAudit({
+      id: "aud_1",
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 7,
+      summary: "read a file",
+      runId: "run_x",
+    });
+    app.db.insertRunEvent({ runId: "run_x", seq: 0, type: "assistant:start" });
+    app.db.insertRunEvent({ runId: "run_x", seq: 1, type: "tool:call", payload: JSON.stringify({ id: "c1", name: "fs.read", args: { path: "a.ts" } }) });
+    app.db.insertRunEvent({ runId: "run_x", seq: 2, type: "tool:result", payload: JSON.stringify({ id: "c1", name: "fs.read", ok: true, summary: "read a file", auditId: "aud_1" }) });
+    app.db.insertRunEvent({ runId: "run_x", seq: 3, type: "assistant:end", payload: JSON.stringify({ content: "done", reasoning: "thought about it" }) });
+
+    const r = await handleUiCommand("/explain run_x", app);
+    expect(r.title).toContain("run_x");
+    expect(r.switchPanel).toBeUndefined(); // routes through the transcript card, not a panel
+    expect(r.text).toContain("fs.read");
+    expect(r.text).toContain("7ms"); // audit-enriched outcome/duration
+    expect(r.text).toContain("thought about it"); // surfaced reasoning
+    expect(r.text).toContain("done");
+  });
+
+  it("/explain <unknownId> reports no events without crashing", async () => {
+    const r = await handleUiCommand("/explain run_missing", app);
+    expect(r.handled).toBe(true);
+    expect(r.text).toContain("No events found");
+  });
+
+  it("/explain tolerates a malformed event payload", async () => {
+    app.db.insertRunEvent({ runId: "run_bad", seq: 0, type: "tool:call", payload: "{not json" });
+    const r = await handleUiCommand("/explain run_bad", app);
+    expect(r.handled).toBe(true);
+    // The unparsable payload yields an empty name placeholder, not a thrown error.
+    expect(r.text).toContain("tool");
+  });
+
   it("/quit signals exit", async () => {
     const r = await handleUiCommand("/quit", app);
     expect(r.quit).toBe(true);

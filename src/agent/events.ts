@@ -56,8 +56,14 @@ export interface AgentEventSink {
   assistantStart(): void;
   /** A token of streamed assistant text. */
   assistantToken(token: string): void;
-  /** The assistant turn finished with this final (think-stripped) content. */
-  assistantEnd(content: string): void;
+  /**
+   * The assistant turn finished with this final (think-stripped) content.
+   * `reasoning` is the model's `<think>…</think>` block for the final round (empty
+   * for non-reasoning models), captured so a run can be replayed with its rationale
+   * — see {@link RunEventSink.assistantEnd}. Optional so live sinks that don't
+   * surface reasoning can keep their one-arg signature.
+   */
+  assistantEnd(content: string, reasoning?: string): void;
   /**
    * The assistant turn was cancelled by the user mid-flight. `content` is whatever
    * was streamed before the abort (often empty); the UI keeps the partial text but
@@ -191,11 +197,14 @@ export class RunEventSink implements AgentEventSink {
     this.contentBuffer += token;
   }
 
-  assistantEnd(content: string): void {
+  assistantEnd(content: string, reasoning?: string): void {
     // `content` is authoritative for this (final) round, so drop the streamed
     // buffer instead of flushing it as a duplicate assistant:content row.
     this.contentBuffer = "";
-    this.write("assistant:end", { content });
+    // Only record `reasoning` when the model actually produced a think block, so a
+    // non-reasoning model's run doesn't inflate the payload with `reasoning: ""`.
+    const payload = reasoning ? { content, reasoning } : { content };
+    this.write("assistant:end", payload);
   }
 
   assistantCancelled(content: string): void {

@@ -8,6 +8,11 @@ import fs from "node:fs";
 import type { App } from "./app.js";
 import { describeConfig } from "../config.js";
 import { Tier } from "../schemas.js";
+import type {
+  AuditRecord,
+  RunEventRecord,
+  RunSummaryRecord,
+} from "../schemas.js";
 import { parseAuditExportArgs, serializeAudit } from "../tools/auditTools.js";
 import { helpLines } from "../commandRegistry.js";
 
@@ -26,6 +31,128 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 export type PanelKey = "watchers" | "inbox" | "timers" | "audit" | "help";
+
+/** Parse a run-event payload defensively; a malformed row must never throw. */
+function parseEventPayload(payload?: string): Record<string, unknown> {
+  if (!payload) return {};
+  try {
+    const v = JSON.parse(payload);
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** One-line, length-bounded preview of a tool call's arguments. */
+function previewArgs(args: unknown): string {
+  if (args === undefined || args === null) return "";
+  let s: string;
+  try {
+    s = typeof args === "string" ? args : JSON.stringify(args);
+  } catch {
+    return "";
+  }
+  if (!s || s === "{}") return "";
+  return s.length > 120 ? `${s.slice(0, 117)}…` : s;
+}
+
+/** Indent every line of a (possibly multi-line) block by `pad` spaces. */
+function indent(text: string, pad = "    "): string {
+  return text
+    .split("\n")
+    .map((l) => `${pad}${l}`)
+    .join("\n");
+}
+
+/**
+ * Render a single run's event log as a replayable plain-text timeline, shared by
+ * the Ink command card and the REPL so both surfaces read identically. Events are
+ * assumed to arrive in `seq` order (as `Db.listRunEvents` returns them). Tool
+ * results are enriched from `auditRows` (matched by `auditId`) for outcome/duration
+ * when the call reached dispatch; calls that didn't leave an audit row fall back to
+ * the event's own summary.
+ */
+export function formatRunTimeline(
+  events: RunEventRecord[],
+  auditRows: AuditRecord[],
+): string {
+  if (events.length === 0) return "(no events found for this run)";
+  const auditById = new Map(auditRows.map((r) => [r.id, r]));
+  const lines: string[] = [];
+  for (const ev of events) {
+    const p = parseEventPayload(ev.payload);
+    switch (ev.type) {
+      case "assistant:start":
+        lines.push("▸ assistant");
+        break;
+      case "assistant:content": {
+        const content = String(p.content ?? "").trim();
+        if (content) lines.push(indent(content));
+        break;
+      }
+      case "assistant:end": {
+        const reasoning = String(p.reasoning ?? "").trim();
+        if (reasoning) {
+          lines.push("  reasoning:");
+          lines.push(indent(reasoning, "      "));
+        }
+        const content = String(p.content ?? "").trim();
+        if (content) lines.push(indent(content));
+        break;
+      }
+      case "assistant:cancelled": {
+        const content = String(p.content ?? "").trim();
+        lines.push(`■ cancelled${content ? ":" : ""}`);
+        if (content) lines.push(indent(content));
+        break;
+      }
+      case "tool:call": {
+        const args = previewArgs(p.args);
+        lines.push(`→ tool ${String(p.name ?? "?")}${args ? ` ${args}` : ""}`);
+        break;
+      }
+      case "tool:result": {
+        const audit =
+          typeof p.auditId === "string" ? auditById.get(p.auditId) : undefined;
+        const ok = p.ok === true;
+        const mark = ok ? "✓" : "✗";
+        const meta = audit
+          ? `${audit.outcome}, ${audit.durationMs}ms`
+          : ok
+            ? "ok"
+            : "error";
+        lines.push(`${mark} tool ${String(p.name ?? "?")} (${meta})`);
+        const summary = String(p.summary ?? "").trim();
+        if (summary) lines.push(indent(summary));
+        break;
+      }
+      case "error":
+        lines.push(`⚠ error: ${String(p.message ?? "").trim()}`);
+        break;
+      case "info":
+        lines.push(`· ${String(p.message ?? "").trim()}`);
+        break;
+      default:
+        // Unknown event type — surface it rather than silently dropping a row.
+        lines.push(`· ${ev.type}`);
+        break;
+    }
+  }
+  return lines.join("\n");
+}
+
+/** A one-line-per-run listing for no-argument `/explain` (run discovery). */
+export function formatRunList(runs: RunSummaryRecord[]): string {
+  if (runs.length === 0) {
+    return "(no runs recorded yet — runs are logged as the assistant works)";
+  }
+  return runs
+    .map(
+      (r) =>
+        `${r.runId.padEnd(16)} ${new Date(r.firstTs).toLocaleString()}  ${r.eventCount} event${r.eventCount === 1 ? "" : "s"}`,
+    )
+    .join("\n");
+}
 
 export interface DoctorCheck {
   label: string;
@@ -318,6 +445,35 @@ export async function handleUiCommand(
               return `${new Date(r.ts).toLocaleTimeString()} ${r.toolName.padEnd(22)} ${outcome} ${r.durationMs}ms — ${r.summary}`;
             })
             .join("\n") || "(none)",
+      };
+    }
+
+    case "explain": {
+      // No id → list recent runs so the user can pick one. The operations view is
+      // a live dashboard, not a text pane, so this routes through the transcript
+      // command card (no switchPanel) like /tools and /models.
+      if (!arg) {
+        const runs = app.db.listRuns(10);
+        return {
+          handled: true,
+          title: `Explain — recent runs (${runs.length})`,
+          text: `${formatRunList(runs)}\n\n/explain <runId> to replay one.`,
+        };
+      }
+      const runId = rest[0];
+      const events = app.db.listRunEvents(runId);
+      if (events.length === 0) {
+        return {
+          handled: true,
+          title: "Explain",
+          text: `No events found for run '${runId}'. Use /explain to list recent runs.`,
+        };
+      }
+      const auditRows = app.db.listAuditByRunId(runId);
+      return {
+        handled: true,
+        title: `Explain ${runId} (${events.length} events)`,
+        text: formatRunTimeline(events, auditRows),
       };
     }
 
