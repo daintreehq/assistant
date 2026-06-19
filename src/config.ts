@@ -64,6 +64,16 @@ export interface AppConfig {
   offline: boolean;
 
   /**
+   * Repo-local instructions loaded from `DAINTREE.md` at the project root, if
+   * present. The RESOLVED content (not a path), read once at startup and folded
+   * into the dynamic prompt layer (message[1]) so the cached base prefix is never
+   * disturbed. Undefined when no file exists or it was skipped. The read happens
+   * in the entry path (CLI/host) before App.create() — loadConfig() stays sync.
+   * See src/projectInstructions.ts.
+   */
+  projectInstructions?: string;
+
+  /**
    * When true, append a full-fidelity trace of EVERYTHING — every model request and
    * response, every tool/function call with its args and result, and the whole
    * watcher lifecycle — to a per-session `<date>-<sessionId>.log` under {@link logDir}
@@ -101,6 +111,7 @@ export interface ConfigOverrides {
   debugLog?: boolean;
   splash?: boolean;
   logDir?: string;
+  projectInstructions?: string;
 }
 
 export const DEFAULTS = {
@@ -309,6 +320,9 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     // is fine (it can't affect safety or where anything is written).
     splash:
       overrides.splash ?? process.env.DAINTREE_ASSISTANT_NO_SPLASH !== "1",
+    // Pre-loaded by the entry path (CLI/host) before App.create(); loadConfig()
+    // never touches the filesystem for this — it just carries the resolved content.
+    projectInstructions: overrides.projectInstructions,
   };
 }
 
@@ -332,5 +346,8 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
     autoApprove: String(cfg.autoApprove),
     offline: String(cfg.offline),
     debugLog: String(cfg.debugLog),
+    projectInstructions: cfg.projectInstructions
+      ? `${cfg.projectInstructions.length} bytes`
+      : "(none)",
   };
 }

@@ -151,12 +151,22 @@ async function main(): Promise<void> {
     // node:sqlite, a native dep) is reported and exits instead of hanging.
     const { App } = await import("../cli/app.js");
     const { startDebugLog } = await import("../debugLog.js");
+    const { loadProjectInstructions } = await import("../projectInstructions.js");
     const appSessionId = descriptor.resumeSessionId ?? descriptor.sessionId;
+    // Read DAINTREE.md before wiring App, mirroring the CLI entry. Best-effort:
+    // no hooks exist yet at this point in boot, so surface any warning on stderr.
+    const projectInstructions = await loadProjectInstructions(descriptor.cwd);
+    if (projectInstructions.warning) {
+      process.stderr.write(`${projectInstructions.warning}\n`);
+    }
     const instance = App.create({
       sessionId: appSessionId,
       // Project binding comes from the descriptor; MCP url/token/tier and the
       // project id are read from env by loadConfig(), mirroring the CLI path.
-      overrides: { projectPath: descriptor.cwd },
+      overrides: {
+        projectPath: descriptor.cwd,
+        projectInstructions: projectInstructions.content,
+      },
     });
     app = instance;
     // Open this session's global debug log (prune old + header); no-op unless enabled.
