@@ -45,6 +45,7 @@ export const queueTools: ToolDef[] = [
             "timer",
             "terminal_watcher",
             "worktree_watcher",
+            "pr_watcher",
             "workflow",
             "model_worker",
             "system",

@@ -478,4 +478,78 @@ describe("Scheduler.tick", () => {
     const events = deps.queue.digest();
     expect(events.some((e) => e.source === "system")).toBe(false);
   });
+
+  it("routes a due pr_state watcher to the PR engine (forge.getPR), not the terminal engine", async () => {
+    const deps = makeDeps();
+    // A connected MCP whose forge.getPR reports the PR has merged.
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string) => {
+        expect(name).toBe("forge.getPR");
+        return {
+          text: "",
+          content: [],
+          structuredContent: { state: "merged" },
+          isError: false,
+        };
+      },
+    };
+    const ctxFor = (actor: ToolContext["actor"]): ToolContext =>
+      ({
+        config: {} as ToolContext["config"],
+        mcp: mcp as unknown as ToolContext["mcp"],
+        db: deps.db,
+        queue: deps.queue,
+        router: deps.router,
+        projectPath: "/tmp/project",
+        actor,
+        confirm: async () => true,
+        log: () => {},
+        daemonActive: () => true,
+      }) as ToolContext;
+    const scheduler = new Scheduler({ ...deps, ctxFor });
+    const now = 4_000_000;
+
+    const watcher = deps.db.insertWatcher({
+      kind: "pr_state",
+      title: "PR #5",
+      goal: "watch pr",
+      targetsJson: JSON.stringify(["PR #5"]),
+      cadenceMs: 60_000,
+      modelTier: "small",
+      status: "active",
+      optionsJson: JSON.stringify({ prNumber: 5, lastState: "open" }),
+      nextCheckAt: now - 1000, // due
+    });
+
+    await scheduler.tick(now);
+
+    const after = deps.db.getWatcher(watcher.id)!;
+    expect(after.status).toBe("condition_met");
+    const digest = deps.queue.digest({ severityAtLeast: "attention" });
+    expect(digest.some((e) => e.source === "pr_watcher")).toBe(true);
+  });
+
+  it("fails an unknown watcher kind closed to error instead of running a check", async () => {
+    const deps = makeDeps();
+    const scheduler = new Scheduler(deps);
+    const now = 5_000_000;
+
+    const watcher = deps.db.insertWatcher({
+      // A kind no engine handles — must not be silently rerouted to the terminal
+      // engine; it fails closed to `error` so it never reschedules forever.
+      kind: "bogus" as unknown as "terminal",
+      title: "mystery",
+      goal: "?",
+      targetsJson: JSON.stringify(["x"]),
+      cadenceMs: 10_000,
+      modelTier: "small",
+      status: "active",
+      nextCheckAt: now - 1000, // due
+    });
+
+    await scheduler.tick(now);
+
+    expect(deps.db.getWatcher(watcher.id)!.status).toBe("error");
+  });
 });

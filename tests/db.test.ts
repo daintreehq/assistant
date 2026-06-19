@@ -303,6 +303,15 @@ describe("Db startup watcher invalidation", () => {
         title: "worktree gone",
         summary: "Worktree is no longer present.",
       });
+      // PR watchers are session-scoped too — a leftover "PR updated" alert from a
+      // prior session must be swept, or it resurfaces in every new inbox.
+      db.upsertEvent({
+        source: "pr_watcher",
+        severity: "attention",
+        title: "PR #7 merged",
+        summary: "PR #7 is merged.",
+        dedupeKey: "pr_watcher:wch_old:state_change",
+      });
       // Non-watcher sources must survive the session boundary.
       db.upsertEvent({
         source: "timer",
@@ -337,6 +346,7 @@ describe("Db startup watcher invalidation", () => {
     const openSources = open.map((e) => e.source);
     expect(openSources).not.toContain("terminal_watcher");
     expect(openSources).not.toContain("worktree_watcher");
+    expect(openSources).not.toContain("pr_watcher");
     // ...while timer and system events are untouched.
     expect(openSources).toContain("timer");
     expect(openSources).toContain("system");
@@ -346,10 +356,12 @@ describe("Db startup watcher invalidation", () => {
     const all = db.listEvents({ includeResolved: true });
     const sweptWatcherEvents = all.filter(
       (e) =>
-        (e.source === "terminal_watcher" || e.source === "worktree_watcher") &&
+        (e.source === "terminal_watcher" ||
+          e.source === "worktree_watcher" ||
+          e.source === "pr_watcher") &&
         e.title !== "earlier alert",
     );
-    expect(sweptWatcherEvents.length).toBe(2);
+    expect(sweptWatcherEvents.length).toBe(3);
     for (const e of sweptWatcherEvents) expect(e.resolvedAt).toBeTruthy();
 
     // The already-resolved watcher event keeps its ORIGINAL resolvedAt — the

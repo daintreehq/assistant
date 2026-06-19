@@ -7,7 +7,8 @@
 import { z } from "zod";
 import { ok, fail, type ToolDef } from "./types.js";
 import { WatchCondition, type WatcherRecord } from "../schemas.js";
-import { MONITOR_DEFAULT_CADENCE_MS } from "../watcherCadence.js";
+import { MONITOR_DEFAULT_CADENCE_MS, PR_WATCHER_CADENCE_MS } from "../watcherCadence.js";
+import type { PrWatcherOptions } from "../daemon/prWatcherEngine.js";
 import { logDebug } from "../debugLog.js";
 
 const CreateArgs = z.object({
@@ -50,6 +51,34 @@ const CreateArgs = z.object({
 
 const CancelArgs = z.object({
   id: z.string().describe("Watcher id to cancel."),
+});
+
+const WatchPrArgs = z.object({
+  prNumber: z
+    .number()
+    .int()
+    .positive()
+    .describe("Forge pull/merge request number to watch."),
+  cwd: z
+    .string()
+    .optional()
+    .describe("Repo working directory passed to forge.getPR (defaults to the bound project)."),
+  title: z
+    .string()
+    .optional()
+    .describe("Short label for the watcher (defaults to 'PR #N')."),
+  startAfterMs: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Delay before the first check, in ms."),
+  stopAfterMs: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Stop watching after this many ms (timeout)."),
 });
 
 /*
@@ -201,6 +230,11 @@ function summarizeWatcher(w: WatcherRecord): string {
   } catch {
     targets = [];
   }
+  // PR watchers carry a display label ("PR #N") in targetsJson and make no model
+  // call, so the modelTier suffix would be noise — render them as their own kind.
+  if (w.kind === "pr_state") {
+    return `${w.id} [${w.status}] ${w.title} — ${targets.join(", ")} (pr_state, every ${w.cadenceMs}ms)`;
+  }
   return `${w.id} [${w.status}] ${w.title} — ${targets.join(", ")} (every ${w.cadenceMs}ms, ${w.modelTier})`;
 }
 
@@ -314,8 +348,107 @@ export const watcherTools: ToolDef[] = [
     },
   },
   {
+    name: "watcher.watchPR",
+    description:
+      "Create an in-session PR-state watcher that polls forge.getPR (~every 60s) and raises an attention event when the PR is merged or closed, becomes ready for review (draft→ready), or has new activity (comment/push/review). Read-only orchestration; never edits files or writes to the forge. IMPORTANT: it polls only while this assistant is open (session-scoped, foreground-only) and cannot see review-comment contents — only PR state, draft, and last-updated transitions. Use this to follow up on a PR without blocking the conversation.",
+    risk: "local",
+    schema: WatchPrArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        prNumber: {
+          type: "number",
+          description: "Forge pull/merge request number to watch.",
+        },
+        cwd: {
+          type: "string",
+          description:
+            "Repo working directory passed to forge.getPR (defaults to the bound project).",
+        },
+        title: {
+          type: "string",
+          description: "Short label for the watcher (defaults to 'PR #N').",
+        },
+        startAfterMs: {
+          type: "number",
+          description: "Delay before the first check, in ms.",
+        },
+        stopAfterMs: {
+          type: "number",
+          description: "Stop watching after this many ms (timeout).",
+        },
+      },
+      required: ["prNumber"],
+    },
+    async handler(args: z.infer<typeof WatchPrArgs>, ctx) {
+      try {
+        const options: PrWatcherOptions = {
+          cwd: args.cwd,
+          prNumber: args.prNumber,
+          // No baseline yet — the first check records the PR's current state
+          // silently (unless it is already merged/closed, which resolves it).
+          lastState: undefined,
+          lastIsDraft: undefined,
+          lastUpdatedAt: undefined,
+        };
+        const w = ctx.db.insertWatcher({
+          kind: "pr_state",
+          title: args.title ?? `PR #${args.prNumber}`,
+          goal: `Watch PR #${args.prNumber} for merge/close, ready-for-review, and activity.`,
+          // A display label, not a terminal id — keeps the NOT NULL column valid
+          // and lets watcher.list render the row.
+          targetsJson: JSON.stringify([`PR #${args.prNumber}`]),
+          // Fixed cadence — not user-configurable, to avoid hammering the forge.
+          cadenceMs: PR_WATCHER_CADENCE_MS,
+          isSupervisor: false,
+          // No model is consulted; "small" simply satisfies the required field.
+          modelTier: "small",
+          startAfterMs: args.startAfterMs,
+          stopAfterMs: args.stopAfterMs,
+          optionsJson: JSON.stringify(options),
+          nextCheckAt: Date.now() + (args.startAfterMs ?? 0),
+        });
+        logDebug(ctx.config, "watcher.created", {
+          watcherId: w.id,
+          kind: "pr_state",
+          isSupervisor: false,
+          via: "watcher.watchPR",
+          title: w.title,
+          prNumber: args.prNumber,
+          cwd: args.cwd,
+          cadenceMs: w.cadenceMs,
+          startAfterMs: args.startAfterMs,
+          stopAfterMs: args.stopAfterMs,
+          nextCheckAt: w.nextCheckAt,
+        });
+        // Same foreground-only lifecycle note the terminal watcher emits: polling
+        // pauses the moment the assistant is closed and never resumes next launch.
+        const schedulerRunning = ctx.daemonActive ? ctx.daemonActive() : true;
+        const lifecycleNote = schedulerRunning
+          ? " NOTE: this PR watcher polls only while the assistant is open; it is discarded when you close the assistant and does not resume on the next launch (watchers are session-scoped). It cannot read review comments — only state, draft, and activity transitions."
+          : " NOTE: no scheduler is running in this session, so it will not poll until the assistant runs interactively.";
+        return ok(
+          `Created PR watcher ${w.id} for PR #${args.prNumber}.${lifecycleNote}`,
+          {
+            id: w.id,
+            prNumber: args.prNumber,
+            cadenceMs: w.cadenceMs,
+            nextCheckAt: w.nextCheckAt,
+            daemonActive: ctx.daemonActive ? ctx.daemonActive() : true,
+          },
+        );
+      } catch (e) {
+        return fail(
+          "WATCHER_CREATE",
+          `Could not create PR watcher: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    },
+  },
+  {
     name: "watcher.list",
-    description: "List active terminal watchers (read-only).",
+    description: "List active terminal and PR watchers (read-only).",
     risk: "read",
     readOnly: true,
     parameters: {
