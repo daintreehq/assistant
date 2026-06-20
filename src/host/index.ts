@@ -267,10 +267,15 @@ async function main(): Promise<void> {
       case "interrupt":
         // Abort the running turn's signal so send() actually stops mid-stream
         // (cooperative checks in AgentSession.send / ModelRouter.stream); this
-        // frees `busy` promptly and prevents post-cancel tool execution. Then
-        // bridge.interrupt() handles the display side (stop forwarding + close
-        // the open turn). No-op if no turn is in flight.
+        // frees `busy` promptly and prevents post-cancel tool execution.
         turnController?.abort();
+        // The signal alone can't unpark a turn that's awaiting a tool approval:
+        // registry.dispatch() awaits ctx.confirm() (-> bridge.confirm()), a
+        // promise that only settles on approval:decide or the 5-min timeout.
+        // Reject any outstanding approval so dispatch returns USER_DECLINED and
+        // send() reaches the next signal check instead of stranding `busy`.
+        bridge.settlePendingApprovals("rejected");
+        // Display side: stop forwarding the in-flight turn's output + close it.
         bridge.interrupt();
         return;
       case "hibernate":
