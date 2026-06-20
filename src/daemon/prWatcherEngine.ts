@@ -23,6 +23,16 @@ import type { McpCallResult } from "../mcp/client.js";
 import type { ToolContext } from "../tools/types.js";
 import { PR_WATCHER_CADENCE_MS } from "../watcherCadence.js";
 import { logDebug } from "../debugLog.js";
+import { MCP_READ_RETRY_POLICY, MCP_READ_TIMEOUT_MS } from "../reliability.js";
+
+/** Read-only MCP call opts for PR watcher ticks: bound `forge.getPR` with a
+ *  timeout and retry a transient transport hiccup, so a slow or unreachable forge
+ *  doesn't burn the MCP SDK's 60s default and stall the scheduler tick (issue
+ *  #142). Mirrors {@link watcherEngine}'s MCP_READ_OPTS — read-only call only. */
+const MCP_READ_OPTS = {
+  timeoutMs: MCP_READ_TIMEOUT_MS,
+  retries: MCP_READ_RETRY_POLICY.maxRetries,
+} as const;
 
 /** Last-seen PR state persisted in `WatcherRecord.optionsJson` between ticks. */
 export interface PrWatcherOptions {
@@ -234,10 +244,15 @@ export async function runPrWatcherCheck(
 
   let res: McpCallResult;
   try {
-    res = await ctx.mcp.callTool("forge.getPR", {
-      cwd: options.cwd ?? ctx.projectPath,
-      prNumber: options.prNumber,
-    });
+    res = await ctx.mcp.callTool(
+      "forge.getPR",
+      {
+        cwd: options.cwd ?? ctx.projectPath,
+        prNumber: options.prNumber,
+      },
+      undefined,
+      MCP_READ_OPTS,
+    );
   } catch (err) {
     logDebug(ctx.config, "pr_watcher.error", {
       watcherId: rec.id,
