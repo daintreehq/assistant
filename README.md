@@ -21,14 +21,11 @@ Powered by **Fireworks AI** (OpenAI-compatible): a large model
 npm install
 cp .env.example .env      # then set FIREWORKS_API_KEY (already present in this repo's .env)
 
-# Interactive Ink cockpit (full-screen TUI)
+# Interactive cockpit (inline — renders in the terminal's main buffer, native scrollback)
 npm run dev
 
 # Legacy readline REPL / non-TTY-safe
 npm run dev -- --classic
-
-# Ink rendered inline instead of the full-screen buffer — keeps native scrollback
-npm run dev -- --inline
 
 # One-shot (console output)
 npm run dev -- "which worktrees are ready for review?"
@@ -37,25 +34,18 @@ npm run dev -- "which worktrees are ready for review?"
 npm run dev -- doctor
 ```
 
-The default interactive experience is the **Daintree Control Room** — a live
-operations surface with conversation integrated, not a chat box. The primary
-target is the **55–65 column Daintree sidebar**: it is operations-first
-(NOW → WATCHING → TIMERS → ATTENTION, then RECENT conversation), because the
-value is knowing what is running, what is watched, what is scheduled, and what
-needs intervention — before any chat history:
+The default interactive experience is the **Daintree cockpit**, rendered *inline*
+in the terminal's **main** screen buffer — not an alternate full-screen buffer —
+so the host terminal's own scrollback, mouse wheel, and text selection keep working
+natively. Completed turns are committed once (via Ink `<Static>`) and flow into that
+native scrollback, never repainting; only the in-flight turn, a status line, and the
+composer repaint, pinned at the bottom. The header is printed once and is allowed to
+scroll away — it is not sticky. There is no column-banded layout: the cockpit renders
+the same single inline surface at every width.
 
 ```
 ◆ DAINTREE  assistant-main           OPERATOR  ● CONNECTED
-NOW
-◌ WORKING term_8                                       18s
-  repair watcher tests
-  42 passed · running WatcherPanel…
-WATCHING
-◌ term_8   tests running                               18s
-✓ term_4   branch ready                               08:51
-TIMERS
-◷ 09:30  check CI
-RECENT
+
 YOU
 ╭────────────────────────────────────────────────────────╮
 │ Fix the watcher tests and tell me when the branch is … │
@@ -65,34 +55,24 @@ I'll delegate the edit and supervise the result.
 ├─ ✓ Delegated   term_8 · repair watcher tests
 ╰─ ◌ Watching    tests running · 42 passed              18s
 ──────────────────────────────────────────────────────────
-◌ Watching term_8 · 18s                    agents 1 · MCP
+◌ Watching term_8 · 18s                    agents 1 · tmr 1
 › Ask Daintree…
-  / commands · ^O inspect ops               agents 1 · tmr 1
+  / commands · ^O ops · ^X detail
 ```
-
-Wider terminals progressively add more transcript space and, at wide widths, a
-secondary operations rail. They are enhancements, not the design baseline.
-
-- **sidebar** (<72 cols): the canonical surface — operations-first sections
-  (NOW / WATCHING / TIMERS / ATTENTION) above a short RECENT conversation strip.
-  Optimized for the 55–65 "comfortable" band; below 55 it drops to survival
-  density (fewer labels and previews).
-- **standard** (72–115 cols): conversation-first, with a one-line current-operation
-  strip and an attention banner below the header.
-- **wide** (≥116 cols): the run-oriented transcript on the left, a quiet
-  **operations rail** on the right (NOW / ATTENTION / NEXT).
 
 User messages render as a distinct, dimmer **boxed card** (theme-aware via
 `DAINTREE_THEME=dark|light|ansi|none`, never a hard-coded bright block) while
 Daintree's own prose stays unboxed under a `◆ DAINTREE` marker — so "who said
 what" is unmistakable even with color stripped.
 
-Operational detail is a purposeful **view**, not a text dump: `^O` opens the
-operations surface (NOW → NEEDS ATTENTION → AGENTS → SCHEDULED → RECENT, with
+Operational detail is a purposeful **view**, not a text dump: `^O` toggles the
+operations deck (NOW → NEEDS ATTENTION → AGENTS → SCHEDULED → RECENT, with
 watchers and terminals merged into single agent rows and recommended actions
-exposed), and `/watchers`, `/inbox`, `/timers`, `/audit` open it directly. `^X`
-reveals raw tool args/results in the transcript; `Esc` returns home; `^C` shuts
-down the scheduler, MCP, and DB cleanly.
+exposed), and `/watchers`, `/inbox`, `/timers`, `/audit` open it focused on one
+section. `^X` toggles raw tool args/results in the transcript; `Esc` returns home
+from any view; `^C` shuts down the scheduler, MCP, and DB cleanly. These on-demand
+views render *in place of the composer* and never as pinned panels — a pinned
+full-screen panel would be mutually exclusive with the native scrollback.
 
 Risky actions raise a full-width **approval sheet** above the composer with a
 risk-specific question (e.g. "Push branch to origin?") that defaults visually to
@@ -106,7 +86,7 @@ Iterate on the surface without a live model, scheduler, or MCP connection:
 ```bash
 npm run ui:gallery   # number keys switch fixtures (idle · active · attention ·
                      # approval · degraded · timers · fleet · long message)
-                     # w width (55/58/62/65/80/120) · h height · o ops · x detail · q quit
+                     # w width (55/58/62/65/80/120) · o ops · x detail · q quit
 ```
 
 Fixtures use a frozen clock, so screenshots and golden-frame tests stay stable.
@@ -190,15 +170,22 @@ cached prefix doesn't churn each message. Drive it manually with `/recipes`
 
 ## Tools the model can call
 
-| Group        | Tools                                                                 |
-| ------------ | -------------------------------------------------------------------- |
-| Project read | `fs.list` `fs.read` `fs.search`                                       |
-| Daintree     | `daintree.status` `daintree.listTools` `tool.search` `daintree.call` |
-| Context      | `context.snapshot` `terminal.summarize`                              |
-| Timers       | `timer.schedule` `timer.list` `timer.cancel`                         |
-| Watchers     | `watcher.terminal.create` `watcher.list` `watcher.cancel`           |
-| Queue        | `queue.publish` `queue.digest` `queue.resolve`                       |
-| Agent tasks  | `agentTask.spawnForEdits` (the no-file-edit escape hatch)            |
+| Group        | Tools                                                                       |
+| ------------ | --------------------------------------------------------------------------- |
+| Project read | `fs.list` `fs.read` `fs.search`                                             |
+| Daintree     | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
+| Context      | `context.snapshot` `terminal.summarize`                                    |
+| Timers       | `timer.schedule` `timer.list` `timer.cancel`                               |
+| Watchers     | `watcher.terminal.create` `watcher.list` `watcher.cancel`                 |
+| Queue        | `queue.publish` `queue.digest` `queue.resolve`                             |
+| Extraction   | `terminal.extract` `terminal.extract.async`                               |
+| Agent tasks  | `agentTask.spawnForEdits` (the no-file-edit escape hatch)                  |
+| Grants       | `grant.create` `grant.list` `grant.revoke`                                 |
+| Workflows    | `workflow.create` `workflow.get` `workflow.list` `workflow.update`        |
+| Recipe runs  | `recipe.step.advance` `recipe.run.get` `recipe.load`                       |
+| Audit        | `audit.export`                                                             |
+| Memory       | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
+| Artifacts    | `artifact.read`                                                            |
 
 ## Debug logging
 
@@ -245,5 +232,7 @@ npm run typecheck
   watcher engine never renders, and the model loop never writes to stdout — it
   emits through an `AgentEventSink` consumed by either the Ink `UiBridge` or the
   legacy console sink (`src/cli/consoleSink.ts`).
-- Workflow templates (start_issue, merge_supervision, …) and worktree watchers
-  are the next phase on top of this foundation.
+- Workflows, recipes, and persistent memory are implemented tool surfaces
+  (`workflow.*`, `recipe.*`, `memory.*`). Future phases target Daintree-owned
+  watch-sets over MCP (option C in the scheduler decision record), which would let
+  supervision tick without the assistant open.

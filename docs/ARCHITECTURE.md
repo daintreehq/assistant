@@ -1,45 +1,61 @@
-# Daintree Assistant CLI — architecture & build contract
+# Daintree Assistant CLI — architecture reference
 
-This is the ground-truth contract. The coherent core (schemas, config, storage,
-mcp, models, safety, queue, tool framework, runtime) is already written. Tool
-modules and tests are built against the **exact** interfaces below.
+Architecture reference for the Daintree Assistant CLI. Every module described
+below is implemented; the interfaces (the `ToolDef` contract, the scheduler
+decision record, the per-module behavior notes) describe the system as it stands.
 
 ## Layout
 
 ```
 src/
-  schemas.ts            domain types + Zod (DONE)
-  config.ts             AppConfig, loadConfig (DONE)
-  queue.ts              Queue (DONE)
-  storage/db.ts         Db (node:sqlite) (DONE)
-  mcp/client.ts         DaintreeMcpClient (DONE)
+  schemas.ts            domain types + Zod
+  config.ts             AppConfig, loadConfig
+  queue.ts              Queue
+  storage/db.ts         Db (node:sqlite)
+  mcp/client.ts         DaintreeMcpClient
   models/
-    fireworks.ts        FireworksClient, ChatMessage, ChatTool, ThinkFilter (DONE)
-    router.ts           ModelRouter (DONE)
-    prompts.ts          system prompts (DONE)
-  safety/policy.ts      tier gating, confirmation, no-file-edit guard (DONE)
+    fireworks.ts        FireworksClient, ChatMessage, ChatTool, ThinkFilter
+    router.ts           ModelRouter
+    prompts/            base.ts, runtimeContext.ts, daintreeMcp.ts, recipes.ts (system prompts)
+  safety/policy.ts      tier gating, confirmation, no-file-edit guard
   tools/
-    types.ts            ToolDef, ToolContext, ok(), fail(), NO_ARGS (DONE)
-    registry.ts         ToolRegistry (DONE)
-    fsTools.ts          export const fsTools: ToolDef[]            <-- build
-    mcpTools.ts         export const mcpTools: ToolDef[]           <-- build
-    timerTools.ts       export const timerTools: ToolDef[]         <-- build
-    watcherTools.ts     export const watcherTools: ToolDef[]       <-- build
-    queueTools.ts       export const queueTools: ToolDef[]         <-- build
-    contextTools.ts     export const contextTools: ToolDef[]       <-- build
-    agentTaskTools.ts   export const agentTaskTools: ToolDef[]     <-- build
-    index.ts            buildAllTools(): ToolDef[] (DONE)
-  agent/loop.ts         AgentSession (DONE)
+    types.ts            ToolDef, ToolContext, ok(), fail(), NO_ARGS
+    registry.ts         ToolRegistry
+    fsTools.ts          fsTools: ToolDef[]            (read-only project access)
+    mcpTools.ts         mcpTools: ToolDef[]           (Daintree MCP + typed wrappers)
+    timerTools.ts       timerTools: ToolDef[]         (durable timers)
+    watcherTools.ts     watcherTools: ToolDef[]       (terminal watchers)
+    queueTools.ts       queueTools: ToolDef[]         (attention queue)
+    contextTools.ts     contextTools: ToolDef[]       (snapshots & summaries)
+    extractionTools.ts  extractionTools: ToolDef[]    (terminal.extract / .async)
+    agentTaskTools.ts   agentTaskTools: ToolDef[]     (no-file-edit spawn escape hatch)
+    grantTools.ts       grantTools: ToolDef[]         (automation grants)
+    workflowTools.ts    workflowTools: ToolDef[]      (workflow create/get/list/update)
+    recipeRunTools.ts   recipeRunTools: ToolDef[]     (recipe run/step/load)
+    auditTools.ts       auditTools: ToolDef[]         (audit.export)
+    memoryTools.ts      memoryTools: ToolDef[]        (persistent memory recall/save/…)
+    artifactTools.ts    artifactTools: ToolDef[]      (artifact.read)
+    index.ts            buildAllTools(): ToolDef[]
+  agent/loop.ts         AgentSession
   daemon/
-    watcherEngine.ts    runTerminalWatcherCheck + pure helpers (DONE)
-    scheduler.ts        Scheduler (DONE)
+    watcherEngine.ts    runTerminalWatcherCheck + pure helpers
+    scheduler.ts        Scheduler
   cli/
-    render.ts           render + colors (DONE)
-    app.ts              App: wires deps, ctx, session, scheduler (DONE)
-    commands.ts         slash commands (DONE)
-    repl.ts             interactive REPL (DONE)
-    index.ts            commander entry (DONE)
-tests/                  vitest specs                                <-- build
+    render.ts           render + colors
+    consoleSink.ts      console AgentEventSink (one-shot / non-TTY)
+    jsonSink.ts         JSON event stream sink
+    commandData.ts      slash-command catalog + data
+    commands.ts         slash commands
+    terminalClear.ts    scrollback-safe clear helper
+    app.ts              App: wires deps, ctx, session, scheduler
+    repl.ts             interactive (classic) REPL
+    index.ts            commander entry
+  ui/                   Ink TUI (the ONLY Ink importers)
+    DaintreeInkApp.tsx  app wiring + global keybindings
+    ControlRoom.tsx     inline cockpit (Static scrollback + repainting region)
+    dev/UiGallery.tsx   fixture-driven visual gallery (npm run ui:gallery)
+  host/                 embedded Electron utility-process host
+tests/                  vitest specs
 ```
 
 ## Scheduler architecture decision (issue #5)
@@ -70,6 +86,20 @@ Two longer-term options were considered for true background ticking:
 issue #5. Target **option C** long-term once Daintree exposes watch-sets over an
 SSE transport. Option B remains a viable intermediate, but only after issue #4
 (per-project DB). No sidecar or transport work is undertaken here.
+
+## Cockpit rendering model (src/ui/ControlRoom.tsx)
+
+The cockpit renders **inline** into the terminal's *main* screen buffer — never the
+alternate buffer — so the host terminal's own scrollback, mouse wheel, and selection
+work natively. `ControlRoom.tsx` splits the transcript at the trailing active turn:
+completed cells are committed once via Ink `<Static>` (they flow into native
+scrollback and never repaint), while the in-flight turn, status line, and composer
+form a repainting region pinned at the bottom. The header is printed once as the
+first Static item and is allowed to scroll away — it is not sticky. There is no
+column-banded layout. On-demand views (operations via `^O`, help) render *in place of
+the composer* and return via `Esc`; a pinned full-screen panel is impossible without
+the alternate buffer, so none exist. Keep committed cells append-only — `<Static>`
+requires the reducer to mutate only the trailing active turn.
 
 ## The ToolDef contract (from src/tools/types.ts)
 
@@ -133,7 +163,7 @@ export const fsTools: ToolDef[] = [
 ];
 ```
 
-## Tools to build (name · risk · behavior)
+## Implemented tool modules (name · risk · behavior)
 
 ### fsTools.ts — read-only project access (NEVER writes)
 - `fs.list` (read) — list a directory relative to project root. Args `{path?: string, depth?: number}`. Use `resolveInsideProject`. Return entries with name/type. Skip `.git`, `node_modules`.
@@ -169,11 +199,33 @@ export const fsTools: ToolDef[] = [
 - `agentTask.spawnForEdits` — Args `{worktreeId?: string, agentId?: string (default "claude"), mode?: "edit"|"explore" (default "edit"), title, taskPrompt, context?: {filePaths?: string[], includeDiff?: boolean}, watcher?: {create: boolean, goal?: string, cadenceMs?: number}}`. Behavior: build an agent prompt (compose taskPrompt + a mode-specific constraints block — edit mode: "Make changes only in this worktree… Report back changed files/tests/risks"; explore mode: "READ-ONLY exploration: do not modify files… report findings"), then `ctx.mcp.callTool("agent.launch", {agentId, worktreeId?, prompt})` (requestKey via randomUUID). From the result, get the terminalId (structuredContent.terminalId ?? parse). If `watcher.create`, insert a terminal watcher (same shape as watcher.terminal.create) for that terminalId. Return `{terminalId, worktreeId, watcherId?}`. If MCP down, fail with guidance. This is the ONLY agent-spawn path (edits AND exploration); the CLI never edits files and never hand-rolls a raw agent.launch.
 - `daintree.call` — raw escape hatch. Before forwarding, it checks `WRAPPED_MCP_TOOLS`: if `name` has a typed wrapper (agent.launch → agentTask.spawnForEdits; terminal.getOutput → terminal.summarize/extract; panel.focus → terminal.focus), it fails fast with code `USE_TYPED_WRAPPER` naming the wrapper instead of forwarding. This stops the recurring "use the escape hatch with empty args, then retry the identical broken call" loop.
 
+### extractionTools.ts — structured terminal extraction (risk "read"/"local")
+- `terminal.extract` — pull structured fields from a terminal's output via the small model. Synchronous variant.
+- `terminal.extract.async` — same, but enqueued for background completion; the result lands on the attention queue.
+
+### grantTools.ts — automation grants (risk "local")
+- `grant.create` / `grant.list` / `grant.revoke` — scoped grants that let non-interactive actors (watchers, timers, workflows) run mutating tools without an interactive confirmation. The confirmation matrix consults these for non-`main` actors.
+
+### workflowTools.ts — workflow runs (risk "local"/"project")
+- `workflow.create` / `workflow.get` / `workflow.list` / `workflow.update` — durable multi-step workflow records persisted in SQLite, advanced over multiple turns.
+
+### recipeRunTools.ts — recipe runs (risk "local")
+- `recipe.load` — load recipe bodies into the active context. `recipe.run.get` — inspect a run. `recipe.step.advance` — advance a recipe run to its next step.
+
+### auditTools.ts — audit export (risk "read")
+- `audit.export` — export the audit log (every dispatched tool call) for review.
+
+### memoryTools.ts — persistent memory (risk "read"/"local")
+- `memory.recall` / `memory.list` / `memory.save` / `memory.forget` / `memory.pin` / `memory.unpin` — durable cross-session memory of facts, preferences, and project context.
+
+### artifactTools.ts — artifact access (risk "read")
+- `artifact.read` — read a stored artifact (e.g. an extraction or workflow output) by id.
+
 ## Confirmation / risk
 The registry calls `ctx.confirm` automatically for risk in {terminal, project, git, external, system}. Handlers do NOT call confirm themselves.
 
-## Tests (tests/*.test.ts) — vitest
-Build these. Import from `../src/...`. Use `:memory:` DBs and fake MCP/model objects — NO network.
+## Test coverage (tests/*.test.ts) — vitest
+Import from `../src/...`. Use `:memory:` DBs and fake MCP/model objects — NO network.
 1. `noFileEditGuard.test.ts` — `assertNoFileEditTools` throws on "fs.write"/"apply_patch"; passes for the real registry (`buildAllTools()` names). `resolveInsideProject` blocks traversal.
 2. `policy.test.ts` — confirmation matrix: supervisor denies "terminal"; operator allows+confirms "project"; system allows "git"; read/local never confirm.
 3. `config.test.ts` — loadConfig picks up overrides + defaults; describeConfig redacts secrets.
