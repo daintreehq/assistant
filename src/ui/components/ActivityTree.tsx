@@ -102,7 +102,7 @@ export function ActivityTree({
                   // Always at least one space after the (white) label, and pad
                   // short labels so details line up in a column. Labels longer
                   // than the column just get the single separating space.
-                  <Text dimColor>
+                  <Text dimColor wrap="truncate">
                     {" ".repeat(Math.max(1, LABEL_WIDTH - a.label.length))}
                     {truncate(detail, detailRoom)}
                   </Text>
@@ -115,12 +115,17 @@ export function ActivityTree({
               ) : null}
             </Box>
             {expanded ? (
+              // truncate the raw args/result so an expanded row (^X) can't out-run a
+              // just-shrunk terminal during a pane resize and orphan a wrapped copy
+              // into scrollback (#138); `width` is a lagged content-budget hint.
               <Box flexDirection="column" paddingLeft={3}>
-                <Text dimColor>
+                <Text dimColor wrap="truncate">
                   {a.name} args: {compactArgs(a.args, Math.max(20, width - 12))}
                 </Text>
                 {a.summary ? (
-                  <Text dimColor>result: {truncate(a.summary, width - 12)}</Text>
+                  <Text dimColor wrap="truncate">
+                    result: {truncate(a.summary, width - 12)}
+                  </Text>
                 ) : null}
               </Box>
             ) : null}

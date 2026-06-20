@@ -29,13 +29,21 @@ const EDIT_KEYS: Array<[string, string]> = [
 
 export function HelpOverlay({ width = 72 }: { width?: number }) {
   return (
+    // Size by yoga against the LIVE terminal, not the numeric `width` prop. The
+    // overlay renders in the repainting region in place of the composer, and
+    // `width` derives from ControlRoom's lagged `columns` prop. An explicit
+    // `width={width}` would briefly exceed a just-shrunk terminal while Daintree
+    // animates the pane (#138), wrap the bordered frame, and orphan a stale copy
+    // into scrollback. `width="100%"` tracks the live width; `maxWidth` keeps the
+    // numeric prop as the readability cap.
     <Box
       flexDirection="column"
       borderStyle="round"
       borderColor={ui.color.accent}
       paddingX={2}
       paddingY={1}
-      width={width}
+      width="100%"
+      maxWidth={width}
     >
       <BrandMark label="DAINTREE — help" />
       <Box marginTop={1} flexDirection="column">

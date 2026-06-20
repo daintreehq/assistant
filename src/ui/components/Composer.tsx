@@ -143,8 +143,12 @@ export function Composer({
           />
         </Box>
         {busy ? (
-          <Box marginLeft={1}>
-            <Text color={ui.color.info}>
+          // Truncate rather than let a long stage label widen this row past the
+          // live terminal — the composer is in the repainting region, and an
+          // over-wide row wraps and orphans into scrollback during a pane resize
+          // (#138). flexShrink lets yoga reclaim the space; the input keeps its grow.
+          <Box marginLeft={1} flexShrink={1}>
+            <Text color={ui.color.info} wrap="truncate">
               <ThinkingDot ascii={ascii} /> {stage}
               {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
             </Text>
@@ -173,7 +177,16 @@ export function Composer({
             </>
           ) : null}
         </Box>
-        {contextHint ? <Text dimColor>{contextHint}</Text> : null}
+        {/* Truncate so a long context summary (many agents/timers) can't widen this
+            space-between row past the live terminal and orphan a wrapped row into
+            scrollback during a pane resize (#138). */}
+        {contextHint ? (
+          <Box flexShrink={1}>
+            <Text dimColor wrap="truncate">
+              {contextHint}
+            </Text>
+          </Box>
+        ) : null}
       </Box>
     </Box>
   );

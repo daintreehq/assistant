@@ -40,6 +40,164 @@ function frameFor(
 // wide banding is gone). 58 is a typical host side panel; 120 is a wide terminal.
 const WIDTHS = [58, 80, 120];
 
+/** Strip SGR color codes so we measure the VISIBLE width of a rendered row. */
+const ANSI = /\[[0-9;]*m/g;
+const visibleWidth = (line: string): number => line.replace(ANSI, "").length;
+
+/**
+ * Width below every live value in the oscillation. We commit the `<Static>` region
+ * (the one-time header, plus any already-finished turns) at THIS narrow width on
+ * the first render — modelling "the history scrolled past while the pane was
+ * narrow". Ink's `<Static>` emits each item exactly once and never repaints it, so
+ * those rows are EXEMPT from the orphan bug (they print once and flow into native
+ * scrollback). Seeding them narrow keeps them out of the width assertion, which
+ * then measures only the repainting region — the part that actually re-renders and
+ * can orphan.
+ */
+const STATIC_SEED_COLUMNS = 40;
+
+const renderControlRoom = (
+  label: string,
+  columns: number,
+  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean },
+) => {
+  const f = byKey(label);
+  return (
+    <ControlRoom
+      project="assistant"
+      tier="system"
+      columns={columns}
+      connected={f.connected}
+      transcript={f.transcript}
+      dashboard={f.dashboard}
+      sessionUsage={f.sessionUsage}
+      previews={f.previews}
+      busy={f.busy}
+      stage={f.stage}
+      queueDepth={f.queueDepth}
+      view={over.view ?? f.view}
+      activePanel={over.activePanel}
+      expanded={over.expanded ?? false}
+      pending={f.pending}
+      now={FIXED_NOW}
+      composerFocus={false}
+    />
+  );
+};
+
+/**
+ * Render a fixture with the LIVE terminal width (`stdout.columns`) decoupled from
+ * the `columns` PROP — the exact #138 lag. Ink's yoga layout sizes `width="100%"`
+ * children against the live terminal on every relayout, but the `columns` prop we
+ * thread into the tree comes from `useWindowSize()`, which updates a render tick
+ * later. So during a pane show/hide the prop trails the real width, and any box in
+ * the repainting region sized from that prop can momentarily be WIDER than the live
+ * terminal — its row wraps and orphans a stale copy into scrollback. We reproduce
+ * the trailing prop by overriding the headless stdout's hardcoded `columns` getter,
+ * then assert the repainting region never out-runs the live width.
+ *
+ * (The literal duplicated-row symptom is a terminal-scrollback artifact of Ink's
+ * cursor-up erase math and is not reproducible in the headless debug renderer; the
+ * reproducible ROOT CAUSE is the over-wide line, which is what we guard here.)
+ */
+function liveFrame(
+  label: string,
+  propColumns: number,
+  liveColumns: number,
+  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean } = {},
+): string {
+  // First render at the narrow seed so the <Static> region commits (once) at a
+  // width that fits every live value below — keeping the exempt header/history out
+  // of the assertion.
+  const { rerender, stdout, lastFrame } = render(
+    renderControlRoom(label, STATIC_SEED_COLUMNS, over),
+  );
+  // Pin the headless stdout (hardcoded columns=100) to the live width and relayout
+  // with the prop now LAGGING ahead of it — the repainting region re-renders, the
+  // already-committed <Static> rows do not.
+  Object.defineProperty(stdout, "columns", {
+    value: liveColumns,
+    configurable: true,
+  });
+  rerender(renderControlRoom(label, propColumns, over));
+  return lastFrame() ?? "";
+}
+
+// A pane animation oscillates the live width; the prop trails by one step. The
+// shrink half (prop > live) is the dangerous direction — a prop-sized box exceeds
+// the just-shrunk terminal. We cover both halves; the grow half (prop < live) is
+// trivially safe but asserted anyway as a guard against the inverse regression.
+const OSCILLATION: Array<{ prop: number; live: number }> = [
+  { prop: 80, live: 76 }, // just shrank, prop still 80
+  { prop: 76, live: 72 }, // shrank again
+  { prop: 72, live: 76 }, // grew back, prop still 72
+  { prop: 76, live: 80 }, // grew again
+  { prop: 80, live: 58 }, // a hard jump to a narrow pane, prop way ahead
+];
+
+describe("ControlRoom resize oscillation — no row out-runs the live width (#138)", () => {
+  for (const fixture of ["idle", "active", "approval"] as const) {
+    it.each(OSCILLATION)(
+      `${fixture}: every live row fits the terminal when prop lags (prop=$prop, live=$live)`,
+      ({ prop, live }) => {
+        const frame = liveFrame(fixture, prop, live);
+        const overflowing = frame
+          .split("\n")
+          .filter((line) => visibleWidth(line) > live);
+        expect(overflowing).toEqual([]);
+      },
+    );
+  }
+
+  it.each(OSCILLATION)(
+    "help overlay fits the terminal when prop lags (prop=$prop, live=$live)",
+    ({ prop, live }) => {
+      const frame = liveFrame("idle", prop, live, { view: "help" });
+      const overflowing = frame
+        .split("\n")
+        .filter((line) => visibleWidth(line) > live);
+      expect(overflowing).toEqual([]);
+    },
+  );
+
+  it.each(OSCILLATION)(
+    "operations deck fits the terminal when prop lags (prop=$prop, live=$live)",
+    ({ prop, live }) => {
+      // The "active" fixture carries watchers/timers/audit, so every operations
+      // section (Now/Attention/Agents/Scheduled/Recent) renders and is measured.
+      const frame = liveFrame("active", prop, live, { view: "operations" });
+      const overflowing = frame
+        .split("\n")
+        .filter((line) => visibleWidth(line) > live);
+      expect(overflowing).toEqual([]);
+    },
+  );
+
+  it.each(OSCILLATION)(
+    "expanded activity tree fits the terminal when prop lags (prop=$prop, live=$live)",
+    ({ prop, live }) => {
+      // ^X expands raw args/result rows in the live turn — the widest live content.
+      const frame = liveFrame("active", prop, live, { expanded: true });
+      const overflowing = frame
+        .split("\n")
+        .filter((line) => visibleWidth(line) > live);
+      expect(overflowing).toEqual([]);
+    },
+  );
+
+  it("the status line stays a single row across the whole oscillation", () => {
+    // Regression for the stacked-status-line symptom: whatever the prop/live skew,
+    // the idle status content ("Standing by") renders exactly once per frame — a
+    // duplicated row would mean a wrapped overflow leaked a second copy.
+    for (const { prop, live } of OSCILLATION) {
+      const frame = liveFrame("idle", prop, live);
+      const count = frame.split("\n").filter((l) => l.includes("Standing by"))
+        .length;
+      expect(count).toBe(1);
+    }
+  });
+});
+
 describe("ControlRoom inline cockpit (golden frames)", () => {
   it.each(WIDTHS)("prints the masthead + composer, idle reads as standing by (%i cols)", (w) => {
     const frame = frameFor("idle", w);
