@@ -68,11 +68,16 @@ async function main(): Promise<void> {
   let state: "await-descriptor" | "running" = "await-descriptor";
   let ready = false;
   let busy = false;
+  // The in-flight command-driven turn's abort controller, so an `interrupt`
+  // command can actually cancel send() mid-stream (issue #141) rather than only
+  // suppressing display. Wake turns are intentionally unabortable (autonomous,
+  // read-only) so they don't register here.
+  let turnController: AbortController | null = null;
   let bridge: HostBridge | null = null;
   // Set once the App is wired; `unknown` keeps this file free of a cycle into app.ts types.
   let app: {
     session: {
-      send(input: string, opts?: { readOnly?: boolean }): Promise<string>;
+      send(input: string, opts?: { readOnly?: boolean; signal?: AbortSignal }): Promise<string>;
     };
     shutdown(): Promise<void>;
   } | null = null;
@@ -234,11 +239,18 @@ async function main(): Promise<void> {
         }
         busy = true;
         bridge.startExchange();
+        // Mint a fresh per-turn controller so `interrupt` can abort this send()
+        // mid-stream. Mirrors the Ink controller (useDaintreeController.ts).
+        const controller = new AbortController();
+        turnController = controller;
         try {
-          await app.session.send(cmd.text);
+          await app.session.send(cmd.text, { signal: controller.signal });
         } catch (err) {
           post({ type: "host:error", sessionId, code: "turn-failed", message: errMessage(err) });
         } finally {
+          // Identity guard: only clear if this is still the active controller, so
+          // a later turn's controller isn't nulled by a stale finally.
+          if (turnController === controller) turnController = null;
           // Close any assistant turn the loop left open (error paths don't emit
           // assistantEnd); a normal completion already closed it, so this no-ops.
           bridge.settleTurn("answered");
@@ -253,10 +265,12 @@ async function main(): Promise<void> {
         bridge.resolveApproval(cmd.approvalId, cmd.decision);
         return;
       case "interrupt":
-        // Best-effort: stops forwarding the in-flight turn's output and closes
-        // it. The underlying model stream is not yet abortable mid-token — a
-        // real cancel needs an AbortSignal threaded through ModelRouter.stream
-        // (tracked follow-up). The next prompt is accepted once send() returns.
+        // Abort the running turn's signal so send() actually stops mid-stream
+        // (cooperative checks in AgentSession.send / ModelRouter.stream); this
+        // frees `busy` promptly and prevents post-cancel tool execution. Then
+        // bridge.interrupt() handles the display side (stop forwarding + close
+        // the open turn). No-op if no turn is in flight.
+        turnController?.abort();
         bridge.interrupt();
         return;
       case "hibernate":
