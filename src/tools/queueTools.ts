@@ -129,7 +129,6 @@ export const queueTools: ToolDef[] = [
     description:
       "Read the attention queue: returns the open (or filtered) events plus a formatted, human-readable digest (read-only).",
     risk: "read",
-    readOnly: true,
     schema: DigestArgs,
     parameters: {
       type: "object",

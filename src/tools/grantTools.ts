@@ -232,7 +232,6 @@ export const grantTools: ToolDef[] = [
     description:
       "List live automation grants (non-revoked, non-expired, with uses remaining), optionally filtered to one watcher/timer id.",
     risk: "read",
-    readOnly: true,
     schema: ListArgs,
     parameters: {
       type: "object",

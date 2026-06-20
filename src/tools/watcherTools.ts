@@ -450,7 +450,6 @@ export const watcherTools: ToolDef[] = [
     name: "watcher.list",
     description: "List active terminal and PR watchers (read-only).",
     risk: "read",
-    readOnly: true,
     parameters: {
       type: "object",
       additionalProperties: false,

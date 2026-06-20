@@ -155,10 +155,9 @@ describe("audit.export tool", () => {
 
   const tool = auditTools.find((t) => t.name === "audit.export")!;
 
-  it("is registered as a read-only read-risk tool", () => {
+  it("is registered as a read-risk tool", () => {
     expect(tool).toBeDefined();
     expect(tool.risk).toBe("read");
-    expect(tool.readOnly).toBe(true);
   });
 
   it("exports filtered rows as CSV with a count", async () => {

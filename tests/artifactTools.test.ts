@@ -9,9 +9,8 @@ function ctxWith(store?: Map<string, string>): ToolContext {
 }
 
 describe("artifact.read", () => {
-  it("is registered as a read-only, read-risk tool", () => {
+  it("is registered as a read-risk tool", () => {
     expect(readTool).toBeDefined();
-    expect(readTool.readOnly).toBe(true);
     expect(readTool.risk).toBe("read");
   });
 

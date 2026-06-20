@@ -131,8 +131,6 @@ export interface ToolDef<A = any> {
   parameters: Record<string, unknown>;
   /** Optional Zod schema for runtime validation of parsed args. */
   schema?: z.ZodType<A>;
-  /** Hint for the model + a sanity flag enforced by the registry. */
-  readOnly?: boolean;
   handler: (args: A, ctx: ToolContext) => Promise<ToolResult>;
 }
 

@@ -548,7 +548,6 @@ export const extractionTools: ToolDef[] = [
     description:
       "Read a bounded tail of one or more Daintree terminals and extract caller-specified content with the small model — as plain text or structured JSON. Optionally wait (poll) until a condition is met before extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no model call). Read-only; requires Daintree MCP.",
     risk: "read",
-    readOnly: true,
     schema: ExtractArgs,
     parameters: {
       type: "object",

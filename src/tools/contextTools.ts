@@ -55,7 +55,6 @@ export const contextTools: ToolDef[] = [
     description:
       "Build a compact snapshot of the current workspace: Daintree MCP status, and (when connected) action context, worktrees, terminals, plus the open attention queue. Best-effort and read-only; degrades gracefully when Daintree is offline.",
     risk: "read",
-    readOnly: true,
     parameters: NO_ARGS,
     async handler(_args, ctx) {
       const mcp = ctx.mcp.status();
@@ -113,7 +112,6 @@ export const contextTools: ToolDef[] = [
     description:
       "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. Use this instead of dumping raw scrollback into context. Read-only; requires Daintree MCP.",
     risk: "read",
-    readOnly: true,
     schema: SummarizeArgs,
     parameters: {
       type: "object",

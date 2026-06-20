@@ -159,7 +159,6 @@ export const auditTools: ToolDef[] = [
     description:
       "Export the audit log as JSON or CSV with optional filters (actor, toolName, outcome, and a tsFrom/tsTo time range in Unix ms). Filters are AND-combined; rows are returned newest-first and bounded by `limit`. Read-only — returns the serialized content as a string for the caller to save or inspect.",
     risk: "read",
-    readOnly: true,
     schema: ExportArgs,
     parameters: {
       type: "object",

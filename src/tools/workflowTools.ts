@@ -269,7 +269,6 @@ export const workflowTools: ToolDef[] = [
     name: "workflow.get",
     description: "Read one workflow ledger record by id (read-only).",
     risk: "read",
-    readOnly: true,
     schema: GetArgs,
     parameters: {
       type: "object",
@@ -294,7 +293,6 @@ export const workflowTools: ToolDef[] = [
     description:
       "List workflow ledger records, optionally filtered by status (read-only).",
     risk: "read",
-    readOnly: true,
     schema: ListArgs,
     parameters: {
       type: "object",

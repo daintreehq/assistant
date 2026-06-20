@@ -112,7 +112,6 @@ describe("AgentSession cancellation (#45)", () => {
       name: "probe",
       description: "records the signal it was dispatched with",
       risk: "read",
-      readOnly: true,
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async handler(_args, ctx) {
         seen.push(ctx.signal);
@@ -185,7 +184,6 @@ describe("AgentSession cancellation (#45)", () => {
       name: "abortertool",
       description: "aborts the turn from inside the first dispatch",
       risk: "read",
-      readOnly: true,
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async handler() {
         dispatchCount++;

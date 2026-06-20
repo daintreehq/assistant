@@ -44,9 +44,9 @@ describe("memory.save", () => {
     expect(save.schema!.safeParse({ content: "x", source: "user" }).success).toBe(true);
   });
 
-  it("is a local-risk, non-readOnly tool", () => {
+  it("is a local-risk (non-read-risk) tool", () => {
     expect(save.risk).toBe("local");
-    expect(save.readOnly).toBeFalsy();
+    expect(save.risk).not.toBe("read");
   });
 });
 
@@ -55,7 +55,6 @@ describe("memory.recall / memory.list", () => {
     const c = ctx();
     await save.handler({ content: "a fact" }, c);
     expect(recall.risk).toBe("read");
-    expect(recall.readOnly).toBe(true);
     const res = await recall.handler({ query: "   " }, c);
     expect(res.ok).toBe(true);
     expect((res as RecallResult).result.memories).toEqual([]);

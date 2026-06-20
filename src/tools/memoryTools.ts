@@ -96,7 +96,6 @@ export const memoryTools: ToolDef[] = [
     description:
       "Search durable project memory for facts/decisions/procedures relevant to the current task (full-text, best-match first). Use this to recover context that earlier sessions saved. Read-only.",
     risk: "read",
-    readOnly: true,
     schema: RecallArgs,
     parameters: {
       type: "object",
@@ -138,7 +137,6 @@ export const memoryTools: ToolDef[] = [
     description:
       "List stored project memories (pinned first, then most recent), optionally filtered by category or to pinned-only. Read-only; use memory.recall for relevance search.",
     risk: "read",
-    readOnly: true,
     schema: ListArgs,
     parameters: {
       type: "object",
