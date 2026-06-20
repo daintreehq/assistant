@@ -92,16 +92,48 @@ async function passthrough(
 }
 
 /**
+ * Pull the `armed: string[]` set from an arming tool's result, reading
+ * `structuredContent` first then falling back to a JSON-encoded `text` body.
+ * Daintree only populates `structuredContent` for actions that opt into an
+ * output schema and otherwise returns the payload in the text content blocks
+ * (the same structuredContent-vs-text mismatch that silently broke readStatuses,
+ * see mcp/resultHelpers.ts) — the arming actions DO opt in today, but reading
+ * both sources keeps this robust and consistent with every other result reader.
+ * Returns `undefined` ONLY when neither source carries a well-formed string
+ * array, so a legitimately empty set (e.g. after disarmAll) is preserved as `[]`
+ * while a missing/garbled set is distinguishable and can fail loudly.
+ */
+function extractArmedSet(
+  result: { text?: unknown; structuredContent?: unknown } | undefined,
+): string[] | undefined {
+  const fromObj = (o: unknown): string[] | undefined => {
+    if (!o || typeof o !== "object") return undefined;
+    const armed = (o as { armed?: unknown }).armed;
+    return Array.isArray(armed) && armed.every((x): x is string => typeof x === "string")
+      ? armed
+      : undefined;
+  };
+  const fromStructured = fromObj(result?.structuredContent);
+  if (fromStructured) return fromStructured;
+  const text = result?.text;
+  if (typeof text === "string" && text.trim()) {
+    try {
+      return fromObj(JSON.parse(text));
+    } catch {
+      /* not JSON — fall through to the loud failure below */
+    }
+  }
+  return undefined;
+}
+
+/**
  * Arm/disarm wrappers must NEVER silently reroute the human's keystrokes (#136):
  * every arming call reports the resulting armed set back to the user. We run the
  * shared `passthrough` for connection/error handling, then replace its generic
- * "Called terminal.arm." summary with the concrete armed-terminal list pulled
- * from Daintree's `{ armed: string[] }` structuredContent. If that shape is
- * absent we FAIL rather than return a success that hides which terminals are now
- * armed — an unknown arming state is the one thing these tools may not do
- * quietly. Strict on structuredContent (no text-JSON fallback), matching
- * attachSupervisorWatcher: if Daintree changes its shape we want the loud
- * failure, not a silently wrong parse.
+ * "Called terminal.arm." summary with the concrete armed-terminal list Daintree
+ * returns as `{ armed: string[] }`. If neither result source carries that set we
+ * FAIL rather than return a success that hides which terminals are now armed — an
+ * unknown arming state is the one thing these tools may not do quietly.
  */
 async function terminalArmingPassthrough(
   ctx: ToolContext,
@@ -112,17 +144,15 @@ async function terminalArmingPassthrough(
   const res = await passthrough(ctx, mcpName, args);
   if (!res.ok) return res;
   const result = res.result as { text?: unknown; structuredContent?: unknown } | undefined;
-  const sc = result?.structuredContent;
-  const armedRaw =
-    sc && typeof sc === "object" ? (sc as { armed?: unknown }).armed : undefined;
-  if (!Array.isArray(armedRaw) || !armedRaw.every((x): x is string => typeof x === "string")) {
+  const armed = extractArmedSet(result);
+  if (!armed) {
     return fail(
       "MCP_TOOL_ERROR",
       `${mcpName} did not report the resulting armed set, so the current arming state is unknown — re-check with terminal.getStatus before relying on it.`,
-      { details: { structuredContent: sc, rawText: result?.text } },
+      { details: { structuredContent: result?.structuredContent, rawText: result?.text } },
     );
   }
-  const list = armedRaw.length ? armedRaw.join(", ") : "none";
+  const list = armed.length ? armed.join(", ") : "none";
   return ok(`${action} Armed terminals now: ${list}.`, result as object);
 }
 
@@ -198,13 +228,15 @@ const TerminalSendCommandArgs = z.object({
   command: z.string().trim().min(1).describe("Shell command text to type into the terminal and run."),
 });
 
-const TerminalArmingArgs = z.object({
-  terminalId: z
-    .string()
-    .trim()
-    .min(1)
-    .describe("Terminal to arm or disarm in the fleet broadcast set."),
-});
+const TerminalArmingArgs = z
+  .object({
+    terminalId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("Terminal to arm or disarm in the fleet broadcast set."),
+  })
+  .strict();
 
 const SnapshotWorktreeArgs = z.object({
   worktreeId: z.string().trim().min(1).describe("Worktree whose pre-agent git snapshot to act on."),

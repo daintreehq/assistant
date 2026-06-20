@@ -78,9 +78,9 @@ Your local tools wrap Daintree:
   HAVE a wrapper are refused here and redirected: agent.launch ->
   agentTask.spawnForEdits; terminal.getOutput -> terminal.summarize /
   terminal.extract; panel.focus -> terminal.focus; terminal.sendCommand,
-  copyTree.injectToTerminal, copyTree.generateAndCopyFile, git.snapshotRevert,
-  git.snapshotDelete -> their same-named typed wrappers. Reach for the wrapper,
-  not this.
+  terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
+  copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
+  same-named typed wrappers. Reach for the wrapper, not this.
 
 ## Daintree MCP surface (what the wrappers call; verified shapes)
 Use this when building daintree.call args or reasoning about what a wrapper does.

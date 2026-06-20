@@ -880,9 +880,38 @@ describe("terminal arming wrappers (#136)", () => {
     const c = armingCtx("operator", ["term_1", "term_2"]);
     const res = await reg.dispatch("terminal.arm", { terminalId: "term_1" }, c);
     expect(res.ok).toBe(true);
+    expect(c._calls).toHaveLength(1);
     expect(c._calls.find((x) => x.name === "terminal.arm")?.args).toEqual({ terminalId: "term_1" });
     // Never-silent: the resulting armed set is named in the summary.
     if (res.ok) expect(res.summary).toContain("term_1, term_2");
+  });
+
+  it("surfaces the armed set when Daintree returns it only in the text body (no structuredContent)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    // Mirror the Daintree mismatch: payload only in `text` (JSON), structuredContent absent.
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: JSON.stringify({ armed: ["term_9"] }), content: [], isError: false };
+      },
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "operator" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+    const res = await reg.dispatch("terminal.arm", { terminalId: "term_9" }, c);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.summary).toContain("term_9");
   });
 
   it("terminal.disarm forwards terminalId and surfaces the resulting armed set", async () => {
@@ -910,9 +939,43 @@ describe("terminal arming wrappers (#136)", () => {
   it("fails loudly when Daintree omits the armed set (arming state must never be silent)", async () => {
     const reg = new ToolRegistry();
     reg.registerAll(mcpTools);
-    // The default `ctx` fake returns `{ ran: name }` — no `armed` field.
-    const c = ctx("operator");
-    const res = await reg.dispatch("terminal.arm", { terminalId: "term_1" }, c);
+    // The default `ctx` fake returns `{ ran: name }` — no `armed` field in
+    // structuredContent and a non-JSON text body, so neither source yields it.
+    for (const [name, args] of [
+      ["terminal.arm", { terminalId: "term_1" }],
+      ["terminal.disarm", { terminalId: "term_1" }],
+      ["terminal.disarmAll", {}],
+    ] as const) {
+      const c = ctx("operator");
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("MCP_TOOL_ERROR");
+    }
+  });
+
+  it("fails loudly when the armed set carries non-string elements", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: "", content: [], structuredContent: { armed: [42, null] }, isError: false };
+      },
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "operator" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+    const res = await reg.dispatch("terminal.arm", { terminalId: "t" }, c);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("MCP_TOOL_ERROR");
   });
@@ -957,8 +1020,10 @@ describe("terminal arming wrappers (#136)", () => {
       ["terminal.arm", {}], // missing terminalId
       ["terminal.arm", { terminalId: "" }], // empty
       ["terminal.arm", { terminalId: "   " }], // whitespace
+      ["terminal.arm", { terminalId: "t", extra: "bad" }], // extra key (strict)
       ["terminal.disarm", {}], // missing terminalId
       ["terminal.disarm", { terminalId: "  " }], // whitespace
+      ["terminal.disarm", { terminalId: "t", bogus: 1 }], // extra key (strict)
       ["terminal.disarmAll", { terminalId: "t" }], // extra key (strict)
     ] as const) {
       const res = await reg.dispatch(name, args, c);

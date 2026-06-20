@@ -6,7 +6,10 @@ import {
   type LowLevelMcpClient,
 } from "../src/mcp/client.js";
 import type { AppConfig } from "../src/config.js";
-import { DOCUMENTED_MCP_TOOL_NAMES } from "../src/models/prompts/daintreeMcp.js";
+import {
+  DOCUMENTED_MCP_TOOL_NAMES,
+  DAINTREE_MCP_REFERENCE,
+} from "../src/models/prompts/daintreeMcp.js";
 
 /** A LowLevelMcpClient fake whose listTools() returns the given names. */
 function fakeClient(toolNames: string[]): LowLevelMcpClient {
@@ -37,6 +40,9 @@ describe("DOCUMENTED_MCP_TOOL_NAMES (#7)", () => {
   it("documents the shipped fleet-arming MCP tools (#136)", () => {
     for (const name of ["terminal.arm", "terminal.disarm", "terminal.disarmAll"]) {
       expect(DOCUMENTED_MCP_TOOL_NAMES).toContain(name);
+      // Also named in the base-prompt reference (so the daintree.call redirect
+      // guidance stays in sync with the wrappers — guards the #136 prose drift).
+      expect(DAINTREE_MCP_REFERENCE).toContain(name);
     }
   });
 
