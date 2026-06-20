@@ -5,6 +5,7 @@ import { Queue } from "../src/queue.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { WatcherRecord } from "../src/schemas.js";
 import type { PrWatcherOptions } from "../src/daemon/prWatcherEngine.js";
+import { MCP_READ_RETRY_POLICY, MCP_READ_TIMEOUT_MS } from "../src/reliability.js";
 
 const PR_WATCHER_CADENCE_MS = 60_000;
 
@@ -105,12 +106,22 @@ describe("runPrWatcherCheck transitions", () => {
     expect(after.nextCheckAt).toBeCloseTo(Date.now() + PR_WATCHER_CADENCE_MS, -3);
   });
 
-  it("calls forge.getPR with the watcher's prNumber and cwd", async () => {
-    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+  it("calls forge.getPR with the watcher's prNumber, cwd, and a bounded read timeout", async () => {
+    const calls: Array<{
+      name: string;
+      args?: Record<string, unknown>;
+      signal?: AbortSignal;
+      opts?: Record<string, unknown>;
+    }> = [];
     const mcp = {
       isConnected: () => true,
-      callTool: async (name: string, args?: Record<string, unknown>) => {
-        calls.push({ name, args });
+      callTool: async (
+        name: string,
+        args?: Record<string, unknown>,
+        signal?: AbortSignal,
+        opts?: Record<string, unknown>,
+      ) => {
+        calls.push({ name, args, signal, opts });
         return { text: "", content: [], structuredContent: { state: "open" }, isError: false };
       },
     };
@@ -136,14 +147,26 @@ describe("runPrWatcherCheck transitions", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].name).toBe("forge.getPR");
     expect(calls[0].args).toEqual({ cwd: "/my/repo", prNumber: 77 });
+    // Watcher/timer contexts carry no turn signal — must pass undefined explicitly
+    // so the bounded read opts land in the 4th positional slot (issue #142).
+    expect(calls[0].signal).toBeUndefined();
+    expect(calls[0].opts).toEqual({
+      timeoutMs: MCP_READ_TIMEOUT_MS,
+      retries: MCP_READ_RETRY_POLICY.maxRetries,
+    });
   });
 
   it("falls back to ctx.projectPath when the watcher has no cwd", async () => {
-    const calls: Array<{ args?: Record<string, unknown> }> = [];
+    const calls: Array<{ args?: Record<string, unknown>; opts?: Record<string, unknown> }> = [];
     const mcp = {
       isConnected: () => true,
-      callTool: async (_name: string, args?: Record<string, unknown>) => {
-        calls.push({ args });
+      callTool: async (
+        _name: string,
+        args?: Record<string, unknown>,
+        _signal?: AbortSignal,
+        opts?: Record<string, unknown>,
+      ) => {
+        calls.push({ args, opts });
         return { text: "", content: [], structuredContent: { state: "open" }, isError: false };
       },
     };
@@ -163,6 +186,11 @@ describe("runPrWatcherCheck transitions", () => {
     await runPrWatcherCheck(w, ctx);
 
     expect(calls[0].args).toEqual({ cwd: "/default/project", prNumber: 5 });
+    // The bounded read opts must ride the cwd-fallback branch too (issue #142).
+    expect(calls[0].opts).toEqual({
+      timeoutMs: MCP_READ_TIMEOUT_MS,
+      retries: MCP_READ_RETRY_POLICY.maxRetries,
+    });
   });
 
   it("publishes an attention event and stops the watcher when the PR merges", async () => {
