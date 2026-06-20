@@ -438,17 +438,3 @@ export function severitySymbol(severity: string): {
   const tone = severityTone(severity);
   return { symbol: toneGlyph(tone), color: toneColor(tone) };
 }
-
-/** Short tier label for the compact header capsule. */
-export function tierShort(tier: string): string {
-  switch (tier) {
-    case "supervisor":
-      return "sup";
-    case "system":
-      return "sys";
-    case "operator":
-      return "op";
-    default:
-      return tier.slice(0, 3);
-  }
-}

@@ -16,6 +16,12 @@ import { glyphs, ui } from "../theme.js";
  * changes — sits in the identity block as a plain-English line so "system" stops
  * reading as a cryptic token; the live MCP link stays in the StatusLine (it only
  * ever surfaces there, by exception, as DEGRADED).
+ *
+ * The tier line stays QUIET at rest (dim, no color) for every tier including
+ * `system`: a steady red `system` capsule is alarm fatigue — it screams danger
+ * when nothing is happening. Red is reserved for the moment it actually matters,
+ * when a destructive (git/system) action is awaiting confirmation, surfaced via the
+ * `destructivePending` prop the controller derives from the live confirmation.
  */
 
 /**
@@ -42,6 +48,7 @@ export function Header({
   project,
   runTitle,
   tier,
+  destructivePending = false,
   logging = false,
   logFile,
   version,
@@ -54,6 +61,9 @@ export function Header({
   runTitle?: string;
   /** Permission tier (supervisor|operator|system); shown with a plain-English gloss. */
   tier?: string;
+  /** A destructive (git/system) action is awaiting confirmation: escalate the tier
+   *  label to danger color. At rest every tier stays dim/neutral. */
+  destructivePending?: boolean;
   /** Debug logging is active — surfaced under the rule so it's verifiable at a glance. */
   logging?: boolean;
   /** Path of the active debug log, shown dim so it can be tailed. */
@@ -88,8 +98,8 @@ export function Header({
           <Text wrap="truncate">
             <Text dimColor>tier </Text>
             <Text
-              color={tier === "system" ? ui.color.danger : undefined}
-              dimColor={tier !== "system"}
+              color={destructivePending ? ui.color.danger : undefined}
+              dimColor
             >
               {tier}
             </Text>

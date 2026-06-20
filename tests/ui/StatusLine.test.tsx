@@ -117,10 +117,27 @@ describe("StatusLine", () => {
   });
 
   it("shows an attention chip when the inbox is non-empty", () => {
+    // The inbox is controller-filtered to actionable severities (>= attention), so
+    // its length IS the actionable count — non-actionable debug/info/done never reach
+    // the chip.
     const frame =
       render(<StatusLine dashboard={dash({ inbox: [event("error"), event("attention")] })} />)
         .lastFrame() ?? "";
     expect(frame).toContain("!2");
+  });
+
+  it("colors the chip by the MOST urgent item, not the inbox head (#154)", () => {
+    // Pass the worst event LAST to prove the color comes from topSeverity(), not an
+    // implicit inbox[0] ordering. #FB7185 (danger) is the error tone; #F6C85F
+    // (warning) is the attention tone.
+    const DANGER = "38;2;251;113;133";
+    const WARNING = "38;2;246;200;95";
+    const frame =
+      render(<StatusLine dashboard={dash({ inbox: [event("attention"), event("error")] })} />)
+        .lastFrame() ?? "";
+    expect(frame).toContain("!2");
+    expect(frame).toContain(DANGER); // worst item (error) drives the color
+    expect(frame).not.toContain(WARNING); // not the head item's (attention) tone
   });
 
   it("flags a degraded MCP connection", () => {

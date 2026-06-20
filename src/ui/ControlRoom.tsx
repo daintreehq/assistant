@@ -192,6 +192,17 @@ export function ControlRoom({
     ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
     : "MCP degraded";
 
+  // The tier capsule only goes red when a DESTRUCTIVE (git/system) action is awaiting
+  // confirmation — the moment red actually earns attention. The risk-class business
+  // logic lives here, not in the pure Header, which just takes a boolean.
+  const destructivePending =
+    !!pending &&
+    (pending.request.risk === "git" || pending.request.risk === "system");
+  // The inbox is controller-filtered to actionable severities, so a non-empty inbox
+  // is exactly "actionable attention pending" — the signal that promotes ^O in the
+  // composer hint row.
+  const attentionPending = dashboard.inbox.length > 0;
+
   // A confirmation is interactive and must surface in every view; while it is
   // pending the on-demand panels yield so the approval (and composer) stay live.
   const showPanel = !pending && view !== "home";
@@ -213,6 +224,7 @@ export function ControlRoom({
         columns={chromeWidth}
         project={project}
         tier={tier}
+        destructivePending={destructivePending}
         logging={logging}
         logFile={logFile}
       />
@@ -289,6 +301,7 @@ export function ControlRoom({
             contextHint={contextHint}
             focus={composerFocus}
             cancellable={cancellable}
+            attentionPending={attentionPending}
             onSubmit={onSubmit}
             onCancel={onCancel}
             ref={composerRef}
