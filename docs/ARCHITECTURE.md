@@ -80,7 +80,6 @@ interface ToolDef<A = any> {
   risk: RiskClass;              // "read"|"local"|"ui"|"terminal"|"project"|"git"|"external"|"system"
   parameters: Record<string, unknown>;  // JSON Schema, additionalProperties:false
   schema?: z.ZodType<A>;        // optional runtime validation of parsed args
-  readOnly?: boolean;
   handler: (args: A, ctx: ToolContext) => Promise<ToolResult>;
 }
 ```
@@ -110,7 +109,6 @@ export const fsTools: ToolDef[] = [
     name: "fs.read",
     description: "Read a UTF-8 text file from the project (read-only).",
     risk: "read",
-    readOnly: true,
     schema: ReadArgs,
     parameters: {
       type: "object",

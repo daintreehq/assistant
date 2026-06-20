@@ -240,7 +240,6 @@ export const recipeRunTools: ToolDef[] = [
     description:
       "Read the step-level checkpoint for a recipe in this session — which step is live, which steps are done/skipped. Call at the start of a loaded-recipe turn to recover your place after an interruption. Read-only.",
     risk: "read",
-    readOnly: true,
     schema: GetArgs,
     parameters: {
       type: "object",
@@ -283,7 +282,6 @@ export const recipeRunTools: ToolDef[] = [
     description:
       "Load a specific recipe (procedural runbook) by id into your context right now, when you already know which runbook you need rather than waiting for automatic selection. The recipe's body becomes available to you on your next step this turn. The loaded set is capped; an explicit load takes priority over auto-selected recipes. Read-only — pulls the recipe into context, never edits files.",
     risk: "read",
-    readOnly: true,
     schema: LoadArgs,
     parameters: {
       type: "object",

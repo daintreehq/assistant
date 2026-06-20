@@ -404,17 +404,16 @@ describe("forge write + getPR wrappers (#29)", () => {
     return def;
   }
 
-  it("registers forge.getPR as a read-only wrapper", () => {
+  it("registers forge.getPR as a read-risk wrapper", () => {
     const getPR = tool("forge.getPR");
     expect(getPR.risk).toBe("read");
-    expect(getPR.readOnly).toBe(true);
   });
 
-  it("registers every forge write as external risk and not read-only", () => {
+  it("registers every forge write as external risk and not read-risk", () => {
     for (const name of FORGE_WRITE_NAMES) {
       const def = tool(name);
       expect(def.risk, name).toBe("external");
-      expect(def.readOnly, name).toBeFalsy();
+      expect(def.risk, name).not.toBe("read");
     }
   });
 
@@ -618,7 +617,6 @@ describe("typed copyTree / terminal-input / agent-focus / git-snapshot wrappers 
 
   it("registers each new wrapper with its verified risk class", () => {
     expect(tool("copyTree.generate").risk).toBe("read");
-    expect(tool("copyTree.generate").readOnly).toBe(true);
     expect(tool("terminal.sendCommand").risk).toBe("terminal");
     expect(tool("copyTree.injectToTerminal").risk).toBe("terminal");
     for (const name of UI_FOCUS_NAMES) expect(tool(name).risk, name).toBe("ui");

@@ -130,7 +130,6 @@ export const fsTools: ToolDef[] = [
     description:
       "List directory entries under the project root (read-only). Skips .git, node_modules, and dist.",
     risk: "read",
-    readOnly: true,
     schema: ListArgs,
     parameters: {
       type: "object",
@@ -231,7 +230,6 @@ export const fsTools: ToolDef[] = [
     name: "fs.read",
     description: "Read a UTF-8 text file from the project (read-only).",
     risk: "read",
-    readOnly: true,
     schema: ReadArgs,
     parameters: {
       type: "object",
@@ -310,7 +308,6 @@ export const fsTools: ToolDef[] = [
     description:
       "Text-search file contents across the project (read-only). Recursive pure-JS walk skipping .git, node_modules, and dist.",
     risk: "read",
-    readOnly: true,
     schema: SearchArgs,
     parameters: {
       type: "object",

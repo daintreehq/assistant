@@ -25,7 +25,6 @@ function dummyTool(name: string): ToolDef {
     name,
     description: `dummy ${name}`,
     risk: "read",
-    readOnly: true,
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async handler() {
       return ok("ok");

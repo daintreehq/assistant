@@ -212,7 +212,6 @@ export const timerTools: ToolDef[] = [
     name: "timer.list",
     description: "List scheduled (pending) timers with their fire times and payload types.",
     risk: "read",
-    readOnly: true,
     schema: ListArgs,
     parameters: {
       type: "object",

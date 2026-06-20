@@ -158,7 +158,6 @@ describe("ToolRegistry tracing", () => {
       name: "demo.echo",
       description: "echo",
       risk: "read",
-      readOnly: true,
       parameters: { type: "object", properties: {}, additionalProperties: true },
       handler: async (args) => ({ ok: true, summary: "done", result: { echoed: args } }),
     };

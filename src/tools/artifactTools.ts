@@ -50,7 +50,6 @@ export const artifactTools: ToolDef[] = [
     description:
       "Read a slice of a large tool result that was stored as an artifact because it overflowed the inline size limit. Pass the artifactId from a truncated result, plus an optional character offset and limit, to page through the full output. Use the returned nextOffset/eof to continue.",
     risk: "read",
-    readOnly: true,
     schema: ReadArgs,
     parameters: {
       type: "object",

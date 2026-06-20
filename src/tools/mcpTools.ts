@@ -468,7 +468,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "Report Daintree MCP connection status (connected, transport, tool count). Works even when disconnected.",
     risk: "read",
-    readOnly: true,
     parameters: NO_ARGS,
     async handler(_args, ctx) {
       const status = ctx.mcp.status();
@@ -485,7 +484,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "List the Daintree MCP tools, with their names and descriptions. Each entry carries a `callable` flag: tools marked `callable: false` are known to exist but are not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset), so calling them would do nothing.",
     risk: "read",
-    readOnly: true,
     schema: ListToolsArgs,
     parameters: NO_ARGS,
     async handler(_args, ctx) {
@@ -528,7 +526,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "Search Daintree MCP tools by keyword (substring match on name/description). Each match carries a `callable` flag: tools marked `callable: false` exist but are not offered in this turn's tool spec (e.g. an active recipe narrowed the toolset), so calling them would do nothing — only `callable: true` results can be invoked now.",
     risk: "read",
-    readOnly: true,
     schema: SearchArgs,
     parameters: {
       type: "object",
@@ -676,7 +673,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "List available Daintree workspace recipes (read-only). Typed wrapper around the Daintree recipe.list MCP tool.",
     risk: "read",
-    readOnly: true,
     schema: RecipeListArgs,
     parameters: {
       type: "object",
@@ -784,7 +780,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "Generate a Daintree 'copy tree' — a concatenated digest of a worktree's files — and return it as text (read-only). Typed wrapper around the Daintree copyTree.generate MCP tool. 'options' is forwarded verbatim; don't invent keys.",
     risk: "read",
-    readOnly: true,
     schema: CopyTreeGenerateArgs,
     parameters: {
       type: "object",
@@ -999,7 +994,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "List forge issues (GitHub/GitLab) via Daintree (read-only). Typed wrapper around the Daintree forge.listIssues MCP tool. Pass optional filters through 'arguments'.",
     risk: "read",
-    readOnly: true,
     schema: ForgeReadArgs,
     parameters: {
       type: "object",
@@ -1022,7 +1016,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "Fetch a single forge issue via Daintree (read-only). Typed wrapper around the Daintree forge.getIssue MCP tool. Pass the issue identifier (e.g. issueId) through 'arguments'.",
     risk: "read",
-    readOnly: true,
     schema: ForgeGetIssueArgs,
     parameters: {
       type: "object",
@@ -1045,7 +1038,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "List forge pull/merge requests via Daintree (read-only). Typed wrapper around the Daintree forge.listPRs MCP tool. Pass optional filters through 'arguments'.",
     risk: "read",
-    readOnly: true,
     schema: ForgeReadArgs,
     parameters: {
       type: "object",
@@ -1250,7 +1242,6 @@ export const mcpTools: ToolDef[] = [
     description:
       "Fetch a single forge pull/merge request via Daintree (read-only). Typed wrapper around the Daintree forge.getPR MCP tool.",
     risk: "read",
-    readOnly: true,
     schema: z.object({ cwd: cwdField, prNumber: prNumberField }),
     parameters: forgeObjSchema({ cwd: P_CWD, prNumber: P_PR_NUMBER }, ["prNumber"]),
     async handler(args, ctx) {

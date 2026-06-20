@@ -37,7 +37,6 @@ const readTool: ToolDef = {
   name: "test.read",
   description: "A read-only test tool.",
   risk: "read",
-  readOnly: true,
   parameters: { type: "object", properties: {}, additionalProperties: false },
   async handler() {
     return ok("read ran");
@@ -105,7 +104,6 @@ describe("ToolRegistry.dispatch", () => {
       name: "test.union",
       description: "A tool with a union-typed arg.",
       risk: "read",
-      readOnly: true,
       schema: UnionArgs,
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async handler() {
@@ -132,7 +130,6 @@ describe("ToolRegistry.dispatch", () => {
       name: "test.watch",
       description: "Tool carrying the real WatchCondition union.",
       risk: "read",
-      readOnly: true,
       schema: WatcherArgs,
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async handler() {
@@ -515,7 +512,6 @@ function watcherCreateTool(name: string): ToolDef {
     name,
     description: "A multi-segment dotted test tool.",
     risk: "read",
-    readOnly: true,
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async handler() {
       return ok("ran");
