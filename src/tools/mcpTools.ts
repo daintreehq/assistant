@@ -91,6 +91,71 @@ async function passthrough(
   }
 }
 
+/**
+ * Pull the `armed: string[]` set from an arming tool's result, reading
+ * `structuredContent` first then falling back to a JSON-encoded `text` body.
+ * Daintree only populates `structuredContent` for actions that opt into an
+ * output schema and otherwise returns the payload in the text content blocks
+ * (the same structuredContent-vs-text mismatch that silently broke readStatuses,
+ * see mcp/resultHelpers.ts) — the arming actions DO opt in today, but reading
+ * both sources keeps this robust and consistent with every other result reader.
+ * Returns `undefined` ONLY when neither source carries a well-formed string
+ * array, so a legitimately empty set (e.g. after disarmAll) is preserved as `[]`
+ * while a missing/garbled set is distinguishable and can fail loudly.
+ */
+function extractArmedSet(
+  result: { text?: unknown; structuredContent?: unknown } | undefined,
+): string[] | undefined {
+  const fromObj = (o: unknown): string[] | undefined => {
+    if (!o || typeof o !== "object") return undefined;
+    const armed = (o as { armed?: unknown }).armed;
+    return Array.isArray(armed) && armed.every((x): x is string => typeof x === "string")
+      ? armed
+      : undefined;
+  };
+  const fromStructured = fromObj(result?.structuredContent);
+  if (fromStructured) return fromStructured;
+  const text = result?.text;
+  if (typeof text === "string" && text.trim()) {
+    try {
+      return fromObj(JSON.parse(text));
+    } catch {
+      /* not JSON — fall through to the loud failure below */
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Arm/disarm wrappers must NEVER silently reroute the human's keystrokes (#136):
+ * every arming call reports the resulting armed set back to the user. We run the
+ * shared `passthrough` for connection/error handling, then replace its generic
+ * "Called terminal.arm." summary with the concrete armed-terminal list Daintree
+ * returns as `{ armed: string[] }`. If neither result source carries that set we
+ * FAIL rather than return a success that hides which terminals are now armed — an
+ * unknown arming state is the one thing these tools may not do quietly.
+ */
+async function terminalArmingPassthrough(
+  ctx: ToolContext,
+  mcpName: string,
+  args: Record<string, unknown>,
+  action: string,
+): Promise<ToolResult> {
+  const res = await passthrough(ctx, mcpName, args);
+  if (!res.ok) return res;
+  const result = res.result as { text?: unknown; structuredContent?: unknown } | undefined;
+  const armed = extractArmedSet(result);
+  if (!armed) {
+    return fail(
+      "MCP_TOOL_ERROR",
+      `${mcpName} did not report the resulting armed set, so the current arming state is unknown — re-check with terminal.getStatus before relying on it.`,
+      { details: { structuredContent: result?.structuredContent, rawText: result?.text } },
+    );
+  }
+  const list = armed.length ? armed.join(", ") : "none";
+  return ok(`${action} Armed terminals now: ${list}.`, result as object);
+}
+
 const ListToolsArgs = z.object({}).strict();
 
 const RecipeListArgs = z
@@ -163,6 +228,16 @@ const TerminalSendCommandArgs = z.object({
   command: z.string().trim().min(1).describe("Shell command text to type into the terminal and run."),
 });
 
+const TerminalArmingArgs = z
+  .object({
+    terminalId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("Terminal to arm or disarm in the fleet broadcast set."),
+  })
+  .strict();
+
 const SnapshotWorktreeArgs = z.object({
   worktreeId: z.string().trim().min(1).describe("Worktree whose pre-agent git snapshot to act on."),
 });
@@ -185,6 +260,9 @@ const WRAPPED_MCP_TOOLS: Record<string, string> = {
   "panel.focus": "terminal.focus",
   "terminal.sendCommand":
     "terminal.sendCommand (typed wrapper — pass terminalId and command)",
+  "terminal.arm": "terminal.arm (typed wrapper — pass terminalId)",
+  "terminal.disarm": "terminal.disarm (typed wrapper — pass terminalId)",
+  "terminal.disarmAll": "terminal.disarmAll (typed wrapper — no args needed)",
   "copyTree.injectToTerminal":
     "copyTree.injectToTerminal (typed wrapper — pass terminalId)",
   "copyTree.generateAndCopyFile":
@@ -772,9 +850,11 @@ export const mcpTools: ToolDef[] = [
    * These cover Daintree actions that were previously reachable only through the raw
    * daintree.call escape hatch. Each carries the same risk class Daintree gates the
    * action at (verified against helpAssistantTierAllowlists.ts), so reads/UI focus run
-   * without the system-tier confirmation the escape hatch always forces. The fleet.*
-   * arming ops and terminal.armByState are intentionally NOT wrapped — they are
-   * renderer-only UI gestures with no MCP surface. */
+   * without the system-tier confirmation the escape hatch always forces. The
+   * terminal.arm / terminal.disarm / terminal.disarmAll wrappers below cover the
+   * fleet-arming MCP tools Daintree shipped in #10696 (#136). terminal.armByState,
+   * armAll, and the fleet.* store calls stay renderer-only with no MCP surface, so
+   * they are still intentionally NOT wrapped and can't be reached via daintree.call. */
   {
     name: "copyTree.generate",
     description:
@@ -824,6 +904,69 @@ export const mcpTools: ToolDef[] = [
     },
     async handler(args, ctx) {
       return passthrough(ctx, "terminal.sendCommand", args);
+    },
+  },
+  {
+    name: "terminal.arm",
+    description:
+      "Add a terminal to Daintree's fleet arming set so the human's next broadcast keystrokes are ALSO routed to it. Mutating (reroutes the human's input), so it always confirms. Typed wrapper around the Daintree terminal.arm MCP tool. Reports the resulting armed set so arming is never silent.",
+    consequence:
+      "Arms a terminal: the human's next broadcast input is also typed into it, and keeps being routed to every armed terminal until disarmed.",
+    risk: "terminal",
+    schema: TerminalArmingArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: { type: "string", description: "Terminal to add to the fleet arming set." },
+      },
+      required: ["terminalId"],
+    },
+    async handler(args, ctx) {
+      return terminalArmingPassthrough(
+        ctx,
+        "terminal.arm",
+        { terminalId: args.terminalId },
+        `Armed terminal ${args.terminalId}.`,
+      );
+    },
+  },
+  {
+    name: "terminal.disarm",
+    description:
+      "Remove a terminal from Daintree's fleet arming set so it no longer receives the human's broadcast input. Mutating (reroutes the human's input), so it always confirms. Typed wrapper around the Daintree terminal.disarm MCP tool. Reports the resulting armed set so the change is never silent.",
+    consequence:
+      "Disarms a terminal: it stops receiving the human's broadcast input. Changes where keystrokes are routed.",
+    risk: "terminal",
+    schema: TerminalArmingArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: { type: "string", description: "Terminal to remove from the fleet arming set." },
+      },
+      required: ["terminalId"],
+    },
+    async handler(args, ctx) {
+      return terminalArmingPassthrough(
+        ctx,
+        "terminal.disarm",
+        { terminalId: args.terminalId },
+        `Disarmed terminal ${args.terminalId}.`,
+      );
+    },
+  },
+  {
+    name: "terminal.disarmAll",
+    description:
+      "Clear Daintree's entire fleet arming set so no terminal receives the human's broadcast input. Mutating (reroutes the human's input), so it always confirms. Typed wrapper around the Daintree terminal.disarmAll MCP tool. Reports the resulting (empty) armed set so the change is never silent.",
+    consequence:
+      "Disarms every terminal at once: the human's broadcast input stops being routed anywhere. Changes where keystrokes are routed.",
+    risk: "terminal",
+    schema: ListToolsArgs,
+    parameters: NO_ARGS,
+    async handler(_args, ctx) {
+      return terminalArmingPassthrough(ctx, "terminal.disarmAll", {}, "Cleared the fleet arming set.");
     },
   },
   {

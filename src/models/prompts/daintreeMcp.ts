@@ -42,9 +42,13 @@ Your local tools wrap Daintree:
   always confirmed). copyTree.generateAndCopyFile — copy it to the OS clipboard
   as a file (system tier, always confirmed).
 - git.snapshotRevert / git.snapshotDelete — revert a worktree to, or delete, its
-  pre-agent git snapshot (system tier, always confirmed, IRREVERSIBLE). Daintree's
-  fleet.* arming ops and terminal.armByState are renderer-only UI gestures with no
-  MCP surface — they have no wrapper and can't be reached via daintree.call.
+  pre-agent git snapshot (system tier, always confirmed, IRREVERSIBLE).
+- terminal.arm / terminal.disarm / terminal.disarmAll — add a terminal to, remove a
+  terminal from, or clear the fleet arming set. Arming reroutes the human's next
+  broadcast keystrokes to every armed terminal, so each is mutating and always
+  confirmed; each reports the resulting armed set, so arming is never silent.
+  terminal.armByState, armAll, and the fleet.* store calls stay renderer-only with
+  no MCP surface — they have no wrapper and can't be reached via daintree.call.
 - terminal.extract — read terminal tail(s) and extract caller-specified content
   (text or JSON) with the small model; an optional wait mode polls until a
   condition is met before extracting. terminal.extract.async runs it in the
@@ -74,17 +78,22 @@ Your local tools wrap Daintree:
   HAVE a wrapper are refused here and redirected: agent.launch ->
   agentTask.spawnForEdits; terminal.getOutput -> terminal.summarize /
   terminal.extract; panel.focus -> terminal.focus; terminal.sendCommand,
-  copyTree.injectToTerminal, copyTree.generateAndCopyFile, git.snapshotRevert,
-  git.snapshotDelete -> their same-named typed wrappers. Reach for the wrapper,
-  not this.
+  terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
+  copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
+  same-named typed wrappers. Reach for the wrapper, not this.
 
 ## Daintree MCP surface (what the wrappers call; verified shapes)
 Use this when building daintree.call args or reasoning about what a wrapper does.
 - terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?:{ lines 1–50,
   stripAnsi } }) -> { terminals: [{ terminalId, agentId, agentState, waitingReason?,
-  exitCode?, spawnedAt?, lastTransitionAt?, recentOutput? }] }. There is NO flat
-  agentState and NO runtimeStatus. exitCode (numeric) appears once a terminal has
-  exited; spawnedAt and lastTransitionAt are epoch-ms timestamps.
+  exitCode?, spawnedAt?, lastTransitionAt?, recentOutput?, armed? }] }. There is NO
+  flat agentState and NO runtimeStatus. exitCode (numeric) appears once a terminal
+  has exited; spawnedAt and lastTransitionAt are epoch-ms timestamps. armed (boolean)
+  is true when the terminal is in the fleet arming/broadcast set — this is the read
+  path for arming state (there is no separate getArmed tool).
+- terminal.arm({ terminalId }) / terminal.disarm({ terminalId }) / terminal.disarmAll()
+  -> { armed: string[] } — the resulting armed terminal ids in broadcast order
+  (disarmAll always returns []). The local wrappers surface this set in their result.
 - terminal.getOutput({ terminalId, maxLines 1–1000 }) -> { terminalId, content,
   lineCount, truncated }. Scrollback is in "content".
 - There is NO terminal.listStatus and NO terminal.waitForAny. Batch by passing
@@ -183,6 +192,9 @@ export const DOCUMENTED_MCP_TOOL_NAMES: string[] = [
   "panel.focus",
   "recipe.list",
   "recipe.run",
+  "terminal.arm",
+  "terminal.disarm",
+  "terminal.disarmAll",
   "terminal.getOutput",
   "terminal.getStatus",
   "terminal.list",

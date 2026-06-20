@@ -818,3 +818,235 @@ describe("typed copyTree / terminal-input / agent-focus / git-snapshot wrappers 
     expect(c._calls.length).toBe(0);
   });
 });
+
+describe("terminal arming wrappers (#136)", () => {
+  function tool(name: string) {
+    const def = mcpTools.find((t) => t.name === name);
+    if (!def) throw new Error(`missing tool ${name}`);
+    return def;
+  }
+
+  const ARMING_NAMES = ["terminal.arm", "terminal.disarm", "terminal.disarmAll"] as const;
+
+  /**
+   * Arming wrappers fail unless Daintree returns `{ armed: string[] }`, so the
+   * default `ctx` fake (which echoes `{ ran: name }`) can't drive the happy path.
+   * This variant returns a controllable armed set so we can assert the resulting
+   * list is surfaced in the summary — the never-silent invariant.
+   */
+  function armingCtx(
+    tier: "supervisor" | "operator" | "system",
+    armed: string[],
+    confirm: () => Promise<boolean> = async () => true,
+  ): ToolContext & { _calls: Array<{ name: string; args: Record<string, unknown> }> } {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: "ok", content: [], structuredContent: { armed }, isError: false };
+      },
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm,
+      log: () => {},
+    } as ToolContext;
+    return Object.assign(c, { _calls: calls });
+  }
+
+  it("registers all three arming wrappers at terminal risk", () => {
+    for (const name of ARMING_NAMES) expect(tool(name).risk, name).toBe("terminal");
+  });
+
+  it("gives every arming wrapper a distinct user-facing consequence line", () => {
+    for (const name of ARMING_NAMES) {
+      const def = tool(name);
+      expect(def.consequence, name).toBeTruthy();
+      expect((def.consequence ?? "").length, name).toBeGreaterThan(10);
+      expect(def.consequence, name).not.toBe(def.risk);
+    }
+  });
+
+  it("terminal.arm forwards terminalId and surfaces the resulting armed set (operator tier, confirmed)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("operator", ["term_1", "term_2"]);
+    const res = await reg.dispatch("terminal.arm", { terminalId: "term_1" }, c);
+    expect(res.ok).toBe(true);
+    expect(c._calls).toHaveLength(1);
+    expect(c._calls.find((x) => x.name === "terminal.arm")?.args).toEqual({ terminalId: "term_1" });
+    // Never-silent: the resulting armed set is named in the summary.
+    if (res.ok) expect(res.summary).toContain("term_1, term_2");
+  });
+
+  it("surfaces the armed set when Daintree returns it only in the text body (no structuredContent)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    // Mirror the Daintree mismatch: payload only in `text` (JSON), structuredContent absent.
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: JSON.stringify({ armed: ["term_9"] }), content: [], isError: false };
+      },
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "operator" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+    const res = await reg.dispatch("terminal.arm", { terminalId: "term_9" }, c);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.summary).toContain("term_9");
+  });
+
+  it("terminal.disarm forwards terminalId and surfaces the resulting armed set", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("operator", ["term_2"]);
+    const res = await reg.dispatch("terminal.disarm", { terminalId: "term_1" }, c);
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "terminal.disarm")?.args).toEqual({
+      terminalId: "term_1",
+    });
+    if (res.ok) expect(res.summary).toContain("term_2");
+  });
+
+  it("terminal.disarmAll forwards no args and reports an empty armed set as 'none'", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("operator", []);
+    const res = await reg.dispatch("terminal.disarmAll", {}, c);
+    expect(res.ok).toBe(true);
+    expect(c._calls.find((x) => x.name === "terminal.disarmAll")?.args).toEqual({});
+    if (res.ok) expect(res.summary).toContain("none");
+  });
+
+  it("fails loudly when Daintree omits the armed set (arming state must never be silent)", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    // The default `ctx` fake returns `{ ran: name }` — no `armed` field in
+    // structuredContent and a non-JSON text body, so neither source yields it.
+    for (const [name, args] of [
+      ["terminal.arm", { terminalId: "term_1" }],
+      ["terminal.disarm", { terminalId: "term_1" }],
+      ["terminal.disarmAll", {}],
+    ] as const) {
+      const c = ctx("operator");
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("MCP_TOOL_ERROR");
+    }
+  });
+
+  it("fails loudly when the armed set carries non-string elements", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const mcp = {
+      isConnected: () => true,
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { text: "", content: [], structuredContent: { armed: [42, null] }, isError: false };
+      },
+    } as unknown as ToolContext["mcp"];
+    const c = {
+      config: { tier: "operator" } as ToolContext["config"],
+      mcp,
+      db: new Db(":memory:"),
+      queue: {} as ToolContext["queue"],
+      router: {} as ToolContext["router"],
+      projectPath: "/tmp/p",
+      actor: "main",
+      confirm: async () => true,
+      log: () => {},
+    } as ToolContext;
+    const res = await reg.dispatch("terminal.arm", { terminalId: "t" }, c);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("MCP_TOOL_ERROR");
+  });
+
+  it("denies all three arming wrappers below operator tier", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("supervisor", []);
+    for (const [name, args] of [
+      ["terminal.arm", { terminalId: "t" }],
+      ["terminal.disarm", { terminalId: "t" }],
+      ["terminal.disarmAll", {}],
+    ] as const) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("TIER_DENIED");
+    }
+    expect(c._calls.length).toBe(0);
+  });
+
+  it("declining confirmation blocks the arming MCP call", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("operator", [], async () => false);
+    for (const [name, args] of [
+      ["terminal.arm", { terminalId: "t" }],
+      ["terminal.disarm", { terminalId: "t" }],
+      ["terminal.disarmAll", {}],
+    ] as const) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("USER_DECLINED");
+    }
+    expect(c._calls.length).toBe(0);
+  });
+
+  it("rejects missing, empty, and whitespace-only terminalId (and extra args) locally", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = armingCtx("system", []);
+    for (const [name, args] of [
+      ["terminal.arm", {}], // missing terminalId
+      ["terminal.arm", { terminalId: "" }], // empty
+      ["terminal.arm", { terminalId: "   " }], // whitespace
+      ["terminal.arm", { terminalId: "t", extra: "bad" }], // extra key (strict)
+      ["terminal.disarm", {}], // missing terminalId
+      ["terminal.disarm", { terminalId: "  " }], // whitespace
+      ["terminal.disarm", { terminalId: "t", bogus: 1 }], // extra key (strict)
+      ["terminal.disarmAll", { terminalId: "t" }], // extra key (strict)
+    ] as const) {
+      const res = await reg.dispatch(name, args, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) expect(res.error.code, name).toBe("INVALID_ARGS");
+    }
+    expect(c._calls.length).toBe(0);
+  });
+
+  it("daintree.call refuses the arming tools and redirects to the typed wrappers", async () => {
+    const reg = new ToolRegistry();
+    reg.registerAll(mcpTools);
+    const c = ctx("system") as ToolContext & {
+      _calls: Array<{ name: string; args: Record<string, unknown> }>;
+    };
+    for (const name of ARMING_NAMES) {
+      const res = await reg.dispatch("daintree.call", { name, arguments: {} }, c);
+      expect(res.ok, name).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code, name).toBe("USE_TYPED_WRAPPER");
+        expect(res.error.message, name).toContain(name);
+      }
+    }
+    expect(c._calls.length).toBe(0);
+  });
+});

@@ -6,7 +6,10 @@ import {
   type LowLevelMcpClient,
 } from "../src/mcp/client.js";
 import type { AppConfig } from "../src/config.js";
-import { DOCUMENTED_MCP_TOOL_NAMES } from "../src/models/prompts/daintreeMcp.js";
+import {
+  DOCUMENTED_MCP_TOOL_NAMES,
+  DAINTREE_MCP_REFERENCE,
+} from "../src/models/prompts/daintreeMcp.js";
 
 /** A LowLevelMcpClient fake whose listTools() returns the given names. */
 function fakeClient(toolNames: string[]): LowLevelMcpClient {
@@ -34,15 +37,25 @@ describe("DOCUMENTED_MCP_TOOL_NAMES (#7)", () => {
     }
   });
 
+  it("documents the shipped fleet-arming MCP tools (#136)", () => {
+    for (const name of ["terminal.arm", "terminal.disarm", "terminal.disarmAll"]) {
+      expect(DOCUMENTED_MCP_TOOL_NAMES).toContain(name);
+      // Also named in the base-prompt reference (so the daintree.call redirect
+      // guidance stays in sync with the wrappers — guards the #136 prose drift).
+      expect(DAINTREE_MCP_REFERENCE).toContain(name);
+    }
+  });
+
   it("excludes the documented negative examples (non-existent / local-only tools)", () => {
     for (const bogus of [
       "terminal.listStatus",
       "terminal.waitForAny",
       "terminal.focus",
-      // Fleet arming is a renderer-only UI gesture with no MCP surface. Neither
-      // fleet.armByState (an internal store call) nor terminal.armByState (its
-      // action id, scope: "renderer") is advertised by the live server, so listing
-      // either here would emit a permanent false-positive drift warning.
+      // terminal.arm/disarm/disarmAll ARE on the live MCP surface (#10696) and are
+      // documented above. But terminal.armByState (a renderer-scoped action id) and
+      // the fleet.armByState internal store call are NOT advertised by the live
+      // server, so listing either here would emit a permanent false-positive drift
+      // warning.
       "fleet.armByState",
       "terminal.armByState",
     ]) {
