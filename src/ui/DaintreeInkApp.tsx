@@ -101,6 +101,7 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       project={project}
       tier={app.config.tier}
       columns={columns}
+      reservedColumns={app.config.reservedColumns}
       rows={rows}
       connected={controller.dashboard.mcp.connected}
       transcript={controller.transcript}

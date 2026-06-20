@@ -75,6 +75,61 @@ describe("loadConfig", () => {
       expect(loadConfig({ stateDir }).windowId).toBe("win-99");
     });
   });
+
+  describe("reservedColumns (scrollbar/autowrap gutter)", () => {
+    const prevWin = process.env.DAINTREE_WINDOW_ID;
+    const prevRes = process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS;
+    afterEach(() => {
+      for (const [k, v] of [
+        ["DAINTREE_WINDOW_ID", prevWin],
+        ["DAINTREE_ASSISTANT_RESERVED_COLUMNS", prevRes],
+      ] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+
+    it("reserves 1 column in a bare terminal (no window id)", () => {
+      delete process.env.DAINTREE_WINDOW_ID;
+      delete process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS;
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(1);
+    });
+
+    it("reserves 2 columns when embedded in a Daintree window", () => {
+      process.env.DAINTREE_WINDOW_ID = "win-1";
+      delete process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS;
+      // The xterm overlay scrollbar can paint over the rightmost 1–2 cells.
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(2);
+    });
+
+    it("honours an explicit override over the window-id default", () => {
+      process.env.DAINTREE_WINDOW_ID = "win-1";
+      process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS = "4";
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(4);
+    });
+
+    it("floors a too-small or negative override at 1 (DECAWM is mandatory)", () => {
+      delete process.env.DAINTREE_WINDOW_ID;
+      process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS = "0";
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(1);
+      process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS = "-3";
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(1);
+    });
+
+    it("ignores a non-numeric override and falls back to the default", () => {
+      process.env.DAINTREE_WINDOW_ID = "win-1";
+      process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS = "wide";
+      expect(loadConfig({ stateDir }).reservedColumns).toBe(2);
+    });
+
+    it("accepts an explicit override object value and floors it at 1", () => {
+      delete process.env.DAINTREE_WINDOW_ID;
+      delete process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS;
+      expect(loadConfig({ stateDir, reservedColumns: 3 }).reservedColumns).toBe(3);
+      // 0 is a real (non-empty) override but below the DECAWM floor → clamped to 1.
+      expect(loadConfig({ stateDir, reservedColumns: 0 }).reservedColumns).toBe(1);
+    });
+  });
 });
 
 describe("describeConfig", () => {

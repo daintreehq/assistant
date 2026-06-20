@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { MultilineInput } from "../../src/ui/components/MultilineInput.js";
 
@@ -67,6 +68,37 @@ describe("MultilineInput", () => {
     const { lastFrame } = render(<Harness />);
     expect(plain(lastFrame())).toContain("› ");
     expect(plain(lastFrame())).toContain("Ask…");
+  });
+
+  // Regression (#138): the placeholder lives in the repainting live region, so a
+  // placeholder longer than the field used to WRAP onto a second physical row that
+  // Ink's logical-line erase can't see — which both looked broken and orphaned a
+  // stale copy on resize. It must truncate to a single row instead. Bound the field
+  // with a narrow wrapper so the truncation engages.
+  it("truncates a long placeholder to a single row (never wraps)", () => {
+    const WIDTH = 16;
+    const { lastFrame } = render(
+      <Box width={WIDTH}>
+        <MultilineInput
+          value=""
+          onChange={() => {}}
+          onSubmit={() => {}}
+          onCancel={() => {}}
+          focus
+          prompt="› "
+          // No trailing ellipsis in the source text, so the "…" below can only come
+          // from truncation — not from the placeholder itself.
+          placeholder="Supervise and delegate operations across the fleet"
+        />
+      </Box>,
+    );
+    const rows = plain(lastFrame()).split("\n").filter((r) => r.length > 0);
+    expect(rows).toHaveLength(1); // one physical row, no wrap
+    // Fits EXACTLY within the field (no +1 over-allocation that would wrap a column
+    // in a real narrow terminal).
+    expect(rows[0].length).toBeLessThanOrEqual(WIDTH);
+    expect(rows[0]).toContain("…"); // clipped with the truncation ellipsis
+    expect(rows[0].startsWith("› S")).toBe(true); // gutter + first placeholder char
   });
 
   it("types printable characters", async () => {

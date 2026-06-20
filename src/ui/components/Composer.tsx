@@ -129,7 +129,10 @@ export function Composer({
       {suggestions.length > 0 ? (
         <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {suggestions.map(([cmd, desc]) => (
-            <Text key={cmd}>
+            // Truncate: these rows live in the repainting region, so a long
+            // description on a narrow pane would wrap to a second physical row that
+            // Ink's logical-line erase can't see and orphan on resize (#138).
+            <Text key={cmd} wrap="truncate">
               <Text color={ui.color.info}>{cmd.padEnd(14)}</Text>
               <Text dimColor>{desc}</Text>
             </Text>

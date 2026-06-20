@@ -137,6 +137,38 @@ describe("Header", () => {
     expect(frame).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
+  // Regression (#138): the header commits to <Static>, where Ink lays each item out
+  // in an isolated tree with no parent width — so `width="100%"` collapsed to content
+  // width and the `wrap="truncate"` rows (notably the long log path) had no bound and
+  // physically wrapped. A numeric root width gives truncate a real bound. Lock it in:
+  // at a narrow width EVERY masthead row must fit `columns`, the rule is exactly
+  // `columns`, and the long log path truncates with an ellipsis instead of wrapping.
+  it("truncates every masthead row to the column bound (no wrapping)", () => {
+    const COLS = 22;
+    const frame = stripAnsi(
+      render(
+        <Header
+          columns={COLS}
+          version="0.1.0"
+          project="a-very-long-project-name-that-overflows"
+          tier="system"
+          logging
+          logFile="/Users/gpriday/.daintree/logs/2026-06-20-ses_02f0965b.log"
+        />,
+      ).lastFrame() ?? "",
+    );
+    const rows = frame.split("\n");
+    for (const row of rows) {
+      expect(row.length).toBeLessThanOrEqual(COLS);
+    }
+    // The full-width rule fills exactly the column bound (no more, no less).
+    expect(rows).toContain("─".repeat(COLS));
+    // The over-long log path is clipped with the truncation ellipsis, not wrapped
+    // onto a second physical row.
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("ses_02f0965b.log");
+  });
+
   it("names the active run when one is supplied", () => {
     const { lastFrame } = render(
       <Header columns={60} version="0.1.0" runTitle="repair watcher tests" />,

@@ -336,13 +336,25 @@ export function MultilineInput({
   const showCursor = focus;
 
   // The prompt sits in a fixed-width gutter so wrapped/continuation lines align
-  // under the first character rather than under the chevron.
+  // under the first character rather than under the chevron. The gutter is pinned
+  // (`flexShrink={0}`) and the field is `flexGrow` + `minWidth={0}`: a bare <Text>
+  // prompt as a flex sibling makes yoga over-allocate the field by one column, so a
+  // truncating placeholder/line lands one past the field edge and still wraps a
+  // single column in a narrow terminal. Boxing the gutter and letting the field
+  // shrink to zero makes the field exactly `width - gutter`, so truncation fits (#138).
   return (
     <Box>
-      <Text color={ui.color.accent}>{prompt}</Text>
-      <Box flexGrow={1} flexDirection="column">
+      <Box flexShrink={0}>
+        <Text color={ui.color.accent}>{prompt}</Text>
+      </Box>
+      <Box flexGrow={1} minWidth={0} flexDirection="column">
         {value.length === 0 ? (
-          <Text>
+          // Truncate (never wrap) the placeholder: it sits in the repainting live
+          // region, where a line wider than the field wraps onto a second physical
+          // row that Ink's logical-line erase can't see — orphaning a stale copy on
+          // resize. flexGrow on the parent gives truncate a live, yoga-resolved
+          // width bound, so it clips to the field instead of overflowing.
+          <Text wrap="truncate">
             {showCursor ? (
               placeholder.length > 0 ? (
                 <>

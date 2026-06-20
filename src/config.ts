@@ -93,6 +93,25 @@ export interface AppConfig {
    * shows it.
    */
   splash: boolean;
+
+  /**
+   * How many columns to hold back from the RIGHT edge of the cockpit — a safety
+   * gutter so no glyph ever lands under a host scrollbar or in the terminal's
+   * autowrap (DECAWM) column. At least 1 is always reserved (DECAWM); the value can
+   * be raised when the host overlays a wider scrollbar.
+   *
+   * Why this is a knob, not a constant: when Daintree embeds the assistant in an
+   * xterm.js pane on macOS, the OS "overlay" scrollbar reports 0px to xterm's
+   * FitAddon, so the PTY column count it hands us spans the FULL element width and
+   * the viewport scrollbar is painted ON TOP of the rightmost 1–2 cells — columns
+   * the PTY swears are visible but the user can't see. Reserving them here keeps
+   * full-width rules and truncated chrome clear of that overlay. Defaults to 2 when
+   * embedded (a window id is present) and 1 in a bare terminal; override explicitly
+   * with `DAINTREE_ASSISTANT_RESERVED_COLUMNS`. The real cure is host-side (reserve
+   * the scrollbar gutter via `overflow-y: scroll` on `.xterm-viewport`); this is the
+   * robust fallback so the assistant renders cleanly regardless of the host.
+   */
+  reservedColumns: number;
 }
 
 export interface ConfigOverrides {
@@ -110,6 +129,7 @@ export interface ConfigOverrides {
   offline?: boolean;
   debugLog?: boolean;
   splash?: boolean;
+  reservedColumns?: number;
   logDir?: string;
   projectInstructions?: string;
 }
@@ -320,6 +340,23 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     // is fine (it can't affect safety or where anything is written).
     splash:
       overrides.splash ?? process.env.DAINTREE_ASSISTANT_NO_SPLASH !== "1",
+    // Scrollbar/autowrap safety gutter (see AppConfig.reservedColumns). A UI-only
+    // cosmetic, so the merged env is fine. Explicit override wins; otherwise reserve
+    // 2 columns when embedded in a Daintree window (its xterm overlay scrollbar can
+    // cover the rightmost 1–2 cells) and 1 in a bare terminal (DECAWM only). Floor at
+    // 1 and ignore a non-finite/negative override so a bad value can never widen
+    // content back into the autowrap column.
+    reservedColumns: (() => {
+      const raw = firstString(
+        overrides.reservedColumns?.toString(),
+        process.env.DAINTREE_ASSISTANT_RESERVED_COLUMNS,
+      );
+      const parsed = raw === undefined ? undefined : Number.parseInt(raw, 10);
+      if (parsed !== undefined && Number.isFinite(parsed)) {
+        return Math.max(1, parsed);
+      }
+      return windowId ? 2 : 1;
+    })(),
     // Pre-loaded by the entry path (CLI/host) before App.create(); loadConfig()
     // never touches the filesystem for this — it just carries the resolved content.
     projectInstructions: overrides.projectInstructions,
@@ -343,6 +380,7 @@ export function describeConfig(cfg: AppConfig): Record<string, string> {
     mcpToken: redact(cfg.mcpToken),
     tier: cfg.tier,
     splash: String(cfg.splash),
+    reservedColumns: String(cfg.reservedColumns),
     autoApprove: String(cfg.autoApprove),
     offline: String(cfg.offline),
     debugLog: String(cfg.debugLog),

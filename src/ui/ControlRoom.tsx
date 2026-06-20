@@ -65,6 +65,16 @@ export interface ControlRoomProps {
   project: string;
   tier: string;
   columns: number;
+  /**
+   * Columns to hold back from the right edge — the autowrap/scrollbar safety gutter
+   * ({@link AppConfig.reservedColumns}). Defaults to 1 (DECAWM only) so existing
+   * callers/tests are unchanged; the live shell raises it (e.g. to 2 under a Daintree
+   * xterm whose overlay scrollbar covers the rightmost cells). Both the right padding
+   * of the repainting region AND the numeric `chromeWidth` derive from it, so the
+   * masthead rule, the live rules and the truncated chrome all stop at the same
+   * column.
+   */
+  reservedColumns?: number;
   /** Accepted for back-compat (gallery/tests); the inline cockpit ignores it. */
   rows?: number;
   connected: boolean;
@@ -118,6 +128,7 @@ export function ControlRoom({
   project,
   tier,
   columns,
+  reservedColumns = 1,
   connected,
   transcript,
   dashboard,
@@ -163,11 +174,14 @@ export function ControlRoom({
   //     readability ceiling / lagged-prop width. The live full-width children (status
   //     line, composer rules) likewise fill via flex, so they can't overflow mid-resize.
   //
-  // `chromeWidth` is one shy of the terminal and is allowed to span the whole
-  // cockpit for separators/input chrome. `contentWidth` is the readable measure for
+  // `chromeWidth` is the reserved-gutter-shy span allowed to run the whole cockpit
+  // for separators/input chrome; `contentWidth` is the readable measure for
   // prose/history cells. Keep those separate so a masthead rule can run end-to-end
-  // without making transcript prose stretch across a maximized terminal.
-  const chromeWidth = Math.max(1, columns - 1);
+  // without making transcript prose stretch across a maximized terminal. The gutter
+  // (>=1, see `reservedColumns`) keeps every glyph clear of the terminal autowrap
+  // column AND of a host overlay scrollbar painted over the rightmost cells.
+  const gutter = Math.max(1, reservedColumns);
+  const chromeWidth = Math.max(1, columns - gutter);
   const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
@@ -208,7 +222,7 @@ export function ControlRoom({
   const showPanel = !pending && view !== "home";
 
   return (
-    <Box flexDirection="column" width="100%" paddingRight={1}>
+    <Box flexDirection="column" width="100%" paddingRight={gutter}>
       <Static key={staticKey} items={staticItems}>
         {(item) =>
           item.cell ? (

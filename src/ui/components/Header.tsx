@@ -79,7 +79,15 @@ export function Header({
   const ver = version ?? assistantVersion();
   const gloss = tier ? tierGloss(tier) : "";
   return (
-    <Box flexDirection="column" width="100%">
+    // Size to the EXPLICIT numeric `columns`, never `width="100%"`. The header
+    // commits to <Static>, where Ink lays each item out in an isolated tree with no
+    // parent width: a percentage there collapses to the CONTENT width, leaving the
+    // `wrap="truncate"` rows below (notably the long log path) with no bound to
+    // truncate against — so the terminal physically wraps them. A definite width is
+    // the bound truncate needs, and the Static-prints-once context means the
+    // resize-lag hazard that forces flex sizing in the live region does not apply
+    // here (same reason the Divider below already takes an explicit count).
+    <Box flexDirection="column" width={columns}>
       {/* Identity: wordmark + version on one line, project name beneath it.
           minWidth=0 + truncate so a briefly-narrow terminal (a resize/host race)
           can't detonate the wordmark into a vertical char stack. */}

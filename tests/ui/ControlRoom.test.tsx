@@ -459,3 +459,76 @@ describe("ControlRoom operations view (on-demand, replaces the composer)", () =>
     });
   });
 });
+
+// Regression (#138): `reservedColumns` is the single right-edge gutter that keeps
+// every glyph clear of the terminal autowrap column AND of a host overlay scrollbar
+// painted over the rightmost cells. Both the masthead rule (committed to <Static> at
+// the numeric chrome width) and the live composer rules (flex-filled, minus the root
+// paddingRight) derive from it — so they land at the SAME column instead of one rule
+// stopping short of the others. Prove both rules equal `columns - reservedColumns`.
+describe("ControlRoom reserved-column gutter (#138)", () => {
+  const ruleWidths = (frame: string): number[] =>
+    frame
+      .split("\n")
+      .map((line) => line.replace(ANSI, ""))
+      .filter((line) => /^[─-]+$/.test(line.trim()) && line.trim().length > 1)
+      .map((line) => line.trim().length);
+
+  it.each([
+    [1, 119],
+    [2, 118],
+    [3, 117],
+  ])(
+    "sizes the masthead AND live rules to columns-%i",
+    (reserved, expectedWidth) => {
+      const f = byKey("idle");
+      const COLS = 120;
+      // The masthead commits to <Static> exactly once; the headless stdout is a fixed
+      // 100 cols, so widen it to the prop width and bump staticKey to re-measure the
+      // one-time commit at the wide width (mirrors the existing masthead-rule test).
+      const { rerender, stdout, lastFrame } = render(
+        <ControlRoom
+          project="assistant"
+          tier="system"
+          columns={COLS}
+          reservedColumns={reserved}
+          connected={f.connected}
+          transcript={[]}
+          dashboard={f.dashboard}
+          busy={false}
+          stage=""
+          view="home"
+          staticKey={0}
+          now={FIXED_NOW}
+          composerFocus={false}
+        />,
+      );
+      Object.defineProperty(stdout, "columns", { value: COLS, configurable: true });
+      rerender(
+        <ControlRoom
+          project="assistant"
+          tier="system"
+          columns={COLS}
+          reservedColumns={reserved}
+          connected={f.connected}
+          transcript={[]}
+          dashboard={f.dashboard}
+          busy={false}
+          stage=""
+          view="home"
+          staticKey={1}
+          now={FIXED_NOW}
+          composerFocus={false}
+        />,
+      );
+      const widths = ruleWidths(lastFrame() ?? "");
+      // Exactly three full-width rules in the idle home view: the masthead rule plus
+      // the composer's top and bottom rules. Asserting the count (not just ">= 2")
+      // proves the masthead rule is among them — a regressed masthead can't hide.
+      expect(widths).toHaveLength(3);
+      // Every full-width rule lands at the same gutter-shy column (masthead + live
+      // rules converge), proving the single `reservedColumns` gutter drives them all.
+      for (const w of widths) expect(w).toBe(expectedWidth);
+    },
+  );
+});
