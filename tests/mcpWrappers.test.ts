@@ -409,11 +409,10 @@ describe("forge write + getPR wrappers (#29)", () => {
     expect(getPR.risk).toBe("read");
   });
 
-  it("registers every forge write as external risk and not read-risk", () => {
+  it("registers every forge write as external risk", () => {
     for (const name of FORGE_WRITE_NAMES) {
       const def = tool(name);
       expect(def.risk, name).toBe("external");
-      expect(def.risk, name).not.toBe("read");
     }
   });
 
