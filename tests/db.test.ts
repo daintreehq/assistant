@@ -1712,6 +1712,61 @@ describe("Db.gcRetentionSweep (bounded retention — issue #145)", () => {
     expect(db.getMemory(rec.id, { includeDeleted: true })?.deletedAt).toBe(NOW - 100);
   });
 
+  it("retains active runs and the keepRuns newest expired runs (HAVING + count floor)", () => {
+    // 3 expired runs (events predate the cutoff) + 2 active runs (recent events).
+    for (let i = 0; i < 3; i++) {
+      db.insertRunEvent({ runId: `exp${i}`, seq: 0, ts: OLD + i, type: "start" });
+    }
+    db.insertRunEvent({ runId: "act0", seq: 0, ts: NOW - 200, type: "start" });
+    db.insertRunEvent({ runId: "act1", seq: 0, ts: NOW - 100, type: "start" });
+
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 2 }));
+
+    // Active runs are excluded by the MAX(ts) HAVING filter — never candidates.
+    expect(db.listRunEvents("act0").length).toBe(1);
+    expect(db.listRunEvents("act1").length).toBe(1);
+    // Among the 3 expired runs, the 2 newest survive the count floor; the oldest goes.
+    expect(db.listRunEvents("exp0")).toEqual([]);
+    expect(db.listRunEvents("exp1").length).toBe(1);
+    expect(db.listRunEvents("exp2").length).toBe(1);
+  });
+
+  it("keepRows: 0 removes every row past the cutoff (no floor)", () => {
+    audit(OLD);
+    audit(OLD + 1);
+    db.gcRetentionSweep(NOW, retention({ auditLogKeepRows: 0 }));
+    expect(db.listAudit()).toEqual([]);
+  });
+
+  it("keepRuns greater than the expired count deletes nothing (quiet-project tail)", () => {
+    db.insertRunEvent({ runId: "a", seq: 0, ts: OLD, type: "start" });
+    db.insertRunEvent({ runId: "b", seq: 0, ts: OLD + 1, type: "start" });
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 5 }));
+    expect(db.listRunEvents("a").length).toBe(1);
+    expect(db.listRunEvents("b").length).toBe(1);
+  });
+
+  it("keeps an event resolved long ago but expiring only recently (scalar MAX of stamps)", () => {
+    const split = db.upsertEvent({
+      source: "system", severity: "info", title: "split", summary: "s",
+      createdAt: OLD, resolvedAt: OLD, expiresAt: NOW - 1,
+    });
+    db.gcRetentionSweep(NOW, retention());
+    // MAX(OLD, NOW-1) = NOW-1, inside the 7-day terminal window → retained.
+    expect(db.getEvent(split.id)).toBeTruthy();
+  });
+
+  it("never co-prunes a null-runId audit row when pruning expired runs", () => {
+    db.insertRunEvent({ runId: "old", seq: 0, ts: OLD, type: "start" });
+    audit(NOW - 10, "old"); // recent ts, belongs to the expired run
+    const orphan = audit(NOW - 5); // no runId — must survive (NULL never matches IN)
+
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 0 }));
+
+    expect(db.listAuditByRunId("old")).toEqual([]);
+    expect(db.listAudit().map((r) => r.id)).toContain(orphan.id);
+  });
+
   it("runs the sweep at construction via DbOptions (now + retention overrides)", () => {
     const path = join(dir, "ctor.db");
     const seed = new Db(path);

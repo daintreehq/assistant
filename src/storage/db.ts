@@ -88,7 +88,10 @@ export interface RetentionPolicy {
 
 export const DEFAULT_RETENTION: RetentionPolicy = {
   auditLogMaxAgeMs: 30 * DAY_MS,
-  auditLogKeepRows: 1000,
+  // Sized to clear runEventsKeepRuns (500) × a generous per-run dispatch count so
+  // the audit floor never trims a run still retained by the run sweep (the
+  // /explain replay pairs run_events with audit_log by runId).
+  auditLogKeepRows: 5000,
   runEventsMaxAgeMs: 14 * DAY_MS,
   runEventsKeepRuns: 500,
   conversationMaxAgeMs: 90 * DAY_MS,
@@ -564,7 +567,22 @@ export class Db {
    */
   /** @internal */
   gcRetentionSweep(now: number, retention: RetentionPolicy): void {
+    // run_events first (pruned by whole run, not by row — see pruneOldRuns),
+    // which also co-deletes the audit rows of every expired run. Doing this
+    // BEFORE audit_log's own age+count sweep means the audit count floor below is
+    // spent on genuinely-retained rows, not on dead-run rows already destined for
+    // deletion — so a run kept by runEventsKeepRuns is far less likely to have its
+    // audit detail trimmed out from under it (the /explain replay pairing).
+    this.pruneOldRuns(
+      now - retention.runEventsMaxAgeMs,
+      retention.runEventsKeepRuns,
+    );
     // Plain log tables: keep the newer of (within maxAge) OR (last keepN rows).
+    // audit's window (30d) is wider than run_events' (14d), so a run retained by
+    // the run floor whose rows are 14–30d old keeps its audit rows regardless of
+    // the count floor; only audit for runs older than the full 30d window is at
+    // risk, and auditLogKeepRows is sized to comfortably exceed runEventsKeepRuns
+    // worth of dispatch rows.
     this.deleteByAgeAndCount(
       "audit_log",
       "ts",
@@ -582,11 +600,6 @@ export class Db {
       "ts",
       now - retention.recipeSelLogMaxAgeMs,
       retention.recipeSelLogKeepRows,
-    );
-    // run_events is pruned by whole run, not by row (see pruneOldRuns).
-    this.pruneOldRuns(
-      now - retention.runEventsMaxAgeMs,
-      retention.runEventsKeepRuns,
     );
     // Terminal inbox events (resolved or expired) past the window. upsertEvent
     // only dedupes against open/unexpired rows, so these are unreachable dead
@@ -658,13 +671,29 @@ export class Db {
       .all(cutoff, keepRuns) as Array<{ runId: string }>;
     if (expired.length === 0) return;
     const ids = expired.map((r) => r.runId);
-    const placeholders = ids.map(() => "?").join(",");
-    this.db
-      .prepare(`DELETE FROM run_events WHERE runId IN (${placeholders})`)
-      .run(...ids);
-    this.db
-      .prepare(`DELETE FROM audit_log WHERE runId IN (${placeholders})`)
-      .run(...ids);
+    // One transaction so run_events and audit_log can never diverge if a DELETE
+    // mid-sweep throws (a dangling audit row without its run events, or vice
+    // versa). Chunk the id list to stay under SQLite's host-parameter ceiling
+    // (SQLITE_MAX_VARIABLE_NUMBER, 999 on older builds) and Node's argument-spread
+    // limit — a large keepRuns=0 backlog could otherwise overflow either and, via
+    // the constructor's catch, silently disable the sweep.
+    this.db.exec("BEGIN");
+    try {
+      for (let i = 0; i < ids.length; i += 900) {
+        const chunk = ids.slice(i, i + 900);
+        const placeholders = chunk.map(() => "?").join(",");
+        this.db
+          .prepare(`DELETE FROM run_events WHERE runId IN (${placeholders})`)
+          .run(...chunk);
+        this.db
+          .prepare(`DELETE FROM audit_log WHERE runId IN (${placeholders})`)
+          .run(...chunk);
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   /**
