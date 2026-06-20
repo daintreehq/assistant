@@ -67,6 +67,7 @@ const renderControlRoom = (
     activePanel?: PanelKey | null;
     expanded?: boolean;
     transcript?: TranscriptCell[];
+    staticKey?: number;
   },
 ) => {
   const f = byKey(label);
@@ -74,6 +75,7 @@ const renderControlRoom = (
     <ControlRoom
       project="assistant"
       tier="system"
+      staticKey={over.staticKey ?? 0}
       columns={columns}
       connected={f.connected}
       transcript={over.transcript ?? f.transcript}
@@ -244,14 +246,25 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
   });
 
   it("initial masthead rule spans the full cockpit width, not the prose cap", () => {
-    // The masthead is live chrome, so it must follow the live terminal width even
-    // when the React `columns` prop is stale/narrow.
-    const frame = liveFrame("idle", 80, 120);
-    const firstRule = frame
+    // The masthead commits to <Static> at first-render width (it prints once, then
+    // scrolls away with history); in production that first render is the real
+    // terminal width, so the rule spans the full chrome (cols-1), past the ≤100
+    // prose cap. The headless stdout is a fixed 100 cols, so widen it like liveFrame
+    // does, then bump staticKey to remount <Static> and re-emit the masthead at the
+    // wide width (its one-time commit can't otherwise be re-measured).
+    const { rerender, stdout, lastFrame } = render(
+      renderControlRoom("idle", 120, { staticKey: 0 }),
+    );
+    Object.defineProperty(stdout, "columns", { value: 120, configurable: true });
+    rerender(renderControlRoom("idle", 120, { staticKey: 1 }));
+    const firstRule = (lastFrame() ?? "")
       .split("\n")
       .find((line) => /^[─-]+$/.test(line.replace(ANSI, "").trim()));
     expect(firstRule).toBeDefined();
-    expect(visibleWidth(firstRule!)).toBeGreaterThan(100);
+    // Exactly the full chrome width (columns-1 = 119), not merely "> the 100 prose
+    // cap": an exact assertion proves the masthead rule itself spans the cockpit
+    // (a stray composer divider couldn't satisfy it if the header rule regressed).
+    expect(visibleWidth(firstRule!)).toBe(119);
   });
 
   it("startup notes stay below the live masthead", () => {

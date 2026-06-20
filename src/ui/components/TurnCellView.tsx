@@ -16,9 +16,10 @@
  */
 import { Box, Text } from "ink";
 import type { TurnCell } from "../types.js";
-import { glyphs, toneColor, ui } from "../theme.js";
+import { glyphs, toneColor, ui, unicodeOk } from "../theme.js";
 import { renderMarkdown } from "../markdown.js";
 import { ActivityTree } from "./ActivityTree.js";
+import { ThinkingDot } from "./ThinkingDot.js";
 import { UserMessageCard } from "./UserMessageCard.js";
 
 export function TurnCellView({
@@ -33,6 +34,18 @@ export function TurnCellView({
   expanded?: boolean;
 }) {
   const set = glyphs();
+  // Before any output lands, the active turn shows a live "Thinking" line directly
+  // under the DAINTREE marker so the human sees Daintree is busy *in the transcript*
+  // (not just the composer). It clears the moment real output starts — the first
+  // streamed token (assistantText) or the first tool activity ("the tech loading") —
+  // so it never doubles up with prose or the activity tree. Gated on state==="active"
+  // so it only ever lives in the repainting live region, never a committed <Static>
+  // cell (ThinkingDot animates via setInterval; freezing it into Static is forbidden).
+  const ascii = !unicodeOk();
+  const thinking =
+    turn.state === "active" &&
+    turn.assistantText.length === 0 &&
+    turn.activities.length === 0;
   // Each transcript cell owns the single blank line ABOVE it (marginTop), never
   // below. A leading blank is deterministic — Ink only trims trailing whitespace,
   // so a bottom margin on the last committed cell collapses at the <Static>→live
@@ -45,17 +58,23 @@ export function TurnCellView({
         <UserMessageCard text={turn.userText} width={width} />
       ) : null}
 
-      {turn.assistantText || turn.streaming ? (
+      {turn.assistantText || turn.streaming || thinking ? (
         <Box flexDirection="column">
           <Text bold color={ui.color.accent}>
             {set.brand} DAINTREE
           </Text>
-          <Text>
-            {turn.state === "active"
-              ? turn.assistantText
-              : renderMarkdown(turn.assistantText)}
-            {turn.streaming ? <Text dimColor>▌</Text> : null}
-          </Text>
+          {thinking ? (
+            <Text dimColor>
+              <ThinkingDot ascii={ascii} /> Thinking
+            </Text>
+          ) : (
+            <Text>
+              {turn.state === "active"
+                ? turn.assistantText
+                : renderMarkdown(turn.assistantText)}
+              {turn.streaming ? <Text dimColor>▌</Text> : null}
+            </Text>
+          )}
         </Box>
       ) : null}
 

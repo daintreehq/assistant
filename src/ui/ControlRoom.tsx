@@ -6,12 +6,12 @@
  *
  * INLINE MODEL (Claude Code style). The cockpit renders into the terminal's MAIN
  * screen buffer, not the alternate buffer, so the terminal's own scrollback /
- * mouse wheel / selection work natively. Completed turns are committed permanently
- * above the live region with Ink's <Static> (they flow into native scrollback and
- * never repaint); the masthead, in-flight turn, status line and composer live in
- * the repainting region pinned at the bottom. The masthead is live because its
- * separator must resize with the host pane; completed transcript history remains
- * native scrollback above it.
+ * mouse wheel / selection work natively. The masthead and completed turns are
+ * committed permanently with Ink's <Static> (header is item 0): they print ONCE,
+ * flow into native scrollback and never repaint. The in-flight turn, status line
+ * and composer live in the repainting region pinned at the bottom. The masthead is
+ * deliberately NOT live chrome — a repainting masthead lands *below* the committed
+ * scrollback, beneath every finished response, instead of at the top.
  *
  * Operations and help are momentary, on-demand views rendered in place of the
  * composer (Esc returns), never a pinned panel — a pinned panel is impossible in
@@ -111,8 +111,8 @@ export interface ControlRoomProps {
   onResolve?: (approved: boolean) => void;
 }
 
-/** A committed transcript cell emitted once through <Static>. */
-type StaticItem = { key: string; cell: TranscriptCell };
+/** A <Static> item: the one-time header (no cell) or a committed transcript cell. */
+type StaticItem = { key: string; cell?: TranscriptCell };
 
 export function ControlRoom({
   project,
@@ -171,11 +171,7 @@ export function ControlRoom({
   const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
-  // The masthead itself is live chrome so its rule can resize like the composer
-  // rails. Keep a pure startup transcript (standalone MCP/log notes only) live as
-  // well, otherwise <Static> would print those notes above the live masthead.
-  const hasConversationHistory = transcript.some((cell) => cell.kind !== "note");
-  const liveStart = hasConversationHistory ? liveTailStart(transcript) : 0;
+  const liveStart = liveTailStart(transcript);
   const committed = transcript.slice(0, liveStart);
   const live = transcript.slice(liveStart);
 
@@ -183,10 +179,14 @@ export function ControlRoom({
   // it only emits items appended since the last pass. `committed` is append-only
   // (it never shrinks or reorders — pull-back only ever drops the live turn), so
   // each completed turn is committed exactly once and the terminal keeps the rest.
-  const staticItems: StaticItem[] = committed.map((c) => ({
-    key: c.id,
-    cell: c,
-  }));
+  // The header is item 0: printed ONCE at the very top, then free to scroll away
+  // with the history (Claude Code model). It is NOT live chrome — a live masthead
+  // repaints *below* the committed scrollback, so it ends up beneath every finished
+  // response instead of at the top. Static keeps it pinned above all history.
+  const staticItems: StaticItem[] = [
+    { key: "__header" },
+    ...committed.map((c) => ({ key: c.id, cell: c })),
+  ];
 
   const contextHint = connected
     ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
@@ -210,24 +210,28 @@ export function ControlRoom({
   return (
     <Box flexDirection="column" width="100%" paddingRight={1}>
       <Static key={staticKey} items={staticItems}>
-        {(item) => (
-          <CellView
-            key={item.key}
-            cell={item.cell}
-            width={contentWidth}
-            now={now}
-            expanded={expanded}
-          />
-        )}
+        {(item) =>
+          item.cell ? (
+            <CellView
+              key={item.key}
+              cell={item.cell}
+              width={contentWidth}
+              now={now}
+              expanded={expanded}
+            />
+          ) : (
+            <Header
+              key="__header"
+              columns={chromeWidth}
+              project={project}
+              tier={tier}
+              destructivePending={destructivePending}
+              logging={logging}
+              logFile={logFile}
+            />
+          )
+        }
       </Static>
-      <Header
-        columns={chromeWidth}
-        project={project}
-        tier={tier}
-        destructivePending={destructivePending}
-        logging={logging}
-        logFile={logFile}
-      />
 
       {/* The live region (repaints): the in-flight turn and the status line are
           always shown; only the bottom slot swaps the composer for an on-demand

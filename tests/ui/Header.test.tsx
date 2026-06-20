@@ -106,13 +106,17 @@ describe("Header", () => {
     expect(frame).toMatch(/[─-]{10,}/);
   });
 
-  it("does not cap the rule to the columns prop", () => {
+  it("sizes the rule to the columns prop", () => {
+    // The masthead commits to <Static> (prints once, never repaints), so the rule
+    // takes the explicit cockpit width it is handed rather than yoga-filling the
+    // live region — a flex "100%" rule collapses to content width inside a Static
+    // item, which is what shrank the masthead rule to the prose width.
     const frame = stripAnsi(
       render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "",
     );
     const rule = frame.split("\n").find((line) => /^[─-]+$/.test(line));
     expect(rule).toBeDefined();
-    expect(rule!.length).toBeGreaterThan(60);
+    expect(rule!.length).toBe(60);
   });
 
   it("places the rule directly under the project and a blank row below it", () => {

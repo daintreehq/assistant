@@ -98,7 +98,21 @@ function tableToList(
   });
   return `${records.join("\n")}\n`;
 }
-md.use({ renderer: { table: tableToList } });
+// marked v15 changed how inline formatting nests: a paragraph's `text` token now
+// carries its bold/`code`/link children in `token.tokens` (not a flat string).
+// marked-terminal's own `text` renderer grabs the raw `token.text` instead of
+// recursing, so `**bold**`, `` `code` `` and links leak through as literal markers
+// — the regression that left the whole transcript showing raw markdown. Override
+// `text` to descend into the inline children when present (mirroring marked's own
+// default text renderer) so the inline span renderers above actually run.
+function renderText(
+  this: { parser: { parseInline(tokens: Token[]): string } },
+  token: Tokens.Text | Tokens.Escape,
+): string {
+  const t = token as Tokens.Text;
+  return t.tokens ? this.parser.parseInline(t.tokens) : token.text;
+}
+md.use({ renderer: { table: tableToList, text: renderText } });
 
 /**
  * Render finalized assistant markdown to a styled ANSI string for an Ink

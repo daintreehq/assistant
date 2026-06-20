@@ -444,9 +444,11 @@ function deriveStage(cells: TranscriptCell[]): string {
         return "Working";
     }
   }
-  if (turn.streaming) return "Responding";
-  if (turn.activities.length > 0) return "Orienting";
-  return "Planning";
+  // No active tool verb to name → the model is composing (waiting for the first
+  // token, streaming prose, or between tool steps). All of these read as "Thinking":
+  // once real output is streaming the transcript itself shows it, so the composer
+  // doesn't separately announce "Responding" — it just signals that work is ongoing.
+  return "Thinking";
 }
 
 export interface DaintreeController {
@@ -535,8 +537,21 @@ export function useDaintreeController(
   const [booting, setBooting] = useState(() => app.config.splash);
   const startupSettled = useRef(false);
   const animationDone = useRef(false);
+  // The masthead commits to <Static> (prints once, never repaints — see ControlRoom),
+  // so the authoritative project name has to be resolved BEFORE the cockpit's first
+  // paint; a late upgrade can no longer be patched into a live header. So the name
+  // fetch is a third splash-dismiss gate (bounded by the 8s bootCap). It flips true
+  // the moment the name resolves, the link is down, or the retries give up — never a
+  // hang. (When the header was live chrome this could lag the splash freely; Static
+  // changed that.)
+  const projectSettled = useRef(false);
   const finishBootIfReady = useCallback(() => {
-    if (startupSettled.current && animationDone.current) setBooting(false);
+    if (
+      startupSettled.current &&
+      animationDone.current &&
+      projectSettled.current
+    )
+      setBooting(false);
   }, []);
   const notifyAnimationDone = useCallback(() => {
     animationDone.current = true;
@@ -737,20 +752,27 @@ export function useDaintreeController(
       // fetch below is non-blocking and deliberately does NOT hold the splash.
       startupSettled.current = true;
       finishBootIfReady();
-      // Async, non-blocking: ask Daintree for the authoritative project name and
-      // fill it into the header when it arrives. Never blocks startup; a miss just
-      // leaves the provisional name in place. Retry a few times — right after connect
-      // the renderer may not have a project bound yet — but stop the moment we're
-      // offline (getContext needs the link) or disposed.
+      // Ask Daintree for the authoritative project name and fill it into the header.
+      // This now GATES the splash (via projectSettled) because the masthead freezes
+      // into <Static> on first paint — a name arriving after that can't be shown.
+      // Retry a few times (right after connect the renderer may not have a project
+      // bound yet), but always settle the gate in `finally` so a miss, an offline
+      // link, or disposal drops cleanly into the cockpit with the provisional name
+      // rather than stranding the user on the splash (the 8s bootCap is the backstop).
       void (async () => {
-        for (let attempt = 0; attempt < 4 && !disposed; attempt++) {
-          if (!app.mcp.status().connected) return;
-          const name = await fetchProjectName(app);
-          if (name) {
-            if (!disposed) setProjectName(name);
-            return;
+        try {
+          for (let attempt = 0; attempt < 4 && !disposed; attempt++) {
+            if (!app.mcp.status().connected) return;
+            const name = await fetchProjectName(app);
+            if (name) {
+              if (!disposed) setProjectName(name);
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
           }
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } finally {
+          projectSettled.current = true;
+          if (!disposed) finishBootIfReady();
         }
       })();
     })();

@@ -45,6 +45,7 @@ function tierGloss(tier: string): string {
 }
 
 export function Header({
+  columns,
   project,
   runTitle,
   tier,
@@ -53,7 +54,10 @@ export function Header({
   logFile,
   version,
 }: {
-  /** Deprecated: header width is resolved from the live Ink layout. */
+  /** Cockpit width for the masthead rule. The header commits to <Static> (prints
+   *  once, never repaints), so an explicit count is correct here — yoga's "100%"
+   *  flex rule collapses to the content width inside a Static item, and the
+   *  resize-orphan hazard that flex avoids only exists in the repainting region. */
   columns?: number;
   /** Name of the bound project, shown beneath the wordmark. */
   project?: string;
@@ -112,7 +116,7 @@ export function Header({
           rule. "logging" is pinned (flexShrink 0) so it is never clipped to
           "loggin", and only the path truncates on a narrow term. */}
       <Box flexDirection="column">
-        <Divider />
+        <Divider width={columns} />
         <Box height={1} />
         {logging ? (
           <Box>
