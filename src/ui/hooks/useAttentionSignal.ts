@@ -2,7 +2,7 @@
  * Out-of-band attention signalling for the cockpit.
  *
  * When a supervised agent surfaces a fresh actionable event the user may have
- * switched focus to another window — the in-band {@link AttentionBanner} only
+ * switched focus to another window — the in-band attention banner only
  * helps if they're looking at the terminal. This hook adds two terminal-native
  * cues that survive a focus change:
  *
