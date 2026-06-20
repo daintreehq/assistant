@@ -38,10 +38,11 @@ The default interactive experience is the **Daintree cockpit**, rendered *inline
 in the terminal's **main** screen buffer — not an alternate full-screen buffer —
 so the host terminal's own scrollback, mouse wheel, and text selection keep working
 natively. Completed turns are committed once (via Ink `<Static>`) and flow into that
-native scrollback, never repainting; only the in-flight turn, a status line, and the
-composer repaint, pinned at the bottom. The header is printed once and is allowed to
-scroll away — it is not sticky. There is no column-banded layout: the cockpit renders
-the same single inline surface at every width.
+native scrollback, never repainting; the masthead, the in-flight turn, a status line,
+and the composer form the repainting region pinned at the bottom. The masthead stays
+live (not committed to scrollback) so its separator rule resizes with the terminal.
+There is no column-banded layout: the cockpit renders the same single inline surface
+at every width.
 
 ```
 ◆ DAINTREE  assistant-main           OPERATOR  ● CONNECTED

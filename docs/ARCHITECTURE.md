@@ -93,9 +93,9 @@ The cockpit renders **inline** into the terminal's *main* screen buffer — neve
 alternate buffer — so the host terminal's own scrollback, mouse wheel, and selection
 work natively. `ControlRoom.tsx` splits the transcript at the trailing active turn:
 completed cells are committed once via Ink `<Static>` (they flow into native
-scrollback and never repaint), while the in-flight turn, status line, and composer
-form a repainting region pinned at the bottom. The header is printed once as the
-first Static item and is allowed to scroll away — it is not sticky. There is no
+scrollback and never repaint), while the masthead, in-flight turn, status line, and
+composer form a repainting region pinned at the bottom. The masthead is live chrome
+(not a Static item) so its separator rule can resize with the host pane. There is no
 column-banded layout. On-demand views (operations via `^O`, help) render *in place of
 the composer* and return via `Esc`; a pinned full-screen panel is impossible without
 the alternate buffer, so none exist. Keep committed cells append-only — `<Static>`
@@ -204,9 +204,9 @@ export const fsTools: ToolDef[] = [
 - `terminal.extract.async` — same, but enqueued for background completion; the result lands on the attention queue.
 
 ### grantTools.ts — automation grants (risk "local")
-- `grant.create` / `grant.list` / `grant.revoke` — scoped grants that let non-interactive actors (watchers, timers, workflows) run mutating tools without an interactive confirmation. The confirmation matrix consults these for non-`main` actors.
+- `grant.create` / `grant.list` / `grant.revoke` — scoped grants that let non-interactive actors (watchers, timers) run mutating tools without an interactive confirmation. The confirmation matrix consults these for non-`main` actors.
 
-### workflowTools.ts — workflow runs (risk "local"/"project")
+### workflowTools.ts — workflow runs (risk "local"/"read")
 - `workflow.create` / `workflow.get` / `workflow.list` / `workflow.update` — durable multi-step workflow records persisted in SQLite, advanced over multiple turns.
 
 ### recipeRunTools.ts — recipe runs (risk "local")
