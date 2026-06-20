@@ -48,6 +48,68 @@ export interface AuditFilters {
   limit?: number;
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * Bounded-retention policy for the append-only tables. The per-project DB file is
+ * long-lived, so `audit_log`/`run_events`/`conversation`/`recipe_selection_log`
+ * (write-only, never pruned by their callers) would otherwise grow without bound,
+ * resolved/expired `events` rows would never be reclaimed, and soft-deleted
+ * `memories` would linger in the FTS index forever. {@link Db.gcRetentionSweep}
+ * runs once per DB open (a session boundary, like the watcher/launch sweeps) and
+ * enforces these caps. Each log table keeps the newer of `maxAgeMs` OR the last
+ * `keepRows`/`keepRuns` — so a quiet project still keeps a useful tail, and a busy
+ * one is bounded by row count rather than age alone.
+ */
+export interface RetentionPolicy {
+  /** Tool-dispatch audit trail — verbose, but the primary forensic record. */
+  auditLogMaxAgeMs: number;
+  auditLogKeepRows: number;
+  /** Per-turn event traces. Pruned by whole run (see below), not by row, so a
+   *  kept run replays intact for `/explain`; `keepRuns` counts runs, not rows. */
+  runEventsMaxAgeMs: number;
+  runEventsKeepRuns: number;
+  /** Persisted chat turns. Old sessions never reload (sessionId is session-fresh),
+   *  so this is a safety net rather than a load-bearing constraint. */
+  conversationMaxAgeMs: number;
+  conversationKeepRows: number;
+  /** Recipe-selection diagnostics — analytics only, safe to prune aggressively. */
+  recipeSelLogMaxAgeMs: number;
+  recipeSelLogKeepRows: number;
+  /** Hard-delete resolved/expired inbox events this long after they went
+   *  terminal — `upsertEvent` only dedupes against open rows, so terminal rows are
+   *  otherwise dead weight. */
+  eventsTerminalAgeMs: number;
+  /** Hard-delete soft-deleted memories this long after `deletedAt` (an undo
+   *  window). The base-table DELETE fires the `memories_ad` trigger, which evicts
+   *  the row from `memories_fts` — no manual FTS work here. */
+  memoriesDeletedAgeMs: number;
+}
+
+export const DEFAULT_RETENTION: RetentionPolicy = {
+  auditLogMaxAgeMs: 30 * DAY_MS,
+  // Sized to clear runEventsKeepRuns (500) × a generous per-run dispatch count so
+  // the audit floor never trims a run still retained by the run sweep (the
+  // /explain replay pairs run_events with audit_log by runId).
+  auditLogKeepRows: 5000,
+  runEventsMaxAgeMs: 14 * DAY_MS,
+  runEventsKeepRuns: 500,
+  conversationMaxAgeMs: 90 * DAY_MS,
+  conversationKeepRows: 1000,
+  recipeSelLogMaxAgeMs: 30 * DAY_MS,
+  recipeSelLogKeepRows: 500,
+  eventsTerminalAgeMs: 7 * DAY_MS,
+  memoriesDeletedAgeMs: 30 * DAY_MS,
+};
+
+/** Optional construction overrides. Both fields exist for tests: `now` pins the
+ *  sweep clock so a row can be made "old" deterministically, and `retention`
+ *  shrinks the windows so a test doesn't have to fabricate 30-day-old timestamps. */
+export interface DbOptions {
+  now?: () => number;
+  retention?: Partial<RetentionPolicy>;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS timers (
   id TEXT PRIMARY KEY,
@@ -137,6 +199,10 @@ CREATE TABLE IF NOT EXISTS run_events (
   payload TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run ON run_events (runId, seq);
+-- Plain ts index so the retention sweep's "MAX(ts) per run < cutoff" scan is
+-- indexed instead of a full-table aggregate (the unique index above is keyed on
+-- runId/seq, not ts).
+CREATE INDEX IF NOT EXISTS idx_run_events_ts ON run_events (ts);
 
 CREATE TABLE IF NOT EXISTS conversation (
   id TEXT PRIMARY KEY,
@@ -149,6 +215,9 @@ CREATE TABLE IF NOT EXISTS conversation (
   createdAt INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation (sessionId, seq);
+-- Plain createdAt index for the retention sweep's age-cutoff scan (the session
+-- index is keyed on sessionId/seq, useless for an across-session age sweep).
+CREATE INDEX IF NOT EXISTS idx_conv_createdat ON conversation (createdAt);
 
 CREATE TABLE IF NOT EXISTS recipe_selection_log (
   id TEXT PRIMARY KEY,
@@ -368,7 +437,7 @@ function grantAuthorizes(
 export class Db {
   private db: InstanceType<typeof DatabaseSync>;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts?: DbOptions) {
     this.db = new DatabaseSync(dbPath);
     // 5 s — generous for a single-writer local CLI; without it SQLite fails a
     // contended lock immediately (0 ms wait) instead of retrying. Set first so
@@ -381,6 +450,18 @@ export class Db {
     this.migrate();
     this.cancelStaleWatchers();
     this.cancelStaleAgentLaunches();
+    // Bound the append-only tables' growth at the session boundary. Wrapped so a
+    // sweep failure (e.g. a transient lock) can never abort DB construction and
+    // take the whole app down — retention is best-effort housekeeping, not a
+    // correctness invariant; the next open retries it.
+    try {
+      this.gcRetentionSweep(opts?.now?.() ?? Date.now(), {
+        ...DEFAULT_RETENTION,
+        ...opts?.retention,
+      });
+    } catch {
+      /* best-effort: never let housekeeping break startup */
+    }
   }
 
   /**
@@ -463,6 +544,156 @@ export class Db {
          WHERE stage NOT IN ('confirmed','failed')`,
       )
       .run(now);
+  }
+
+  /**
+   * Bounded-retention housekeeping, run once per DB open (a session boundary,
+   * alongside {@link cancelStaleWatchers}/{@link cancelStaleAgentLaunches}). The
+   * append-only log tables have no caller-side prune, so without this they grow
+   * for the life of the project file. Each sweep is independent and best-effort;
+   * the constructor wraps the whole call in try/catch.
+   *
+   * No VACUUM: freed pages return to SQLite's freelist and are reused by later
+   * inserts, so an append-heavy local file never needs to shrink — VACUUM would
+   * just rewrite the file and block. Soft-deleted memories are hard-DELETEd from
+   * the base table only; the `memories_ad` AFTER DELETE trigger evicts them from
+   * `memories_fts` automatically (and `forgetMemory` never mutates `content`, so
+   * the trigger's `old.content` matches the indexed value — issuing the FTS
+   * 'delete' command here too would double-evict and corrupt the index).
+   *
+   * `@internal` (public for direct unit testing) — production only calls it via
+   * the constructor. Tests pass an explicit `now`/`retention` to make rows old
+   * without fabricating real-time-distant timestamps.
+   */
+  /** @internal */
+  gcRetentionSweep(now: number, retention: RetentionPolicy): void {
+    // run_events first (pruned by whole run, not by row — see pruneOldRuns),
+    // which also co-deletes the audit rows of every expired run. Doing this
+    // BEFORE audit_log's own age+count sweep means the audit count floor below is
+    // spent on genuinely-retained rows, not on dead-run rows already destined for
+    // deletion — so a run kept by runEventsKeepRuns is far less likely to have its
+    // audit detail trimmed out from under it (the /explain replay pairing).
+    this.pruneOldRuns(
+      now - retention.runEventsMaxAgeMs,
+      retention.runEventsKeepRuns,
+    );
+    // Plain log tables: keep the newer of (within maxAge) OR (last keepN rows).
+    // audit's window (30d) is wider than run_events' (14d), so a run retained by
+    // the run floor whose rows are 14–30d old keeps its audit rows regardless of
+    // the count floor; only audit for runs older than the full 30d window is at
+    // risk, and auditLogKeepRows is sized to comfortably exceed runEventsKeepRuns
+    // worth of dispatch rows.
+    this.deleteByAgeAndCount(
+      "audit_log",
+      "ts",
+      now - retention.auditLogMaxAgeMs,
+      retention.auditLogKeepRows,
+    );
+    this.deleteByAgeAndCount(
+      "conversation",
+      "createdAt",
+      now - retention.conversationMaxAgeMs,
+      retention.conversationKeepRows,
+    );
+    this.deleteByAgeAndCount(
+      "recipe_selection_log",
+      "ts",
+      now - retention.recipeSelLogMaxAgeMs,
+      retention.recipeSelLogKeepRows,
+    );
+    // Terminal inbox events (resolved or expired) past the window. upsertEvent
+    // only dedupes against open/unexpired rows, so these are unreachable dead
+    // weight. Keyed on the most recent terminal stamp so a row resolved long ago
+    // but expiring later still waits out the full window.
+    this.db
+      .prepare(
+        `DELETE FROM events
+          WHERE (resolvedAt IS NOT NULL OR expiresAt IS NOT NULL)
+            AND MAX(COALESCE(resolvedAt, 0), COALESCE(expiresAt, 0)) < ?`,
+      )
+      .run(now - retention.eventsTerminalAgeMs);
+    // Soft-deleted memories past the undo window. The base-table DELETE fires
+    // memories_ad, which removes the row from memories_fts — no manual FTS work.
+    this.db
+      .prepare(
+        "DELETE FROM memories WHERE deletedAt IS NOT NULL AND deletedAt < ?",
+      )
+      .run(now - retention.memoriesDeletedAgeMs);
+  }
+
+  /**
+   * Dual-condition retention for a plain log table: delete rows older than
+   * `cutoff` UNLESS they fall in the most-recent `keepN` (the count floor keeps a
+   * useful tail on a quiet table whose every row predates the cutoff). The
+   * `NOT IN (… ORDER BY … LIMIT keepN)` subquery is uncorrelated, so SQLite
+   * evaluates it once. `table`/`timeCol` are fixed internal identifiers (never
+   * caller input), so interpolating them is injection-safe.
+   */
+  private deleteByAgeAndCount(
+    table: string,
+    timeCol: string,
+    cutoff: number,
+    keepN: number,
+  ): void {
+    this.db
+      .prepare(
+        `DELETE FROM ${table}
+          WHERE ${timeCol} < ?
+            AND rowid NOT IN (
+              SELECT rowid FROM ${table} ORDER BY ${timeCol} DESC LIMIT ?
+            )`,
+      )
+      .run(cutoff, keepN);
+  }
+
+  /**
+   * Prune `run_events` by whole run, never by row: `/explain` replays a run from
+   * its full ordered event list ({@link listRunEvents}) cross-referenced with its
+   * audit rows ({@link listAuditByRunId}), so a half-deleted run is worse than a
+   * fully-gone one. A run is eligible when its newest event predates `cutoff`,
+   * except the `keepRuns` most-recently-active runs are always retained
+   * (count floor, matching the plain-table sweep). The matching `audit_log` rows
+   * are co-deleted so an audit trail never dangles without its run events.
+   *
+   * `LIMIT -1 OFFSET keepRuns` is SQLite's "skip the first keepRuns, take the
+   * rest" idiom (−1 = no upper bound) — i.e. exactly the runs *not* in the kept
+   * tail. Empty list → both DELETEs are no-ops.
+   */
+  private pruneOldRuns(cutoff: number, keepRuns: number): void {
+    const expired = this.db
+      .prepare(
+        `SELECT runId FROM run_events
+          GROUP BY runId
+          HAVING MAX(ts) < ?
+          ORDER BY MAX(ts) DESC
+          LIMIT -1 OFFSET ?`,
+      )
+      .all(cutoff, keepRuns) as Array<{ runId: string }>;
+    if (expired.length === 0) return;
+    const ids = expired.map((r) => r.runId);
+    // One transaction so run_events and audit_log can never diverge if a DELETE
+    // mid-sweep throws (a dangling audit row without its run events, or vice
+    // versa). Chunk the id list to stay under SQLite's host-parameter ceiling
+    // (SQLITE_MAX_VARIABLE_NUMBER, 999 on older builds) and Node's argument-spread
+    // limit — a large keepRuns=0 backlog could otherwise overflow either and, via
+    // the constructor's catch, silently disable the sweep.
+    this.db.exec("BEGIN");
+    try {
+      for (let i = 0; i < ids.length; i += 900) {
+        const chunk = ids.slice(i, i + 900);
+        const placeholders = chunk.map(() => "?").join(",");
+        this.db
+          .prepare(`DELETE FROM run_events WHERE runId IN (${placeholders})`)
+          .run(...chunk);
+        this.db
+          .prepare(`DELETE FROM audit_log WHERE runId IN (${placeholders})`)
+          .run(...chunk);
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   /**

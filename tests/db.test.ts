@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Db } from "../src/storage/db.js";
+import { Db, DEFAULT_RETENTION } from "../src/storage/db.js";
+import type { RetentionPolicy } from "../src/storage/db.js";
 
 describe("Db fresh schema (single baseline migration)", () => {
   let dir: string;
@@ -46,6 +47,11 @@ describe("Db fresh schema (single baseline migration)", () => {
       expect.arrayContaining(["id", "runId", "seq", "ts", "type", "payload"]),
     );
     expect(indexNames("run_events")).toContain("idx_run_events_run");
+    // Retention-sweep support indexes (issue #145): a plain ts index on
+    // run_events and a plain createdAt index on conversation so the age-cutoff
+    // scans are indexed rather than full-table.
+    expect(indexNames("run_events")).toContain("idx_run_events_ts");
+    expect(indexNames("conversation")).toContain("idx_conv_createdat");
 
     // workflow_runs table + its index exist on a fresh DB.
     expect(colNames("workflow_runs")).toEqual(
@@ -1532,5 +1538,246 @@ describe("Db.queryAudit (filtered audit export query)", () => {
       db2.close();
       rmSync(d2, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Db.gcRetentionSweep (bounded retention — issue #145)", () => {
+  let dir: string;
+  let db: Db;
+  // A far-future clock so rows stamped at `OLD` are unambiguously past every
+  // default retention window, while rows stamped near NOW are unambiguously
+  // inside it. (Real Date.now() ≈ 1.7e12; NOW here is ~285 000 AD.)
+  const NOW = 9_000_000_000_000;
+  const OLD = 1000; // ancient — older than any window
+
+  const retention = (over: Partial<RetentionPolicy> = {}): RetentionPolicy => ({
+    ...DEFAULT_RETENTION,
+    ...over,
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "db-gc-"));
+    db = new Db(join(dir, "state.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const audit = (ts: number, runId?: string) =>
+    db.insertAudit({
+      ts,
+      actor: "main",
+      toolName: "fs.read",
+      argsJson: "{}",
+      outcome: "ok",
+      durationMs: 1,
+      summary: "x",
+      runId,
+    });
+
+  it("prunes audit_log rows past the age window but keeps recent ones", () => {
+    audit(OLD);
+    const recent = audit(NOW - 1000);
+    // keepRows: 1 so the count floor only shields the single newest row, leaving
+    // the age cutoff free to act on the ancient one.
+    db.gcRetentionSweep(NOW, retention({ auditLogKeepRows: 1 }));
+    expect(db.listAudit().map((r) => r.id)).toEqual([recent.id]);
+  });
+
+  it("keeps the last N audit rows even when all are past the age window (count floor)", () => {
+    // Every row is ancient, but the count floor retains the most recent keepRows.
+    for (let i = 0; i < 5; i++) audit(OLD + i);
+    db.gcRetentionSweep(NOW, retention({ auditLogKeepRows: 2 }));
+    const kept = db.listAudit();
+    expect(kept.length).toBe(2);
+    // The two newest by ts are the survivors.
+    expect(kept.map((r) => r.ts)).toEqual([OLD + 4, OLD + 3]);
+  });
+
+  it("a fresh DB sweep deletes nothing (all rows within window)", () => {
+    audit(NOW - 1000);
+    audit(NOW - 2000);
+    db.gcRetentionSweep(NOW, retention());
+    expect(db.listAudit().length).toBe(2);
+  });
+
+  it("prunes run_events by whole run and co-prunes the run's audit rows", () => {
+    // Old run: both events predate the window → whole run removed.
+    db.insertRunEvent({ runId: "old", seq: 0, ts: OLD, type: "start" });
+    db.insertRunEvent({ runId: "old", seq: 1, ts: OLD + 1, type: "end" });
+    // Fresh run: recent → fully retained, every seq intact.
+    db.insertRunEvent({ runId: "fresh", seq: 0, ts: NOW - 100, type: "start" });
+    db.insertRunEvent({ runId: "fresh", seq: 1, ts: NOW - 90, type: "end" });
+    // Audit rows keyed to each run. The old run's audit row is stamped RECENT on
+    // purpose: it survives audit_log's own age sweep, proving the run co-prune
+    // (keyed on runId, not ts) is what removes it.
+    audit(NOW - 50, "old");
+    audit(NOW - 40, "fresh");
+
+    // keepRuns: 0 so the count floor shields nothing — the age cutoff alone
+    // decides. The fresh run is excluded from the expired set by the MAX(ts)
+    // HAVING filter regardless, so it is never a prune candidate.
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 0 }));
+
+    expect(db.listRunEvents("old")).toEqual([]);
+    expect(db.listRunEvents("fresh").map((e) => e.seq)).toEqual([0, 1]);
+    expect(db.listAuditByRunId("old")).toEqual([]); // co-pruned despite recent ts
+    expect(db.listAuditByRunId("fresh").length).toBe(1);
+  });
+
+  it("keeps the last N runs even when all are past the age window (count floor)", () => {
+    for (let i = 0; i < 4; i++) {
+      db.insertRunEvent({ runId: `r${i}`, seq: 0, ts: OLD + i, type: "start" });
+    }
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 2 }));
+    // The two most-recently-active runs survive; the oldest two are gone.
+    expect(db.listRunEvents("r0")).toEqual([]);
+    expect(db.listRunEvents("r1")).toEqual([]);
+    expect(db.listRunEvents("r2").length).toBe(1);
+    expect(db.listRunEvents("r3").length).toBe(1);
+  });
+
+  it("prunes conversation and recipe_selection_log by age, keeping recent rows", () => {
+    db.insertMessage({ sessionId: "s", seq: 0, role: "user", content: "old", createdAt: OLD });
+    db.insertMessage({ sessionId: "s", seq: 1, role: "user", content: "new", createdAt: NOW - 100 });
+    db.insertRecipeSelection({
+      ts: OLD,
+      sessionId: "s",
+      userInput: "old",
+      selectedRecipeIdsJson: "[]",
+      confidence: 0.5,
+    });
+    db.insertRecipeSelection({
+      ts: NOW - 100,
+      sessionId: "s",
+      userInput: "new",
+      selectedRecipeIdsJson: "[]",
+      confidence: 0.5,
+    });
+
+    // keepRows: 1 each so the age cutoff is free to drop the ancient row.
+    db.gcRetentionSweep(NOW, retention({ conversationKeepRows: 1, recipeSelLogKeepRows: 1 }));
+
+    expect(db.listMessages("s").map((m) => m.content)).toEqual(["new"]);
+    expect(db.listRecipeSelections().map((r) => r.userInput)).toEqual(["new"]);
+  });
+
+  it("hard-deletes resolved/expired events past the window but keeps open and recent ones", () => {
+    const open = db.upsertEvent({ source: "system", severity: "info", title: "open", summary: "s", createdAt: OLD });
+    const resolvedOld = db.upsertEvent({
+      source: "system", severity: "info", title: "ro", summary: "s",
+      createdAt: OLD, resolvedAt: OLD,
+    });
+    const expiredOld = db.upsertEvent({
+      source: "system", severity: "info", title: "eo", summary: "s",
+      createdAt: OLD, expiresAt: OLD,
+    });
+    const resolvedRecent = db.upsertEvent({
+      source: "system", severity: "info", title: "rr", summary: "s",
+      createdAt: NOW - 100, resolvedAt: NOW - 100,
+    });
+
+    db.gcRetentionSweep(NOW, retention());
+
+    expect(db.getEvent(open.id)).toBeTruthy(); // never resolved → kept
+    expect(db.getEvent(resolvedOld.id)).toBeUndefined();
+    expect(db.getEvent(expiredOld.id)).toBeUndefined();
+    expect(db.getEvent(resolvedRecent.id)).toBeTruthy(); // within window → kept
+  });
+
+  it("hard-deletes soft-deleted memories past the window and evicts them from the FTS index", () => {
+    const gone = db.insertMemory({ content: "uniquewidget alpha" });
+    const live = db.insertMemory({ content: "uniquewidget beta" });
+    db.forgetMemory(gone.id, OLD); // soft-deleted long ago
+
+    // Direct FTS probe: before the sweep the soft-deleted row is still indexed.
+    const ftsMatches = (term: string) =>
+      (db.raw().prepare("SELECT count(*) AS n FROM memories_fts WHERE memories_fts MATCH ?").get(term) as { n: number }).n;
+    expect(ftsMatches("uniquewidget")).toBe(2);
+
+    db.gcRetentionSweep(NOW, retention());
+
+    // Base row gone, and the AFTER DELETE trigger evicted it from the FTS index.
+    expect(db.getMemory(gone.id, { includeDeleted: true })).toBeUndefined();
+    expect(ftsMatches("uniquewidget")).toBe(1);
+    expect(db.getMemory(live.id)).toBeTruthy();
+  });
+
+  it("keeps a recently soft-deleted memory (inside the undo window)", () => {
+    const rec = db.insertMemory({ content: "recent forget" });
+    db.forgetMemory(rec.id, NOW - 100);
+    db.gcRetentionSweep(NOW, retention());
+    expect(db.getMemory(rec.id, { includeDeleted: true })?.deletedAt).toBe(NOW - 100);
+  });
+
+  it("retains active runs and the keepRuns newest expired runs (HAVING + count floor)", () => {
+    // 3 expired runs (events predate the cutoff) + 2 active runs (recent events).
+    for (let i = 0; i < 3; i++) {
+      db.insertRunEvent({ runId: `exp${i}`, seq: 0, ts: OLD + i, type: "start" });
+    }
+    db.insertRunEvent({ runId: "act0", seq: 0, ts: NOW - 200, type: "start" });
+    db.insertRunEvent({ runId: "act1", seq: 0, ts: NOW - 100, type: "start" });
+
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 2 }));
+
+    // Active runs are excluded by the MAX(ts) HAVING filter — never candidates.
+    expect(db.listRunEvents("act0").length).toBe(1);
+    expect(db.listRunEvents("act1").length).toBe(1);
+    // Among the 3 expired runs, the 2 newest survive the count floor; the oldest goes.
+    expect(db.listRunEvents("exp0")).toEqual([]);
+    expect(db.listRunEvents("exp1").length).toBe(1);
+    expect(db.listRunEvents("exp2").length).toBe(1);
+  });
+
+  it("keepRows: 0 removes every row past the cutoff (no floor)", () => {
+    audit(OLD);
+    audit(OLD + 1);
+    db.gcRetentionSweep(NOW, retention({ auditLogKeepRows: 0 }));
+    expect(db.listAudit()).toEqual([]);
+  });
+
+  it("keepRuns greater than the expired count deletes nothing (quiet-project tail)", () => {
+    db.insertRunEvent({ runId: "a", seq: 0, ts: OLD, type: "start" });
+    db.insertRunEvent({ runId: "b", seq: 0, ts: OLD + 1, type: "start" });
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 5 }));
+    expect(db.listRunEvents("a").length).toBe(1);
+    expect(db.listRunEvents("b").length).toBe(1);
+  });
+
+  it("keeps an event resolved long ago but expiring only recently (scalar MAX of stamps)", () => {
+    const split = db.upsertEvent({
+      source: "system", severity: "info", title: "split", summary: "s",
+      createdAt: OLD, resolvedAt: OLD, expiresAt: NOW - 1,
+    });
+    db.gcRetentionSweep(NOW, retention());
+    // MAX(OLD, NOW-1) = NOW-1, inside the 7-day terminal window → retained.
+    expect(db.getEvent(split.id)).toBeTruthy();
+  });
+
+  it("never co-prunes a null-runId audit row when pruning expired runs", () => {
+    db.insertRunEvent({ runId: "old", seq: 0, ts: OLD, type: "start" });
+    audit(NOW - 10, "old"); // recent ts, belongs to the expired run
+    const orphan = audit(NOW - 5); // no runId — must survive (NULL never matches IN)
+
+    db.gcRetentionSweep(NOW, retention({ runEventsKeepRuns: 0 }));
+
+    expect(db.listAuditByRunId("old")).toEqual([]);
+    expect(db.listAudit().map((r) => r.id)).toContain(orphan.id);
+  });
+
+  it("runs the sweep at construction via DbOptions (now + retention overrides)", () => {
+    const path = join(dir, "ctor.db");
+    const seed = new Db(path);
+    seed.insertAudit({ ts: OLD, actor: "main", toolName: "t", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "old" });
+    seed.insertAudit({ ts: OLD + 1, actor: "main", toolName: "t", argsJson: "{}", outcome: "ok", durationMs: 1, summary: "old2" });
+    seed.close();
+
+    // Reopen with a far-future clock: the constructor sweep prunes the ancient
+    // rows down to the count floor.
+    const reopened = new Db(path, { now: () => NOW, retention: { auditLogKeepRows: 1 } });
+    expect(reopened.listAudit().length).toBe(1);
+    reopened.close();
   });
 });
