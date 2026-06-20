@@ -176,6 +176,13 @@ describe("Ink resize reflow guard", () => {
       stderr: stdout as unknown as NodeJS.WriteStream,
       exitOnCtrlC: false,
       patchConsole: false,
+      // Force interactive: Ink only attaches its `resize` handler (and takes the
+      // erase-and-redraw clear path this test exercises) when interactive. By
+      // default Ink derives that from `!isInCi && stdout.isTTY`, so on CI runners
+      // (`CI=true` → is-in-ci true) the handler is never registered and the
+      // resize emits nothing — eraseCount stays 0. Pinning it true makes the
+      // guard's real-resize behavior deterministic on Linux CI and locally alike.
+      interactive: true,
     });
 
     try {
