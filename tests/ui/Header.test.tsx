@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import chalk from "chalk";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { Header } from "../../src/ui/components/Header.js";
 
@@ -106,17 +107,22 @@ describe("Header", () => {
     expect(frame).toMatch(/[─-]{10,}/);
   });
 
-  it("sizes the rule to the columns prop", () => {
-    // The masthead commits to <Static> (prints once, never repaints), so the rule
-    // takes the explicit cockpit width it is handed rather than yoga-filling the
-    // live region — a flex "100%" rule collapses to content width inside a Static
-    // item, which is what shrank the masthead rule to the prose width.
+  it("flex-fills its container width (so the rule reflows on resize)", () => {
+    // The masthead now renders in the repainting region, so its rule yoga-fills the
+    // live width every frame (reflowing on resize / matching the composer rules)
+    // rather than taking a frozen character count. Bound it with a width box and
+    // assert the rule fills exactly that width.
+    const WIDTH = 48;
     const frame = stripAnsi(
-      render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "",
+      render(
+        <Box width={WIDTH}>
+          <Header version="0.1.0" />
+        </Box>,
+      ).lastFrame() ?? "",
     );
     const rule = frame.split("\n").find((line) => /^[─-]+$/.test(line));
     expect(rule).toBeDefined();
-    expect(rule!.length).toBe(60);
+    expect(rule!.length).toBe(WIDTH);
   });
 
   it("places the rule directly under the project and a blank row below it", () => {
@@ -137,36 +143,45 @@ describe("Header", () => {
     expect(frame).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
-  // Regression (#138): the header commits to <Static>, where Ink lays each item out
-  // in an isolated tree with no parent width — so `width="100%"` collapsed to content
-  // width and the `wrap="truncate"` rows (notably the long log path) had no bound and
-  // physically wrapped. A numeric root width gives truncate a real bound. Lock it in:
-  // at a narrow width EVERY masthead row must fit `columns`, the rule is exactly
-  // `columns`, and the long log path truncates with an ellipsis instead of wrapping.
-  it("truncates every masthead row to the column bound (no wrapping)", () => {
+  // Regression (#138): the `wrap="truncate"` rows (notably the long log path) need a
+  // bounded container or they physically wrap. In the repainting region the header
+  // flex-fills the live width, which IS that bound. Lock it in: inside a narrow box
+  // every masthead row fits the box, the rule is exactly the box width, and the long
+  // log path truncates with an ellipsis instead of wrapping.
+  it("truncates every masthead row to its container width (no wrapping)", () => {
     const COLS = 22;
     const frame = stripAnsi(
       render(
-        <Header
-          columns={COLS}
-          version="0.1.0"
-          project="a-very-long-project-name-that-overflows"
-          tier="system"
-          logging
-          logFile="/Users/gpriday/.daintree/logs/2026-06-20-ses_02f0965b.log"
-        />,
+        <Box width={COLS}>
+          <Header
+            version="0.1.0"
+            project="a-very-long-project-name-that-overflows"
+            tier="system"
+            logging
+            logFile="/Users/gpriday/.daintree/logs/2026-06-20-ses_02f0965b.log"
+          />
+        </Box>,
       ).lastFrame() ?? "",
     );
     const rows = frame.split("\n");
     for (const row of rows) {
       expect(row.length).toBeLessThanOrEqual(COLS);
     }
-    // The full-width rule fills exactly the column bound (no more, no less).
+    // The full-width rule fills exactly the box width (no more, no less).
     expect(rows).toContain("─".repeat(COLS));
-    // The over-long log path is clipped with the truncation ellipsis, not wrapped
-    // onto a second physical row.
-    expect(frame).toContain("…");
-    expect(frame).not.toContain("ses_02f0965b.log");
+    // The log path lives on EXACTLY ONE row (the "logging" row), is clipped to the box
+    // with the truncation ellipsis, and no fragment of the path spills onto a second
+    // physical row — i.e. it truncated, it did not wrap.
+    const loggingRows = rows.filter((r) => r.includes("logging"));
+    expect(loggingRows).toHaveLength(1);
+    expect(loggingRows[0]).toContain("…");
+    expect(loggingRows[0].length).toBeLessThanOrEqual(COLS);
+    // The path is .../2026-06-20-ses_02f0965b.log — assert no row carries a later
+    // fragment (a wrap would push "ses_…"/".log" onto its own row).
+    for (const row of rows) {
+      expect(row).not.toContain("ses_02f0965b");
+      expect(row).not.toMatch(/\.log\b/);
+    }
   });
 
   it("names the active run when one is supplied", () => {

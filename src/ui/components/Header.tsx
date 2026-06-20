@@ -45,7 +45,6 @@ function tierGloss(tier: string): string {
 }
 
 export function Header({
-  columns,
   project,
   runTitle,
   tier,
@@ -54,10 +53,10 @@ export function Header({
   logFile,
   version,
 }: {
-  /** Cockpit width for the masthead rule. The header commits to <Static> (prints
-   *  once, never repaints), so an explicit count is correct here — yoga's "100%"
-   *  flex rule collapses to the content width inside a Static item, and the
-   *  resize-orphan hazard that flex avoids only exists in the repainting region. */
+  /** Accepted for back-compat (older call sites/tests pass it); now IGNORED. The
+   *  header lives in the repainting region, so it flex-fills its container ("100%")
+   *  and the rule yoga-tracks the live width — reflowing on resize like the composer
+   *  rules — instead of a frozen character count. */
   columns?: number;
   /** Name of the bound project, shown beneath the wordmark. */
   project?: string;
@@ -79,15 +78,11 @@ export function Header({
   const ver = version ?? assistantVersion();
   const gloss = tier ? tierGloss(tier) : "";
   return (
-    // Size to the EXPLICIT numeric `columns`, never `width="100%"`. The header
-    // commits to <Static>, where Ink lays each item out in an isolated tree with no
-    // parent width: a percentage there collapses to the CONTENT width, leaving the
-    // `wrap="truncate"` rows below (notably the long log path) with no bound to
-    // truncate against — so the terminal physically wraps them. A definite width is
-    // the bound truncate needs, and the Static-prints-once context means the
-    // resize-lag hazard that forces flex sizing in the live region does not apply
-    // here (same reason the Divider below already takes an explicit count).
-    <Box flexDirection="column" width={columns}>
+    // The header now renders in the REPAINTING region (not <Static>), so it flex-fills
+    // the live width: `width="100%"` resolves against the live container every frame,
+    // which both gives the `wrap="truncate"` rows below a real bound AND lets the rule
+    // re-measure on resize. `minWidth={0}` lets it shrink with a narrowing terminal.
+    <Box flexDirection="column" width="100%" minWidth={0}>
       {/* Identity: wordmark + version on one line, project name beneath it.
           minWidth=0 + truncate so a briefly-narrow terminal (a resize/host race)
           can't detonate the wordmark into a vertical char stack. */}
@@ -124,7 +119,10 @@ export function Header({
           rule. "logging" is pinned (flexShrink 0) so it is never clipped to
           "loggin", and only the path truncates on a narrow term. */}
       <Box flexDirection="column">
-        <Divider width={columns} />
+        {/* Flex rule (no fixed count): in the repainting region yoga sizes it to the
+            live width every frame, so it reflows on resize and matches the composer
+            rules exactly. */}
+        <Divider />
         <Box height={1} />
         {logging ? (
           <Box>

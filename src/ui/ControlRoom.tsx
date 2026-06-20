@@ -6,12 +6,15 @@
  *
  * INLINE MODEL (Claude Code style). The cockpit renders into the terminal's MAIN
  * screen buffer, not the alternate buffer, so the terminal's own scrollback /
- * mouse wheel / selection work natively. The masthead and completed turns are
- * committed permanently with Ink's <Static> (header is item 0): they print ONCE,
- * flow into native scrollback and never repaint. The in-flight turn, status line
- * and composer live in the repainting region pinned at the bottom. The masthead is
- * deliberately NOT live chrome — a repainting masthead lands *below* the committed
- * scrollback, beneath every finished response, instead of at the top.
+ * mouse wheel / selection work natively. Completed turns are committed permanently
+ * with Ink's <Static>: they print ONCE, flow into native scrollback and never
+ * repaint. The in-flight turn, the masthead, the status line and the composer live
+ * in the repainting region pinned at the bottom. The masthead lives here (not in
+ * <Static>) on purpose: its rule must REFLOW on resize like the composer rules,
+ * which only the repainting region can do. The accepted trade-off is that a
+ * repainting masthead settles just above the input — below the committed
+ * scrollback — rather than pinned at the very top, and history that has already
+ * scrolled off keeps its commit-time width.
  *
  * Operations and help are momentary, on-demand views rendered in place of the
  * composer (Esc returns), never a pinned panel — a pinned panel is impossible in
@@ -121,8 +124,8 @@ export interface ControlRoomProps {
   onResolve?: (approved: boolean) => void;
 }
 
-/** A <Static> item: the one-time header (no cell) or a committed transcript cell. */
-type StaticItem = { key: string; cell?: TranscriptCell };
+/** A committed transcript cell, keyed for <Static>. */
+type StaticItem = { key: string; cell: TranscriptCell };
 
 export function ControlRoom({
   project,
@@ -193,14 +196,11 @@ export function ControlRoom({
   // it only emits items appended since the last pass. `committed` is append-only
   // (it never shrinks or reorders — pull-back only ever drops the live turn), so
   // each completed turn is committed exactly once and the terminal keeps the rest.
-  // The header is item 0: printed ONCE at the very top, then free to scroll away
-  // with the history (Claude Code model). It is NOT live chrome — a live masthead
-  // repaints *below* the committed scrollback, so it ends up beneath every finished
-  // response instead of at the top. Static keeps it pinned above all history.
-  const staticItems: StaticItem[] = [
-    { key: "__header" },
-    ...committed.map((c) => ({ key: c.id, cell: c })),
-  ];
+  // The header is NOT here: it lives in the repainting region (below) so its rule
+  // reflows on resize like the composer rules. The cost — accepted deliberately — is
+  // that it sits just above the input instead of pinned at the very top, and once a
+  // message scrolls off it keeps its commit-time width.
+  const staticItems: StaticItem[] = committed.map((c) => ({ key: c.id, cell: c }));
 
   const contextHint = connected
     ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
@@ -224,27 +224,15 @@ export function ControlRoom({
   return (
     <Box flexDirection="column" width="100%" paddingRight={gutter}>
       <Static key={staticKey} items={staticItems}>
-        {(item) =>
-          item.cell ? (
-            <CellView
-              key={item.key}
-              cell={item.cell}
-              width={contentWidth}
-              now={now}
-              expanded={expanded}
-            />
-          ) : (
-            <Header
-              key="__header"
-              columns={chromeWidth}
-              project={project}
-              tier={tier}
-              destructivePending={destructivePending}
-              logging={logging}
-              logFile={logFile}
-            />
-          )
-        }
+        {(item) => (
+          <CellView
+            key={item.key}
+            cell={item.cell}
+            width={contentWidth}
+            now={now}
+            expanded={expanded}
+          />
+        )}
       </Static>
 
       {/* The live region (repaints): the in-flight turn and the status line are
@@ -278,6 +266,21 @@ export function ControlRoom({
             onResolve={onResolve}
           />
         ) : null}
+
+        {/* The masthead lives HERE, in the repainting region, so its rule reflows on
+            resize (it's a flex rule that yoga re-measures every frame) — the trade-off
+            being it settles just above the input instead of pinned at the top. It sits
+            below the in-flight turn so a completing turn commits to <Static> above it
+            without jumping past it. */}
+        <Box marginTop={1} flexDirection="column">
+          <Header
+            project={project}
+            tier={tier}
+            destructivePending={destructivePending}
+            logging={logging}
+            logFile={logFile}
+          />
+        </Box>
 
         {/* Cells own only their leading gap now, so the live turn no longer carries
             a bottom margin; this marginTop keeps one blank line between the
