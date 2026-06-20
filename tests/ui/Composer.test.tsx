@@ -4,8 +4,10 @@ import {
   Composer,
   type ComposerHandle,
 } from "../../src/ui/components/Composer.js";
+import { LIVE_CHROME_MAX_WIDTH } from "../../src/ui/liveChrome.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
+const ANSI = /\x1b\[[0-9;]*m/g;
 
 // Unmount every rendered Composer after each test. A *busy* Composer mounts the
 // animated ThinkingDot, which holds a live setInterval; without teardown those
@@ -29,6 +31,18 @@ describe("Composer", () => {
     expect(frame).toContain("commands"); // / commands hint
     expect(frame).toContain("inspect ops"); // ^O opens operations as inspect mode
     expect(frame).toContain("2 agents active");
+  });
+
+  it("keeps the input rules full-width on a wide terminal", () => {
+    const { lastFrame } = render(
+      <Composer busy={false} contextHint="agents 0 · tmr 0" onSubmit={() => {}} />,
+    );
+    const ruleWidths = (lastFrame() ?? "")
+      .split("\n")
+      .map((line) => line.replace(ANSI, ""))
+      .filter((line) => /^[─-]+$/.test(line.trim()))
+      .map((line) => line.length);
+    expect(Math.max(...ruleWidths)).toBeGreaterThan(LIVE_CHROME_MAX_WIDTH);
   });
 
   it("shows the live stage while busy", () => {

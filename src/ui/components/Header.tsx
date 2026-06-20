@@ -5,10 +5,10 @@ import { glyphs, ui } from "../theme.js";
 
 /**
  * The control-room masthead — deliberately plain text now: the wordmark + version
- * on one line, the bound project's name beneath it, then a full-width rule (a blank
- * line above and below it) closing the header off from the body. Brand identity at
- * startup is handled separately (a centered splash while the session loads); once the
- * cockpit is up the header is just a quiet label, not a logo.
+ * on one line, the bound project's name beneath it, then a full-width rule
+ * directly below the masthead. Brand identity at startup is handled separately (a
+ * centered splash while the session loads); once the cockpit is up the header is
+ * just a quiet label, not a logo.
  *
  * The rule doubles as the lip of a status strip: the debug-log line sits under it
  * when logging is active, and it's the natural home for any other at-a-glance startup
@@ -16,15 +16,14 @@ import { glyphs, ui } from "../theme.js";
  * the StatusLine, not here.
  */
 export function Header({
-  columns,
   project,
   runTitle,
   logging = false,
   logFile,
   version,
 }: {
-  /** Interior content width of the control room (used to size the rule). */
-  columns: number;
+  /** Deprecated: header width is resolved from the live Ink layout. */
+  columns?: number;
   /** Name of the bound project, shown beneath the wordmark. */
   project?: string;
   /** Subtitle: the in-flight run's intent, when a turn is active. */
@@ -38,11 +37,8 @@ export function Header({
 }) {
   const set = glyphs();
   const ver = version ?? assistantVersion();
-  const ruleWidth = Math.max(1, columns);
-  // No trailing margin: the first transcript cell owns the blank line below the
-  // header via its own marginTop, so the gap is contributed by exactly one side.
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width="100%">
       {/* Identity: wordmark + version on one line, project name beneath it.
           minWidth=0 + truncate so a briefly-narrow terminal (a resize/host race)
           can't detonate the wordmark into a vertical char stack. */}
@@ -62,13 +58,13 @@ export function Header({
           </Text>
         ) : null}
       </Box>
-      {/* The rule (blank line above via marginTop; the blank below is owned by the
-          first transcript cell's marginTop) closes the header. The debug-log line —
-          when active — sits under it as a status strip; "logging" is pinned
-          (flexShrink 0) so it is never clipped to "loggin", and only the path
-          truncates on a narrow term. */}
-      <Box flexDirection="column" marginTop={1}>
-        <Divider width={ruleWidth} />
+      {/* The full-width rule sits directly under the masthead. The blank row below
+          it belongs to the header so debug logging always starts one row after the
+          rule. "logging" is pinned (flexShrink 0) so it is never clipped to
+          "loggin", and only the path truncates on a narrow term. */}
+      <Box flexDirection="column">
+        <Divider />
+        <Box height={1} />
         {logging ? (
           <Box>
             <Box flexShrink={0}>

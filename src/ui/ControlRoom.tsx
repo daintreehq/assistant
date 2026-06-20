@@ -8,9 +8,10 @@
  * screen buffer, not the alternate buffer, so the terminal's own scrollback /
  * mouse wheel / selection work natively. Completed turns are committed permanently
  * above the live region with Ink's <Static> (they flow into native scrollback and
- * never repaint); only the in-flight turn, the status line and the composer live
- * in the repainting region pinned at the bottom. The header is printed ONCE at the
- * top and is allowed to scroll away with the history — it is not sticky.
+ * never repaint); the masthead, in-flight turn, status line and composer live in
+ * the repainting region pinned at the bottom. The masthead is live because its
+ * separator must resize with the host pane; completed transcript history remains
+ * native scrollback above it.
  *
  * Operations and help are momentary, on-demand views rendered in place of the
  * composer (Esc returns), never a pinned panel — a pinned panel is impossible in
@@ -110,8 +111,8 @@ export interface ControlRoomProps {
   onResolve?: (approved: boolean) => void;
 }
 
-/** A <Static> item: the one-time header (no cell) or a committed transcript cell. */
-type StaticItem = { key: string; cell?: TranscriptCell };
+/** A committed transcript cell emitted once through <Static>. */
+type StaticItem = { key: string; cell: TranscriptCell };
 
 export function ControlRoom({
   project,
@@ -162,13 +163,19 @@ export function ControlRoom({
   //     readability ceiling / lagged-prop width. The live full-width children (status
   //     line, composer rules) likewise fill via flex, so they can't overflow mid-resize.
   //
-  // `contentWidth` is the content-area width — one shy of the terminal, never past the
-  // readability cap — used for the static/committed cells and as the maxWidth cap.
-  // The floor (1) only guards against a zero/negative width breaking Ink's layout.
-  const contentWidth = Math.max(1, Math.min(columns - 1, CONTENT_MAX));
+  // `chromeWidth` is one shy of the terminal and is allowed to span the whole
+  // cockpit for separators/input chrome. `contentWidth` is the readable measure for
+  // prose/history cells. Keep those separate so a masthead rule can run end-to-end
+  // without making transcript prose stretch across a maximized terminal.
+  const chromeWidth = Math.max(1, columns - 1);
+  const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
 
   // Split history (committed -> Static -> native scrollback) from the live tail.
-  const liveStart = liveTailStart(transcript);
+  // The masthead itself is live chrome so its rule can resize like the composer
+  // rails. Keep a pure startup transcript (standalone MCP/log notes only) live as
+  // well, otherwise <Static> would print those notes above the live masthead.
+  const hasConversationHistory = transcript.some((cell) => cell.kind !== "note");
+  const liveStart = hasConversationHistory ? liveTailStart(transcript) : 0;
   const committed = transcript.slice(0, liveStart);
   const live = transcript.slice(liveStart);
 
@@ -176,11 +183,10 @@ export function ControlRoom({
   // it only emits items appended since the last pass. `committed` is append-only
   // (it never shrinks or reorders — pull-back only ever drops the live turn), so
   // each completed turn is committed exactly once and the terminal keeps the rest.
-  // The header is item 0: printed once, then free to scroll away with the history.
-  const staticItems: StaticItem[] = [
-    { key: "__header" },
-    ...committed.map((c) => ({ key: c.id, cell: c })),
-  ];
+  const staticItems: StaticItem[] = committed.map((c) => ({
+    key: c.id,
+    cell: c,
+  }));
 
   const contextHint = connected
     ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
@@ -191,33 +197,24 @@ export function ControlRoom({
   const showPanel = !pending && view !== "home";
 
   return (
-    <Box
-      flexDirection="column"
-      width="100%"
-      maxWidth={contentWidth + 1}
-      paddingRight={1}
-    >
+    <Box flexDirection="column" width="100%" paddingRight={1}>
       <Static key={staticKey} items={staticItems}>
-        {(item) =>
-          item.cell ? (
-            <CellView
-              key={item.key}
-              cell={item.cell}
-              width={contentWidth}
-              now={now}
-              expanded={expanded}
-            />
-          ) : (
-            <Header
-              key="__header"
-              columns={contentWidth}
-              project={project}
-              logging={logging}
-              logFile={logFile}
-            />
-          )
-        }
+        {(item) => (
+          <CellView
+            key={item.key}
+            cell={item.cell}
+            width={contentWidth}
+            now={now}
+            expanded={expanded}
+          />
+        )}
       </Static>
+      <Header
+        columns={chromeWidth}
+        project={project}
+        logging={logging}
+        logFile={logFile}
+      />
 
       {/* The live region (repaints): the in-flight turn and the status line are
           always shown; only the bottom slot swaps the composer for an on-demand

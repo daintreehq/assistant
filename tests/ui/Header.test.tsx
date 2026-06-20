@@ -40,6 +40,28 @@ describe("Header", () => {
     expect(frame).toMatch(/[─-]{10,}/);
   });
 
+  it("does not cap the rule to the columns prop", () => {
+    const frame = stripAnsi(
+      render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "",
+    );
+    const rule = frame.split("\n").find((line) => /^[─-]+$/.test(line));
+    expect(rule).toBeDefined();
+    expect(rule!.length).toBeGreaterThan(60);
+  });
+
+  it("places the rule directly under the project and a blank row below it", () => {
+    const frame = stripAnsi(
+      render(
+        <Header columns={60} version="0.1.0" project="Daintree Assistant" />,
+      ).lastFrame() ?? "",
+    );
+    const lines = frame.split("\n");
+    expect(lines[0]).toContain("Daintree Assistant v0.1.0");
+    expect(lines[1]).toBe("Daintree Assistant");
+    expect(lines[2]).toMatch(/^[─-]+$/);
+    expect(lines[3]).toBe("");
+  });
+
   it("shows no emoji or brand mark — plain text only", () => {
     const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
     expect(frame).not.toMatch(/\p{Extended_Pictographic}/u);
@@ -67,17 +89,17 @@ describe("Header", () => {
     expect(frame).toContain("/tmp/daintree.log");
   });
 
-  // Guards the header's rendered row count. The header owns the blank line ABOVE
-  // its rule (marginTop) but NOT a trailing blank — the first transcript cell owns
-  // the gap below the header via its own marginTop, so the two never double up.
+  // Guards the header's rendered row count. The header owns the blank line BELOW
+  // its rule so debug logging and the first transcript row never sit flush against
+  // the masthead separator.
   it("renders a stable row count", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    // wordmark (1) + blank above rule + rule = 3.
+    // wordmark (1) + rule + blank below rule = 3.
     expect(rows(<Header columns={60} version="0.1.0" />)).toBe(3);
-    // + the logging line under the rule = 4.
+    // + the logging line after the blank row = 4.
     expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(4);
-    // wordmark + project + run subtitle = 3 text rows + blank + rule = 5.
+    // wordmark + project + run subtitle = 3 text rows + rule + blank = 5.
     expect(
       rows(<Header columns={60} version="0.1.0" project="p" runTitle="busy" />),
     ).toBe(5);

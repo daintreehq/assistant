@@ -5,7 +5,6 @@ import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
-import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
 
 /**
  * Slash commands surfaced as a filterable palette — described by intent. Derived
@@ -106,7 +105,7 @@ export function Composer({
   }
 
   return (
-    <Box flexDirection="column" width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
+    <Box flexDirection="column" width="100%">
       {suggestions.length > 0 ? (
         <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {suggestions.map(([cmd, desc]) => (

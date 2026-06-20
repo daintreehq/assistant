@@ -3,6 +3,7 @@ import { ControlRoom, type View } from "../../src/ui/ControlRoom.js";
 import type { PanelKey } from "../../src/cli/commandData.js";
 import { buildFixtures, FIXED_NOW } from "../../src/ui/dev/fixtures.js";
 import { LIVE_CHROME_MAX_WIDTH } from "../../src/ui/liveChrome.js";
+import type { TranscriptCell } from "../../src/ui/types.js";
 
 const fixtures = buildFixtures();
 const byKey = (label: string) => fixtures.find((f) => f.label === label)!;
@@ -47,7 +48,7 @@ const visibleWidth = (line: string): number => line.replace(ANSI, "").length;
 
 /**
  * Width below every live value in the oscillation. We commit the `<Static>` region
- * (the one-time header, plus any already-finished turns) at THIS narrow width on
+ * (any already-finished turns) at THIS narrow width on
  * the first render — modelling "the history scrolled past while the pane was
  * narrow". Ink's `<Static>` emits each item exactly once and never repaints it, so
  * those rows are EXEMPT from the orphan bug (they print once and flow into native
@@ -60,7 +61,12 @@ const STATIC_SEED_COLUMNS = 40;
 const renderControlRoom = (
   label: string,
   columns: number,
-  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean },
+  over: {
+    view?: View;
+    activePanel?: PanelKey | null;
+    expanded?: boolean;
+    transcript?: TranscriptCell[];
+  },
 ) => {
   const f = byKey(label);
   return (
@@ -69,7 +75,7 @@ const renderControlRoom = (
       tier="system"
       columns={columns}
       connected={f.connected}
-      transcript={f.transcript}
+      transcript={over.transcript ?? f.transcript}
       dashboard={f.dashboard}
       sessionUsage={f.sessionUsage}
       previews={f.previews}
@@ -105,11 +111,16 @@ function liveFrame(
   label: string,
   propColumns: number,
   liveColumns: number,
-  over: { view?: View; activePanel?: PanelKey | null; expanded?: boolean } = {},
+  over: {
+    view?: View;
+    activePanel?: PanelKey | null;
+    expanded?: boolean;
+    transcript?: TranscriptCell[];
+  } = {},
 ): string {
   // First render at the narrow seed so the <Static> region commits (once) at a
-  // width that fits every live value below — keeping the exempt header/history out
-  // of the assertion.
+  // width that fits every live value below — keeping exempt history out of the
+  // assertion.
   const { rerender, stdout, lastFrame } = render(
     renderControlRoom(label, STATIC_SEED_COLUMNS, over),
   );
@@ -200,9 +211,10 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
 
   it("idle chrome is already narrow-pane safe before a shrink", () => {
     // The prior regression only checked the frame AFTER a shrink. The real
-    // terminal reflows the OLD wide frame first, so full-width status/divider/footer
-    // rows can gain physical rows before Ink erases them and leave "Standing by"
-    // orphaned above the new frame.
+    // terminal reflows the OLD wide frame first, so full-width status/footer rows
+    // can gain physical rows before Ink erases them and leave "Standing by" orphaned
+    // above the new frame. Full-width composer rules are visual separators and are
+    // allowed to match the transcript width.
     const frame = liveFrame("idle", 80, 80);
     const unsafe = frame.split("\n").filter((line) => {
       const plain = line.replace(ANSI, "");
@@ -210,8 +222,7 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         plain.includes("Standing by") ||
         plain.includes("Ask Daintree") ||
         plain.includes("commands") ||
-        /^agents \d+/.test(plain.trim()) ||
-        /^[─-]+$/.test(plain.trim());
+        /^agents \d+/.test(plain.trim());
       return isIdleChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
     });
     expect(unsafe).toEqual([]);
@@ -226,18 +237,51 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         plain.includes("Ask Daintree") ||
         plain.includes("queued") ||
         plain.includes("commands") ||
-        /^agents \d+/.test(plain.trim()) ||
-        /^[─-]+$/.test(plain.trim());
+        /^agents \d+/.test(plain.trim());
       return isBusyChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
     });
     expect(unsafe).toEqual([]);
+  });
+
+  it("initial masthead rule spans the full cockpit width, not the prose cap", () => {
+    // The masthead is live chrome, so it must follow the live terminal width even
+    // when the React `columns` prop is stale/narrow.
+    const frame = liveFrame("idle", 80, 120);
+    const firstRule = frame
+      .split("\n")
+      .find((line) => /^[─-]+$/.test(line.replace(ANSI, "").trim()));
+    expect(firstRule).toBeDefined();
+    expect(visibleWidth(firstRule!)).toBeGreaterThan(100);
+  });
+
+  it("startup notes stay below the live masthead", () => {
+    const frame = liveFrame("idle", 80, 120, {
+      transcript: [
+        {
+          kind: "note",
+          id: "note_connected",
+          level: "info",
+          text: "Connected to Daintree MCP.",
+          ts: FIXED_NOW,
+        },
+      ],
+    });
+    const lines = frame.split("\n").map((line) => line.replace(ANSI, ""));
+    const headerLine = lines.findIndex((line) =>
+      line.includes("Daintree Assistant"),
+    );
+    const noteLine = lines.findIndex((line) =>
+      line.includes("Connected to Daintree MCP."),
+    );
+    expect(headerLine).toBeGreaterThanOrEqual(0);
+    expect(noteLine).toBeGreaterThan(headerLine);
   });
 });
 
 describe("ControlRoom inline cockpit (golden frames)", () => {
   it.each(WIDTHS)("prints the masthead + composer, idle reads as standing by (%i cols)", (w) => {
     const frame = frameFor("idle", w);
-    expect(frame).toContain("Daintree Assistant"); // one-time header banner (scrolls away)
+    expect(frame).toContain("Daintree Assistant"); // live masthead
     expect(frame).toContain("MCP"); // connection lives in the status line
     expect(frame).toContain("Standing by"); // what is it doing?
     expect(frame).toContain("commands"); // composer hint: / opens the palette

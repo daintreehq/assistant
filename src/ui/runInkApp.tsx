@@ -2,6 +2,7 @@ import { render } from "ink";
 import { createElement } from "react";
 import type { App } from "../cli/app.js";
 import { DaintreeInkApp } from "./DaintreeInkApp.js";
+import { installInkResizeReflowGuard } from "./inkResizeReflowGuard.js";
 
 export interface InkAppOptions {
   /**
@@ -22,6 +23,7 @@ export async function startInkApp(app: App): Promise<void> {
     patchConsole: true,
     kittyKeyboard: { mode: "auto" },
   });
+  await installInkResizeReflowGuard(process.stdout);
 
   try {
     await instance.waitUntilExit();
