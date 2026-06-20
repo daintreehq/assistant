@@ -385,4 +385,53 @@ describe("ControlRoom operations view (on-demand, replaces the composer)", () =>
     expect(frame).not.toContain("RECENT");
     expect(frame).not.toContain("NOW");
   });
+
+  // Wire-through of the destructivePending escalation (#154): ControlRoom owns the
+  // risk-class decision (git/system are destructive) and the Header just renders the
+  // boolean. ui.color.danger is #FB7185 → SGR 38;2;251;113;133. Scope the assertion
+  // to the TIER line so unrelated red elsewhere (an approval sheet, an error badge)
+  // can't mask the signal we're proving.
+  describe("tier escalation by pending risk class (#154)", () => {
+    const DANGER = "38;2;251;113;133";
+    const tierLineHasDanger = (risk: string | null) => {
+      const f = byKey("approval"); // a fixture with a pending confirm
+      const pending =
+        risk === null
+          ? null
+          : { ...f.pending!, request: { ...f.pending!.request, risk } as any };
+      const { lastFrame } = render(
+        <ControlRoom
+          project="assistant"
+          tier="system"
+          columns={80}
+          connected={f.connected}
+          transcript={f.transcript}
+          dashboard={f.dashboard}
+          busy={f.busy}
+          stage={f.stage}
+          view="home"
+          pending={pending}
+          now={FIXED_NOW}
+          composerFocus={false}
+        />,
+      );
+      const tierLine = (lastFrame() ?? "")
+        .split("\n")
+        .find((l) => l.includes("tier ") && l.includes("system"));
+      return (tierLine ?? "").includes(DANGER);
+    };
+
+    it("colors the system tier red while a git/system confirm is pending", () => {
+      expect(tierLineHasDanger("git")).toBe(true);
+      expect(tierLineHasDanger("system")).toBe(true);
+    });
+
+    it("keeps the tier quiet for a non-destructive (external) confirm", () => {
+      expect(tierLineHasDanger("external")).toBe(false);
+    });
+
+    it("keeps the tier quiet when nothing is pending", () => {
+      expect(tierLineHasDanger(null)).toBe(false);
+    });
+  });
 });

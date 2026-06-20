@@ -403,12 +403,15 @@ export function epistemicMark(
 }
 
 // Severity ranks for ordering (lower = more urgent). The status line and the
-// attention surfaces share this so they never disagree on the worst event.
+// attention surfaces share this so they never disagree on the worst event. The
+// order mirrors the DB's canonical SEVERITY_ORDER (`storage/db.ts`, where higher =
+// more severe) inverted, so the chip color agrees with how the inbox itself is
+// sorted: `error` is the most severe, then `urgent`, `blocked`, `attention`.
 const SEVERITY_RANK: Record<string, number> = {
-  blocked: 0,
-  urgent: 0,
-  error: 1,
-  attention: 2,
+  error: 0,
+  urgent: 1,
+  blocked: 2,
+  attention: 3,
   done: 4,
   info: 5,
   debug: 6,

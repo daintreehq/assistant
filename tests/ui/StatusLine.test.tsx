@@ -126,18 +126,31 @@ describe("StatusLine", () => {
     expect(frame).toContain("!2");
   });
 
+  // Truecolor SGRs for the relevant tones (ink-testing-library forces color).
+  const DANGER = "38;2;251;113;133"; // error → danger (#FB7185)
+  const WARNING = "38;2;246;200;95"; // attention → warning (#F6C85F)
+  const BLOCKED = "38;2;196;181;253"; // blocked/urgent → blocked (#C4B5FD)
+
   it("colors the chip by the MOST urgent item, not the inbox head (#154)", () => {
     // Pass the worst event LAST to prove the color comes from topSeverity(), not an
-    // implicit inbox[0] ordering. #FB7185 (danger) is the error tone; #F6C85F
-    // (warning) is the attention tone.
-    const DANGER = "38;2;251;113;133";
-    const WARNING = "38;2;246;200;95";
+    // implicit inbox[0] ordering.
     const frame =
       render(<StatusLine dashboard={dash({ inbox: [event("attention"), event("error")] })} />)
         .lastFrame() ?? "";
     expect(frame).toContain("!2");
     expect(frame).toContain(DANGER); // worst item (error) drives the color
     expect(frame).not.toContain(WARNING); // not the head item's (attention) tone
+  });
+
+  it("ranks error above blocked for the chip color, matching DB severity order (#154)", () => {
+    // SEVERITY_RANK mirrors the DB's canonical order, so a mixed inbox colors the
+    // chip by `error` (danger/red), not `blocked` (purple) — regardless of position.
+    const frame =
+      render(<StatusLine dashboard={dash({ inbox: [event("blocked"), event("error")] })} />)
+        .lastFrame() ?? "";
+    expect(frame).toContain("!2");
+    expect(frame).toContain(DANGER); // error wins
+    expect(frame).not.toContain(BLOCKED); // not the blocked tone
   });
 
   it("flags a degraded MCP connection", () => {
