@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { ControlRoom, type View } from "../../src/ui/ControlRoom.js";
 import type { PanelKey } from "../../src/cli/commandData.js";
@@ -393,6 +394,16 @@ describe("ControlRoom operations view (on-demand, replaces the composer)", () =>
   // can't mask the signal we're proving.
   describe("tier escalation by pending risk class (#154)", () => {
     const DANGER = "38;2;251;113;133";
+    // Ink emits the danger SGR only when chalk's color level is non-zero; pin it to
+    // truecolor (restoring after) so the assertion is deterministic on a non-TTY CI.
+    let prevLevel: typeof chalk.level;
+    beforeEach(() => {
+      prevLevel = chalk.level;
+      chalk.level = 3;
+    });
+    afterEach(() => {
+      chalk.level = prevLevel;
+    });
     const tierLineHasDanger = (risk: string | null) => {
       const f = byKey("approval"); // a fixture with a pending confirm
       const pending =
