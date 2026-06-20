@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { Header } from "../../src/ui/components/Header.js";
 
@@ -33,13 +34,53 @@ describe("Header", () => {
   });
 
   it("shows the permission tier with a plain-English gloss", () => {
-    // The system tier colors its name red, so "tier" and "system" land in separate
-    // spans with an SGR reset between them — strip color before asserting the row.
+    // The tier name sits in its own <Text> span (dim, color escalates by exception),
+    // so "tier" and "system" land in separate spans with an SGR reset between them —
+    // strip color before asserting the row.
     const frame = stripAnsi(
       render(<Header columns={60} version="0.1.0" tier="system" />).lastFrame() ?? "",
     );
     expect(frame).toContain("tier system"); // labelled, not a bare token
     expect(frame).toContain("full access"); // gloss explains what it grants
+  });
+
+  // ui.color.danger is the #FB7185 truecolor, emitted by Ink as the SGR
+  // 38;2;251;113;133. Asserting its presence/absence is how we prove the tier is
+  // quiet at rest and red only by exception. Ink emits color only when chalk's color
+  // level is non-zero; a non-TTY CI run defaults it to 0 and would strip every code,
+  // so pin it to truecolor for these tests (and restore it after) to make the color
+  // assertions deterministic across local and CI.
+  describe("tier color escalation", () => {
+    const DANGER_SGR = "38;2;251;113;133";
+    let prevLevel: typeof chalk.level;
+    beforeEach(() => {
+      prevLevel = chalk.level;
+      chalk.level = 3;
+    });
+    afterEach(() => {
+      chalk.level = prevLevel;
+    });
+
+    it("keeps the system tier quiet at rest, not alarm-red", () => {
+      // At rest no destructive action is pending, so the `system` tier must NOT carry
+      // the danger color — a steady red capsule is alarm fatigue. The tier word is
+      // still present; only its color is muted to dim.
+      const frame =
+        render(<Header columns={60} version="0.1.0" tier="system" />).lastFrame() ?? "";
+      expect(stripAnsi(frame)).toContain("tier system"); // still rendered
+      expect(frame).not.toContain(DANGER_SGR); // no red anywhere at rest
+    });
+
+    it("escalates the tier to danger color when a destructive action is pending", () => {
+      // Red is reserved for the moment it earns attention: a git/system confirmation
+      // in flight. The controller passes destructivePending and the tier turns red.
+      const frame =
+        render(
+          <Header columns={60} version="0.1.0" tier="system" destructivePending />,
+        ).lastFrame() ?? "";
+      expect(stripAnsi(frame)).toContain("tier system");
+      expect(frame).toContain(DANGER_SGR); // danger color present on the tier
+    });
   });
 
   it("glosses each tier so the level is self-explaining", () => {

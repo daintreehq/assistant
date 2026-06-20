@@ -1,4 +1,4 @@
-import { useImperativeHandle, useState, type Ref } from "react";
+import { Fragment, useImperativeHandle, useState, type Ref } from "react";
 import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
 import { glyphs, ui, unicodeOk } from "../theme.js";
@@ -50,6 +50,7 @@ export function Composer({
   queueDepth = 0,
   contextHint,
   cancellable,
+  attentionPending = false,
   onSubmit,
   onCancel,
   ref,
@@ -67,6 +68,9 @@ export function Composer({
   /** Whether the in-flight turn can be aborted; gates the "Esc cancel" hint.
    *  Defaults to `busy` so callers that don't distinguish turn kinds still show it. */
   cancellable?: boolean;
+  /** Actionable attention is waiting in the inbox: when no cancellable turn is in
+   *  flight, lead the hint row with `^O` so the operator notices the ops view. */
+  attentionPending?: boolean;
   onSubmit: (value: string) => boolean | void | Promise<void>;
   /** Abort the in-flight turn — invoked on Escape when the composer is empty and
    *  busy. With text present, Escape clears the buffer instead (no cancel). */
@@ -87,6 +91,22 @@ export function Composer({
   // on the same character set (no mixed Unicode/ASCII within one composer line).
   const ascii = !unicodeOk();
   const set = glyphs(ascii);
+
+  // The hint row order adapts to what is most relevant right now, but the set of
+  // hints stays stable (no new chrome — just promotion). A cancellable turn in
+  // flight leads with Esc so the abort gesture is discoverable exactly when it
+  // applies; failing that, pending actionable attention leads with `^O` to pull the
+  // eye toward the ops view. Cancel takes precedence over attention. `^O` is emitted
+  // exactly once regardless of which branch promotes it. The Esc hint still appears
+  // only while a turn is cancellable (falling back to `busy`), unchanged.
+  const cancelActive = cancellable ?? busy;
+  const leadWithOps = attentionPending && !cancelActive;
+  const hints: Array<{ key: string; action: string }> = [];
+  if (cancelActive) hints.push({ key: "Esc", action: "cancel" });
+  if (leadWithOps) hints.push({ key: "^O", action: "inspect ops" });
+  hints.push({ key: "/", action: "commands" });
+  hints.push({ key: "↑", action: "history" });
+  if (!leadWithOps) hints.push({ key: "^O", action: "inspect ops" });
 
   function submit(text: string) {
     const trimmed = text.trim();
@@ -160,20 +180,12 @@ export function Composer({
 
       <Box flexDirection="column">
         <Text wrap="truncate">
-          <KeyHint keyName="/" action="commands" />
-          <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="↑" action="history" />
-          <Text dimColor>{" · "}</Text>
-          <KeyHint keyName="^O" action="inspect ops" />
-          {/* Surfaced only while a cancellable turn runs, so the gesture is
-              discoverable exactly when it applies (Escape on the empty composer).
-              Falls back to `busy` when the caller doesn't distinguish turn kinds. */}
-          {(cancellable ?? busy) ? (
-            <>
-              <Text dimColor>{" · "}</Text>
-              <KeyHint keyName="Esc" action="cancel" />
-            </>
-          ) : null}
+          {hints.map((h, i) => (
+            <Fragment key={h.key}>
+              {i > 0 ? <Text dimColor>{" · "}</Text> : null}
+              <KeyHint keyName={h.key} action={h.action} />
+            </Fragment>
+          ))}
         </Text>
         {/* Truncate so a long context summary (many agents/timers) can't widen this
             row past the live terminal and orphan a wrapped row into scrollback

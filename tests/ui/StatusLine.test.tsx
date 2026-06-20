@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { StatusLine } from "../../src/ui/components/StatusLine.js";
 import type { DashboardState, SessionUsage } from "../../src/ui/types.js";
@@ -117,10 +118,52 @@ describe("StatusLine", () => {
   });
 
   it("shows an attention chip when the inbox is non-empty", () => {
+    // The inbox is controller-filtered to actionable severities (>= attention), so
+    // its length IS the actionable count — non-actionable debug/info/done never reach
+    // the chip.
     const frame =
       render(<StatusLine dashboard={dash({ inbox: [event("error"), event("attention")] })} />)
         .lastFrame() ?? "";
     expect(frame).toContain("!2");
+  });
+
+  // The chip COLOR is only observable via the SGR codes, which Ink emits only when
+  // chalk's color level is non-zero. A non-TTY CI run defaults it to 0, so pin it to
+  // truecolor for these tests (restoring after) to make the assertions deterministic.
+  describe("attention chip color", () => {
+    const DANGER = "38;2;251;113;133"; // error → danger (#FB7185)
+    const WARNING = "38;2;246;200;95"; // attention → warning (#F6C85F)
+    const BLOCKED = "38;2;196;181;253"; // blocked/urgent → blocked (#C4B5FD)
+    let prevLevel: typeof chalk.level;
+    beforeEach(() => {
+      prevLevel = chalk.level;
+      chalk.level = 3;
+    });
+    afterEach(() => {
+      chalk.level = prevLevel;
+    });
+
+    it("colors the chip by the MOST urgent item, not the inbox head (#154)", () => {
+      // Pass the worst event LAST to prove the color comes from topSeverity(), not an
+      // implicit inbox[0] ordering.
+      const frame =
+        render(<StatusLine dashboard={dash({ inbox: [event("attention"), event("error")] })} />)
+          .lastFrame() ?? "";
+      expect(frame).toContain("!2");
+      expect(frame).toContain(DANGER); // worst item (error) drives the color
+      expect(frame).not.toContain(WARNING); // not the head item's (attention) tone
+    });
+
+    it("ranks error above blocked for the chip color, matching DB severity order (#154)", () => {
+      // SEVERITY_RANK mirrors the DB's canonical order, so a mixed inbox colors the
+      // chip by `error` (danger/red), not `blocked` (purple) — regardless of position.
+      const frame =
+        render(<StatusLine dashboard={dash({ inbox: [event("blocked"), event("error")] })} />)
+          .lastFrame() ?? "";
+      expect(frame).toContain("!2");
+      expect(frame).toContain(DANGER); // error wins
+      expect(frame).not.toContain(BLOCKED); // not the blocked tone
+    });
   });
 
   it("flags a degraded MCP connection", () => {

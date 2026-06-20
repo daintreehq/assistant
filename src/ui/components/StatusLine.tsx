@@ -16,7 +16,7 @@ import { Box, Text } from "ink";
 import { Fragment, type ReactNode } from "react";
 import type { DashboardState, SessionUsage } from "../types.js";
 import { StateBadge, formatDuration } from "../primitives.js";
-import { severityTone, toneColor, ui } from "../theme.js";
+import { severityTone, toneColor, topSeverity, ui } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
 import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
@@ -43,9 +43,14 @@ export function StatusLine({
   const agents = buildAgentRows(dashboard.watchers);
   const active =
     agents.find((a) => a.classification === "still_working") ?? agents[0];
+  // The inbox is already filtered to actionable severities (>= attention) at the
+  // controller boundary, so its length IS the actionable count — debug/info/done
+  // never reach here. Derive the chip color from the worst item explicitly via
+  // topSeverity() rather than trusting inbox[0]'s implicit DB ordering, so the
+  // "most urgent wins" contract is visible at the callsite, not a hidden invariant.
   const attention = dashboard.inbox.length;
   const connected = dashboard.mcp.connected;
-  const topSev = dashboard.inbox[0]?.severity ?? "attention";
+  const topSev = topSeverity(dashboard.inbox) ?? "attention";
 
   // Context pressure: latest estimate over the auto-compact threshold. Only shown
   // once a usage event has arrived (threshold > 0). Dim by default; amber as it

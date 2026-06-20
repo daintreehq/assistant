@@ -184,6 +184,57 @@ describe("Composer", () => {
     expect(busy.lastFrame() ?? "").toContain("cancel");
   });
 
+  // The hint row is a single truncating line; strip ANSI and read it back to assert
+  // the ORDER of the promoted hint, and that ^O never appears twice.
+  const hintLine = (frame: string) =>
+    (frame.replace(ANSI, "").split("\n").find((l) => l.includes("commands")) ?? "");
+
+  it("leads the hint row with ^O when actionable attention is pending (#154)", () => {
+    const { lastFrame } = render(
+      <Composer busy={false} focus attentionPending onSubmit={() => {}} />,
+    );
+    const line = hintLine(lastFrame() ?? "");
+    expect(line).toContain("inspect ops");
+    // ^O is promoted to the front, ahead of the commands hint.
+    expect(line.indexOf("inspect ops")).toBeLessThan(line.indexOf("commands"));
+    // …and it is emitted exactly once (not duplicated into the trailing slot).
+    expect(line.match(/inspect ops/g)?.length).toBe(1);
+  });
+
+  it("keeps ^O in its trailing slot when no attention is pending (#154)", () => {
+    const { lastFrame } = render(
+      <Composer busy={false} focus onSubmit={() => {}} />,
+    );
+    const line = hintLine(lastFrame() ?? "");
+    // Default order: commands first, ^O last.
+    expect(line.indexOf("commands")).toBeLessThan(line.indexOf("inspect ops"));
+    expect(line.match(/inspect ops/g)?.length).toBe(1);
+  });
+
+  it("leads with Esc cancel over ^O when a cancellable turn is in flight (#154)", () => {
+    const { lastFrame } = render(
+      <Composer busy cancellable focus attentionPending onSubmit={() => {}} />,
+    );
+    const line = hintLine(lastFrame() ?? "");
+    // Cancel takes precedence: Esc leads even though attention is pending.
+    expect(line).toContain("cancel");
+    expect(line.indexOf("cancel")).toBeLessThan(line.indexOf("commands"));
+    expect(line.indexOf("cancel")).toBeLessThan(line.indexOf("inspect ops"));
+    // ^O is not promoted here, so it stays a single trailing hint.
+    expect(line.match(/inspect ops/g)?.length).toBe(1);
+  });
+
+  it("does not promote ^O for a non-cancellable busy turn with attention (#154)", () => {
+    // cancellable={false} suppresses the Esc hint, and attention then leads with ^O.
+    const { lastFrame } = render(
+      <Composer busy cancellable={false} focus attentionPending onSubmit={() => {}} />,
+    );
+    const line = hintLine(lastFrame() ?? "");
+    expect(line).not.toContain("cancel");
+    expect(line.indexOf("inspect ops")).toBeLessThan(line.indexOf("commands"));
+    expect(line.match(/inspect ops/g)?.length).toBe(1);
+  });
+
   it("Escape on an empty composer while busy aborts the turn (#45)", async () => {
     let cancelled = 0;
     const { stdin } = render(
