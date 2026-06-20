@@ -2,6 +2,7 @@ import { render } from "ink-testing-library";
 import { ControlRoom, type View } from "../../src/ui/ControlRoom.js";
 import type { PanelKey } from "../../src/cli/commandData.js";
 import { buildFixtures, FIXED_NOW } from "../../src/ui/dev/fixtures.js";
+import { LIVE_CHROME_MAX_WIDTH } from "../../src/ui/liveChrome.js";
 
 const fixtures = buildFixtures();
 const byKey = (label: string) => fixtures.find((f) => f.label === label)!;
@@ -143,7 +144,7 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         const frame = liveFrame(fixture, prop, live);
         const overflowing = frame
           .split("\n")
-          .filter((line) => visibleWidth(line) > live);
+          .filter((line) => visibleWidth(line) >= live);
         expect(overflowing).toEqual([]);
       },
     );
@@ -155,7 +156,7 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
       const frame = liveFrame("idle", prop, live, { view: "help" });
       const overflowing = frame
         .split("\n")
-        .filter((line) => visibleWidth(line) > live);
+        .filter((line) => visibleWidth(line) >= live);
       expect(overflowing).toEqual([]);
     },
   );
@@ -168,7 +169,7 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
       const frame = liveFrame("active", prop, live, { view: "operations" });
       const overflowing = frame
         .split("\n")
-        .filter((line) => visibleWidth(line) > live);
+        .filter((line) => visibleWidth(line) >= live);
       expect(overflowing).toEqual([]);
     },
   );
@@ -180,7 +181,7 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
       const frame = liveFrame("active", prop, live, { expanded: true });
       const overflowing = frame
         .split("\n")
-        .filter((line) => visibleWidth(line) > live);
+        .filter((line) => visibleWidth(line) >= live);
       expect(overflowing).toEqual([]);
     },
   );
@@ -195,6 +196,41 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         .length;
       expect(count).toBe(1);
     }
+  });
+
+  it("idle chrome is already narrow-pane safe before a shrink", () => {
+    // The prior regression only checked the frame AFTER a shrink. The real
+    // terminal reflows the OLD wide frame first, so full-width status/divider/footer
+    // rows can gain physical rows before Ink erases them and leave "Standing by"
+    // orphaned above the new frame.
+    const frame = liveFrame("idle", 80, 80);
+    const unsafe = frame.split("\n").filter((line) => {
+      const plain = line.replace(ANSI, "");
+      const isIdleChrome =
+        plain.includes("Standing by") ||
+        plain.includes("Ask Daintree") ||
+        plain.includes("commands") ||
+        /^agents \d+/.test(plain.trim()) ||
+        /^[─-]+$/.test(plain.trim());
+      return isIdleChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
+    });
+    expect(unsafe).toEqual([]);
+  });
+
+  it("active/busy chrome is already narrow-pane safe before a shrink", () => {
+    const frame = liveFrame("active", 80, 80);
+    const unsafe = frame.split("\n").filter((line) => {
+      const plain = line.replace(ANSI, "");
+      const isBusyChrome =
+        plain.includes("WORKING") ||
+        plain.includes("Ask Daintree") ||
+        plain.includes("queued") ||
+        plain.includes("commands") ||
+        /^agents \d+/.test(plain.trim()) ||
+        /^[─-]+$/.test(plain.trim());
+      return isBusyChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
+    });
+    expect(unsafe).toEqual([]);
   });
 });
 

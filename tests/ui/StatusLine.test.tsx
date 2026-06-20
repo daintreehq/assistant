@@ -103,6 +103,22 @@ describe("StatusLine", () => {
     expect(frame).toContain("MCP");
   });
 
+  it("keeps context pressure visible during an active run", () => {
+    const frame =
+      render(
+        <StatusLine
+          dashboard={dash({ watchers: [watcher()] })}
+          sessionUsage={usage()}
+          tier="operator"
+          width={80}
+          now={0}
+        />,
+      ).lastFrame() ?? "";
+    expect(frame).toContain("CTX 42%");
+    expect(frame).not.toContain("$0.012");
+    expect(frame).not.toContain("minimax-m3");
+  });
+
   it("leaves no orphan separator when no tier is provided during a run", () => {
     const frame =
       render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";

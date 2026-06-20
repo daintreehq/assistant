@@ -5,6 +5,7 @@ import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
+import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
 
 /**
  * Slash commands surfaced as a filterable palette — described by intent. Derived
@@ -105,7 +106,7 @@ export function Composer({
   }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
       {suggestions.length > 0 ? (
         <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {suggestions.map(([cmd, desc]) => (
@@ -142,26 +143,24 @@ export function Composer({
             placeholder="Ask Daintree to supervise, delegate, or inspect…"
           />
         </Box>
-        {busy ? (
-          // Truncate rather than let a long stage label widen this row past the
-          // live terminal — the composer is in the repainting region, and an
-          // over-wide row wraps and orphans into scrollback during a pane resize
-          // (#138). flexShrink lets yoga reclaim the space; the input keeps its grow.
-          <Box marginLeft={1} flexShrink={1}>
-            <Text color={ui.color.info} wrap="truncate">
-              <ThinkingDot ascii={ascii} /> {stage}
-              {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
-            </Text>
-          </Box>
-        ) : null}
       </Box>
+
+      {busy ? (
+        // Keep the busy indicator on its own short row. Sharing the prompt row
+        // forces either the placeholder or the stage to truncate inside the
+        // shrink-safe chrome budget.
+        <Text color={ui.color.info} wrap="truncate">
+          <ThinkingDot ascii={ascii} /> {stage}
+          {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
+        </Text>
+      ) : null}
 
       {/* Bracket the input top AND bottom so the field reads unmistakably as the
           place text goes — the hints below sit outside the rule. */}
       <Divider />
 
-      <Box justifyContent="space-between">
-        <Box>
+      <Box flexDirection="column">
+        <Text wrap="truncate">
           <KeyHint keyName="/" action="commands" />
           <Text dimColor>{" · "}</Text>
           <KeyHint keyName="↑" action="history" />
@@ -176,16 +175,14 @@ export function Composer({
               <KeyHint keyName="Esc" action="cancel" />
             </>
           ) : null}
-        </Box>
+        </Text>
         {/* Truncate so a long context summary (many agents/timers) can't widen this
-            space-between row past the live terminal and orphan a wrapped row into
-            scrollback during a pane resize (#138). */}
+            row past the live terminal and orphan a wrapped row into scrollback
+            during a pane resize (#138). */}
         {contextHint ? (
-          <Box flexShrink={1}>
-            <Text dimColor wrap="truncate">
-              {contextHint}
-            </Text>
-          </Box>
+          <Text dimColor wrap="truncate">
+            {contextHint}
+          </Text>
         ) : null}
       </Box>
     </Box>

@@ -1,12 +1,13 @@
 /**
- * A single status line that prefers CURRENT STATE over inventory counts. Left:
- * what Daintree is doing right now (the active agent, or "Standing by"). Right: a
- * compact rollup — context pressure, session cost, active model, attention count,
- * agent count, and the live MCP badge. The attention chip and a high context
- * gauge are the only saturated tokens; everything else stays dim.
+ * A compact status line that prefers CURRENT STATE over inventory counts: what
+ * Daintree is doing right now (the active agent, or "Standing by"), then the
+ * smallest useful rollup — context pressure, session cost/model while idle,
+ * attention count, agent count, permission tier, and the live MCP badge. The
+ * attention chip and a high context gauge are the only saturated tokens; everything
+ * else stays dim.
  *
- *   ◌ WORKING term_8 · tests running 18s   CTX 42% · $0.012 · !1 · agents 2 · MCP
- *   Standing by                            CTX 8% · $0.004 · minimax-m3 · MCP
+ *   ◌ WORKING term_8 · tests running 18s · CTX 42% · agents 2 · sys · MCP
+ *   Standing by · SYSTEM · CTX 8% · $0.004 · minimax-m3 · MCP
  */
 import { Box, Text } from "ink";
 import type { DashboardState, SessionUsage } from "../types.js";
@@ -14,6 +15,7 @@ import { StateBadge, formatDuration } from "../primitives.js";
 import { severityTone, toneColor, tierShort, ui } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
+import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
 
 /** Format a running session cost compactly, keeping small amounts legible. */
 function formatCost(cost: number): string {
@@ -62,91 +64,156 @@ export function StatusLine({
           : undefined;
   const cost = sessionUsage?.costUsd;
   const model = sessionUsage?.lastModel;
+  const chromeWidth = Math.min(width, LIVE_CHROME_MAX_WIDTH);
+  const activeDuration = active
+    ? formatDuration(Math.max(0, now - active.startedAt))
+    : "";
   // The model id is the longest right-hand token, so only show it when the line is
   // wide enough to carry it without crowding the active-agent text on the left.
   const showModel = width >= 62 && !!model;
-
-  const ctxText = pressure !== undefined ? `CTX ${pressure}%` : "";
-  const costText = cost !== undefined ? formatCost(cost) : "";
-  const modelText = showModel && model ? model : "";
+  const showCostModel = !active;
   // Keep the permission tier visible at all times — including during active runs,
   // when the left side carries agent context instead of the idle "Standing by"
   // label. The `system` tier (git/system powers unlocked) gets a saturated danger
   // color so the elevated risk reads at a glance; lower tiers stay dim.
   const tierText = tier ? tierShort(tier) : "";
+  const rightTierText = active ? tierText : "";
 
-  // Reserve room for the right-hand rollup so the line never wraps to 2 rows
+  const ctxText = pressure !== undefined ? `CTX ${pressure}%` : "";
+  const costText = showCostModel && cost !== undefined ? formatCost(cost) : "";
+
+  // Reserve room for the compact rollup so the line never wraps to 2 rows
   // (which would overflow the fixed-height shell and overlap the row above). Each
   // visible segment costs its text plus a 3-char " · " separator.
   const seg = (s: string) => (s ? s.length + 3 : 0);
+  const idlePrefixLen = active
+    ? 0
+    : "Standing by".length + (tier ? 3 + tier.toUpperCase().length : 0);
+  const attentionLen = attention > 0 ? 4 + String(attention).length : 0;
+  const agentsLen =
+    agents.length > 0 ? 3 + "agents ".length + String(agents.length).length : 0;
+  const mcpLen = 3 + (connected ? "MCP".length : "DEGRADED".length);
+  const modelText =
+    showCostModel &&
+    showModel &&
+    model &&
+    idlePrefixLen +
+      seg(ctxText) +
+      seg(costText) +
+      seg(model) +
+      attentionLen +
+      agentsLen +
+      seg(rightTierText) +
+      mcpLen <=
+      chromeWidth
+      ? model
+      : "";
+  const activeBadgeLen = active
+    ? 2 + active.badge.label.toUpperCase().length
+    : 0;
+  const activeFixedLen = active
+    ? activeBadgeLen +
+      1 +
+      active.id.length +
+      (activeDuration ? 1 + activeDuration.length : 0)
+    : 0;
+  const requiredRollupLen =
+    seg(ctxText) +
+    seg(costText) +
+    seg(modelText) +
+    attentionLen +
+    seg(rightTierText) +
+    mcpLen;
+  const showAgents =
+    agents.length > 0 &&
+    (!active || activeFixedLen + requiredRollupLen + agentsLen <= chromeWidth);
+  const visibleAgentsLen = showAgents ? agentsLen : 0;
   const rightLen =
     seg(ctxText) +
     seg(costText) +
     seg(modelText) +
-    seg(tierText) +
-    (attention > 0 ? 6 : 0) +
-    (agents.length > 0 ? 10 : 0) +
-    10;
-  const leftRoom = Math.max(12, width - rightLen);
+    seg(rightTierText) +
+    attentionLen +
+    visibleAgentsLen +
+    mcpLen;
+  const activeGoalRoom = active
+    ? chromeWidth - rightLen - activeFixedLen - 3
+    : 0;
+  const activeGoal =
+    active && activeGoalRoom >= 6
+      ? truncate(active.goal || active.title, activeGoalRoom)
+      : "";
 
   return (
-    // Fill the parent's LIVE width (`width="100%"`) rather than an explicit number:
-    // yoga resolves it against the real terminal on every resize relayout, so the
-    // space-between line can't momentarily exceed a just-shrunk terminal and orphan a
-    // wrapped row into scrollback during a pane show/hide. The `width` prop still
-    // drives the right-hand reservation math above; the left side is `wrap="truncate"`,
-    // so even if that estimate lags a resize the line never actually overflows.
-    <Box width="100%" justifyContent="space-between">
-      <Box>
+    // Keep the repainting status row short. A full-width `space-between` row is
+    // visually tidy, but on terminal shrink the OLD wide row reflows before Ink's
+    // erase pass and the top physical row can survive as a duplicate status line.
+    <Box width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
+      <Text wrap="truncate">
         {active ? (
-          <Text wrap="truncate">
+          <>
             <StateBadge tone={active.badge.tone} label={active.badge.label} />
             <Text dimColor>
               {" "}
-              {active.id} ·{" "}
-              {truncate(active.goal || active.title, Math.max(6, leftRoom - active.id.length - 14))}{" "}
-              {formatDuration(Math.max(0, now - active.startedAt))}
+              {active.id}
+              {activeGoal ? ` · ${activeGoal}` : ""}
+              {activeDuration ? ` ${activeDuration}` : ""}
             </Text>
-          </Text>
+          </>
         ) : (
-          <Text dimColor wrap="truncate">
+          <Text dimColor>
             Standing by{tier ? ` · ${tier.toUpperCase()}` : ""}
           </Text>
         )}
-      </Box>
-      <Box>
+        {ctxText ? (
+          <Text dimColor> · </Text>
+        ) : null}
         {ctxText ? (
           <Text color={pressureColor} dimColor={pressureColor === undefined}>
             {ctxText}
-            <Text dimColor> · </Text>
           </Text>
         ) : null}
-        {costText ? <Text dimColor>{costText} · </Text> : null}
-        {modelText ? <Text dimColor>{modelText} · </Text> : null}
+        {costText ? (
+          <>
+            <Text dimColor> · </Text>
+            <Text dimColor>{costText}</Text>
+          </>
+        ) : null}
+        {modelText ? (
+          <>
+            <Text dimColor> · </Text>
+            <Text dimColor>{modelText}</Text>
+          </>
+        ) : null}
         {attention > 0 ? (
-          <Text color={toneColor(severityTone(topSev))}>
-            !{attention}
+          <>
             <Text dimColor> · </Text>
-          </Text>
+            <Text color={toneColor(severityTone(topSev))}>!{attention}</Text>
+          </>
         ) : null}
-        {agents.length > 0 ? (
-          <Text dimColor>agents {agents.length} · </Text>
+        {showAgents ? (
+          <>
+            <Text dimColor> · agents {agents.length}</Text>
+          </>
         ) : null}
-        {tierText ? (
-          <Text
-            color={tier === "system" ? ui.color.danger : undefined}
-            dimColor={tier !== "system"}
-          >
-            {tierText}
+        {rightTierText ? (
+          <>
             <Text dimColor> · </Text>
-          </Text>
+            <Text
+              color={tier === "system" ? ui.color.danger : undefined}
+              dimColor={tier !== "system"}
+            >
+              {rightTierText}
+            </Text>
+          </>
         ) : null}
+        <Text dimColor> · </Text>
         {connected ? (
           <Text color={ui.color.accent}>MCP</Text>
         ) : (
           <Text color={ui.color.warning}>DEGRADED</Text>
         )}
-      </Box>
+      </Text>
     </Box>
   );
 }
