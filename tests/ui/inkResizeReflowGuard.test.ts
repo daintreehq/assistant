@@ -63,7 +63,7 @@ class TestStdin extends EventEmitter {
 describe("Ink resize reflow guard", () => {
   it("models the stale status row left by logical-height clearing", () => {
     const wideFrame = [
-      "Standing by · SYSTEM · MCP",
+      "CTX 8% · $0.004 · minimax-m3",
       "",
       "─".repeat(80),
       "› Ask Daintree to supervise, delegate, or inspect…",
@@ -76,7 +76,7 @@ describe("Ink resize reflow guard", () => {
     const logicalLineCount = wideFrame.split("\n").length;
     const physical = reflowPlainFrame(wideFrame, 58);
     const oldInkClearRemainder = eraseBottomRows(physical, logicalLineCount);
-    expect(oldInkClearRemainder.join("\n")).toContain("Standing by");
+    expect(oldInkClearRemainder.join("\n")).toContain("CTX 8%");
 
     const guardedLineCount = estimateReflowedFrameLineCount(wideFrame, 58);
     const guardedRemainder = eraseBottomRows(physical, guardedLineCount);
@@ -85,7 +85,7 @@ describe("Ink resize reflow guard", () => {
 
   it("teaches Ink the reflowed physical height before shrink clears", () => {
     const wideFrame = [
-      "Standing by · SYSTEM · MCP",
+      "CTX 8% · $0.004 · minimax-m3",
       "",
       "─".repeat(80),
       "› Ask Daintree to supervise, delegate, or inspect…",
@@ -119,7 +119,7 @@ describe("Ink resize reflow guard", () => {
     const instance = {
       log: { clear, sync },
       lastOutput: "",
-      lastOutputToRender: "Standing by · SYSTEM · MCP\n",
+      lastOutputToRender: "CTX 8% · $0.004 · minimax-m3\n",
       lastTerminalWidth: 58,
     };
 
@@ -160,7 +160,7 @@ describe("Ink resize reflow guard", () => {
 
   it("expands Ink's real resize clear to the old frame's reflowed height", async () => {
     const wideFrame = [
-      "Standing by · SYSTEM · MCP",
+      "CTX 8% · $0.004 · minimax-m3",
       "",
       "─".repeat(80),
       "› Ask Daintree to supervise, delegate, or inspect…",

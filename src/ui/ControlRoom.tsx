@@ -212,6 +212,7 @@ export function ControlRoom({
       <Header
         columns={chromeWidth}
         project={project}
+        tier={tier}
         logging={logging}
         logFile={logFile}
       />
@@ -254,7 +255,6 @@ export function ControlRoom({
         <Box marginTop={1} flexDirection="column">
           <StatusLine
             dashboard={dashboard}
-            tier={tier}
             sessionUsage={sessionUsage}
             width={contentWidth}
             now={now}

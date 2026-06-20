@@ -12,12 +12,36 @@ import { glyphs, ui } from "../theme.js";
  *
  * The rule doubles as the lip of a status strip: the debug-log line sits under it
  * when logging is active, and it's the natural home for any other at-a-glance startup
- * state we surface later. Operational detail (tier, the live MCP link) still lives in
- * the StatusLine, not here.
+ * state we surface later. The permission tier — session-level capability that rarely
+ * changes — sits in the identity block as a plain-English line so "system" stops
+ * reading as a cryptic token; the live MCP link stays in the StatusLine (it only
+ * ever surfaces there, by exception, as DEGRADED).
  */
+
+/**
+ * One-line gloss of what a permission tier can actually do, so the tier name in the
+ * masthead is self-explaining instead of jargon. Mirrors the tier ladder in
+ * `safety/policy.ts` (supervisor ⊂ operator ⊂ system).
+ */
+function tierGloss(tier: string): string {
+  switch (tier) {
+    case "supervisor":
+      return "read & UI only";
+    case "operator":
+      return "terminals, projects, external";
+    case "system":
+      // No hard-coded "·" here — it would bypass the glyphs() ASCII fallback
+      // (DAINTREE_ASCII); the only separator on this line is the active set.bullet.
+      return "full access (git, system)";
+    default:
+      return "";
+  }
+}
+
 export function Header({
   project,
   runTitle,
+  tier,
   logging = false,
   logFile,
   version,
@@ -28,6 +52,8 @@ export function Header({
   project?: string;
   /** Subtitle: the in-flight run's intent, when a turn is active. */
   runTitle?: string;
+  /** Permission tier (supervisor|operator|system); shown with a plain-English gloss. */
+  tier?: string;
   /** Debug logging is active — surfaced under the rule so it's verifiable at a glance. */
   logging?: boolean;
   /** Path of the active debug log, shown dim so it can be tailed. */
@@ -37,6 +63,7 @@ export function Header({
 }) {
   const set = glyphs();
   const ver = version ?? assistantVersion();
+  const gloss = tier ? tierGloss(tier) : "";
   return (
     <Box flexDirection="column" width="100%">
       {/* Identity: wordmark + version on one line, project name beneath it.
@@ -55,6 +82,18 @@ export function Header({
         {runTitle ? (
           <Text dimColor wrap="truncate">
             {runTitle}
+          </Text>
+        ) : null}
+        {tier ? (
+          <Text wrap="truncate">
+            <Text dimColor>tier </Text>
+            <Text
+              color={tier === "system" ? ui.color.danger : undefined}
+              dimColor={tier !== "system"}
+            >
+              {tier}
+            </Text>
+            {gloss ? <Text dimColor> {set.bullet} {gloss}</Text> : null}
           </Text>
         ) : null}
       </Box>

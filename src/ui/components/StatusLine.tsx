@@ -1,18 +1,22 @@
 /**
- * A compact status line that prefers CURRENT STATE over inventory counts: what
- * Daintree is doing right now (the active agent, or "Standing by"), then the
- * smallest useful rollup — context pressure, session cost/model while idle,
- * attention count, agent count, permission tier, and the live MCP badge. The
- * attention chip and a high context gauge are the only saturated tokens; everything
- * else stays dim.
+ * A compact status line that speaks ONLY when it has something to say. It carries
+ * CURRENT STATE — the active agent and the smallest useful live rollup (context
+ * pressure, session cost/model while idle, an attention count, the agent count) —
+ * and nothing else. There is no idle "Standing by" label (silence already means
+ * idle) and no steady-state "MCP" badge (a healthy link is already confirmed by the
+ * startup banner); the connection only surfaces here as `DEGRADED`, by exception.
+ * The permission tier lives in the masthead now, not here. When idle with no signal
+ * to report the component renders nothing at all.
  *
- *   ◌ WORKING term_8 · tests running 18s · CTX 42% · agents 2 · sys · MCP
- *   Standing by · SYSTEM · CTX 8% · $0.004 · minimax-m3 · MCP
+ *   ◌ WORKING term_8 · tests running 18s · CTX 42% · agents 2
+ *   CTX 8% · $0.004 · minimax-m3
+ *   (idle, nothing to report → empty)
  */
 import { Box, Text } from "ink";
+import { Fragment, type ReactNode } from "react";
 import type { DashboardState, SessionUsage } from "../types.js";
 import { StateBadge, formatDuration } from "../primitives.js";
-import { severityTone, toneColor, tierShort, ui } from "../theme.js";
+import { severityTone, toneColor, ui } from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
 import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
@@ -27,13 +31,11 @@ function formatCost(cost: number): string {
 
 export function StatusLine({
   dashboard,
-  tier,
   sessionUsage,
   width = 80,
   now = Date.now(),
 }: {
   dashboard: DashboardState;
-  tier?: string;
   sessionUsage?: SessionUsage;
   width?: number;
   now?: number;
@@ -68,43 +70,33 @@ export function StatusLine({
   const activeDuration = active
     ? formatDuration(Math.max(0, now - active.startedAt))
     : "";
-  // The model id is the longest right-hand token, so only show it when the line is
-  // wide enough to carry it without crowding the active-agent text on the left.
+  // The model id is the longest idle token. It only ever renders while idle (see
+  // showCostModel), so it never competes with active-agent text — the width gate is
+  // purely a terseness rule: keep narrow panes to the gauge/cost and drop the long
+  // model id even when it would technically fit the 56-col chrome.
   const showModel = width >= 62 && !!model;
+  // Cost and model are idle-only context: during an active run the left side
+  // carries the agent and the right side stays terse.
   const showCostModel = !active;
-  // Keep the permission tier visible at all times — including during active runs,
-  // when the left side carries agent context instead of the idle "Standing by"
-  // label. The `system` tier (git/system powers unlocked) gets a saturated danger
-  // color so the elevated risk reads at a glance; lower tiers stay dim.
-  const tierText = tier ? tierShort(tier) : "";
-  const rightTierText = active ? tierText : "";
 
   const ctxText = pressure !== undefined ? `CTX ${pressure}%` : "";
   const costText = showCostModel && cost !== undefined ? formatCost(cost) : "";
 
-  // Reserve room for the compact rollup so the line never wraps to 2 rows
-  // (which would overflow the fixed-height shell and overlap the row above). Each
-  // visible segment costs its text plus a 3-char " · " separator.
+  // Reserve room for the compact rollup so the line never wraps to 2 rows (which
+  // would overflow the fixed-height shell and overlap the row above). Each visible
+  // segment conservatively costs its text plus a 3-char " · " separator — slightly
+  // over-reserving, which only ever drops an OPTIONAL token (model/agents) early.
   const seg = (s: string) => (s ? s.length + 3 : 0);
-  const idlePrefixLen = active
-    ? 0
-    : "Standing by".length + (tier ? 3 + tier.toUpperCase().length : 0);
   const attentionLen = attention > 0 ? 4 + String(attention).length : 0;
   const agentsLen =
     agents.length > 0 ? 3 + "agents ".length + String(agents.length).length : 0;
-  const mcpLen = 3 + (connected ? "MCP".length : "DEGRADED".length);
+  // The connection only ever costs width when it is DOWN (the by-exception badge).
+  const degradedLen = connected ? 0 : 3 + "DEGRADED".length;
   const modelText =
     showCostModel &&
     showModel &&
     model &&
-    idlePrefixLen +
-      seg(ctxText) +
-      seg(costText) +
-      seg(model) +
-      attentionLen +
-      agentsLen +
-      seg(rightTierText) +
-      mcpLen <=
+    seg(ctxText) + seg(costText) + seg(model) + attentionLen + degradedLen <=
       chromeWidth
       ? model
       : "";
@@ -117,13 +109,7 @@ export function StatusLine({
       active.id.length +
       (activeDuration ? 1 + activeDuration.length : 0)
     : 0;
-  const requiredRollupLen =
-    seg(ctxText) +
-    seg(costText) +
-    seg(modelText) +
-    attentionLen +
-    seg(rightTierText) +
-    mcpLen;
+  const requiredRollupLen = seg(ctxText) + attentionLen + degradedLen;
   const showAgents =
     agents.length > 0 &&
     (!active || activeFixedLen + requiredRollupLen + agentsLen <= chromeWidth);
@@ -132,10 +118,9 @@ export function StatusLine({
     seg(ctxText) +
     seg(costText) +
     seg(modelText) +
-    seg(rightTierText) +
     attentionLen +
     visibleAgentsLen +
-    mcpLen;
+    degradedLen;
   const activeGoalRoom = active
     ? chromeWidth - rightLen - activeFixedLen - 3
     : 0;
@@ -144,75 +129,81 @@ export function StatusLine({
       ? truncate(active.goal || active.title, activeGoalRoom)
       : "";
 
+  // Build the visible segments, then join them with " · " separators. A segment
+  // array (rather than hand-threaded separators) means the FIRST visible token
+  // never carries a dangling leading "·", regardless of which tokens are present.
+  const parts: ReactNode[] = [];
+  if (active) {
+    parts.push(
+      <Fragment key="active">
+        <StateBadge tone={active.badge.tone} label={active.badge.label} />
+        <Text dimColor>
+          {" "}
+          {active.id}
+          {activeGoal ? ` · ${activeGoal}` : ""}
+          {activeDuration ? ` ${activeDuration}` : ""}
+        </Text>
+      </Fragment>,
+    );
+  }
+  if (ctxText) {
+    parts.push(
+      <Text key="ctx" color={pressureColor} dimColor={pressureColor === undefined}>
+        {ctxText}
+      </Text>,
+    );
+  }
+  if (costText) {
+    parts.push(
+      <Text key="cost" dimColor>
+        {costText}
+      </Text>,
+    );
+  }
+  if (modelText) {
+    parts.push(
+      <Text key="model" dimColor>
+        {modelText}
+      </Text>,
+    );
+  }
+  if (attention > 0) {
+    parts.push(
+      <Text key="att" color={toneColor(severityTone(topSev))}>
+        !{attention}
+      </Text>,
+    );
+  }
+  if (showAgents) {
+    parts.push(
+      <Text key="agents" dimColor>
+        agents {agents.length}
+      </Text>,
+    );
+  }
+  if (!connected) {
+    parts.push(
+      <Text key="deg" color={ui.color.warning}>
+        DEGRADED
+      </Text>,
+    );
+  }
+
+  // Idle with nothing to report: render nothing rather than a noisy placeholder.
+  if (parts.length === 0) return null;
+
   return (
     // Keep the repainting status row short. A full-width `space-between` row is
     // visually tidy, but on terminal shrink the OLD wide row reflows before Ink's
     // erase pass and the top physical row can survive as a duplicate status line.
     <Box width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
       <Text wrap="truncate">
-        {active ? (
-          <>
-            <StateBadge tone={active.badge.tone} label={active.badge.label} />
-            <Text dimColor>
-              {" "}
-              {active.id}
-              {activeGoal ? ` · ${activeGoal}` : ""}
-              {activeDuration ? ` ${activeDuration}` : ""}
-            </Text>
-          </>
-        ) : (
-          <Text dimColor>
-            Standing by{tier ? ` · ${tier.toUpperCase()}` : ""}
-          </Text>
-        )}
-        {ctxText ? (
-          <Text dimColor> · </Text>
-        ) : null}
-        {ctxText ? (
-          <Text color={pressureColor} dimColor={pressureColor === undefined}>
-            {ctxText}
-          </Text>
-        ) : null}
-        {costText ? (
-          <>
-            <Text dimColor> · </Text>
-            <Text dimColor>{costText}</Text>
-          </>
-        ) : null}
-        {modelText ? (
-          <>
-            <Text dimColor> · </Text>
-            <Text dimColor>{modelText}</Text>
-          </>
-        ) : null}
-        {attention > 0 ? (
-          <>
-            <Text dimColor> · </Text>
-            <Text color={toneColor(severityTone(topSev))}>!{attention}</Text>
-          </>
-        ) : null}
-        {showAgents ? (
-          <>
-            <Text dimColor> · agents {agents.length}</Text>
-          </>
-        ) : null}
-        {rightTierText ? (
-          <>
-            <Text dimColor> · </Text>
-            <Text
-              color={tier === "system" ? ui.color.danger : undefined}
-              dimColor={tier !== "system"}
-            >
-              {rightTierText}
-            </Text>
-          </>
-        ) : null}
-        <Text dimColor> · </Text>
-        {connected ? (
-          <Text color={ui.color.accent}>MCP</Text>
-        ) : (
-          <Text color={ui.color.warning}>DEGRADED</Text>
-        )}
+        {parts.map((p, i) => (
+          <Fragment key={i}>
+            {i > 0 ? <Text dimColor> · </Text> : null}
+            {p}
+          </Fragment>
+        ))}
       </Text>
     </Box>
   );

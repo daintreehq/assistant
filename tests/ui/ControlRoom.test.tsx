@@ -199,12 +199,11 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
 
   it("the status line stays a single row across the whole oscillation", () => {
     // Regression for the stacked-status-line symptom: whatever the prop/live skew,
-    // the idle status content ("Standing by") renders exactly once per frame — a
-    // duplicated row would mean a wrapped overflow leaked a second copy.
+    // the idle status content (the context gauge "CTX 8%") renders exactly once per
+    // frame — a duplicated row would mean a wrapped overflow leaked a second copy.
     for (const { prop, live } of OSCILLATION) {
       const frame = liveFrame("idle", prop, live);
-      const count = frame.split("\n").filter((l) => l.includes("Standing by"))
-        .length;
+      const count = frame.split("\n").filter((l) => l.includes("CTX 8%")).length;
       expect(count).toBe(1);
     }
   });
@@ -212,14 +211,14 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
   it("idle chrome is already narrow-pane safe before a shrink", () => {
     // The prior regression only checked the frame AFTER a shrink. The real
     // terminal reflows the OLD wide frame first, so full-width status/footer rows
-    // can gain physical rows before Ink erases them and leave "Standing by" orphaned
+    // can gain physical rows before Ink erases them and leave the idle gauge orphaned
     // above the new frame. Full-width composer rules are visual separators and are
     // allowed to match the transcript width.
     const frame = liveFrame("idle", 80, 80);
     const unsafe = frame.split("\n").filter((line) => {
       const plain = line.replace(ANSI, "");
       const isIdleChrome =
-        plain.includes("Standing by") ||
+        plain.includes("CTX") ||
         plain.includes("Ask Daintree") ||
         plain.includes("commands") ||
         /^agents \d+/.test(plain.trim());
@@ -279,11 +278,11 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
 });
 
 describe("ControlRoom inline cockpit (golden frames)", () => {
-  it.each(WIDTHS)("prints the masthead + composer, idle reads as standing by (%i cols)", (w) => {
+  it.each(WIDTHS)("prints the masthead + composer, quiet when idle (%i cols)", (w) => {
     const frame = frameFor("idle", w);
     expect(frame).toContain("Daintree Assistant"); // live masthead
-    expect(frame).toContain("MCP"); // connection lives in the status line
-    expect(frame).toContain("Standing by"); // what is it doing?
+    expect(frame).toContain("tier operator"); // permission tier reads in the masthead
+    expect(frame).not.toContain("Standing by"); // silence already means idle
     expect(frame).toContain("commands"); // composer hint: / opens the palette
     expect(frame).toContain("ops"); // composer hint: ^O inspects operations
   });

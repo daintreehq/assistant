@@ -25,12 +25,37 @@ describe("Header", () => {
     expect(frame).toContain("assistant");
   });
 
-  it("drops the operational badges from the masthead", () => {
+  it("drops the MCP connection badge from the masthead", () => {
     const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
-    // Tier + the MCP connection badge now live in the StatusLine, not here.
+    // The live MCP link is by-exception status that stays in the StatusLine.
     expect(frame).not.toContain("CONNECTED");
     expect(frame).not.toContain("DEGRADED");
-    expect(frame).not.toContain("OPERATOR");
+  });
+
+  it("shows the permission tier with a plain-English gloss", () => {
+    // The system tier colors its name red, so "tier" and "system" land in separate
+    // spans with an SGR reset between them — strip color before asserting the row.
+    const frame = stripAnsi(
+      render(<Header columns={60} version="0.1.0" tier="system" />).lastFrame() ?? "",
+    );
+    expect(frame).toContain("tier system"); // labelled, not a bare token
+    expect(frame).toContain("full access"); // gloss explains what it grants
+  });
+
+  it("glosses each tier so the level is self-explaining", () => {
+    const op =
+      render(<Header columns={60} version="0.1.0" tier="operator" />).lastFrame() ?? "";
+    expect(op).toContain("operator");
+    expect(op).toContain("terminals");
+    const sup =
+      render(<Header columns={60} version="0.1.0" tier="supervisor" />).lastFrame() ?? "";
+    expect(sup).toContain("supervisor");
+    expect(sup).toContain("read & UI only");
+  });
+
+  it("omits the tier line entirely when no tier is supplied", () => {
+    const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
+    expect(frame).not.toContain("tier ");
   });
 
   it("always closes the header with a full-width rule", () => {
@@ -111,11 +136,19 @@ describe("Header", () => {
     try {
       const frame =
         render(
-          <Header columns={60} version="0.1.0" logging logFile="/tmp/t.log" />,
+          <Header
+            columns={60}
+            version="0.1.0"
+            tier="system"
+            logging
+            logFile="/tmp/t.log"
+          />,
         ).lastFrame() ?? "";
       expect(frame).toContain("Daintree Assistant");
+      expect(frame).toContain("full access"); // tier gloss still rendered
       expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
-      expect(frame).not.toContain("·"); // log separator uses the ASCII bullet
+      // Neither the log separator NOR the tier gloss may emit a Unicode bullet.
+      expect(frame).not.toContain("·");
     } finally {
       if (prev === undefined) delete process.env.DAINTREE_ASCII;
       else process.env.DAINTREE_ASCII = prev;

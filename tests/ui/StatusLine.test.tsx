@@ -48,11 +48,28 @@ function watcher(over: Partial<WatcherRecord> = {}): WatcherRecord {
 const event = (severity: string) => ({ id: severity, severity }) as any;
 
 describe("StatusLine", () => {
-  it("stands by when nothing is active, surfacing the tier", () => {
-    const frame = render(<StatusLine dashboard={dash()} tier="operator" />).lastFrame() ?? "";
-    expect(frame).toContain("Standing by");
-    expect(frame).toContain("OPERATOR");
-    expect(frame).toContain("MCP");
+  it("renders nothing when idle with no signal to report", () => {
+    // Silence already means idle: no "Standing by", no steady-state MCP badge, no
+    // tier (that lives in the masthead now). A clean idle line is simply empty.
+    const frame = render(<StatusLine dashboard={dash()} />).lastFrame() ?? "";
+    expect(frame.trim()).toBe("");
+  });
+
+  it("never shows an 'MCP' token while the link is healthy", () => {
+    // The startup banner already confirms the connection; the status line only ever
+    // speaks about it by exception (DEGRADED). A connected line must stay quiet.
+    const frame =
+      render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
+    expect(frame).toContain("WORKING");
+    expect(frame).not.toContain("MCP");
+  });
+
+  it("carries no tier token — the tier lives in the masthead", () => {
+    const frame =
+      render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
+    expect(frame).not.toMatch(/\bsys\b/i);
+    expect(frame).not.toMatch(/\bop\b/i);
+    expect(frame).not.toContain("SYSTEM");
   });
 
   it("prefers the current active agent over inventory counts", () => {
@@ -63,44 +80,18 @@ describe("StatusLine", () => {
     expect(frame).toContain("agents 1"); // compact rollup on the right
   });
 
-  it("keeps the tier visible during an active run", () => {
-    const frame =
-      render(
-        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="system" now={0} />,
-      ).lastFrame() ?? "";
-    expect(frame).toContain("WORKING"); // active agent occupies the left side
-    expect(frame).toContain("sys"); // tier badge persists on the right
-    expect(frame).toContain("MCP"); // right-side rollup still intact
-  });
-
-  it("uses the short tier label for operator and supervisor during a run", () => {
-    const op =
-      render(
-        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="operator" now={0} />,
-      ).lastFrame() ?? "";
-    expect(op).toContain("op");
-    expect(op).not.toContain("OPERATOR"); // short form on the right, not the idle label
-    const sup =
-      render(
-        <StatusLine dashboard={dash({ watchers: [watcher()] })} tier="supervisor" now={0} />,
-      ).lastFrame() ?? "";
-    expect(sup).toContain("sup");
-  });
-
-  it("keeps the tier visible even when the model id is suppressed on a narrow line", () => {
+  it("drops the model id on a narrow active line but keeps context pressure", () => {
     const frame =
       render(
         <StatusLine
           dashboard={dash({ watchers: [watcher()] })}
           sessionUsage={usage()}
-          tier="operator"
           width={50}
           now={0}
         />,
       ).lastFrame() ?? "";
     expect(frame).not.toContain("minimax-m3"); // model dropped on a narrow line
-    expect(frame).toContain("op"); // tier survives the squeeze
-    expect(frame).toContain("MCP");
+    expect(frame).toContain("CTX 42%"); // pressure survives the squeeze
   });
 
   it("keeps context pressure visible during an active run", () => {
@@ -109,7 +100,6 @@ describe("StatusLine", () => {
         <StatusLine
           dashboard={dash({ watchers: [watcher()] })}
           sessionUsage={usage()}
-          tier="operator"
           width={80}
           now={0}
         />,
@@ -119,11 +109,11 @@ describe("StatusLine", () => {
     expect(frame).not.toContain("minimax-m3");
   });
 
-  it("leaves no orphan separator when no tier is provided during a run", () => {
+  it("leaves no orphan separator during a run", () => {
     const frame =
       render(<StatusLine dashboard={dash({ watchers: [watcher()] })} now={0} />).lastFrame() ?? "";
-    expect(frame).toContain("MCP");
-    expect(frame).not.toMatch(/·\s+·/); // no dangling " ·  · " from an empty tier badge
+    expect(frame).toContain("WORKING");
+    expect(frame).not.toMatch(/·\s+·/); // no dangling " ·  · " between segments
   });
 
   it("shows an attention chip when the inbox is non-empty", () => {
