@@ -4,26 +4,24 @@
  * controller, the gallery feeds it from frozen fixtures, and tests feed it fixed
  * timestamps.
  *
- * INLINE MODEL (Claude Code style), now on OpenTUI's native renderer. The cockpit
- * renders into the terminal's MAIN screen buffer (`screenMode: "main-screen"`), not
- * the alternate buffer, so the terminal's own scrollback / mouse wheel / selection
- * work natively. The masthead sits at the top of the tree and the conversation grows
- * beneath it; as content exceeds the viewport the older rows scroll up into the
- * host's native scrollback. The in-flight turn, status line and composer are the
- * bottom of that same stream. On resize the native (Zig) renderer reflows the whole
- * tree cleanly — there is no Ink `<Static>` line-rewrite, so the resize-duplication
- * hazard is gone; a full repaint on resize is the intended behaviour.
+ * INLINE MODEL (Claude Code style) on OpenTUI's `split-footer` renderer. This
+ * component is ONLY the live footer: it renders the in-flight turn (`transcript` here
+ * is the LIVE tail, not the whole history), the status line and the composer. Finished
+ * turns and the masthead are committed to the terminal's native scrollback by the
+ * shell (DaintreeApp via `useScrollbackTranscript`) and scroll up and away under the
+ * host's own scrollbar — so this tree stays short and can never overflow the viewport
+ * (the garble that `main-screen` caused once the tree outgrew the terminal height).
  *
- * (Follow-up, not v1: `split-footer` + ScrollbackSurface.commitRows() can commit
- * finished turns to scrollback and keep only a small live footer repainting — the
- * true `<Static>` equivalent. It needs real-terminal tuning; v1 renders the whole
- * tree. See docs/OPENTUI_PORT.md.)
+ * `renderHeader` is true by default so the gallery/tests still show the masthead
+ * inline; the live shell sets it false (the header is in scrollback instead) and feeds
+ * `footerSlot` the in-flight scrollback-commit and `rootRef` so it can size the footer
+ * to this tree's measured height.
  *
  * Operations and help are momentary, on-demand views rendered in place of the
  * composer (Esc returns), never a pinned panel.
  */
-import type { Ref } from "react";
-import { TextAttributes } from "@opentui/core";
+import type { ReactNode, Ref } from "react";
+import { TextAttributes, type BoxRenderable } from "@opentui/core";
 import type {
   DashboardState,
   PendingConfirm,
@@ -47,10 +45,10 @@ export type View = "home" | "operations" | "help";
  * full width of a maximised window are hard to read, so prose and run cells wrap
  * at a comfortable measure the way other conversational CLIs do.
  */
-const CONTENT_MAX = 100;
+export const CONTENT_MAX = 100;
 
 /** One-column left inset so content never touches the terminal's left edge. */
-const LEFT_PAD = 1;
+export const LEFT_PAD = 1;
 
 export interface ControlRoomProps {
   /** Name of the bound project, shown in the masthead beneath the wordmark. */
@@ -100,6 +98,22 @@ export interface ControlRoomProps {
   /** Handle the composer registers so a pulled-back message can be restored (#61). */
   composerRef?: Ref<ComposerHandle>;
   onResolve?: (approved: boolean) => void;
+  /**
+   * Render the masthead inline at the top of this tree. Default true (gallery/tests).
+   * The live shell sets it false — there the masthead is committed to native scrollback
+   * by {@link useScrollbackTranscript} so it scrolls away with the rest of the history.
+   */
+  renderHeader?: boolean;
+  /**
+   * Mounted (but visually portaled out) so the in-flight native-scrollback commit can
+   * run as part of the live tree. Supplied by the shell; null in gallery/tests.
+   */
+  footerSlot?: ReactNode;
+  /**
+   * Ref to the outermost footer box so the shell can read its measured height and size
+   * the split-footer region to exactly this tree (see `useFooterHeight`).
+   */
+  rootRef?: Ref<BoxRenderable>;
 }
 
 export function ControlRoom({
@@ -128,6 +142,9 @@ export function ControlRoom({
   onCancel,
   composerRef,
   onResolve = () => {},
+  renderHeader = true,
+  footerSlot = null,
+  rootRef,
 }: ControlRoomProps) {
   // A one-column INSET on every side so nothing touches the terminal edges. `gutter`
   // (>=1, see `reservedColumns`) is the right inset — it also keeps glyphs clear of
@@ -157,20 +174,37 @@ export function ControlRoom({
   const showPanel = !pending && view !== "home";
 
   return (
-    <box flexDirection="column" width="100%" paddingRight={gutter}>
-      {/* Masthead at the top of the stream — scrolls away into native scrollback as
-          the conversation grows (Claude Code model). The Header owns its own closing
-          rule (below the wordmark/project/tier lines, above the logging line). */}
-      <box paddingLeft={LEFT_PAD} paddingTop={1}>
-        <Header
-          columns={chromeWidth}
-          project={project}
-          tier={tier}
-          destructivePending={destructivePending}
-          logging={logging}
-          logFile={logFile}
-        />
-      </box>
+    // flexShrink={0}: keep the footer's NATURAL height even while the split-footer
+    // region is momentarily shorter than the content. Otherwise the live box shrinks
+    // to the current `footerHeight`, which then reads back as the measured height and
+    // deadlocks `useFooterHeight` (it could never grow the footer back after a shrink).
+    <box
+      ref={rootRef}
+      flexDirection="column"
+      flexShrink={0}
+      width="100%"
+      paddingRight={gutter}
+    >
+      {/* The masthead. In the live cockpit it is committed to native scrollback (so it
+          scrolls away with the history) and `renderHeader` is false; the gallery/tests
+          render it inline. The Header owns its own closing rule (below the
+          wordmark/project/tier lines, above the logging line). */}
+      {renderHeader ? (
+        <box paddingLeft={LEFT_PAD} paddingTop={1}>
+          <Header
+            columns={chromeWidth}
+            project={project}
+            tier={tier}
+            destructivePending={destructivePending}
+            logging={logging}
+            logFile={logFile}
+          />
+        </box>
+      ) : null}
+
+      {/* The in-flight scrollback commit. It portals its content off into an off-screen
+          surface, so it draws nothing here — it only needs to be mounted in the tree. */}
+      {footerSlot}
 
       {/* The conversation + the live region, one column. The native renderer reflows
           the whole tree on resize, so there is no wrap/orphan hazard to design

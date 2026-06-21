@@ -128,25 +128,29 @@ thread.
   never inherits a prior session's watchers. Never imply background supervision.
 - **UI boundary.** Only `src/ui` imports `@opentui/*`. The runtime emits structured
   events via `AgentEventSink`, consumed by the `UiBridge` or the console sink.
-- **Inline cockpit — NEVER the alternate screen (Claude Code model).** The cockpit renders
-  on **OpenTUI** (`@opentui/react`, native Zig renderer) INLINE into the terminal's **main**
-  screen buffer: `runApp.tsx` calls `createCliRenderer({ screenMode: "main-screen", useMouse: false })`.
+- **Inline cockpit on `split-footer` — NEVER the alternate screen (Claude Code model).** The
+  cockpit renders on **OpenTUI** (`@opentui/react`, native Zig renderer): `runApp.tsx` calls
+  `createCliRenderer({ screenMode: "split-footer", externalOutputMode: "capture-stdout", useMouse: false })`.
   This must stay that way: **Daintree always runs the assistant inside xterm, and the host (xterm)
   must own scrolling** — native mouse-wheel-where-you-hover, scrollbar, selection and copy/paste.
   The alternate screen (and capturing the mouse) would disable all of that, so both are forbidden.
-  In main-screen the whole cockpit tree renders inline (`ControlRoom.tsx`): masthead at top, the
-  conversation beneath, the live region (status + composer) at the bottom; as content grows the
-  older rows scroll into the host's native scrollback. On resize the native renderer reflows the
-  whole tree cleanly — there is no Ink `<Static>` line-rewrite, so the old resize-duplication
-  hazard is **gone by construction** (a full repaint on resize is intended). The **`Header` still
-  has NO full-width rule** — a committed rule would be wrapped by the host on shrink. Content is
-  inset one column each side (`LEFT_PAD` + the `reservedColumns` right gutter). Keys come from
-  `useKeyboard` (global — gate by view/focus in-handler, since there's no Ink `isActive`); terminal
-  size from `useTerminalDimensions()`. Do NOT raw-parse SGR mouse mode. Operations/help are
+  **Do NOT switch back to `main-screen`**: it repaints the whole tree into a FIXED viewport and does
+  not spill overflow into native scrollback, so the cockpit garbled the instant the tree outgrew the
+  terminal height — that bug is what `split-footer` fixes. The live footer (`renderer.root` =
+  `ControlRoom.tsx`) holds ONLY the in-flight turn + status + composer; finished turns and the
+  masthead are committed ONCE to the host's native scrollback (real terminal lines that scroll away)
+  by `useScrollbackTranscript` + `scrollback.tsx` (React `createPortal` → `createScrollbackSurface()`
+  → `settle()` → `commitRows()`). The scrollback APIs THROW without BOTH `screenMode: "split-footer"`
+  and `externalOutputMode: "capture-stdout"`. `useFooterHeight` sizes the reserved `footerHeight` to
+  the live tree's measured height each frame (via `setFrameCallback`, NOT a layout effect — native
+  layout lags a React commit); the footer root box is `flexShrink={0}` so it can grow back after a
+  shrink, and a shrink forces a full repaint (OpenTUI doesn't clear vacated footer rows). The
+  **`Header` still has NO full-width rule** — a committed rule would be wrapped by the host on shrink.
+  Content is inset one column each side (`LEFT_PAD` + the `reservedColumns` right gutter). Keys come
+  from `useKeyboard` (global — gate by view/focus in-handler, since there's no Ink `isActive`);
+  terminal size from `useTerminalDimensions()`. Do NOT raw-parse SGR mouse mode. Operations/help are
   **on-demand** views (`^O` / `/panel`, Esc returns) in place of the composer — single column.
-  Follow-up (not yet done): `split-footer` + `ScrollbackSurface.commitRows()` is OpenTUI's true
-  `<Static>` equivalent (commit finished turns, keep a small live footer) — needs real-terminal
-  tuning. See `docs/OPENTUI_PORT.md`. **`OpenTUI <box> defaults to flexDirection:"column"`** (Ink
+  See `docs/OPENTUI_PORT.md`. **`OpenTUI <box> defaults to flexDirection:"column"`** (Ink
   `<Box>` was row) — set `flexDirection="row"` explicitly for horizontal layouts.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcherEngine.ts`):
   deterministic signals (agentState, exit code, tail regex, timeout) first, the small

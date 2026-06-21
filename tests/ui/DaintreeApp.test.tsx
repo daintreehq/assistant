@@ -12,8 +12,37 @@ import { DaintreeApp } from "../../src/ui/DaintreeApp.js";
 // setTimeout, so we wait wall-clock between flushes rather than pumping frames.
 const tick = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 
+// The cockpit boots in split-footer mode (see runApp): the live footer is what
+// captureCharFrame() shows, while the masthead and finished turns are committed to
+// native scrollback (captured by externalOutput). The scrollback APIs require
+// externalOutputMode "capture-stdout", so the harness must mirror runApp's config.
+const FOOTER_OPTS = {
+  width: 80,
+  height: 24,
+  screenMode: "split-footer",
+  externalOutputMode: "capture-stdout",
+  // Mirror runApp: seed the footer at the FULL terminal height so the composer is
+  // never clipped on the first frames; `useFooterHeight` then shrinks it to fit.
+  footerHeight: 24,
+} as const;
+
+// Drain a few frames so the async scrollback commits (layout → settle → commitRows)
+// land, then return everything committed to native scrollback as text.
+async function settledScrollback(t: {
+  flush: () => Promise<void>;
+  externalOutput: { takeText: () => string };
+}): Promise<string> {
+  let acc = "";
+  for (let i = 0; i < 8; i++) {
+    await t.flush();
+    await tick();
+    acc += t.externalOutput.takeText();
+  }
+  return acc;
+}
+
 describe("DaintreeApp (full mount, offline)", () => {
-  test("renders the single-column cockpit: header, status line, composer", async () => {
+  test("footer shows the live region; masthead + notes commit to scrollback", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-ink-"));
     const app = App.create({
       // splash:false → skip the boot gate (vitest pins NO_SPLASH; bun tests don't,
@@ -22,23 +51,19 @@ describe("DaintreeApp (full mount, offline)", () => {
     });
     const exit = mock();
 
-    const t = await testRender(<DaintreeApp app={app} exit={exit} />, {
-      width: 80,
-      height: 24,
-    });
-    await t.flush();
-    await tick(); // let mount effects (connect + scheduler + first poll) settle
-    await t.flush();
+    const t = await testRender(<DaintreeApp app={app} exit={exit} />, FOOTER_OPTS);
+    const scrollback = await settledScrollback(t);
 
+    // The LIVE FOOTER holds only the status line + composer — never the masthead.
     const frame = t.captureCharFrame();
-    expect(frame).toContain("Daintree Assistant"); // brand masthead wordmark
     expect(frame).toContain("›"); // the composer prompt glyph
-    // Offline → the connection badge degrades and the mount log lands in the
-    // transcript (which is why the empty hint is gone by now).
-    expect(frame).toContain("DEGRADED");
-    expect(frame).toContain("not connected");
-    // The operations surface is never inline now — it lives behind ^O / a
-    // /panel command, covered by OperationsView.test.
+    expect(frame).toContain("DEGRADED"); // offline → status badge degrades
+    expect(frame).not.toContain("Daintree Assistant"); // masthead is in scrollback now
+
+    // The masthead and the offline mount note scrolled away into native scrollback —
+    // committed once, owned by the host terminal.
+    expect(scrollback).toContain("Daintree Assistant"); // brand masthead wordmark
+    expect(scrollback).toContain("not connected"); // degraded mount note
 
     t.renderer.destroy?.();
     // After teardown, a confirm requested by an in-flight tool call must
@@ -62,10 +87,7 @@ describe("DaintreeApp (full mount, offline)", () => {
     });
     const exit = mock();
 
-    const t = await testRender(<DaintreeApp app={app} exit={exit} />, {
-      width: 80,
-      height: 24,
-    });
+    const t = await testRender(<DaintreeApp app={app} exit={exit} />, FOOTER_OPTS);
     await t.flush();
     await tick();
     await t.flush();
@@ -105,10 +127,7 @@ describe("DaintreeApp (full mount, offline)", () => {
     });
     const exit = mock();
 
-    const t = await testRender(<DaintreeApp app={app} exit={exit} />, {
-      width: 80,
-      height: 24,
-    });
+    const t = await testRender(<DaintreeApp app={app} exit={exit} />, FOOTER_OPTS);
     await t.flush();
     await tick();
     await t.flush();
@@ -140,30 +159,30 @@ describe("DaintreeApp (full mount, offline)", () => {
     });
     const exit = mock();
 
-    const t = await testRender(<DaintreeApp app={app} exit={exit} />, {
-      width: 80,
-      height: 24,
-    });
+    const t = await testRender(<DaintreeApp app={app} exit={exit} />, FOOTER_OPTS);
     await t.flush();
     await tick(60); // a frame or two into the draw
     await t.flush();
     const booting = t.captureCharFrame();
-    // The splash owns the screen: the cockpit is not rendered behind it.
+    // The splash owns the screen: neither the masthead nor the composer is up yet.
     expect(booting).not.toContain("Daintree Assistant");
     expect(booting).not.toContain("›");
 
     // The draw finishes (~1.1s) AND offline startup settles immediately, so the gate
-    // opens and the cockpit takes over. Poll for it (rather than one fixed wait) so a
-    // slow CI just takes more iterations instead of flaking.
+    // opens and the cockpit takes over. Poll for the composer in the live footer
+    // (rather than one fixed wait) so a slow CI just takes more iterations.
     let cockpit = "";
+    let scrollback = "";
     for (let i = 0; i < 100; i++) {
       cockpit = t.captureCharFrame();
-      if (cockpit.includes("Daintree Assistant") && cockpit.includes("›")) break;
+      scrollback += t.externalOutput.takeText();
+      if (cockpit.includes("›") && scrollback.includes("Daintree Assistant")) break;
       await tick(50);
       await t.flush();
     }
-    expect(cockpit).toContain("Daintree Assistant");
+    // Composer lives in the footer; the masthead committed to scrollback on dissolve.
     expect(cockpit).toContain("›");
+    expect(scrollback).toContain("Daintree Assistant");
 
     t.renderer.destroy?.();
     await app.shutdown();

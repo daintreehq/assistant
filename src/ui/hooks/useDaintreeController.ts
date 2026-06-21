@@ -490,6 +490,12 @@ export interface DaintreeController {
   booting: boolean;
   /** Called by the splash when its draw has finished — one half of the dismiss gate. */
   notifyAnimationDone: () => void;
+  /**
+   * Monotonic counter bumped on every `/clear`. Signals that the transcript was
+   * REPLACED (not appended), so the scrollback layer can reset its commit cursor and
+   * re-commit the masthead deterministically. See {@link useScrollbackTranscript}.
+   */
+  clearNonce: number;
 }
 
 /**
@@ -510,6 +516,19 @@ function resyncCockpitSurface(
   renderer: CliRenderer,
   cfg: App["config"],
 ): void {
+  // Split-footer keeps its OWN record of the lines it has committed to scrollback so it
+  // can replay them on resize. After an external host-scrollback wipe that record is
+  // stale, so drop it (`clearSavedLines`) and let the footer redraw from a clean slate;
+  // the transcript hook then re-commits the masthead on top of the fresh scrollback.
+  // Guarded SEPARATELY from the shadow-buffer reset below so a stub/older renderer that
+  // lacks the method still gets the forced repaint that fixes the blank-header gap.
+  try {
+    renderer.resetSplitFooterForReplay({ clearSavedLines: true });
+  } catch (err) {
+    logDebug(cfg, "ui.clear.split_reset_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   try {
     renderer.currentRenderBuffer.clear();
     renderer.nextRenderBuffer.clear();
@@ -1011,5 +1030,6 @@ export function useDaintreeController(
     projectName,
     booting,
     notifyAnimationDone,
+    clearNonce,
   };
 }

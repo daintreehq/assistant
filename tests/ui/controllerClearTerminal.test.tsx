@@ -36,9 +36,15 @@ function makeStubRenderer() {
     currentCleared: 0,
     nextCleared: 0,
     rendered: 0,
+    splitReset: 0,
     forceFullRepaintRequested: false,
   };
   const renderer = {
+    // Split-footer's scrollback-replay reset — dropped so a stale saved-line record
+    // can't redraw the old conversation after the host-scrollback wipe.
+    resetSplitFooterForReplay: () => {
+      calls.splitReset += 1;
+    },
     currentRenderBuffer: {
       clear: () => {
         calls.currentCleared += 1;
@@ -175,8 +181,10 @@ describe("useDaintreeController /clear wipes host scrollback (#137)", () => {
     });
     await tick();
 
-    // The resync ran post-commit: both shadow buffers blanked, the forced-repaint
-    // latch set, and a render requested — the fix for the blank-header gap.
+    // The resync ran post-commit: split-footer's saved scrollback record was reset,
+    // both shadow buffers blanked, the forced-repaint latch set, and a render
+    // requested — the fix for the blank-header gap.
+    expect(calls.splitReset).toBeGreaterThan(0);
     expect(calls.currentCleared).toBeGreaterThan(0);
     expect(calls.nextCleared).toBeGreaterThan(0);
     expect(calls.forceFullRepaintRequested).toBe(true);
