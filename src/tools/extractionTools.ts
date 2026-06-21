@@ -41,6 +41,35 @@ import {
 
 /* ------------------------------- arg schemas ----------------------------- */
 
+/**
+ * The "agent has finished its turn" signal for a spawned agent: it has settled
+ * into one of the non-working terminal states. An explore/edit agent lands on
+ * `waiting` when it finishes (idle at the prompt), and on `exited`/`completed`
+ * when the process ends — so polling for any of these is the right default for
+ * "wait until the agent is done, then read what it said".
+ */
+const SETTLED_WAIT: WatchCondition = {
+  any: [{ stateIs: "waiting" }, { stateIs: "completed" }, { stateIs: "exited" }],
+};
+
+/**
+ * The model-facing schema advertises `wait` as a bare object, and the large model
+ * reliably reaches for `wait: {}` to mean "wait until the agent finishes". The
+ * strict WatchCondition union rejects an empty object, which once trapped a turn
+ * in a re-issue loop (it kept emitting the same `{}` after each validation error).
+ * So for the inline extract tools ONLY, coerce a keyless `wait` object into the
+ * settled default rather than erroring — the model's natural call now does the
+ * obviously-intended thing. Real watchers keep the strict union: a degenerate
+ * condition there would persist a watcher that can never fire.
+ */
+const ExtractWaitSchema = z.preprocess(
+  (v) =>
+    v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0
+      ? SETTLED_WAIT
+      : v,
+  WatchCondition,
+);
+
 const baseExtractShape = {
   terminalIds: z
     .array(z.string().min(1))

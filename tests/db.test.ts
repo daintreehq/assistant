@@ -156,33 +156,6 @@ describe("Db fresh schema (single baseline migration)", () => {
 
     db.close();
   });
-
-  it("self-heals a column an older DB file is missing (schema reconcile)", () => {
-    // Simulate the drift that silently killed every watcher attach: a column added to
-    // SCHEMA after a file was created is invisible to CREATE TABLE IF NOT EXISTS, so an
-    // old on-disk DB lacks it and the first INSERT naming it throws. Reproduce by
-    // building the full DB and DROPping the nullable column.
-    const seed = new Db(path);
-    seed.raw().exec("ALTER TABLE watchers DROP COLUMN lastEpistemicKind");
-    const before = (
-      seed.raw().prepare("PRAGMA table_info(watchers)").all() as Array<{
-        name: string;
-      }>
-    ).map((c) => c.name);
-    expect(before).not.toContain("lastEpistemicKind");
-    seed.close();
-
-    // Reopening runs reconcileSchema, which re-adds the missing column BEFORE anything
-    // reads or writes the table — so a watcher INSERT that names it no longer throws.
-    const db = new Db(path);
-    const after = (
-      db.raw().prepare("PRAGMA table_info(watchers)").all() as Array<{
-        name: string;
-      }>
-    ).map((c) => c.name);
-    expect(after).toContain("lastEpistemicKind");
-    db.close();
-  });
 });
 
 describe("Db startup watcher invalidation", () => {

@@ -442,10 +442,6 @@ export class Db {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
-    // Heal schema drift on a pre-existing DB BEFORE anything reads/writes it: a
-    // column added to SCHEMA after this file was created is invisible to the
-    // CREATE TABLE IF NOT EXISTS above, and the first INSERT naming it would throw.
-    this.reconcileSchema();
     this.migrate();
     this.cancelStaleWatchers();
     this.cancelStaleAgentLaunches();
@@ -718,64 +714,6 @@ export class Db {
     for (let v = current; v < migrations.length; v++) migrations[v]();
     // PRAGMA values can't be bound as parameters; the count is an internal int.
     this.db.exec(`PRAGMA user_version = ${migrations.length}`);
-  }
-
-  /**
-   * Self-heal schema drift on a pre-existing DB. The base SCHEMA uses CREATE TABLE
-   * IF NOT EXISTS, so a column ADDED to SCHEMA after a file was first created never
-   * lands on that old file — and the first INSERT naming it throws (exactly how a
-   * stale `watchers.lastEpistemicKind` silently killed every watcher attach). Rather
-   * than maintain a versioned migration chain (we don't, in dev — see {@link migrate}),
-   * reconcile GENERICALLY: stand up a reference DB from the canonical SCHEMA, then
-   * `ALTER ADD COLUMN` whatever the live DB is missing. Idempotent (a fresh DB already
-   * matches → no-op), runtime-agnostic (runs through the same driver as everything
-   * else), and heals every table — not just the one that bit us.
-   *
-   * Only nullable / defaulted columns can be added: SQLite can't ALTER-add a NOT NULL
-   * column without a default to a populated table, so such a column is skipped (it
-   * would need a hard reset). Virtual / FTS tables are excluded — the FTS5 extension
-   * owns their structure and it never drifts.
-   */
-  private reconcileSchema(): void {
-    const ref = new DatabaseSync(":memory:");
-    try {
-      ref.exec(SCHEMA);
-      const tables = ref
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE TABLE%' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%'",
-        )
-        .all() as Array<{ name: string }>;
-      for (const { name } of tables) {
-        const expected = ref
-          .prepare(`PRAGMA table_info(${name})`)
-          .all() as Array<{
-          name: string;
-          type: string;
-          notnull: number;
-          dflt_value: unknown;
-        }>;
-        const present = new Set(
-          (
-            this.db.prepare(`PRAGMA table_info(${name})`).all() as Array<{
-              name: string;
-            }>
-          ).map((c) => c.name),
-        );
-        for (const col of expected) {
-          if (present.has(col.name)) continue;
-          // Can't safely ALTER-add a NOT NULL column with no default — skip it.
-          if (col.notnull && col.dflt_value == null) continue;
-          const type = col.type || "TEXT";
-          const def =
-            col.dflt_value != null ? ` DEFAULT ${String(col.dflt_value)}` : "";
-          this.db.exec(
-            `ALTER TABLE ${name} ADD COLUMN ${col.name} ${type}${def}`,
-          );
-        }
-      }
-    } finally {
-      ref.close();
-    }
   }
 
   close(): void {
