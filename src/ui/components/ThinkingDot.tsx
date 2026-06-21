@@ -1,4 +1,3 @@
-import { Text } from "ink";
 import { useEffect, useState } from "react";
 
 /**
@@ -55,5 +54,5 @@ export function ThinkingDot({ ascii = false }: { ascii?: boolean }) {
     // Keyed on `frames.length` (not the array ref): a stable length never
     // restarts the interval mid-turn, while a size change resets it cleanly.
   }, [frames.length]);
-  return <Text>{frames[idx]}</Text>;
+  return <text>{frames[idx]}</text>;
 }

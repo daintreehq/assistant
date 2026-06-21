@@ -5,13 +5,20 @@
  * falls back to it. `doctor` checks the environment.
  */
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { Command } from "commander";
 import { App } from "./app.js";
 import { startRepl } from "./repl.js";
 import { render, c } from "./render.js";
 import { createConsoleSink } from "./consoleSink.js";
 import { createJsonSink } from "./jsonSink.js";
-import { startInkApp } from "../ui/runInkApp.js";
+// NOTE: the cockpit (src/ui/runApp.js → @opentui/*) is imported LAZILY inside the
+// TTY branch of runInteractive, NOT at module load. OpenTUI's native renderer only
+// runs under Bun (or Node ≥26.3.0 --experimental-ffi), and @opentui/react uses a
+// bare `react-reconciler/constants` import that Node's strict ESM resolver rejects.
+// Keeping the import lazy means the Node-safe paths (doctor, --classic, one-shot,
+// non-TTY) never load OpenTUI and run fine under plain Node.
 import { startDebugLog } from "../debugLog.js";
 import { loadProjectInstructions } from "../projectInstructions.js";
 import type { ConfigOverrides } from "../config.js";
@@ -137,7 +144,62 @@ async function runOneShot(prompt: string, opts: CliOptions): Promise<void> {
   }
 }
 
+/**
+ * Locate a Bun executable, or null if none is installed. Checks the standard
+ * install locations and BUN_INSTALL first (cheap, no subprocess), then falls back
+ * to a PATH lookup. Used to re-exec the cockpit under Bun (see {@link runInteractive}).
+ */
+function resolveBunPath(): string | null {
+  const candidates: string[] = [];
+  if (process.env.BUN_INSTALL)
+    candidates.push(path.join(process.env.BUN_INSTALL, "bin", "bun"));
+  if (process.env.HOME)
+    candidates.push(path.join(process.env.HOME, ".bun", "bin", "bun"));
+  candidates.push("/opt/homebrew/bin/bun", "/usr/local/bin/bun");
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) return c;
+    } catch {
+      /* keep looking */
+    }
+  }
+  try {
+    const which = spawnSync(
+      process.platform === "win32" ? "where" : "which",
+      ["bun"],
+      { encoding: "utf8" },
+    );
+    const found = which.stdout
+      ?.split(/\r?\n/)
+      .map((s) => s.trim())
+      .find(Boolean);
+    if (found && existsSync(found)) return found;
+  } catch {
+    /* no bun on PATH */
+  }
+  return null;
+}
+
 async function runInteractive(opts: CliOptions): Promise<void> {
+  // The cockpit renders on OpenTUI's native (FFI) renderer, which only runs under
+  // Bun. The `daintree-assistant` bin and Daintree's own launcher start us under
+  // Node, so when a cockpit is wanted and we're NOT already under Bun, re-exec THIS
+  // process under Bun (inheriting the TTY so the cockpit renders in place). The child
+  // re-enters here already under Bun and skips this branch. If Bun isn't installed we
+  // fall through; the cockpit import then fails and degrades to the classic REPL.
+  const wantsCockpit =
+    !opts.classic && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const underBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+  if (wantsCockpit && !underBun) {
+    const bun = resolveBunPath();
+    if (bun) {
+      const child = spawnSync(bun, [process.argv[1], ...process.argv.slice(2)], {
+        stdio: "inherit",
+      });
+      process.exit(child.status ?? 0);
+    }
+  }
+
   const app = App.create({ overrides: await buildOverrides(opts) });
   const ttyOk = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (opts.classic || !ttyOk) {
@@ -147,11 +209,32 @@ async function runInteractive(opts: CliOptions): Promise<void> {
     await startRepl(app);
     return;
   }
-  // Ink cockpit: still open the log (so currentDebugLogPath() resolves for the
+  // OpenTUI cockpit: still open the log (so currentDebugLogPath() resolves for the
   // header), but print nothing — the header's "◌ logging · <path>" badge already
   // shows it, and a console line above the cockpit would just duplicate it.
   startDebugLog(app.config, app.sessionId);
-  await startInkApp(app);
+  try {
+    // Lazy import: only the interactive cockpit needs OpenTUI, whose native renderer
+    // runs under Bun (or Node ≥26.3.0 --experimental-ffi). Loading it here keeps the
+    // Node-safe paths above clean, and lets us DEGRADE instead of crash if the
+    // runtime can't load it (e.g. Daintree forking the assistant under Electron's
+    // Node): @opentui/react's `react-reconciler/constants` import fails Node's strict
+    // ESM resolver, so a plain-Node launch throws ERR_MODULE_NOT_FOUND on import.
+    const { startCockpit } = await import("../ui/runApp.js");
+    await startCockpit(app);
+  } catch (err) {
+    // Fall back to the classic console REPL rather than taking the whole app down.
+    // The cockpit needs Bun; tell the user how to get it.
+    process.stderr.write(
+      "\nThe OpenTUI cockpit requires Bun (its renderer is native FFI). This process " +
+        "is not running under a compatible runtime, so the assistant is falling back " +
+        "to the classic console REPL.\n  → Run `npm run dev` under Bun for the full UI " +
+        "(install: curl -fsSL https://bun.sh/install | bash).\n" +
+        `  (${err instanceof Error ? err.message : String(err)})\n\n`,
+    );
+    announceDebugLog(app);
+    await startRepl(app);
+  }
 }
 
 async function runDoctor(opts: CliOptions): Promise<void> {

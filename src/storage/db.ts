@@ -5,15 +5,10 @@
  * is append-heavy and auditable; every autonomous action carries an idempotency /
  * dedupe key. Pass ":memory:" as the path in tests.
  */
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-
-// Loaded via createRequire so the bundler (esbuild) leaves the `node:sqlite`
-// specifier intact — it otherwise strips the `node:` prefix off builtins it
-// doesn't yet recognise, producing an unresolvable `import "sqlite"`.
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
-  DatabaseSync: typeof import("node:sqlite").DatabaseSync;
-};
+// Runtime-adaptive SQLite: `bun:sqlite` under Bun (the cockpit's renderer runtime),
+// Node's built-in `node:sqlite` under Node — same synchronous surface either way.
+import { DatabaseSync } from "./sqliteDriver.js";
 import type {
   AgentLaunchRecord,
   AgentLaunchStage,

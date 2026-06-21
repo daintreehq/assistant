@@ -16,7 +16,6 @@ import {
   useState,
   type RefObject,
 } from "react";
-import { useStdout } from "ink";
 import type { App } from "../../cli/app.js";
 import type { ComposerHandle } from "../components/Composer.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
@@ -158,10 +157,11 @@ export function transcriptReducer(
       return [...cells, newTurn(action.text, now)];
 
     case "transcript:clear":
-      // /clear reset the session to its initial controls — drop every in-flight
-      // cell so the live region starts empty. Cells already committed to native
-      // scrollback via <Static> stay there (same as a shell `clear`); the caller
-      // also bumps staticKey to remount <Static> so they don't ghost on resize.
+      // /clear resets the session to its initial controls — drop every in-flight
+      // cell so the live region starts empty. Rows already scrolled into the host's
+      // native scrollback stay there (same as a shell `clear`); the caller also wipes
+      // that scrollback via clearHostTerminal so the cleared conversation can't be
+      // wheeled back into.
       return [];
 
     case "user:pullback": {
@@ -481,12 +481,6 @@ export interface DaintreeController {
   /** The purposeful view a panel command (`/help`, `/watchers`, …) wants open. */
   activePanel: PanelKey | null;
   setActivePanel: (panel: PanelKey | null) => void;
-  /**
-   * Monotonic counter bumped by `/clear`. Used as the `key` on the `<Static>`
-   * element so a clear forces it to remount and purge Ink's internal
-   * `fullStaticOutput` cache — otherwise committed cells ghost back on resize.
-   */
-  staticKey: number;
   resolveConfirm: (approved: boolean) => void;
   /** The bound project's display name (from Daintree's MCP, basename fallback). */
   projectName?: string;
@@ -501,9 +495,11 @@ export function useDaintreeController(
   onExit?: () => void,
 ): DaintreeController {
   const bridge = useMemo(() => new UiBridge(), []);
-  // Raw managed stdout for terminal side-channels (e.g. wiping host scrollback on
-  // /clear). Stable across renders; written to only outside the render body.
-  const { stdout } = useStdout();
+  // Raw stdout for terminal side-channels (e.g. wiping host scrollback on /clear).
+  // Under OpenTUI's main-screen (inline) mode the process owns the real TTY, so we
+  // write the scrollback-wipe escape straight to `process.stdout` (Ink's managed
+  // `useStdout()` no longer exists). Written to only outside the render body.
+  const stdout = process.stdout;
   const [transcript, dispatch] = useReducer(transcriptReducer, []);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(
     null,
@@ -514,7 +510,6 @@ export function useDaintreeController(
   // and autonomous wake turns, neither of which Escape can abort.
   const [canCancel, setCanCancel] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelKey | null>(null);
-  const [staticKey, setStaticKey] = useState(0);
   const [dashboard, setDashboard] = useState<DashboardState>(() =>
     snapshot(app),
   );
@@ -834,16 +829,13 @@ export function useDaintreeController(
               setActivePanel(result.switchPanel);
             } else if (result.clearTranscript) {
               // /clear: wipe the host terminal's scrollback FIRST (synchronously,
-              // before any React dispatch) so the OS drops the committed cells that
-              // already flowed into native scrollback — otherwise the user can wheel
-              // back up into the "cleared" conversation. Then wipe the live
-              // transcript, remount <Static> (bump the key) so committed cells don't
-              // ghost back, and finally drop a single confirmation card into the
-              // now-empty transcript so the user sees it ran. Order matters:
-              // scrollback wipe → clear → remount → add the success card.
+              // before any React dispatch) so the OS drops the rows that already
+              // flowed into native scrollback — otherwise the user can wheel back up
+              // into the "cleared" conversation. Then wipe the live transcript and
+              // drop a single confirmation card into the now-empty transcript so the
+              // user sees it ran. Order matters: scrollback wipe → clear → add card.
               clearHostTerminal(stdout);
               dispatch({ type: "transcript:clear" });
-              setStaticKey((k) => k + 1);
               dispatch({
                 type: "command:add",
                 title: result.title ?? "Clear",
@@ -955,7 +947,6 @@ export function useDaintreeController(
     queueDepth,
     activePanel,
     setActivePanel,
-    staticKey,
     resolveConfirm,
     projectName,
     booting,

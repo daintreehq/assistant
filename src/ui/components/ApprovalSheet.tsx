@@ -5,9 +5,17 @@
  * touched and whether it's reversible — in plain language, not the raw risk
  * class. The tool name stays as a dim secondary label; `V` reveals the raw
  * reason + args. It stays understandable with color stripped.
+ *
+ * OpenTUI port: Ink `<Box>`/`<Text>` become the native `<box>`/`<text>`; Ink's
+ * `useInput` becomes OpenTUI's global `useKeyboard`. The bordered card uses
+ * `<box border borderStyle="rounded" borderColor=…>`. Inline `<Text>` runs that
+ * nested other `<Text>` become `<span>` children of one `<text>` (a native
+ * `<text>` may not contain another `<text>`); `color`→`fg`, `dimColor`→the DIM
+ * attribute, `bold`→the BOLD attribute, `inverse`→the inverse fg/bg swap.
  */
 import { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { TextAttributes } from "@opentui/core";
+import { useKeyboard } from "@opentui/react";
 import type { PendingConfirm } from "../types.js";
 import type { ConfirmRequest } from "../../tools/types.js";
 import type { RiskClass } from "../../schemas.js";
@@ -64,10 +72,12 @@ function Field({
   // One predictable line per field so the sheet's height never overflows its
   // reserved budget (which would overlap rows at narrow widths).
   return (
-    <Text wrap="truncate">
-      <Text dimColor>{("  " + label).padEnd(10)}</Text>
-      <Text dimColor={dim}>{value}</Text>
-    </Text>
+    <text truncate>
+      <span attributes={TextAttributes.DIM}>{("  " + label).padEnd(10)}</span>
+      <span attributes={dim ? TextAttributes.DIM : TextAttributes.NONE}>
+        {value}
+      </span>
+    </text>
   );
 }
 
@@ -91,10 +101,10 @@ export function ApprovalSheet({
     setShownFor(pending.id);
     setShowArgs(false);
   }
-  useInput((input, key) => {
-    if (/^y$/i.test(input)) onResolve(true);
-    else if (/^n$/i.test(input) || key.escape) onResolve(false);
-    else if (/^v$/i.test(input)) setShowArgs((v) => !v);
+  useKeyboard((key) => {
+    if (/^y$/i.test(key.name)) onResolve(true);
+    else if (/^n$/i.test(key.name) || key.name === "escape") onResolve(false);
+    else if (/^v$/i.test(key.name)) setShowArgs((v) => !v);
   });
 
   const req = pending.request;
@@ -105,21 +115,23 @@ export function ApprovalSheet({
     // `columns` prop, which lags the real width by a render tick while Daintree
     // animates the pane on show/hide (#138). An explicit `width={width}` would
     // momentarily exceed a just-shrunk terminal, wrap the bordered row, and orphan
-    // a stale copy into scrollback (Ink erases by logical line count and only
-    // clears on shrink, never on grow). `width="100%"` resolves against the live
-    // width on every relayout; `maxWidth` keeps the numeric prop as the readability
-    // cap. Fields below already `wrap="truncate"`, so the body clips to match.
-    <Box
+    // a stale copy into scrollback. `width="100%"` resolves against the live width
+    // on every relayout; `maxWidth` keeps the numeric prop as the readability cap.
+    // Fields below already `truncate`, so the body clips to match. The native Zig
+    // renderer reflows the bordered card cleanly on resize.
+    <box
       flexDirection="column"
-      borderStyle="round"
+      border
+      borderStyle="rounded"
       borderColor={ui.color.warning}
-      paddingX={1}
+      paddingLeft={1}
+      paddingRight={1}
       width="100%"
       maxWidth={width}
     >
-      <Text color={ui.color.warning} bold wrap="truncate">
+      <text fg={ui.color.warning} attributes={TextAttributes.BOLD} truncate>
         {set.attention} {titleFor(req)}
-      </Text>
+      </text>
       <Field label="affects" value={consequenceFor(req)} />
       <Field label="tool" value={req.toolName} dim />
       {showArgs ? (
@@ -128,19 +140,19 @@ export function ApprovalSheet({
           <Field label="args" value={compactArgs(req.args, width - 12)} dim />
         </>
       ) : null}
-      <Box marginTop={1}>
-        {/* One line (wrap=truncate) so the sheet height stays predictable.
+      <box marginTop={1}>
+        {/* One line (truncate) so the sheet height stays predictable.
             Default visually to decline: it's inverse, approve is plain. */}
-        <Text wrap="truncate">
-          <Text color={ui.color.accent}>Y approve</Text>
-          <Text dimColor> · </Text>
-          <Text inverse color={ui.color.danger}>
+        <text truncate>
+          <span fg={ui.color.accent}>Y approve</span>
+          <span attributes={TextAttributes.DIM}> · </span>
+          <span fg={ui.color.danger} attributes={TextAttributes.INVERSE}>
             {" "}
             N decline{" "}
-          </Text>
-          <Text dimColor> · V inspect · Esc</Text>
-        </Text>
-      </Box>
-    </Box>
+          </span>
+          <span attributes={TextAttributes.DIM}> · V inspect · Esc</span>
+        </text>
+      </box>
+    </box>
   );
 }

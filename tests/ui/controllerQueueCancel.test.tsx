@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { vi } from "vitest";
-import { render } from "ink-testing-library";
+import { test, expect, describe, mock } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
 import { App } from "../../src/cli/app.js";
 import {
   useDaintreeController,
@@ -21,7 +21,9 @@ function Harness({
 }) {
   const controller = useDaintreeController(app);
   onController(controller);
-  return null;
+  // The controller is logic-only here; render nothing visible. OpenTUI's test
+  // renderer needs a node, so return an empty box rather than null.
+  return <box />;
 }
 
 function makeOfflineApp() {
@@ -40,7 +42,7 @@ function makeOfflineApp() {
 function deferredSession(app: App) {
   const calls: Array<{ input: string; signal?: AbortSignal }> = [];
   const resolvers: Array<() => void> = [];
-  (app.session as unknown as { send: unknown }).send = vi.fn(
+  (app.session as unknown as { send: unknown }).send = mock(
     (input: string, opts: { signal?: AbortSignal } = {}) => {
       calls.push({ input, signal: opts.signal });
       return new Promise<string>((res) => {
@@ -57,14 +59,16 @@ function deferredSession(app: App) {
 }
 
 describe("useDaintreeController queue + cancel (#45)", () => {
-  it("queues a follow-up while busy and drains it in order once the turn ends", async () => {
+  test("queues a follow-up while busy and drains it in order once the turn ends", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls, finish } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     expect(controller.sendUserMessage("first")).toBe(true);
@@ -83,19 +87,21 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     expect(calls[1].signal).toBeInstanceOf(AbortSignal);
     expect(calls[1].signal).not.toBe(calls[0].signal);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("drains a strictly FIFO three-deep queue, each with a distinct signal", async () => {
+  test("drains a strictly FIFO three-deep queue, each with a distinct signal", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls, finish } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("first");
@@ -117,19 +123,21 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     const signals = calls.map((c) => c.signal);
     expect(new Set(signals).size).toBe(3);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("tracks queueDepth as follow-ups enqueue and drain (#95)", async () => {
+  test("tracks queueDepth as follow-ups enqueue and drain (#95)", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { finish } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     // Idle: nothing queued.
@@ -159,19 +167,21 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     await tick();
     expect(controller.queueDepth).toBe(0);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("resets queueDepth to 0 when a pre-stream turn is pulled back (#95)", async () => {
+  test("resets queueDepth to 0 when a pre-stream turn is pulled back (#95)", async () => {
     const { app, stateDir } = makeOfflineApp();
     deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("first");
@@ -185,19 +195,21 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     await tick();
     expect(controller.queueDepth).toBe(0);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("cancelTurn aborts the in-flight turn's signal", async () => {
+  test("cancelTurn aborts the in-flight turn's signal", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("long running");
@@ -209,19 +221,21 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     await tick();
     expect(calls[0].signal?.aborted).toBe(true);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("after cancelling the in-flight turn, a queued follow-up still drains", async () => {
+  test("after cancelling the in-flight turn, a queued follow-up still drains", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("first");
@@ -237,7 +251,7 @@ describe("useDaintreeController queue + cancel (#45)", () => {
     expect(calls.map((c) => c.input)).toEqual(["first", "queued"]);
     expect(calls[1].signal?.aborted).toBe(false);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
@@ -247,14 +261,16 @@ const onlyTurns = (c: DaintreeController) =>
   c.transcript.filter((cell) => cell.kind === "turn");
 
 describe("useDaintreeController pull-back (#61)", () => {
-  it("pulls a pre-stream message back: removes the turn, aborts, clears canCancel", async () => {
+  test("pulls a pre-stream message back: removes the turn, aborts, clears canCancel", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("hello");
@@ -271,19 +287,21 @@ describe("useDaintreeController pull-back (#61)", () => {
     expect(calls[0].signal?.aborted).toBe(true);
     expect(controller.canCancel).toBe(false);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("clears queued follow-ups on pull-back so none drains while editing", async () => {
+  test("clears queued follow-ups on pull-back so none drains while editing", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("first");
@@ -299,19 +317,21 @@ describe("useDaintreeController pull-back (#61)", () => {
     expect(calls.map((c) => c.input)).toEqual(["first"]);
     expect(onlyTurns(controller)).toHaveLength(0);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("falls back to plain cancel once the turn is streaming", async () => {
+  test("falls back to plain cancel once the turn is streaming", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("hello");
@@ -332,19 +352,21 @@ describe("useDaintreeController pull-back (#61)", () => {
     expect(turns).toHaveLength(1);
     expect((turns[0] as { state: string }).state).toBe("cancelled");
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("falls back to plain cancel once the turn has already run a tool", async () => {
+  test("falls back to plain cancel once the turn has already run a tool", async () => {
     const { app, stateDir } = makeOfflineApp();
     const { calls } = deferredSession(app);
 
     let controller!: DaintreeController;
-    const { unmount } = render(
+    const t = await testRender(
       <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
     );
+    await t.flush();
     await tick();
 
     controller.sendUserMessage("spawn an agent");
@@ -369,7 +391,7 @@ describe("useDaintreeController pull-back (#61)", () => {
     expect(turns).toHaveLength(1);
     expect((turns[0] as { activities: unknown[] }).activities).toHaveLength(1);
 
-    unmount();
+    t.renderer.destroy?.();
     await app.shutdown();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });

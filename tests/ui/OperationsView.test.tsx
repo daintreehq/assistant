@@ -1,4 +1,5 @@
-import { render } from "ink-testing-library";
+import { test, expect, describe } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
 import { OperationsView } from "../../src/ui/components/OperationsView.js";
 import type { DashboardState } from "../../src/ui/types.js";
 import type { WatcherRecord } from "../../src/schemas.js";
@@ -31,42 +32,51 @@ function dash(over: Partial<DashboardState> = {}): DashboardState {
   };
 }
 
+// A generous render box so the full deck is never clipped — captureCharFrame only
+// reports what physically rendered, so a too-short height would falsely "hide" a
+// section the way the unbounded ink-testing-library frame never did.
+const SIZE = { width: 72, height: 40 };
+
 describe("OperationsView", () => {
-  it("orders sections by human priority and merges watchers into agents", () => {
-    const frame =
-      render(
-        <OperationsView dashboard={dash({ watchers: [watcher({})] })} width={72} now={0} />,
-      ).lastFrame() ?? "";
+  test("orders sections by human priority and merges watchers into agents", async () => {
+    const t = await testRender(
+      <OperationsView dashboard={dash({ watchers: [watcher({})] })} width={72} now={0} />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("NOW");
     expect(frame).toContain("AGENTS");
     expect(frame).toContain("term_8"); // the supervised terminal, not a separate concept
   });
 
-  it("names the most urgent attention item but suppresses inert action labels", () => {
-    const frame =
-      render(
-        <OperationsView
-          dashboard={dash({
-            inbox: [
-              {
-                id: "e1",
-                source: "terminal_watcher",
-                severity: "error",
-                title: "Tests failed in term_8",
-                summary: "3 failures",
-                createdAt: 0,
-                count: 1,
-                recommendedActions: [
-                  { label: "focus terminal", toolName: "terminal.focus" },
-                  { label: "rerun", toolName: "recipe.run" },
-                ],
-              } as any,
-            ],
-          })}
-          width={72}
-          now={0}
-        />,
-      ).lastFrame() ?? "";
+  test("names the most urgent attention item but suppresses inert action labels", async () => {
+    const t = await testRender(
+      <OperationsView
+        dashboard={dash({
+          inbox: [
+            {
+              id: "e1",
+              source: "terminal_watcher",
+              severity: "error",
+              title: "Tests failed in term_8",
+              summary: "3 failures",
+              createdAt: 0,
+              count: 1,
+              recommendedActions: [
+                { label: "focus terminal", toolName: "terminal.focus" },
+                { label: "rerun", toolName: "recipe.run" },
+              ],
+            } as any,
+          ],
+        })}
+        width={72}
+        now={0}
+      />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("NEEDS ATTENTION");
     expect(frame).toContain("Tests failed in term_8");
     expect(frame).toContain("3 failures");
@@ -76,9 +86,57 @@ describe("OperationsView", () => {
     expect(frame).not.toContain("[R rerun]");
   });
 
-  it("marks an agent row with its epistemic provenance (#85)", () => {
-    const frame =
-      render(
+  test("marks an agent row with its epistemic provenance (#85)", async () => {
+    const t = await testRender(
+      <OperationsView
+        dashboard={dash({
+          watchers: [
+            watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
+          ],
+        })}
+        width={72}
+        now={0}
+      />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
+    // The 3-letter tag is glyph-set independent (survives the ASCII fallback).
+    expect(frame).toContain("obs");
+  });
+
+  test("marks an attention event with its epistemic provenance (#85)", async () => {
+    const t = await testRender(
+      <OperationsView
+        dashboard={dash({
+          inbox: [
+            {
+              id: "e1",
+              source: "terminal_watcher",
+              severity: "error",
+              title: "Tests failed in term_8",
+              summary: "3 failures",
+              epistemicKind: "inferred",
+              createdAt: 0,
+              count: 1,
+            } as any,
+          ],
+        })}
+        width={72}
+        now={0}
+      />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
+    expect(frame).toContain("inf");
+  });
+
+  test("renders the ASCII fallback glyph for epistemic marks when DAINTREE_ASCII=1 (#85)", async () => {
+    const prev = process.env.DAINTREE_ASCII;
+    process.env.DAINTREE_ASCII = "1";
+    try {
+      const t = await testRender(
         <OperationsView
           dashboard={dash({
             watchers: [
@@ -88,52 +146,10 @@ describe("OperationsView", () => {
           width={72}
           now={0}
         />,
-      ).lastFrame() ?? "";
-    // The 3-letter tag is glyph-set independent (survives the ASCII fallback).
-    expect(frame).toContain("obs");
-  });
-
-  it("marks an attention event with its epistemic provenance (#85)", () => {
-    const frame =
-      render(
-        <OperationsView
-          dashboard={dash({
-            inbox: [
-              {
-                id: "e1",
-                source: "terminal_watcher",
-                severity: "error",
-                title: "Tests failed in term_8",
-                summary: "3 failures",
-                epistemicKind: "inferred",
-                createdAt: 0,
-                count: 1,
-              } as any,
-            ],
-          })}
-          width={72}
-          now={0}
-        />,
-      ).lastFrame() ?? "";
-    expect(frame).toContain("inf");
-  });
-
-  it("renders the ASCII fallback glyph for epistemic marks when DAINTREE_ASCII=1 (#85)", () => {
-    const prev = process.env.DAINTREE_ASCII;
-    process.env.DAINTREE_ASCII = "1";
-    try {
-      const frame =
-        render(
-          <OperationsView
-            dashboard={dash({
-              watchers: [
-                watcher({ lastClassification: "terminal_exited", lastEpistemicKind: "observed" }),
-              ],
-            })}
-            width={72}
-            now={0}
-          />,
-        ).lastFrame() ?? "";
+        SIZE,
+      );
+      await t.flush();
+      const frame = t.captureCharFrame();
       // ASCII observed glyph is "*", label "obs".
       expect(frame).toContain("* obs");
     } finally {
@@ -142,9 +158,13 @@ describe("OperationsView", () => {
     }
   });
 
-  it("hides empty sections (no audit/timers shown when there are none)", () => {
-    const frame =
-      render(<OperationsView dashboard={dash()} width={72} now={0} />).lastFrame() ?? "";
+  test("hides empty sections (no audit/timers shown when there are none)", async () => {
+    const t = await testRender(
+      <OperationsView dashboard={dash()} width={72} now={0} />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).not.toContain("RECENT");
     expect(frame).not.toContain("SCHEDULED");
     expect(frame).toContain("Standing by");
@@ -178,40 +198,45 @@ describe("OperationsView", () => {
     { panel: "audit", label: "RECENT", marker: "git.push" },
   ] as const;
 
-  it.each(PANEL_CASES)(
-    "focuses only the $label section when activePanel=$panel",
-    ({ panel, label, marker }) => {
-      const frame =
-        render(
-          <OperationsView dashboard={fullDash()} width={72} now={0} activePanel={panel} />,
-        ).lastFrame() ?? "";
+  for (const { panel, label, marker } of PANEL_CASES) {
+    test(`focuses only the ${label} section when activePanel=${panel}`, async () => {
+      const t = await testRender(
+        <OperationsView dashboard={fullDash()} width={72} now={0} activePanel={panel} />,
+        SIZE,
+      );
+      await t.flush();
+      const frame = t.captureCharFrame();
       expect(frame).toContain(label);
       expect(frame).toContain(marker);
       for (const other of ALL_LABELS) {
         if (other !== label) expect(frame).not.toContain(other);
       }
-    },
-  );
+    });
+  }
 
-  it("renders the full deck when activePanel is null (unchanged behavior)", () => {
-    const frame =
-      render(
-        <OperationsView
-          dashboard={dash({ watchers: [watcher({})] })}
-          width={72}
-          now={0}
-          activePanel={null}
-        />,
-      ).lastFrame() ?? "";
+  test("renders the full deck when activePanel is null (unchanged behavior)", async () => {
+    const t = await testRender(
+      <OperationsView
+        dashboard={dash({ watchers: [watcher({})] })}
+        width={72}
+        now={0}
+        activePanel={null}
+      />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("NOW");
     expect(frame).toContain("AGENTS");
   });
 
-  it("shows an honest placeholder when a focused panel is empty", () => {
-    const frame =
-      render(
-        <OperationsView dashboard={dash()} width={72} now={0} activePanel="timers" />,
-      ).lastFrame() ?? "";
+  test("shows an honest placeholder when a focused panel is empty", async () => {
+    const t = await testRender(
+      <OperationsView dashboard={dash()} width={72} now={0} activePanel="timers" />,
+      SIZE,
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).not.toContain("SCHEDULED");
     expect(frame).toContain("Nothing here yet.");
   });

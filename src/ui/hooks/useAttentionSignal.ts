@@ -14,8 +14,8 @@
  * Both are gated on `stdout.isTTY` and wrapped so a failed write can never crash
  * the cockpit — these are passive side-channels, like the audit log. We do NOT
  * implement terminal focus-reporting (`\x1b[?1004h`) for v1: it requires raw
- * stdin parsing that fights Ink's own input handling, and the issue names it
- * optional. Desktop-notification escapes (OSC 9 / 777) are likewise out of scope.
+ * stdin parsing that fights the renderer's own input handling, and the issue names
+ * it optional. Desktop-notification escapes (OSC 9 / 777) are likewise out of scope.
  *
  * Why a BEL on the bridge event rather than on an inbox-count increment: the
  * scheduler stamps `notifiedAt` and delivers each fresh batch exactly once via
@@ -24,7 +24,6 @@
  * new events replace resolved ones, which would miss a ding.
  */
 import { useEffect } from "react";
-import { useStdout } from "ink";
 import type { UiBridge } from "../bridge.js";
 
 const BEL = "\x07";
@@ -41,8 +40,8 @@ function safeWrite(
 ): void {
   if (!stdout?.isTTY) return;
   try {
-    // The managed Ink stream: BEL and OSC title escapes emit no printable chars
-    // and don't move the cursor, so they don't corrupt the rendered frame.
+    // BEL and OSC title escapes emit no printable chars and don't move the cursor,
+    // so writing them straight to the host TTY doesn't corrupt the rendered frame.
     stdout.write(chunk);
   } catch {
     // A failed escape write must never take down the cockpit.
@@ -56,7 +55,7 @@ export function useAttentionSignal({
   bridge: UiBridge;
   inboxCount: number;
 }): void {
-  const { stdout } = useStdout();
+  const stdout = process.stdout;
 
   // Ding once per fresh attention batch the scheduler delivers.
   useEffect(() => {

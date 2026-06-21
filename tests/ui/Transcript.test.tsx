@@ -1,4 +1,5 @@
-import { render } from "ink-testing-library";
+import { test, expect, describe } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
 import { Transcript } from "../../src/ui/components/Transcript.js";
 import type { TranscriptCell } from "../../src/ui/types.js";
 
@@ -42,17 +43,22 @@ function activeRun(): TranscriptCell[] {
 }
 
 describe("Transcript", () => {
-  it("shows an empty hint when there are no cells", () => {
-    expect(
-      render(<Transcript cells={[]} height={10} width={72} />).lastFrame() ?? "",
-    ).toContain("Ask Daintree");
+  test("shows an empty hint when there are no cells", async () => {
+    const t = await testRender(
+      <Transcript cells={[]} height={10} width={72} />,
+      { width: 72, height: 10 },
+    );
+    await t.flush();
+    expect(t.captureCharFrame()).toContain("Ask Daintree");
   });
 
-  it("renders the run as YOU/DAINTREE markers and a branch tree of verbs", () => {
-    const frame =
-      render(
-        <Transcript cells={activeRun()} height={20} width={72} now={FIXED} />,
-      ).lastFrame() ?? "";
+  test("renders the run as YOU/DAINTREE markers and a branch tree of verbs", async () => {
+    const t = await testRender(
+      <Transcript cells={activeRun()} height={20} width={72} now={FIXED} />,
+      { width: 72, height: 20 },
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("YOU"); // quiet who-said-what label
     expect(frame).toContain("▏"); // the human's left accent bar marks the turn
     expect(frame).toContain("DAINTREE");
@@ -67,11 +73,13 @@ describe("Transcript", () => {
     expect(frame).toContain("180ms");
   });
 
-  it("reveals raw args/result only in expanded detail mode", () => {
-    const frame =
-      render(
-        <Transcript cells={activeRun()} height={30} width={72} now={FIXED} expanded />,
-      ).lastFrame() ?? "";
+  test("reveals raw args/result only in expanded detail mode", async () => {
+    const t = await testRender(
+      <Transcript cells={activeRun()} height={30} width={72} now={FIXED} expanded />,
+      { width: 72, height: 30 },
+    );
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("fs.search args:");
     expect(frame).toContain("result:");
   });

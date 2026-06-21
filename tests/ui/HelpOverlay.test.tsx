@@ -1,11 +1,16 @@
-import { render } from "ink-testing-library";
+import { test, expect, describe } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
 import { HelpOverlay } from "../../src/ui/components/HelpOverlay.js";
 import { overlayEntries } from "../../src/commandRegistry.js";
 
 describe("HelpOverlay", () => {
-  it("renders every registry command's syntax (issue #50: was missing /models, /help)", () => {
-    const { lastFrame } = render(<HelpOverlay width={72} />);
-    const frame = lastFrame() ?? "";
+  test("renders every registry command's syntax (issue #50: was missing /models, /help)", async () => {
+    const t = await testRender(<HelpOverlay width={72} />, {
+      width: 80,
+      height: 60,
+    });
+    await t.flush();
+    const frame = t.captureCharFrame();
     for (const [syntax] of overlayEntries()) {
       expect(frame).toContain(syntax);
     }
@@ -14,11 +19,15 @@ describe("HelpOverlay", () => {
     expect(frame).toContain("/help");
   });
 
-  it("keeps each command's description on one line at the default width", () => {
+  test("keeps each command's description on one line at the default width", async () => {
     // The overlay's right column is ~46 chars at width=72; descriptions must fit
     // so a registered command renders as a single, untruncated row.
-    const { lastFrame } = render(<HelpOverlay width={72} />);
-    const lines = (lastFrame() ?? "").split("\n");
+    const t = await testRender(<HelpOverlay width={72} />, {
+      width: 80,
+      height: 60,
+    });
+    await t.flush();
+    const lines = t.captureCharFrame().split("\n");
     for (const [syntax, help] of overlayEntries()) {
       const row = lines.find((l) => l.includes(syntax));
       expect(row).toBeDefined();

@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import { assistantVersion } from "../../config.js";
 import { glyphs, ui } from "../theme.js";
 
@@ -6,8 +6,8 @@ import { glyphs, ui } from "../theme.js";
  * The control-room masthead — deliberately plain text (Claude Code model): the
  * wordmark + version on one line, the bound project's name beneath it, the tier
  * gloss, and the debug-log line when active. NO full-width rule: the masthead
- * commits to native scrollback and scrolls away, and a committed rule would be
- * wrapped by the host on a narrow resize and permanently break the layout. Brand
+ * scrolls away into the host's native scrollback, and a committed rule would be
+ * wrapped by the host on a narrow resize and break the historical layout. Brand
  * identity at startup is handled separately (a centered splash while the session
  * loads); once the cockpit is up the header is just a quiet label, not a logo.
  *
@@ -17,10 +17,9 @@ import { glyphs, ui } from "../theme.js";
  * exception, as DEGRADED).
  *
  * The tier line stays QUIET at rest (dim, no color) for every tier including
- * `system`: a steady red `system` capsule is alarm fatigue — it screams danger
- * when nothing is happening. Red is reserved for the moment it actually matters,
- * when a destructive (git/system) action is awaiting confirmation, surfaced via the
- * `destructivePending` prop the controller derives from the live confirmation.
+ * `system`: a steady red `system` capsule is alarm fatigue. Red is reserved for the
+ * moment it actually matters — a destructive (git/system) action awaiting
+ * confirmation, surfaced via the `destructivePending` prop the controller derives.
  */
 
 /**
@@ -53,10 +52,7 @@ export function Header({
   logFile,
   version,
 }: {
-  /** Cockpit width for the masthead rule. The header commits to <Static> (prints
-   *  once, never repaints), so an explicit count is correct here — yoga's "100%"
-   *  flex rule collapses to the content width inside a Static item, and the
-   *  resize-orphan hazard that flex avoids only exists in the repainting region. */
+  /** Cockpit width for the masthead block; bounds the `truncate` rows. */
   columns?: number;
   /** Name of the bound project, shown beneath the wordmark. */
   project?: string;
@@ -67,7 +63,7 @@ export function Header({
   /** A destructive (git/system) action is awaiting confirmation: escalate the tier
    *  label to danger color. At rest every tier stays dim/neutral. */
   destructivePending?: boolean;
-  /** Debug logging is active — surfaced under the rule so it's verifiable at a glance. */
+  /** Debug logging is active — surfaced under the identity block so it's verifiable. */
   logging?: boolean;
   /** Path of the active debug log, shown dim so it can be tailed. */
   logFile?: string;
@@ -78,66 +74,63 @@ export function Header({
   const ver = version ?? assistantVersion();
   const gloss = tier ? tierGloss(tier) : "";
   return (
-    // Size to the EXPLICIT numeric `columns`, never `width="100%"`. The header
-    // commits to <Static>, where Ink lays each item out in an isolated tree with no
-    // parent width: a percentage there collapses to the CONTENT width, leaving the
-    // `wrap="truncate"` rows below (notably the long log path) with no bound to
-    // truncate against — so the terminal physically wraps them. A definite width is
-    // the bound truncate needs, and the Static-prints-once context means the
-    // resize-lag hazard that forces flex sizing in the live region does not apply
-    // here (same reason the Divider below already takes an explicit count).
-    <Box flexDirection="column" width={columns}>
+    <box flexDirection="column" width={columns}>
       {/* Identity: wordmark + version on one line, project name beneath it.
-          minWidth=0 + truncate so a briefly-narrow terminal (a resize/host race)
-          can't detonate the wordmark into a vertical char stack. */}
-      <Box flexDirection="column" minWidth={0}>
-        <Text wrap="truncate">
-          <Text bold>Daintree Assistant</Text>
-          <Text dimColor> v{ver}</Text>
-        </Text>
+          minWidth=0 + truncate so a briefly-narrow terminal can't detonate the
+          wordmark into a vertical char stack. */}
+      <box flexDirection="column" minWidth={0}>
+        <text truncate>
+          <span attributes={TextAttributes.BOLD}>Daintree Assistant</span>
+          <span attributes={TextAttributes.DIM}> v{ver}</span>
+        </text>
         {project ? (
-          <Text dimColor wrap="truncate">
+          <text attributes={TextAttributes.DIM} truncate>
             {project}
-          </Text>
+          </text>
         ) : null}
         {runTitle ? (
-          <Text dimColor wrap="truncate">
+          <text attributes={TextAttributes.DIM} truncate>
             {runTitle}
-          </Text>
+          </text>
         ) : null}
         {tier ? (
-          <Text wrap="truncate">
-            <Text dimColor>tier </Text>
-            <Text
-              color={destructivePending ? ui.color.danger : undefined}
-              dimColor
+          <text truncate>
+            <span attributes={TextAttributes.DIM}>tier </span>
+            <span
+              fg={destructivePending ? ui.color.danger : undefined}
+              attributes={TextAttributes.DIM}
             >
               {tier}
-            </Text>
-            {gloss ? <Text dimColor> {set.bullet} {gloss}</Text> : null}
-          </Text>
+            </span>
+            {gloss ? (
+              <span attributes={TextAttributes.DIM}>
+                {" "}
+                {set.bullet} {gloss}
+              </span>
+            ) : null}
+          </text>
         ) : null}
-      </Box>
-      {/* NO full-width rule. The masthead commits to native scrollback (<Static>) and
-          scrolls away (Claude Code model); a committed full-width rule would be wrapped
-          by the host on shrink and permanently break the historical layout. The debug-
-          log line just sits a blank row under the identity block. "logging" is pinned
-          (flexShrink 0) so it is never clipped to "loggin"; only the path truncates. */}
+      </box>
+      {/* NO full-width rule (see header note). The debug-log line sits a blank row
+          under the identity block. "logging" is pinned (flexShrink 0) so it is never
+          clipped to "loggin"; only the path truncates. */}
       {logging ? (
-        <Box marginTop={1}>
-          <Box flexShrink={0}>
-            <Text color={ui.color.warning}>{set.active} logging</Text>
-          </Box>
+        // flexDirection="row": OpenTUI <box> defaults to column (Ink <Box> was row),
+        // so the "logging" label and the path must be told to sit side by side.
+        <box flexDirection="row" marginTop={1}>
+          <box flexShrink={0}>
+            <text fg={ui.color.warning}>{set.active} logging</text>
+          </box>
           {logFile ? (
-            <Box flexShrink={1} minWidth={0}>
-              <Text dimColor wrap="truncate">
+            <box flexShrink={1} minWidth={0}>
+              <text attributes={TextAttributes.DIM} truncate>
                 {` ${set.bullet} `}
                 {logFile}
-              </Text>
-            </Box>
+              </text>
+            </box>
           ) : null}
-        </Box>
+        </box>
       ) : null}
-    </Box>
+    </box>
   );
 }

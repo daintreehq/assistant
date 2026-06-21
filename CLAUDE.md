@@ -29,28 +29,48 @@ classification), `medium` (routes to large in v1).
 ## Commands
 
 ```bash
-npm run dev                 # interactive Ink cockpit (tsx, no build)
+npm run dev                 # interactive OpenTUI cockpit (runs under Bun — see below)
 npm run dev -- --classic    # legacy readline REPL (also used for non-TTY)
 npm run dev -- "prompt"     # one-shot, console output, exits
 npm run dev -- doctor       # check MCP / Fireworks key / project / tier
 npm run ui:gallery          # iterate on the UI with frozen fixtures, no model/MCP
 
-npm test                    # vitest run (no network; MCP + models are faked)
-npx vitest run tests/config.test.ts   # a single test file
+npm test                    # vitest run (non-UI, Node) THEN `bun test tests/ui` (UI)
+npm run test:unit           # just the Node/vitest suite
+npm run test:ui             # just the Bun cockpit-render suite
 npm run typecheck           # tsc --noEmit
 npm run build               # tsup → dist/index.js (CLI) + dist/host.js (embedded host)
 ```
 
+**Runtime: the cockpit runs under Bun.** OpenTUI's renderer is a native (FFI) core
+that needs Bun (or Node ≥26.3.0 `--experimental-ffi`; we target Bun). `npm run dev`
+and `ui:gallery` are `bun run …`. Install Bun via `curl -fsSL https://bun.sh/install | bash`.
+The published bin (`daintree-assistant` → `dist/index.js`, `#!/usr/bin/env node`) and
+Daintree itself launch us under **Node**; when a cockpit is wanted (TTY, not `--classic`)
+and we're not under Bun, `runInteractive` **re-execs the process under Bun**
+(`resolveBunPath` in `src/cli/index.ts`, `stdio:"inherit"`) so OpenTUI loads and the
+cockpit renders in place — MCP env vars pass through, so it reconnects over HTTP. The
+cockpit import is **lazy** (only the TTY branch loads `@opentui/*`), so Node-only paths
+(`doctor`, `--classic`, one-shot, non-TTY) never touch it; if Bun is absent the cockpit
+degrades to the classic REPL instead of crashing. (`@opentui/react`'s bare
+`react-reconciler/constants` import fails Node's strict ESM resolver — another reason
+Node-run paths must not import it.) SQLite is runtime-adaptive
+(`src/storage/sqliteDriver.ts`): `bun:sqlite` under Bun, `node:sqlite` under Node —
+never import a SQLite builtin directly.
+
 **There is no ESLint/Prettier/Biome.** The only gates are `npm run typecheck` and
-`npm test` (this is also what CI runs — `.github/workflows/ci.yml`). Run both before
-considering work done. `rtk` can mask the real `tsc` output, so verify a clean
-typecheck with `./node_modules/.bin/tsc --noEmit` directly.
+`npm test`. The UI tests render through OpenTUI's native renderer so they run under
+**`bun test`** (`tests/ui/**`); everything else stays on vitest/Node (`vitest.config.ts`
+excludes `tests/ui`). Run both before considering work done. `rtk` can mask the real
+`tsc` output, so verify a clean typecheck with `./node_modules/.bin/tsc --noEmit`. The
+full OpenTUI port contract is in `docs/OPENTUI_PORT.md`.
 
 ## Layout & architecture
 
-ESM + `NodeNext` (`"type": "module"`, Node ≥22). **Import with `.js` extensions**
-even from `.ts` files. `node:sqlite` is used directly (no native build) and is
-marked `external` in the tsup build.
+ESM + `NodeNext` (`"type": "module"`, Node ≥22, cockpit under Bun). **Import with
+`.js` extensions** even from `.ts` files. SQLite goes through the runtime-adaptive
+`storage/sqliteDriver.ts` (`bun:sqlite` | `node:sqlite`), marked `external` in the
+tsup build.
 
 ```
 src/
@@ -61,9 +81,9 @@ src/
   mcp/        DaintreeMcpClient (client.ts) — Streamable HTTP, SSE fallback
   safety/     policy.ts — tier gating, confirmation matrix, no-file-edit guard
   daemon/     scheduler.ts (3s tick) + watcherEngine.ts (terminal watcher FSM)
-  storage/    db.ts — node:sqlite: timers, watchers, events, audit, conversation, grants
+  storage/    db.ts + sqliteDriver.ts — timers, watchers, events, audit, conversation, grants
   recipes/    runbooks injected into the prompt when relevant (registry/selector/render)
-  ui/         Ink TUI: ControlRoom.tsx + DaintreeInkApp.tsx + components/ (the ONLY Ink importers)
+  ui/         OpenTUI cockpit: runApp.tsx + DaintreeApp.tsx + ControlRoom.tsx + components/ (the ONLY @opentui importers)
   host/       Embedded Electron utility-process host (protocol.ts, index.ts)
   config.ts schemas.ts queue.ts debugLog.ts watcherCadence.ts
 ```
@@ -102,35 +122,35 @@ thread.
   they supervise terminals that live only for the session, so any left non-terminal
   are cancelled on the next `Db` construction (`cancelStaleWatchers`) — a new session
   never inherits a prior session's watchers. Never imply background supervision.
-- **UI boundary.** Only `src/ui` imports Ink. The runtime emits structured events via
-  `AgentEventSink`, consumed by the Ink `UiBridge` or the console sink.
+- **UI boundary.** Only `src/ui` imports `@opentui/*`. The runtime emits structured
+  events via `AgentEventSink`, consumed by the `UiBridge` or the console sink.
 - **Inline cockpit — NEVER the alternate screen (Claude Code model).** The cockpit renders
-  INLINE into the terminal's **main** screen buffer. `runInkApp.tsx` does NOT pass
-  `alternateScreen`, and it must stay that way: **Daintree always runs the assistant inside
-  xterm, and the host (xterm) must own scrolling** — native mouse-wheel-where-you-hover,
-  scrollbar, selection and copy/paste. The alternate screen would disable all of that, so it is
-  forbidden. (This is what Claude Code / gemini-cli / aider do; alt-screen is only for heavy
-  graphical TUIs.) `ControlRoom.tsx` commits completed turns to native scrollback via Ink
-  **`<Static>`** (split at the trailing **active** turn — keep `transcriptReducer` mutating only
-  that tail so committed cells stay append-only). On resize the HOST reflows the scrollback
-  natively and Ink only repaints the small live region; we do **NOT** monkeypatch Ink's
-  clear/erase (an earlier `inkResizeReflowGuard` did, and its over-erase progressively ATE the
-  committed region on each SIGWINCH in Daintree's animating pane — deleted, never reinstate).
-  Two rules for clean inline resize: (1) **live-region lines must never WRAP** — truncate so
-  logical rows == physical rows, or Ink's `eraseLines` undershoots and orphans a row; (2) **never
-  commit a full-width rule to scrollback** — the host wraps it on shrink and permanently breaks
-  the layout, which is why the **`Header` has NO rule** and is plain text that scrolls away.
-  Content is inset one column on every side (`LEFT_PAD` + the `reservedColumns` right gutter) so
-  nothing touches the edges. Do NOT raw-parse SGR mouse mode (it fights Ink's stdin; see
-  `useAttentionSignal.ts`). Operations/help are **on-demand** views (`^O` / `/panel`, Esc
-  returns) in place of the composer; the old `SidebarHome`/`OpsRail`/`AttentionBanner` banding
-  stays gone — single column.
+  on **OpenTUI** (`@opentui/react`, native Zig renderer) INLINE into the terminal's **main**
+  screen buffer: `runApp.tsx` calls `createCliRenderer({ screenMode: "main-screen", useMouse: false })`.
+  This must stay that way: **Daintree always runs the assistant inside xterm, and the host (xterm)
+  must own scrolling** — native mouse-wheel-where-you-hover, scrollbar, selection and copy/paste.
+  The alternate screen (and capturing the mouse) would disable all of that, so both are forbidden.
+  In main-screen the whole cockpit tree renders inline (`ControlRoom.tsx`): masthead at top, the
+  conversation beneath, the live region (status + composer) at the bottom; as content grows the
+  older rows scroll into the host's native scrollback. On resize the native renderer reflows the
+  whole tree cleanly — there is no Ink `<Static>` line-rewrite, so the old resize-duplication
+  hazard is **gone by construction** (a full repaint on resize is intended). The **`Header` still
+  has NO full-width rule** — a committed rule would be wrapped by the host on shrink. Content is
+  inset one column each side (`LEFT_PAD` + the `reservedColumns` right gutter). Keys come from
+  `useKeyboard` (global — gate by view/focus in-handler, since there's no Ink `isActive`); terminal
+  size from `useTerminalDimensions()`. Do NOT raw-parse SGR mouse mode. Operations/help are
+  **on-demand** views (`^O` / `/panel`, Esc returns) in place of the composer — single column.
+  Follow-up (not yet done): `split-footer` + `ScrollbackSurface.commitRows()` is OpenTUI's true
+  `<Static>` equivalent (commit finished turns, keep a small live footer) — needs real-terminal
+  tuning. See `docs/OPENTUI_PORT.md`. **`OpenTUI <box> defaults to flexDirection:"column"`** (Ink
+  `<Box>` was row) — set `flexDirection="row"` explicitly for horizontal layouts.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcherEngine.ts`):
   deterministic signals (agentState, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
   on a read-only git-cleanliness check before any irreversible action is suggested.
 - **Comment style:** dense, "why"-focused block comments on non-obvious logic. Match
-  it. Tests use vitest globals (no imports needed) and `ink-testing-library` for UI.
+  it. Non-UI tests use vitest globals (Node). UI tests use `bun:test` + OpenTUI's
+  `testRender`/`captureCharFrame` from `@opentui/react/test-utils` (run with `bun test`).
 
 ## Debug logging
 

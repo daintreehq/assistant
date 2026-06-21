@@ -1,24 +1,29 @@
 /**
  * The cockpit as a PURE presentational component: everything it needs is a prop,
- * nothing is fetched or subscribed. The live shell (DaintreeInkApp) feeds it from
- * the controller, the gallery feeds it from frozen fixtures, and tests feed it
- * fixed timestamps.
+ * nothing is fetched or subscribed. The live shell (DaintreeApp) feeds it from the
+ * controller, the gallery feeds it from frozen fixtures, and tests feed it fixed
+ * timestamps.
  *
- * INLINE MODEL (Claude Code style). The cockpit renders into the terminal's MAIN
- * screen buffer, not the alternate buffer, so the terminal's own scrollback /
- * mouse wheel / selection work natively. The masthead and completed turns are
- * committed permanently with Ink's <Static> (header is item 0): they print ONCE,
- * flow into native scrollback and never repaint. The in-flight turn, status line
- * and composer live in the repainting region pinned at the bottom. The masthead is
- * deliberately NOT live chrome — a repainting masthead lands *below* the committed
- * scrollback, beneath every finished response, instead of at the top.
+ * INLINE MODEL (Claude Code style), now on OpenTUI's native renderer. The cockpit
+ * renders into the terminal's MAIN screen buffer (`screenMode: "main-screen"`), not
+ * the alternate buffer, so the terminal's own scrollback / mouse wheel / selection
+ * work natively. The masthead sits at the top of the tree and the conversation grows
+ * beneath it; as content exceeds the viewport the older rows scroll up into the
+ * host's native scrollback. The in-flight turn, status line and composer are the
+ * bottom of that same stream. On resize the native (Zig) renderer reflows the whole
+ * tree cleanly — there is no Ink `<Static>` line-rewrite, so the resize-duplication
+ * hazard is gone; a full repaint on resize is the intended behaviour.
+ *
+ * (Follow-up, not v1: `split-footer` + ScrollbackSurface.commitRows() can commit
+ * finished turns to scrollback and keep only a small live footer repainting — the
+ * true `<Static>` equivalent. It needs real-terminal tuning; v1 renders the whole
+ * tree. See docs/OPENTUI_PORT.md.)
  *
  * Operations and help are momentary, on-demand views rendered in place of the
- * composer (Esc returns), never a pinned panel — a pinned panel is impossible in
- * the main buffer without re-taking the alternate screen and losing scrollback.
+ * composer (Esc returns), never a pinned panel.
  */
 import type { Ref } from "react";
-import { Box, Static, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import type {
   DashboardState,
   PendingConfirm,
@@ -47,22 +52,6 @@ const CONTENT_MAX = 100;
 /** One-column left inset so content never touches the terminal's left edge. */
 const LEFT_PAD = 1;
 
-/**
- * Index in `cells` where the live (repainting) tail begins. Everything before it
- * is immutable and committed to <Static>; everything at/after it is re-rendered
- * each pass. Only the trailing turn — and then only while it is still `active` —
- * mutates (the reducer attaches tokens/tools/notes to it). A background note can
- * land *after* the active turn, so the tail is "the active turn and anything after
- * it", which all commits together once the turn finishes.
- */
-function liveTailStart(cells: TranscriptCell[]): number {
-  for (let i = cells.length - 1; i >= 0; i--) {
-    const c = cells[i];
-    if (c.kind === "turn") return c.state === "active" ? i : cells.length;
-  }
-  return cells.length;
-}
-
 export interface ControlRoomProps {
   /** Name of the bound project, shown in the masthead beneath the wordmark. */
   project: string;
@@ -70,12 +59,9 @@ export interface ControlRoomProps {
   columns: number;
   /**
    * Columns to hold back from the right edge — the autowrap/scrollbar safety gutter
-   * ({@link AppConfig.reservedColumns}). Defaults to 1 (DECAWM only) so existing
-   * callers/tests are unchanged; the live shell raises it (e.g. to 2 under a Daintree
-   * xterm whose overlay scrollbar covers the rightmost cells). Both the right padding
-   * of the repainting region AND the numeric `chromeWidth` derive from it, so the
-   * masthead rule, the live rules and the truncated chrome all stop at the same
-   * column.
+   * ({@link AppConfig.reservedColumns}). Defaults to 1; the live shell raises it
+   * (e.g. to 2 under a Daintree xterm whose overlay scrollbar covers the rightmost
+   * cells). Drives both the right padding and the numeric `chromeWidth`.
    */
   reservedColumns?: number;
   /** Accepted for back-compat (gallery/tests); the inline cockpit ignores it. */
@@ -97,19 +83,11 @@ export interface ControlRoomProps {
    * section. `help` is rendered by its own `view` branch. Null shows the full deck.
    */
   activePanel?: PanelKey | null;
-  /**
-   * Bumped by `/clear` to force the `<Static>` region to remount. Ink caches all
-   * static output in `fullStaticOutput` and replays it on resize/overflow, so
-   * clearing the transcript without changing this key leaves cleared cells able to
-   * ghost back. Using it as the `<Static>` `key` unmounts/remounts and purges that
-   * cache. Defaults to 0 (gallery/tests that never clear).
-   */
-  staticKey?: number;
   expanded?: boolean;
   pending?: PendingConfirm | null;
   /** Frozen clock for deterministic rendering; defaults to live time. */
   now?: number;
-  /** Debug logging is active — shown in the one-time header banner. */
+  /** Debug logging is active — shown in the masthead. */
   logging?: boolean;
   /** Path of the active debug log, shown under the header so it can be tailed. */
   logFile?: string;
@@ -123,9 +101,6 @@ export interface ControlRoomProps {
   composerRef?: Ref<ComposerHandle>;
   onResolve?: (approved: boolean) => void;
 }
-
-/** A <Static> item: the one-time header (no cell) or a committed transcript cell. */
-type StaticItem = { key: string; cell?: TranscriptCell };
 
 export function ControlRoom({
   project,
@@ -142,7 +117,6 @@ export function ControlRoom({
   queueDepth = 0,
   view,
   activePanel = null,
-  staticKey = 0,
   expanded = false,
   pending = null,
   now = Date.now(),
@@ -155,69 +129,27 @@ export function ControlRoom({
   composerRef,
   onResolve = () => {},
 }: ControlRoomProps) {
-  // Reserve the terminal's last column AND keep the repainting region pinned to the
-  // terminal's *live* width. The cockpit renders inline (main buffer, no alternate
-  // screen), so the bottom region is erased and redrawn by moving the cursor up by
-  // Ink's logical line count — NOT the terminal's physical wrapping. Two distinct
-  // failure modes orphan a stale copy into scrollback:
-  //
-  //  1. Steady state: if a dynamic line fills the full width its final glyph lands
-  //     in the autowrap (DECAWM) column, where many terminals wrap it onto a second
-  //     physical row invisible to Ink's height accounting; the next repaint then
-  //     moves up one row short and orphans the top row. `paddingRight={1}` keeps the
-  //     content one column shy of the edge so nothing ever sits in that column.
-  //  2. Resize (e.g. Daintree animating the pane width on show/hide): Ink repaints
-  //     SYNCHRONOUSLY on every SIGWINCH using the CURRENT React tree, but
-  //     `useWindowSize` only updates `columns` a tick LATER. An explicit
-  //     `width={columns - 1}` is therefore momentarily WIDER than the just-shrunk
-  //     terminal, wraps, and — because Ink only auto-clears when shrinking, not when
-  //     it grows back — leaves one orphaned row per show/hide cycle. So the root is
-  //     sized `width="100%"`: yoga resolves that against the live terminal width on
-  //     every resize relayout, never a lagged prop. `maxWidth` caps it at the
-  //     readability ceiling / lagged-prop width. The live full-width children (status
-  //     line, composer rules) likewise fill via flex, so they can't overflow mid-resize.
-  //
   // A one-column INSET on every side so nothing touches the terminal edges. `gutter`
   // (>=1, see `reservedColumns`) is the right inset — it also keeps glyphs clear of
   // the autowrap (DECAWM) column and any host scrollbar. `LEFT_PAD` is the matching
-  // left inset (applied to the header, history cells and the live region). `chromeWidth`
-  // is the usable span after both insets; `contentWidth` caps prose/history at a
-  // readable measure so it doesn't stretch across a maximized terminal.
+  // left inset. `chromeWidth` is the usable span after both insets; `contentWidth`
+  // caps prose/history at a readable measure so it doesn't stretch across a maximized
+  // terminal.
   const gutter = Math.max(1, reservedColumns);
   const chromeWidth = Math.max(1, columns - gutter - LEFT_PAD);
   const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
-
-  // Split history (committed -> Static -> native scrollback) from the live tail.
-  const liveStart = liveTailStart(transcript);
-  const committed = transcript.slice(0, liveStart);
-  const live = transcript.slice(liveStart);
-
-  // <Static> renders items once and prints them permanently above the live tree;
-  // it only emits items appended since the last pass. `committed` is append-only
-  // (it never shrinks or reorders — pull-back only ever drops the live turn), so
-  // each completed turn is committed exactly once and the terminal keeps the rest.
-  // The header is item 0: printed ONCE at the very top, then free to scroll away
-  // with the history (Claude Code model). It is NOT live chrome — a live masthead
-  // repaints *below* the committed scrollback, so it ends up beneath every finished
-  // response instead of at the top. Static keeps it pinned above all history.
-  const staticItems: StaticItem[] = [
-    { key: "__header" },
-    ...committed.map((c) => ({ key: c.id, cell: c })),
-  ];
 
   const contextHint = connected
     ? `agents ${dashboard.watchers.length} · tmr ${dashboard.timers.length}`
     : "MCP degraded";
 
   // The tier capsule only goes red when a DESTRUCTIVE (git/system) action is awaiting
-  // confirmation — the moment red actually earns attention. The risk-class business
-  // logic lives here, not in the pure Header, which just takes a boolean.
+  // confirmation — the moment red actually earns attention.
   const destructivePending =
     !!pending &&
     (pending.request.risk === "git" || pending.request.risk === "system");
   // The inbox is controller-filtered to actionable severities, so a non-empty inbox
-  // is exactly "actionable attention pending" — the signal that promotes ^O in the
-  // composer hint row.
+  // is exactly "actionable attention pending" — the signal that promotes ^O.
   const attentionPending = dashboard.inbox.length > 0;
 
   // A confirmation is interactive and must surface in every view; while it is
@@ -225,51 +157,25 @@ export function ControlRoom({
   const showPanel = !pending && view !== "home";
 
   return (
-    <Box flexDirection="column" width="100%" paddingRight={gutter}>
-      <Static key={staticKey} items={staticItems}>
-        {(item) =>
-          item.cell ? (
-            // Static items render in their own tree and don't inherit the root's
-            // padding, so each carries the left inset itself.
-            <Box key={item.key} paddingLeft={LEFT_PAD}>
-              <CellView
-                cell={item.cell}
-                width={contentWidth}
-                now={now}
-                expanded={expanded}
-              />
-            </Box>
-          ) : (
-            // The header is item 0 — also pad it down a row from the top edge.
-            <Box key="__header" paddingLeft={LEFT_PAD} paddingTop={1}>
-              <Header
-                columns={chromeWidth}
-                project={project}
-                tier={tier}
-                destructivePending={destructivePending}
-                logging={logging}
-                logFile={logFile}
-              />
-            </Box>
-          )
-        }
-      </Static>
+    <box flexDirection="column" width="100%" paddingRight={gutter}>
+      {/* Masthead at the top of the stream — scrolls away into native scrollback as
+          the conversation grows (Claude Code model). */}
+      <box paddingLeft={LEFT_PAD} paddingTop={1}>
+        <Header
+          columns={chromeWidth}
+          project={project}
+          tier={tier}
+          destructivePending={destructivePending}
+          logging={logging}
+          logFile={logFile}
+        />
+      </box>
 
-      {/* The live region (repaints): the in-flight turn and the status line are
-          always shown; only the bottom slot swaps the composer for an on-demand
-          operations/help panel. Nothing here is pinned across the scrollback — it
-          is simply the bottom of the stream.
-
-          INVARIANT (#138): nothing in this subtree may set a Box's layout `width`
-          to a number derived from the lagged `columns` prop — yoga would size it to
-          a stale value that briefly exceeds a just-shrunk terminal and orphan a
-          wrapped row into scrollback. The numeric `contentWidth` handed to the
-          children below is a content-budget hint for truncation math ONLY; their
-          boxes size by yoga (`width="100%"` / `flexShrink`, capped with `maxWidth`)
-          so a live line can never out-run the real width. The `<Static>` cells
-          above are exempt — they print once and scroll away. */}
-      <Box flexDirection="column" paddingLeft={LEFT_PAD}>
-        {live.map((cell) => (
+      {/* The conversation + the live region, one column. The native renderer reflows
+          the whole tree on resize, so there is no wrap/orphan hazard to design
+          around; `contentWidth` is a readable-measure cap for prose/history. */}
+      <box flexDirection="column" paddingLeft={LEFT_PAD}>
+        {transcript.map((cell) => (
           <CellView
             key={cell.id}
             cell={cell}
@@ -287,24 +193,21 @@ export function ControlRoom({
           />
         ) : null}
 
-        {/* Cells own only their leading gap now, so the live turn no longer carries
-            a bottom margin; this marginTop keeps one blank line between the
-            conversation and the status chrome below it. */}
-        <Box marginTop={1} flexDirection="column">
+        {/* One blank line between the conversation and the status chrome below it. */}
+        <box marginTop={1} flexDirection="column">
           <StatusLine
             dashboard={dashboard}
             sessionUsage={sessionUsage}
             width={contentWidth}
             now={now}
           />
-        </Box>
+        </box>
 
-        {/* Breathing room between the conversation and the input, the way other
-            conversational CLIs sit the prompt off the content above it. */}
-        <Box height={1} flexShrink={0} />
+        {/* Breathing room between the conversation and the input. */}
+        <box height={1} flexShrink={0} />
 
         {showPanel && view === "operations" ? (
-          <Box flexDirection="column">
+          <box flexDirection="column">
             <OperationsView
               dashboard={dashboard}
               previews={previews}
@@ -312,13 +215,13 @@ export function ControlRoom({
               now={now}
               activePanel={activePanel === "help" ? null : activePanel}
             />
-            <Text dimColor>Esc to return</Text>
-          </Box>
+            <text attributes={TextAttributes.DIM}>Esc to return</text>
+          </box>
         ) : showPanel && view === "help" ? (
-          <Box flexDirection="column">
+          <box flexDirection="column">
             <HelpOverlay width={Math.min(76, contentWidth)} />
-            <Text dimColor>Esc to return</Text>
-          </Box>
+            <text attributes={TextAttributes.DIM}>Esc to return</text>
+          </box>
         ) : (
           <Composer
             busy={busy}
@@ -333,7 +236,7 @@ export function ControlRoom({
             ref={composerRef}
           />
         )}
-      </Box>
-    </Box>
+      </box>
+    </box>
   );
 }

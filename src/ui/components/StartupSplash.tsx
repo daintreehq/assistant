@@ -1,4 +1,3 @@
-import { Box, Text } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SPLASH_FRAMES,
@@ -18,10 +17,11 @@ import {
  * ControlRoom), so the splash does NOT fill and vertically-center the screen — a
  * screen-high frame in the main buffer just pushes scrollback around and risks
  * leaving artifacts when it dissolves. Instead it draws at its NATURAL height,
- * after a couple of blank lines for breathing room, and Ink cleanly erases those
- * rows when the cockpit takes over. It is still HORIZONTALLY centered across the
- * terminal — within `columns - 1`, so the mark's right edge can never reach the
- * autowrap column and ghost an animation frame (see ControlRoom for that hazard).
+ * after a couple of blank lines for breathing room, and the native renderer cleanly
+ * erases those rows when the cockpit takes over. It is still HORIZONTALLY centered
+ * across the terminal — within `columns - 1`, so the mark's right edge can never
+ * reach the autowrap column and ghost an animation frame (see ControlRoom for that
+ * hazard).
  *
  * It self-advances and holds on the final frame, calling `onComplete` once when the
  * draw finishes. It does NOT decide when to leave — the controller owns that (it
@@ -108,18 +108,23 @@ export function StartupSplash({
   // centered. The centering track is `columns - 1` so the mark stays one column shy
   // of the terminal edge (no autowrap ghosting); `tooSmall` guarantees there's room.
   return (
-    <Box
+    // flexDirection="row" is explicit here: Ink's `<Box>` defaulted to a row, but
+    // OpenTUI's `<box>` defaults to a column — and `justifyContent="center"` centers
+    // along the MAIN axis, so without `row` it would center vertically instead of
+    // pushing the mark to the horizontal middle of the `columns - 1` track.
+    <box
+      flexDirection="row"
       width={Math.max(SPLASH_WIDTH, columns - 1)}
       justifyContent="center"
       marginTop={2}
     >
-      <Box flexDirection="column" width={SPLASH_WIDTH}>
+      <box flexDirection="column" width={SPLASH_WIDTH}>
         {frameRows.map((line, i) => (
-          <Text key={i} color={rowColor(i, SPLASH_HEIGHT)}>
+          <text key={i} fg={rowColor(i, SPLASH_HEIGHT)}>
             {line}
-          </Text>
+          </text>
         ))}
-      </Box>
-    </Box>
+      </box>
+    </box>
   );
 }

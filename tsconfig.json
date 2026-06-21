@@ -6,6 +6,7 @@
     "lib": ["ES2023"],
     "types": ["node", "react"],
     "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react",
     "strict": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,

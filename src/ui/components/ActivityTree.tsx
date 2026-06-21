@@ -3,8 +3,16 @@
  * activity is one branch carrying a real relationship: request → decision →
  * agent → watcher → outcome. Default view shows verb + target + outcome +
  * duration; `expanded` adds the raw args/result for debugging.
+ *
+ * OpenTUI port: Ink `<Box>`/`<Text>` → the lowercase native `<box>`/`<text>`.
+ * The branch / glyph / label / detail runs stay as sibling `<text>` leaves inside
+ * a flex `<box>` (they each carry a distinct `fg`/`attributes` and the detail
+ * truncates independently, so they can't collapse into one `<text>`+`<span>`).
+ * Ink `color=` → `fg=`, `dimColor` → `attributes={TextAttributes.DIM}`,
+ * `wrap="truncate"` → the `truncate` prop. Glyphs, columns and budgets are byte
+ * identical to the Ink source.
  */
-import { Box, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import type { ActivityItem, ActivityState } from "../types.js";
 import {
   glyphs,
@@ -70,7 +78,7 @@ export function ActivityTree({
   if (activities.length === 0) return null;
   const set = glyphs();
   return (
-    <Box flexDirection="column">
+    <box flexDirection="column">
       {activities.map((a, i) => {
         const last = i === activities.length - 1;
         const branch = last ? set.lastBranch : set.branch;
@@ -92,46 +100,50 @@ export function ActivityTree({
           width - PREFIX_COLS - labelCols - DURATION_COLS,
         );
         return (
-          <Box key={a.id} flexDirection="column">
-            <Box justifyContent="space-between">
-              <Box>
-                <Text color={ui.color.muted}>{branch} </Text>
-                <Text color={toneColor(tone)}>{activityGlyph(a.state, set)} </Text>
-                <Text>{a.label}</Text>
+          <box key={a.id} flexDirection="column">
+            {/* OpenTUI `<box>` defaults to a column (Ink's `<Box>` defaulted to a
+                row), so the horizontal rows are explicitly `flexDirection="row"`. */}
+            <box flexDirection="row" justifyContent="space-between">
+              <box flexDirection="row">
+                <text fg={ui.color.muted}>{branch} </text>
+                <text fg={toneColor(tone)}>{activityGlyph(a.state, set)} </text>
+                <text>{a.label}</text>
                 {detail ? (
-                  // Always at least one space after the (white) label, and pad
-                  // short labels so details line up in a column. Labels longer
-                  // than the column just get the single separating space.
-                  <Text dimColor wrap="truncate">
+                  // Always at least one space after the label, and pad short
+                  // labels so details line up in a column. Labels longer than the
+                  // column just get the single separating space.
+                  <text attributes={TextAttributes.DIM} truncate>
                     {" ".repeat(Math.max(1, LABEL_WIDTH - a.label.length))}
                     {truncate(detail, detailRoom)}
-                  </Text>
+                  </text>
                 ) : null}
-              </Box>
+              </box>
               {elapsed != null ? (
-                <Box marginLeft={1}>
-                  <Text dimColor>{formatDuration(elapsed)}</Text>
-                </Box>
+                <box marginLeft={1}>
+                  <text attributes={TextAttributes.DIM}>
+                    {formatDuration(elapsed)}
+                  </text>
+                </box>
               ) : null}
-            </Box>
+            </box>
             {expanded ? (
               // truncate the raw args/result so an expanded row (^X) can't out-run a
               // just-shrunk terminal during a pane resize and orphan a wrapped copy
               // into scrollback (#138); `width` is a lagged content-budget hint.
-              <Box flexDirection="column" paddingLeft={3}>
-                <Text dimColor wrap="truncate">
+              <box flexDirection="column" paddingLeft={3}>
+                <text attributes={TextAttributes.DIM} truncate>
                   {a.name} args: {compactArgs(a.args, Math.max(20, width - 12))}
-                </Text>
+                </text>
                 {a.summary ? (
-                  <Text dimColor wrap="truncate">
+                  <text attributes={TextAttributes.DIM} truncate>
                     result: {truncate(a.summary, width - 12)}
-                  </Text>
+                  </text>
                 ) : null}
-              </Box>
+              </box>
             ) : null}
-          </Box>
+          </box>
         );
       })}
-    </Box>
+    </box>
   );
 }

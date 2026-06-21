@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import { BrandMark, KeyHint } from "../primitives.js";
 import { ui } from "../theme.js";
 import { overlayEntries } from "../../commandRegistry.js";
@@ -36,51 +36,58 @@ export function HelpOverlay({ width = 72 }: { width?: number }) {
     // animates the pane (#138), wrap the bordered frame, and orphan a stale copy
     // into scrollback. `width="100%"` tracks the live width; `maxWidth` keeps the
     // numeric prop as the readability cap.
-    <Box
+    <box
       flexDirection="column"
-      borderStyle="round"
+      borderStyle="rounded"
       borderColor={ui.color.accent}
-      paddingX={2}
-      paddingY={1}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
       width="100%"
       maxWidth={width}
     >
       <BrandMark label="DAINTREE — help" />
-      <Box marginTop={1} flexDirection="column">
+      <box marginTop={1} flexDirection="column">
         {COMMANDS.map(([k, v]) => (
-          <Text key={k}>
-            <Text color={ui.color.info}>{k.padEnd(20)}</Text>
-            <Text dimColor>{v}</Text>
-          </Text>
+          // The Ink original nested two <Text> runs in one row; a native <text>
+          // may not contain another <text>, so the runs become <span> children.
+          <text key={k}>
+            <span fg={ui.color.info}>{k.padEnd(20)}</span>
+            <span attributes={TextAttributes.DIM}>{v}</span>
+          </text>
         ))}
-      </Box>
-      <Box marginTop={1} flexDirection="column">
+      </box>
+      <box marginTop={1} flexDirection="column">
         {KEYS.map(([k, v]) => (
-          <Box key={k}>
-            <Box width={20}>
+          // Ink `<Box>` defaults to a row; OpenTUI `<box>` defaults to a column,
+          // so the key/description pair needs an explicit `flexDirection="row"`
+          // to sit side by side instead of stacking.
+          <box key={k} flexDirection="row">
+            <box width={20}>
               <KeyHint keyName={k} action="" />
-            </Box>
-            <Text dimColor>{v}</Text>
-          </Box>
+            </box>
+            <text attributes={TextAttributes.DIM}>{v}</text>
+          </box>
         ))}
-      </Box>
-      <Box marginTop={1} flexDirection="column">
-        <Text color={ui.color.muted}>editing</Text>
+      </box>
+      <box marginTop={1} flexDirection="column">
+        <text fg={ui.color.muted}>editing</text>
         {EDIT_KEYS.map(([k, v]) => (
-          <Box key={k}>
-            <Box width={20}>
+          <box key={k} flexDirection="row">
+            <box width={20}>
               <KeyHint keyName={k} action="" />
-            </Box>
-            <Text dimColor>{v}</Text>
-          </Box>
+            </box>
+            <text attributes={TextAttributes.DIM}>{v}</text>
+          </box>
         ))}
-      </Box>
-      <Box marginTop={1}>
-        <Text dimColor>
+      </box>
+      <box marginTop={1}>
+        <text attributes={TextAttributes.DIM}>
           I supervise Daintree and delegate to visible agents — I never edit
           files directly.
-        </Text>
-      </Box>
-    </Box>
+        </text>
+      </box>
+    </box>
   );
 }

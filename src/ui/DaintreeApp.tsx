@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useApp, useInput, useWindowSize } from "ink";
-import type { App as DaintreeApp } from "../cli/app.js";
+import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import type { App as DaintreeRuntime } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useAttentionSignal } from "./hooks/useAttentionSignal.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
@@ -10,17 +10,29 @@ import { currentDebugLogPath } from "../debugLog.js";
 
 /**
  * The live shell. It owns the runtime wiring (controller, terminal previews,
- * window size, key handling) and feeds a pure {@link ControlRoom} the resulting
+ * terminal size, key handling) and feeds a pure {@link ControlRoom} the resulting
  * state. One centralized UI mode (home / operations / help) keeps key handlers
- * from overlapping, and the composer is focusable only when home owns the
- * screen.
+ * from overlapping, and the composer is focusable only when home owns the screen.
  *
  * Operational detail is a purposeful VIEW (`^O`, or a `/panel` command), never a
  * text dump. Esc returns home; `^X` toggles raw tool detail in the transcript.
+ *
+ * OpenTUI port: terminal size comes from `useTerminalDimensions()` (`{width,height}`)
+ * and global keys from `useKeyboard((e) => …)` — both replace the Ink hooks. There
+ * is no `useApp().exit`; the bootstrap injects an `exit` callback that tears down the
+ * renderer + runtime. `useKeyboard` is global (every subscriber sees every key), so
+ * this handler only ever acts on the app chords (^C/Esc/^O/^X) and leaves everything
+ * else for the focused composer, which gates on `composerFocus`.
  */
-export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
-  const { exit } = useApp();
-  const { columns, rows } = useWindowSize();
+export function DaintreeApp({
+  app,
+  exit,
+}: {
+  app: DaintreeRuntime;
+  /** Tear down the renderer + runtime and end the process (bootstrap-owned). */
+  exit: () => void;
+}) {
+  const { width: columns, height: rows } = useTerminalDimensions();
   const [view, setView] = useState<View>("home");
   const [expanded, setExpanded] = useState(false);
   const controller = useDaintreeController(app, exit);
@@ -44,8 +56,9 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     controller.setActivePanel(null);
   };
 
-  useInput((input, key) => {
-    if (key.ctrl && input === "c") {
+  useKeyboard((e) => {
+    const name = e.name ?? "";
+    if (e.ctrl && name === "c") {
       exit();
       return;
     }
@@ -53,16 +66,15 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
     // view/expand chords so the cockpit can't surface mid-animation in a non-home
     // state (e.g. a stray ^O leaving it on the operations deck once boot finishes).
     if (controller.booting) return;
-    if (key.escape) {
+    if (name === "escape") {
       // On home the composer owns Escape (clear buffer, or cancel the turn when
-      // empty+busy) — handled by MultilineInput, which is focused there. Ink has no
-      // stop-propagation, so this handler must act ONLY off-home to avoid double-
-      // firing on the same keypress.
+      // empty+busy) — handled by MultilineInput, which is focused there. This handler
+      // acts ONLY off-home (where the composer is unfocused) to avoid double-firing.
       if (view !== "home") returnHome();
       return;
     }
     // Ctrl chords only — these never collide with composing text.
-    if (key.ctrl && input === "o") {
+    if (e.ctrl && name === "o") {
       if (view === "operations") returnHome();
       else {
         // ^O opens the full operations deck. Clear any panel left set by a prior
@@ -72,14 +84,14 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       }
       return;
     }
-    if (key.ctrl && input === "x") {
-      setExpanded((e) => !e);
+    if (e.ctrl && name === "x") {
+      setExpanded((x) => !x);
     }
   });
 
   // The masthead shows the bound project's name. The controller seeds it from the
-  // directory leaf and upgrades it to Daintree's authoritative project name (via the
-  // MCP `actions.getContext`) once that resolves — see useDaintreeController.
+  // directory leaf and upgrades it to Daintree's authoritative project name once
+  // the MCP `actions.getContext` resolves — see useDaintreeController.
   const project = controller.projectName ?? "";
 
   // While the session connects/loads in the background, the horizontally-centered
@@ -113,7 +125,6 @@ export function DaintreeInkApp({ app }: { app: DaintreeApp }) {
       queueDepth={controller.queueDepth}
       view={view}
       activePanel={controller.activePanel}
-      staticKey={controller.staticKey}
       expanded={expanded}
       pending={controller.pendingConfirm}
       logging={app.config.debugLog}

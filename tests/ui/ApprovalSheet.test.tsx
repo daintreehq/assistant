@@ -1,8 +1,8 @@
-import { render } from "ink-testing-library";
+import { test, expect, describe } from "bun:test";
+import { act, useState } from "react";
+import { testRender } from "@opentui/react/test-utils";
 import { ApprovalSheet } from "../../src/ui/components/ApprovalSheet.js";
 import type { PendingConfirm } from "../../src/ui/types.js";
-
-const tick = () => new Promise((r) => setTimeout(r, 20));
 
 function pending(
   toolName: string,
@@ -23,16 +23,18 @@ function pending(
 }
 
 describe("ApprovalSheet", () => {
-  it("leads with the consequence, keeps the tool name as a dim secondary label", () => {
-    const { lastFrame } = render(
+  test("leads with the consequence, keeps the tool name as a dim secondary label", async () => {
+    const t = await testRender(
       <ApprovalSheet
         pending={pending("git.push", "external", {
           consequence: "Pushes your branch to the remote, visible to collaborators.",
         })}
         onResolve={() => {}}
       />,
+      { width: 72, height: 16 },
     );
-    const frame = lastFrame() ?? "";
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("Push branch to origin?");
     expect(frame).toContain("affects");
     expect(frame).toContain("Pushes your branch to the remote");
@@ -42,106 +44,140 @@ describe("ApprovalSheet", () => {
     expect(frame).toContain("decline");
   });
 
-  it("never renders the raw risk class as a labelled field", () => {
-    const { lastFrame } = render(
+  test("never renders the raw risk class as a labelled field", async () => {
+    const t = await testRender(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={() => {}} />,
+      { width: 72, height: 16 },
     );
-    const frame = lastFrame() ?? "";
+    await t.flush();
+    const frame = t.captureCharFrame();
     // The old `risk  external` row is gone — consequence language replaces it.
     expect(frame).not.toMatch(/risk\s+external/);
   });
 
-  it("falls back to a per-risk consequence when the tool gives none", () => {
-    const { lastFrame } = render(
+  test("falls back to a per-risk consequence when the tool gives none", async () => {
+    const t = await testRender(
       <ApprovalSheet pending={pending("daintree.call", "system")} onResolve={() => {}} />,
+      { width: 72, height: 16 },
     );
-    expect(lastFrame() ?? "").toContain("system-level action");
+    await t.flush();
+    expect(t.captureCharFrame()).toContain("system-level action");
   });
 
-  it("falls back when the consequence is blank rather than rendering an empty line", () => {
-    const { lastFrame } = render(
+  test("falls back when the consequence is blank rather than rendering an empty line", async () => {
+    const t = await testRender(
       <ApprovalSheet
         pending={pending("daintree.call", "system", { consequence: "   " })}
         onResolve={() => {}}
       />,
+      { width: 72, height: 16 },
     );
-    expect(lastFrame() ?? "").toContain("system-level action");
+    await t.flush();
+    expect(t.captureCharFrame()).toContain("system-level action");
   });
 
-  it("renders a non-empty consequence for every risk class", () => {
+  test("renders a non-empty consequence for every risk class", async () => {
     const RISKS = ["read", "local", "ui", "terminal", "project", "git", "external", "system"];
     for (const risk of RISKS) {
-      const { lastFrame } = render(
+      const t = await testRender(
         <ApprovalSheet pending={pending("some.tool", risk)} onResolve={() => {}} />,
+        { width: 72, height: 16 },
       );
-      const frame = lastFrame() ?? "";
+      await t.flush();
+      const frame = t.captureCharFrame();
       const affects = (frame.split("\n").find((l) => l.includes("affects")) ?? "").trim();
       // The affects row must carry prose, never just the bare risk-class word.
       expect(affects, risk).toContain("affects");
       expect(affects.replace("affects", "").trim().length, risk).toBeGreaterThan(0);
       expect(affects.replace("affects", "").trim(), risk).not.toBe(risk);
+      t.renderer.destroy?.();
     }
   });
 
-  it("hides the raw reason and args until V is pressed, then reveals them", async () => {
-    const { lastFrame, stdin } = render(
+  test("hides the raw reason and args until V is pressed, then reveals them", async () => {
+    const t = await testRender(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={() => {}} />,
+      { width: 72, height: 16 },
     );
+    await t.flush();
     // Collapsed by default: the LLM-facing summary and args are not shown.
-    expect(lastFrame() ?? "").not.toContain("ready for review");
-    expect(lastFrame() ?? "").not.toContain("fix/x");
+    expect(t.captureCharFrame()).not.toContain("ready for review");
+    expect(t.captureCharFrame()).not.toContain("fix/x");
 
-    stdin.write("v");
-    await tick();
-    const frame = lastFrame() ?? "";
+    act(() => {
+      t.mockInput.pressKey("v");
+    });
+    await t.flush();
+    const frame = t.captureCharFrame();
     expect(frame).toContain("ready for review");
     expect(frame).toContain("fix/x");
   });
 
-  it("collapses the inspect panel when a new request takes the sheet", async () => {
-    const { lastFrame, stdin, rerender } = render(
-      <ApprovalSheet
-        pending={pending("git.push", "external", { id: "cfm_1" })}
-        onResolve={() => {}}
-      />,
-    );
-    stdin.write("v");
-    await tick();
-    expect(lastFrame() ?? "").toContain("ready for review");
+  test("collapses the inspect panel when a new request takes the sheet", async () => {
+    // The OpenTUI test harness mounts a single tree (no Ink-style `rerender`), so
+    // drive the prop change through a stateful wrapper that swaps `pending.id`,
+    // exercising the same render-time reset path as a live re-render.
+    let swap: () => void = () => {};
+    function Harness() {
+      const [id, setId] = useState("cfm_1");
+      swap = () => setId("cfm_2");
+      return (
+        <ApprovalSheet
+          pending={pending("git.push", "external", { id })}
+          onResolve={() => {}}
+        />
+      );
+    }
 
-    rerender(
-      <ApprovalSheet
-        pending={pending("git.push", "external", { id: "cfm_2" })}
-        onResolve={() => {}}
-      />,
-    );
-    // No await: the reset happens during render, so even the very first frame of
-    // the new request must not flash the previous one's expanded raw args.
-    expect(lastFrame() ?? "").not.toContain("ready for review");
+    const t = await testRender(<Harness />, { width: 72, height: 16 });
+    await t.flush();
+    act(() => {
+      t.mockInput.pressKey("v");
+    });
+    await t.flush();
+    expect(t.captureCharFrame()).toContain("ready for review");
+
+    // Swap to a new request id; the render-time reset must collapse the panel so
+    // even the first frame of the new request hides the previous expanded args.
+    act(() => {
+      swap();
+    });
+    await t.flush();
+    expect(t.captureCharFrame()).not.toContain("ready for review");
   });
 
-  it("titles a terminal-input request distinctly", () => {
-    const { lastFrame } = render(
+  test("titles a terminal-input request distinctly", async () => {
+    const t = await testRender(
       <ApprovalSheet pending={pending("terminal.sendInput", "terminal")} onResolve={() => {}} />,
+      { width: 72, height: 16 },
     );
-    expect(lastFrame() ?? "").toContain("Send input to terminal?");
+    await t.flush();
+    expect(t.captureCharFrame()).toContain("Send input to terminal?");
   });
 
-  it("approves on y and declines on n", async () => {
+  test("approves on y and declines on n", async () => {
     let a: boolean | undefined;
-    const { stdin } = render(
+    const t1 = await testRender(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={(v) => (a = v)} />,
+      { width: 72, height: 16 },
     );
-    stdin.write("y");
-    await tick();
+    await t1.flush();
+    act(() => {
+      t1.mockInput.pressKey("y");
+    });
+    await t1.flush();
     expect(a).toBe(true);
 
     let b: boolean | undefined;
-    const r2 = render(
+    const t2 = await testRender(
       <ApprovalSheet pending={pending("git.push", "external")} onResolve={(v) => (b = v)} />,
+      { width: 72, height: 16 },
     );
-    r2.stdin.write("n");
-    await tick();
+    await t2.flush();
+    act(() => {
+      t2.mockInput.pressKey("n");
+    });
+    await t2.flush();
     expect(b).toBe(false);
   });
 });

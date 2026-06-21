@@ -7,8 +7,13 @@
  * box. Daintree's own prose stays bare by contrast. Both the bar and fill are
  * theme-aware (see {@link userMessageSurface}) so we never paint a bright block —
  * or, in ansi/none modes, any fill at all — on a dark terminal.
+ *
+ * OpenTUI port: Ink `<Box>`/`<Text>` → `<box>`/`<text>`; `color=` → `fg=`,
+ * `dimColor` → the DIM attribute, `bold` → the BOLD attribute (combined with `|`),
+ * `wrap="truncate"` → `truncate`. The native renderer reflows the card on resize, so
+ * the `flexShrink` guard below is kept verbatim — it still bounds a stale-wide card.
  */
-import { Box, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import { userMessageSurface } from "../theme.js";
 import { collapseLines, snipRule, wrapText } from "../../utils/text.js";
 
@@ -33,23 +38,22 @@ export function UserMessageCard({
   // is rendered per row below, so the gutter stays aligned with whatever we show.
   const rows = collapseLines(wrapText(text, inner));
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <box flexDirection="column" marginBottom={1}>
       {/* Quiet who-said-what anchor. Dim so it never competes with the bar. */}
-      <Text dimColor bold>
-        YOU
-      </Text>
-      <Box flexDirection="row">
+      <text attributes={TextAttributes.DIM | TextAttributes.BOLD}>YOU</text>
+      <box flexDirection="row">
         {/* One bar glyph per rendered row, as a 1-cell unfilled gutter. */}
-        <Box flexDirection="column" flexShrink={0}>
+        <box flexDirection="column" flexShrink={0}>
           {rows.map((_, i) => (
-            <Text key={i} color={s.barColor}>
+            <text key={i} fg={s.barColor}>
               {BAR}
-            </Text>
+            </text>
           ))}
-        </Box>
-        <Box
+        </box>
+        <box
           flexDirection="column"
-          paddingX={1}
+          paddingLeft={1}
+          paddingRight={1}
           backgroundColor={s.backgroundColor}
           // Must stay shrinkable. `inner` is budgeted from the `width` prop, which
           // lags the live terminal during a resize (Daintree animates the pane on
@@ -57,29 +61,34 @@ export function UserMessageCard({
           // overflow the live edge and the terminal would autowrap the *filled* row —
           // orphaning a copy into scrollback the same way the status line used to.
           // Letting yoga shrink it to the live parent keeps the fill within bounds;
-          // wrap="truncate" on the lines below clips the text. In steady state the
-          // content already fits, so this never engages and the card looks identical.
+          // `truncate` on the lines below clips the text. In steady state the content
+          // already fits, so this never engages and the card looks identical.
           flexShrink={1}
         >
           {rows.map((row, i) =>
             row.kind === "snip" ? (
               // The snip marker is the divider: a dim, centered "+N lines" rule.
-              <Text key={i} color={s.textColor} dimColor wrap="truncate">
-                {snipRule(row.hidden, inner)}
-              </Text>
-            ) : (
-              <Text
+              <text
                 key={i}
-                color={s.textColor}
-                dimColor={s.dimText}
-                wrap="truncate"
+                fg={s.textColor}
+                attributes={TextAttributes.DIM}
+                truncate
+              >
+                {snipRule(row.hidden, inner)}
+              </text>
+            ) : (
+              <text
+                key={i}
+                fg={s.textColor}
+                attributes={s.dimText ? TextAttributes.DIM : TextAttributes.NONE}
+                truncate
               >
                 {row.text}
-              </Text>
+              </text>
             ),
           )}
-        </Box>
-      </Box>
-    </Box>
+        </box>
+      </box>
+    </box>
   );
 }

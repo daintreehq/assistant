@@ -1,6 +1,6 @@
 import { Fragment, useImperativeHandle, useState, type Ref } from "react";
-import { Box, Text } from "ink";
-import { Divider, KeyHint } from "../primitives.js";
+import { TextAttributes } from "@opentui/core";
+import { Divider } from "../primitives.js";
 import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { paletteEntries } from "../../commandRegistry.js";
@@ -96,8 +96,7 @@ export function Composer({
   // flight leads with Esc so the abort gesture is discoverable exactly when it
   // applies; failing that, pending actionable attention leads with `^O` to pull the
   // eye toward the ops view. Cancel takes precedence over attention. `^O` is emitted
-  // exactly once regardless of which branch promotes it. The Esc hint still appears
-  // only while a turn is cancellable (falling back to `busy`), unchanged.
+  // exactly once regardless of which branch promotes it.
   const cancelActive = cancellable ?? busy;
   const leadWithOps = attentionPending && !cancelActive;
   const hints: Array<{ key: string; action: string }> = [];
@@ -124,25 +123,25 @@ export function Composer({
   }
 
   return (
-    <Box flexDirection="column" width="100%">
+    <box flexDirection="column" width="100%">
       {suggestions.length > 0 ? (
-        <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+        <box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {suggestions.map(([cmd, desc]) => (
-            // Truncate: these rows live in the repainting region, so a long
-            // description on a narrow pane would wrap to a second physical row that
-            // Ink's logical-line erase can't see and orphan on resize (#138).
-            <Text key={cmd} wrap="truncate">
-              <Text color={ui.color.info}>{cmd.padEnd(14)}</Text>
-              <Text dimColor>{desc}</Text>
-            </Text>
+            // Truncate: these rows live in the repainting region; the native
+            // renderer reflows them cleanly, and truncate keeps a long description
+            // on a narrow pane from wrapping.
+            <text key={cmd} truncate>
+              <span fg={ui.color.info}>{cmd.padEnd(14)}</span>
+              <span attributes={TextAttributes.DIM}>{desc}</span>
+            </text>
           ))}
-        </Box>
+        </box>
       ) : null}
 
       <Divider />
 
-      <Box>
-        <Box flexGrow={1}>
+      <box flexDirection="row">
+        <box flexGrow={1}>
           <MultilineInput
             value={value}
             focus={focus}
@@ -163,40 +162,44 @@ export function Composer({
             prompt={set.active === "◌" ? "› " : "> "}
             placeholder="Ask Daintree to supervise, delegate, or inspect…"
           />
-        </Box>
-      </Box>
+        </box>
+      </box>
 
       {/* No "thinking" indicator at the input: the active turn already shows a live
           "Thinking" line in the transcript above (TurnCellView), so repeating it here
           is redundant. We still surface silently-queued follow-ups (#95). */}
       {busy && queueDepth > 0 ? (
-        <Text color={ui.color.info} wrap="truncate">
+        <text fg={ui.color.info} truncate>
           {queueDepth} queued
-        </Text>
+        </text>
       ) : null}
 
       {/* Bracket the input top AND bottom so the field reads unmistakably as the
           place text goes — the hints below sit outside the rule. */}
       <Divider />
 
-      <Box flexDirection="column">
-        <Text wrap="truncate">
+      <box flexDirection="column">
+        {/* Hint row: inlined as <span> runs (a native <text> may not nest <text>,
+            so we don't use the block <KeyHint> here — same look, valid tree). */}
+        <text truncate>
           {hints.map((h, i) => (
             <Fragment key={h.key}>
-              {i > 0 ? <Text dimColor>{" · "}</Text> : null}
-              <KeyHint keyName={h.key} action={h.action} />
+              {i > 0 ? (
+                <span attributes={TextAttributes.DIM}>{" · "}</span>
+              ) : null}
+              <span fg={ui.color.info}>{h.key}</span>
+              <span attributes={TextAttributes.DIM}> {h.action}</span>
             </Fragment>
           ))}
-        </Text>
+        </text>
         {/* Truncate so a long context summary (many agents/timers) can't widen this
-            row past the live terminal and orphan a wrapped row into scrollback
-            during a pane resize (#138). */}
+            row past the live terminal on a narrow pane. */}
         {contextHint ? (
-          <Text dimColor wrap="truncate">
+          <text attributes={TextAttributes.DIM} truncate>
             {contextHint}
-          </Text>
+          </text>
         ) : null}
-      </Box>
-    </Box>
+      </box>
+    </box>
   );
 }

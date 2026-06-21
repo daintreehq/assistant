@@ -11,12 +11,27 @@
  *   ◌ WORKING term_8 · tests running 18s · CTX 42% · agents 2
  *   CTX 8% · $0.004 · minimax-m3
  *   (idle, nothing to report → empty)
+ *
+ * OpenTUI port: the whole line is one `<text truncate>` (Ink's `wrap="truncate"`),
+ * and a native `<text>` may NOT nest another `<text>`. So every segment — including
+ * the active-agent badge, which Ink rendered via the `StateBadge` `<text>` helper —
+ * is composed as `<span>` runs (carrying `fg`/`attributes`) directly under that one
+ * `<text>`. The badge is inlined as a tinted `<span>` (the same glyph + UPPER label
+ * StateBadge would emit) instead of the helper, since the helper returns a `<text>`.
+ * The ` · ` separators stay dim spans between segments so the FIRST visible token
+ * never carries a dangling leading separator.
  */
-import { Box, Text } from "ink";
+import { TextAttributes } from "@opentui/core";
 import { Fragment, type ReactNode } from "react";
 import type { DashboardState, SessionUsage } from "../types.js";
-import { StateBadge, formatDuration } from "../primitives.js";
-import { severityTone, toneColor, topSeverity, ui } from "../theme.js";
+import { formatDuration } from "../primitives.js";
+import {
+  severityTone,
+  toneColor,
+  toneGlyph,
+  topSeverity,
+  ui,
+} from "../theme.js";
 import { truncate } from "../../utils/text.js";
 import { buildAgentRows } from "../presentation/operations.js";
 import { LIVE_CHROME_MAX_WIDTH } from "../liveChrome.js";
@@ -137,60 +152,72 @@ export function StatusLine({
   // Build the visible segments, then join them with " · " separators. A segment
   // array (rather than hand-threaded separators) means the FIRST visible token
   // never carries a dangling leading "·", regardless of which tokens are present.
+  // Each part is a `<span>` (or run of spans) so they all live under ONE `<text>`.
   const parts: ReactNode[] = [];
   if (active) {
+    // Inline the StateBadge as spans (a native <text> can't nest the helper's
+    // <text>): the tone-tinted "<glyph> LABEL" exactly as StateBadge would emit it,
+    // then a dim run carrying the id / goal / duration.
     parts.push(
       <Fragment key="active">
-        <StateBadge tone={active.badge.tone} label={active.badge.label} />
-        <Text dimColor>
+        <span fg={toneColor(active.badge.tone)}>
+          {toneGlyph(active.badge.tone)} {active.badge.label.toUpperCase()}
+        </span>
+        <span attributes={TextAttributes.DIM}>
           {" "}
           {active.id}
           {activeGoal ? ` · ${activeGoal}` : ""}
           {activeDuration ? ` ${activeDuration}` : ""}
-        </Text>
+        </span>
       </Fragment>,
     );
   }
   if (ctxText) {
     parts.push(
-      <Text key="ctx" color={pressureColor} dimColor={pressureColor === undefined}>
+      <span
+        key="ctx"
+        fg={pressureColor}
+        attributes={
+          pressureColor === undefined ? TextAttributes.DIM : TextAttributes.NONE
+        }
+      >
         {ctxText}
-      </Text>,
+      </span>,
     );
   }
   if (costText) {
     parts.push(
-      <Text key="cost" dimColor>
+      <span key="cost" attributes={TextAttributes.DIM}>
         {costText}
-      </Text>,
+      </span>,
     );
   }
   if (modelText) {
     parts.push(
-      <Text key="model" dimColor>
+      <span key="model" attributes={TextAttributes.DIM}>
         {modelText}
-      </Text>,
+      </span>,
     );
   }
   if (attention > 0) {
     parts.push(
-      <Text key="att" color={toneColor(severityTone(topSev))}>
+      <span key="att" fg={toneColor(severityTone(topSev))}>
         !{attention}
-      </Text>,
+      </span>,
     );
   }
   if (showAgents) {
     parts.push(
-      <Text key="agents" dimColor>
+      <span key="agents" attributes={TextAttributes.DIM}>
         agents {agents.length}
-      </Text>,
+      </span>,
     );
   }
   if (!connected) {
     parts.push(
-      <Text key="deg" color={ui.color.warning}>
+      <span key="deg" fg={ui.color.warning}>
         DEGRADED
-      </Text>,
+      </span>,
     );
   }
 
@@ -198,18 +225,20 @@ export function StatusLine({
   if (parts.length === 0) return null;
 
   return (
-    // Keep the repainting status row short. A full-width `space-between` row is
-    // visually tidy, but on terminal shrink the OLD wide row reflows before Ink's
-    // erase pass and the top physical row can survive as a duplicate status line.
-    <Box width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
-      <Text wrap="truncate">
+    // Keep the repainting status row short. The native renderer reflows the whole
+    // tree cleanly on resize, so the Ink-era wide-row erase desync (which could leave
+    // a duplicate status line) is gone; the maxWidth is purely the compact-chrome cap.
+    <box width="100%" maxWidth={LIVE_CHROME_MAX_WIDTH}>
+      <text truncate>
         {parts.map((p, i) => (
           <Fragment key={i}>
-            {i > 0 ? <Text dimColor> · </Text> : null}
+            {i > 0 ? (
+              <span attributes={TextAttributes.DIM}> · </span>
+            ) : null}
             {p}
           </Fragment>
         ))}
-      </Text>
-    </Box>
+      </text>
+    </box>
   );
 }
