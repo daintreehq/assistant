@@ -4,15 +4,14 @@
  * DAINTREE marker (never the word "assistant"), then the activity branch tree and
  * any in-turn notes. Body prose uses the terminal's own foreground.
  *
- * While the turn is in flight (`state === "active"`) we print the raw text — plus
- * a caret while tokens are actually streaming — so the human sees them land in
- * place. Once the turn finalizes (complete/failed/cancelled) we render the prose
- * through OpenTUI's NATIVE `<markdown>` renderable so bold/`code`/headings/lists
- * show styled rather than as raw markers. We gate on `state`, NOT `streaming`: a
- * tool call mid-turn stops the caret (`streaming` → false) while the turn stays
- * active, so keying on `streaming` would briefly markdown-render then flip back to
- * raw. Parsing only finalized text means the markdown is built once with no
- * partial-token churn.
+ * While the turn is in flight (`state === "active"`) we stream the COMPLETED lines
+ * through OpenTUI's NATIVE `<markdown>` renderable and show the in-progress line as
+ * raw text + a caret (see {@link StreamingProse}) — so bold/`code`/headings/lists
+ * style AS they're produced, the way other agent CLIs do it, instead of only at the
+ * end. Once the turn finalizes (complete/failed/cancelled) the whole text renders as
+ * markdown. Splitting at the last newline means the stable block is byte-identical
+ * between tokens within a line, so the markdown re-parses once per completed line,
+ * not per token.
  *
  * OpenTUI port: the Ink path pre-converted markdown to an ANSI string (via
  * `renderMarkdown` / marked-terminal) and showed it in a `<Text>`. We now hand the
@@ -50,6 +49,44 @@ const MARKDOWN_STYLE = colorize
       "markup.link.label": { fg: RGBA.fromHex(ui.color.info), underline: true },
     })
   : SyntaxStyle.fromStyles({ default: {} });
+
+/**
+ * In-flight prose, streamed the way other agent CLIs do it: render the COMPLETE
+ * lines (everything up to the last newline) as styled markdown, and the trailing
+ * in-progress line as raw text plus a caret. As each newline lands, that line joins
+ * the stable block and styles. This shows markdown AS it's produced rather than only
+ * at finalize, and it's cheap: `stable` is byte-identical between tokens within a
+ * line, so the `<markdown>` content prop doesn't change and the native renderable
+ * doesn't re-parse — it only re-parses once per completed line.
+ */
+function StreamingProse({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const lastNL = text.lastIndexOf("\n");
+  const stable = lastNL >= 0 ? text.slice(0, lastNL) : "";
+  const pending = lastNL >= 0 ? text.slice(lastNL + 1) : text;
+  return (
+    <box flexDirection="column">
+      {stable ? (
+        <markdown content={stable} syntaxStyle={MARKDOWN_STYLE} />
+      ) : null}
+      {/* The in-progress line + caret. When `pending` is empty (the text just ended
+          on a newline) we render nothing rather than a lone caret on its own row —
+          that bounce isn't worth it; the caret reappears with the next line's first
+          token. */}
+      {pending.length > 0 ? (
+        <text>
+          {pending}
+          {streaming ? <span attributes={TextAttributes.DIM}>▌</span> : null}
+        </text>
+      ) : null}
+    </box>
+  );
+}
 
 export function TurnCellView({
   turn,
@@ -102,20 +139,15 @@ export function TurnCellView({
               <text attributes={TextAttributes.DIM}> Thinking</text>
             </box>
           ) : finalized && turn.assistantText ? (
-            // Finalized prose: native markdown styling (built once). A bare
-            // `<markdown content="">` renders nothing, so the empty case is handled
-            // by the branch above (it only enters here when assistantText is set).
+            // Finalized prose: native markdown styling over the whole text (built
+            // once). A bare `<markdown content="">` renders nothing, so the empty
+            // case is handled by the branch above (it only enters here when
+            // assistantText is set).
             <markdown content={turn.assistantText} syntaxStyle={MARKDOWN_STYLE} />
           ) : (
-            // Active turn (or finalized-but-empty): raw text + a streaming caret so
-            // the human watches tokens land in place. A native `<text>` may not nest
-            // a `<text>`, so the caret is a `<span>` child of the same `<text>`.
-            <text>
-              {turn.assistantText}
-              {turn.streaming ? (
-                <span attributes={TextAttributes.DIM}>▌</span>
-              ) : null}
-            </text>
+            // Active turn (or finalized-but-empty): stream completed lines as styled
+            // markdown, the in-progress line as raw text + caret (see StreamingProse).
+            <StreamingProse text={turn.assistantText} streaming={turn.streaming} />
           )}
         </box>
       ) : null}

@@ -159,7 +159,8 @@ export function ControlRoom({
   return (
     <box flexDirection="column" width="100%" paddingRight={gutter}>
       {/* Masthead at the top of the stream — scrolls away into native scrollback as
-          the conversation grows (Claude Code model). */}
+          the conversation grows (Claude Code model). The Header owns its own closing
+          rule (below the wordmark/project/tier lines, above the logging line). */}
       <box paddingLeft={LEFT_PAD} paddingTop={1}>
         <Header
           columns={chromeWidth}

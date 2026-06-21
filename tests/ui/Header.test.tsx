@@ -104,13 +104,21 @@ describe("Header", () => {
     expect(frame).not.toContain("tier ");
   });
 
-  test("renders NO full-width rule (it scrolls away cleanly, Claude Code model)", async () => {
-    // A committed full-width rule would be wrapped by the host on a narrow resize and
-    // permanently break the historical layout, so the masthead has none.
+  test("closes the identity band with a full-width rule (above the logging line)", async () => {
+    // The identity block (wordmark / project / tier) is followed by a full-width rule,
+    // then the separate logging line sits BELOW it. Safe to render live on OpenTUI —
+    // the native renderer reflows the whole tree cleanly on resize (no Ink <Static>
+    // wrap hazard that once forced the masthead to carry no rule).
     const frame = await frameOf(
       <Header columns={60} version="0.1.0" tier="system" logging logFile="/t.log" />,
     );
-    expect(frame).not.toMatch(/[─-]{4,}/);
+    const lines = frame.split("\n");
+    const ruleIdx = lines.findIndex((l) => /[─-]{4,}/.test(l));
+    const tierIdx = lines.findIndex((l) => l.includes("system"));
+    const logIdx = lines.findIndex((l) => l.includes("logging"));
+    expect(ruleIdx).toBeGreaterThan(-1); // a rule exists
+    expect(ruleIdx).toBeGreaterThan(tierIdx); // …below the tier line
+    expect(logIdx).toBeGreaterThan(ruleIdx); // …and the logging line is below the rule
   });
 
   test("places the project directly under the wordmark", async () => {
@@ -171,8 +179,8 @@ describe("Header", () => {
     expect(frame).toContain("/tmp/daintree.log");
   });
 
-  // Guards the header's rendered (non-blank) row count (no rule now; a blank row
-  // separates the logging line from the identity block).
+  // Guards the header's rendered (non-blank) row count. The identity block is always
+  // followed by the full-width rule, and the logging line (when present) sits below it.
   test("renders a stable row count", async () => {
     const rows = async (node: Parameters<typeof testRender>[0]) => {
       const t = await testRender(node, { width: 60, height: 12 });
@@ -184,16 +192,16 @@ describe("Header", () => {
         .split("\n")
         .filter((l) => l.trim().length > 0).length;
     };
-    // Just the wordmark.
-    expect(await rows(<Header columns={60} version="0.1.0" />)).toBe(1);
-    // wordmark + (blank) + logging line → two visible rows.
+    // Wordmark + rule.
+    expect(await rows(<Header columns={60} version="0.1.0" />)).toBe(2);
+    // Wordmark + rule + logging line.
     expect(
       await rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />),
-    ).toBe(2);
-    // wordmark + project + run subtitle.
+    ).toBe(3);
+    // Wordmark + project + run subtitle + rule.
     expect(
       await rows(<Header columns={60} version="0.1.0" project="p" runTitle="busy" />),
-    ).toBe(3);
+    ).toBe(4);
   });
 
   test("keeps the ASCII bullet (no Unicode) when unicode is disabled", async () => {

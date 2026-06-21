@@ -308,26 +308,29 @@ describe("ControlRoom reserved-column gutter (#138)", () => {
       );
       await t.flush();
       const widths = ruleWidths(t.captureCharFrame());
-      // Exactly two full-width rules in the idle home view: the composer's top and
-      // bottom. (The masthead has no rule — it scrolls away cleanly.)
-      expect(widths).toHaveLength(2);
-      // Both land at the same inset column (columns - reserved - LEFT_PAD = chromeWidth).
+      // Three full-width rules in the idle home view: the header-band rule below the
+      // masthead, plus the composer's top and bottom.
+      expect(widths).toHaveLength(3);
+      // All land at the same inset column (columns - reserved - LEFT_PAD = chromeWidth).
       for (const w of widths) expect(w).toBe(expectedWidth);
     },
   );
 
-  test("the masthead carries no full-width rule (it scrolls away cleanly)", async () => {
-    // The old Ink build committed a full-width masthead rule to <Static>; the OpenTUI
-    // Header is plain text with NO rule, so the only rules in an idle frame are the
-    // composer's two. A committed full-width rule would be wrapped by the host on a
-    // narrow resize and break the historical layout — hence none.
+  test("a full-width rule closes the header band (below the masthead)", async () => {
+    // The Header COMPONENT itself emits no rule (a committed rule would wrap on a
+    // narrow host resize — see Header.test); ControlRoom draws the band rule instead,
+    // live, just below the masthead. The native renderer reflows it cleanly, so it's
+    // safe to render full-width. Assert a rule appears within a couple rows of the
+    // wordmark, not only down at the composer.
     const frame = await frameFor("idle", 120);
     const lines = frame.split("\n").map((l) => l.trim());
     const headerIdx = lines.findIndex((l) => l.includes("Daintree Assistant"));
-    const firstComposerRuleIdx = lines.findIndex(
+    const firstRuleIdx = lines.findIndex(
       (l) => /^[─-]+$/.test(l) && l.length > 1,
     );
-    // The first rule appears only down at the composer, never within the masthead block.
-    expect(firstComposerRuleIdx).toBeGreaterThan(headerIdx + 2);
+    expect(firstRuleIdx).toBeGreaterThan(headerIdx);
+    // The header-band rule sits close under the masthead block (tier line included),
+    // not all the way down at the composer.
+    expect(firstRuleIdx).toBeLessThanOrEqual(headerIdx + 4);
   });
 });

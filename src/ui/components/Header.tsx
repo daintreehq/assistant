@@ -1,6 +1,7 @@
 import { TextAttributes } from "@opentui/core";
 import { assistantVersion } from "../../config.js";
 import { glyphs, ui } from "../theme.js";
+import { Divider } from "../primitives.js";
 
 /**
  * The control-room masthead — deliberately plain text (Claude Code model): the
@@ -111,13 +112,16 @@ export function Header({
           </text>
         ) : null}
       </box>
-      {/* NO full-width rule (see header note). The debug-log line sits a blank row
-          under the identity block. "logging" is pinned (flexShrink 0) so it is never
-          clipped to "loggin"; only the path truncates. */}
+      {/* A full-width rule closes the identity band end-to-end, right below the
+          wordmark / project / tier lines. Safe to render live on OpenTUI (the native
+          renderer reflows the whole tree cleanly on resize — no Ink <Static> wrap
+          hazard). */}
+      <Divider />
+      {/* Debug logging is a SEPARATE concern, so it sits BELOW the rule. "logging" is
+          pinned (flexShrink 0) so it's never clipped to "loggin"; only the path
+          truncates. flexDirection="row" because OpenTUI <box> defaults to column. */}
       {logging ? (
-        // flexDirection="row": OpenTUI <box> defaults to column (Ink <Box> was row),
-        // so the "logging" label and the path must be told to sit side by side.
-        <box flexDirection="row" marginTop={1}>
+        <box flexDirection="row">
           <box flexShrink={0}>
             <text fg={ui.color.warning}>{set.active} logging</text>
           </box>
