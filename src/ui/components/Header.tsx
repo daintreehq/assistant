@@ -112,11 +112,12 @@ export function Header({
           </text>
         ) : null}
       </box>
-      {/* A full-width rule closes the identity band end-to-end, right below the
-          wordmark / project / tier lines. Safe to render live on OpenTUI (the native
-          renderer reflows the whole tree cleanly on resize — no Ink <Static> wrap
-          hazard). */}
-      <Divider />
+      {/* A rule closes the identity band, right below the wordmark / project / tier
+          lines. It MUST take a fixed width (`columns`): the masthead is committed to
+          the host's native scrollback as a fixed snapshot that does NOT reflow, so a
+          flex `width:'100%'` rule would be wrapped by the host on a narrow resize and
+          break the historical layout. A fixed-length rule snapshots cleanly. */}
+      <Divider width={columns} />
       {/* Debug logging is a SEPARATE concern, so it sits BELOW the rule. "logging" is
           pinned (flexShrink 0) so it's never clipped to "loggin"; only the path
           truncates. flexDirection="row" because OpenTUI <box> defaults to column. */}
