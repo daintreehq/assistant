@@ -131,6 +131,11 @@ export function TurnCellView({
               <span attributes={TextAttributes.DIM}> · received</span>
             ) : null}
           </text>
+          {/* The live run status sits DIRECTLY under the marker, above the response, so
+              a turn reads "DAINTREE → Generating → [the answer]". Animated spinner +
+              precise label + live elapsed; null once the turn finalizes or while the
+              activity tree is the indicator (tool_running). */}
+          <LiveRunStatus turn={turn} now={now} />
           {turn.assistantText ? (
             finalized ? (
               // Finalized prose: native markdown styling over the whole text.
@@ -147,9 +152,6 @@ export function TurnCellView({
               />
             )
           ) : null}
-          {/* The precise "silent work" status (Analyzing / Integrating / awaiting
-              approval / Cancelling) with a live spinner + elapsed. Null otherwise. */}
-          <LiveRunStatus turn={turn} now={now} />
         </box>
       ) : null}
 

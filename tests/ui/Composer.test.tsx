@@ -79,17 +79,18 @@ describe("Composer", () => {
     expect(Math.max(...ruleWidths)).toBeGreaterThan(LIVE_CHROME_MAX_WIDTH);
   });
 
-  test("shows the precise stage at the input while busy", async () => {
-    // The composer names the active phase right at the prompt so you always know work
-    // is in flight (and the input is still live) — including while the transcript's
-    // own status line is hidden (during streaming / tool execution).
+  test("shows NO stage/spinner notification at the input while busy", async () => {
+    // The live run status belongs in the transcript under the DAINTREE marker, NOT as a
+    // notification under the input where the user just typed (that reads wrong). The
+    // input stays clean while busy.
     const t = await testRender(
       <Composer busy stage="Delegating" onSubmit={() => {}} />,
       COMPOSER_SIZE,
     );
     await t.flush();
     const frame = t.captureCharFrame();
-    expect(frame).toContain("Delegating");
+    expect(frame).not.toContain("Delegating");
+    expect(frame).not.toContain("⠋"); // no braille spinner at the prompt
   });
 
   test("renders no spinner glyph or queued suffix when idle (#115)", async () => {
@@ -111,7 +112,7 @@ describe("Composer", () => {
     await t.flush();
     const frame = t.captureCharFrame();
     expect(frame).toContain("2 queued");
-    expect(frame).toContain("Watching"); // the precise stage is shown at the prompt
+    expect(frame).not.toContain("Watching"); // the stage lives under DAINTREE, not here
   });
 
   test("omits the queued count when nothing is waiting (#95)", async () => {
@@ -122,7 +123,7 @@ describe("Composer", () => {
     await t.flush();
     const frame = t.captureCharFrame();
     expect(frame).not.toContain("queued"); // no queued suffix when nothing waits
-    expect(frame).toContain("Watching"); // ...but the stage still shows while busy
+    expect(frame).not.toContain("Watching"); // and no stage notification at the input
   });
 
   test("opens a filtered slash palette as you type a command", async () => {

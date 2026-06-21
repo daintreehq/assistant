@@ -3,7 +3,6 @@ import { TextAttributes } from "@opentui/core";
 import { Divider } from "../primitives.js";
 import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
-import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
 
 /**
@@ -166,21 +165,14 @@ export function Composer({
         </box>
       </box>
 
-      {/* A compact busy cue at the input: the PRECISE stage (Analyzing request /
-          Generating / Delegating / Integrating results / Waiting for approval /
-          Cancelling) + any silently-queued follow-ups (#95). The transcript names the
-          same state under DAINTREE during silent gaps; here it stays visible right at
-          the prompt even while prose streams or the tree fills (where that line hides),
-          so you always know work is in flight and the composer is still live. */}
-      {busy ? (
-        <box flexDirection="row">
-          <ThinkingDot ascii={ascii} />
-          <text attributes={TextAttributes.DIM} truncate>
-            {" "}
-            {stage}
-            {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
-          </text>
-        </box>
+      {/* The live run status (Generating / Analyzing / tool tree …) belongs in the
+          TRANSCRIPT under the DAINTREE marker, NOT here under the input — a status
+          notification right where you just typed reads wrong. The input stays clean;
+          we only surface silently-queued follow-ups so they aren't invisible (#95). */}
+      {busy && queueDepth > 0 ? (
+        <text attributes={TextAttributes.DIM} truncate>
+          {queueDepth} queued
+        </text>
       ) : null}
 
       {/* Bracket the input top AND bottom so the field reads unmistakably as the

@@ -75,6 +75,10 @@ export function liveStatusLabel(turn: TurnCell): string | null {
   switch (turn.phase) {
     case "analyzing":
       return "Analyzing request";
+    case "generating":
+      // Shown right under DAINTREE, above the streaming response, so the run reads
+      // "DAINTREE → Generating → [the answer]" rather than a bare wall of prose.
+      return "Generating";
     case "integrating":
       return "Integrating results";
     case "awaiting_approval":
@@ -82,6 +86,8 @@ export function liveStatusLabel(turn: TurnCell): string | null {
     case "cancelling":
       return "Cancelling";
     default:
+      // received (shown inline on the marker) and tool_running (the activity tree IS
+      // the live indicator) and terminal states get no separate line.
       return null;
   }
 }

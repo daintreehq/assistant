@@ -213,7 +213,9 @@ describe("TurnCellView markdown", () => {
     expect(frame).not.toContain("▌"); // the status line replaces the stream caret
   });
 
-  test("drops the status line once prose starts streaming", async () => {
+  test("shows 'Generating' under DAINTREE while prose streams", async () => {
+    // The run reads "DAINTREE → Generating → [the answer]": the status sits under the
+    // marker, above the streaming response — not as a notification under the input.
     const t = await testRender(
       <TurnCellView
         turn={turn({
@@ -228,8 +230,8 @@ describe("TurnCellView markdown", () => {
     );
     await t.flush();
     const frame = t.captureCharFrame();
-    expect(frame).toContain("hi");
-    expect(frame).not.toContain("Analyzing"); // prose itself communicates activity
+    expect(frame).toContain("hi"); // the streaming response
+    expect(frame).toContain("Generating"); // ...with the live status above it
     expect(frame).not.toContain("Thinking");
   });
 
