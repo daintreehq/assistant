@@ -1,0 +1,251 @@
+package host
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+func TestRedactArgs(t *testing.T) {
+	long := strings.Repeat("a", 100)
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{`null`, ""},
+		{`"short"`, `"short"`},
+		{`"` + long + `"`, "<string: 100 chars>"},
+		{`42`, "42"},
+		{`true`, "true"},
+		{`{"k":"v","big":"` + long + `","arr":[1],"obj":{"x":1},"n":3}`,
+			"OBJECT"}, // checked structurally below
+		{`[1,2]`, `{"0":1,"1":2}`}, // array → string-keyed object quirk
+		{`not json`, `"not json"`},
+	}
+	for _, c := range cases {
+		got := redactArgs(c.in)
+		if c.want == "OBJECT" {
+			// encoding/json HTML-escapes '<' to <; assert on the escaped forms.
+			if !strings.Contains(got, `"big":"<string: 100 chars>"`) ||
+				!strings.Contains(got, `"arr":"<array>"`) ||
+				!strings.Contains(got, `"obj":"<object>"`) ||
+				!strings.Contains(got, `"k":"v"`) ||
+				!strings.Contains(got, `"n":3`) {
+				t.Errorf("object redaction wrong: %s", got)
+			}
+			continue
+		}
+		if got != c.want {
+			t.Errorf("redactArgs(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestResultToAudit(t *testing.T) {
+	r, sev, code := resultToAudit(domain.Ok("done", nil))
+	if r != AuditSuccess || sev != SeverityInfo || code != "" {
+		t.Fatalf("ok result mapped wrong: %v %v %q", r, sev, code)
+	}
+	r, sev, code = resultToAudit(domain.Fail("UNAUTHORIZED", "no"))
+	if r != AuditUnauthorized || sev != SeverityWarning || code != "UNAUTHORIZED" {
+		t.Fatalf("unauthorized mapped wrong: %v %v %q", r, sev, code)
+	}
+	r, _, _ = resultToAudit(domain.Fail("WEIRD", "x"))
+	if r != AuditError {
+		t.Fatalf("unknown code want error, got %v", r)
+	}
+}
+
+// collectPost captures emitted events for assertions (timer/goroutine-safe).
+type collector struct {
+	mu  sync.Mutex
+	evs []HostEvent
+}
+
+func (c *collector) post(ev HostEvent) {
+	c.mu.Lock()
+	c.evs = append(c.evs, ev)
+	c.mu.Unlock()
+}
+func (c *collector) snapshot() []HostEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]HostEvent, len(c.evs))
+	copy(out, c.evs)
+	return out
+}
+func (c *collector) types() []string {
+	var out []string
+	for _, e := range c.snapshot() {
+		out = append(out, eventType(e))
+	}
+	return out
+}
+
+func eventType(e HostEvent) string {
+	switch e.(type) {
+	case EvReady:
+		return "host:ready"
+	case EvTurnStart:
+		return "turn:start"
+	case EvTurnToken:
+		return "turn:token"
+	case EvTurnEnd:
+		return "turn:end"
+	case EvToolStarted:
+		return "tool:started"
+	case EvToolSettled:
+		return "tool:settled"
+	case EvApprovalRequested:
+		return "approval:requested"
+	case EvApprovalDecided:
+		return "approval:decided"
+	case EvError:
+		return "host:error"
+	case EvShutdown:
+		return "host:shutdown"
+	}
+	return "?"
+}
+
+func TestBridgeTurnLifecycle(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+
+	b.StartExchange() // user turn: start+end
+	b.AssistantStart()
+	b.AssistantStart() // second start is a no-op (single open turn)
+	b.AssistantToken("hi")
+	b.AssistantEnd("answer", "")
+
+	got := c.types()
+	want := []string{"turn:start", "turn:end", "turn:start", "turn:token", "turn:end"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("lifecycle events=%v want %v", got, want)
+	}
+	// First turn:start is the user role, third is assistant.
+	evs := c.snapshot()
+	if evs[0].(EvTurnStart).Role != RoleUser {
+		t.Errorf("first turn not user")
+	}
+	if evs[2].(EvTurnStart).Role != RoleAssistant {
+		t.Errorf("assistant turn not role assistant")
+	}
+	if evs[4].(EvTurnEnd).Outcome != OutcomeAnswered {
+		t.Errorf("end outcome=%q want answered", evs[4].(EvTurnEnd).Outcome)
+	}
+}
+
+func TestBridgeInterruptSuppresses(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+	b.StartExchange()
+	b.AssistantStart()
+	b.Interrupt() // latches interrupted, closes turn agent-stuck
+	b.AssistantToken("late")
+	b.ToolCall(agent.ToolCallEvent{ID: "t1", Name: "fs.read", StartedAt: 1})
+
+	// No turn:token or tool:started after interrupt.
+	for _, ty := range c.types() {
+		if ty == "turn:token" || ty == "tool:started" {
+			t.Fatalf("interrupt failed to suppress: %v", c.types())
+		}
+	}
+	// The interrupt closed the assistant turn as agent-stuck.
+	snap := c.snapshot()
+	last := snap[len(snap)-1].(EvTurnEnd)
+	if last.Outcome != OutcomeAgentStuck {
+		t.Fatalf("interrupt close outcome=%q want agent-stuck", last.Outcome)
+	}
+}
+
+func TestBridgeApprovalDecide(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0})
+
+	done := make(chan bool, 1)
+	go func() { done <- b.Confirm(context.Background(), "git.push", "push?") }()
+
+	// Wait for the approval:requested to land, then decide approved.
+	var approvalID string
+	deadline := time.After(time.Second)
+	for approvalID == "" {
+		select {
+		case <-deadline:
+			t.Fatal("no approval:requested emitted")
+		default:
+		}
+		for _, e := range c.snapshot() {
+			if ar, ok := e.(EvApprovalRequested); ok {
+				approvalID = ar.ApprovalID
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	b.ResolveApproval(approvalID, DecisionApproved)
+	if got := <-done; !got {
+		t.Fatal("approved confirm returned false")
+	}
+}
+
+func TestBridgeApprovalTimeout(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 10})
+	got := b.Confirm(context.Background(), "git.push", "push?")
+	if got {
+		t.Fatal("timed-out confirm returned true")
+	}
+	// approval:decided with timeout must have been emitted.
+	found := false
+	for _, e := range c.snapshot() {
+		if ad, ok := e.(EvApprovalDecided); ok && ad.Decision == DecisionTimeout {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no timeout decision emitted")
+	}
+}
+
+func TestBridgeSettlePendingApprovals(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0})
+	done := make(chan bool, 1)
+	go func() { done <- b.Confirm(context.Background(), "git.push", "p") }()
+	// Let the approval register.
+	time.Sleep(10 * time.Millisecond)
+	b.SettlePendingApprovals(DecisionRejected)
+	select {
+	case got := <-done:
+		if got {
+			t.Fatal("rejected confirm returned true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settlePendingApprovals did not unblock confirm")
+	}
+}
+
+func TestIsDanger(t *testing.T) {
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: func(HostEvent) {},
+		RiskOf: func(name string) (domain.RiskClass, bool) {
+			switch name {
+			case "fs.read":
+				return domain.RiskRead, true
+			case "git.push":
+				return domain.RiskGit, true
+			}
+			return "", false
+		}})
+	if b.isDanger("fs.read") {
+		t.Error("read risk must not be danger")
+	}
+	if !b.isDanger("git.push") {
+		t.Error("git risk must be danger")
+	}
+	if b.isDanger("unknown.tool") {
+		t.Error("unknown tool must not be danger")
+	}
+}

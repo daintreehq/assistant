@@ -1,0 +1,123 @@
+package ui
+
+import (
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// presentation_test.go ports tests/ui/presentation.test.ts: presentTool maps
+// first-party tools to human verbs (never raw fn() syntax for unknowns), and
+// BuildAgentRows merges/orders watchers + threads the epistemic kind (persisted
+// preference, classification fallback, raw passthrough).
+
+func TestPresentTool_FirstPartyVerbs(t *testing.T) {
+	cases := map[string]string{
+		"fs.search":               "Searched",
+		"agentTask.spawnForEdits": "Delegated",
+		"watcher.terminal.create": "Watching",
+		"fs.read":                 "Read",
+		"fs.list":                 "Listed",
+		"timer.create":            "Scheduled",
+	}
+	for name, want := range cases {
+		if got := presentTool(name); got != want {
+			t.Errorf("presentTool(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestPresentTool_UnknownFallsBackToInternalName(t *testing.T) {
+	// Unknown tools fall back to the title-cased leaf — NEVER raw "fn(" syntax.
+	got := presentTool("some.exotic.tool")
+	if got != "Tool" {
+		t.Errorf("presentTool unknown leaf = %q, want title-cased leaf Tool", got)
+	}
+	for _, name := range []string{"some.exotic.thing", "weird"} {
+		if p := presentTool(name); contains(p, "(") {
+			t.Errorf("presentTool(%q) = %q must not contain a paren (raw fn syntax)", name, p)
+		}
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// watcherRec builds a watcher record with overridable classification/epistemic.
+func watcherRec(id string, classification string, epistemic *domain.EpistemicKind) domain.WatcherRecord {
+	w := domain.WatcherRecord{
+		ID:        id,
+		Kind:      "terminal",
+		Title:     "repair tests",
+		Goal:      "wait for tests",
+		Status:    "active",
+		CadenceMs: 1000,
+	}
+	if classification != "" {
+		c := classification
+		w.LastClassification = &c
+	}
+	w.LastEpistemicKind = epistemic
+	return w
+}
+
+func TestBuildAgentRows_OrdersByUrgency(t *testing.T) {
+	rows := BuildAgentRows([]domain.WatcherRecord{
+		watcherRec("wch_working", string(domain.ClassStillWorking), nil),
+		watcherRec("wch_input", string(domain.ClassWaitingForInput), nil),
+	})
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	// Needs-input sorts ahead of still-working.
+	if rows[0].ID != "wch_input" {
+		t.Errorf("rows[0] = %q, want wch_input (needs-input first)", rows[0].ID)
+	}
+	if !rows[0].NeedsAttention {
+		t.Error("needs-input row should flag NeedsAttention")
+	}
+}
+
+func TestBuildAgentRows_PrefersPersistedEpistemicKind(t *testing.T) {
+	// still_working would derive "inferred", but a stored kind is authoritative.
+	obs := domain.EpistemicObserved
+	rows := BuildAgentRows([]domain.WatcherRecord{
+		watcherRec("a", string(domain.ClassStillWorking), &obs),
+	})
+	if rows[0].EpistemicKind != domain.EpistemicObserved {
+		t.Errorf("epistemicKind = %q, want observed (persisted wins)", rows[0].EpistemicKind)
+	}
+}
+
+func TestBuildAgentRows_ClassificationFallback(t *testing.T) {
+	cases := []struct {
+		classification string
+		want           domain.EpistemicKind
+	}{
+		{string(domain.ClassTerminalExited), domain.EpistemicObserved},
+		{string(domain.ClassStillWorking), domain.EpistemicInferred},
+		{string(domain.ClassUnknown), domain.EpistemicUnverified},
+	}
+	for _, c := range cases {
+		rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("x", c.classification, nil)})
+		if rows[0].EpistemicKind != c.want {
+			t.Errorf("classification %q → %q, want %q", c.classification, rows[0].EpistemicKind, c.want)
+		}
+	}
+}
+
+func TestBuildAgentRows_RawEpistemicPassthrough(t *testing.T) {
+	// A corrupt stored kind degrades safely (epistemicTag returns "" → no tag) but is
+	// not re-validated away — the row keeps it verbatim.
+	bogus := domain.EpistemicKind("bogus")
+	rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("a", string(domain.ClassStillWorking), &bogus)})
+	if rows[0].EpistemicKind != "bogus" {
+		t.Errorf("raw epistemicKind = %q, want passthrough bogus", rows[0].EpistemicKind)
+	}
+}

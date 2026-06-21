@@ -1,12 +1,30 @@
-node_modules/
-dist/
+# Build output
+/bin/
+/dist/
+daintree-assistant
+*.exe
+
+# Go test / profiling artifacts
+*.test
+*.out
+coverage/
+coverage.txt
+coverage.html
+*.prof
+*.cpu
+*.mem
+
+# Local env & secrets
 .env
 .env.*
 !.env.example
+
+# Logs & local state
 *.log
 logs/
-.DS_Store
-coverage/
-*.local
 state.db
+*.local
 .tmp/
+
+# OS / editor
+.DS_Store

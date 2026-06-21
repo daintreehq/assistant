@@ -1,0 +1,109 @@
+// Package commands is the slash-command subsystem: the pure-data COMMAND_REGISTRY
+// (single source of truth for names/syntax/palette/help — drives suggestions, help
+// blobs, and both handler surfaces) plus the two handlers (REPL prints via render;
+// UI returns structured cards) and the rich /doctor checklist. Port of
+// src/commandRegistry.ts + src/cli/commands.ts + src/cli/commandData.ts.
+package commands
+
+import "strings"
+
+// CommandMeta is one row of the registry (commandRegistry.ts CommandMeta).
+type CommandMeta struct {
+	// Name is the bare command word (no leading slash).
+	Name string
+	// Palette is the short composer-suggestion blurb.
+	Palette string
+	// Syntax is the help-line usage form ("/audit [n]").
+	Syntax string
+	// Help is the one-line description.
+	Help string
+}
+
+// COMMAND_REGISTRY is the ordered, canonical command table. Aliases (? ⇐ help;
+// exit/q ⇐ quit) are handled by the parsers but intentionally NOT listed here.
+// Order is a product contract (drives the help/palette ordering).
+var COMMAND_REGISTRY = []CommandMeta{
+	{Name: "status", Syntax: "/status", Palette: "connection and session", Help: "Daintree connection, project, models, tier"},
+	{Name: "inbox", Syntax: "/inbox [sev]", Palette: "items requiring attention", Help: "watcher/timer events (info|attention|urgent)"},
+	{Name: "tools", Syntax: "/tools [query]", Palette: "list / search tools", Help: "list/search available tools"},
+	{Name: "timers", Syntax: "/timers", Palette: "scheduled operations", Help: "scheduled timers"},
+	{Name: "watchers", Syntax: "/watchers", Palette: "supervised agents", Help: "active watchers"},
+	{Name: "audit", Syntax: "/audit [n]", Palette: "recent tool calls · export", Help: "recent calls (def 15); export <json|csv>"},
+	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},
+	{Name: "models", Syntax: "/models", Palette: "model routing", Help: "model routing (large/medium/small tiers)"},
+	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
+	{Name: "skills", Syntax: "/skills [sub]", Palette: "loaded · find · load · clear", Help: "loaded | find <query> | load <id…> | clear"},
+	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
+	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},
+	{Name: "doctor", Syntax: "/doctor", Palette: "environment check", Help: "check MCP / config / project (with fixes)"},
+	{Name: "reconnect", Syntax: "/reconnect", Palette: "retry the Daintree connection", Help: "retry the Daintree MCP connection"},
+	{Name: "help", Syntax: "/help", Palette: "all commands and keys", Help: "this help"},
+	{Name: "quit", Syntax: "/quit", Palette: "exit", Help: "exit"},
+}
+
+// helpPad is the syntax column width (clears the widest syntax "/permissions [tier]").
+const helpPad = 24
+
+// PaletteEntries returns ["/name", palette] pairs for the composer palette.
+func PaletteEntries() [][2]string {
+	out := make([][2]string, 0, len(COMMAND_REGISTRY))
+	for _, c := range COMMAND_REGISTRY {
+		out = append(out, [2]string{"/" + c.Name, c.Palette})
+	}
+	return out
+}
+
+// HelpLines returns each command's "syntax<pad>help" line.
+func HelpLines() []string {
+	out := make([]string, 0, len(COMMAND_REGISTRY))
+	for _, c := range COMMAND_REGISTRY {
+		out = append(out, padRight(c.Syntax, helpPad)+c.Help)
+	}
+	return out
+}
+
+// PanelKey identifies an on-demand UI panel (commandData.ts PanelKey).
+type PanelKey string
+
+const (
+	PanelWatchers PanelKey = "watchers"
+	PanelInbox    PanelKey = "inbox"
+	PanelTimers   PanelKey = "timers"
+	PanelAudit    PanelKey = "audit"
+	PanelHelp     PanelKey = "help"
+)
+
+// parseCommand splits a slash line into (cmd, arg, rest). Identical to both TS
+// handlers: `line.slice(1).trim().split(/\s+/)`.
+func parseCommand(line string) (cmd string, arg string, rest []string) {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "/"))
+	if trimmed == "" {
+		return "", "", nil
+	}
+	fields := strings.Fields(trimmed)
+	cmd = fields[0]
+	rest = fields[1:]
+	arg = strings.Join(rest, " ")
+	return cmd, arg, rest
+}
+
+// canonical maps an alias to its registry name (? → help; exit/q → quit).
+func canonical(cmd string) string {
+	switch cmd {
+	case "?":
+		return "help"
+	case "exit", "q":
+		return "quit"
+	default:
+		return cmd
+	}
+}
+
+// padRight pads s with spaces to at least width runes.
+func padRight(s string, width int) string {
+	n := len([]rune(s))
+	if n >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-n)
+}

@@ -1,0 +1,181 @@
+package agent
+
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/models"
+)
+
+// compactionMarkerPrefix and the clear marker bound the rehydration boundary. The
+// compaction marker is matched by PREFIX, the clear marker by EXACT equality.
+// Preserve the em-dash characters (U+2014). Spec: agent-loop.md §2/§7/§17.7.
+const (
+	compactionMarkerPrefix = "[conversation compacted"
+	compactionMarker       = "[conversation compacted — earlier turns dropped from context]"
+	compactedNotePrefix    = "[compacted summary of earlier conversation]\n"
+	injectNotePrefix       = "[system event]\n"
+)
+
+// RehydrateResult is the reconstructed working history on resume.
+type RehydrateResult struct {
+	RestoredMessages []models.ChatMessage
+	InitialSeq       int
+	// DirtyFreshStart is set when a dup-seq tangle forced an EMPTY working history
+	// resumed at maxSeq+1 (a safe fresh start that still continues numbering past
+	// the dirty rows). NewSession persists a clear breadcrumb so the durable log
+	// records the reset boundary at the new, collision-free seq.
+	DirtyFreshStart bool
+}
+
+// RehydrateSession reconstructs the working model history from persisted rows
+// (agent-loop.md §7). Returns (result, true) to resume, or (_, false) to start
+// fresh. Fresh-start fallbacks: empty rows, or a dup-seq tangle (the fingerprint
+// of a historical double-write bug — replaying it is worse than losing it).
+func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult, bool) {
+	if len(rows) == 0 {
+		return RehydrateResult{}, false
+	}
+
+	// initialSeq = max(seq)+1 via an O(n) reduce (NOT a spread-max — §17.5).
+	// Computed first so the dup-seq safe-fresh-start below can continue numbering
+	// PAST the dirty rows rather than restarting at 0.
+	maxSeq := 0
+	for _, r := range rows {
+		if r.Seq > maxSeq {
+			maxSeq = r.Seq
+		}
+	}
+	initialSeq := maxSeq + 1
+
+	// Dup-seq detection: a non-unique seq set is the fingerprint of a prior buggy
+	// double-write (§7.2 / §17.4). We can't trust the ordering, so we start with an
+	// EMPTY working history — but we resume (not "false"/fresh) at maxSeq+1 so the
+	// fresh control rows and every subsequent append are numbered ABOVE the dirty
+	// rows and never collide with them again. Returning "fresh" here would restart
+	// persisting at seq 0, so the next resume would keep seeing the same dup-seqs.
+	// IsDirtyFreshStart marks the resume so the caller persists a clear breadcrumb.
+	seen := make(map[int]struct{}, len(rows))
+	for _, r := range rows {
+		if _, dup := seen[r.Seq]; dup {
+			return RehydrateResult{RestoredMessages: []models.ChatMessage{}, InitialSeq: initialSeq, DirtyFreshStart: true}, true
+		}
+		seen[r.Seq] = struct{}{}
+	}
+
+	// markerIdx = LAST row that is a compact/clear breadcrumb.
+	markerIdx := -1
+	for i, r := range rows {
+		if r.Role == "system" && (strings.HasPrefix(r.Content, compactionMarkerPrefix) || r.Content == domain.ClearMarker) {
+			markerIdx = i
+		}
+	}
+
+	var working []domain.ConversationMessageRecord
+	if markerIdx >= 0 {
+		// Everything AFTER the marker (the marker itself is skipped — a durable-log
+		// breadcrumb, not a model message). A trailing CLEAR ⇒ empty history.
+		working = rows[markerIdx+1:]
+	} else {
+		// No marker: drop the three control rows (seq 0,1,2).
+		for _, r := range rows {
+			if r.Seq >= domain.ControlMessageCount {
+				working = append(working, r)
+			}
+		}
+	}
+
+	msgs := make([]models.ChatMessage, 0, len(working))
+	for _, r := range working {
+		msgs = append(msgs, recordToChatMessage(r))
+	}
+	msgs = dropOrphanToolResults(msgs)
+	msgs = dropOrphanToolCallTail(msgs)
+
+	return RehydrateResult{RestoredMessages: msgs, InitialSeq: initialSeq}, true
+}
+
+// recordToChatMessage rebuilds a ChatMessage from a persisted row (§7.1). Empty
+// content becomes a null content (TS `content: null`). Malformed tool-call JSON is
+// dropped silently — one bad row never aborts a resume.
+func recordToChatMessage(r domain.ConversationMessageRecord) models.ChatMessage {
+	m := models.ChatMessage{Role: r.Role}
+	if r.Content == "" {
+		m.ContentNull = true
+	} else {
+		m.StringContent = r.Content
+	}
+	if r.Role == "assistant" && r.ToolCallsJson != nil && *r.ToolCallsJson != "" {
+		var calls []models.ToolCallRequest
+		if err := json.Unmarshal([]byte(*r.ToolCallsJson), &calls); err == nil {
+			m.ToolCalls = calls
+		}
+		// On error: drop calls, keep text (silent).
+	}
+	if r.Role == "tool" && r.ToolCallID != nil {
+		m.ToolCallID = *r.ToolCallID
+	}
+	return m
+}
+
+// dropOrphanToolResults filters out role=="tool" messages whose tool_call_id was
+// never declared by a PRECEDING assistant tool_calls (§7.2). Fireworks rejects an
+// orphan tool result (its parent's toolCallsJson was malformed/lost). The pass is
+// strictly forward and declarations accumulate as we go, so a tool result is kept
+// only when an EARLIER assistant message already declared its id — a result that
+// precedes its (future) declaration is still an orphan in transcript order and is
+// dropped. Pre-collecting ids from the whole history would wrongly keep it.
+// Non-tool messages are always kept (and declare their ids before later results).
+func dropOrphanToolResults(messages []models.ChatMessage) []models.ChatMessage {
+	declared := make(map[string]struct{})
+	out := make([]models.ChatMessage, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "tool" {
+			if m.ToolCallID == "" {
+				continue
+			}
+			if _, ok := declared[m.ToolCallID]; !ok {
+				continue
+			}
+			out = append(out, m)
+			continue
+		}
+		// Non-tool message: record its declared tool-call ids so subsequent tool
+		// results can match, then keep it.
+		for _, tc := range m.ToolCalls {
+			declared[tc.ID] = struct{}{}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// dropOrphanToolCallTail cuts an incomplete trailing tool exchange (§7.3): if the
+// LAST assistant message with tool_calls has any call id NOT answered by a later
+// tool message, slice the history to just before that assistant message. Only the
+// tail is checked — a mid-history break implies an already-unusable DB.
+func dropOrphanToolCallTail(messages []models.ChatMessage) []models.ChatMessage {
+	lastCall := -1
+	for i, m := range messages {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			lastCall = i
+		}
+	}
+	if lastCall == -1 {
+		return messages
+	}
+	answered := make(map[string]struct{})
+	for _, m := range messages[lastCall+1:] {
+		if m.Role == "tool" && m.ToolCallID != "" {
+			answered[m.ToolCallID] = struct{}{}
+		}
+	}
+	for _, tc := range messages[lastCall].ToolCalls {
+		if _, ok := answered[tc.ID]; !ok {
+			// Incomplete trailing exchange — cut it.
+			return messages[:lastCall]
+		}
+	}
+	return messages
+}

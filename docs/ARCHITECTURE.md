@@ -1,244 +1,188 @@
-# Daintree Assistant CLI — architecture reference
+# Daintree Assistant — architecture reference
 
-Architecture reference for the Daintree Assistant CLI. Every module described
-below is implemented; the interfaces (the `ToolDef` contract, the scheduler
-decision record, the per-module behavior notes) describe the system as it stands.
+Architecture reference for the Go binary. Every package described below is
+implemented; the contracts (the `ToolDef` shape, the scheduler decision record, the
+per-package behavior notes) describe the system as it stands. The cockpit's own
+rendering architecture has a dedicated doc — see [`BUBBLE_TEA.md`](BUBBLE_TEA.md).
 
 ## Layout
 
 ```
-src/
-  schemas.ts            domain types + Zod
-  config.ts             AppConfig, loadConfig
-  queue.ts              Queue
-  storage/db.ts         Db (node:sqlite)
-  mcp/client.ts         DaintreeMcpClient
+cmd/daintree-assistant/   main.go — flags → one-shot | doctor | cockpit | classic
+internal/
+  domain/        pure vocabulary (uuid + stdlib only): RiskClass, Tier, ModelTier, RunPhase,
+                 ToolResult (Ok/Fail), AgentEvent union, DB-row records, WatchCondition DSL,
+                 constants (MainPromptCacheKey = "daintree-main", MaxToolIterations = 12), IDs
+  config/        LoadConfig(ConfigOverrides) → AppConfig; trusted-env boundary; DEFAULTS
+  ports/         interface seams (EventSink, Store, Router, ToolRegistry, MCPClient, Queue)
+  projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
+  debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath
+  storage/       Store (store.go) over modernc.org/sqlite — durable state
   models/
-    fireworks.ts        FireworksClient, ChatMessage, ChatTool, ThinkFilter
-    router.ts           ModelRouter
-    prompts/            base.ts, runtimeContext.ts, daintreeMcp.ts, skills.ts (system prompts)
-  safety/policy.ts      tier gating, confirmation, no-file-edit guard
+    fireworks.go FireworksClient — net/http Chat Completions, SSE streaming, think-filter
+    router.go    Router — ModelFor(tier), Chat, Stream(onToken), JSON
+    pricing.go   per-model cost estimation
+    prompts/     base.go (BaseSystemPrompt), runtime context + loaded-skills builders
+  mcp/           Daintree MCP client (go-sdk: Streamable HTTP, SSE fallback) + typed wrappers
+  safety/        policy.go — Decide(risk, tier), AlwaysConfirm, no-file-edit guard
   tools/
-    types.ts            ToolDef, ToolContext, ok(), fail(), NO_ARGS
-    registry.ts         ToolRegistry
-    fsTools.ts          fsTools: ToolDef[]            (read-only project access)
-    mcpTools.ts         mcpTools: ToolDef[]           (Daintree MCP + typed wrappers)
-    timerTools.ts       timerTools: ToolDef[]         (durable timers)
-    watcherTools.ts     watcherTools: ToolDef[]       (terminal watchers)
-    queueTools.ts       queueTools: ToolDef[]         (attention queue)
-    contextTools.ts     contextTools: ToolDef[]       (snapshots & summaries)
-    extractionTools.ts  extractionTools: ToolDef[]    (terminal.extract / .async)
-    agentTaskTools.ts   agentTaskTools: ToolDef[]     (no-file-edit spawn escape hatch)
-    grantTools.ts       grantTools: ToolDef[]         (automation grants)
-    workflowTools.ts    workflowTools: ToolDef[]      (workflow create/get/list/update)
-    skillRunTools.ts    skillRunTools: ToolDef[]      (skill run/step/load)
-    auditTools.ts       auditTools: ToolDef[]         (audit.export)
-    memoryTools.ts      memoryTools: ToolDef[]        (persistent memory recall/save/…)
-    artifactTools.ts    artifactTools: ToolDef[]      (artifact.read)
-    index.ts            buildAllTools(): ToolDef[]
-  agent/loop.ts         AgentSession
-  daemon/
-    watcherEngine.ts    runTerminalWatcherCheck + pure helpers
-    scheduler.ts        Scheduler
-  cli/
-    render.ts           render + colors
-    consoleSink.ts      console AgentEventSink (one-shot / non-TTY)
-    jsonSink.ts         JSON event stream sink
-    commandData.ts      slash-command catalog + data
-    commands.ts         slash commands
-    terminalClear.ts    scrollback-safe clear helper
-    app.ts              App: wires deps, ctx, session, scheduler
-    repl.ts             interactive (classic) REPL
-    index.ts            commander entry
-  ui/                   Ink TUI (the ONLY Ink importers)
-    DaintreeInkApp.tsx  app wiring + global keybindings
-    ControlRoom.tsx     inline cockpit (Static scrollback + repainting region)
-    dev/UiGallery.tsx   fixture-driven visual gallery (npm run ui:gallery)
-  host/                 embedded Electron utility-process host
-tests/                  vitest specs
+    registry.go  Registry — register, project per-turn tool set, AssertSafe
+    dispatch.go  Dispatch — validate → tier gate → confirm/grant → run → audit
+    fsx/         fs.list / fs.read / fs.search (read-only project access)
+    mcpx/        daintree.status / daintree.listTools / tool.search / daintree.call
+    mcpwrap/     typed MCP wrappers (USE_TYPED_WRAPPER guard)
+    contextx/    context.snapshot / terminal.summarize
+    extractionx/ terminal.extract / terminal.extract.async
+    timer/       timer.schedule / timer.list / timer.cancel
+    watcher/     watcher.terminal.create / watcher.list / watcher.cancel
+    queue/       queue.publish / queue.digest / queue.resolve
+    grant/       grant.create / grant.list / grant.revoke
+    workflow/    workflow.create / get / list / update
+    skill/       skill.find / skill.load / skill.step.advance / skill.run.get
+    auditx/      audit.export
+    memory/      memory.recall / list / save / forget / pin / unpin
+    artifactx/   artifact.read
+    agenttaskx/  agentTask.spawnForEdits (the no-file-edit escape hatch)
+  agent/         Session (session.go) main turn loop + EventSink (events.go)
+  daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
+  queue/         Queue — attention queue
+  skills/        embedded runbooks (go:embed files/*.md) + SkillRegistry + SelectSkills
+  app/           App.Create — wires deps, ctx, session, scheduler; ToolContext factory
+  commands/      slash-command catalog + handlers (cockpit & classic)
+  cli/           Run(Options) entry, repl.go (classic), CockpitRunner seam, render/, jsonout/
+  ui/            Bubble Tea cockpit (the ONLY bubbletea importers) — see BUBBLE_TEA.md
+  host/          embedded host (run.go) — stdio NDJSON, PROTOCOL_VERSION 2
+  terminal/      TTY-gated raw escapes (clear.go) — the only host-scrollback wipe
 ```
 
-## Scheduler architecture decision (issue #5)
+## Wiring & data flow
 
-The scheduler (`daemon/scheduler.ts`) is **foreground-only**: it runs in-process
-via `setInterval(...).unref()` and is started only on interactive paths
-(`App.startScheduler`). Timers, watchers, and automatic reactions are persisted
-in SQLite and resume on the next launch, but **nothing ticks while the CLI is
-closed**. This is honest, current behavior (call it *option A*) and the prompt /
-tool surfaces now say so explicitly rather than implying background supervision.
+`app.App.Create(CreateOptions)` builds every dependency **once**, in order: config
+(`config.LoadConfig`), `storage.Store`, the MCP client, `queue.Queue`, `models.Router`,
+`tools.Registry` (populated then gated by `AssertSafe`), the embedded skill registry,
+and `agent.Session`. It exposes a `ToolContext` factory so each tool dispatch gets the
+config, MCP client, store, queue, router, project path, actor, confirm hook, and logger.
 
-Two longer-term options were considered for true background ticking:
+A turn runs through `agent.Session.Send()`:
 
-- **Option B — detached sidecar.** A separate long-lived process owns the tick
-  loop (`ref()`'d interval or a kept-open server) and survives TUI close. Viable,
-  but only as an *interim* step and **gated on per-project DB isolation (issue
-  #4)**: without a per-project `state.db` plus SQLite WAL mode + busy timeout, a
-  sidecar and an open TUI are concurrent writers that can double-fire. Adds
-  process supervision / IPC / daemonization complexity.
-- **Option C — Daintree-owned watch-sets over MCP.** Daintree owns the lifecycle
-  entirely (watch-sets + completion callbacks over an SSE/HTTP MCP transport) and
-  the CLI becomes a pure conversation UI with no tick loop. No local concurrency
-  problem, but requires Daintree-side primitives that do not exist yet and an
-  SSE transport (stdio dies with the parent), and couples scheduling to Daintree
-  availability (no offline operation).
+1. Phase `Received`; optional **auto-compact** of the conversation; push the user message.
+2. Build the per-turn allowed-tool set (read-only set, widened by any loaded skills'
+   `requiredTools`).
+3. Loop, up to `domain.MaxToolIterations` (12):
+   - Phase `Analyzing` / `Integrating`; `router.Stream("large", …)` with a token callback.
+   - Append the assistant message. **No tool calls** → phase `Complete`, return the answer.
+   - Otherwise announce the whole tool batch (`ToolBatch`, all `queued`), then
+     `registry.Dispatch()` each in the safe sequence, promoting and resolving each, and
+     feed the results back as `tool` messages.
+4. Re-select skills (`FindSkills`, small model, ≤3) for the next turn.
 
-**Decision:** keep option A now; the honesty fix is the only in-repo work for
-issue #5. Target **option C** long-term once Daintree exposes watch-sets over an
-SSE transport. Option B remains a viable intermediate, but only after issue #4
-(per-project DB). No sidecar or transport work is undertaken here.
+`Dispatch` = parse/validate args → tier gate (`safety.Decide`) → confirmation (interactive
+`main` actor) or scoped automation grant (watcher/timer/workflow actors) → run the handler
+→ write an audit row. Handlers return a `domain.ToolResult` via `Ok` / `Fail`; `Dispatch`
+recovers panics into a `Fail` so a tool can never crash the loop.
 
-## Cockpit rendering model (src/ui/ControlRoom.tsx)
+The daemon `Scheduler` ticks every 3s (foreground only), firing due timers and watcher
+checks. Everything off the main thread publishes to the **attention queue** (a digest the
+main thread reads), never interrupting the conversation with raw logs.
 
-The cockpit renders **inline** into the terminal's *main* screen buffer (the Claude
-Code model) — NEVER the alternate screen, because the host terminal (xterm, in Daintree)
-must own scrolling: native wheel-where-you-hover, scrollbar, selection, copy/paste.
-`ControlRoom.tsx` splits the transcript at the trailing active turn and commits completed
-cells once via Ink `<Static>` (they flow into native scrollback and never repaint); the
-masthead is plain text that scrolls away with them — **no full-width rule** (a committed
-rule would be wrapped by the host on a narrow resize and permanently break the layout).
-The in-flight turn, status line and composer are the small repainting region at the bottom.
-On resize the host reflows the committed scrollback natively and Ink repaints only the live
-region — we do NOT monkeypatch Ink's clear/erase (an earlier reflow guard that did was
-deleted; its over-erase ate the committed region on each SIGWINCH). Clean inline resize
-needs two things: live-region lines never WRAP (truncate so logical==physical rows), and
-nothing commits a full-width rule. Content is inset one column on each side. There is no
-column-banded layout. On-demand views (operations via `^O`, help) render *in place of the
-composer* and return via `Esc`.
+## Scheduler architecture decision
 
-## The ToolDef contract (from src/tools/types.ts)
+The scheduler (`daemon/scheduler.go`) is **foreground-only**: it ticks in-process every 3s
+and runs only on interactive paths. Timers, watchers, and automatic reactions persist in
+SQLite and resume on the next launch, but **nothing ticks while the assistant is closed**.
+This is honest, current behavior (*option A*) and the prompt / tool surfaces say so rather
+than implying background supervision.
 
-```ts
-interface ToolDef<A = any> {
-  name: string;                 // e.g. "fs.read" — MUST NOT imply file mutation
-  description: string;          // shown to the model; be specific & action-oriented
-  risk: RiskClass;              // "read"|"local"|"ui"|"terminal"|"project"|"git"|"external"|"system"
-  parameters: Record<string, unknown>;  // JSON Schema, additionalProperties:false
-  schema?: z.ZodType<A>;        // optional runtime validation of parsed args
-  handler: (args: A, ctx: ToolContext) => Promise<ToolResult>;
-}
-```
+Two longer-term options were considered:
 
-`ToolContext` provides: `config`, `mcp` (DaintreeMcpClient), `db` (Db), `queue`
-(Queue), `router` (ModelRouter), `projectPath`, `actor`, `confirm`, `log`.
+- **Option B — detached sidecar.** A separate long-lived process owns the tick loop and
+  survives cockpit close. Viable, but only as an interim step and **gated on per-project DB
+  isolation**: without a per-project `state.db` plus WAL + busy timeout, a sidecar and an
+  open cockpit are concurrent writers that can double-fire.
+- **Option C — Daintree-owned watch-sets over MCP.** Daintree owns the lifecycle entirely
+  (watch-sets + completion callbacks over an SSE/HTTP MCP transport) and the assistant
+  becomes a pure conversation UI with no tick loop. No local concurrency problem, but
+  requires Daintree-side primitives that don't exist yet.
 
-Use the helpers `ok(summary, result?)` and `fail(code, message, {recoverable?,details?})`
-for results. Use `NO_ARGS` for the parameters of no-arg tools. Confirmation and
-audit are handled by the registry — handlers just do the work and return a result.
+**Decision:** keep option A now; target option C long-term. Option B remains a viable
+intermediate, only after per-project DB isolation.
 
-### Worked example (match this style exactly)
+## The ToolDef contract
 
-```ts
-import { z } from "zod";
-import { ok, fail, type ToolDef } from "./types.js";
-import { resolveInsideProject } from "../safety/policy.js";
-import fs from "node:fs/promises";
+A tool is a `ToolDef` (its exact Go shape lives in `internal/tools`):
 
-const ReadArgs = z.object({
-  path: z.string().describe("Path relative to the project root."),
-  maxBytes: z.number().int().positive().max(200_000).optional(),
-});
+- `Name` — e.g. `fs.read`. **MUST NOT imply file mutation** (the `AssertSafe` guard
+  rejects forbidden fragments such as `write_file`, `edit_file`, `fs.write`,
+  `apply_patch`, `file.edit` at startup).
+- `Description` — shown to the model; specific and action-oriented.
+- `Risk` — a `domain.RiskClass` (`read` | `local` | `ui` | `terminal` | `project` |
+  `external` | `git` | `system`).
+- `Parameters` — a JSON Schema (`additionalProperties: false`) advertised to the model;
+  args are validated before the handler runs.
+- `Handler(args, ctx) → domain.ToolResult` — does the work and returns a result.
 
-export const fsTools: ToolDef[] = [
-  {
-    name: "fs.read",
-    description: "Read a UTF-8 text file from the project (read-only).",
-    risk: "read",
-    schema: ReadArgs,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        path: { type: "string", description: "Path relative to project root." },
-        maxBytes: { type: "number", description: "Max bytes to read." },
-      },
-      required: ["path"],
-    },
-    async handler(args, ctx) {
-      try {
-        const abs = resolveInsideProject(ctx.projectPath, args.path);
-        const buf = await fs.readFile(abs, "utf8");
-        const sliced = args.maxBytes ? buf.slice(0, args.maxBytes) : buf;
-        return ok(`Read ${args.path} (${sliced.length} chars).`, { path: args.path, content: sliced });
-      } catch (e) {
-        return fail("FS_READ", `Could not read ${args.path}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    },
-  },
-];
-```
+Handlers use `domain.Ok(summary, result)` and `domain.Fail(code, message, opts…)`. The
+`ToolContext` provides `Config`, `MCP`, `Store`, `Queue`, `Router`, `ProjectPath`,
+`Actor`, the confirm hook, and the logger. **Confirmation and audit are handled by
+`Dispatch`** — handlers never call confirm themselves and never throw to the caller.
 
-## Implemented tool modules (name · risk · behavior)
+## Tool families (name · risk · behavior)
 
-### fsTools.ts — read-only project access (NEVER writes)
-- `fs.list` (read) — list a directory relative to project root. Args `{path?: string, depth?: number}`. Use `resolveInsideProject`. Return entries with name/type. Skip `.git`, `node_modules`.
-- `fs.read` (read) — see worked example.
-- `fs.search` (read) — text search across project files. Args `{query: string, glob?: string, maxResults?: number}`. Pure JS recursive walk (skip `.git`, `node_modules`, `dist`); return matches `{file, line, text}` capped (default 50). No shell.
-
-### mcpTools.ts — Daintree MCP access
-- `daintree.status` (read) — return `ctx.mcp.status()` plus a one-line summary. Works even when disconnected (report it).
-- `daintree.listTools` (read) — `await ctx.mcp.listTools()`; return names + descriptions, each annotated with a `callable` flag (membership in `ctx.activeToolNames`, the turn's projection; absent ⇒ all callable). If disconnected, `fail("MCP_UNAVAILABLE", ...)`.
-- `tool.search` (read) — search Daintree MCP tools by keyword (substring on name/description). Args `{query: string, max?: number}`. Each match carries `callable: boolean` (whether it's offered in this turn's tool spec, `ctx.activeToolNames`) so it never advertises a tool the model can't invoke now; annotate rather than filter so discovery still works.
-- `daintree.call` (depends → mark risk `"project"`) — raw passthrough. Args `{name: string, arguments?: object, requestKey?: string}`. Call `ctx.mcp.callTool(name, {...arguments, requestKey})`. Return `{text, structuredContent, isError}`. This is the escape hatch; it is risk "project" so it always confirms. If `isError`, return `fail`.
-
-### timerTools.ts — durable timers (CLI-local, risk "local")
-- `timer.schedule` — Args `{title, fireAt?: ISO string, delayMs?: number, repeat?: {everyMs, maxRuns?, until?: ISO}, payload: {type: "enqueue"|"run_check"|"call_safe_tool", message?, checkPrompt?, toolCall?: {toolName, args}}, target?: {projectId?,worktreeId?,terminalId?,workflowRunId?}}`. Compute fireAt from delayMs if needed (Date.now()+delayMs). Insert via `ctx.db.insertTimer({title, fireAt, repeatEveryMs?, repeatUntil?, maxRuns?, payloadType, payloadJson, targetJson?})`. Return the timer id + fireAt.
-- `timer.list` — list scheduled timers (`ctx.db.listTimers("scheduled")`), summarized.
-- `timer.cancel` — Args `{id}`. `ctx.db.updateTimer(id, {status:"cancelled"})`.
-
-### watcherTools.ts — terminal watchers (CLI-local, risk "local")
-- `watcher.terminal.create` — Args `{terminalIds: string[], title, goal, cadenceMs?, startAfterMs?, stopAfterMs?, stopWhen?: WatchCondition, alertWhen?: WatchCondition, modelTier?: "small"|"medium"}`. Default cadenceMs 120000. Insert via `ctx.db.insertWatcher({kind:"terminal", title, goal, targetsJson: JSON.stringify(terminalIds), cadenceMs, modelTier: modelTier??"small", startAfterMs?, stopAfterMs?, stopWhenJson?, alertWhenJson?, nextCheckAt: Date.now()+(startAfterMs??0)})`. Validate conditions with `WatchCondition` from schemas. Return watcher id.
-- `watcher.list` — list active watchers summarized.
-- `watcher.cancel` — Args `{id}`. `ctx.db.updateWatcher(id, {status:"cancelled"})`.
-
-### queueTools.ts — attention queue (CLI-local, risk "local" for publish/resolve, read for digest)
-- `queue.publish` — Args = `QueuePublishArgs` schema. `ctx.queue.publish(args)`. (Used mostly by sub-threads, but expose it.)
-- `queue.digest` (read) — Args `{severityAtLeast?, maxItems?, includeResolved?}`. Return `ctx.queue.digest(opts)` + formatted text via `ctx.queue.format(events)`.
-- `queue.resolve` — Args `{id}`. `ctx.queue.resolve(id)`.
-
-### contextTools.ts — snapshots & summaries
-- `context.snapshot` (read) — Build a compact main-thread snapshot: mcp status; if connected, best-effort call `actions.getContext`, `worktree.list`, `terminal.list` via `ctx.mcp.callTool` (wrap each in try/catch); include open queue digest (`ctx.queue.digest({severityAtLeast:"attention", maxItems:10})`). Return a structured object + a readable summary. Must not throw if MCP is down.
-- `terminal.summarize` (read) — Args `{terminalId, purpose?: string, tailBytes?: number}`. Read terminal output via `ctx.mcp.callTool("terminal.getOutput", {terminalId, lines:200})`, then summarize with the SMALL model using `SUMMARIZER_SYSTEM_PROMPT` + `buildSummarizerUserPrompt` (import from ../models/prompts.js) via `ctx.router.chat("small", {...})`. Return the summary text. If MCP down, fail cleanly.
-
-### agentTaskTools.ts — the no-file-edit escape hatch (risk "project")
-- `agentTask.spawnForEdits` — Args `{worktreeId?: string, agentId?: string (default "claude"), mode?: "edit"|"explore" (default "edit"), title, taskPrompt, context?: {filePaths?: string[], includeDiff?: boolean}, watcher?: {create: boolean, goal?: string, cadenceMs?: number}}`. Behavior: build an agent prompt (compose taskPrompt + a mode-specific constraints block — edit mode: "Make changes only in this worktree… Report back changed files/tests/risks"; explore mode: "READ-ONLY exploration: do not modify files… report findings"), then `ctx.mcp.callTool("agent.launch", {agentId, worktreeId?, prompt})` (requestKey via randomUUID). From the result, get the terminalId (structuredContent.terminalId ?? parse). If `watcher.create`, insert a terminal watcher (same shape as watcher.terminal.create) for that terminalId. Return `{terminalId, worktreeId, watcherId?}`. If MCP down, fail with guidance. This is the ONLY agent-spawn path (edits AND exploration); the CLI never edits files and never hand-rolls a raw agent.launch.
-- `daintree.call` — raw escape hatch. Before forwarding, it checks `WRAPPED_MCP_TOOLS`: if `name` has a typed wrapper (agent.launch → agentTask.spawnForEdits; terminal.getOutput → terminal.summarize/extract; panel.focus → terminal.focus), it fails fast with code `USE_TYPED_WRAPPER` naming the wrapper instead of forwarding. This stops the recurring "use the escape hatch with empty args, then retry the identical broken call" loop.
-
-### extractionTools.ts — structured terminal extraction (risk "read"/"local")
-- `terminal.extract` — pull structured fields from a terminal's output via the small model. Synchronous variant.
-- `terminal.extract.async` — same, but enqueued for background completion; the result lands on the attention queue.
-
-### grantTools.ts — automation grants (risk "local")
-- `grant.create` / `grant.list` / `grant.revoke` — scoped grants that let non-interactive actors (watchers, timers) run mutating tools without an interactive confirmation. The confirmation matrix consults these for non-`main` actors.
-
-### workflowTools.ts — workflow runs (risk "local"/"read")
-- `workflow.create` / `workflow.get` / `workflow.list` / `workflow.update` — durable multi-step workflow records persisted in SQLite, advanced over multiple turns.
-
-### skillRunTools.ts — skill runs (risk "local")
-- `skill.load` — load skill bodies into the active context. `skill.run.get` — inspect a run. `skill.step.advance` — advance a skill run to its next step.
-
-### auditTools.ts — audit export (risk "read")
-- `audit.export` — export the audit log (every dispatched tool call) for review.
-
-### memoryTools.ts — persistent memory (risk "read"/"local")
-- `memory.recall` / `memory.list` / `memory.save` / `memory.forget` / `memory.pin` / `memory.unpin` — durable cross-session memory of facts, preferences, and project context.
-
-### artifactTools.ts — artifact access (risk "read")
-- `artifact.read` — read a stored artifact (e.g. an extraction or workflow output) by id.
+- **fsx** — `fs.list` / `fs.read` / `fs.search` (read). Read-only project access, confined
+  to the project root (path traversal blocked), skipping `.git` / `node_modules` / build
+  dirs. **Never writes.**
+- **mcpx** — `daintree.status` (read), `daintree.listTools` / `tool.search` (read,
+  annotate each match with a `callable` flag for the turn's projection), `daintree.call`
+  (project, raw passthrough escape hatch — always confirms).
+- **mcpwrap** — typed wrappers; `daintree.call` fails fast with `USE_TYPED_WRAPPER` when a
+  raw call has a typed equivalent (e.g. `agent.launch` → `agentTask.spawnForEdits`).
+- **contextx** — `context.snapshot` (read; MCP status + best-effort context/worktree/
+  terminal lists + open queue digest, never throws if MCP is down), `terminal.summarize`
+  (read; small-model summary of terminal output).
+- **extractionx** — `terminal.extract` / `terminal.extract.async` (structured field
+  extraction via the small model; async lands the result on the attention queue).
+- **timer** — `timer.schedule` / `timer.list` / `timer.cancel` (local; durable timers in
+  SQLite with one-shot or repeating fire).
+- **watcher** — `watcher.terminal.create` / `watcher.list` / `watcher.cancel` (local;
+  terminal watchers with `WatchCondition` stop/alert DSL, default cadence 120s).
+- **queue** — `queue.publish` (local) / `queue.digest` (read) / `queue.resolve` (local).
+- **grant** — `grant.create` / `grant.list` / `grant.revoke` (local; scoped automation
+  grants that let non-interactive actors run mutating tools without an interactive confirm).
+- **workflow** — `workflow.create` / `get` / `list` / `update` (durable multi-step records
+  advanced over turns).
+- **skill** — `skill.find` / `skill.load` / `skill.step.advance` / `skill.run.get`.
+- **auditx** — `audit.export` (read; the audit log of every dispatched tool call).
+- **memory** — `memory.recall` / `list` / `save` / `forget` / `pin` / `unpin` (durable
+  cross-session memory).
+- **artifactx** — `artifact.read` (read; a stored artifact by id).
+- **agenttaskx** — `agentTask.spawnForEdits` (project; the **only** agent-spawn path,
+  modes `edit` | `explore`; optionally attaches a supervising watcher). The assistant
+  never edits files and never hand-rolls a raw `agent.launch`.
 
 ## Confirmation / risk
-The registry calls `ctx.confirm` automatically for risk in {terminal, project, git, external, system}. Handlers do NOT call confirm themselves.
 
-## Test coverage (tests/*.test.ts) — vitest
-Import from `../src/...`. Use `:memory:` DBs and fake MCP/model objects — NO network.
-1. `noFileEditGuard.test.ts` — `assertNoFileEditTools` throws on "fs.write"/"apply_patch"; passes for the real registry (`buildAllTools()` names). `resolveInsideProject` blocks traversal.
-2. `policy.test.ts` — confirmation matrix: supervisor denies "terminal"; operator allows+confirms "project"; system allows "git"; read/local never confirm.
-3. `config.test.ts` — loadConfig picks up overrides + defaults; describeConfig redacts secrets.
-4. `db.test.ts` — timers due query; watcher due query; event dedupe bumps count; resolve hides from digest; severity ordering in listEvents.
-5. `queue.test.ts` — publish + dedupe + digest formatting; ttl expiry.
-6. `thinkFilter.test.ts` — ThinkFilter strips `<think>…</think>` across chunk boundaries; visible/reasoning correct; streaming split mid-tag.
-7. `registry.test.ts` — dispatch unknown tool; invalid args; tier-denied; a read tool runs + writes an audit row; a mutating tool with a confirm() that returns false yields USER_DECLINED.
-8. `watcherEngine.test.ts` — `evaluateCondition` for stateIs/contains/regex/noOutputForMs/all/any/not; `decideOutcome` publishes on meaningful change, suppresses repeated still_working, stops on completed_success/stopWhen/timeout.
-9. `scheduler.test.ts` — a one-shot enqueue timer fires and publishes once, then status fired; a repeating timer reschedules with run count; due watcher (terminal) runs through a fake MCP+model and updates lastClassification. (Use fake `ctxFor`.)
-10. `fsTools.test.ts` — fs.read/list/search over a temp dir confined to project; traversal blocked.
+`safety.Decide(risk, tier)` gates every dispatch. Tiers widen the allowed set:
+`supervisor` (read/local/ui), `operator` (+terminal/project/external), `system`
+(+git/system). `AlwaysConfirm` risk classes (terminal/project/external/git/system) require
+confirmation for the interactive `main` actor; non-interactive actors need a matching
+automation grant. read/local/ui never confirm.
 
-Keep each test file focused and fast.
+## Storage
+
+`storage.Store` is built on `modernc.org/sqlite` (pure Go, no CGO). State lives at
+`~/.daintree/assistant-cli/state.db` (a per-project subdir when a project id is set) and
+holds timers, watchers, events, audit, conversation, grants, and memory. The schema is a
+**single clean baseline** (`schemaUserVersion = 1`); pre-release, a schema change is a
+hard reset, not a migration chain. On open, the store cancels any stale (non-terminal)
+watchers so a new session never inherits a prior one's supervision.
+
+## Test coverage
+
+Go `testing` across all packages — no network (`:memory:` SQLite, fakes for MCP/models).
+Highlights: the no-file-edit guard rejects forbidden tool names; `safety.Decide` honours
+the confirmation matrix; `config.LoadConfig` resolves overrides/defaults and redacts
+secrets; the store's due-timer / due-watcher / dedupe queries; the think-filter strips
+`<think>…</think>` across chunk boundaries; `Dispatch` audits a read tool and yields
+`USER_DECLINED` on a declined confirm; the watcher engine's condition evaluation and
+outcome decisions; the scheduler firing a one-shot vs rescheduling a repeat; and the
+cockpit's no-alt-screen / no-mouse contract (`internal/ui/view_test.go`).

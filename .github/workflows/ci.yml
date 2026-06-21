@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "22"
+  GO_VERSION: "1.25.8"
 
 jobs:
   test:
@@ -27,25 +27,34 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
-      # The UI suite renders through OpenTUI's native renderer and runs under
-      # `bun test` (`npm run test` is `vitest run && bun test tests/ui`), so Bun
-      # must be on PATH or the second half exits 127 with `bun: not found`.
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      # Pure-Go SQLite (modernc.org/sqlite) — no CGO needed.
+      - name: Build
+        run: go build ./...
 
-      - name: Install dependencies
-        run: npm ci
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
 
-      - name: Test (vitest unit + bun UI)
-        run: npm run test
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # The race detector is Linux-friendly; run it here as the stricter gate.
+      - name: Test (race)
+        run: go test -race ./...
 
   # Gate job — use this as the sole required status check in branch protection.
   # Insulates against job name changes breaking required checks.

@@ -1,0 +1,290 @@
+package contextx
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/tools"
+)
+
+// Summarizer prompts, ported verbatim from models/prompts/index.ts. Kept byte-stable.
+const summarizerSystemPrompt = `You summarize terminal output for a developer's supervisor view. Be terse and factual. Never dump raw logs. Focus on: what the process is doing, any errors, any question it is asking, test results, and changed files. Output 1-4 short sentences plus, if relevant, a short bullet list of errors/files. Do not speculate beyond the provided text.
+
+Begin with the summary itself. Do NOT think out loud or restate the task — no "We need to summarize…", "The output shows…", "Let me…" — that narration wastes your limited token budget and gets the actual summary truncated. Decide silently, then write only the summary.`
+
+func buildSummarizerUserPrompt(purpose, tail string) string {
+	return fmt.Sprintf("Purpose of this summary: %s\n\nTerminal output:\n\"\"\"\n%s\n\"\"\"\n\nSummarize.", purpose, tail)
+}
+
+/* ----------------------------- context.snapshot --------------------------- */
+
+var snapshotSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+
+func newSnapshotTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "context.snapshot",
+		Description: "Build a compact snapshot of the current workspace: Daintree MCP status, and (when connected) action context, " +
+			"worktrees, terminals, plus the open attention queue. Best-effort and read-only; degrades gracefully when Daintree is offline.",
+		Risk:   domain.RiskRead,
+		Schema: snapshotSchema,
+		Handle: func(ctx context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			status := deps.MCP.Status()
+
+			actionContext, acOK := tryCall(ctx, deps.MCP, "actions.getContext", map[string]any{})
+			worktrees, wtOK := tryCall(ctx, deps.MCP, "worktree.list", map[string]any{})
+			terminals, tOK := tryCall(ctx, deps.MCP, "terminal.list", map[string]any{})
+
+			// Open attention queue (CLI-local, always available).
+			sev := domain.SeverityAttention
+			maxItems := 10
+			inbox := deps.Queue.Digest(domain.QueueDigestOptions{SeverityAtLeast: &sev, MaxItems: &maxItems})
+			inboxText := deps.Queue.Format(inbox)
+
+			var lines []string
+			head := fmt.Sprintf("Daintree MCP: %s", connectedWord(status.Connected))
+			if status.Transport != "" {
+				head += fmt.Sprintf(" (%s)", status.Transport)
+			}
+			if status.ToolCount != nil {
+				head += fmt.Sprintf(", %d tools", *status.ToolCount)
+			}
+			if !status.Connected && status.Error != "" {
+				head += " — " + status.Error
+			}
+			lines = append(lines, head)
+			if !status.Connected {
+				lines = append(lines, "Degraded local mode: worktree/terminal/action context unavailable until Daintree connects.")
+			} else {
+				lines = append(lines, "Action context: "+availableWord(acOK))
+				lines = append(lines, "Worktrees: "+availableWord(wtOK))
+				lines = append(lines, "Terminals: "+availableWord(tOK))
+			}
+			plural := "s"
+			if len(inbox) == 1 {
+				plural = ""
+			}
+			lines = append(lines, fmt.Sprintf("Inbox (attention+): %d open event%s", len(inbox), plural))
+			if len(inbox) > 0 {
+				lines = append(lines, inboxText)
+			}
+
+			return tools.Ok(strings.Join(lines, "\n"), map[string]any{
+				"mcp":           status,
+				"actionContext": contentOrNil(actionContext, acOK),
+				"worktrees":     contentOrNil(worktrees, wtOK),
+				"terminals":     contentOrNil(terminals, tOK),
+				"inbox":         inbox,
+			})
+		},
+	}
+}
+
+func connectedWord(c bool) string {
+	if c {
+		return "connected"
+	}
+	return "disconnected"
+}
+
+func availableWord(ok bool) string {
+	if ok {
+		return "available"
+	}
+	return "unavailable"
+}
+
+/* ---------------------------- terminal.summarize -------------------------- */
+
+type summarizeArgs struct {
+	TerminalID string `json:"terminalId"`
+	Purpose    string `json:"purpose,omitempty"`
+	TailBytes  *int   `json:"tailBytes,omitempty"`
+}
+
+// Validate enforces the required terminalId + the tailBytes bound (Zod:
+// string + number.int.positive.max(100000)). A missing terminalId would read
+// nothing; a negative/oversized tailBytes would make the lastRunes cap degenerate.
+func (a *summarizeArgs) Validate() error {
+	if strings.TrimSpace(a.TerminalID) == "" {
+		return fmt.Errorf("terminalId is required")
+	}
+	if a.TailBytes != nil && (*a.TailBytes < 1 || *a.TailBytes > 100_000) {
+		return fmt.Errorf("tailBytes must be between 1 and 100000")
+	}
+	return nil
+}
+
+var summarizeSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "terminalId": { "type": "string", "description": "Daintree terminal id to summarize." },
+    "purpose": { "type": "string", "description": "What this summary is for (focuses the model)." },
+    "tailBytes": { "type": "number", "description": "Max characters of terminal tail to summarize." }
+  },
+  "required": ["terminalId"]
+}`)
+
+func newSummarizeTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.summarize",
+		Description: "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. Use this instead of " +
+			"dumping raw scrollback into context. Read-only; requires Daintree MCP.",
+		Risk:   domain.RiskRead,
+		Schema: summarizeSchema,
+		Decode: tools.StrictDecoder(func() any { return &summarizeArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a summarizeArgs
+			_ = json.Unmarshal(raw, &a)
+
+			if !deps.MCP.Connected() {
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+			}
+			if ctx.Err() != nil {
+				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
+			}
+			content, err := readTerminalTail(ctx, deps.MCP, a.TerminalID, 200)
+			if err != nil {
+				if ctx.Err() != nil {
+					return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
+				}
+				return tools.Fail(codeTerminalOutput, fmt.Sprintf("Could not read output for terminal %s: %s", a.TerminalID, err.Error()))
+			}
+			tail := content
+			if a.TailBytes != nil {
+				tail = lastRunes(tail, *a.TailBytes)
+			}
+			purpose := a.Purpose
+			if purpose == "" {
+				purpose = fmt.Sprintf("Summarize terminal %s for the supervisor.", a.TerminalID)
+			}
+
+			res, cerr := deps.Router.Chat(ctx, domain.ModelSmall, []ChatMessage{
+				{Role: "system", Content: summarizerSystemPrompt},
+				{Role: "user", Content: buildSummarizerUserPrompt(purpose, tail)},
+			}, 512)
+			if cerr != nil {
+				if ctx.Err() != nil {
+					return tools.Fail(codeCancelled, "Turn cancelled while summarizing terminal.", tools.Unrecoverable())
+				}
+				return tools.Fail(codeSummarize, fmt.Sprintf("Failed to summarize terminal %s: %s", a.TerminalID, cerr.Error()))
+			}
+			// A "length" finishReason means the small model hit its cap mid-summary,
+			// so the text is cut off. Lead with the warning (the serializer
+			// head-truncates an oversized summary) and flag it.
+			truncated := res.FinishReason == "length"
+			body := strings.TrimSpace(res.Content)
+			if body == "" {
+				body = "(no summary produced)"
+			}
+			note := ""
+			if truncated {
+				note = "⚠ This summary is cut off: the summarizer hit its token cap. For the complete text use terminal.read (raw scrollback, no model, no cap).\n\n"
+			}
+			summary := note + body
+			return tools.Ok(summary, map[string]any{
+				"terminalId": a.TerminalID, "purpose": purpose, "truncated": truncated, "summary": summary,
+			})
+		},
+	}
+}
+
+/* ------------------------------- terminal.read ---------------------------- */
+
+type readArgs struct {
+	TerminalID string `json:"terminalId"`
+	MaxLines   *int   `json:"maxLines,omitempty"`
+	TailBytes  *int   `json:"tailBytes,omitempty"`
+}
+
+// Validate enforces the required terminalId + the maxLines/tailBytes bounds (Zod:
+// maxLines int.positive.max(1000), tailBytes int.positive.max(100000)). Without
+// this a missing terminalId reads nothing and a negative maxLines is forwarded
+// straight into the MCP read.
+func (a *readArgs) Validate() error {
+	if strings.TrimSpace(a.TerminalID) == "" {
+		return fmt.Errorf("terminalId is required")
+	}
+	if a.MaxLines != nil && (*a.MaxLines < 1 || *a.MaxLines > 1000) {
+		return fmt.Errorf("maxLines must be between 1 and 1000")
+	}
+	if a.TailBytes != nil && (*a.TailBytes < 1 || *a.TailBytes > 100_000) {
+		return fmt.Errorf("tailBytes must be between 1 and 100000")
+	}
+	return nil
+}
+
+var readSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "terminalId": { "type": "string", "description": "Daintree terminal id to read." },
+    "maxLines": { "type": "number", "description": "Max trailing lines of scrollback to return (1–1000, default 200)." },
+    "tailBytes": { "type": "number", "description": "Further cap the returned text to the last N characters." }
+  },
+  "required": ["terminalId"]
+}`)
+
+func newReadTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.read",
+		Description: "Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap. Use this to relay " +
+			"exactly what an agent said, or when you need the literal text. Prefer this over terminal.summarize/terminal.extract " +
+			"whenever you want the output reproduced rather than interpreted: those route through a small model that paraphrases and " +
+			"can truncate. Read-only; requires Daintree MCP.",
+		Risk:   domain.RiskRead,
+		Schema: readSchema,
+		Decode: tools.StrictDecoder(func() any { return &readArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a readArgs
+			_ = json.Unmarshal(raw, &a)
+			maxLines := 200
+			if a.MaxLines != nil {
+				maxLines = *a.MaxLines
+			}
+			if !deps.MCP.Connected() {
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+			}
+			if ctx.Err() != nil {
+				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
+			}
+			content, err := readTerminalTail(ctx, deps.MCP, a.TerminalID, maxLines)
+			if err != nil {
+				if ctx.Err() != nil {
+					return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
+				}
+				return tools.Fail(codeTerminalOutput, fmt.Sprintf("Could not read output for terminal %s: %s", a.TerminalID, err.Error()))
+			}
+			if a.TailBytes != nil {
+				content = lastRunes(content, *a.TailBytes)
+			}
+			summary := content
+			if summary == "" {
+				summary = "(no output captured)"
+			}
+			lineCount := 0
+			if content != "" {
+				lineCount = len(strings.Split(content, "\n"))
+			}
+			return tools.Ok(summary, map[string]any{
+				"terminalId": a.TerminalID, "content": content, "lineCount": lineCount,
+			})
+		},
+	}
+}
+
+// lastRunes returns the last n characters (runes) of s, matching the TS
+// .slice(-tailBytes) on a JS string the model consumes.
+func lastRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
+}

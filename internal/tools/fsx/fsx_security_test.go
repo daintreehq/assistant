@@ -1,0 +1,218 @@
+package fsx
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/tools"
+)
+
+// buildSecurityFixture lays out the fsToolsSecurity.test.ts tree: a .env, a
+// private key, an ordinary source file, a NUL-byte binary, several credential
+// stores at varying depths (each with a unique marker so a leak would surface),
+// an ordinary sibling, an uppercase credential dir, and (when supported) a
+// benign-named symlink pointing at a credential dir.
+func buildSecurityFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".env", "FIREWORKS_API_KEY=fw_secret_value\n")
+	write("server.key", "-----BEGIN PRIVATE KEY-----\nsecret\n")
+	write("app.ts", "const apiKey = readEnv();\n")
+	if err := os.WriteFile(filepath.Join(root, "blob.bin"), []byte{0x00, 0x01, 0x02, 0x00, 0x42}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write(".ssh/id_ed25519", "SSH_MARKER_aaa\n")
+	write("nested/.aws/credentials", "AWS_MARKER_bbb\n")
+	write("nested/readme.txt", "ORDINARY\n")
+	write(".env.local/secret.txt", "ENV_MARKER_ccc\n")
+	write(".KUBE/config", "KUBE_MARKER_ddd\n")
+	return root
+}
+
+// callTool decodes argsJSON through the tool's own Decode and runs its handler
+// against the fixture root, returning the ToolResult.
+func callTool(t *testing.T, tool tools.Tool, root, argsJSON string) tools.ToolResult {
+	t.Helper()
+	decoded, err := tool.Decode(json.RawMessage(argsJSON))
+	if err != nil {
+		t.Fatalf("decode %s: %v", tool.Name, err)
+	}
+	return tool.Handle(context.Background(), decoded, tctx(root))
+}
+
+func callSearch(t *testing.T, root, query, glob string) tools.ToolResult {
+	args := map[string]string{"query": query}
+	if glob != "" {
+		args["glob"] = glob
+	}
+	b, _ := json.Marshal(args)
+	return callTool(t, newSearchTool(), root, string(b))
+}
+
+func callList(t *testing.T, root, path string, depth int) tools.ToolResult {
+	args := map[string]any{"depth": depth}
+	if path != "" {
+		args["path"] = path
+	}
+	b, _ := json.Marshal(args)
+	return callTool(t, newListTool(), root, string(b))
+}
+
+func callRead(t *testing.T, root, path string, maxBytes int) tools.ToolResult {
+	args := map[string]any{"path": path}
+	if maxBytes > 0 {
+		args["maxBytes"] = maxBytes
+	}
+	b, _ := json.Marshal(args)
+	return callTool(t, newReadTool(), root, string(b))
+}
+
+// TestSearchPrunesCredentialDirsAtWalkTime is the load-bearing security test
+// (fsToolsSecurity.test.ts #122): the walk must NEVER descend into a credential
+// dir. We assert it white-box against walkFiles — the dir's marker file never
+// appears in the walk output, proving the prune fires at walk time (not as a
+// post-hoc isSensitivePath filter on already-collected paths).
+func TestSearchPrunesCredentialDirsAtWalkTime(t *testing.T) {
+	root := buildSecurityFixture(t)
+	entries := walkFiles(root)
+	for _, e := range entries {
+		segs := strings.Split(filepath.ToSlash(e.rel), "/")
+		for _, seg := range segs {
+			low := strings.ToLower(seg)
+			if low == ".ssh" || low == ".aws" || low == ".env.local" || low == ".kube" {
+				t.Fatalf("walk descended into a credential dir: %q (the prune must fire at walk time)", e.rel)
+			}
+		}
+	}
+	// And the ordinary nested sibling is still walked.
+	found := false
+	for _, e := range entries {
+		if filepath.ToSlash(e.rel) == "nested/readme.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ordinary nested file must still be walked (prune the sibling, not the parent)")
+	}
+}
+
+// TestSearchNeverReturnsCredentialMarkers ports the fsToolsSecurity.test.ts
+// matrix: searching for each credential dir's unique marker yields zero matches.
+func TestSearchNeverReturnsCredentialMarkers(t *testing.T) {
+	root := buildSecurityFixture(t)
+	for _, marker := range []string{"SSH_MARKER_aaa", "AWS_MARKER_bbb", "ENV_MARKER_ccc", "KUBE_MARKER_ddd"} {
+		res := callSearch(t, root, marker, "")
+		if !res.Ok {
+			t.Fatalf("search %s failed: %+v", marker, res.Error)
+		}
+		matches := res.Result.(map[string]any)["matches"].([]searchMatch)
+		if len(matches) != 0 {
+			t.Errorf("search for %q must return no matches, got %+v", marker, matches)
+		}
+	}
+}
+
+// TestSearchSkipsDotEnvContents ports fsToolsSecurity.test.ts: a query that WOULD
+// match inside .env never returns the .env file.
+func TestSearchSkipsDotEnvContents(t *testing.T) {
+	root := buildSecurityFixture(t)
+	res := callSearch(t, root, "FIREWORKS_API_KEY", "")
+	if !res.Ok {
+		t.Fatalf("search failed: %+v", res.Error)
+	}
+	for _, m := range res.Result.(map[string]any)["matches"].([]searchMatch) {
+		if m.File == ".env" {
+			t.Fatal("fs.search must never surface a match from .env")
+		}
+	}
+}
+
+// TestListOmitsCredentialDirsAtAnyDepth ports fsToolsSecurity.test.ts: a deep
+// listing never surfaces a credential segment anywhere in an entry path.
+func TestListOmitsCredentialDirsAtAnyDepth(t *testing.T) {
+	root := buildSecurityFixture(t)
+	res := callList(t, root, "", 10)
+	if !res.Ok {
+		t.Fatalf("list failed: %+v", res.Error)
+	}
+	for _, e := range res.Result.(map[string]any)["entries"].([]listEntry) {
+		for _, seg := range strings.Split(e.Name, "/") {
+			low := strings.ToLower(seg)
+			if low == ".ssh" || low == ".aws" || low == ".env.local" || low == ".kube" {
+				t.Errorf("listing leaked a credential segment: %q", e.Name)
+			}
+		}
+	}
+}
+
+// TestListRefusesCredentialDirDirectly ports fsToolsSecurity.test.ts: listing a
+// credential dir directly (or nested) is refused with FS_SENSITIVE, not an empty
+// success that could be misread as "directory is empty".
+func TestListRefusesCredentialDirDirectly(t *testing.T) {
+	root := buildSecurityFixture(t)
+	for _, p := range []string{".ssh", "nested/.aws"} {
+		res := callList(t, root, p, 1)
+		if res.Ok || res.Error.Code != codeFSSensitive {
+			t.Errorf("listing %q should be FS_SENSITIVE, got %+v", p, res)
+		}
+	}
+}
+
+// TestListStillListsOrdinaryNested ports fsToolsSecurity.test.ts: nested itself is
+// fine — its .aws child is pruned but readme.txt survives.
+func TestListStillListsOrdinaryNested(t *testing.T) {
+	root := buildSecurityFixture(t)
+	res := callList(t, root, "nested", 1)
+	if !res.Ok {
+		t.Fatalf("listing nested failed: %+v", res.Error)
+	}
+	entries := res.Result.(map[string]any)["entries"].([]listEntry)
+	var sawAws, sawReadme bool
+	for _, e := range entries {
+		if e.Name == ".aws" {
+			sawAws = true
+		}
+		if e.Name == "readme.txt" {
+			sawReadme = true
+		}
+	}
+	if sawAws {
+		t.Error("nested/.aws must be pruned from the listing")
+	}
+	if !sawReadme {
+		t.Error("nested/readme.txt must survive the listing")
+	}
+}
+
+// TestListRefusesSymlinkToCredentialDir ports fsToolsSecurity.test.ts: a
+// benign-named symlink (cloud → nested/.aws) that RESOLVES to a credential store
+// is refused with FS_SENSITIVE.
+func TestListRefusesSymlinkToCredentialDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privilege on Windows")
+	}
+	root := buildSecurityFixture(t)
+	target := filepath.Join(root, "nested", ".aws")
+	link := filepath.Join(root, "cloud")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	res := callList(t, root, "cloud", 1)
+	if res.Ok || res.Error.Code != codeFSSensitive {
+		t.Fatalf("symlink to a credential dir must be refused FS_SENSITIVE, got %+v", res)
+	}
+}

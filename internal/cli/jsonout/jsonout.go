@@ -1,0 +1,217 @@
+// Package jsonout is the one-shot JSONL sink (port of src/cli/jsonSink.ts), schema
+// v1. It implements agent.EventSink: every event becomes one stdout line
+// {type, ts, seq, ...payload}; finish() writes the terminal `result` envelope and
+// returns the process exit code.
+//
+// STDOUT PURITY: in --json mode stdout carries ONLY these JSONL lines. The caller
+// routes every human/diagnostic line (errors, warnings, logs) to stderr.
+package jsonout
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"sync"
+
+	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// Clock returns the current epoch-ms; injectable for tests.
+type Clock func() int64
+
+// Sink is the JSONL event sink + terminal-envelope writer. Construct with New.
+type Sink struct {
+	out io.Writer
+	now Clock
+
+	mu            sync.Mutex
+	seq           int
+	contentBuffer string
+	content       string
+	status        domain.JsonOutputStatus
+	exitCode      int
+	errorMessage  *string
+	finished      bool
+}
+
+// New builds a Sink writing to w. The default terminal state is "error"/exit 1: a
+// turn that ends with no explicit terminal event is itself a failure.
+func New(w io.Writer, now Clock) *Sink {
+	if now == nil {
+		now = domain.NowMS
+	}
+	return &Sink{
+		out:      w,
+		now:      now,
+		status:   domain.JSONStatusError,
+		exitCode: domain.OneShotExitCode.Error,
+	}
+}
+
+// emit builds {type, ts, seq, ...payload}, marshals it, and writes one line. After
+// finish() no line is emitted (dropped). On a marshal failure a degraded but valid
+// line is written keeping the seq (a gap would break the monotonic-seq contract).
+func (s *Sink) emit(typ string, payload map[string]any) {
+	if s.finished {
+		return
+	}
+	line := map[string]any{"type": typ, "ts": s.now(), "seq": s.seq}
+	s.seq++
+	for k, v := range payload {
+		line[k] = v
+	}
+	b, err := json.Marshal(line)
+	if err != nil {
+		degraded := map[string]any{
+			"type": typ, "ts": line["ts"], "seq": line["seq"], "serializationError": true,
+		}
+		b, _ = json.Marshal(degraded)
+	}
+	fmt.Fprintln(s.out, string(b))
+}
+
+// flushContent emits the buffered streamed prose as one assistant:content line.
+func (s *Sink) flushContent() {
+	if s.contentBuffer == "" {
+		return
+	}
+	buf := s.contentBuffer
+	s.contentBuffer = ""
+	s.emit("assistant:content", map[string]any{"content": buf})
+}
+
+// --- agent.EventSink implementation ---
+
+// Phase is live-only UI vocabulary; not part of the JSONL stream.
+func (s *Sink) Phase(domain.RunPhase) {}
+
+func (s *Sink) AssistantStart() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushContent()
+	s.emit("assistant:start", nil)
+}
+
+func (s *Sink) AssistantToken(token string) {
+	s.mu.Lock()
+	s.contentBuffer += token
+	s.mu.Unlock()
+}
+
+func (s *Sink) AssistantEnd(content, _ string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contentBuffer = "" // drop the streamed dup; content arrives authoritative here
+	s.content = content
+	s.status = domain.JSONStatusSuccess
+	s.exitCode = domain.OneShotExitCode.Success
+	s.errorMessage = nil
+	s.emit("assistant:end", map[string]any{"content": content})
+}
+
+func (s *Sink) AssistantCancelled(content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contentBuffer = ""
+	s.content = content
+	s.status = domain.JSONStatusCancelled
+	s.exitCode = domain.OneShotExitCode.Cancelled
+	s.emit("assistant:cancelled", map[string]any{"content": content})
+}
+
+// ToolBatch / ToolState / ToolProgress are live-footer-only; not part of the JSONL stream.
+func (s *Sink) ToolBatch([]agent.BatchedToolCall) {}
+func (s *Sink) ToolState(string, agent.ToolState) {}
+func (s *Sink) ToolProgress(string, string)       {}
+
+func (s *Sink) ToolCall(ev agent.ToolCallEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushContent() // prose precedes the call
+	s.emit("tool:call", map[string]any{"id": ev.ID, "name": ev.Name, "args": rawArgsAsAny(ev.Args)})
+}
+
+func (s *Sink) ToolResult(ev agent.ToolResultEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var errPayload any
+	if ev.Result.Error != nil {
+		errPayload = ev.Result.Error
+	}
+	payload := map[string]any{
+		"id":      ev.ID,
+		"name":    ev.Name,
+		"ok":      ev.Result.Ok,
+		"summary": ev.Result.Summary,
+		"error":   errPayload, // null on success
+	}
+	if ev.Result.AuditID != "" {
+		payload["auditId"] = ev.Result.AuditID
+	}
+	s.emit("tool:result", payload)
+}
+
+func (s *Sink) Error(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushContent()
+	s.status = domain.JSONStatusError
+	s.exitCode = domain.OneShotExitCode.Error
+	m := message
+	s.errorMessage = &m
+	s.emit("error", map[string]any{"message": message})
+}
+
+func (s *Sink) Info(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emit("info", map[string]any{"message": message})
+}
+
+// Usage is not part of the JSONL one-shot stream.
+func (s *Sink) Usage(agent.UsageEvent) {}
+
+// Finish writes the terminal `result` envelope (idempotent) and returns the exit
+// code. After Finish no further line is emitted.
+func (s *Sink) Finish() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return s.exitCode
+	}
+	s.flushContent()
+	var errObj any
+	if s.errorMessage != nil {
+		errObj = map[string]any{"message": *s.errorMessage}
+	}
+	s.emit("result", map[string]any{
+		"schemaVersion": domain.JSONOutputSchemaVersion,
+		"status":        s.status,
+		"exitCode":      s.exitCode,
+		"content":       s.content,
+		"error":         errObj, // null pointer → JSON null
+	})
+	s.finished = true
+	return s.exitCode
+}
+
+// ExitCode returns the current terminal exit code without finishing.
+func (s *Sink) ExitCode() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitCode
+}
+
+// rawArgsAsAny decodes the raw JSON args string to a generic value, falling back
+// to the raw string when it isn't valid JSON (matching the TS behavior).
+func rawArgsAsAny(raw string) any {
+	if raw == "" {
+		return map[string]any{}
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	return v
+}
