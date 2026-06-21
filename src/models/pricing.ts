@@ -20,6 +20,7 @@ interface ModelRate {
  * broader family entry if one is ever added.
  */
 const RATES: Array<{ prefix: string; rate: ModelRate }> = [
+  { prefix: "glm-5p2", rate: { inputPerM: 0.55, outputPerM: 2.19 } },
   { prefix: "minimax-m3", rate: { inputPerM: 0.3, outputPerM: 1.2 } },
   { prefix: "deepseek-v4", rate: { inputPerM: 0.56, outputPerM: 1.68 } },
   { prefix: "deepseek-v3", rate: { inputPerM: 0.56, outputPerM: 1.68 } },

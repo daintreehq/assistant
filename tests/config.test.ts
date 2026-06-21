@@ -41,7 +41,7 @@ describe("loadConfig", () => {
   it("falls back to defaults for largeModel", () => {
     const cfg = loadConfig({ stateDir });
 
-    expect(cfg.largeModel).toBe("accounts/fireworks/models/minimax-m3");
+    expect(cfg.largeModel).toBe("accounts/fireworks/models/glm-5p2");
     expect(cfg.largeModel).toBe(DEFAULTS.largeModel);
   });
 

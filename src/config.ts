@@ -136,8 +136,8 @@ export interface ConfigOverrides {
 
 export const DEFAULTS = {
   fireworksBaseUrl: "https://api.fireworks.ai/inference/v1",
-  largeModel: "accounts/fireworks/models/minimax-m3",
-  mediumModel: "accounts/fireworks/models/minimax-m3",
+  largeModel: "accounts/fireworks/models/glm-5p2",
+  mediumModel: "accounts/fireworks/models/glm-5p2",
   smallModel: "accounts/fireworks/models/deepseek-v4-flash",
   defaultMcpUrl: "http://127.0.0.1:45454/mcp",
 } as const;
