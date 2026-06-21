@@ -1,10 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import type { BoxRenderable } from "@opentui/core";
 import type { App as DaintreeRuntime } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useAttentionSignal } from "./hooks/useAttentionSignal.js";
 import { useTerminalPreview } from "./hooks/useTerminalPreview.js";
-import { ControlRoom, type View } from "./ControlRoom.js";
+import {
+  useScrollbackTranscript,
+  type ScrollbackHeader,
+} from "./hooks/useScrollbackTranscript.js";
+import { useFooterHeight } from "./hooks/useFooterHeight.js";
+import { ControlRoom, CONTENT_MAX, LEFT_PAD, type View } from "./ControlRoom.js";
+import { Header } from "./components/Header.js";
 import { StartupSplash } from "./components/StartupSplash.js";
 import { currentDebugLogPath } from "../debugLog.js";
 
@@ -40,6 +47,54 @@ export function DaintreeApp({
   // repaint after wiping the host scrollback (the controller stays @opentui-free).
   const controller = useDaintreeController(app, exit, renderer);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
+
+  // The masthead shows the bound project's name. The controller seeds it from the
+  // directory leaf and upgrades it to Daintree's authoritative project name once the
+  // MCP `actions.getContext` resolves — see useDaintreeController.
+  const project = controller.projectName ?? "";
+
+  // Footer sizing + scrollback: mirror ControlRoom's insets so the committed masthead
+  // and the live footer share one content measure. `rootRef` is the live footer's
+  // outer box; the split-footer region is sized to its measured height.
+  const rootRef = useRef<BoxRenderable | null>(null);
+  const gutter = Math.max(1, app.config.reservedColumns ?? 1);
+  const chromeWidth = Math.max(1, columns - gutter - LEFT_PAD);
+  const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
+
+  // The masthead committed ONCE to native scrollback (so it scrolls up and away like
+  // the rest of the history). It never reflects the live `destructivePending` cue —
+  // that escalation surfaces on the ApprovalSheet down in the live footer instead.
+  const header: ScrollbackHeader = useMemo(
+    () => ({
+      node: (
+        <box paddingLeft={LEFT_PAD} paddingTop={1}>
+          <Header
+            columns={chromeWidth}
+            project={project}
+            tier={app.config.tier}
+            logging={app.config.debugLog}
+            logFile={app.config.debugLog ? currentDebugLogPath() : undefined}
+          />
+        </box>
+      ),
+      fallbackText: `Daintree Assistant — ${project} · tier ${app.config.tier}`,
+    }),
+    [chromeWidth, project, app.config.tier, app.config.debugLog],
+  );
+
+  // Hooks must run every render (before the boot early-return). While booting the
+  // header is withheld (null) and the transcript is empty, so nothing commits until
+  // the cockpit is actually up; `rootRef` is null during the splash, so the footer
+  // stays seeded at full height for it.
+  const { liveCells, commitSlot } = useScrollbackTranscript({
+    renderer,
+    transcript: controller.transcript,
+    header: controller.booting ? null : header,
+    width: contentWidth,
+    expanded,
+    resetKey: controller.clearNonce,
+  });
+  useFooterHeight(renderer, rootRef, rows);
 
   // Out-of-band cue (BEL + window-title badge) so a fresh attention event reaches
   // the user even when they've switched focus away from the cockpit.
@@ -92,11 +147,6 @@ export function DaintreeApp({
     }
   });
 
-  // The masthead shows the bound project's name. The controller seeds it from the
-  // directory leaf and upgrades it to Daintree's authoritative project name once
-  // the MCP `actions.getContext` resolves — see useDaintreeController.
-  const project = controller.projectName ?? "";
-
   // While the session connects/loads in the background, the horizontally-centered
   // logo-reveal plays inline (natural height, not a full-screen takeover); it
   // dissolves into the cockpit once startup has settled and the draw has finished
@@ -119,7 +169,10 @@ export function DaintreeApp({
       reservedColumns={app.config.reservedColumns}
       rows={rows}
       connected={controller.dashboard.mcp.connected}
-      transcript={controller.transcript}
+      transcript={liveCells}
+      renderHeader={false}
+      footerSlot={commitSlot}
+      rootRef={rootRef}
       dashboard={controller.dashboard}
       sessionUsage={controller.sessionUsage}
       previews={previews}

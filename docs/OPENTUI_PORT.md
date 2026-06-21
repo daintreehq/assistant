@@ -24,23 +24,42 @@ our job is a faithful, mechanical-where-possible transform of the React tree.
 
 OpenTUI offers `screenMode: "alternate-screen" | "main-screen" | "split-footer"`.
 
-- **We use `main-screen`** — render the cockpit INLINE into the terminal's MAIN
-  buffer at natural height. Never `alternate-screen` (it would kill xterm's native
-  wheel-scroll / selection / copy-paste — the hard requirement). This is the direct
-  successor to the Ink inline + `<Static>` model.
+- **We use `split-footer`** — a growing transcript committed to the terminal's
+  native scrollback plus a small LIVE FOOTER (`renderer.root`) pinned at the bottom
+  for the in-flight turn, the status line and the composer. This is OpenTUI's true
+  equivalent of Ink's inline `<Static>` model. Never `alternate-screen` (it would
+  kill xterm's native wheel-scroll / selection / copy-paste — the hard requirement).
+- **Why NOT `main-screen`** (the original port's mistake): `main-screen` renders the
+  WHOLE React tree into a FIXED viewport and repaints it in place — it does **not**
+  spill overflow into native scrollback the way Ink's inline printing did. The moment
+  the tree grew taller than the terminal the layout math overflowed and the cockpit
+  garbled/interleaved. `split-footer` is the only mode that gives the inline-scroll
+  behaviour we want.
 - The host (xterm in Daintree) owns scrolling: wheel-where-you-hover, scrollbar,
-  selection all come free from the main buffer. On resize the native Zig renderer
-  reflows the whole tree cleanly — no Ink line-rewrite desync, so the resize
-  duplication bug is gone by construction. A full reflow/repaint on resize is the
-  intended, accepted behaviour.
+  selection all come free because committed turns are REAL terminal scrollback lines.
+- **How finished content reaches scrollback** (`src/ui/scrollback.tsx`): a *sealed*
+  cell (finished turn / standalone note / command result) and the masthead are
+  rendered ONCE into a `createScrollbackSurface()` via React `createPortal` (full
+  fidelity — native `<markdown>`, spans, tone colors), `settle()`d (markdown's
+  tree-sitter highlight is async) and `commitRows()`'d, then the surface is destroyed.
+  `useScrollbackTranscript` drives this in transcript order, one commit at a time. The
+  scrollback APIs (`createScrollbackSurface` / `writeToScrollback`) THROW unless the
+  renderer is created with BOTH `screenMode: "split-footer"` AND
+  `externalOutputMode: "capture-stdout"` — both are required in `runApp`.
+- **Footer sizing** (`useFooterHeight`): `footerHeight` is the reserved row count and
+  does NOT auto-track content, so we measure the live tree's height each frame (via
+  `renderer.setFrameCallback`, not a React layout effect — the native layout lags a
+  React commit) and set `footerHeight` to it, clamped to the terminal height. The
+  footer's root box is `flexShrink={0}` so it keeps its natural height and can grow
+  the footer back after a shrink; a shrink forces one full repaint (OpenTUI doesn't
+  always clear the rows a shrunk footer vacates).
 - **Content insets**: keep the one-column left inset (`LEFT_PAD = 1`) and the
   right gutter (`reservedColumns`, default 2 when embedded) so nothing touches the
   edges or the host overlay scrollbar / DECAWM column.
-- **Follow-up (not v1):** `split-footer` + `ScrollbackSurface.commitRows()` is
-  OpenTUI's true `<Static>` equivalent (commit finished turns to scrollback, keep
-  only a small live footer repainting). It needs real-terminal iteration to tune;
-  v1 renders the whole tree in main-screen. Do NOT attempt split-footer in this
-  pass — keep the single-column inline tree.
+- **`/clear`**: after wiping the host scrollback, call
+  `renderer.resetSplitFooterForReplay({ clearSavedLines: true })` so OpenTUI drops its
+  stale saved-line record; `useScrollbackTranscript` then re-commits the masthead on
+  top of the fresh scrollback.
 
 ## Bootstrap (replaces `runInkApp.tsx`)
 
@@ -49,9 +68,11 @@ import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
 
 const renderer = await createCliRenderer({
-  screenMode: "main-screen",   // INLINE — never alternate-screen
-  exitOnCtrlC: false,          // the app owns Ctrl-C shutdown
-  useMouse: false,             // let the HOST own mouse/scroll; don't capture it
+  screenMode: "split-footer",          // inline scrollback + live footer; never alt-screen
+  externalOutputMode: "capture-stdout", // REQUIRED — the scrollback-commit APIs throw without it
+  footerHeight: process.stdout.rows,    // seeded full-height; useFooterHeight shrinks it to fit
+  exitOnCtrlC: false,                  // the app owns Ctrl-C shutdown
+  useMouse: false,                     // let the HOST own mouse/scroll; don't capture it
   targetFps: 30,
 })
 const root = createRoot(renderer)
