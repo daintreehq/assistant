@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { App as DaintreeRuntime } from "../cli/app.js";
 import { useDaintreeController } from "./hooks/useDaintreeController.js";
 import { useAttentionSignal } from "./hooks/useAttentionSignal.js";
@@ -33,9 +33,12 @@ export function DaintreeApp({
   exit: () => void;
 }) {
   const { width: columns, height: rows } = useTerminalDimensions();
+  const renderer = useRenderer();
   const [view, setView] = useState<View>("home");
   const [expanded, setExpanded] = useState(false);
-  const controller = useDaintreeController(app, exit);
+  // The renderer is passed to the controller so `/clear` can force a clean full
+  // repaint after wiping the host scrollback (the controller stays @opentui-free).
+  const controller = useDaintreeController(app, exit, renderer);
   const previews = useTerminalPreview(app, controller.dashboard.watchers);
 
   // Out-of-band cue (BEL + window-title badge) so a fresh attention event reaches

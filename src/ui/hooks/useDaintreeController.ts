@@ -10,12 +10,14 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
   type RefObject,
 } from "react";
+import type { CliRenderer } from "@opentui/core";
 import type { App } from "../../cli/app.js";
 import type { ComposerHandle } from "../components/Composer.js";
 import { UiBridge, type UiBridgeEvent } from "../bridge.js";
@@ -490,9 +492,52 @@ export interface DaintreeController {
   notifyAnimationDone: () => void;
 }
 
+/**
+ * Force OpenTUI to fully repaint the cockpit from the top of the viewport.
+ *
+ * `/clear` wipes the host terminal's screen + scrollback behind OpenTUI's back
+ * (clearHostTerminal). OpenTUI renders by DIFFING the new frame against a shadow
+ * copy of what it last drew, so after that external wipe it still believes the
+ * masthead (and everything that didn't change) is on screen and skips re-emitting
+ * it — which is exactly the blank gap at the top. Mirror OpenTUI's own reset recipe
+ * (`resetSplitFooterForReplay`): blank both shadow buffers and raise the
+ * forced-repaint flag so the next frame redraws the whole tree from line 1 —
+ * masthead included. Must run AFTER React has committed the cleared (short) tree,
+ * or it would repaint the OLD conversation straight back into scrollback.
+ * Fully guarded — a cosmetic repaint must never take down the command.
+ */
+function resyncCockpitSurface(
+  renderer: CliRenderer,
+  cfg: App["config"],
+): void {
+  try {
+    renderer.currentRenderBuffer.clear();
+    renderer.nextRenderBuffer.clear();
+    // `forceFullRepaintRequested` is private in the typings but is the same flag
+    // OpenTUI sets on resize / resume / replay to bypass the per-cell diff.
+    (
+      renderer as unknown as { forceFullRepaintRequested: boolean }
+    ).forceFullRepaintRequested = true;
+    renderer.requestRender();
+  } catch (err) {
+    // A repaint nudge must never break /clear — but stay loud in the debug trace.
+    // This reaches into a private OpenTUI field; if a version bump moves it, the
+    // blank-header bug would otherwise silently return with no breadcrumb.
+    logDebug(cfg, "ui.clear.repaint_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function useDaintreeController(
   app: App,
   onExit?: () => void,
+  // The active OpenTUI renderer, passed in by DaintreeApp (the @opentui importer) so
+  // `/clear` can force a clean full repaint after wiping the host scrollback. Injected
+  // rather than pulled via `useRenderer()` here so this module stays free of any
+  // @opentui *value* import — it also exports the pure `transcriptReducer`, which is
+  // unit-tested under Node where importing @opentui/react would break ESM resolution.
+  renderer?: CliRenderer,
 ): DaintreeController {
   const bridge = useMemo(() => new UiBridge(), []);
   // Raw stdout for terminal side-channels (e.g. wiping host scrollback on /clear).
@@ -501,6 +546,10 @@ export function useDaintreeController(
   // `useStdout()` no longer exists). Written to only outside the render body.
   const stdout = process.stdout;
   const [transcript, dispatch] = useReducer(transcriptReducer, []);
+  // Bumped each time `/clear` runs. The host-wipe + forced repaint can't fire inline
+  // with the dispatch (React commits the cleared tree asynchronously), so it rides a
+  // layout effect that runs AFTER the now-empty tree is committed.
+  const [clearNonce, setClearNonce] = useState(0);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(
     null,
   );
@@ -566,6 +615,17 @@ export function useDaintreeController(
   // closure — refs give it both. The transcript mirror is synced in an effect below.
   const composerRef = useRef<ComposerHandle | null>(null);
   const transcriptRef = useRef<TranscriptCell[]>([]);
+
+  // `/clear`: now that the cleared (short) tree has committed, drop the host
+  // terminal's screen + scrollback and force a clean full repaint from the top so
+  // the masthead reappears with no gap (issue: /clear left a blank band on top).
+  // A layout effect runs post-commit but pre-paint, so the forced repaint redraws
+  // the CLEARED state — never the old conversation. Skip the initial mount (nonce 0).
+  useLayoutEffect(() => {
+    if (clearNonce === 0) return;
+    clearHostTerminal(stdout);
+    if (renderer) resyncCockpitSurface(renderer, app.config);
+  }, [clearNonce, renderer, stdout, app.config]);
   // Follow-ups typed while a turn is in flight queue here (FIFO) and drain one at a
   // time once the lock clears — user input is drained before any pending wake. The
   // ref (not state) keeps enqueue/drain synchronous with the inFlight lock so a
@@ -828,19 +888,19 @@ export function useDaintreeController(
               // for operations/help. Re-running the same command re-opens it.
               setActivePanel(result.switchPanel);
             } else if (result.clearTranscript) {
-              // /clear: wipe the host terminal's scrollback FIRST (synchronously,
-              // before any React dispatch) so the OS drops the rows that already
-              // flowed into native scrollback — otherwise the user can wheel back up
-              // into the "cleared" conversation. Then wipe the live transcript and
-              // drop a single confirmation card into the now-empty transcript so the
-              // user sees it ran. Order matters: scrollback wipe → clear → add card.
-              clearHostTerminal(stdout);
+              // /clear restarts the cockpit in place: wipe the live transcript and
+              // drop a single confirmation card into the now-empty tree so the user
+              // sees it ran. The host-terminal scrollback wipe + forced repaint are
+              // deferred to a layout effect (keyed on this nonce) so they fire AFTER
+              // React commits the cleared tree — repainting the fresh, header-on-top
+              // state instead of reflowing the old conversation back into scrollback.
               dispatch({ type: "transcript:clear" });
               dispatch({
                 type: "command:add",
                 title: result.title ?? "Clear",
                 text: result.text ?? "Conversation cleared — starting fresh.",
               });
+              setClearNonce((n) => n + 1);
             } else if (result.title || result.text) {
               dispatch({
                 type: "command:add",

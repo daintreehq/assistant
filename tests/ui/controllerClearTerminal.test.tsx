@@ -17,13 +17,51 @@ const tick = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 function Harness({
   app,
   onController,
+  renderer,
 }: {
   app: App;
   onController: (c: DaintreeController) => void;
+  // Optional stub renderer; the controller takes it by param (not useRenderer) so a
+  // test can drive the /clear full-repaint resync without the native renderer.
+  renderer?: Parameters<typeof useDaintreeController>[2];
 }) {
-  const controller = useDaintreeController(app);
+  const controller = useDaintreeController(app, undefined, renderer);
   onController(controller);
   return null;
+}
+
+/** A minimal stand-in for the OpenTUI renderer that records the resync side effects. */
+function makeStubRenderer() {
+  const calls = {
+    currentCleared: 0,
+    nextCleared: 0,
+    rendered: 0,
+    forceFullRepaintRequested: false,
+  };
+  const renderer = {
+    currentRenderBuffer: {
+      clear: () => {
+        calls.currentCleared += 1;
+      },
+    },
+    nextRenderBuffer: {
+      clear: () => {
+        calls.nextCleared += 1;
+      },
+    },
+    requestRender: () => {
+      calls.rendered += 1;
+    },
+    get forceFullRepaintRequested() {
+      return calls.forceFullRepaintRequested;
+    },
+    set forceFullRepaintRequested(v: boolean) {
+      calls.forceFullRepaintRequested = v;
+    },
+  };
+  return { renderer: renderer as unknown as Parameters<
+    typeof useDaintreeController
+  >[2], calls };
 }
 
 function makeOfflineApp() {
@@ -109,6 +147,40 @@ describe("useDaintreeController /clear wipes host scrollback (#137)", () => {
     });
     await tick();
     expect(writes.slice(before2).join("")).toContain(HOST_TERMINAL_CLEAR);
+
+    t.renderer.destroy?.();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  test("forces a full OpenTUI repaint after the clear commits", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+    const { renderer, calls } = makeStubRenderer();
+
+    let controller!: DaintreeController;
+    const t = await testRender(
+      <Harness
+        app={app}
+        renderer={renderer}
+        onController={(c) => (controller = c)}
+      />,
+      { width: 80, height: 24 },
+    );
+    await t.flush();
+    await tick();
+
+    await act(async () => {
+      controller.sendUserMessage("/clear");
+    });
+    await tick();
+
+    // The resync ran post-commit: both shadow buffers blanked, the forced-repaint
+    // latch set, and a render requested — the fix for the blank-header gap.
+    expect(calls.currentCleared).toBeGreaterThan(0);
+    expect(calls.nextCleared).toBeGreaterThan(0);
+    expect(calls.forceFullRepaintRequested).toBe(true);
+    expect(calls.rendered).toBeGreaterThan(0);
 
     t.renderer.destroy?.();
     await app.shutdown();
