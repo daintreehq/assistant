@@ -33,10 +33,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      # The UI suite renders through OpenTUI's native renderer and runs under
+      # `bun test` (`npm run test` is `vitest run && bun test tests/ui`), so Bun
+      # must be on PATH or the second half exits 127 with `bun: not found`.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Test (vitest unit)
+      - name: Test (vitest unit + bun UI)
         run: npm run test
 
   # Gate job — use this as the sole required status check in branch protection.
