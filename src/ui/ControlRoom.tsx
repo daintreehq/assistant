@@ -121,7 +121,6 @@ export function ControlRoom({
   tier,
   columns,
   reservedColumns = 1,
-  rows,
   connected,
   transcript,
   dashboard,
@@ -174,26 +173,15 @@ export function ControlRoom({
   // pending the on-demand panels yield so the approval (and composer) stay live.
   const showPanel = !pending && view !== "home";
 
-  // Cap the live footer at the terminal height (when known — the live shell passes it;
-  // the gallery/tests don't, so nothing clips there). The conversation region below
-  // absorbs any overflow by CLIPPING its TOP, so the status line + composer are PINNED
-  // and can never be pushed off the bottom — the bug where the input vanished while a
-  // long answer streamed. Completed turns have already left for native scrollback, so
-  // what clips here is only the head of the in-flight turn; its full text lands in
-  // scrollback when it seals.
-  const maxFooterHeight = rows && rows > 0 ? rows : undefined;
-
   return (
     // flexShrink={0}: keep the footer's NATURAL height even while the split-footer
     // region is momentarily shorter than the content. Otherwise the live box shrinks
     // to the current `footerHeight`, which then reads back as the measured height and
     // deadlocks `useFooterHeight` (it could never grow the footer back after a shrink).
-    // maxHeight bounds the top so the conversation region has something to shrink into.
     <box
       ref={rootRef}
       flexDirection="column"
       flexShrink={0}
-      maxHeight={maxFooterHeight}
       width="100%"
       paddingRight={gutter}
     >
@@ -218,16 +206,10 @@ export function ControlRoom({
           surface, so it draws nothing here — it only needs to be mounted in the tree. */}
       {footerSlot}
 
-      {/* The conversation tail. It FLEXES and CLIPS (overflow hidden) so a long in-flight
-          turn can never grow past the footer and shove the pinned chrome off-screen.
-          `contentWidth` is a readable-measure cap for prose/history. */}
-      <box
-        flexDirection="column"
-        flexShrink={1}
-        minHeight={0}
-        overflow="hidden"
-        paddingLeft={LEFT_PAD}
-      >
+      {/* The conversation + the live region, one column. The native renderer reflows
+          the whole tree on resize, so there is no wrap/orphan hazard to design
+          around; `contentWidth` is a readable-measure cap for prose/history. */}
+      <box flexDirection="column" paddingLeft={LEFT_PAD}>
         {transcript.map((cell) => (
           <CellView
             key={cell.id}
@@ -237,12 +219,7 @@ export function ControlRoom({
             expanded={expanded}
           />
         ))}
-      </box>
 
-      {/* Pinned chrome — the approval sheet (interactive), status line and composer (or
-          an on-demand panel) NEVER shrink, so they stay visible no matter how long the
-          active turn runs and you can always read the status and queue a follow-up. */}
-      <box flexShrink={0} flexDirection="column" paddingLeft={LEFT_PAD}>
         {pending ? (
           <ApprovalSheet
             pending={pending}
