@@ -309,18 +309,12 @@ describe("AgentSession cancellation (#45)", () => {
     let streamCalls = 0;
     const { session } = makeSession(
       {
-        // The recipe selector runs in the pre-turn window. Abort mid-flight to
-        // mimic an Escape (pull-back) landing after send() began but before the
+        // The auto-compact summarizer runs in the pre-turn window. Abort mid-flight
+        // to mimic an Escape (pull-back) landing after send() began but before the
         // user message is committed to history.
-        json: async () => {
+        chat: async () => {
           controller.abort();
-          return {
-            recipeIds: [],
-            confidence: 0,
-            reason: "",
-            taskType: "qa",
-            keepExisting: false,
-          };
+          return { content: "summary", reasoning: "", toolCalls: [], finishReason: "stop" };
         },
         stream: async () => {
           streamCalls++;
@@ -329,6 +323,12 @@ describe("AgentSession cancellation (#45)", () => {
       },
       sink,
     );
+
+    // Grow history past the auto-compact token threshold (and beyond CONTROL+1
+    // messages) so the pre-turn summarizer actually runs and gives the abort a
+    // window to land.
+    session.injectNote("A".repeat(200_000));
+    session.injectNote("B".repeat(200_000));
 
     const reply = await session.send("hi", { signal: controller.signal });
 

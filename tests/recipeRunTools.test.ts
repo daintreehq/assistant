@@ -6,6 +6,7 @@ import type { ToolContext } from "../src/tools/types.js";
 const advance = recipeRunTools.find((t) => t.name === "recipe.step.advance")!;
 const get = recipeRunTools.find((t) => t.name === "recipe.run.get")!;
 const load = recipeRunTools.find((t) => t.name === "recipe.load")!;
+const find = recipeRunTools.find((t) => t.name === "recipe.find")!;
 
 function ctx(sessionId = "ses_test"): ToolContext {
   const db = new Db(":memory:");
@@ -308,5 +309,93 @@ describe("recipe.load", () => {
     const res = await load.handler({ recipeId: "r.known" }, c);
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("RECIPE_LOAD_UNAVAILABLE");
+  });
+});
+
+describe("recipe.find", () => {
+  type FindResult = {
+    result: {
+      query: string;
+      selected: { id: string; title: string; summary: string }[];
+      activeRecipeIds: string[];
+    };
+  };
+
+  /** A context with a spy findRecipes callback returning a canned result. */
+  function findCtx(
+    findRecipes?: (query: string) => Promise<unknown>,
+  ): ToolContext {
+    return {
+      actor: "main",
+      findRecipes: findRecipes
+        ? vi.fn((query: string) => findRecipes(query))
+        : undefined,
+    } as unknown as ToolContext;
+  }
+
+  it("loads the matched recipes the selector resolved and reports them", async () => {
+    const c = findCtx(async (query) => ({
+      ok: true,
+      matched: true,
+      query,
+      reason: "matches the edit flow",
+      confidence: 0.9,
+      selected: [
+        {
+          id: "daintree.edits.spawn-visible-agent",
+          title: "Spawn a visible agent",
+          summary: "short header",
+        },
+      ],
+      activeRecipeIds: ["daintree.edits.spawn-visible-agent"],
+    }));
+    const res = await find.handler({ query: "how do I edit files" }, c);
+    expect(res.ok).toBe(true);
+    expect(c.findRecipes).toHaveBeenCalledWith("how do I edit files", undefined);
+    const { result } = res as FindResult;
+    expect(result.selected.map((r) => r.id)).toEqual([
+      "daintree.edits.spawn-visible-agent",
+    ]);
+    expect(result.activeRecipeIds).toEqual([
+      "daintree.edits.spawn-visible-agent",
+    ]);
+  });
+
+  it("returns ok with an empty selection (not a failure) when nothing matches", async () => {
+    const c = findCtx(async (query) => ({
+      ok: true,
+      matched: false,
+      query,
+      reason: "no fit",
+      confidence: 0.1,
+      selected: [],
+      activeRecipeIds: [],
+    }));
+    const res = await find.handler({ query: "unrelated trivia" }, c);
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain("No recipe matched");
+    expect((res as FindResult).result.selected).toEqual([]);
+  });
+
+  it("returns a recoverable failure when the selector model errored", async () => {
+    const c = findCtx(async (query) => ({
+      ok: false,
+      matched: false,
+      query,
+      reason: "recipe selector unavailable",
+      confidence: 0,
+      selected: [],
+      activeRecipeIds: [],
+    }));
+    const res = await find.handler({ query: "anything" }, c);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("RECIPE_FIND_FAILED");
+    expect(res.error?.recoverable).toBe(true);
+  });
+
+  it("fails cleanly when recipe lookup is unavailable (e.g. a watcher context)", async () => {
+    const res = await find.handler({ query: "anything" }, findCtx(undefined));
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("RECIPE_FIND_UNAVAILABLE");
   });
 });

@@ -156,6 +156,12 @@ export class App {
         actor === "main"
           ? (ids) => this.session.loadAdditionalRecipes(ids)
           : undefined,
+      // Query-driven recipe fetch (recipe.find). Same main-only wiring as
+      // loadRecipes — it reshapes the live session's loaded recipes.
+      findRecipes:
+        actor === "main"
+          ? (query, signal) => this.session.findRecipes(query, signal)
+          : undefined,
     };
   }
 

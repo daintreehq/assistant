@@ -84,7 +84,9 @@ src/
   safety/     policy.ts — tier gating, confirmation matrix, no-file-edit guard
   daemon/     scheduler.ts (3s tick) + watcherEngine.ts (terminal watcher FSM)
   storage/    db.ts + sqliteDriver.ts — timers, watchers, events, audit, conversation, grants
-  recipes/    runbooks injected into the prompt when relevant (registry/selector/render)
+  recipes/    runbooks: content files in repo-root `recipes/*.md` (fileSource), loaded
+              into the registry; the model pulls them on demand via `recipe.find` (query →
+              small-model selector → inject). See docs/RECIPES.md to author one.
   ui/         OpenTUI cockpit: runApp.tsx + DaintreeApp.tsx + ControlRoom.tsx + components/ (the ONLY @opentui importers)
   host/       Embedded Electron utility-process host (protocol.ts, index.ts)
   config.ts schemas.ts queue.ts debugLog.ts watcherCadence.ts
@@ -181,4 +183,4 @@ All loaded in `src/config.ts`. State lives under `~/.daintree/assistant-cli/`.
 ## More docs
 
 `README.md` (full overview), `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`,
-`docs/FIREWORKS.md`.
+`docs/FIREWORKS.md`, `docs/RECIPES.md` (how to author assistant recipes).

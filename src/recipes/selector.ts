@@ -1,48 +1,43 @@
 /**
  * Small-model recipe selector.
  *
- * Uses the cheap Flash model (router.json("small", ...)) to choose 0-3 recipe ids
- * for the next main-model turn. The selector sees only recipe metadata — never the
- * bodies — so selection stays cheap. Output is validated against RecipeSelection.
+ * The main model calls the `recipe.find` tool with a natural-language query ("how
+ * do I spawn an agent to edit files?"). This selector hands that query plus every
+ * recipe's headers (NOT bodies) to the cheap Flash model and gets back the 0-3
+ * recipe ids whose bodies should be loaded. Metadata-only input keeps the call
+ * cheap; the output is validated against RecipeSelection.
  */
 import type { ModelRouter } from "../models/router.js";
-import { contentToText, type ChatMessage } from "../models/fireworks.js";
-import type { RecipeRegistry } from "./registry.js";
-import { RecipeSelection } from "./types.js";
+import { RecipeSelection, type RecipeMetadata } from "./types.js";
 
 const RECIPE_SELECTOR_SYSTEM_PROMPT = `You are the Daintree Assistant recipe selector.
 Return only JSON.
-Your job is to choose 0-3 assistant prompt recipes for the next main-model turn.
-Choose recipes only when they materially help the main model do the user's task.
+The main assistant has hit a point where it wants a procedural runbook ("recipe") and has given you a query describing what it needs to figure out. Choose the 0-3 recipes whose full instructions best answer that query.
 Rules:
-- Prefer 0 recipes for simple explanations.
-- Prefer 1 recipe for focused tasks.
-- Use 2-3 recipes only when the task spans multiple Daintree workflows.
-- Keep existing recipes if the task has not changed.
-- Choose edit/delegation recipes when the user asks to implement, fix, refactor, add tests, update docs, or otherwise change files.
-- Choose Daintree recipe/worktree recipes when the user asks to run recipes, create startup layouts, initialize worktrees, review PRs, or set up repeatable environments.
-- Choose orchestration recipes when the user asks about agents, terminals, queues, watchers, timers, project state, or what needs attention.
+- Match the query against each candidate's "whenToUse" (the detailed signal) and "summary".
+- Return 0 recipes if none genuinely fit — do not force a match.
+- Return 1 recipe for a focused need; 2-3 only when the task clearly spans multiple recipes.
+- Order recipeIds best-match first.
 - Never invent recipe ids. Choose only from the candidate list.
 Return this JSON shape:
 {
   "recipeIds": ["string"],
   "confidence": 0.0,
   "reason": "string",
-  "taskType": "string",
-  "keepExisting": false
+  "taskType": "string"
 }`;
 
-/** Bound the untrusted user input sent to the small model (cost + injection surface). */
-const MAX_USER_INPUT_CHARS = 2000;
+/** Bound the untrusted query sent to the small model (cost + injection surface). */
+const MAX_QUERY_CHARS = 2000;
 
 export interface SelectRecipesArgs {
   router: ModelRouter;
-  registry: RecipeRegistry;
-  userInput: string;
-  recentMessages: ReadonlyArray<ChatMessage>;
-  activeRecipeIds: string[];
+  /** Header-only view of every candidate recipe (never bodies). */
+  candidates: RecipeMetadata[];
+  /** The main model's natural-language "what I need to figure out" query. */
+  query: string;
   /**
-   * Abort signal for the in-flight turn. When the user cancels while this pre-turn
+   * Abort signal for the in-flight turn. When the user cancels while this
    * selection call is running, the request is torn down (the small model rejects
    * with CancelledError) instead of completing in the background.
    */
@@ -52,13 +47,7 @@ export interface SelectRecipesArgs {
 export async function selectRecipes(
   args: SelectRecipesArgs,
 ): Promise<RecipeSelection> {
-  const candidates = args.registry.metadataForSelection();
-  const userInput = args.userInput.slice(0, MAX_USER_INPUT_CHARS);
-  const recent = args.recentMessages
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .slice(-8)
-    .map((m) => `${m.role}: ${contentToText(m.content).slice(0, 800)}`)
-    .join("\n");
+  const query = args.query.slice(0, MAX_QUERY_CHARS);
 
   return args.router.json(
     "small",
@@ -68,17 +57,11 @@ export async function selectRecipes(
         {
           role: "user",
           content: `JSON selection task.
-Current user input:
-${userInput}
+Query (what the assistant needs to figure out):
+${query}
 
-Recent conversation:
-${recent || "(none)"}
-
-Currently loaded recipe ids:
-${JSON.stringify(args.activeRecipeIds)}
-
-Candidate recipes (metadata only):
-${JSON.stringify(candidates, null, 2)}
+Candidate recipes (headers only):
+${JSON.stringify(args.candidates, null, 2)}
 
 Return the JSON object now.`,
         },

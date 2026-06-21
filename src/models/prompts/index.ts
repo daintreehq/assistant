@@ -3,8 +3,9 @@
  *
  * The main-thread system prompt is split into three stable control layers:
  *   - base.ts          message[0] — permanent identity + hard rules (cached prefix)
- *   - runtimeContext.ts message[1] — tier/project/MCP/model state
- *   - recipes.ts       message[2] — task-specific loaded recipe bodies
+ *   - runtimeContext.ts message[1] — tier/project/MCP/model state + the recipe catalog
+ *                                    (the always-present menu of available recipes)
+ *   - recipes.ts       message[2] — the bodies of recipes loaded for the current task
  *
  * The watcher / summarizer / timer sub-agent prompts (cheap small-model work) live
  * here. buildMainSystemPrompt() composes the three layers into one string and is
@@ -15,7 +16,10 @@ export {
   buildRuntimeContextMessage,
   type MainPromptContext,
 } from "./runtimeContext.js";
-export { buildLoadedRecipesMessage } from "./recipes.js";
+export {
+  buildLoadedRecipesMessage,
+  buildRecipeCatalogMessage,
+} from "./recipes.js";
 
 import { BASE_SYSTEM_PROMPT } from "./base.js";
 import {
