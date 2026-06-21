@@ -24,10 +24,12 @@ import { UiBridge, type UiBridgeEvent } from "../bridge.js";
 import { handleUiCommand, type PanelKey } from "../../cli/commandData.js";
 import { clearHostTerminal } from "../../cli/terminalClear.js";
 import { presentTool } from "../presentation/tools.js";
+import { runStageLabel } from "../runStatus.js";
 import type {
   ActivityItem,
   DashboardState,
   PendingConfirm,
+  RunPhase,
   SessionUsage,
   TranscriptCell,
   TurnCell,
@@ -111,7 +113,11 @@ function replaceAt(
   return copy;
 }
 
-function newTurn(userText: string, now: number): TurnCell {
+function newTurn(
+  userText: string,
+  now: number,
+  opts: { queued?: boolean } = {},
+): TurnCell {
   return {
     kind: "turn",
     id: uid("turn"),
@@ -121,8 +127,19 @@ function newTurn(userText: string, now: number): TurnCell {
     activities: [],
     notes: [],
     state: "active",
+    // A turn is born the instant the user submits: acknowledge it immediately
+    // ("received") so the cockpit reacts synchronously, before the model answers.
+    phase: opts.queued ? "received" : "received",
+    phaseStartedAt: now,
+    queued: opts.queued,
     ts: now,
   };
+}
+
+/** Set the active turn's run phase + reset its phase clock (drives LiveRunStatus). */
+function withPhase(turn: TurnCell, phase: RunPhase, now: number): TurnCell {
+  if (turn.phase === phase) return turn;
+  return { ...turn, phase, phaseStartedAt: now };
 }
 
 /** Ensure there is an active turn to attach to; create a system-origin one if not. */
@@ -147,6 +164,7 @@ export type ControllerAction =
   | { type: "user:add"; text: string }
   | { type: "user:pullback" }
   | { type: "command:add"; title: string; text: string }
+  | { type: "phase"; phase: RunPhase }
   | { type: "transcript:clear" };
 
 export function transcriptReducer(
@@ -194,17 +212,34 @@ export function transcriptReducer(
     case "assistant:start": {
       const { cells: c, index } = ensureActiveTurn(cells, now);
       const turn = c[index] as TurnCell;
-      return replaceAt(c, index, { ...turn, streaming: true });
+      // The first model call of a turn is "analyzing"; a call that comes AFTER tools
+      // have run is "integrating" their results — the silent gap the old model couldn't
+      // name. We only enter "generating" once a token actually streams (below).
+      const phase: RunPhase =
+        turn.activities.length > 0 ? "integrating" : "analyzing";
+      return replaceAt(
+        c,
+        index,
+        withPhase({ ...turn, streaming: true }, phase, now),
+      );
     }
 
     case "assistant:token": {
       const { cells: c, index } = ensureActiveTurn(cells, now);
       const turn = c[index] as TurnCell;
-      return replaceAt(c, index, {
-        ...turn,
-        assistantText: turn.assistantText + action.token,
-        streaming: true,
-      });
+      return replaceAt(
+        c,
+        index,
+        withPhase(
+          {
+            ...turn,
+            assistantText: turn.assistantText + action.token,
+            streaming: true,
+          },
+          "generating",
+          now,
+        ),
+      );
     }
 
     case "assistant:end": {
@@ -215,12 +250,21 @@ export function transcriptReducer(
       // start/token/tool events via ensureActiveTurn; a terminal event never is.
       if (idx < 0) return cells;
       const turn = cells[idx] as TurnCell;
-      return replaceAt(cells, idx, {
-        ...turn,
-        assistantText: action.content || turn.assistantText,
-        streaming: false,
-        state: turn.state === "failed" ? "failed" : "complete",
-      });
+      const endState = turn.state === "failed" ? "failed" : "complete";
+      return replaceAt(
+        cells,
+        idx,
+        withPhase(
+          {
+            ...turn,
+            assistantText: action.content || turn.assistantText,
+            streaming: false,
+            state: endState,
+          },
+          endState,
+          now,
+        ),
+      );
     }
 
     case "assistant:cancelled": {
@@ -230,16 +274,29 @@ export function transcriptReducer(
       const idx = activeTurnIndex(cells);
       if (idx < 0) return cells;
       const turn = cells[idx] as TurnCell;
-      return replaceAt(cells, idx, {
-        ...turn,
-        assistantText: action.content || turn.assistantText,
-        streaming: false,
-        state: "cancelled",
-        notes: [
-          ...turn.notes,
-          { id: uid("note"), level: "info", text: "Turn cancelled", ts: now },
-        ],
-      });
+      return replaceAt(
+        cells,
+        idx,
+        withPhase(
+          {
+            ...turn,
+            assistantText: action.content || turn.assistantText,
+            streaming: false,
+            state: "cancelled",
+            notes: [
+              ...turn.notes,
+              {
+                id: uid("note"),
+                level: "info",
+                text: "Turn cancelled",
+                ts: now,
+              },
+            ],
+          },
+          "cancelled",
+          now,
+        ),
+      );
     }
 
     case "tool:call": {
@@ -255,10 +312,15 @@ export function transcriptReducer(
         state: "active",
         startedAt: action.startedAt,
       };
-      return replaceAt(c, index, {
-        ...turn,
-        activities: [...turn.activities, activity],
-      });
+      return replaceAt(
+        c,
+        index,
+        withPhase(
+          { ...turn, activities: [...turn.activities, activity] },
+          "tool_running",
+          now,
+        ),
+      );
     }
 
     case "tool:result": {
@@ -293,14 +355,19 @@ export function transcriptReducer(
         // Attach to the active turn; an error fails it and stops the caret.
         const turn = stopCaret(cells[idx] as TurnCell);
         const level = action.level;
-        return replaceAt(cells, idx, {
+        const next: TurnCell = {
           ...turn,
           state: level === "error" ? "failed" : turn.state,
           notes: [
             ...turn.notes,
             { id: uid("note"), level, text: action.message, ts: now },
           ],
-        });
+        };
+        return replaceAt(
+          cells,
+          idx,
+          level === "error" ? withPhase(next, "failed", now) : next,
+        );
       }
       return [
         ...cells,
@@ -328,6 +395,19 @@ export function transcriptReducer(
           };
         }),
       ];
+
+    case "phase": {
+      // Controller-driven phase changes that the event stream can't express on its
+      // own: `awaiting_approval` (a confirm is blocking) and `cancelling` (Escape
+      // pressed — set synchronously so the UI reacts before the abort propagates).
+      const idx = activeTurnIndex(cells);
+      if (idx < 0) return cells;
+      return replaceAt(
+        cells,
+        idx,
+        withPhase(cells[idx] as TurnCell, action.phase, now),
+      );
+    }
 
     default:
       return cells;
@@ -423,34 +503,16 @@ async function fetchProjectName(app: App): Promise<string | undefined> {
   }
 }
 
-/** The composer's live-stage label — derived from the active run, not random. */
+/**
+ * The composer's live-stage label — the active run's PRECISE phase (Analyzing
+ * request / Generating / Integrating results / Delegating / Waiting for approval /
+ * Cancelling …), via the shared {@link runStageLabel} vocabulary. Falls back to
+ * "Processing" (never the old vague "Thinking") when there's no active run.
+ */
 function deriveStage(cells: TranscriptCell[]): string {
   const idx = activeTurnIndex(cells);
-  if (idx < 0) return "Thinking";
-  const turn = cells[idx] as TurnCell;
-  const active = [...turn.activities].reverse().find((a) => a.state === "active");
-  if (active) {
-    // Map the verb to a control-room stage.
-    switch (active.label) {
-      case "Delegated":
-        return "Delegating";
-      case "Watching":
-        return "Watching";
-      case "Read":
-      case "Listed":
-      case "Searched":
-        return "Inspecting";
-      case "Scheduled":
-        return "Scheduling";
-      default:
-        return "Working";
-    }
-  }
-  // No active tool verb to name → the model is composing (waiting for the first
-  // token, streaming prose, or between tool steps). All of these read as "Thinking":
-  // once real output is streaming the transcript itself shows it, so the composer
-  // doesn't separately announce "Responding" — it just signals that work is ongoing.
-  return "Thinking";
+  if (idx < 0) return "Processing";
+  return runStageLabel(cells[idx] as TurnCell);
 }
 
 export interface DaintreeController {
@@ -806,6 +868,9 @@ export function useDaintreeController(
     return bridge.subscribe((event) => {
       if (event.type === "confirm") {
         setPendingConfirm(event.pending);
+        // A confirmation is now blocking the run — name it precisely so the cockpit
+        // doesn't look frozen while it waits on the human.
+        dispatch({ type: "phase", phase: "awaiting_approval" });
       } else if (event.type === "usage") {
         const u = event.usage;
         setSessionUsage((prev) => ({
@@ -1021,8 +1086,11 @@ export function useDaintreeController(
   transcriptRef.current = transcript;
 
   // Abort the in-flight user turn (Escape on an empty composer while busy).
-  // Idempotent and a no-op when nothing is running.
+  // Idempotent and a no-op when nothing is running. The phase flips to "cancelling"
+  // SYNCHRONOUSLY so the cockpit acknowledges Escape immediately, before the abort
+  // propagates through the loop and the terminal assistant:cancelled lands.
   const cancelTurn = useCallback(() => {
+    if (abortController.current) dispatch({ type: "phase", phase: "cancelling" });
     abortController.current?.abort();
   }, []);
 
@@ -1053,6 +1121,9 @@ export function useDaintreeController(
       cur?.resolve(approved);
       return null;
     });
+    // Approval resolved — the tool resumes; leave "awaiting_approval" so the line
+    // doesn't linger. The subsequent tool:result / assistant:start refines it.
+    dispatch({ type: "phase", phase: "tool_running" });
   }, []);
 
   const stage = useMemo(() => deriveStage(transcript), [transcript]);

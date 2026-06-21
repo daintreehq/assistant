@@ -45,6 +45,33 @@ export interface ActivityItem {
 
 export type TurnState = "active" | "complete" | "failed" | "cancelled";
 
+/**
+ * The fine-grained lifecycle of a single run (turn), so the live UI can name what's
+ * actually happening instead of a vague "Thinking". Driven explicitly by the event
+ * stream + controller (not inferred from `streaming`/text/activities, which left
+ * ambiguous silent gaps — e.g. after a tool finished but before the next model token).
+ *
+ *   received          — submit accepted, model not yet responding (instant ack)
+ *   analyzing         — first model call in flight, no visible output yet
+ *   generating        — visible response tokens are streaming
+ *   tool_running      — one or more tools are executing (see the activity tree)
+ *   awaiting_approval — a confirmation is blocking the run
+ *   integrating       — tools finished, the model was called again (next round)
+ *   cancelling        — Escape pressed; abort is propagating
+ *   complete/failed/cancelled — terminal
+ */
+export type RunPhase =
+  | "received"
+  | "analyzing"
+  | "generating"
+  | "tool_running"
+  | "awaiting_approval"
+  | "integrating"
+  | "cancelling"
+  | "complete"
+  | "failed"
+  | "cancelled";
+
 export interface SystemNote {
   id: string;
   level: "info" | "warn" | "error";
@@ -63,6 +90,18 @@ export interface TurnCell {
   activities: ActivityItem[];
   notes: SystemNote[];
   state: TurnState;
+  /**
+   * Fine-grained run phase, set explicitly by the reducer/controller as events land.
+   * Drives the live status line (LiveRunStatus) so the UI names the precise activity.
+   */
+  phase: RunPhase;
+  /** Epoch (ms) the current {@link phase} began — drives the live "· 0.4s" elapsed. */
+  phaseStartedAt: number;
+  /**
+   * A queued follow-up the user submitted while a turn was in flight: it shows
+   * immediately as a dimmed "queued" turn and is promoted in place when it starts.
+   */
+  queued?: boolean;
   ts: number;
 }
 

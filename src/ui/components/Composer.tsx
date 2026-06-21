@@ -3,6 +3,7 @@ import { TextAttributes } from "@opentui/core";
 import { Divider } from "../primitives.js";
 import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
+import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
 
 /**
@@ -165,13 +166,21 @@ export function Composer({
         </box>
       </box>
 
-      {/* No "thinking" indicator at the input: the active turn already shows a live
-          "Thinking" line in the transcript above (TurnCellView), so repeating it here
-          is redundant. We still surface silently-queued follow-ups (#95). */}
-      {busy && queueDepth > 0 ? (
-        <text fg={ui.color.info} truncate>
-          {queueDepth} queued
-        </text>
+      {/* A compact busy cue at the input: the PRECISE stage (Analyzing request /
+          Generating / Delegating / Integrating results / Waiting for approval /
+          Cancelling) + any silently-queued follow-ups (#95). The transcript names the
+          same state under DAINTREE during silent gaps; here it stays visible right at
+          the prompt even while prose streams or the tree fills (where that line hides),
+          so you always know work is in flight and the composer is still live. */}
+      {busy ? (
+        <box flexDirection="row">
+          <ThinkingDot ascii={ascii} />
+          <text attributes={TextAttributes.DIM} truncate>
+            {" "}
+            {stage}
+            {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
+          </text>
+        </box>
       ) : null}
 
       {/* Bracket the input top AND bottom so the field reads unmistakably as the

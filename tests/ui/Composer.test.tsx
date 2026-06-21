@@ -79,17 +79,17 @@ describe("Composer", () => {
     expect(Math.max(...ruleWidths)).toBeGreaterThan(LIVE_CHROME_MAX_WIDTH);
   });
 
-  test("shows NO thinking/stage/spinner at the input while busy", async () => {
-    // The active turn shows the live "Thinking" line in the transcript above; the
-    // input must not repeat it (no stage text, no spinner glyph).
+  test("shows the precise stage at the input while busy", async () => {
+    // The composer names the active phase right at the prompt so you always know work
+    // is in flight (and the input is still live) — including while the transcript's
+    // own status line is hidden (during streaming / tool execution).
     const t = await testRender(
       <Composer busy stage="Delegating" onSubmit={() => {}} />,
       COMPOSER_SIZE,
     );
     await t.flush();
     const frame = t.captureCharFrame();
-    expect(frame).not.toContain("Delegating");
-    expect(frame).not.toContain("⠋"); // no braille spinner
+    expect(frame).toContain("Delegating");
   });
 
   test("renders no spinner glyph or queued suffix when idle (#115)", async () => {
@@ -111,7 +111,7 @@ describe("Composer", () => {
     await t.flush();
     const frame = t.captureCharFrame();
     expect(frame).toContain("2 queued");
-    expect(frame).not.toContain("Watching"); // the stage is no longer shown here
+    expect(frame).toContain("Watching"); // the precise stage is shown at the prompt
   });
 
   test("omits the queued count when nothing is waiting (#95)", async () => {
@@ -121,8 +121,8 @@ describe("Composer", () => {
     );
     await t.flush();
     const frame = t.captureCharFrame();
-    expect(frame).not.toContain("queued");
-    expect(frame).not.toContain("Watching");
+    expect(frame).not.toContain("queued"); // no queued suffix when nothing waits
+    expect(frame).toContain("Watching"); // ...but the stage still shows while busy
   });
 
   test("opens a filtered slash palette as you type a command", async () => {

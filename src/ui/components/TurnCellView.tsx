@@ -23,9 +23,9 @@
  */
 import { SyntaxStyle, RGBA, TextAttributes } from "@opentui/core";
 import type { TurnCell } from "../types.js";
-import { glyphs, toneColor, ui, unicodeOk, terminalThemeMode } from "../theme.js";
+import { glyphs, toneColor, ui, terminalThemeMode } from "../theme.js";
 import { ActivityTree } from "./ActivityTree.js";
-import { ThinkingDot } from "./ThinkingDot.js";
+import { LiveRunStatus } from "./LiveRunStatus.js";
 import { UserMessageCard } from "./UserMessageCard.js";
 
 // The native `<markdown>` renderable styles inline runs (bold/italic) itself via
@@ -100,17 +100,14 @@ export function TurnCellView({
   expanded?: boolean;
 }) {
   const set = glyphs();
-  // Before any output lands, the active turn shows a live "Thinking" line directly
-  // under the DAINTREE marker so the human sees Daintree is busy *in the transcript*
-  // (not just the composer). It clears the moment real output starts — the first
-  // streamed token (assistantText) or the first tool activity ("the tech loading") —
-  // so it never doubles up with prose or the activity tree.
-  const ascii = !unicodeOk();
-  const thinking =
-    turn.state === "active" &&
-    turn.assistantText.length === 0 &&
-    turn.activities.length === 0;
   const finalized = turn.state !== "active";
+  // The DAINTREE block shows the instant the turn is live (so the cockpit reacts on
+  // submit) or once it has said anything. The precise live state — Analyzing /
+  // Integrating / Waiting for approval / Cancelling — is named by LiveRunStatus below
+  // the marker (it renders nothing while prose streams or tools run, since those are
+  // self-evident). The old hardcoded "Thinking" + the `no-text && no-activities` gate
+  // (which made the spinner vanish once any activity existed) are gone.
+  const showDaintree = turn.state === "active" || !!turn.assistantText;
   // Each transcript cell owns the single blank line ABOVE it (marginTop), never
   // below. A leading blank is deterministic — the native renderer reflows the whole
   // tree, so owning the gap as a leading margin keeps exactly one blank line before
@@ -121,34 +118,38 @@ export function TurnCellView({
         <UserMessageCard text={turn.userText} width={width} />
       ) : null}
 
-      {turn.assistantText || turn.streaming || thinking ? (
+      {showDaintree ? (
         <box flexDirection="column">
-          <text
-            fg={ui.color.accent}
-            attributes={TextAttributes.BOLD}
-          >
-            {set.brand} DAINTREE
+          {/* Marker + an instant "· received" ack that disappears the moment the model
+              starts (analyzing/a token/a tool). Distinct `<span>` runs so the dim ack
+              doesn't inherit the bold-accent marker styling. */}
+          <text>
+            <span fg={ui.color.accent} attributes={TextAttributes.BOLD}>
+              {set.brand} DAINTREE
+            </span>
+            {turn.phase === "received" ? (
+              <span attributes={TextAttributes.DIM}> · received</span>
+            ) : null}
           </text>
-          {thinking ? (
-            // ThinkingDot is its own `<text>` (an animated spinner), and a native
-            // `<text>` may NOT nest another `<text>` — so the dot and the dim
-            // "Thinking" label sit side by side in a row box rather than as inline
-            // runs of one `<Text>` (the Ink shape). Both still read as one line.
-            <box flexDirection="row">
-              <ThinkingDot ascii={ascii} />
-              <text attributes={TextAttributes.DIM}> Thinking</text>
-            </box>
-          ) : finalized && turn.assistantText ? (
-            // Finalized prose: native markdown styling over the whole text (built
-            // once). A bare `<markdown content="">` renders nothing, so the empty
-            // case is handled by the branch above (it only enters here when
-            // assistantText is set).
-            <markdown content={turn.assistantText} syntaxStyle={MARKDOWN_STYLE} />
-          ) : (
-            // Active turn (or finalized-but-empty): stream completed lines as styled
-            // markdown, the in-progress line as raw text + caret (see StreamingProse).
-            <StreamingProse text={turn.assistantText} streaming={turn.streaming} />
-          )}
+          {turn.assistantText ? (
+            finalized ? (
+              // Finalized prose: native markdown styling over the whole text.
+              <markdown
+                content={turn.assistantText}
+                syntaxStyle={MARKDOWN_STYLE}
+              />
+            ) : (
+              // Active: stream completed lines as styled markdown, the in-progress
+              // line as raw text + caret (see StreamingProse).
+              <StreamingProse
+                text={turn.assistantText}
+                streaming={turn.streaming}
+              />
+            )
+          ) : null}
+          {/* The precise "silent work" status (Analyzing / Integrating / awaiting
+              approval / Cancelling) with a live spinner + elapsed. Null otherwise. */}
+          <LiveRunStatus turn={turn} now={now} />
         </box>
       ) : null}
 

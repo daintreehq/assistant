@@ -31,6 +31,76 @@ describe("transcriptReducer (run-oriented)", () => {
     expect(t.state).toBe("complete");
   });
 
+  it("tracks the explicit run phase through a tool-using turn", () => {
+    // received (submit) → analyzing (first model call) → generating (first token) →
+    // tool_running (tool call) → integrating (model called again after tools) →
+    // complete. Each transition is the precise state the old vague "Thinking" hid.
+    const phaseAfter = (actions: ControllerAction[]) =>
+      turns(run(actions))[0].phase;
+
+    expect(phaseAfter([{ type: "user:add", text: "go" }])).toBe("received");
+    expect(
+      phaseAfter([{ type: "user:add", text: "go" }, { type: "assistant:start" }]),
+    ).toBe("analyzing");
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "assistant:token", token: "hi" },
+      ]),
+    ).toBe("generating");
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "tool:call", id: "c1", name: "fs.read", args: {}, startedAt: 0 },
+      ]),
+    ).toBe("tool_running");
+    // A second assistant:start AFTER a tool ran is "integrating", not "analyzing".
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "tool:call", id: "c1", name: "fs.read", args: {}, startedAt: 0 },
+        { type: "tool:result", id: "c1", name: "fs.read", result: { ok: true }, endedAt: 1 },
+        { type: "assistant:start" },
+      ]),
+    ).toBe("integrating");
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "assistant:end", content: "done" },
+      ]),
+    ).toBe("complete");
+  });
+
+  it("flips to awaiting_approval / cancelling / failed on the explicit phase + error signals", () => {
+    const phaseAfter = (actions: ControllerAction[]) =>
+      turns(run(actions))[0].phase;
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "phase", phase: "awaiting_approval" },
+      ]),
+    ).toBe("awaiting_approval");
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "phase", phase: "cancelling" },
+      ]),
+    ).toBe("cancelling");
+    expect(
+      phaseAfter([
+        { type: "user:add", text: "go" },
+        { type: "assistant:start" },
+        { type: "log", level: "error", message: "boom" },
+      ]),
+    ).toBe("failed");
+  });
+
   it("groups tool calls as activities under the turn and resolves by id", () => {
     const out = run([
       { type: "user:add", text: "fix tests" },

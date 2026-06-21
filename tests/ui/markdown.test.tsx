@@ -46,6 +46,8 @@ function turn(over: Partial<TurnCell>): TurnCell {
     assistantText: "",
     streaming: false,
     state: "complete",
+    phase: "complete",
+    phaseStartedAt: 1_700_000_000_000,
     ts: 1_700_000_000_000,
     notes: [],
     activities: [],
@@ -168,10 +170,15 @@ describe("TurnCellView markdown", () => {
     expect(frame).not.toContain("▌"); // caret gone with the stream
   });
 
-  test("shows a Thinking line under DAINTREE while active before any output", async () => {
+  test("acknowledges the turn instantly with '· received' before the model answers", async () => {
     const t = await testRender(
       <TurnCellView
-        turn={turn({ state: "active", assistantText: "", streaming: false })}
+        turn={turn({
+          state: "active",
+          phase: "received",
+          assistantText: "",
+          streaming: false,
+        })}
         width={72}
       />,
       { width: 72, height: 8 },
@@ -179,31 +186,42 @@ describe("TurnCellView markdown", () => {
     await t.flush();
     const frame = t.captureCharFrame();
     expect(frame).toContain("DAINTREE");
-    expect(frame).toContain("Thinking");
+    expect(frame).toContain("received"); // instant ack, never the vague "Thinking"
+    expect(frame).not.toContain("Thinking");
   });
 
-  test("shows Thinking while active and streaming but still output-less", async () => {
+  test("names the silent 'Analyzing request' gap while active and output-less", async () => {
     // The real pre-token state after `assistant:start`: active, streaming=true,
-    // empty assistantText, no activities. The gate intentionally does NOT key on
-    // `streaming` (only on output landing), so Thinking must still show here — this
-    // pins that a future `!streaming` gate can't silently drop the indicator.
+    // empty assistantText, phase "analyzing". The precise label must show here (not a
+    // vague Thinking, and not the stream caret) so the gap is never silent.
     const t = await testRender(
       <TurnCellView
-        turn={turn({ state: "active", assistantText: "", streaming: true })}
+        turn={turn({
+          state: "active",
+          phase: "analyzing",
+          assistantText: "",
+          streaming: true,
+        })}
         width={72}
       />,
       { width: 72, height: 8 },
     );
     await t.flush();
     const frame = t.captureCharFrame();
-    expect(frame).toContain("Thinking");
-    expect(frame).not.toContain("▌"); // the Thinking line replaces the stream caret
+    expect(frame).toContain("Analyzing request");
+    expect(frame).not.toContain("Thinking");
+    expect(frame).not.toContain("▌"); // the status line replaces the stream caret
   });
 
-  test("drops the Thinking line once prose starts streaming", async () => {
+  test("drops the status line once prose starts streaming", async () => {
     const t = await testRender(
       <TurnCellView
-        turn={turn({ state: "active", assistantText: "hi", streaming: true })}
+        turn={turn({
+          state: "active",
+          phase: "generating",
+          assistantText: "hi",
+          streaming: true,
+        })}
         width={72}
       />,
       { width: 72, height: 8 },
@@ -211,16 +229,18 @@ describe("TurnCellView markdown", () => {
     await t.flush();
     const frame = t.captureCharFrame();
     expect(frame).toContain("hi");
+    expect(frame).not.toContain("Analyzing"); // prose itself communicates activity
     expect(frame).not.toContain("Thinking");
   });
 
-  test("drops the Thinking line once a tool activity begins", async () => {
+  test("drops the status line once a tool activity begins", async () => {
     // "as the tech [tools] starts loading, it can stop saying it's thinking":
     // the activity tree takes over once work is visible.
     const t = await testRender(
       <TurnCellView
         turn={turn({
           state: "active",
+          phase: "tool_running",
           assistantText: "",
           activities: [
             {
@@ -240,6 +260,7 @@ describe("TurnCellView markdown", () => {
     const frame = t.captureCharFrame();
     expect(frame).toContain("Read"); // the activity row is what takes over
     expect(frame).not.toContain("Thinking");
+    expect(frame).not.toContain("Analyzing");
   });
 
   test("renders markdown for a cancelled turn (finalized, no caret)", async () => {

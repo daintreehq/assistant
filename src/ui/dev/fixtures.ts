@@ -145,6 +145,8 @@ function longUserRun(): TranscriptCell[] {
       assistantText: "On it — delegating the repair and attaching a watcher.",
       streaming: false,
       state: "active",
+      phase: "tool_running",
+      phaseStartedAt: FIXED_NOW - s(20),
       ts: FIXED_NOW - s(28),
       notes: [],
       activities: [
@@ -172,6 +174,8 @@ function activeRun(): TranscriptCell[] {
       assistantText: "I'll delegate the edit and supervise the result.",
       streaming: false,
       state: "active",
+      phase: "tool_running",
+      phaseStartedAt: FIXED_NOW - s(18),
       ts: FIXED_NOW - s(28),
       notes: [],
       activities: [
