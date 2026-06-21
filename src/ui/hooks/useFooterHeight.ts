@@ -18,6 +18,19 @@
 import { useEffect, useRef, type RefObject } from "react";
 import type { BoxRenderable, CliRenderer } from "@opentui/core";
 
+/**
+ * Frames to keep the render loop alive after each React commit so the per-frame
+ * measurement can CONVERGE. This is the load-bearing fix for the live cockpit: the
+ * frame callback reads the tree's height ONE FRAME LATE (native layout lags the React
+ * commit), and the renderer paints on-demand — so after a turn streams in, exactly one
+ * frame renders (the callback reads the OLD, small height), then the renderer goes idle
+ * and the footer NEVER grows to fit the new content. The result was the bug where a
+ * running turn showed only its top few rows: no streamed response, no activity tree, and
+ * the composer clipped off the bottom. Kicking a few extra frames per commit lets the
+ * callback re-read the settled layout and grow the footer, then it stops (idle).
+ */
+const SETTLE_FRAMES = 3;
+
 export function useFooterHeight(
   renderer: CliRenderer,
   rootRef: RefObject<BoxRenderable | null>,
@@ -27,6 +40,21 @@ export function useFooterHeight(
   const maxRef = useRef(maxHeight);
   maxRef.current = maxHeight;
   const last = useRef(-1);
+  // Frames remaining to keep the loop alive (reset on every React commit, below).
+  const settle = useRef(0);
+
+  // Runs after EVERY React commit (no deps): the tree may have changed (a streamed
+  // token, a new tool row, a view switch), so re-arm the settle budget and kick a frame
+  // — without this the on-demand renderer would stop after one frame and the lagged
+  // measurement could never catch up to the new content.
+  useEffect(() => {
+    settle.current = SETTLE_FRAMES;
+    try {
+      renderer.requestRender();
+    } catch {
+      /* renderer torn down — nothing to schedule */
+    }
+  });
 
   useEffect(() => {
     // setFrameCallback wants a () => Promise<void>; do the work synchronously and hand
@@ -36,23 +64,46 @@ export function useFooterHeight(
       const node = rootRef.current;
       if (!node) return done;
       const measured = Math.ceil(node.height ?? 0);
-      if (!Number.isFinite(measured) || measured <= 0) return done;
-      const next = Math.max(1, Math.min(Math.max(1, maxRef.current), measured));
-      const prev = last.current;
-      if (next === prev) return done;
-      last.current = next;
-      try {
-        renderer.footerHeight = next;
-        // Shrinking vacates rows at the footer's top; OpenTUI doesn't always clear them
-        // on a split-footer shrink (it does on grow), so old chrome can linger and
-        // overlap. Force one full repaint to wipe the vacated rows.
-        if (prev > 0 && next < prev) {
-          (
-            renderer as unknown as { forceFullRepaintRequested: boolean }
-          ).forceFullRepaintRequested = true;
+      if (Number.isFinite(measured) && measured > 0) {
+        // Cap at the FULL TERMINAL height, NOT the caller's `maxHeight`: in split-footer
+        // mode that value comes from `useTerminalDimensions()`, which returns the RENDER
+        // height — i.e. the current footerHeight. Capping the footer at its own height is
+        // the deadlock: once it shrinks to fit the idle composer it can never grow back
+        // for a turn (the bug where a running turn showed only its top few rows). The
+        // renderer knows the real terminal height; OpenTUI clamps footerHeight to it
+        // anyway, so an over-tall measure is safe.
+        const terminalRows =
+          (renderer as unknown as { terminalHeight?: number }).terminalHeight ||
+          maxRef.current;
+        const next = Math.max(1, Math.min(Math.max(1, terminalRows), measured));
+        const prev = last.current;
+        if (next !== prev) {
+          last.current = next;
+          try {
+            renderer.footerHeight = next;
+            // Shrinking vacates rows at the footer's top; OpenTUI doesn't always clear
+            // them on a split-footer shrink (it does on grow), so old chrome can linger
+            // and overlap. Force one full repaint to wipe the vacated rows.
+            if (prev > 0 && next < prev) {
+              (
+                renderer as unknown as { forceFullRepaintRequested: boolean }
+              ).forceFullRepaintRequested = true;
+            }
+          } catch {
+            /* sizing is best-effort; never break a render over it */
+          }
         }
-      } catch {
-        /* sizing is best-effort; never break a render over it */
+      }
+      // While settling, keep requesting frames so a height that's still converging (the
+      // one-frame layout lag) gets re-measured. Counts DOWN to zero so an idle cockpit
+      // isn't pinned in a permanent render loop.
+      if (settle.current > 0) {
+        settle.current -= 1;
+        try {
+          renderer.requestRender();
+        } catch {
+          /* renderer torn down */
+        }
       }
       return done;
     };
