@@ -51,13 +51,18 @@ const MARKDOWN_STYLE = colorize
   : SyntaxStyle.fromStyles({ default: {} });
 
 /**
- * In-flight prose, streamed the way other agent CLIs do it: render the COMPLETE
- * lines (everything up to the last newline) as styled markdown, and the trailing
- * in-progress line as raw text plus a caret. As each newline lands, that line joins
- * the stable block and styles. This shows markdown AS it's produced rather than only
- * at finalize, and it's cheap: `stable` is byte-identical between tokens within a
- * line, so the `<markdown>` content prop doesn't change and the native renderable
- * doesn't re-parse — it only re-parses once per completed line.
+ * In-flight prose, rendered as PLAIN TEXT + a trailing caret — deliberately NOT live
+ * markdown. The native `<markdown>` renderable parses asynchronously (tree-sitter), and
+ * its measured height DIPS while a line re-parses, then jumps back. In the split-footer
+ * cockpit the live footer is sized to its content every frame, so each of those height
+ * dips made the whole footer shrink-then-grow and forced a full repaint — i.e. the
+ * response visibly FLASHED on every line as it streamed.
+ *
+ * Plain text only ever GROWS as tokens arrive (no reflow, no async parse), so the footer
+ * height is monotonic and never force-repaints mid-stream. The full markdown styling —
+ * headings, code, links — lands the moment the turn seals into native scrollback (see
+ * the `finalized` branch in TurnCellView), which is the polished result the user sees in
+ * history. Stream raw, style on commit (the Claude Code model).
  */
 function StreamingProse({
   text,
@@ -66,25 +71,11 @@ function StreamingProse({
   text: string;
   streaming: boolean;
 }) {
-  const lastNL = text.lastIndexOf("\n");
-  const stable = lastNL >= 0 ? text.slice(0, lastNL) : "";
-  const pending = lastNL >= 0 ? text.slice(lastNL + 1) : text;
   return (
-    <box flexDirection="column">
-      {stable ? (
-        <markdown content={stable} syntaxStyle={MARKDOWN_STYLE} />
-      ) : null}
-      {/* The in-progress line + caret. When `pending` is empty (the text just ended
-          on a newline) we render nothing rather than a lone caret on its own row —
-          that bounce isn't worth it; the caret reappears with the next line's first
-          token. */}
-      {pending.length > 0 ? (
-        <text>
-          {pending}
-          {streaming ? <span attributes={TextAttributes.DIM}>▌</span> : null}
-        </text>
-      ) : null}
-    </box>
+    <text>
+      {text}
+      {streaming ? <span attributes={TextAttributes.DIM}>▌</span> : null}
+    </text>
   );
 }
 

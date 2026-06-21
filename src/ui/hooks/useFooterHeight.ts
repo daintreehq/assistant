@@ -80,14 +80,24 @@ export function useFooterHeight(
         if (next !== prev) {
           last.current = next;
           try {
+            // Setting footerHeight makes OpenTUI queue a FULL-SCREEN repaint for this
+            // resize (applyScreenMode → forceFullRepaintRequested). With a footer that
+            // resizes on every streamed token that means a full repaint per token — the
+            // FLASH. So we override that flag deliberately:
             renderer.footerHeight = next;
-            // Shrinking vacates rows at the footer's top; OpenTUI doesn't always clear
-            // them on a split-footer shrink (it does on grow), so old chrome can linger
-            // and overlap. Force one full repaint to wipe the vacated rows.
+            const flag = renderer as unknown as {
+              forceFullRepaintRequested: boolean;
+            };
             if (prev > 0 && next < prev) {
-              (
-                renderer as unknown as { forceFullRepaintRequested: boolean }
-              ).forceFullRepaintRequested = true;
+              // SHRINK: keep the full repaint — it clears the rows the footer vacates at
+              // its top (OpenTUI doesn't always wipe them), which would otherwise linger.
+              flag.forceFullRepaintRequested = true;
+            } else {
+              // GROW (or the first sizing): suppress the full repaint. A grow just extends
+              // the footer upward over rows the incremental split commit redraws anyway,
+              // so it needs no screen-clear — and suppressing it is what stops a streaming
+              // turn from flashing on every token.
+              flag.forceFullRepaintRequested = false;
             }
           } catch {
             /* sizing is best-effort; never break a render over it */
