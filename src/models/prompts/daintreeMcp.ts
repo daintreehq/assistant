@@ -95,7 +95,7 @@ Run it like this — do NOT hand-poll the terminal in a loop:
    "waiting" (idle back at its prompt) IS end-of-turn completion: the watcher
    routes that through the completion gate and surfaces the result. When that
    queue event arrives (the scheduler wakes you), read it and relay the answer.
-3. A freshly spawned agent prints NOTHING for the first several seconds. Empty
+3. A freshly spawned agent prints NOTHING for several seconds after launch. Empty
    output right after a spawn means "not finished yet" — never "the terminal is
    gone", never "Daintree dropped it". Do not invent a failure; just let the
    watcher do its job.
