@@ -158,6 +158,9 @@ export function TurnCellView({
         width={width}
         now={now}
         expanded={expanded}
+        // Animate active rows only while the turn is live; a committed/scrollback
+        // render passes false so the spinner timer can't freeze/smear (ThinkingDot).
+        live={turn.state === "active"}
       />
 
       {turn.notes.map((n) => {

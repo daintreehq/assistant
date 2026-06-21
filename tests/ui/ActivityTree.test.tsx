@@ -17,6 +17,49 @@ function done(over: Partial<ActivityItem>): ActivityItem {
 }
 
 describe("ActivityTree", () => {
+  test("surfaces a failure summary alongside the target on a failed row", async () => {
+    // The outcome must never be hidden behind the original "Read foo.ts" target.
+    const acts: ActivityItem[] = [
+      {
+        id: "f",
+        name: "fs.read",
+        label: "Read",
+        detail: "missing.ts",
+        summary: "ENOENT: no such file",
+        state: "failed",
+        startedAt: 0,
+        endedAt: 5,
+      },
+    ];
+    const t = await testRender(<ActivityTree activities={acts} width={72} />, {
+      width: 72,
+      height: 8,
+    });
+    await t.flush();
+    const frame = t.captureCharFrame();
+    expect(frame).toContain("Read");
+    expect(frame).toContain("missing.ts"); // the target is still shown
+    expect(frame).toContain("ENOENT"); // ...and so is the failure summary
+
+    t.renderer.destroy?.();
+  });
+
+  test("shows the static glyph on a non-live active row (scrollback safety)", async () => {
+    // A committed/scrollback render passes live={false}, so the animated spinner (whose
+    // timer would freeze/smear into native scrollback) is never used there.
+    const acts: ActivityItem[] = [
+      { id: "a", name: "fs.read", label: "Read", state: "active", startedAt: 0 },
+    ];
+    const set = glyphs();
+    const still = await testRender(
+      <ActivityTree activities={acts} width={72} live={false} />,
+      { width: 72, height: 8 },
+    );
+    await still.flush();
+    expect(still.captureCharFrame()).toContain(set.active);
+    still.renderer.destroy?.();
+  });
+
   test("uses the square last-branch glyph, not the rounded arc", async () => {
     // The arc ╰ (U+2570) is substituted at a different width by many fonts and
     // breaks column alignment with ├; the square └ is its universal sibling.

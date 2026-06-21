@@ -18,11 +18,13 @@ import {
   glyphs,
   toneColor,
   ui,
+  unicodeOk,
   type GlyphSet,
   type Tone,
 } from "../theme.js";
 import { formatDuration } from "../primitives.js";
 import { compactArgs, truncate } from "../../utils/text.js";
+import { ThinkingDot } from "./ThinkingDot.js";
 
 function activityTone(state: ActivityState): Tone {
   switch (state) {
@@ -69,14 +71,23 @@ export function ActivityTree({
   width,
   now = Date.now(),
   expanded = false,
+  live = false,
 }: {
   activities: ActivityItem[];
   width: number;
   now?: number;
   expanded?: boolean;
+  /**
+   * True only in the LIVE active turn — gates the animated spinner on active rows.
+   * Must stay false for a committed/scrollback render: ThinkingDot drives a timer and
+   * would freeze/smear into native scrollback (see its INVARIANT). Active activities
+   * only exist on a live turn anyway, so a committed turn never animates.
+   */
+  live?: boolean;
 }) {
   if (activities.length === 0) return null;
   const set = glyphs();
+  const ascii = !unicodeOk();
   return (
     <box flexDirection="column">
       {activities.map((a, i) => {
@@ -89,7 +100,13 @@ export function ActivityTree({
             : a.state === "active"
               ? Math.max(0, now - a.startedAt)
               : undefined;
-        const detail = a.detail ?? (a.state === "done" ? a.summary : undefined);
+        // Default detail: the target, or the result summary once done. On FAILURE,
+        // surface the failure summary even when a target detail exists — the outcome
+        // must never be hidden behind the original "Reading foo.ts" target.
+        let detail = a.detail ?? (a.state === "done" ? a.summary : undefined);
+        if (a.state === "failed" && a.summary) {
+          detail = detail ? `${detail} · ${a.summary}` : a.summary;
+        }
         // Detail shares the row with the label and the right-aligned duration.
         // The label column is its real width (padded up to LABEL_WIDTH for short
         // verbs), plus one separating space — budget the remainder so a long
@@ -106,7 +123,18 @@ export function ActivityTree({
             <box flexDirection="row" justifyContent="space-between">
               <box flexDirection="row">
                 <text fg={ui.color.muted}>{branch} </text>
-                <text fg={toneColor(tone)}>{activityGlyph(a.state, set)} </text>
+                {live && a.state === "active" ? (
+                  // Animated spinner for a running tool (live turn only). One column +
+                  // a trailing space, matching the static glyph cell's width.
+                  <box flexDirection="row">
+                    <ThinkingDot ascii={ascii} />
+                    <text> </text>
+                  </box>
+                ) : (
+                  <text fg={toneColor(tone)}>
+                    {activityGlyph(a.state, set)}{" "}
+                  </text>
+                )}
                 <text>{a.label}</text>
                 {detail ? (
                   // Always at least one space after the label, and pad short
