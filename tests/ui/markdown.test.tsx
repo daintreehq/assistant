@@ -13,17 +13,29 @@ const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 // The native <markdown> renderable parses asynchronously (tree-sitter) on a path
 // that runs OFF the OpenTUI render loop, so a bare flush()/waitForVisualIdle() can
-// return before the parsed text has painted (they only settle the render loop). We
-// give the parse a wall-clock window, then flush() + waitForVisualIdle() to commit
-// and capture the repaint deterministically.
-async function waitForMarkdown(t: {
-  flush: () => Promise<void>;
-  waitForVisualIdle: () => Promise<void>;
-}) {
-  await t.flush();
-  await new Promise((r) => setTimeout(r, 150));
-  await t.flush();
-  await t.waitForVisualIdle();
+// return before the parsed text has painted (they only settle the render loop). A
+// single fixed wall-clock wait is racy on slow CI runners (the parse can land after
+// it), so we POLL: flush + settle + check the frame for the expected text, retrying
+// until it lands or we hit a generous ceiling. Returns the committed frame.
+async function waitForMarkdown(
+  t: {
+    flush: () => Promise<void>;
+    waitForVisualIdle: () => Promise<void>;
+    captureCharFrame: () => string;
+  },
+  expected: string,
+): Promise<string> {
+  let frame = "";
+  // ~3s ceiling (60 × 50ms) — far past the parse cost, but only ever waits as long
+  // as the parse actually takes since we return the moment the text appears.
+  for (let i = 0; i < 60; i++) {
+    await t.flush();
+    await t.waitForVisualIdle();
+    frame = t.captureCharFrame();
+    if (frame.includes(expected)) return frame;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return frame;
 }
 
 function turn(over: Partial<TurnCell>): TurnCell {
@@ -112,8 +124,7 @@ describe("TurnCellView markdown", () => {
     // parses asynchronously (tree-sitter) OFF the render loop — flush()/visualIdle
     // settle the render loop but can return before the parse lands. A short
     // wall-clock wait lets the parse complete, then flush() commits the repaint.
-    await waitForMarkdown(t);
-    const frame = t.captureCharFrame();
+    const frame = await waitForMarkdown(t, "do it now");
     expect(frame).toContain("do it now");
     expect(frame).not.toContain("**");
     expect(frame).not.toContain("▌");
@@ -245,8 +256,7 @@ describe("TurnCellView markdown", () => {
     );
     // Cancelled is finalized too, so the prose also routes through the async
     // native <markdown> renderable — settle past the parse before asserting.
-    await waitForMarkdown(t);
-    const frame = t.captureCharFrame();
+    const frame = await waitForMarkdown(t, "do it");
     expect(frame).toContain("do it");
     expect(frame).not.toContain("**");
     expect(frame).not.toContain("▌");
