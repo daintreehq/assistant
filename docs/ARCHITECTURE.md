@@ -89,17 +89,21 @@ SSE transport. Option B remains a viable intermediate, but only after issue #4
 
 ## Cockpit rendering model (src/ui/ControlRoom.tsx)
 
-The cockpit renders **inline** into the terminal's *main* screen buffer — never the
-alternate buffer — so the host terminal's own scrollback, mouse wheel, and selection
-work natively. `ControlRoom.tsx` splits the transcript at the trailing active turn:
-completed cells are committed once via Ink `<Static>` (they flow into native
-scrollback and never repaint), while the masthead, in-flight turn, status line, and
-composer form a repainting region pinned at the bottom. The masthead is live chrome
-(not a Static item) so its separator rule can resize with the host pane. There is no
-column-banded layout. On-demand views (operations via `^O`, help) render *in place of
-the composer* and return via `Esc`; a pinned full-screen panel is impossible without
-the alternate buffer, so none exist. Keep committed cells append-only — `<Static>`
-requires the reducer to mutate only the trailing active turn.
+The cockpit renders **inline** into the terminal's *main* screen buffer (the Claude
+Code model) — NEVER the alternate screen, because the host terminal (xterm, in Daintree)
+must own scrolling: native wheel-where-you-hover, scrollbar, selection, copy/paste.
+`ControlRoom.tsx` splits the transcript at the trailing active turn and commits completed
+cells once via Ink `<Static>` (they flow into native scrollback and never repaint); the
+masthead is plain text that scrolls away with them — **no full-width rule** (a committed
+rule would be wrapped by the host on a narrow resize and permanently break the layout).
+The in-flight turn, status line and composer are the small repainting region at the bottom.
+On resize the host reflows the committed scrollback natively and Ink repaints only the live
+region — we do NOT monkeypatch Ink's clear/erase (an earlier reflow guard that did was
+deleted; its over-erase ate the committed region on each SIGWINCH). Clean inline resize
+needs two things: live-region lines never WRAP (truncate so logical==physical rows), and
+nothing commits a full-width rule. Content is inset one column on each side. There is no
+column-banded layout. On-demand views (operations via `^O`, help) render *in place of the
+composer* and return via `Esc`.
 
 ## The ToolDef contract (from src/tools/types.ts)
 

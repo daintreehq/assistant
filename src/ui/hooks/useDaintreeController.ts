@@ -537,12 +537,13 @@ export function useDaintreeController(
   const [booting, setBooting] = useState(() => app.config.splash);
   const startupSettled = useRef(false);
   const animationDone = useRef(false);
-  // The masthead is live chrome now (it repaints — see ControlRoom), so a late name
-  // upgrade WOULD patch into it. We still gate the splash on the name resolving as a
-  // third splash-dismiss gate (bounded by the 8s bootCap) so the cockpit doesn't open
-  // on the provisional directory-leaf name and then visibly flip to the authoritative
-  // one a beat later. It flips true the moment the name resolves, the link is down, or
-  // the retries give up — never a hang.
+  // The masthead commits to <Static> (prints once, never repaints — see ControlRoom),
+  // so the authoritative project name has to be resolved BEFORE the cockpit's first
+  // paint; a late upgrade can no longer be patched into a live header. So the name
+  // fetch is a third splash-dismiss gate (bounded by the 8s bootCap). It flips true
+  // the moment the name resolves, the link is down, or the retries give up — never a
+  // hang. (When the header was live chrome this could lag the splash freely; Static
+  // changed that.)
   const projectSettled = useRef(false);
   const finishBootIfReady = useCallback(() => {
     if (
@@ -752,9 +753,8 @@ export function useDaintreeController(
       startupSettled.current = true;
       finishBootIfReady();
       // Ask Daintree for the authoritative project name and fill it into the header.
-      // This GATES the splash (via projectSettled) so the cockpit doesn't open on the
-      // provisional name and then flip — the live masthead WOULD show a late upgrade,
-      // we just prefer not to flash it.
+      // This now GATES the splash (via projectSettled) because the masthead freezes
+      // into <Static> on first paint — a name arriving after that can't be shown.
       // Retry a few times (right after connect the renderer may not have a project
       // bound yet), but always settle the gate in `finally` so a miss, an offline
       // link, or disposal drops cleanly into the cockpit with the provisional name

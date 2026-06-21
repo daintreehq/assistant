@@ -3,7 +3,6 @@ import { Box, Text } from "ink";
 import { Divider, KeyHint } from "../primitives.js";
 import { glyphs, ui, unicodeOk } from "../theme.js";
 import { MultilineInput } from "./MultilineInput.js";
-import { ThinkingDot } from "./ThinkingDot.js";
 import { paletteEntries } from "../../commandRegistry.js";
 
 /**
@@ -167,13 +166,12 @@ export function Composer({
         </Box>
       </Box>
 
-      {busy ? (
-        // Keep the busy indicator on its own short row. Sharing the prompt row
-        // forces either the placeholder or the stage to truncate inside the
-        // shrink-safe chrome budget.
+      {/* No "thinking" indicator at the input: the active turn already shows a live
+          "Thinking" line in the transcript above (TurnCellView), so repeating it here
+          is redundant. We still surface silently-queued follow-ups (#95). */}
+      {busy && queueDepth > 0 ? (
         <Text color={ui.color.info} wrap="truncate">
-          <ThinkingDot ascii={ascii} /> {stage}
-          {queueDepth > 0 ? ` · ${queueDepth} queued` : ""}
+          {queueDepth} queued
         </Text>
       ) : null}
 

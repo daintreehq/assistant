@@ -45,20 +45,15 @@ describe("Composer", () => {
     expect(Math.max(...ruleWidths)).toBeGreaterThan(LIVE_CHROME_MAX_WIDTH);
   });
 
-  it("shows the live stage while busy", () => {
+  it("shows NO thinking/stage/spinner at the input while busy", () => {
+    // The active turn shows the live "Thinking" line in the transcript above; the
+    // input must not repeat it (no stage text, no spinner glyph).
     const { lastFrame } = render(
       <Composer busy stage="Delegating" onSubmit={() => {}} />,
     );
-    expect(lastFrame() ?? "").toContain("Delegating");
-  });
-
-  it("renders the animated spinner glyph beside the busy stage (#115)", () => {
-    const { lastFrame } = render(
-      <Composer busy stage="Thinking" onSubmit={() => {}} />,
-    );
-    // The first braille frame is on screen before any tick — proves the spinner
-    // node is actually mounted in the busy line, not silently absent.
-    expect(lastFrame() ?? "").toContain("⠋");
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("Delegating");
+    expect(frame).not.toContain("⠋"); // no braille spinner
   });
 
   it("renders no spinner glyph or queued suffix when idle (#115)", () => {
@@ -70,13 +65,13 @@ describe("Composer", () => {
     expect(frame).not.toContain("queued");
   });
 
-  it("appends the queued follow-up count to the busy stage (#95)", () => {
+  it("surfaces silently-queued follow-ups while busy (#95)", () => {
     const { lastFrame } = render(
       <Composer busy stage="Watching" queueDepth={2} onSubmit={() => {}} />,
     );
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Watching");
     expect(frame).toContain("2 queued");
+    expect(frame).not.toContain("Watching"); // the stage is no longer shown here
   });
 
   it("omits the queued count when nothing is waiting (#95)", () => {
@@ -84,8 +79,8 @@ describe("Composer", () => {
       <Composer busy stage="Watching" queueDepth={0} onSubmit={() => {}} />,
     );
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Watching");
     expect(frame).not.toContain("queued");
+    expect(frame).not.toContain("Watching");
   });
 
   it("opens a filtered slash palette as you type a command", () => {

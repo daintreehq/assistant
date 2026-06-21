@@ -224,8 +224,9 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         plain.includes("CTX") ||
         plain.includes("Ask Daintree") ||
         plain.includes("commands") ||
-        /^agents \d+/.test(plain.trim());
-      return isIdleChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
+        /^\s*agents \d+/.test(plain);
+      // +1 for the one-column left inset (LEFT_PAD) that every live row now carries.
+      return isIdleChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH + 1;
     });
     expect(unsafe).toEqual([]);
   });
@@ -239,106 +240,36 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
         plain.includes("Ask Daintree") ||
         plain.includes("queued") ||
         plain.includes("commands") ||
-        /^agents \d+/.test(plain.trim());
-      return isBusyChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH;
+        /^\s*agents \d+/.test(plain);
+      // +1 for the one-column left inset (LEFT_PAD) that every live row now carries.
+      return isBusyChrome && visibleWidth(line) > LIVE_CHROME_MAX_WIDTH + 1;
     });
     expect(unsafe).toEqual([]);
   });
 
-  it("masthead rule spans the full cockpit width, not the prose cap", () => {
-    // The masthead rule is a flex `<Divider />` in the repainting region, so it
-    // yoga-fills the live width (stdout - gutter), past the ≤100 prose cap. The
-    // headless stdout is a fixed 100 cols, so widen it to 120 and re-render so the
-    // flex rule re-measures.
+  it("initial masthead rule spans the full cockpit width, not the prose cap", () => {
+    // The masthead commits to <Static> at first-render width (it prints once, then
+    // scrolls away with history); in production that first render is the real
+    // terminal width, so the rule spans the full chrome (cols-1), past the ≤100
+    // prose cap. The headless stdout is a fixed 100 cols, so widen it like liveFrame
+    // does, then bump staticKey to remount <Static> and re-emit the masthead at the
+    // wide width (its one-time commit can't otherwise be re-measured).
     const { rerender, stdout, lastFrame } = render(
       renderControlRoom("idle", 120, { staticKey: 0 }),
     );
     Object.defineProperty(stdout, "columns", { value: 120, configurable: true });
-    rerender(renderControlRoom("idle", 120, { staticKey: 0 }));
+    rerender(renderControlRoom("idle", 120, { staticKey: 1 }));
     const firstRule = (lastFrame() ?? "")
       .split("\n")
       .find((line) => /^[─-]+$/.test(line.replace(ANSI, "").trim()));
     expect(firstRule).toBeDefined();
-    // Exactly the full chrome width (cols - gutter = 119), not merely "> the 100 prose
-    // cap": an exact assertion proves a full-width rule spans the cockpit.
+    // Exactly the full chrome width (columns-1 = 119), not merely "> the 100 prose
+    // cap": an exact assertion proves the masthead rule itself spans the cockpit
+    // (a stray composer divider couldn't satisfy it if the header rule regressed).
     expect(visibleWidth(firstRule!)).toBe(119);
   });
 
-  it("reflows the masthead rule when the live width changes (no stale-width copy)", () => {
-    // The whole point of moving the masthead into the repainting region: its rule
-    // re-measures on resize. Drive the live width via stdout (yoga reads stdout for
-    // the flex rules) and assert the FIRST rule — the masthead's — tracks it, with no
-    // stale wider rule and exactly one masthead row per frame.
-    const mastheadRows = (frame: string) =>
-      frame
-        .split("\n")
-        .map((l) => l.replace(ANSI, ""))
-        .filter((l) => l.includes("Daintree Assistant"));
-    const firstRuleWidth = (frame: string) => {
-      const rule = frame
-        .split("\n")
-        .map((l) => l.replace(ANSI, ""))
-        .find((l) => /^[─-]+$/.test(l.trim()));
-      return rule ? rule.trim().length : -1;
-    };
-    const allRuleWidths = (frame: string) =>
-      frame
-        .split("\n")
-        .map((l) => l.replace(ANSI, ""))
-        .filter((l) => /^[─-]+$/.test(l.trim()))
-        .map((l) => l.trim().length);
-
-    const { rerender, stdout, lastFrame } = render(
-      renderControlRoom("idle", 80, { staticKey: 0 }),
-    );
-    Object.defineProperty(stdout, "columns", { value: 80, configurable: true });
-    rerender(renderControlRoom("idle", 80, { staticKey: 0 }));
-    expect(mastheadRows(lastFrame() ?? "")).toHaveLength(1);
-    expect(firstRuleWidth(lastFrame() ?? "")).toBe(79); // 80 - gutter(1)
-
-    // Shrink the live width: the masthead rule must follow, leaving no 79-wide copy.
-    Object.defineProperty(stdout, "columns", { value: 58, configurable: true });
-    rerender(renderControlRoom("idle", 80, { staticKey: 0 }));
-    expect(mastheadRows(lastFrame() ?? "")).toHaveLength(1);
-    expect(firstRuleWidth(lastFrame() ?? "")).toBe(57);
-    expect(allRuleWidths(lastFrame() ?? "")).not.toContain(79);
-
-    // Grow it back: the rule re-expands.
-    Object.defineProperty(stdout, "columns", { value: 80, configurable: true });
-    rerender(renderControlRoom("idle", 80, { staticKey: 0 }));
-    expect(firstRuleWidth(lastFrame() ?? "")).toBe(79);
-  });
-
-  it("orders the masthead below history/turn and above the input chrome", () => {
-    // Layout contract after the move: committed history (and any in-flight turn) sit
-    // ABOVE the masthead, which sits ABOVE the status line and composer. Distinct
-    // marker text on each band lets us assert the vertical order in one frame.
-    const frame = liveFrame("idle", 80, 120, {
-      transcript: [
-        {
-          kind: "note",
-          id: "note_hist",
-          level: "info",
-          text: "HISTORY_MARKER note",
-          ts: FIXED_NOW,
-        },
-      ],
-    });
-    const lines = frame.split("\n").map((l) => l.replace(ANSI, ""));
-    const at = (needle: string) => lines.findIndex((l) => l.includes(needle));
-    const history = at("HISTORY_MARKER");
-    const masthead = at("Daintree Assistant");
-    const composer = at("Ask Daintree to supervise");
-    expect(history).toBeGreaterThanOrEqual(0);
-    expect(masthead).toBeGreaterThan(history); // history above masthead
-    expect(composer).toBeGreaterThan(masthead); // masthead above the input
-  });
-
-  it("renders the masthead below committed history (it lives in the repainting region)", () => {
-    // The masthead moved OUT of <Static> into the live region so its rule reflows on
-    // resize. Consequence (accepted): committed history — including the startup
-    // "Connected" note — now sits ABOVE the masthead, which settles just above the
-    // input rather than pinned at the very top.
+  it("startup notes stay below the live masthead", () => {
     const frame = liveFrame("idle", 80, 120, {
       transcript: [
         {
@@ -357,8 +288,8 @@ describe("ControlRoom resize oscillation — no row out-runs the live width (#13
     const noteLine = lines.findIndex((line) =>
       line.includes("Connected to Daintree MCP."),
     );
-    expect(noteLine).toBeGreaterThanOrEqual(0);
-    expect(headerLine).toBeGreaterThan(noteLine);
+    expect(headerLine).toBeGreaterThanOrEqual(0);
+    expect(noteLine).toBeGreaterThan(headerLine);
   });
 });
 
@@ -531,12 +462,11 @@ describe("ControlRoom operations view (on-demand, replaces the composer)", () =>
   });
 });
 
-// Regression (#138): `reservedColumns` is the single right-edge gutter that keeps
-// every glyph clear of the terminal autowrap column AND of a host overlay scrollbar
-// painted over the rightmost cells. The masthead rule and the composer rules are now
-// ALL flex `<Divider />` inside the same root that has paddingRight={gutter}, so they
-// resolve to the SAME width instead of one rule stopping short of the others. Prove
-// every full-width rule equals `columns - reservedColumns`.
+// Regression (#138): the cockpit insets content by one column on each side — the
+// right by `reservedColumns` (the autowrap/scrollbar gutter), the left by LEFT_PAD
+// (=1). The only full-width rules left are the composer's top and bottom (the masthead
+// has no rule now); both flex-fill the live region, so they equal
+// `columns - reservedColumns - 1`.
 describe("ControlRoom reserved-column gutter (#138)", () => {
   const ruleWidths = (frame: string): number[] =>
     frame
@@ -546,17 +476,17 @@ describe("ControlRoom reserved-column gutter (#138)", () => {
       .map((line) => line.trim().length);
 
   it.each([
-    [1, 119],
-    [2, 118],
-    [3, 117],
+    [1, 118],
+    [2, 117],
+    [3, 116],
   ])(
-    "sizes the masthead AND composer rules to columns-%i",
+    "sizes the composer rules to columns - reserved(%i) - 1",
     (reserved, expectedWidth) => {
       const f = byKey("idle");
       const COLS = 120;
-      // All rules are flex now, so they yoga-fill stdout - paddingRight(gutter). The
-      // headless stdout is a fixed 100 cols, so widen it to the prop width and
-      // re-render so the flex rules re-measure at the wide width.
+      // The masthead commits to <Static> exactly once; the headless stdout is a fixed
+      // 100 cols, so widen it to the prop width and bump staticKey to re-measure the
+      // one-time commit at the wide width (mirrors the existing masthead-rule test).
       const { rerender, stdout, lastFrame } = render(
         <ControlRoom
           project="assistant"
@@ -587,18 +517,16 @@ describe("ControlRoom reserved-column gutter (#138)", () => {
           busy={false}
           stage=""
           view="home"
-          staticKey={0}
+          staticKey={1}
           now={FIXED_NOW}
           composerFocus={false}
         />,
       );
       const widths = ruleWidths(lastFrame() ?? "");
-      // Exactly three full-width rules in the idle home view: the masthead rule plus
-      // the composer's top and bottom rules. Asserting the count (not just ">= 2")
-      // proves the masthead rule is among them — a regressed masthead can't hide.
-      expect(widths).toHaveLength(3);
-      // Every full-width rule lands at the same gutter-shy column (masthead + live
-      // rules converge), proving the single `reservedColumns` gutter drives them all.
+      // Exactly two full-width rules in the idle home view: the composer's top and
+      // bottom. (The masthead has no rule — it scrolls away cleanly.)
+      expect(widths).toHaveLength(2);
+      // Both land at the same inset column (columns - reserved - LEFT_PAD).
       for (const w of widths) expect(w).toBe(expectedWidth);
     },
   );

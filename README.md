@@ -34,15 +34,17 @@ npm run dev -- "which worktrees are ready for review?"
 npm run dev -- doctor
 ```
 
-The default interactive experience is the **Daintree cockpit**, rendered *inline*
-in the terminal's **main** screen buffer — not an alternate full-screen buffer —
-so the host terminal's own scrollback, mouse wheel, and text selection keep working
-natively. Completed turns are committed once (via Ink `<Static>`) and flow into that
-native scrollback, never repainting; the masthead, the in-flight turn, a status line,
-and the composer form the repainting region pinned at the bottom. The masthead stays
-live (not committed to scrollback) so its separator rule resizes with the terminal.
-There is no column-banded layout: the cockpit renders the same single inline surface
-at every width.
+The default interactive experience is the **Daintree cockpit**, rendered *inline* in
+the terminal's **main** screen buffer (the Claude Code model) — never the alternate
+screen. This keeps scrolling where it belongs: the host terminal (xterm, in Daintree)
+owns the scrollback, so the mouse wheel scrolls wherever it hovers, and selection and
+copy/paste work natively. Completed turns are committed once (via Ink `<Static>`) and
+flow into that native scrollback; the masthead is plain text that scrolls away with
+them (no pinned full-width rule — a committed rule would wrap and break on resize). The
+in-flight turn, a status line, and the composer are the small repainting region at the
+bottom. On resize the host reflows the scrollback natively and Ink only repaints that
+region — there is no monkeypatching of Ink's erase. Content is inset one column on each
+side. There is no column-banded layout: the same single surface renders at every width.
 
 ```
 ◆ DAINTREE  assistant-main           OPERATOR  ● CONNECTED

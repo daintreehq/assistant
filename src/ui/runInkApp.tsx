@@ -2,28 +2,32 @@ import { render } from "ink";
 import { createElement } from "react";
 import type { App } from "../cli/app.js";
 import { DaintreeInkApp } from "./DaintreeInkApp.js";
-import { installInkResizeReflowGuard } from "./inkResizeReflowGuard.js";
 
 export interface InkAppOptions {
   /**
-   * Reserved. The cockpit is an INLINE surface (Claude Code style): it renders
-   * into the terminal's main screen buffer so native scrollback / mouse wheel /
-   * selection work, and commits completed turns to scrollback via <Static>. We do
-   * NOT use the alternate screen buffer — a pinned full-screen frame is mutually
-   * exclusive with native scrollback. Kept for call-site compatibility only.
+   * Reserved for call-site compatibility — the cockpit is ALWAYS an inline surface
+   * (Claude Code model) and never takes the alternate screen. We render into the
+   * terminal's MAIN buffer and commit completed turns to native scrollback via
+   * `<Static>`, so the host terminal (xterm in Daintree) owns scrolling: the mouse
+   * wheel scrolls wherever it hovers, selection and copy/paste work, and on resize
+   * the host reflows the scrollback while Ink only repaints the small live region at
+   * the bottom. The alternate screen would disable all of that, so we never use it.
    */
   alternateScreen?: boolean;
 }
 
 export async function startInkApp(app: App): Promise<void> {
   const instance = render(createElement(DaintreeInkApp, { app }), {
-    // We handle Ctrl+C ourselves so shutdown drains the scheduler/MCP/DB.
+    // INLINE / main buffer (no alternateScreen) so xterm keeps native scrollback +
+    // hover scroll. We deliberately do NOT monkeypatch Ink's resize/erase: the host
+    // reflows committed scrollback natively (the Claude Code approach). Resize stays
+    // clean as long as live-region lines never WRAP (they truncate) and nothing
+    // commits a full-width rule to scrollback (the host would wrap it on shrink).
     exitOnCtrlC: false,
     // Keep stray console output from corrupting the live region.
     patchConsole: true,
     kittyKeyboard: { mode: "auto" },
   });
-  await installInkResizeReflowGuard(process.stdout);
 
   try {
     await instance.waitUntilExit();

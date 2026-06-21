@@ -1,6 +1,5 @@
 import type { ReactElement } from "react";
 import chalk from "chalk";
-import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { Header } from "../../src/ui/components/Header.js";
 
@@ -100,32 +99,16 @@ describe("Header", () => {
     expect(frame).not.toContain("tier ");
   });
 
-  it("always closes the header with a full-width rule", () => {
-    // The rule is always present now (it closes the header off from the body),
-    // not just when logging is active.
-    const frame = render(<Header columns={60} version="0.1.0" />).lastFrame() ?? "";
-    expect(frame).toMatch(/[─-]{10,}/);
+  it("renders NO full-width rule (it scrolls away cleanly, Claude Code model)", () => {
+    // A committed full-width rule would be wrapped by the host on a narrow resize and
+    // permanently break the historical layout, so the masthead has none.
+    const frame =
+      render(<Header columns={60} version="0.1.0" tier="system" logging logFile="/t.log" />)
+        .lastFrame() ?? "";
+    expect(stripAnsi(frame)).not.toMatch(/[─-]{4,}/);
   });
 
-  it("flex-fills its container width (so the rule reflows on resize)", () => {
-    // The masthead now renders in the repainting region, so its rule yoga-fills the
-    // live width every frame (reflowing on resize / matching the composer rules)
-    // rather than taking a frozen character count. Bound it with a width box and
-    // assert the rule fills exactly that width.
-    const WIDTH = 48;
-    const frame = stripAnsi(
-      render(
-        <Box width={WIDTH}>
-          <Header version="0.1.0" />
-        </Box>,
-      ).lastFrame() ?? "",
-    );
-    const rule = frame.split("\n").find((line) => /^[─-]+$/.test(line));
-    expect(rule).toBeDefined();
-    expect(rule!.length).toBe(WIDTH);
-  });
-
-  it("places the rule directly under the project and a blank row below it", () => {
+  it("places the project directly under the wordmark", () => {
     const frame = stripAnsi(
       render(
         <Header columns={60} version="0.1.0" project="Daintree Assistant" />,
@@ -134,8 +117,6 @@ describe("Header", () => {
     const lines = frame.split("\n");
     expect(lines[0]).toContain("Daintree Assistant v0.1.0");
     expect(lines[1]).toBe("Daintree Assistant");
-    expect(lines[2]).toMatch(/^[─-]+$/);
-    expect(lines[3]).toBe("");
   });
 
   it("shows no emoji or brand mark — plain text only", () => {
@@ -143,45 +124,34 @@ describe("Header", () => {
     expect(frame).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
-  // Regression (#138): the `wrap="truncate"` rows (notably the long log path) need a
-  // bounded container or they physically wrap. In the repainting region the header
-  // flex-fills the live width, which IS that bound. Lock it in: inside a narrow box
-  // every masthead row fits the box, the rule is exactly the box width, and the long
-  // log path truncates with an ellipsis instead of wrapping.
-  it("truncates every masthead row to its container width (no wrapping)", () => {
+  // Regression (#138): the header commits to <Static>, where Ink lays each item out
+  // in an isolated tree with no parent width — so `width="100%"` collapsed to content
+  // width and the `wrap="truncate"` rows (notably the long log path) had no bound and
+  // physically wrapped. A numeric root width gives truncate a real bound. Lock it in:
+  // at a narrow width EVERY masthead row must fit `columns`, the rule is exactly
+  // `columns`, and the long log path truncates with an ellipsis instead of wrapping.
+  it("truncates every masthead row to the column bound (no wrapping)", () => {
     const COLS = 22;
     const frame = stripAnsi(
       render(
-        <Box width={COLS}>
-          <Header
-            version="0.1.0"
-            project="a-very-long-project-name-that-overflows"
-            tier="system"
-            logging
-            logFile="/Users/gpriday/.daintree/logs/2026-06-20-ses_02f0965b.log"
-          />
-        </Box>,
+        <Header
+          columns={COLS}
+          version="0.1.0"
+          project="a-very-long-project-name-that-overflows"
+          tier="system"
+          logging
+          logFile="/Users/gpriday/.daintree/logs/2026-06-20-ses_02f0965b.log"
+        />,
       ).lastFrame() ?? "",
     );
     const rows = frame.split("\n");
     for (const row of rows) {
       expect(row.length).toBeLessThanOrEqual(COLS);
     }
-    // The full-width rule fills exactly the box width (no more, no less).
-    expect(rows).toContain("─".repeat(COLS));
-    // The log path lives on EXACTLY ONE row (the "logging" row), is clipped to the box
-    // with the truncation ellipsis, and no fragment of the path spills onto a second
-    // physical row — i.e. it truncated, it did not wrap.
-    const loggingRows = rows.filter((r) => r.includes("logging"));
-    expect(loggingRows).toHaveLength(1);
-    expect(loggingRows[0]).toContain("…");
-    expect(loggingRows[0].length).toBeLessThanOrEqual(COLS);
-    // The path is .../2026-06-20-ses_02f0965b.log — assert no row carries a later
-    // fragment (a wrap would push "ses_…"/".log" onto its own row).
-    for (const row of rows) {
-      expect(row).not.toContain("ses_02f0965b");
-      expect(row).not.toMatch(/\.log\b/);
-    }
+    // The over-long log path is clipped with the truncation ellipsis, not wrapped
+    // onto a second physical row.
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("ses_02f0965b.log");
   });
 
   it("names the active run when one is supplied", () => {
@@ -191,7 +161,7 @@ describe("Header", () => {
     expect(lastFrame() ?? "").toContain("repair watcher tests");
   });
 
-  it("surfaces the debug log under a rule when active", () => {
+  it("surfaces the debug log when active", () => {
     const frame =
       render(
         <Header
@@ -201,28 +171,26 @@ describe("Header", () => {
           logFile="/tmp/daintree.log"
         />,
       ).lastFrame() ?? "";
-    expect(frame).toMatch(/[─-]{10,}/); // the rule that opens the log section
     expect(frame).toContain("logging"); // spelled out, not "LO"
     expect(frame).toContain("/tmp/daintree.log");
   });
 
-  // Guards the header's rendered row count. The header owns the blank line BELOW
-  // its rule so debug logging and the first transcript row never sit flush against
-  // the masthead separator.
+  // Guards the header's rendered row count (no rule now; a blank row separates the
+  // logging line from the identity block).
   it("renders a stable row count", () => {
     const rows = (el: ReactElement) =>
       (render(el).lastFrame() ?? "").split("\n").length;
-    // wordmark (1) + rule + blank below rule = 3.
-    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(3);
-    // + the logging line after the blank row = 4.
-    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(4);
-    // wordmark + project + run subtitle = 3 text rows + rule + blank = 5.
+    // Just the wordmark.
+    expect(rows(<Header columns={60} version="0.1.0" />)).toBe(1);
+    // wordmark + blank + logging line.
+    expect(rows(<Header columns={60} version="0.1.0" logging logFile="/t.log" />)).toBe(3);
+    // wordmark + project + run subtitle.
     expect(
       rows(<Header columns={60} version="0.1.0" project="p" runTitle="busy" />),
-    ).toBe(5);
+    ).toBe(3);
   });
 
-  it("keeps an ASCII rule and bullet when unicode is disabled", () => {
+  it("keeps the ASCII bullet (no Unicode) when unicode is disabled", () => {
     const prev = process.env.DAINTREE_ASCII;
     process.env.DAINTREE_ASCII = "1";
     try {
@@ -238,7 +206,6 @@ describe("Header", () => {
         ).lastFrame() ?? "";
       expect(frame).toContain("Daintree Assistant");
       expect(frame).toContain("full access"); // tier gloss still rendered
-      expect(frame).toMatch(/-{10,}/); // ASCII rule (hyphens, not box-drawing)
       // Neither the log separator NOR the tier gloss may emit a Unicode bullet.
       expect(frame).not.toContain("·");
     } finally {

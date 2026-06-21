@@ -104,22 +104,27 @@ thread.
   never inherits a prior session's watchers. Never imply background supervision.
 - **UI boundary.** Only `src/ui` imports Ink. The runtime emits structured events via
   `AgentEventSink`, consumed by the Ink `UiBridge` or the console sink.
-- **Inline cockpit, native scrollback (Claude Code model).** The cockpit renders into the
-  terminal's **main** screen buffer (NOT the alternate buffer — `runInkApp.tsx` no longer
-  passes `alternateScreen`), so the host terminal's own scrollback / mouse wheel / selection
-  work natively. `ControlRoom.tsx` splits the transcript at the trailing **active** turn:
-  completed cells (immutable per `transcriptReducer`) are committed once via Ink **`<Static>`**
-  — they flow into native scrollback and never repaint — while the in-flight turn, status line
-  and composer are the repainting region pinned at the bottom. The header (`Header`) is printed
-  ONCE as Static item 0 and is allowed to scroll away; it is NOT sticky. This supersedes the
-  earlier "full-screen multi-layout is canonical" decision: the pinned sidebar/standard/wide
-  banding and `SidebarHome`/`OpsRail`/`AttentionBanner` are gone from the live shell. Operations
-  and help are **on-demand** views (`^O` / `/panel`, Esc returns) rendered in place of the
-  composer — never pinned, since a pinned full-screen panel is mutually exclusive with native
-  scrollback. Do NOT reintroduce the alternate buffer or raw-parse SGR mouse mode (it fights
-  Ink's stdin; see `useAttentionSignal.ts`). "DEC 2026" = synchronized output (flicker), not
-  scrolling. `<Static>` requires committed cells stay append-only — keep the reducer mutating
-  only the trailing active turn.
+- **Inline cockpit — NEVER the alternate screen (Claude Code model).** The cockpit renders
+  INLINE into the terminal's **main** screen buffer. `runInkApp.tsx` does NOT pass
+  `alternateScreen`, and it must stay that way: **Daintree always runs the assistant inside
+  xterm, and the host (xterm) must own scrolling** — native mouse-wheel-where-you-hover,
+  scrollbar, selection and copy/paste. The alternate screen would disable all of that, so it is
+  forbidden. (This is what Claude Code / gemini-cli / aider do; alt-screen is only for heavy
+  graphical TUIs.) `ControlRoom.tsx` commits completed turns to native scrollback via Ink
+  **`<Static>`** (split at the trailing **active** turn — keep `transcriptReducer` mutating only
+  that tail so committed cells stay append-only). On resize the HOST reflows the scrollback
+  natively and Ink only repaints the small live region; we do **NOT** monkeypatch Ink's
+  clear/erase (an earlier `inkResizeReflowGuard` did, and its over-erase progressively ATE the
+  committed region on each SIGWINCH in Daintree's animating pane — deleted, never reinstate).
+  Two rules for clean inline resize: (1) **live-region lines must never WRAP** — truncate so
+  logical rows == physical rows, or Ink's `eraseLines` undershoots and orphans a row; (2) **never
+  commit a full-width rule to scrollback** — the host wraps it on shrink and permanently breaks
+  the layout, which is why the **`Header` has NO rule** and is plain text that scrolls away.
+  Content is inset one column on every side (`LEFT_PAD` + the `reservedColumns` right gutter) so
+  nothing touches the edges. Do NOT raw-parse SGR mouse mode (it fights Ink's stdin; see
+  `useAttentionSignal.ts`). Operations/help are **on-demand** views (`^O` / `/panel`, Esc
+  returns) in place of the composer; the old `SidebarHome`/`OpsRail`/`AttentionBanner` banding
+  stays gone — single column.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcherEngine.ts`):
   deterministic signals (agentState, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
