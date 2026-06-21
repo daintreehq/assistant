@@ -16,7 +16,7 @@ src/
   models/
     fireworks.ts        FireworksClient, ChatMessage, ChatTool, ThinkFilter
     router.ts           ModelRouter
-    prompts/            base.ts, runtimeContext.ts, daintreeMcp.ts, recipes.ts (system prompts)
+    prompts/            base.ts, runtimeContext.ts, daintreeMcp.ts, skills.ts (system prompts)
   safety/policy.ts      tier gating, confirmation, no-file-edit guard
   tools/
     types.ts            ToolDef, ToolContext, ok(), fail(), NO_ARGS
@@ -31,7 +31,7 @@ src/
     agentTaskTools.ts   agentTaskTools: ToolDef[]     (no-file-edit spawn escape hatch)
     grantTools.ts       grantTools: ToolDef[]         (automation grants)
     workflowTools.ts    workflowTools: ToolDef[]      (workflow create/get/list/update)
-    recipeRunTools.ts   recipeRunTools: ToolDef[]     (recipe run/step/load)
+    skillRunTools.ts    skillRunTools: ToolDef[]      (skill run/step/load)
     auditTools.ts       auditTools: ToolDef[]         (audit.export)
     memoryTools.ts      memoryTools: ToolDef[]        (persistent memory recall/save/…)
     artifactTools.ts    artifactTools: ToolDef[]      (artifact.read)
@@ -213,8 +213,8 @@ export const fsTools: ToolDef[] = [
 ### workflowTools.ts — workflow runs (risk "local"/"read")
 - `workflow.create` / `workflow.get` / `workflow.list` / `workflow.update` — durable multi-step workflow records persisted in SQLite, advanced over multiple turns.
 
-### recipeRunTools.ts — recipe runs (risk "local")
-- `recipe.load` — load recipe bodies into the active context. `recipe.run.get` — inspect a run. `recipe.step.advance` — advance a recipe run to its next step.
+### skillRunTools.ts — skill runs (risk "local")
+- `skill.load` — load skill bodies into the active context. `skill.run.get` — inspect a run. `skill.step.advance` — advance a skill run to its next step.
 
 ### auditTools.ts — audit export (risk "read")
 - `audit.export` — export the audit log (every dispatched tool call) for review.

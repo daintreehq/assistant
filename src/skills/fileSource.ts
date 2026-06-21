@@ -1,44 +1,44 @@
 /**
- * Load the assistant recipe library from `recipes/*.md` content files.
+ * Load the assistant skill library from `skills/*.md` content files.
  *
- * Each recipe is a single markdown file: a small YAML-ish frontmatter block of
+ * Each skill is a single markdown file: a small YAML-ish frontmatter block of
  * metadata (id, title, version, the two headers, tags, risk, requiredTools)
- * followed by the procedural body. Authoring one is "drop a file in `recipes/`"
- * — see docs/RECIPES.md. Loading happens once, synchronously, at registry
+ * followed by the procedural body. Authoring one is "drop a file in `skills/`"
+ * — see docs/SKILLS.md. Loading happens once, synchronously, at registry
  * construction (the registry stays sync), and every file is validated through the
- * `Recipe` Zod schema, so a malformed recipe fails loudly at boot with its
+ * `Skill` Zod schema, so a malformed skill fails loudly at boot with its
  * filename rather than silently shipping a broken runbook.
  *
- * This is the on-disk implementation of the swappable recipe seam (see source.ts):
- * a future hosted recipe service would replace this loader without touching any
+ * This is the on-disk implementation of the swappable skill seam (see source.ts):
+ * a future hosted skill service would replace this loader without touching any
  * caller. We deliberately parse a *small, fixed* subset of YAML by hand rather
  * than add a dependency — the frontmatter shape is ours to constrain.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Recipe } from "./types.js";
+import { Skill } from "./types.js";
 
-/** Env override for the recipes directory (absolute path). Mostly for tests. */
-const RECIPES_DIR_ENV = "DAINTREE_ASSISTANT_RECIPES_DIR";
+/** Env override for the skills directory (absolute path). Mostly for tests. */
+const SKILLS_DIR_ENV = "DAINTREE_ASSISTANT_SKILLS_DIR";
 
 /**
- * Find the project's `recipes/` directory by walking up from this module to the
- * NEAREST `package.json` (our package root) and resolving `recipes/` beside it.
- * This resolves the same way whether we run from source (`src/recipes/…` under
+ * Find the project's `skills/` directory by walking up from this module to the
+ * NEAREST `package.json` (our package root) and resolving `skills/` beside it.
+ * This resolves the same way whether we run from source (`src/skills/…` under
  * bun/tsx/vitest) or from the bundle (`dist/index.js` under node) — both live
  * inside the package root. We stop at the first package.json rather than climbing
- * further, so we can never accidentally adopt an ancestor/consumer's `recipes/`
- * dir: if our own package root has no `recipes/`, that's an error, not a reason to
- * keep walking. Returns undefined when no package root or no `recipes/` is found.
+ * further, so we can never accidentally adopt an ancestor/consumer's `skills/`
+ * dir: if our own package root has no `skills/`, that's an error, not a reason to
+ * keep walking. Returns undefined when no package root or no `skills/` is found.
  */
-function findRecipesDir(startDir: string): string | undefined {
+function findSkillsDir(startDir: string): string | undefined {
   let dir = startDir;
   for (;;) {
     if (fs.existsSync(path.join(dir, "package.json"))) {
-      const recipes = path.join(dir, "recipes");
-      return fs.existsSync(recipes) && fs.statSync(recipes).isDirectory()
-        ? recipes
+      const skills = path.join(dir, "skills");
+      return fs.existsSync(skills) && fs.statSync(skills).isDirectory()
+        ? skills
         : undefined;
     }
     const parent = path.dirname(dir);
@@ -47,16 +47,16 @@ function findRecipesDir(startDir: string): string | undefined {
   }
 }
 
-/** Resolve the directory recipe files live in (env override wins). Throws if none. */
-export function resolveRecipesDir(): string {
-  const override = process.env[RECIPES_DIR_ENV]?.trim();
+/** Resolve the directory skill files live in (env override wins). Throws if none. */
+export function resolveSkillsDir(): string {
+  const override = process.env[SKILLS_DIR_ENV]?.trim();
   if (override) return override;
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const found = findRecipesDir(here);
+  const found = findSkillsDir(here);
   if (!found) {
     throw new Error(
-      `Could not locate the recipes/ directory (searched up from ${here}). ` +
-        `Set ${RECIPES_DIR_ENV} to override.`,
+      `Could not locate the skills/ directory (searched up from ${here}). ` +
+        `Set ${SKILLS_DIR_ENV} to override.`,
     );
   }
   return found;
@@ -80,11 +80,11 @@ function coerceScalar(raw: string): string | number | boolean {
 }
 
 /**
- * Parse the small YAML subset we allow in recipe frontmatter:
+ * Parse the small YAML subset we allow in skill frontmatter:
  *   - `key: scalar`            (string / int / bool; quotes optional)
  *   - `key: [a, b, c]`         inline array
  *   - `key:` then `  - item`   block-list array (preferred for long lists)
- * Anything else is rejected so a typo can't silently produce a half-parsed recipe.
+ * Anything else is rejected so a typo can't silently produce a half-parsed skill.
  */
 function parseFrontmatter(
   block: string,
@@ -135,11 +135,11 @@ function parseFrontmatter(
 }
 
 /**
- * Parse one recipe markdown file into a validated Recipe. The frontmatter supplies
- * the metadata; the markdown beneath the closing `---` is the recipe body. Throws
+ * Parse one skill markdown file into a validated Skill. The frontmatter supplies
+ * the metadata; the markdown beneath the closing `---` is the skill body. Throws
  * (with the filename) on a missing/garbled frontmatter block or a schema violation.
  */
-export function parseRecipeFile(text: string, filename: string): Recipe {
+export function parseSkillFile(text: string, filename: string): Skill {
   // Tolerate a leading BOM and any blank lines before the opening fence.
   const normalized = text.replace(/^﻿/, "").replace(/^(?:[ \t]*\r?\n)+/, "");
   const fence = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?([\s\S]*)$/.exec(
@@ -147,22 +147,22 @@ export function parseRecipeFile(text: string, filename: string): Recipe {
   );
   if (!fence) {
     throw new Error(
-      `${filename}: missing YAML frontmatter (a recipe must open with a --- … --- block).`,
+      `${filename}: missing YAML frontmatter (a skill must open with a --- … --- block).`,
     );
   }
   const meta = parseFrontmatter(fence[1], filename);
   const body = fence[2].trim();
   try {
-    return Recipe.parse({ ...meta, body });
+    return Skill.parse({ ...meta, body });
   } catch (e) {
     throw new Error(
-      `${filename}: invalid recipe — ${e instanceof Error ? e.message : String(e)}`,
+      `${filename}: invalid skill — ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
 
-/** True for files we treat as recipe content (skip READMEs and dot/underscore files). */
-function isRecipeFile(name: string): boolean {
+/** True for files we treat as skill content (skip READMEs and dot/underscore files). */
+function isSkillFile(name: string): boolean {
   if (!name.toLowerCase().endsWith(".md")) return false;
   if (name.startsWith(".") || name.startsWith("_")) return false;
   if (name.toLowerCase() === "readme.md") return false;
@@ -170,15 +170,15 @@ function isRecipeFile(name: string): boolean {
 }
 
 /**
- * Load and validate every recipe file in `dir` (default: the resolved recipes
+ * Load and validate every skill file in `dir` (default: the resolved skills
  * directory), sorted by filename for a deterministic order. Each file is parsed
  * and validated; one bad file aborts the whole load so the problem is impossible
  * to miss.
  */
-export function loadRecipesFromDir(dir: string = resolveRecipesDir()): Recipe[] {
-  const names = fs.readdirSync(dir).filter(isRecipeFile).sort();
+export function loadSkillsFromDir(dir: string = resolveSkillsDir()): Skill[] {
+  const names = fs.readdirSync(dir).filter(isSkillFile).sort();
   return names.map((name) => {
     const full = path.join(dir, name);
-    return parseRecipeFile(fs.readFileSync(full, "utf8"), name);
+    return parseSkillFile(fs.readFileSync(full, "utf8"), name);
   });
 }

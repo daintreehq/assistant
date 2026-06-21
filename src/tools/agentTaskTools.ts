@@ -46,7 +46,7 @@ const EXPLORE_CONSTRAINTS_BLOCK = [
 /**
  * Compose the agent prompt from the task, any caller-supplied context hints
  * (relevant file paths, whether to include a diff, the target worktree), and the
- * standard constraints block. The schema accepts `context`, the recipe tells the
+ * standard constraints block. The schema accepts `context`, the skill tells the
  * model to pass file paths — so we must actually fold them into the prompt.
  */
 function buildAgentPrompt(args: SpawnForEditsArgs): string {

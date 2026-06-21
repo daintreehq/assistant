@@ -18,8 +18,8 @@ import type {
   MemoryRecord,
   MemorySource,
   QueueEvent,
-  RecipeRunStateRecord,
-  RecipeSelectionLogRecord,
+  SkillRunStateRecord,
+  SkillSelectionLogRecord,
   RunEventRecord,
   RunSummaryRecord,
   TimerRecord,
@@ -47,7 +47,7 @@ const DAY_MS = 86_400_000;
 
 /**
  * Bounded-retention policy for the append-only tables. The per-project DB file is
- * long-lived, so `audit_log`/`run_events`/`conversation`/`recipe_selection_log`
+ * long-lived, so `audit_log`/`run_events`/`conversation`/`skill_selection_log`
  * (write-only, never pruned by their callers) would otherwise grow without bound,
  * resolved/expired `events` rows would never be reclaimed, and soft-deleted
  * `memories` would linger in the FTS index forever. {@link Db.gcRetentionSweep}
@@ -68,9 +68,9 @@ export interface RetentionPolicy {
    *  so this is a safety net rather than a load-bearing constraint. */
   conversationMaxAgeMs: number;
   conversationKeepRows: number;
-  /** Recipe-selection diagnostics — analytics only, safe to prune aggressively. */
-  recipeSelLogMaxAgeMs: number;
-  recipeSelLogKeepRows: number;
+  /** Skill-selection diagnostics — analytics only, safe to prune aggressively. */
+  skillSelLogMaxAgeMs: number;
+  skillSelLogKeepRows: number;
   /** Hard-delete resolved/expired inbox events this long after they went
    *  terminal — `upsertEvent` only dedupes against open rows, so terminal rows are
    *  otherwise dead weight. */
@@ -91,8 +91,8 @@ export const DEFAULT_RETENTION: RetentionPolicy = {
   runEventsKeepRuns: 500,
   conversationMaxAgeMs: 90 * DAY_MS,
   conversationKeepRows: 1000,
-  recipeSelLogMaxAgeMs: 30 * DAY_MS,
-  recipeSelLogKeepRows: 500,
+  skillSelLogMaxAgeMs: 30 * DAY_MS,
+  skillSelLogKeepRows: 500,
   eventsTerminalAgeMs: 7 * DAY_MS,
   memoriesDeletedAgeMs: 30 * DAY_MS,
 };
@@ -214,17 +214,17 @@ CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation (sessionId, seq);
 -- index is keyed on sessionId/seq, useless for an across-session age sweep).
 CREATE INDEX IF NOT EXISTS idx_conv_createdat ON conversation (createdAt);
 
-CREATE TABLE IF NOT EXISTS recipe_selection_log (
+CREATE TABLE IF NOT EXISTS skill_selection_log (
   id TEXT PRIMARY KEY,
   ts INTEGER NOT NULL,
   sessionId TEXT NOT NULL,
   userInput TEXT NOT NULL,
-  selectedRecipeIdsJson TEXT NOT NULL,
+  selectedSkillIdsJson TEXT NOT NULL,
   confidence REAL NOT NULL,
   taskType TEXT,
   reason TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_recipe_sel_ts ON recipe_selection_log (ts);
+CREATE INDEX IF NOT EXISTS idx_skill_sel_ts ON skill_selection_log (ts);
 
 CREATE TABLE IF NOT EXISTS automation_grants (
   id TEXT PRIMARY KEY,
@@ -287,10 +287,10 @@ CREATE TABLE IF NOT EXISTS agent_launches (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_launches_key ON agent_launches (idempotencyKey, stage, updatedAt);
 
-CREATE TABLE IF NOT EXISTS recipe_run_state (
+CREATE TABLE IF NOT EXISTS skill_run_state (
   id TEXT PRIMARY KEY,
   sessionId TEXT NOT NULL,
-  recipeId TEXT NOT NULL,
+  skillId TEXT NOT NULL,
   currentStep INTEGER NOT NULL DEFAULT 0,
   stepsJson TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'active',
@@ -298,9 +298,9 @@ CREATE TABLE IF NOT EXISTS recipe_run_state (
   updatedAt INTEGER NOT NULL,
   completedAt INTEGER
 );
--- One run per (session, recipe): the selector caps a session at three mutually
--- exclusive recipes, so the natural key is unique and lets the tool upsert by it.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_recipe_run_state_key ON recipe_run_state (sessionId, recipeId);
+-- One run per (session, skill): the selector caps a session at three mutually
+-- exclusive skills, so the natural key is unique and lets the tool upsert by it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_run_state_key ON skill_run_state (sessionId, skillId);
 
 -- Cross-session project memory. Each row is one durable fact/decision/procedure
 -- scoped to this (already per-project) database. forget = soft delete (deletedAt);
@@ -380,9 +380,9 @@ const WORKFLOW_UPDATE_COLS: ReadonlySet<string> = new Set([
   "terminalIdsJson", "watcherIdsJson", "queueEventIdsJson", "status",
   "nextActionJson", "notesJson", "updatedAt", "completedAt",
 ]);
-// `id`/`sessionId`/`recipeId`/`startedAt` are immutable; `updatedAt` is always
-// forced by the store (see updateRecipeRunState).
-const RECIPE_RUN_UPDATE_COLS: ReadonlySet<string> = new Set([
+// `id`/`sessionId`/`skillId`/`startedAt` are immutable; `updatedAt` is always
+// forced by the store (see updateSkillRunState).
+const SKILL_RUN_UPDATE_COLS: ReadonlySet<string> = new Set([
   "currentStep", "stepsJson", "status", "updatedAt", "completedAt",
 ]);
 // `id`/`idempotencyKey`/`createdAt` are immutable; `updatedAt` is always forced
@@ -591,10 +591,10 @@ export class Db {
       retention.conversationKeepRows,
     );
     this.deleteByAgeAndCount(
-      "recipe_selection_log",
+      "skill_selection_log",
       "ts",
-      now - retention.recipeSelLogMaxAgeMs,
-      retention.recipeSelLogKeepRows,
+      now - retention.skillSelLogMaxAgeMs,
+      retention.skillSelLogKeepRows,
     );
     // Terminal inbox events (resolved or expired) past the window. upsertEvent
     // only dedupes against open/unexpired rows, so these are unreachable dead
@@ -1352,24 +1352,24 @@ export class Db {
       .all(sessionId) as unknown as ConversationMessageRecord[];
   }
 
-  /* ----------------------- recipe selection log -------------------------- */
+  /* ----------------------- skill selection log -------------------------- */
 
-  insertRecipeSelection(
-    rec: Omit<RecipeSelectionLogRecord, "id" | "ts"> & Partial<RecipeSelectionLogRecord>,
-  ): RecipeSelectionLogRecord {
-    const full: RecipeSelectionLogRecord = {
+  insertSkillSelection(
+    rec: Omit<SkillSelectionLogRecord, "id" | "ts"> & Partial<SkillSelectionLogRecord>,
+  ): SkillSelectionLogRecord {
+    const full: SkillSelectionLogRecord = {
       id: rec.id ?? `rsl_${randomUUID().slice(0, 8)}`,
       ts: rec.ts ?? Date.now(),
       sessionId: rec.sessionId,
       userInput: rec.userInput,
-      selectedRecipeIdsJson: rec.selectedRecipeIdsJson,
+      selectedSkillIdsJson: rec.selectedSkillIdsJson,
       confidence: rec.confidence,
       taskType: rec.taskType,
       reason: rec.reason,
     };
     this.db
       .prepare(
-        `INSERT INTO recipe_selection_log (id,ts,sessionId,userInput,selectedRecipeIdsJson,confidence,taskType,reason)
+        `INSERT INTO skill_selection_log (id,ts,sessionId,userInput,selectedSkillIdsJson,confidence,taskType,reason)
          VALUES (?,?,?,?,?,?,?,?)`,
       )
       .run(
@@ -1377,7 +1377,7 @@ export class Db {
         full.ts,
         full.sessionId,
         full.userInput,
-        full.selectedRecipeIdsJson,
+        full.selectedSkillIdsJson,
         full.confidence,
         full.taskType ?? null,
         full.reason ?? null,
@@ -1385,10 +1385,10 @@ export class Db {
     return full;
   }
 
-  listRecipeSelections(limit = 50): RecipeSelectionLogRecord[] {
+  listSkillSelections(limit = 50): SkillSelectionLogRecord[] {
     return this.db
-      .prepare("SELECT * FROM recipe_selection_log ORDER BY ts DESC LIMIT ?")
-      .all(limit) as unknown as RecipeSelectionLogRecord[];
+      .prepare("SELECT * FROM skill_selection_log ORDER BY ts DESC LIMIT ?")
+      .all(limit) as unknown as SkillSelectionLogRecord[];
   }
 
   /* -------------------------- workflow runs ------------------------------ */
@@ -1506,17 +1506,17 @@ export class Db {
     };
   }
 
-  /* ------------------------ recipe run state ----------------------------- */
+  /* ------------------------ skill run state ----------------------------- */
 
-  insertRecipeRunState(
-    rec: Omit<RecipeRunStateRecord, "id" | "status" | "startedAt" | "updatedAt"> &
-      Partial<RecipeRunStateRecord>,
-  ): RecipeRunStateRecord {
+  insertSkillRunState(
+    rec: Omit<SkillRunStateRecord, "id" | "status" | "startedAt" | "updatedAt"> &
+      Partial<SkillRunStateRecord>,
+  ): SkillRunStateRecord {
     const now = rec.startedAt ?? Date.now();
-    const full: RecipeRunStateRecord = {
+    const full: SkillRunStateRecord = {
       id: rec.id ?? `rrs_${randomUUID().slice(0, 8)}`,
       sessionId: rec.sessionId,
-      recipeId: rec.recipeId,
+      skillId: rec.skillId,
       currentStep: rec.currentStep ?? 0,
       stepsJson: rec.stepsJson ?? "[]",
       status: rec.status ?? "active",
@@ -1526,13 +1526,13 @@ export class Db {
     };
     this.db
       .prepare(
-        `INSERT INTO recipe_run_state (id,sessionId,recipeId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt)
+        `INSERT INTO skill_run_state (id,sessionId,skillId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt)
          VALUES (?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         full.id,
         full.sessionId,
-        full.recipeId,
+        full.skillId,
         full.currentStep,
         full.stepsJson,
         full.status,
@@ -1586,56 +1586,56 @@ export class Db {
     return full;
   }
 
-  /** Look up the single run for a (session, recipe) pair — the natural key. */
-  getRecipeRunState(
+  /** Look up the single run for a (session, skill) pair — the natural key. */
+  getSkillRunState(
     sessionId: string,
-    recipeId: string,
-  ): RecipeRunStateRecord | undefined {
+    skillId: string,
+  ): SkillRunStateRecord | undefined {
     const row = this.db
       .prepare(
-        "SELECT * FROM recipe_run_state WHERE sessionId = ? AND recipeId = ?",
+        "SELECT * FROM skill_run_state WHERE sessionId = ? AND skillId = ?",
       )
-      .get(sessionId, recipeId) as Record<string, unknown> | undefined;
-    return row ? this.rowToRecipeRunState(row) : undefined;
+      .get(sessionId, skillId) as Record<string, unknown> | undefined;
+    return row ? this.rowToSkillRunState(row) : undefined;
   }
 
   /** All runs for a session (most-recently-touched first), or every run. */
-  listRecipeRunStates(sessionId?: string): RecipeRunStateRecord[] {
+  listSkillRunStates(sessionId?: string): SkillRunStateRecord[] {
     const rows = (sessionId
       ? this.db
           .prepare(
-            "SELECT * FROM recipe_run_state WHERE sessionId = ? ORDER BY updatedAt DESC",
+            "SELECT * FROM skill_run_state WHERE sessionId = ? ORDER BY updatedAt DESC",
           )
           .all(sessionId)
       : this.db
-          .prepare("SELECT * FROM recipe_run_state ORDER BY updatedAt DESC")
+          .prepare("SELECT * FROM skill_run_state ORDER BY updatedAt DESC")
           .all()) as Record<string, unknown>[];
-    return rows.map((r) => this.rowToRecipeRunState(r));
+    return rows.map((r) => this.rowToSkillRunState(r));
   }
 
-  updateRecipeRunState(id: string, patch: Partial<RecipeRunStateRecord>): void {
+  updateSkillRunState(id: string, patch: Partial<SkillRunStateRecord>): void {
     // updatedAt is always advanced by the store and never taken from a caller's
     // patch, so an update can't write a stale recency value. completedAt IS
     // caller-settable (the tool stamps it on the terminal transition).
     const next = { ...patch, updatedAt: Date.now() };
     this.applyUpdate(
-      "recipe_run_state",
-      RECIPE_RUN_UPDATE_COLS,
+      "skill_run_state",
+      SKILL_RUN_UPDATE_COLS,
       id,
       next as Record<string, unknown>,
     );
   }
 
-  /** Coerce a raw recipe_run_state row into a record (SQL NULL → undefined for
+  /** Coerce a raw skill_run_state row into a record (SQL NULL → undefined for
    * the only optional column, completedAt; stepsJson stays raw JSON). */
-  private rowToRecipeRunState(r: Record<string, unknown>): RecipeRunStateRecord {
+  private rowToSkillRunState(r: Record<string, unknown>): SkillRunStateRecord {
     return {
       id: r.id as string,
       sessionId: r.sessionId as string,
-      recipeId: r.recipeId as string,
+      skillId: r.skillId as string,
       currentStep: r.currentStep as number,
       stepsJson: r.stepsJson as string,
-      status: r.status as RecipeRunStateRecord["status"],
+      status: r.status as SkillRunStateRecord["status"],
       startedAt: r.startedAt as number,
       updatedAt: r.updatedAt as number,
       completedAt: (r.completedAt as number) ?? undefined,

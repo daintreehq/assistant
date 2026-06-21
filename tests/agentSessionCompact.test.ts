@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, serializeToolResult, CLEAR_MARKER } from "../src/agent/loop.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ModelRouter } from "../src/models/router.js";
@@ -11,7 +11,7 @@ function makeSession(routerOverrides: Partial<Record<string, unknown>> = {}) {
   const db = new Db(":memory:");
   const router = {
     json: async () => ({
-      recipeIds: [],
+      skillIds: [],
       confidence: 0,
       reason: "",
       taskType: "qa",
@@ -34,7 +34,7 @@ function makeSession(routerOverrides: Partial<Record<string, unknown>> = {}) {
   const session = new AgentSession({
     router,
     registry: new ToolRegistry(),
-    recipeRegistry: new RecipeRegistry(),
+    skillRegistry: new SkillRegistry(),
     ctx,
     promptContext,
     sessionId: "ses_compact",
@@ -58,7 +58,7 @@ describe("AgentSession.compact (#7)", () => {
     expect(msgs.length).toBe(4);
     expect(msgs[0].role).toBe("system");
     expect(msgs[1].content).toContain("# Runtime context");
-    expect(msgs[2].content).toContain("# Loaded recipes");
+    expect(msgs[2].content).toContain("# Loaded skills");
     expect(msgs[3].role).toBe("user");
     expect(msgs[3].content).toContain("compacted summary");
     expect(msgs[3].content).toContain("goals: X");
@@ -81,7 +81,7 @@ describe("AgentSession.clear (#114)", () => {
     expect(msgs.length).toBe(3);
     expect(msgs[0].role).toBe("system");
     expect(msgs[1].content).toContain("# Runtime context");
-    expect(msgs[2].content).toContain("# Loaded recipes");
+    expect(msgs[2].content).toContain("# Loaded skills");
     // Old turns and any compaction summary are gone from context.
     expect(msgs.some((m) => m.content?.includes("alpha"))).toBe(false);
     expect(msgs.some((m) => m.content?.includes("compacted summary"))).toBe(false);

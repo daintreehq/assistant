@@ -18,17 +18,17 @@ import type { ConversationMessageRecord, ToolResult } from "../schemas.js";
 import { BASE_SYSTEM_PROMPT } from "../models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../models/prompts/runtimeContext.js";
 import {
-  buildLoadedRecipesMessage,
-  buildRecipeCatalogMessage,
-} from "../models/prompts/recipes.js";
+  buildLoadedSkillsMessage,
+  buildSkillCatalogMessage,
+} from "../models/prompts/skills.js";
 import type { MainPromptContext } from "../models/prompts/runtimeContext.js";
-import type { RecipeRegistry } from "../recipes/registry.js";
-import { selectRecipes } from "../recipes/selector.js";
+import type { SkillRegistry } from "../skills/registry.js";
+import { selectSkills } from "../skills/selector.js";
 import {
-  renderRecipeBundle,
-  type RenderedRecipeBundle,
-} from "../recipes/render.js";
-import type { RecipeSelection, RecipeFindResult } from "../recipes/types.js";
+  renderSkillBundle,
+  type RenderedSkillBundle,
+} from "../skills/render.js";
+import type { SkillSelection, SkillFindResult } from "../skills/types.js";
 import { type AgentEventSink, type RunIdRef, noopAgentEvents } from "./events.js";
 import { bareModelId, estimateCostUsd } from "../models/pricing.js";
 
@@ -68,11 +68,11 @@ export const CLEAR_MARKER = "[conversation cleared — context reset to initial 
  */
 const MAIN_PROMPT_CACHE_KEY = "daintree-main";
 /**
- * `risk: "read"` tools whose *effect* is a write to the live loaded-recipe set
- * (they rewrite message[2] / activeRecipeIds). They are withheld on autonomous
+ * `risk: "read"` tools whose *effect* is a write to the live loaded-skill set
+ * (they rewrite message[2] / activeSkillIds). They are withheld on autonomous
  * wake turns, which must not reshape the interactive session's context.
  */
-const RECIPE_CONTEXT_MUTATING_TOOLS = new Set(["recipe.find", "recipe.load"]);
+const SKILL_CONTEXT_MUTATING_TOOLS = new Set(["skill.find", "skill.load"]);
 const MAX_TOOL_RESULT_CHARS = 8000;
 /**
  * How much of the overflowing output to inline as a preview inside the truncation
@@ -125,10 +125,10 @@ function estimateTokens(messages: ChatMessage[]): number {
 }
 
 /**
- * Tools always sent to the model regardless of which recipes are loaded —
+ * Tools always sent to the model regardless of which skills are loaded —
  * low-risk read/orient tools it needs to stay unblocked in any context. The
  * per-turn subset (see buildToolFilter) is the union of these and the loaded
- * recipes' declared `requiredTools`.
+ * skills' declared `requiredTools`.
  */
 const CORE_TOOL_NAMES = [
   "context.snapshot",
@@ -144,16 +144,16 @@ const CORE_TOOL_NAMES = [
   // that relays a finished agent's answer can always reach the verbatim path.
   "terminal.read",
   "terminal.extract",
-  // Recipe step-progress tools are always available so any loaded multi-step
-  // recipe can checkpoint and resume without each recipe re-declaring them. They
-  // no-op when no recipe is active (the model has nothing to advance).
-  "recipe.step.advance",
-  "recipe.run.get",
-  // Always available so the model can discover + pull recipes into context on
-  // demand even when an active recipe's allowlist would otherwise filter them out.
-  // `recipe.find` runs a query through the small model; `recipe.load` pulls a known id.
-  "recipe.find",
-  "recipe.load",
+  // Skill step-progress tools are always available so any loaded multi-step
+  // skill can checkpoint and resume without each skill re-declaring them. They
+  // no-op when no skill is active (the model has nothing to advance).
+  "skill.step.advance",
+  "skill.run.get",
+  // Always available so the model can discover + pull skills into context on
+  // demand even when an active skill's allowlist would otherwise filter them out.
+  // `skill.find` runs a query through the small model; `skill.load` pulls a known id.
+  "skill.find",
+  "skill.load",
   "memory.recall",
   "memory.list",
   // Always available so the model can page through any tool result that overflowed
@@ -281,7 +281,7 @@ export function rehydrateSession(
 export interface AgentSessionDeps {
   router: ModelRouter;
   registry: ToolRegistry;
-  recipeRegistry: RecipeRegistry;
+  skillRegistry: SkillRegistry;
   ctx: ToolContext;
   promptContext: MainPromptContext;
   sessionId: string;
@@ -311,28 +311,28 @@ export class AgentSession {
   private readonly deps: AgentSessionDeps;
   private readonly events: AgentEventSink;
 
-  // Recipe state. Control messages live at fixed indices:
+  // Skill state. Control messages live at fixed indices:
   //   [0] base system prompt (cached prefix, never changes mid-session)
-  //   [1] runtime context (tier/project/MCP/models) + the recipe catalog
-  //   [2] loaded recipes (bodies pulled in by recipe.find / recipe.load)
-  private activeRecipeIds: string[] = [];
-  private recipeBundle: RenderedRecipeBundle = renderRecipeBundle([]);
-  // The recipe catalog (the menu of every available recipe, headers only) is static
-  // for the session — recipes don't change mid-session — so it's built once and
+  //   [1] runtime context (tier/project/MCP/models) + the skill catalog
+  //   [2] loaded skills (bodies pulled in by skill.find / skill.load)
+  private activeSkillIds: string[] = [];
+  private skillBundle: RenderedSkillBundle = renderSkillBundle([]);
+  // The skill catalog (the menu of every available skill, headers only) is static
+  // for the session — skills don't change mid-session — so it's built once and
   // appended to the runtime-context message. Kept here so refreshRuntimeContext()
   // can re-append it when it rewrites message[1].
-  private readonly recipeCatalog: string;
+  private readonly skillCatalog: string;
 
   constructor(deps: AgentSessionDeps) {
     this.deps = deps;
     this.events = deps.events ?? noopAgentEvents;
-    this.recipeCatalog = buildRecipeCatalogMessage(
-      deps.recipeRegistry.metadataForSelection(),
+    this.skillCatalog = buildSkillCatalogMessage(
+      deps.skillRegistry.metadataForSelection(),
     );
     const control: ChatMessage[] = [
       { role: "system", content: BASE_SYSTEM_PROMPT },
       { role: "system", content: this.composeRuntimeContext(deps.promptContext) },
-      { role: "system", content: buildLoadedRecipesMessage(this.recipeBundle) },
+      { role: "system", content: buildLoadedSkillsMessage(this.skillBundle) },
     ];
     if (deps.restoredMessages !== undefined) {
       // Resume: the control rows already exist in the DB from the prior run, so
@@ -348,21 +348,21 @@ export class AgentSession {
   }
 
   /**
-   * Compose message[1]: the dynamic runtime context followed by the static recipe
+   * Compose message[1]: the dynamic runtime context followed by the static skill
    * catalog. The catalog rides along here (rather than in its own control message)
-   * so the loaded-recipe message stays at index [2] and the control-message count
+   * so the loaded-skill message stays at index [2] and the control-message count
    * is unchanged — the catalog is appended, never interleaved, so runtime-context
    * assertions still see "# Runtime context" up top.
    */
   private composeRuntimeContext(promptContext: MainPromptContext): string {
     const runtime = buildRuntimeContextMessage(promptContext);
-    return this.recipeCatalog ? `${runtime}\n\n${this.recipeCatalog}` : runtime;
+    return this.skillCatalog ? `${runtime}\n\n${this.skillCatalog}` : runtime;
   }
 
   /**
    * Refresh the runtime-context message (e.g. after MCP connects or the tier
    * changes). Only message[1] is rewritten, so the cached base prefix is intact.
-   * The recipe catalog is re-appended so it survives the rewrite.
+   * The skill catalog is re-appended so it survives the rewrite.
    */
   refreshRuntimeContext(promptContext: MainPromptContext): void {
     this.deps.promptContext = promptContext;
@@ -387,7 +387,7 @@ export class AgentSession {
   /**
    * Compact the conversation: drop the working history and replace it with a
    * single summary note, keeping the three control messages (base prompt,
-   * runtime context, loaded recipes) so the prompt-cache prefix and recipe state
+   * runtime context, loaded skills) so the prompt-cache prefix and skill state
    * survive. Unlike injectNote(), this actually shrinks the prompt — the model no
    * longer receives the old turns. A marker is appended to the durable log so the
    * persisted transcript records that earlier context was intentionally dropped.
@@ -408,13 +408,13 @@ export class AgentSession {
 
   /**
    * Clear the conversation: drop the working history entirely, keeping only the
-   * three control messages (base prompt, runtime context, loaded recipes) so the
-   * prompt-cache prefix and recipe state survive. Unlike compact(), no summary
+   * three control messages (base prompt, runtime context, loaded skills) so the
+   * prompt-cache prefix and skill state survive. Unlike compact(), no summary
    * note is injected — the next turn starts a genuinely fresh thread with no
    * memory of what came before. A marker is appended to the durable log so the
    * persisted transcript records the reset, and rehydrateSession() treats it as a
-   * boundary (a resumed session restores nothing after it). Loaded recipes are
-   * left as-is — the model re-pulls what it needs via recipe.find on the next turn.
+   * boundary (a resumed session restores nothing after it). Loaded skills are
+   * left as-is — the model re-pulls what it needs via skill.find on the next turn.
    */
   clear(): void {
     this.messages = this.messages.slice(0, CONTROL_MESSAGE_COUNT);
@@ -425,7 +425,7 @@ export class AgentSession {
    * Before a turn, compact automatically if the accumulated history is large. We
    * summarize the working history (everything past the 3 control messages) with
    * the small model and fold it into a single note via compact(), so the cached
-   * base prefix and recipe state survive. Best-effort: any failure (or no real
+   * base prefix and skill state survive. Best-effort: any failure (or no real
    * history to compact) leaves the conversation untouched and the turn proceeds.
    */
   private async maybeAutoCompact(signal?: AbortSignal): Promise<void> {
@@ -472,8 +472,8 @@ export class AgentSession {
    * `opts.readOnly` is for AUTONOMOUS turns (e.g. a watcher wake-up) that were not
    * initiated by the user: the model is given ONLY read-only/inspection tools, so a
    * background trigger can inspect and report but can NEVER run a mutating tool
-   * unattended — the model literally isn't offered one. Recipe re-selection is also
-   * skipped so an automatic nudge doesn't churn the user's loaded recipes.
+   * unattended — the model literally isn't offered one. Skill re-selection is also
+   * skipped so an automatic nudge doesn't churn the user's loaded skills.
    *
    * `opts.signal` lets the UI cancel an in-flight turn (Escape-to-cancel). When it
    * fires mid-stream the model call rejects with CancelledError; we catch it, mark
@@ -512,8 +512,8 @@ export class AgentSession {
       return CANCELLED_REPLY;
     }
     await this.maybeAutoCompact(opts.signal);
-    // Recipes are pulled on demand by the model via `recipe.find` / `recipe.load`
-    // (no pre-turn auto-selection) — nothing to do here for recipes.
+    // Skills are pulled on demand by the model via `skill.find` / `skill.load`
+    // (no pre-turn auto-selection) — nothing to do here for skills.
     // The auto-compact summary call above honours the signal and swallows a cancel
     // internally, and it awaits/yields long enough for an Escape to land. Re-check
     // before committing the user message so a cancel arriving in THIS window also
@@ -530,7 +530,7 @@ export class AgentSession {
     // colliding wire name (a registration-time programmer error). Surface it
     // through the event sink rather than letting it escape send() and strand
     // the session after the user message was already persisted. The per-turn
-    // filter narrows the projection to the core ∪ active-recipe tool subset, or —
+    // filter narrows the projection to the core ∪ active-skill tool subset, or —
     // for a read-only turn — to inspection tools only.
     const allowedNames = opts.readOnly
       ? this.readOnlyToolNames()
@@ -811,24 +811,24 @@ export class AgentSession {
   }
 
   /**
-   * Compute the per-turn tool subset to send to the model. With no recipe
+   * Compute the per-turn tool subset to send to the model. With no skill
    * active, return undefined so the full registry is sent — an unconstrained
-   * turn must not be starved of tools. With recipes active, send only the core
-   * tools plus the tools the loaded recipes declare they need; pruning the
+   * turn must not be starved of tools. With skills active, send only the core
+   * tools plus the tools the loaded skills declare they need; pruning the
    * schema list cuts per-turn input tokens without hiding anything a loaded
-   * recipe relies on. Recomputed each turn after maybeRefreshRecipes() has
-   * settled activeRecipeIds. Note: on throttled turns the active set is reused,
-   * so a request needing a tool outside the loaded recipes' requiredTools (and
+   * skill relies on. Recomputed each turn after maybeRefreshSkills() has
+   * settled activeSkillIds. Note: on throttled turns the active set is reused,
+   * so a request needing a tool outside the loaded skills' requiredTools (and
    * not in core) won't have it offered until the next re-selection — tool.search
    * stays in core so the model can still discover and request it.
    */
   private buildToolFilter(): string[] | undefined {
-    if (this.activeRecipeIds.length === 0) return undefined;
-    const recipes = this.deps.recipeRegistry.getMany(this.activeRecipeIds);
+    if (this.activeSkillIds.length === 0) return undefined;
+    const skills = this.deps.skillRegistry.getMany(this.activeSkillIds);
     return [
       ...new Set([
         ...CORE_TOOL_NAMES,
-        ...recipes.flatMap((r) => r.requiredTools),
+        ...skills.flatMap((r) => r.requiredTools),
       ]),
     ];
   }
@@ -842,16 +842,16 @@ export class AgentSession {
    * wake-up can read a terminal and report, but cannot act. "read" is never in
    * ALWAYS_CONFIRM, so a read-only turn also never blocks on a confirmation prompt.
    *
-   * `recipe.find` and `recipe.load` are the `risk: "read"` tools excluded here: their
+   * `skill.find` and `skill.load` are the `risk: "read"` tools excluded here: their
    * read is only a lookup/selection, but their *effect* is a write to the live loaded-
-   * recipe set (they rewrite messages[2] and mutate activeRecipeIds). An autonomous
+   * skill set (they rewrite messages[2] and mutate activeSkillIds). An autonomous
    * wake turn must not reshape the interactive session's context, so they are withheld
    * despite the risk class.
    */
   private readOnlyToolNames(): string[] {
     return this.deps.registry
       .list()
-      .filter((t) => t.risk === "read" && !RECIPE_CONTEXT_MUTATING_TOOLS.has(t.name))
+      .filter((t) => t.risk === "read" && !SKILL_CONTEXT_MUTATING_TOOLS.has(t.name))
       .map((t) => t.name);
   }
 
@@ -862,7 +862,7 @@ export class AgentSession {
 
   /**
    * Persist a message to the conversation log (best-effort). Mutable control
-   * messages (runtime context, loaded recipes) are persisted once on insert; when
+   * messages (runtime context, loaded skills) are persisted once on insert; when
    * they are later rewritten in place we deliberately do NOT re-persist them, so
    * the durable log keeps the initial control snapshot and append seqs stay clean.
    */
@@ -885,30 +885,30 @@ export class AgentSession {
     }
   }
 
-  /* --------------------------- recipe control ---------------------------- */
+  /* --------------------------- skill control ---------------------------- */
 
-  /** Currently loaded recipe ids (for inspection / selection context). */
-  getActiveRecipeIds(): ReadonlyArray<string> {
-    return this.activeRecipeIds;
+  /** Currently loaded skill ids (for inspection / selection context). */
+  getActiveSkillIds(): ReadonlyArray<string> {
+    return this.activeSkillIds;
   }
 
   /**
-   * Query-driven recipe fetch — the engine behind the `recipe.find` tool and the
-   * `/recipes find` command. The small model reads `query` against every recipe's
+   * Query-driven skill fetch — the engine behind the `skill.find` tool and the
+   * `/skills find` command. The small model reads `query` against every skill's
    * headers and returns the best 0-3 ids; their bodies are merged into the loaded
    * set (new ids first so they survive the cap-of-3) and injected into message[2],
    * so later iterations of the same turn see them. Best-effort: a selector failure
    * resolves to `ok: false` with the loaded set unchanged rather than throwing.
    */
-  async findRecipes(
+  async findSkills(
     query: string,
     signal?: AbortSignal,
-  ): Promise<RecipeFindResult> {
-    let selection: RecipeSelection;
+  ): Promise<SkillFindResult> {
+    let selection: SkillSelection;
     try {
-      selection = await selectRecipes({
+      selection = await selectSkills({
         router: this.deps.router,
-        candidates: this.deps.recipeRegistry.metadataForSelection(),
+        candidates: this.deps.skillRegistry.metadataForSelection(),
         query,
         signal,
       });
@@ -917,15 +917,15 @@ export class AgentSession {
         ok: false,
         matched: false,
         query,
-        reason: "recipe selector unavailable",
+        reason: "skill selector unavailable",
         confidence: 0,
         selected: [],
-        activeRecipeIds: [...this.activeRecipeIds],
+        activeSkillIds: [...this.activeSkillIds],
       };
     }
 
     // A cancel that landed while the selector was in flight: don't mutate the live
-    // recipe set with a result the user already abandoned. Leave the load unchanged.
+    // skill set with a result the user already abandoned. Leave the load unchanged.
     if (signal?.aborted) {
       return {
         ok: false,
@@ -934,25 +934,25 @@ export class AgentSession {
         reason: "cancelled",
         confidence: 0,
         selected: [],
-        activeRecipeIds: [...this.activeRecipeIds],
+        activeSkillIds: [...this.activeSkillIds],
       };
     }
 
-    // The recipes this query actually resolved (hallucinated ids dropped).
-    const newlyKnown = this.resolveKnownIds(selection.recipeIds);
+    // The skills this query actually resolved (hallucinated ids dropped).
+    const newlyKnown = this.resolveKnownIds(selection.skillIds);
     // Merge them in front of the current set, capped, and inject into message[2].
     const merged = this.resolveKnownIds([
-      ...selection.recipeIds,
-      ...this.activeRecipeIds,
+      ...selection.skillIds,
+      ...this.activeSkillIds,
     ]);
-    this.applyRecipeBundle(this.deps.recipeRegistry.getMany(merged));
+    this.applySkillBundle(this.deps.skillRegistry.getMany(merged));
     // Log what the query resolved — NOT the post-merge active set — so a no-match
     // (or all-hallucinated) selection isn't recorded as if it loaded the existing set.
     this.logSelection(query, selection, newlyKnown);
 
-    // Report only the recipes this query pulled in (not the whole loaded set), so
+    // Report only the skills this query pulled in (not the whole loaded set), so
     // the tool result tells the model what its query resolved.
-    const selected = this.deps.recipeRegistry.getMany(newlyKnown).map((r) => ({
+    const selected = this.deps.skillRegistry.getMany(newlyKnown).map((r) => ({
       id: r.id,
       title: r.title,
       summary: r.summary,
@@ -964,59 +964,59 @@ export class AgentSession {
       reason: selection.reason,
       confidence: selection.confidence,
       selected,
-      activeRecipeIds: [...this.activeRecipeIds],
+      activeSkillIds: [...this.activeSkillIds],
     };
   }
 
-  /** Manually load these recipe ids (unknown ids are dropped, capped at three). */
-  setRecipes(ids: string[]): void {
-    this.applyRecipeBundle(
-      this.deps.recipeRegistry.getMany(this.resolveKnownIds(ids)),
+  /** Manually load these skill ids (unknown ids are dropped, capped at three). */
+  setSkills(ids: string[]): void {
+    this.applySkillBundle(
+      this.deps.skillRegistry.getMany(this.resolveKnownIds(ids)),
     );
   }
 
   /**
-   * Merge additional recipe ids into the loaded set on demand — the model-facing
-   * `recipe.load` tool path. The new ids go *first* so they survive the cap-of-3
-   * slice even when three recipes are already loaded (an explicit load evicts the
-   * lowest-priority prior recipe rather than being dropped). Rewriting the
-   * loaded-recipes control message here means later iterations in the same turn see
-   * the recipe. Returns the resulting active ids.
+   * Merge additional skill ids into the loaded set on demand — the model-facing
+   * `skill.load` tool path. The new ids go *first* so they survive the cap-of-3
+   * slice even when three skills are already loaded (an explicit load evicts the
+   * lowest-priority prior skill rather than being dropped). Rewriting the
+   * loaded-skills control message here means later iterations in the same turn see
+   * the skill. Returns the resulting active ids.
    */
-  loadAdditionalRecipes(ids: string[]): string[] {
-    const merged = this.resolveKnownIds([...ids, ...this.activeRecipeIds]);
-    this.applyRecipeBundle(this.deps.recipeRegistry.getMany(merged));
-    return [...this.activeRecipeIds];
+  loadAdditionalSkills(ids: string[]): string[] {
+    const merged = this.resolveKnownIds([...ids, ...this.activeSkillIds]);
+    this.applySkillBundle(this.deps.skillRegistry.getMany(merged));
+    return [...this.activeSkillIds];
   }
 
   /**
    * Dedupe, drop unknown ids, then cap at three. Resolving known ids before the
-   * cap means a hallucinated/unknown id can never push a valid recipe out.
+   * cap means a hallucinated/unknown id can never push a valid skill out.
    */
   private resolveKnownIds(ids: string[]): string[] {
     return [...new Set(ids)]
-      .filter((id) => this.deps.recipeRegistry.has(id))
+      .filter((id) => this.deps.skillRegistry.has(id))
       .slice(0, 3);
   }
 
-  /** Render the loaded recipes for /recipes loaded. */
-  describeRecipes(): string {
-    if (this.recipeBundle.items.length === 0) {
-      return "No recipes are currently loaded.";
+  /** Render the loaded skills for /skills loaded. */
+  describeSkills(): string {
+    if (this.skillBundle.items.length === 0) {
+      return "No skills are currently loaded.";
     }
-    const lines = this.recipeBundle.items.map(
+    const lines = this.skillBundle.items.map(
       (r) => `  ${r.id}  [${r.risk}]  ${r.title} — ${r.summary}`,
     );
-    return `Loaded recipes (${this.recipeBundle.items.length}, bundle ${this.recipeBundle.hash}):\n${lines.join("\n")}`;
+    return `Loaded skills (${this.skillBundle.items.length}, bundle ${this.skillBundle.hash}):\n${lines.join("\n")}`;
   }
 
-  /** Swap in a new recipe bundle and rewrite the loaded-recipes control message. */
-  private applyRecipeBundle(recipes: ReturnType<RecipeRegistry["getMany"]>): void {
-    this.recipeBundle = renderRecipeBundle(recipes);
-    this.activeRecipeIds = this.recipeBundle.ids;
+  /** Swap in a new skill bundle and rewrite the loaded-skills control message. */
+  private applySkillBundle(skills: ReturnType<SkillRegistry["getMany"]>): void {
+    this.skillBundle = renderSkillBundle(skills);
+    this.activeSkillIds = this.skillBundle.ids;
     this.messages[2] = {
       role: "system",
-      content: buildLoadedRecipesMessage(this.recipeBundle),
+      content: buildLoadedSkillsMessage(this.skillBundle),
     };
   }
 
@@ -1027,14 +1027,14 @@ export class AgentSession {
    */
   private logSelection(
     userInput: string,
-    selection: RecipeSelection,
+    selection: SkillSelection,
     selectedIds: string[],
   ): void {
     try {
-      this.deps.ctx.db.insertRecipeSelection({
+      this.deps.ctx.db.insertSkillSelection({
         sessionId: this.deps.sessionId,
         userInput: userInput.slice(0, 1000),
-        selectedRecipeIdsJson: JSON.stringify(selectedIds),
+        selectedSkillIdsJson: JSON.stringify(selectedIds),
         confidence: selection.confidence,
         taskType: selection.taskType,
         reason: selection.reason,

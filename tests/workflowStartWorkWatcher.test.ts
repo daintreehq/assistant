@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { mcpTools } from "../src/tools/mcpTools.js";
-import { WORKFLOW_START_WORK_RECIPE } from "../src/recipes/builtin.js";
+import { WORKFLOW_START_WORK_SKILL } from "../src/skills/builtin.js";
 import { Db } from "../src/storage/db.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -216,10 +216,10 @@ describe("workflow.startWorkOnIssue atomic supervisor watcher (#126)", () => {
     expect(c.db.listWatchers("active")).toHaveLength(1);
   });
 
-  it("the start-work recipe no longer requires watcher.terminal.create", async () => {
-    // Attachment is automatic now; guard against the recipe change being reverted.
-    expect(WORKFLOW_START_WORK_RECIPE.requiredTools).toContain("workflow.startWorkOnIssue");
-    expect(WORKFLOW_START_WORK_RECIPE.requiredTools).not.toContain("watcher.terminal.create");
+  it("the start-work skill no longer requires watcher.terminal.create", async () => {
+    // Attachment is automatic now; guard against the skill change being reverted.
+    expect(WORKFLOW_START_WORK_SKILL.requiredTools).toContain("workflow.startWorkOnIssue");
+    expect(WORKFLOW_START_WORK_SKILL.requiredTools).not.toContain("watcher.terminal.create");
   });
 
   it("never forwards attachWatcher to the Daintree MCP call", async () => {

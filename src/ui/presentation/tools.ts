@@ -73,13 +73,13 @@ const MAP: Record<string, (a: Args) => ToolPresentation> = {
   "queue.resolve": (a) => ({ label: "Resolved", detail: str(a.id) }),
   "recipe.list": () => ({ label: "Listed recipes" }),
   "recipe.run": (a) => ({ label: "Ran recipe", detail: str(a.recipeId) }),
-  "recipe.step.advance": (a) => ({
+  "skill.step.advance": (a) => ({
     label: "Advanced step",
     detail: str(a.completedStep)
-      ? `${str(a.recipeId) ?? "recipe"} · step ${str(a.completedStep)}`
-      : str(a.recipeId),
+      ? `${str(a.skillId) ?? "skill"} · step ${str(a.completedStep)}`
+      : str(a.skillId),
   }),
-  "recipe.run.get": (a) => ({ label: "Checked recipe progress", detail: str(a.recipeId) }),
+  "skill.run.get": (a) => ({ label: "Checked skill progress", detail: str(a.skillId) }),
   "worktree.createWithRecipe": (a) => ({
     label: "Created worktree",
     detail: str(a.recipeId),

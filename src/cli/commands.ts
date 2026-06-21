@@ -242,80 +242,80 @@ export async function handleSlashCommand(
       return { handled: true };
     }
 
-    case "recipes": {
+    case "skills": {
       const sub = rest[0];
       if (!sub) {
-        const all = app.recipes.list();
-        render.line(c.bold(`\nRecipes (${all.length})`));
+        const all = app.skills.list();
+        render.line(c.bold(`\nSkills (${all.length})`));
         for (const r of all) {
           render.line(
             `  ${c.cyan(r.id)} ${c.gray(`[${r.risk}]`)} ${r.title} — ${r.summary}`,
           );
         }
         render.line(
-          c.gray("\n  /recipes loaded | find <query> | load <id…> | clear"),
+          c.gray("\n  /skills loaded | find <query> | load <id…> | clear"),
         );
         return { handled: true };
       }
       if (sub === "loaded") {
-        render.line(`\n${app.session.describeRecipes()}`);
+        render.line(`\n${app.session.describeSkills()}`);
         return { handled: true };
       }
       if (sub === "clear") {
-        app.session.setRecipes([]);
-        render.success("Cleared loaded recipes.");
+        app.session.setSkills([]);
+        render.success("Cleared loaded skills.");
         return { handled: true };
       }
       if (sub === "load") {
         const ids = rest.slice(1);
         if (ids.length === 0) {
-          render.warn("Usage: /recipes load <id> [<id>…]");
+          render.warn("Usage: /skills load <id> [<id>…]");
           return { handled: true };
         }
-        const known = ids.filter((id) => app.recipes.has(id));
-        const unknown = ids.filter((id) => !app.recipes.has(id));
+        const known = ids.filter((id) => app.skills.has(id));
+        const unknown = ids.filter((id) => !app.skills.has(id));
         if (unknown.length) {
-          render.warn(`Unknown recipe id(s): ${unknown.join(", ")}`);
+          render.warn(`Unknown skill id(s): ${unknown.join(", ")}`);
         }
         if (known.length === 0) {
           // Don't clear the loaded set just because every id was a typo.
-          render.warn("No known recipe ids given; loaded recipes unchanged.");
+          render.warn("No known skill ids given; loaded skills unchanged.");
           return { handled: true };
         }
         if (new Set(known).size > 3) {
-          render.warn("More than 3 recipes given; loading the first 3.");
+          render.warn("More than 3 skills given; loading the first 3.");
         }
-        app.session.setRecipes(known);
-        render.line(app.session.describeRecipes());
+        app.session.setSkills(known);
+        render.line(app.session.describeSkills());
         return { handled: true };
       }
       if (sub === "find") {
         const query = rest.slice(1).join(" ").trim();
         if (!query) {
-          render.warn("Usage: /recipes find <query>");
+          render.warn("Usage: /skills find <query>");
           return { handled: true };
         }
-        render.info(`Finding recipes for "${query}"…`);
+        render.info(`Finding skills for "${query}"…`);
         try {
-          const res = await app.session.findRecipes(query);
+          const res = await app.session.findSkills(query);
           if (!res.ok) {
-            render.warn("Selector unavailable; loaded recipes unchanged.");
+            render.warn("Selector unavailable; loaded skills unchanged.");
           } else if (res.matched) {
             render.success(
               `Loaded: ${res.selected.map((r) => r.id).join(", ")}`,
             );
           } else {
-            render.warn(`No recipe matched "${query}".`);
+            render.warn(`No skill matched "${query}".`);
           }
-          render.line(app.session.describeRecipes());
+          render.line(app.session.describeSkills());
         } catch (e) {
           render.error(
-            `Recipe find failed: ${e instanceof Error ? e.message : String(e)}`,
+            `Skill find failed: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
         return { handled: true };
       }
-      render.warn("Usage: /recipes [loaded|find <query>|load <id…>|clear]");
+      render.warn("Usage: /skills [loaded|find <query>|load <id…>|clear]");
       return { handled: true };
     }
 

@@ -9,8 +9,8 @@ import type { DaintreeMcpClient } from "../mcp/client.js";
 import type { Db } from "../storage/db.js";
 import type { Queue } from "../queue.js";
 import type { ModelRouter } from "../models/router.js";
-import type { RecipeSource } from "../recipes/source.js";
-import type { RecipeFindResult } from "../recipes/types.js";
+import type { SkillSource } from "../skills/source.js";
+import type { SkillFindResult } from "../skills/types.js";
 import type { RiskClass, ToolResult } from "../schemas.js";
 
 export type ToolActor = "main" | "watcher" | "timer" | "workflow" | "system";
@@ -38,7 +38,7 @@ export interface ToolContext {
   router: ModelRouter;
   projectPath: string;
   /**
-   * Id of the conversation session this dispatch belongs to. Used by recipe
+   * Id of the conversation session this dispatch belongs to. Used by skill
    * step-progress tools to key durable checkpoints to the live session. Absent
    * in stripped-down test contexts; tools that need it fail gracefully.
    */
@@ -69,7 +69,7 @@ export interface ToolContext {
   signal?: AbortSignal;
   /**
    * Tool names offered to the model in the current turn's tool spec — the core ∪
-   * active-recipe projection (or the read-only inspection set). Discovery tools
+   * active-skill projection (or the read-only inspection set). Discovery tools
    * (`tool.search`, `daintree.listTools`) cross-reference this to mark whether each
    * tool they surface is actually `callable` this turn, so they never advertise a
    * tool the model can't invoke. `undefined` ⇒ unconstrained (all tools callable).
@@ -98,31 +98,31 @@ export interface ToolContext {
    */
   artifactStore?: Map<string, string>;
   /**
-   * Read-only view of the recipe library, for the model-facing `recipe.load`
-   * tool to validate an id and read a recipe's title/summary back. Typed as the
-   * narrow `RecipeSource` seam (not the concrete registry) so the backing store
+   * Read-only view of the skill library, for the model-facing `skill.load`
+   * tool to validate an id and read a skill's title/summary back. Typed as the
+   * narrow `SkillSource` seam (not the concrete registry) so the backing store
    * can later become a hosted service without touching the tool. Absent in
    * stripped-down test/scheduler contexts; the tool fails gracefully when missing.
    */
-  recipeSource?: RecipeSource;
+  skillSource?: SkillSource;
   /**
-   * Merge additional recipe ids into the loaded set mid-turn (the `recipe.load`
+   * Merge additional skill ids into the loaded set mid-turn (the `skill.load`
    * tool). Explicit ids take priority over auto-selected ones and the loaded set
    * stays capped; returns the resulting active ids so the tool can report what is
-   * now loaded. Rewrites the loaded-recipes control message so later iterations in
-   * the same turn see the recipe. Wired only for the interactive `main` actor;
+   * now loaded. Rewrites the loaded-skills control message so later iterations in
+   * the same turn see the skill. Wired only for the interactive `main` actor;
    * absent for watcher/timer contexts, where the tool fails gracefully.
    */
-  loadRecipes?: (ids: string[]) => string[];
+  loadSkills?: (ids: string[]) => string[];
   /**
-   * Resolve a natural-language query to recipes and load their bodies (the
-   * `recipe.find` tool). Runs the query through the small model against every
-   * recipe's headers, merges the matches into the loaded set, and rewrites the
-   * loaded-recipes control message so later iterations in the same turn see them.
+   * Resolve a natural-language query to skills and load their bodies (the
+   * `skill.find` tool). Runs the query through the small model against every
+   * skill's headers, merges the matches into the loaded set, and rewrites the
+   * loaded-skills control message so later iterations in the same turn see them.
    * Wired only for the interactive `main` actor; absent for watcher/timer contexts,
    * where the tool fails gracefully.
    */
-  findRecipes?: (query: string, signal?: AbortSignal) => Promise<RecipeFindResult>;
+  findSkills?: (query: string, signal?: AbortSignal) => Promise<SkillFindResult>;
 }
 
 export interface ToolDef<A = any> {

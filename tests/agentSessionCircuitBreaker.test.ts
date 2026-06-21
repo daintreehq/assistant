@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession } from "../src/agent/loop.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ModelRouter } from "../src/models/router.js";
@@ -18,7 +18,7 @@ function makeSession(stream: () => Promise<unknown>) {
   const db = new Db(":memory:");
   const router = {
     json: async () => ({
-      recipeIds: [],
+      skillIds: [],
       confidence: 0,
       reason: "",
       taskType: "qa",
@@ -40,7 +40,7 @@ function makeSession(stream: () => Promise<unknown>) {
   const session = new AgentSession({
     router,
     registry: new ToolRegistry(),
-    recipeRegistry: new RecipeRegistry(),
+    skillRegistry: new SkillRegistry(),
     ctx,
     promptContext,
     sessionId: "ses_breaker",

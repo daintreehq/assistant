@@ -15,7 +15,7 @@ import { ModelRouter } from "../models/router.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { buildAllTools } from "../tools/index.js";
 import type { ConfirmRequest, ToolActor, ToolContext } from "../tools/types.js";
-import { RecipeRegistry } from "../recipes/registry.js";
+import { SkillRegistry } from "../skills/registry.js";
 import { AgentSession, rehydrateSession } from "../agent/loop.js";
 import {
   type AgentEventSink,
@@ -51,7 +51,7 @@ export class App {
   readonly queue: Queue;
   readonly router: ModelRouter;
   readonly registry: ToolRegistry;
-  readonly recipes: RecipeRegistry;
+  readonly skills: SkillRegistry;
   readonly sessionId: string;
   /** Holds the id of the run currently streaming; set per-turn by AgentSession. */
   readonly runIdRef: RunIdRef = { current: undefined };
@@ -77,7 +77,7 @@ export class App {
     this.registry = new ToolRegistry();
     this.registry.registerAll(buildAllTools());
     this.registry.assertSafe();
-    this.recipes = new RecipeRegistry();
+    this.skills = new SkillRegistry();
     this.hooks = opts.hooks ?? {};
     this.sessionId = opts.sessionId ?? `ses_${randomUUID().slice(0, 8)}`;
   }
@@ -91,7 +91,7 @@ export class App {
     app.session = new AgentSession({
       router: app.router,
       registry: app.registry,
-      recipeRegistry: app.recipes,
+      skillRegistry: app.skills,
       ctx: app.buildContext("main"),
       promptContext: app.promptContext(),
       sessionId: app.sessionId,
@@ -146,21 +146,21 @@ export class App {
       // Read live: the scheduler is started later (interactive paths) and never
       // in a one-shot run, so timers/watchers can warn honestly.
       daemonActive: () => Boolean(this.scheduler),
-      // The recipe library satisfies the narrow RecipeSource seam directly.
-      recipeSource: this.recipes,
-      // Recipe loading mutates the live session's loaded set, so it is wired only
-      // for the interactive main actor; watcher/timer turns have no recipe set and
+      // The skill library satisfies the narrow SkillSource seam directly.
+      skillSource: this.skills,
+      // Skill loading mutates the live session's loaded set, so it is wired only
+      // for the interactive main actor; watcher/timer turns have no skill set and
       // the tool fails gracefully when this is absent. Read this.session lazily —
       // buildContext("main") runs while the session is being constructed.
-      loadRecipes:
+      loadSkills:
         actor === "main"
-          ? (ids) => this.session.loadAdditionalRecipes(ids)
+          ? (ids) => this.session.loadAdditionalSkills(ids)
           : undefined,
-      // Query-driven recipe fetch (recipe.find). Same main-only wiring as
-      // loadRecipes — it reshapes the live session's loaded recipes.
-      findRecipes:
+      // Query-driven skill fetch (skill.find). Same main-only wiring as
+      // loadSkills — it reshapes the live session's loaded skills.
+      findSkills:
         actor === "main"
-          ? (query, signal) => this.session.findRecipes(query, signal)
+          ? (query, signal) => this.session.findSkills(query, signal)
           : undefined,
     };
   }

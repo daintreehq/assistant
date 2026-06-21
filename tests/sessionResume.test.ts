@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, rehydrateSession, CLEAR_MARKER } from "../src/agent/loop.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ModelRouter } from "../src/models/router.js";
@@ -25,7 +25,7 @@ function controlRows(): ConversationMessageRecord[] {
   return [
     rec({ seq: 0, role: "system", content: "You are Daintree Assistant" }),
     rec({ seq: 1, role: "system", content: "# Runtime context" }),
-    rec({ seq: 2, role: "system", content: "# Loaded recipes" }),
+    rec({ seq: 2, role: "system", content: "# Loaded skills" }),
   ];
 }
 
@@ -45,7 +45,7 @@ function makeSession(
   extra: { restoredMessages?: ReturnType<typeof rehydrateSession> } = {},
 ) {
   const router = {
-    json: async () => ({ recipeIds: [], confidence: 0, reason: "", taskType: "qa", keepExisting: false }),
+    json: async () => ({ skillIds: [], confidence: 0, reason: "", taskType: "qa", keepExisting: false }),
     stream: async () => ({ content: "ok", reasoning: "", toolCalls: [], finishReason: "stop" }),
     chat: async () => ({ content: "SUMMARY", reasoning: "", toolCalls: [], finishReason: "stop" }),
   } as unknown as ModelRouter;
@@ -54,7 +54,7 @@ function makeSession(
   return new AgentSession({
     router,
     registry: new ToolRegistry(),
-    recipeRegistry: new RecipeRegistry(),
+    skillRegistry: new SkillRegistry(),
     ctx,
     promptContext,
     sessionId,
