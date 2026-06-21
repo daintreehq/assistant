@@ -312,6 +312,37 @@ describe("terminal.extract — inline", () => {
     expect((res.result as { finished: boolean }).finished).toBe(false);
   });
 
+  it("flags an extractor token-cap truncation (finishReason=length) so the caller doesn't re-extract the same cut-off", async () => {
+    // The small model hit its maxTokens mid-output: its text is cut off, but that
+    // is the EXTRACTOR running out of budget, not the source agent's answer being
+    // incomplete. The result must say so (truncated flag + a steer to terminal.read).
+    const chat = vi.fn().mockResolvedValue({
+      content: "Daintree Assistant — a local CLI orchestration",
+      finishReason: "length",
+    });
+    const { ctx } = ctxWith({ output: () => "the full agent answer", chat });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "return the answer verbatim", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.result as { truncated: boolean }).truncated).toBe(true);
+    // The user-facing summary must name terminal.read as the verbatim escape hatch.
+    expect(res.summary).toContain("terminal.read");
+    expect(res.summary).toContain("maxTokens");
+  });
+
+  it("does NOT flag truncation on a clean finishReason", async () => {
+    const chat = vi.fn().mockResolvedValue({ content: "answer", finishReason: "stop" });
+    const { ctx } = ctxWith({ output: () => "log", chat });
+    const res = await extract.handler(
+      { terminalIds: ["t1"], instruction: "x", format: "text", pollIntervalMs: 0, maxAttempts: 5, tailBytes: 12000, maxTokens: 400 },
+      ctx,
+    );
+    expect((res.result as { truncated: boolean }).truncated).toBe(false);
+    expect(res.summary).not.toContain("cut off");
+  });
+
   it("feeds the instruction and terminal tail to the extraction model", async () => {
     const chat = vi.fn().mockResolvedValue({ content: "answer" });
     const { ctx } = ctxWith({ output: () => "the build log content", chat });

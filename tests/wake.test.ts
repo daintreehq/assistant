@@ -63,7 +63,7 @@ describe("buildWakePrompt", () => {
       { alreadySummarized: new Set(["t1"]) },
     );
     expect(prompt).toContain("already reported");
-    expect(prompt).toContain("do NOT call terminal.summarize");
+    expect(prompt).toContain("do NOT call terminal.read/terminal.summarize/terminal.extract again");
     // The per-event line names the terminal so the model knows which one.
     expect(prompt).toContain("[terminal t1]");
   });
@@ -104,7 +104,7 @@ describe("buildWakePrompt", () => {
       { alreadySummarized: summarized },
     );
     expect(second).toContain("already reported");
-    expect(second).toContain("do NOT call terminal.summarize");
+    expect(second).toContain("do NOT call terminal.read/terminal.summarize/terminal.extract again");
   });
 
   it("summarizes a new terminal even when another was already reported (per-terminal granularity)", () => {

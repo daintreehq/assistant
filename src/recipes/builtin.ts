@@ -31,6 +31,7 @@ export const BASIC_DAINTREE_ORCHESTRATION_RECIPE: Recipe = {
     "tool.search",
     "daintree.call",
     "queue.digest",
+    "terminal.read",
     "terminal.summarize",
     "terminal.extract",
     "terminal.extract.async",

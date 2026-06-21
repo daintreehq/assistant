@@ -49,6 +49,53 @@ const SummarizeArgs = z.object({
 });
 type SummarizeArgs = z.infer<typeof SummarizeArgs>;
 
+const ReadArgs = z.object({
+  terminalId: z.string().describe("Daintree terminal id to read."),
+  maxLines: z
+    .number()
+    .int()
+    .positive()
+    .max(1000)
+    .default(200)
+    .describe("Max trailing lines of scrollback to return (1–1000)."),
+  tailBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(100_000)
+    .optional()
+    .describe("Further cap the returned text to the last N characters."),
+});
+type ReadArgs = z.infer<typeof ReadArgs>;
+
+/** Read a terminal's scrollback tail via terminal.getOutput, no model involved. */
+async function readTerminalTail(
+  ctx: Parameters<ToolDef["handler"]>[1],
+  terminalId: string,
+  maxLines: number,
+): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  try {
+    const out = await ctx.mcp.callTool(
+      "terminal.getOutput",
+      { terminalId, maxLines },
+      ctx.signal,
+    );
+    if (out.isError) {
+      return { ok: false, error: out.text || "terminal returned an error" };
+    }
+    // Scrollback may arrive in structuredContent.content OR the raw text body
+    // (Daintree uses the latter) — read both, falling back to raw text.
+    const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
+    const content = typeof sc.content === "string" ? sc.content : out.text;
+    return { ok: true, content };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 export const contextTools: ToolDef[] = [
   {
     name: "context.snapshot",
@@ -138,27 +185,13 @@ export const contextTools: ToolDef[] = [
         );
       }
 
-      let tail: string;
-      try {
-        const out = await ctx.mcp.callTool(
-          "terminal.getOutput",
-          {
-            terminalId: args.terminalId,
-            maxLines: 200,
-          },
-          ctx.signal,
-        );
-        if (out.isError) {
-          return fail(
-            "TERMINAL_OUTPUT",
-            `Could not read output for terminal ${args.terminalId}: ${out.text || "terminal returned an error"}`,
-          );
-        }
-        // Scrollback may arrive in structuredContent.content OR the raw text body
-        // (Daintree uses the latter) — read both, falling back to raw text.
-        const sc = (out.structuredContent ?? {}) as Record<string, unknown>;
-        tail = typeof sc.content === "string" ? sc.content : out.text;
-      } catch (e) {
+      if (ctx.signal?.aborted) {
+        return fail("CANCELLED", "Turn cancelled while reading terminal output.", {
+          recoverable: false,
+        });
+      }
+      const read = await readTerminalTail(ctx, args.terminalId, 200);
+      if (!read.ok) {
         if (ctx.signal?.aborted) {
           return fail("CANCELLED", "Turn cancelled while reading terminal output.", {
             recoverable: false,
@@ -166,9 +199,10 @@ export const contextTools: ToolDef[] = [
         }
         return fail(
           "TERMINAL_OUTPUT",
-          `Could not read output for terminal ${args.terminalId}: ${e instanceof Error ? e.message : String(e)}`,
+          `Could not read output for terminal ${args.terminalId}: ${read.error}`,
         );
       }
+      let tail = read.content;
 
       if (args.tailBytes && tail.length > args.tailBytes) {
         tail = tail.slice(-args.tailBytes);
@@ -182,13 +216,24 @@ export const contextTools: ToolDef[] = [
             { role: "system", content: SUMMARIZER_SYSTEM_PROMPT },
             { role: "user", content: buildSummarizerUserPrompt({ purpose, tail }) },
           ],
-          maxTokens: 300,
+          maxTokens: 512,
           signal: ctx.signal,
         });
-        const summary = res.content.trim() || "(no summary produced)";
+        // Same truncation-legibility contract as terminal.extract: a "length"
+        // finishReason means the small model hit its cap mid-summary, so the text
+        // is cut off. Lead with the warning (the serializer head-truncates an
+        // oversized summary) and flag it, so the caller doesn't read a partial
+        // summary as complete — and knows terminal.read gives the full raw text.
+        const truncated = res.finishReason === "length";
+        const body = res.content.trim() || "(no summary produced)";
+        const note = truncated
+          ? "⚠ This summary is cut off: the summarizer hit its token cap. For the complete text use terminal.read (raw scrollback, no model, no cap).\n\n"
+          : "";
+        const summary = note + body;
         return ok(summary, {
           terminalId: args.terminalId,
           purpose,
+          truncated,
           summary,
         });
       } catch (e) {
@@ -202,6 +247,64 @@ export const contextTools: ToolDef[] = [
           `Failed to summarize terminal ${args.terminalId}: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
+    },
+  },
+  {
+    name: "terminal.read",
+    description:
+      "Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap. Use this to relay exactly what an agent said, or when you need the literal text. Prefer this over terminal.summarize/terminal.extract whenever you want the output reproduced rather than interpreted: those route through a small model that paraphrases and can truncate. Read-only; requires Daintree MCP.",
+    risk: "read",
+    schema: ReadArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        terminalId: { type: "string", description: "Daintree terminal id to read." },
+        maxLines: {
+          type: "number",
+          description: "Max trailing lines of scrollback to return (1–1000, default 200).",
+        },
+        tailBytes: {
+          type: "number",
+          description: "Further cap the returned text to the last N characters.",
+        },
+      },
+      required: ["terminalId"],
+    },
+    async handler(args: ReadArgs, ctx) {
+      if (!ctx.mcp.isConnected()) {
+        return fail(
+          "MCP_UNAVAILABLE",
+          "Daintree MCP is not connected, so terminal output cannot be read.",
+          { recoverable: true },
+        );
+      }
+      if (ctx.signal?.aborted) {
+        return fail("CANCELLED", "Turn cancelled while reading terminal output.", {
+          recoverable: false,
+        });
+      }
+      const read = await readTerminalTail(ctx, args.terminalId, args.maxLines);
+      if (!read.ok) {
+        if (ctx.signal?.aborted) {
+          return fail("CANCELLED", "Turn cancelled while reading terminal output.", {
+            recoverable: false,
+          });
+        }
+        return fail(
+          "TERMINAL_OUTPUT",
+          `Could not read output for terminal ${args.terminalId}: ${read.error}`,
+        );
+      }
+      let content = read.content;
+      if (args.tailBytes && content.length > args.tailBytes) {
+        content = content.slice(-args.tailBytes);
+      }
+      return ok(content || "(no output captured)", {
+        terminalId: args.terminalId,
+        content,
+        lineCount: content ? content.split("\n").length : 0,
+      });
     },
   },
 ];
