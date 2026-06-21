@@ -2,15 +2,15 @@ import { AgentSession } from "../src/agent/loop.js";
 import { RunEventSink, multiSink, type RunIdRef } from "../src/agent/events.js";
 import { Db } from "../src/storage/db.js";
 import type { MainPromptContext } from "../src/models/prompts/index.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 
 // Integration: AgentSession.send() drives the durable RunEventSink end-to-end,
 // mirroring the App.create() wiring (multiSink(RunEventSink, …) + a shared
 // runIdRef the session stamps per turn).
 
-const recipeRegistry = new RecipeRegistry();
+const skillRegistry = new SkillRegistry();
 const selectNone = async () => ({
-  recipeIds: [],
+  skillIds: [],
   confidence: 0,
   reason: "test",
   taskType: "none",
@@ -47,7 +47,7 @@ function buildSession(db: Db, ref: RunIdRef, router: any) {
   return new AgentSession({
     router,
     registry,
-    recipeRegistry,
+    skillRegistry,
     ctx: { db } as any,
     promptContext: PROMPT_CTX,
     sessionId: "ses_t",
@@ -173,7 +173,7 @@ describe("AgentSession persists a run's event log", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx: { db } as any,
       promptContext: PROMPT_CTX,
       sessionId: "ses_x",

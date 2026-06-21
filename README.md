@@ -146,30 +146,32 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ```
 /status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
-/permissions [tier]  /recipes [loaded|reload|load <id…>|clear]
+/permissions [tier]  /skills [loaded|find <query>|load <id…>|clear]
 /compact  /doctor  /help  /quit
 ```
 
 In the Ink cockpit these render as command cards (and may focus a deck panel);
 in `--classic` mode they print to the console.
 
-## Recipe system
+## Skill system
 
-Behavior is steered by **recipes** — short procedural runbooks injected into the
+Behavior is steered by **skills** — short procedural runbooks injected into the
 main model's context only when relevant, instead of fine-tuning. The base system
 prompt is split into three stable control messages to preserve Fireworks prompt
 caching:
 
 1. **base** — the cached prefix, almost never changes
 2. **runtime context** — tier, project, MCP status, model ids
-3. **loaded recipes** — the bodies of whatever recipes are active
+3. **loaded skills** — the bodies of whatever skills are active
 
-The small model (`deepseek-v4-flash`) selects 0–3 recipes from a metadata-only
-view of the library via `router.json("small", …)`, validated against a Zod schema.
-Selection is throttled (first turn, every 4th turn, or on a trigger term) so the
-cached prefix doesn't churn each message. Drive it manually with `/recipes`
-(`loaded` / `reload` / `load <id…>` / `clear`); decisions are written to a
-`recipe_selection_log` table for later tuning. See [`src/recipes`](src/recipes).
+Skills are pulled on demand: the model calls `skill.find` with a short query and
+the small model (`deepseek-v4-flash`) selects 0–3 skills from a metadata-only
+view of the library via `router.json("small", …)`, validated against a Zod schema,
+and injects their bodies into the loaded-skills control message. The model can
+also pull a known skill directly with `skill.load <id>`. Drive it manually with
+`/skills` (`loaded` / `find <query>` / `load <id…>` / `clear`); selection
+decisions are written to a `skill_selection_log` table for later tuning. See
+[`src/skills`](src/skills).
 
 ## Tools the model can call
 
@@ -185,7 +187,7 @@ cached prefix doesn't churn each message. Drive it manually with `/recipes`
 | Agent tasks  | `agentTask.spawnForEdits` (the no-file-edit escape hatch)                  |
 | Grants       | `grant.create` `grant.list` `grant.revoke`                                 |
 | Workflows    | `workflow.create` `workflow.get` `workflow.list` `workflow.update`        |
-| Recipe runs  | `recipe.step.advance` `recipe.run.get` `recipe.load`                       |
+| Skill runs   | `skill.step.advance` `skill.run.get` `skill.load`                          |
 | Audit        | `audit.export`                                                             |
 | Memory       | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
 | Artifacts    | `artifact.read`                                                            |
@@ -235,7 +237,7 @@ npm run typecheck
   watcher engine never renders, and the model loop never writes to stdout — it
   emits through an `AgentEventSink` consumed by either the Ink `UiBridge` or the
   legacy console sink (`src/cli/consoleSink.ts`).
-- Workflows, recipes, and persistent memory are implemented tool surfaces
-  (`workflow.*`, `recipe.*`, `memory.*`). Future phases target Daintree-owned
+- Workflows, skills, and persistent memory are implemented tool surfaces
+  (`workflow.*`, `skill.*`, `memory.*`). Future phases target Daintree-owned
   watch-sets over MCP (option C in the scheduler decision record), which would let
   supervision tick without the assistant open.

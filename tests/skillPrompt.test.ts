@@ -2,15 +2,15 @@ import { describe, it, expect } from "vitest";
 import { BASE_SYSTEM_PROMPT } from "../src/models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../src/models/prompts/runtimeContext.js";
 import {
-  buildLoadedRecipesMessage,
-  buildRecipeCatalogMessage,
-} from "../src/models/prompts/recipes.js";
-import { renderRecipeBundle } from "../src/recipes/render.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+  buildLoadedSkillsMessage,
+  buildSkillCatalogMessage,
+} from "../src/models/prompts/skills.js";
+import { renderSkillBundle } from "../src/skills/render.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 import {
-  BUILTIN_RECIPES,
-  SPAWN_AGENT_FOR_EDITS_RECIPE,
-} from "../src/recipes/builtin.js";
+  BUILTIN_SKILLS,
+  SPAWN_AGENT_FOR_EDITS_SKILL,
+} from "../src/skills/builtin.js";
 import type { MainPromptContext } from "../src/models/prompts/runtimeContext.js";
 
 const CTX: MainPromptContext = {
@@ -26,7 +26,7 @@ const CTX: MainPromptContext = {
 };
 
 describe("base system prompt", () => {
-  it("contains stable identity but no dynamic state or recipe bodies", () => {
+  it("contains stable identity but no dynamic state or skill bodies", () => {
     expect(BASE_SYSTEM_PROMPT).toContain("Daintree Assistant");
     expect(BASE_SYSTEM_PROMPT).toContain("never write, patch, sed");
     // No runtime/dynamic content.
@@ -34,10 +34,10 @@ describe("base system prompt", () => {
     expect(BASE_SYSTEM_PROMPT).not.toContain(CTX.mcpStatusLine);
     expect(BASE_SYSTEM_PROMPT).not.toContain(CTX.largeModel);
     expect(BASE_SYSTEM_PROMPT).not.toContain("# Runtime context");
-    // No loaded-recipe section or recipe bodies.
-    expect(BASE_SYSTEM_PROMPT).not.toContain("# Loaded recipes");
-    expect(BASE_SYSTEM_PROMPT).not.toContain("Recipe id:");
-    expect(BASE_SYSTEM_PROMPT).not.toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
+    // No loaded-skill section or skill bodies.
+    expect(BASE_SYSTEM_PROMPT).not.toContain("# Loaded skills");
+    expect(BASE_SYSTEM_PROMPT).not.toContain("Skill id:");
+    expect(BASE_SYSTEM_PROMPT).not.toContain(SPAWN_AGENT_FOR_EDITS_SKILL.body);
   });
 
   it("states the foreground-only scheduler lifecycle", () => {
@@ -103,55 +103,55 @@ describe("runtime context message", () => {
   });
 });
 
-describe("loaded recipes message", () => {
-  it("includes selected recipe bodies and ids", () => {
-    const bundle = renderRecipeBundle([SPAWN_AGENT_FOR_EDITS_RECIPE]);
-    const msg = buildLoadedRecipesMessage(bundle);
-    expect(msg).toContain("# Loaded recipes");
-    expect(msg).toContain(`Recipe id: ${SPAWN_AGENT_FOR_EDITS_RECIPE.id}`);
-    expect(msg).toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
+describe("loaded skills message", () => {
+  it("includes selected skill bodies and ids", () => {
+    const bundle = renderSkillBundle([SPAWN_AGENT_FOR_EDITS_SKILL]);
+    const msg = buildLoadedSkillsMessage(bundle);
+    expect(msg).toContain("# Loaded skills");
+    expect(msg).toContain(`Skill id: ${SPAWN_AGENT_FOR_EDITS_SKILL.id}`);
+    expect(msg).toContain(SPAWN_AGENT_FOR_EDITS_SKILL.body);
   });
 
-  it("instructs the model to checkpoint steps via recipe.step.advance", () => {
-    const bundle = renderRecipeBundle([SPAWN_AGENT_FOR_EDITS_RECIPE]);
-    const msg = buildLoadedRecipesMessage(bundle);
-    expect(msg).toContain("recipe.step.advance");
-    expect(msg).toContain("recipe.run.get");
+  it("instructs the model to checkpoint steps via skill.step.advance", () => {
+    const bundle = renderSkillBundle([SPAWN_AGENT_FOR_EDITS_SKILL]);
+    const msg = buildLoadedSkillsMessage(bundle);
+    expect(msg).toContain("skill.step.advance");
+    expect(msg).toContain("skill.run.get");
   });
 
-  it("instructs the spawn recipe to ask when the target worktree is ambiguous", () => {
+  it("instructs the spawn skill to ask when the target worktree is ambiguous", () => {
     // Guards issue #55: step 3 must branch on ambiguity instead of silently
     // picking a worktree. Proceed when exactly one matches; stop and ask when
     // multiple candidates exist (or none) and the user named none.
-    const body = SPAWN_AGENT_FOR_EDITS_RECIPE.body;
+    const body = SPAWN_AGENT_FOR_EDITS_SKILL.body;
     expect(body).toContain("if exactly one worktree plausibly matches");
     expect(body).toContain("STOP, list the candidates, and ask the user");
     expect(body).toContain("Do not silently fall back to the active worktree");
   });
 
   it("renders a safe fallback for an empty bundle", () => {
-    const msg = buildLoadedRecipesMessage(renderRecipeBundle([]));
-    expect(msg).toContain("# Loaded recipes");
-    expect(msg).toContain("No task-specific recipes");
-    // No recipe loaded ⇒ nothing to checkpoint ⇒ no step-tracking directive.
-    expect(msg).not.toContain("recipe.step.advance");
+    const msg = buildLoadedSkillsMessage(renderSkillBundle([]));
+    expect(msg).toContain("# Loaded skills");
+    expect(msg).toContain("No task-specific skills");
+    // No skill loaded ⇒ nothing to checkpoint ⇒ no step-tracking directive.
+    expect(msg).not.toContain("skill.step.advance");
   });
 
-  it("orders recipes deterministically by id (stable cache hash)", () => {
-    const a = renderRecipeBundle([...BUILTIN_RECIPES]);
-    const b = renderRecipeBundle([...BUILTIN_RECIPES].reverse());
+  it("orders skills deterministically by id (stable cache hash)", () => {
+    const a = renderSkillBundle([...BUILTIN_SKILLS]);
+    const b = renderSkillBundle([...BUILTIN_SKILLS].reverse());
     expect(a.hash).toBe(b.hash);
     expect(a.ids).toEqual(b.ids);
   });
 });
 
-describe("recipe catalog message", () => {
-  it("lists every recipe's id + both headers, but never a body", () => {
-    const reg = new RecipeRegistry();
-    const msg = buildRecipeCatalogMessage(reg.metadataForSelection());
-    expect(msg).toContain("# Recipe catalog");
+describe("skill catalog message", () => {
+  it("lists every skill's id + both headers, but never a body", () => {
+    const reg = new SkillRegistry();
+    const msg = buildSkillCatalogMessage(reg.metadataForSelection());
+    expect(msg).toContain("# Skill catalog");
     // Tells the model how to pull a runbook in.
-    expect(msg).toContain("recipe.find");
+    expect(msg).toContain("skill.find");
     for (const r of reg.list()) {
       expect(msg).toContain(r.id); // id
       expect(msg).toContain(r.summary); // short header
@@ -159,10 +159,10 @@ describe("recipe catalog message", () => {
     }
     // Headers only — no body content (body marker) leaks into the catalog.
     expect(msg).not.toContain("Procedure:");
-    expect(msg).not.toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
+    expect(msg).not.toContain(SPAWN_AGENT_FOR_EDITS_SKILL.body);
   });
 
-  it("renders an empty string when there are no recipes (caller omits the section)", () => {
-    expect(buildRecipeCatalogMessage([])).toBe("");
+  it("renders an empty string when there are no skills (caller omits the section)", () => {
+    expect(buildSkillCatalogMessage([])).toBe("");
   });
 });

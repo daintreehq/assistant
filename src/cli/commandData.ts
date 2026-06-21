@@ -532,57 +532,57 @@ export async function handleUiCommand(
       };
     }
 
-    case "recipes": {
+    case "skills": {
       const sub = rest[0];
       if (!sub) {
-        const all = app.recipes.list();
+        const all = app.skills.list();
         return {
           handled: true,
-          title: `Recipes (${all.length})`,
+          title: `Skills (${all.length})`,
           text:
             all
               .map((r) => `${r.id}  [${r.risk}]  ${r.title} — ${r.summary}`)
               .join("\n") +
-            "\n\n/recipes loaded | find <query> | load <id…> | clear",
+            "\n\n/skills loaded | find <query> | load <id…> | clear",
         };
       }
       if (sub === "loaded") {
         return {
           handled: true,
-          title: "Recipes",
-          text: app.session.describeRecipes(),
+          title: "Skills",
+          text: app.session.describeSkills(),
         };
       }
       if (sub === "clear") {
-        app.session.setRecipes([]);
-        return { handled: true, title: "Recipes", text: "Cleared loaded recipes." };
+        app.session.setSkills([]);
+        return { handled: true, title: "Skills", text: "Cleared loaded skills." };
       }
       if (sub === "load") {
         const ids = rest.slice(1);
         if (ids.length === 0) {
           return {
             handled: true,
-            title: "Recipes",
-            text: "Usage: /recipes load <id> [<id>…]",
+            title: "Skills",
+            text: "Usage: /skills load <id> [<id>…]",
           };
         }
-        const known = ids.filter((id) => app.recipes.has(id));
-        const unknown = ids.filter((id) => !app.recipes.has(id));
+        const known = ids.filter((id) => app.skills.has(id));
+        const unknown = ids.filter((id) => !app.skills.has(id));
         if (known.length === 0) {
           return {
             handled: true,
-            title: "Recipes",
-            text: `No known recipe ids given; loaded recipes unchanged.${unknown.length ? ` Unknown: ${unknown.join(", ")}` : ""}`,
+            title: "Skills",
+            text: `No known skill ids given; loaded skills unchanged.${unknown.length ? ` Unknown: ${unknown.join(", ")}` : ""}`,
           };
         }
-        app.session.setRecipes(known);
+        app.session.setSkills(known);
         const note = unknown.length
           ? `Unknown id(s) ignored: ${unknown.join(", ")}\n`
           : "";
         return {
           handled: true,
-          title: "Recipes",
-          text: note + app.session.describeRecipes(),
+          title: "Skills",
+          text: note + app.session.describeSkills(),
         };
       }
       if (sub === "find") {
@@ -590,34 +590,34 @@ export async function handleUiCommand(
         if (!query) {
           return {
             handled: true,
-            title: "Recipes",
-            text: "Usage: /recipes find <query>",
+            title: "Skills",
+            text: "Usage: /skills find <query>",
           };
         }
         try {
-          const res = await app.session.findRecipes(query);
+          const res = await app.session.findSkills(query);
           const head = !res.ok
-            ? "Selector unavailable; loaded recipes unchanged."
+            ? "Selector unavailable; loaded skills unchanged."
             : res.matched
               ? `Loaded for "${query}": ${res.selected.map((r) => r.id).join(", ")}`
-              : `No recipe matched "${query}".`;
+              : `No skill matched "${query}".`;
           return {
             handled: true,
-            title: "Recipes",
-            text: `${head}\n${app.session.describeRecipes()}`,
+            title: "Skills",
+            text: `${head}\n${app.session.describeSkills()}`,
           };
         } catch (e) {
           return {
             handled: true,
-            title: "Recipes",
-            text: `Recipe find failed: ${e instanceof Error ? e.message : String(e)}`,
+            title: "Skills",
+            text: `Skill find failed: ${e instanceof Error ? e.message : String(e)}`,
           };
         }
       }
       return {
         handled: true,
-        title: "Recipes",
-        text: "Usage: /recipes [loaded|find <query>|load <id…>|clear]",
+        title: "Skills",
+        text: "Usage: /skills [loaded|find <query>|load <id…>|clear]",
       };
     }
 

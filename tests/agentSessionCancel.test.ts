@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, CANCELLED_REPLY } from "../src/agent/loop.js";
 import { CancelledError } from "../src/models/fireworks.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 import { Db } from "../src/storage/db.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ModelRouter } from "../src/models/router.js";
@@ -31,7 +31,7 @@ function makeSession(
   const db = new Db(":memory:");
   const router = {
     json: async () => ({
-      recipeIds: [],
+      skillIds: [],
       confidence: 0,
       reason: "",
       taskType: "qa",
@@ -54,7 +54,7 @@ function makeSession(
   const session = new AgentSession({
     router,
     registry: new ToolRegistry(),
-    recipeRegistry: new RecipeRegistry(),
+    skillRegistry: new SkillRegistry(),
     ctx,
     promptContext,
     sessionId: "ses_cancel",
@@ -123,7 +123,7 @@ describe("AgentSession cancellation (#45)", () => {
     const db = new Db(":memory:");
     const router = {
       json: async () => ({
-        recipeIds: [],
+        skillIds: [],
         confidence: 0,
         reason: "",
         taskType: "qa",
@@ -159,7 +159,7 @@ describe("AgentSession cancellation (#45)", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry: new RecipeRegistry(),
+      skillRegistry: new SkillRegistry(),
       ctx,
       promptContext,
       sessionId: "ses_probe",
@@ -197,7 +197,7 @@ describe("AgentSession cancellation (#45)", () => {
     const db = new Db(":memory:");
     const router = {
       json: async () => ({
-        recipeIds: [],
+        skillIds: [],
         confidence: 0,
         reason: "",
         taskType: "qa",
@@ -230,7 +230,7 @@ describe("AgentSession cancellation (#45)", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry: new RecipeRegistry(),
+      skillRegistry: new SkillRegistry(),
       ctx,
       promptContext,
       sessionId: "ses_midloop",
@@ -276,7 +276,7 @@ describe("AgentSession cancellation (#45)", () => {
         json: async () => {
           jsonCalls++;
           return {
-            recipeIds: [],
+            skillIds: [],
             confidence: 0,
             reason: "",
             taskType: "qa",
@@ -294,7 +294,7 @@ describe("AgentSession cancellation (#45)", () => {
     const reply = await session.send("hi", { signal: controller.signal });
 
     expect(reply).toBe(CANCELLED_REPLY);
-    // Not the stream, nor the recipe selector (json), nor auto-compact (chat).
+    // Not the stream, nor the skill selector (json), nor auto-compact (chat).
     expect(streamCalls).toBe(0);
     expect(jsonCalls).toBe(0);
     expect(chatCalls).toBe(0);

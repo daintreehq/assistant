@@ -563,13 +563,13 @@ export interface ConversationMessageRecord {
   createdAt: number;
 }
 
-/** One small-model recipe-selection decision; the dataset for improving recipes. */
-export interface RecipeSelectionLogRecord {
+/** One small-model skill-selection decision; the dataset for improving skills. */
+export interface SkillSelectionLogRecord {
   id: string;
   ts: number;
   sessionId: string;
   userInput: string;
-  selectedRecipeIdsJson: string;
+  selectedSkillIdsJson: string;
   confidence: number;
   taskType?: string;
   reason?: string;
@@ -669,54 +669,54 @@ export interface MemoryRecord {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Recipe run state (step-level progress + checkpoints)                        */
+/* Skill run state (step-level progress + checkpoints)                         */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Lifecycle of one recipe's step-level execution within a session:
- *   - active    — the recipe is mid-run; `currentStep` points at the live step
+ * Lifecycle of one skill's step-level execution within a session:
+ *   - active    — the skill is mid-run; `currentStep` points at the live step
  *   - completed — the model advanced past the final step (terminal)
  *   - abandoned — the run was explicitly closed without finishing (terminal)
  *
- * Recipes themselves stay stateless prompt injections; this record is the only
- * place runtime progress lives, so a multi-step recipe can be supervised as it
- * runs and resumed (via recipe.run.get) if a turn is interrupted.
+ * Skills themselves stay stateless prompt injections; this record is the only
+ * place runtime progress lives, so a multi-step skill can be supervised as it
+ * runs and resumed (via skill.run.get) if a turn is interrupted.
  */
-export type RecipeRunStatus = "active" | "completed" | "abandoned";
+export type SkillRunStatus = "active" | "completed" | "abandoned";
 
 /** Outcome the model reports for a single numbered step. */
-export type RecipeStepStatus = "done" | "skipped";
+export type SkillStepStatus = "done" | "skipped";
 
 /**
  * One checkpoint entry: a numbered step the model has reported on. `index` is
  * 1-based (matching the runbook's numbered steps), `ts` is when the transition
  * was recorded, and `notes` is an optional freeform checkpoint note.
  */
-export interface RecipeStepProgress {
+export interface SkillStepProgress {
   index: number;
-  status: RecipeStepStatus;
+  status: SkillStepStatus;
   notes?: string;
   ts: number;
 }
 
 /**
- * Durable step-level progress for one (session, recipe) pair. The natural key is
- * `(sessionId, recipeId)` — the selector caps a session at three mutually
- * exclusive recipes, so a single active run per recipe is sufficient.
+ * Durable step-level progress for one (session, skill) pair. The natural key is
+ * `(sessionId, skillId)` — the selector caps a session at three mutually
+ * exclusive skills, so a single active run per skill is sufficient.
  *
- * `stepsJson` holds a serialized {@link RecipeStepProgress}`[]` (matching the
+ * `stepsJson` holds a serialized {@link SkillStepProgress}`[]` (matching the
  * store-wide `*Json` convention); the tool layer deserializes it. `currentStep`
  * is denormalized for a fast "where did we leave off" read without parsing JSON
  * (0 = not started).
  */
-export interface RecipeRunStateRecord {
+export interface SkillRunStateRecord {
   id: string; // rrs_<uuid8>
   sessionId: string;
-  recipeId: string;
+  skillId: string;
   /** The step now active. 0 = not started; stays at the final step once done. */
   currentStep: number;
-  stepsJson: string; // JSON RecipeStepProgress[]
-  status: RecipeRunStatus;
+  stepsJson: string; // JSON SkillStepProgress[]
+  status: SkillRunStatus;
   startedAt: number;
   /** Advances on every transition; startedAt stays fixed. Used for recency. */
   updatedAt: number;

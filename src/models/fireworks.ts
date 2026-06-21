@@ -90,7 +90,7 @@ export function hasImageContent(messages: ChatMessage[]): boolean {
 
 /**
  * Flatten a message's content to plain text for the string-only paths (token
- * estimation, durable persistence, recipe-selection context). Image parts are
+ * estimation, durable persistence, skill-selection context). Image parts are
  * never stringified to their (huge) base64 URI — they collapse to an
  * `[image omitted]` marker so callers never write `[object Object]` or megabytes
  * of base64 into SQLite.
@@ -125,7 +125,7 @@ export interface ChatOptions {
    * Abort the in-flight request. Used by the UI's Escape-to-cancel path: when the
    * user cancels a turn, the signal fires and the in-flight call rejects. Honoured
    * by all three paths — streaming and the one-shot chat()/json() — so a cancel
-   * that lands during a pre-turn auto-compact or recipe-selection call tears the
+   * that lands during a pre-turn auto-compact or skill-selection call tears the
    * request down instead of running it to completion in the background.
    */
   signal?: AbortSignal;
@@ -503,7 +503,7 @@ export class FireworksClient {
     let resp;
     try {
       // Same bounded retry + per-attempt timeout as chat(): a transient 5xx on a
-      // watcher classification or recipe-selection call now rides out instead of
+      // watcher classification or skill-selection call now rides out instead of
       // collapsing the call to an "unknown" verdict on the first blip.
       resp = await retryModelCall(
         () =>
@@ -514,7 +514,7 @@ export class FireworksClient {
         { signal: opts.signal },
       );
     } catch (err) {
-      // A cancel during a pre-turn json() (e.g. recipe selection) is a clean abort,
+      // A cancel during a pre-turn json() (e.g. skill selection) is a clean abort,
       // not a model failure — normalise it like the other paths.
       if (isAbortError(err)) throw new CancelledError();
       throw err;

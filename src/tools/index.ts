@@ -13,7 +13,7 @@ import { extractionTools } from "./extractionTools.js";
 import { agentTaskTools } from "./agentTaskTools.js";
 import { grantTools } from "./grantTools.js";
 import { workflowTools } from "./workflowTools.js";
-import { recipeRunTools } from "./recipeRunTools.js";
+import { skillRunTools } from "./skillRunTools.js";
 import { auditTools } from "./auditTools.js";
 import { memoryTools } from "./memoryTools.js";
 import { artifactTools } from "./artifactTools.js";
@@ -30,7 +30,7 @@ export function buildAllTools(): ToolDef[] {
     ...agentTaskTools,
     ...grantTools,
     ...workflowTools,
-    ...recipeRunTools,
+    ...skillRunTools,
     ...auditTools,
     ...memoryTools,
     ...artifactTools,

@@ -94,9 +94,9 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
     help: "show or set tier (supervisor|operator|system)",
   },
   {
-    name: "recipes",
+    name: "skills",
     palette: "loaded · find · load · clear",
-    syntax: "/recipes [sub]",
+    syntax: "/skills [sub]",
     help: "loaded | find <query> | load <id…> | clear",
   },
   {

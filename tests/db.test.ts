@@ -71,12 +71,12 @@ describe("Db fresh schema (single baseline migration)", () => {
     );
     expect(indexNames("workflow_runs")).toContain("idx_workflow_runs_status");
 
-    // recipe_run_state table + its unique natural-key index exist on a fresh DB.
-    expect(colNames("recipe_run_state")).toEqual(
+    // skill_run_state table + its unique natural-key index exist on a fresh DB.
+    expect(colNames("skill_run_state")).toEqual(
       expect.arrayContaining([
         "id",
         "sessionId",
-        "recipeId",
+        "skillId",
         "currentStep",
         "stepsJson",
         "status",
@@ -85,8 +85,8 @@ describe("Db fresh schema (single baseline migration)", () => {
         "completedAt",
       ]),
     );
-    expect(indexNames("recipe_run_state")).toContain(
-      "idx_recipe_run_state_key",
+    expect(indexNames("skill_run_state")).toContain(
+      "idx_skill_run_state_key",
     );
 
     // agent_launches table + its idempotency-key index exist on a fresh DB.
@@ -1054,11 +1054,11 @@ describe("Db", () => {
     });
   });
 
-  describe("recipe run state", () => {
-    it("insertRecipeRunState applies defaults (rrs_ id, active status, timestamps)", () => {
-      const rec = db.insertRecipeRunState({
+  describe("skill run state", () => {
+    it("insertSkillRunState applies defaults (rrs_ id, active status, timestamps)", () => {
+      const rec = db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "daintree.orchestration.basic",
+        skillId: "daintree.orchestration.basic",
       });
       expect(rec.id).toMatch(/^rrs_[0-9a-f]{8}$/);
       expect(rec.status).toBe("active");
@@ -1069,15 +1069,15 @@ describe("Db", () => {
       expect(rec.completedAt).toBeUndefined();
     });
 
-    it("getRecipeRunState looks up by the (session, recipe) natural key", () => {
-      db.insertRecipeRunState({ sessionId: "ses_a", recipeId: "r.one" });
-      db.insertRecipeRunState({ sessionId: "ses_a", recipeId: "r.two" });
-      db.insertRecipeRunState({ sessionId: "ses_b", recipeId: "r.one" });
+    it("getSkillRunState looks up by the (session, skill) natural key", () => {
+      db.insertSkillRunState({ sessionId: "ses_a", skillId: "r.one" });
+      db.insertSkillRunState({ sessionId: "ses_a", skillId: "r.two" });
+      db.insertSkillRunState({ sessionId: "ses_b", skillId: "r.one" });
 
-      const found = db.getRecipeRunState("ses_a", "r.two")!;
-      expect(found.recipeId).toBe("r.two");
+      const found = db.getSkillRunState("ses_a", "r.two")!;
+      expect(found.skillId).toBe("r.two");
       expect(found.sessionId).toBe("ses_a");
-      expect(db.getRecipeRunState("ses_missing", "r.one")).toBeUndefined();
+      expect(db.getSkillRunState("ses_missing", "r.one")).toBeUndefined();
     });
 
     it("round-trips the stepsJson checkpoint array", () => {
@@ -1085,37 +1085,37 @@ describe("Db", () => {
         { index: 1, status: "done", notes: "cloned repo", ts: 111 },
         { index: 2, status: "skipped", ts: 222 },
       ];
-      const rec = db.insertRecipeRunState({
+      const rec = db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "r.steps",
+        skillId: "r.steps",
         currentStep: 3,
         stepsJson: JSON.stringify(steps),
       });
-      const fetched = db.getRecipeRunState("ses_a", "r.steps")!;
+      const fetched = db.getSkillRunState("ses_a", "r.steps")!;
       expect(fetched.currentStep).toBe(3);
       expect(JSON.parse(fetched.stepsJson)).toEqual(steps);
       expect(rec.id).toBe(fetched.id);
     });
 
-    it("the (session, recipe) index is unique — duplicate insert throws", () => {
-      db.insertRecipeRunState({ sessionId: "ses_a", recipeId: "r.dup" });
+    it("the (session, skill) index is unique — duplicate insert throws", () => {
+      db.insertSkillRunState({ sessionId: "ses_a", skillId: "r.dup" });
       expect(() =>
-        db.insertRecipeRunState({ sessionId: "ses_a", recipeId: "r.dup" }),
+        db.insertSkillRunState({ sessionId: "ses_a", skillId: "r.dup" }),
       ).toThrow();
     });
 
-    it("updateRecipeRunState patches allowed columns and advances updatedAt", () => {
-      const rec = db.insertRecipeRunState({
+    it("updateSkillRunState patches allowed columns and advances updatedAt", () => {
+      const rec = db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "r.upd",
+        skillId: "r.upd",
         startedAt: 1000,
       });
-      db.updateRecipeRunState(rec.id, {
+      db.updateSkillRunState(rec.id, {
         currentStep: 2,
         stepsJson: JSON.stringify([{ index: 1, status: "done", ts: 500 }]),
         status: "active",
       });
-      const fetched = db.getRecipeRunState("ses_a", "r.upd")!;
+      const fetched = db.getSkillRunState("ses_a", "r.upd")!;
       expect(fetched.currentStep).toBe(2);
       expect(JSON.parse(fetched.stepsJson)).toHaveLength(1);
       // updatedAt advances past the seeded startedAt; startedAt is unchanged.
@@ -1123,50 +1123,50 @@ describe("Db", () => {
       expect(fetched.startedAt).toBe(1000);
     });
 
-    it("updateRecipeRunState ignores unknown / immutable columns", () => {
-      const rec = db.insertRecipeRunState({
+    it("updateSkillRunState ignores unknown / immutable columns", () => {
+      const rec = db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "r.imm",
+        skillId: "r.imm",
         startedAt: 1000,
       });
-      db.updateRecipeRunState(rec.id, {
+      db.updateSkillRunState(rec.id, {
         id: "rrs_hacked",
         sessionId: "ses_other",
-        recipeId: "r.other",
+        skillId: "r.other",
         startedAt: 5,
         bogus: "nope",
       } as Record<string, unknown>);
-      const fetched = db.getRecipeRunState("ses_a", "r.imm")!;
+      const fetched = db.getSkillRunState("ses_a", "r.imm")!;
       expect(fetched.id).toBe(rec.id);
       expect(fetched.sessionId).toBe("ses_a");
-      expect(fetched.recipeId).toBe("r.imm");
+      expect(fetched.skillId).toBe("r.imm");
       expect(fetched.startedAt).toBe(1000);
     });
 
-    it("listRecipeRunStates filters by session and orders by updatedAt desc", () => {
-      db.insertRecipeRunState({
+    it("listSkillRunStates filters by session and orders by updatedAt desc", () => {
+      db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "r.1",
+        skillId: "r.1",
         startedAt: 100,
         updatedAt: 100,
       });
-      db.insertRecipeRunState({
+      db.insertSkillRunState({
         sessionId: "ses_a",
-        recipeId: "r.2",
+        skillId: "r.2",
         startedAt: 300,
         updatedAt: 300,
       });
-      db.insertRecipeRunState({
+      db.insertSkillRunState({
         sessionId: "ses_b",
-        recipeId: "r.1",
+        skillId: "r.1",
         startedAt: 200,
         updatedAt: 200,
       });
-      expect(db.listRecipeRunStates("ses_a").map((r) => r.recipeId)).toEqual([
+      expect(db.listSkillRunStates("ses_a").map((r) => r.skillId)).toEqual([
         "r.2",
         "r.1",
       ]);
-      expect(db.listRecipeRunStates()).toHaveLength(3);
+      expect(db.listSkillRunStates()).toHaveLength(3);
     });
 
     it("maps SQL NULL completedAt to undefined and persists across reopen", () => {
@@ -1174,16 +1174,16 @@ describe("Db", () => {
       const path = join(dir, "state.db");
       try {
         const first = new Db(path);
-        const rec = first.insertRecipeRunState({
+        const rec = first.insertSkillRunState({
           sessionId: "ses_a",
-          recipeId: "r.persist",
+          skillId: "r.persist",
         });
-        expect(first.getRecipeRunState("ses_a", "r.persist")!.completedAt).toBeUndefined();
-        first.updateRecipeRunState(rec.id, { status: "completed", completedAt: 8888 });
+        expect(first.getSkillRunState("ses_a", "r.persist")!.completedAt).toBeUndefined();
+        first.updateSkillRunState(rec.id, { status: "completed", completedAt: 8888 });
         first.close();
 
         const second = new Db(path);
-        const fetched = second.getRecipeRunState("ses_a", "r.persist")!;
+        const fetched = second.getSkillRunState("ses_a", "r.persist")!;
         expect(fetched.status).toBe("completed");
         expect(fetched.completedAt).toBe(8888);
         second.close();
@@ -1639,29 +1639,29 @@ describe("Db.gcRetentionSweep (bounded retention — issue #145)", () => {
     expect(db.listRunEvents("r3").length).toBe(1);
   });
 
-  it("prunes conversation and recipe_selection_log by age, keeping recent rows", () => {
+  it("prunes conversation and skill_selection_log by age, keeping recent rows", () => {
     db.insertMessage({ sessionId: "s", seq: 0, role: "user", content: "old", createdAt: OLD });
     db.insertMessage({ sessionId: "s", seq: 1, role: "user", content: "new", createdAt: NOW - 100 });
-    db.insertRecipeSelection({
+    db.insertSkillSelection({
       ts: OLD,
       sessionId: "s",
       userInput: "old",
-      selectedRecipeIdsJson: "[]",
+      selectedSkillIdsJson: "[]",
       confidence: 0.5,
     });
-    db.insertRecipeSelection({
+    db.insertSkillSelection({
       ts: NOW - 100,
       sessionId: "s",
       userInput: "new",
-      selectedRecipeIdsJson: "[]",
+      selectedSkillIdsJson: "[]",
       confidence: 0.5,
     });
 
     // keepRows: 1 each so the age cutoff is free to drop the ancient row.
-    db.gcRetentionSweep(NOW, retention({ conversationKeepRows: 1, recipeSelLogKeepRows: 1 }));
+    db.gcRetentionSweep(NOW, retention({ conversationKeepRows: 1, skillSelLogKeepRows: 1 }));
 
     expect(db.listMessages("s").map((m) => m.content)).toEqual(["new"]);
-    expect(db.listRecipeSelections().map((r) => r.userInput)).toEqual(["new"]);
+    expect(db.listSkillSelections().map((r) => r.userInput)).toEqual(["new"]);
   });
 
   it("hard-deletes resolved/expired events past the window but keeps open and recent ones", () => {

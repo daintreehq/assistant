@@ -7,13 +7,13 @@ import {
 } from "../src/agent/events.js";
 import { Db } from "../src/storage/db.js";
 import type { MainPromptContext } from "../src/models/prompts/index.js";
-import { RecipeRegistry } from "../src/recipes/registry.js";
+import { SkillRegistry } from "../src/skills/registry.js";
 
-// Recipe selection runs at the top of send(); a stub keeps it a no-op so these
+// Skill selection runs at the top of send(); a stub keeps it a no-op so these
 // tests stay focused on the event sink.
-const recipeRegistry = new RecipeRegistry();
+const skillRegistry = new SkillRegistry();
 const selectNone = async () => ({
-  recipeIds: [],
+  skillIds: [],
   confidence: 0,
   reason: "test",
   taskType: "none",
@@ -47,7 +47,7 @@ const PROMPT_CTX: MainPromptContext = {
 };
 
 const ctx = {
-  db: { insertMessage: () => {}, insertRecipeSelection: () => {} },
+  db: { insertMessage: () => {}, insertSkillSelection: () => {} },
 } as any;
 
 function chatResult(over: Partial<{ content: string; toolCalls: any[] }>) {
@@ -83,7 +83,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t1",
@@ -118,7 +118,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t2",
@@ -166,7 +166,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "tu",
@@ -222,7 +222,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "tm",
@@ -267,7 +267,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "tn",
@@ -299,7 +299,7 @@ describe("AgentSession emits structured events instead of rendering", () => {
     const session = new AgentSession({
       router,
       registry,
-      recipeRegistry,
+      skillRegistry,
       ctx,
       promptContext: PROMPT_CTX,
       sessionId: "t3",

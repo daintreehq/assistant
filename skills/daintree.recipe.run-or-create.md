@@ -23,7 +23,7 @@ requiredTools:
   - context.snapshot
 ---
 Use when: the user asks about Daintree workspace recipes or creating a worktree with one.
-Note: "Daintree workspace recipes" (MCP actions) are distinct from the assistant recipes loaded into your context.
+Note: "Daintree workspace recipes" (MCP actions) are distinct from the assistant skills loaded into your context.
 Procedure:
 1. Inspect current Daintree context first if the project/worktree is ambiguous.
 2. List available recipes with the recipe.list tool when needed.

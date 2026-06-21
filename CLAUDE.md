@@ -84,9 +84,9 @@ src/
   safety/     policy.ts — tier gating, confirmation matrix, no-file-edit guard
   daemon/     scheduler.ts (3s tick) + watcherEngine.ts (terminal watcher FSM)
   storage/    db.ts + sqliteDriver.ts — timers, watchers, events, audit, conversation, grants
-  recipes/    runbooks: content files in repo-root `recipes/*.md` (fileSource), loaded
-              into the registry; the model pulls them on demand via `recipe.find` (query →
-              small-model selector → inject). See docs/RECIPES.md to author one.
+  skills/     runbooks: content files in repo-root `skills/*.md` (fileSource), loaded
+              into the registry; the model pulls them on demand via `skill.find` (query →
+              small-model selector → inject). See docs/SKILLS.md to author one.
   ui/         OpenTUI cockpit: runApp.tsx + DaintreeApp.tsx + ControlRoom.tsx + components/ (the ONLY @opentui importers)
   host/       Embedded Electron utility-process host (protocol.ts, index.ts)
   config.ts schemas.ts queue.ts debugLog.ts watcherCadence.ts
@@ -94,7 +94,7 @@ src/
 
 **Data flow:** `App.create()` (cli/app.ts) builds every dependency once and exposes
 a `ToolContext` factory. `AgentSession.send()` runs a turn: optional auto-compact →
-recipe re-selection → project tools → `router.stream("large", …)` → for each tool
+skill re-selection → project tools → `router.stream("large", …)` → for each tool
 call, `registry.dispatch()` → feed results back (≤12 iterations). `dispatch` =
 validate args (Zod) → tier gate (`decide`) → confirmation/grant → run handler →
 audit. The daemon `Scheduler` ticks every 3s firing due timers and watcher checks.
@@ -183,4 +183,4 @@ All loaded in `src/config.ts`. State lives under `~/.daintree/assistant-cli/`.
 ## More docs
 
 `README.md` (full overview), `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`,
-`docs/FIREWORKS.md`, `docs/RECIPES.md` (how to author assistant recipes).
+`docs/FIREWORKS.md`, `docs/SKILLS.md` (how to author assistant skills).
