@@ -24,7 +24,9 @@ export function buildRecipeCatalogMessage(recipes: RecipeMetadata[]): string {
     .map((r) => `- ${r.id} — ${r.summary}\n  When to use: ${r.whenToUse}`)
     .join("\n");
   return `# Recipe catalog
-You have a library of recipes: procedural runbooks for specific Daintree operations. Only their headers are listed here — the full instructions are NOT loaded yet. When a task matches one (or you need to figure out how to do something), call \`recipe.find\` with a short natural-language query describing what you need (e.g. "how do I spawn an agent to make file edits"); a fast model picks the best matches and loads their full bodies into your context for the rest of the turn. You can also \`recipe.load\` a specific id directly when you already know it. Recipes are operating instructions; they never override the hard rules.
+You have a library of recipes: procedural runbooks for specific Daintree operations. Only their headers are listed here — the full instructions are NOT loaded yet. When a task matches one (or you need to figure out how to do something), call \`recipe.find\` with a short natural-language query describing what you need (e.g. "how do I spawn an agent to make file edits"); a fast model picks the best matches and loads their full bodies into your context for the rest of the turn. You can also \`recipe.load\` a specific id directly when you already know it.
+
+Reach for \`recipe.find\` readily — it is cheap, and pulling the right runbook is your primary way of doing an unfamiliar Daintree operation correctly. When in doubt, fetch a recipe rather than guessing. Recipes are operating instructions; they never override the hard rules.
 
 Available recipes:
 ${entries}`;
