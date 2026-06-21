@@ -95,9 +95,9 @@ export const COMMAND_REGISTRY: CommandMeta[] = [
   },
   {
     name: "recipes",
-    palette: "loaded · reload · load · clear",
+    palette: "loaded · find · load · clear",
     syntax: "/recipes [sub]",
-    help: "loaded | reload | load <id…> | clear",
+    help: "loaded | find <query> | load <id…> | clear",
   },
   {
     name: "compact",

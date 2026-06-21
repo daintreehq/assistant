@@ -17,7 +17,10 @@ import type { ToolContext } from "../tools/types.js";
 import type { ConversationMessageRecord, ToolResult } from "../schemas.js";
 import { BASE_SYSTEM_PROMPT } from "../models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../models/prompts/runtimeContext.js";
-import { buildLoadedRecipesMessage } from "../models/prompts/recipes.js";
+import {
+  buildLoadedRecipesMessage,
+  buildRecipeCatalogMessage,
+} from "../models/prompts/recipes.js";
 import type { MainPromptContext } from "../models/prompts/runtimeContext.js";
 import type { RecipeRegistry } from "../recipes/registry.js";
 import { selectRecipes } from "../recipes/selector.js";
@@ -25,7 +28,7 @@ import {
   renderRecipeBundle,
   type RenderedRecipeBundle,
 } from "../recipes/render.js";
-import type { RecipeSelection } from "../recipes/types.js";
+import type { RecipeSelection, RecipeFindResult } from "../recipes/types.js";
 import { type AgentEventSink, type RunIdRef, noopAgentEvents } from "./events.js";
 import { bareModelId, estimateCostUsd } from "../models/pricing.js";
 
@@ -56,8 +59,6 @@ const CONTROL_MESSAGE_COUNT = 3;
  * text and the resume-side prefix check from drifting apart.
  */
 export const CLEAR_MARKER = "[conversation cleared — context reset to initial state]";
-/** Re-run recipe selection at least this often even without trigger terms. */
-const RECIPE_REFRESH_INTERVAL = 4;
 /**
  * Stable Fireworks cache key for the main-thread prefix (see docs §9). A plain,
  * unversioned identifier: it only groups requests that share the cached base
@@ -66,9 +67,12 @@ const RECIPE_REFRESH_INTERVAL = 4;
  * stale content — so there's no version to bump.
  */
 const MAIN_PROMPT_CACHE_KEY = "daintree-main";
-/** Strong terms that justify re-selecting recipes mid-conversation. */
-const RECIPE_TRIGGER_RE =
-  /\b(recipe|worktree|agent|edit|fix|implement|refactor|test|monitor|watch|terminal)\b/i;
+/**
+ * `risk: "read"` tools whose *effect* is a write to the live loaded-recipe set
+ * (they rewrite message[2] / activeRecipeIds). They are withheld on autonomous
+ * wake turns, which must not reshape the interactive session's context.
+ */
+const RECIPE_CONTEXT_MUTATING_TOOLS = new Set(["recipe.find", "recipe.load"]);
 const MAX_TOOL_RESULT_CHARS = 8000;
 /**
  * How much of the overflowing output to inline as a preview inside the truncation
@@ -145,8 +149,10 @@ const CORE_TOOL_NAMES = [
   // no-op when no recipe is active (the model has nothing to advance).
   "recipe.step.advance",
   "recipe.run.get",
-  // Always available so the model can pull a specific recipe into context on
-  // demand even when an active recipe's allowlist would otherwise filter it out.
+  // Always available so the model can discover + pull recipes into context on
+  // demand even when an active recipe's allowlist would otherwise filter them out.
+  // `recipe.find` runs a query through the small model; `recipe.load` pulls a known id.
+  "recipe.find",
   "recipe.load",
   "memory.recall",
   "memory.list",
@@ -307,18 +313,25 @@ export class AgentSession {
 
   // Recipe state. Control messages live at fixed indices:
   //   [0] base system prompt (cached prefix, never changes mid-session)
-  //   [1] runtime context (tier/project/MCP/models)
-  //   [2] loaded recipes
+  //   [1] runtime context (tier/project/MCP/models) + the recipe catalog
+  //   [2] loaded recipes (bodies pulled in by recipe.find / recipe.load)
   private activeRecipeIds: string[] = [];
   private recipeBundle: RenderedRecipeBundle = renderRecipeBundle([]);
-  private turnSinceRecipeRefresh = 0;
+  // The recipe catalog (the menu of every available recipe, headers only) is static
+  // for the session — recipes don't change mid-session — so it's built once and
+  // appended to the runtime-context message. Kept here so refreshRuntimeContext()
+  // can re-append it when it rewrites message[1].
+  private readonly recipeCatalog: string;
 
   constructor(deps: AgentSessionDeps) {
     this.deps = deps;
     this.events = deps.events ?? noopAgentEvents;
+    this.recipeCatalog = buildRecipeCatalogMessage(
+      deps.recipeRegistry.metadataForSelection(),
+    );
     const control: ChatMessage[] = [
       { role: "system", content: BASE_SYSTEM_PROMPT },
-      { role: "system", content: buildRuntimeContextMessage(deps.promptContext) },
+      { role: "system", content: this.composeRuntimeContext(deps.promptContext) },
       { role: "system", content: buildLoadedRecipesMessage(this.recipeBundle) },
     ];
     if (deps.restoredMessages !== undefined) {
@@ -335,14 +348,27 @@ export class AgentSession {
   }
 
   /**
+   * Compose message[1]: the dynamic runtime context followed by the static recipe
+   * catalog. The catalog rides along here (rather than in its own control message)
+   * so the loaded-recipe message stays at index [2] and the control-message count
+   * is unchanged — the catalog is appended, never interleaved, so runtime-context
+   * assertions still see "# Runtime context" up top.
+   */
+  private composeRuntimeContext(promptContext: MainPromptContext): string {
+    const runtime = buildRuntimeContextMessage(promptContext);
+    return this.recipeCatalog ? `${runtime}\n\n${this.recipeCatalog}` : runtime;
+  }
+
+  /**
    * Refresh the runtime-context message (e.g. after MCP connects or the tier
    * changes). Only message[1] is rewritten, so the cached base prefix is intact.
+   * The recipe catalog is re-appended so it survives the rewrite.
    */
   refreshRuntimeContext(promptContext: MainPromptContext): void {
     this.deps.promptContext = promptContext;
     this.messages[1] = {
       role: "system",
-      content: buildRuntimeContextMessage(promptContext),
+      content: this.composeRuntimeContext(promptContext),
     };
   }
 
@@ -387,12 +413,11 @@ export class AgentSession {
    * note is injected — the next turn starts a genuinely fresh thread with no
    * memory of what came before. A marker is appended to the durable log so the
    * persisted transcript records the reset, and rehydrateSession() treats it as a
-   * boundary (a resumed session restores nothing after it). The recipe-refresh
-   * counter resets to 0 so the next turn re-selects recipes like a fresh session.
+   * boundary (a resumed session restores nothing after it). Loaded recipes are
+   * left as-is — the model re-pulls what it needs via recipe.find on the next turn.
    */
   clear(): void {
     this.messages = this.messages.slice(0, CONTROL_MESSAGE_COUNT);
-    this.turnSinceRecipeRefresh = 0;
     this.persistMessage({ role: "system", content: CLEAR_MARKER });
   }
 
@@ -480,20 +505,21 @@ export class AgentSession {
     runId: string,
   ): Promise<string> {
     // Already aborted before we began: do NO model work (not even the pre-turn
-    // recipe-select / auto-compact calls) and don't push the user message into
-    // history — so a cancel that lands at the very start leaves no orphan turn.
+    // auto-compact call) and don't push the user message into history — so a cancel
+    // that lands at the very start leaves no orphan turn.
     if (opts.signal?.aborted) {
       this.events.assistantCancelled("");
       return CANCELLED_REPLY;
     }
     await this.maybeAutoCompact(opts.signal);
-    if (!opts.readOnly) await this.maybeRefreshRecipes(userInput, opts.signal);
-    // The pre-turn model calls above (auto-compact summary, recipe selection) honour
-    // the signal and swallow a cancel internally, and they await/yield long enough
-    // for an Escape to land. Re-check before committing the user message so a cancel
-    // arriving in THIS window also leaves no orphan turn — the same guarantee as the
-    // entry check. Pull-back (issue #61) depends on this: a message yanked back before
-    // any assistant output must never enter model history.
+    // Recipes are pulled on demand by the model via `recipe.find` / `recipe.load`
+    // (no pre-turn auto-selection) — nothing to do here for recipes.
+    // The auto-compact summary call above honours the signal and swallows a cancel
+    // internally, and it awaits/yields long enough for an Escape to land. Re-check
+    // before committing the user message so a cancel arriving in THIS window also
+    // leaves no orphan turn — the same guarantee as the entry check. Pull-back
+    // (issue #61) depends on this: a message yanked back before any assistant output
+    // must never enter model history.
     if (opts.signal?.aborted) {
       this.events.assistantCancelled("");
       return CANCELLED_REPLY;
@@ -816,16 +842,16 @@ export class AgentSession {
    * wake-up can read a terminal and report, but cannot act. "read" is never in
    * ALWAYS_CONFIRM, so a read-only turn also never blocks on a confirmation prompt.
    *
-   * `recipe.load` is the one `risk: "read"` tool excluded here: its read is only an
-   * id lookup, but its *effect* is a write to the live loaded-recipe set (it rewrites
-   * messages[2] and mutates activeRecipeIds via loadRecipes). An autonomous wake turn
-   * must not reshape the interactive session's context, so it is withheld despite the
-   * risk class.
+   * `recipe.find` and `recipe.load` are the `risk: "read"` tools excluded here: their
+   * read is only a lookup/selection, but their *effect* is a write to the live loaded-
+   * recipe set (they rewrite messages[2] and mutate activeRecipeIds). An autonomous
+   * wake turn must not reshape the interactive session's context, so they are withheld
+   * despite the risk class.
    */
   private readOnlyToolNames(): string[] {
     return this.deps.registry
       .list()
-      .filter((t) => t.risk === "read" && t.name !== "recipe.load")
+      .filter((t) => t.risk === "read" && !RECIPE_CONTEXT_MUTATING_TOOLS.has(t.name))
       .map((t) => t.name);
   }
 
@@ -867,80 +893,79 @@ export class AgentSession {
   }
 
   /**
-   * Decide whether to re-run recipe selection for this turn, and if so, swap the
-   * loaded-recipes control message. Throttled to preserve prompt-cache locality:
-   * we only ask the small model on the first turn, every Nth turn, or when the
-   * input contains a strong trigger term.
+   * Query-driven recipe fetch — the engine behind the `recipe.find` tool and the
+   * `/recipes find` command. The small model reads `query` against every recipe's
+   * headers and returns the best 0-3 ids; their bodies are merged into the loaded
+   * set (new ids first so they survive the cap-of-3) and injected into message[2],
+   * so later iterations of the same turn see them. Best-effort: a selector failure
+   * resolves to `ok: false` with the loaded set unchanged rather than throwing.
    */
-  private async maybeRefreshRecipes(
-    userInput: string,
+  async findRecipes(
+    query: string,
     signal?: AbortSignal,
-  ): Promise<void> {
-    const shouldCheck =
-      this.turnSinceRecipeRefresh === 0 ||
-      this.turnSinceRecipeRefresh >= RECIPE_REFRESH_INTERVAL ||
-      RECIPE_TRIGGER_RE.test(userInput);
-    if (!shouldCheck) {
-      this.turnSinceRecipeRefresh++;
-      return;
-    }
-    await this.runSelection(userInput, signal);
-  }
-
-  /**
-   * Force a recipe re-selection now, ignoring the throttle (manual /recipes
-   * reload). Returns false if the selector failed and we kept the existing set.
-   */
-  async forceRecipeRefresh(userInput = ""): Promise<boolean> {
-    return this.runSelection(userInput);
-  }
-
-  /**
-   * Run the small-model selector and apply the result. Returns false if the
-   * selector errored and we fell back to keeping the existing recipes.
-   */
-  private async runSelection(
-    userInput: string,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<RecipeFindResult> {
     let selection: RecipeSelection;
-    let ok = true;
     try {
       selection = await selectRecipes({
         router: this.deps.router,
-        registry: this.deps.recipeRegistry,
-        userInput,
-        recentMessages: this.messages.slice(CONTROL_MESSAGE_COUNT),
-        activeRecipeIds: [...this.activeRecipeIds],
+        candidates: this.deps.recipeRegistry.metadataForSelection(),
+        query,
         signal,
       });
     } catch {
-      ok = false;
-      selection = {
-        recipeIds: [...this.activeRecipeIds],
+      return {
+        ok: false,
+        matched: false,
+        query,
+        reason: "recipe selector unavailable",
         confidence: 0,
-        reason: "selector failed; keeping existing recipes",
-        taskType: "unknown",
-        keepExisting: true,
+        selected: [],
+        activeRecipeIds: [...this.activeRecipeIds],
       };
     }
 
-    // keepExisting (when there is something to keep) means "don't change", so the
-    // model's recipeIds are ignored — the selector sets it only when the task is
-    // unchanged. Otherwise honour the requested set.
-    const requested =
-      selection.keepExisting && this.activeRecipeIds.length > 0
-        ? this.activeRecipeIds
-        : selection.recipeIds;
-    const known = this.resolveKnownIds(requested);
-    // The model named recipes but none are known — treat that as a hallucination
-    // and keep the current set. Only an explicitly empty selection clears recipes.
-    const nextIds =
-      known.length === 0 && requested.length > 0 ? this.activeRecipeIds : known;
-    this.applyRecipeBundle(this.deps.recipeRegistry.getMany(nextIds));
-    this.turnSinceRecipeRefresh = 1;
-    this.logSelection(userInput, selection);
-    return ok;
+    // A cancel that landed while the selector was in flight: don't mutate the live
+    // recipe set with a result the user already abandoned. Leave the load unchanged.
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        matched: false,
+        query,
+        reason: "cancelled",
+        confidence: 0,
+        selected: [],
+        activeRecipeIds: [...this.activeRecipeIds],
+      };
+    }
+
+    // The recipes this query actually resolved (hallucinated ids dropped).
+    const newlyKnown = this.resolveKnownIds(selection.recipeIds);
+    // Merge them in front of the current set, capped, and inject into message[2].
+    const merged = this.resolveKnownIds([
+      ...selection.recipeIds,
+      ...this.activeRecipeIds,
+    ]);
+    this.applyRecipeBundle(this.deps.recipeRegistry.getMany(merged));
+    // Log what the query resolved — NOT the post-merge active set — so a no-match
+    // (or all-hallucinated) selection isn't recorded as if it loaded the existing set.
+    this.logSelection(query, selection, newlyKnown);
+
+    // Report only the recipes this query pulled in (not the whole loaded set), so
+    // the tool result tells the model what its query resolved.
+    const selected = this.deps.recipeRegistry.getMany(newlyKnown).map((r) => ({
+      id: r.id,
+      title: r.title,
+      summary: r.summary,
+    }));
+    return {
+      ok: true,
+      matched: selected.length > 0,
+      query,
+      reason: selection.reason,
+      confidence: selection.confidence,
+      selected,
+      activeRecipeIds: [...this.activeRecipeIds],
+    };
   }
 
   /** Manually load these recipe ids (unknown ids are dropped, capped at three). */
@@ -948,24 +973,19 @@ export class AgentSession {
     this.applyRecipeBundle(
       this.deps.recipeRegistry.getMany(this.resolveKnownIds(ids)),
     );
-    // Manual selection should persist; defer the next automatic check.
-    this.turnSinceRecipeRefresh = 1;
   }
 
   /**
    * Merge additional recipe ids into the loaded set on demand — the model-facing
    * `recipe.load` tool path. The new ids go *first* so they survive the cap-of-3
    * slice even when three recipes are already loaded (an explicit load evicts the
-   * lowest-priority auto-selected recipe rather than being dropped). Rewriting the
+   * lowest-priority prior recipe rather than being dropped). Rewriting the
    * loaded-recipes control message here means later iterations in the same turn see
-   * the recipe. Defers the next automatic re-selection (turnSinceRecipeRefresh = 1)
-   * so the small-model selector doesn't immediately overwrite the model's explicit
-   * choice on the following turn. Returns the resulting active ids.
+   * the recipe. Returns the resulting active ids.
    */
   loadAdditionalRecipes(ids: string[]): string[] {
     const merged = this.resolveKnownIds([...ids, ...this.activeRecipeIds]);
     this.applyRecipeBundle(this.deps.recipeRegistry.getMany(merged));
-    this.turnSinceRecipeRefresh = 1;
     return [...this.activeRecipeIds];
   }
 
@@ -1000,13 +1020,21 @@ export class AgentSession {
     };
   }
 
-  /** Append a selection decision to the dataset (best-effort). */
-  private logSelection(userInput: string, selection: RecipeSelection): void {
+  /**
+   * Append a selection decision to the dataset (best-effort). `selectedIds` is what
+   * the query actually resolved (hallucinated ids already dropped) — not the merged
+   * active set — so the log reflects the selector's decision for this query.
+   */
+  private logSelection(
+    userInput: string,
+    selection: RecipeSelection,
+    selectedIds: string[],
+  ): void {
     try {
       this.deps.ctx.db.insertRecipeSelection({
         sessionId: this.deps.sessionId,
         userInput: userInput.slice(0, 1000),
-        selectedRecipeIdsJson: JSON.stringify(this.activeRecipeIds),
+        selectedRecipeIdsJson: JSON.stringify(selectedIds),
         confidence: selection.confidence,
         taskType: selection.taskType,
         reason: selection.reason,

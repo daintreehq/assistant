@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { BASE_SYSTEM_PROMPT } from "../src/models/prompts/base.js";
 import { buildRuntimeContextMessage } from "../src/models/prompts/runtimeContext.js";
-import { buildLoadedRecipesMessage } from "../src/models/prompts/recipes.js";
+import {
+  buildLoadedRecipesMessage,
+  buildRecipeCatalogMessage,
+} from "../src/models/prompts/recipes.js";
 import { renderRecipeBundle } from "../src/recipes/render.js";
+import { RecipeRegistry } from "../src/recipes/registry.js";
 import {
   BUILTIN_RECIPES,
   SPAWN_AGENT_FOR_EDITS_RECIPE,
@@ -138,5 +142,27 @@ describe("loaded recipes message", () => {
     const b = renderRecipeBundle([...BUILTIN_RECIPES].reverse());
     expect(a.hash).toBe(b.hash);
     expect(a.ids).toEqual(b.ids);
+  });
+});
+
+describe("recipe catalog message", () => {
+  it("lists every recipe's id + both headers, but never a body", () => {
+    const reg = new RecipeRegistry();
+    const msg = buildRecipeCatalogMessage(reg.metadataForSelection());
+    expect(msg).toContain("# Recipe catalog");
+    // Tells the model how to pull a runbook in.
+    expect(msg).toContain("recipe.find");
+    for (const r of reg.list()) {
+      expect(msg).toContain(r.id); // id
+      expect(msg).toContain(r.summary); // short header
+      expect(msg).toContain(r.whenToUse); // long header
+    }
+    // Headers only — no body content (body marker) leaks into the catalog.
+    expect(msg).not.toContain("Procedure:");
+    expect(msg).not.toContain(SPAWN_AGENT_FOR_EDITS_RECIPE.body);
+  });
+
+  it("renders an empty string when there are no recipes (caller omits the section)", () => {
+    expect(buildRecipeCatalogMessage([])).toBe("");
   });
 });

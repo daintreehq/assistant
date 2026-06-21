@@ -32,9 +32,17 @@ export const Recipe = z.object({
   title: z.string().min(1),
   /** Semver-ish version; bump when the body changes so cache hashes shift. */
   version: z.string().min(1),
-  /** One-line summary the selector sees as metadata. */
+  /**
+   * The SHORT header (~8-10 words): a one-line "what this recipe does" the main
+   * model reads in the recipe catalog and the selector sees as metadata. Keep it
+   * terse and scannable — it sits next to every other recipe in the catalog.
+   */
   summary: z.string().min(1),
-  /** When to use it — the primary signal for the small-model selector. */
+  /**
+   * The LONG header (1-2 sentences): the detailed "when to reach for this" signal.
+   * This is the primary thing the small-model selector matches a query against, so
+   * spell out the situations/verbs that should trigger the recipe.
+   */
   whenToUse: z.string().min(1),
   /** Free-form tags to bias selection. */
   tags: z.array(z.string()).default([]),
@@ -68,12 +76,33 @@ export const RecipeMetadata = Recipe.pick({
 });
 export type RecipeMetadata = z.infer<typeof RecipeMetadata>;
 
-/** The small model's structured selection output. */
+/**
+ * The small model's structured selection output for a `recipe.find` query. The
+ * selector reads the query + every recipe's headers and returns the 0-3 recipes
+ * whose bodies should be loaded into the main model's context.
+ */
 export const RecipeSelection = z.object({
   recipeIds: z.array(z.string()).max(3),
   confidence: z.number().min(0).max(1),
   reason: z.string(),
   taskType: z.string(),
-  keepExisting: z.boolean().default(false),
 });
 export type RecipeSelection = z.infer<typeof RecipeSelection>;
+
+/** Result of a `recipe.find` query: what the small model resolved and loaded. */
+export interface RecipeFindResult {
+  /** False only when the selector model errored (loaded set left unchanged). */
+  ok: boolean;
+  /** Whether the query resolved to at least one recipe. */
+  matched: boolean;
+  /** The query that was run (echoed back for the tool result). */
+  query: string;
+  /** The selector's one-line rationale. */
+  reason: string;
+  /** The selector's confidence in [0, 1]. */
+  confidence: number;
+  /** The recipes this query pulled in (headers only — bodies go to the context). */
+  selected: { id: string; title: string; summary: string }[];
+  /** The full loaded recipe id set after this find. */
+  activeRecipeIds: string[];
+}

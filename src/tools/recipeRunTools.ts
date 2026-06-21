@@ -66,6 +66,16 @@ const LoadArgs = z.object({
     ),
 });
 
+const FindArgs = z.object({
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      "A short natural-language description of what you need to figure out (e.g. 'how do I spawn an agent to edit files', 'start work on a forge issue'). A fast model matches it against every recipe and loads the best matches' full bodies into your context.",
+    ),
+});
+
 /** Parse the stored step array, tolerating null/garbage. */
 function parseSteps(s: string | undefined): RecipeStepProgress[] {
   if (!s) return [];
@@ -278,9 +288,66 @@ export const recipeRunTools: ToolDef[] = [
     },
   },
   {
+    name: "recipe.find",
+    description:
+      "Figure out how to do a Daintree operation by pulling in the right runbook. Pass a natural-language query describing what you need; a fast model matches it against the recipe catalog and loads the best 0-3 recipes' full bodies into your context for the rest of this turn. Use this whenever a task matches a catalog entry and you don't already have the runbook loaded. Read-only — selects and injects recipes, never edits files.",
+    risk: "read",
+    schema: FindArgs,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "A short natural-language description of what you need to figure out (e.g. 'how do I spawn an agent to edit files'). Matched against every recipe; the best matches are loaded into your context.",
+        },
+      },
+      required: ["query"],
+    },
+    async handler(args: z.infer<typeof FindArgs>, ctx) {
+      // findRecipes runs the selection + context rewrite; wired only for the
+      // interactive main actor (watcher/timer turns have no live recipe set).
+      if (!ctx.findRecipes) {
+        return fail(
+          "RECIPE_FIND_UNAVAILABLE",
+          "Recipe lookup is not available in this context.",
+          { recoverable: false },
+        );
+      }
+      const result = await ctx.findRecipes(args.query, ctx.signal);
+      if (!result.ok) {
+        // The selector model failed — recoverable, the model can retry or proceed.
+        return fail(
+          "RECIPE_FIND_FAILED",
+          "The recipe selector was unavailable; no recipes were loaded.",
+          { recoverable: true },
+        );
+      }
+      if (!result.matched) {
+        // A genuine "nothing fits" is a normal answer, not an error: tell the model
+        // to fall back to its base operating instructions.
+        return ok(
+          `No recipe matched "${args.query}". Use your base operating instructions.`,
+          { query: args.query, selected: [], activeRecipeIds: result.activeRecipeIds },
+        );
+      }
+      const labels = result.selected.map((r) => `${r.id} (${r.title})`).join(", ");
+      return ok(
+        `Loaded ${result.selected.length} recipe(s) for "${args.query}": ${labels}. Their full instructions are now in your context.`,
+        {
+          query: args.query,
+          selected: result.selected,
+          reason: result.reason,
+          activeRecipeIds: result.activeRecipeIds,
+        },
+      );
+    },
+  },
+  {
     name: "recipe.load",
     description:
-      "Load a specific recipe (procedural runbook) by id into your context right now, when you already know which runbook you need rather than waiting for automatic selection. The recipe's body becomes available to you on your next step this turn. The loaded set is capped; an explicit load takes priority over auto-selected recipes. Read-only — pulls the recipe into context, never edits files.",
+      "Load a specific recipe (procedural runbook) by id into your context right now, when you already know which runbook you need (e.g. from the recipe catalog). The recipe's body becomes available to you on your next step this turn. The loaded set is capped; an explicit load takes priority. Prefer `recipe.find` when you only know what you need in words, not the exact id. Read-only — pulls the recipe into context, never edits files.",
     risk: "read",
     schema: LoadArgs,
     parameters: {

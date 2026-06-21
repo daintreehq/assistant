@@ -543,7 +543,7 @@ export async function handleUiCommand(
             all
               .map((r) => `${r.id}  [${r.risk}]  ${r.title} — ${r.summary}`)
               .join("\n") +
-            "\n\n/recipes loaded | reload | load <id…> | clear",
+            "\n\n/recipes loaded | find <query> | load <id…> | clear",
         };
       }
       if (sub === "loaded") {
@@ -585,26 +585,39 @@ export async function handleUiCommand(
           text: note + app.session.describeRecipes(),
         };
       }
-      if (sub === "reload") {
-        try {
-          const ok = await app.session.forceRecipeRefresh();
+      if (sub === "find") {
+        const query = rest.slice(1).join(" ").trim();
+        if (!query) {
           return {
             handled: true,
             title: "Recipes",
-            text: `${ok ? "Recipe selection refreshed." : "Selector unavailable; kept existing recipes."}\n${app.session.describeRecipes()}`,
+            text: "Usage: /recipes find <query>",
+          };
+        }
+        try {
+          const res = await app.session.findRecipes(query);
+          const head = !res.ok
+            ? "Selector unavailable; loaded recipes unchanged."
+            : res.matched
+              ? `Loaded for "${query}": ${res.selected.map((r) => r.id).join(", ")}`
+              : `No recipe matched "${query}".`;
+          return {
+            handled: true,
+            title: "Recipes",
+            text: `${head}\n${app.session.describeRecipes()}`,
           };
         } catch (e) {
           return {
             handled: true,
             title: "Recipes",
-            text: `Recipe refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+            text: `Recipe find failed: ${e instanceof Error ? e.message : String(e)}`,
           };
         }
       }
       return {
         handled: true,
         title: "Recipes",
-        text: "Usage: /recipes [loaded|reload|load <id…>|clear]",
+        text: "Usage: /recipes [loaded|find <query>|load <id…>|clear]",
       };
     }
 

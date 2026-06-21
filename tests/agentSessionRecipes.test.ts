@@ -51,7 +51,6 @@ const NO_RECIPES: RecipeSelection = {
   confidence: 0.1,
   reason: "simple question",
   taskType: "qa",
-  keepExisting: false,
 };
 
 function makeSession(opts: {
@@ -104,7 +103,9 @@ const REGISTERED_TOOLS = [
   // can checkpoint/resume without re-declaring them
   "recipe.step.advance",
   "recipe.run.get",
-  // recipe.load is core too — the model can pull a recipe on demand in any context
+  // recipe.find and recipe.load are core too — the model can discover + pull
+  // recipes on demand in any context
+  "recipe.find",
   "recipe.load",
   // extra tools a recipe may require
   "agentTask.spawnForEdits",
@@ -115,13 +116,17 @@ const REGISTERED_TOOLS = [
 ];
 
 describe("AgentSession control messages", () => {
-  it("starts with [base, runtime, recipes] system messages", () => {
+  it("starts with [base, runtime+catalog, recipes] system messages", () => {
     const { session } = makeSession();
     const msgs = session.getMessages();
     expect(msgs.length).toBe(3);
     expect(msgs.every((m) => m.role === "system")).toBe(true);
     expect(msgs[0].content).toContain("Daintree Assistant");
     expect(msgs[1].content).toContain("# Runtime context");
+    // The recipe catalog (menu of every recipe) rides along in message[1] so the
+    // model always knows what runbooks exist and can pull one with recipe.find.
+    expect(msgs[1].content).toContain("# Recipe catalog");
+    expect(msgs[1].content).toContain("daintree.edits.spawn-visible-agent");
     expect(msgs[2].content).toContain("# Loaded recipes");
   });
 
@@ -223,17 +228,21 @@ describe("AgentSession control messages", () => {
     expect(captured?.promptCacheKey).toBe("daintree-main");
   });
 
-  it("loads the recipe the small model selects and logs the decision", async () => {
+  it("findRecipes loads the recipes the small model selects and logs the decision", async () => {
     const { session, db } = makeSession({
       selection: {
         recipeIds: ["daintree.edits.spawn-visible-agent"],
         confidence: 0.9,
         reason: "user asked to implement",
         taskType: "code_edit",
-        keepExisting: false,
       },
     });
-    await session.send("implement the new feature");
+    const res = await session.findRecipes("how do I implement the new feature");
+    expect(res.ok).toBe(true);
+    expect(res.matched).toBe(true);
+    expect(res.selected.map((r) => r.id)).toEqual([
+      "daintree.edits.spawn-visible-agent",
+    ]);
     expect(session.getActiveRecipeIds()).toEqual([
       "daintree.edits.spawn-visible-agent",
     ]);
@@ -248,29 +257,41 @@ describe("AgentSession control messages", () => {
     ]);
   });
 
-  it("keeps existing recipes when the selector returns only unknown ids", async () => {
+  it("findRecipes ignores hallucinated ids and keeps the existing loaded set", async () => {
     const { session } = makeSession({
       selection: {
         recipeIds: ["hallucinated.recipe.id"],
         confidence: 0.4,
         reason: "made something up",
         taskType: "unknown",
-        keepExisting: false,
       },
     });
     session.setRecipes(["daintree.edits.spawn-visible-agent"]);
-    await session.forceRecipeRefresh("do a thing");
-    // Hallucinated-only selection must not clear the active set.
+    const res = await session.findRecipes("do a thing");
+    // An all-hallucinated selection resolves to no match and must not clear the set.
+    expect(res.matched).toBe(false);
     expect(session.getActiveRecipeIds()).toEqual([
       "daintree.edits.spawn-visible-agent",
     ]);
   });
 
-  it("clears recipes when the selector returns an explicitly empty selection", async () => {
-    const { session } = makeSession({ selection: NO_RECIPES });
-    session.setRecipes(["daintree.edits.spawn-visible-agent"]);
-    await session.forceRecipeRefresh("just a question");
-    expect(session.getActiveRecipeIds()).toEqual([]);
+  it("findRecipes merges a new match in front of the already-loaded recipes", async () => {
+    const { session } = makeSession({
+      selection: {
+        recipeIds: ["daintree.recipe.run-or-create"],
+        confidence: 0.8,
+        reason: "second need",
+        taskType: "recipe",
+      },
+    });
+    session.setRecipes(["daintree.orchestration.basic"]);
+    const res = await session.findRecipes("how do I run a workspace recipe");
+    expect(res.matched).toBe(true);
+    // Both the prior recipe and the freshly found one are now loaded.
+    expect(session.getActiveRecipeIds().sort()).toEqual([
+      "daintree.orchestration.basic",
+      "daintree.recipe.run-or-create",
+    ]);
   });
 
   it("does not push known ids out of the cap with unknown ones", () => {
@@ -286,45 +307,27 @@ describe("AgentSession control messages", () => {
     ]);
   });
 
-  it("keepExisting keeps the active set even if recipeIds differ", async () => {
-    const { session } = makeSession({
-      selection: {
-        recipeIds: ["daintree.recipe.run-or-create"],
-        confidence: 0.5,
-        reason: "task unchanged",
-        taskType: "same",
-        keepExisting: true,
-      },
-    });
-    session.setRecipes(["daintree.orchestration.basic"]);
-    await session.forceRecipeRefresh("more of the same");
-    expect(session.getActiveRecipeIds()).toEqual([
-      "daintree.orchestration.basic",
-    ]);
-  });
-
-  it("forceRecipeRefresh returns false and keeps recipes when the selector throws", async () => {
+  it("findRecipes returns ok:false and keeps recipes when the selector throws", async () => {
     const { session } = makeSession({
       json: async () => {
         throw new Error("flash model down");
       },
     });
     session.setRecipes(["daintree.orchestration.basic"]);
-    const ok = await session.forceRecipeRefresh("anything");
-    expect(ok).toBe(false);
+    const res = await session.findRecipes("anything");
+    expect(res.ok).toBe(false);
     expect(session.getActiveRecipeIds()).toEqual([
       "daintree.orchestration.basic",
     ]);
   });
 
-  it("throttles selection: re-runs on a trigger term, skips a plain follow-up", async () => {
+  it("does not auto-select recipes on send() — recipes are pulled on demand", async () => {
     const { session, calls } = makeSession();
-    await session.send("hello"); // turn 0 → always selects
-    expect(calls.json).toBe(1);
-    await session.send("just chatting about the weather"); // no trigger term
-    expect(calls.json).toBe(1); // skipped
-    await session.send("please implement the fix"); // trigger term
-    expect(calls.json).toBe(2);
+    await session.send("please implement the fix");
+    // No pre-turn selector call: the small model only runs when the model itself
+    // calls recipe.find. (auto-compact may call json, but selection never does.)
+    expect(session.getActiveRecipeIds()).toEqual([]);
+    expect(calls.json).toBe(0);
   });
 
   it("sends the full registry when no recipe is active", async () => {
@@ -344,16 +347,12 @@ describe("AgentSession control messages", () => {
   it("prunes tools to core ∪ recipe.requiredTools when a recipe is active", async () => {
     let captured: ChatOptions | undefined;
     const { session } = makeSession({
-      selection: {
-        recipeIds: ["daintree.edits.spawn-visible-agent"],
-        confidence: 0.9,
-        reason: "user asked to implement",
-        taskType: "code_edit",
-        keepExisting: false,
-      },
       onStream: (o) => (captured = o),
       tools: REGISTERED_TOOLS,
     });
+    // Recipes are pulled on demand now, so load one explicitly before the turn to
+    // exercise the per-turn tool pruning (core ∪ the active recipe's requiredTools).
+    session.setRecipes(["daintree.edits.spawn-visible-agent"]);
     await session.send("implement the new feature");
     const names = new Set(
       (captured?.tools ?? []).map((t) => fromWire(t.function.name)),
@@ -366,7 +365,9 @@ describe("AgentSession control messages", () => {
     // active recipe (the model needs them to checkpoint a multi-step runbook).
     expect(names.has("recipe.step.advance")).toBe(true);
     expect(names.has("recipe.run.get")).toBe(true);
-    // recipe.load is core too, so the model can pull another recipe mid-task.
+    // recipe.find/recipe.load are core too, so the model can discover + pull
+    // another recipe mid-task.
+    expect(names.has("recipe.find")).toBe(true);
     expect(names.has("recipe.load")).toBe(true);
     // The active recipe's required tools are present.
     expect(names.has("agentTask.spawnForEdits")).toBe(true);
@@ -386,6 +387,7 @@ describe("AgentSession control messages", () => {
       "tool.search",
       "recipe.step.advance",
       "recipe.run.get",
+      "recipe.find",
       "recipe.load",
       "agentTask.spawnForEdits",
       "watcher.terminal.create",
@@ -427,8 +429,9 @@ describe("AgentSession read-only (wake) turn", () => {
     registry.register(mixedTool("term.focus", "ui"));
     registry.register(mixedTool("agentTask.spawnForEdits", "project"));
     registry.register(mixedTool("git.commit", "git"));
-    // risk:"read" but its effect is a write to the live recipe set — must be
+    // risk:"read" but their effect is a write to the live recipe set — must be
     // withheld on autonomous wake turns despite the risk class.
+    registry.register(mixedTool("recipe.find", "read"));
     registry.register(mixedTool("recipe.load", "read"));
     const router = {
       json: async () => NO_RECIPES,
@@ -456,8 +459,10 @@ describe("AgentSession read-only (wake) turn", () => {
     expect(names).not.toContain("term.focus");
     expect(names).not.toContain("agentTask.spawnForEdits");
     expect(names).not.toContain("git.commit");
-    // recipe.load is risk:"read" but mutates the live recipe set; an autonomous
-    // wake turn must not reshape the interactive session, so it is withheld.
+    // recipe.find/recipe.load are risk:"read" but mutate the live recipe set; an
+    // autonomous wake turn must not reshape the interactive session, so they are
+    // withheld.
+    expect(names).not.toContain("recipe.find");
     expect(names).not.toContain("recipe.load");
   });
 

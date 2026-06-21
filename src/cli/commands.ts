@@ -253,7 +253,7 @@ export async function handleSlashCommand(
           );
         }
         render.line(
-          c.gray("\n  /recipes loaded | reload | load <id…> | clear"),
+          c.gray("\n  /recipes loaded | find <query> | load <id…> | clear"),
         );
         return { handled: true };
       }
@@ -289,24 +289,33 @@ export async function handleSlashCommand(
         render.line(app.session.describeRecipes());
         return { handled: true };
       }
-      if (sub === "reload") {
-        render.info("Re-selecting recipes…");
+      if (sub === "find") {
+        const query = rest.slice(1).join(" ").trim();
+        if (!query) {
+          render.warn("Usage: /recipes find <query>");
+          return { handled: true };
+        }
+        render.info(`Finding recipes for "${query}"…`);
         try {
-          const ok = await app.session.forceRecipeRefresh();
-          if (ok) {
-            render.success("Recipe selection refreshed.");
+          const res = await app.session.findRecipes(query);
+          if (!res.ok) {
+            render.warn("Selector unavailable; loaded recipes unchanged.");
+          } else if (res.matched) {
+            render.success(
+              `Loaded: ${res.selected.map((r) => r.id).join(", ")}`,
+            );
           } else {
-            render.warn("Selector unavailable; kept existing recipes.");
+            render.warn(`No recipe matched "${query}".`);
           }
           render.line(app.session.describeRecipes());
         } catch (e) {
           render.error(
-            `Recipe refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+            `Recipe find failed: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
         return { handled: true };
       }
-      render.warn("Usage: /recipes [loaded|reload|load <id…>|clear]");
+      render.warn("Usage: /recipes [loaded|find <query>|load <id…>|clear]");
       return { handled: true };
     }
 

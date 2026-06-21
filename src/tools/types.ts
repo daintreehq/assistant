@@ -10,6 +10,7 @@ import type { Db } from "../storage/db.js";
 import type { Queue } from "../queue.js";
 import type { ModelRouter } from "../models/router.js";
 import type { RecipeSource } from "../recipes/source.js";
+import type { RecipeFindResult } from "../recipes/types.js";
 import type { RiskClass, ToolResult } from "../schemas.js";
 
 export type ToolActor = "main" | "watcher" | "timer" | "workflow" | "system";
@@ -113,6 +114,15 @@ export interface ToolContext {
    * absent for watcher/timer contexts, where the tool fails gracefully.
    */
   loadRecipes?: (ids: string[]) => string[];
+  /**
+   * Resolve a natural-language query to recipes and load their bodies (the
+   * `recipe.find` tool). Runs the query through the small model against every
+   * recipe's headers, merges the matches into the loaded set, and rewrites the
+   * loaded-recipes control message so later iterations in the same turn see them.
+   * Wired only for the interactive `main` actor; absent for watcher/timer contexts,
+   * where the tool fails gracefully.
+   */
+  findRecipes?: (query: string, signal?: AbortSignal) => Promise<RecipeFindResult>;
 }
 
 export interface ToolDef<A = any> {
