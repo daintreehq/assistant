@@ -134,6 +134,11 @@ const CORE_TOOL_NAMES = [
   "queue.digest",
   "daintree.status",
   "tool.search",
+  // Both terminal reads are always available: terminal.read for a verbatim,
+  // no-model relay of what an agent said, terminal.extract to pull a specific
+  // field (or gate on a wait condition). Keeping read core means the wake turn
+  // that relays a finished agent's answer can always reach the verbatim path.
+  "terminal.read",
   "terminal.extract",
   // Recipe step-progress tools are always available so any loaded multi-step
   // recipe can checkpoint and resume without each recipe re-declaring them. They

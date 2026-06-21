@@ -256,7 +256,7 @@ const WRAPPED_MCP_TOOLS: Record<string, string> = {
   "agent.launch":
     'agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)',
   "terminal.getOutput":
-    "terminal.summarize (model summary of the tail) or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
+    "terminal.read (raw scrollback VERBATIM — use this to relay what an agent said), terminal.summarize (model gist of the tail), or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
   "panel.focus": "terminal.focus",
   "terminal.sendCommand":
     "terminal.sendCommand (typed wrapper — pass terminalId and command)",

@@ -67,7 +67,7 @@ describe("typed Daintree wrappers vs daintree.call (#2)", () => {
     // raw escape hatch (with empty args). Both must redirect, not forward.
     for (const [name, hint] of [
       ["agent.launch", "agentTask.spawnForEdits"],
-      ["terminal.getOutput", "terminal.summarize"],
+      ["terminal.getOutput", "terminal.read"],
       ["panel.focus", "terminal.focus"],
     ] as const) {
       const res = await reg.dispatch("daintree.call", { name, arguments: {} }, c);

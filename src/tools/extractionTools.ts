@@ -115,8 +115,13 @@ const baseExtractShape = {
     .int()
     .positive()
     .max(2000)
-    .default(400)
-    .describe("Max tokens the extraction model may produce."),
+    .default(1024)
+    .describe(
+      "Max tokens the extraction model may produce. Default 1024 — 400 was too low " +
+        "for a verbatim/full-reproduction instruction against the default tailBytes, " +
+        "so the extractor truncated mid-output. A small model stops at its natural end " +
+        "for short fields, so a higher cap costs nothing there but prevents truncation.",
+    ),
 } as const;
 
 export const ExtractArgs = z
@@ -393,7 +398,7 @@ async function runExtract(
     terminalIds: string[];
   },
   tail: string,
-): Promise<{ text?: string; json?: unknown }> {
+): Promise<{ text?: string; json?: unknown; truncated: boolean }> {
   const userPrompt = buildExtractorUserPrompt({
     instruction: args.instruction,
     format: args.format,
@@ -415,14 +420,26 @@ async function runExtract(
       { messages, maxTokens: args.maxTokens, signal: ctx.signal },
       ExtractionResult,
     );
-    return { json: out.result };
+    // The JSON path can't report extractor truncation today: router.json returns
+    // only the parsed object and fireworks.json() discards finish_reason. That's a
+    // far smaller risk than the text path — JSON extracts pull small structured
+    // fields, not verbatim prose, and a "length"-truncated object usually fails to
+    // parse and is retried rather than returned half-formed. Surfacing finishReason
+    // from the JSON path would need a router.json signature change; left for later.
+    return { json: out.result, truncated: false };
   }
   const res = await ctx.router.chat("small", {
     messages,
     maxTokens: args.maxTokens,
     signal: ctx.signal,
   });
-  return { text: res.content.trim() };
+  // finishReason "length" means the small model hit maxTokens mid-output — its
+  // text is cut off. This is the EXTRACTOR running out of budget, NOT the source
+  // agent's answer being incomplete; the caller must be told which, or it will
+  // misdiagnose and re-extract the same truncation forever (the failure mode this
+  // tool was hardened against). Surface it so the caller raises maxTokens or, for
+  // a verbatim relay, switches to terminal.read (no model, no cap).
+  return { text: res.content.trim(), truncated: res.finishReason === "length" };
 }
 
 const VERDICT_SYSTEM_PROMPT = `You judge whether an extracted result satisfies a caller's pass/fail condition. Return ONLY a JSON object { "pass": boolean, "reason": "<one short sentence>" }. Be strict and literal; do not invent facts beyond the provided result.`;
@@ -495,6 +512,11 @@ export async function runAsyncExtraction(
       (args.format === "json"
         ? JSON.stringify(extracted.json)
         : extracted.text) ?? "";
+    // Flag an extractor token-cap truncation in the queue event too, so a
+    // background extraction's cut-off result isn't read as the final answer.
+    const truncatedSuffix = extracted.truncated
+      ? " ⚠ extractor hit its maxTokens cap — result is cut off; raise maxTokens or read raw via terminal.read."
+      : "";
 
     let verdict: { pass: boolean; reason: string } | undefined;
     if (args.verdictInstruction) {
@@ -508,9 +530,9 @@ export async function runAsyncExtraction(
       title: verdict
         ? `${label}: ${verdict.pass ? "pass" : "fail"}`
         : `${label}: done`,
-      summary: verdict
-        ? verdict.reason
-        : resultText.slice(0, 280) || "(empty result)",
+      summary:
+        (verdict ? verdict.reason : resultText.slice(0, 280) || "(empty result)") +
+        truncatedSuffix,
       evidence: [resultText.slice(0, 2000)],
       target,
       dedupeKey,
@@ -567,7 +589,8 @@ const SHARED_EXTRACT_PROPERTIES = {
   },
   maxTokens: {
     type: "number",
-    description: "Max tokens the extraction model may produce (default 400).",
+    description:
+      "Max tokens the extraction model may produce (default 1024, max 2000). For a verbatim/full-reproduction instruction prefer terminal.read instead — it returns raw scrollback with no model and no token cap.",
   },
 } as const;
 
@@ -640,17 +663,30 @@ export const extractionTools: ToolDef[] = [
           poll.combinedTail,
         );
         const result = args.format === "json" ? extracted.json : extracted.text;
-        const summary =
+        // The extraction model hit its token cap mid-output — the result is the
+        // EXTRACTOR's truncation, not the source agent's answer. Make that legible
+        // so the caller doesn't re-extract the same cut-off forever: tell it the
+        // fix is a higher maxTokens or a no-model verbatim read, not a retry.
+        const base =
           args.format === "json"
             ? "Extracted JSON result."
             : (extracted.text || "(empty result)");
-        return ok(summary, {
+        // Lead with the warning, not trail it: an oversized result is serialized to
+        // a head-truncated summary preview (see serializeToolResult in loop.ts), so a
+        // note appended after a long extract would be sliced off — exactly when a
+        // truncated 1024-token extract is most likely to overflow. Prefixing keeps the
+        // "this is cut off, use terminal.read" steer visible no matter the length.
+        const truncatedNote = extracted.truncated
+          ? `⚠ This result is cut off: the extraction model hit its maxTokens cap (currently ${args.maxTokens}) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n`
+          : "";
+        return ok(truncatedNote + base, {
           terminalIds: args.terminalIds,
           format: args.format,
           attempts: poll.attempts,
           elapsedMs,
           matched: poll.matched,
           finished: poll.finished,
+          truncated: extracted.truncated,
           result,
         });
       } catch (e) {

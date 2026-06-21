@@ -64,6 +64,7 @@ const MAP: Record<string, (a: Args) => ToolPresentation> = {
   "timer.list": () => ({ label: "Listed timers" }),
   "timer.cancel": (a) => ({ label: "Cancelled timer", detail: str(a.id) }),
   "terminal.focus": (a) => ({ label: "Focused", detail: str(a.terminalId) }),
+  "terminal.read": (a) => ({ label: "Read", detail: str(a.terminalId) }),
   "terminal.extract": (a) => ({ label: "Extracted", detail: str(a.terminalId) }),
   "terminal.extract.async": (a) => ({ label: "Extracting", detail: str(a.terminalId) }),
   "terminal.summarize": (a) => ({ label: "Summarized", detail: str(a.terminalId) }),

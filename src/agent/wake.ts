@@ -54,7 +54,7 @@ export function buildWakePrompt(
     if (terminalId && seen.has(terminalId)) {
       // Already reported this terminal — a follow-up lifecycle event, not new content.
       anyFollowUp = true;
-      return `${base} (already reported — acknowledge in one line, do NOT call terminal.summarize/terminal.extract again)`;
+      return `${base} (already reported — acknowledge in one line, do NOT call terminal.read/terminal.summarize/terminal.extract again)`;
     }
     if (terminalId) seen.add(terminalId);
     anyNew = true; // a fresh terminal, or a non-terminal event worth deciding on
@@ -64,8 +64,8 @@ export function buildWakePrompt(
   // present. When every event is a follow-up it would contradict the per-event "do
   // NOT summarize" markers, so swap in acknowledge-only guidance instead.
   const guidance = anyNew
-    ? "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it with terminal.summarize or terminal.extract and give the user a concise update. If it isn't worth acting on, say so in one line."
-    : "Every event below is a terminal you have already reported this session — these are lifecycle transitions only. Acknowledge each in one short line; do NOT call terminal.summarize/terminal.extract again.";
+    ? "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it and give the user a concise update — use terminal.read to relay what the agent said verbatim, terminal.summarize for a gist, or terminal.extract to pull a specific field. If it isn't worth acting on, say so in one line."
+    : "Every event below is a terminal you have already reported this session — these are lifecycle transitions only. Acknowledge each in one short line; do NOT call terminal.read/terminal.summarize/terminal.extract again.";
   return [
     "[automatic wake-up] A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
     guidance,
