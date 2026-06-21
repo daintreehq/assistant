@@ -40,6 +40,8 @@ npm run test:unit           # just the Node/vitest suite
 npm run test:ui             # just the Bun cockpit-render suite
 npm run typecheck           # tsc --noEmit
 npm run build               # tsup → dist/index.js (CLI) + dist/host.js (embedded host)
+npm run db:reset            # hard-reset state: rm -rf ~/.daintree/assistant-cli (dev policy
+                            # for schema changes — a fresh DB rebuilds from SCHEMA on launch)
 ```
 
 **Runtime: the cockpit runs under Bun.** OpenTUI's renderer is a native (FFI) core

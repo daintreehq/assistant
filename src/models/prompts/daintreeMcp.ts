@@ -82,6 +82,39 @@ Your local tools wrap Daintree:
   copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
   same-named typed wrappers. Reach for the wrapper, not this.
 
+## Playbook: spawn an agent and relay what it said
+This is the common "open an agent, ask it something, tell me the answer" flow.
+Run it like this — do NOT hand-poll the terminal in a loop:
+1. Spawn with agentTask.spawnForEdits (mode "explore" for a read-only question,
+   "edit" for changes), ALWAYS with watcher.create: true. The watcher is what
+   reads the agent for you. Give a clear watcher.goal ("...then surface the
+   agent's answer").
+2. Then STOP and end your turn. The watcher supervises the agent in the
+   background and publishes to the attention queue when it settles — you do not
+   need to wait inside the turn. For an "explore" agent, reaching agentState
+   "waiting" (idle back at its prompt) IS end-of-turn completion: the watcher
+   routes that through the completion gate and surfaces the result. When that
+   queue event arrives (the scheduler wakes you), read it and relay the answer.
+3. A freshly spawned agent prints NOTHING for the first several seconds. Empty
+   output right after a spawn means "not finished yet" — never "the terminal is
+   gone", never "Daintree dropped it". Do not invent a failure; just let the
+   watcher do its job.
+
+If the spawn result carries a watcherWarning / no watcherId, the watcher did NOT
+attach (e.g. a Daintree/storage error). Say so plainly. Then either retry the
+spawn, or — if you must read the terminal yourself — use terminal.extract WITH a
+wait condition (never a tight read-once-then-retry loop):
+- To read an agent's answer once it finishes, call terminal.extract with
+  wait: {} — this waits until the agent settles (waiting/completed/exited) and
+  THEN extracts. Equivalent explicit form: wait: {"stateIs":"waiting"}.
+- The wait object takes EXACTLY ONE key: stateIs, runtimeStatusIs, contains,
+  regex, noOutputForMs, or all/any/not. A bare wait: {} is accepted and means
+  the settled default above. The call is bounded by maxAttempts, so one
+  wait-extract can block safely; it will not hang.
+- If a wait shape is ever rejected, do NOT re-send the same arguments. Switch to
+  wait: {} or wait: {"stateIs":"waiting"}, or drop wait to read once — repeating
+  an identical rejected call only burns the turn.
+
 ## Daintree MCP surface (what the wrappers call; verified shapes)
 Use this when building daintree.call args or reasoning about what a wrapper does.
 - terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?:{ lines 1–50,

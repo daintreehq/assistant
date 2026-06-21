@@ -152,6 +152,41 @@ describe("terminal.extract — inline", () => {
     expect((res.result as { finished: boolean }).finished).toBe(true);
   });
 
+  it("coerces an empty `wait: {}` into the settled (waiting/completed/exited) default", () => {
+    // The large model reliably emits `wait: {}` to mean "wait until the agent
+    // finishes". The strict union would reject it; the extract schema coerces it.
+    const parsed = ExtractArgs.parse({ terminalIds: ["t1"], instruction: "x", wait: {} });
+    expect(parsed.wait).toEqual({
+      any: [{ stateIs: "waiting" }, { stateIs: "completed" }, { stateIs: "exited" }],
+    });
+  });
+
+  it("still rejects a wait object carrying an unknown key", () => {
+    expect(() =>
+      ExtractArgs.parse({ terminalIds: ["t1"], instruction: "x", wait: { bogus: 1 } }),
+    ).toThrow();
+  });
+
+  it("with the coerced settled default, polls until the agent is `waiting`, then extracts", async () => {
+    // Mirrors the real failure: a freshly spawned explore agent is `working`,
+    // then settles into `waiting` once it has printed its answer.
+    const { ctx, chat } = ctxWith({
+      status: (c) => [{ terminalId: "t1", agentState: c === 0 ? "working" : "waiting" }],
+      output: () => "This project is a local CLI orchestration assistant.",
+      chat: vi.fn().mockResolvedValue({ content: "summary" }),
+    });
+    const args = ExtractArgs.parse({
+      terminalIds: ["t1"],
+      instruction: "explain the project",
+      wait: {},
+      pollIntervalMs: 0,
+    });
+    const res = await extract.handler(args, ctx);
+    expect(res.ok).toBe(true);
+    expect((res.result as { attempts: number }).attempts).toBe(2);
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a modelJudge wait condition as unsupported", async () => {
     const { ctx, chat } = ctxWith({});
     const res = await extract.handler(

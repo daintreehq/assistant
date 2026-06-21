@@ -15,6 +15,7 @@
     "ui:gallery": "bun run src/ui/dev/gallery.tsx",
     "build": "tsup",
     "start": "bun dist/index.js",
+    "db:reset": "rm -rf \"$HOME/.daintree/assistant-cli\" && echo 'Daintree Assistant state reset — a fresh DB builds from SCHEMA on next launch'",
     "typecheck": "tsc --noEmit",
     "test": "vitest run && bun test tests/ui",
     "test:unit": "vitest run",

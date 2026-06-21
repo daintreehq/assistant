@@ -86,8 +86,8 @@ const baseExtractShape = {
     .describe(
       "When format=json, a description/JSON-Schema of the value to extract; embedded in the prompt.",
     ),
-  wait: WatchCondition.optional().describe(
-    "Poll until this condition is met before extracting (contains/regex/noOutputForMs/runtimeStatusIs/stateIs; modelJudge unsupported).",
+  wait: ExtractWaitSchema.optional().describe(
+    "Poll until this condition is met before extracting (contains/regex/noOutputForMs/runtimeStatusIs/stateIs; modelJudge unsupported). Pass {} to wait until the spawned agent settles (waiting/completed/exited) — the right default for reading an agent's answer once it finishes.",
   ),
   pollIntervalMs: z
     .number()
@@ -534,7 +534,7 @@ export async function runAsyncExtraction(
 const WAIT_PARAM = {
   type: "object",
   description:
-    "Poll until this WatchCondition is met before extracting (contains/regex/noOutputForMs/runtimeStatusIs/stateIs; modelJudge unsupported).",
+    "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs ('waiting'|'completed'|'exited'|…), runtimeStatusIs ('running'|'exited'), contains (substring), regex, noOutputForMs (idle ms), or all/any/not. modelJudge unsupported. To read a spawned agent's answer once it finishes, pass {} (waits until the agent settles: waiting/completed/exited) or {\"stateIs\":\"waiting\"}. Omit entirely to read once with no wait.",
 } as const;
 
 const SHARED_EXTRACT_PROPERTIES = {
