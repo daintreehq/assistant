@@ -146,6 +146,12 @@ thread.
   layout lags a React commit); the footer root box is `flexShrink={0}` so it can grow back after a
   shrink, and a shrink forces a full repaint (OpenTUI doesn't clear vacated footer rows). The
   **`Header` still has NO full-width rule** — a committed rule would be wrapped by the host on shrink.
+  **On a settled terminal resize** OpenTUI's split-footer leaves stale footer rows frozen in scrollback
+  (it only force-clears on a width *shrink*), so they accumulate and the masthead scrolls off. The fix
+  is a debounced **"nuclear redraw"** (`useResizeRedraw` → `useDaintreeController.requestRedraw`): wipe
+  the host screen+scrollback, reset the split replay record + force a repaint, and re-commit the
+  masthead + whole transcript fresh at the new width — the same machinery as `/clear`, minus emptying
+  the transcript (`resetKey = clearNonce + redrawNonce`). It also fires once on the boot→cockpit handoff.
   Content is inset one column each side (`LEFT_PAD` + the `reservedColumns` right gutter). Keys come
   from `useKeyboard` (global — gate by view/focus in-handler, since there's no Ink `isActive`);
   terminal size from `useTerminalDimensions()`. Do NOT raw-parse SGR mouse mode. Operations/help are

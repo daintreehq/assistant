@@ -195,6 +195,95 @@ describe("useDaintreeController /clear wipes host scrollback (#137)", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
+  test("requestRedraw resets the split-footer surface + forces a repaint, but keeps the transcript", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+    const { renderer, calls } = makeStubRenderer();
+
+    let controller!: DaintreeController;
+    const t = await testRender(
+      <Harness
+        app={app}
+        renderer={renderer}
+        onController={(c) => (controller = c)}
+      />,
+      { width: 80, height: 24 },
+    );
+    await t.flush();
+    await tick();
+
+    // Seed a transcript cell (a log note) so we can prove the redraw does NOT clear it
+    // (unlike /clear). Going through the bridge keeps this offline-deterministic.
+    await act(async () => {
+      controller.bridge.emit({
+        type: "log",
+        level: "info",
+        message: "seed-line",
+      });
+    });
+    await tick();
+    const lenBefore = controller.transcript.length;
+    const hasSeed = () =>
+      controller.transcript.some(
+        (c) => c.kind === "note" && c.text === "seed-line",
+      );
+    expect(lenBefore).toBeGreaterThan(0);
+    expect(hasSeed()).toBe(true);
+
+    const before = writes.length;
+    await act(async () => {
+      controller.requestRedraw();
+    });
+    await tick();
+
+    // The renderer-owned reset ran: split replay record reset, both shadow buffers
+    // blanked, the forced-repaint latch set, a render requested. resetSplitFooterForReplay
+    // itself erases viewport + scrollback (in the real renderer), so the resize path does
+    // NOT emit the raw clearHostTerminal escape when a renderer is present — asserting that
+    // here guards the "no extra blank line above the header" fix.
+    expect(calls.splitReset).toBeGreaterThan(0);
+    expect(calls.currentCleared).toBeGreaterThan(0);
+    expect(calls.nextCleared).toBeGreaterThan(0);
+    expect(calls.forceFullRepaintRequested).toBe(true);
+    expect(calls.rendered).toBeGreaterThan(0);
+    expect(writes.slice(before).join("")).not.toContain(HOST_TERMINAL_CLEAR);
+    // ...and the transcript is untouched — a resize re-commits the SAME cells (proven by
+    // the seed note surviving), it doesn't clear the conversation.
+    expect(controller.transcript).toHaveLength(lenBefore);
+    expect(hasSeed()).toBe(true);
+
+    t.renderer.destroy?.();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  test("requestRedraw falls back to the raw host-clear escape when no renderer is available", async () => {
+    const { app, stateDir } = makeOfflineApp();
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+
+    // No renderer passed: the resize path can't use resetSplitFooterForReplay, so it must
+    // fall back to the raw clearHostTerminal wipe so scrollback is still cleared.
+    let controller!: DaintreeController;
+    const t = await testRender(
+      <Harness app={app} onController={(c) => (controller = c)} />,
+      { width: 80, height: 24 },
+    );
+    await t.flush();
+    await tick();
+
+    const before = writes.length;
+    await act(async () => {
+      controller.requestRedraw();
+    });
+    await tick();
+
+    expect(writes.slice(before).join("")).toContain(HOST_TERMINAL_CLEAR);
+
+    t.renderer.destroy?.();
+    await app.shutdown();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
   test("writes no clear escape when stdout is not a TTY", async () => {
     const { app, stateDir } = makeOfflineApp();
     // Leave isTTY false → the TTY gate suppresses the escape (piped stdout).
