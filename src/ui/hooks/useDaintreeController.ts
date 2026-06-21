@@ -496,6 +496,20 @@ export interface DaintreeController {
    * re-commit the masthead deterministically. See {@link useScrollbackTranscript}.
    */
   clearNonce: number;
+  /**
+   * Monotonic counter bumped on every terminal-resize "nuclear redraw". Like
+   * {@link clearNonce} it wipes the host scrollback and forces a full repaint, but it
+   * does NOT touch the transcript — the same cells are re-committed fresh at the new
+   * width. {@link useResizeRedraw} drives it via {@link requestRedraw}.
+   */
+  redrawNonce: number;
+  /**
+   * Trigger a nuclear redraw: wipe the host screen + scrollback, reset OpenTUI's
+   * split-footer replay record, force a full repaint, and re-commit the masthead + the
+   * whole transcript at the current width. Bumps {@link redrawNonce}. Called by
+   * {@link useResizeRedraw} once a resize settles (and once on the boot hand-off).
+   */
+  requestRedraw: () => void;
 }
 
 /**
@@ -569,6 +583,12 @@ export function useDaintreeController(
   // with the dispatch (React commits the cleared tree asynchronously), so it rides a
   // layout effect that runs AFTER the now-empty tree is committed.
   const [clearNonce, setClearNonce] = useState(0);
+  // Bumped each time a terminal resize settles (the "nuclear redraw" — see
+  // useResizeRedraw). It drives the SAME host-wipe + split-footer reset + forced repaint
+  // as /clear, but leaves the transcript intact so the scrollback layer re-commits the
+  // masthead and every sealed cell fresh at the new width. Separate from clearNonce so a
+  // resize never reads as a logical "conversation cleared".
+  const [redrawNonce, setRedrawNonce] = useState(0);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(
     null,
   );
@@ -645,6 +665,33 @@ export function useDaintreeController(
     clearHostTerminal(stdout);
     if (renderer) resyncCockpitSurface(renderer, app.config);
   }, [clearNonce, renderer, stdout, app.config]);
+
+  // Resize "nuclear redraw": once React has committed the post-resize tree (and
+  // useScrollbackTranscript has re-armed its commit cursor off the bumped resetKey), wipe
+  // the scrollback and force a full repaint so the stale duplicate footer rows OpenTUI
+  // freezes on resize are cleared and the masthead + whole transcript re-commit at the new
+  // width. Unlike `/clear` we do NOT call clearHostTerminal here: resyncCockpitSurface's
+  // `resetSplitFooterForReplay` already erases the viewport AND scrollback (it emits
+  // clearScreen + clearSavedLines + home) through OpenTUI's OWN tracked writer, so its
+  // cursor-column bookkeeping stays consistent and the masthead re-commits flush, with no
+  // spurious leading blank. A raw clearHostTerminal would double-clear and — because
+  // capture-stdout intercepts and queues its escapes, then flushes them mid-reset —
+  // intermittently inject an extra blank line above the header. clearHostTerminal stays
+  // only as the fallback for when no renderer is available. Skip the initial mount.
+  useLayoutEffect(() => {
+    if (redrawNonce === 0) return;
+    if (renderer) resyncCockpitSurface(renderer, app.config);
+    else clearHostTerminal(stdout);
+  }, [redrawNonce, renderer, stdout, app.config]);
+
+  // Bump the redraw nonce — wired to useResizeRedraw, which calls this once a terminal
+  // resize settles (and once on the boot → cockpit hand-off). The layout effect above
+  // does the actual scrollback wipe + repaint post-commit; useScrollbackTranscript
+  // re-commits the masthead + cells because DaintreeApp folds redrawNonce into its
+  // resetKey.
+  const requestRedraw = useCallback(() => {
+    setRedrawNonce((n) => n + 1);
+  }, []);
   // Follow-ups typed while a turn is in flight queue here (FIFO) and drain one at a
   // time once the lock clears — user input is drained before any pending wake. The
   // ref (not state) keeps enqueue/drain synchronous with the inFlight lock so a
@@ -1031,5 +1078,7 @@ export function useDaintreeController(
     booting,
     notifyAnimationDone,
     clearNonce,
+    redrawNonce,
+    requestRedraw,
   };
 }

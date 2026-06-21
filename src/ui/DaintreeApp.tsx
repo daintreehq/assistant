@@ -10,6 +10,7 @@ import {
   type ScrollbackHeader,
 } from "./hooks/useScrollbackTranscript.js";
 import { useFooterHeight } from "./hooks/useFooterHeight.js";
+import { useResizeRedraw } from "./hooks/useResizeRedraw.js";
 import { ControlRoom, CONTENT_MAX, LEFT_PAD, type View } from "./ControlRoom.js";
 import { Header } from "./components/Header.js";
 import { StartupSplash } from "./components/StartupSplash.js";
@@ -92,9 +93,24 @@ export function DaintreeApp({
     header: controller.booting ? null : header,
     width: contentWidth,
     expanded,
-    resetKey: controller.clearNonce,
+    // Both a `/clear` and a resize "nuclear redraw" reset the scrollback commit cursor and
+    // re-commit the masthead. Summing the two monotonic nonces gives one strictly-rising
+    // resetKey that changes on either event (neither counter ever decreases).
+    resetKey: controller.clearNonce + controller.redrawNonce,
   });
   useFooterHeight(renderer, rootRef, rows);
+
+  // On a settled terminal resize (and once when the boot splash hands off to the
+  // cockpit), do a full "nuclear redraw": wipe the host scrollback and re-commit the
+  // masthead + transcript fresh at the new width. This is what clears the duplicate
+  // footer rows OpenTUI's split-footer leaves behind on resize and keeps the masthead
+  // from scrolling away. Gated off during boot so the splash isn't interrupted.
+  useResizeRedraw({
+    enabled: !controller.booting,
+    columns,
+    rows,
+    onRedraw: controller.requestRedraw,
+  });
 
   // Out-of-band cue (BEL + window-title badge) so a fresh attention event reaches
   // the user even when they've switched focus away from the cockpit.
