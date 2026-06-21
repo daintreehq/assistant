@@ -146,7 +146,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ```
 /status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
-/permissions [tier]  /skills [loaded|reload|load <id…>|clear]
+/permissions [tier]  /skills [loaded|find <query>|load <id…>|clear]
 /compact  /doctor  /help  /quit
 ```
 
@@ -164,12 +164,14 @@ caching:
 2. **runtime context** — tier, project, MCP status, model ids
 3. **loaded skills** — the bodies of whatever skills are active
 
-The small model (`deepseek-v4-flash`) selects 0–3 skills from a metadata-only
-view of the library via `router.json("small", …)`, validated against a Zod schema.
-Selection is throttled (first turn, every 4th turn, or on a trigger term) so the
-cached prefix doesn't churn each message. Drive it manually with `/skills`
-(`loaded` / `reload` / `load <id…>` / `clear`); decisions are written to a
-`skill_selection_log` table for later tuning. See [`src/skills`](src/skills).
+Skills are pulled on demand: the model calls `skill.find` with a short query and
+the small model (`deepseek-v4-flash`) selects 0–3 skills from a metadata-only
+view of the library via `router.json("small", …)`, validated against a Zod schema,
+and injects their bodies into the loaded-skills control message. The model can
+also pull a known skill directly with `skill.load <id>`. Drive it manually with
+`/skills` (`loaded` / `find <query>` / `load <id…>` / `clear`); selection
+decisions are written to a `skill_selection_log` table for later tuning. See
+[`src/skills`](src/skills).
 
 ## Tools the model can call
 
