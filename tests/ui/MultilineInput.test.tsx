@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, mock } from "bun:test";
 import { act, useState } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import { MultilineInput } from "../../src/ui/components/MultilineInput.js";
@@ -354,5 +354,42 @@ describe("MultilineInput", () => {
     expect(latest).toBe("old");
     await press(t, "ARROW_DOWN"); // back past the newest → the draft returns
     expect(latest).toBe("draft");
+  });
+});
+
+describe("bracketed paste", () => {
+  // OpenTUI's PasteEvent carries the payload as `bytes` (a Uint8Array), not `text`,
+  // so the handler must DECODE it — reading `.text` (as an early port did) silently
+  // dropped every paste. These guard that.
+  test("inserts pasted clipboard text at the cursor", async () => {
+    let latest = "";
+    const t = await testRender(
+      <Harness onValue={(v) => (latest = v)} />,
+      RENDER_OPTS,
+    );
+    await t.flush();
+    await act(async () => {
+      await t.mockInput.pasteBracketedText("pasted text");
+    });
+    await t.flush();
+    expect(latest).toBe("pasted text");
+    expect(t.captureCharFrame()).toContain("pasted text");
+  });
+
+  test("a multi-line paste lands as multiple lines and does NOT submit", async () => {
+    const onSubmit = mock(() => {});
+    let latest = "";
+    const t = await testRender(
+      <Harness onSubmit={onSubmit} onValue={(v) => (latest = v)} />,
+      { ...RENDER_OPTS, height: 8 },
+    );
+    await t.flush();
+    await act(async () => {
+      await t.mockInput.pasteBracketedText("line one\nline two");
+    });
+    await t.flush();
+    expect(latest).toBe("line one\nline two");
+    // A newline that arrives in a PASTE is a literal newline, never an Enter/submit.
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

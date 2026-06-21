@@ -300,10 +300,14 @@ export function MultilineInput({
   }
 
   // Bracketed paste arrives as one chunk (possibly multi-line); insert verbatim,
-  // normalising CR/CRLF, exactly like the old `input`-chunk paste path.
+  // normalising CR/CRLF, exactly like the old `input`-chunk paste path. OpenTUI's
+  // PasteEvent carries the payload as raw `bytes` (a Uint8Array), NOT a `text`
+  // string, so decode it (some builds also expose `.text` — prefer it if present).
   usePaste((event) => {
     if (!focus) return;
-    const text = (event as { text?: string }).text ?? "";
+    const e = event as { text?: string; bytes?: Uint8Array };
+    const text =
+      e.text ?? (e.bytes ? new TextDecoder().decode(e.bytes) : "");
     if (text) insert(text.replace(/\r\n?/g, "\n"));
   });
 
