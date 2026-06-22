@@ -129,14 +129,106 @@ func TestScheduler_RepeatCatchUpSingular(t *testing.T) {
 	}}
 	queue := newFakeQueue()
 	s := newScheduler(store, queue, &fakeRegistry{}, nil)
-	// elapsed = 61_001-1000 = 60_001 → missed = 1.
-	s.Tick(context.Background(), 61_001)
+	// elapsed = 61_000-1000 = 60_000 = exactly one interval → missed = 1 (boundary).
+	s.Tick(context.Background(), 61_000)
 	got := queue.published[0].Summary
 	if !strings.Contains(got, "1 occurrence was skipped") {
 		t.Errorf("a single skipped occurrence must use singular phrasing, got %q", got)
 	}
 	if strings.Contains(got, "occurrences") {
 		t.Errorf("singular catch-up must not pluralize, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_TerminalMaxRunsNoClause: a maxRuns-capped final fire
+// has no backlog (the timer was never going to run again), so even when overdue it
+// must NOT claim occurrences were skipped.
+func TestScheduler_RepeatCatchUp_TerminalMaxRunsNoClause(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	maxRuns := 3
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_term_mr", Title: "Capped", FireAt: 0, Status: "scheduled",
+		RepeatEveryMs: &every, MaxRuns: &maxRuns, RunCount: 2, // this fire makes it 3 → done
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"last"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	// now is 10 intervals past FireAt: a naive floor(elapsed/every) would say "10".
+	s.Tick(context.Background(), 600_000)
+	if store.timerPatches["tmr_term_mr"]["status"] != "done" {
+		t.Fatalf("maxRuns terminal fire should mark done, got %v", store.timerPatches["tmr_term_mr"]["status"])
+	}
+	if got := queue.published[0].Summary; strings.Contains(got, "skipped") {
+		t.Errorf("a terminal (maxRuns) fire must not report skipped occurrences, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_TerminalRepeatUntilNoClause: a repeatUntil-capped
+// final fire likewise has no backlog past the deadline — no catch-up clause.
+func TestScheduler_RepeatCatchUp_TerminalRepeatUntilNoClause(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	until := int64(5000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_term_until", Title: "Until", FireAt: 4500, Status: "scheduled",
+		RepeatEveryMs: &every, RepeatUntil: &until, RunCount: 0,
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"last"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	// now far past FireAt; next fire (now+every) is well past until → terminal.
+	s.Tick(context.Background(), 300_000)
+	if store.timerPatches["tmr_term_until"]["status"] != "done" {
+		t.Fatalf("repeatUntil terminal fire should mark done, got %v", store.timerPatches["tmr_term_until"]["status"])
+	}
+	if got := queue.published[0].Summary; strings.Contains(got, "skipped") {
+		t.Errorf("a terminal (repeatUntil) fire must not report skipped occurrences, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_SubTickNoFalseClause: a timer whose interval is below
+// the scheduler tick collapses occurrences on every normal fire, so the gap is NOT
+// evidence of downtime — no catch-up clause.
+func TestScheduler_RepeatCatchUp_SubTickNoFalseClause(t *testing.T) {
+	store := newFakeStore()
+	every := int64(1000) // < SchedulerTickMS (3000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_subtick", Title: "Fast", FireAt: 0, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"tick"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	// elapsed = 3000 = 3 intervals, but that's just normal tick granularity.
+	s.Tick(context.Background(), 3000)
+	if got := queue.published[0].Summary; got != "tick" {
+		t.Errorf("a sub-tick repeat must not report skipped occurrences, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_CallSafeToolErrorNoClause: a failed call_safe_tool
+// publishes an error-severity event; the informational catch-up clause must not
+// dilute it.
+func TestScheduler_RepeatCatchUp_CallSafeToolErrorNoClause(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_cst_err", Title: "Tool", FireAt: 1000, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "call_safe_tool",
+		PayloadJson: `{"type":"call_safe_tool","toolCall":{"toolName":"x.do","args":{}}}`,
+	}}
+	queue := newFakeQueue()
+	reg := &fakeRegistry{result: domain.Fail("SOME_ERR", "tool blew up")}
+	s := newScheduler(store, queue, reg, nil)
+	s.Tick(context.Background(), 10_000_000)
+	p := queue.published[0]
+	if p.Severity != domain.SeverityError {
+		t.Fatalf("a failed call_safe_tool must publish an error event, got sev=%s", p.Severity)
+	}
+	if strings.Contains(p.Summary, "skipped") {
+		t.Errorf("an error-severity fire must not carry the catch-up clause, got %q", p.Summary)
 	}
 }
 

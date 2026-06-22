@@ -306,6 +306,12 @@ func missedOccurrences(rec domain.TimerRecord, now int64) int64 {
 	if rec.RepeatEveryMs == nil || *rec.RepeatEveryMs <= 0 {
 		return 0
 	}
+	// Below the tick, a repeat collapses occurrences on EVERY normal fire (the
+	// daemon only checks every SchedulerTickMS), so a multi-interval gap does not
+	// imply downtime — don't claim occurrences were "skipped while closed".
+	if *rec.RepeatEveryMs < SchedulerTickMS {
+		return 0
+	}
 	elapsed := now - rec.FireAt
 	if elapsed <= 0 {
 		return 0
@@ -373,7 +379,13 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 	// A long closure collapses every missed repeat into this one fire; surface how
 	// many occurrences it stands in for so the operational record isn't silently
 	// short. Empty for one-shot/on-time timers, so the common path is unchanged.
-	clause := catchUpClause(missedOccurrences(rec, now))
+	// Skip TERMINAL fires (maxRuns/repeatUntil reached): a capped timer has no
+	// remaining backlog, so floor(elapsed/every) would over-report occurrences that
+	// were never going to fire.
+	clause := ""
+	if !terminal {
+		clause = catchUpClause(missedOccurrences(rec, now))
+	}
 
 	func() {
 		defer func() {
