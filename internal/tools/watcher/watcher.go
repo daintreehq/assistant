@@ -32,9 +32,17 @@ type Store interface {
 	InsertWatcher(ctx context.Context, rec domain.WatcherRecord) (string, error)
 	ListWatchers(ctx context.Context, status string) ([]domain.WatcherRecord, error)
 	GetWatcher(ctx context.Context, id string) (*domain.WatcherRecord, error)
-	UpdateWatcherStatus(ctx context.Context, id, status string) error
+	// CancelWatcher flips the watcher to 'cancelled' and stamps WHY (the reason) +
+	// WHEN, so a deliberate user cancel is distinguishable from a session-boundary
+	// teardown. The watcher tools always pass "user_cancelled".
+	CancelWatcher(ctx context.Context, id, reason string) error
 	RevokeGrantsByActor(ctx context.Context, actorID string) (int, error)
 }
+
+// reasonUserCancelled is the endedReason stamped when a user cancels a watcher via
+// the watcher.cancel tool (vs. 'session_ended' stamped by the session-boundary
+// sweep). Kept in sync with internal/storage/sweeps.go.
+const reasonUserCancelled = "user_cancelled"
 
 // Deps is the dependency set for the watcher family.
 type Deps struct {
@@ -355,7 +363,7 @@ func newCancelTool(deps Deps) *tools.Tool {
 			if err != nil || existing == nil {
 				return tools.Fail(codeWatcherNotFound, "watcher.cancel: no such watcher: "+a.ID, tools.Unrecoverable())
 			}
-			if err := deps.Store.UpdateWatcherStatus(context.Background(), a.ID, "cancelled"); err != nil {
+			if err := deps.Store.CancelWatcher(context.Background(), a.ID, reasonUserCancelled); err != nil {
 				return tools.Fail(domain.CodeInternal, "watcher.cancel: "+err.Error())
 			}
 			_, _ = deps.Store.RevokeGrantsByActor(context.Background(), a.ID)

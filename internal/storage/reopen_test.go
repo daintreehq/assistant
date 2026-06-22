@@ -64,11 +64,38 @@ func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
 		if w == nil || w.Status != "cancelled" {
 			t.Fatalf("wch_%s want cancelled, got %v", st, w)
 		}
+		// The sweep stamps WHY (session_ended) + WHEN, so the row is distinguishable
+		// from a deliberate user cancel.
+		if w.EndedReason == nil || *w.EndedReason != "session_ended" {
+			t.Fatalf("wch_%s want endedReason session_ended, got %v", st, w.EndedReason)
+		}
+		if w.EndedAt == nil || *w.EndedAt != now {
+			t.Fatalf("wch_%s want endedAt %d, got %v", st, now, w.EndedAt)
+		}
 	}
 	for _, st := range terminal {
 		w, _ := s.GetWatcher("wch_" + st)
 		if w == nil || w.Status != st {
 			t.Fatalf("wch_%s should be untouched, got %v", st, w)
+		}
+		// A pre-existing terminal row is NOT re-stamped — including a 'cancelled' row
+		// that carried no reason, which stays reasonless (the sweep only touches
+		// non-terminal rows).
+		if w.EndedReason != nil {
+			t.Fatalf("terminal wch_%s should keep nil endedReason, got %q", st, *w.EndedReason)
+		}
+	}
+
+	// The sweep carries the cancelled titles forward so the composition root can surface
+	// a one-time NOTE. Exactly the three non-terminal watchers' titles, no terminal ones.
+	ended := s.SessionEndedWatchers()
+	if len(ended) != len(nonTerminal) {
+		t.Fatalf("SessionEndedWatchers want %d titles, got %v", len(nonTerminal), ended)
+	}
+	wantTitles := map[string]bool{"w wch_active": true, "w wch_created": true, "w wch_paused": true}
+	for _, ti := range ended {
+		if !wantTitles[ti] {
+			t.Fatalf("unexpected session-ended title %q", ti)
 		}
 	}
 	if dw, _ := s.DueWatchers(now); len(dw) != 0 {
@@ -112,6 +139,11 @@ func TestReopenCancelsPRStateWatcher(t *testing.T) {
 	defer s.Close()
 	if w, _ := s.GetWatcher("wch_pr"); w == nil || w.Status != "cancelled" {
 		t.Fatalf("pr_state watcher should be cancelled, got %v", w)
+	} else if w.EndedReason == nil || *w.EndedReason != "session_ended" {
+		t.Fatalf("pr_state watcher want endedReason session_ended, got %v", w.EndedReason)
+	}
+	if ended := s.SessionEndedWatchers(); len(ended) != 1 || ended[0] != "PR #5" {
+		t.Fatalf("SessionEndedWatchers want [PR #5], got %v", ended)
 	}
 	if g, _ := s.GetGrant("grt_pr"); g == nil || g.RevokedAt == nil {
 		t.Fatalf("pr watcher grant should be revoked")

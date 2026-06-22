@@ -163,8 +163,15 @@ func (a watcherStoreAdapter) GetWatcher(_ context.Context, id string) (*domain.W
 	return a.s.GetWatcher(id)
 }
 
-func (a watcherStoreAdapter) UpdateWatcherStatus(_ context.Context, id, status string) error {
-	return a.s.UpdateWatcher(id, map[string]any{"status": status})
+// CancelWatcher flips the watcher to 'cancelled' and stamps the reason + cancel time
+// (the storage update allowlist carries endedReason/endedAt), so a user cancel is
+// distinguishable from the session-boundary sweep's 'session_ended'.
+func (a watcherStoreAdapter) CancelWatcher(_ context.Context, id, reason string) error {
+	return a.s.UpdateWatcher(id, map[string]any{
+		"status":      "cancelled",
+		"endedReason": reason,
+		"endedAt":     domain.NowMS(),
+	})
 }
 
 func (a watcherStoreAdapter) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {

@@ -149,14 +149,14 @@ func (s *Store) InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, e
 		INSERT INTO watchers
 		  (id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,
 		   stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,
-		   lastEpistemicKind,lastCheckedAt,nextCheckAt,createdAt)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   lastEpistemicKind,lastCheckedAt,nextCheckAt,createdAt,endedReason,endedAt)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.ID, rec.Kind, rec.Title, rec.Goal, rec.TargetsJson, rec.CadenceMs,
 		boolToInt(rec.IsSupervisor), string(rec.ModelTier), nullI64(rec.StartAfterMs),
 		nullI64(rec.StopAfterMs), nullStr(rec.StopWhenJson), nullStr(rec.AlertWhenJson),
 		nullStr(rec.OptionsJson), rec.Status, nullStr(rec.LastClassification),
 		epistemicArg(rec.LastEpistemicKind), nullI64(rec.LastCheckedAt), rec.NextCheckAt,
-		rec.CreatedAt)
+		rec.CreatedAt, nullStr(rec.EndedReason), nullI64(rec.EndedAt))
 	if err != nil {
 		return domain.WatcherRecord{}, fmt.Errorf("insert watcher: %w", err)
 	}
@@ -171,18 +171,19 @@ func epistemicArg(p *domain.EpistemicKind) any {
 	return string(*p)
 }
 
-const watcherCols = `id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastEpistemicKind,lastCheckedAt,nextCheckAt,createdAt`
+const watcherCols = `id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,stopAfterMs,stopWhenJson,alertWhenJson,optionsJson,status,lastClassification,lastEpistemicKind,lastCheckedAt,nextCheckAt,createdAt,endedReason,endedAt`
 
 // scanWatcher rebuilds a WatcherRecord, coercing isSupervisor 0/1 back to *bool.
 func scanWatcher(sc scanner) (domain.WatcherRecord, error) {
 	var w domain.WatcherRecord
 	var isSup int
 	var modelTier string
-	var startAfter, stopAfter, lastChecked sql.NullInt64
-	var stopWhen, alertWhen, options, lastClass, lastEpis sql.NullString
+	var startAfter, stopAfter, lastChecked, endedAt sql.NullInt64
+	var stopWhen, alertWhen, options, lastClass, lastEpis, endedReason sql.NullString
 	if err := sc.Scan(&w.ID, &w.Kind, &w.Title, &w.Goal, &w.TargetsJson, &w.CadenceMs,
 		&isSup, &modelTier, &startAfter, &stopAfter, &stopWhen, &alertWhen, &options,
-		&w.Status, &lastClass, &lastEpis, &lastChecked, &w.NextCheckAt, &w.CreatedAt); err != nil {
+		&w.Status, &lastClass, &lastEpis, &lastChecked, &w.NextCheckAt, &w.CreatedAt,
+		&endedReason, &endedAt); err != nil {
 		return domain.WatcherRecord{}, err
 	}
 	b := isSup != 0
@@ -195,6 +196,8 @@ func scanWatcher(sc scanner) (domain.WatcherRecord, error) {
 	w.OptionsJson = strFromNull(options)
 	w.LastClassification = strFromNull(lastClass)
 	w.LastCheckedAt = i64FromNull(lastChecked)
+	w.EndedReason = strFromNull(endedReason)
+	w.EndedAt = i64FromNull(endedAt)
 	if lastEpis.Valid {
 		ek := domain.EpistemicKind(lastEpis.String)
 		w.LastEpistemicKind = &ek
@@ -254,7 +257,7 @@ func queryWatchers(db *sql.DB, q string, args ...any) ([]domain.WatcherRecord, e
 var watcherUpdateCols = newColSet("title", "goal", "targetsJson", "cadenceMs",
 	"isSupervisor", "modelTier", "startAfterMs", "stopAfterMs", "stopWhenJson",
 	"alertWhenJson", "optionsJson", "status", "lastClassification", "lastEpistemicKind",
-	"lastCheckedAt", "nextCheckAt")
+	"lastCheckedAt", "nextCheckAt", "endedReason", "endedAt")
 
 // UpdateWatcher applies an allowlisted patch.
 func (s *Store) UpdateWatcher(id string, patch map[string]any) error {

@@ -5,27 +5,36 @@ import (
 	"strings"
 )
 
+// reasonSessionEnded is the endedReason cancelStaleWatchers stamps when it tears a
+// non-terminal watcher down at a session boundary — distinct from the
+// 'user_cancelled' the watcher.cancel tool stamps. Kept in sync with
+// internal/tools/watcher/watcher.go.
+const reasonSessionEnded = "session_ended"
+
 // cancelStaleWatchers runs on DB open (session boundary). KEEP EXACT ORDER:
 //
 //  1. revoke automation_grants for watcher actors whose watcher is non-terminal
 //     (status in active/created/paused) and not already revoked;
-//  2. flip those watchers to status='cancelled';
+//  2. snapshot the titles about to be cancelled, then flip those watchers to
+//     status='cancelled' stamping endedReason='session_ended' + endedAt;
 //  3. resolve all open events sourced from the three watcher sources.
 //
 // Order matters: revoke BEFORE the flip so no grant is ever live for a watcher we
 // just cancelled. Terminal-status watchers (condition_met/timeout/cancelled/error)
 // are left for the UI history. Scoped to the 3 watcher sources so timer/system/
-// user events persist across sessions.
-func (s *Store) cancelStaleWatchers(now int64) error {
+// user events persist across sessions. Returns the titles of the watchers it
+// cancelled so the caller can surface a one-time "these stopped because the prior
+// session ended" NOTE (nil when none).
+func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
 	const liveStatuses = "('active','created','paused')"
 
-	// Wrap the three ordered statements in ONE transaction so the session boundary
-	// either fully applies or not at all — a mid-failure must not leave a watcher
-	// cancelled while its grant stays live, or vice versa. Single connection ⇒
-	// BEGIN IMMEDIATE serialization; only tx-scoped statements inside.
+	// Wrap the ordered statements in ONE transaction so the session boundary either
+	// fully applies or not at all — a mid-failure must not leave a watcher cancelled
+	// while its grant stays live, or vice versa. Single connection ⇒ BEGIN IMMEDIATE
+	// serialization; only tx-scoped statements inside.
 	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("begin cancel stale watchers: %w", err)
+		return nil, fmt.Errorf("begin cancel stale watchers: %w", err)
 	}
 
 	// (1) revoke watcher grants pointing at non-terminal watchers (BEFORE the flip,
@@ -38,14 +47,43 @@ func (s *Store) cancelStaleWatchers(now int64) error {
 		   AND actorId IN (SELECT id FROM watchers WHERE status IN `+liveStatuses+`)`,
 		now); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("revoke watcher grants: %w", err)
+		return nil, fmt.Errorf("revoke watcher grants: %w", err)
 	}
 
-	// (2) cancel non-terminal watchers.
-	if _, err := tx.Exec(
-		`UPDATE watchers SET status = 'cancelled' WHERE status IN ` + liveStatuses); err != nil {
+	// (2a) snapshot the titles of the watchers we're about to cancel. Read INSIDE the
+	// tx (the single writer already holds the write lock from step 1) so this set is
+	// exactly the rows the next UPDATE flips — no concurrent writer can change it.
+	rows, err := tx.Query(`SELECT title FROM watchers WHERE status IN ` + liveStatuses + ` ORDER BY createdAt`)
+	if err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("cancel watchers: %w", err)
+		return nil, fmt.Errorf("select stale watcher titles: %w", err)
+	}
+	var titles []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			_ = rows.Close()
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("scan stale watcher title: %w", err)
+		}
+		titles = append(titles, title)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("iterate stale watcher titles: %w", err)
+	}
+	// Close BEFORE the next statement: an open rows cursor on the single connection
+	// would block the UPDATE below.
+	_ = rows.Close()
+
+	// (2b) cancel non-terminal watchers, stamping WHY (session_ended) + WHEN so the UI
+	// and store can tell a session-boundary teardown from a deliberate user cancel.
+	if _, err := tx.Exec(
+		`UPDATE watchers SET status = 'cancelled', endedReason = ?, endedAt = ? WHERE status IN `+liveStatuses,
+		reasonSessionEnded, now); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("cancel watchers: %w", err)
 	}
 
 	// (3) resolve open watcher-sourced events (no sessionId / TTL on these).
@@ -56,14 +94,14 @@ func (s *Store) cancelStaleWatchers(now int64) error {
 		   AND source IN ('terminal_watcher','worktree_watcher','pr_watcher')`,
 		now); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("resolve watcher events: %w", err)
+		return nil, fmt.Errorf("resolve watcher events: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("commit cancel stale watchers: %w", err)
+		return nil, fmt.Errorf("commit cancel stale watchers: %w", err)
 	}
-	return nil
+	return titles, nil
 }
 
 // cancelStaleAgentLaunches fails any non-terminal spawn saga on open so a fresh

@@ -11,6 +11,11 @@ import (
 
 type memStore struct {
 	inserted []domain.WatcherRecord
+	// cancelled records the (id, reason) of the last CancelWatcher call so tests can
+	// assert watcher.cancel stamps the user-cancel reason.
+	cancelledID     string
+	cancelledReason string
+	revokedActor    string
 }
 
 func (m *memStore) InsertWatcher(_ context.Context, rec domain.WatcherRecord) (string, error) {
@@ -28,8 +33,14 @@ func (m *memStore) GetWatcher(_ context.Context, id string) (*domain.WatcherReco
 	}
 	return nil, nil
 }
-func (m *memStore) UpdateWatcherStatus(context.Context, string, string) error { return nil }
-func (m *memStore) RevokeGrantsByActor(context.Context, string) (int, error)  { return 0, nil }
+func (m *memStore) CancelWatcher(_ context.Context, id, reason string) error {
+	m.cancelledID, m.cancelledReason = id, reason
+	return nil
+}
+func (m *memStore) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {
+	m.revokedActor = actorID
+	return 0, nil
+}
 
 func find(ts []*tools.Tool, name string) *tools.Tool {
 	for _, t := range ts {
@@ -105,5 +116,39 @@ func TestWatchPRFixedCadence(t *testing.T) {
 	_ = json.Unmarshal([]byte(w.TargetsJson), &targets)
 	if len(targets) != 1 || targets[0] != "PR #42" {
 		t.Fatalf("targetsJson: %v", targets)
+	}
+}
+
+// watcher.cancel stamps the user-cancel reason (so a deliberate cancel is
+// distinguishable from the session-boundary sweep's 'session_ended') and revokes the
+// watcher's automation grants.
+func TestCancelStampsUserCancelledReason(t *testing.T) {
+	st := &memStore{inserted: []domain.WatcherRecord{{ID: "wch_1", Kind: "terminal", Title: "t"}}}
+	tool := find(Tools(Deps{Store: st}), "watcher.cancel")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_1"}`), &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if st.cancelledID != "wch_1" {
+		t.Fatalf("cancelled id: got %q want wch_1", st.cancelledID)
+	}
+	if st.cancelledReason != reasonUserCancelled {
+		t.Fatalf("cancel reason: got %q want %q", st.cancelledReason, reasonUserCancelled)
+	}
+	if st.revokedActor != "wch_1" {
+		t.Fatalf("revoked actor: got %q want wch_1", st.revokedActor)
+	}
+}
+
+// Cancelling an unknown watcher fails closed (no CancelWatcher call).
+func TestCancelUnknownWatcher(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "watcher.cancel")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_missing"}`), &tools.ToolContext{})
+	if res.Ok || res.Error.Code != codeWatcherNotFound {
+		t.Fatalf("expected WATCHER_NOT_FOUND, got %+v", res)
+	}
+	if st.cancelledID != "" {
+		t.Fatalf("must not cancel a missing watcher, got %q", st.cancelledID)
 	}
 }

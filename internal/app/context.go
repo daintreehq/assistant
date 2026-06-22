@@ -23,18 +23,66 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 	// the Tier read while a turn is rebuilding its runtime context.
 	cfg := a.snapshotConfig()
 	st := a.MCP.Status()
+	schedulerActive := a.scheduler != nil
 	return prompts.MainPromptContext{
-		Tier:                cfg.Tier,
-		ProjectPath:         cfg.ProjectPath,
-		ProjectID:           cfg.ProjectID,
-		MCPConnected:        st.Connected,
-		MCPStatusLine:       mcpStatusLine(st),
-		LargeModel:          cfg.LargeModel,
-		SmallModel:          cfg.SmallModel,
-		SchedulerActive:     a.scheduler != nil,
-		ProjectInstructions: cfg.ProjectInstructions,
-		PinnedMemories:      a.pinnedMemoriesBlock(),
+		Tier:                 cfg.Tier,
+		ProjectPath:          cfg.ProjectPath,
+		ProjectID:            cfg.ProjectID,
+		MCPConnected:         st.Connected,
+		MCPStatusLine:        mcpStatusLine(st),
+		LargeModel:           cfg.LargeModel,
+		SmallModel:           cfg.SmallModel,
+		SchedulerActive:      schedulerActive,
+		ProjectInstructions:  cfg.ProjectInstructions,
+		PinnedMemories:       a.pinnedMemoriesBlock(),
+		SessionEndedWatchers: a.sessionEndedNote(schedulerActive),
 	}
+}
+
+// sessionEndedNote returns the carried-over titles of watchers cancelled when the
+// prior session ended, but ONLY while the scheduler is active (the interactive path
+// where watchers matter) and the one-time NOTE has not yet been consumed by the
+// first turn. Returns nil otherwise, so message[1] omits the NOTE. Reads the flag +
+// slice under noteMu since a turn goroutine may consume concurrently.
+func (a *App) sessionEndedNote(schedulerActive bool) []string {
+	if !schedulerActive {
+		return nil
+	}
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	if a.sessionEndedNoteConsumed || len(a.sessionEndedWatchers) == 0 {
+		return nil
+	}
+	return a.sessionEndedWatchers
+}
+
+// consumeSessionEndedNote marks the one-time session-ended-watchers NOTE consumed
+// and refreshes message[1] to strip it, so it surfaces on the first interactive turn
+// and never again this session. Idempotent and cheap after the first call (no-op when
+// already consumed or when there was no NOTE to begin with).
+func (a *App) consumeSessionEndedNote() {
+	a.noteMu.Lock()
+	if a.sessionEndedNoteConsumed || len(a.sessionEndedWatchers) == 0 {
+		a.noteMu.Unlock()
+		return
+	}
+	a.sessionEndedNoteConsumed = true
+	a.noteMu.Unlock()
+	// Rebuild message[1] without the NOTE. PromptContext now returns nil for the
+	// titles (consumed flag is set), so this strips it.
+	a.Session.RefreshRuntimeContext(a.PromptContext())
+}
+
+// Send runs one interactive user turn through the session, then consumes the
+// one-time session-ended-watchers NOTE so it surfaces during exactly the first turn
+// and is stripped from message[1] afterwards. Interactive callers (cockpit/REPL user
+// turns) route through here instead of Session.Send directly; autonomous wake turns
+// and one-shot runs call Session.Send and never trip the consume (one-shot never
+// starts the scheduler, so the NOTE is never seeded there).
+func (a *App) Send(ctx context.Context, userInput string, opts agent.SendOptions) (string, error) {
+	reply, err := a.Session.Send(ctx, userInput, opts)
+	a.consumeSessionEndedNote()
+	return reply, err
 }
 
 // pinnedMemoriesMax caps how many pinned memories are injected (pinned-first order,

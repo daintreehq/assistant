@@ -62,13 +62,13 @@ func indexNames(t *testing.T, s *Store, table string) map[string]bool {
 }
 
 // TestFreshSchemaShape asserts a fresh DB builds the whole current schema and
-// stamps user_version=1 — the single-baseline contract.
+// stamps user_version == schemaUserVersion — the single-baseline contract.
 func TestFreshSchemaShape(t *testing.T) {
 	s := openTest(t, 1)
 
 	mustHaveCols := map[string][]string{
 		"events":            {"updatedAt", "notifiedAt"},
-		"watchers":          {"isSupervisor", "lastEpistemicKind"},
+		"watchers":          {"isSupervisor", "lastEpistemicKind", "endedReason", "endedAt"},
 		"automation_grants": {"source"},
 		"audit_log":         {"grantSource", "grantId", "runId"},
 		"run_events":        {"id", "runId", "seq", "ts", "type", "payload"},

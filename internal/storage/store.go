@@ -36,7 +36,9 @@ const (
 	// pruneChunk caps run-id deletes per batch under SQLITE_MAX_VARIABLE_NUMBER 999.
 	pruneChunk = 900
 	// schemaUserVersion is the single baseline; dev hard-resets rather than chain.
-	schemaUserVersion = 1
+	// Bumped to 2 when the watchers table gained endedReason/endedAt — a schema change
+	// is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 2
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
@@ -82,6 +84,12 @@ type Store struct {
 	db        *sql.DB
 	now       func() int64
 	retention Retention
+
+	// sessionEndedWatchers holds the titles of watchers cancelStaleWatchers cancelled
+	// on THIS Open because the prior session ended (nil when none). It is a one-shot
+	// carryover: the composition root reads it once to surface a single "these stopped
+	// when the last session ended" NOTE. Set only during Open; never mutated after.
+	sessionEndedWatchers []string
 }
 
 // Open opens (or creates) the SQLite file at dbPath, applies PRAGMAs, execs the
@@ -125,10 +133,12 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 	}
 
 	now := s.now()
-	if err := s.cancelStaleWatchers(now); err != nil {
+	endedTitles, err := s.cancelStaleWatchers(now)
+	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale watchers: %w", err)
 	}
+	s.sessionEndedWatchers = endedTitles
 	if err := s.cancelStaleAgentLaunches(now); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale agent launches: %w", err)
@@ -178,6 +188,19 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DB returns the raw handle (escape hatch, mainly for tests). Port of raw().
 func (s *Store) DB() *sql.DB { return s.db }
+
+// SessionEndedWatchers returns the titles of watchers that THIS Open cancelled
+// because the prior session ended (nil when none). Read once by the composition
+// root to surface a one-time NOTE; returns a defensive copy so the caller can't
+// mutate the store's slice.
+func (s *Store) SessionEndedWatchers() []string {
+	if len(s.sessionEndedWatchers) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.sessionEndedWatchers))
+	copy(out, s.sessionEndedWatchers)
+	return out
+}
 
 // ---- ports.Store seam (the minimum the agent loop compiles against) ----
 
