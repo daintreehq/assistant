@@ -649,3 +649,104 @@ func TestDoctorNoProbeWhenDisconnected(t *testing.T) {
 		}
 	}
 }
+
+// TestUIGrantsEmptyAndLive: /grants reports "(none)" with an empty store and a text
+// card (no panel switch), and renders a live grant's id, actor, source, uses, and the
+// allowed risk classes once seeded.
+func TestUIGrantsEmptyAndLive(t *testing.T) {
+	a := newOfflineApp(t)
+	if r := ui(a, "/grants"); !r.Handled || r.Title != "Grants" || r.Text != "(none)" {
+		t.Fatalf("empty /grants: %+v", r)
+	}
+	if r := ui(a, "/grants"); r.SwitchPanel != "" {
+		t.Fatalf("/grants must not switch panels, got %q", r.SwitchPanel)
+	}
+	future := time.Now().Add(time.Hour).UnixMilli()
+	risks := `["project"]`
+	rec, err := a.Store.InsertGrant(domain.AutomationGrantRecord{
+		ActorID:                "wch_abc",
+		ActorType:              domain.GrantActorWatcher,
+		AllowedRiskClassesJson: &risks,
+		ExpiresAt:              future,
+		MaxUses:                3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := ui(a, "/grants")
+	for _, want := range []string{rec.ID, "wch_abc", "watcher", "uses=3/3", "risks=project"} {
+		if !strings.Contains(r.Text, want) {
+			t.Fatalf("/grants missing %q: %q", want, r.Text)
+		}
+	}
+}
+
+// TestUIWorkflowsDefaultActiveAndFilters: bare /workflows shows only active runs (and
+// the issue ref), "/workflows all" shows every status, "/workflows done" filters to done.
+func TestUIWorkflowsDefaultActiveAndFilters(t *testing.T) {
+	a := newOfflineApp(t)
+	if r := ui(a, "/workflows"); !r.Handled || r.Title != "Workflows" || r.Text != "(none)" {
+		t.Fatalf("empty /workflows: %+v", r)
+	}
+	issueNum := 170
+	issueTitle := "Add inspection commands"
+	active, err := a.Store.InsertWorkflowRun(domain.WorkflowRunRecord{
+		Status:      domain.WorkflowActive,
+		IssueNumber: &issueNum,
+		IssueTitle:  &issueTitle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := a.Store.InsertWorkflowRun(domain.WorkflowRunRecord{Status: domain.WorkflowDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bare /workflows defaults to active; the done run must not appear.
+	r := ui(a, "/workflows")
+	if !strings.Contains(r.Text, active.ID) || strings.Contains(r.Text, done.ID) {
+		t.Fatalf("default /workflows should show only active: %q", r.Text)
+	}
+	if !strings.Contains(r.Text, "issue #170") || !strings.Contains(r.Text, "Add inspection commands") {
+		t.Fatalf("/workflows missing the issue ref: %q", r.Text)
+	}
+	// "all" drops the filter — both statuses appear.
+	if r := ui(a, "/workflows all"); !strings.Contains(r.Text, active.ID) || !strings.Contains(r.Text, done.ID) {
+		t.Fatalf("/workflows all should show both: %q", r.Text)
+	}
+	// An explicit status filters to that status only.
+	if r := ui(a, "/workflows done"); strings.Contains(r.Text, active.ID) || !strings.Contains(r.Text, done.ID) {
+		t.Fatalf("/workflows done should show only done: %q", r.Text)
+	}
+}
+
+// TestUILaunchesEmptyAndWithError: /launches reports "(none)" when empty and renders a
+// failed launch's id, stage, mode, title, and error code+message once seeded.
+func TestUILaunchesEmptyAndWithError(t *testing.T) {
+	a := newOfflineApp(t)
+	if r := ui(a, "/launches"); !r.Handled || r.Title != "Launches" || r.Text != "(none)" {
+		t.Fatalf("empty /launches: %+v", r)
+	}
+	code := "spawn_failed"
+	msg := "worktree busy"
+	rec, err := a.Store.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "idem-1",
+		AgentID:        "agent-1",
+		Mode:           "edit",
+		Title:          "Fix the bug",
+		Name:           "bugfix",
+		Stage:          domain.LaunchFailed,
+		ErrorCode:      &code,
+		ErrorMessage:   &msg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := ui(a, "/launches")
+	for _, want := range []string{rec.ID, "failed", "edit", "Fix the bug", "spawn_failed", "worktree busy"} {
+		if !strings.Contains(r.Text, want) {
+			t.Fatalf("/launches missing %q: %q", want, r.Text)
+		}
+	}
+}
