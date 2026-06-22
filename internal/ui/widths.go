@@ -24,6 +24,13 @@ const (
 	// holds the in-flight remainder; capping it small keeps the live View short so a flush/
 	// commit tea.Println can never dump a tall footer into scrollback (bubbletea#1613).
 	maxLiveRows = 8
+	// minCockpitRows is the height floor below which the footer collapses to a single
+	// "terminal too small" line (see footer()). Below it the fixed bottom band (composer +
+	// optional status/approval) can't fit, so rendering it whole would make View() taller
+	// than the terminal and scroll a frozen partial copy into native scrollback
+	// (bubbletea#1613) — the very corruption the rest of view.go is built to avoid. Nothing
+	// is lost: onResize re-commits the transcript and restores the real footer on grow-back.
+	minCockpitRows = 4
 )
 
 // gutterFor returns the right gutter: 1 normally, raised to 2 when embedded under
