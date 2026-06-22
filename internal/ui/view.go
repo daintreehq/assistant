@@ -64,6 +64,20 @@ func (m Model) footer() string {
 		return m.splash.bootView(m.theme, m.columns, m.rows)
 	}
 
+	// Minimum-terminal-size floor. The fixed bottom band (composer, plus an optional status
+	// line or a multi-row approval sheet) is emitted WHOLE — it is never height-clamped the
+	// way the live tail and the ops/help decks are. On a hard-shrunk pane it alone outgrows
+	// m.rows, making View() taller than the terminal; a flush/commit tea.Println then scrolls
+	// a frozen partial copy into native scrollback and corrupts it (bubbletea#1613). So below
+	// a small row floor — applied to EVERY view, not just home, since ops/help still emit a
+	// body line + an "Esc back" line and overflow at 1-2 rows — collapse the whole footer to
+	// one dim line. Exactly one row, so View() can never exceed the terminal. The home path
+	// adds a second, content-aware check once the band's true height is known (below).
+	tooSmall := indentLines(truncateCells(m.theme.Dim().Render("terminal too small — resize taller"), w), LeftPad)
+	if m.rows < minCockpitRows {
+		return tooSmall
+	}
+
 	var b strings.Builder
 	switch m.view {
 	case viewOperations:
@@ -96,7 +110,23 @@ func (m Model) footer() string {
 	// fits above it. The FULL turn commits to scrollback the instant it seals, so nothing
 	// is lost — the host then owns scrolling it, exactly as intended.
 	bottom := m.bottomBand(w)
-	if live := m.liveCellsView(w); live != "" {
+	live := m.liveCellsView(w)
+
+	// Content-aware floor for the home view: even at m.rows >= minCockpitRows the bottom band
+	// can be tall (a multi-row approval sheet in a ~5-row window), so verify the band itself
+	// fits before composing. The minimum footer height is lineCount(bottom) + 1 for the blank
+	// separator line; when a turn is in flight it is +2, because the live region is floored to
+	// at least one row (budget < 1 → 1, below) plus that separator. If even that minimum
+	// overflows, collapse to the one-liner instead of letting View() exceed the terminal.
+	needed := lineCount(bottom) + 1
+	if live != "" {
+		needed = lineCount(bottom) + 2
+	}
+	if needed > m.rows {
+		return tooSmall
+	}
+
+	if live != "" {
 		// Hard-bound the live region so the footer is NEVER tall. Two reasons: (1) a View
 		// taller than the terminal scrolls its own top into native scrollback (a frozen
 		// partial copy); (2) even below that, a tea.Println (a flush/commit) fired while the
