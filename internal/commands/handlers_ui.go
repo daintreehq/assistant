@@ -278,8 +278,8 @@ func grantsText(a *app.App) string {
 
 // grantAllowSummary describes what a grant authorizes: its allowed risk classes
 // and/or tool names (the authorization is their union). "(any)" is a defensive
-// fallback — InsertGrant enforces at least one non-empty list — so an empty tail
-// never renders.
+// fallback for a grant carrying neither list (or unparseable JSON columns); live
+// grants normally hold at least one, so an empty tail is not expected in practice.
 func grantAllowSummary(g domain.AutomationGrantRecord) string {
 	var parts []string
 	if risks := decodeJSONStringList(g.AllowedRiskClassesJson); len(risks) > 0 {
@@ -303,7 +303,9 @@ const workflowsDisplayCap = 20
 // status filter (pending|active|blocked|done|cancelled|failed). Newest-first, capped
 // at workflowsDisplayCap.
 func workflowsText(a *app.App, arg string) string {
-	status := strings.TrimSpace(arg)
+	// Normalize case so "/workflows Active" matches the stored lowercase status (a
+	// literal SQL WHERE) instead of silently returning "(none)".
+	status := strings.ToLower(strings.TrimSpace(arg))
 	switch status {
 	case "":
 		status = string(domain.WorkflowActive)

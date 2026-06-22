@@ -663,18 +663,24 @@ func TestUIGrantsEmptyAndLive(t *testing.T) {
 	}
 	future := time.Now().Add(time.Hour).UnixMilli()
 	risks := `["project"]`
+	tools := `["git.commit"]`
+	// MaxUses=5 with UsesRemaining=2 (explicit, so InsertGrant's "0 ⇒ MaxUses" default
+	// does not overwrite it) pins the uses=remaining/max display order. Both lists are
+	// set so grantAllowSummary's risks= AND tools= branches are exercised.
 	rec, err := a.Store.InsertGrant(domain.AutomationGrantRecord{
 		ActorID:                "wch_abc",
 		ActorType:              domain.GrantActorWatcher,
 		AllowedRiskClassesJson: &risks,
+		AllowedToolNamesJson:   &tools,
 		ExpiresAt:              future,
-		MaxUses:                3,
+		MaxUses:                5,
+		UsesRemaining:          2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := ui(a, "/grants")
-	for _, want := range []string{rec.ID, "wch_abc", "watcher", "uses=3/3", "risks=project"} {
+	for _, want := range []string{rec.ID, "wch_abc", "watcher", "uses=2/5", "risks=project", "tools=git.commit"} {
 		if !strings.Contains(r.Text, want) {
 			t.Fatalf("/grants missing %q: %q", want, r.Text)
 		}
@@ -748,5 +754,56 @@ func TestUILaunchesEmptyAndWithError(t *testing.T) {
 		if !strings.Contains(r.Text, want) {
 			t.Fatalf("/launches missing %q: %q", want, r.Text)
 		}
+	}
+}
+
+// TestUILaunchesNoErrorSuffix: a launch with no error code/message must NOT render a
+// trailing " — error:" suffix (guards the ErrorCode/ErrorMessage nil checks).
+func TestUILaunchesNoErrorSuffix(t *testing.T) {
+	a := newOfflineApp(t)
+	rec, err := a.Store.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "idem-ok",
+		AgentID:        "agent-ok",
+		Mode:           "explore",
+		Title:          "Survey the layout",
+		Name:           "survey",
+		Stage:          domain.LaunchConfirmed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := ui(a, "/launches")
+	if !strings.Contains(r.Text, rec.ID) || !strings.Contains(r.Text, "confirmed") {
+		t.Fatalf("/launches missing the confirmed launch: %q", r.Text)
+	}
+	if strings.Contains(r.Text, "error:") {
+		t.Fatalf("/launches appended an error suffix to an error-free launch: %q", r.Text)
+	}
+}
+
+// TestUIWorkflowsCapCaseAndInvalid: the display caps at 20 rows with a "(+N more)"
+// trailer, mixed-case status args are normalized, and an unknown status yields "(none)".
+func TestUIWorkflowsCapCaseAndInvalid(t *testing.T) {
+	a := newOfflineApp(t)
+	for i := 0; i < 21; i++ {
+		if _, err := a.Store.InsertWorkflowRun(domain.WorkflowRunRecord{Status: domain.WorkflowActive}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Bare /workflows defaults to active: 20 rows shown + a "(+1 more)" trailer.
+	r := ui(a, "/workflows")
+	if n := strings.Count(r.Text, "[active]"); n != 20 {
+		t.Fatalf("/workflows should cap at 20 rows, rendered %d: %q", n, r.Text)
+	}
+	if !strings.Contains(r.Text, "(+1 more)") {
+		t.Fatalf("/workflows missing the overflow trailer: %q", r.Text)
+	}
+	// Mixed-case status is normalized and still matches the stored lowercase status.
+	if r := ui(a, "/workflows ACTIVE"); !strings.Contains(r.Text, "[active]") {
+		t.Fatalf("/workflows ACTIVE should match active runs: %q", r.Text)
+	}
+	// An unknown status filters everything out rather than erroring.
+	if r := ui(a, "/workflows nope"); r.Text != "(none)" {
+		t.Fatalf("/workflows nope should be (none): %q", r.Text)
 	}
 }
