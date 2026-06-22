@@ -17,6 +17,12 @@ import (
 const (
 	codeInvalidArgs   = "INVALID_ARGS"
 	codeQueueNotFound = "QUEUE_NOT_FOUND"
+
+	// queue.digest is bounded so an inbox that has accumulated many open events can never
+	// return an unbounded tool result that busts the model's context budget. The caller may
+	// ask for fewer; a larger ask is clamped, and no ask defaults to defaultDigestItems.
+	defaultDigestItems = 50
+	maxDigestItems     = 200
 )
 
 // Queue is the consumer-defined slice of the attention queue these tools drive.
@@ -170,12 +176,17 @@ func newDigestTool(deps Deps) *tools.Tool {
 				}
 				opts.SeverityAtLeast = &sev
 			}
+			limit := defaultDigestItems
 			if a.MaxItems != nil {
 				if *a.MaxItems <= 0 {
 					return tools.Fail(codeInvalidArgs, "queue.digest: maxItems must be a positive integer")
 				}
-				opts.MaxItems = a.MaxItems
+				limit = *a.MaxItems
+				if limit > maxDigestItems {
+					limit = maxDigestItems // clamp, never an unbounded dump
+				}
 			}
+			opts.MaxItems = &limit
 			events, err := q.Digest(ctx, opts)
 			if err != nil {
 				return tools.Fail(domain.CodeInternal, "queue.digest: "+err.Error())

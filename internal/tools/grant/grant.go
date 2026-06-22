@@ -38,6 +38,13 @@ const (
 var ungrantableTools = map[string]bool{
 	"grant.create": true,
 	"grant.revoke": true,
+	// daintree.call is the raw, unbounded MCP escape hatch (RiskSystem, always an interactive
+	// confirm for the main actor). Granting it to a watcher/timer would let automation reach
+	// ANY Daintree MCP method unattended — bypassing the per-method typed-wrapper gating that
+	// is the whole point of the typed wrappers. Automation must go through the risk-classified
+	// wrappers, never the escape hatch. (A "system" risk-class grant remains a deliberate,
+	// confirmed act and is intentionally still allowed.)
+	"daintree.call": true,
 }
 
 // mutatingGrantRisks are the risk classes whose presence in a grant's scope makes

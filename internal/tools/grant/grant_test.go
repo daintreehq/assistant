@@ -63,14 +63,18 @@ func TestGrantCreateEmptyScope(t *testing.T) {
 	}
 }
 
-// Granting grant.create itself is forbidden.
+// Granting the grant tools themselves — or the raw daintree.call escape hatch — is
+// forbidden. daintree.call would let a watcher/timer reach ANY MCP method unattended,
+// bypassing the per-method typed-wrapper gating.
 func TestGrantCreateUngrantable(t *testing.T) {
-	tool := find(Tools(Deps{Store: &memStore{}}), "grant.create")
-	ctx := &tools.ToolContext{Actor: domain.ActorMain}
-	p := decode(t, tool, `{"actorId":"wch_1","actorType":"watcher","allowedToolNames":["grant.create"],"ttlMs":1000,"maxUses":1}`)
-	res := tool.Handle(context.Background(), p, ctx)
-	if res.Ok || res.Error.Code != codeUngrantableTool {
-		t.Fatalf("expected GRANT_UNGRANTABLE_TOOL, got %+v", res)
+	for _, tn := range []string{"grant.create", "grant.revoke", "daintree.call"} {
+		tool := find(Tools(Deps{Store: &memStore{}}), "grant.create")
+		ctx := &tools.ToolContext{Actor: domain.ActorMain}
+		p := decode(t, tool, `{"actorId":"wch_1","actorType":"watcher","allowedToolNames":["`+tn+`"],"ttlMs":1000,"maxUses":1}`)
+		res := tool.Handle(context.Background(), p, ctx)
+		if res.Ok || res.Error.Code != codeUngrantableTool {
+			t.Fatalf("granting %q must be ungrantable, got %+v", tn, res)
+		}
 	}
 }
 

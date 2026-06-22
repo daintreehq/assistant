@@ -19,6 +19,11 @@ import (
 const (
 	codeInvalidArgs      = "INVALID_ARGS"
 	codeWorkflowNotFound = "WORKFLOW_NOT_FOUND"
+
+	// maxWorkflowList bounds workflow.list so a long-lived workspace's run history can't
+	// return an unbounded tool result. The store orders by updatedAt DESC, so the cap keeps
+	// the most-recently-active runs and truncates older ones (surfaced in the summary).
+	maxWorkflowList = 100
 )
 
 // terminalStatuses stamp completedAt the first time they are reached.
@@ -228,11 +233,19 @@ func newListTool(deps Deps) *tools.Tool {
 			if err != nil {
 				return tools.Fail(domain.CodeInternal, "workflow.list: "+err.Error())
 			}
+			total := len(rows)
+			if len(rows) > maxWorkflowList {
+				rows = rows[:maxWorkflowList] // ORDER BY updatedAt DESC → keep the most recent
+			}
 			out := make([]map[string]any, 0, len(rows))
 			for i := range rows {
 				out = append(out, workflowView(&rows[i]))
 			}
-			return tools.Ok(fmt.Sprintf("%d workflow(s).", len(out)), map[string]any{"workflows": out})
+			summary := fmt.Sprintf("%d workflow(s).", len(out))
+			if total > len(out) {
+				summary = fmt.Sprintf("%d of %d workflow(s) (most recent shown; older truncated).", len(out), total)
+			}
+			return tools.Ok(summary, map[string]any{"workflows": out})
 		},
 	}
 }
