@@ -427,6 +427,13 @@ func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onTo
 		}
 		// Retriable ONLY before the first emitted token; otherwise honour the budget.
 		if emitted || attempt >= ModelRetryPolicy.MaxRetries || !isRetriableModelError(streamErr) {
+			// A budget-exhausted 429 is wrapped into the exported RateLimitedError so it
+			// can cross into the agent's classifyStreamError. The emitted path returns
+			// raw — a partially-streamed turn must NOT be relabelled as a clean
+			// rate-limit (a mid-stream read error is not a 429 anyway).
+			if !emitted {
+				return ChatResult{}, wrapExhaustedRateLimit(streamErr)
+			}
 			return ChatResult{}, streamErr
 		}
 		if serr := abortableSleep(ctx, modelRetryDelayMs(attempt, streamErr, ModelRetryPolicy)); serr != nil {

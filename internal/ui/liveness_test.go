@@ -127,6 +127,20 @@ func TestPhasePumpEvent_DrivesActiveTurn(t *testing.T) {
 	}
 }
 
+func TestModelRateLimited_SetByPumpAndClearedByUsage(t *testing.T) {
+	m := liveModel(80)
+	// A provider 429 that outlasted the retry budget raises the health badge.
+	m.applyPumpEvent(pumpEvent{kind: pumpModelRateLimited})
+	if !m.modelRateLimited {
+		t.Fatal("pumpModelRateLimited must raise the model-rate-limited badge")
+	}
+	// The next successful usage round means the model resumed — the badge clears.
+	m.applyPumpEvent(pumpEvent{kind: pumpUsage, usage: agent.UsageEvent{ContextWindow: 1000, ContextTokens: 10}})
+	if m.modelRateLimited {
+		t.Fatal("a successful Usage event must clear the model-rate-limited badge")
+	}
+}
+
 // --- 2. Synchronous ack: "◆ DAINTREE · received", yields to first token ---
 
 func TestStartTurn_SynchronousReceivedAck(t *testing.T) {

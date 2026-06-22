@@ -1,6 +1,8 @@
 package models
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"testing"
 )
@@ -53,6 +55,70 @@ func TestIsRateLimitModelError(t *testing.T) {
 	}
 	if isRateLimitModelError(&apiError{status: 0}) {
 		t.Error("connection error must NOT be flagged as rate-limit")
+	}
+}
+
+// wrapExhaustedRateLimit converts a budget-exhausted 429 into the exported
+// *RateLimitedError (so it can cross into the agent layer) and passes every other
+// error through untouched, including nil.
+func TestWrapExhaustedRateLimit(t *testing.T) {
+	h := http.Header{}
+	h.Set("retry-after-ms", "1200")
+
+	// A 429 with a Retry-After header → RateLimitedError carrying RetryAfterMs.
+	var rl *RateLimitedError
+	got := wrapExhaustedRateLimit(&apiError{status: 429, headers: h})
+	if !errors.As(got, &rl) {
+		t.Fatalf("429 must wrap to *RateLimitedError, got %T", got)
+	}
+	if rl.RetryAfterMs != 1200 {
+		t.Errorf("RetryAfterMs = %d, want 1200", rl.RetryAfterMs)
+	}
+	if rl.Code() != "MODEL_RATE_LIMITED" {
+		t.Errorf("Code = %q, want MODEL_RATE_LIMITED", rl.Code())
+	}
+	if rl.Error() != "provider quota/throughput exceeded" {
+		t.Errorf("Error = %q", rl.Error())
+	}
+
+	// A 429 with no header → RetryAfterMs 0.
+	rl = nil
+	if got := wrapExhaustedRateLimit(&apiError{status: 429}); !errors.As(got, &rl) || rl.RetryAfterMs != 0 {
+		t.Fatalf("429 no-header: got %v (rl=%+v)", got, rl)
+	}
+
+	// Non-429 errors pass through unchanged (same interface value).
+	for _, e := range []error{
+		&apiError{status: 500},
+		&apiError{status: 0},
+		context.DeadlineExceeded,
+		errors.New("misc"),
+	} {
+		if out := wrapExhaustedRateLimit(e); out != e {
+			t.Errorf("wrapExhaustedRateLimit(%v) = %v, want unchanged", e, out)
+		}
+	}
+	// nil stays nil.
+	if out := wrapExhaustedRateLimit(nil); out != nil {
+		t.Errorf("nil must pass through, got %v", out)
+	}
+}
+
+// retryModelCall surfaces a final exhausted 429 as the exported *RateLimitedError so
+// the agent layer can classify it; the budget is honoured (MaxRetries+1 attempts).
+func TestRetryModelCallExhausted429Wraps(t *testing.T) {
+	fast := RetryPolicy{MaxRetries: 2, BaseDelayMs: 0, MaxDelayMs: 0}
+	calls := 0
+	_, err := retryModelCall(context.Background(), fast, func() (int, error) {
+		calls++
+		return 0, &apiError{status: 429}
+	})
+	if calls != fast.MaxRetries+1 {
+		t.Fatalf("attempts = %d, want %d", calls, fast.MaxRetries+1)
+	}
+	var rl *RateLimitedError
+	if !errors.As(err, &rl) {
+		t.Fatalf("exhausted 429 must surface *RateLimitedError, got %T (%v)", err, err)
 	}
 }
 

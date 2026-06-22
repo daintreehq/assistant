@@ -266,6 +266,7 @@ func (throwingSink) Error(string)                { panic("boom") }
 func (throwingSink) Info(string)                 { panic("boom") }
 func (throwingSink) Usage(UsageEvent)            { panic("boom") }
 func (throwingSink) TurnPrompt(string)           { panic("boom") }
+func (throwingSink) ModelRateLimited()           { panic("boom") }
 
 // recordingSink captures a flat string log of received events.
 type recordingSink struct {

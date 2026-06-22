@@ -207,6 +207,10 @@ func (b *Bridge) Usage(agent.UsageEvent) {}
 // bridge drops it (it's persisted for /explain by the run-event sink).
 func (b *Bridge) TurnPrompt(string) {}
 
+// ModelRateLimited is a live cockpit health cue with no host-protocol channel —
+// dropped. The "Model rate-limited" reply still flows through the normal turn text.
+func (b *Bridge) ModelRateLimited() {}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------

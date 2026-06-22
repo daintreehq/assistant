@@ -84,7 +84,8 @@ const (
 	pumpLog
 	pumpError
 	pumpAttention
-	pumpComplete // turn / wake completion, delivered IN-STREAM (#1)
+	pumpComplete         // turn / wake completion, delivered IN-STREAM (#1)
+	pumpModelRateLimited // provider 429 after the retry budget — raise the health badge
 )
 
 // eventPump is the agent.EventSink implementation. It coalesces tokens and forwards
@@ -250,6 +251,12 @@ func (p *eventPump) Usage(ev agent.UsageEvent) {
 // /explain); the live cockpit already shows the prompt as the user turn, so the
 // pump drops it.
 func (p *eventPump) TurnPrompt(string) {}
+
+// ModelRateLimited forwards the provider-throttled health cue so the reducer can
+// raise the "▲ Model rate-limited" footer badge (cleared on the next Usage).
+func (p *eventPump) ModelRateLimited() {
+	p.emit(pumpEvent{kind: pumpModelRateLimited})
+}
 
 func (p *eventPump) Error(msg string) {
 	p.emit(pumpEvent{kind: pumpError, level: NoteError, msg: msg})

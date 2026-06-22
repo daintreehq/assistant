@@ -304,16 +304,17 @@ func (m Model) statusView(w int) string {
 		}
 	}
 	return renderStatusLine(m.theme, statusParams{
-		ContextPct:  pct,
-		HasUsage:    m.hasUsage,
-		Cost:        m.cost,
-		Model:       m.model,
-		AttentionN:  m.attentionN,
-		TopSeverity: m.dashboard.topSeverity(),
-		Degraded:    m.degraded,
-		ActiveTone:  aTone,
-		ActiveLabel: aLabel,
-		ActiveGoal:  aGoal,
+		ContextPct:       pct,
+		HasUsage:         m.hasUsage,
+		Cost:             m.cost,
+		Model:            m.model,
+		AttentionN:       m.attentionN,
+		TopSeverity:      m.dashboard.topSeverity(),
+		Degraded:         m.degraded,
+		ModelRateLimited: m.modelRateLimited,
+		ActiveTone:       aTone,
+		ActiveLabel:      aLabel,
+		ActiveGoal:       aGoal,
 	}, w)
 }
 

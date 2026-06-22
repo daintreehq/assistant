@@ -187,6 +187,27 @@ func parseRetryAfterMs(h http.Header) (int, bool) {
 	return 0, false
 }
 
+// wrapExhaustedRateLimit converts a retry-budget-exhausted 429 into the exported
+// *RateLimitedError so it can cross the package boundary into the agent's
+// classifyStreamError — the unexported *apiError can't. Any non-429 error passes
+// through unchanged (it's a no-op for them). Called at the two budget-exhaustion
+// return sites: the one-shot retryModelCall and chatStream's bespoke pre-token
+// loop. RetryAfterMs copies the provider's honoured Retry-After (0 when no header),
+// kept on the struct for future surfacing rather than shown to the user.
+func wrapExhaustedRateLimit(err error) error {
+	if !isRateLimitModelError(err) {
+		return err
+	}
+	ms := 0
+	var ae *apiError
+	if errors.As(err, &ae) {
+		if ra, ok := parseRetryAfterMs(ae.headers); ok {
+			ms = ra
+		}
+	}
+	return &RateLimitedError{Message: "provider quota/throughput exceeded", RetryAfterMs: ms}
+}
+
 // modelRetryDelayMs is the delay before retrying a failed model attempt: an
 // honoured (capped) Retry-After on a 429, otherwise full-jitter backoff.
 func modelRetryDelayMs(attempt int, err error, policy RetryPolicy) int {
@@ -242,7 +263,9 @@ func retryModelCall[T any](ctx context.Context, policy RetryPolicy, attempt func
 			return res, nil
 		}
 		if i >= policy.MaxRetries {
-			return zero, err
+			// Budget exhausted: surface a final 429 as the exported RateLimitedError so
+			// the agent layer can classify it; all other errors pass through unchanged.
+			return zero, wrapExhaustedRateLimit(err)
 		}
 		if ctx.Err() != nil {
 			return zero, err

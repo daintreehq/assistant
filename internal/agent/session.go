@@ -603,6 +603,16 @@ func (s *Session) classifyStreamError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	var rateLimited *models.RateLimitedError
+	if errors.As(err, &rateLimited) {
+		// Retry budget exhausted on a 429: a friendly, byte-stable reply plus a health
+		// badge — not the raw provider blob. The badge clears on the next good Usage.
+		msg := "Model rate-limited: " + rateLimited.Error()
+		s.events.Phase(domain.PhaseFailed)
+		s.events.ModelRateLimited()
+		s.events.Error(msg)
+		return msg
+	}
 	msg := "Model error: " + err.Error()
 	s.events.Phase(domain.PhaseFailed)
 	s.events.Error(msg)

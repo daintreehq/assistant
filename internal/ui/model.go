@@ -128,6 +128,9 @@ type Model struct {
 	cost                 float64
 	model                string
 	degraded             bool
+	// modelRateLimited latches a provider 429 (retry budget exhausted) as a footer
+	// health badge; cleared on the next successful Usage event (the model resumed).
+	modelRateLimited bool
 
 	// out-of-band cues.
 	clearNonce    int

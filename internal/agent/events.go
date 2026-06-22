@@ -114,6 +114,12 @@ type EventSink interface {
 	// once per turn, BEFORE AssistantStart. Live-only sinks no-op it (it carries no
 	// liveness — only the durable RunEventSink persists it).
 	TurnPrompt(input string)
+
+	// ModelRateLimited signals the provider throttled us after the retry budget was
+	// exhausted on a 429. A live-only health cue: the cockpit raises a "▲ Model
+	// rate-limited" badge that clears on the next successful Usage. No-op in sinks
+	// that don't render persistent health state.
+	ModelRateLimited()
 }
 
 // NoopEventSink discards every event. Default sink and test stand-in.
@@ -133,6 +139,7 @@ func (NoopEventSink) Error(string)                {}
 func (NoopEventSink) Info(string)                 {}
 func (NoopEventSink) Usage(UsageEvent)            {}
 func (NoopEventSink) TurnPrompt(string)           {}
+func (NoopEventSink) ModelRateLimited()           {}
 
 // MultiSink fans every event out to several sinks, each isolated by panic
 // recovery so one misbehaving sink (e.g. a UI bridge) can never break the loop or
@@ -225,6 +232,11 @@ func (m *MultiSink) Usage(ev UsageEvent) {
 func (m *MultiSink) TurnPrompt(input string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.TurnPrompt(input) })
+	}
+}
+func (m *MultiSink) ModelRateLimited() {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ModelRateLimited() })
 	}
 }
 
@@ -385,6 +397,10 @@ func (s *RunEventSink) Usage(ev UsageEvent) {
 	}
 	s.write("usage", payload)
 }
+
+// ModelRateLimited is a live-only health cue (badge state), not persisted to the
+// durable run-event log.
+func (s *RunEventSink) ModelRateLimited() {}
 
 // flushContent emits the buffered intermediate prose as one assistant:content row
 // and clears the buffer.

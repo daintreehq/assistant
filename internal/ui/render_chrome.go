@@ -182,6 +182,9 @@ type statusParams struct {
 	AttentionN  int
 	TopSeverity domain.Severity
 	Degraded    bool
+	// ModelRateLimited surfaces a provider-throttled (429) health badge by exception,
+	// mirroring Degraded; cleared once the model answers again.
+	ModelRateLimited bool
 
 	// Active-agent badge ingredients ("" ActiveLabel ⇒ no agent working). ActiveTone
 	// is a semantic tone name as understood by styleFor/toneGlyphFor ("active",
@@ -213,6 +216,12 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	// (a persistent condition the operator must see), never a steady-state healthy badge.
 	if p.Degraded {
 		segs = append(segs, th.Warning().Render("▲ Daintree MCP unavailable"))
+	}
+
+	// Model health — surfaced BY EXCEPTION, same as the MCP link: a provider 429 that
+	// outlasted the retry budget raises this badge; it clears on the next good round.
+	if p.ModelRateLimited {
+		segs = append(segs, th.Warning().Render("▲ Model rate-limited"))
 	}
 
 	// Active-agent badge: a tone-tinted "<glyph> LABEL" run (color + glyph from the
