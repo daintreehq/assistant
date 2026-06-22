@@ -63,6 +63,14 @@ func EstimateCostUsd(model string, promptTokens, completionTokens, cachedTokens 
 	if !ok {
 		return 0, false
 	}
+	// Clamp all counts to >= 0: a malformed/negative usage report must never produce a
+	// negative cost that makes the running session total go DOWN.
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if completionTokens < 0 {
+		completionTokens = 0
+	}
 	cached := cachedTokens
 	if cached < 0 {
 		cached = 0

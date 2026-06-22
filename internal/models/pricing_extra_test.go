@@ -72,3 +72,15 @@ func TestBareModelIDExtra(t *testing.T) {
 		t.Fatalf("bare = %q", got)
 	}
 }
+
+// TestEstimateCostUsdClampsNegative locks the clamp: malformed/negative token counts
+// must never produce a negative cost (which would make the running session total drop).
+func TestEstimateCostUsdClampsNegative(t *testing.T) {
+	cost, ok := EstimateCostUsd("minimax-m3", -100, -50, -10)
+	if !ok {
+		t.Skip("minimax-m3 not rated in this build")
+	}
+	if cost < 0 {
+		t.Errorf("negative inputs produced a negative cost: %v", cost)
+	}
+}

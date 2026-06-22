@@ -76,9 +76,20 @@ type streamChoice struct {
 	FinishReason *string  `json:"finish_reason"`
 }
 
+// streamError carries a provider-side error delivered MID-STREAM (after HTTP 200) as
+// an SSE `data: {"error": {...}}` payload — e.g. a rate limit or upstream failure the
+// provider can only report once the stream has opened. Without capturing it, such a
+// chunk has no choices and would be silently treated as an empty, clean completion.
+type streamError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+}
+
 // streamChunk is a single SSE `data:` payload on the streaming path. The
 // usage-only final chunk carries an empty Choices array.
 type streamChunk struct {
 	Choices []streamChoice `json:"choices"`
 	Usage   *rawUsage      `json:"usage"`
+	Error   *streamError   `json:"error"`
 }

@@ -211,7 +211,9 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 			cfg.StateDir = stateRoot
 		}
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o777); err != nil {
+	// 0700: the state dir holds conversations, the audit trail, automation grants, and
+	// memories — owner-only, never world/group readable (mirrors the debug-log dir perms).
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return AppConfig{}, fmt.Errorf("create state dir: %w", err)
 	}
 	cfg.DBPath = filepath.Join(cfg.StateDir, "state.db")

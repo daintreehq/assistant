@@ -112,3 +112,23 @@ func TestLoad_ResolvesAgainstGivenPathNotCwd(t *testing.T) {
 		t.Errorf("scoped content = %q", got)
 	}
 }
+
+// TestLoad_RejectsSymlink locks the exfiltration fix: a symlinked DAINTREE.md is NOT
+// followed (a malicious repo could point it at a secret file to read into the prompt).
+func TestLoad_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(dir, Filename)); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	res := Load(dir)
+	if strings.Contains(res.Content, "TOPSECRET") {
+		t.Fatal("a symlinked DAINTREE.md was followed — a linked secret leaked into the prompt")
+	}
+	if res.Warning == "" {
+		t.Error("expected a warning that the symlink was skipped")
+	}
+}

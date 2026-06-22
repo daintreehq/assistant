@@ -117,3 +117,22 @@ func TestBuildStreamToolCallsDefaultArgs(t *testing.T) {
 		t.Fatalf("args = %q, want {}", calls[0].Function.Arguments)
 	}
 }
+
+// TestParseSSEMidStreamErrorSurfaces locks the fix for a provider error delivered
+// mid-stream (after HTTP 200) as `data: {"error":{...}}` — it must surface as an error,
+// not be silently swallowed into an empty "clean" completion.
+func TestParseSSEMidStreamErrorSurfaces(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"par"}}]}`,
+		`data: {"error":{"message":"rate limited","code":"429"}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	err := parseSSE(strings.NewReader(stream), func(chunk *streamChunk) {})
+	if err == nil {
+		t.Fatal("a mid-stream provider error must surface, not be swallowed as empty success")
+	}
+	if !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("error should carry the provider message, got: %v", err)
+	}
+}

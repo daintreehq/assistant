@@ -33,12 +33,19 @@ type Result struct {
 func Load(projectPath string) Result {
 	file := filepath.Join(projectPath, Filename)
 
-	info, err := os.Stat(file)
+	// Lstat (NOT Stat) so a SYMLINK is detected and rejected rather than followed: the
+	// bound project is untrusted, and a repo could point DAINTREE.md at a secret file
+	// (e.g. ~/.ssh/config) to exfiltrate its contents into the model prompt. We only ever
+	// read a real regular file located at this exact path.
+	info, err := os.Lstat(file)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Result{} // normal case: no file
 		}
 		return Result{Warning: fmt.Sprintf("Could not read %s: %v", Filename, err)}
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return Result{Warning: fmt.Sprintf("Skipping %s: it is a symlink (not followed, to avoid reading a linked file into the prompt).", Filename)}
 	}
 	if !info.Mode().IsRegular() {
 		return Result{} // silent skip (e.g. a directory named DAINTREE.md)

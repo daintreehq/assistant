@@ -526,6 +526,22 @@ func parseSSE(r io.Reader, onChunk func(*streamChunk)) error {
 			// truncated payload as the transient read failure it is.
 			return fmt.Errorf("fireworks: malformed SSE data payload: %w (%v)", io.ErrUnexpectedEOF, err)
 		}
+		// A provider error delivered mid-stream (after HTTP 200) arrives as
+		// `data: {"error": {...}}` with no choices. Surface it as a real failure instead
+		// of letting the empty-choices path silently fabricate a clean, empty completion.
+		if chunk.Error != nil {
+			msg := chunk.Error.Message
+			if msg == "" {
+				msg = chunk.Error.Code
+			}
+			if msg == "" {
+				msg = chunk.Error.Type
+			}
+			if msg == "" {
+				msg = "unknown stream error"
+			}
+			return fmt.Errorf("fireworks: provider stream error: %s", msg)
+		}
 		onChunk(&chunk)
 	}
 	if err := sc.Err(); err != nil {
