@@ -63,12 +63,13 @@ func TestMemoryExists(t *testing.T) {
 	if ok, _ := s.MemoryExists("totally different"); ok {
 		t.Fatal("absent content reported as existing")
 	}
-	// Soft-deleted content no longer counts as existing.
+	// Soft-deleted content STILL counts as existing, so distillation does not resurrect
+	// a memory the user explicitly forgot.
 	if _, err := s.ForgetMemory(m.ID, 2000); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.MemoryExists("exact content match target"); ok {
-		t.Fatal("soft-deleted memory must not count as existing")
+	if ok, err := s.MemoryExists("exact content match target"); err != nil || !ok {
+		t.Fatalf("soft-deleted memory must still count as existing (no resurrection): ok=%v err=%v", ok, err)
 	}
 }
 

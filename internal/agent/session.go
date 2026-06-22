@@ -854,8 +854,10 @@ func (s *Session) distillCompact(ctx context.Context, transcript string) (saved 
 	if s.deps.MemoryStore == nil {
 		return 0
 	}
+	// Keep the freshest TAIL — durable decisions are most likely near the end of the
+	// conversation, while the head is the part most likely already summarized away.
 	if r := []rune(transcript); len(r) > distillTranscriptMaxRunes {
-		transcript = string(r[:distillTranscriptMaxRunes])
+		transcript = string(r[len(r)-distillTranscriptMaxRunes:])
 	}
 	if trimSpace(transcript) == "" {
 		return 0

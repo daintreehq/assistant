@@ -590,6 +590,11 @@ func TestUIMemoryCommand(t *testing.T) {
 	if !strings.Contains(a.PromptContext().PinnedMemories, "deploy uses fireworks tokens") {
 		t.Fatalf("pinned memory not injected into prompt context: %q", a.PromptContext().PinnedMemories)
 	}
+	// The LIVE session message[1] must reflect the pin (RefreshRuntimeContext ran) —
+	// PromptContext() recomputes from the DB, so it alone would pass without the refresh.
+	if msgs := a.Session.Messages(); len(msgs) < 2 || !strings.Contains(msgs[1].StringContent, "deploy uses fireworks tokens") {
+		t.Fatal("session message[1] not refreshed after pin")
+	}
 
 	// unpin → no longer injected.
 	if r := ui(a, "/memory unpin "+rec.ID); !strings.Contains(r.Text, "Unpinned") {
@@ -597,6 +602,9 @@ func TestUIMemoryCommand(t *testing.T) {
 	}
 	if a.PromptContext().PinnedMemories != "" {
 		t.Fatalf("unpinned memory should not be injected, got %q", a.PromptContext().PinnedMemories)
+	}
+	if msgs := a.Session.Messages(); len(msgs) >= 2 && strings.Contains(msgs[1].StringContent, "deploy uses fireworks tokens") {
+		t.Fatal("session message[1] still shows the unpinned memory")
 	}
 
 	// forget removes it from the list.
@@ -608,6 +616,26 @@ func TestUIMemoryCommand(t *testing.T) {
 	r := ui(a, "/memory pin mem_does_not_exist")
 	if !r.Handled || !strings.Contains(r.Text, "No such memory") {
 		t.Fatalf("/memory pin unknown id: %+v", r)
+	}
+}
+
+// TestPinnedMemoryMultilineSanitized: a pinned memory with embedded newlines renders
+// as a single "- fact" line so it can't inject a stray heading into message[1].
+func TestPinnedMemoryMultilineSanitized(t *testing.T) {
+	a := newOfflineApp(t)
+	rec, err := a.Store.InsertMemory(domain.MemoryRecord{Content: "line one\n# fake heading\nline two", Source: domain.MemoryUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Store.PinMemory(rec.ID, domain.NowMS()); err != nil {
+		t.Fatal(err)
+	}
+	block := a.PromptContext().PinnedMemories
+	if strings.Contains(block, "\n# fake heading") {
+		t.Fatalf("embedded newline must be flattened, got: %q", block)
+	}
+	if !strings.Contains(block, "- line one # fake heading line two") {
+		t.Fatalf("content not flattened to one line: %q", block)
 	}
 }
 

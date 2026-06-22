@@ -504,29 +504,37 @@ func memoryText(a *app.App, rest []string) string {
 // compactRun summarizes the conversation with the small model then compacts, after
 // distilling any durable facts from the transcript so they survive the discard.
 func compactRun(ctx context.Context, a *app.App) string {
-	transcript := buildCompactionTranscript(a, 12000)
+	full := transcriptString(a)
 	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
 		Messages: []models.ChatMessage{
 			models.TextMessage("system", "Summarize this assistant session into a tight brief: goals, decisions, open watchers/timers, and next steps. <= 200 words."),
-			models.TextMessage("user", transcript),
+			models.TextMessage("user", capHead(full, 12000)),
 		},
 		MaxTokens: intPtr(400),
 	})
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
-	// Distill durable facts BEFORE the transcript is discarded (best-effort; never
-	// blocks the compaction). Mirrors the agent auto-compact path.
-	saved := distillFromTranscript(ctx, a, buildCompactionTranscript(a, 8000))
+	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
+	// discards it.
+	distillInput := capTail(full, distillTranscriptMaxRunes)
 	if err := a.Session.Compact(res.Content); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
+	// Only AFTER the history is actually discarded do we persist the distilled facts —
+	// so a rejected compaction never writes premature memories (best-effort; the
+	// distillation itself never affects the already-completed compaction).
+	saved := distillFromTranscript(ctx, a, distillInput)
 	msg := "Conversation compacted."
 	if saved > 0 {
 		msg += fmt.Sprintf(" Distilled %d %s.", saved, pluralMemory(saved))
 	}
 	return msg
 }
+
+// distillTranscriptMaxRunes caps the transcript fed to the distillation model (mirrors
+// the agent path) — the small model needs only enough recent context to extract facts.
+const distillTranscriptMaxRunes = 8000
 
 // distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
 // it extracts durable facts from a soon-to-be-discarded transcript (one small-model
@@ -610,9 +618,11 @@ func reconnectRun(ctx context.Context, a *app.App) string {
 
 func intPtr(n int) *int { return &n }
 
-// buildCompactionTranscript flattens the non-system history to "role: text"
-// (empty text → "[tool call]"), joined by newlines and sliced to maxChars.
-func buildCompactionTranscript(a *app.App, maxChars int) string {
+// transcriptString flattens the non-system history to "role: text" lines (empty text
+// → "[tool call]"), newline-joined and uncapped. Capping is the caller's choice:
+// capHead for the summary (oldest-first brief) and capTail for distillation (which
+// wants the freshest content, where durable decisions are most likely to live).
+func transcriptString(a *app.App) string {
 	var b strings.Builder
 	for _, m := range a.Session.Messages() {
 		if m.Role == "system" {
@@ -627,10 +637,21 @@ func buildCompactionTranscript(a *app.App, maxChars int) string {
 		b.WriteString(text)
 		b.WriteString("\n")
 	}
-	s := b.String()
-	rs := []rune(s)
-	if len(rs) > maxChars {
-		return string(rs[:maxChars])
+	return b.String()
+}
+
+// capHead keeps the first maxRunes runes (oldest content).
+func capHead(s string, maxRunes int) string {
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes])
+	}
+	return s
+}
+
+// capTail keeps the last maxRunes runes (freshest content).
+func capTail(s string, maxRunes int) string {
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[len(r)-maxRunes:])
 	}
 	return s
 }

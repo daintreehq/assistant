@@ -300,6 +300,55 @@ func TestDistillCompactEmptyTranscriptSkips(t *testing.T) {
 	}
 }
 
+// seqChatRouter returns Chat replies in sequence (summary, then distillation JSON).
+type seqChatRouter struct {
+	replies   []string
+	chatCalls int
+}
+
+func (r *seqChatRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	return models.ChatResult{Content: "ok"}, nil
+}
+func (r *seqChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	i := r.chatCalls
+	r.chatCalls++
+	if i < len(r.replies) {
+		return models.ChatResult{Content: r.replies[i]}, nil
+	}
+	return models.ChatResult{Content: ""}, nil
+}
+func (r *seqChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+
+// TestAutoCompactDistillsBeforeDiscard is the integration guard: with a MemoryStore
+// wired, an over-threshold auto-compact makes TWO model calls (summary + distill) and
+// saves the distilled fact as source=compact before the oversized history is dropped.
+// It would catch the distill pass being removed from maybeAutoCompact.
+func TestAutoCompactDistillsBeforeDiscard(t *testing.T) {
+	r := &seqChatRouter{replies: []string{"AUTO_SUMMARY", `["distilled durable fact"]`}}
+	s, _ := compactSession(t, r)
+	mem := &fakeMemoryStore{}
+	s.deps.MemoryStore = mem
+	s.InjectNote("keep-small")
+	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if r.chatCalls != 2 {
+		t.Fatalf("want 2 Chat calls (summary + distill), got %d", r.chatCalls)
+	}
+	if len(mem.inserted) != 1 || mem.inserted[0].Content != "distilled durable fact" {
+		t.Fatalf("distilled memory not saved: %+v", mem.inserted)
+	}
+	if mem.inserted[0].Source != domain.MemoryCompact {
+		t.Fatalf("source = %q, want compact", mem.inserted[0].Source)
+	}
+	for _, m := range s.Messages() {
+		if strings.Contains(m.StringContent, "GIANT_MARKER") {
+			t.Fatal("oversized history should have been compacted away")
+		}
+	}
+}
+
 func TestDoesNotAutoCompactSmallConversation(t *testing.T) {
 	r := &chatCountRouter{summary: "X"}
 	s, _ := compactSession(t, r)

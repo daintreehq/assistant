@@ -60,6 +60,22 @@ type Store interface {
 // Deps is the dependency set for the memory family.
 type Deps struct {
 	Store Store
+	// OnChange, when set, is invoked after a successful pin/unpin/forget so the caller
+	// can refresh the injected pinned-memory block in the runtime context (message[1]).
+	// Optional + best-effort (nil-safe, panic-guarded) — a refresh failure must never
+	// fail the tool call. Not fired for save (a new memory is unpinned, so it does not
+	// affect the injected block) or for the read-only recall/list tools.
+	OnChange func()
+}
+
+// notifyChange fires the optional OnChange hook, swallowing any panic — the pin-state
+// mutation already succeeded, so a refresh side-effect must not turn it into a failure.
+func (d Deps) notifyChange() {
+	if d.OnChange == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	d.OnChange()
 }
 
 // Tools returns the memory tool family.
@@ -334,6 +350,8 @@ func newForgetTool(deps Deps) *tools.Tool {
 			if !found {
 				return tools.Fail(codeMemoryNotFound, "memory.forget: no such memory: "+a.ID, tools.Unrecoverable())
 			}
+			// A forgotten memory might have been pinned — refresh the injected block.
+			deps.notifyChange()
 			return tools.Ok("Forgot memory "+a.ID+".", map[string]any{"id": a.ID})
 		},
 	}
@@ -361,6 +379,7 @@ func newPinTool(deps Deps) *tools.Tool {
 			if rec == nil {
 				return tools.Fail(codeMemoryNotFound, "memory.pin: no such memory: "+a.ID, tools.Unrecoverable())
 			}
+			deps.notifyChange()
 			return tools.Ok("Pinned memory "+a.ID+".", map[string]any{"id": a.ID, "memory": memoryView(rec)})
 		},
 	}
@@ -388,6 +407,7 @@ func newUnpinTool(deps Deps) *tools.Tool {
 			if rec == nil {
 				return tools.Fail(codeMemoryNotFound, "memory.unpin: no such memory: "+a.ID, tools.Unrecoverable())
 			}
+			deps.notifyChange()
 			return tools.Ok("Unpinned memory "+a.ID+".", map[string]any{"id": a.ID, "memory": memoryView(rec)})
 		},
 	}

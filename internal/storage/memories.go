@@ -146,14 +146,17 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 	return collectMemories(rows)
 }
 
-// MemoryExists reports whether a non-deleted memory with EXACTLY this content already
-// exists. The distill-on-compact path uses it to skip re-saving a fact it already
-// holds — deliberately an exact match (predictable and cheap) rather than an FTS
-// similarity threshold (which needs tuning and false-positives on short facts).
+// MemoryExists reports whether a memory with EXACTLY this content has ever been stored
+// — INCLUDING soft-deleted rows. The distill-on-compact path uses it to skip re-saving
+// a fact it already holds: matching live rows avoids duplicates, and matching
+// soft-deleted rows means a memory the user explicitly forgot is not silently
+// resurrected by a later compaction. Deliberately an exact match (predictable and
+// cheap) rather than an FTS similarity threshold (which needs tuning and
+// false-positives on short facts).
 func (s *Store) MemoryExists(content string) (bool, error) {
 	var one int
 	err := s.db.QueryRow(
-		"SELECT 1 FROM memories WHERE content = ? AND deletedAt IS NULL LIMIT 1", content).Scan(&one)
+		"SELECT 1 FROM memories WHERE content = ? LIMIT 1", content).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

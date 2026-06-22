@@ -60,11 +60,17 @@ func (a *App) pinnedMemoriesBlock() string {
 	}
 	var b strings.Builder
 	for _, m := range rows {
-		line := "- " + strings.TrimSpace(m.Content)
-		// +1 for the joining newline; stop before overflow so a fact is never cut
-		// mid-line.
+		// Flatten embedded newlines so one memory is exactly one "- fact" line — a raw
+		// "\n" would otherwise break the list (or inject a stray heading) into the
+		// system message.
+		content := strings.ReplaceAll(m.Content, "\r\n", " ")
+		content = strings.ReplaceAll(content, "\n", " ")
+		content = strings.ReplaceAll(content, "\r", " ")
+		line := "- " + strings.TrimSpace(content)
+		// +1 for the joining newline; skip a line that would overflow the cap (continue,
+		// not break, so a single oversized pin can't suppress the shorter ones after it).
 		if b.Len()+len(line)+1 > pinnedMemoriesBlockMaxBytes {
-			break
+			continue
 		}
 		if b.Len() > 0 {
 			b.WriteByte('\n')

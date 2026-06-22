@@ -99,6 +99,38 @@ func TestForgetNotFound(t *testing.T) {
 	}
 }
 
+// pin/unpin/forget fire the OnChange hook (so the caller can refresh the injected
+// pinned-memory block); save and the read tools do not.
+func TestPinStateToolsFireOnChange(t *testing.T) {
+	for _, name := range []string{"memory.pin", "memory.unpin", "memory.forget"} {
+		t.Run(name, func(t *testing.T) {
+			st := &memStore{forgetFound: true}
+			fired := 0
+			tool := find(Tools(Deps{Store: st, OnChange: func() { fired++ }}), name)
+			res := tool.Handle(context.Background(), json.RawMessage(`{"id":"mem_x"}`), &tools.ToolContext{})
+			if !res.Ok {
+				t.Fatalf("%s failed: %+v", name, res.Error)
+			}
+			if fired != 1 {
+				t.Fatalf("%s OnChange fired %d times, want 1", name, fired)
+			}
+		})
+	}
+}
+
+func TestSaveDoesNotFireOnChange(t *testing.T) {
+	st := &memStore{}
+	fired := 0
+	tool := find(Tools(Deps{Store: st, OnChange: func() { fired++ }}), "memory.save")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x"}`), &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("save failed: %+v", res.Error)
+	}
+	if fired != 0 {
+		t.Fatalf("save must not fire OnChange, fired %d", fired)
+	}
+}
+
 // pin returns a view with pinned=true.
 func TestPinView(t *testing.T) {
 	tool := find(Tools(Deps{Store: &memStore{}}), "memory.pin")
