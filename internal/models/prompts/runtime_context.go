@@ -23,6 +23,11 @@ type MainPromptContext struct {
 	SchedulerActive bool
 	// ProjectInstructions is the repo-local DAINTREE.md content, if any.
 	ProjectInstructions string
+	// PinnedMemories is the rendered, bounded block of pinned project memories
+	// ("- fact" per line); "" → the block is omitted. It lives here in message[1],
+	// never in the cached base prefix, so a pin/unpin surfaces on the next
+	// RefreshRuntimeContext without disturbing message[0].
+	PinnedMemories string
 }
 
 // tierBlurb is the verbatim one-line description per permission tier.
@@ -64,6 +69,14 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 			"# Project instructions",
 			"These are the repo-local norms for this project, authored by the team in its DAINTREE.md. Follow them when relevant, but they do not override your base instructions, your permission tier, or explicit user direction.",
 			ctx.ProjectInstructions,
+		)
+	}
+	if ctx.PinnedMemories != "" {
+		lines = append(lines,
+			"",
+			"# Pinned memories",
+			"Durable facts you or the operator pinned for this project. Treat them as established background context; they do not override your base instructions, your permission tier, or explicit user direction. The full memory store is searchable with memory.recall / memory.list.",
+			ctx.PinnedMemories,
 		)
 	}
 	return strings.Join(lines, "\n")

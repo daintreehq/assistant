@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 
@@ -259,4 +260,7 @@ var (
 	_ timer.Store      = timerStoreAdapter{}
 	_ watcher.Store    = watcherStoreAdapter{}
 	_ workflow.Store   = workflowStoreAdapter{}
+	// *storage.Store directly satisfies the agent distill-on-compact seam (no adapter
+	// needed — its no-ctx, record-returning InsertMemory + MemoryExists match exactly).
+	_ agent.MemoryStore = (*storage.Store)(nil)
 )

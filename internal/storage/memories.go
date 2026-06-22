@@ -146,6 +146,26 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 	return collectMemories(rows)
 }
 
+// MemoryExists reports whether a memory with EXACTLY this content has ever been stored
+// — INCLUDING soft-deleted rows. The distill-on-compact path uses it to skip re-saving
+// a fact it already holds: matching live rows avoids duplicates, and matching
+// soft-deleted rows means a memory the user explicitly forgot is not silently
+// resurrected by a later compaction. Deliberately an exact match (predictable and
+// cheap) rather than an FTS similarity threshold (which needs tuning and
+// false-positives on short facts).
+func (s *Store) MemoryExists(content string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(
+		"SELECT 1 FROM memories WHERE content = ? LIMIT 1", content).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("memory exists: %w", err)
+	}
+	return true, nil
+}
+
 // ForgetMemory soft-deletes (stamp deletedAt+updatedAt WHERE deletedAt IS NULL).
 // It does NOT mutate content, so the FTS old.content still matches on a later
 // hard-delete sweep (KEEP). Reports whether changed.

@@ -10,6 +10,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
 // UICommandResult is the structured return of the cockpit slash handler.
@@ -70,6 +72,8 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		return UICommandResult{Handled: true, Title: "Approvals", Text: "Session tool approvals are managed in the cockpit. Press A (bounded) or F (forever this session) on an approval prompt; run /approvals there to list or clear them."}
 	case "skills":
 		return UICommandResult{Handled: true, Title: "Skills", Text: skillsText(ctx, a, rest)}
+	case "memory":
+		return UICommandResult{Handled: true, Title: "Memory", Text: memoryText(a, rest)}
 	case "compact":
 		return UICommandResult{Handled: true, Title: "Compact", Text: compactRun(ctx, a)}
 	case "clear":
@@ -418,23 +422,182 @@ func describeLoaded(a *app.App) string {
 	return strings.Join(lines, "\n")
 }
 
-// compactRun summarizes the conversation with the small model then compacts.
+// memoryText powers /memory: bare/list shows the pinned-first memory store, and
+// pin/unpin/forget curate by id. After a pin-state change it refreshes message[1] so
+// the injected pinned block (App.pinnedMemoriesBlock) reflects the change at once.
+// Mirrors skillsText's subcommand shape. The classic REPL reaches this via its
+// default delegation to HandleUICommand, so there is no separate REPL handler.
+func memoryText(a *app.App, rest []string) string {
+	const usage = "Usage: /memory list | pin <id> | unpin <id> | forget <id>"
+	sub := ""
+	if len(rest) > 0 {
+		sub = rest[0]
+	}
+	switch sub {
+	case "", "list":
+		limit := 50
+		rows, err := a.Store.ListMemories(storage.MemoryListOptions{Limit: &limit})
+		if err != nil {
+			return "Failed to list memories: " + err.Error()
+		}
+		if len(rows) == 0 {
+			return "No memories yet.\n\n" + usage
+		}
+		var lines []string
+		for _, m := range rows {
+			pin := "  "
+			if m.PinnedAt != nil {
+				pin = "📌"
+			}
+			lines = append(lines, fmt.Sprintf("%s %s [%s] %s", pin, m.ID, string(m.Source), oneLine(m.Content)))
+		}
+		lines = append(lines, "", usage)
+		return strings.Join(lines, "\n")
+	case "pin":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory pin <id>"
+		}
+		rec, err := a.Store.PinMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to pin: " + err.Error()
+		}
+		if rec == nil {
+			return "No such memory: " + id
+		}
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Pinned " + id + " — it now surfaces in the assistant's context."
+	case "unpin":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory unpin <id>"
+		}
+		rec, err := a.Store.UnpinMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to unpin: " + err.Error()
+		}
+		if rec == nil {
+			return "No such memory: " + id
+		}
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Unpinned " + id + "."
+	case "forget":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory forget <id>"
+		}
+		found, err := a.Store.ForgetMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to forget: " + err.Error()
+		}
+		if !found {
+			return "No such memory: " + id
+		}
+		// A forgotten memory might have been pinned — refresh so it leaves the inject.
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Forgot " + id + "."
+	default:
+		return usage
+	}
+}
+
+// compactRun summarizes the conversation with the small model then compacts, after
+// distilling any durable facts from the transcript so they survive the discard.
 func compactRun(ctx context.Context, a *app.App) string {
-	transcript := buildCompactionTranscript(a, 12000)
+	full := transcriptString(a)
 	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
 		Messages: []models.ChatMessage{
 			models.TextMessage("system", "Summarize this assistant session into a tight brief: goals, decisions, open watchers/timers, and next steps. <= 200 words."),
-			models.TextMessage("user", transcript),
+			models.TextMessage("user", capHead(full, 12000)),
 		},
 		MaxTokens: intPtr(400),
 	})
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
+	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
+	// discards it.
+	distillInput := capTail(full, distillTranscriptMaxRunes)
 	if err := a.Session.Compact(res.Content); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
-	return "Conversation compacted."
+	// Only AFTER the history is actually discarded do we persist the distilled facts —
+	// so a rejected compaction never writes premature memories (best-effort; the
+	// distillation itself never affects the already-completed compaction).
+	saved := distillFromTranscript(ctx, a, distillInput)
+	msg := "Conversation compacted."
+	if saved > 0 {
+		msg += fmt.Sprintf(" Distilled %d %s.", saved, pluralMemory(saved))
+	}
+	return msg
+}
+
+// distillTranscriptMaxRunes caps the transcript fed to the distillation model (mirrors
+// the agent path) — the small model needs only enough recent context to extract facts.
+const distillTranscriptMaxRunes = 8000
+
+// distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
+// it extracts durable facts from a soon-to-be-discarded transcript (one small-model
+// call) and saves the novel ones as source="compact" memories. It lives here (not in
+// the agent seam) because the command layer has direct *app.App access — no import
+// cycle. Best-effort: any failure yields 0 and never affects compaction.
+func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (saved int) {
+	defer func() { _ = recover() }()
+	if a.Store == nil || strings.TrimSpace(transcript) == "" {
+		return 0
+	}
+	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
+		Messages: []models.ChatMessage{
+			models.TextMessage("system", prompts.DistillSystemPrompt),
+			models.TextMessage("user", transcript),
+		},
+		MaxTokens: intPtr(600),
+	})
+	if err != nil {
+		return 0
+	}
+	for _, fact := range prompts.ParseDistilledFacts(res.Content) {
+		exists, exErr := a.Store.MemoryExists(fact)
+		if exErr != nil || exists {
+			continue
+		}
+		now := domain.NowMS()
+		if _, insErr := a.Store.InsertMemory(domain.MemoryRecord{
+			Content:   fact,
+			Source:    domain.MemoryCompact,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); insErr == nil {
+			saved++
+		}
+	}
+	return saved
+}
+
+// pluralMemory renders the singular/plural noun for a memory count.
+func pluralMemory(n int) string {
+	if n == 1 {
+		return "memory"
+	}
+	return "memories"
+}
+
+// argAt returns rest[i] or "" when out of range.
+func argAt(rest []string, i int) string {
+	if i >= 0 && i < len(rest) {
+		return rest[i]
+	}
+	return ""
+}
+
+// oneLine flattens newlines and truncates to a compact single-line preview.
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 80 {
+		return string(r[:77]) + "..."
+	}
+	return s
 }
 
 func reconnectRun(ctx context.Context, a *app.App) string {
@@ -455,9 +618,11 @@ func reconnectRun(ctx context.Context, a *app.App) string {
 
 func intPtr(n int) *int { return &n }
 
-// buildCompactionTranscript flattens the non-system history to "role: text"
-// (empty text → "[tool call]"), joined by newlines and sliced to maxChars.
-func buildCompactionTranscript(a *app.App, maxChars int) string {
+// transcriptString flattens the non-system history to "role: text" lines (empty text
+// → "[tool call]"), newline-joined and uncapped. Capping is the caller's choice:
+// capHead for the summary (oldest-first brief) and capTail for distillation (which
+// wants the freshest content, where durable decisions are most likely to live).
+func transcriptString(a *app.App) string {
 	var b strings.Builder
 	for _, m := range a.Session.Messages() {
 		if m.Role == "system" {
@@ -472,10 +637,21 @@ func buildCompactionTranscript(a *app.App, maxChars int) string {
 		b.WriteString(text)
 		b.WriteString("\n")
 	}
-	s := b.String()
-	rs := []rune(s)
-	if len(rs) > maxChars {
-		return string(rs[:maxChars])
+	return b.String()
+}
+
+// capHead keeps the first maxRunes runes (oldest content).
+func capHead(s string, maxRunes int) string {
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes])
+	}
+	return s
+}
+
+// capTail keeps the last maxRunes runes (freshest content).
+func capTail(s string, maxRunes int) string {
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[len(r)-maxRunes:])
 	}
 	return s
 }

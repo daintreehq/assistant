@@ -46,6 +46,33 @@ func TestMemoryInsertRecallFTS(t *testing.T) {
 	}
 }
 
+func TestMemoryExists(t *testing.T) {
+	s := openTest(t, 1000)
+	m, err := s.InsertMemory(domain.MemoryRecord{Content: "exact content match target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Present (exact match).
+	if ok, err := s.MemoryExists("exact content match target"); err != nil || !ok {
+		t.Fatalf("exact match should exist: ok=%v err=%v", ok, err)
+	}
+	// Absent (different content) + near-match must NOT count (exact only).
+	if ok, _ := s.MemoryExists("exact content match"); ok {
+		t.Fatal("substring must not be treated as existing")
+	}
+	if ok, _ := s.MemoryExists("totally different"); ok {
+		t.Fatal("absent content reported as existing")
+	}
+	// Soft-deleted content STILL counts as existing, so distillation does not resurrect
+	// a memory the user explicitly forgot.
+	if _, err := s.ForgetMemory(m.ID, 2000); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.MemoryExists("exact content match target"); err != nil || !ok {
+		t.Fatalf("soft-deleted memory must still count as existing (no resurrection): ok=%v err=%v", ok, err)
+	}
+}
+
 func TestRecallEmptyAndEscaping(t *testing.T) {
 	s := openTest(t, 1000)
 	if _, err := s.InsertMemory(domain.MemoryRecord{Content: `quote " and AND operators`}); err != nil {

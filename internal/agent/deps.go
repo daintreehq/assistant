@@ -88,6 +88,17 @@ type MessageStore interface {
 	InsertSkillSelection(rec domain.SkillSelectionLogRecord) (domain.SkillSelectionLogRecord, error)
 }
 
+// MemoryStore is the distill-on-compact persistence seam (satisfied by
+// *storage.Store). Just before auto-compact discards the working history, the session
+// extracts durable facts and saves the novel ones via this seam. Optional: a nil
+// MemoryStore disables distillation entirely (the default in tests, so the extra
+// model call never fires). All writes are best-effort — a failure must never break
+// compaction.
+type MemoryStore interface {
+	InsertMemory(rec domain.MemoryRecord) (domain.MemoryRecord, error)
+	MemoryExists(content string) (bool, error)
+}
+
 // SessionDeps is the AgentSession constructor input. restoredMessages != nil ⇒ a
 // resumed session: the three control messages are rebuilt fresh (so the cached
 // prefix stays byte-stable) but NOT re-persisted (they already exist in the DB);
@@ -99,6 +110,8 @@ type SessionDeps struct {
 	SkillSelector SkillSelector
 	SkillCatalog  SkillCatalog
 	Store         MessageStore
+	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
+	MemoryStore   MemoryStore
 	PromptContext prompts.MainPromptContext
 	SessionID     string
 
