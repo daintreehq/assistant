@@ -626,6 +626,7 @@ func (s *Session) emitUsage(result models.ChatResult) {
 	ev := UsageEvent{
 		ContextTokens:    s.estimateTokens(),
 		ContextThreshold: domain.AutoCompactTokenThreshold,
+		ContextWindow:    domain.LargeContextWindowTokens,
 		Tier:             string(domain.ModelLarge),
 		Model:            model,
 	}

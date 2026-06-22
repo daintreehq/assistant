@@ -254,7 +254,6 @@ func (m Model) statusView(w int) string {
 		TopSeverity: m.dashboard.topSeverity(),
 		Agents:      len(m.dashboard.Agents),
 		Degraded:    m.degraded,
-		McpResolved: m.mcpResolved,
 		ActiveTone:  aTone,
 		ActiveLabel: aLabel,
 		ActiveGoal:  aGoal,

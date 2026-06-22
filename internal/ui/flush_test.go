@@ -8,9 +8,10 @@ import (
 )
 
 // flush_test.go locks the INCREMENTAL ROW FLUSH (flush.go): the active turn's STABLE
-// completed-line rows commit to native scrollback AS THEY STREAM (auto-scroll) while the
-// still-reflowing in-progress paragraph stays in the footer; flushed rows carry no caret
-// and are byte-identical to the seal's render, so nothing is duplicated.
+// completed-paragraph rows commit to native scrollback AS THEY STREAM (auto-scroll) while
+// the still-growing final paragraph is WITHHELD from the footer entirely (paragraph-by-
+// paragraph commit). Flushed rows carry no caret and are byte-identical to the seal's
+// render, so nothing is duplicated.
 
 func armedModel(turn *TurnCell) Model {
 	m := testModel(80)
@@ -35,7 +36,7 @@ func streamingProse(text string) (Model, *TurnCell) {
 }
 
 // TestFlush_StableParasFlow proves completed PARAGRAPHS flush to scrollback while streaming
-// and the in-progress paragraph stays in the short footer tail (auto-scroll, constant-ht).
+// and the still-growing final paragraph is WITHHELD from the footer (paragraph-by-paragraph).
 func TestFlush_StableParasFlow(t *testing.T) {
 	// Two completed paragraphs + an in-progress third paragraph (no trailing "\n\n").
 	m, turn := streamingProse("ALPHALINE first completed paragraph.\n\nBETALINE second completed paragraph.\n\nGAMMALIVE still typing")
@@ -58,13 +59,14 @@ func TestFlush_StableParasFlow(t *testing.T) {
 	if strings.Contains(flushedChunk, "▌") {
 		t.Errorf("flushed rows must not carry the caret:\n%s", ansi.Strip(flushedChunk))
 	}
-	// The footer now holds only the in-progress paragraph (the caret tail) — short.
+	// The in-progress paragraph is WITHHELD from the footer (paragraph-by-paragraph commit):
+	// neither a flushed paragraph nor the still-growing one appears in the live tail.
 	live := ansi.Strip(m.liveCellsView(m.contentW()))
 	if strings.Contains(live, "ALPHALINE") {
 		t.Errorf("a flushed paragraph is still in the live footer:\n%s", live)
 	}
-	if !strings.Contains(live, "GAMMALIVE") {
-		t.Errorf("the in-progress paragraph must remain in the footer:\n%s", live)
+	if strings.Contains(live, "GAMMALIVE") {
+		t.Errorf("the in-progress paragraph must be withheld from the footer (no token-by-token):\n%s", live)
 	}
 }
 
@@ -118,18 +120,23 @@ func TestFlush_SingleParagraphHeld(t *testing.T) {
 	}
 }
 
-// TestFlush_FooterHeightCapped proves the live footer is never tall: even a huge in-progress
-// paragraph (held in the footer, raw) is bounded to maxLiveRows so a flush/commit tea.Println
-// can't dump a tall footer into scrollback (bubbletea#1613).
+// TestFlush_FooterHeightCapped proves the live footer is never tall: a huge in-progress
+// paragraph is WITHHELD entirely (paragraph-by-paragraph commit), and the maxLiveRows cap
+// (view.go) backstops any transient tall content so a flush/commit tea.Println can't dump a
+// tall footer into scrollback (bubbletea#1613).
 func TestFlush_FooterHeightCapped(t *testing.T) {
-	huge := "BIGPARA " + strings.Repeat("word ", 400) // wraps to dozens of rows
+	huge := "BIGPARA " + strings.Repeat("word ", 400) // would wrap to dozens of rows if shown
 	m, _ := streamingProse(huge)
-	m.rows = 50 // a tall terminal — without the cap the footer would be dozens of rows
+	m.rows = 50 // a tall terminal — the withheld paragraph + cap keep the footer short anyway
 	m.inFlight = true
 	foot := m.footer()
 	n := strings.Count(foot, "\n") + 1
 	if n > maxLiveRows+10 {
 		t.Errorf("footer is %d rows; want <= %d (live cap %d + bottom band)", n, maxLiveRows+10, maxLiveRows)
+	}
+	// The still-growing paragraph must NOT be in the footer at all.
+	if strings.Contains(ansi.Strip(foot), "BIGPARA") {
+		t.Errorf("the in-progress paragraph must be withheld from the footer:\n%s", ansi.Strip(foot))
 	}
 }
 
@@ -174,10 +181,11 @@ func TestFlush_GatedOnMastheadCommitted(t *testing.T) {
 	}
 }
 
-// TestFlush_LeftPadConsistent proves the STREAMING footer prose sits at the same LeftPad
-// inset as the committed scrollback — so it never jumps a column on seal.
+// TestFlush_LeftPadConsistent proves a completed paragraph shown in the footer (before it
+// flushes) sits at the same LeftPad inset as the committed scrollback — so it never jumps a
+// column on seal. (The still-growing final paragraph BETAWORD is withheld from the footer.)
 func TestFlush_LeftPadConsistent(t *testing.T) {
-	m, turn := streamingProse("ALPHAWORD here is a streaming answer line")
+	m, turn := streamingProse("ALPHAWORD here is a completed answer line.\n\nBETAWORD still going")
 	m.rows = 30
 	m.inFlight = true
 	foot := ansi.Strip(m.footer())
@@ -189,7 +197,10 @@ func TestFlush_LeftPadConsistent(t *testing.T) {
 		}
 	}
 	if liveLine == "" {
-		t.Fatalf("streaming prose not found in footer:\n%s", foot)
+		t.Fatalf("completed paragraph not found in footer:\n%s", foot)
+	}
+	if strings.Contains(foot, "BETAWORD") {
+		t.Errorf("the in-progress paragraph must be withheld from the footer:\n%s", foot)
 	}
 	if !strings.HasPrefix(liveLine, strings.Repeat(" ", LeftPad)) {
 		t.Errorf("streaming prose is not LeftPad-inset (%d spaces): %q", LeftPad, liveLine)

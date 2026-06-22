@@ -225,10 +225,12 @@ func TestStatusLine_Degraded(t *testing.T) {
 	}
 }
 
-func TestStatusLine_ConnectedShownWhileHealthy(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{McpResolved: true}, 80))
-	if !strings.Contains(out, "Connected to Daintree MCP") {
-		t.Errorf("healthy MCP link must be shown persistently (spec §4.2): %q", out)
+func TestStatusLine_HealthyMcpIsSilent(t *testing.T) {
+	// A healthy link is announced ONCE as a top status note (update.go), never a permanent
+	// footer segment — so the status line says nothing about MCP while connected.
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{}, 80))
+	if strings.Contains(out, "Connected to Daintree MCP") || strings.Contains(out, "MCP") {
+		t.Errorf("healthy status line must not carry an MCP segment: %q", out)
 	}
 }
 

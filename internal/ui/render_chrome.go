@@ -100,7 +100,6 @@ type statusParams struct {
 	TopSeverity domain.Severity
 	Agents      int
 	Degraded    bool
-	McpResolved bool // the MCP connect attempt has settled (connected, unless Degraded)
 
 	// Active-agent badge ingredients ("" ActiveLabel ⇒ no agent working). ActiveTone
 	// is a semantic tone name as understood by styleFor/toneGlyphFor ("active",
@@ -126,15 +125,12 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	}
 	var segs []string
 
-	// MCP connection — the FIRST, persistent segment (spec §4.2). The assistant exists to
-	// control Daintree over MCP, so its link state is part of the always-visible footer, not
-	// a by-exception diagnostic: a healthy link reads "● Connected to Daintree MCP" and does
-	// NOT disappear just because it is healthy (the masthead scrolls off in native
-	// scrollback, so this strip is where the user keeps an eye on the link).
+	// MCP connection — surfaced BY EXCEPTION only. A healthy link is announced once as a
+	// top status note when it settles ("● Connected to Daintree MCP", see update.go), so the
+	// always-visible footer stays quiet while connected; it speaks only when the link is DOWN
+	// (a persistent condition the operator must see), never a steady-state healthy badge.
 	if p.Degraded {
 		segs = append(segs, th.Warning().Render("▲ Daintree MCP unavailable"))
-	} else if p.McpResolved {
-		segs = append(segs, th.Accent().Render("● Connected to Daintree MCP"))
 	}
 
 	// Active-agent badge: a tone-tinted "<glyph> LABEL" run (color + glyph from the

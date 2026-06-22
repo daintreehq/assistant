@@ -14,6 +14,12 @@ func liveStatusLabel(p domain.RunPhase) string {
 	switch p {
 	case domain.PhaseAnalyzing:
 		return "Analyzing request"
+	case domain.PhaseGenerating:
+		// Prose now commits PARAGRAPH BY PARAGRAPH (render_turn.go): the still-growing
+		// paragraph is withheld from the footer, so the spinner is the ONLY motion between
+		// committed paragraphs. Without a label here the footer would look frozen while the
+		// model composes the next paragraph.
+		return "Writing"
 	case domain.PhaseIntegrating:
 		return "Integrating results"
 	case domain.PhaseAwaitingApproval:
@@ -21,8 +27,8 @@ func liveStatusLabel(p domain.RunPhase) string {
 	case domain.PhaseCancelling:
 		return "Cancelling"
 	default:
-		// generating (prose + caret), tool_running (activity tree), received (inline
-		// on the marker), and the terminal phases carry no separate live line.
+		// tool_running (activity tree), received (inline on the marker), and the terminal
+		// phases carry no separate live line.
 		return ""
 	}
 }

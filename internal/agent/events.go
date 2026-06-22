@@ -65,7 +65,8 @@ type UsageEvent struct {
 	TotalTokens      int
 	CachedTokens     *int
 	ContextTokens    int
-	ContextThreshold int
+	ContextThreshold int // auto-compact trigger point (NOT the gauge denominator)
+	ContextWindow    int // model context window — the CTX% gauge denominator
 	// CostUsd is nil when the provider reported no usage ("no data"), never a
 	// misleading $0.000.
 	CostUsd *float64
@@ -331,6 +332,7 @@ func (s *RunEventSink) Usage(ev UsageEvent) {
 		"totalTokens":      ev.TotalTokens,
 		"contextTokens":    ev.ContextTokens,
 		"contextThreshold": ev.ContextThreshold,
+		"contextWindow":    ev.ContextWindow,
 		"tier":             ev.Tier,
 		"model":            ev.Model,
 	}

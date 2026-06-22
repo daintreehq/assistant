@@ -43,7 +43,7 @@ func TestLiveStatusLabel_FromPhase(t *testing.T) {
 		{domain.PhaseIntegrating, "Integrating results"},
 		{domain.PhaseAwaitingApproval, "Waiting for approval"},
 		{domain.PhaseCancelling, "Cancelling"},
-		{domain.PhaseGenerating, ""}, // streaming prose carries itself
+		{domain.PhaseGenerating, "Writing"}, // prose commits paragraph-by-paragraph; spinner carries the gap
 		{domain.PhaseToolRunning, ""},
 		{domain.PhaseReceived, ""},
 	}

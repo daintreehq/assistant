@@ -25,6 +25,31 @@ func noColorTheme() theme.Theme {
 	return t
 }
 
+// TestListMarkersRendered locks the list-bullet fix: without an Item/Enumeration
+// BlockPrefix glamour renders list items as bare indentation (no "•"), which reads as
+// broken "mystery indentation" — a nested bullet list collapses to orphaned indents. We
+// assert real markers appear for unordered, ordered, AND nested lists.
+func TestListMarkersRendered(t *testing.T) {
+	r := New(noColorTheme())
+
+	unordered := r.Render("- alpha\n- beta", 60, false).Plain
+	if !strings.Contains(unordered, "• alpha") || !strings.Contains(unordered, "• beta") {
+		t.Errorf("unordered list missing the • marker:\n%q", unordered)
+	}
+
+	ordered := r.Render("1. first\n2. second", 60, false).Plain
+	if !strings.Contains(ordered, "1. first") || !strings.Contains(ordered, "2. second") {
+		t.Errorf("ordered list missing the N. marker:\n%q", ordered)
+	}
+
+	// Nested unordered list — the worktree-list shape from the bug report. Each level
+	// must carry a bullet, not bare indentation.
+	nested := r.Render("- outer:\n  - inner one\n  - inner two", 60, false).Plain
+	if c := strings.Count(nested, "•"); c < 3 {
+		t.Errorf("nested list should have a bullet per item (>=3 •), got %d:\n%q", c, nested)
+	}
+}
+
 // TestCacheHit asserts a second render of the same (content,width,theme,expanded)
 // returns the cached result and does not grow the cache — the render is pure.
 func TestCacheHit(t *testing.T) {

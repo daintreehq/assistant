@@ -18,12 +18,13 @@ import (
 //  1. Keep completed content OUT of the footer: flush each IMMUTABLE block (a closed tool
 //     group, a finished prose step, a completed markdown PARAGRAPH of the live prose step)
 //     to scrollback the instant it can no longer change, so the footer never accumulates.
-//  2. Keep the in-flight remainder SHORT: the footer renders only the un-flushed tail,
-//     hard-bounded to a few rows (view.go), so the live View is never tall enough to dump.
+//  2. Keep the in-flight remainder SHORT: prose commits PARAGRAPH BY PARAGRAPH and the
+//     still-growing final paragraph is WITHHELD from the footer entirely (render_turn.go),
+//     so the live View is only [open tool group / live status / composer] — never tall.
 //
 // Two correctness rules make the flushed bytes match the seal's render exactly (no dup):
-//   - The streaming caret rides ONLY the live last step (render_turn.go), so a flushed row
-//     never carries a "▌".
+//   - Live-ness rides ONLY the position of the last step (render_turn.go); an earlier prose
+//     step renders as final markdown, so the flush never freezes a half-rendered paragraph.
 //   - A prose paragraph is committed only once COMPLETE (after a "\n\n"); CommonMark joins
 //     single-newline lines into one reflowing paragraph, so a blank line is the only safe
 //     commit boundary. Completed paragraphs render as settled markdown — byte-identical to
@@ -86,19 +87,19 @@ func finalizedStepCount(t *TurnCell) int {
 // form (leading blank separator + body, UN-indented) that the flush commits. It is a
 // strict prefix of activeTurnRows: the head (YOU card + settled marker), then the finalized
 // steps [0:finalizedStepCount), then — when the immutable prefix reaches the live last
-// prose step — that step's COMPLETED paragraphs (its in-progress paragraph + caret + live
-// status are dropped). Every row it returns is byte-identical to what the seal will commit
-// for that row, so a flushed row is never re-committed. Returns nil for an empty prefix.
+// prose step — that step's COMPLETED paragraphs (its still-growing final paragraph and the
+// live status are dropped). Every row it returns is byte-identical to what the seal will
+// commit for that row, so a flushed row is never re-committed. Returns nil for an empty prefix.
 func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 	w := m.chromeW()
 	cw := m.contentW()
 
 	// The immutable step frontier. When every step before the last is finalized AND the last
-	// step is the live prose, EXTEND the range over it too: renderTurnSteps with dropPending
-	// renders only that step's COMPLETED paragraphs (its in-progress paragraph is dropped),
-	// so its settled prefix flushes while the live tail stays in the footer. Rendering the
-	// whole prefix through one renderTurnSteps call (the same one the footer uses) keeps the
-	// flush a byte-exact PREFIX of the footer render — including the blank-after-tool spacing.
+	// step is the live prose, EXTEND the range over it too: renderTurnSteps with liveLast=true
+	// renders only that step's COMPLETED paragraphs (its still-growing final paragraph is
+	// withheld), so its settled prefix flushes while only the live status stays in the footer.
+	// Rendering the whole prefix through one renderTurnSteps call (the same one the footer uses)
+	// keeps the flush a byte-exact PREFIX of the footer render — including blank-after-tool spacing.
 	k := finalizedStepCount(t)
 	last := len(t.Steps) - 1
 	if t.State == TurnActive && k == last && last >= 0 && t.Steps[last].Kind == StepProse {
@@ -110,7 +111,7 @@ func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 		parts = append(parts, pre)
 	}
 	if k > 0 {
-		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true, true); body != "" {
+		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true); body != "" {
 			parts = append(parts, body)
 		}
 	}

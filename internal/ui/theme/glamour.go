@@ -89,13 +89,18 @@ func (t Theme) GlamourStyles() ansi.StyleConfig {
 		Link:     ansi.StylePrimitive{Color: hexInfoP, Underline: ptrBool(true)},
 		LinkText: ansi.StylePrimitive{Color: hexInfoP},
 
-		// List bullets/enumeration: muted so structure reads without shouting.
+		// List bullets/enumeration: muted so structure reads without shouting. The
+		// BlockPrefix is the MARKER glamour prints before each item — WITHOUT it glamour
+		// renders list items as bare indentation (no "•"), which reads as broken "mystery
+		// indentation" (a nested list collapses to orphaned indents with no bullets — the
+		// worktree-list bug). "• " for unordered; for ordered, glamour supplies the number
+		// as a dynamic prefix and ". " here closes it to "1. ".
 		List: ansi.StyleList{
 			StyleBlock:  ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP}},
 			LevelIndent: 2,
 		},
-		Item:        ansi.StylePrimitive{Color: hexMutedP},
-		Enumeration: ansi.StylePrimitive{Color: hexMutedP},
+		Item:        ansi.StylePrimitive{Color: hexMutedP, BlockPrefix: "• "},
+		Enumeration: ansi.StylePrimitive{Color: hexMutedP, BlockPrefix: ". "},
 
 		// Horizontal rule: muted.
 		HorizontalRule: ansi.StylePrimitive{Color: hexMutedP, Faint: ptrBool(true)},

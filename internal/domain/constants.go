@@ -40,6 +40,12 @@ const (
 	AutoCompactTokenThreshold = 60000
 	CharsPerToken             = 4
 
+	// LargeContextWindowTokens is the main (large) model's context window, used as the
+	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
+	// "% toward auto-compaction". glm-5p2 carries a ~1M-token window; the gauge must reflect
+	// that (a small conversation reads ~1%, not 13% of the 60K compact threshold).
+	LargeContextWindowTokens = 1_000_000
+
 	// MainPromptCacheKey is the Fireworks prompt_cache_key. Plain, UNVERSIONED:
 	// it only groups requests onto a cache node, never a version.
 	MainPromptCacheKey = "daintree-main"

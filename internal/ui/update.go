@@ -79,6 +79,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MCPConnectedMsg:
 		m.degraded = false
+		// Surface the link as a TOP status note (green "● Connected to Daintree MCP"), not a
+		// permanent footer segment: the assistant exists to drive Daintree over MCP, so the
+		// connection is worth announcing ONCE, in the transcript, the moment it settles —
+		// right under the masthead. (The footer only flags the link BY EXCEPTION when down.)
+		m.addNote(NoteSuccess, "Connected to Daintree MCP")
 		return m.onMcpResolved()
 
 	case MCPDegradedMsg:
@@ -298,7 +303,13 @@ func toolFailSummary(r domain.ToolResult) string {
 // applyUsage updates the CTX% / cost / model rollup from a usage event.
 func (m *Model) applyUsage(u agent.UsageEvent) {
 	m.hasUsage = true
-	if u.ContextThreshold > 0 {
+	// CTX% is "% of the model's context window in use" — divide by the window, NOT the
+	// (much smaller) auto-compact threshold, so a 1M-window model reads ~1% on a short
+	// conversation rather than a misleading 13%. Fall back to the threshold only if no
+	// window was reported (older events / tests).
+	if denom := u.ContextWindow; denom > 0 {
+		m.contextPct = (u.ContextTokens * 100) / denom
+	} else if u.ContextThreshold > 0 {
 		m.contextPct = (u.ContextTokens * 100) / u.ContextThreshold
 	}
 	if u.CostUsd != nil {

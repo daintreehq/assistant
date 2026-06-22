@@ -97,32 +97,22 @@ func renderLiveStatus(th theme.Theme, t *TurnCell, spinnerFrame int, now int64) 
 // step-range pieces the incremental flush and seal use (renderTurnPreamble /
 // renderTurnSteps), so a turn renders byte-identically whether it streams through
 // the live footer or commits to scrollback.
+//
+// The live-status line is appended only while the turn is active (renderLiveStatus
+// returns "" for a sealed turn), so the flush's immutable prefix (preamble + finalized
+// steps via renderTurnSteps) is always a row-exact PREFIX of this full render.
 func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, contentW int, expanded bool, spinnerFrame int, now int64) string {
-	return renderTurnDrop(th, md, t, width, contentW, expanded, spinnerFrame, now, false)
-}
-
-// renderTurnDrop is renderTurn with an extra dropPending switch. When dropPending is set,
-// the live last prose step renders ONLY its stable portion (markdown of the text up to the
-// last newline) and omits the in-progress line + caret + live status. That stable render is
-// IMMUTABLE — it is byte-identical to what the seal will commit for those rows — so the
-// incremental flush commits exactly those rows (never the raw, still-reflowing in-progress
-// paragraph). The full render (dropPending=false) is what the footer and the seal use.
-func renderTurnDrop(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, contentW int, expanded bool, spinnerFrame int, now int64, dropPending bool) string {
 	active := t.State == TurnActive
 	var parts []string
-	// The marker shows once the turn is active OR has said anything (the historical
-	// rule); the live caret rides only the genuinely-live last step (active turn).
+	// The marker shows once the turn is active OR has said anything (the historical rule).
 	if pre := renderTurnPreamble(th, t, width, active, active || hasProse(t)); pre != "" {
 		parts = append(parts, pre)
 	}
-	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active, dropPending); body != "" {
+	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
 		parts = append(parts, body)
 	}
-	// The live-status line is never part of the flushable (stable) render.
-	if !dropPending {
-		if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
-			parts = append(parts, ls)
-		}
+	if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
+		parts = append(parts, ls)
 	}
 	return strings.Join(parts, "\n")
 }
@@ -149,17 +139,18 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 
 // renderTurnSteps renders the ordered steps in the half-open range [from, to) of the
 // turn (to < 0 means "to the end"): prose as styled markdown, contiguous tool runs as
-// one branch tree, notes inline. liveLast governs the streaming caret: the caret rides
-// ONLY the turn's genuine last step (global index len(Steps)-1) and ONLY when liveLast
-// is set — so an earlier prose step that streamed before a tool batch renders as FINAL
-// markdown (no caret), even though its sticky Streaming flag is still true. This is the
-// fix for the "frozen ▌ in scrollback" half of the streaming-duplication bug: the flush
-// renders its range with liveLast=false, so it can never freeze a caret-bearing row.
+// one branch tree, notes inline. liveLast governs whether the turn's genuine LAST prose
+// step (global index len(Steps)-1) is treated as LIVE — committed paragraph by paragraph
+// with its still-growing final paragraph WITHHELD (renderProse). It applies ONLY to that
+// last step and ONLY when liveLast is set, so an earlier prose step that streamed before a
+// tool batch renders as FINAL markdown (its whole text), even though its sticky Streaming
+// flag is still true. The flush passes liveLast=true so it commits only completed
+// paragraphs; the seal renders with liveLast=false so the withheld paragraph commits once.
 //
 // Tool grouping is computed over the sub-range; the incremental flush only ever passes a
 // range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
 // branch tree is never split across the flush frontier.
-func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast, dropPending bool) string {
+func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
 		to = len(steps)
@@ -187,7 +178,7 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 		switch step.Kind {
 		case StepProse:
 			live := liveLast && g == lastIdx
-			if rendered := renderProse(md, step, contentW, live, live && dropPending); rendered != "" {
+			if rendered := renderProse(md, step, contentW, live); rendered != "" {
 				if afterTool {
 					b.WriteByte('\n')
 				}
@@ -228,20 +219,25 @@ func hasProse(t *TurnCell) bool {
 	return false
 }
 
-// renderProse renders one prose step. When live (the genuinely-streaming last step of an
-// active turn) it splits at the last PARAGRAPH boundary ("\n\n"): the completed paragraphs
-// render as settled markdown, and the in-progress paragraph renders through the SAME
-// markdown renderer plus a caret. Using markdown for the in-progress paragraph (not raw
-// wrapping) is what makes streaming feel premium: glamour wraps it identically to how the
-// committed paragraph will wrap, so the text does NOT reflow / shift a column when the
-// paragraph seals — only the caret disappears. For plain prose glamour wraps greedily, so
-// earlier lines stay put as words append; the only motion is the last line growing.
+// renderProse renders one prose step. When NOT live (a sealed turn, or an earlier prose
+// step that a later tool batch has since closed) it renders the whole step as settled
+// markdown.
+//
+// When live (the genuinely-streaming LAST step of an active turn) it commits PARAGRAPH BY
+// PARAGRAPH: only the text up to the last blank line ("\n\n") is settled, and that renders
+// as markdown (it flushes to scrollback — flush.go). The still-growing final paragraph is
+// WITHHELD until it completes — prose surfaces one finished, fully-parsed markdown paragraph
+// at a time rather than streaming token by token. This is deliberately the simpler model
+// the user asked for: no live token caret, no max-height live block that fills then
+// truncates, no raw→markdown reflow when a paragraph seals. The "⠋ Writing" live status
+// (renderLiveStatus) is the only motion between paragraphs.
 //
 // `live` is decided by POSITION (is this the turn's last step), never by the step's sticky
-// Streaming flag, so a caret can never be frozen mid-turn into scrollback. A "\n\n" is the
-// only safe commit boundary because CommonMark joins single-newline lines into one
-// reflowing paragraph — so the flush (dropPending) commits ONLY completed paragraphs.
-func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropPending bool) string {
+// Streaming flag, so a half-rendered paragraph can never be frozen mid-turn into scrollback.
+// "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
+// reflowing paragraph; md.Render(settled-prefix) is a byte-exact prefix of the eventual full
+// render, so the flush and the seal agree row-for-row.
+func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live bool) string {
 	if step.Text == "" {
 		return ""
 	}
@@ -250,39 +246,9 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropP
 	}
 	idx := strings.LastIndex(step.Text, "\n\n")
 	if idx < 0 {
-		// No completed paragraph yet. dropPending callers (the incremental flush) get
-		// NOTHING — the whole paragraph is still reflowing and must not be committed.
-		if dropPending {
-			return ""
-		}
-		return liveParagraph(md, step.Text, contentW)
+		return "" // no completed paragraph yet — withhold the still-growing one
 	}
-	stable := step.Text[:idx]
-	stableR := strings.TrimRight(md.Render(stable, contentW, false).ANSI, "\n")
-	if dropPending {
-		// The flush commits ONLY the settled paragraphs — byte-identical to the prefix the
-		// seal will render — so the still-reflowing in-progress paragraph is never frozen.
-		return stableR
-	}
-	pending := strings.TrimLeft(step.Text[idx+2:], "\n")
-	var b strings.Builder
-	b.WriteString(stableR)
-	if pending != "" {
-		// Blank line between the settled paragraphs and the in-progress one (the markdown
-		// paragraph gap), so the footer matches how the seal will lay them out.
-		b.WriteString("\n\n")
-		b.WriteString(liveParagraph(md, pending, contentW))
-	}
-	return b.String()
-}
-
-// liveParagraph renders the in-progress paragraph through the markdown renderer (so it
-// wraps exactly as the committed paragraph will) and appends the streaming caret. The
-// caret is appended AFTER rendering — never fed into glamour — so it can't change the wrap
-// point and cause a one-line shift when the paragraph seals.
-func liveParagraph(md *markdown.Renderer, text string, contentW int) string {
-	r := strings.TrimRight(md.Render(text, contentW, false).ANSI, "\n")
-	return r + " ▌"
+	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.
@@ -308,6 +274,13 @@ func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 	case NoteWarn:
 		// theme.ts `attention` glyph is "!" in BOTH the unicode and ASCII sets.
 		return "!", "warning"
+	case NoteSuccess:
+		// A filled connection dot in accent green (the "● Connected to Daintree MCP"
+		// status line). ASCII fallback uses the done glyph so it never renders blank.
+		if g.Brand == "#" { // ASCII glyph set
+			return g.Done, "success"
+		}
+		return "●", "success"
 	default:
 		return g.Bullet, "info"
 	}
