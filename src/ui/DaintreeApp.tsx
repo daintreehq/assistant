@@ -62,6 +62,15 @@ export function DaintreeApp({
   const chromeWidth = Math.max(1, columns - gutter - LEFT_PAD);
   const contentWidth = Math.min(chromeWidth, CONTENT_MAX);
 
+  // Row budget for an active turn's live body. Use the TRUE terminal height
+  // (renderer.terminalHeight) — in split-footer `rows` from useTerminalDimensions is
+  // the footer's render height, which would feed back on itself. ~40% of the screen
+  // keeps the streaming pane generous while leaving rows for committed scrollback +
+  // the status/composer chrome. A fixed budget = a fixed footer height = no flash.
+  const terminalRows =
+    (renderer as unknown as { terminalHeight?: number }).terminalHeight ?? rows;
+  const liveMaxRows = Math.max(4, Math.min(16, Math.floor(terminalRows * 0.4)));
+
   // The masthead committed ONCE to native scrollback (so it scrolls up and away like
   // the rest of the history). It never reflects the live `destructivePending` cue —
   // that escalation surfaces on the ApprovalSheet down in the live footer instead.
@@ -189,6 +198,7 @@ export function DaintreeApp({
       renderHeader={false}
       footerSlot={commitSlot}
       rootRef={rootRef}
+      liveMaxRows={liveMaxRows}
       dashboard={controller.dashboard}
       sessionUsage={controller.sessionUsage}
       previews={previews}

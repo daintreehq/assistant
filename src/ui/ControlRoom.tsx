@@ -114,6 +114,14 @@ export interface ControlRoomProps {
    * the split-footer region to exactly this tree (see `useFooterHeight`).
    */
   rootRef?: Ref<BoxRenderable>;
+  /**
+   * Row budget for an ACTIVE turn's growing body. The shell computes it from the TRUE
+   * terminal height (renderer.terminalHeight — NOT useTerminalDimensions, which in
+   * split-footer returns the footer's render height) so the live turn renders in a
+   * fixed-height pane and the footer never resizes mid-stream (the streaming-flash
+   * fix). Unset (gallery/tests) leaves the live body unbounded.
+   */
+  liveMaxRows?: number;
 }
 
 export function ControlRoom({
@@ -145,6 +153,7 @@ export function ControlRoom({
   renderHeader = true,
   footerSlot = null,
   rootRef,
+  liveMaxRows,
 }: ControlRoomProps) {
   // A one-column INSET on every side so nothing touches the terminal edges. `gutter`
   // (>=1, see `reservedColumns`) is the right inset — it also keeps glyphs clear of
@@ -217,6 +226,7 @@ export function ControlRoom({
             width={contentWidth}
             now={now}
             expanded={expanded}
+            liveMaxRows={liveMaxRows}
           />
         ))}
 

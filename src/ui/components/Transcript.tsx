@@ -78,15 +78,28 @@ export function CellView({
   width,
   now,
   expanded = false,
+  liveMaxRows,
 }: {
   cell: TranscriptCell;
   width: number;
   now?: number;
   expanded?: boolean;
+  /**
+   * Row budget for an active turn's live body — forwarded to TurnCellView so the
+   * footer can't grow per streamed token. Only the live tail passes this; the
+   * scrollback commit renders the full sealed cell (unbounded).
+   */
+  liveMaxRows?: number;
 }) {
   if (cell.kind === "turn")
     return (
-      <TurnCellView turn={cell} width={width} now={now} expanded={expanded} />
+      <TurnCellView
+        turn={cell}
+        width={width}
+        now={now}
+        expanded={expanded}
+        liveMaxRows={liveMaxRows}
+      />
     );
   if (cell.kind === "note") return <NoteView cell={cell} />;
   return <CommandView cell={cell} />;

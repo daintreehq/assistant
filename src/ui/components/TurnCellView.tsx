@@ -79,19 +79,76 @@ function StreamingProse({
   );
 }
 
-export function TurnCellView({
+/**
+ * The live (active-turn) body in a FIXED-height pane: streaming prose on top, the
+ * activity tree pinned at the bottom, the whole thing reserving exactly `rows` rows
+ * no matter how much has streamed. That invariance is the streaming-flash fix — the
+ * footer measures this tree every frame, and a height change forces a full
+ * split-footer repaint (the flash). The prose is tail-sliced to the last lines that
+ * can fit so the most recent output stays visible; the activity tree (few rows) keeps
+ * its natural height and the prose flexes into whatever space is left.
+ */
+function LiveBody({
   turn,
   width,
   now,
-  expanded = false,
+  expanded,
+  rows,
 }: {
   turn: TurnCell;
   width: number;
   now?: number;
   expanded?: boolean;
+  rows: number;
+}) {
+  // Reserve rows for the activity tree (≈one row each), leave the rest for prose.
+  const actRows = Math.min(turn.activities.length, Math.max(0, rows - 1));
+  const proseRows = Math.max(1, rows - actRows);
+  const lines = turn.assistantText ? turn.assistantText.split("\n") : [];
+  const proseTail = lines.slice(-proseRows).join("\n");
+  return (
+    <box flexDirection="column" height={rows} overflow="hidden" flexShrink={0}>
+      <box flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden">
+        {turn.assistantText ? (
+          <StreamingProse text={proseTail} streaming={turn.streaming} />
+        ) : null}
+      </box>
+      <ActivityTree
+        activities={turn.activities}
+        width={width}
+        now={now}
+        expanded={expanded}
+        live
+      />
+    </box>
+  );
+}
+
+export function TurnCellView({
+  turn,
+  width,
+  now,
+  expanded = false,
+  liveMaxRows,
+}: {
+  turn: TurnCell;
+  width: number;
+  now?: number;
+  expanded?: boolean;
+  /**
+   * Row budget for an ACTIVE turn's growing body (prose + activity tree). When set,
+   * the live body renders inside a FIXED-height pane of this many rows so the footer
+   * tree height stays invariant as tokens stream — the structural fix for the
+   * streaming flash (a footer-height change forces a full split-footer repaint, see
+   * useFooterHeight). Completed content shows as the tail; the full styled turn lands
+   * in native scrollback the moment it seals. Unset (gallery/tests/history) = unbounded.
+   */
+  liveMaxRows?: number;
 }) {
   const set = glyphs();
   const finalized = turn.state !== "active";
+  // Bound the live body only while the turn is active AND a budget was supplied.
+  const bounded = !finalized && liveMaxRows != null && liveMaxRows > 0;
   // The DAINTREE block shows the instant the turn is live (so the cockpit reacts on
   // submit) or once it has said anything. The precise live state — Analyzing /
   // Integrating / Waiting for approval / Cancelling — is named by LiveRunStatus below
@@ -127,34 +184,47 @@ export function TurnCellView({
               precise label + live elapsed; null once the turn finalizes or while the
               activity tree is the indicator (tool_running). */}
           <LiveRunStatus turn={turn} now={now} />
-          {turn.assistantText ? (
-            finalized ? (
-              // Finalized prose: native markdown styling over the whole text.
-              <markdown
-                content={turn.assistantText}
-                syntaxStyle={MARKDOWN_STYLE}
-              />
-            ) : (
-              // Active: stream completed lines as styled markdown, the in-progress
-              // line as raw text + caret (see StreamingProse).
-              <StreamingProse
-                text={turn.assistantText}
-                streaming={turn.streaming}
-              />
-            )
+          {/* Finalized prose only here (full native-markdown styling over the whole
+              text). While ACTIVE the prose lives in the bounded pane below so the
+              footer can't grow per token. */}
+          {finalized && turn.assistantText ? (
+            <markdown content={turn.assistantText} syntaxStyle={MARKDOWN_STYLE} />
           ) : null}
         </box>
       ) : null}
 
-      <ActivityTree
-        activities={turn.activities}
-        width={width}
-        now={now}
-        expanded={expanded}
-        // Animate active rows only while the turn is live; a committed/scrollback
-        // render passes false so the spinner timer can't freeze/smear (ThinkingDot).
-        live={turn.state === "active"}
-      />
+      {bounded ? (
+        // The live body — streaming prose + the activity tree — in a FIXED-height pane
+        // so the footer never resizes mid-stream. The pane reserves `liveMaxRows`
+        // rows; the prose shows its TAIL (last lines), the activity tree sits below it
+        // and always shows in full (tools are few). On seal the unbounded branch above
+        // + ActivityTree below render the whole turn into scrollback at full fidelity.
+        <LiveBody
+          turn={turn}
+          width={width}
+          now={now}
+          expanded={expanded}
+          rows={liveMaxRows!}
+        />
+      ) : (
+        // Unbounded path (gallery / direct tests / non-live callers): no fixed pane, so
+        // the active prose streams here as raw text + caret (finalized prose is the
+        // markdown branch above). The activity tree follows it.
+        <>
+          {!finalized && turn.assistantText ? (
+            <StreamingProse text={turn.assistantText} streaming={turn.streaming} />
+          ) : null}
+          <ActivityTree
+            activities={turn.activities}
+            width={width}
+            now={now}
+            expanded={expanded}
+            // Animate active rows only while the turn is live; a committed/scrollback
+            // render passes false so the spinner timer can't freeze/smear (ThinkingDot).
+            live={turn.state === "active"}
+          />
+        </>
+      )}
 
       {turn.notes.map((n) => {
         const tone =

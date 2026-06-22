@@ -13,16 +13,16 @@ import type {
 } from "../../src/ui/types.js";
 
 /**
- * The live footer-growth regression. Unlike the golden ControlRoom tests, this wires the
- * REAL split-footer pipeline — useScrollbackTranscript + useFooterHeight + ControlRoom on
- * a split-footer renderer — and drives a streaming turn through it, so it exercises the
- * `useFooterHeight` measure/grow loop that the golden tests can't.
+ * The live footer-STABILITY regression. Unlike the golden ControlRoom tests, this wires the
+ * REAL split-footer pipeline — useScrollbackTranscript + useFooterHeight + ControlRoom on a
+ * split-footer renderer — and streams a turn through it, so it exercises the
+ * `useFooterHeight` measure loop the golden tests can't.
  *
- * It pins the bug where the footer froze at its idle height: useFooterHeight capped the
- * footer at `useTerminalDimensions().height`, which in split-footer mode IS the footer
- * height — so once it shrank to fit the idle composer it could never grow back, and a
- * running turn showed only its top few rows (no streamed response, one tool call, the
- * composer clipped off). The fix caps at the real `renderer.terminalHeight`.
+ * It pins the streaming-flash fix: an active turn renders inside a FIXED-height pane
+ * (liveMaxRows, see TurnCellView), so once the footer reaches its busy height it stays
+ * CONSTANT as more tokens stream — no per-token resize, which is what forced a full
+ * split-footer repaint (the flash). The turn shows its TAIL (most recent lines) plus every
+ * tool call and the composer; the full styled turn lands in scrollback on seal.
  */
 
 const tick = (ms = 12) => new Promise((r) => setTimeout(r, ms));
@@ -66,6 +66,9 @@ let drive: ((t: TranscriptCell[]) => void) | null = null;
 function Cockpit() {
   const renderer = useRenderer();
   const { width: columns, height: rows } = useTerminalDimensions();
+  const terminalRows =
+    (renderer as unknown as { terminalHeight?: number }).terminalHeight ?? rows;
+  const liveMaxRows = Math.max(4, Math.min(16, Math.floor(terminalRows * 0.4)));
   const [transcript, setT] = useState<TranscriptCell[]>([]);
   drive = setT;
   const rootRef = useRef<BoxRenderable | null>(null);
@@ -91,14 +94,15 @@ function Cockpit() {
       renderHeader={false}
       footerSlot={commitSlot}
       rootRef={rootRef}
+      liveMaxRows={liveMaxRows}
       composerFocus
       now={0}
     />
   );
 }
 
-describe("live footer grows to fit a streaming turn", () => {
-  test("a tall in-flight turn shows the full response, every tool call, AND the composer", async () => {
+describe("live footer stays fixed while a turn streams", () => {
+  test("the footer holds a constant height across streamed steps and shows the tail + tools + composer", async () => {
     const t = await testRender(<Cockpit />, OPTS);
     const fh = () =>
       (t.renderer as unknown as { footerHeight: number }).footerHeight;
@@ -113,32 +117,31 @@ describe("live footer grows to fit a streaming turn", () => {
       }
     };
     await drain();
-    const idleFooter = fh();
 
-    // A turn taller than the idle footer: 8 response lines + two tool calls.
-    await act(async () =>
-      drive!([
-        activeTurn(
-          Array.from({ length: 8 }, (_, i) => `response line ${i + 1}`).join("\n"),
-          {
-            activities: [
-              { id: "a", name: "fs.list", label: "Listed", detail: ".", state: "done", startedAt: 0, endedAt: 7 },
-              { id: "b", name: "fs.read", label: "Read", detail: "README.md", state: "active", startedAt: 0 },
-            ],
-          },
-        ),
-      ]),
-    );
-    await drain();
+    const tools = [
+      { id: "a", name: "fs.list", label: "Listed", detail: ".", state: "done" as const, startedAt: 0, endedAt: 7 },
+      { id: "b", name: "fs.read", label: "Read", detail: "README.md", state: "active" as const, startedAt: 0 },
+    ];
+
+    // Stream the response one line at a time; record the footer height after each step.
+    const heights: number[] = [];
+    for (let n = 1; n <= 8; n++) {
+      const text = Array.from({ length: n }, (_, i) => `response line ${i + 1}`).join("\n");
+      await act(async () => drive!([activeTurn(text, { activities: n >= 3 ? tools : [] })]));
+      await drain();
+      heights.push(fh());
+    }
+
+    // Once it reaches its busy height the footer NEVER resizes again as more streams in —
+    // that invariance is the flash fix (a resize forces a full split-footer repaint). The
+    // tail (last few steps) must be perfectly flat.
+    const tail = heights.slice(3);
+    expect(new Set(tail).size).toBe(1);
+
     const frame = t.captureCharFrame();
-
-    // The footer grew past its idle height to fit the turn...
-    expect(fh()).toBeGreaterThan(idleFooter);
-    // ...and the whole turn is on screen: DAINTREE, the FULL response (last line, not
-    // just the first), BOTH tool calls, and the composer.
+    // The latest line, both tool calls, and the composer are all on screen (tail view).
     expect(frame).toContain("DAINTREE");
-    expect(frame).toContain("response line 1");
-    expect(frame).toContain("response line 8"); // not clipped to the top
+    expect(frame).toContain("response line 8"); // most recent line is visible
     expect(frame).toContain("Listed");
     expect(frame).toContain("Read"); // the second tool call shows, not just the first
     expect(frame).toContain("commands"); // the composer is visible/usable

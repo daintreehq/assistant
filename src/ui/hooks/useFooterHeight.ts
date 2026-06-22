@@ -80,25 +80,16 @@ export function useFooterHeight(
         if (next !== prev) {
           last.current = next;
           try {
-            // Setting footerHeight makes OpenTUI queue a FULL-SCREEN repaint for this
-            // resize (applyScreenMode → forceFullRepaintRequested). With a footer that
-            // resizes on every streamed token that means a full repaint per token — the
-            // FLASH. So we override that flag deliberately:
+            // Setting footerHeight makes OpenTUI scroll the viewport and force a FULL
+            // split-footer repaint for the resize. That repaint is REQUIRED — it clears
+            // the rows the resize vacates and repaints over the scrolled region; the old
+            // code tried to SUPPRESS it on a grow to stop the streaming flash, but that
+            // just left the scrolled region unpainted (the black-background/garbage
+            // glitch). The real flash fix is upstream: the live turn renders in a
+            // FIXED-height pane (see TurnCellView/liveMaxRows), so this height now only
+            // changes at turn boundaries / view switches — rare, single, clean repaints
+            // that should NOT be suppressed.
             renderer.footerHeight = next;
-            const flag = renderer as unknown as {
-              forceFullRepaintRequested: boolean;
-            };
-            if (prev > 0 && next < prev) {
-              // SHRINK: keep the full repaint — it clears the rows the footer vacates at
-              // its top (OpenTUI doesn't always wipe them), which would otherwise linger.
-              flag.forceFullRepaintRequested = true;
-            } else {
-              // GROW (or the first sizing): suppress the full repaint. A grow just extends
-              // the footer upward over rows the incremental split commit redraws anyway,
-              // so it needs no screen-clear — and suppressing it is what stops a streaming
-              // turn from flashing on every token.
-              flag.forceFullRepaintRequested = false;
-            }
           } catch {
             /* sizing is best-effort; never break a render over it */
           }

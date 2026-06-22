@@ -16,13 +16,14 @@ import type {
  * The "no flash while streaming" regression. The flash the user saw is structural: in
  * split-footer mode OpenTUI does a FULL-SCREEN repaint whenever `forceFullRepaintRequested`
  * is true at render time (renderNative), and applyScreenMode sets that flag true on EVERY
- * footer resize. Our footer resizes as the turn streams (it grows to fit), so without the
- * fix every streamed token forced a full repaint — the flash. useFooterHeight now suppresses
- * the forced repaint on a GROW (it only needs it on a shrink, to clear vacated rows).
+ * footer resize. The OLD footer resized on every streamed token (it grew to fit), so every
+ * token forced a full repaint — the flash.
  *
- * We measure it directly: spy on `forceFullRepaintRequested` and count how many frames read
- * it as true (= a full repaint = a flash). Across many incremental streamed steps it must
- * stay tiny — NOT one-per-token.
+ * The fix is structural: an active turn renders inside a FIXED-height pane (liveMaxRows, see
+ * TurnCellView), so the live tree height is invariant as tokens stream and the footer stops
+ * resizing mid-stream. We measure it directly: spy on `forceFullRepaintRequested` and count
+ * how many frames read it true (= a full repaint = a flash). Across many incremental streamed
+ * steps it must stay tiny — at most the single idle→active entry resize, NOT one-per-token.
  */
 
 const tick = (ms = 8) => new Promise((r) => setTimeout(r, ms));
@@ -65,6 +66,9 @@ let drive: ((t: TranscriptCell[]) => void) | null = null;
 function Cockpit() {
   const renderer = useRenderer();
   const { width: columns, height: rows } = useTerminalDimensions();
+  const terminalRows =
+    (renderer as unknown as { terminalHeight?: number }).terminalHeight ?? rows;
+  const liveMaxRows = Math.max(4, Math.min(16, Math.floor(terminalRows * 0.4)));
   const [transcript, setT] = useState<TranscriptCell[]>([]);
   drive = setT;
   const rootRef = useRef<BoxRenderable | null>(null);
@@ -90,6 +94,7 @@ function Cockpit() {
       renderHeader={false}
       footerSlot={commitSlot}
       rootRef={rootRef}
+      liveMaxRows={liveMaxRows}
       composerFocus
       now={0}
     />
