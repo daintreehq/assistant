@@ -178,10 +178,19 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 	gi := 0
 	for li := range sub {
 		step := sub[li]
+		g := from + li
+		// A blank line AFTER a tool group: separate the function-call ledger from the prose
+		// or note that follows it. The blank rides the FOLLOWING step (a leading blank) so it
+		// survives the flush boundary — when the tool group flushes alone, the blank flushes
+		// with the prose later, keeping spacing identical across streaming and seal.
+		afterTool := g > 0 && steps[g-1].Kind == StepTool
 		switch step.Kind {
 		case StepProse:
-			live := liveLast && from+li == lastIdx
+			live := liveLast && g == lastIdx
 			if rendered := renderProse(md, step, contentW, live, live && dropPending); rendered != "" {
+				if afterTool {
+					b.WriteByte('\n')
+				}
 				b.WriteString(rendered)
 				if !strings.HasSuffix(rendered, "\n") {
 					b.WriteByte('\n')
@@ -197,6 +206,9 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 			}
 		case StepNote:
 			if step.Note != nil {
+				if afterTool {
+					b.WriteByte('\n')
+				}
 				b.WriteString(renderInlineNote(th, *step.Note, width))
 				b.WriteByte('\n')
 			}
@@ -216,13 +228,19 @@ func hasProse(t *TurnCell) bool {
 	return false
 }
 
-// renderProse renders one prose step. When live (the genuinely-streaming last step of
-// an active turn), it splits at the last newline: the stable block renders as styled
-// markdown, the trailing in-progress line as raw text + a "▌" caret (no per-token
-// markdown re-parse). When NOT live — a finalized step, OR an earlier prose step that
-// streamed before a tool batch — the whole thing renders as markdown with NO caret.
-// `live` is decided by POSITION (is this the turn's last step), never by the step's
-// sticky Streaming flag, so a caret can never be frozen mid-turn into scrollback.
+// renderProse renders one prose step. When live (the genuinely-streaming last step of an
+// active turn) it splits at the last PARAGRAPH boundary ("\n\n"): the completed paragraphs
+// render as settled markdown, and the in-progress paragraph renders through the SAME
+// markdown renderer plus a caret. Using markdown for the in-progress paragraph (not raw
+// wrapping) is what makes streaming feel premium: glamour wraps it identically to how the
+// committed paragraph will wrap, so the text does NOT reflow / shift a column when the
+// paragraph seals — only the caret disappears. For plain prose glamour wraps greedily, so
+// earlier lines stay put as words append; the only motion is the last line growing.
+//
+// `live` is decided by POSITION (is this the turn's last step), never by the step's sticky
+// Streaming flag, so a caret can never be frozen mid-turn into scrollback. A "\n\n" is the
+// only safe commit boundary because CommonMark joins single-newline lines into one
+// reflowing paragraph — so the flush (dropPending) commits ONLY completed paragraphs.
 func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropPending bool) string {
 	if step.Text == "" {
 		return ""
@@ -230,21 +248,14 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropP
 	if !live {
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
-	// Streaming: split at the last PARAGRAPH boundary ("\n\n"). A markdown paragraph only
-	// renders stably once it is COMPLETE — CommonMark joins single-newline lines into one
-	// reflowing paragraph, so a line boundary is NOT a safe commit point; a blank-line
-	// boundary IS. Completed paragraphs (before the last "\n\n") render as settled markdown;
-	// the in-progress paragraph (after it) renders RAW + caret (no per-token markdown
-	// re-parse — the research guidance: plain in-progress text, markdown only at commit).
 	idx := strings.LastIndex(step.Text, "\n\n")
 	if idx < 0 {
 		// No completed paragraph yet. dropPending callers (the incremental flush) get
-		// NOTHING — the whole paragraph is still reflowing and must not be committed. The
-		// footer (dropPending=false) shows the raw in-progress paragraph + caret.
+		// NOTHING — the whole paragraph is still reflowing and must not be committed.
 		if dropPending {
 			return ""
 		}
-		return wrapCells(step.Text+" ▌", contentW)
+		return liveParagraph(md, step.Text, contentW)
 	}
 	stable := step.Text[:idx]
 	stableR := strings.TrimRight(md.Render(stable, contentW, false).ANSI, "\n")
@@ -257,12 +268,21 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropP
 	var b strings.Builder
 	b.WriteString(stableR)
 	if pending != "" {
-		// Blank line between the settled paragraphs and the raw in-progress one (the
-		// markdown paragraph gap), so the footer matches how the seal will lay them out.
+		// Blank line between the settled paragraphs and the in-progress one (the markdown
+		// paragraph gap), so the footer matches how the seal will lay them out.
 		b.WriteString("\n\n")
-		b.WriteString(wrapCells(pending+" ▌", contentW))
+		b.WriteString(liveParagraph(md, pending, contentW))
 	}
 	return b.String()
+}
+
+// liveParagraph renders the in-progress paragraph through the markdown renderer (so it
+// wraps exactly as the committed paragraph will) and appends the streaming caret. The
+// caret is appended AFTER rendering — never fed into glamour — so it can't change the wrap
+// point and cause a one-line shift when the paragraph seals.
+func liveParagraph(md *markdown.Renderer, text string, contentW int) string {
+	r := strings.TrimRight(md.Render(text, contentW, false).ANSI, "\n")
+	return r + " ▌"
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.

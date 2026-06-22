@@ -92,23 +92,26 @@ func finalizedStepCount(t *TurnCell) int {
 func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 	w := m.chromeW()
 	cw := m.contentW()
+
+	// The immutable step frontier. When every step before the last is finalized AND the last
+	// step is the live prose, EXTEND the range over it too: renderTurnSteps with dropPending
+	// renders only that step's COMPLETED paragraphs (its in-progress paragraph is dropped),
+	// so its settled prefix flushes while the live tail stays in the footer. Rendering the
+	// whole prefix through one renderTurnSteps call (the same one the footer uses) keeps the
+	// flush a byte-exact PREFIX of the footer render — including the blank-after-tool spacing.
 	k := finalizedStepCount(t)
+	last := len(t.Steps) - 1
+	if t.State == TurnActive && k == last && last >= 0 && t.Steps[last].Kind == StepProse {
+		k = len(t.Steps)
+	}
 
 	var parts []string
 	if pre := renderTurnPreamble(m.theme, t, w, false, true); pre != "" {
 		parts = append(parts, pre)
 	}
 	if k > 0 {
-		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), false, false); body != "" {
+		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true, true); body != "" {
 			parts = append(parts, body)
-		}
-	}
-	// If every step before the last is finalized AND the last step is the live prose, flush
-	// its completed paragraphs too (dropPending = drop the in-progress paragraph).
-	last := len(t.Steps) - 1
-	if t.State == TurnActive && k == last && last >= 0 && t.Steps[last].Kind == StepProse {
-		if para := renderProse(m.md, t.Steps[last], cw, true, true); para != "" {
-			parts = append(parts, para)
 		}
 	}
 
