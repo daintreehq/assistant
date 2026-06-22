@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,40 @@ func TestParseSSEMidStreamErrorSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rate limited") {
 		t.Errorf("error should carry the provider message, got: %v", err)
+	}
+}
+
+// A rate-limit (code "429") delivered as an SSE error payload before any token must
+// be surfaced as a retriable, classifiable error — the same envelope a wire 429
+// produces — so the shared RateLimitedError path (friendly reply + health badge)
+// applies, rather than an opaque non-retriable "Model error:" string.
+func TestParseSSERateLimitErrorIsClassifiable(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"error":{"message":"rate limited","code":"429"}}`,
+		``,
+	}, "\n")
+	err := parseSSE(strings.NewReader(stream), func(*streamChunk) {})
+	if err == nil {
+		t.Fatal("SSE rate-limit error must surface")
+	}
+	if !isRateLimitModelError(err) {
+		t.Fatalf("SSE 429 must be classifiable as a rate-limit, got %T: %v", err, err)
+	}
+	if !isRetriableModelError(err) {
+		t.Error("SSE 429 must be retriable like a wire 429")
+	}
+	// The provider message is preserved on the apiError body.
+	if !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("SSE 429 must keep the provider message, got: %v", err)
+	}
+	// And it wraps to the exported RateLimitedError on budget exhaustion.
+	var rl *RateLimitedError
+	if !errors.As(wrapExhaustedRateLimit(err), &rl) {
+		t.Error("exhausted SSE 429 must wrap to *RateLimitedError")
+	}
+	// A non-429 SSE error stays a plain, non-retriable string error.
+	other := parseSSE(strings.NewReader("data: {\"error\":{\"message\":\"boom\",\"code\":\"500\"}}\n\n"), func(*streamChunk) {})
+	if isRateLimitModelError(other) {
+		t.Error("a non-429 SSE error must NOT be classified as a rate-limit")
 	}
 }

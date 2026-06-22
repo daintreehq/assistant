@@ -539,17 +539,7 @@ func parseSSE(r io.Reader, onChunk func(*streamChunk)) error {
 		// `data: {"error": {...}}` with no choices. Surface it as a real failure instead
 		// of letting the empty-choices path silently fabricate a clean, empty completion.
 		if chunk.Error != nil {
-			msg := chunk.Error.Message
-			if msg == "" {
-				msg = chunk.Error.Code
-			}
-			if msg == "" {
-				msg = chunk.Error.Type
-			}
-			if msg == "" {
-				msg = "unknown stream error"
-			}
-			return fmt.Errorf("fireworks: provider stream error: %s", msg)
+			return sseErrorToError(chunk.Error)
 		}
 		onChunk(&chunk)
 	}
@@ -561,6 +551,31 @@ func parseSSE(r io.Reader, onChunk func(*streamChunk)) error {
 		return io.ErrUnexpectedEOF
 	}
 	return nil
+}
+
+// sseErrorToError converts an in-stream `data: {"error":{...}}` payload into a Go
+// error. A rate-limit (HTTP-status code "429" in the body) is surfaced as the SAME
+// *apiError a wire 429 produces — status 429, provider message preserved — so the
+// shared retry + RateLimitedError classification path treats an SSE-delivered
+// throttle exactly like an HTTP 429: it retries pre-token and, once the budget is
+// exhausted, becomes a friendly "Model rate-limited" reply plus the health badge.
+// No headers are available on the SSE path, so RetryAfterMs stays 0. Every other
+// provider error stays a plain, non-retriable error surfaced verbatim.
+func sseErrorToError(se *streamError) error {
+	msg := se.Message
+	if msg == "" {
+		msg = se.Code
+	}
+	if msg == "" {
+		msg = se.Type
+	}
+	if msg == "" {
+		msg = "unknown stream error"
+	}
+	if se.Code == "429" {
+		return &apiError{status: 429, body: msg}
+	}
+	return fmt.Errorf("fireworks: provider stream error: %s", msg)
 }
 
 const maxSSELineBytes = 8 * 1024 * 1024 // 8MB ceiling per SSE line

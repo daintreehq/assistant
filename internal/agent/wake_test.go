@@ -230,6 +230,7 @@ func TestBuildWakePromptEventWithoutTerminalIDNeutral(t *testing.T) {
 func TestIsWakeFailureReplyRecognizesSentinels(t *testing.T) {
 	failures := []string{
 		"Model unavailable: 503",
+		"Model rate-limited: provider quota/throughput exceeded",
 		"Model error: boom",
 		"Tool projection failed: dup name",
 		"Reached the tool-iteration limit without a final answer.",
