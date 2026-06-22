@@ -272,6 +272,11 @@ func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) 
 func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) string {
 	s.events.Phase(domain.PhaseReceived)
 
+	// Persist the originating prompt as the run's FIRST durable row so /explain can
+	// label the run by what prompted it. Emitted before AssistantStart and before
+	// the cancel check below, so even an immediately-aborted turn carries a label.
+	s.events.TurnPrompt(userInput)
+
 	// 1. Cancel BEFORE any model work leaves no orphan turn (issue #61 pull-back).
 	if ctx.Err() != nil {
 		s.events.Phase(domain.PhaseCancelled)

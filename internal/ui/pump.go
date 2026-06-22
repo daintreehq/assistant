@@ -246,6 +246,11 @@ func (p *eventPump) Usage(ev agent.UsageEvent) {
 	p.emit(pumpEvent{kind: pumpUsage, usage: ev})
 }
 
+// TurnPrompt is durable-log-only vocabulary (persisted by the run-event sink for
+// /explain); the live cockpit already shows the prompt as the user turn, so the
+// pump drops it.
+func (p *eventPump) TurnPrompt(string) {}
+
 func (p *eventPump) Error(msg string) {
 	p.emit(pumpEvent{kind: pumpError, level: NoteError, msg: msg})
 }

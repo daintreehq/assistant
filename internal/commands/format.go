@@ -22,8 +22,14 @@ func FormatRunList(runs []domain.RunSummaryRecord) string {
 		if r.EventCount == 1 {
 			noun = "event"
 		}
-		lines = append(lines, fmt.Sprintf("%s %s  %d %s",
-			padRight(r.RunID, 16), localTime(r.FirstTs), r.EventCount, noun))
+		line := fmt.Sprintf("%s %s  %d %s",
+			padRight(r.RunID, 16), localTime(r.FirstTs), r.EventCount, noun)
+		// Append the originating prompt as a one-line preview so opaque run ids gain
+		// a "what prompted this" handle.
+		if label := capLabel(r.Label); label != "" {
+			line += "  " + label
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -77,14 +83,26 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 			if !ok {
 				detail = "error"
 			}
+			var audit domain.AuditRecord
+			var haveAudit bool
 			if aid := str(payload["auditId"]); aid != "" {
 				if a, found := auditByID[aid]; found {
+					audit, haveAudit = a, true
 					detail = fmt.Sprintf("%s, %dms", a.Outcome, a.DurationMs)
 				}
 			}
 			lines = append(lines, fmt.Sprintf("%s tool %s (%s)", mark, str(payload["name"]), detail))
 			if s := str(payload["summary"]); s != "" {
 				lines = append(lines, indent(s, 4))
+			}
+			// For an allowlisted set of agent-facing tools, surface the reply text the
+			// agent RECEIVED back (terminal scrollback / MCP response) from the audit
+			// row's structured result — not the one-line summary above. Bounded so a
+			// noisy terminal read can't flood the replay.
+			if haveAudit {
+				if reply := agentReply(str(payload["name"]), audit.ResultJson); reply != "" {
+					lines = append(lines, indent("agent said: "+reply, 4))
+				}
 			}
 		case "error":
 			lines = append(lines, "⚠ error: "+str(payload["message"]))
@@ -208,6 +226,50 @@ func previewArgs(args any) string {
 		return string(rs[:117]) + "…"
 	}
 	return s
+}
+
+// capLabel collapses a multi-line prompt into a compact single-line preview for
+// the run list, capped at 140 display runes (slice 139 + …).
+func capLabel(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	if rs := []rune(s); len(rs) > 140 {
+		return string(rs[:139]) + "…"
+	}
+	return s
+}
+
+// agentReply extracts the human-meaningful reply text from a tool's structured
+// result JSON for an allowlisted set of agent-facing tools, capped at 600 runes
+// (slice 599 + …). Returns "" for tools off the allowlist or when the expected
+// field is absent/blank. The allowlist is deliberately tight — only tools whose
+// result carries text the agent RECEIVED back (a terminal read's scrollback, an
+// MCP call's response), never the outbound commands other tools dispatch.
+func agentReply(name string, resultJSON *string) string {
+	if resultJSON == nil || *resultJSON == "" {
+		return ""
+	}
+	var field string
+	switch name {
+	case "terminal.read":
+		field = "content"
+	case "daintree.call":
+		field = "text"
+	default:
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(*resultJSON), &m) != nil {
+		return ""
+	}
+	reply := strings.TrimSpace(str(m[field]))
+	if reply == "" {
+		return ""
+	}
+	if rs := []rune(reply); len(rs) > 600 {
+		return string(rs[:599]) + "…"
+	}
+	return reply
 }
 
 // indent prefixes every line of s with `pad` spaces.

@@ -108,6 +108,12 @@ type EventSink interface {
 	Error(message string) // fatal-for-this-turn
 	Info(message string)  // informational
 	Usage(ev UsageEvent)  // per-round token accounting (no-op in sinks that ignore)
+
+	// TurnPrompt records the turn's originating user prompt as the run's first
+	// durable event, so /explain can label runs by what prompted them. Emitted
+	// once per turn, BEFORE AssistantStart. Live-only sinks no-op it (it carries no
+	// liveness — only the durable RunEventSink persists it).
+	TurnPrompt(input string)
 }
 
 // NoopEventSink discards every event. Default sink and test stand-in.
@@ -126,6 +132,7 @@ func (NoopEventSink) ToolResult(ToolResultEvent)  {}
 func (NoopEventSink) Error(string)                {}
 func (NoopEventSink) Info(string)                 {}
 func (NoopEventSink) Usage(UsageEvent)            {}
+func (NoopEventSink) TurnPrompt(string)           {}
 
 // MultiSink fans every event out to several sinks, each isolated by panic
 // recovery so one misbehaving sink (e.g. a UI bridge) can never break the loop or
@@ -215,6 +222,11 @@ func (m *MultiSink) Usage(ev UsageEvent) {
 		fanOut(s, func(s EventSink) { s.Usage(ev) })
 	}
 }
+func (m *MultiSink) TurnPrompt(input string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.TurnPrompt(input) })
+	}
+}
 
 // RunIDRef is the shared mutable run-id holder. The session stamps the current
 // run id here per turn and clears it in finally; the durable RunEventSink reads it
@@ -269,6 +281,12 @@ func NewRunEventSink(db runEventStore, ref *RunIDRef) *RunEventSink {
 // Phase is not persisted (it's live-only UI vocabulary); the durable log records
 // concrete content rows, not phase transitions.
 func (s *RunEventSink) Phase(domain.RunPhase) {}
+
+// TurnPrompt persists the originating user prompt as the run's first durable row
+// (type "turn:prompt"), so /explain can label the run by what prompted it.
+func (s *RunEventSink) TurnPrompt(input string) {
+	s.write("turn:prompt", map[string]any{"prompt": input})
+}
 
 func (s *RunEventSink) AssistantStart() {
 	s.flushContent()

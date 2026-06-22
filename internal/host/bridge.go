@@ -203,6 +203,10 @@ func (b *Bridge) Info(string) {}
 // Usage is not forwarded over the host protocol (token/cost stays in-process).
 func (b *Bridge) Usage(agent.UsageEvent) {}
 
+// TurnPrompt has no host-protocol channel — Daintree originated the prompt, so the
+// bridge drops it (it's persisted for /explain by the run-event sink).
+func (b *Bridge) TurnPrompt(string) {}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------

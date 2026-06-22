@@ -84,6 +84,10 @@ type RunSummaryRecord struct {
 	FirstTs    int64  `json:"firstTs"`
 	LastTs     int64  `json:"lastTs"`
 	EventCount int    `json:"eventCount"`
+	// Label is the originating user prompt for the run, read back from its
+	// turn:prompt event so /explain can show what prompted each run ("" when the
+	// run has no turn:prompt event). Stored verbatim; the formatter truncates.
+	Label string `json:"label,omitempty"`
 }
 
 // AutomationGrantRecord authorizes a non-interactive actor to run mutating tools.
