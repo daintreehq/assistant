@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -118,16 +119,18 @@ func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
 }
 
 // renderActionRow renders the standard single-key action row — DECLINE is the visual
-// default (inverse). The A (approve & remember) affordance appears only for risk classes
-// eligible for the session allow-list.
+// default (inverse). The A (allow a bounded number of further calls) and F (allow for the
+// whole session) affordances appear only for risk classes eligible for the session
+// allow-list.
 func renderActionRow(th theme.Theme, req tools.ConfirmRequest) string {
 	approve := th.Body().Render("Y approve")
 	decline := th.Body().Reverse(true).Render(" N decline ")
 	inspect := th.Dim().Render("V inspect")
 	esc := th.Dim().Render("Esc")
 	if rememberable(req.Risk) {
-		allow := th.Dim().Render("A allow tool")
-		return approve + "  " + decline + "  " + allow + "  " + inspect + "  " + esc
+		allow := th.Dim().Render(fmt.Sprintf("A allow %d×", approveDefaultCount))
+		always := th.Dim().Render("F always")
+		return approve + "  " + decline + "  " + allow + "  " + always + "  " + inspect + "  " + esc
 	}
 	return approve + "  " + decline + "  " + inspect + "  " + esc
 }

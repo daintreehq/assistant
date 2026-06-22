@@ -66,9 +66,12 @@ type Model struct {
 	pending     *pendingConfirm
 
 	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
-	// approval sheet's A action, consulted in onApprovalRequested). In-memory and session-
-	// scoped — never persisted — and never holds a git/system tool (rememberable()).
-	approvedTools map[string]bool
+	// approval sheet's A / F actions, consulted in onApprovalRequested). The value is a
+	// REMAINING-COUNT: a missing key or 0 means "ask"; a positive n means "auto-approve n
+	// more times then re-prompt" (A, bounded); allowForeverCount (-1) means "for the whole
+	// session" (F, unbounded). In-memory and session-scoped — never persisted — and never
+	// holds a git/system tool (rememberable()).
+	approvedTools map[string]int
 
 	// boot splash overlay (never gates input).
 	//

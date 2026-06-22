@@ -96,6 +96,12 @@ type App struct {
 	// reads Tier on agent/tool goroutines, so SetTier (write) and those reads must be
 	// serialized or the race detector flags a torn read of the mutated field.
 	cfgMu sync.RWMutex
+
+	// InitialTier is the boot-time tier resolved from env/overrides/DEFAULTS, captured
+	// once in Create and NEVER mutated by SetTier. /permissions compares the live tier
+	// against it to warn that a narrowed/broadened tier is session-only and reverts next
+	// launch. Immutable after Create, so it needs no lock.
+	InitialTier domain.Tier
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
@@ -149,13 +155,14 @@ func Create(opts CreateOptions) (*App, error) {
 
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	a := &App{
-		Config:     cfg,
-		Store:      store,
-		SessionID:  sessionID,
-		runRef:     &agent.RunIDRef{},
-		hooks:      opts.Hooks,
-		baseCtx:    baseCtx,
-		baseCancel: baseCancel,
+		Config:      cfg,
+		Store:       store,
+		SessionID:   sessionID,
+		runRef:      &agent.RunIDRef{},
+		hooks:       opts.Hooks,
+		baseCtx:     baseCtx,
+		baseCancel:  baseCancel,
+		InitialTier: cfg.Tier,
 	}
 
 	// mcp → queue → router → registry → skills.
