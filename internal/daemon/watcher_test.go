@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -41,10 +42,30 @@ func TestWatcher_WaitingForInputPublishesAttention(t *testing.T) {
 	if len(queue.published) != 1 || queue.published[0].Severity != domain.SeverityAttention {
 		t.Fatalf("waiting_for_input should publish attention")
 	}
-	// Recommended action focuses the terminal.
-	ra := queue.published[0].RecommendedActions
-	if len(ra) != 1 || ra[0].ToolName != "terminal.focus" {
-		t.Errorf("waiting_for_input should recommend terminal.focus, got %+v", ra)
+	pub := queue.published[0]
+	// Recommended actions: focus FIRST (look-before-you-leap), then a reply path.
+	ra := pub.RecommendedActions
+	if len(ra) != 2 || ra[0].ToolName != "terminal.focus" || ra[1].ToolName != "terminal.sendCommand" {
+		t.Fatalf("waiting_for_input should recommend terminal.focus then terminal.sendCommand, got %+v", ra)
+	}
+	if !ra[1].RequiresConfirmation || ra[1].Risk != domain.RiskTerminal {
+		t.Errorf("reply action must be RiskTerminal + RequiresConfirmation, got %+v", ra[1])
+	}
+	if args, ok := ra[1].Args.(map[string]any); !ok || args["terminalId"] != "t1" {
+		t.Errorf("reply action args must carry terminalId=t1, got %+v", ra[1].Args)
+	}
+	// The actual question text is folded into the summary and evidence.
+	if !strings.Contains(pub.Summary, "Proceed? (y/n)") {
+		t.Errorf("question summary should include the tail snippet, got %q", pub.Summary)
+	}
+	foundQ := false
+	for _, e := range pub.Evidence {
+		if strings.Contains(e, "question:") && strings.Contains(e, "Proceed? (y/n)") {
+			foundQ = true
+		}
+	}
+	if !foundQ {
+		t.Errorf("question evidence should include the tail snippet, got %v", pub.Evidence)
 	}
 }
 
