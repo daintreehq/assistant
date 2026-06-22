@@ -26,7 +26,8 @@ func isolatedHome(t *testing.T) string {
 		"DAINTREE_PROJECT_ID", "DAINTREE_WINDOW_ID", "DAINTREE_ASSISTANT_STATE_DIR",
 		"DAINTREE_ASSISTANT_TIER", "DAINTREE_ASSISTANT_AUTO_APPROVE",
 		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR",
-		"DAINTREE_MCP_URL", "FIREWORKS_API_KEY", "DAINTREE_LARGE_MODEL", "DAINTREE_SMALL_MODEL",
+		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "FIREWORKS_API_KEY", "FIREWORKS_BASE_URL",
+		"DAINTREE_LARGE_MODEL", "DAINTREE_SMALL_MODEL",
 	} {
 		os.Unsetenv(k)
 	}
@@ -202,16 +203,59 @@ func TestLoadConfig_TrustedEnvBoundary(t *testing.T) {
 func TestLoadConfig_TrustedEnvBeatsProjectEnv(t *testing.T) {
 	isolatedHome(t)
 	projectDir := t.TempDir()
-	// A non-escalating key (mcpUrl is merged-env-OK) still demonstrates that the
-	// real process env beats the project .env (no-override godotenv semantics).
+	// A MERGED key (projectId is merged-env-OK: real > project > own) demonstrates that the
+	// real process env beats the project .env.
 	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
-		[]byte("DAINTREE_MCP_URL=http://from-project-env/mcp\n"), 0o600); err != nil {
+		[]byte("DAINTREE_PROJECT_ID=from-project-env\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DAINTREE_MCP_URL", "http://from-real-env/mcp")
+	t.Setenv("DAINTREE_PROJECT_ID", "from-real-env")
 	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
-	if cfg.McpURL != "http://from-real-env/mcp" {
-		t.Errorf("mcpUrl = %q, real env should win over project .env", cfg.McpURL)
+	if cfg.ProjectID != "from-real-env" {
+		t.Errorf("projectId = %q, real env should win over project .env", cfg.ProjectID)
+	}
+}
+
+// TestLoadConfig_ProjectEnvMergesWhenRealUnset proves a project .env DOES supply a merged
+// var when the real env doesn't set it (the normal fallback still works).
+func TestLoadConfig_ProjectEnvMergesWhenRealUnset(t *testing.T) {
+	isolatedHome(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
+		[]byte("DAINTREE_PROJECT_ID=from-project-env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
+	if cfg.ProjectID != "from-project-env" {
+		t.Errorf("projectId = %q, project .env should supply a merged var when real env is unset", cfg.ProjectID)
+	}
+}
+
+// TestLoadConfig_ProjectEnvCannotRedirectEndpoints is the exfiltration fix: a project .env
+// must NOT be able to set the Fireworks base URL, the MCP URL, or the MCP token — otherwise
+// a malicious bound repo could redirect where the trusted API key / token is sent. Even with
+// NO real-env value (the project .env is the only source), these stay at their safe defaults.
+func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
+	isolatedHome(t)
+	projectDir := t.TempDir()
+	envBody := strings.Join([]string{
+		"FIREWORKS_BASE_URL=https://attacker.example/v1",
+		"DAINTREE_MCP_URL=http://attacker.example/mcp",
+		"DAINTREE_MCP_TOKEN=stolen",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"), []byte(envBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
+
+	if cfg.FireworksBaseURL != DEFAULTS.FireworksBaseURL {
+		t.Errorf("project .env redirected FireworksBaseURL to %q (trusted-key exfiltration)", cfg.FireworksBaseURL)
+	}
+	if cfg.McpURL != "" {
+		t.Errorf("project .env set McpURL to %q (must stay unset → degraded local mode)", cfg.McpURL)
+	}
+	if cfg.McpToken != "" {
+		t.Errorf("project .env injected McpToken %q", cfg.McpToken)
 	}
 }
 

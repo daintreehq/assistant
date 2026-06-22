@@ -4,13 +4,19 @@
 // Resolution order (highest priority first):
 //  1. explicit overrides (CLI flags)
 //  2. real process environment (incl. what Daintree injects on launch)
-//  3. project-root .env (<projectPath>/.env)
+//  3. project-root .env (<projectPath>/.env) — UNTRUSTED (arbitrary bound repo)
 //  4. the assistant's own package .env (gap-filling fallback)
 //  5. built-in DEFAULTS
 //
-// godotenv.Load never overrides an already-set var, so real env (2) always beats
-// either .env file; the project .env is loaded before the own .env, and since it
-// doesn't override, the project .env wins over the own .env.
+// .env files are READ INTO MAPS (godotenv.Read), never loaded into os.Environ, so the
+// trusted snapshot stays pristine and no os.Getenv caller can be steered by a project .env.
+// THREE trust tiers govern which sources a setting may come from:
+//   - trusted-only (trustedGet): tier/autoApprove/offline/stateDir/logDir — real env only;
+//     a bound project must never escalate the assistant.
+//   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (Fireworks base
+//     URL, MCP URL + token) — real env or the assistant's own .env, NEVER the project .env,
+//     so a malicious repo can't redirect where a trusted key/token is sent (exfiltration).
+//   - merged (mergedGet): everything else — real env > project .env > own .env.
 package config
 
 import (
@@ -139,16 +145,33 @@ func ProjectIDToDir(rawID string) string {
 	return slug + "-" + hash8
 }
 
-// env is the resolution context: a trusted snapshot (taken before any .env load)
-// and the merged environment (after .env loads).
+// env is the resolution context. All THREE sources are read into MAPS (godotenv.Read,
+// never godotenv.Load) so loading a project .env can NEVER mutate the real process env —
+// which would otherwise (a) pollute a later trusted snapshot and (b) let any os.Getenv
+// caller (e.g. the skills-dir override) silently read a project-controlled value.
 type env struct {
-	trusted map[string]string // os.Environ() snapshot, pre-.env
-	// merged is read live via os.Getenv after godotenv.Load mutated the process
-	// env (godotenv writes only previously-unset keys).
+	trusted    map[string]string // os.Environ() snapshot — real, injected-by-Daintree env
+	projectEnv map[string]string // <projectPath>/.env (UNTRUSTED — arbitrary bound repo)
+	ownEnv     map[string]string // the assistant's own package .env (trusted-adjacent)
 }
 
+// trustedGet reads ONLY the real-env snapshot (never any .env): tier/autoApprove/offline/
+// stateDir/logDir — a bound project must never be able to escalate the assistant.
 func (e *env) trustedGet(key string) string { return e.trusted[key] }
-func (e *env) mergedGet(key string) string  { return os.Getenv(key) }
+
+// mergedGet is the normal precedence (real env > project .env > own .env), skipping blanks
+// so an empty real-env var correctly falls through to a .env value.
+func (e *env) mergedGet(key string) string {
+	return FirstString(e.trusted[key], e.projectEnv[key], e.ownEnv[key])
+}
+
+// trustedOrOwnGet EXCLUDES the untrusted project .env (real env > own .env). It governs the
+// endpoint / secret-pairing vars (Fireworks base URL, MCP URL + token) so a malicious repo's
+// .env can NEVER redirect where a TRUSTED API key / token is sent — a confused-deputy
+// exfiltration. A custom endpoint must be set in the real env or the assistant's own .env.
+func (e *env) trustedOrOwnGet(key string) string {
+	return FirstString(e.trusted[key], e.ownEnv[key])
+}
 
 // LoadConfig resolves the configuration. It snapshots os.Environ() into the
 // trusted set BEFORE loading any .env, then loads the project .env and the
@@ -173,24 +196,35 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	}
 	projectPath = absProject
 
-	// 2. Load .env files with no-override semantics (godotenv.Load never
-	//    overrides an already-set var). Project .env first, then own .env.
-	//    Errors are ignored: a missing .env is the normal case.
-	_ = godotenv.Load(filepath.Join(projectPath, ".env"))
+	// 2. READ the .env files into maps (godotenv.Read — NOT Load). Read never touches
+	//    os.Environ, so the trusted snapshot above stays pristine and project-controlled
+	//    values can't leak to os.Getenv callers. A missing .env yields an error → nil map
+	//    (indexing a nil map is "", so resolution just falls through). Precedence is
+	//    applied per-key by mergedGet / trustedOrOwnGet, not by load order.
+	if m, err := godotenv.Read(filepath.Join(projectPath, ".env")); err == nil {
+		e.projectEnv = m
+	}
 	if ownEnv := ownDotenvPath(); ownEnv != "" {
-		_ = godotenv.Load(ownEnv)
+		if m, err := godotenv.Read(ownEnv); err == nil {
+			e.ownEnv = m
+		}
 	}
 
 	cfg := AppConfig{ProjectPath: projectPath}
 
 	// --- merged-env-OK settings ---
 	cfg.FireworksAPIKey = FirstString(deref(overrides.FireworksAPIKey), e.mergedGet("FIREWORKS_API_KEY"))
-	cfg.FireworksBaseURL = FirstString(e.mergedGet("FIREWORKS_BASE_URL"), DEFAULTS.FireworksBaseURL)
+	// FIREWORKS_BASE_URL is trustedOrOwn (NOT mergedGet): the API key is a trusted secret,
+	// so a project .env must never redirect where it is sent (exfiltration).
+	cfg.FireworksBaseURL = FirstString(e.trustedOrOwnGet("FIREWORKS_BASE_URL"), DEFAULTS.FireworksBaseURL)
 	cfg.LargeModel = FirstString(deref(overrides.LargeModel), e.mergedGet("DAINTREE_LARGE_MODEL"), DEFAULTS.LargeModel)
 	cfg.MediumModel = FirstString(e.mergedGet("DAINTREE_MEDIUM_MODEL"), DEFAULTS.MediumModel)
 	cfg.SmallModel = FirstString(deref(overrides.SmallModel), e.mergedGet("DAINTREE_SMALL_MODEL"), DEFAULTS.SmallModel)
-	cfg.McpURL = FirstString(deref(overrides.McpURL), e.mergedGet("DAINTREE_MCP_URL")) // no default → degraded local mode
-	cfg.McpToken = FirstString(deref(overrides.McpToken), e.mergedGet("DAINTREE_MCP_TOKEN"))
+	// The MCP endpoint + token are the Daintree connection credentials (injected by Daintree
+	// into the real env). They are trustedOrOwn so a project .env can't redirect the link or
+	// inject a token: no default → degraded local mode when genuinely unset.
+	cfg.McpURL = FirstString(deref(overrides.McpURL), e.trustedOrOwnGet("DAINTREE_MCP_URL"))
+	cfg.McpToken = FirstString(deref(overrides.McpToken), e.trustedOrOwnGet("DAINTREE_MCP_TOKEN"))
 	cfg.ProjectID = FirstString(deref(overrides.ProjectID), e.mergedGet("DAINTREE_PROJECT_ID"))
 	cfg.WindowID = FirstString(deref(overrides.WindowID), e.mergedGet("DAINTREE_WINDOW_ID"))
 	cfg.DebugLog = resolveBool(overrides.DebugLog, e.mergedGet("DAINTREE_ASSISTANT_DEBUG_LOG"))
