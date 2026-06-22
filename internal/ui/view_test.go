@@ -121,7 +121,7 @@ func TestViewWidths_Approval(t *testing.T) {
 	}
 }
 
-// TestViewWidths_Degraded shows the DEGRADED status segment.
+// TestViewWidths_Degraded shows the degraded MCP status segment.
 func TestViewWidths_Degraded(t *testing.T) {
 	for _, w := range goldenWidths {
 		m := testModel(w)
@@ -129,8 +129,8 @@ func TestViewWidths_Degraded(t *testing.T) {
 		m.hasUsage = true
 		m.contextPct = 42
 		v := m.View()
-		if !strings.Contains(ansi.Strip(v.Content), "DEGRADED") {
-			t.Errorf("degraded@%d: status line missing DEGRADED: %q", w, ansi.Strip(v.Content))
+		if !strings.Contains(ansi.Strip(v.Content), "Daintree MCP") {
+			t.Errorf("degraded@%d: status line missing the MCP-unavailable segment: %q", w, ansi.Strip(v.Content))
 		}
 		assertNoOverflow(t, "degraded@"+itoa(w), v.Content, m.usableWidth())
 		assertNoForbiddenEscapes(t, "degraded@"+itoa(w), v.Content)

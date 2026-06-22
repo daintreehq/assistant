@@ -232,10 +232,18 @@ func (m Model) statusView(w int) string {
 	if m.hasUsage {
 		pct = m.contextPct
 	}
-	active := ""
+	// Surface an agent in the compact strip ONLY when it NEEDS ATTENTION, and by a HUMAN
+	// label (its badge + title) — never the raw watcher id (e.g. "DONE wch_fa04bee6", which
+	// reads as meaningless noise). A done / quietly-working watcher lives in the operations
+	// view; the always-visible strip is for the MCP link + things that need the operator.
+	var aLabel, aTone, aGoal string
 	if len(m.dashboard.Agents) > 0 {
 		a := m.dashboard.Agents[0]
-		active = a.Badge + " " + a.ID
+		if a.NeedsAttention {
+			aLabel = a.Badge
+			aTone = badgeTone(a.Badge)
+			aGoal = a.Title
+		}
 	}
 	return renderStatusLine(m.theme, statusParams{
 		ContextPct:  pct,
@@ -246,7 +254,10 @@ func (m Model) statusView(w int) string {
 		TopSeverity: m.dashboard.topSeverity(),
 		Agents:      len(m.dashboard.Agents),
 		Degraded:    m.degraded,
-		ActiveAgent: active,
+		McpResolved: m.mcpResolved,
+		ActiveTone:  aTone,
+		ActiveLabel: aLabel,
+		ActiveGoal:  aGoal,
 	}, w)
 }
 

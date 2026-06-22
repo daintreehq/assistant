@@ -100,6 +100,7 @@ type statusParams struct {
 	TopSeverity domain.Severity
 	Agents      int
 	Degraded    bool
+	McpResolved bool // the MCP connect attempt has settled (connected, unless Degraded)
 
 	// Active-agent badge ingredients ("" ActiveLabel ⇒ no agent working). ActiveTone
 	// is a semantic tone name as understood by styleFor/toneGlyphFor ("active",
@@ -124,6 +125,17 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 		cap = LiveChromeMaxWidth
 	}
 	var segs []string
+
+	// MCP connection — the FIRST, persistent segment (spec §4.2). The assistant exists to
+	// control Daintree over MCP, so its link state is part of the always-visible footer, not
+	// a by-exception diagnostic: a healthy link reads "● Connected to Daintree MCP" and does
+	// NOT disappear just because it is healthy (the masthead scrolls off in native
+	// scrollback, so this strip is where the user keeps an eye on the link).
+	if p.Degraded {
+		segs = append(segs, th.Warning().Render("▲ Daintree MCP unavailable"))
+	} else if p.McpResolved {
+		segs = append(segs, th.Accent().Render("● Connected to Daintree MCP"))
+	}
 
 	// Active-agent badge: a tone-tinted "<glyph> LABEL" run (color + glyph from the
 	// tone), then a DIM " id [· goal] [duration]" run — exactly as StatusLine.tsx
@@ -172,9 +184,6 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	if p.Agents > 0 {
 		segs = append(segs, th.Dim().Render("agents "+itoa(p.Agents)))
 	}
-	if p.Degraded {
-		segs = append(segs, th.Warning().Render("DEGRADED"))
-	}
 
 	if len(segs) == 0 {
 		return ""
@@ -199,6 +208,20 @@ func toneGlyphFor(g theme.GlyphSet, tone string) string {
 		return "!"
 	default:
 		return g.Bullet
+	}
+}
+
+// badgeTone maps an agent badge to a render tone for the compact strip: the urgent
+// states are tinted (red needs-input/failed, amber blocked/review), everything else
+// is the neutral "active" cyan.
+func badgeTone(badge string) string {
+	switch badge {
+	case "NEEDS INPUT", "FAILED":
+		return "danger"
+	case "BLOCKED", "REVIEW":
+		return "warning"
+	default:
+		return "active"
 	}
 }
 

@@ -220,8 +220,15 @@ func TestStatusLine_AttentionChip(t *testing.T) {
 
 func TestStatusLine_Degraded(t *testing.T) {
 	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{Degraded: true}, 80))
-	if !strings.Contains(out, "DEGRADED") {
-		t.Errorf("degraded flag missing: %q", out)
+	if !strings.Contains(out, "Daintree MCP unavailable") {
+		t.Errorf("degraded MCP status missing: %q", out)
+	}
+}
+
+func TestStatusLine_ConnectedShownWhileHealthy(t *testing.T) {
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{McpResolved: true}, 80))
+	if !strings.Contains(out, "Connected to Daintree MCP") {
+		t.Errorf("healthy MCP link must be shown persistently (spec §4.2): %q", out)
 	}
 }
 
