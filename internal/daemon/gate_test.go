@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -21,7 +22,7 @@ func TestTailSnippet(t *testing.T) {
 		{"last two non-empty joined", "first\nsecond\nthird", 2, 200, "second | third"},
 		{"skips interior blanks", "Question:\n\nAnswer y or n", 2, 200, "Question: | Answer y or n"},
 		{"keeps order oldest-to-newest", "a\nb\nc\nd", 3, 200, "b | c | d"},
-		{"caps to maxChars", strings.Repeat("x", 250), 2, 200, strings.Repeat("x", 200) + "…"},
+		{"caps to last maxChars bytes", strings.Repeat("x", 250), 2, 200, "…" + strings.Repeat("x", 200)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -29,6 +30,33 @@ func TestTailSnippet(t *testing.T) {
 				t.Errorf("tailSnippet(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// A long earlier line must NOT crowd out the actual question (the last line):
+// left-truncation keeps the most recent bytes, so the question survives.
+func TestTailSnippet_LongLeadingLinePreservesQuestion(t *testing.T) {
+	tail := strings.Repeat("x", 250) + "\nProceed? (y/n)"
+	got := tailSnippet(tail, 2, 200)
+	if !strings.Contains(got, "Proceed? (y/n)") {
+		t.Errorf("snippet must preserve the trailing question, got %q", got)
+	}
+	if len(got) > 200+len("…") {
+		t.Errorf("snippet should respect the byte cap, got %d bytes: %q", len(got), got)
+	}
+}
+
+// Left-truncation must land on a valid UTF-8 boundary, never split a rune.
+func TestTailSnippet_TruncationIsRuneSafe(t *testing.T) {
+	// "aaaaa☃bbb" = 5 + 3 + 3 = 11 bytes; capping to the last 5 bytes lands
+	// inside the 3-byte ☃, so the partial leading continuation bytes must be
+	// dropped, leaving "…bbb" — valid UTF-8 with no orphaned bytes.
+	got := tailSnippet("aaaaa☃bbb", 1, 5)
+	if !utf8.ValidString(got) {
+		t.Errorf("snippet must be valid UTF-8, got %q", got)
+	}
+	if got != "…bbb" {
+		t.Errorf("expected partial rune dropped → \"…bbb\", got %q", got)
 	}
 }
 

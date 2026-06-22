@@ -174,10 +174,14 @@ func recommendedActionsFor(class domain.WatcherClassification, terminalID string
 }
 
 // tailSnippet returns the last up to maxLines non-empty, trimmed lines of s joined
-// with " | ", capped to maxChars bytes (matching the codebase's byte-slice tail
-// convention; rune-safety isn't required for a debug snippet). Returns "" when s
-// has no non-blank content. Used to fold the actual question text from a blocked
-// agent's terminal tail into the published event so the operator sees what is asked.
+// with " | ", capped to maxChars bytes. Returns "" when s has no non-blank content.
+// Used to fold the actual question text from a blocked agent's terminal tail into
+// the published event so the operator sees what is asked. Over-length snippets are
+// truncated from the LEFT (a leading "…"), keeping the most recent bytes — matching
+// the codebase's tailBytes(slice(-n)) "show the tail" convention. This matters: the
+// question text is the last line, so left-truncation preserves it even when an
+// earlier context line is long. The cut is nudged forward off any partial leading
+// UTF-8 rune so the snippet starts on a valid boundary.
 func tailSnippet(s string, maxLines, maxChars int) string {
 	lines := strings.Split(s, "\n")
 	kept := make([]string, 0, maxLines)
@@ -188,7 +192,11 @@ func tailSnippet(s string, maxLines, maxChars int) string {
 	}
 	out := strings.Join(kept, " | ")
 	if len(out) > maxChars {
-		out = out[:maxChars] + "…"
+		out = out[len(out)-maxChars:]
+		for len(out) > 0 && out[0]&0xC0 == 0x80 {
+			out = out[1:]
+		}
+		out = "…" + out
 	}
 	return out
 }
