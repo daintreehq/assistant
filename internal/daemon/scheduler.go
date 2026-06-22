@@ -296,6 +296,39 @@ type timerPayload struct {
 	} `json:"toolCall,omitempty"`
 }
 
+// missedOccurrences reports how many whole repeat intervals elapsed between a
+// timer's due deadline (rec.FireAt) and now — the occurrences that were collapsed
+// away while the assistant was closed. The catch-up reschedule folds all of them
+// into this single fire (see rescheduleePatch), so this count is the only record
+// that intervening occurrences were skipped. Returns 0 for one-shot timers and
+// for an on-time fire (elapsed < one interval).
+func missedOccurrences(rec domain.TimerRecord, now int64) int64 {
+	if rec.RepeatEveryMs == nil || *rec.RepeatEveryMs <= 0 {
+		return 0
+	}
+	elapsed := now - rec.FireAt
+	if elapsed <= 0 {
+		return 0
+	}
+	// elapsed and the interval are both non-negative here, so Go's truncating
+	// integer division equals floor — the issue's prescribed formula.
+	return elapsed / *rec.RepeatEveryMs
+}
+
+// catchUpClause renders the operator-facing suffix appended to a fired timer's
+// summary when missed > 0, so a single catch-up fire still reports the backlog it
+// stood in for. Empty for the common on-time path (nothing skipped).
+func catchUpClause(missed int64) string {
+	switch {
+	case missed <= 0:
+		return ""
+	case missed == 1:
+		return " (caught up — 1 occurrence was skipped while the assistant was closed; fired once now)"
+	default:
+		return fmt.Sprintf(" (caught up — %d occurrences were skipped while the assistant was closed; fired once now)", missed)
+	}
+}
+
 // fireTimer fires one due timer, then reschedules it (always). A corrupt row is
 // disabled with a visible error event so it can't throw every tick.
 func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now int64) {
@@ -337,6 +370,11 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 		_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
 	}
 
+	// A long closure collapses every missed repeat into this one fire; surface how
+	// many occurrences it stands in for so the operational record isn't silently
+	// short. Empty for one-shot/on-time timers, so the common path is unchanged.
+	clause := catchUpClause(missedOccurrences(rec, now))
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -357,7 +395,7 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 			}
 			_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
 				Source: domain.SourceTimer, Severity: domain.SeverityAttention,
-				Title: rec.Title, Summary: summary, Target: target, DedupeKey: dedupeKey,
+				Title: rec.Title, Summary: summary + clause, Target: target, DedupeKey: dedupeKey,
 			})
 		case "run_check":
 			// Deprecated, legacy rows only — fire as a plain grounded reminder.
@@ -368,7 +406,7 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 			_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
 				Source: domain.SourceTimer, Severity: domain.SeverityAttention,
 				Title:   rec.Title,
-				Summary: "Reminder (run_check is deprecated — use a watcher to observe real state): " + prompt,
+				Summary: "Reminder (run_check is deprecated — use a watcher to observe real state): " + prompt + clause,
 				Target:  target, DedupeKey: dedupeKey,
 			})
 		case "call_safe_tool":
@@ -396,9 +434,15 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 				if !res.Ok {
 					sev = domain.SeverityError
 				}
+				// Only the success path carries the catch-up clause; a failure is an
+				// error-severity event and shouldn't be diluted with backlog context.
+				summary := res.Summary
+				if res.Ok {
+					summary += clause
+				}
 				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
 					Source: domain.SourceTimer, Severity: sev,
-					Title: rec.Title, Summary: res.Summary, Target: target, DedupeKey: dedupeKey,
+					Title: rec.Title, Summary: summary, Target: target, DedupeKey: dedupeKey,
 				})
 			}
 		}

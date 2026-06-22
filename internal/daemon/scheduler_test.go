@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,105 @@ func TestScheduler_RepeatCatchUpSingleFire(t *testing.T) {
 	}
 	if patch["fireAt"].(int64) != now+every {
 		t.Errorf("next fire must be relative to NOW (%d), got %v", now+every, patch["fireAt"])
+	}
+	// (now-FireAt)/every = (10_000_000-1000)/60_000 = 166 collapsed occurrences.
+	// The single fire must surface that backlog, not swallow it silently.
+	if got := queue.published[0].Summary; !strings.Contains(got, "166 occurrences were skipped") {
+		t.Errorf("catch-up summary must report the 166 collapsed occurrences, got %q", got)
+	}
+	if got := queue.published[0].Summary; !strings.Contains(got, "fired once now") {
+		t.Errorf("catch-up summary must note the single fire, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatOnTimeNoClause: a repeat that fires within one interval of
+// its deadline skipped nothing, so the summary must NOT carry the catch-up clause.
+func TestScheduler_RepeatOnTimeNoClause(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_ontime", Title: "Repeat", FireAt: 1000, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"ping"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	// elapsed = 60_999-1000 = 59_999 < every → missed = 0.
+	s.Tick(context.Background(), 60_999)
+	if len(queue.published) != 1 {
+		t.Fatalf("want 1 published, got %d", len(queue.published))
+	}
+	if got := queue.published[0].Summary; got != "ping" {
+		t.Errorf("on-time repeat must publish the plain summary with no catch-up clause, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUpSingular: exactly one skipped occurrence uses the
+// singular phrasing ("1 occurrence", not "occurrences").
+func TestScheduler_RepeatCatchUpSingular(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_one", Title: "Repeat", FireAt: 1000, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"ping"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	// elapsed = 61_001-1000 = 60_001 → missed = 1.
+	s.Tick(context.Background(), 61_001)
+	got := queue.published[0].Summary
+	if !strings.Contains(got, "1 occurrence was skipped") {
+		t.Errorf("a single skipped occurrence must use singular phrasing, got %q", got)
+	}
+	if strings.Contains(got, "occurrences") {
+		t.Errorf("singular catch-up must not pluralize, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_RunCheck: the catch-up clause rides along the
+// deprecated run_check reminder too, appended after the deprecation prefix.
+func TestScheduler_RepeatCatchUp_RunCheck(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_rc", Title: "Old", FireAt: 1000, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "run_check", PayloadJson: `{"type":"run_check","checkPrompt":"is it done?"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	s.Tick(context.Background(), 10_000_000)
+	got := queue.published[0].Summary
+	if !strings.Contains(got, "run_check is deprecated") {
+		t.Errorf("run_check must keep its deprecation prefix, got %q", got)
+	}
+	if !strings.Contains(got, "166 occurrences were skipped") {
+		t.Errorf("run_check catch-up must report collapsed occurrences, got %q", got)
+	}
+}
+
+// TestScheduler_RepeatCatchUp_CallSafeTool: a successful call_safe_tool fire
+// carries the clause on its result summary.
+func TestScheduler_RepeatCatchUp_CallSafeTool(t *testing.T) {
+	store := newFakeStore()
+	every := int64(60_000)
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_cst", Title: "Tool", FireAt: 1000, Status: "scheduled",
+		RepeatEveryMs: &every, RunCount: 0,
+		PayloadType: "call_safe_tool",
+		PayloadJson: `{"type":"call_safe_tool","toolCall":{"toolName":"x.do","args":{}}}`,
+	}}
+	queue := newFakeQueue()
+	reg := &fakeRegistry{result: domain.Ok("did the thing", nil)}
+	s := newScheduler(store, queue, reg, nil)
+	s.Tick(context.Background(), 10_000_000)
+	got := queue.published[0].Summary
+	if !strings.Contains(got, "did the thing") {
+		t.Errorf("call_safe_tool must keep its result summary, got %q", got)
+	}
+	if !strings.Contains(got, "166 occurrences were skipped") {
+		t.Errorf("call_safe_tool catch-up must report collapsed occurrences, got %q", got)
 	}
 }
 
