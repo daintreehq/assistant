@@ -376,11 +376,16 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.columns = msg.Width
 	m.rows = msg.Height
-	// Debounce a drag storm: bump the pending nonce; a delayed RedrawMsg with the
-	// matching nonce performs the nuclear redraw. Resize NEVER clears history.
-	m.resizePending++
-	nonce := m.resizePending
-	return m, tea.Tick(resizeRedrawDelay, func(time.Time) tea.Msg { return RedrawMsg{Nonce: nonce} })
+	// THE inline-cockpit resize rule: do NOTHING but record the geometry. We must NOT
+	// touch native scrollback on resize. Re-emitting committed content (a "nuclear
+	// redraw" — clear scrollback + re-tea.Println everything) is an OpenTUI concept that
+	// is actively wrong in Bubble Tea: the HOST terminal reflows prior scrollback itself,
+	// and Bubble Tea re-renders the live footer at the new width automatically on this
+	// very WindowSizeMsg. Re-committing instead fought BT's renderer and the host reflow —
+	// it flashed the screen between the masthead and the footer and dropped the input
+	// (the masthead's tea.Println lands at a stale cell-buffer height; repeated SIGWINCH
+	// from the embedder turned that into a strobe). The footer just re-flows; that's it.
+	return m, nil
 }
 
 // resizeRedrawDelay debounces resize drags (TS uses 150ms).
@@ -396,16 +401,87 @@ func (m Model) onRedraw(msg RedrawMsg) (tea.Model, tea.Cmd) {
 	}
 	m.redrawNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
-	// #3: ordered wipe-then-recommit (see onClear) so the redraw can't print a stale
-	// block after the host clear or wipe a freshly committed masthead.
-	return m, tea.Sequence(hostClearCmd(), m.scheduleCommit())
+	// A resize changes the View dimensions, so the renderer's cell buffer is sized to
+	// the OLD geometry until it re-flushes. Recommitting the masthead immediately would
+	// tea.Println it at that stale height and wipe the footer (charmbracelet/bubbletea
+	// #1613 — the same bug as the boot hand-off). So: clear the host + reset BT's buffer
+	// (tea.ClearScreen), DISARM commits, and re-arm them one cycle out (commitArmCmd) —
+	// by which point the footer has re-flushed at the new size and the masthead recommits
+	// above a correctly-sized footer. See scheduleCommit.
+	m.commitArmed = false
+	return m, tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
 }
 
-// --- bootstrap / dashboard ---
+// --- bootstrap / dashboard / boot gate ---
+
+// onMcpResolved records that the MCP connect settled (connected or degraded) — one
+// half of the startupSettled gate — and recomputes whether startup has settled. It
+// also kicks the authoritative project-name fetch (the third boot gate) and arms the
+// 8s boot-cap backstop, both of which can only run once a connect attempt resolved.
+func (m Model) onMcpResolved() (tea.Model, tea.Cmd) {
+	m.mcpResolved = true
+	gate := m.recomputeStartupSettled()
+	// Fetch the real project name (gates the splash via projectSettled). The 8s boot-cap
+	// backstop is already armed from launch (Init), so it isn't re-armed here.
+	return m.afterStateChange(tea.Batch(gate, m.fetchProjectNameCmd()))
+}
+
+// recomputeStartupSettled flips startupSettled true once BOTH the MCP connect resolved
+// and the first dashboard snapshot landed, then runs the boot gate. Idempotent.
+func (m *Model) recomputeStartupSettled() tea.Cmd {
+	if m.startupSettled {
+		return nil
+	}
+	if m.mcpResolved && m.bootSnapshotIn {
+		m.startupSettled = true
+		return m.finishBootIfReady()
+	}
+	return nil
+}
+
+// fetchProjectNameCmd asks Daintree for the authoritative project name off the loop
+// (a few bounded retries — right after connect the renderer may not have a project
+// bound yet) and ALWAYS reports a ProjectNameMsg so the projectSettled gate closes
+// even on a miss / offline link. Non-blocking; the 8s bootCap is the backstop.
+func (m Model) fetchProjectNameCmd() tea.Cmd {
+	a := m.app
+	ctx := m.ctx
+	return func() tea.Msg {
+		for attempt := 0; attempt < projectNameRetries; attempt++ {
+			if !a.MCP.IsConnected() {
+				break
+			}
+			if name := a.MCP.FetchProjectName(ctx); name != "" {
+				return ProjectNameMsg{Name: name}
+			}
+			select {
+			case <-ctx.Done():
+				return ProjectNameMsg{}
+			case <-time.After(projectNameRetryDelay):
+			}
+		}
+		return ProjectNameMsg{} // settle the gate with the provisional name
+	}
+}
+
+// projectNameRetries / projectNameRetryDelay mirror the original's 4 × 1s fetch loop.
+const (
+	projectNameRetries    = 4
+	projectNameRetryDelay = time.Second
+)
+
+// bootCapCmd is the hard safety cap (8000ms — the original's bootCap): if startup
+// stalls, drop into the cockpit regardless of gate readiness. A BootCapMsg fires it.
+func bootCapCmd() tea.Cmd {
+	return tea.Tick(bootCap, func(time.Time) tea.Msg { return BootCapMsg{} })
+}
+
+// bootCap matches the original 8000ms backstop.
+const bootCap = 8000 * time.Millisecond
 
 // bootstrapCmd runs the async MCP connect + scheduler start off the loop and reports
-// MCPConnected/Degraded + wires the attention callback. It also fires one redraw on
-// the boot→cockpit handoff.
+// MCPConnected/Degraded + wires the attention callback. The boot→cockpit hand-off
+// (masthead commit + redraw) is driven by the 3-gate lock, NOT here.
 func (m Model) bootstrapCmd() tea.Cmd {
 	a := m.app
 	ctx := m.ctx
@@ -492,5 +568,13 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 		kind = BlockCommand
 	}
 	rendered = indentLines(rendered, LeftPad)
+	if rendered != "" {
+		// Each sealed cell OWNS the single blank line ABOVE it (shared layout rule §3:
+		// Transcript/TurnCellView marginTop={1}). Committed via its own tea.Println,
+		// the leading "\n" is what separates this turn from the masthead and from the
+		// prior turn in native scrollback — without it the history packs together with
+		// no breathing room.
+		rendered = "\n" + rendered
+	}
 	return ScrollbackBlock{ID: cell.ID(), Kind: kind, Rendered: rendered, Plain: stripAnsi(rendered), Width: w}
 }

@@ -57,13 +57,30 @@ type Model struct {
 	pending     *pendingConfirm
 
 	// boot splash overlay (never gates input).
-	booting bool
-	splash  splashModel
+	//
+	// The boot hand-off is a 3-GATE LOCK matching the original controller
+	// (useDaintreeController): booting flips false ONLY once startupSettled (MCP
+	// connect resolved — connected or degraded — and the first dashboard snapshot is
+	// in) AND animationDone (the splash draw + linger finished) AND projectSettled
+	// (the authoritative project name resolved, the link is down, or the retries gave
+	// up) are ALL true. A fast connect can't cut the animation short and a slow one
+	// can't flash a half-built cockpit; the 8s bootCap is the backstop so a hung
+	// startup never strands the user on the splash. The masthead is committed to
+	// scrollback only AFTER the hand-off (see scheduleCommit), exactly like the
+	// original withholding the header (booting ? null) until the cockpit is up.
+	booting        bool
+	splash         splashModel
+	startupSettled bool
+	animationDone  bool
+	projectSettled bool
+	mcpResolved    bool // MCP connect settled (connected or degraded) — half of startupSettled
+	bootSnapshotIn bool // the first dashboard snapshot landed — the other half
 
 	// transcript + scrollback commit queue.
-	transcript []TranscriptCell
-	queue      scrollbackQueue
-	masthead   mastheadParams
+	transcript  []TranscriptCell
+	queue       scrollbackQueue
+	masthead    mastheadParams
+	commitArmed bool // first scrollback commit deferred one render cycle (see scheduleCommit)
 
 	// work serialization (§6.3/§6.4).
 	inFlight    bool                // exactly one Session.Send outstanding
@@ -84,7 +101,8 @@ type Model struct {
 	// out-of-band cues.
 	clearNonce    int
 	redrawNonce   int
-	resizePending int // latest debounce nonce
+	resizePending int  // latest debounce nonce
+	sizedOnce     bool // first WindowSizeMsg seen (its redraw is suppressed)
 	attentionN    int
 
 	// spinner frame (advanced on a periodic tick) for animated active rows.
@@ -121,7 +139,10 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		embedded: a.Config.WindowID != "",
 		view:     viewHome,
 		composer: cmp,
-		booting:  true,
+		// The splash is played BEFORE the program starts (see boot_splash.go), so the
+		// program begins already in the cockpit: View() is the short footer from frame
+		// one, and the masthead commits cleanly to scrollback (no tall-View handoff).
+		booting: false,
 		masthead: mastheadParams{
 			Version:     UIVersion,
 			ProjectName: provisionalName,

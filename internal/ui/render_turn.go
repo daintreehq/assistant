@@ -13,28 +13,46 @@ import (
 // takes width + expanded + now and is pure given (cell, theme, md, width, ...) so
 // the scrollback queue can re-render frozen blocks fresh on resize.
 
-// renderUserMessage renders the "YOU" card: an accent bar + the user's text. A
-// system-origin turn (UserText == "") renders nothing.
+// renderUserMessage renders the "YOU" card (UserMessageCard.tsx): a dim+bold "YOU"
+// label on its OWN line, then the wrapped message body with one left accent bar
+// (▏, U+258F) per row. A system-origin turn (UserText == "") renders nothing.
 func renderUserMessage(th theme.Theme, text string, width int) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
 	g := th.Glyphs
-	// The YOU bar + label are gray/dim chrome (NOT accent green): the user's voice
-	// is quiet, the bar wires the existing UserMessageSurface gray (§9). The text
-	// itself stays at normal body fg.
+	// The bar carries the visual weight; the dim+bold "YOU" label is a quiet
+	// who-said-what anchor above it (UserMessageCard.tsx). The bar color comes from
+	// the theme's UserMessageSurface (a cool neutral gray, NOT accent green — green
+	// is reserved for Daintree's identity).
 	surface := th.UserMessageSurface()
 	barStyle := th.Muted()
 	if surface.Bar != nil {
 		barStyle = th.Dim().Foreground(surface.Bar)
 	}
 	bar := barStyle.Render(g.Bar)
-	label := th.Dim().Bold(true).Render("YOU")
+	// Body text color: the surface text color, falling back to plain body fg.
+	textStyle := th.Body()
+	if surface.Text != nil {
+		textStyle = textStyle.Foreground(surface.Text)
+	}
 	var b strings.Builder
-	b.WriteString(bar + " " + label)
-	for _, line := range strings.Split(text, "\n") {
-		b.WriteByte('\n')
-		b.WriteString(bar + " " + th.Body().Render(truncateCells(line, width-2)))
+	// Quiet anchor on its own line — dim so it never competes with the bar.
+	b.WriteString(th.Dim().Bold(true).Render("YOU"))
+	// Reserve the bar column (1) + the gap/padding (1) + a right breathing margin
+	// (UserMessageCard.tsx: inner = max(10, width-4)); one bar per wrapped row.
+	inner := width - 4
+	if inner < 10 {
+		inner = 10
+	}
+	// Wrap each explicit paragraph (hard \n breaks preserved, matching wrapText), one
+	// bar per visual row so the gutter stays aligned with whatever we show.
+	for _, para := range strings.Split(text, "\n") {
+		wrapped := wrapCells(para, inner)
+		for _, line := range strings.Split(wrapped, "\n") {
+			b.WriteByte('\n')
+			b.WriteString(bar + " " + textStyle.Render(truncateCells(line, inner)))
+		}
 	}
 	return b.String()
 }
@@ -66,7 +84,10 @@ func renderLiveStatus(th theme.Theme, t *TurnCell, spinnerFrame int, now int64) 
 	if len(g.Spinner) > 0 {
 		spin = g.Spinner[spinnerFrame%len(g.Spinner)]
 	}
-	return th.Accent().Render(spin) + " " + th.Muted().Render(label+elapsedToken(t.PhaseStartedAt, now))
+	// LiveRunStatus.tsx: the spinner (ThinkingDot) is a PLAIN <text> (terminal
+	// default fg, no tone), and the label + elapsed are DIM (attribute-only faint),
+	// NOT muted gray. Elapsed shows only once ≥300ms (elapsedToken).
+	return th.Body().Render(spin) + th.Dim().Render(" "+label+elapsedToken(t.PhaseStartedAt, now))
 }
 
 // renderTurn renders the full turn cell: user message, marker, ordered steps
@@ -79,7 +100,9 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	// The cell owns the single blank line ABOVE it (shared layout rule §3).
 	if um := renderUserMessage(th, t.UserText, width); um != "" {
 		b.WriteString(um)
-		b.WriteByte('\n')
+		// UserMessageCard.tsx marginBottom={1}: a blank line separates the YOU card
+		// from the ◆ DAINTREE marker so the exchange breathes.
+		b.WriteString("\n\n")
 	}
 
 	active := t.State == TurnActive
@@ -168,22 +191,27 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int) string {
 func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 	g := th.Glyphs
 	glyph, tone := noteGlyph(th, n.Level)
-	// Tone the │ continuation spine with the note tone (green info / red error)
-	// instead of flat muted gray, so a note reads as a colored spine (§7).
-	cont := styleFor(th, tone, g.Continuation)
-	return truncateCells(cont+styleFor(th, tone, glyph)+" "+th.Dim().Render(n.Text), width)
+	// TurnCellView.tsx note row: a single toned span carries the continuation spine
+	// + the toned glyph + a separating space ("│ " already ends in a space), then the
+	// note text renders at BODY color (a bare child — NOT dim). The spine tone is
+	// green info / yellow warn / red error.
+	spine := styleFor(th, tone, g.Continuation+glyph+" ")
+	return truncateCells(spine+th.Body().Render(n.Text), width)
 }
 
-// noteGlyph maps a note level to (glyph, tone).
+// noteGlyph maps a note level to (glyph, tone), mirroring TurnCellView.tsx:
+// error → failed glyph + danger, warn → attention "!" + warning, else → bullet "·"
+// + the "active" tone (cyan info — NOT accent green).
 func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 	g := th.Glyphs
 	switch level {
 	case NoteError:
 		return g.Failed, "danger"
 	case NoteWarn:
-		return "!", "warning" // theme has no dedicated warn glyph; "!" reads clearly
+		// theme.ts `attention` glyph is "!" in BOTH the unicode and ASCII sets.
+		return "!", "warning"
 	default:
-		return g.Bullet, "accent"
+		return g.Bullet, "info"
 	}
 }
 

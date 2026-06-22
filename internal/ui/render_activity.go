@@ -1,6 +1,10 @@
 package ui
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
@@ -10,49 +14,184 @@ import (
 // branch tree, the brand signature (ui-transcript.md §4). Each activity is one
 // branch carrying a state glyph + a human verb + target + duration.
 
-// presentTool maps an internal tool name to a human verb (ui-transcript.md §4
-// verb map, abbreviated to the families that exist in the Go port). Unmapped names
-// fall back to the raw name title-cased.
+// presentTool maps an internal tool name to a human verb (presentation/tools.ts
+// MAP). An unknown tool falls back to its RAW internal name — never raw fn()/JSON
+// syntax, and (matching tools.ts) NOT title-cased.
 func presentTool(name string) string {
+	if l, _ := presentToolVerb(name); l != "" {
+		return l
+	}
+	return name
+}
+
+// presentToolVerb returns the verb label for a known tool plus the args KEY whose
+// value is the target/detail (or one of several, tried in order). A known tool with
+// no target key returns ("Verb", nil). An unknown tool returns ("", nil). Mirrors
+// presentation/tools.ts MAP exactly (labels and the arg key precedence).
+func presentToolVerb(name string) (label string, keys []string) {
 	switch name {
 	case "fs.read":
-		return "Read"
+		return "Read", []string{"path:rel"}
 	case "fs.list":
-		return "Listed"
-	case "fs.search", "search":
-		return "Searched"
-	case "extract", "fs.extract":
-		return "Extracted"
-	case "agentTask.spawnForEdits", "agent.spawn":
-		return "Delegated"
-	case "watcher.create", "watcher.terminal.create", "watch":
-		return "Watching"
-	case "timer.create", "schedule":
-		return "Scheduled"
-	case "artifact.read", "artifactx.read":
-		return "Read"
-	case "snapshot", "context.snapshot":
-		return "Snapshotted"
-	case "daintree.call":
-		return "Daintree"
-	case "skill.find":
-		return "Skill"
+		return "Listed", []string{"path:rel", ".:lit"}
+	case "fs.search":
+		return "Searched", []string{"query"}
+	case "tool.search":
+		return "Searched tools", []string{"query"}
+	case "context.snapshot":
+		return "Snapshotted", []string{"workspace context:lit"}
+	case "context.summarize":
+		return "Summarized", []string{"terminalId"}
+	case "agentTask.spawnForEdits":
+		return "Delegated", []string{"title", "goal"}
+	case "watcher.terminal.create":
+		return "Watching", []string{"goal", "title", "terminalIds:ids"}
+	case "watcher.list":
+		return "Listed watchers", nil
+	case "watcher.cancel":
+		return "Stopped watcher", []string{"id"}
+	case "timer.schedule":
+		return "Scheduled", []string{"title"}
+	case "timer.list":
+		return "Listed timers", nil
+	case "timer.cancel":
+		return "Cancelled timer", []string{"id"}
+	case "terminal.focus":
+		return "Focused", []string{"terminalId"}
+	case "terminal.read":
+		return "Read", []string{"terminalId"}
+	case "terminal.extract":
+		return "Extracted", []string{"terminalId"}
+	case "terminal.extract.async":
+		return "Extracting", []string{"terminalId"}
+	case "terminal.summarize":
+		return "Summarized", []string{"terminalId"}
 	case "queue.publish":
-		return "Note"
+		return "Raised", []string{"title"}
+	case "queue.digest":
+		return "Read inbox", nil
+	case "queue.resolve":
+		return "Resolved", []string{"id"}
+	case "recipe.list":
+		return "Listed recipes", nil
+	case "recipe.run":
+		return "Ran recipe", []string{"recipeId"}
+	case "skill.step.advance":
+		return "Advanced step", []string{"skillId"}
+	case "skill.run.get":
+		return "Checked skill progress", []string{"skillId"}
+	case "worktree.createWithRecipe":
+		return "Created worktree", []string{"recipeId"}
+	case "forge.getIssue":
+		return "Read issue", []string{"issueNumber"}
+	case "forge.listIssues":
+		return "Listed issues", nil
+	case "forge.listPRs":
+		return "Listed PRs", nil
+	case "workflow.startWorkOnIssue":
+		return "Started work", []string{"issueNumber", "title"}
+	case "workflow.prepBranchForReview":
+		return "Prepping branch", []string{"branch", "worktreeId"}
+	case "grant.create":
+		return "Granted automation", nil
+	case "grant.list":
+		return "Listed grants", nil
+	case "grant.revoke":
+		return "Revoked grant", []string{"id"}
+	case "daintree.status":
+		return "Checked status", nil
+	case "daintree.listTools":
+		return "Listed tools", nil
+	case "daintree.call":
+		return "Called", []string{"toolName", "name"}
 	default:
-		if name == "" {
-			return "Tool"
-		}
-		// Title-case the leaf segment of a dotted name.
-		leaf := name
-		if i := strings.LastIndexByte(name, '.'); i >= 0 {
-			leaf = name[i+1:]
-		}
-		if len(leaf) == 0 {
-			return name
-		}
-		return strings.ToUpper(leaf[:1]) + leaf[1:]
+		return "", nil
 	}
+}
+
+// presentToolTarget derives the verb's target/object from the raw args JSON
+// (presentation/tools.ts: the `detail` half of a ToolPresentation, truncated to 48
+// cells). Returns "" when the tool is unknown or has no resolvable target.
+func presentToolTarget(name, args string) string {
+	_, keys := presentToolVerb(name)
+	if len(keys) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if args != "" {
+		_ = json.Unmarshal([]byte(args), &obj)
+	}
+	for _, k := range keys {
+		// A "key:mode" entry resolves specially: ":lit" is a literal string (e.g.
+		// "workspace context"), ":rel" relativizes a path, ":ids" joins an array.
+		key, mode, _ := strings.Cut(k, ":")
+		switch mode {
+		case "lit":
+			return truncateCells(key, 48)
+		case "rel":
+			if v := strArg(obj, key); v != "" {
+				return truncateCells(relativizePath(v), 48)
+			}
+		case "ids":
+			if v := idsArg(obj, key); v != "" {
+				return truncateCells(v, 48)
+			}
+		default:
+			if v := strArg(obj, key); v != "" {
+				return truncateCells(v, 48)
+			}
+		}
+	}
+	return ""
+}
+
+// strArg returns a non-empty string/number arg, or "" (tools.ts str()).
+func strArg(obj map[string]any, key string) string {
+	v, ok := obj[key]
+	if !ok {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		if strings.TrimSpace(t) != "" {
+			return t
+		}
+	case float64:
+		// JSON numbers decode to float64; render integers without a trailing ".0".
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	}
+	return ""
+}
+
+// idsArg joins an array arg "a, b" or falls back to a scalar (tools.ts ids()).
+func idsArg(obj map[string]any, key string) string {
+	v, ok := obj[key]
+	if !ok {
+		return ""
+	}
+	if arr, ok := v.([]any); ok {
+		parts := make([]string, 0, len(arr))
+		for _, e := range arr {
+			parts = append(parts, fmt.Sprint(e))
+		}
+		return strings.Join(parts, ", ")
+	}
+	return strArg(obj, key)
+}
+
+// relativizePath trims the cwd prefix from an absolute path (tools.ts relativePath).
+func relativizePath(p string) string {
+	cwd, err := os.Getwd()
+	if err == nil && cwd != "" && strings.HasPrefix(p, cwd) {
+		rel := strings.TrimLeft(p[len(cwd):], "/\\")
+		if rel != "" {
+			return rel
+		}
+	}
+	return p
 }
 
 // activityGlyph returns the state glyph (animated spinner frame for active rows)
@@ -63,16 +202,19 @@ func activityGlyph(th theme.Theme, a Activity, spinnerFrame int) (string, string
 	case ActQueued:
 		return g.Queued, "muted"
 	case ActActive:
-		// Animated spinner (not a static glyph) for the active row. Active is
-		// CYAN (info) so a live row reads as "working", visually distinct from a
-		// completed green ✓ (§4: cyan = live, green = done).
+		// Animated spinner (not a static glyph) for the active row. ActivityTree.tsx
+		// renders the live ThinkingDot as a PLAIN <text> (terminal default fg, no
+		// tone) — the motion alone reads as "working"; only the STATIC state glyphs
+		// (done ✓ green, failed × red, …) carry a tone color.
 		frames := g.Spinner
 		if len(frames) == 0 {
-			return g.Active, "info"
+			return g.Active, "plain"
 		}
-		return frames[spinnerFrame%len(frames)], "info"
+		return frames[spinnerFrame%len(frames)], "plain"
 	case ActDone:
-		return g.Done, "accent"
+		// toneColor("success") in theme.ts is the accent green — but NOT bold (the
+		// bold-accent style is reserved for the ◆ DAINTREE marker / headings).
+		return g.Done, "success"
 	case ActFailed:
 		return g.Failed, "danger"
 	case ActWaiting:
@@ -89,6 +231,10 @@ func styleFor(th theme.Theme, tone, s string) string {
 	switch tone {
 	case "accent":
 		return th.Accent().Render(s)
+	case "success":
+		// toneColor("success") = accent green, NON-bold (theme.ts). Distinct from
+		// the bold "accent" used by the DAINTREE marker.
+		return th.Body().Foreground(th.Color.Accent).Render(s)
 	case "danger":
 		return th.Danger().Render(s)
 	case "blocked":
@@ -115,78 +261,111 @@ func renderActivityRow(th theme.Theme, a Activity, last, expanded bool, spinnerF
 	}
 	glyph, tone := activityGlyph(th, a, spinnerFrame)
 
-	verb := padRight(presentTool(a.Name), labelWidth)
+	// The verb label is rendered RAW (not padded) — the alignment padding goes
+	// BEFORE the detail instead, exactly as ActivityTree.tsx does it.
+	label := presentTool(a.Name)
 
-	// Detail: while active show the live in-tool substep ("launching terminal");
-	// the settled summary takes over once done (§4). On failure show BOTH target and
-	// the failure summary so the outcome isn't hidden by the original detail (§4 / §6).
+	// Default detail (ActivityTree.tsx `a.detail ?? (done ? a.summary)`): the row's
+	// own Detail when set (the controller stores the target there, and the result
+	// summary on done), otherwise the args-derived target. Either way it is the
+	// `a.detail` slot the failure-outcome below appends to.
 	detail := a.Detail
+	if detail == "" {
+		detail = presentToolTarget(a.Name, a.Args)
+	}
+	// While active, the live in-tool substep overrides ("launching terminal").
 	if a.State == ActActive && a.ProgressMsg != "" {
 		detail = a.ProgressMsg
 	}
+	// On FAILURE, surface the failure summary even when a target detail exists — the
+	// outcome must never be hidden behind the original "Reading foo.ts" target. The
+	// separator is " · " (space-bullet-space), per ActivityTree.tsx.
 	if a.State == ActFailed && a.Outcome != "" {
 		if detail != "" {
-			detail = detail + " — " + a.Outcome
+			detail = detail + " · " + a.Outcome
 		} else {
 			detail = a.Outcome
 		}
 	}
 
-	// Duration / queued marker on the right.
+	// Elapsed: present only when the row has ended (done/failed) or is active; a
+	// queued/waiting row shows NO duration (ActivityTree.tsx: `elapsed` is undefined
+	// → the timing cell renders nothing). Done/failed use ended−started even when
+	// started is 0; active uses max(0, now−started).
+	showDur := false
+	var elapsed int64
+	switch {
+	case a.EndedAt > 0:
+		elapsed = a.EndedAt - a.StartedAt
+		showDur = true
+	case a.State == ActActive:
+		elapsed = now - a.StartedAt
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		showDur = true
+	}
 	right := ""
-	switch a.State {
-	case ActQueued:
-		right = "queued"
-	case ActActive:
-		if a.StartedAt > 0 {
-			right = formatDuration(now - a.StartedAt)
-		}
-	case ActDone, ActFailed:
-		if a.StartedAt > 0 && a.EndedAt > 0 {
-			right = formatDuration(a.EndedAt - a.StartedAt)
-		}
+	if showDur {
+		right = formatDuration(elapsed)
 	}
 
-	// Right-align the duration / queued marker into a fixed gutter so every
-	// "8ms"/"412ms" lines up in a clean column (§4: TS used space-between). We
-	// reserve durationCols on the right, truncate the detail to what's left, then
-	// pad so the muted duration sits flush-right of the row.
 	var b strings.Builder
 	b.WriteString(th.Muted().Render(branch))
 	b.WriteByte(' ')
 	b.WriteString(styleFor(th, tone, glyph))
 	b.WriteByte(' ')
-	b.WriteString(th.Body().Render(verb))
+	b.WriteString(th.Body().Render(label))
 
-	// Width budget left of the duration gutter: row width minus the prefix
-	// (branch+glyph spacing), the verb label, and the reserved duration column.
-	detailCap := width - prefixCols - labelWidth - durationCols
-	if detailCap < 0 {
-		detailCap = 0
-	}
-	if detail != "" && detailCap > 0 {
-		b.WriteByte(' ')
-		// Account for the separating space we just wrote.
-		b.WriteString(th.Dim().Render(truncateCells(detail, detailCap-1)))
+	if detail != "" {
+		// Budget the detail so a long one truncates BEFORE colliding with the timing
+		// (ActivityTree.tsx): labelCols = max(label+1, LABEL_WIDTH);
+		// detailRoom = max(8, width - PREFIX_COLS - labelCols - DURATION_COLS).
+		labelLen := cellWidth(label)
+		labelCols := labelLen + 1
+		if labelCols < labelWidth {
+			labelCols = labelWidth
+		}
+		detailRoom := width - prefixCols - labelCols - durationCols
+		if detailRoom < 8 {
+			detailRoom = 8
+		}
+		// Pad short labels so details line up in a column; long labels get the single
+		// separating space (max(1, LABEL_WIDTH - label.length)).
+		pad := labelWidth - labelLen
+		if pad < 1 {
+			pad = 1
+		}
+		b.WriteString(strings.Repeat(" ", pad))
+		b.WriteString(th.Dim().Render(truncateCells(detail, detailRoom)))
 	}
 
 	if right != "" {
-		// Pad the line out so the duration is flush against the right gutter.
-		// cellWidth(b) already counts the styled spans correctly (ANSI-aware).
+		// Right-align the duration into a flush-right gutter (TS used space-between).
+		// cellWidth(b) counts styled spans ANSI-aware.
 		used := cellWidth(b.String())
 		target := width - cellWidth(right)
-		if pad := target - used; pad > 0 {
-			b.WriteString(strings.Repeat(" ", pad))
+		if p := target - used; p > 0 {
+			b.WriteString(strings.Repeat(" ", p))
 		} else {
 			b.WriteByte(' ')
 		}
-		b.WriteString(th.Muted().Render(right))
+		b.WriteString(th.Dim().Render(right))
 	}
 	// Truncate the assembled row line to width BEFORE appending any expanded-args
 	// line, so the multi-line truncate never clips the row's flush-right duration.
 	row := truncateCells(b.String(), width)
-	if expanded && a.Args != "" && a.Args != "{}" {
-		row += "\n" + th.Muted().Render("   args "+truncateCells(a.Args, width-8))
+	if expanded {
+		// Expanded view (^X): raw args indented 3 cells, dim (ActivityTree.tsx).
+		row += "\n" + indentLines(th.Dim().Render(a.Name+" args: "+compactArgs(a.Args, max(20, width-12))), 3)
+		// `result:` line uses the run's summary (Go: Detail on done, Outcome on fail).
+		summary := a.Detail
+		if summary == "" {
+			summary = a.Outcome
+		}
+		if summary != "" {
+			row += "\n" + indentLines(th.Dim().Render("result: "+truncateCells(summary, width-12)), 3)
+		}
 	}
 	return row
 }
@@ -198,11 +377,3 @@ const (
 	prefixCols   = 5
 	durationCols = 8
 )
-
-// padRight right-pads s to at least w cells (cell-measured).
-func padRight(s string, w int) string {
-	if d := w - cellWidth(s); d > 0 {
-		return s + strings.Repeat(" ", d)
-	}
-	return s
-}

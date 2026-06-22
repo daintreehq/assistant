@@ -34,6 +34,26 @@ type MCPDegradedMsg struct {
 	Reason string
 }
 
+// ProjectNameMsg carries the authoritative project name from Daintree's
+// actions.getContext (or an empty Name when the fetch gave up / the link is down).
+// It closes the projectSettled boot gate: the masthead commits to scrollback ONCE on
+// the boot hand-off, so the name must be resolved before that first paint.
+type ProjectNameMsg struct {
+	Name string
+}
+
+// BootCapMsg is the hard 8s boot-cap backstop: if the 3-gate boot lock hasn't closed
+// by then (e.g. a hung MCP), drop into the cockpit regardless so the user is never
+// stranded on the splash. A no-op once booting has already finished.
+type BootCapMsg struct{}
+
+// CommitArmMsg fires one short tick after launch and arms the FIRST scrollback commit.
+// Bubble Tea v2 defers its cell-buffer resize to the FPS-ticker flush, and tea.Println
+// reads that buffer's height synchronously; arming a cycle in guarantees the short
+// footer has flushed first, so the masthead lays out above a correctly-sized footer
+// rather than wiping it (charmbracelet/bubbletea#1613). See scheduleCommit.
+type CommitArmMsg struct{}
+
 // --- dashboard / operations snapshots ---
 
 // DashboardTickMsg is the ~1s poll that refreshes the operations deck + status

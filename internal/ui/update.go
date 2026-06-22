@@ -12,15 +12,21 @@ import (
 // explicit RunPhase, serializes work (single-flight + FIFO queue + wake priority),
 // and schedules scrollback commits.
 
-// Init kicks the event pump, the dashboard tick, the splash tick, and the one-shot
-// bootstrap (async MCP connect + scheduler). The composer is already interactive.
+// Init kicks the event pump, the dashboard/spinner ticks, and the one-shot bootstrap
+// (async MCP connect + scheduler). The splash already played BEFORE the program
+// started (boot_splash.go), so there is no in-program splash tick or boot-cap — the
+// cockpit is live immediately. The composer is interactive from frame one.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.pump.waitEvent(),
 		func() tea.Msg { return BootstrapMsg{} },
-		splashTickCmd(),
 		dashboardTickCmd(),
 		spinnerTickCmd(),
+		// Arm the first scrollback commit one render cycle in, so Bubble Tea has flushed
+		// the SHORT footer (and sized its cell buffer to it) before the masthead's first
+		// tea.Println — BT defers cellbuf resize to the flush, so an immediate Println
+		// would read a stale height (charmbracelet/bubbletea#1613). See scheduleCommit.
+		commitArmCmd(),
 	)
 }
 
@@ -73,18 +79,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MCPConnectedMsg:
 		m.degraded = false
-		return m.afterStateChange(nil)
+		return m.onMcpResolved()
 
 	case MCPDegradedMsg:
 		m.degraded = true
 		m.addNote(NoteWarn, "Daintree MCP degraded — "+msg.Reason)
-		return m.afterStateChange(nil)
+		return m.onMcpResolved()
+
+	case ProjectNameMsg:
+		// The authoritative project name resolved (or the fetch gave up / the link is
+		// down). The masthead is committed to scrollback ONCE on the boot hand-off, so
+		// the name must be in BEFORE the first paint — this is the third boot gate.
+		if msg.Name != "" {
+			m.masthead.ProjectName = msg.Name
+		}
+		m.projectSettled = true
+		return m.afterStateChange(m.finishBootIfReady())
 
 	case DashboardTickMsg:
 		return m, tea.Batch(m.buildDashboardCmd(), dashboardTickCmd())
 
 	case DashboardSnapshotMsg:
 		m.dashboard = msg.Snapshot
+		// The first snapshot is the OTHER half of the startup-settled gate (MCP connect
+		// resolved AND the first dashboard snapshot is in). A later tick is a no-op here.
+		if !m.bootSnapshotIn {
+			m.bootSnapshotIn = true
+			return m.afterStateChange(m.recomputeStartupSettled())
+		}
 		return m.afterStateChange(nil)
 
 	case spinnerTickMsg:
@@ -93,12 +115,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SplashTickMsg:
 		cmd := m.splash.advance()
+		// Force a FULL repaint each splash frame. The whole 18-row mark changes every
+		// frame, and Bubble Tea's inline diff renderer repaints that with relative
+		// cursor moves (up/left/backward-tab) that desync on tall, fully-changing
+		// content — smearing the mark across the top of the screen. ClearScreen erases
+		// the renderer's cell buffer so the next frame paints fresh from a clean slate
+		// (under BT's synchronized-output, no flicker). Only while booting — the steady
+		// cockpit's small, mostly-static footer diffs cleanly and must NOT clear (that
+		// would wipe the host's native scrollback every render).
+		if m.booting {
+			return m, tea.Batch(cmd, tea.ClearScreen)
+		}
 		return m, cmd
 
-	case SplashDoneMsg:
-		m.splash.done = true
-		m.booting = false
+	case CommitArmMsg:
+		// One render cycle has passed since launch, so the short footer has flushed and
+		// the renderer's cell buffer is sized to it — safe to begin scrollback commits
+		// (the masthead lands first). See scheduleCommit.
+		m.commitArmed = true
 		return m.afterStateChange(nil)
+
+	case SplashDoneMsg:
+		// The splash draw + linger finished — one of the THREE boot gates (animationDone).
+		// Booting does NOT flip here on its own: it waits for startup + project to settle
+		// too, so a fast animation can't surface a half-built cockpit.
+		m.splash.done = true
+		m.animationDone = true
+		return m.afterStateChange(m.finishBootIfReady())
 
 	case TurnCompleteMsg:
 		return m.onTurnComplete(msg)
@@ -128,6 +171,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case LogMsg:
 		m.addNote(msg.Level, msg.Text)
 		return m.afterStateChange(nil)
+
+	case BootCapMsg:
+		// Hard 8s backstop: drop into the cockpit regardless of gate readiness so a
+		// hung startup never strands the user on the splash. A no-op if already up.
+		if m.booting {
+			return m, m.completeBoot()
+		}
+		return m, nil
 
 	case ShutdownMsg:
 		return m.onShutdown()
@@ -296,6 +347,56 @@ func (m *Model) syncComposer() {
 }
 
 // scheduleCommit asks the queue for the next commit cmd at the current width.
+//
+// COMMIT ARM (charmbracelet/bubbletea#1613): nothing commits to native scrollback
+// until commitArmed flips true, one short tick after Init (see commitArmCmd). Bubble
+// Tea v2 DEFERS its cell-buffer resize to the FPS-ticker flush, and tea.Println's
+// insertAbove runs synchronously off that buffer's height. The program opens already
+// in the cockpit (the splash played before BT started), so the live View is the short
+// footer from the start — but the renderer's buffer is only sized to it after the
+// first flush. Arming the first commit one cycle in guarantees the footer has flushed,
+// so the masthead Println lays out above a correctly-sized footer instead of wiping it.
 func (m *Model) scheduleCommit() tea.Cmd {
+	if !m.commitArmed {
+		return nil
+	}
 	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock)
+}
+
+// finishBootIfReady flips booting off ONCE all three boot gates are satisfied
+// (startupSettled && animationDone && projectSettled) — the original's exact lock.
+// On the flip it fires a single boot→cockpit "nuclear redraw" (the original calls
+// requestRedraw once on the hand-off via useResizeRedraw): it re-arms the commit
+// queue at the now-correct cockpit width and wipes any splash rows the program left
+// in the live region, then commits the masthead + transcript fresh. Returns the
+// hand-off cmd (nil unless the gate just closed).
+func (m *Model) finishBootIfReady() tea.Cmd {
+	if !m.booting {
+		return nil
+	}
+	if !(m.startupSettled && m.animationDone && m.projectSettled) {
+		return nil
+	}
+	return m.completeBoot()
+}
+
+// completeBoot performs the boot→cockpit hand-off: drop the splash, re-arm the commit
+// queue (bump redrawNonce → resetKey change → committed=0, headerDone=false), and run
+// the ordered wipe-then-recommit so the masthead lands flush on a clean host screen
+// with the composer live beneath it. Mirrors onRedraw, but driven by the boot gate.
+func (m *Model) completeBoot() tea.Cmd {
+	m.booting = false
+	m.splash.done = true
+	m.redrawNonce++
+	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
+	// #3 (see onClear/onRedraw): ordered wipe-then-recommit so the hand-off can't print
+	// a stale block after the host clear or wipe a freshly committed masthead.
+	//
+	// The boot view was a tall (20-row) block, so right now Bubble Tea's renderer still
+	// reserves that height. Committing the masthead immediately lays it out with stale
+	// geometry (a misplaced erase-below then wipes it). So: clear the host + reset BT's
+	// own cell buffer (tea.ClearScreen), then DEFER the masthead commit one render cycle
+	// (bootCommitMsg) — by which point the short footer has rendered and the renderer's
+	// live-area model has shrunk, so the masthead prints above a correctly-sized footer.
+	return tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
 }

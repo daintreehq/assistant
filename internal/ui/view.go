@@ -53,15 +53,18 @@ func (m Model) footer() string {
 	}
 	w := m.contentW()
 
-	// Boot splash overlay (transient; never gates input — the composer is below it).
-	var b strings.Builder
+	// During boot the splash OWNS the whole live View — nothing else renders. This is
+	// the intended layout (the animation plays alone while MCP connects + the project
+	// name resolves; the masthead, rule and composer appear only AFTER the hand-off),
+	// and it is also what keeps the inline renderer stable: a short, fixed-height View
+	// repaints cleanly, whereas splash-stacked-above-composer overflowed the viewport
+	// and the cursor math drifted. Once booting flips false the masthead commits to
+	// scrollback and the composer takes the bottom of the footer for good.
 	if m.booting {
-		if sp := m.splash.view(m.theme, m.columns); sp != "" {
-			b.WriteString(sp)
-			b.WriteByte('\n')
-		}
+		return m.splash.bootView(m.theme, m.columns, m.rows)
 	}
 
+	var b strings.Builder
 	switch m.view {
 	case viewOperations:
 		b.WriteString(indentLines(renderOperations(m.theme, m.dashboard, m.activePanel, domain.NowMS(), w), LeftPad))
@@ -75,24 +78,37 @@ func (m Model) footer() string {
 		return b.String()
 	}
 
-	// Home: the live (unsealed) cells + the approval sheet OR composer + status line.
-	if live := m.liveCellsView(w); live != "" {
+	// Home (ControlRoom.tsx band order): live cells → StatusLine → Composer, with a
+	// blank line of breathing room between bands. The composer is ALWAYS last — it is
+	// the input the human types into, anchored at the bottom of the live footer. The
+	// status band sits ABOVE it (StatusLine.tsx marginTop={1} + the height={1} spacer);
+	// the approval sheet replaces the status band when a confirmation is pending.
+	live := m.liveCellsView(w)
+	if live != "" {
 		b.WriteString(live)
-		b.WriteByte('\n')
 	}
 
-	if m.pending != nil {
-		// Approval sheet sits directly above the composer; the composer is unfocused.
+	switch {
+	case m.pending != nil:
+		if live != "" {
+			b.WriteString("\n\n")
+		}
 		b.WriteString(indentLines(renderApproval(m.theme, m.pending.req, m.pending.showArgs, w), LeftPad))
-		b.WriteByte('\n')
+		b.WriteString("\n\n")
+	default:
+		if sl := m.statusView(w); sl != "" {
+			if live != "" {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(indentLines(sl, LeftPad))
+			b.WriteString("\n\n")
+		} else if live != "" {
+			// A live turn sits above the composer with no status band — keep one blank.
+			b.WriteString("\n\n")
+		}
 	}
 
 	b.WriteString(indentLines(m.composerView(w), LeftPad))
-
-	if sl := m.statusView(w); sl != "" {
-		b.WriteByte('\n')
-		b.WriteString(indentLines(sl, LeftPad))
-	}
 
 	return strings.TrimRight(b.String(), "\n")
 }

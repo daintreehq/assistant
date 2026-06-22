@@ -22,6 +22,9 @@ import (
 func liveModel(columns int) Model {
 	m := testModel(columns)
 	m.ctx = context.Background()
+	// A live cockpit is past the one-cycle commit-arm gate (see scheduleCommit), so
+	// scrollback commits are enabled — matches the real steady state these tests model.
+	m.commitArmed = true
 	pump := newEventPump()
 	m.pump = pump
 	m.controller = &controller{pump: pump}
@@ -287,17 +290,30 @@ func TestCancel_SynchronousCancellingPhase(t *testing.T) {
 	}
 }
 
-// --- 8. Splash never gates input: the composer is focusable while booting ---
+// --- 8. Splash plays ALONE during boot, then the composer takes the bottom ---
 
-func TestSplash_DoesNotGateComposer(t *testing.T) {
+func TestSplash_PlaysAloneDuringBoot(t *testing.T) {
 	m := liveModel(80)
 	m.booting = true
+	// Keystrokes are still captured while booting (input isn't lost) — focus stays on
+	// the composer even though it isn't drawn yet.
 	if !m.composerFocus() {
-		t.Error("composer must be focusable while the splash is up (input not gated)")
+		t.Error("composer must stay focusable while booting (input captured, not lost)")
 	}
-	// The footer renders the composer even during boot (splash is just an overlay).
-	v := ansi.Strip(m.footer())
-	if !strings.Contains(v, "Ask Daintree") {
-		t.Errorf("composer placeholder missing during boot: %q", v)
+	// The boot screen shows the SPLASH ALONE — no composer. This is the intended layout
+	// (the animation plays by itself while MCP/project settle) AND it keeps the live
+	// View short + height-stable so the inline renderer doesn't drift.
+	boot := ansi.Strip(m.footer())
+	if strings.Contains(boot, "Ask Daintree") {
+		t.Errorf("composer must NOT render during boot (splash plays alone): %q", boot)
+	}
+	if !strings.Contains(boot, "████") {
+		t.Errorf("splash mark missing during boot: %q", boot)
+	}
+	// After the boot hand-off the composer takes the bottom of the footer for good.
+	m.booting = false
+	steady := ansi.Strip(m.footer())
+	if !strings.Contains(steady, "Ask Daintree") {
+		t.Errorf("composer placeholder missing after boot: %q", steady)
 	}
 }

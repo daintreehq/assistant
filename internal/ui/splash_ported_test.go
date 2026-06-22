@@ -15,6 +15,31 @@ import (
 
 func splashTheme() theme.Theme { return darkTheme() }
 
+func TestSplash_FrameDataShape(t *testing.T) {
+	// The frames are transcribed VERBATIM from splash/frames.ts: exactly 20 frames, each
+	// 18 lines of 48 columns, using only U+2588 (█) and spaces. Any drift here means the
+	// art was edited by hand — it must be regenerated from the TS source instead.
+	if len(splashFrames) != SplashFrames {
+		t.Fatalf("splashFrames length = %d, want %d", len(splashFrames), SplashFrames)
+	}
+	for fi, frame := range splashFrames {
+		lines := strings.Split(frame, "\n")
+		if len(lines) != SplashHeight {
+			t.Fatalf("frame %d: %d lines, want %d", fi, len(lines), SplashHeight)
+		}
+		for li, line := range lines {
+			if w := len([]rune(line)); w != SplashWidth {
+				t.Fatalf("frame %d line %d: %d columns, want %d", fi, li, w, SplashWidth)
+			}
+			for _, r := range line {
+				if r != '█' && r != ' ' {
+					t.Fatalf("frame %d line %d: unexpected rune %q", fi, li, r)
+				}
+			}
+		}
+	}
+}
+
 func TestSplash_FramesAreNonEmptyAndDrawIn(t *testing.T) {
 	th := splashTheme()
 	// First frame (frame 0) reveals fewer rows than the final frame.
@@ -23,8 +48,8 @@ func TestSplash_FramesAreNonEmptyAndDrawIn(t *testing.T) {
 	ink := func(s string) int {
 		return len(strings.ReplaceAll(strings.ReplaceAll(stripAnsi(s), " ", ""), "\n", ""))
 	}
-	firstInk := ink(first.view(th, 80))
-	lastInk := ink(last.view(th, 80))
+	firstInk := ink(first.view(th, 80, 40))
+	lastInk := ink(last.view(th, 80, 40))
 	if lastInk <= firstInk {
 		t.Errorf("splash must draw in: last frame ink %d should exceed first %d", lastInk, firstInk)
 	}
@@ -36,7 +61,7 @@ func TestSplash_FramesAreNonEmptyAndDrawIn(t *testing.T) {
 func TestSplash_TopBreathingRoomAndNaturalSize(t *testing.T) {
 	th := splashTheme()
 	s := splashModel{frame: SplashFrames - 1}
-	lines := strings.Split(s.view(th, 60), "\n")
+	lines := strings.Split(s.view(th, 60, 40), "\n")
 	if strings.TrimSpace(lines[0]) != "" {
 		t.Errorf("first splash line must be blank (top breathing room): %q", lines[0])
 	}
@@ -47,7 +72,7 @@ func TestSplash_TopBreathingRoomAndNaturalSize(t *testing.T) {
 			nonBlank++
 		}
 	}
-	if nonBlank > len(splashArt)+2 {
+	if nonBlank > SplashHeight+2 {
 		t.Errorf("splash should be natural height, drew %d ink rows", nonBlank)
 	}
 }
@@ -57,7 +82,7 @@ func TestSplash_CentersHorizontally(t *testing.T) {
 	s := splashModel{frame: SplashFrames - 1}
 	minPad := func(columns int) int {
 		min := 1 << 30
-		for _, l := range strings.Split(stripAnsi(s.view(th, columns)), "\n") {
+		for _, l := range strings.Split(stripAnsi(s.view(th, columns, 40)), "\n") {
 			if strings.TrimSpace(l) == "" {
 				continue
 			}
@@ -81,7 +106,7 @@ func TestSplash_NarrowSkipsButStillCompletes(t *testing.T) {
 	if !s.tooSmall {
 		t.Fatal("a too-narrow splash must flag tooSmall")
 	}
-	if got := s.view(splashTheme(), SplashWidth); strings.TrimSpace(got) != "" {
+	if got := s.view(splashTheme(), SplashWidth, 40); strings.TrimSpace(got) != "" {
 		t.Errorf("too-narrow splash must render nothing, got %q", got)
 	}
 	// advance() returns no further tick (done immediately) for a too-small splash.

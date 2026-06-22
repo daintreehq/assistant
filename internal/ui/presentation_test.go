@@ -18,7 +18,8 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		"watcher.terminal.create": "Watching",
 		"fs.read":                 "Read",
 		"fs.list":                 "Listed",
-		"timer.create":            "Scheduled",
+		// The scheduling verb is keyed on the real tool name (presentation/tools.ts).
+		"timer.schedule": "Scheduled",
 	}
 	for name, want := range cases {
 		if got := presentTool(name); got != want {
@@ -28,10 +29,11 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 }
 
 func TestPresentTool_UnknownFallsBackToInternalName(t *testing.T) {
-	// Unknown tools fall back to the title-cased leaf — NEVER raw "fn(" syntax.
+	// Unknown tools fall back to the RAW internal name — NEVER raw "fn(" syntax, and
+	// NOT title-cased (presentation/tools.ts: the fallback is `{ label: name }`).
 	got := presentTool("some.exotic.tool")
-	if got != "Tool" {
-		t.Errorf("presentTool unknown leaf = %q, want title-cased leaf Tool", got)
+	if got != "some.exotic.tool" {
+		t.Errorf("presentTool unknown leaf = %q, want raw internal name some.exotic.tool", got)
 	}
 	for _, name := range []string{"some.exotic.thing", "weird"} {
 		if p := presentTool(name); contains(p, "(") {

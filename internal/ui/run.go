@@ -8,6 +8,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/terminal"
+	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
 // run.go is the cockpit entrypoint matching the cli.CockpitRunner seam signature:
@@ -19,6 +20,11 @@ import (
 // main.go registers this as `cli.Options.Cockpit = ui.Run` so the TTY path launches
 // it (see cmd/daintree-assistant/main.go).
 func Run(ctx context.Context, a *app.App) error {
+	// Play the boot animation OUTSIDE Bubble Tea, then start the program with a stable
+	// short footer (see boot_splash.go for why this — not a tall animated View() — is
+	// the correct pattern for an inline cockpit). No-op on non-TTY / tiny terminals.
+	playBootSplash(ctx, os.Stdout, theme.Resolve())
+
 	pump := newEventPump()
 	m := newModel(ctx, a, pump)
 

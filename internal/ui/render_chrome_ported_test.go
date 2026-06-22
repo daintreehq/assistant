@@ -127,8 +127,16 @@ func TestStatusLine_IdleIsEmpty(t *testing.T) {
 	}
 }
 
+// workingBadge is the structured active-agent badge equivalent of the original's
+// still_working watcher (tone "active", UPPERCASE "WORKING", supervised id "term_8").
+func workingBadge() statusParams {
+	return statusParams{ActiveTone: "active", ActiveLabel: "WORKING", ActiveID: "term_8"}
+}
+
 func TestStatusLine_NoMcpNoTierToken(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{ActiveAgent: "WORKING term_8", Agents: 1}, 80))
+	p := workingBadge()
+	p.Agents = 1
+	out := stripAnsi(renderStatusLine(darkTheme(), p, 80))
 	if strings.Contains(out, "MCP") {
 		t.Errorf("status must not show an MCP token while healthy: %q", out)
 	}
@@ -138,9 +146,17 @@ func TestStatusLine_NoMcpNoTierToken(t *testing.T) {
 }
 
 func TestStatusLine_PrefersActiveAgentNoOrphanSep(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{ActiveAgent: "WORKING term_8", Agents: 1}, 80))
+	p := workingBadge()
+	p.Agents = 1
+	out := stripAnsi(renderStatusLine(darkTheme(), p, 80))
 	if !strings.Contains(out, "WORKING") || !strings.Contains(out, "term_8") {
 		t.Errorf("active agent badge + terminal missing: %q", out)
+	}
+	// The badge is built from tone+label: a leading tone glyph (◌ for active) precedes
+	// the UPPERCASE label, exactly as StatusLine.tsx inlines the StateBadge — NOT the
+	// old flat "WORKING term_8" string.
+	if !strings.Contains(out, "◌ WORKING") {
+		t.Errorf("active badge must lead with the tone glyph: %q", out)
 	}
 	if !strings.Contains(out, "agents 1") {
 		t.Errorf("compact rollup count missing: %q", out)
@@ -152,9 +168,9 @@ func TestStatusLine_PrefersActiveAgentNoOrphanSep(t *testing.T) {
 
 func TestStatusLine_NarrowDropsModelKeepsContext(t *testing.T) {
 	// A narrow active line drops the model id but keeps CTX pressure.
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{
-		HasUsage: true, ContextPct: 42, Model: "glm-5p2", ActiveAgent: "WORKING term_8",
-	}, 50))
+	p := workingBadge()
+	p.HasUsage, p.ContextPct, p.Model = true, 42, "glm-5p2"
+	out := stripAnsi(renderStatusLine(darkTheme(), p, 50))
 	if !strings.Contains(out, "CTX 42%") {
 		t.Errorf("context pressure must survive the squeeze: %q", out)
 	}

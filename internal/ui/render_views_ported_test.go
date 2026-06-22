@@ -257,7 +257,7 @@ func TestOps_FocusedPanelRendersOnlyThatSection(t *testing.T) {
 		{PanelWatchers, "AGENTS", "term_8"},
 		{PanelInbox, "NEEDS ATTENTION", "Tests failed in term_8"},
 		{PanelTimers, "SCHEDULED", "nudge"},
-		{PanelAudit, "RECENT", "Push"}, // Go humanizes the audit tool name (presentTool)
+		{PanelAudit, "RECENT", "git.push"}, // raw tool name (OperationsView.tsx shows r.toolName verbatim)
 	}
 	allLabels := []string{"NEEDS ATTENTION", "AGENTS", "SCHEDULED", "RECENT"}
 	for _, c := range cases {
