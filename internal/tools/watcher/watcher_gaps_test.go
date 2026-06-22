@@ -65,30 +65,62 @@ func TestTerminalCreateWatchConditionMatrix(t *testing.T) {
 // WATCHER_REQUIRES_INTERACTIVE and inserts nothing. Watchers do NOT resume
 // across sessions (unlike timers).
 func TestTerminalCreateLifecycleNotice(t *testing.T) {
-	st := &memStore{}
-	tool := find(Tools(Deps{Store: st}), "watcher.terminal.create")
 	args := json.RawMessage(`{"terminalIds":["t1"],"title":"build","goal":"green"}`)
 
+	// Each sub-case gets a fresh store so its insert count is unambiguous.
 	on := true
-	running := tool.Handle(context.Background(), args, ctxDaemon(&on))
+	stOn := &memStore{}
+	running := find(Tools(Deps{Store: stOn}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(&on))
 	if !running.Ok || !strings.Contains(running.Summary, "session-scoped") ||
 		!strings.Contains(running.Summary, "does not resume") ||
 		strings.Contains(running.Summary, "scheduler is NOT running") {
 		t.Fatalf("running note: %q", running.Summary)
 	}
+	if len(stOn.inserted) != 1 {
+		t.Fatalf("running should insert exactly one watcher, got %d", len(stOn.inserted))
+	}
 
 	off := false
-	stopped := tool.Handle(context.Background(), args, ctxDaemon(&off))
+	stOff := &memStore{}
+	stopped := find(Tools(Deps{Store: stOff}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(&off))
 	if stopped.Ok || stopped.Error.Code != codeWatcherRequiresInteractive || stopped.Error.Recoverable {
 		t.Fatalf("stopped: expected non-retryable %s, got %+v", codeWatcherRequiresInteractive, stopped)
 	}
-	if len(st.inserted) != 1 {
-		t.Fatalf("stopped must not insert a watcher row, got %d total inserts", len(st.inserted))
+	if len(stOff.inserted) != 0 {
+		t.Fatalf("stopped must not insert a watcher row, got %d", len(stOff.inserted))
 	}
 
-	absent := tool.Handle(context.Background(), args, ctxDaemon(nil))
+	absent := find(Tools(Deps{Store: &memStore{}}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(nil))
 	if !absent.Ok || !strings.Contains(absent.Summary, "session-scoped") {
 		t.Fatalf("absent note: %q", absent.Summary)
+	}
+}
+
+// Arg validation must run before the daemon gate, so a call with both invalid
+// args and an inactive daemon reports INVALID_ARGS — not
+// WATCHER_REQUIRES_INTERACTIVE — and inserts nothing.
+func TestWatcherCreateArgsBeatDaemonGate(t *testing.T) {
+	off := false
+	cases := []struct {
+		tool string
+		args string
+	}{
+		{"watcher.terminal.create", `{"terminalIds":[],"title":"x","goal":"g"}`},
+		{"watcher.watchPR", `{"prNumber":0}`},
+	}
+	for _, tc := range cases {
+		st := &memStore{}
+		res := find(Tools(Deps{Store: st}), tc.tool).
+			Handle(context.Background(), json.RawMessage(tc.args), ctxDaemon(&off))
+		if res.Ok || res.Error.Code != codeInvalidArgs {
+			t.Fatalf("%s: expected %s to beat the daemon gate, got %+v", tc.tool, codeInvalidArgs, res)
+		}
+		if len(st.inserted) != 0 {
+			t.Fatalf("%s: invalid args must not insert, got %d", tc.tool, len(st.inserted))
+		}
 	}
 }
 
