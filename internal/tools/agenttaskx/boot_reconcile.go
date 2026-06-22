@@ -76,20 +76,39 @@ func BootReconcile(ctx context.Context, mcp MCPClient, store BootStore, q BootQu
 		if !live[tid] {
 			continue
 		}
-		args := domain.QueuePublishArgs{
-			Source:   domain.SourceSystem,
-			Severity: domain.SeverityAttention,
-			Title:    "Unsupervised agent from a previous session: " + l.Title,
-			Summary: fmt.Sprintf("Terminal %s (%s) is still running, but its supervision ended when the previous "+
+		// Carry the original mode + worktree into the re-attach so the daemon's
+		// completion gate matches how the agent was launched (explore ⇒ no file
+		// changes expected; edit ⇒ git-clean check scoped to the worktree) rather than
+		// a blind "edit" default against the active worktree.
+		actionArgs := map[string]any{"terminalId": tid}
+		if wt := orStr(l.WorktreeID, ""); wt != "" {
+			actionArgs["worktreeId"] = wt
+		}
+		if l.Mode != "" {
+			actionArgs["spawnMode"] = l.Mode
+		}
+		// A confirmed saga may have been launched WITHOUT a supervisor (watcherId nil)
+		// or had one the session sweep cancelled — word the rationale to match so we
+		// never claim supervision "ended" for an agent that was never supervised.
+		summary := fmt.Sprintf("Terminal %s (%s) is still running but has no supervisor attached. "+
+			"Re-attach a supervisor to verify completion, or close the terminal if the work is done.", tid, l.AgentID)
+		if l.WatcherID != nil && *l.WatcherID != "" {
+			summary = fmt.Sprintf("Terminal %s (%s) is still running, but its supervision ended when the previous "+
 				"session closed. Re-attach a supervisor to resume verification, or close the terminal if the work is done.",
-				tid, l.AgentID),
+				tid, l.AgentID)
+		}
+		args := domain.QueuePublishArgs{
+			Source:        domain.SourceSystem,
+			Severity:      domain.SeverityAttention,
+			Title:         "Unsupervised agent from a previous session: " + l.Title,
+			Summary:       summary,
 			Target:        &domain.EventTarget{TerminalID: tid, WorktreeID: orStr(l.WorktreeID, "")},
 			DedupeKey:     "orphan-terminal:" + tid,
 			EpistemicKind: domain.EpistemicInferred,
 			RecommendedActions: []domain.RecommendedAction{{
 				Label:                "Re-attach supervision",
 				ToolName:             "agentTask.superviseTerminal",
-				Args:                 map[string]any{"terminalId": tid},
+				Args:                 actionArgs,
 				Risk:                 domain.RiskTerminal,
 				RequiresConfirmation: true,
 			}},

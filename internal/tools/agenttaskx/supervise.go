@@ -82,7 +82,10 @@ func superviseTerminal(deps Deps, a *superviseArgs) tools.ToolResult {
 	}
 
 	// Dedup: an active supervisor already targeting this terminal ⇒ reuse it rather
-	// than stacking a second watcher on the same agent (idempotent re-attach).
+	// than stacking a second watcher on the same agent (idempotent re-attach). Best-
+	// effort, mirroring the workflow.startWorkOnIssue attach: a ListWatchers error is
+	// non-fatal and we fall through to insert — a rare transient scan failure should
+	// not block adopting a running agent, and the common path has no duplicate.
 	if existing, err := deps.DB.ListWatchers("active"); err == nil {
 		for i := range existing {
 			w := &existing[i]

@@ -2,6 +2,7 @@ package agenttaskx
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -140,6 +141,79 @@ func TestBootReconcilePublishErrorReturned(t *testing.T) {
 	q := &bootQueueFake{err: errBoom("queue full")}
 	if err := runBoot(mcp, store, q); err == nil {
 		t.Fatalf("a publish error should propagate for logging")
+	}
+}
+
+func TestBootReconcileRecommendedActionPreservesLaunchContext(t *testing.T) {
+	wt := "wt-A"
+	tid := "term_7"
+	launch := domain.AgentLaunchRecord{
+		Title: "Look around", AgentID: "claude", Stage: domain.LaunchConfirmed,
+		TerminalID: &tid, WorktreeID: &wt, Mode: "explore",
+	}
+	mcp := &scriptMCP{connected: true, listResult: terminalListResult(map[string]any{"id": "term_7"})}
+	q := &bootQueueFake{}
+	if err := runBoot(mcp, bootStoreFake{launches: []domain.AgentLaunchRecord{launch}}, q); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.published) != 1 {
+		t.Fatalf("want 1 event, got %d", len(q.published))
+	}
+	args, ok := q.published[0].RecommendedActions[0].Args.(map[string]any)
+	if !ok {
+		t.Fatalf("recommended action args should be a map, got %T", q.published[0].RecommendedActions[0].Args)
+	}
+	// The re-attach must carry the original mode + worktree, not a blind edit default.
+	if args["terminalId"] != "term_7" || args["spawnMode"] != "explore" || args["worktreeId"] != "wt-A" {
+		t.Fatalf("re-attach args must preserve launch context, got %v", args)
+	}
+}
+
+func TestBootReconcileMessageDistinguishesNeverSupervised(t *testing.T) {
+	tid := "term_7"
+	live := func() *scriptMCP {
+		return &scriptMCP{connected: true, listResult: terminalListResult(map[string]any{"id": "term_7"})}
+	}
+
+	// Never supervised (watcherId nil) ⇒ must NOT claim supervision ended.
+	q1 := &bootQueueFake{}
+	if err := runBoot(live(), bootStoreFake{launches: []domain.AgentLaunchRecord{
+		confirmedLaunch("Fix", "claude", "term_7"),
+	}}, q1); err != nil {
+		t.Fatal(err)
+	}
+	if len(q1.published) != 1 {
+		t.Fatalf("want 1 event, got %d", len(q1.published))
+	}
+	if s := q1.published[0].Summary; !strings.Contains(s, "no supervisor attached") || strings.Contains(s, "supervision ended") {
+		t.Fatalf("never-supervised summary wrong: %q", s)
+	}
+
+	// Previously supervised (watcherId set) ⇒ wording reflects that supervision ended.
+	wid := "wch_1"
+	q2 := &bootQueueFake{}
+	if err := runBoot(live(), bootStoreFake{launches: []domain.AgentLaunchRecord{
+		{Title: "Fix", AgentID: "claude", Stage: domain.LaunchConfirmed, TerminalID: &tid, WatcherID: &wid},
+	}}, q2); err != nil {
+		t.Fatal(err)
+	}
+	if len(q2.published) != 1 {
+		t.Fatalf("want 1 event, got %d", len(q2.published))
+	}
+	if s := q2.published[0].Summary; !strings.Contains(s, "supervision ended") {
+		t.Fatalf("previously-supervised summary should note supervision ended: %q", s)
+	}
+}
+
+func TestBootReconcileTerminalListIsError(t *testing.T) {
+	mcp := &scriptMCP{connected: true, listResult: MCPCallResult{IsError: true}}
+	store := bootStoreFake{launches: []domain.AgentLaunchRecord{confirmedLaunch("Fix", "claude", "term_7")}}
+	q := &bootQueueFake{}
+	if err := runBoot(mcp, store, q); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.published) != 0 {
+		t.Fatalf("a terminal.list error response must yield no events, got %d", len(q.published))
 	}
 }
 
