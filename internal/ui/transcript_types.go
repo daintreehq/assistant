@@ -92,26 +92,28 @@ type TurnCell struct {
 	Ts             int64
 
 	// FlushedRows is the count of this turn's rendered rows (against the canonical
-	// activeTurnRows form: leading blank separator + LeftPad-indented body) already
-	// committed to native scrollback by the incremental-flush path (update.go). The
-	// streaming "output stopped then repeated" bug came from the whole in-flight turn
-	// living in the live footer and GROWING row by row — in inline mode a View taller
-	// than the screen scrolls its own top into native scrollback, freezing a PARTIAL
-	// copy (caret and all) there. The fix keeps the footer ~constant-height by
-	// tea.Println'ing each turn row the instant it goes FINAL (won't change) and
-	// advancing FlushedRows; the footer then renders only rows >= FlushedRows, and the
-	// seal commits only rows >= FlushedRows (so the flushed prefix is never committed
-	// twice). See flushActiveTurn / liveCellsView / sealedBlock.
+	// activeTurnRows form: leading blank separator + body, UN-indented — LeftPad is added
+	// at commit + footer-assembly so the COUNT matches both) already committed to native
+	// scrollback by the incremental row flush (flush.go). The inline cockpit anchors its
+	// View at the bottom; if the live View grows taller than the terminal the host scrolls
+	// its own top into scrollback, freezing a partial copy. So each completed (FINAL) row
+	// of the active turn is tea.Println'd the instant it can no longer change, advancing
+	// FlushedRows; the footer renders only rows >= FlushedRows and the seal commits only
+	// rows >= FlushedRows. The footer therefore stays ~[in-progress line + status +
+	// composer] tall and completed lines flow into native scrollback AS THEY STREAM (the
+	// host scrolls them up, the input stays pinned) — exactly the desired behaviour.
+	//
+	// The streaming caret rides ONLY the live LAST step (render_turn.go), so a flushed row
+	// can never carry a "▌"; the flushed rows are therefore byte-identical to what the seal
+	// re-renders, and sealTail strips them exactly — no duplication.
 	FlushedRows int
 
-	// flushedRowsText is the exact canonical rows[0:FlushedRows] (un-indented, "\n"-
-	// joined) that were committed to scrollback. It is the REFLOW guard: markdown
-	// (glamour) can re-wrap an already-flushed prefix as more text streams in (a
-	// numbered list joins into one reflowing paragraph), which would make the next
-	// flush splice MISALIGNED rows. Before advancing we require the fresh render's
-	// prefix to still equal this; if it diverged we hold (the seal commits the whole
-	// remaining tail consistently). Greedy wrapCells prose never diverges, so the
-	// common case always advances.
+	// flushedRowsText is the exact canonical rows[0:FlushedRows] (un-indented, "\n"-joined)
+	// already committed. It is the REFLOW guard: glamour can re-wrap an already-flushed
+	// prefix as more text streams in (a numbered list joining into one paragraph). Before
+	// advancing we require the fresh render's prefix to still equal this; if it diverged we
+	// HOLD (the seal commits the whole remaining tail consistently). Greedy word-wrapped
+	// prose — the common case — never diverges, so it always advances.
 	flushedRowsText string
 }
 

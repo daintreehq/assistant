@@ -5,139 +5,201 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
-
-	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// flush_test.go locks the incremental scrollback flush (flush.go): the active turn's
-// completed rows commit to native scrollback AS THEY STREAM so the live View stays
-// ~constant-height, and the seal commits ONLY the un-flushed tail so the flushed
-// prefix is never duplicated (the "output stopped then repeated" bug).
+// flush_test.go locks the INCREMENTAL ROW FLUSH (flush.go): the active turn's STABLE
+// completed-line rows commit to native scrollback AS THEY STREAM (auto-scroll) while the
+// still-reflowing in-progress paragraph stays in the footer; flushed rows carry no caret
+// and are byte-identical to the seal's render, so nothing is duplicated.
 
-// proseModel builds a steady-state-ish model with one active, streaming prose turn of
-// the given text. commitArmed + headerDone are set so the flush gate is open.
-func proseModel(text string, streaming bool) (Model, *TurnCell) {
+func armedModel(turn *TurnCell) Model {
 	m := testModel(80)
 	m.commitArmed = true
 	m.queue.headerDone = true
-	t := &TurnCell{
-		ID:    "turn_1",
-		State: TurnActive,
-		Steps: []TurnStep{{Kind: StepProse, Text: text, Streaming: streaming}},
-	}
-	m.transcript = []TranscriptCell{{Turn: t}}
-	m.activeTurn = "turn_1"
-	return m, t
+	m.transcript = []TranscriptCell{{Turn: turn}}
+	m.activeTurn = turn.ID
+	return m
 }
 
-// longProse is a single paragraph that wraps to many rows at width 80 (greedy
-// wrapCells — earlier rows stable as more text appends, the case the flush targets).
-const longProse = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen"
+func proseStep(text string, streaming bool) TurnStep {
+	return TurnStep{Kind: StepProse, Text: text, Streaming: streaming}
+}
 
-// TestFlush_AdvancesAndFooterShrinks proves a streaming prose turn flushes its leading
-// rows (FlushedRows advances) and the live footer then renders only the tail — never
-// the whole turn — so the View can't grow unbounded.
-func TestFlush_AdvancesAndFooterShrinks(t *testing.T) {
-	m, turn := proseModel(longProse, true)
+func toolStep(id, name, detail string, state ActivityState) TurnStep {
+	return TurnStep{Kind: StepTool, Activity: &Activity{ID: id, Name: name, Detail: detail, State: state, EndedAt: 180}}
+}
 
-	rows := m.activeTurnRows(turn)
-	if len(rows) < 3 {
-		t.Fatalf("expected the long prose to wrap to several rows, got %d: %q", len(rows), rows)
-	}
+func streamingProse(text string) (Model, *TurnCell) {
+	turn := &TurnCell{ID: "turn_1", UserText: "QUESTIONX", State: TurnActive, Steps: []TurnStep{proseStep(text, true)}}
+	return armedModel(turn), turn
+}
 
-	cmd := m.flushActiveTurn()
-	if cmd == nil {
-		t.Fatal("flushActiveTurn returned nil — a streaming multi-row prose turn must flush")
-	}
-	if turn.FlushedRows == 0 {
-		t.Fatal("FlushedRows did not advance after a flush")
-	}
-	// Conservative rule: all-but-the-last row flushes while streaming.
-	if turn.FlushedRows != len(rows)-1 {
-		t.Errorf("FlushedRows = %d, want %d (all-but-last while streaming)", turn.FlushedRows, len(rows)-1)
-	}
+// TestFlush_StableParasFlow proves completed PARAGRAPHS flush to scrollback while streaming
+// and the in-progress paragraph stays in the short footer tail (auto-scroll, constant-ht).
+func TestFlush_StableParasFlow(t *testing.T) {
+	// Two completed paragraphs + an in-progress third paragraph (no trailing "\n\n").
+	m, turn := streamingProse("ALPHALINE first completed paragraph.\n\nBETALINE second completed paragraph.\n\nGAMMALIVE still typing")
 
-	// The live footer now renders ONLY the tail (rows >= FlushedRows), not the whole turn.
-	live := m.liveCellsView(m.contentW())
-	liveRows := strings.Count(strings.TrimRight(live, "\n"), "\n") + 1
-	if liveRows > 2 {
-		t.Errorf("live footer is %d rows after flush; want <= 2 (the live tail only):\n%s", liveRows, ansi.Strip(live))
+	final := m.activeTurnFinalRows(turn)
+	flushedChunk := strings.Join(final[turn.FlushedRows:], "\n")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("a streaming turn with completed paragraphs must flush")
+	}
+	if turn.FlushedRows != len(final) {
+		t.Errorf("FlushedRows = %d, want %d (all stable rows)", turn.FlushedRows, len(final))
+	}
+	// The flushed stable chunk carries the completed paragraphs but NOT the in-progress one.
+	if !strings.Contains(ansi.Strip(flushedChunk), "ALPHALINE") || !strings.Contains(ansi.Strip(flushedChunk), "BETALINE") {
+		t.Errorf("flushed chunk missing a completed paragraph:\n%s", ansi.Strip(flushedChunk))
+	}
+	if strings.Contains(ansi.Strip(flushedChunk), "GAMMALIVE") {
+		t.Errorf("the in-progress paragraph must NOT be flushed:\n%s", ansi.Strip(flushedChunk))
+	}
+	if strings.Contains(flushedChunk, "▌") {
+		t.Errorf("flushed rows must not carry the caret:\n%s", ansi.Strip(flushedChunk))
+	}
+	// The footer now holds only the in-progress paragraph (the caret tail) — short.
+	live := ansi.Strip(m.liveCellsView(m.contentW()))
+	if strings.Contains(live, "ALPHALINE") {
+		t.Errorf("a flushed paragraph is still in the live footer:\n%s", live)
+	}
+	if !strings.Contains(live, "GAMMALIVE") {
+		t.Errorf("the in-progress paragraph must remain in the footer:\n%s", live)
 	}
 }
 
-// TestFlush_NoDuplicateOnSeal proves the flushed prefix is committed exactly once: the
-// seal commits ONLY rows >= FlushedRows, so concatenating the flushed Println text with
-// the sealed block reconstructs the whole turn with NO repeated rows.
-func TestFlush_NoDuplicateOnSeal(t *testing.T) {
-	m, turn := proseModel(longProse, true)
-
-	// Stream-flush.
-	_ = m.flushActiveTurn()
-	flushedN := turn.FlushedRows
-	if flushedN == 0 {
-		t.Fatal("expected a flush to advance FlushedRows")
+// TestFlush_NoDupAcrossSeal proves the flushed stable prefix + the sealed tail reconstruct
+// the whole turn with every distinctive token EXACTLY ONCE and no caret.
+func TestFlush_NoDupAcrossSeal(t *testing.T) {
+	m, turn := streamingProse("ALPHALINE first paragraph.\n\nBETALINE second paragraph.\n\nGAMMALIVE final paragraph still going")
+	final := m.activeTurnFinalRows(turn)
+	flushedChunk := ansi.Strip(strings.Join(final[turn.FlushedRows:], "\n"))
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("expected a flush")
 	}
-	flushedText := turn.flushedRowsText
 
-	// Seal the turn (prose finalizes), then build the sealed block.
 	turn.sealProse()
 	turn.State = TurnComplete
 	blk := m.sealedBlock(0)
+	sealed := ansi.Strip(blk.Rendered)
 
-	// The sealed block must NOT contain the flushed prefix's first line (no double-commit).
-	flushedFirst := strings.TrimSpace(ansi.Strip(strings.SplitN(flushedText, "\n", 3)[1])) // row 0 is the blank separator
-	sealedPlain := ansi.Strip(blk.Rendered)
-	if flushedFirst != "" && strings.Contains(sealedPlain, flushedFirst) {
-		t.Errorf("sealed block re-commits an already-flushed line %q — duplication:\n%s", flushedFirst, sealedPlain)
+	for _, w := range []string{"ALPHALINE", "BETALINE"} {
+		if strings.Contains(sealed, w) {
+			t.Errorf("sealed tail re-commits already-flushed token %q:\n%s", w, sealed)
+		}
 	}
-
-	// Reconstruct: flushed text + sealed tail must cover every wrapped row exactly once.
-	combined := ansi.Strip(flushedText) + "\n" + sealedPlain
-	for _, word := range []string{"Alpha", "eighteen"} {
-		if n := strings.Count(combined, word); n != 1 {
-			t.Errorf("word %q appears %d times across flush+seal, want exactly 1", word, n)
+	combined := flushedChunk + "\n" + sealed
+	if strings.Contains(combined, "▌") {
+		t.Errorf("a caret leaked into committed scrollback:\n%s", combined)
+	}
+	for _, w := range []string{"QUESTIONX", "ALPHALINE", "BETALINE", "GAMMALIVE"} {
+		if n := strings.Count(combined, w); n != 1 {
+			t.Errorf("token %q appears %d times across flush+seal, want exactly 1", w, n)
 		}
 	}
 }
 
-// TestFlush_HeldWhileToolActive proves the conservative rule: a turn with a not-done
-// tool flushes NOTHING (tool rows mutate), so nothing is frozen prematurely.
-func TestFlush_HeldWhileToolActive(t *testing.T) {
-	m := testModel(80)
-	m.commitArmed = true
-	m.queue.headerDone = true
-	turn := &TurnCell{
-		ID:    "turn_1",
-		State: TurnActive,
-		Steps: []TurnStep{
-			{Kind: StepProse, Text: "Working on it.\n", Streaming: false},
-			{Kind: StepTool, Activity: &Activity{ID: "a1", Name: "memory.list", State: ActActive}},
-		},
+// TestFlush_SingleParagraphHeld proves a lone in-progress paragraph (no completed line) is
+// NOT flushed — it is held whole in the footer until it seals, then committed once. This is
+// the case that must never freeze a raw partial copy in scrollback.
+func TestFlush_SingleParagraphHeld(t *testing.T) {
+	m, turn := streamingProse("ZEBRAONE a single growing paragraph with no newline yet so it is all in progress GIRAFFEONE")
+	_ = m.flushActiveTurn() // flushes only the preamble (YOU + marker), not the prose
+	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
+	if strings.Contains(final, "ZEBRAONE") {
+		t.Errorf("an in-progress single paragraph must not be in the flushable prefix:\n%s", final)
 	}
-	m.transcript = []TranscriptCell{{Turn: turn}}
-	m.activeTurn = "turn_1"
-
-	if cmd := m.flushActiveTurn(); cmd != nil {
-		t.Error("flushActiveTurn must return nil while a tool is active (tool rows mutate)")
-	}
-	if turn.FlushedRows != 0 {
-		t.Errorf("FlushedRows = %d, want 0 while a tool is active", turn.FlushedRows)
+	// Seal: the paragraph commits exactly once.
+	turn.sealProse()
+	turn.State = TurnComplete
+	blk := m.sealedBlock(0)
+	if n := strings.Count(ansi.Strip(blk.Rendered), "ZEBRAONE"); n != 1 {
+		t.Errorf("sealed paragraph appears %d times, want 1:\n%s", n, ansi.Strip(blk.Rendered))
 	}
 }
 
-// TestFlush_GatedOnMastheadCommitted proves no prose flushes ABOVE the masthead: the
-// flush is held until commitArmed && headerDone.
+// TestFlush_FooterHeightCapped proves the live footer is never tall: even a huge in-progress
+// paragraph (held in the footer, raw) is bounded to maxLiveRows so a flush/commit tea.Println
+// can't dump a tall footer into scrollback (bubbletea#1613).
+func TestFlush_FooterHeightCapped(t *testing.T) {
+	huge := "BIGPARA " + strings.Repeat("word ", 400) // wraps to dozens of rows
+	m, _ := streamingProse(huge)
+	m.rows = 50 // a tall terminal — without the cap the footer would be dozens of rows
+	m.inFlight = true
+	foot := m.footer()
+	n := strings.Count(foot, "\n") + 1
+	if n > maxLiveRows+10 {
+		t.Errorf("footer is %d rows; want <= %d (live cap %d + bottom band)", n, maxLiveRows+10, maxLiveRows)
+	}
+}
+
+// TestFlush_ActiveToolNotFlushed proves an ACTIVE (mutating) tool row is never frozen: the
+// completed content before it flushes incrementally (so the footer doesn't accumulate), but
+// the open tool group stays live in the footer until it settles + closes.
+func TestFlush_ActiveToolNotFlushed(t *testing.T) {
+	turn := &TurnCell{ID: "turn_1", State: TurnActive, Steps: []TurnStep{
+		proseStep("WORKINGPROSE on it.", false), // completed (a tool follows) → flushes
+		toolStep("a1", "memory.list", "TOOLDETAILX", ActActive),
+	}}
+	m := armedModel(turn)
+
+	final := m.activeTurnFinalRows(turn)
+	flushedChunk := ansi.Strip(strings.Join(final[turn.FlushedRows:], "\n"))
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("the completed prose before an active tool must still flush")
+	}
+	if !strings.Contains(flushedChunk, "WORKINGPROSE") {
+		t.Errorf("completed prose should flush:\n%s", flushedChunk)
+	}
+	if strings.Contains(flushedChunk, "TOOLDETAILX") {
+		t.Errorf("an ACTIVE tool row must NOT be flushed (it still mutates):\n%s", flushedChunk)
+	}
+	// The active tool stays in the live footer.
+	if !strings.Contains(ansi.Strip(m.liveCellsView(m.contentW())), "TOOLDETAILX") {
+		t.Error("the active tool must remain in the live footer")
+	}
+}
+
+// TestFlush_GatedOnMastheadCommitted proves no row flushes ABOVE the masthead.
 func TestFlush_GatedOnMastheadCommitted(t *testing.T) {
-	m, _ := proseModel(longProse, true)
-	m.queue.headerDone = false // masthead not yet committed
+	m, _ := streamingProse("ALPHALINE done.\nBETALINE live")
+	m.queue.headerDone = false
 	if cmd := m.flushActiveTurn(); cmd != nil {
-		t.Error("flushActiveTurn must return nil before the masthead is committed (no prose above the masthead)")
+		t.Error("flushActiveTurn must return nil before the masthead is committed")
 	}
 	m.queue.headerDone = true
-	m.commitArmed = false // commits not yet armed
+	m.commitArmed = false
 	if cmd := m.flushActiveTurn(); cmd != nil {
 		t.Error("flushActiveTurn must return nil before commits are armed")
 	}
 }
 
-var _ = domain.PhaseReceived
+// TestFlush_LeftPadConsistent proves the STREAMING footer prose sits at the same LeftPad
+// inset as the committed scrollback — so it never jumps a column on seal.
+func TestFlush_LeftPadConsistent(t *testing.T) {
+	m, turn := streamingProse("ALPHAWORD here is a streaming answer line")
+	m.rows = 30
+	m.inFlight = true
+	foot := ansi.Strip(m.footer())
+	var liveLine string
+	for _, l := range strings.Split(foot, "\n") {
+		if strings.Contains(l, "ALPHAWORD") {
+			liveLine = l
+			break
+		}
+	}
+	if liveLine == "" {
+		t.Fatalf("streaming prose not found in footer:\n%s", foot)
+	}
+	if !strings.HasPrefix(liveLine, strings.Repeat(" ", LeftPad)) {
+		t.Errorf("streaming prose is not LeftPad-inset (%d spaces): %q", LeftPad, liveLine)
+	}
+	turn.sealProse()
+	turn.State = TurnComplete
+	blk := m.sealedBlock(0)
+	for _, l := range strings.Split(ansi.Strip(blk.Rendered), "\n") {
+		if strings.Contains(l, "ALPHAWORD") && !strings.HasPrefix(l, strings.Repeat(" ", LeftPad)) {
+			t.Errorf("committed prose is not LeftPad-inset: %q", l)
+		}
+	}
+}

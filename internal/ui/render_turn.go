@@ -93,32 +93,95 @@ func renderLiveStatus(th theme.Theme, t *TurnCell, spinnerFrame int, now int64) 
 // renderTurn renders the full turn cell: user message, marker, ordered steps
 // (prose as markdown / activity tree / notes), then the live status. md is the
 // theme-bound markdown renderer; width is the content width; now drives live
-// elapsed; expanded reveals raw tool detail.
+// elapsed; expanded reveals raw tool detail. It composes the same preamble +
+// step-range pieces the incremental flush and seal use (renderTurnPreamble /
+// renderTurnSteps), so a turn renders byte-identically whether it streams through
+// the live footer or commits to scrollback.
 func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, contentW int, expanded bool, spinnerFrame int, now int64) string {
-	var b strings.Builder
+	return renderTurnDrop(th, md, t, width, contentW, expanded, spinnerFrame, now, false)
+}
 
-	// The cell owns the single blank line ABOVE it (shared layout rule §3).
+// renderTurnDrop is renderTurn with an extra dropPending switch. When dropPending is set,
+// the live last prose step renders ONLY its stable portion (markdown of the text up to the
+// last newline) and omits the in-progress line + caret + live status. That stable render is
+// IMMUTABLE — it is byte-identical to what the seal will commit for those rows — so the
+// incremental flush commits exactly those rows (never the raw, still-reflowing in-progress
+// paragraph). The full render (dropPending=false) is what the footer and the seal use.
+func renderTurnDrop(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, contentW int, expanded bool, spinnerFrame int, now int64, dropPending bool) string {
+	active := t.State == TurnActive
+	var parts []string
+	// The marker shows once the turn is active OR has said anything (the historical
+	// rule); the live caret rides only the genuinely-live last step (active turn).
+	if pre := renderTurnPreamble(th, t, width, active, active || hasProse(t)); pre != "" {
+		parts = append(parts, pre)
+	}
+	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active, dropPending); body != "" {
+		parts = append(parts, body)
+	}
+	// The live-status line is never part of the flushable (stable) render.
+	if !dropPending {
+		if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
+			parts = append(parts, ls)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// renderTurnPreamble renders the immutable head of a turn: the "YOU" card (when the
+// turn has user text) and the "◆ DAINTREE" marker. markerActive drives the live
+// "· received" suffix (only meaningful while phase == received); showMarker gates the
+// marker line. The result has NO leading/trailing blank — callers join it with the
+// step body. This is the unit the incremental flush commits ONCE (it never changes
+// after the turn starts responding), so the live footer can stop re-rendering it.
+func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, showMarker bool) string {
+	var b strings.Builder
 	if um := renderUserMessage(th, t.UserText, width); um != "" {
 		b.WriteString(um)
 		// UserMessageCard.tsx marginBottom={1}: a blank line separates the YOU card
 		// from the ◆ DAINTREE marker so the exchange breathes.
 		b.WriteString("\n\n")
 	}
-
-	active := t.State == TurnActive
-	// The marker shows once the turn is active OR has said anything.
-	if active || hasProse(t) {
-		b.WriteString(renderMarker(th, t.Phase, active))
-		b.WriteByte('\n')
+	if showMarker {
+		b.WriteString(renderMarker(th, t.Phase, markerActive))
 	}
+	return strings.TrimRight(b.String(), "\n")
+}
 
-	// Ordered steps: prose as styled markdown, tools as branch rows, notes inline.
-	toolGroup := collectToolGroups(t)
+// renderTurnSteps renders the ordered steps in the half-open range [from, to) of the
+// turn (to < 0 means "to the end"): prose as styled markdown, contiguous tool runs as
+// one branch tree, notes inline. liveLast governs the streaming caret: the caret rides
+// ONLY the turn's genuine last step (global index len(Steps)-1) and ONLY when liveLast
+// is set — so an earlier prose step that streamed before a tool batch renders as FINAL
+// markdown (no caret), even though its sticky Streaming flag is still true. This is the
+// fix for the "frozen ▌ in scrollback" half of the streaming-duplication bug: the flush
+// renders its range with liveLast=false, so it can never freeze a caret-bearing row.
+//
+// Tool grouping is computed over the sub-range; the incremental flush only ever passes a
+// range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
+// branch tree is never split across the flush frontier.
+func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast, dropPending bool) string {
+	steps := t.Steps
+	if to < 0 || to > len(steps) {
+		to = len(steps)
+	}
+	if from < 0 {
+		from = 0
+	}
+	if from >= to {
+		return ""
+	}
+	sub := steps[from:to]
+	lastIdx := len(steps) - 1
+
+	var b strings.Builder
+	groups := collectToolGroups(sub)
 	gi := 0
-	for _, step := range t.Steps {
+	for li := range sub {
+		step := sub[li]
 		switch step.Kind {
 		case StepProse:
-			if rendered := renderProse(md, step, contentW); rendered != "" {
+			live := liveLast && from+li == lastIdx
+			if rendered := renderProse(md, step, contentW, live, live && dropPending); rendered != "" {
 				b.WriteString(rendered)
 				if !strings.HasSuffix(rendered, "\n") {
 					b.WriteByte('\n')
@@ -127,8 +190,8 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 		case StepTool:
 			// A contiguous run of tool steps renders as one branch tree; only the
 			// FIRST step of a group emits the whole group (so last-branch math works).
-			if gi < len(toolGroup) && toolGroup[gi].first == step.Activity {
-				b.WriteString(renderToolGroup(th, toolGroup[gi].acts, expanded, spinnerFrame, now, width))
+			if gi < len(groups) && groups[gi].first == sub[li].Activity {
+				b.WriteString(renderToolGroup(th, groups[gi].acts, expanded, spinnerFrame, now, width))
 				b.WriteByte('\n')
 				gi++
 			}
@@ -140,13 +203,7 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 		}
 	}
 
-	if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
-		b.WriteString(ls)
-		b.WriteByte('\n')
-	}
-
-	out := strings.TrimRight(b.String(), "\n")
-	return out
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // hasProse reports whether the turn has produced any prose text yet.
@@ -159,29 +216,50 @@ func hasProse(t *TurnCell) bool {
 	return false
 }
 
-// renderProse renders one prose step. A streaming step splits at the last newline:
-// the stable block renders as styled markdown, the trailing in-progress line as raw
-// text + a dim caret. A finalized step renders the whole thing as markdown.
-func renderProse(md *markdown.Renderer, step TurnStep, contentW int) string {
+// renderProse renders one prose step. When live (the genuinely-streaming last step of
+// an active turn), it splits at the last newline: the stable block renders as styled
+// markdown, the trailing in-progress line as raw text + a "▌" caret (no per-token
+// markdown re-parse). When NOT live — a finalized step, OR an earlier prose step that
+// streamed before a tool batch — the whole thing renders as markdown with NO caret.
+// `live` is decided by POSITION (is this the turn's last step), never by the step's
+// sticky Streaming flag, so a caret can never be frozen mid-turn into scrollback.
+func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live, dropPending bool) string {
 	if step.Text == "" {
 		return ""
 	}
-	if !step.Streaming {
+	if !live {
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
-	// Streaming: split at the last newline.
-	idx := strings.LastIndexByte(step.Text, '\n')
+	// Streaming: split at the last PARAGRAPH boundary ("\n\n"). A markdown paragraph only
+	// renders stably once it is COMPLETE — CommonMark joins single-newline lines into one
+	// reflowing paragraph, so a line boundary is NOT a safe commit point; a blank-line
+	// boundary IS. Completed paragraphs (before the last "\n\n") render as settled markdown;
+	// the in-progress paragraph (after it) renders RAW + caret (no per-token markdown
+	// re-parse — the research guidance: plain in-progress text, markdown only at commit).
+	idx := strings.LastIndex(step.Text, "\n\n")
 	if idx < 0 {
-		// Single in-progress line: raw text + caret (no markdown re-parse per token).
-		// Wrap to the content width so the live line never overflows the gutter.
+		// No completed paragraph yet. dropPending callers (the incremental flush) get
+		// NOTHING — the whole paragraph is still reflowing and must not be committed. The
+		// footer (dropPending=false) shows the raw in-progress paragraph + caret.
+		if dropPending {
+			return ""
+		}
 		return wrapCells(step.Text+" ▌", contentW)
 	}
 	stable := step.Text[:idx]
-	pending := step.Text[idx+1:]
+	stableR := strings.TrimRight(md.Render(stable, contentW, false).ANSI, "\n")
+	if dropPending {
+		// The flush commits ONLY the settled paragraphs — byte-identical to the prefix the
+		// seal will render — so the still-reflowing in-progress paragraph is never frozen.
+		return stableR
+	}
+	pending := strings.TrimLeft(step.Text[idx+2:], "\n")
 	var b strings.Builder
-	b.WriteString(strings.TrimRight(md.Render(stable, contentW, false).ANSI, "\n"))
+	b.WriteString(stableR)
 	if pending != "" {
-		b.WriteByte('\n')
+		// Blank line between the settled paragraphs and the raw in-progress one (the
+		// markdown paragraph gap), so the footer matches how the seal will lay them out.
+		b.WriteString("\n\n")
 		b.WriteString(wrapCells(pending+" ▌", contentW))
 	}
 	return b.String()
@@ -221,18 +299,27 @@ type toolGroup struct {
 	acts  []Activity
 }
 
-// collectToolGroups walks the steps and groups contiguous StepTool runs.
-func collectToolGroups(t *TurnCell) []toolGroup {
+// collectToolGroups walks a step slice and groups contiguous StepTool runs. `first`
+// holds the LIVE Activity pointer of each group's first step (pointer-identity matched
+// by the render loop), so the slice passed in must be a sub-slice of the turn's Steps
+// (not a copy) for the identity check to hold.
+func collectToolGroups(steps []TurnStep) []toolGroup {
 	var groups []toolGroup
 	var cur []Activity
+	var firstPtr *Activity
 	flush := func() {
 		if len(cur) > 0 {
-			groups = append(groups, toolGroup{first: findFirstActivity(t, cur[0].ID), acts: cur})
+			groups = append(groups, toolGroup{first: firstPtr, acts: cur})
 			cur = nil
+			firstPtr = nil
 		}
 	}
-	for _, s := range t.Steps {
+	for i := range steps {
+		s := steps[i]
 		if s.Kind == StepTool && s.Activity != nil {
+			if firstPtr == nil {
+				firstPtr = steps[i].Activity
+			}
 			cur = append(cur, *s.Activity)
 		} else {
 			flush()
@@ -240,17 +327,6 @@ func collectToolGroups(t *TurnCell) []toolGroup {
 	}
 	flush()
 	return groups
-}
-
-// findFirstActivity returns the live Activity pointer for an id (so group matching
-// uses the actual step pointer the renderer iterates over).
-func findFirstActivity(t *TurnCell, id string) *Activity {
-	for i := range t.Steps {
-		if t.Steps[i].Kind == StepTool && t.Steps[i].Activity != nil && t.Steps[i].Activity.ID == id {
-			return t.Steps[i].Activity
-		}
-	}
-	return nil
 }
 
 // renderToolGroup renders a contiguous activity run as a branch tree.

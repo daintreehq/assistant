@@ -19,6 +19,11 @@ const (
 	LeftPad = 1
 	// LiveChromeMaxWidth caps the compact status rollup so it never wraps to 2 rows.
 	LiveChromeMaxWidth = 56
+	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Completed
+	// blocks flush to native scrollback as they stream (flush.go), so the footer only ever
+	// holds the in-flight remainder; capping it small keeps the live View short so a flush/
+	// commit tea.Println can never dump a tall footer into scrollback (bubbletea#1613).
+	maxLiveRows = 8
 )
 
 // gutterFor returns the right gutter: 1 normally, raised to 2 when embedded under

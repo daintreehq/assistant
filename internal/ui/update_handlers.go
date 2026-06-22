@@ -557,11 +557,10 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 
 	// A turn whose leading rows were already incrementally flushed to scrollback (the
 	// streaming-dup fix — flush.go) must commit ONLY the tail not yet in scrollback; the
-	// flushed prefix is already there, so re-committing it would print that prefix a
-	// SECOND time (the very duplication we're fixing). The turn is now SEALED (prose is
-	// re-rendered as final markdown), so its rows can differ from the streaming-time
-	// rows we flushed (re-wrap). We therefore strip the EXACT flushed text
-	// (flushedRowsText) off the front of the final render and commit the remainder.
+	// flushed prefix is already there, so re-committing it would print it a SECOND time
+	// (the very duplication we are fixing). The turn is now SEALED (prose re-renders as
+	// final markdown), so we strip the EXACT flushed text off the front and commit the
+	// remainder. No leading "\n": the tail continues the flushed prefix.
 	if cell.Turn != nil && cell.Turn.FlushedRows > 0 {
 		tail := sealTail(m.activeTurnRows(cell.Turn), cell.Turn.flushedRowsText)
 		if tail == "" {

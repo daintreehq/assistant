@@ -91,12 +91,31 @@ func (m Model) footer() string {
 	// is lost — the host then owns scrolling it, exactly as intended.
 	bottom := m.bottomBand(w)
 	if live := m.liveCellsView(w); live != "" {
-		budget := m.rows - lineCount(bottom) - 2 // reserve the band + one blank separator
+		// Hard-bound the live region so the footer is NEVER tall. Two reasons: (1) a View
+		// taller than the terminal scrolls its own top into native scrollback (a frozen
+		// partial copy); (2) even below that, a tea.Println (a flush/commit) fired while the
+		// footer is tall makes Bubble Tea's insertAbove dump the whole footer into scrollback
+		// off a stale cell-buffer height (charmbracelet/bubbletea#1613). Completed blocks have
+		// already flushed to scrollback (flush.go), so the live tail is only the in-flight
+		// remainder — capping it to maxLiveRows keeps the View small and the host calm.
+		budget := m.rows - lineCount(bottom) - 2 // never exceed the terminal
+		if budget > maxLiveRows {
+			budget = maxLiveRows
+		}
 		if budget < 1 {
 			budget = 1
 		}
-		b.WriteString(lastLines(live, budget))
+		// LeftPad the live region so a STREAMING turn sits at the same left inset as the
+		// committed transcript (sealedBlock indents too). Without this the prose jumped one
+		// column right the instant it sealed — the live footer was rendered flush-left while
+		// scrollback was inset. Indenting here keeps the two states pixel-consistent.
+		b.WriteString(indentLines(lastLines(live, budget), LeftPad))
 		b.WriteString("\n\n")
+	} else {
+		// No live turn (idle, or the turn just sealed into scrollback). Still hold one blank
+		// line above the bottom band so the status line reads as PART OF THE FOOTER — set off
+		// from the committed response above it — instead of glued to the last line of prose.
+		b.WriteByte('\n')
 	}
 	b.WriteString(bottom)
 
@@ -153,12 +172,11 @@ func (m Model) liveCellsView(w int) string {
 		var s string
 		switch {
 		case cell.Turn != nil:
-			// The active turn's leading FlushedRows rows are already in native scrollback
-			// (the incremental flush — flush.go), so render only the live TAIL here. This is
-			// what keeps the footer ~constant-height: as more rows go final and flush,
-			// FlushedRows advances and the tail stays short. We re-derive the SAME canonical
-			// row slice the flush/seal use and join the suffix, dropping the leading blank
-			// separator (row 0) so the live tail doesn't carry an empty top row.
+			// The active turn's already-flushed leading rows live in native scrollback (the
+			// incremental row flush — flush.go), so render only the un-flushed TAIL here. As
+			// more rows go final and flush, FlushedRows advances and the tail stays short, so
+			// the footer never outgrows the terminal. We re-derive the SAME canonical row
+			// slice the flush/seal use and join the suffix.
 			if cell.Turn.ID == m.activeTurn && cell.Turn.FlushedRows > 0 {
 				rows := m.activeTurnRows(cell.Turn)
 				if cell.Turn.FlushedRows >= len(rows) {
