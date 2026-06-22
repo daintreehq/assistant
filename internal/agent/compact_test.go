@@ -172,6 +172,7 @@ func (r *chatCountRouter) Chat(ctx context.Context, tier domain.ModelTier, opts 
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *chatCountRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
+func (r *chatCountRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestAutoCompactsAboveThreshold(t *testing.T) {
 	r := &chatCountRouter{summary: "AUTO_SUMMARY"}

@@ -378,7 +378,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 		// 10d. Usage — computed BEFORE appending the assistant message so
 		//      contextTokens reflects the prompt actually sent.
-		s.emitUsage(result)
+		s.emitUsage()
 
 		// 10e. Append the assistant message (content null on a pure tool-call turn).
 		s.pushMessage(s.assistantMessage(result))
@@ -619,32 +619,48 @@ func (s *Session) assistantMessage(result models.ChatResult) models.ChatMessage 
 	return m
 }
 
-// emitUsage emits the per-round UsageEvent. costUsd is left nil unless the
-// provider reported usage, so the UI shows "no data" not a misleading $0.000.
-func (s *Session) emitUsage(result models.ChatResult) {
-	model := models.BareModelID(s.deps.Router.ModelFor(domain.ModelLarge))
+// emitUsage emits the per-round UsageEvent. It drains the Router-level meter
+// (FlushMeter) and sums EVERY model call made since the last round — the large
+// thread's stream plus the small-tier background work (skill selection, watcher
+// verdicts, extraction, summaries) that previously went unmetered — into one
+// aggregate. CachedTokens is nil unless some tier reported it; CostUsd sums the
+// known per-tier costs (a partial total beats showing nothing) and is nil only
+// when no tier had a known rate, so the UI shows "no data" not a misleading
+// $0.000. Tier/Model stay the large-tier display rollup for the footer label.
+func (s *Session) emitUsage() {
+	tiers := s.deps.Router.FlushMeter()
 	ev := UsageEvent{
 		ContextTokens:    s.estimateTokens(),
 		ContextThreshold: domain.AutoCompactTokenThreshold,
 		ContextWindow:    domain.LargeContextWindowTokens,
 		Tier:             string(domain.ModelLarge),
-		Model:            model,
+		Model:            models.BareModelID(s.deps.Router.ModelFor(domain.ModelLarge)),
+		Tiers:            tiers,
 	}
-	if u := result.Usage; u != nil {
-		prompt := derefInt(u.PromptTokens)
-		completion := derefInt(u.CompletionTokens)
-		total := derefInt(u.TotalTokens)
-		if u.TotalTokens == nil {
-			total = prompt + completion
+	var (
+		anyCost     bool
+		costTotal   float64
+		anyCached   bool
+		cachedTotal int
+	)
+	for _, t := range tiers {
+		ev.PromptTokens += t.PromptTokens
+		ev.CompletionTokens += t.CompletionTokens
+		ev.TotalTokens += t.TotalTokens
+		if t.CostUsd != nil {
+			anyCost = true
+			costTotal += *t.CostUsd
 		}
-		ev.PromptTokens = prompt
-		ev.CompletionTokens = completion
-		ev.TotalTokens = total
-		ev.CachedTokens = u.CachedTokens
-		if cost, ok := models.EstimateCostUsd(s.deps.Router.ModelFor(domain.ModelLarge),
-			prompt, completion, derefInt(u.CachedTokens)); ok {
-			ev.CostUsd = &cost
+		if t.CachedTokens != nil {
+			anyCached = true
+			cachedTotal += *t.CachedTokens
 		}
+	}
+	if anyCached {
+		ev.CachedTokens = &cachedTotal
+	}
+	if anyCost {
+		ev.CostUsd = &costTotal
 	}
 	s.events.Usage(ev)
 }
@@ -964,13 +980,6 @@ func canonicalJSON(raw string) string {
 		return raw
 	}
 	return string(b)
-}
-
-func derefInt(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 // trimSpace trims leading/trailing ASCII+unicode whitespace (avoids importing

@@ -271,14 +271,16 @@ func (c *FireworksClient) Chat(ctx context.Context, opts ChatOptions) (ChatResul
 // JSON runs a strict json_object completion. The caller (the Router) strips think,
 // extracts the balanced JSON span, and parses/validates — here we just return the
 // raw model content (already think-stripped + extracted) for the caller to decode.
-// Returns the cleaned JSON string.
-func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, error) {
+// Returns the cleaned JSON string AND the parsed token usage, so the Router can
+// meter json-path spend the same way it meters Chat/Stream (usage is nil when the
+// provider reported none).
+func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, *Usage, error) {
 	if err := c.guard(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	body, err := c.buildBody(opts, false, true)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	resp, err := retryModelCall(ctx, ModelRetryPolicy, func() (*chatResponse, error) {
 		httpResp, herr := c.doRequest(ctx, body, ModelRequestTimeoutMs)
@@ -293,21 +295,21 @@ func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, e
 		return &parsed, nil
 	})
 	if err != nil {
-		return "", normalizeAbort(ctx, err)
+		return "", nil, normalizeAbort(ctx, err)
 	}
 	// A protocol failure must surface as a real error, not be papered over with an
 	// empty object: an empty-choices response (mirror Chat()'s handling) or empty
 	// content in json_object mode would otherwise hand the caller a silent "{}" that
 	// validates to a misleading empty result. Let the caller see the failure.
 	if len(resp.Choices) == 0 {
-		return "", errors.New("fireworks: empty choices in response")
+		return "", nil, errors.New("fireworks: empty choices in response")
 	}
 	content := resp.Choices[0].Message.Content
 	if content == nil || *content == "" {
-		return "", errors.New("fireworks: empty content in json_object response")
+		return "", nil, errors.New("fireworks: empty content in json_object response")
 	}
 	cleaned := stripThink(*content)
-	return ExtractJson(cleaned), nil
+	return ExtractJson(cleaned), resp.Usage.toUsage(), nil
 }
 
 // ChatStream runs a streaming completion. onToken (may be nil) is called with each

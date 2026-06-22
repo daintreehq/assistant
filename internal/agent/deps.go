@@ -21,6 +21,11 @@ type Router interface {
 	Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error)
 	Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error)
 	ModelFor(tier domain.ModelTier) string
+	// FlushMeter drains the Router's accumulated per-tier usage since the last
+	// flush. emitUsage calls it once per streamed round so the UsageEvent sums
+	// EVERY model call in the turn (large stream + small-tier background work),
+	// not just the large-thread stream result.
+	FlushMeter() []models.TierUsage
 }
 
 // ToolRunner is the tool-registry seam (satisfied by an adapter over

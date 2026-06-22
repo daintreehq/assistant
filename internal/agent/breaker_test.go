@@ -25,6 +25,7 @@ func (r *varyingRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mo
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *varyingRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
+func (r *varyingRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestBreakerDoesNotTripWhenArgsVary(t *testing.T) {
 	// Each call fails (the tool always fails) but with distinct args, so the

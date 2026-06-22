@@ -415,6 +415,7 @@ func (r *cacheKeyRouter) Chat(ctx context.Context, tier domain.ModelTier, opts m
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *cacheKeyRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
+func (r *cacheKeyRouter) FlushMeter() []models.TierUsage   { return nil }
 
 var errSelector = errString("flash model down")
 

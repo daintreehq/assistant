@@ -173,7 +173,7 @@ func TestJSONErrorsOnEmptyChoices(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv.URL)
-	if _, err := c.JSON(context.Background(), ChatOptions{Model: "m",
+	if _, _, err := c.JSON(context.Background(), ChatOptions{Model: "m",
 		Messages: []ChatMessage{TextMessage("user", "x")}}); err == nil {
 		t.Fatal("empty choices must error, not return {}")
 	}
@@ -185,7 +185,7 @@ func TestJSONErrorsOnEmptyContent(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv.URL)
-	if _, err := c.JSON(context.Background(), ChatOptions{Model: "m",
+	if _, _, err := c.JSON(context.Background(), ChatOptions{Model: "m",
 		Messages: []ChatMessage{TextMessage("user", "x")}}); err == nil {
 		t.Fatal("empty content must error in json_object mode, not return {}")
 	}
@@ -198,7 +198,7 @@ func TestJSONHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv.URL)
-	got, err := c.JSON(context.Background(), ChatOptions{Model: "m",
+	got, _, err := c.JSON(context.Background(), ChatOptions{Model: "m",
 		Messages: []ChatMessage{TextMessage("user", "x")}})
 	if err != nil {
 		t.Fatal(err)
