@@ -78,39 +78,67 @@ func (m Model) footer() string {
 		return b.String()
 	}
 
-	// Home (ControlRoom.tsx band order): live cells → StatusLine → Composer, with a
-	// blank line of breathing room between bands. The composer is ALWAYS last — it is
-	// the input the human types into, anchored at the bottom of the live footer. The
-	// status band sits ABOVE it (StatusLine.tsx marginTop={1} + the height={1} spacer);
-	// the approval sheet replaces the status band when a confirmation is pending.
-	live := m.liveCellsView(w)
-	if live != "" {
-		b.WriteString(live)
-	}
-
-	switch {
-	case m.pending != nil:
-		if live != "" {
-			b.WriteString("\n\n")
+	// Home (ControlRoom.tsx band order): the live in-flight turn → StatusLine → Composer.
+	// The status/approval + composer form the FIXED bottom band (always whole); the live
+	// turn sits above it.
+	//
+	// CRITICAL (the streaming "output stopped then repeated" bug): the live View must
+	// NEVER be taller than the terminal. In inline mode, a View taller than the screen
+	// makes the host scroll its top into native scrollback — freezing a PARTIAL copy of
+	// the still-streaming turn there while the rest re-renders below (the duplicate). So
+	// we render the bottom band whole and show only the TAIL of the in-flight turn that
+	// fits above it. The FULL turn commits to scrollback the instant it seals, so nothing
+	// is lost — the host then owns scrolling it, exactly as intended.
+	bottom := m.bottomBand(w)
+	if live := m.liveCellsView(w); live != "" {
+		budget := m.rows - lineCount(bottom) - 2 // reserve the band + one blank separator
+		if budget < 1 {
+			budget = 1
 		}
-		b.WriteString(indentLines(renderApproval(m.theme, m.pending.req, m.pending.showArgs, w), LeftPad))
+		b.WriteString(lastLines(live, budget))
 		b.WriteString("\n\n")
-	default:
-		if sl := m.statusView(w); sl != "" {
-			if live != "" {
-				b.WriteString("\n\n")
-			}
-			b.WriteString(indentLines(sl, LeftPad))
-			b.WriteString("\n\n")
-		} else if live != "" {
-			// A live turn sits above the composer with no status band — keep one blank.
-			b.WriteString("\n\n")
-		}
 	}
-
-	b.WriteString(indentLines(m.composerView(w), LeftPad))
+	b.WriteString(bottom)
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// bottomBand renders the FIXED bottom of the live footer (never truncated): the approval
+// sheet when a confirmation is pending, else the status line (when it has content), then
+// the composer — the input always anchored last.
+func (m Model) bottomBand(w int) string {
+	var b strings.Builder
+	if m.pending != nil {
+		b.WriteString(indentLines(renderApproval(m.theme, m.pending.req, m.pending.showArgs, w), LeftPad))
+		b.WriteString("\n\n")
+	} else if sl := m.statusView(w); sl != "" {
+		b.WriteString(indentLines(sl, LeftPad))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(indentLines(m.composerView(w), LeftPad))
+	return b.String()
+}
+
+// lineCount is the number of text lines in s (0 for empty). Footer content is pre-
+// wrapped to the content width, so one "\n"-delimited line is one display row.
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// lastLines keeps the last n lines of s (the tail), dropping the head. Used to bound the
+// in-flight turn in the footer so the live View can't outgrow the terminal.
+func lastLines(s string, n int) string {
+	if n < 1 {
+		n = 1
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
 // liveCellsView renders the transcript cells still LIVE in the footer (the active
@@ -125,7 +153,21 @@ func (m Model) liveCellsView(w int) string {
 		var s string
 		switch {
 		case cell.Turn != nil:
-			s = renderTurn(m.theme, m.md, cell.Turn, w, cw, m.expanded, m.spinnerFrame, domain.NowMS())
+			// The active turn's leading FlushedRows rows are already in native scrollback
+			// (the incremental flush — flush.go), so render only the live TAIL here. This is
+			// what keeps the footer ~constant-height: as more rows go final and flush,
+			// FlushedRows advances and the tail stays short. We re-derive the SAME canonical
+			// row slice the flush/seal use and join the suffix, dropping the leading blank
+			// separator (row 0) so the live tail doesn't carry an empty top row.
+			if cell.Turn.ID == m.activeTurn && cell.Turn.FlushedRows > 0 {
+				rows := m.activeTurnRows(cell.Turn)
+				if cell.Turn.FlushedRows >= len(rows) {
+					continue // everything rendered so far is already in scrollback
+				}
+				s = strings.Join(rows[cell.Turn.FlushedRows:], "\n")
+			} else {
+				s = renderTurn(m.theme, m.md, cell.Turn, w, cw, m.expanded, m.spinnerFrame, domain.NowMS())
+			}
 			if cell.Turn.Queued {
 				// A dimmed queued follow-up turn.
 				s = m.theme.Dim().Render(s)

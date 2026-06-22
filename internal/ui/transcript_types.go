@@ -90,6 +90,29 @@ type TurnCell struct {
 	Queued         bool            // a follow-up typed while busy: dimmed, promoted in place
 	Reasoning      string          // <think> body, revealed under ^X
 	Ts             int64
+
+	// FlushedRows is the count of this turn's rendered rows (against the canonical
+	// activeTurnRows form: leading blank separator + LeftPad-indented body) already
+	// committed to native scrollback by the incremental-flush path (update.go). The
+	// streaming "output stopped then repeated" bug came from the whole in-flight turn
+	// living in the live footer and GROWING row by row — in inline mode a View taller
+	// than the screen scrolls its own top into native scrollback, freezing a PARTIAL
+	// copy (caret and all) there. The fix keeps the footer ~constant-height by
+	// tea.Println'ing each turn row the instant it goes FINAL (won't change) and
+	// advancing FlushedRows; the footer then renders only rows >= FlushedRows, and the
+	// seal commits only rows >= FlushedRows (so the flushed prefix is never committed
+	// twice). See flushActiveTurn / liveCellsView / sealedBlock.
+	FlushedRows int
+
+	// flushedRowsText is the exact canonical rows[0:FlushedRows] (un-indented, "\n"-
+	// joined) that were committed to scrollback. It is the REFLOW guard: markdown
+	// (glamour) can re-wrap an already-flushed prefix as more text streams in (a
+	// numbered list joins into one reflowing paragraph), which would make the next
+	// flush splice MISALIGNED rows. Before advancing we require the fresh render's
+	// prefix to still equal this; if it diverged we hold (the seal commits the whole
+	// remaining tail consistently). Greedy wrapCells prose never diverges, so the
+	// common case always advances.
+	flushedRowsText string
 }
 
 // NoteCell is a standalone operational note outside any turn.

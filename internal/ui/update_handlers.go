@@ -554,6 +554,25 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 	cell := m.transcript[i]
 	w := m.chromeW()
 	cw := m.contentW()
+
+	// A turn whose leading rows were already incrementally flushed to scrollback (the
+	// streaming-dup fix — flush.go) must commit ONLY the tail not yet in scrollback; the
+	// flushed prefix is already there, so re-committing it would print that prefix a
+	// SECOND time (the very duplication we're fixing). The turn is now SEALED (prose is
+	// re-rendered as final markdown), so its rows can differ from the streaming-time
+	// rows we flushed (re-wrap). We therefore strip the EXACT flushed text
+	// (flushedRowsText) off the front of the final render and commit the remainder.
+	if cell.Turn != nil && cell.Turn.FlushedRows > 0 {
+		tail := sealTail(m.activeTurnRows(cell.Turn), cell.Turn.flushedRowsText)
+		if tail == "" {
+			// The whole turn already streamed into scrollback — nothing left to commit.
+			// Emit an empty block (commitCmd's Println of "" just advances the cursor).
+			return ScrollbackBlock{ID: cell.ID(), Kind: BlockTurn, Rendered: "", Plain: "", Width: w}
+		}
+		tail = indentLines(tail, LeftPad)
+		return ScrollbackBlock{ID: cell.ID(), Kind: BlockTurn, Rendered: tail, Plain: stripAnsi(tail), Width: w}
+	}
+
 	var rendered string
 	var kind ScrollbackKind
 	switch {

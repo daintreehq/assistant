@@ -330,14 +330,18 @@ func (m *Model) addNote(level NoteLevel, text string) {
 }
 
 // afterStateChange is the common tail: schedule the next scrollback commit (if the
-// frontier advanced) and update the composer's busy/focus flags. Returns (model, cmd).
+// frontier advanced), incrementally flush the active turn's newly-final rows to
+// native scrollback (keeps the live View ~constant-height — see flush.go), and update
+// the composer's busy/focus flags. Returns (model, cmd).
 func (m Model) afterStateChange(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	m.syncComposer()
 	commit := m.scheduleCommit()
-	if extra == nil {
-		return m, commit
-	}
-	return m, tea.Batch(extra, commit)
+	// Flush the active turn's completed rows AFTER scheduling the queue commit so the
+	// masthead (queue) is ordered ahead of any prose Println (flushActiveTurn also gates
+	// on headerDone). Emitting the flush in the SAME batch is fine: tea.Println preserves
+	// emit order, and the queue's masthead commit is enqueued first here.
+	flush := m.flushActiveTurn()
+	return m, tea.Batch(extra, commit, flush)
 }
 
 // syncComposer pushes the current busy/focus state into the composer each reduction.
