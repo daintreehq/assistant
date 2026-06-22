@@ -208,3 +208,28 @@ func TestClaimDueTimer_Guard(t *testing.T) {
 		t.Error("a cancelled timer must not be claimable (no resurrection)")
 	}
 }
+
+// TestClaimDueWatcher_Guard mirrors the timer guard for watchers: the daemon's per-check
+// finalize claim succeeds only while the watcher is still 'active', so a watcher cancelled
+// during a check is never re-armed (resurrected).
+func TestClaimDueWatcher_Guard(t *testing.T) {
+	s := openTest(t, 1000)
+	rec, err := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w", Goal: "supervise", TargetsJson: `["term_1"]`,
+		CadenceMs: 5000, ModelTier: domain.ModelSmall, NextCheckAt: 100, Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Active → the re-arm claim succeeds.
+	if ok, err := s.ClaimDueWatcher(rec.ID, map[string]any{"status": "active", "nextCheckAt": int64(200)}); err != nil || !ok {
+		t.Fatalf("active watcher claim should succeed: ok=%v err=%v", ok, err)
+	}
+	// Cancelled under us → the re-arm claim fails (no resurrection).
+	if err := s.UpdateWatcher(rec.ID, map[string]any{"status": "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.ClaimDueWatcher(rec.ID, map[string]any{"status": "active", "nextCheckAt": int64(300)}); ok {
+		t.Error("a cancelled watcher must not be claimable (no resurrection / re-arm)")
+	}
+}

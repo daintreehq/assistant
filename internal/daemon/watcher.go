@@ -227,7 +227,12 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 
 	options.PerTerminal = perTerminal
 	optsJSON, _ := json.Marshal(options)
-	_ = ctx.Store.UpdateWatcher(rec.ID, map[string]any{
+	// CLAIM the finalize: apply it ONLY while the watcher is still 'active'. If the main turn
+	// cancelled this watcher during the check, the claim fails and we do NOT write it back —
+	// re-arming (status back to 'active' with a new nextCheckAt) would resurrect a cancelled
+	// watcher and keep it supervising forever. A lost claim also means we leave the cancel's
+	// own grant revocation in place rather than racing it here.
+	claimed, _ := ctx.Store.ClaimDueWatcher(rec.ID, map[string]any{
 		"lastClassification": string(headline.Classification),
 		"lastEpistemicKind":  string(headline.EpistemicKind),
 		"lastCheckedAt":      now,
@@ -235,7 +240,7 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		"optionsJson":        string(optsJSON),
 		"status":             status,
 	})
-	if stop {
+	if claimed && stop {
 		_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
 	}
 
@@ -276,6 +281,11 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 
 		case agentState == "waiting":
 			if options.SpawnMode == "explore" && listed.WaitingReason != "question" {
+				// Explore-idle = finished its turn. Explore is READ-ONLY by intent, so its
+				// completion is terminal regardless of git state and is NOT routed through the
+				// git-clean gate (the summary claims only "finished its turn", never a clean/
+				// verified tree, and the daemon attaches no irreversible action). Enforcing that
+				// an explore agent truly cannot edit belongs at the Daintree spawn layer.
 				ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, terminal.list)", parens(listed.WaitingReason))}
 				return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
 			}
@@ -375,6 +385,10 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 
 	case agentState == "waiting":
 		if options.SpawnMode == "explore" && waitingReason != "question" {
+			// Explore-idle = finished its turn. Explore is READ-ONLY by intent, so its completion
+			// is terminal regardless of git state and is intentionally NOT git-gated (the summary
+			// claims only "finished its turn", never a clean/verified tree; no irreversible action
+			// is attached). Enforcing that explore truly cannot edit is a Daintree-spawn concern.
 			ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle)", parens(waitingReason))}
 			return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
 		}

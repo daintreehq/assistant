@@ -112,6 +112,28 @@ func (f *fakeStore) UpdateWatcher(id string, patch map[string]any) error {
 	return nil
 }
 
+func (f *fakeStore) ClaimDueWatcher(id string, patch map[string]any) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.watchers {
+		if f.watchers[i].ID != id {
+			continue
+		}
+		if f.watchers[i].Status != "active" {
+			return false, nil // cancelled/terminal under us — don't resurrect
+		}
+		f.watchPatches[id] = patch
+		if v, ok := patch["status"].(string); ok {
+			f.watchers[i].Status = v
+		}
+		return true, nil
+	}
+	// Not tracked in the fake (most check tests pass the rec directly): treat as claimable so
+	// the finalize is still exercised. The status-guard semantics are covered by storage tests.
+	f.watchPatches[id] = patch
+	return true, nil
+}
+
 func (f *fakeStore) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

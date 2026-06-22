@@ -260,3 +260,12 @@ var watcherUpdateCols = newColSet("title", "goal", "targetsJson", "cadenceMs",
 func (s *Store) UpdateWatcher(id string, patch map[string]any) error {
 	return s.applyUpdate("watchers", watcherUpdateCols, id, patch)
 }
+
+// ClaimDueWatcher atomically applies the daemon's per-check finalize patch ONLY while the
+// watcher is still 'active'. Returns true iff a row matched. A false return means the main
+// turn cancelled it during the check — the daemon must then NOT write it back (re-arming a
+// cancelled watcher would RESURRECT it and keep it supervising forever).
+func (s *Store) ClaimDueWatcher(id string, patch map[string]any) (bool, error) {
+	n, err := s.applyUpdateGuarded("watchers", watcherUpdateCols, id, patch, " AND status = 'active'")
+	return n > 0, err
+}

@@ -30,6 +30,10 @@ type Store interface {
 	DueWatchers(now int64) ([]domain.WatcherRecord, error)
 	// UpdateWatcher applies an allowlisted column patch to a watcher row.
 	UpdateWatcher(id string, patch map[string]any) error
+	// ClaimDueWatcher atomically applies the patch ONLY while the watcher is still 'active';
+	// returns true iff a row matched. A false return means it was cancelled concurrently — the
+	// daemon must not re-arm it (which would resurrect a cancelled watcher).
+	ClaimDueWatcher(id string, patch map[string]any) (bool, error)
 	// RevokeGrantsByActor revokes all live automation grants for an actor id
 	// (called on every timer/watcher terminal state). Returns rows changed.
 	RevokeGrantsByActor(actorID string, now int64) (int, error)
