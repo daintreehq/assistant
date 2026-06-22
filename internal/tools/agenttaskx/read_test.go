@@ -185,3 +185,60 @@ func TestAgentTaskToolsIncludesReaders(t *testing.T) {
 		}
 	}
 }
+
+// recordLimitStore captures the limit agentTask.list passes to the store, so a
+// drift between listDefaultLimit and the actual store call is caught.
+type recordLimitStore struct {
+	*sagaStore
+	gotLimit int
+}
+
+func (r *recordLimitStore) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error) {
+	r.gotLimit = limit
+	return r.sagaStore.ListAgentLaunches(limit)
+}
+
+func TestListToolCallsStoreWithDefaultLimit(t *testing.T) {
+	rec := &recordLimitStore{sagaStore: newSagaStore()}
+	if res := callList(rec); !res.Ok {
+		t.Fatalf("list should succeed, got %+v", res.Error)
+	}
+	if rec.gotLimit != listDefaultLimit {
+		t.Fatalf("list should call the store with limit=%d, got %d", listDefaultLimit, rec.gotLimit)
+	}
+}
+
+// TestStatusToolAllNilOptionals proves the nil-pointer derefs in toLaunchView are
+// safe and that omitempty drops the absent optional fields from the JSON payload.
+func TestStatusToolAllNilOptionals(t *testing.T) {
+	st := newSagaStore()
+	rec, _ := st.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "k", AgentID: "claude", Mode: "explore", Title: "look",
+		Name: "n", Stage: domain.LaunchRequested, CreatedAt: 10, UpdatedAt: 10,
+		// WorktreeID / TerminalID / WatcherID / ErrorCode / ErrorMessage all nil.
+	})
+	res := callStatus(st, rec.ID)
+	if !res.Ok {
+		t.Fatalf("status should succeed, got %+v", res.Error)
+	}
+	view := res.Result.(launchView)
+	if view.WorktreeID != "" || view.TerminalID != "" || view.WatcherID != "" ||
+		view.ErrorCode != "" || view.ErrorMessage != "" {
+		t.Fatalf("nil optionals should deref to empty strings, got %+v", view)
+	}
+	js := string(mustJSON(t, res.Result))
+	for _, key := range []string{"worktreeId", "terminalId", "watcherId", "errorCode", "errorMessage"} {
+		if strings.Contains(js, key) {
+			t.Fatalf("omitempty should drop the nil optional %q, got %s", key, js)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}

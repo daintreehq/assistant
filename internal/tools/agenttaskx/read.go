@@ -127,8 +127,8 @@ func newListTool(deps Deps) tools.Tool {
 		Name: "agentTask.list",
 		Description: "List the most recent spawn sagas (newest first, up to 20) with their stage, bound terminal/watcher, " +
 			"and any error. Use it to see what agentTask.spawnForEdits launches happened and where they stand. Read-only. " +
-			"Shows this session's launches only — non-terminal rows from a prior session are marked failed when the DB opens, " +
-			"so this is not cross-session history.",
+			"Rows can span sessions, but any launch still in a non-terminal stage belongs to THIS session — a prior session's " +
+			"in-flight sagas are swept to 'failed' when the DB opens, so a live-looking stage is always current.",
 		Risk:   domain.RiskRead,
 		Schema: schema,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
