@@ -1,37 +1,35 @@
 # Fireworks AI — integration notes
 
-The Daintree Assistant CLI talks to **Fireworks AI**, which is **wire-compatible with the
-OpenAI Chat Completions API**. We use the official `openai` npm SDK pointed at the Fireworks
-base URL.
+The Daintree Assistant talks to **Fireworks AI**, which is **wire-compatible with the
+OpenAI Chat Completions API**. `internal/models/fireworks.go` (`FireworksClient`) speaks
+it directly over the standard library `net/http` — no SDK — pointed at the Fireworks base
+URL.
 
 ## Connection
 
 | Setting   | Value                                                   |
 | --------- | ------------------------------------------------------- |
-| Base URL  | `https://api.fireworks.ai/inference/v1`                 |
+| Base URL  | `https://api.fireworks.ai/inference/v1` (override `FIREWORKS_BASE_URL`) |
 | Auth      | `Authorization: Bearer <FIREWORKS_API_KEY>`             |
 | API key   | `FIREWORKS_API_KEY` env var (read from `.env` in repo)  |
 
-```ts
-import OpenAI from "openai";
-const client = new OpenAI({
-  baseURL: "https://api.fireworks.ai/inference/v1",
-  apiKey: process.env.FIREWORKS_API_KEY,
-});
-```
+`FireworksClient` builds an `*http.Request` to `<baseURL>/chat/completions` with the
+bearer header and a JSON body, and streams the SSE response. `models.Router`
+(`internal/models/router.go`) maps a `domain.ModelTier` to a model id (`ModelFor`) and
+exposes `Chat`, `Stream(onToken)`, and `JSON`.
 
 ## Models
 
 | Tier  | Model id                                          | Use                                         |
 | ----- | ------------------------------------------------- | ------------------------------------------- |
-| large | `accounts/fireworks/models/minimax-m3`            | Main thread: reasoning, orchestration       |
+| large | `accounts/fireworks/models/glm-5p2`               | Main thread: reasoning, orchestration       |
 | small | `accounts/fireworks/models/deepseek-v4-flash`     | Watchers, summaries, classification, timers |
 
 (There is a `medium` tier in the abstraction; for v1 it routes to `large`.)
 
 ## Chat completions
 
-Standard OpenAI shape: `client.chat.completions.create({ model, messages, tools, tool_choice, stream })`.
+Standard OpenAI request body: `{ model, messages, tools, tool_choice, stream }`.
 
 ### Tool / function calling
 
@@ -53,12 +51,14 @@ Standard OpenAI shape: `client.chat.completions.create({ model, messages, tools,
   string fragments per index.
 - Stream ends with `data: [DONE]`.
 - **Reasoning models** may emit `<think>...</think>` blocks directly inside `delta.content`.
-  The CLI strips/segregates `<think>` content from user-facing output.
+  The think-filter in `internal/models` strips/segregates `<think>` content from
+  user-facing output (correctly across chunk boundaries — see `models` tests).
 
 ### JSON / structured output
 
-For small-model classification we use `response_format: { type: "json_object" }` and validate
-with Zod. Always include the word "JSON" in the prompt when using json_object mode.
+For small-model classification we use `response_format: { type: "json_object" }`
+(`Router.JSON`) and unmarshal + validate the result into the target Go struct. Always
+include the word "JSON" in the prompt when using json_object mode.
 
 ### Useful Fireworks-specific params (optional)
 

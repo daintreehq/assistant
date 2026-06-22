@@ -12,15 +12,17 @@ fine-tuning: a growing, validated library, selected cheaply by the small model.
 
 ## TL;DR — add a skill
 
-1. Create `skills/<id>.md` (filename = the dotted id, e.g.
-   `daintree.edits.spawn-visible-agent.md`).
+1. Create `internal/skills/files/<id>.md` (filename = the dotted id, e.g.
+   `daintree.edits.spawn-visible-agent.md`). This directory is **embedded into the
+   binary** via `go:embed`, so it is canonical — there is no repo-root `skills/` dir.
 2. Write the frontmatter (metadata) and the body (the runbook).
-3. `npm run typecheck && npm test`. A malformed skill fails at boot with its
-   filename — there is nothing else to wire up.
+3. `go build ./... && go test ./...`. A malformed skill fails at load with its
+   filename — there is nothing else to wire up. (The embed means a new file is only
+   picked up after a rebuild.)
 
-No code change, no registration, no DB reset. The loader
-(`src/skills/fileSource.ts`) reads every `*.md` in `skills/`, validates each
-through the `Skill` Zod schema, and seeds the registry.
+No code change, no registration, no DB reset. The loader (`internal/skills/loader.go`,
+`//go:embed files/*.md`) reads every embedded `*.md`, validates each against the skill
+schema, and seeds the registry.
 
 ## How fetching works (why headers matter)
 
@@ -81,7 +83,7 @@ Report back: the ids created and the next checkpoint.
 
 The frontmatter parser accepts: `key: scalar` (string / int / bool, quotes
 optional), inline arrays `key: [a, b, c]`, and block lists (`key:` then `  - item`
-lines). Use block lists for long `requiredTools`. Nothing fancier — a typo throws
+lines). Use block lists for long `requiredTools`. Nothing fancier — a typo fails
 at load with the filename, by design.
 
 ### The two headers
@@ -116,7 +118,7 @@ checklist for a sharp operator who is in a hurry.
 - **Read before you act.** Tell the model to establish state with `context.snapshot`
   rather than assume worktree/terminal/git state.
 - **No identity / hard-rule restatement.** Those live in the base prompt
-  (`src/models/prompts/base.ts`); skills never override them.
+  (`internal/models/prompts/base.go`, `BaseSystemPrompt`); skills never override them.
 
 Canonical body skeleton:
 
@@ -133,14 +135,14 @@ Report back: <the ids / checkpoint to surface to the user>.
 ### The `requiredTools` gotcha
 
 When a skill is loaded, the per-turn tool projection is **core ∪ the loaded
-skills' `requiredTools`** (see `CORE_TOOL_NAMES` in `src/agent/loop.ts`). Any tool
+skills' `requiredTools`** (the core tool set in `internal/agent`). Any tool
 your body tells the model to call **must** be listed in `requiredTools`, or the
 model never sees it — it is silently starved, with no runtime error. Under-declare
 and the skill quietly fails. (Core tools — `context.snapshot`, `tool.search`,
 `skill.find`, `skill.load`, `skill.step.advance`, `skill.run.get`, … — are
-always present; you don't list those, but listing them is harmless.) The
-`skillRegistry` test cross-checks every `requiredTools` name against the real tool
-registry, so a typo fails CI.
+always present; you don't list those, but listing them is harmless.) The skills test
+cross-checks every `requiredTools` name against the real tool registry, so a typo
+fails CI.
 
 ### Multi-step skills: checkpointing
 
@@ -150,7 +152,7 @@ declare those — they're core. Just write clear, numbered steps.
 
 ## Worked example
 
-`skills/daintree.workflow.start-work-on-issue.md`:
+`internal/skills/files/daintree.workflow.start-work-on-issue.md`:
 
 ```markdown
 ---
@@ -192,20 +194,20 @@ Report back: which issue was started, the worktree/branch/terminal ids created, 
 - [ ] **Every tool the body names is in `requiredTools`.**
 - [ ] Body is numbered, terse, tool-id-exact, with `Confirmation:` / `Report back:`.
 - [ ] Bumped `version` if you edited an existing skill's body.
-- [ ] `npm run typecheck && npm test` is green.
+- [ ] `go build ./... && go test ./...` is green.
 
 ## Loading internals (reference)
 
-- Loader: `src/skills/fileSource.ts` — sync, validated, fails loud with the
-  filename. Resolves `skills/` by walking up to the dir holding `package.json`,
-  so it works from source (bun/tsx/vitest) and from the bundle (node). Override
-  with `DAINTREE_ASSISTANT_SKILLS_DIR` (used by tests).
-- Registry: `src/skills/registry.ts` — seeded from the loaded set; exposes
-  `metadataForSelection()` (headers only) to the catalog + selector.
-- Catalog: `buildSkillCatalogMessage()` in `src/models/prompts/skills.ts` —
-  every skill's headers, appended to the runtime-context system message.
-- Selection: `selectSkills()` in `src/skills/selector.ts` — small model, query
-  in, ids out. Driven by the `skill.find` tool (`src/tools/skillRunTools.ts`).
-- The seam is swappable: a future hosted skill service replaces the file loader
-  behind the `SkillSource` interface (`src/skills/source.ts`) without touching
-  any caller.
+- Loader: `internal/skills/loader.go` (`LoadSkills`, `//go:embed files/*.md`) —
+  validated, fails loud with the filename. The library is compiled into the binary,
+  so a checkout isn't needed at runtime. Tests can override the source with
+  `DAINTREE_ASSISTANT_SKILLS_DIR`.
+- Registry: `internal/skills/registry.go` (`SkillRegistry`) — seeded from the loaded
+  set; exposes a headers-only metadata view to the catalog + selector.
+- Catalog: the skill-catalog builder in `internal/models/prompts` — every skill's
+  headers, appended to the runtime-context system message.
+- Selection: `SelectSkills` in `internal/skills/selector.go` — small model, query in,
+  ids out. Driven by the `skill.find` tool (`internal/tools/skill`) and the session's
+  `FindSkills`.
+- The seam is swappable: a future hosted skill service replaces the embedded loader
+  behind the `SkillSource` interface without touching any caller.

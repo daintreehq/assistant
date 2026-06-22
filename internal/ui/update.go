@@ -1,0 +1,426 @@
+package ui
+
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// update.go is the single reducer (ui-input.md §6.4: NEVER mutate the model outside
+// Update). It folds runtime/pump msgs + key events into the transcript, drives the
+// explicit RunPhase, serializes work (single-flight + FIFO queue + wake priority),
+// and schedules scrollback commits.
+
+// Init kicks the event pump, the dashboard/spinner ticks, and the one-shot bootstrap
+// (async MCP connect + scheduler). The splash already played BEFORE the program
+// started (boot_splash.go), so there is no in-program splash tick or boot-cap — the
+// cockpit is live immediately. The composer is interactive from frame one.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		m.pump.waitEvent(),
+		func() tea.Msg { return BootstrapMsg{} },
+		dashboardTickCmd(),
+		spinnerTickCmd(),
+		// Arm the first scrollback commit one render cycle in, so Bubble Tea has flushed
+		// the SHORT footer (and sized its cell buffer to it) before the masthead's first
+		// tea.Println — BT defers cellbuf resize to the flush, so an immediate Println
+		// would read a stale height (charmbracelet/bubbletea#1613). See scheduleCommit.
+		commitArmCmd(),
+	)
+}
+
+// Update reduces one message.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		return m.onResize(msg)
+
+	case tea.KeyPressMsg:
+		return m.onKey(msg)
+
+	case tea.PasteMsg:
+		// Bracketed paste only reaches the composer when it owns keys.
+		if m.composerFocus() {
+			m.composer.Update(msg)
+		}
+		return m, nil
+
+	case AgentEventMsg:
+		// Attention bursts route through the full onAttention reducer (BEL + wake
+		// drain); everything else folds into the active turn. Always RE-ARM the pump.
+		rearm := m.pump.waitEvent()
+		if msg.Event.kind == pumpAttention {
+			next, cmd := m.onAttention(AttentionBatchMsg{Events: msg.Event.attention})
+			return next, tea.Batch(cmd, rearm)
+		}
+		// Completion arrives IN-STREAM (#1): every prior event for the turn has already
+		// drained, so clearing/promoting activeTurn here can never strand a final token
+		// or apply a stale event to the next turn. The runID barrier guards the case
+		// where the active turn already moved on.
+		if msg.Event.kind == pumpComplete {
+			c := msg.Event.completion
+			var next tea.Model
+			var cmd tea.Cmd
+			if c.wake {
+				next, cmd = m.onWakeComplete(WakeCompleteMsg{RunID: c.runID, Reply: c.reply, Failed: c.failed})
+			} else {
+				next, cmd = m.onTurnComplete(TurnCompleteMsg{RunID: c.runID, Reply: c.reply, Failed: c.failed})
+			}
+			return next, tea.Batch(cmd, rearm)
+		}
+		cmd := m.applyPumpEvent(msg.Event)
+		next, tail := m.afterStateChange(cmd)
+		return next, tea.Batch(tail, rearm)
+
+	case BootstrapMsg:
+		return m, m.bootstrapCmd()
+
+	case MCPConnectedMsg:
+		m.degraded = false
+		// Surface the link as a TOP status note (green "● Connected to Daintree MCP"), not a
+		// permanent footer segment: the assistant exists to drive Daintree over MCP, so the
+		// connection is worth announcing ONCE, in the transcript, the moment it settles —
+		// right under the masthead. (The footer only flags the link BY EXCEPTION when down.)
+		m.addNote(NoteSuccess, "Connected to Daintree MCP")
+		return m.onMcpResolved()
+
+	case MCPDegradedMsg:
+		m.degraded = true
+		m.addNote(NoteWarn, "Daintree MCP degraded — "+msg.Reason)
+		return m.onMcpResolved()
+
+	case ProjectNameMsg:
+		// The authoritative project name resolved (or the fetch gave up / the link is
+		// down). The masthead is committed to scrollback ONCE on the boot hand-off, so
+		// the name must be in BEFORE the first paint — this is the third boot gate.
+		if msg.Name != "" {
+			m.masthead.ProjectName = msg.Name
+		}
+		m.projectSettled = true
+		return m.afterStateChange(m.finishBootIfReady())
+
+	case DashboardTickMsg:
+		return m, tea.Batch(m.buildDashboardCmd(), dashboardTickCmd())
+
+	case DashboardSnapshotMsg:
+		m.dashboard = msg.Snapshot
+		// The first snapshot is the OTHER half of the startup-settled gate (MCP connect
+		// resolved AND the first dashboard snapshot is in). A later tick is a no-op here.
+		if !m.bootSnapshotIn {
+			m.bootSnapshotIn = true
+			return m.afterStateChange(m.recomputeStartupSettled())
+		}
+		return m.afterStateChange(nil)
+
+	case spinnerTickMsg:
+		m.spinnerFrame++
+		return m, spinnerTickCmd()
+
+	case SplashTickMsg:
+		cmd := m.splash.advance()
+		// Force a FULL repaint each splash frame. The whole 18-row mark changes every
+		// frame, and Bubble Tea's inline diff renderer repaints that with relative
+		// cursor moves (up/left/backward-tab) that desync on tall, fully-changing
+		// content — smearing the mark across the top of the screen. ClearScreen erases
+		// the renderer's cell buffer so the next frame paints fresh from a clean slate
+		// (under BT's synchronized-output, no flicker). Only while booting — the steady
+		// cockpit's small, mostly-static footer diffs cleanly and must NOT clear (that
+		// would wipe the host's native scrollback every render).
+		if m.booting {
+			return m, tea.Batch(cmd, tea.ClearScreen)
+		}
+		return m, cmd
+
+	case CommitArmMsg:
+		// One render cycle has passed since launch, so the short footer has flushed and
+		// the renderer's cell buffer is sized to it — safe to begin scrollback commits
+		// (the masthead lands first). See scheduleCommit.
+		m.commitArmed = true
+		return m.afterStateChange(nil)
+
+	case SplashDoneMsg:
+		// The splash draw + linger finished — one of the THREE boot gates (animationDone).
+		// Booting does NOT flip here on its own: it waits for startup + project to settle
+		// too, so a fast animation can't surface a half-built cockpit.
+		m.splash.done = true
+		m.animationDone = true
+		return m.afterStateChange(m.finishBootIfReady())
+
+	case TurnCompleteMsg:
+		return m.onTurnComplete(msg)
+
+	case WakeCompleteMsg:
+		return m.onWakeComplete(msg)
+
+	case CommandCompleteMsg:
+		return m.onCommandComplete(msg)
+
+	case ApprovalRequestedMsg:
+		return m.onApprovalRequested(msg)
+
+	case ApprovalResolvedMsg:
+		return m.onApprovalResolved(msg)
+
+	case AttentionBatchMsg:
+		return m.onAttention(msg)
+
+	case ScrollbackCommittedMsg:
+		m.queue.ack(msg.ID, msg.Gen, len(m.transcript))
+		return m.afterStateChange(nil)
+
+	case RedrawMsg:
+		return m.onRedraw(msg)
+
+	case LogMsg:
+		m.addNote(msg.Level, msg.Text)
+		return m.afterStateChange(nil)
+
+	case BootCapMsg:
+		// Hard 8s backstop: drop into the cockpit regardless of gate readiness so a
+		// hung startup never strands the user on the splash. A no-op if already up.
+		if m.booting {
+			return m, m.completeBoot()
+		}
+		return m, nil
+
+	case ShutdownMsg:
+		return m.onShutdown()
+	}
+
+	return m, nil
+}
+
+// applyPumpEvent fans one pump event into a model mutation. Returns any follow-up
+// cmd (none for most). It mutates the active TurnCell's ordered steps + phase.
+func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
+	t := m.activeTurnCell()
+	switch ev.kind {
+	case pumpPhase:
+		if t != nil && t.Phase != ev.phase {
+			t.Phase = ev.phase
+			t.PhaseStartedAt = domain.NowMS()
+		}
+	case pumpStart:
+		// A new model round; nothing to add — prose tokens will open a StepProse.
+	case pumpTokens:
+		if t != nil {
+			t.appendProse(ev.text)
+		}
+	case pumpEnd:
+		if t != nil {
+			t.sealProse()
+			t.Reasoning = ev.reasoning
+		}
+	case pumpCancelled:
+		if t != nil {
+			t.sealProse()
+		}
+	case pumpBatch:
+		if t != nil {
+			for _, c := range ev.batch {
+				t.Steps = append(t.Steps, TurnStep{Kind: StepTool, Activity: &Activity{
+					ID: c.ID, Name: c.Name, Args: c.Args, State: ActQueued,
+				}})
+			}
+		}
+	case pumpToolState:
+		if t != nil {
+			if a := t.findActivity(ev.toolID); a != nil {
+				a.State = mapToolState(ev.toolState)
+			}
+		}
+	case pumpToolProgress:
+		// In-tool substep for the active call: update its live progress line. The
+		// settled result later overwrites Detail; ProgressMsg is the while-active line.
+		if t != nil {
+			if a := t.findActivity(ev.toolID); a != nil {
+				a.ProgressMsg = ev.msg
+			}
+		}
+	case pumpToolCall:
+		if t != nil {
+			if a := t.findActivity(ev.call.ID); a != nil {
+				a.State = ActActive
+				a.StartedAt = ev.call.StartedAt
+				a.Args = ev.call.Args
+			}
+		}
+	case pumpToolResult:
+		if t != nil {
+			if a := t.findActivity(ev.result.ID); a != nil {
+				a.EndedAt = ev.result.EndedAt
+				if ev.result.Result.Ok {
+					a.State = ActDone
+					a.Detail = ev.result.Result.Summary
+				} else {
+					a.State = ActFailed
+					a.Outcome = toolFailSummary(ev.result.Result)
+				}
+			}
+		}
+	case pumpUsage:
+		m.applyUsage(ev.usage)
+	case pumpLog:
+		m.addNote(ev.level, ev.msg)
+	case pumpError:
+		m.addNote(NoteError, ev.msg)
+	}
+	return nil
+}
+
+// mapToolState converts the agent tool state to the UI activity state.
+func mapToolState(s agent.ToolState) ActivityState {
+	switch s {
+	case agent.ToolStateActive:
+		return ActActive
+	case agent.ToolStateWaiting:
+		return ActWaiting
+	case agent.ToolStateDone:
+		return ActDone
+	case agent.ToolStateFailed:
+		return ActFailed
+	default:
+		return ActQueued
+	}
+}
+
+// toolFailSummary extracts a failure summary from a ToolResult (message > code).
+func toolFailSummary(r domain.ToolResult) string {
+	if r.Error != nil {
+		if r.Error.Message != "" {
+			return r.Error.Message
+		}
+		return r.Error.Code
+	}
+	if r.Summary != "" {
+		return r.Summary
+	}
+	return "failed"
+}
+
+// applyUsage updates the CTX% / cost / model rollup from a usage event.
+func (m *Model) applyUsage(u agent.UsageEvent) {
+	m.hasUsage = true
+	// CTX% is "% of the model's context window in use" — divide by the window, NOT the
+	// (much smaller) auto-compact threshold, so a 1M-window model reads ~1% on a short
+	// conversation rather than a misleading 13%. Fall back to the threshold only if no
+	// window was reported (older events / tests). int64 avoids overflow on large token
+	// counts; clamp to [0,100] so an over-full context reads "100%", never above.
+	denom := u.ContextWindow
+	if denom <= 0 {
+		denom = u.ContextThreshold
+	}
+	if denom > 0 {
+		pct := int(int64(u.ContextTokens) * 100 / int64(denom))
+		if pct < 0 {
+			pct = 0
+		} else if pct > 100 {
+			pct = 100
+		}
+		m.contextPct = pct
+	}
+	if u.CostUsd != nil {
+		m.cost += *u.CostUsd
+	}
+	if u.Model != "" {
+		m.model = u.Model
+	}
+}
+
+// activeTurnCell returns the live TurnCell (the one streaming), or nil.
+func (m *Model) activeTurnCell() *TurnCell {
+	if m.activeTurn == "" {
+		return nil
+	}
+	for i := range m.transcript {
+		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == m.activeTurn {
+			return m.transcript[i].Turn
+		}
+	}
+	return nil
+}
+
+// addNote appends a standalone NoteCell to the transcript (out-of-band line).
+func (m *Model) addNote(level NoteLevel, text string) {
+	m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
+		ID: domain.NewID("note_"), Level: level, Text: text, Ts: domain.NowMS(),
+	}})
+}
+
+// afterStateChange is the common tail: schedule the next scrollback commit (if the
+// frontier advanced), incrementally flush the active turn's newly-final rows to
+// native scrollback (keeps the live View ~constant-height — see flush.go), and update
+// the composer's busy/focus flags. Returns (model, cmd).
+func (m Model) afterStateChange(extra tea.Cmd) (tea.Model, tea.Cmd) {
+	m.syncComposer()
+	commit := m.scheduleCommit()
+	// Flush the active turn's completed rows AFTER scheduling the queue commit so the
+	// masthead (queue) is ordered ahead of any prose Println (flushActiveTurn also gates
+	// on headerDone). Emitting the flush in the SAME batch is fine: tea.Println preserves
+	// emit order, and the queue's masthead commit is enqueued first here.
+	flush := m.flushActiveTurn()
+	return m, tea.Batch(extra, commit, flush)
+}
+
+// syncComposer pushes the current busy/focus state into the composer each reduction.
+func (m *Model) syncComposer() {
+	m.composer.SetBusy(m.inFlight)
+	m.composer.SetFocus(m.composerFocus())
+}
+
+// scheduleCommit asks the queue for the next commit cmd at the current width.
+//
+// COMMIT ARM (charmbracelet/bubbletea#1613): nothing commits to native scrollback
+// until commitArmed flips true, one short tick after Init (see commitArmCmd). Bubble
+// Tea v2 DEFERS its cell-buffer resize to the FPS-ticker flush, and tea.Println's
+// insertAbove runs synchronously off that buffer's height. The program opens already
+// in the cockpit (the splash played before BT started), so the live View is the short
+// footer from the start — but the renderer's buffer is only sized to it after the
+// first flush. Arming the first commit one cycle in guarantees the footer has flushed,
+// so the masthead Println lays out above a correctly-sized footer instead of wiping it.
+func (m *Model) scheduleCommit() tea.Cmd {
+	if !m.commitArmed {
+		return nil
+	}
+	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock)
+}
+
+// finishBootIfReady flips booting off ONCE all three boot gates are satisfied
+// (startupSettled && animationDone && projectSettled) — the original's exact lock.
+// On the flip it fires a single boot→cockpit "nuclear redraw" (the original calls
+// requestRedraw once on the hand-off via useResizeRedraw): it re-arms the commit
+// queue at the now-correct cockpit width and wipes any splash rows the program left
+// in the live region, then commits the masthead + transcript fresh. Returns the
+// hand-off cmd (nil unless the gate just closed).
+func (m *Model) finishBootIfReady() tea.Cmd {
+	if !m.booting {
+		return nil
+	}
+	if !(m.startupSettled && m.animationDone && m.projectSettled) {
+		return nil
+	}
+	return m.completeBoot()
+}
+
+// completeBoot performs the boot→cockpit hand-off: drop the splash, re-arm the commit
+// queue (bump redrawNonce → resetKey change → committed=0, headerDone=false), and run
+// the ordered wipe-then-recommit so the masthead lands flush on a clean host screen
+// with the composer live beneath it. Mirrors onRedraw, but driven by the boot gate.
+func (m *Model) completeBoot() tea.Cmd {
+	m.booting = false
+	m.splash.done = true
+	m.redrawNonce++
+	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
+	// #3 (see onClear/onRedraw): ordered wipe-then-recommit so the hand-off can't print
+	// a stale block after the host clear or wipe a freshly committed masthead.
+	//
+	// The boot view was a tall (20-row) block, so right now Bubble Tea's renderer still
+	// reserves that height. Committing the masthead immediately lays it out with stale
+	// geometry (a misplaced erase-below then wipes it). So: clear the host + reset BT's
+	// own cell buffer (tea.ClearScreen), then DEFER the masthead commit one render cycle
+	// (bootCommitMsg) — by which point the short footer has rendered and the renderer's
+	// live-area model has shrunk, so the masthead prints above a correctly-sized footer.
+	return tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
+}

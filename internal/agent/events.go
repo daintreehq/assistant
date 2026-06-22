@@ -1,0 +1,425 @@
+// Package agent ports the main-thread agentic turn loop (src/agent/loop.ts +
+// src/agent/events.ts). AgentSession runs ONE user (or autonomous) turn to
+// completion: optional auto-compact → skill re-selection → assemble the three
+// control messages → stream the large model → dispatch tool calls → feed results
+// back (≤12 iterations). It owns conversation persistence/rehydration, the
+// repeated-failure circuit breaker, oversized-tool-result truncation into session
+// artifacts, and a liveness-rich structured event stream.
+//
+// Spec: docs/port/agent-loop.md (authoritative) and docs/port/_interaction-ux.md
+// (the liveness/RunPhase contract this loop must emit).
+package agent
+
+import (
+	"encoding/json"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// --- Event vocabulary (events.ts §11 + _interaction-ux.md liveness) ---
+
+// ToolCallEvent describes a tool invocation the loop is about to run. Args is the
+// raw JSON-arguments string the model emitted (kept verbatim — the UI parses it).
+// StartedAt/EndedAt are epoch-ms.
+type ToolCallEvent struct {
+	ID        string
+	Name      string
+	Args      string
+	StartedAt int64
+}
+
+// ToolResultEvent is the settled result for a ToolCallEvent (matched by ID).
+type ToolResultEvent struct {
+	ID      string
+	Name    string
+	Result  domain.ToolResult
+	EndedAt int64
+}
+
+// BatchedToolCall is one entry in a ToolBatch announcement: a queued tool call,
+// announced before sequential dispatch so the live footer can show the whole
+// batch at once (spec _interaction-ux.md §3).
+type BatchedToolCall struct {
+	ID   string
+	Name string
+	Args string
+}
+
+// ToolState is the per-call lifecycle the footer renders (§3/§6 glyphs).
+type ToolState string
+
+const (
+	ToolStateQueued  ToolState = "queued"
+	ToolStateActive  ToolState = "active"
+	ToolStateWaiting ToolState = "waiting" // awaiting approval
+	ToolStateDone    ToolState = "done"
+	ToolStateFailed  ToolState = "failed"
+)
+
+// UsageEvent is the per-round token/cost/context-pressure accounting (events.ts
+// §11.1). Emitted once per streamed round, AFTER the call returns and BEFORE the
+// assistant message is appended (so ContextTokens reflects the prompt sent).
+type UsageEvent struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	CachedTokens     *int
+	ContextTokens    int
+	ContextThreshold int // auto-compact trigger point (NOT the gauge denominator)
+	ContextWindow    int // model context window — the CTX% gauge denominator
+	// CostUsd is nil when the provider reported no usage ("no data"), never a
+	// misleading $0.000.
+	CostUsd *float64
+	Tier    string
+	Model   string
+}
+
+// EventSink is the structured-event vocabulary the loop emits. The cockpit's
+// LiveRunStatus is driven from Phase(), never inferred from "is text empty". Go
+// has no optional interface methods, so Usage is required; sinks that don't care
+// no-op it. Spec: agent-loop.md §11, _interaction-ux.md.
+type EventSink interface {
+	// Phase drives the explicit run lifecycle (RunPhase). Cockpit liveness reads
+	// this, NEVER an emptiness heuristic (_interaction-ux.md §1).
+	Phase(p domain.RunPhase)
+
+	AssistantStart()                        // a new round is about to stream
+	AssistantToken(token string)            // one streamed visible token (think-stripped)
+	AssistantEnd(content, reasoning string) // final round; reasoning = <think> body ("" when none)
+	AssistantCancelled(content string)      // user abort mid-flight; content often ""
+
+	// ToolBatch announces every parsed tool call as queued BEFORE sequential
+	// dispatch begins (_interaction-ux.md §3). The loop then promotes each call.
+	ToolBatch(calls []BatchedToolCall)
+	// ToolState promotes one announced call (queued→active→done/failed/waiting).
+	ToolState(id string, state ToolState)
+	// ToolProgress carries an in-tool substep ("launching terminal") for the active
+	// call so the live footer never looks frozen (_interaction-ux.md §4). The id is
+	// the tool call id so the UI maps it to the right activity row; msg is "" when a
+	// progress beat carries only a fraction (the UI keeps the prior message).
+	ToolProgress(id string, msg string)
+
+	ToolCall(ev ToolCallEvent)     // a call is starting (with parsed/raw args)
+	ToolResult(ev ToolResultEvent) // a call settled
+
+	Error(message string) // fatal-for-this-turn
+	Info(message string)  // informational
+	Usage(ev UsageEvent)  // per-round token accounting (no-op in sinks that ignore)
+}
+
+// NoopEventSink discards every event. Default sink and test stand-in.
+type NoopEventSink struct{}
+
+func (NoopEventSink) Phase(domain.RunPhase)       {}
+func (NoopEventSink) AssistantStart()             {}
+func (NoopEventSink) AssistantToken(string)       {}
+func (NoopEventSink) AssistantEnd(string, string) {}
+func (NoopEventSink) AssistantCancelled(string)   {}
+func (NoopEventSink) ToolBatch([]BatchedToolCall) {}
+func (NoopEventSink) ToolState(string, ToolState) {}
+func (NoopEventSink) ToolProgress(string, string) {}
+func (NoopEventSink) ToolCall(ToolCallEvent)      {}
+func (NoopEventSink) ToolResult(ToolResultEvent)  {}
+func (NoopEventSink) Error(string)                {}
+func (NoopEventSink) Info(string)                 {}
+func (NoopEventSink) Usage(UsageEvent)            {}
+
+// MultiSink fans every event out to several sinks, each isolated by panic
+// recovery so one misbehaving sink (e.g. a UI bridge) can never break the loop or
+// starve the others (events.ts §12.5).
+type MultiSink struct {
+	sinks []EventSink
+}
+
+// NewMultiSink builds a MultiSink (nil entries skipped).
+func NewMultiSink(sinks ...EventSink) *MultiSink {
+	filtered := make([]EventSink, 0, len(sinks))
+	for _, s := range sinks {
+		if s != nil {
+			filtered = append(filtered, s)
+		}
+	}
+	return &MultiSink{sinks: filtered}
+}
+
+func fanOut(s EventSink, call func(EventSink)) {
+	defer func() { _ = recover() }()
+	call(s)
+}
+
+func (m *MultiSink) Phase(p domain.RunPhase) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Phase(p) })
+	}
+}
+func (m *MultiSink) AssistantStart() {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantStart() })
+	}
+}
+func (m *MultiSink) AssistantToken(t string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantToken(t) })
+	}
+}
+func (m *MultiSink) AssistantEnd(content, reasoning string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantEnd(content, reasoning) })
+	}
+}
+func (m *MultiSink) AssistantCancelled(content string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantCancelled(content) })
+	}
+}
+func (m *MultiSink) ToolBatch(calls []BatchedToolCall) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ToolBatch(calls) })
+	}
+}
+func (m *MultiSink) ToolState(id string, state ToolState) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ToolState(id, state) })
+	}
+}
+func (m *MultiSink) ToolProgress(id string, msg string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ToolProgress(id, msg) })
+	}
+}
+func (m *MultiSink) ToolCall(ev ToolCallEvent) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ToolCall(ev) })
+	}
+}
+func (m *MultiSink) ToolResult(ev ToolResultEvent) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.ToolResult(ev) })
+	}
+}
+func (m *MultiSink) Error(msg string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Error(msg) })
+	}
+}
+func (m *MultiSink) Info(msg string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Info(msg) })
+	}
+}
+func (m *MultiSink) Usage(ev UsageEvent) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Usage(ev) })
+	}
+}
+
+// RunIDRef is the shared mutable run-id holder. The session stamps the current
+// run id here per turn and clears it in finally; the durable RunEventSink reads it
+// to attribute rows. Single-flight (one app, one session) makes a plain guarded
+// pointer sufficient — documented per spec §15.2.
+type RunIDRef struct {
+	current string
+}
+
+// Set stamps the active run id.
+func (r *RunIDRef) Set(id string) { r.current = id }
+
+// Clear unsets the active run id (called in the turn's finally).
+func (r *RunIDRef) Clear() { r.current = "" }
+
+// Current returns the active run id ("" outside a run).
+func (r *RunIDRef) Current() string { return r.current }
+
+// MaxRunEventPayload bounds a serialized run_events payload; overflow → a
+// truncation marker (events.ts §2). serializePayload preview headroom = -200.
+const (
+	MaxRunEventPayload      = 8000
+	runEventPreviewHeadroom = MaxRunEventPayload - 200 // 7800
+)
+
+// runEventStore is the consumer-defined seam the durable RunEventSink persists
+// through. *storage.Store satisfies it (InsertRunEvent). Declared locally so the
+// agent package compiles without a hard dep on storage; all writes are
+// best-effort (a DB failure must never break a live turn — spec §17.13).
+type runEventStore interface {
+	InsertRunEvent(rec domain.RunEventRecord) (domain.RunEventRecord, error)
+}
+
+// RunEventSink persists the event stream to run_events for /explain replay
+// (events.ts §12). Streamed tokens accumulate in contentBuffer and flush as ONE
+// assistant:content row when the round ends, capturing intermediate prose (text
+// in the same round as a tool call) that never reaches AssistantEnd. seq resets
+// per run (when ref.Current() changes); monotonic within a run from 0.
+type RunEventSink struct {
+	db            runEventStore
+	ref           *RunIDRef
+	seq           int
+	seqRunID      string
+	contentBuffer string
+}
+
+// NewRunEventSink builds the durable sink over a store and the shared run-id ref.
+func NewRunEventSink(db runEventStore, ref *RunIDRef) *RunEventSink {
+	return &RunEventSink{db: db, ref: ref}
+}
+
+// Phase is not persisted (it's live-only UI vocabulary); the durable log records
+// concrete content rows, not phase transitions.
+func (s *RunEventSink) Phase(domain.RunPhase) {}
+
+func (s *RunEventSink) AssistantStart() {
+	s.flushContent()
+	s.write("assistant:start", nil)
+}
+
+func (s *RunEventSink) AssistantToken(token string) {
+	// Buffered; flushed as one assistant:content row when the round ends.
+	s.contentBuffer += token
+}
+
+func (s *RunEventSink) AssistantEnd(content, reasoning string) {
+	// Drop the streamed buffer (its content arrives here) to avoid duplication.
+	s.contentBuffer = ""
+	if reasoning != "" {
+		s.write("assistant:end", map[string]any{"content": content, "reasoning": reasoning})
+	} else {
+		s.write("assistant:end", map[string]any{"content": content})
+	}
+}
+
+func (s *RunEventSink) AssistantCancelled(content string) {
+	s.contentBuffer = ""
+	s.write("assistant:cancelled", map[string]any{"content": content})
+}
+
+// ToolBatch/ToolState are live-footer-only; the durable log keys off the concrete
+// tool:call/tool:result rows, so they are intentionally not persisted.
+func (s *RunEventSink) ToolBatch([]BatchedToolCall) {}
+func (s *RunEventSink) ToolState(string, ToolState) {}
+func (s *RunEventSink) ToolProgress(string, string) {}
+
+func (s *RunEventSink) ToolCall(ev ToolCallEvent) {
+	s.flushContent()
+	// args is the raw JSON string; emit it as parsed JSON when valid, else the raw
+	// string (matching the TS "parsed JSON, or raw string on parse failure").
+	s.write("tool:call", map[string]any{"id": ev.ID, "name": ev.Name, "args": rawArgsAsAny(ev.Args)})
+}
+
+func (s *RunEventSink) ToolResult(ev ToolResultEvent) {
+	s.write("tool:result", map[string]any{
+		"id":      ev.ID,
+		"name":    ev.Name,
+		"ok":      ev.Result.Ok,
+		"summary": ev.Result.Summary,
+		"auditId": ev.Result.AuditID,
+	})
+}
+
+func (s *RunEventSink) Error(msg string) {
+	s.flushContent()
+	s.write("error", map[string]any{"message": msg})
+}
+
+func (s *RunEventSink) Info(msg string) {
+	s.write("info", map[string]any{"message": msg})
+}
+
+func (s *RunEventSink) Usage(ev UsageEvent) {
+	s.flushContent()
+	payload := map[string]any{
+		"promptTokens":     ev.PromptTokens,
+		"completionTokens": ev.CompletionTokens,
+		"totalTokens":      ev.TotalTokens,
+		"contextTokens":    ev.ContextTokens,
+		"contextThreshold": ev.ContextThreshold,
+		"contextWindow":    ev.ContextWindow,
+		"tier":             ev.Tier,
+		"model":            ev.Model,
+	}
+	if ev.CachedTokens != nil {
+		payload["cachedTokens"] = *ev.CachedTokens
+	}
+	if ev.CostUsd != nil {
+		payload["costUsd"] = *ev.CostUsd
+	}
+	s.write("usage", payload)
+}
+
+// flushContent emits the buffered intermediate prose as one assistant:content row
+// and clears the buffer (events.ts §12.2).
+func (s *RunEventSink) flushContent() {
+	if s.contentBuffer == "" {
+		return
+	}
+	content := s.contentBuffer
+	s.contentBuffer = ""
+	s.write("assistant:content", map[string]any{"content": content})
+}
+
+// write persists one row. seq resets when the run id changes; runs without a
+// current id (emitted outside a turn) are dropped. Best-effort: any DB error is
+// swallowed (durable logging must never break a live turn — §17.13).
+func (s *RunEventSink) write(typ string, payload any) {
+	runID := s.ref.Current()
+	if runID == "" {
+		return
+	}
+	if runID != s.seqRunID {
+		s.seqRunID = runID
+		s.seq = 0
+	}
+	var payloadPtr *string
+	if payload != nil {
+		p := serializeRunPayload(payload)
+		payloadPtr = &p
+	}
+	rec := domain.RunEventRecord{
+		RunID:   runID,
+		Seq:     s.seq,
+		Type:    typ,
+		Payload: payloadPtr,
+	}
+	s.seq++
+	func() {
+		defer func() { _ = recover() }()
+		if s.db == nil {
+			return
+		}
+		_, _ = s.db.InsertRunEvent(rec)
+	}()
+}
+
+// serializeRunPayload JSON-encodes a payload, replacing an oversized result with a
+// truncation marker (events.ts §12.4). On a marshal failure it emits a stable
+// {error:"unserializable"} stub.
+func serializeRunPayload(payload any) string {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		stub, _ := json.Marshal(map[string]string{"error": "unserializable"})
+		return string(stub)
+	}
+	if len(b) <= MaxRunEventPayload {
+		return string(b)
+	}
+	preview := sliceChars(string(b), runEventPreviewHeadroom)
+	marker, _ := json.Marshal(map[string]any{
+		"truncated": true,
+		"bytes":     len(b), // Buffer.byteLength → byte length
+		"preview":   preview,
+	})
+	return string(marker)
+}
+
+// rawArgsAsAny decodes a raw JSON argument string to a generic value for the
+// run-event payload, falling back to the raw string when it isn't valid JSON
+// (matching the TS "parsed JSON, or the raw string on parse failure").
+func rawArgsAsAny(raw string) any {
+	if raw == "" {
+		return map[string]any{}
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	return v
+}

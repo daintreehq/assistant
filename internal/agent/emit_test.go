@@ -1,0 +1,131 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/models"
+)
+
+// orderSink records the ordered vocabulary of high-level events the loop emits so
+// the ordering + wire-name translation can be asserted end-to-end (agentEvents).
+type orderSink struct {
+	NoopEventSink
+	log []string
+}
+
+func (s *orderSink) AssistantStart()             { s.log = append(s.log, "start") }
+func (s *orderSink) AssistantToken(t string)     { s.log = append(s.log, "tok:"+t) }
+func (s *orderSink) AssistantEnd(c, _ string)    { s.log = append(s.log, "end:"+c) }
+func (s *orderSink) AssistantCancelled(c string) { s.log = append(s.log, "cancelled:"+c) }
+func (s *orderSink) ToolCall(ev ToolCallEvent)   { s.log = append(s.log, "call:"+ev.Name+":"+ev.ID) }
+func (s *orderSink) ToolResult(ev ToolResultEvent) {
+	ok := "false"
+	if ev.Result.Ok {
+		ok = "true"
+	}
+	s.log = append(s.log, "result:"+ev.Name+":"+ok+":"+ev.ID)
+}
+func (s *orderSink) Error(m string) { s.log = append(s.log, "error:"+m) }
+
+func contains(log []string, want string) bool {
+	for _, e := range log {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEmitStreamsTokensThenEnds(t *testing.T) {
+	sink := &orderSink{}
+	r := &fakeRouter{
+		results: []models.ChatResult{{Content: "Hello"}},
+		streams: [][]string{{"Hel", "lo"}},
+	}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+	out, err := s.Send(context.Background(), "hi", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Hello" {
+		t.Fatalf("reply = %q", out)
+	}
+	want := []string{"start", "tok:Hel", "tok:lo", "end:Hello"}
+	if !equalStrings(sink.log, want) {
+		t.Fatalf("event log = %v want %v", sink.log, want)
+	}
+}
+
+func TestEmitTranslatesWireNameInToolEvents(t *testing.T) {
+	// The model returns the OpenAI-legal wire name (fs__search); the loop must
+	// translate it back to the internal dotted name (fs.search) before the tool
+	// events fire, and the call id must flow through both events.
+	sink := &orderSink{}
+	tools := &fakeTools{result: domain.Ok("found 2 files", nil)}
+	r := &fakeRouter{
+		results: []models.ChatResult{
+			{ToolCalls: []models.ToolCallRequest{toolCall("c1", "fs__search", "{}")}},
+			{Content: "done"},
+		},
+	}
+	deps := baseDeps(r, tools)
+	deps.Events = sink
+	s := NewSession(deps)
+	out, err := s.Send(context.Background(), "search", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "done" {
+		t.Fatalf("reply = %q", out)
+	}
+	if !contains(sink.log, "call:fs.search:c1") {
+		t.Fatalf("missing translated tool call event: %v", sink.log)
+	}
+	if !contains(sink.log, "result:fs.search:true:c1") {
+		t.Fatalf("missing translated tool result event: %v", sink.log)
+	}
+	if sink.log[len(sink.log)-1] != "end:done" {
+		t.Fatalf("last event = %q want end:done", sink.log[len(sink.log)-1])
+	}
+}
+
+func TestEmitReportsModelErrorThroughSink(t *testing.T) {
+	sink := &orderSink{}
+	r := &errRouter{err: errors.New("boom")}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+	out, err := s.Send(context.Background(), "hi", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "Model error: boom") {
+		t.Fatalf("reply = %q want 'Model error: boom'", out)
+	}
+	var sawError bool
+	for _, e := range sink.log {
+		if len(e) >= 6 && e[:6] == "error:" {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("expected an error event: %v", sink.log)
+	}
+}
+
+// errRouter fails its stream with a configurable error (model-error path).
+type errRouter struct{ err error }
+
+func (r *errRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	return models.ChatResult{}, r.err
+}
+func (r *errRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	return models.ChatResult{Content: "S"}, nil
+}
+func (r *errRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }

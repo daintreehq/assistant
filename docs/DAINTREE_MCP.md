@@ -4,10 +4,10 @@ The CLI connects to Daintree's **local MCP server** as an external client. In pr
 Daintree launches the CLI and passes the connection details via environment / flags.
 
 > **Source of truth.** The CLI-side verified contract lives in
-> [`src/models/prompts/daintreeMcp.ts`](../src/models/prompts/daintreeMcp.ts) — it is
-> embedded in the cached system prompt, so it is what the model actually reasons
-> against. This doc is the human-facing companion; keep the two in sync. If they ever
-> disagree, `daintreeMcp.ts` wins.
+> [`internal/models/prompts`](../internal/models/prompts) — it is embedded in the
+> cached system prompt, so it is what the model actually reasons against. This doc is
+> the human-facing companion; keep the two in sync. If they ever disagree, the prompt
+> source wins.
 
 ## Connection
 
@@ -22,25 +22,17 @@ Daintree launches the CLI and passes the connection details via environment / fl
 | Auth header    | `Authorization: Bearer <token>`                            |
 
 `DAINTREE_WINDOW_ID` is injected by Daintree so a CLI bound to one Daintree window
-can be told apart from another. It is read into config (`AppConfig.windowId`, env-only —
-never a CLI flag) and surfaced by `/status` via `describeConfig()`. (`/doctor` reports
-connection health and a live MCP probe rather than the raw config values.)
+can be told apart from another. It is read into config (`AppConfig.WindowID`, env-only —
+never a CLI flag) and surfaced by `/status` via `config.DescribeConfig`. (`/doctor`
+reports connection health and a live MCP probe rather than the raw config values.)
 
-Client uses `@modelcontextprotocol/sdk`:
+The client (`internal/mcp`) uses `github.com/modelcontextprotocol/go-sdk`: it connects
+over the Streamable HTTP transport with an `Authorization: Bearer <token>` header and
+falls back to the legacy SSE transport on failure.
 
-```ts
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-
-const transport = new StreamableHTTPClientTransport(new URL(url), {
-  requestInit: { headers: { Authorization: `Bearer ${token}` } },
-});
-await client.connect(transport); // fall back to SSEClientTransport on failure
-```
-
-`client.listTools()` → `{ tools: [{ name, description, inputSchema }] }`.
-`client.callTool({ name, arguments })` → `{ content: [{ type:"text", text }], structuredContent?, isError? }`.
+`ListTools` → tools with `{ name, description, inputSchema }`.
+`CallTool(name, arguments)` → content text plus optional `structuredContent` and an
+`isError` flag, normalized into a `domain.ToolResult`.
 
 ## Tiers
 
@@ -87,7 +79,7 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
   → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, recentOutput? }] }`.
   There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` (numeric)
   is present once a terminal has exited; `spawnedAt` / `lastTransitionAt` are epoch-ms
-  timestamps. All three are read defensively (absent/non-numeric → `undefined`).
+  timestamps. All three are read defensively (absent/non-numeric → treated as unset).
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
@@ -107,9 +99,7 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
 
 ## State models (from Daintree)
 
-```ts
-type AgentState = "idle" | "working" | "waiting" | "completed" | "exited";
-```
+`domain.AgentState` is one of: `idle` | `working` | `waiting` | `completed` | `exited`.
 
 - `"directing"` exists in Daintree's renderer but is **renderer-only** — you will not see
   it over MCP, so the CLI must not depend on it.
@@ -153,12 +143,12 @@ when Daintree closes the gap.
 1. **No test/lint completion signal.** `terminal.getStatus` now exposes a numeric `exitCode`
    (plus `spawnedAt` / `lastTransitionAt`), which the watcher consumes as signal evidence — a
    nonzero exit is surfaced as failure evidence on a `terminal_exited` event
-   (`src/daemon/watcherEngine.ts`). It is **not** a completion trust gate: there is still no
+   (`internal/daemon/watcher.go`). It is **not** a completion trust gate: there is still no
    test/lint runner signal, so the irreversible-action gate from **issue #3** continues to
    derive completion trust from a deterministic git-cleanliness check, not the exit code.
 2. **`agent.launch` returns only `{ terminalId, location }`.** No `worktreeId` or `taskId`, so
-   `src/tools/agentTaskTools.ts` degrades gracefully (caller-supplied `worktreeId`, `taskId`
-   undefined). If Daintree returns these, the spawn tool can stop guessing.
+   `internal/tools/agenttaskx` degrades gracefully (caller-supplied `worktreeId`, no `taskId`).
+   If Daintree returns these, the spawn tool can stop guessing.
 3. **`DAINTREE_WINDOW_ID` contract.** Daintree injects it but it had been referenced only inside
    a prompt string; it is now read into config so per-window/per-project state isolation can use
    it. This overlaps directly with **issue #4** (per-project state isolation) — #4 owns the

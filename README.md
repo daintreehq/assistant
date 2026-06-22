@@ -1,101 +1,118 @@
-# Daintree Assistant CLI
+# Daintree Assistant
 
-A local command-line **orchestration assistant for Daintree** — Daintree's "local
-operations officer." It understands the current workspace, plans Daintree
-operations, spawns and supervises agent terminals, watches them with cheap models,
-schedules timers, and keeps the human's main conversation clean.
+A single native **Go** binary: a local command-line **orchestration assistant for
+Daintree** — Daintree's "local operations officer." It understands the current
+workspace, plans Daintree operations, spawns and supervises agent terminals, watches
+them with cheap models, schedules timers, and keeps the human's main conversation clean.
 
-It is **not** a code editor. It never edits project files. When a change is needed
-it spawns a *visible* agent terminal inside Daintree and supervises it.
+It is **not** a code editor. It never edits project files. When a change is needed it
+spawns a *visible* agent terminal inside Daintree and supervises it.
 
-Powered by **Fireworks AI** (OpenAI-compatible): a large model
-(`minimax-m3`) runs the main thread; a small fast model
-(`deepseek-v4-flash`) does watchers, summaries, and classification.
+Powered by **Fireworks AI** (OpenAI-compatible Chat Completions over `net/http`): a
+large model (`glm-5p2`) runs the main thread; a small fast model (`deepseek-v4-flash`)
+does watchers, summaries, and classification. A `medium` tier exists in the routing
+abstraction and resolves to `large` in v1.
 
-> This prototype ships with built-in system prompts and talks to Fireworks
-> directly. In the final product these are replaced by the hosted backend.
+> This prototype ships with built-in system prompts and talks to Fireworks directly.
+> In the final product these are replaced by the hosted backend.
 
-## Quick start
+## Build & install
+
+**Prerequisite:** Go **1.25.8 or newer** (`go version`). Nothing else — SQLite is the
+pure-Go `modernc.org/sqlite` driver, so `CGO_ENABLED=0` builds work and there is no
+native toolchain or `npm`/`bun`/`node` dependency.
 
 ```bash
-npm install
-cp .env.example .env      # then set FIREWORKS_API_KEY (already present in this repo's .env)
+# Install to your Go bin ($(go env GOBIN) or $(go env GOPATH)/bin)
+go install github.com/daintreehq/daintree-assistant/cmd/daintree-assistant@latest
 
-# Interactive cockpit (inline — renders in the terminal's main buffer, native scrollback)
-npm run dev
-
-# Legacy readline REPL / non-TTY-safe
-npm run dev -- --classic
-
-# One-shot (console output)
-npm run dev -- "which worktrees are ready for review?"
-
-# Environment check
-npm run dev -- doctor
+# …or from a checkout
+git clone https://github.com/daintreehq/daintree-assistant
+cd daintree-assistant
+make build                                          # → ./bin/daintree-assistant (trimpath + version)
+# or directly:
+go build -o bin/daintree-assistant ./cmd/daintree-assistant
+go install ./cmd/daintree-assistant                 # installs to $(go env GOPATH)/bin
 ```
 
-The default interactive experience is the **Daintree cockpit**, rendered *inline* in
-the terminal's **main** screen buffer (the Claude Code model) — never the alternate
-screen. This keeps scrolling where it belongs: the host terminal (xterm, in Daintree)
-owns the scrollback, so the mouse wheel scrolls wherever it hovers, and selection and
-copy/paste work natively. Completed turns are committed once (via Ink `<Static>`) and
-flow into that native scrollback; the masthead is plain text that scrolls away with
-them (no pinned full-width rule — a committed rule would wrap and break on resize). The
-in-flight turn, a status line, and the composer are the small repainting region at the
-bottom. On resize the host reflows the scrollback natively and Ink only repaints that
-region — there is no monkeypatching of Ink's erase. Content is inset one column on each
-side. There is no column-banded layout: the same single surface renders at every width.
+Then configure the API key and run:
+
+```bash
+cp .env.example .env      # set FIREWORKS_API_KEY
+./bin/daintree-assistant            # interactive cockpit
+./bin/daintree-assistant doctor     # environment check (MCP / Fireworks key / project / tier)
+```
+
+`make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
+`generate` · `run` · `clean`.
+
+## Running it
+
+```bash
+./bin/daintree-assistant                                  # interactive Bubble Tea cockpit (TTY)
+./bin/daintree-assistant --classic                        # classic line REPL (also used for non-TTY)
+./bin/daintree-assistant "which worktrees are ready for review?"   # one-shot, prints, exits
+./bin/daintree-assistant --json "…"                       # one-shot, JSONL event stream to stdout
+./bin/daintree-assistant doctor                           # environment check
+./bin/daintree-assistant host --stdio                     # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
+```
+
+## The cockpit (and why it's not a full-screen takeover)
+
+The default interactive experience is the **Daintree cockpit**, built on **Bubble Tea
+v2** and rendered **inline in the terminal's NORMAL screen buffer** — never the alternate
+screen, never with the mouse captured. This is the deliberate anti-pattern-avoidance
+versus Claude Code / Codex: those take over the whole screen and break native scrolling.
+
+Here the **host terminal owns the scrollback**: the mouse wheel scrolls wherever it
+hovers, the scrollbar works, and selection / copy-paste are native. Completed turns and
+the masthead are committed **once** into that native scrollback (via Bubble Tea's
+`tea.Println` print-above-program, a strict one-in-flight commit queue) and flow up like
+ordinary terminal lines. Only a small **live footer** — the in-flight turn, a status
+line, and the composer — repaints. The masthead is plain text with **no pinned full-width
+rule** (a committed rule would wrap and break on a narrow resize). Content is inset one
+column on each side; the same single surface renders at every width.
 
 ```
 ◆ DAINTREE  assistant-main           OPERATOR  ● CONNECTED
 
 YOU
-╭────────────────────────────────────────────────────────╮
-│ Fix the watcher tests and tell me when the branch is … │
-╰────────────────────────────────────────────────────────╯
+▏ Fix the watcher tests and tell me when the branch is clean.
+
 ◆ DAINTREE
 I'll delegate the edit and supervise the result.
-├─ ✓ Delegated   term_8 · repair watcher tests
-╰─ ◌ Watching    tests running · 42 passed              18s
+├─ ✓ Delegated   term_8 · repair watcher tests              38ms
+╰─ ⠋ Watching    tests running · 42 passed                  18s
 ──────────────────────────────────────────────────────────
-◌ Watching term_8 · 18s                    agents 1 · tmr 1
+⠋ Integrating results · 0.3s              agents 1 · tmr 1
 › Ask Daintree…
   / commands · ^O ops · ^X detail
 ```
 
-User messages render as a distinct, dimmer **boxed card** (theme-aware via
-`DAINTREE_THEME=dark|light|ansi|none`, never a hard-coded bright block) while
-Daintree's own prose stays unboxed under a `◆ DAINTREE` marker — so "who said
-what" is unmistakable even with color stripped.
+The active turn is driven by an **explicit run phase** (Received → Analyzing →
+Generating → Tool queued/running → Integrating → Complete), not guessed from emptiness,
+so the liveness cue never vanishes mid-work. Operational detail is a purposeful **view**,
+not a text dump: `^O` toggles the operations deck (NOW → NEEDS ATTENTION → AGENTS →
+SCHEDULED → RECENT) and `/watchers`, `/inbox`, `/timers`, `/audit` open it focused on one
+section. `^X` toggles raw tool args/results; `Esc` returns home; `^C` shuts down the
+scheduler, MCP, and DB cleanly. These render *in place of the composer*, never as pinned
+panels (a pinned panel is mutually exclusive with native scrollback). Risky actions raise
+a full-width **approval sheet** above the composer that defaults visually to decline and
+stays readable with color stripped. `DAINTREE_THEME=dark|light|ansi|none` themes it.
 
-Operational detail is a purposeful **view**, not a text dump: `^O` toggles the
-operations deck (NOW → NEEDS ATTENTION → AGENTS → SCHEDULED → RECENT, with
-watchers and terminals merged into single agent rows and recommended actions
-exposed), and `/watchers`, `/inbox`, `/timers`, `/audit` open it focused on one
-section. `^X` toggles raw tool args/results in the transcript; `Esc` returns home
-from any view; `^C` shuts down the scheduler, MCP, and DB cleanly. These on-demand
-views render *in place of the composer* and never as pinned panels — a pinned
-full-screen panel would be mutually exclusive with the native scrollback.
+See [`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md) for the full cockpit architecture.
 
-Risky actions raise a full-width **approval sheet** above the composer with a
-risk-specific question (e.g. "Push branch to origin?") that defaults visually to
-decline and stays readable with color stripped. One-shot prompts and non-TTY
-invocations use the console renderer instead.
+## Headless modes
 
-### UI gallery (visual development)
-
-Iterate on the surface without a live model, scheduler, or MCP connection:
-
-```bash
-npm run ui:gallery   # number keys switch fixtures (idle · active · attention ·
-                     # approval · degraded · timers · fleet · long message)
-                     # w width (55/58/62/65/80/120) · o ops · x detail · q quit
-```
-
-Fixtures use a frozen clock, so screenshots and golden-frame tests stay stable.
-
-Build a standalone binary entry: `npm run build` → `dist/index.js` (exposed as the
-`daintree-assistant` bin).
+- **One-shot** — pass a prompt argument; it runs a single turn, prints the result to the
+  console, and exits.
+- **`--json`** — one-shot that streams structured **JSONL** events to stdout (one event
+  per line: tokens, tool calls, results, the final envelope). For scripting/automation.
+- **`--classic`** — a plain line REPL (no cockpit). Also the automatic fallback on a
+  non-TTY stdout.
+- **`host --stdio`** — the embedded host: a stdio **NDJSON** request/response transport
+  (`PROTOCOL_VERSION 2`) that Daintree drives the runtime through. Requires a piped
+  command stream on stdin (it refuses a terminal).
 
 ## How it connects to Daintree
 
@@ -107,71 +124,70 @@ DAINTREE_MCP_TOKEN=<bearer>
 DAINTREE_PROJECT_ID=<id>
 ```
 
-The CLI connects over **Streamable HTTP** (falling back to legacy SSE) with the
-bearer token. Without these it runs in **degraded local mode**: filesystem,
-timer, watcher, and queue tools work; Daintree orchestration tools report a clean
-"not connected" error. Pass them explicitly with `--mcp-url` / `--mcp-token`.
+The CLI connects over **Streamable HTTP** (falling back to legacy SSE) with the bearer
+token, using `github.com/modelcontextprotocol/go-sdk`. Without these it runs in
+**degraded local mode**: filesystem, timer, watcher, and queue tools work; Daintree
+orchestration tools report a clean "not connected" error. Pass them explicitly with
+`--mcp-url` / `--mcp-token`.
 
 ## Architecture
 
 ```
-User ↔ Ink UI ↔ UiBridge ↔ AgentSession (large model)
+User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
        (events/confirm)  │  tools (function calling)
                          ▼
-            ToolRegistry ── safety policy (tiers, confirm, NO file edits) ── audit
+            tools.Registry ── safety policy (tiers, confirm, NO file edits) ── audit
                   │
    ┌──────────────┼─────────────────────────────┐
-   fs (read-only) Daintree MCP (raw + wrappers)  CLI tools (timer/watcher/queue)
+   fsx (read-only) Daintree MCP (raw + wrappers)  CLI tools (timer/watcher/queue)
                   │
-            Scheduler (daemon) ── timers + terminal watchers (small model)
+            daemon.Scheduler ── timers + terminal watchers (small model)
                   │
-            Queue / inbox ──► main thread (digest only, never raw logs)
+            queue.Queue / inbox ──► main thread (digest only, never raw logs)
 ```
 
-- **Three model tiers** (`small`/`medium`/`large`); v1 routes medium→large.
-- **Durable state** in SQLite (`node:sqlite`, no native build) under
-  `~/.daintree/assistant-cli/state.db` — timers, watchers, events, audit,
-  conversation. Survives restarts; timers do sleep catch-up.
-- **Terminal watchers** are small state machines: deterministic signals first,
-  then the small model, then dedupe + publish only meaningful changes.
-- **Permission tiers**: `supervisor` (read-only), `operator` (+spawn/create),
-  `system` (+git/destructive). Mutating actions confirm; file edits are forbidden
-  and delegated to a spawned agent (`agentTask.spawnForEdits`).
+- **Three model tiers** (`small` / `medium` / `large`); v1 routes medium → large.
+- **Durable state** in SQLite (`modernc.org/sqlite`, pure Go, no CGO) under
+  `~/.daintree/assistant-cli/state.db` — timers, watchers, events, audit, conversation,
+  grants, memory. Survives restarts; timers do sleep catch-up. Single clean schema
+  baseline (pre-release: hard-reset on schema changes).
+- **Terminal watchers** are small state machines: deterministic signals first, then the
+  small model, then dedupe + publish only meaningful changes.
+- **Permission tiers**: `supervisor` (read-only), `operator` (+spawn/create), `system`
+  (+git/destructive). Mutating actions confirm; file edits are forbidden and delegated to
+  a spawned agent (`agentTask.spawnForEdits`).
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/FIREWORKS.md`](docs/FIREWORKS.md), and
-[`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md).
+[`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/FIREWORKS.md`](docs/FIREWORKS.md),
+and [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md).
 
 ## Commands (cockpit or classic REPL)
 
 ```
 /status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
 /permissions [tier]  /skills [loaded|find <query>|load <id…>|clear]
-/compact  /doctor  /help  /quit
+/compact  /clear  /doctor  /help  /quit
 ```
 
-In the Ink cockpit these render as command cards (and may focus a deck panel);
-in `--classic` mode they print to the console.
+In the cockpit these render as command cards (and may focus a deck view); in `--classic`
+mode they print to the console.
 
 ## Skill system
 
-Behavior is steered by **skills** — short procedural runbooks injected into the
-main model's context only when relevant, instead of fine-tuning. The base system
-prompt is split into three stable control messages to preserve Fireworks prompt
-caching:
+Behavior is steered by **skills** — short procedural runbooks injected into the main
+model's context only when relevant, instead of fine-tuning. The base system prompt is
+split into three stable control messages to preserve Fireworks prompt caching:
 
-1. **base** — the cached prefix, almost never changes
+1. **base** (`prompts.BaseSystemPrompt`) — the cached prefix, almost never changes
 2. **runtime context** — tier, project, MCP status, model ids
 3. **loaded skills** — the bodies of whatever skills are active
 
-Skills are pulled on demand: the model calls `skill.find` with a short query and
-the small model (`deepseek-v4-flash`) selects 0–3 skills from a metadata-only
-view of the library via `router.json("small", …)`, validated against a Zod schema,
-and injects their bodies into the loaded-skills control message. The model can
-also pull a known skill directly with `skill.load <id>`. Drive it manually with
-`/skills` (`loaded` / `find <query>` / `load <id…>` / `clear`); selection
-decisions are written to a `skill_selection_log` table for later tuning. See
-[`src/skills`](src/skills).
+Skills are pulled on demand: the model calls `skill.find` with a short query and the
+small model selects 0–3 skills from a metadata-only view of the library, validated and
+injected into the loaded-skills message. The model can also pull a known skill directly
+with `skill.load <id>`. Drive it manually with `/skills`. Skill bodies are **embedded**
+into the binary via `go:embed` from `internal/skills/files/*.md`. See
+[`docs/SKILLS.md`](docs/SKILLS.md).
 
 ## Tools the model can call
 
@@ -192,52 +208,53 @@ decisions are written to a `skill_selection_log` table for later tuning. See
 | Memory       | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
 | Artifacts    | `artifact.read`                                                            |
 
+## Environment variables
+
+`FIREWORKS_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
+`DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
+`DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` ·
+`DAINTREE_ASSISTANT_DEBUG_LOG` / `DAINTREE_ASSISTANT_LOG_DIR` ·
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `FIREWORKS_BASE_URL`.
+
+Resolution order: CLI overrides → real process env → project `.env` → the assistant's own
+`.env` → built-in defaults. State lives under `~/.daintree/assistant-cli/`.
+
 ## Debug logging
 
-A full-fidelity trace for debugging the assistant itself. When enabled, it appends
-**everything** — every model request and response (full message arrays), every
-tool/function call with its arguments and result, and the whole watcher lifecycle —
-to a single human-readable log. These logs are intentionally large and untruncated.
+A full-fidelity trace for debugging the assistant itself. When enabled it appends
+**everything** — every model request and response, every tool/function call with its
+arguments and result, and the whole watcher lifecycle — to a single human-readable log.
 
-**Enable it** by setting `DAINTREE_ASSISTANT_DEBUG_LOG=1`. The flag is read from the
-process environment, the bound project's `.env`, **or the assistant's own `.env`**
-(a low-precedence fallback), so it takes effect even when Daintree embeds the
-assistant against another project. It's already set in this repo's `.env`.
-
-**Where it writes:** a **global** directory (default `~/.daintree/logs`, override
-with `DAINTREE_ASSISTANT_LOG_DIR`), so one place covers every session regardless of
-which project it was bound to. Each run gets its **own** file named by session date
-and id — `<YYYY-MM-DD>-<sessionId>.log` — so a new instance never clobbers a previous
-run's log.
+**Enable it** with `DAINTREE_ASSISTANT_DEBUG_LOG=1` (read from the process env, the bound
+project's `.env`, or the assistant's own `.env`). It writes to a **global** dir (default
+`~/.daintree/logs`, override `DAINTREE_ASSISTANT_LOG_DIR`); each run gets its own
+`<YYYY-MM-DD>-<sessionId>.log`, and logs older than 7 days are pruned at boot.
 
 ```bash
-ls -t ~/.daintree/logs | head        # newest session logs
-tail -f ~/.daintree/logs/2026-06-18-ses_ab12cd34.log
+ls -t ~/.daintree/logs | head
+tail -f ~/.daintree/logs/2026-06-21-ses_ab12cd34.log
 ```
-
-**On startup** (when logging is on) the assistant prints `logging to <file>` and
-shows it in the cockpit header alongside a `◌ LOG` badge, the new file opens with a
-`session.start` header (the project it was launched in, tier, models, MCP target),
-and any log older than **7 days** is deleted as part of boot.
 
 ## Testing
 
 ```bash
-npm test          # vitest, no network — fakes for MCP + models
-npm run typecheck
+go test ./...        # all tests (336+), no network — fakes for MCP + models
+go test -race ./...
+go vet ./...
+gofmt -l .           # must print nothing
 ```
 
 ## Notes / roadmap
 
-- The daemon runs **in-process** in this prototype. State lives in SQLite so it's
-  ready to split into a detachable background process (spec §5.1).
-- **UI boundary:** the runtime (App, AgentSession, ToolRegistry, Scheduler, Db,
-  Queue, MCP, Router) emits structured events and exposes state; the Ink layer
-  under `src/ui` is the only thing that imports Ink. Tools never call Ink, the
-  watcher engine never renders, and the model loop never writes to stdout — it
-  emits through an `AgentEventSink` consumed by either the Ink `UiBridge` or the
-  legacy console sink (`src/cli/consoleSink.ts`).
-- Workflows, skills, and persistent memory are implemented tool surfaces
-  (`workflow.*`, `skill.*`, `memory.*`). Future phases target Daintree-owned
-  watch-sets over MCP (option C in the scheduler decision record), which would let
-  supervision tick without the assistant open.
+- The daemon runs **in-process** and **foreground-only** in this prototype. State lives
+  in SQLite so it's ready to split into a detachable background process later (the
+  scheduler decision record is in `docs/ARCHITECTURE.md`).
+- **UI boundary:** the runtime (App, Session, Registry, Scheduler, Store, Queue, MCP,
+  Router) emits structured events and exposes state; only `internal/ui` imports Bubble
+  Tea. Tools never render, the watcher engine never paints, and the model loop never
+  writes to stdout — it emits through an `agent.EventSink` consumed by the cockpit's
+  event pump or the console / JSONL sink.
+- Workflows, skills, and persistent memory are implemented tool surfaces (`workflow.*`,
+  `skill.*`, `memory.*`). Future phases target Daintree-owned watch-sets over MCP, which
+  would let supervision tick without the assistant open.

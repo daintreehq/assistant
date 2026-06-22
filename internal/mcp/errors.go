@@ -1,0 +1,47 @@
+package mcp
+
+import "errors"
+
+// isUnavailable reports whether err is (or wraps) an UnavailableError. Callers use
+// it to decide NOT to degrade the connection (it already means disconnected).
+func isUnavailable(err error) bool {
+	var ue *UnavailableError
+	return errors.As(err, &ue)
+}
+
+// UnavailableError is the sentinel returned when a Daintree-requiring call is made
+// while the client is not connected. Callers distinguish it from transport errors
+// (errors.As) so they DO NOT degrade the connection on it (it already means
+// disconnected) and surface a clean MCP_UNAVAILABLE tool result. Port of
+// McpUnavailableError; Code is fixed to "MCP_UNAVAILABLE".
+type UnavailableError struct {
+	Message string
+}
+
+// UnavailableCode is the stable error code surfaced to tool callers.
+const UnavailableCode = "MCP_UNAVAILABLE"
+
+func (e *UnavailableError) Error() string {
+	if e == nil || e.Message == "" {
+		return "Daintree MCP is not connected"
+	}
+	return e.Message
+}
+
+// Code returns the stable machine code ("MCP_UNAVAILABLE").
+func (e *UnavailableError) Code() string { return UnavailableCode }
+
+// ErrUnavailable is a zero-value sentinel for errors.As matching:
+//
+//	var ue *mcp.UnavailableError
+//	if errors.As(err, &ue) { ... }
+var ErrUnavailable = &UnavailableError{}
+
+// newUnavailable builds an UnavailableError from the current lastError, falling
+// back to the canonical message when empty (matches the TS constructor default).
+func newUnavailable(lastError string) *UnavailableError {
+	if lastError == "" {
+		lastError = "Daintree MCP is not connected"
+	}
+	return &UnavailableError{Message: lastError}
+}
