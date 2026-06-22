@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -25,13 +26,14 @@ func TestFormatRunListShowsPromptLabel(t *testing.T) {
 	}
 }
 
-// TestFormatRunListCapsAndOneLinesLabel verifies a long multi-line prompt is
-// collapsed to a single line and truncated with an ellipsis.
+// TestFormatRunListCapsAndOneLinesLabel verifies a long multi-line prompt (CRLF
+// included) is collapsed to a single line with no stray carriage returns and
+// truncated with an ellipsis.
 func TestFormatRunListCapsAndOneLinesLabel(t *testing.T) {
-	long := "first line\n" + strings.Repeat("x", 300)
+	long := "first line\r\nsecond\r" + strings.Repeat("x", 300)
 	out := FormatRunList([]domain.RunSummaryRecord{{RunID: "run_a", Label: long}})
-	if strings.Contains(out, "\n") {
-		t.Fatalf("multi-line label must be collapsed to one line: %q", out)
+	if strings.ContainsAny(out, "\n\r") {
+		t.Fatalf("multi-line/CRLF label must collapse to one line: %q", out)
 	}
 	if !strings.HasSuffix(out, "…") {
 		t.Fatalf("over-long label must be truncated with …: %q", out)
@@ -41,60 +43,103 @@ func TestFormatRunListCapsAndOneLinesLabel(t *testing.T) {
 	}
 }
 
-// TestFormatRunTimelineAgentSaid verifies that an allowlisted tool's structured
-// result surfaces an indented "agent said:" block from ResultJson (terminal.read →
-// content), while a non-allowlisted tool stays summary-only.
-func TestFormatRunTimelineAgentSaid(t *testing.T) {
+// TestFormatRunTimelineSurfacesHiddenReply verifies that a tool whose summary is
+// terse (daintree.call → "Called X.") surfaces its reply text from ResultJson as
+// an indented "agent said:" block.
+func TestFormatRunTimelineSurfacesHiddenReply(t *testing.T) {
 	events := []domain.RunEventRecord{
-		{RunID: "run_a", Seq: 0, Type: "tool:result", Payload: strPtr(
-			`{"id":"c1","name":"terminal.read","ok":true,"summary":"read terminal t1","auditId":"aud_1"}`)},
-		{RunID: "run_a", Seq: 1, Type: "tool:result", Payload: strPtr(
-			`{"id":"c2","name":"fs.read","ok":true,"summary":"read a.go","auditId":"aud_2"}`)},
+		{RunID: "r", Seq: 0, Type: "tool:result", Payload: strPtr(
+			`{"id":"c1","name":"daintree.call","ok":true,"summary":"Called worktree.list.","auditId":"a1"}`)},
 	}
 	audit := []domain.AuditRecord{
-		{ID: "aud_1", ToolName: "terminal.read", Outcome: "ok", DurationMs: 5,
-			ResultJson: strPtr(`{"terminalId":"t1","content":"build failed: missing import","lineCount":1}`)},
-		{ID: "aud_2", ToolName: "fs.read", Outcome: "ok", DurationMs: 2,
-			ResultJson: strPtr(`{"content":"package main"}`)},
+		{ID: "a1", ToolName: "daintree.call", Outcome: "ok", DurationMs: 7,
+			ResultJson: strPtr(`{"text":"worktree feature-x is clean and ready","structuredContent":null}`)},
 	}
 	out := FormatRunTimeline(events, audit)
-	if !strings.Contains(out, "agent said: build failed: missing import") {
-		t.Fatalf("terminal.read reply not surfaced: %q", out)
+	if !strings.Contains(out, "agent said: worktree feature-x is clean and ready") {
+		t.Fatalf("daintree.call reply not surfaced: %q", out)
 	}
-	// fs.read is off the allowlist — its content must NOT appear as agent said.
-	if strings.Contains(out, "agent said: package main") {
+}
+
+// TestFormatRunTimelineDedupsVerbatimReply verifies that terminal.read — whose
+// summary IS its verbatim scrollback — does NOT also emit an "agent said:" block
+// (the content would appear twice).
+func TestFormatRunTimelineDedupsVerbatimReply(t *testing.T) {
+	content := "build failed: missing import \"fmt\""
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "tool:result", Payload: strPtr(
+			`{"id":"c1","name":"terminal.read","ok":true,"summary":` + jsonStr(content) + `,"auditId":"a1"}`)},
+	}
+	audit := []domain.AuditRecord{
+		{ID: "a1", ToolName: "terminal.read", Outcome: "ok", DurationMs: 5,
+			ResultJson: strPtr(`{"terminalId":"t1","content":` + jsonStr(content) + `,"lineCount":1}`)},
+	}
+	out := FormatRunTimeline(events, audit)
+	if strings.Contains(out, "agent said:") {
+		t.Fatalf("verbatim terminal.read must not duplicate as agent said: %q", out)
+	}
+	if strings.Count(out, content) != 1 {
+		t.Fatalf("scrollback should appear exactly once (as the summary): %q", out)
+	}
+}
+
+// TestFormatRunTimelineNonAllowlistedToolNoReply verifies a tool off the allowlist
+// (fs.read) never emits an agent-said block even with a content field.
+func TestFormatRunTimelineNonAllowlistedToolNoReply(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "tool:result", Payload: strPtr(
+			`{"id":"c1","name":"fs.read","ok":true,"summary":"read a.go","auditId":"a1"}`)},
+	}
+	audit := []domain.AuditRecord{
+		{ID: "a1", ToolName: "fs.read", Outcome: "ok", ResultJson: strPtr(`{"content":"package main"}`)},
+	}
+	out := FormatRunTimeline(events, audit)
+	if strings.Contains(out, "agent said:") {
 		t.Fatalf("non-allowlisted tool leaked agent said: %q", out)
 	}
 }
 
-// TestFormatRunTimelineAgentSaidDaintreeCall verifies daintree.call surfaces its
-// "text" field, and that an empty reply renders nothing.
-func TestFormatRunTimelineAgentSaidDaintreeCall(t *testing.T) {
+// TestFormatRunTimelineSkipsTurnPromptLine verifies the turn:prompt event (shown as
+// the run label in FormatRunList) is not rendered as a timeline line.
+func TestFormatRunTimelineSkipsTurnPromptLine(t *testing.T) {
 	events := []domain.RunEventRecord{
-		{RunID: "r", Seq: 0, Type: "tool:result", Payload: strPtr(
-			`{"id":"c1","name":"daintree.call","ok":true,"summary":"called","auditId":"a1"}`)},
-		{RunID: "r", Seq: 1, Type: "tool:result", Payload: strPtr(
-			`{"id":"c2","name":"daintree.call","ok":true,"summary":"called","auditId":"a2"}`)},
+		{RunID: "r", Seq: 0, Type: "turn:prompt", Payload: strPtr(`{"prompt":"spawn the fixer"}`)},
+		{RunID: "r", Seq: 1, Type: "assistant:start"},
 	}
-	audit := []domain.AuditRecord{
-		{ID: "a1", ToolName: "daintree.call", Outcome: "ok", ResultJson: strPtr(`{"text":"worktree ready"}`)},
-		{ID: "a2", ToolName: "daintree.call", Outcome: "ok", ResultJson: strPtr(`{"text":""}`)},
+	out := FormatRunTimeline(events, nil)
+	if strings.Contains(out, "turn:prompt") || strings.Contains(out, "spawn the fixer") {
+		t.Fatalf("turn:prompt must not appear in the timeline: %q", out)
 	}
-	out := FormatRunTimeline(events, audit)
-	if !strings.Contains(out, "agent said: worktree ready") {
-		t.Fatalf("daintree.call reply not surfaced: %q", out)
-	}
-	if strings.Count(out, "agent said:") != 1 {
-		t.Fatalf("empty reply must render nothing: %q", out)
+	if !strings.Contains(out, "▸ assistant") {
+		t.Fatalf("assistant:start should still render: %q", out)
 	}
 }
 
-// TestAgentReplyCapsLongReply verifies the 600-rune cap with an ellipsis.
-func TestAgentReplyCapsLongReply(t *testing.T) {
-	long := strings.Repeat("y", 800)
-	rj := `{"content":"` + long + `"}`
-	got := agentReply("terminal.read", &rj)
-	if r := []rune(got); len(r) != 600 || !strings.HasSuffix(got, "…") {
-		t.Fatalf("reply not capped at 600 with …: %d runes", len([]rune(got)))
+// TestAgentReplyAllowlistAndCap verifies allowlist gating (raw, uncapped) and the
+// 600-rune capReply boundary.
+func TestAgentReplyAllowlistAndCap(t *testing.T) {
+	// off the allowlist → empty.
+	if got := agentReply("fs.read", strPtr(`{"content":"x"}`)); got != "" {
+		t.Fatalf("non-allowlisted should be empty, got %q", got)
 	}
+	// nil/blank result → empty.
+	if got := agentReply("terminal.read", nil); got != "" {
+		t.Fatalf("nil result should be empty, got %q", got)
+	}
+	// agentReply returns the RAW (uncapped) reply; capReply bounds it.
+	long := strings.Repeat("y", 800)
+	raw := agentReply("terminal.read", strPtr(`{"content":`+jsonStr(long)+`}`))
+	if raw != long {
+		t.Fatalf("agentReply should return the raw reply uncapped")
+	}
+	if capped := capReply(raw); len([]rune(capped)) != 600 || !strings.HasSuffix(capped, "…") {
+		t.Fatalf("capReply must bound to 600 runes + …: %d runes", len([]rune(capped)))
+	}
+}
+
+// jsonStr returns s as a JSON string literal (quoted, escaped) for embedding in a
+// raw payload fixture.
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

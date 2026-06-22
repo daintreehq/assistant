@@ -91,19 +91,24 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 					detail = fmt.Sprintf("%s, %dms", a.Outcome, a.DurationMs)
 				}
 			}
+			summary := str(payload["summary"])
 			lines = append(lines, fmt.Sprintf("%s tool %s (%s)", mark, str(payload["name"]), detail))
-			if s := str(payload["summary"]); s != "" {
-				lines = append(lines, indent(s, 4))
+			if summary != "" {
+				lines = append(lines, indent(summary, 4))
 			}
 			// For an allowlisted set of agent-facing tools, surface the reply text the
-			// agent RECEIVED back (terminal scrollback / MCP response) from the audit
-			// row's structured result — not the one-line summary above. Bounded so a
-			// noisy terminal read can't flood the replay.
+			// agent reported back (terminal scrollback / MCP response) from the audit
+			// row's structured result. Suppress it when the summary already IS that text
+			// (terminal.read's summary is its verbatim scrollback — re-printing it would
+			// duplicate). Bounded so a noisy read can't flood the replay.
 			if haveAudit {
-				if reply := agentReply(str(payload["name"]), audit.ResultJson); reply != "" {
-					lines = append(lines, indent("agent said: "+reply, 4))
+				if reply := agentReply(str(payload["name"]), audit.ResultJson); reply != "" && !strings.Contains(summary, reply) {
+					lines = append(lines, indent("agent said: "+capReply(reply), 4))
 				}
 			}
+		case "turn:prompt":
+			// The prompt is rendered as the run's label in FormatRunList; skip it here
+			// so the per-run timeline doesn't carry a redundant line.
 		case "error":
 			lines = append(lines, "⚠ error: "+str(payload["message"]))
 		case "info":
@@ -229,9 +234,10 @@ func previewArgs(args any) string {
 }
 
 // capLabel collapses a multi-line prompt into a compact single-line preview for
-// the run list, capped at 140 display runes (slice 139 + …).
+// the run list, normalizing every line ending to a space (so a stray \r can't
+// corrupt the row) and capping at 140 display runes (slice 139 + …).
 func capLabel(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
 	s = strings.TrimSpace(s)
 	if rs := []rune(s); len(rs) > 140 {
 		return string(rs[:139]) + "…"
@@ -239,12 +245,13 @@ func capLabel(s string) string {
 	return s
 }
 
-// agentReply extracts the human-meaningful reply text from a tool's structured
-// result JSON for an allowlisted set of agent-facing tools, capped at 600 runes
-// (slice 599 + …). Returns "" for tools off the allowlist or when the expected
-// field is absent/blank. The allowlist is deliberately tight — only tools whose
-// result carries text the agent RECEIVED back (a terminal read's scrollback, an
-// MCP call's response), never the outbound commands other tools dispatch.
+// agentReply extracts the trimmed reply text from a tool's structured result JSON
+// for an allowlisted set of agent-facing tools, returning "" for tools off the
+// allowlist or when the field is absent/blank. The caller caps it (capReply) and
+// suppresses it when the summary already shows it. The allowlist is deliberately
+// tight — only tools whose result carries text the agent reported back (a terminal
+// read's verbatim scrollback, an MCP call's response), never the outbound commands
+// other tools dispatch.
 func agentReply(name string, resultJSON *string) string {
 	if resultJSON == nil || *resultJSON == "" {
 		return ""
@@ -262,14 +269,15 @@ func agentReply(name string, resultJSON *string) string {
 	if json.Unmarshal([]byte(*resultJSON), &m) != nil {
 		return ""
 	}
-	reply := strings.TrimSpace(str(m[field]))
-	if reply == "" {
-		return ""
-	}
-	if rs := []rune(reply); len(rs) > 600 {
+	return strings.TrimSpace(str(m[field]))
+}
+
+// capReply bounds a reply preview to 600 display runes (slice 599 + …).
+func capReply(s string) string {
+	if rs := []rune(s); len(rs) > 600 {
 		return string(rs[:599]) + "…"
 	}
-	return reply
+	return s
 }
 
 // indent prefixes every line of s with `pad` spaces.

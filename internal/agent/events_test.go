@@ -273,6 +273,7 @@ type recordingSink struct {
 	log []string
 }
 
+func (r *recordingSink) TurnPrompt(p string)      { r.log = append(r.log, "prompt:"+p) }
 func (r *recordingSink) AssistantStart()          { r.log = append(r.log, "start") }
 func (r *recordingSink) AssistantEnd(c, _ string) { r.log = append(r.log, "end:"+c) }
 func (r *recordingSink) Info(m string)            { r.log = append(r.log, "info:"+m) }
@@ -281,10 +282,11 @@ func TestMultiSinkDeliversWhenOneThrows(t *testing.T) {
 	healthy := &recordingSink{}
 	// Throwing sink FIRST so its panic can't short-circuit the healthy one.
 	fan := NewMultiSink(throwingSink{}, healthy)
+	fan.TurnPrompt("p")
 	fan.AssistantStart()
 	fan.AssistantEnd("hi", "")
 	fan.Info("note")
-	want := []string{"start", "end:hi", "info:note"}
+	want := []string{"prompt:p", "start", "end:hi", "info:note"}
 	if !equalStrings(healthy.log, want) {
 		t.Fatalf("healthy log = %v want %v", healthy.log, want)
 	}
