@@ -246,6 +246,7 @@ func (r *jsonChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts m
 	return models.ChatResult{Content: r.content}, nil
 }
 func (r *jsonChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+func (r *jsonChatRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestDistillCompactSavesNovelFacts(t *testing.T) {
 	r := &jsonChatRouter{content: `["fact A", "fact B"]`}
@@ -318,6 +319,7 @@ func (r *seqChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mo
 	return models.ChatResult{Content: ""}, nil
 }
 func (r *seqChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+func (r *seqChatRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestAutoCompactDistillsBeforeDiscard is the integration guard: with a MemoryStore
 // wired, an over-threshold auto-compact makes TWO model calls (summary + distill) and
