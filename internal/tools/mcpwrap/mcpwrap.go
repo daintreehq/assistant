@@ -10,6 +10,8 @@ func Tools(deps Deps) []*tools.Tool {
 	return []*tools.Tool{
 		newRecipeListTool(),
 		newRecipeRunTool(),
+		newWorktreeListTool(),
+		newWorktreeGetCurrentTool(),
 		newWorktreeCreateWithRecipeTool(),
 
 		newForgeListIssuesTool(),

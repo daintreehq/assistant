@@ -19,6 +19,8 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 	wantRisk := map[string]domain.RiskClass{
 		"recipe.list":                  domain.RiskRead,
 		"recipe.run":                   domain.RiskProject,
+		"worktree.list":                domain.RiskRead,
+		"worktree.getCurrent":          domain.RiskRead,
 		"worktree.createWithRecipe":    domain.RiskProject,
 		"forge.listIssues":             domain.RiskRead,
 		"forge.getIssue":               domain.RiskRead,
