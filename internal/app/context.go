@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -32,7 +33,45 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 		SmallModel:          cfg.SmallModel,
 		SchedulerActive:     a.scheduler != nil,
 		ProjectInstructions: cfg.ProjectInstructions,
+		PinnedMemories:      a.pinnedMemoriesBlock(),
 	}
+}
+
+// pinnedMemoriesMax caps how many pinned memories are injected (pinned-first order,
+// so the most recently pinned win when the operator exceeds it).
+const pinnedMemoriesMax = 20
+
+// pinnedMemoriesBlockMaxBytes bounds the rendered pinned-memory block, mirroring the
+// DAINTREE.md project-instructions ceiling (16 KiB) — generous, since pins are short.
+const pinnedMemoriesBlockMaxBytes = 16384
+
+// pinnedMemoriesBlock renders pinned project memories as "- content" lines for
+// message[1] (consumed by prompts.BuildRuntimeContextMessage). Best-effort: a nil
+// Store, a query error, or no pins yields "" (the block is simply omitted). The total
+// is bounded to pinnedMemoriesBlockMaxBytes and never emits a partial trailing line.
+func (a *App) pinnedMemoriesBlock() string {
+	if a.Store == nil {
+		return ""
+	}
+	limit := pinnedMemoriesMax
+	rows, err := a.Store.ListMemories(storage.MemoryListOptions{PinnedOnly: true, Limit: &limit})
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, m := range rows {
+		line := "- " + strings.TrimSpace(m.Content)
+		// +1 for the joining newline; stop before overflow so a fact is never cut
+		// mid-line.
+		if b.Len()+len(line)+1 > pinnedMemoriesBlockMaxBytes {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // mcpStatusLine renders the connected/not-connected one-liner.

@@ -10,6 +10,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
 // UICommandResult is the structured return of the cockpit slash handler.
@@ -70,6 +72,8 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		return UICommandResult{Handled: true, Title: "Approvals", Text: "Session tool approvals are managed in the cockpit. Press A (bounded) or F (forever this session) on an approval prompt; run /approvals there to list or clear them."}
 	case "skills":
 		return UICommandResult{Handled: true, Title: "Skills", Text: skillsText(ctx, a, rest)}
+	case "memory":
+		return UICommandResult{Handled: true, Title: "Memory", Text: memoryText(a, rest)}
 	case "compact":
 		return UICommandResult{Handled: true, Title: "Compact", Text: compactRun(ctx, a)}
 	case "clear":
@@ -418,7 +422,87 @@ func describeLoaded(a *app.App) string {
 	return strings.Join(lines, "\n")
 }
 
-// compactRun summarizes the conversation with the small model then compacts.
+// memoryText powers /memory: bare/list shows the pinned-first memory store, and
+// pin/unpin/forget curate by id. After a pin-state change it refreshes message[1] so
+// the injected pinned block (App.pinnedMemoriesBlock) reflects the change at once.
+// Mirrors skillsText's subcommand shape. The classic REPL reaches this via its
+// default delegation to HandleUICommand, so there is no separate REPL handler.
+func memoryText(a *app.App, rest []string) string {
+	const usage = "Usage: /memory list | pin <id> | unpin <id> | forget <id>"
+	sub := ""
+	if len(rest) > 0 {
+		sub = rest[0]
+	}
+	switch sub {
+	case "", "list":
+		limit := 50
+		rows, err := a.Store.ListMemories(storage.MemoryListOptions{Limit: &limit})
+		if err != nil {
+			return "Failed to list memories: " + err.Error()
+		}
+		if len(rows) == 0 {
+			return "No memories yet.\n\n" + usage
+		}
+		var lines []string
+		for _, m := range rows {
+			pin := "  "
+			if m.PinnedAt != nil {
+				pin = "📌"
+			}
+			lines = append(lines, fmt.Sprintf("%s %s [%s] %s", pin, m.ID, string(m.Source), oneLine(m.Content)))
+		}
+		lines = append(lines, "", usage)
+		return strings.Join(lines, "\n")
+	case "pin":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory pin <id>"
+		}
+		rec, err := a.Store.PinMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to pin: " + err.Error()
+		}
+		if rec == nil {
+			return "No such memory: " + id
+		}
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Pinned " + id + " — it now surfaces in the assistant's context."
+	case "unpin":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory unpin <id>"
+		}
+		rec, err := a.Store.UnpinMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to unpin: " + err.Error()
+		}
+		if rec == nil {
+			return "No such memory: " + id
+		}
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Unpinned " + id + "."
+	case "forget":
+		id := argAt(rest, 1)
+		if id == "" {
+			return "Usage: /memory forget <id>"
+		}
+		found, err := a.Store.ForgetMemory(id, domain.NowMS())
+		if err != nil {
+			return "Failed to forget: " + err.Error()
+		}
+		if !found {
+			return "No such memory: " + id
+		}
+		// A forgotten memory might have been pinned — refresh so it leaves the inject.
+		a.Session.RefreshRuntimeContext(a.PromptContext())
+		return "Forgot " + id + "."
+	default:
+		return usage
+	}
+}
+
+// compactRun summarizes the conversation with the small model then compacts, after
+// distilling any durable facts from the transcript so they survive the discard.
 func compactRun(ctx context.Context, a *app.App) string {
 	transcript := buildCompactionTranscript(a, 12000)
 	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
@@ -431,10 +515,81 @@ func compactRun(ctx context.Context, a *app.App) string {
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
+	// Distill durable facts BEFORE the transcript is discarded (best-effort; never
+	// blocks the compaction). Mirrors the agent auto-compact path.
+	saved := distillFromTranscript(ctx, a, buildCompactionTranscript(a, 8000))
 	if err := a.Session.Compact(res.Content); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
-	return "Conversation compacted."
+	msg := "Conversation compacted."
+	if saved > 0 {
+		msg += fmt.Sprintf(" Distilled %d %s.", saved, pluralMemory(saved))
+	}
+	return msg
+}
+
+// distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
+// it extracts durable facts from a soon-to-be-discarded transcript (one small-model
+// call) and saves the novel ones as source="compact" memories. It lives here (not in
+// the agent seam) because the command layer has direct *app.App access — no import
+// cycle. Best-effort: any failure yields 0 and never affects compaction.
+func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (saved int) {
+	defer func() { _ = recover() }()
+	if a.Store == nil || strings.TrimSpace(transcript) == "" {
+		return 0
+	}
+	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
+		Messages: []models.ChatMessage{
+			models.TextMessage("system", prompts.DistillSystemPrompt),
+			models.TextMessage("user", transcript),
+		},
+		MaxTokens: intPtr(600),
+	})
+	if err != nil {
+		return 0
+	}
+	for _, fact := range prompts.ParseDistilledFacts(res.Content) {
+		exists, exErr := a.Store.MemoryExists(fact)
+		if exErr != nil || exists {
+			continue
+		}
+		now := domain.NowMS()
+		if _, insErr := a.Store.InsertMemory(domain.MemoryRecord{
+			Content:   fact,
+			Source:    domain.MemoryCompact,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); insErr == nil {
+			saved++
+		}
+	}
+	return saved
+}
+
+// pluralMemory renders the singular/plural noun for a memory count.
+func pluralMemory(n int) string {
+	if n == 1 {
+		return "memory"
+	}
+	return "memories"
+}
+
+// argAt returns rest[i] or "" when out of range.
+func argAt(rest []string, i int) string {
+	if i >= 0 && i < len(rest) {
+		return rest[i]
+	}
+	return ""
+}
+
+// oneLine flattens newlines and truncates to a compact single-line preview.
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 80 {
+		return string(r[:77]) + "..."
+	}
+	return s
 }
 
 func reconnectRun(ctx context.Context, a *app.App) string {

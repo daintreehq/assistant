@@ -804,8 +804,17 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	summaryMsgs := []models.ChatMessage{
 		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual."),
 	}
+	// Capture a flattened transcript from the SAME snapshot (still under the lock) so
+	// the distillation pass can mine the about-to-be-discarded history after the lock
+	// is released for the model calls.
+	transcript := ""
 	for _, m := range s.messages[domain.ControlMessageCount:] {
-		summaryMsgs = append(summaryMsgs, models.TextMessage(m.Role, m.ContentToText()))
+		text := m.ContentToText()
+		summaryMsgs = append(summaryMsgs, models.TextMessage(m.Role, text))
+		if text == "" {
+			text = "[tool call]"
+		}
+		transcript += m.Role + ": " + text + "\n"
 	}
 	s.mu.Unlock()
 
@@ -819,10 +828,73 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 		s.events.Info("Auto-compact skipped: empty summary")
 		return
 	}
+	// Distill durable facts from the transcript BEFORE compaction discards it
+	// (best-effort, outside the lock; a nil MemoryStore skips it with no model call).
+	saved := s.distillCompact(ctx, transcript)
 	s.mu.Lock()
 	s.compactLocked(summary)
 	s.mu.Unlock()
+	if saved > 0 {
+		s.events.Info("Distilled " + itoa(saved) + " " + pluralMemory(saved) + " before compacting")
+	}
 	s.events.Info("Auto-compacted conversation")
+}
+
+// distillTranscriptMaxRunes caps the transcript fed to the distillation model — the
+// small model needs only enough context to extract facts, not the full summary input.
+const distillTranscriptMaxRunes = 8000
+
+// distillCompact extracts durable facts from a soon-to-be-discarded transcript via a
+// single small-model call and saves the novel ones as source="compact" memories.
+// Best-effort by construction: a nil MemoryStore, an empty transcript, a model error,
+// an unparseable reply, or any panic yields 0 and never affects compaction. It MUST be
+// called with s.mu released (it makes a network call + DB writes).
+func (s *Session) distillCompact(ctx context.Context, transcript string) (saved int) {
+	defer func() { _ = recover() }()
+	if s.deps.MemoryStore == nil {
+		return 0
+	}
+	if r := []rune(transcript); len(r) > distillTranscriptMaxRunes {
+		transcript = string(r[:distillTranscriptMaxRunes])
+	}
+	if trimSpace(transcript) == "" {
+		return 0
+	}
+	maxTok := 600
+	result, err := s.deps.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
+		Messages: []models.ChatMessage{
+			models.TextMessage("system", prompts.DistillSystemPrompt),
+			models.TextMessage("user", transcript),
+		},
+		MaxTokens: &maxTok,
+	})
+	if err != nil {
+		return 0
+	}
+	for _, fact := range prompts.ParseDistilledFacts(result.Content) {
+		exists, exErr := s.deps.MemoryStore.MemoryExists(fact)
+		if exErr != nil || exists {
+			continue
+		}
+		now := domain.NowMS()
+		if _, insErr := s.deps.MemoryStore.InsertMemory(domain.MemoryRecord{
+			Content:   fact,
+			Source:    domain.MemoryCompact,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); insErr == nil {
+			saved++
+		}
+	}
+	return saved
+}
+
+// pluralMemory renders the singular/plural noun for a saved-memory count.
+func pluralMemory(n int) string {
+	if n == 1 {
+		return "memory"
+	}
+	return "memories"
 }
 
 // Artifacts exposes the session's overflow store so the artifact.read tool family

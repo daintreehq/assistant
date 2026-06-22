@@ -569,6 +569,48 @@ func TestUIEveryRegistryCommandHandled(t *testing.T) {
 	}
 }
 
+// TestUIMemoryCommand: /memory list shows the store; pin injects the memory into the
+// prompt context; unpin/forget remove it. Curation must not fall through to unknown.
+func TestUIMemoryCommand(t *testing.T) {
+	a := newOfflineApp(t)
+	rec, err := a.Store.InsertMemory(domain.MemoryRecord{Content: "deploy uses fireworks tokens", Source: domain.MemoryUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// list surfaces the memory id.
+	if r := ui(a, "/memory list"); !r.Handled || !strings.Contains(r.Text, rec.ID) {
+		t.Fatalf("/memory list missing the memory: %q", r.Text)
+	}
+
+	// pin → injected into the runtime prompt context.
+	if r := ui(a, "/memory pin "+rec.ID); !strings.Contains(r.Text, "Pinned") {
+		t.Fatalf("/memory pin: %q", r.Text)
+	}
+	if !strings.Contains(a.PromptContext().PinnedMemories, "deploy uses fireworks tokens") {
+		t.Fatalf("pinned memory not injected into prompt context: %q", a.PromptContext().PinnedMemories)
+	}
+
+	// unpin → no longer injected.
+	if r := ui(a, "/memory unpin "+rec.ID); !strings.Contains(r.Text, "Unpinned") {
+		t.Fatalf("/memory unpin: %q", r.Text)
+	}
+	if a.PromptContext().PinnedMemories != "" {
+		t.Fatalf("unpinned memory should not be injected, got %q", a.PromptContext().PinnedMemories)
+	}
+
+	// forget removes it from the list.
+	if r := ui(a, "/memory forget "+rec.ID); !strings.Contains(r.Text, "Forgot") {
+		t.Fatalf("/memory forget: %q", r.Text)
+	}
+
+	// unknown id reports cleanly (not an unknown-command fall-through).
+	r := ui(a, "/memory pin mem_does_not_exist")
+	if !r.Handled || !strings.Contains(r.Text, "No such memory") {
+		t.Fatalf("/memory pin unknown id: %+v", r)
+	}
+}
+
 // TestDoctorNoProbeWhenDisconnected: with MCP offline/disconnected, runDoctor adds
 // no "mcp probe" check (the live probe is connection-gated).
 func TestDoctorNoProbeWhenDisconnected(t *testing.T) {

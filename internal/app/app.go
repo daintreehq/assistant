@@ -259,6 +259,7 @@ func Create(opts CreateOptions) (*App, error) {
 		SkillSelector:    skillSelectorAdapter{router: a.Router},
 		SkillCatalog:     skillReg,
 		Store:            store,
+		MemoryStore:      store,
 		PromptContext:    a.PromptContext(),
 		SessionID:        sessionID,
 		RestoredMessages: restored,

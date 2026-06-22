@@ -203,6 +203,103 @@ func TestAutoCompactsAboveThreshold(t *testing.T) {
 	}
 }
 
+// --- distill-on-compact ---
+
+// fakeMemoryStore satisfies the agent.MemoryStore seam: it records inserts and
+// answers MemoryExists from its seeded/inserted content set.
+type fakeMemoryStore struct {
+	existing  map[string]bool
+	inserted  []domain.MemoryRecord
+	insertErr error
+}
+
+func (f *fakeMemoryStore) MemoryExists(content string) (bool, error) {
+	return f.existing[content], nil
+}
+
+func (f *fakeMemoryStore) InsertMemory(rec domain.MemoryRecord) (domain.MemoryRecord, error) {
+	if f.insertErr != nil {
+		return domain.MemoryRecord{}, f.insertErr
+	}
+	if f.existing == nil {
+		f.existing = map[string]bool{}
+	}
+	if rec.ID == "" {
+		rec.ID = "mem_fake"
+	}
+	f.inserted = append(f.inserted, rec)
+	f.existing[rec.Content] = true
+	return rec, nil
+}
+
+// jsonChatRouter returns a fixed Chat body (the distillation reply); Stream is a stub.
+type jsonChatRouter struct {
+	content   string
+	chatCalls int
+}
+
+func (r *jsonChatRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	return models.ChatResult{Content: "ok"}, nil
+}
+func (r *jsonChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	r.chatCalls++
+	return models.ChatResult{Content: r.content}, nil
+}
+func (r *jsonChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+
+func TestDistillCompactSavesNovelFacts(t *testing.T) {
+	r := &jsonChatRouter{content: `["fact A", "fact B"]`}
+	s, _ := compactSession(t, r)
+	mem := &fakeMemoryStore{existing: map[string]bool{"fact B": true}}
+	s.deps.MemoryStore = mem
+	saved := s.distillCompact(context.Background(), "user: did X\nassistant: ok")
+	if saved != 1 {
+		t.Fatalf("saved=%d want 1 (fact B already exists, only fact A is novel)", saved)
+	}
+	if len(mem.inserted) != 1 || mem.inserted[0].Content != "fact A" {
+		t.Fatalf("unexpected inserts: %+v", mem.inserted)
+	}
+	if mem.inserted[0].Source != domain.MemoryCompact {
+		t.Fatalf("source = %q, want compact", mem.inserted[0].Source)
+	}
+}
+
+func TestDistillCompactNilStoreSkipsModelCall(t *testing.T) {
+	r := &jsonChatRouter{content: `["x"]`}
+	s, _ := compactSession(t, r) // no MemoryStore wired
+	if saved := s.distillCompact(context.Background(), "transcript"); saved != 0 {
+		t.Fatalf("nil MemoryStore should save nothing, got %d", saved)
+	}
+	if r.chatCalls != 0 {
+		t.Fatalf("nil MemoryStore must not call the model, got %d calls", r.chatCalls)
+	}
+}
+
+func TestDistillCompactMalformedReply(t *testing.T) {
+	r := &jsonChatRouter{content: "sorry, I cannot do that"}
+	s, _ := compactSession(t, r)
+	mem := &fakeMemoryStore{}
+	s.deps.MemoryStore = mem
+	if saved := s.distillCompact(context.Background(), "transcript"); saved != 0 {
+		t.Fatalf("malformed reply should save nothing, got %d", saved)
+	}
+	if len(mem.inserted) != 0 {
+		t.Fatalf("malformed reply must not insert, got %+v", mem.inserted)
+	}
+}
+
+func TestDistillCompactEmptyTranscriptSkips(t *testing.T) {
+	r := &jsonChatRouter{content: `["x"]`}
+	s, _ := compactSession(t, r)
+	s.deps.MemoryStore = &fakeMemoryStore{}
+	if saved := s.distillCompact(context.Background(), "   "); saved != 0 {
+		t.Fatalf("blank transcript should save nothing, got %d", saved)
+	}
+	if r.chatCalls != 0 {
+		t.Fatalf("blank transcript must not call the model, got %d", r.chatCalls)
+	}
+}
+
 func TestDoesNotAutoCompactSmallConversation(t *testing.T) {
 	r := &chatCountRouter{summary: "X"}
 	s, _ := compactSession(t, r)
