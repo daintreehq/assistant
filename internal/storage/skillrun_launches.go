@@ -177,6 +177,31 @@ func (s *Store) GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error) {
 	return &a, nil
 }
 
+// ListAgentLaunches returns the newest-first spawn sagas, bounded by limit
+// (limit <= 0 defaults to 20 — the invariant lives here so callers can pass an
+// unvalidated cap). In practice session-scoped: non-terminal rows from prior
+// sessions are failed on DB open (cancelStaleAgentLaunches).
+func (s *Store) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		"SELECT "+agentLaunchCols+" FROM agent_launches ORDER BY updatedAt DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, fmt.Errorf("list agent launches: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.AgentLaunchRecord
+	for rows.Next() {
+		a, err := scanAgentLaunch(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // FindActiveAgentLaunch returns the newest NON-TERMINAL saga for an idempotency
 // key (stage NOT IN confirmed/failed), or (nil, nil) — so a fresh launch can
 // re-attach instead of double-spawning.

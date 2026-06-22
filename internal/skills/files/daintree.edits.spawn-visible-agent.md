@@ -22,6 +22,8 @@ tags:
 requiredTools:
   - context.snapshot
   - agentTask.spawnForEdits
+  - agentTask.status
+  - agentTask.list
   - watcher.terminal.create
   - queue.digest
 ---
