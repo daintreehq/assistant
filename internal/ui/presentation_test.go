@@ -73,7 +73,7 @@ func TestBuildAgentRows_OrdersByUrgency(t *testing.T) {
 	rows := BuildAgentRows([]domain.WatcherRecord{
 		watcherRec("wch_working", string(domain.ClassStillWorking), nil),
 		watcherRec("wch_input", string(domain.ClassWaitingForInput), nil),
-	})
+	}, nil, nil)
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
@@ -91,7 +91,7 @@ func TestBuildAgentRows_PrefersPersistedEpistemicKind(t *testing.T) {
 	obs := domain.EpistemicObserved
 	rows := BuildAgentRows([]domain.WatcherRecord{
 		watcherRec("a", string(domain.ClassStillWorking), &obs),
-	})
+	}, nil, nil)
 	if rows[0].EpistemicKind != domain.EpistemicObserved {
 		t.Errorf("epistemicKind = %q, want observed (persisted wins)", rows[0].EpistemicKind)
 	}
@@ -107,7 +107,7 @@ func TestBuildAgentRows_ClassificationFallback(t *testing.T) {
 		{string(domain.ClassUnknown), domain.EpistemicUnverified},
 	}
 	for _, c := range cases {
-		rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("x", c.classification, nil)})
+		rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("x", c.classification, nil)}, nil, nil)
 		if rows[0].EpistemicKind != c.want {
 			t.Errorf("classification %q → %q, want %q", c.classification, rows[0].EpistemicKind, c.want)
 		}
@@ -118,7 +118,7 @@ func TestBuildAgentRows_RawEpistemicPassthrough(t *testing.T) {
 	// A corrupt stored kind degrades safely (epistemicTag returns "" → no tag) but is
 	// not re-validated away — the row keeps it verbatim.
 	bogus := domain.EpistemicKind("bogus")
-	rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("a", string(domain.ClassStillWorking), &bogus)})
+	rows := BuildAgentRows([]domain.WatcherRecord{watcherRec("a", string(domain.ClassStillWorking), &bogus)}, nil, nil)
 	if rows[0].EpistemicKind != "bogus" {
 		t.Errorf("raw epistemicKind = %q, want passthrough bogus", rows[0].EpistemicKind)
 	}
