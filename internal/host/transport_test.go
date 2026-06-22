@@ -139,3 +139,29 @@ func TestTransportCloseIdempotentAndSendNoop(t *testing.T) {
 	// A post-Close send must not panic on the closed outQ.
 	tr.send("s", EvError{Code: "x", Message: "after-close"})
 }
+
+// TestTransportConcurrentSendDuringClose hammers send() from many goroutines while
+// Close() races, exercising the window where a producer is mid-enqueue as the
+// transport shuts down. Because outQ is never closed, no send may panic. Run under
+// -race; repeated iterations make the close-vs-send interleaving likely.
+func TestTransportConcurrentSendDuringClose(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		tr := newTransport(strings.NewReader(""), io.Discard, io.Discard)
+		tr.start()
+
+		var wg sync.WaitGroup
+		for p := 0; p < 8; p++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < 200; i++ {
+					// A send racing Close() must never panic on a closed channel.
+					tr.send("s", EvError{Code: "x", Message: "race"})
+				}
+			}()
+		}
+		// Close concurrently with the producers.
+		tr.Close()
+		wg.Wait()
+	}
+}

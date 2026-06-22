@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/config"
@@ -70,6 +71,27 @@ func TestDispatchUnknownTool(t *testing.T) {
 	}
 	if lastAudit(s).Outcome != outcomeError {
 		t.Fatalf("unknown tool audited as %s", lastAudit(s).Outcome)
+	}
+}
+
+// A near-miss tool name (a typo / hallucinated wire form) gets a "did you mean?"
+// hint naming the closest registered tool, so the model can self-correct.
+func TestDispatchUnknownToolSuggestsClosest(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("fs.read", domain.RiskRead))
+	s := &fakeStore{}
+	// One-character typo of the wire form: must point back at fs.read.
+	res := r.Dispatch(context.Background(), "fs__raed", nil, baseCtx(s, nil, domain.TierSystem, domain.ActorMain))
+	if res.Ok || res.Error.Code != "UNKNOWN_TOOL" {
+		t.Fatalf("want UNKNOWN_TOOL, got %+v", res.Error)
+	}
+	if !strings.Contains(res.Error.Message, "fs.read") || !strings.Contains(res.Error.Message, "Did you mean") {
+		t.Fatalf("expected a did-you-mean hint naming fs.read, got %q", res.Error.Message)
+	}
+	// A wildly different name has no close neighbor → no misleading suggestion.
+	res2 := r.Dispatch(context.Background(), "zzzzzzzzzz.qqqqq", nil, baseCtx(s, nil, domain.TierSystem, domain.ActorMain))
+	if strings.Contains(res2.Error.Message, "Did you mean") {
+		t.Fatalf("a far-off name must not get a suggestion, got %q", res2.Error.Message)
 	}
 }
 

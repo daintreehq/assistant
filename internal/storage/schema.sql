@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS conversation (
   toolCallId    TEXT,
   createdAt     INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_conv_session   ON conversation(sessionId, seq);
+-- UNIQUE so a (sessionId, seq) collision is rejected at the storage layer, not
+-- merely caught on read by the rehydrator (mirrors run_events' idx_run_events_run).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_session   ON conversation(sessionId, seq);
 CREATE INDEX IF NOT EXISTS idx_conv_createdat ON conversation(createdAt);
 
 -- 3.7 skill_selection_log — selector diagnostics.

@@ -46,7 +46,8 @@ type transport struct {
 	err io.Writer
 
 	// outQ carries pre-encoded NDJSON frames (without the trailing newline) to the
-	// single writer goroutine. Closed by Close() to stop the writer.
+	// single writer goroutine. NEVER closed (producers send to it concurrently); the
+	// writer stops on t.closed, draining the buffer first.
 	outQ chan []byte
 	// emu guards err writes (diag) so a producer-side diagnostic can't interleave
 	// with a writer-goroutine diagnostic.
@@ -58,7 +59,12 @@ type transport struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 
-	sendFailed bool // writer-goroutine-only after start; protected by closed gate
+	// writeMu serializes the actual stdout write+flush so the teardown sendSync path
+	// (a direct write of the final host:shutdown frame) can never interleave with the
+	// writer goroutine still draining outQ — both write t.out. It also guards
+	// sendFailed, which both goroutines read and set.
+	writeMu    sync.Mutex
+	sendFailed bool // guarded by writeMu (writerLoop + the teardown sendSync path)
 	failOnce   sync.Once
 	onSendFail func(error)
 }
@@ -84,27 +90,55 @@ func (t *transport) start() {
 // and the last event before exit is delivered. The first write failure trips
 // onSendFail (parent gone) and the loop keeps draining (cheaply discarding) until
 // Close so producers never block.
+//
+// It exits on t.closed, NOT on a closed outQ: outQ is deliberately never closed (a
+// producer may be mid-enqueue on another goroutine, and closing it would risk a
+// send-on-closed panic in send()). On t.closed it drains whatever is buffered for a
+// best-effort final delivery, then returns.
 func (t *transport) writerLoop() {
-	for frame := range t.outQ {
-		if t.sendFailed {
-			continue
-		}
-		if _, werr := t.out.Write(append(frame, '\n')); werr != nil {
-			t.sendFailed = true
-			t.failOnce.Do(func() {
-				if t.onSendFail != nil {
-					// Off-goroutine: the hook only signals cancellation; it must not
-					// re-enter send (which would deadlock on this single writer).
-					go t.onSendFail(werr)
+	for {
+		select {
+		case frame := <-t.outQ:
+			t.writeFrame(frame)
+		case <-t.closed:
+			for {
+				select {
+				case frame := <-t.outQ:
+					t.writeFrame(frame)
+				default:
+					return
 				}
-			})
-			continue
+			}
 		}
-		// bufio.Writer needs an explicit Flush(); an *os.File write is already
-		// unbuffered. Detect Flush() first (bufio), fall back to Sync() (file-level
-		// best-effort). Either error is best-effort — the frame already left Write.
-		flushWriter(t.out)
 	}
+}
+
+// writeFrame writes one NDJSON frame under writeMu — serialized against the
+// teardown sendSync direct-write so the two never interleave on t.out — and trips
+// onSendFail once on the first write error.
+func (t *transport) writeFrame(frame []byte) {
+	t.writeMu.Lock()
+	if t.sendFailed {
+		t.writeMu.Unlock()
+		return
+	}
+	if _, werr := t.out.Write(append(frame, '\n')); werr != nil {
+		t.sendFailed = true
+		t.writeMu.Unlock()
+		t.failOnce.Do(func() {
+			if t.onSendFail != nil {
+				// Off-goroutine: the hook only signals cancellation; it must not
+				// re-enter send (which would deadlock on this single writer).
+				go t.onSendFail(werr)
+			}
+		})
+		return
+	}
+	// bufio.Writer needs an explicit Flush(); an *os.File write is already
+	// unbuffered. Detect Flush() first (bufio), fall back to Sync() (file-level
+	// best-effort). Either error is best-effort — the frame already left Write.
+	flushWriter(t.out)
+	t.writeMu.Unlock()
 }
 
 // flushWriter flushes a buffered writer (bufio.Writer.Flush) or syncs a file
@@ -206,6 +240,10 @@ func (t *transport) sendSync(sessionID string, ev HostEvent) {
 		t.diag(fmt.Sprintf("host: refusing oversize outbound frame (%d bytes)", len(data)))
 		return
 	}
+	// Take writeMu so this direct write can't interleave with a writerLoop frame
+	// still draining from outQ (teardown calls sendSync before Close()).
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	if t.sendFailed {
 		return
 	}
@@ -227,7 +265,9 @@ func (t *transport) sendSync(sessionID string, ev HostEvent) {
 func (t *transport) Close() {
 	t.closeOnce.Do(func() {
 		close(t.closed)
-		close(t.outQ)
+		// outQ is deliberately NOT closed: a producer (send) may be mid-enqueue on
+		// another goroutine, and closing it would risk a send-on-closed-channel panic.
+		// writerLoop drains the buffer and exits on t.closed instead.
 		if c, ok := t.in.(io.Closer); ok {
 			_ = c.Close()
 		}

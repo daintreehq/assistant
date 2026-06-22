@@ -178,7 +178,7 @@ func printBanner(r *render.Renderer, a *app.App, connected bool, transport strin
 		"project   " + a.Config.ProjectPath,
 		"mcp       " + mcpLine,
 		"models    large=" + basename(d["large"]) + " · small=" + basename(d["small"]),
-		"tier      " + string(a.Config.Tier),
+		"tier      " + string(a.Tier()),
 		r.Gray("Type /help for commands. I never edit files directly — I spawn and supervise agents."),
 	}
 	r.Banner(lines)

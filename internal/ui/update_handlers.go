@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
@@ -297,9 +298,16 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 	if msg.RunID != "" && msg.RunID != m.activeTurn {
 		return m.afterStateChange(nil) // stale completion (barrier, #1)
 	}
+	// A wake "failed" when the turn flagged it OR the reply is a model/tool failure
+	// SENTINEL. Send returns those as plain strings (nil error), and the cockpit's
+	// isFailureReply only catches the turn-level sentinels — NOT the wake sentinels
+	// ("Model unavailable:", "Model error:", …). Use agent.IsWakeFailureReply (the
+	// same predicate the host uses) so a transient model outage never gets recorded as
+	// a real summary and never permanently downgrades the terminal's later events.
+	wakeFailed := msg.Failed || agent.IsWakeFailureReply(msg.Reply)
 	if t := m.activeTurnCell(); t != nil {
 		t.sealProse()
-		if msg.Failed {
+		if wakeFailed {
 			t.State = TurnFailed
 		} else {
 			t.State = TurnComplete
@@ -310,11 +318,23 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 	m.activeWake = nil
 	m.activeTurn = ""
 	m.inFlight = false
-	if msg.Failed && !m.wakeRetried && len(burst) > 0 {
+	if wakeFailed && !m.wakeRetried && len(burst) > 0 {
 		// Re-queue THIS wake burst once so a transient outage isn't stranded. Prepend
 		// so the retry runs ahead of any newer burst that arrived meanwhile.
 		m.wakeRetried = true
 		m.pendingWake = append(append([]domain.QueueEvent{}, burst...), m.pendingWake...)
+	} else if !wakeFailed {
+		// Record the burst's terminals as summarized ONLY on a REAL reply (mirrors the
+		// host) — a failed wake must not permanently downgrade later lifecycle events
+		// to one-line acks. A successful retry path lands here too.
+		if m.summarizedTerminals == nil {
+			m.summarizedTerminals = map[string]struct{}{}
+		}
+		for _, e := range burst {
+			if e.Target != nil && e.Target.TerminalID != "" {
+				m.summarizedTerminals[e.Target.TerminalID] = struct{}{}
+			}
+		}
 	}
 	return m.drainPending()
 }
@@ -336,7 +356,11 @@ func (m Model) drainPending() (tea.Model, tea.Cmd) {
 		burst := m.pendingWake
 		m.pendingWake = nil
 		m.activeWake = burst
-		prompt := wakePrompt(burst)
+		// Use the shared wake-reactor prompt (cross-burst dedup + the read-only
+		// "NOT typed by the user" framing) so the cockpit and the host react
+		// identically and a terminal already summarized this session is downgraded
+		// to a one-line ack instead of being re-summarized.
+		prompt := agent.BuildWakePrompt(burst, m.summarizedTerminals)
 		wnow := domain.NowMS()
 		cell := &TurnCell{ID: domain.NewID("turn_"), State: TurnActive, Phase: domain.PhaseReceived, PhaseStartedAt: wnow, Ts: wnow, StartedAt: wnow, LastActivityAt: wnow}
 		m.transcript = append(m.transcript, TranscriptCell{Turn: cell})
@@ -358,20 +382,6 @@ func terminalTurnState(phase domain.RunPhase, reply string) TurnState {
 		return TurnFailed
 	}
 	return TurnComplete
-}
-
-// wakePrompt builds a read-only wake reactor prompt over a burst of attention events.
-func wakePrompt(events []domain.QueueEvent) string {
-	var b strings.Builder
-	b.WriteString("A background signal needs your review. Inspect and report (read-only):\n")
-	for _, e := range events {
-		b.WriteString("- " + e.Title)
-		if e.Summary != "" {
-			b.WriteString(": " + e.Summary)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String()
 }
 
 // --- slash command completion ---

@@ -53,10 +53,16 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		}
 	}()
 
-	// 1. Tool lookup.
+	// 1. Tool lookup. On a miss, add a "did you mean?" hint with the closest
+	//    registered name so the model can self-correct a hallucinated/misremembered
+	//    tool name on the next round instead of getting a bare "No such tool".
 	tool := r.tools[name]
 	if tool == nil {
-		res := Fail(codeUnknownTool, "No such tool: "+name, Unrecoverable())
+		msg := "No such tool: " + name + "."
+		if near := r.closestToolName(name); near != "" && near != name {
+			msg += " Did you mean " + near + "?"
+		}
+		res := Fail(codeUnknownTool, msg, Unrecoverable())
 		return r.audit(ctx, name, rawArgs, tctx, started, outcomeError, res, nil)
 	}
 

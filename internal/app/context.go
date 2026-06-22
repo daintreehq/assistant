@@ -18,17 +18,20 @@ import (
 // config + scheduler state. It is re-read on every connect/reconnect
 // and on /permissions changes so message[1] stays current.
 func (a *App) PromptContext() prompts.MainPromptContext {
+	// Snapshot Config under cfgMu so a concurrent SetTier (/permissions) can't tear
+	// the Tier read while a turn is rebuilding its runtime context.
+	cfg := a.snapshotConfig()
 	st := a.MCP.Status()
 	return prompts.MainPromptContext{
-		Tier:                a.Config.Tier,
-		ProjectPath:         a.Config.ProjectPath,
-		ProjectID:           a.Config.ProjectID,
+		Tier:                cfg.Tier,
+		ProjectPath:         cfg.ProjectPath,
+		ProjectID:           cfg.ProjectID,
 		MCPConnected:        st.Connected,
 		MCPStatusLine:       mcpStatusLine(st),
-		LargeModel:          a.Config.LargeModel,
-		SmallModel:          a.Config.SmallModel,
+		LargeModel:          cfg.LargeModel,
+		SmallModel:          cfg.SmallModel,
 		SchedulerActive:     a.scheduler != nil,
-		ProjectInstructions: a.Config.ProjectInstructions,
+		ProjectInstructions: cfg.ProjectInstructions,
 	}
 }
 
@@ -71,13 +74,16 @@ func (a *App) buildContext(actor domain.ToolActor, actorID string) *tools.ToolCo
 			fn(msg)
 		}
 	}
+	// Snapshot Config under cfgMu so the per-turn tool context can't capture a torn
+	// Tier write from a concurrent /permissions change.
+	cfg := a.snapshotConfig()
 	return &tools.ToolContext{
-		Config:       a.Config,
+		Config:       cfg,
 		MCP:          mcpToolAdapter{c: a.MCP},
 		DB:           storeToolAdapter{s: a.Store},
 		Queue:        a.Queue,
 		Router:       a.Router,
-		ProjectPath:  a.Config.ProjectPath,
+		ProjectPath:  cfg.ProjectPath,
 		Actor:        actor,
 		Confirm:      confirm,
 		Log:          log,

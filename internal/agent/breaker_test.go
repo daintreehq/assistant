@@ -61,12 +61,63 @@ func TestBreakerWarnsAtSecondIdenticalFailure(t *testing.T) {
 	}
 	var nudged bool
 	for _, m := range s.Messages() {
-		if m.Role == "user" && strings.Contains(m.StringContent, "byte-identical arguments") &&
+		if m.Role == "user" && strings.Contains(m.StringContent, "the same arguments") &&
 			strings.Contains(m.StringContent, "INVALID_ARGS") {
 			nudged = true
 		}
 	}
 	if !nudged {
 		t.Fatal("expected a one-time system nudge after the second identical failure")
+	}
+}
+
+// TestBreakerTripsWhenOnlyKeyOrderVaries proves the circuit breaker groups
+// semantically-identical calls: the model re-emits the SAME failing call with
+// reordered JSON keys each round, which must share one signature and trip the
+// breaker, not slip past it as "varying args".
+func TestBreakerTripsWhenOnlyKeyOrderVaries(t *testing.T) {
+	failing := domain.Fail("INVALID_ARGS", "bad shape")
+	tools := &fakeTools{result: failing}
+	// Same {path, mode} object, keys in a different order each round.
+	argVariants := []string{
+		`{"path":"x","mode":"r"}`,
+		`{"mode":"r","path":"x"}`,
+		`{"path":"x",  "mode":"r"}`,
+		`{"mode":"r","path":"x"}`,
+		`{"path":"x","mode":"r"}`,
+		`{"mode":"r","path":"x"}`,
+	}
+	rounds := make([]models.ChatResult, len(argVariants))
+	for i, a := range argVariants {
+		rounds[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", a)}}
+	}
+	r := &fakeRouter{results: rounds}
+	s := NewSession(baseDeps(r, tools))
+	reply, err := s.Send(context.Background(), "go", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "fs.read") || !strings.Contains(reply, "identical arguments") {
+		t.Fatalf("breaker must abort the turn once the key-reordered repeats hit the limit; reply = %q", reply)
+	}
+}
+
+func TestCanonicalJSON_NormalizesKeyOrderAndWhitespace(t *testing.T) {
+	a := canonicalJSON(`{"path":"x","mode":"r"}`)
+	b := canonicalJSON(`{"mode":"r","path":"x"}`)
+	c := canonicalJSON(`{ "path" : "x" ,  "mode":"r" }`)
+	if a != b || a != c {
+		t.Fatalf("key order / whitespace must canonicalize to one form: %q %q %q", a, b, c)
+	}
+	// Non-JSON and empty pass through unchanged.
+	if got := canonicalJSON("not json"); got != "not json" {
+		t.Fatalf("non-JSON must pass through: %q", got)
+	}
+	if got := canonicalJSON(""); got != "" {
+		t.Fatalf("empty must stay empty: %q", got)
+	}
+	// Distinct content must NOT collide.
+	if canonicalJSON(`{"path":"x"}`) == canonicalJSON(`{"path":"y"}`) {
+		t.Fatal("distinct args must not canonicalize to the same form")
 	}
 }

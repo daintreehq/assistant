@@ -22,13 +22,14 @@ func testModel(columns int) Model {
 	th := theme.Resolve()
 	cmp := composer.New(th)
 	return Model{
-		theme:    th,
-		md:       markdown.New(th),
-		columns:  columns,
-		rows:     40,
-		view:     viewHome,
-		composer: cmp,
-		masthead: mastheadParams{Version: "9.9.9", ProjectName: "demo", Tier: domain.TierSystem},
+		theme:               th,
+		md:                  markdown.New(th),
+		columns:             columns,
+		rows:                40,
+		view:                viewHome,
+		composer:            cmp,
+		summarizedTerminals: map[string]struct{}{},
+		masthead:            mastheadParams{Version: "9.9.9", ProjectName: "demo", Tier: domain.TierSystem},
 	}
 }
 

@@ -64,16 +64,16 @@ func TestUIStatusReportsMCPAndConfig(t *testing.T) {
 func TestUIPermissionsSwitchAndReject(t *testing.T) {
 	a := newOfflineApp(t)
 	r := ui(a, "/permissions supervisor")
-	if !strings.Contains(r.Text, "supervisor") || a.Config.Tier != domain.TierSupervisor {
-		t.Fatalf("permissions switch failed: tier=%v text=%q", a.Config.Tier, r.Text)
+	if !strings.Contains(r.Text, "supervisor") || a.Tier() != domain.TierSupervisor {
+		t.Fatalf("permissions switch failed: tier=%v text=%q", a.Tier(), r.Text)
 	}
-	before := a.Config.Tier
+	before := a.Tier()
 	r = ui(a, "/permissions wizard")
 	if !strings.Contains(r.Text, "Unknown tier") {
 		t.Fatalf("unknown tier not reported: %q", r.Text)
 	}
-	if a.Config.Tier != before {
-		t.Fatalf("rejected tier mutated config to %v", a.Config.Tier)
+	if a.Tier() != before {
+		t.Fatalf("rejected tier mutated config to %v", a.Tier())
 	}
 }
 
@@ -439,6 +439,64 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	r2 := ui(a, "/clear")
 	if !r2.ClearTranscript {
 		t.Errorf("/clear after the turn settled must succeed: %+v", r2)
+	}
+}
+
+// blockedSessionApp swaps in a session whose turn blocks (inFlight stays set),
+// runs the turn on a goroutine, and waits until it is actually in flight. Returns
+// the release func + a waiter; the caller closes/waits to settle the turn. Mirrors
+// the setup in TestUIClearRejectedDuringActiveTurn.
+func blockedSessionApp(t *testing.T) (*app.App, func()) {
+	t.Helper()
+	a := newOfflineApp(t)
+	release := make(chan struct{})
+	a.Session = agent.NewSession(agent.SessionDeps{
+		Router:        blockStreamRouter{release: release},
+		Tools:         noopRunner{},
+		SkillSelector: noopSelector{},
+		SkillCatalog:  noopCatalog{},
+		SessionID:     "sess_test",
+	})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = a.Session.Send(context.Background(), "go", agent.SendOptions{})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for a.Session.Clear() == nil {
+		if time.Now().After(deadline) {
+			close(release)
+			wg.Wait()
+			t.Fatal("turn never became in-flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	settle := func() { close(release); wg.Wait() }
+	return a, settle
+}
+
+// A turn-in-progress must REJECT (not silently succeed) the session-mutating slash
+// commands whose underlying Session.SetSkills returns ErrTurnInProgress: /skills
+// clear and /skills load. Previously each reported success regardless, desyncing
+// the UI from a session that never changed. (/compact shares the identical guard
+// but can't be exercised here: compactRun calls the model FIRST, which the offline
+// router fails before the in-flight Session.Compact check is reached.)
+func TestUISkillsRejectedDuringActiveTurn(t *testing.T) {
+	// /skills load needs a REAL skill id so the handler reaches SetSkills rather than
+	// short-circuiting on "no known skill ids".
+	for _, line := range []string{"/skills clear", "/skills load daintree.orchestration.basic"} {
+		t.Run(line, func(t *testing.T) {
+			a, settle := blockedSessionApp(t)
+			defer settle()
+			r := ui(a, line)
+			if !r.Handled {
+				t.Fatalf("%s not handled", line)
+			}
+			if !strings.Contains(strings.ToLower(r.Text), "in progress") {
+				t.Errorf("%s during a live turn must report the turn is in progress, got: %q", line, r.Text)
+			}
+		})
 	}
 }
 

@@ -275,7 +275,7 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	}
 	r.Line("  instructions   : " + instr)
 	r.Line(fmt.Sprintf("  tools loaded   : %d", len(a.Registry.List())))
-	r.Line("  tier           : " + string(a.Config.Tier))
+	r.Line("  tier           : " + string(a.Tier()))
 
 	_ = a.Shutdown()
 	return domain.OneShotExitCode.Success

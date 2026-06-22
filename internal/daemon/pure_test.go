@@ -78,10 +78,48 @@ func TestEvaluateCondition_ModelJudge(t *testing.T) {
 	if EvaluateCondition(c, WatcherSignals{}, judges) {
 		t.Error("below-floor confidence must not fire")
 	}
-	// Missing answer → false; not:{missing} flips to true (documented wart).
+	// A MISSING judge answer is UNKNOWN, not false: not:{missing judge} stays
+	// unknown and must NOT fire (fail closed). This is the three-valued fix —
+	// previously not(missing) flipped to a confident true and could fire an alert/
+	// stop on a judge the model never actually answered.
 	notC := cond(t, `{"not":{"modelJudge":"unknown q"}}`)
-	if !EvaluateCondition(notC, WatcherSignals{}, map[string]domain.ModelJudgeAnswer{}) {
-		t.Error("not of a missing judge answer must be true")
+	if EvaluateCondition(notC, WatcherSignals{}, map[string]domain.ModelJudgeAnswer{}) {
+		t.Error("not of a MISSING judge answer must NOT fire (unknown, not true)")
+	}
+	// A PRESENT-but-not-matched answer is a definite false, so its negation IS true.
+	notPresent := cond(t, `{"not":{"modelJudge":"did tests pass?"}}`)
+	if !EvaluateCondition(notPresent, WatcherSignals{},
+		map[string]domain.ModelJudgeAnswer{"did tests pass?": {Matched: false}}) {
+		t.Error("not of a PRESENT false judge answer must be true")
+	}
+}
+
+// TestEvaluateCondition_TriStatePropagation locks the all/any unknown propagation:
+// a missing judge inside all/any must not be silently treated as a confident
+// false/true that lets a negation or combinator fire.
+func TestEvaluateCondition_TriStatePropagation(t *testing.T) {
+	noJudges := map[string]domain.ModelJudgeAnswer{}
+	sig := WatcherSignals{AgentState: "exited"}
+
+	// all[ true-leaf , missing-judge ] → unknown → does not fire.
+	allUnknown := cond(t, `{"all":[{"stateIs":"exited"},{"modelJudge":"q"}]}`)
+	if EvaluateCondition(allUnknown, sig, noJudges) {
+		t.Error("all with an unknown child (and no false) must not fire")
+	}
+	// all[ false-leaf , missing-judge ] → false (a definite false dominates unknown).
+	allFalse := cond(t, `{"all":[{"stateIs":"idle"},{"modelJudge":"q"}]}`)
+	if EvaluateCondition(allFalse, sig, noJudges) {
+		t.Error("all with a false child must be false")
+	}
+	// any[ true-leaf , missing-judge ] → true (a definite true dominates unknown).
+	anyTrue := cond(t, `{"any":[{"stateIs":"exited"},{"modelJudge":"q"}]}`)
+	if !EvaluateCondition(anyTrue, sig, noJudges) {
+		t.Error("any with a true child must fire even when another child is unknown")
+	}
+	// any[ false-leaf , missing-judge ] → unknown → does not fire.
+	anyUnknown := cond(t, `{"any":[{"stateIs":"idle"},{"modelJudge":"q"}]}`)
+	if EvaluateCondition(anyUnknown, sig, noJudges) {
+		t.Error("any with only false + unknown children must not fire")
 	}
 }
 

@@ -25,7 +25,7 @@ func isolatedHome(t *testing.T) string {
 	for _, k := range []string{
 		"DAINTREE_PROJECT_ID", "DAINTREE_WINDOW_ID", "DAINTREE_ASSISTANT_STATE_DIR",
 		"DAINTREE_ASSISTANT_TIER", "DAINTREE_ASSISTANT_AUTO_APPROVE",
-		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR",
+		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR", "DAINTREE_ASSISTANT_DEBUG_LOG",
 		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "FIREWORKS_API_KEY", "FIREWORKS_BASE_URL",
 		"DAINTREE_LARGE_MODEL", "DAINTREE_SMALL_MODEL",
 	} {
@@ -203,16 +203,16 @@ func TestLoadConfig_TrustedEnvBoundary(t *testing.T) {
 func TestLoadConfig_TrustedEnvBeatsProjectEnv(t *testing.T) {
 	isolatedHome(t)
 	projectDir := t.TempDir()
-	// A MERGED key (projectId is merged-env-OK: real > project > own) demonstrates that the
+	// A genuinely MERGED key (largeModel: real > project > own) demonstrates that the
 	// real process env beats the project .env.
 	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
-		[]byte("DAINTREE_PROJECT_ID=from-project-env\n"), 0o600); err != nil {
+		[]byte("DAINTREE_LARGE_MODEL=from-project-env\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DAINTREE_PROJECT_ID", "from-real-env")
+	t.Setenv("DAINTREE_LARGE_MODEL", "from-real-env")
 	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
-	if cfg.ProjectID != "from-real-env" {
-		t.Errorf("projectId = %q, real env should win over project .env", cfg.ProjectID)
+	if cfg.LargeModel != "from-real-env" {
+		t.Errorf("largeModel = %q, real env should win over project .env", cfg.LargeModel)
 	}
 }
 
@@ -222,12 +222,37 @@ func TestLoadConfig_ProjectEnvMergesWhenRealUnset(t *testing.T) {
 	isolatedHome(t)
 	projectDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
-		[]byte("DAINTREE_PROJECT_ID=from-project-env\n"), 0o600); err != nil {
+		[]byte("DAINTREE_LARGE_MODEL=from-project-env\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
-	if cfg.ProjectID != "from-project-env" {
-		t.Errorf("projectId = %q, project .env should supply a merged var when real env is unset", cfg.ProjectID)
+	if cfg.LargeModel != "from-project-env" {
+		t.Errorf("largeModel = %q, project .env should supply a merged var when real env is unset", cfg.LargeModel)
+	}
+}
+
+// TestLoadConfig_ProjectEnvCannotSupplyIdentity is the identity-boundary fix: a
+// project .env must NOT be able to supply ProjectID/WindowID (Daintree-injected
+// identity that scopes the state dir + UI binding) or DebugLog (full-fidelity
+// tracing), even when the real env leaves them unset. Otherwise a bound repo could
+// spoof identity to reach another project's state or silently enable tracing.
+func TestLoadConfig_ProjectEnvCannotSupplyIdentity(t *testing.T) {
+	isolatedHome(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
+		[]byte("DAINTREE_PROJECT_ID=spoofed\nDAINTREE_WINDOW_ID=win-spoofed\nDAINTREE_ASSISTANT_DEBUG_LOG=true\n"),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
+	if cfg.ProjectID != "" {
+		t.Errorf("projectId = %q, a project .env must NOT supply identity", cfg.ProjectID)
+	}
+	if cfg.WindowID != "" {
+		t.Errorf("windowId = %q, a project .env must NOT supply identity", cfg.WindowID)
+	}
+	if cfg.DebugLog {
+		t.Error("debugLog must NOT be enableable from a project .env")
 	}
 }
 

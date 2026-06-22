@@ -311,14 +311,14 @@ func modelsText(a *app.App) string {
 func permissionsText(a *app.App, arg string) string {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
-		return "Current tier: " + string(a.Config.Tier) + "\n" +
+		return "Current tier: " + string(a.Tier()) + "\n" +
 			"supervisor: read/local/ui · operator: +terminal/project/external · system: +git/system"
 	}
 	t := domain.Tier(arg)
 	if !t.IsValid() {
 		return "Unknown tier '" + arg + "'. Use supervisor | operator | system."
 	}
-	a.Config.Tier = t
+	a.SetTier(t)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return "Tier set to " + string(t) + "."
 }
@@ -343,7 +343,9 @@ func skillsText(ctx context.Context, a *app.App, rest []string) string {
 	case "loaded":
 		return describeLoaded(a)
 	case "clear":
-		a.Session.SetSkills(nil)
+		if err := a.Session.SetSkills(nil); err != nil {
+			return "Can't clear skills while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
+		}
 		return "Cleared loaded skills."
 	case "load":
 		ids := rest[1:]
@@ -359,7 +361,9 @@ func skillsText(ctx context.Context, a *app.App, rest []string) string {
 		if len(known) > skillsLoadCap {
 			known = known[:skillsLoadCap]
 		}
-		a.Session.SetSkills(known)
+		if err := a.Session.SetSkills(known); err != nil {
+			return "Can't load skills while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
+		}
 		return describeLoaded(a)
 	case "find":
 		query := strings.Join(rest[1:], " ")
@@ -408,7 +412,9 @@ func compactRun(ctx context.Context, a *app.App) string {
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
-	a.Session.Compact(res.Content)
+	if err := a.Session.Compact(res.Content); err != nil {
+		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
+	}
 	return "Conversation compacted."
 }
 

@@ -14,9 +14,11 @@
 //   - trusted-only (trustedGet): tier/autoApprove/offline/stateDir/logDir — real env only;
 //     a bound project must never escalate the assistant.
 //   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (Fireworks base
-//     URL, MCP URL + token) — real env or the assistant's own .env, NEVER the project .env,
-//     so a malicious repo can't redirect where a trusted key/token is sent (exfiltration).
-//   - merged (mergedGet): everything else — real env > project .env > own .env.
+//     URL, MCP URL + token) PLUS the Daintree-injected identity (project id, window id) and
+//     the debug-logging toggle — real env or the assistant's own .env, NEVER the project
+//     .env, so a malicious repo can't redirect where a trusted key/token is sent
+//     (exfiltration), spoof identity (cross-project state access), or silently enable tracing.
+//   - merged (mergedGet): everything else (model routing, api key) — real env > project .env > own .env.
 package config
 
 import (
@@ -225,9 +227,14 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// inject a token: no default → degraded local mode when genuinely unset.
 	cfg.McpURL = FirstString(deref(overrides.McpURL), e.trustedOrOwnGet("DAINTREE_MCP_URL"))
 	cfg.McpToken = FirstString(deref(overrides.McpToken), e.trustedOrOwnGet("DAINTREE_MCP_TOKEN"))
-	cfg.ProjectID = FirstString(deref(overrides.ProjectID), e.mergedGet("DAINTREE_PROJECT_ID"))
-	cfg.WindowID = FirstString(deref(overrides.WindowID), e.mergedGet("DAINTREE_WINDOW_ID"))
-	cfg.DebugLog = resolveBool(overrides.DebugLog, e.mergedGet("DAINTREE_ASSISTANT_DEBUG_LOG"))
+	// ProjectID + WindowID are the Daintree-injected IDENTITY (they scope StateDir
+	// and the UI binding) and DebugLog gates full-fidelity tracing — all trustedOrOwn
+	// (real env or the assistant's OWN .env), NEVER the project .env. A bound repo
+	// must not be able to spoof identity (cross-project state access) or silently
+	// enable tracing by planting a .env.
+	cfg.ProjectID = FirstString(deref(overrides.ProjectID), e.trustedOrOwnGet("DAINTREE_PROJECT_ID"))
+	cfg.WindowID = FirstString(deref(overrides.WindowID), e.trustedOrOwnGet("DAINTREE_WINDOW_ID"))
+	cfg.DebugLog = resolveBool(overrides.DebugLog, e.trustedOrOwnGet("DAINTREE_ASSISTANT_DEBUG_LOG"))
 
 	// --- trusted-only settings (NEVER from a loaded .env) ---
 	cfg.Tier = resolveTier(overrides.Tier, e.trustedGet("DAINTREE_ASSISTANT_TIER"))

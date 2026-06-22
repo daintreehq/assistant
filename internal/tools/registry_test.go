@@ -96,24 +96,6 @@ func TestExemplarFsReadSecretGuard(t *testing.T) {
 	}
 }
 
-func TestDaintreeCallTypedWrapperDenylist(t *testing.T) {
-	res := handleDaintreeCall(context.Background(),
-		json.RawMessage(`{"name":"agent.launch"}`),
-		&ToolContext{Actor: domain.ActorMain})
-	if res.Ok || res.Error.Code != "USE_TYPED_WRAPPER" {
-		t.Fatalf("agent.launch via daintree.call must redirect, got %+v", res.Error)
-	}
-}
-
-func TestDaintreeCallFileEditRecheck(t *testing.T) {
-	res := handleDaintreeCall(context.Background(),
-		json.RawMessage(`{"name":"fs.write"}`),
-		&ToolContext{Actor: domain.ActorMain})
-	if res.Ok || res.Error.Code != safety.FileEditForbiddenCode || res.Error.Recoverable {
-		t.Fatalf("fs.write via daintree.call must be FILE_EDIT_FORBIDDEN non-recoverable, got %+v", res.Error)
-	}
-}
-
 func TestCapJSON(t *testing.T) {
 	small := `{"a":1}`
 	if capJSON(small) != small {

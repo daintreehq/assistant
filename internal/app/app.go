@@ -90,6 +90,12 @@ type App struct {
 	// cheap and the closures read a consistent set.
 	hooksMu sync.RWMutex
 	hooks   AppHooks
+
+	// cfgMu guards Config — specifically Config.Tier, the one field mutated at
+	// runtime (/permissions). buildContext copies the whole Config and PromptContext
+	// reads Tier on agent/tool goroutines, so SetTier (write) and those reads must be
+	// serialized or the race detector flags a torn read of the mutated field.
+	cfgMu sync.RWMutex
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
@@ -97,6 +103,30 @@ func (a *App) snapshotHooks() AppHooks {
 	a.hooksMu.RLock()
 	defer a.hooksMu.RUnlock()
 	return a.hooks
+}
+
+// SetTier updates the permission tier under cfgMu. Callers refresh the runtime
+// prompt context afterwards (PromptContext takes its own read lock, so this must
+// not hold cfgMu across that call).
+func (a *App) SetTier(t domain.Tier) {
+	a.cfgMu.Lock()
+	a.Config.Tier = t
+	a.cfgMu.Unlock()
+}
+
+// Tier returns the current permission tier under the read lock.
+func (a *App) Tier() domain.Tier {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.Config.Tier
+}
+
+// snapshotConfig returns a consistent copy of Config under the read lock, so a
+// caller building a per-turn ToolContext can't observe a torn Tier write.
+func (a *App) snapshotConfig() config.AppConfig {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.Config
 }
 
 // Create builds the App in the canonical construction order. A failure at any

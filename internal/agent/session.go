@@ -507,9 +507,10 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			StringContent: SerializeToolResult(res, s.artifacts),
 		})
 
-		// Circuit-breaker bookkeeping: signature is the RAW argument string the
-		// model emitted (NOT re-encoded) + the error code, so only a byte-identical
-		// repeat failing the SAME way increments the same counter.
+		// Circuit-breaker bookkeeping: signature is the CANONICALIZED argument JSON
+		// (key order / whitespace normalized) + the error code, so a semantically
+		// identical call failing the SAME way increments the same counter even when
+		// the model re-emits it with reordered keys.
 		if !res.Ok {
 			errCode := ""
 			if res.Error != nil {
@@ -556,7 +557,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			codeSuffix = " (" + worstRepeat.res.Error.Code + ")"
 		}
 		nudge := "[system event]\nYou have called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
-			" times this turn with byte-identical arguments and it failed the same way each time" + codeSuffix +
+			" times this turn with the same arguments and it failed the same way each time" + codeSuffix +
 			". Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again."
 		s.pushMessage(models.TextMessage("user", nudge))
 	}
@@ -941,7 +942,27 @@ func (s *Session) logSelection(userInput string, selection skills.SkillSelection
 func setHas(set map[string]struct{}, k string) bool { _, ok := set[k]; return ok }
 
 func failureSignature(name, rawArgs, errCode string) string {
-	b, _ := json.Marshal([]string{name, rawArgs, errCode})
+	b, _ := json.Marshal([]string{name, canonicalJSON(rawArgs), errCode})
+	return string(b)
+}
+
+// canonicalJSON normalizes a JSON arguments string so two semantically-identical
+// calls that differ only in key order or whitespace hash the same: parse then
+// re-marshal (Go's encoder sorts object keys). Non-JSON input passes through
+// unchanged. This keeps the circuit breaker counting a repeated-same-way failure
+// even when the model re-emits the call with reordered keys.
+func canonicalJSON(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
 	return string(b)
 }
 

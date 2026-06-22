@@ -25,54 +25,102 @@ type WatcherSignals struct {
 	Confidence     float64
 }
 
-// EvaluateCondition evaluates a WatchCondition against deterministic signals.
-//
-// modelJudge leaves are NOT evaluated against the live model here (that would
-// make this async/untestable); answers are precomputed in runModelJudges and
-// threaded in keyed by the exact question string. A missing judge answer → false;
-// not:{modelJudge} of a missing answer flips false→true (accepted wart, not
-// three-valued logic).
+// triState is the three-valued result of a condition evaluation. A modelJudge leaf
+// whose answer is MISSING (the model wasn't consulted this tick — e.g. MCP was
+// disconnected) is genuinely unknown, distinct from a present-but-not-matched
+// answer (false). Negation and the all/any combinators propagate unknown so a
+// not:{modelJudge} of an unanswered judge stays unknown rather than flipping to a
+// confident true.
+type triState int8
+
+const (
+	triFalse triState = iota
+	triTrue
+	triUnknown
+)
+
+// EvaluateCondition reports whether a WatchCondition DEFINITELY holds against the
+// deterministic signals. It fails closed: an unknown result (a missing model-judge
+// answer, possibly under negation) is NOT a match, so an alert/stop never fires on
+// an unproven condition. modelJudge answers are precomputed in runModelJudges and
+// threaded in keyed by the exact question string.
 func EvaluateCondition(cond domain.WatchCondition, s WatcherSignals, judges map[string]domain.ModelJudgeAnswer) bool {
+	return evalConditionTri(cond, s, judges) == triTrue
+}
+
+// evalConditionTri is the three-valued core. Deterministic leaves are always
+// known (true/false); only a missing modelJudge answer yields unknown.
+func evalConditionTri(cond domain.WatchCondition, s WatcherSignals, judges map[string]domain.ModelJudgeAnswer) triState {
 	switch {
 	case cond.StateIs != nil:
-		return s.AgentState == string(*cond.StateIs)
+		return boolTri(s.AgentState == string(*cond.StateIs))
 	case cond.RuntimeStatusIs != nil:
-		return s.RuntimeStatus == *cond.RuntimeStatusIs
+		return boolTri(s.RuntimeStatus == *cond.RuntimeStatusIs)
 	case cond.Contains != nil:
-		return strings.Contains(s.Tail, *cond.Contains)
+		return boolTri(strings.Contains(s.Tail, *cond.Contains))
 	case cond.Regex != nil:
 		// Invalid regex caught → false. Conditions are validated at creation, but
 		// a Go RE2 difference (no backreferences/lookahead) could still fail to
 		// compile a legacy pattern; fail closed rather than panic.
 		re, err := regexp.Compile(*cond.Regex)
 		if err != nil {
-			return false
+			return triFalse
 		}
-		return re.MatchString(s.Tail)
+		return boolTri(re.MatchString(s.Tail))
 	case cond.NoOutputForMs != nil:
 		// Only fire when we actually know how long the terminal has been quiet.
-		return s.MsSinceOutput != nil && *s.MsSinceOutput >= *cond.NoOutputForMs
+		return boolTri(s.MsSinceOutput != nil && *s.MsSinceOutput >= *cond.NoOutputForMs)
 	case cond.ModelJudge != nil:
 		r, ok := judges[*cond.ModelJudge]
-		return ok && r.Matched && r.Confidence >= judgeConfidenceFloor
+		if !ok {
+			// The judge wasn't answered this tick — unknown, NOT false.
+			return triUnknown
+		}
+		return boolTri(r.Matched && r.Confidence >= judgeConfidenceFloor)
 	case len(cond.All) > 0:
+		// false if any child is false; unknown if any child is unknown (and none
+		// false); else true.
+		result := triTrue
 		for i := range cond.All {
-			if !EvaluateCondition(cond.All[i], s, judges) {
-				return false
+			switch evalConditionTri(cond.All[i], s, judges) {
+			case triFalse:
+				return triFalse
+			case triUnknown:
+				result = triUnknown
 			}
 		}
-		return true
+		return result
 	case len(cond.Any) > 0:
+		// true if any child is true; unknown if any child is unknown (and none
+		// true); else false.
+		result := triFalse
 		for i := range cond.Any {
-			if EvaluateCondition(cond.Any[i], s, judges) {
-				return true
+			switch evalConditionTri(cond.Any[i], s, judges) {
+			case triTrue:
+				return triTrue
+			case triUnknown:
+				result = triUnknown
 			}
 		}
-		return false
+		return result
 	case cond.Not != nil:
-		return !EvaluateCondition(*cond.Not, s, judges)
+		switch evalConditionTri(*cond.Not, s, judges) {
+		case triTrue:
+			return triFalse
+		case triFalse:
+			return triTrue
+		default:
+			return triUnknown
+		}
 	}
-	return false
+	return triFalse
+}
+
+func boolTri(b bool) triState {
+	if b {
+		return triTrue
+	}
+	return triFalse
 }
 
 // CollectModelJudges returns every distinct modelJudge question across one or

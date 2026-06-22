@@ -102,6 +102,10 @@ type Model struct {
 	pendingWake []domain.QueueEvent // autonomous wakes drained after the user queue
 	activeWake  []domain.QueueEvent // the burst the in-flight wake turn is reacting to (kept for one retry, #9)
 	wakeRetried bool                // per-burst wake retry budget
+	// summarizedTerminals is the cross-burst memory the wake prompt builder reads so a
+	// terminal already reported this session is downgraded to a one-line ack (mirrors
+	// the host's Host.summarizedTerminals) — recorded only on a real (non-failure) wake.
+	summarizedTerminals map[string]struct{}
 
 	// dashboard + usage rollup.
 	dashboard  Dashboard
@@ -152,16 +156,17 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 	provisionalName := filepath.Base(a.Config.ProjectPath)
 
 	m := Model{
-		ctx:      ctx,
-		app:      a,
-		pump:     pump,
-		theme:    th,
-		md:       markdown.New(th),
-		columns:  80, // provisional until the first WindowSizeMsg
-		rows:     24,
-		embedded: a.Config.WindowID != "",
-		view:     viewHome,
-		composer: cmp,
+		ctx:                 ctx,
+		app:                 a,
+		pump:                pump,
+		theme:               th,
+		md:                  markdown.New(th),
+		columns:             80, // provisional until the first WindowSizeMsg
+		rows:                24,
+		embedded:            a.Config.WindowID != "",
+		view:                viewHome,
+		composer:            cmp,
+		summarizedTerminals: map[string]struct{}{},
 		// The splash is played BEFORE the program starts (see boot_splash.go), so the
 		// program begins already in the cockpit: View() is the short footer from frame
 		// one, and the masthead commits cleanly to scrollback (no tall-View handoff).
@@ -169,7 +174,7 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		masthead: mastheadParams{
 			Version:     UIVersion,
 			ProjectName: provisionalName,
-			Tier:        a.Config.Tier,
+			Tier:        a.Tier(),
 			Logging:     a.Config.DebugLog,
 		},
 	}
