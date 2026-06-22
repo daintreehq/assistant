@@ -16,6 +16,8 @@ tags:
 requiredTools:
   - context.snapshot
   - daintree.status
+  - worktree.list
+  - worktree.getCurrent
   - daintree.listTools
   - tool.search
   - daintree.call
@@ -36,7 +38,7 @@ requiredTools:
 ---
 Use when: the user asks about current Daintree state or what to do next.
 Procedure:
-1. Establish current state first. Prefer context.snapshot; use Daintree MCP read tools for more detail.
+1. Establish current state first. Prefer context.snapshot; use Daintree MCP read tools for more detail. For worktrees specifically, prefer the typed reads worktree.list (enumerate all worktrees by id/status) and worktree.getCurrent (the active one) over digging through the snapshot or a raw daintree.call.
 2. Never guess the active worktree, focused terminal, agent state, git state, or recipe availability — read it.
 3. For tool discovery, use tool.search before a raw daintree.call.
 4. For long-running processes, do not poll terminal output in a loop. Create a watcher or schedule a timer.

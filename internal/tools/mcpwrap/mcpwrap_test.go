@@ -133,6 +133,28 @@ func TestWorktreeReadsForwardAndPassThrough(t *testing.T) {
 	}
 }
 
+// A Daintree-side refusal (IsError) maps to MCP_TOOL_ERROR, and the strict
+// top-level schema rejects an unknown key locally (only a nested arguments object
+// is allowed) before any transport call.
+func TestWorktreeReadsErrorPaths(t *testing.T) {
+	for _, name := range []string{"worktree.list", "worktree.getCurrent"} {
+		tool := findTool(Tools(Deps{}), name)
+
+		// Daintree refuses → MCP_TOOL_ERROR (not a transport failure).
+		m := &fakeMCP{connected: true, result: tools.MCPCallResult{IsError: true, Text: "not found"}}
+		res := tool.Handle(context.Background(), json.RawMessage(`{}`), ctxWith(m))
+		if res.Ok || res.Error.Code != codeMCPToolError {
+			t.Fatalf("%s: expected MCP_TOOL_ERROR on IsError, got %+v", name, res)
+		}
+
+		// An unknown top-level key is rejected by the strict decoder — the schema
+		// only admits a nested arguments object.
+		if _, err := tool.Decode(json.RawMessage(`{"filter":"active"}`)); err == nil {
+			t.Fatalf("%s: expected strict-decode error for unknown top-level key", name)
+		}
+	}
+}
+
 // A disconnected MCP must surface MCP_UNAVAILABLE for the worktree reads too,
 // never reaching the transport.
 func TestWorktreeReadsDisconnected(t *testing.T) {
