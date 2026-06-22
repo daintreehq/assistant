@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"unicode"
 
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -145,13 +146,14 @@ func join(parts []string, sep string) string {
 // max runes with a "..." marker. Rune-aware so a multibyte command is never cut
 // mid-codepoint.
 func truncateCommand(s string, max int) string {
-	// Collapse any whitespace run (incl. \r\n, tabs) to a single space and trim
-	// the ends — keeps the summary one line and free of leading indentation.
-	// prevSpace starts true so a leading whitespace run is dropped entirely.
+	// Collapse any whitespace run (incl. \r\n, tabs, and exotic Unicode line/paragraph
+	// separators) to a single space and trim the ends — keeps the summary one line and
+	// free of leading indentation. prevSpace starts true so a leading whitespace run is
+	// dropped entirely.
 	var b []rune
 	prevSpace := true
 	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+		if unicode.IsSpace(r) {
 			if !prevSpace {
 				b = append(b, ' ')
 				prevSpace = true

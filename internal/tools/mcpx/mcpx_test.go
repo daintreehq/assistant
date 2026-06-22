@@ -139,6 +139,11 @@ func TestTruncateCommand(t *testing.T) {
 	if got := truncateCommand("  echo hi\n\tthen\r\nbye  ", 80); got != "echo hi then bye" {
 		t.Errorf("whitespace not collapsed: %q", got)
 	}
+	// Exotic Unicode whitespace (U+2028 LINE SEPARATOR, vertical tab) collapses
+	// the same way, so no separator can sneak a line break into the summary.
+	if got := truncateCommand("a b\vc", 80); got != "a b c" {
+		t.Errorf("unicode whitespace not collapsed: %q", got)
+	}
 	// Rune-aware: a multibyte command is never cut mid-codepoint.
 	multi := strings.Repeat("é", 81)
 	got := truncateCommand(multi, 80)
@@ -166,9 +171,19 @@ func TestTerminalSendCommandSummary(t *testing.T) {
 	if mcp.lastName != "terminal.sendCommand" {
 		t.Errorf("forwarded wrong MCP name: %q", mcp.lastName)
 	}
-	// The original result payload is preserved, not discarded.
-	if rm, _ := res.Result.(map[string]any); rm["structuredContent"] == nil {
-		t.Errorf("result payload not preserved: %v", res.Result)
+	// Both args reach Daintree verbatim — a wrapper that dropped command would
+	// otherwise still pass the name/summary assertions above.
+	if mcp.lastArgs["terminalId"] != "t7" || mcp.lastArgs["command"] != "go test ./..." {
+		t.Errorf("args not forwarded verbatim: %v", mcp.lastArgs)
+	}
+	// The original result payload is preserved in full (text + structuredContent),
+	// not discarded when the summary is overridden.
+	rm, _ := res.Result.(map[string]any)
+	if rm["text"] != "ok" {
+		t.Errorf("result text not preserved: %v", rm["text"])
+	}
+	if sc, _ := rm["structuredContent"].(map[string]any); sc == nil || sc["k"] != "v" {
+		t.Errorf("structuredContent not preserved: %v", rm["structuredContent"])
 	}
 
 	// A long command is clipped in the summary (still single-line, ellipsised).
@@ -204,6 +219,18 @@ func TestTerminalSendCommandFailurePreserved(t *testing.T) {
 	if strings.Contains(res.Summary, "Sent to terminal") {
 		t.Errorf("failed send must not claim delivery: %q", res.Summary)
 	}
+
+	// A connected MCP that reports a tool-level error (IsError) must also surface as
+	// a failure, never a fabricated "Sent to terminal" success.
+	mcpErr := &fakeMCP{connected: true, result: MCPCallResult{IsError: true, Text: "terminal not found"}}
+	resErr := terminalSendCommandPassthrough(context.Background(), mcpErr, "t1", "ls",
+		map[string]any{"terminalId": "t1", "command": "ls"})
+	if resErr.Ok || resErr.Error.Code != codeMCPToolError {
+		t.Fatalf("Daintree-reported error should fail: %+v", resErr)
+	}
+	if strings.Contains(resErr.Summary, "Sent to terminal") {
+		t.Errorf("tool-error send must not claim delivery: %q", resErr.Summary)
+	}
 }
 
 func TestCopyTreeInjectSummary(t *testing.T) {
@@ -220,6 +247,22 @@ func TestCopyTreeInjectSummary(t *testing.T) {
 	}
 	if mcp.lastName != "copyTree.injectToTerminal" {
 		t.Errorf("forwarded wrong MCP name: %q", mcp.lastName)
+	}
+
+	// Optional worktreeId + options reach Daintree verbatim — guards against the
+	// wrapper's map-building dropping the optional fields.
+	mcpOpt := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+	toolOpt := newCopyTreeInjectTool(Deps{MCP: mcpOpt})
+	dOpt, _ := toolOpt.Decode(json.RawMessage(`{"terminalId":"t1","worktreeId":"wt-prod","options":{"depth":2}}`))
+	rOpt := toolOpt.Handle(context.Background(), dOpt, &tools.ToolContext{})
+	if !rOpt.Ok {
+		t.Fatalf("expected ok with options, got %+v", rOpt.Error)
+	}
+	if mcpOpt.lastArgs["worktreeId"] != "wt-prod" {
+		t.Errorf("worktreeId not forwarded: %v", mcpOpt.lastArgs)
+	}
+	if opts, _ := mcpOpt.lastArgs["options"].(map[string]any); opts == nil || opts["depth"] != float64(2) {
+		t.Errorf("options not forwarded: %v", mcpOpt.lastArgs["options"])
 	}
 
 	// Whitespace-only terminalId is rejected before any MCP call.
@@ -239,5 +282,13 @@ func TestCopyTreeInjectSummary(t *testing.T) {
 	r3 := copyTreeInjectPassthrough(context.Background(), mcp3, "t1", map[string]any{"terminalId": "t1"})
 	if r3.Ok || strings.Contains(r3.Summary, "Injected copy tree") {
 		t.Errorf("failed inject must not claim delivery: %+v", r3)
+	}
+
+	// A Daintree-reported tool error (connected, IsError) likewise must not be
+	// dressed up as a successful injection.
+	mcp4 := &fakeMCP{connected: true, result: MCPCallResult{IsError: true, Text: "terminal not found"}}
+	r4 := copyTreeInjectPassthrough(context.Background(), mcp4, "t1", map[string]any{"terminalId": "t1"})
+	if r4.Ok || r4.Error.Code != codeMCPToolError || strings.Contains(r4.Summary, "Injected copy tree") {
+		t.Errorf("tool-error inject must not claim delivery: %+v", r4)
 	}
 }
