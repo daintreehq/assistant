@@ -64,6 +64,113 @@ func TestRecipeRunRecipeIDWins(t *testing.T) {
 	}
 }
 
+// The worktree reads forward to the right Daintree action name, carry RiskRead
+// (supervisor-tier reachable, no confirmation — unlike system-tier daintree.call),
+// and pass the MCP envelope's structuredContent straight through to the model.
+// An omitted arguments record forwards an empty (non-nil) map, matching forgeRead's
+// nil-guard, and an opaque nested arguments object is forwarded verbatim.
+func TestWorktreeReadsForwardAndPassThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+	}{
+		{"worktree.list", "worktree.list"},
+		{"worktree.getCurrent", "worktree.getCurrent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := findTool(Tools(Deps{}), tc.target)
+			if tool == nil {
+				t.Fatalf("%s not registered", tc.target)
+			}
+			if tool.Risk != domain.RiskRead {
+				t.Fatalf("%s risk: got %s want %s", tc.target, tool.Risk, domain.RiskRead)
+			}
+
+			// Omitted arguments → MCP receives an empty, non-nil map.
+			m := &fakeMCP{connected: true, result: tools.MCPCallResult{
+				Text:              "raw",
+				StructuredContent: map[string]any{"worktrees": []any{"wt1"}},
+			}}
+			parsed, err := tool.Decode(json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			res := tool.Handle(context.Background(), parsed, ctxWith(m))
+			if !res.Ok {
+				t.Fatalf("expected ok, got %+v", res.Error)
+			}
+			if m.lastName != tc.target {
+				t.Fatalf("forwarded to %q, want %q", m.lastName, tc.target)
+			}
+			if m.lastArgs == nil || len(m.lastArgs) != 0 {
+				t.Fatalf("omitted arguments should forward an empty non-nil map, got %#v", m.lastArgs)
+			}
+			payload, ok := res.Result.(map[string]any)
+			if !ok {
+				t.Fatalf("result not a map: %#v", res.Result)
+			}
+			sc, ok := payload["structuredContent"].(map[string]any)
+			if !ok {
+				t.Fatalf("structuredContent not passed through: %#v", payload["structuredContent"])
+			}
+			if _, ok := sc["worktrees"]; !ok {
+				t.Fatalf("structuredContent contents not preserved: %#v", sc)
+			}
+
+			// An opaque nested arguments object is forwarded verbatim.
+			m2 := &fakeMCP{connected: true, result: tools.MCPCallResult{Text: "ok"}}
+			parsed2, err := tool.Decode(json.RawMessage(`{"arguments":{"filter":"active"}}`))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if res := tool.Handle(context.Background(), parsed2, ctxWith(m2)); !res.Ok {
+				t.Fatalf("expected ok, got %+v", res.Error)
+			}
+			if m2.lastArgs["filter"] != "active" {
+				t.Fatalf("opaque nested arg not forwarded: %#v", m2.lastArgs)
+			}
+		})
+	}
+}
+
+// A Daintree-side refusal (IsError) maps to MCP_TOOL_ERROR, and the strict
+// top-level schema rejects an unknown key locally (only a nested arguments object
+// is allowed) before any transport call.
+func TestWorktreeReadsErrorPaths(t *testing.T) {
+	for _, name := range []string{"worktree.list", "worktree.getCurrent"} {
+		tool := findTool(Tools(Deps{}), name)
+
+		// Daintree refuses → MCP_TOOL_ERROR (not a transport failure).
+		m := &fakeMCP{connected: true, result: tools.MCPCallResult{IsError: true, Text: "not found"}}
+		res := tool.Handle(context.Background(), json.RawMessage(`{}`), ctxWith(m))
+		if res.Ok || res.Error.Code != codeMCPToolError {
+			t.Fatalf("%s: expected MCP_TOOL_ERROR on IsError, got %+v", name, res)
+		}
+
+		// An unknown top-level key is rejected by the strict decoder — the schema
+		// only admits a nested arguments object.
+		if _, err := tool.Decode(json.RawMessage(`{"filter":"active"}`)); err == nil {
+			t.Fatalf("%s: expected strict-decode error for unknown top-level key", name)
+		}
+	}
+}
+
+// A disconnected MCP must surface MCP_UNAVAILABLE for the worktree reads too,
+// never reaching the transport.
+func TestWorktreeReadsDisconnected(t *testing.T) {
+	for _, name := range []string{"worktree.list", "worktree.getCurrent"} {
+		m := &fakeMCP{connected: false}
+		tool := findTool(Tools(Deps{}), name)
+		res := tool.Handle(context.Background(), json.RawMessage(`{}`), ctxWith(m))
+		if res.Ok || res.Error.Code != codeMCPUnavailable {
+			t.Fatalf("%s: expected MCP_UNAVAILABLE, got %+v", name, res)
+		}
+		if m.lastName != "" {
+			t.Fatalf("%s: MCP must not be called when disconnected, called %q", name, m.lastName)
+		}
+	}
+}
+
 // A disconnected MCP must surface MCP_UNAVAILABLE, never reach the transport.
 func TestPassthroughDisconnected(t *testing.T) {
 	m := &fakeMCP{connected: false}
