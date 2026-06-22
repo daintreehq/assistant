@@ -141,6 +141,11 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a copyTreeInjectArgs
 			_ = json.Unmarshal(raw, &a)
+			// Mirror terminal.sendCommand's guard: a blank terminalId would inject
+			// the digest into an unnamed target, so reject it before the MCP call.
+			if strings.TrimSpace(a.TerminalID) == "" {
+				return tools.Fail(domain.CodeValidation, "copyTree.injectToTerminal: terminalId must be non-empty.")
+			}
 			m := map[string]any{"terminalId": a.TerminalID}
 			if a.WorktreeID != "" {
 				m["worktreeId"] = a.WorktreeID
@@ -148,7 +153,7 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 			if a.Options != nil {
 				m["options"] = a.Options
 			}
-			return passthrough(ctx, deps.MCP, "copyTree.injectToTerminal", m, "")
+			return copyTreeInjectPassthrough(ctx, deps.MCP, a.TerminalID, m)
 		},
 	}
 }
@@ -187,8 +192,8 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 			if strings.TrimSpace(a.TerminalID) == "" || strings.TrimSpace(a.Command) == "" {
 				return tools.Fail(domain.CodeValidation, "terminal.sendCommand: terminalId and command must be non-empty.")
 			}
-			return passthrough(ctx, deps.MCP, "terminal.sendCommand",
-				map[string]any{"terminalId": a.TerminalID, "command": a.Command}, "")
+			return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command,
+				map[string]any{"terminalId": a.TerminalID, "command": a.Command})
 		},
 	}
 }
