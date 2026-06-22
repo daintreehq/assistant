@@ -15,7 +15,7 @@ import (
 )
 
 // PromptContext builds the dynamic MainPromptContext from the live MCP status +
-// config + scheduler state (app.ts §2.6). It is re-read on every connect/reconnect
+// config + scheduler state. It is re-read on every connect/reconnect
 // and on /permissions changes so message[1] stays current.
 func (a *App) PromptContext() prompts.MainPromptContext {
 	st := a.MCP.Status()
@@ -32,7 +32,7 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 	}
 }
 
-// mcpStatusLine renders the connected/not-connected one-liner (app.ts §2.6).
+// mcpStatusLine renders the connected/not-connected one-liner.
 func mcpStatusLine(st mcp.Status) string {
 	if st.Connected {
 		count := "?"
@@ -48,7 +48,7 @@ func mcpStatusLine(st mcp.Status) string {
 	return "not connected — " + reason
 }
 
-// buildContext is the ToolContext factory (app.ts §2.5). actor gates the confirm
+// buildContext is the ToolContext factory. actor gates the confirm
 // branch: only the interactive "main" actor can prompt; non-interactive actors
 // (watcher/timer/workflow) auto-decline and rely on automation grants. The Confirm
 // / Log closures read a.hooks LIVE so SetHooks partial updates take effect without
@@ -91,7 +91,7 @@ func (a *App) buildContext(actor domain.ToolActor, actorID string) *tools.ToolCo
 
 // eventProxy is the stable EventSink the session holds; every method delegates to
 // a.hooks.AgentEvents (read live), so SetHooks can swap the UI/console/JSON sink
-// without rebuilding the session and dropping history (app.ts §2.4).
+// without rebuilding the session and dropping history.
 type eventProxy struct{ app *App }
 
 func (p *eventProxy) sink() agent.EventSink {
@@ -152,7 +152,7 @@ func (t *toolRunner) ResolveWireName(wireName string) string {
 }
 
 // ReadOnlyToolNames returns read-risk tools minus the skill-context-mutating ones
-// (skill.find/skill.load) — the autonomous-wake-turn set (agent.SessionDeps §2).
+// (skill.find/skill.load) — the autonomous-wake-turn set (agent.SessionDeps).
 func (t *toolRunner) ReadOnlyToolNames() []string {
 	var out []string
 	for _, tool := range t.app.Registry.List() {
@@ -174,8 +174,8 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 	tctx.RunID = turn.RunID
 	tctx.ActiveToolNames = turn.ActiveToolNames
 	// Liveness: forward the registry's in-tool progress beats out to the session's
-	// sink, tagged with this call's id so the UI maps them to the right activity row
-	// (_interaction-ux.md §4). The registry emits the standard
+	// sink, tagged with this call's id so the UI maps them to the right activity row.
+	// The registry emits the standard
 	// validating→awaiting_approval→running phases; long handlers add substeps.
 	tctx.ToolCallID = turn.CallID
 	if turn.Progress != nil {

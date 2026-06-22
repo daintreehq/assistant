@@ -2,8 +2,8 @@ package ui
 
 import "github.com/daintreehq/daintree-assistant/internal/domain"
 
-// transcript_types.go holds the run-oriented transcript model (ui-transcript.md §3)
-// plus the ordered-step turn model (_interaction-ux.md §5). The transcript folds a
+// transcript_types.go holds the run-oriented transcript model
+// plus the ordered-step turn model. The transcript folds a
 // flat event stream into turns; a sealed cell becomes an immutable ScrollbackBlock.
 
 // NoteLevel tones a standalone operational note.
@@ -28,8 +28,8 @@ const (
 )
 
 // TurnStepKind tags an ordered step within a turn. The ordered model preserves the
-// true chronological narrative (prose → tool batch → more prose) instead of the
-// flat "all prose then all tools" the TS version produced.
+// true chronological narrative (prose → tool batch → more prose) instead of a flat
+// "all prose then all tools" layout.
 type TurnStepKind int
 
 const (
@@ -39,7 +39,7 @@ const (
 	StepNote
 )
 
-// ActivityState is the per-tool lifecycle the activity tree renders (§4 glyphs).
+// ActivityState is the per-tool lifecycle the activity tree renders.
 type ActivityState int
 
 const (
@@ -48,6 +48,12 @@ const (
 	ActDone
 	ActFailed
 	ActWaiting
+	// ActCancelled is a terminal state synthesized by the UI (never emitted by the
+	// agent): a turn the user aborted leaves calls[c:] announced-but-never-resolved
+	// (the backend stubs their MODEL-side results but emits no UI ToolResult), so
+	// without re-stamping them they would freeze into scrollback rendered as ◦ queued
+	// / ◌ active, falsely implying they will still run. See (*TurnCell).cancelPending.
+	ActCancelled
 )
 
 // Activity is one branch in the turn's activity tree: a delegated unit of work.
@@ -80,7 +86,7 @@ type TurnStep struct {
 }
 
 // TurnCell is one request → decision → delegated work → outcome. It uses ordered
-// Steps (not flat text+activities) per _interaction-ux.md §5.
+// Steps (not flat text+activities).
 type TurnCell struct {
 	ID             string
 	UserText       string // empty for system-origin turns (e.g. a scheduled wake)
@@ -91,6 +97,13 @@ type TurnCell struct {
 	Queued         bool            // a follow-up typed while busy: dimmed, promoted in place
 	Reasoning      string          // <think> body, revealed under ^X
 	Ts             int64
+
+	// StartedAt stamps when the turn began RUNNING (not when it was queued), driving the
+	// CUMULATIVE live elapsed so it doesn't reset to 0 on every phase transition.
+	// LastActivityAt stamps the most recent streamed token / tool event; a long gap means
+	// the turn is stalled (vs. hung), surfaced as a "still working" cue in the live status.
+	StartedAt      int64
+	LastActivityAt int64
 
 	// FlushedRows is the count of this turn's rendered rows (against the canonical
 	// activeTurnRows form: leading blank separator + body, UN-indented — LeftPad is added
@@ -154,7 +167,7 @@ func (c TranscriptCell) ID() string {
 	return ""
 }
 
-// isSealed is the commit gate (§3): a turn seals when it leaves the active state;
+// isSealed is the commit gate: a turn seals when it leaves the active state;
 // standalone notes and command results are immutable the moment they arrive.
 func (c TranscriptCell) isSealed() bool {
 	if c.Turn != nil {
@@ -180,7 +193,7 @@ func (t *TurnCell) activeProseStep() int {
 }
 
 // appendProse appends streamed text, opening a new StepProse when prose resumes
-// after a tool/note step so the chronological narrative is preserved (§5).
+// after a tool/note step so the chronological narrative is preserved.
 func (t *TurnCell) appendProse(text string) {
 	if text == "" {
 		return
@@ -198,6 +211,31 @@ func (t *TurnCell) sealProse() {
 	for i := range t.Steps {
 		if t.Steps[i].Kind == StepProse {
 			t.Steps[i].Streaming = false
+		}
+	}
+}
+
+// cancelPending re-stamps every tool activity still queued/active/waiting as
+// ActCancelled when the user aborts the turn. The agent's stubCancelledFrom only
+// pushes CANCELLED results into the MODEL's message history (so replay stays valid);
+// it emits no UI ToolResult, so these rows would otherwise commit to scrollback
+// still rendered as live/queued. A was-active call records "cancelled"; a never-started
+// (queued/waiting) call records "not run" — both shown via Outcome at render time so the
+// row's resolved target detail is preserved alongside the terminal note.
+func (t *TurnCell) cancelPending() {
+	for i := range t.Steps {
+		if t.Steps[i].Kind != StepTool || t.Steps[i].Activity == nil {
+			continue
+		}
+		a := t.Steps[i].Activity
+		switch a.State {
+		case ActActive:
+			a.State = ActCancelled
+			a.ProgressMsg = ""
+			a.Outcome = "cancelled"
+		case ActQueued, ActWaiting:
+			a.State = ActCancelled
+			a.Outcome = "not run"
 		}
 	}
 }

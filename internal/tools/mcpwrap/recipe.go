@@ -40,7 +40,7 @@ func newRecipeListTool() *tools.Tool {
 
 // recipeRunArgs runs a recipe. The top-level recipeId is authoritative: it is
 // merged LAST into the forwarded arguments so a stray nested arguments.recipeId
-// can never override the explicit one (§8.11).
+// can never override the explicit one.
 type recipeRunArgs struct {
 	RecipeID   string         `json:"recipeId"`
 	Arguments  map[string]any `json:"arguments,omitempty"`
@@ -74,7 +74,7 @@ func newRecipeRunTool() *tools.Tool {
 			if a.RecipeID == "" {
 				return tools.Fail(codeInvalidArgs, "recipe.run: recipeId is required")
 			}
-			// Merge {...arguments, recipeId} — explicit recipeId wins (§8.11).
+			// Merge {...arguments, recipeId} — explicit recipeId wins.
 			merged := make(map[string]any, len(a.Arguments)+1)
 			for k, v := range a.Arguments {
 				merged[k] = v

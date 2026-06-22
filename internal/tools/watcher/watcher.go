@@ -3,8 +3,6 @@
 // they supervise terminals that live only for the session and never resume on a
 // new launch (unlike durable timers). Every creator appends a foreground-only
 // lifecycle NOTE.
-//
-// Spec: docs/port/tools-families.md §4.7 (watcherTools.ts), §3 (cadences).
 package watcher
 
 import (
@@ -17,7 +15,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// Cadence constants (watcherCadence.ts §3). PR cadence is fixed (not
+// Cadence constants. PR cadence is fixed (not
 // user-configurable); the terminal default is the user-background monitor rate.
 const (
 	monitorDefaultCadenceMs = 120000
@@ -86,7 +84,7 @@ type terminalCreateArgs struct {
 // terminalCreateSchema embeds the hand-written WATCH_CONDITION schema. It uses
 // anyOf (Fireworks rejects oneOf), the combinators flatten to ONE level of
 // atomic leaves (no $ref/deep recursion), and "not" is a property literally
-// named not (NOT the JSON-Schema not keyword). Spec: §4.7.
+// named not (NOT the JSON-Schema not keyword).
 var terminalCreateSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,

@@ -1,6 +1,6 @@
 // Package projectinstructions loads a repo's DAINTREE.md instruction file. It
 // NEVER panics: a missing file is the normal case (silent skip); an oversized or
-// unreadable file yields a warning and no content. Spec: docs/port/domain-config.md §3.
+// unreadable file yields a warning and no content.
 package projectinstructions
 
 import (

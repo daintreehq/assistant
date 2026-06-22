@@ -24,12 +24,12 @@ const (
 )
 
 // Host owns the transport, the descriptor handshake, the command loop, the wake
-// reactor, boot, and teardown — the Go port of src/host/index.ts. It is driven by
-// Run(ctx). Process-level state (busy/ready/pendingWake/…) is owned by the single
-// command-loop goroutine, EXCEPT the Bridge's own state (the agent loop calls the
-// sink concurrently and uses its own mutex). The command loop MUST NOT block on a
-// running Send — send runs on a worker goroutine while the loop keeps servicing
-// interrupt/approval:decide (the key structural property from the TS event loop).
+// reactor, boot, and teardown. It is driven by Run(ctx). Process-level state
+// (busy/ready/pendingWake/…) is owned by the single command-loop goroutine, EXCEPT
+// the Bridge's own state (the agent loop calls the sink concurrently and uses its
+// own mutex). The command loop MUST NOT block on a running Send — send runs on a
+// worker goroutine while the loop keeps servicing interrupt/approval:decide (the
+// key structural property of the event loop).
 type Host struct {
 	factory AppFactory
 	tr      *transport
@@ -80,8 +80,8 @@ func NewHost(factory AppFactory, in io.Reader, out, errw io.Writer) *Host {
 }
 
 // report emits a host:error ONLY when sessionId is set — a pre-descriptor crash
-// names the empty session, matching the TS guard (a leaked event with empty
-// sessionId would be dropped by Daintree's session match anyway).
+// names the empty session (a leaked event with empty sessionId would be dropped
+// by Daintree's session match anyway).
 func (h *Host) report(code, message string) {
 	if h.sessionID == "" {
 		// No session yet: still surface to stderr so the failure isn't silent.
@@ -114,7 +114,7 @@ func (h *Host) post(ev HostEvent) { h.tr.send(h.sessionID, ev) }
 
 // Run is the entry point: install the stdout-fail hook, run the command loop, and
 // (on a terminal inbound) tear down. It blocks until teardown calls exit. The
-// caller wires os.Stdin/os.Stdout/os.Stderr. Spec §7 main().
+// caller wires os.Stdin/os.Stdout/os.Stderr.
 func (h *Host) Run(parent context.Context) {
 	h.runCtx, h.runCancel = context.WithCancel(parent)
 	defer h.runCancel()
@@ -167,7 +167,7 @@ func (h *Host) Run(parent context.Context) {
 	}
 }
 
-// onLine drives the descriptor/command state machine (TS port.on("message")).
+// onLine drives the descriptor/command state machine.
 func (h *Host) onLine(line []byte) {
 	switch h.state {
 	case stateAwaitDescriptor:

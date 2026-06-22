@@ -9,8 +9,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// render_chrome_ported_test.go ports tests/ui/Header.test.tsx and StatusLine.test.tsx
-// to the rendered Go masthead/status strings (the Bubble Tea cockpit renders via a
+// render_chrome_ported_test.go exercises the rendered Go masthead/status strings
+// (the Bubble Tea cockpit renders via a
 // View string, so we assert on the stripped text + the width/field invariants).
 
 func darkTheme() theme.Theme {
@@ -20,7 +20,7 @@ func darkTheme() theme.Theme {
 	return t
 }
 
-// --- Header / masthead (tests/ui/Header.test.tsx) ---
+// --- Header / masthead ---
 
 func TestMasthead_WordmarkVersionAndProject(t *testing.T) {
 	th := darkTheme()
@@ -118,7 +118,7 @@ func TestMasthead_DestructiveEscalatesTier(t *testing.T) {
 	}
 }
 
-// --- StatusLine (tests/ui/StatusLine.test.tsx) ---
+// --- StatusLine ---
 
 func TestStatusLine_IdleIsEmpty(t *testing.T) {
 	// Silence means idle: no "Standing by", no MCP/tier token.
@@ -135,7 +135,6 @@ func workingBadge() statusParams {
 
 func TestStatusLine_NoMcpNoTierToken(t *testing.T) {
 	p := workingBadge()
-	p.Agents = 1
 	out := stripAnsi(renderStatusLine(darkTheme(), p, 80))
 	if strings.Contains(out, "MCP") {
 		t.Errorf("status must not show an MCP token while healthy: %q", out)
@@ -147,19 +146,15 @@ func TestStatusLine_NoMcpNoTierToken(t *testing.T) {
 
 func TestStatusLine_PrefersActiveAgentNoOrphanSep(t *testing.T) {
 	p := workingBadge()
-	p.Agents = 1
 	out := stripAnsi(renderStatusLine(darkTheme(), p, 80))
 	if !strings.Contains(out, "WORKING") || !strings.Contains(out, "term_8") {
 		t.Errorf("active agent badge + terminal missing: %q", out)
 	}
 	// The badge is built from tone+label: a leading tone glyph (◌ for active) precedes
-	// the UPPERCASE label, exactly as StatusLine.tsx inlines the StateBadge — NOT the
+	// the UPPERCASE label (the StateBadge is inlined) — NOT the
 	// old flat "WORKING term_8" string.
 	if !strings.Contains(out, "◌ WORKING") {
 		t.Errorf("active badge must lead with the tone glyph: %q", out)
-	}
-	if !strings.Contains(out, "agents 1") {
-		t.Errorf("compact rollup count missing: %q", out)
 	}
 	if strings.Contains(out, "·  ·") {
 		t.Errorf("orphan separator between segments: %q", out)
@@ -234,7 +229,7 @@ func TestStatusLine_HealthyMcpIsSilent(t *testing.T) {
 	}
 }
 
-// --- HelpOverlay (tests/ui/HelpOverlay.test.tsx) ---
+// --- HelpOverlay ---
 
 func TestHelpView_RendersEveryRegistryCommandSyntax(t *testing.T) {
 	// The help view is built from the command registry, so it can't drift from the

@@ -111,7 +111,10 @@ func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 		parts = append(parts, pre)
 	}
 	if k > 0 {
-		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true); body != "" {
+		// showTail=false: the flush commits ONLY completed paragraphs; the still-growing one
+		// stays a footer-only preview (render_turn.go renderProse) so scrollback never gets a
+		// half-paragraph that would later be re-committed as markdown.
+		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true, false); body != "" {
 			parts = append(parts, body)
 		}
 	}

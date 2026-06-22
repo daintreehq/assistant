@@ -2,8 +2,6 @@
 // grant.revoke. A grant is the non-interactive escape valve — it pre-authorizes
 // a watcher/timer actor to run otherwise-confirm-required tools unattended,
 // bounded by TTL, use-count, and a tool/risk allowlist (union authorization).
-//
-// Spec: docs/port/tools-families.md §4.5 (grantTools.ts), tools-core.md §9.
 package grant
 
 import (

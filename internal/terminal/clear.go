@@ -5,9 +5,7 @@
 // NEVER used for ordinary redraw, resize reflow, or per-frame painting (Bubble
 // Tea owns that). Every writer is guarded so a non-TTY stdout is a no-op and a
 // failed write never propagates — an out-of-band cue must never break the program.
-//
-// Spec: docs/port/ui-transcript.md §11 (the ONLY path that clears host scrollback)
-// and the cockpit task's `internal/terminal/clear.go` mandate.
+// This is the ONLY path that clears host scrollback.
 package terminal
 
 import (
@@ -17,7 +15,7 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-// HostTerminalClear is the host screen+scrollback wipe (ui-transcript.md §11):
+// HostTerminalClear is the host screen+scrollback wipe:
 //
 //	\x1b[2J  erase the entire viewport
 //	\x1b[3J  erase the SCROLLBACK buffer (the one that actually matters here)

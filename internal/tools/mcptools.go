@@ -9,7 +9,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/safety"
 )
 
-// daintree.call-specific error codes (model-facing — §3.2, §7).
+// daintree.call-specific error codes (model-facing).
 const (
 	codeUseTypedWrapper = "USE_TYPED_WRAPPER"
 	codeMCPUnavailable  = "MCP_UNAVAILABLE"
@@ -21,7 +21,7 @@ const (
 // wrapper the model must use instead. The escape hatch invites two failure modes
 // — reaching for it when a wrapper exists, then sending arguments:{} and retrying
 // the identical broken call — so we redirect to the typed, validated wrapper.
-// Keep in sync with the wrappers. Verbatim 11 entries. Spec: §7.
+// Keep in sync with the wrappers. Verbatim 11 entries.
 var wrappedMCPTools = map[string]string{
 	"agent.launch":                 `agentTask.spawnForEdits (mode "explore"/"edit")`,
 	"terminal.getOutput":           "terminal.read / terminal.summarize / terminal.extract",
@@ -44,7 +44,7 @@ type callArgs struct {
 }
 
 // daintreeCallSchema is the raw JSON Schema (additionalProperties:false,
-// required:["name"], arguments is an open object). Spec: §7.
+// required:["name"], arguments is an open object).
 var daintreeCallSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
@@ -58,7 +58,7 @@ var daintreeCallSchema = json.RawMessage(`{
 
 // NewDaintreeCallTool builds the raw-passthrough daintree.call tool: risk system,
 // always confirmed, requires the system tier. Its handler re-applies the
-// typed-wrapper denylist and the no-file-edit guard before forwarding. Spec: §7.
+// typed-wrapper denylist and the no-file-edit guard before forwarding.
 func NewDaintreeCallTool() *Tool {
 	return &Tool{
 		Name: "daintree.call",

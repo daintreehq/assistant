@@ -15,7 +15,7 @@ import (
 
 // CORE_TOOL_NAMES — always offered to the model regardless of loaded skills. The
 // union with loaded skills' requiredTools forms the per-turn projection. Internal
-// dotted names. Spec: agent-loop.md §3.
+// dotted names.
 var coreToolNames = []string{
 	"context.snapshot",
 	"fs.read",
@@ -37,7 +37,7 @@ var coreToolNames = []string{
 
 // SkillContextMutatingTools are read-risk tools withheld on read-only wake turns
 // (they mutate the loaded-skill set). The ToolRunner adapter uses this set when
-// building ReadOnlyToolNames so both sides share one source of truth. Spec §2.
+// building ReadOnlyToolNames so both sides share one source of truth.
 var SkillContextMutatingTools = map[string]struct{}{
 	"skill.find": {},
 	"skill.load": {},
@@ -50,7 +50,7 @@ func IsSkillContextMutating(name string) bool {
 	return ok
 }
 
-// CoreToolNames returns a copy of the always-offered core tool names (§3).
+// CoreToolNames returns a copy of the always-offered core tool names.
 func CoreToolNames() []string {
 	out := make([]string, len(coreToolNames))
 	copy(out, coreToolNames)
@@ -89,7 +89,7 @@ type Session struct {
 // NewSession builds a Session: the skill catalog + the three control messages.
 // On resume (deps.RestoredMessages != nil) the controls are rebuilt fresh but NOT
 // re-persisted and the restored working history is appended; seq continues from
-// InitialSeq. On a fresh session the controls are persisted. Spec §5/§6.1.
+// InitialSeq. On a fresh session the controls are persisted.
 func NewSession(deps SessionDeps) *Session {
 	if deps.Events == nil {
 		deps.Events = NoopEventSink{}
@@ -110,7 +110,7 @@ func NewSession(deps SessionDeps) *Session {
 
 	resume := deps.RestoredMessages != nil
 
-	// Control messages at fixed indices (§6.2).
+	// Control messages at fixed indices.
 	control := []models.ChatMessage{
 		models.TextMessage("system", prompts.BaseSystemPrompt),
 		models.TextMessage("system", s.composeRuntimeContext()),
@@ -124,11 +124,11 @@ func NewSession(deps SessionDeps) *Session {
 		if s.seq < domain.ControlMessageCount {
 			s.seq = domain.ControlMessageCount
 		}
-		// Controls already exist in the DB — do NOT re-persist (§17.6).
+		// Controls already exist in the DB — do NOT re-persist.
 		// On a dup-seq forced fresh start the working history is EMPTY and we resume
 		// at maxSeq+1; persist a clear breadcrumb at that collision-free seq so the
 		// durable log records the reset boundary and a later resume sees a clean,
-		// post-marker history rather than the dirty dup-seq rows again (§7.2/§17.4).
+		// post-marker history rather than the dirty dup-seq rows again.
 		if deps.DirtyFreshStart {
 			s.persistMessage(models.TextMessage("system", domain.ClearMarker))
 		}
@@ -144,7 +144,7 @@ func NewSession(deps SessionDeps) *Session {
 
 // composeRuntimeContext builds message[1]: the runtime context, then the catalog
 // appended (never interleaved) so message[2] stays the loaded-skills slot and the
-// "# Runtime context" header stays at the top of [1]. Spec §6.2.
+// "# Runtime context" header stays at the top of [1].
 func (s *Session) composeRuntimeContext() string {
 	runtime := prompts.BuildRuntimeContextMessage(s.deps.PromptContext)
 	if s.skillCatalog != "" {
@@ -154,7 +154,7 @@ func (s *Session) composeRuntimeContext() string {
 }
 
 // RefreshRuntimeContext rewrites ONLY message[1] (re-appending the catalog). The
-// cached prefix [0] is untouched; not re-persisted. Spec §6.3.
+// cached prefix [0] is untouched; not re-persisted.
 func (s *Session) RefreshRuntimeContext(ctx prompts.MainPromptContext) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,7 +192,7 @@ func (s *Session) InjectNote(note string) {
 // Clear truncates the live history to the three controls and persists a CLEAR
 // breadcrumb. Loaded skills are left as-is. Returns ErrTurnInProgress when a turn
 // is in flight (a mid-turn clear would corrupt the streaming snapshot) — do NOT
-// mutate in that case. Spec §6.3.
+// mutate in that case.
 func (s *Session) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,7 +214,7 @@ func (s *Session) clearLocked() {
 // Compact keeps the three controls and replaces the working history with one
 // "[compacted summary…]" user note, persisting a system marker then the note.
 // Returns ErrTurnInProgress when a turn is in flight (the interactive /compact
-// path) — the in-turn auto-compact uses compactLocked instead. Spec §6.3.
+// path) — the in-turn auto-compact uses compactLocked instead.
 func (s *Session) Compact(summary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -237,7 +237,7 @@ func (s *Session) compactLocked(summary string) {
 }
 
 // SendOptions tunes a turn. ReadOnly marks an autonomous wake turn (read-risk
-// tools only, enforced at dispatch). Spec §6.3 / §10.4.
+// tools only, enforced at dispatch).
 type SendOptions struct {
 	ReadOnly bool
 }
@@ -246,7 +246,7 @@ type SendOptions struct {
 // single-flight: a concurrent call returns ErrTurnInProgress. The reply string is
 // the model's final answer OR a sentinel string on a model/tool failure (Send
 // never returns an error for those — wake reactors prefix-match the sentinels).
-// The error return is reserved for the single-flight guard. Spec §6.3 / §15.4.
+// The error return is reserved for the single-flight guard.
 func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) (string, error) {
 	s.mu.Lock()
 	if s.inFlight {
@@ -268,7 +268,7 @@ func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) 
 	return s.runTurn(ctx, runID, userInput, opts), nil
 }
 
-// runTurn is the core loop (agent-loop.md §6.4 — ordering is load-bearing).
+// runTurn is the core loop (ordering is load-bearing).
 func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) string {
 	s.events.Phase(domain.PhaseReceived)
 
@@ -391,7 +391,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 
 		// 10g. Execute the batch. Announce ALL calls as queued BEFORE sequential
-		//      dispatch (liveness §3), then promote each queued→active→done/failed.
+		//      dispatch, then promote each queued→active→done/failed.
 		if reply, done := s.runToolBatch(ctx, result.ToolCalls, turn, allowedSet, failureCounts, &stuckNudged); done {
 			return reply
 		}
@@ -406,12 +406,11 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 // runToolBatch dispatches a batch of tool calls sequentially after announcing the
 // whole batch as queued. Returns (reply, true) when the turn must end (cancel or
-// circuit-breaker abort), else ("", false) to continue the iteration loop. Spec
-// §6.4 step 10g + liveness §3.
+// circuit-breaker abort), else ("", false) to continue the iteration loop.
 func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, turn TurnContext,
 	allowedSet map[string]struct{}, failureCounts map[string]int, stuckNudged *bool) (string, bool) {
 
-	// Announce the whole batch as queued first (_interaction-ux.md §3).
+	// Announce the whole batch as queued first.
 	batch := make([]BatchedToolCall, 0, len(calls))
 	for _, call := range calls {
 		internalName := s.resolveInternal(call.Function.Name)
@@ -436,7 +435,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// executes after the user hit Escape. The current call AND every remaining
 		// one (calls[c:]) get a structurally-valid CANCELLED tool result, so each
 		// assistant tool_call still has a matching reply (or Fireworks 400s on
-		// replay). Spec §6.4 / §17.2.
+		// replay).
 		if ctx.Err() != nil {
 			s.stubCancelledFrom(calls, c)
 			s.events.Phase(domain.PhaseCancelled)
@@ -470,7 +469,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
 		case allowedSet != nil && !setHas(allowedSet, internalName):
 			// Read-only-turn refusal, double-gated (the list filter alone is
-			// insufficient — ResolveWireName can fall through to a raw name). §10.4.
+			// insufficient — ResolveWireName can fall through to a raw name).
 			res = domain.Fail("READ_ONLY_TURN",
 				"Mutating tools are disabled on autonomous wake-up turns; only read-only inspection is allowed.",
 				domain.Unrecoverable())
@@ -482,7 +481,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			}
 			// Per-call progress plumbing: stamp the active call id + a forwarder so an
 			// in-tool substep emits ToolProgress(callID, msg) on this turn's sink,
-			// tagged so the UI maps it to the right activity row (_interaction-ux.md §4).
+			// tagged so the UI maps it to the right activity row.
 			callTurn := turn
 			callTurn.CallID = call.ID
 			callTurn.Progress = func(callID string, msg string) {
@@ -510,7 +509,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 
 		// Circuit-breaker bookkeeping: signature is the RAW argument string the
 		// model emitted (NOT re-encoded) + the error code, so only a byte-identical
-		// repeat failing the SAME way increments the same counter. Spec §6.4 / §17.3.
+		// repeat failing the SAME way increments the same counter.
 		if !res.Ok {
 			errCode := ""
 			if res.Error != nil {
@@ -528,7 +527,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// queue now. This call already has its real result; stub every remaining
 		// undispatched call (calls[c+1:]) so the transcript stays well-formed (each
 		// assistant tool_call needs a matching tool result, or Fireworks 400s on
-		// replay). Spec §6.4 / §17.2.
+		// replay).
 		if ctx.Err() != nil {
 			s.stubCancelledFrom(calls, c+1)
 			s.events.Phase(domain.PhaseCancelled)
@@ -566,7 +565,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 
 // stubCancelledFrom pushes a structurally-valid CANCELLED tool result for every
 // call in calls[from:] (none of which executed), so each assistant tool_call keeps
-// a matching tool reply and the transcript replays cleanly. Spec §6.4 / §17.2.
+// a matching tool reply and the transcript replays cleanly.
 func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) {
 	for r := from; r < len(calls); r++ {
 		pending := calls[r]
@@ -583,7 +582,7 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) {
 }
 
 // classifyStreamError maps a router stream error to its sentinel reply. The
-// prefixes are WAKE_FAILURE_PREFIXES — keep them byte-stable (§10.1 / §17.14).
+// prefixes are WAKE_FAILURE_PREFIXES — keep them byte-stable.
 func (s *Session) classifyStreamError(err error) string {
 	var cancelled *models.CancelledError
 	if errors.As(err, &cancelled) || errors.Is(err, context.Canceled) {
@@ -619,7 +618,7 @@ func (s *Session) assistantMessage(result models.ChatResult) models.ChatMessage 
 	return m
 }
 
-// emitUsage emits the per-round UsageEvent (§11.1). costUsd is left nil unless the
+// emitUsage emits the per-round UsageEvent. costUsd is left nil unless the
 // provider reported usage, so the UI shows "no data" not a misleading $0.000.
 func (s *Session) emitUsage(result models.ChatResult) {
 	model := models.BareModelID(s.deps.Router.ModelFor(domain.ModelLarge))
@@ -650,8 +649,8 @@ func (s *Session) emitUsage(result models.ChatResult) {
 }
 
 // buildToolFilter returns the per-turn tool projection. No active skills ⇒ nil
-// (the FULL registry — an unconstrained turn must not be starved of tools; §17.15).
-// Else: unique(core ∪ skills.requiredTools). Spec §6.3.
+// (the FULL registry — an unconstrained turn must not be starved of tools).
+// Else: unique(core ∪ skills.requiredTools).
 func (s *Session) buildToolFilter() []string {
 	if len(s.activeSkills) == 0 {
 		return nil
@@ -676,7 +675,7 @@ func (s *Session) buildToolFilter() []string {
 }
 
 // resolveInternal maps a wire name back to its internal name, falling through to
-// the raw name when the registry doesn't resolve it (ResolveWireName ?? raw). §6.4.
+// the raw name when the registry doesn't resolve it (ResolveWireName ?? raw).
 func (s *Session) resolveInternal(wireName string) string {
 	if n := s.deps.Tools.ResolveWireName(wireName); n != "" {
 		return n
@@ -718,7 +717,7 @@ func (s *Session) persistMessage(m models.ChatMessage) {
 }
 
 // persistMessageLocked writes a conversation row (swallows errors — a DB failure
-// must never break a live turn; §17.13). Caller MUST hold s.mu (it reads/bumps
+// must never break a live turn). Caller MUST hold s.mu (it reads/bumps
 // s.seq).
 func (s *Session) persistMessageLocked(m models.ChatMessage) {
 	defer func() { _ = recover() }()
@@ -749,7 +748,7 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 	_, _ = s.deps.Store.InsertMessage(rec)
 }
 
-// estimateTokens approximates the conversation size (dependency-free, §8.1):
+// estimateTokens approximates the conversation size (dependency-free):
 // sum of each message's flattened-text length + tool-call argument JSON length,
 // divided by CHARS_PER_TOKEN and ceil'd. Approximate by design.
 func (s *Session) estimateTokens() int {
@@ -773,7 +772,6 @@ func (s *Session) estimateTokensLocked() int {
 // maybeAutoCompact summarizes the conversation with the small model when it has
 // grown past the token threshold, replacing the working history with a short note.
 // Best-effort: any failure leaves the conversation untouched and the turn proceeds.
-// Spec §8.
 func (s *Session) maybeAutoCompact(ctx context.Context) {
 	// Build the summary input under the lock (read a stable snapshot), then run the
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
@@ -785,7 +783,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	}
 	// Flatten multimodal history to text (the small model is text-only; an image
 	// turn would otherwise trip the vision tier gate and silently fail every
-	// auto-compact, growing history unbounded). §8.
+	// auto-compact, growing history unbounded).
 	summaryMsgs := []models.ChatMessage{
 		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual."),
 	}
@@ -815,7 +813,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 // is created in NewSession and lives for the session.
 func (s *Session) Artifacts() *ArtifactStore { return s.artifacts }
 
-// FindSkills runs the skill.find engine (§14). On a selector error/cancel it
+// FindSkills runs the skill.find engine. On a selector error/cancel it
 // leaves the loaded set unchanged. New ids merge FIRST so they survive the cap of
 // 3 (an explicit/new load evicts the lowest-priority prior skill).
 // FindSkills is invoked by the skill.find TOOL on the turn goroutine, so it does
@@ -884,7 +882,7 @@ func (s *Session) activeSkillIDsLocked() []string {
 }
 
 // resolveKnownIDs = unique(ids).filter(has).slice(0,3) — filter BEFORE the cap so
-// a hallucinated id can't evict a valid one. Spec §6.3 / §17.16.
+// a hallucinated id can't evict a valid one.
 func (s *Session) resolveKnownIDs(ids []string) []string {
 	seen := make(map[string]struct{})
 	var out []string
@@ -904,7 +902,7 @@ func (s *Session) resolveKnownIDs(ids []string) []string {
 }
 
 // applySkillBundleLocked re-renders the bundle, updates active ids, and rewrites
-// message[2]. Caller MUST hold s.mu. Spec §6.3.
+// message[2]. Caller MUST hold s.mu.
 func (s *Session) applySkillBundleLocked(sks []skills.Skill) {
 	s.skillBundle = skills.RenderSkillBundle(sks)
 	s.activeSkills = s.skillBundle.IDs
@@ -914,7 +912,7 @@ func (s *Session) applySkillBundleLocked(sks []skills.Skill) {
 }
 
 // logSelection best-effort records what the QUERY resolved (newlyKnown, NOT the
-// merged set), with userInput sliced to 1000 chars. Spec §6.3 / §14.
+// merged set), with userInput sliced to 1000 chars.
 func (s *Session) logSelection(userInput string, selection skills.SkillSelection, selectedIDs []string) {
 	defer func() { _ = recover() }()
 	if s.deps.Store == nil {

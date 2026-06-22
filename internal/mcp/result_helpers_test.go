@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// Port of the mcpResultHelpers.test.ts contract as it manifests in internal/mcp.
-// The dedicated parseMcpArray/parseMcpString matrix lives (unexported) in
-// internal/daemon in the Go rewrite; the mcp package's surface for the same
+// The mcp-result-helpers contract as it manifests in internal/mcp. The dedicated
+// parseMcpArray/parseMcpString matrix lives (unexported) in internal/daemon; the
+// mcp package's surface for the same
 // "structuredContent-first, then JSON-text fallback, ignore garbage" rule is
 // ReadProjectName (the actions.getContext extractor) and the CallResult
 // normalization. This table exercises that source-precedence + ignore matrix.

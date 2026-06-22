@@ -8,7 +8,7 @@ import (
 
 const fileText = "hello daintree\nfind-me-needle here\nthird line\n"
 
-// buildFunctionalFixture mirrors fsTools.test.ts: a readme + a nested subdir.
+// buildFunctionalFixture builds the functional fixture: a readme + a nested subdir.
 func buildFunctionalFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -24,7 +24,7 @@ func buildFunctionalFixture(t *testing.T) string {
 	return root
 }
 
-// TestReadReturnsContentAndMaxBytes ports fsTools.test.ts: fs.read returns the
+// TestReadReturnsContentAndMaxBytes: fs.read returns the
 // full content, and honours maxBytes by slicing.
 func TestReadReturnsContentAndMaxBytes(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -46,7 +46,7 @@ func TestReadReturnsContentAndMaxBytes(t *testing.T) {
 	}
 }
 
-// TestReadBlocksTraversal ports fsTools.test.ts: a ../ traversal is blocked and
+// TestReadBlocksTraversal: a ../ traversal is blocked and
 // returns FS_READ.
 func TestReadBlocksTraversal(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -59,7 +59,7 @@ func TestReadBlocksTraversal(t *testing.T) {
 	}
 }
 
-// TestListNameAndType ports fsTools.test.ts: fs.list reports each entry's name and
+// TestListNameAndType: fs.list reports each entry's name and
 // type (file vs dir) under the project root.
 func TestListNameAndType(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -80,7 +80,7 @@ func TestListNameAndType(t *testing.T) {
 	}
 }
 
-// TestListDescendsWithDepth ports fsTools.test.ts: depth:2 surfaces a nested file
+// TestListDescendsWithDepth: depth:2 surfaces a nested file
 // as a path-joined entry.
 func TestListDescendsWithDepth(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -100,7 +100,7 @@ func TestListDescendsWithDepth(t *testing.T) {
 	}
 }
 
-// TestSearchFindsFileLineText ports fsTools.test.ts: fs.search reports the file,
+// TestSearchFindsFileLineText: fs.search reports the file,
 // 1-based line number, and matching text.
 func TestSearchFindsFileLineText(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -126,7 +126,7 @@ func TestSearchFindsFileLineText(t *testing.T) {
 	}
 }
 
-// TestSearchRespectsGlobSuffix ports fsTools.test.ts: the glob acts as a filename
+// TestSearchRespectsGlobSuffix: the glob acts as a filename
 // suffix filter.
 func TestSearchRespectsGlobSuffix(t *testing.T) {
 	root := buildFunctionalFixture(t)
@@ -146,7 +146,7 @@ func TestSearchRespectsGlobSuffix(t *testing.T) {
 	}
 }
 
-// TestReadSecretAndBinaryVariants ports fsToolsSecurity.test.ts read guards: a
+// TestReadSecretAndBinaryVariants exercises the read guards: a
 // .env is FS_SENSITIVE, a private key is refused, a NUL-byte file is FS_BINARY,
 // and an ordinary source file still reads.
 func TestReadSecretAndBinaryVariants(t *testing.T) {

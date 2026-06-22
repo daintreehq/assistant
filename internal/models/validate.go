@@ -42,7 +42,7 @@ func redactMessages(messages []ChatMessage) []map[string]any {
 }
 
 // DecodeWatcherVerdict parses+validates a small-model watcher classification from
-// the cleaned JSON the json path returns. Mirrors the Zod WatcherVerdict.strict():
+// the cleaned JSON the json path returns. Strict validation:
 //   - confidence clamped to [0,1] is REJECTED out of range (range check), evidence
 //     defaults to [], recommendedAction defaults to "none".
 //

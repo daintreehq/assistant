@@ -4,7 +4,6 @@
 // hands the model a compact stub carrying an artifactId; this tool pages back
 // through that full output by CHARACTER range. The store is in-memory and
 // session-scoped: a stale/replayed id fails gracefully rather than crashing.
-// Spec: docs/port/tools-families.md §4.2.
 package artifactx
 
 import (
@@ -51,7 +50,7 @@ type readArgs struct {
 
 // Validate enforces `offset: int().min(0)` and `limit: int().min(1).max(MAX)`.
 // Without the limit floor a negative limit makes end = offset+limit < offset, and
-// runes[offset:end] panics with an invalid slice range. Spec parity: §4.2.
+// runes[offset:end] panics with an invalid slice range.
 func (a *readArgs) Validate() error {
 	if a.Offset != nil && *a.Offset < 0 {
 		return fmt.Errorf("offset must be >= 0")

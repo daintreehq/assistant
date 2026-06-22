@@ -34,7 +34,6 @@ func mcpFrom(tctx *tools.ToolContext) MCPClient {
 // MCP envelope to a ToolResult. Disconnected → MCP_UNAVAILABLE; a context cancel
 // during the call → CANCELLED (recoverable:false); isError → MCP_TOOL_ERROR with
 // the refusal text + structuredContent detail; success → ok("Called <name>.").
-// Spec: §4.14 passthrough.
 func passthrough(ctx context.Context, tctx *tools.ToolContext, mcpName string, args map[string]any, requestKey string) tools.ToolResult {
 	mcp := mcpFrom(tctx)
 	if mcp == nil || !mcp.Connected() {

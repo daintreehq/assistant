@@ -8,7 +8,7 @@ import (
 
 // liveStatusLabel returns the LiveRunStatus label for a phase, or "" when the
 // phase is self-evident (the streaming prose / activity tree already explain it).
-// Spec ui-transcript.md §5: only the "silent work" gaps get a label, driven by the
+// Only the "silent work" gaps get a label, driven by the
 // explicit RunPhase — NEVER inferred from "is assistantText empty".
 func liveStatusLabel(p domain.RunPhase) string {
 	switch p {
@@ -35,7 +35,7 @@ func liveStatusLabel(p domain.RunPhase) string {
 
 // runStageLabel is the composer's busy cue label. It maps the same silent-work
 // phases plus a generating fallback, never "Thinking"/"Generating"-during-tools.
-// The generic fallback is "Processing…" (_interaction-ux.md §1 vocabulary).
+// The generic fallback is "Processing…".
 func runStageLabel(p domain.RunPhase) string {
 	switch p {
 	case domain.PhaseReceived:
@@ -58,7 +58,7 @@ func runStageLabel(p domain.RunPhase) string {
 	}
 }
 
-// formatDuration renders a millisecond duration per ui-transcript.md §10:
+// formatDuration renders a millisecond duration:
 //
 //	ms < 0       → ""
 //	ms < 1000    → "<round(ms)>ms"
@@ -80,7 +80,7 @@ func formatDuration(ms int64) string {
 	return fmt.Sprintf("%02d:%02d", mins, rem)
 }
 
-// formatCost renders a USD cost per ui-transcript.md §10: <=0 → "$0.000",
+// formatCost renders a USD cost: <=0 → "$0.000",
 // < 0.01 → 4dp, < 1 → 3dp, else 2dp.
 func formatCost(usd float64) string {
 	switch {
@@ -96,7 +96,7 @@ func formatCost(usd float64) string {
 }
 
 // elapsedToken returns " · <dur>" for a phase that started PhaseStartedAt ms ago,
-// shown only once elapsed reaches 300ms (avoids a 0ms flicker, §5). "" otherwise.
+// shown only once elapsed reaches 300ms (avoids a 0ms flicker). "" otherwise.
 func elapsedToken(phaseStartedAt, now int64) string {
 	if phaseStartedAt <= 0 {
 		return ""

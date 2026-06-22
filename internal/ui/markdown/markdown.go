@@ -4,7 +4,7 @@
 // returns a Rendered{ANSI, Plain}: the styled, width-wrapped ANSI string and a
 // plain-text fallback that is never lost if the styling path fails.
 //
-// HARD CONTRACTS (ui-transcript.md §8):
+// HARD CONTRACTS:
 //   - SYNCHRONOUS only. A render call NEVER does I/O and NEVER spawns a goroutine
 //     (glamour renders synchronously; chroma highlighting is in-process). This is
 //     load-bearing: renders happen inside the Bubble Tea Update/View loop.
@@ -20,6 +20,7 @@ package markdown
 import (
 	"hash/fnv"
 	"strings"
+	"sync"
 
 	"charm.land/glamour/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -46,6 +47,14 @@ type Rendered struct {
 type Renderer struct {
 	theme theme.Theme
 	cache *renderCache
+
+	// trMu/trs memoize one glamour TermRenderer PER WIDTH. Building a TermRenderer compiles
+	// the whole goldmark + ANSI style pipeline, which dominated a cache-miss render and was
+	// repeated on every settled paragraph / resize. Reuse it per width instead (the theme is
+	// fixed per Renderer). tr.Render is serialized under trMu — cache misses are rare (the
+	// LRU above absorbs hits) and the cockpit renders from a single loop.
+	trMu sync.Mutex
+	trs  map[int]*glamour.TermRenderer
 }
 
 // New builds a Renderer for the given theme with the default cache bound.
@@ -127,13 +136,23 @@ func (r *Renderer) render(clean string, width int) Rendered {
 // word wrap. WithStyles drives the semantic map; WithWordWrap hands wrapping to
 // glamour at the live width. TableWrap is disabled (we already converted tables).
 func (r *Renderer) glamourRender(src string, width int) (string, error) {
-	tr, err := glamour.NewTermRenderer(
-		glamour.WithStyles(r.theme.GlamourStyles()),
-		glamour.WithWordWrap(width),
-		glamour.WithTableWrap(false),
-	)
-	if err != nil {
-		return "", err
+	r.trMu.Lock()
+	defer r.trMu.Unlock()
+	tr := r.trs[width]
+	if tr == nil {
+		var err error
+		tr, err = glamour.NewTermRenderer(
+			glamour.WithStyles(r.theme.GlamourStyles()),
+			glamour.WithWordWrap(width),
+			glamour.WithTableWrap(false),
+		)
+		if err != nil {
+			return "", err
+		}
+		if r.trs == nil {
+			r.trs = map[int]*glamour.TermRenderer{}
+		}
+		r.trs[width] = tr
 	}
 	return tr.Render(src)
 }

@@ -1,6 +1,6 @@
 // Package debuglog writes a per-session, full-fidelity, append-only human-readable
 // trace. It is a no-op when disabled and NEVER panics into the caller: a write
-// failure warns ONCE on stderr, then is swallowed. Spec: docs/port/domain-config.md §4.
+// failure warns ONCE on stderr, then is swallowed.
 //
 // Full-fidelity logs contain model messages, tool args, and terminal output, so
 // the dir is 0700 and files are 0600 (owner-only).
@@ -250,8 +250,8 @@ func pruneOldLogs(dir string) {
 	}
 }
 
-// randomID returns an 8-char lowercase base36 id. The exact bytes need not match
-// the TS output, but the produced filename must satisfy sessionLogRe.
+// randomID returns an 8-char lowercase base36 id. The produced filename must
+// satisfy sessionLogRe.
 func randomID() string {
 	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 	b := make([]byte, 8)

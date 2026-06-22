@@ -3,8 +3,6 @@
 // run (issue → branch → worktree → PR) so the assistant can resume and report on
 // long-running work. Array fields serialize to JSON columns; an update REPLACES
 // arrays wholesale. Reaching a terminal status stamps completedAt exactly once.
-//
-// Spec: docs/port/tools-families.md §4.12 (workflowTools.ts).
 package workflow
 
 import (

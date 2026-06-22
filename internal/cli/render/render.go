@@ -1,7 +1,7 @@
-// Package render is the dependency-free ANSI console helper (port of
-// src/cli/render.ts). Color is enabled only on a stdout TTY and disabled when
-// NO_COLOR is set (any value). All human/diagnostic output for the console and
-// classic-REPL paths flows through here.
+// Package render is the dependency-free ANSI console helper. Color is enabled
+// only on a stdout TTY and disabled when NO_COLOR is set (any value). All
+// human/diagnostic output for the console and classic-REPL paths flows through
+// here.
 package render
 
 import (
@@ -12,7 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-// Color codes (render.ts c.*).
+// Color codes.
 const (
 	codeDim     = "2"
 	codeBold    = "1"
@@ -25,7 +25,7 @@ const (
 	codeGray    = "90"
 )
 
-// toolResultTruncate caps tool-result summaries in the console (render.ts: 200).
+// toolResultTruncate caps tool-result summaries in the console.
 const toolResultTruncate = 200
 
 // Renderer writes ANSI-decorated lines to an output stream. The zero value is not
@@ -38,12 +38,14 @@ type Renderer struct {
 // Stdout builds a Renderer over os.Stdout, honoring NO_COLOR + isatty.
 func Stdout() *Renderer { return New(os.Stdout) }
 
-// New builds a Renderer over w. Color is enabled only when w is os.Stdout, it is a
-// TTY, and NO_COLOR is unset. For any other writer (a pipe, a buffer) color is off.
+// New builds a Renderer over w. Color is enabled only when w is a TTY *os.File and NO_COLOR
+// is unset. NO_COLOR is honored by PRESENCE (any value, even empty), via LookupEnv, so the
+// console agrees with the cockpit theme (theme.resolveMode) — previously an empty NO_COLOR
+// was ignored here (os.Getenv can't tell unset from empty) while the cockpit honored it.
 func New(w io.Writer) *Renderer {
 	useColor := false
 	if f, ok := w.(*os.File); ok {
-		if os.Getenv("NO_COLOR") == "" && isatty.IsTerminal(f.Fd()) {
+		if _, noColor := os.LookupEnv("NO_COLOR"); !noColor && isatty.IsTerminal(f.Fd()) {
 			useColor = true
 		}
 	}

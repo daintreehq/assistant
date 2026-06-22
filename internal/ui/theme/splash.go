@@ -12,7 +12,7 @@ import (
 // brand green. The splash *animation* (frames, timing) is a separate component;
 // this file owns only the COLOR ramp so theme is the single source of brand green.
 //
-// Endpoints ported from ui-input.md §5 / splash/frames.ts:
+// Endpoints:
 //
 //	TOP  = #8febc4  (canopy crown, lighter)
 //	BASE = #36ce94  (brand green, base)
@@ -32,7 +32,7 @@ var (
 // SplashRowColor returns the gradient color for row `i` of a `rows`-tall mark.
 // It linearly interpolates each channel: t = i/(rows-1), channel = round(top +
 // (base-top)*t). Row 0 is the crown (top), the last row is the brand base. With
-// rows <= 1 (or i clamped) it returns the top color, matching the TS edge cases.
+// rows <= 1 (or i clamped) it returns the top color.
 //
 // When the theme has no color (ModeNone), the splash should not be tinted; the
 // caller may skip tinting, but SplashRowColor still returns a valid color so the
@@ -57,8 +57,8 @@ func SplashRowColor(i, rows int) color.Color {
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
 }
 
-// lerp interpolates a single channel and rounds to the nearest integer (matching
-// the TS `Math.round`), keeping the ramp visually symmetric to the original.
+// lerp interpolates a single channel and rounds to the nearest integer, keeping
+// the ramp visually symmetric.
 func lerp(from, to int, t float64) int {
 	v := float64(from) + (float64(to)-float64(from))*t
 	return int(v + 0.5)

@@ -8,13 +8,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
-// Port of mcpClientCancel.test.ts (#81). The TS client forwarded an AbortSignal as
-// RequestOptions to the low-level callTool/listTools and, crucially, did NOT degrade
-// the connection when a call was torn down by a caller abort (an abort says nothing
-// about transport health). The Go client expresses caller cancellation through the
-// context (isAborted == context.Canceled) rather than an explicit signal arg, so the
-// behaviors port to: cancel the parent ctx, make the low client fail, and assert the
-// connection stays healthy — while a real (non-abort) failure still degrades.
+// Client-cancel contract (#81). A call torn down by a caller abort must NOT degrade
+// the connection (an abort says nothing about transport health). The client
+// expresses caller cancellation through the context (isAborted == context.Canceled),
+// so the behaviors are: cancel the parent ctx, make the low client fail, and assert
+// the connection stays healthy — while a real (non-abort) failure still degrades.
 
 // TestCallToolAbortDoesNotDegrade: a callTool torn down by a caller abort must NOT
 // flip the connection to degraded (a user cancel is not a transport failure).

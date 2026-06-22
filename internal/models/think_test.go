@@ -125,9 +125,9 @@ func TestStripThink(t *testing.T) {
 }
 
 // The <think> filter strips a literal <think>…</think> ANYWHERE in the output —
-// this is deliberate and FAITHFUL to the TS (the streaming code-unit contract that
-// makes a split tag boundary-safe relies on it; constraining it would break that).
-// These tests LOCK that behavior so it isn't accidentally narrowed later.
+// this is deliberate (the streaming code-unit contract that makes a split tag
+// boundary-safe relies on it; constraining it would break that). These tests LOCK
+// that behavior so it isn't accidentally narrowed later.
 
 // A literal <think> tag appearing inside otherwise-visible prose is stripped, both
 // incrementally (ThinkFilter) and in the whole-string path (stripThink).

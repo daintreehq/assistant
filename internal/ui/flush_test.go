@@ -9,9 +9,9 @@ import (
 
 // flush_test.go locks the INCREMENTAL ROW FLUSH (flush.go): the active turn's STABLE
 // completed-paragraph rows commit to native scrollback AS THEY STREAM (auto-scroll) while
-// the still-growing final paragraph is WITHHELD from the footer entirely (paragraph-by-
-// paragraph commit). Flushed rows carry no caret and are byte-identical to the seal's
-// render, so nothing is duplicated.
+// the still-growing final paragraph streams as a DIM LIVE PREVIEW in the footer (T6) but is
+// never flushed — only completed "\n\n"-terminated paragraphs commit. Flushed rows carry no
+// caret and are byte-identical to the seal's render, so nothing is duplicated.
 
 func armedModel(turn *TurnCell) Model {
 	m := testModel(80)
@@ -59,14 +59,14 @@ func TestFlush_StableParasFlow(t *testing.T) {
 	if strings.Contains(flushedChunk, "▌") {
 		t.Errorf("flushed rows must not carry the caret:\n%s", ansi.Strip(flushedChunk))
 	}
-	// The in-progress paragraph is WITHHELD from the footer (paragraph-by-paragraph commit):
-	// neither a flushed paragraph nor the still-growing one appears in the live tail.
+	// The flushed paragraphs leave the footer; the still-growing final paragraph (T6) streams
+	// as a live preview in the footer but is never committed to scrollback.
 	live := ansi.Strip(m.liveCellsView(m.contentW()))
 	if strings.Contains(live, "ALPHALINE") {
 		t.Errorf("a flushed paragraph is still in the live footer:\n%s", live)
 	}
-	if strings.Contains(live, "GAMMALIVE") {
-		t.Errorf("the in-progress paragraph must be withheld from the footer (no token-by-token):\n%s", live)
+	if !strings.Contains(live, "GAMMALIVE") {
+		t.Errorf("the in-progress paragraph must stream as a live preview in the footer:\n%s", live)
 	}
 }
 
@@ -111,6 +111,11 @@ func TestFlush_SingleParagraphHeld(t *testing.T) {
 	if strings.Contains(final, "ZEBRAONE") {
 		t.Errorf("an in-progress single paragraph must not be in the flushable prefix:\n%s", final)
 	}
+	// But the footer DOES stream it as a live preview (T6): the answer is visible while it
+	// is still being written, not hidden behind a lone spinner.
+	if !strings.Contains(ansi.Strip(m.footer()), "ZEBRAONE") {
+		t.Errorf("a single growing paragraph must stream as a live preview in the footer:\n%s", ansi.Strip(m.footer()))
+	}
 	// Seal: the paragraph commits exactly once.
 	turn.sealProse()
 	turn.State = TurnComplete
@@ -134,9 +139,11 @@ func TestFlush_FooterHeightCapped(t *testing.T) {
 	if n > maxLiveRows+10 {
 		t.Errorf("footer is %d rows; want <= %d (live cap %d + bottom band)", n, maxLiveRows+10, maxLiveRows)
 	}
-	// The still-growing paragraph must NOT be in the footer at all.
-	if strings.Contains(ansi.Strip(foot), "BIGPARA") {
-		t.Errorf("the in-progress paragraph must be withheld from the footer:\n%s", ansi.Strip(foot))
+	// The still-growing paragraph streams as a live preview, but the cap keeps it short: only
+	// the TAIL rows show, so the height stays bounded (a flush tea.Println can't dump a tall
+	// footer — bubbletea#1613).
+	if !strings.Contains(ansi.Strip(foot), "word") {
+		t.Errorf("the in-progress paragraph should stream a (bounded) live preview:\n%s", ansi.Strip(foot))
 	}
 }
 
@@ -229,8 +236,8 @@ func TestFlush_LeftPadConsistent(t *testing.T) {
 	if liveLine == "" {
 		t.Fatalf("completed paragraph not found in footer:\n%s", foot)
 	}
-	if strings.Contains(foot, "BETAWORD") {
-		t.Errorf("the in-progress paragraph must be withheld from the footer:\n%s", foot)
+	if !strings.Contains(foot, "BETAWORD") {
+		t.Errorf("the in-progress paragraph must stream as a live preview in the footer:\n%s", foot)
 	}
 	if !strings.HasPrefix(liveLine, strings.Repeat(" ", LeftPad)) {
 		t.Errorf("streaming prose is not LeftPad-inset (%d spaces): %q", LeftPad, liveLine)

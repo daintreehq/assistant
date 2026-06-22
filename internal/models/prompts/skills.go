@@ -2,8 +2,8 @@ package prompts
 
 import "strings"
 
-// SkillMetadata is the catalog-header view of a skill (no body). Mirrors the fields
-// the catalog message uses from skills/types.ts SkillMetadata.
+// SkillMetadata is the catalog-header view of a skill (no body) — the fields the
+// catalog message uses.
 type SkillMetadata struct {
 	ID        string
 	Summary   string

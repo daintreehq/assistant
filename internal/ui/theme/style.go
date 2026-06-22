@@ -39,12 +39,21 @@ func (t Theme) Danger() lipgloss.Style { return fg(t.Color.Danger) }
 // Blocked — waiting-on-approval / gated (violet).
 func (t Theme) Blocked() lipgloss.Style { return fg(t.Color.Blocked) }
 
-// Muted — dim chrome (separators, labels, durations). Faint reinforces the gray.
-func (t Theme) Muted() lipgloss.Style { return fg(t.Color.Muted).Faint(true) }
+// Muted — dim chrome (separators, labels, durations): the muted GRAY hue alone. NO Faint —
+// the gray already carries the dimness, and compounding the SGR-2 faint atop the 16-color
+// bright-black slot (ModeANSI) renders near-invisible (an accessibility regression).
+func (t Theme) Muted() lipgloss.Style { return fg(t.Color.Muted) }
 
-// Dim — attribute-only faint, no hue. Used where we want dim but theme-neutral
-// (e.g. body-adjacent secondary text that must survive ModeNone).
-func (t Theme) Dim() lipgloss.Style { return lipgloss.NewStyle().Faint(true) }
+// Dim — secondary text. In any color-capable mode it uses the muted GRAY hue (a real
+// luminance, so it stays legible even on terminals that IGNORE the unreliable SGR-2 faint
+// attribute); only in ModeNone, where there is no hue to lean on, does it fall back to
+// attribute-only Faint so some dimness still reads.
+func (t Theme) Dim() lipgloss.Style {
+	if t.Color.Muted != nil {
+		return fg(t.Color.Muted)
+	}
+	return lipgloss.NewStyle().Faint(true)
+}
 
 // Body — the body foreground. EMPTY Text => terminal default (the never-force-white
 // rule); only the light theme pins a near-black via Color.Text.

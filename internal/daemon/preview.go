@@ -6,7 +6,7 @@ import (
 )
 
 // TerminalPreview is one preview card. Raw scrollback shown to the human ONLY —
-// NEVER fed to the main model (useTerminalPreview.ts invariant).
+// NEVER fed to the main model.
 type TerminalPreview struct {
 	TerminalID    string
 	WatcherID     string

@@ -19,27 +19,27 @@ func lipglossFg(_ theme.Theme, c color.Color, s string) string {
 	return lipgloss.NewStyle().Foreground(c).Render(s)
 }
 
-// splash.go is the boot splash overlay (ui-input.md §5 / StartupSplash.tsx). It is a
+// splash.go is the boot splash overlay. It is a
 // transient overlay that dismisses on its OWN timer and NEVER gates input — the
 // composer is already interactive while the splash shows. It steps a frame index on a
 // ~28fps tick (one frame every 1000/28 ≈ 35.7ms), holds the finished logo for lingerMs,
 // then emits SplashDoneMsg ONCE. When the terminal is too narrow (columns <= SplashWidth)
 // it renders nothing and fires done immediately (a clipped logo looks broken).
 //
-// The frames are the VERBATIM SPLASH_FRAMES from the TS source (splash_frames.go), a
-// pre-rendered 20-step reveal — trunk grows up, then roots, then the canopy arch draws
+// The frames are the SPLASH_FRAMES in splash_frames.go, a pre-rendered 20-step
+// reveal — trunk grows up, then roots, then the canopy arch draws
 // on 45° diagonals to the centre peak. We do NOT re-derive the art at runtime; we just
 // step the index and tint each of the 18 rows with the green gradient (theme.SplashRowColor)
 // so the canopy reads lit and the trunk grounded.
 //
-// INLINE SIZING (matches StartupSplash.tsx): the cockpit renders into the terminal's
+// INLINE SIZING: the cockpit renders into the terminal's
 // MAIN buffer, so the splash draws at its NATURAL height — two blank lines down for
 // breathing room, NOT vertically centered / fullscreen — and is HORIZONTALLY centered
 // across columns-1 so the mark's right edge never reaches the autowrap column.
 
 const (
-	// SplashWidth/Height match the TS constants (SPLASH_WIDTH/SPLASH_HEIGHT); SplashFrames
-	// is the animation length (len(splashFrames)).
+	// SplashWidth/Height are the splash mark's dimensions; SplashFrames is the
+	// animation length (len(splashFrames)).
 	SplashWidth  = 48
 	SplashHeight = 18
 	SplashFrames = 20
@@ -147,8 +147,8 @@ func (s splashModel) view(th theme.Theme, columns, rows int) string {
 // View is short and printed at the bottom, each ~28fps frame scrolls the terminal and
 // the up-count desyncs, smearing the mark across the top of the screen. Giving boot a
 // stable, screen-filling block means the region never scrolls and every frame repaints
-// in place (the same thing OpenTUI did by seeding footerHeight to the full height). The
-// hand-off (completeBoot → hostClearCmd) wipes this and drops to the short live footer.
+// in place. The hand-off (completeBoot → hostClearCmd) wipes this and drops to the
+// short live footer.
 //
 // It always renders the current frame while booting (ignoring s.done) so the height
 // stays stable right up to the hand-off; a too-small/too-narrow terminal yields a

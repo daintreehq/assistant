@@ -54,8 +54,8 @@ func scanEvent(sc scanner) (domain.QueueEvent, error) {
 
 // UpsertEvent inserts a new attention-queue event, or — when ev.DedupeKey is set
 // and an OPEN row (resolvedAt NULL AND (expiresAt NULL OR > now)) with the same
-// key exists (newest first) — collapses into it. KEEP dedupe semantics
-// (storage.md §6 events): on a hit bump count, refresh title/summary/severity/
+// key exists (newest first) — collapses into it. KEEP dedupe semantics:
+// on a hit bump count, refresh title/summary/severity/
 // epistemicKind, OVERWRITE recommendedActions outright (clear to NULL if none),
 // fall back to existing evidence/epistemicKind when omitted, bump updatedAt and
 // refresh expiresAt — but NEVER touch createdAt (the scheduler's "is new?" keys on

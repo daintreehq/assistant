@@ -4,9 +4,8 @@
 //
 // These interfaces are deliberately SMALL — just the core methods — so concrete
 // packages (storage, models, tools, mcp, queue) can implement them in Phase C
-// without import cycles. Each interface points to the docs/port spec that
-// describes its full surface. Concrete signatures will grow there; keep the
-// seam minimal here.
+// without import cycles. Concrete signatures will grow in those packages; keep
+// the seam minimal here.
 package ports
 
 import (
@@ -16,8 +15,7 @@ import (
 )
 
 // EventSink receives structured runtime events. The UiBridge, console sink, and
-// one-shot JSON sink each implement it. Spec: docs/port/_interaction-ux.md
-// (the live-footer event model) and the AgentEventSink in src/agent/events.ts.
+// one-shot JSON sink each implement it (the live-footer event model).
 type EventSink interface {
 	// Emit publishes a single event. Implementations MUST NOT block the caller
 	// for long and MUST NOT panic into it.
@@ -64,8 +62,7 @@ func emitSafe(s EventSink, ev domain.AgentEvent) {
 
 // Store is the persistence seam the agent loop and daemon depend on. The full
 // surface (timers, watchers, events, audit, conversation, grants, memories,
-// workflow runs, skill state, agent launches) lives in docs/port/domain-config.md
-// §2.4 and _contracts.md §7. Phase C's internal/storage implements this; the
+// workflow runs, skill state, agent launches) lives in internal/storage; the
 // methods here are the minimum the loop needs to compile against.
 type Store interface {
 	// AppendRunEvent persists one durable replay event for a turn.
@@ -77,8 +74,7 @@ type Store interface {
 }
 
 // ChatMessage is a single message in a model request. Kept minimal; the models
-// package owns the full request/response shape. Spec: docs/port/FIREWORKS.md (TS
-// src/models/fireworks.ts).
+// package owns the full request/response shape.
 type ChatMessage struct {
 	Role       string
 	Content    string
@@ -95,16 +91,16 @@ type ModelChunk struct {
 
 // Router selects a model tier and streams a completion. The full router surface
 // (retry, json mode, tool calling) lives in the models package; this is the seam
-// the loop calls. Spec: TS src/models/router.ts.
+// the loop calls.
 type Router interface {
 	// Stream runs a streaming completion for the given tier, delivering chunks
 	// on the returned channel until it closes. ctx cancellation aborts the turn.
 	Stream(ctx context.Context, tier domain.ModelTier, messages []ChatMessage) (<-chan ModelChunk, error)
 }
 
-// ToolRegistry validates, gates, runs and audits a tool call. Full surface in
-// _contracts.md §1 and src/tools/registry.ts; assertNoFileEditTools and the tier
-// gate live behind Dispatch. The seam here is what the loop invokes per call.
+// ToolRegistry validates, gates, runs and audits a tool call. The no-file-edit
+// guard and the tier gate live behind Dispatch. The seam here is what the loop
+// invokes per call.
 type ToolRegistry interface {
 	// Dispatch runs a single tool call by name as the given actor and returns
 	// the ToolResult envelope. Handlers never throw — Dispatch always returns a
@@ -116,7 +112,6 @@ type ToolRegistry interface {
 }
 
 // MCPClient talks to the Daintree MCP server (Streamable HTTP, SSE fallback).
-// Full surface in docs/port/DAINTREE_MCP.md and src/mcp/client.ts.
 type MCPClient interface {
 	// CallTool invokes a raw MCP tool by name with JSON arguments.
 	CallTool(ctx context.Context, name string, argsJson string) (domain.ToolResult, error)
@@ -125,8 +120,7 @@ type MCPClient interface {
 }
 
 // Queue is the attention queue: sub-threads publish here instead of interrupting
-// the main thread. Full surface (dedupe, severity ordering, format) in
-// docs/port/domain-config.md §6.
+// the main thread. Full surface: dedupe, severity ordering, format.
 type Queue interface {
 	// Publish adds or dedupes an event and returns the resulting QueueEvent.
 	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)

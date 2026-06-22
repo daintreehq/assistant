@@ -14,7 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Approval/redaction constants (TS bridge.ts).
+// Approval/redaction constants.
 const (
 	// DefaultApprovalTimeoutMs is the unanswered-confirm auto-timeout (5 min).
 	DefaultApprovalTimeoutMs = 5 * 60_000 // 300000
@@ -27,7 +27,7 @@ const (
 type PostFunc func(HostEvent)
 
 // RiskOfFunc looks up a tool's risk class for the danger hint. The bool is false
-// when the tool is unknown (mirrors the TS `RiskClass | undefined`).
+// when the tool is unknown.
 type RiskOfFunc func(toolName string) (domain.RiskClass, bool)
 
 // BridgeOptions configures a Bridge.
@@ -50,7 +50,7 @@ type pendingApproval struct {
 // HostEvents. It owns the single-turn lifecycle, approvals, redaction, and audit
 // mapping. The agent loop runs Send() on another goroutine and calls the sink
 // methods concurrently, so all mutable state is guarded by mu. No transport
-// dependency — events go through the injected Post. Spec: docs/port/host.md §6.
+// dependency — events go through the injected Post.
 type Bridge struct {
 	sessionID         string
 	post              PostFunc
@@ -398,12 +398,11 @@ func strLen(s string) int { return len(utf16.Encode([]rune(s))) }
 
 // redactArgs builds a single-level, redacted JSON view of tool args for the
 // timeline. Raw values may carry file/terminal/prompt content and must never
-// cross verbatim. Mirrors src/host/bridge.ts redactArgs. args is the raw JSON
-// arguments string the model emitted.
+// cross verbatim. args is the raw JSON arguments string the model emitted.
 //
 // Quirk preserved: a top-level JSON array is iterated by key (Object.entries),
 // so its indices become string keys and it serializes as an object {"0":…}, not
-// an array — matching the TS behavior.
+// an array.
 func redactArgs(rawArgs string) string {
 	if rawArgs == "" {
 		return ""
@@ -438,8 +437,8 @@ func redactArgs(rawArgs string) string {
 }
 
 // redactTopLevelString: >80 → "<string: N chars>" else the quoted string. Uses
-// no-HTML-escape marshaling so a short string containing <, >, & matches the TS
-// JSON.stringify output byte-for-byte.
+// no-HTML-escape marshaling so a short string containing <, >, & is emitted
+// verbatim rather than escaped.
 func redactTopLevelString(s string) string {
 	if strLen(s) > argsSummaryMaxString {
 		return fmt.Sprintf("<string: %d chars>", strLen(s))

@@ -46,9 +46,9 @@ func ToolsAdvertiseGrantSupport(tools []ToolInfo, grantNames []string) bool {
 	return false
 }
 
-// DocumentedMcpToolNames is the EXACT, ORDERED drift baseline (from
-// src/models/prompts/daintreeMcp.ts). Hand-maintained (NOT parsed from prose,
-// which names non-existent tools as negative examples). Drift is missing-only:
+// DocumentedMcpToolNames is the EXACT, ORDERED drift baseline. Hand-maintained
+// (NOT parsed from prose, which names non-existent tools as negative examples).
+// Drift is missing-only:
 // documented names absent from the live server are warned; extra live tools are
 // expected and ignored. 55 names — keep byte-stable with the reference prose.
 var DocumentedMcpToolNames = []string{

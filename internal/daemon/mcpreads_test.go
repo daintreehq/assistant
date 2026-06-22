@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Ports readStatuses exit-metadata coercion + text-body fallback (watcherEngine.test.ts
-// §readStatuses #22 / #108) and readOutput's failed-read vs silent distinction.
+// Covers readStatuses exit-metadata coercion + text-body fallback and
+// readOutput's failed-read vs silent distinction.
 
 // rawMCP returns a fixed MCPResult per tool name, recording calls.
 type rawMCP struct{ byName map[string]MCPResult }

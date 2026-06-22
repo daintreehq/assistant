@@ -124,7 +124,7 @@ func TestLoadConfig_WindowID(t *testing.T) {
 	})
 }
 
-// --- Tier resolution: fail-closed contract (domain-config.md §1.5) ---
+// --- Tier resolution: fail-closed contract ---
 
 func TestResolveTier_FailClosed(t *testing.T) {
 	stateDir := t.TempDir()

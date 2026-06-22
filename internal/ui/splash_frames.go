@@ -1,9 +1,9 @@
 package ui
 
-// Code generated from ../../../assistant/src/ui/splash/frames.ts — DO NOT EDIT BY HAND.
+// The splash animation frames, maintained directly as Go.
 
-// Verbatim transcription of SPLASH_FRAMES (scripts/gen-splash.py output). 20 frames,
-// each 18 lines of 48 columns using U+2588 (█) blocks and spaces. The mark draws
+// SPLASH_FRAMES: 20 frames, each 18 lines of 48 columns using U+2588 (█) blocks
+// and spaces. The mark draws
 // itself in: trunk grows up (0-3), roots (4-6), then the canopy arch on 45° diagonals
 // up to the centre peak that connects last (7-19); frame 19 is the complete logo.
 

@@ -13,8 +13,8 @@
 // and the sub-agent prompts are what the small model is tuned against.
 package prompts
 
-// identityAndRules is the permanent identity + hard rules. Byte-for-byte port of
-// IDENTITY_AND_RULES in base.ts. No dynamic content belongs here.
+// identityAndRules is the permanent identity + hard rules. No dynamic content
+// belongs here.
 const identityAndRules = `You are the **Daintree Assistant** — Daintree's local operations officer.
 
 Mission:

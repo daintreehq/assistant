@@ -7,13 +7,13 @@ import (
 	"strings"
 )
 
-// cacheKeyPrefix is the DEBUG/log bundle cache-key prefix (spec §9.1). It is NOT
+// cacheKeyPrefix is the DEBUG/log bundle cache-key prefix. It is NOT
 // the live Fireworks prompt_cache_key (that constant is "daintree-main",
 // unversioned, and lives in the agent loop). Keep these distinct — do not wire
 // this into the Fireworks request.
 const cacheKeyPrefix = "daintree-main-v1-skills-"
 
-// RenderedSkillBundle is the id-sorted, hashed set of loaded skills (spec §9.1).
+// RenderedSkillBundle is the id-sorted, hashed set of loaded skills.
 type RenderedSkillBundle struct {
 	IDs      []string `json:"ids"`
 	Hash     string   `json:"hash"`     // 12-char hex, first 12 of SHA-256 over the signature
@@ -22,8 +22,8 @@ type RenderedSkillBundle struct {
 }
 
 // RenderSkillBundle sorts the skills by id, builds the "id@version|…" signature,
-// and hashes it (spec §9.2). For the ASCII dotted ids in use, byte-order sort
-// (strings.Compare) matches JS localeCompare exactly.
+// and hashes it. For the ASCII dotted ids in use, a byte-order sort
+// (strings.Compare) is the stable ordering.
 func RenderSkillBundle(skills []Skill) RenderedSkillBundle {
 	sorted := make([]Skill, len(skills))
 	copy(sorted, skills)

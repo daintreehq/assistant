@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -17,7 +18,7 @@ import (
 
 // hostTerminalClear erases the viewport, the scrollback, and homes the cursor —
 // the three escapes `clear` emits on xterm-class terminals, IN ORDER. Never
-// touches the alternate buffer. Port of terminalClear.ts HOST_TERMINAL_CLEAR.
+// touches the alternate buffer.
 const hostTerminalClear = "\x1b[2J\x1b[3J\x1b[H"
 
 // clearHostTerminal writes the clear sequence when stdout is a TTY (errors
@@ -30,7 +31,7 @@ func clearHostTerminal() {
 	fmt.Fprint(os.Stdout, hostTerminalClear)
 }
 
-// startRepl runs the classic line REPL (repl.ts; readline → bufio). Returns the
+// startRepl runs the classic line REPL. Returns the
 // process exit code.
 func startRepl(ctx context.Context, a *app.App) int {
 	r := render.Stdout()
@@ -45,6 +46,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 		return strings.TrimSpace(line)
 	}
 
+	// Known limitation: a Ctrl-C WHILE this approval prompt is waiting for y/N input does
+	// NOT cancel the turn — the classic REPL runs in cooked mode, so the blocking line read
+	// can't be interrupted by a signal (no raw-mode key handling here, unlike the cockpit).
+	// The decision is reached by typing n / Enter (declines, the safe default); Ctrl-C takes
+	// effect once control returns to the main prompt loop.
 	confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
 		r.Warn(r.Bold(req.ToolName) + " (" + string(req.Risk) + ") wants to run:\n     " +
 			req.Summary + "\n     args: " + render.Truncate(string(req.Args), 200))
@@ -60,9 +66,20 @@ func startRepl(ctx context.Context, a *app.App) int {
 		Log:         logHook,
 	})
 
-	a.ConnectMcp(ctx)
+	// Own SIGINT for the REPL: a Ctrl-C DURING a turn cancels that one generation and
+	// keeps the REPL alive (the high-value fix — previously the process was killed); at
+	// idle it is a no-op (the cooked-mode line read can't be interrupted portably — exit
+	// with Ctrl-D or /exit). The session + scheduler + slash commands run on a base
+	// context DECOUPLED from main's signal context, which cancels exactly once on the
+	// first Ctrl-C; reusing it would wedge every later turn after a single interrupt.
+	base := context.WithoutCancel(ctx)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+
+	a.ConnectMcp(base)
 	st := a.MCP.Status()
-	a.StartScheduler(ctx, func(events []domain.QueueEvent) { printAttention(r, events) })
+	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) })
 
 	printBanner(r, a, st.Connected, st.Transport)
 	if !st.Connected {
@@ -80,7 +97,7 @@ func startRepl(ctx context.Context, a *app.App) int {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			res := commands.HandleSlashCommand(ctx, line, a, r)
+			res := commands.HandleSlashCommand(base, line, a, r)
 			if res.Quit {
 				break
 			}
@@ -91,7 +108,13 @@ func startRepl(ctx context.Context, a *app.App) int {
 			}
 			continue
 		}
-		if _, err := a.Session.Send(ctx, line, agent.SendOptions{}); err != nil {
+		// Drain any Ctrl-C buffered while idle so a stray idle press can't instantly
+		// cancel this fresh turn.
+		select {
+		case <-sigCh:
+		default:
+		}
+		if err := runReplTurn(base, a, sigCh, line); err != nil {
 			r.Error(err.Error())
 		}
 	}
@@ -99,6 +122,37 @@ func startRepl(ctx context.Context, a *app.App) int {
 	_ = a.Shutdown()
 	r.Line(r.Gray("Goodbye."))
 	return 0
+}
+
+// runReplTurn runs one user turn under a cancellable child context. A Ctrl-C (sigCh)
+// arriving while the generation is in flight cancels it gracefully (the session
+// unwinds to AssistantCancelled and prints "Turn cancelled") and returns nil so the
+// REPL loops back to the prompt instead of surfacing the cancellation as an error.
+func runReplTurn(base context.Context, a *app.App, sigCh <-chan os.Signal, line string) error {
+	return runCancellable(base, sigCh, func(ctx context.Context) error {
+		_, err := a.Session.Send(ctx, line, agent.SendOptions{})
+		return err
+	})
+}
+
+// runCancellable runs fn under a cancellable child of base and aborts it on the first
+// sigCh signal — cancelling fn's context and swallowing its result so a Ctrl-C cancels
+// just this unit of work (the generation) without surfacing an error or tearing down
+// the REPL. Returns fn's error on normal completion. Pure (no app/session), so the
+// interrupt contract is unit-testable.
+func runCancellable(base context.Context, sigCh <-chan os.Signal, fn func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(base)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- fn(ctx) }()
+	select {
+	case <-sigCh:
+		cancel() // first Ctrl-C: abort this generation, keep the REPL alive
+		<-done   // let the unit unwind before returning to the prompt
+		return nil
+	case err := <-done:
+		return err
+	}
 }
 
 // splitCmd extracts the canonical command word from a slash line (for the /clear
@@ -112,7 +166,7 @@ func splitCmd(line string) (string, string, []string) {
 	return fields[0], strings.Join(fields[1:], " "), fields[1:]
 }
 
-// printBanner prints the REPL banner (repl.ts §5.1).
+// printBanner prints the REPL banner.
 func printBanner(r *render.Renderer, a *app.App, connected bool, transport string) {
 	mcpLine := "degraded local mode"
 	if connected {
@@ -130,9 +184,16 @@ func printBanner(r *render.Renderer, a *app.App, connected bool, transport strin
 	r.Banner(lines)
 }
 
-// printAttention prints out-of-band inbox events, then restores the prompt
-// (repl.ts §5.2).
+// printAttention prints out-of-band inbox events, then restores the prompt.
 func printAttention(r *render.Renderer, events []domain.QueueEvent) {
+	// Out-of-band: an inbox event can land while the user is mid-type at the prompt.
+	// Erase the current prompt line first (TTY only) so the event starts clean instead
+	// of being appended onto the half-typed input, then reprint the prompt afterward.
+	// The in-progress text survives in the terminal's cooked line buffer and still
+	// submits on Enter.
+	if stdoutIsTTY() {
+		r.Out("\r\x1b[K")
+	}
 	for _, e := range events {
 		r.Line("")
 		r.Line(r.Magenta("◆ inbox") + " " + r.Bold(e.Title) + " " + r.Gray("("+string(e.Severity)+")"))

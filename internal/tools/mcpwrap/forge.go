@@ -11,7 +11,7 @@ import (
 // Forge READS (risk read). listIssues/getIssue/listPRs forward an opaque
 // arguments record verbatim (forge query options are forge-defined). getPR takes
 // a typed {cwd?, prNumber} so the model can't drop the required positive integer.
-// Spec: §4.14 Forge wrappers (reads).
+// Forge wrappers (reads).
 
 // forgeArgumentsArgs forwards an opaque arguments record (strict at the top).
 type forgeArgumentsArgs struct {

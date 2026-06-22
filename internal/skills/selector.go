@@ -8,14 +8,14 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Selector constants (spec §6.1).
+// Selector constants.
 const (
 	maxQueryChars     = 2000 // query is sliced to this before use (bounds cost + injection surface)
 	selectorMaxTokens = 500
 )
 
 // JSONRouter is the consumer-defined seam for the model router's structured-JSON
-// call (spec §6.4). The selector posts to the cheap "small" tier requesting a
+// call. The selector posts to the cheap "small" tier requesting a
 // JSON object validated against SkillSelection. Declared locally (not imported
 // from internal/ports) so this package compiles in isolation.
 //
@@ -51,7 +51,7 @@ type ToolPresence interface {
 	Has(name string) bool
 }
 
-// selectorSystemPrompt is byte-stable — a wire/behavior contract (spec §6.2).
+// selectorSystemPrompt is byte-stable — a wire/behavior contract.
 const selectorSystemPrompt = `You are the Daintree Assistant skill selector.
 Return only JSON.
 The main assistant has hit a point where it wants a procedural runbook ("skill") and has given you a query describing what it needs to figure out. Choose the 0-3 skills whose full instructions best answer that query.
@@ -69,7 +69,7 @@ Return this JSON shape:
   "taskType": "string"
 }`
 
-// SelectSkills runs the small-model selector (spec §6). candidates is the
+// SelectSkills runs the small-model selector. candidates is the
 // header-only metadata; the body is never sent. The query is sliced to
 // maxQueryChars. The returned SkillSelection is validated (≤3 ids, confidence
 // clamped to [0,1]). A router error (incl. cancellation) propagates so the
@@ -80,7 +80,7 @@ func SelectSkills(ctx context.Context, router JSONRouter, candidates []SkillMeta
 		q = q[:maxQueryChars]
 	}
 
-	// candidates serialized as 2-space-indented JSON (spec §6.3).
+	// candidates serialized as 2-space-indented JSON.
 	candJSON, err := json.MarshalIndent(candidates, "", "  ")
 	if err != nil {
 		return SkillSelection{}, fmt.Errorf("marshaling skill candidates: %w", err)
@@ -105,9 +105,9 @@ func SelectSkills(ctx context.Context, router JSONRouter, candidates []SkillMeta
 		return SkillSelection{}, err
 	}
 
-	// Mirror the Zod constraints the wire schema enforces: hard-cap ids at 3 and
-	// clamp confidence into [0,1]. The selector model is *told* to obey these but
-	// we don't trust the model output.
+	// Enforce the wire-schema constraints: hard-cap ids at 3 and clamp confidence
+	// into [0,1]. The selector model is *told* to obey these but we don't trust the
+	// model output.
 	if len(sel.SkillIDs) > 3 {
 		sel.SkillIDs = sel.SkillIDs[:3]
 	}
@@ -122,9 +122,9 @@ func SelectSkills(ctx context.Context, router JSONRouter, candidates []SkillMeta
 // ValidateRequiredTools checks every loaded skill's requiredTools against the
 // live tool registry and returns the set of (skillId, toolName) pairs that are
 // missing. An empty result means all declared tools exist. This is advisory: the
-// caller decides whether a missing tool is a boot error or a logged warning
-// (the TS source under-declaring "silently starves" — surfacing it here lets the
-// Go port choose to fail loud).
+// caller decides whether a missing tool is a boot error or a logged warning.
+// An under-declared requiredTool would otherwise silently starve the skill, so
+// surfacing it here lets the caller choose to fail loud.
 func ValidateRequiredTools(skills []Skill, tools ToolPresence) []MissingTool {
 	if tools == nil {
 		return nil

@@ -1,10 +1,9 @@
 // Package mcpx is the Daintree MCP tool family: discovery (daintree.status,
 // daintree.listTools, tool.search), the raw passthrough escape hatch
-// (daintree.call), and the typed MCP wrappers ported in this slice — terminal
+// (daintree.call), and the typed MCP wrappers — terminal
 // focus/input/arming, agent focus, and copyTree. Each wrapper carries the risk
 // class Daintree gates the action at, so reads/UI-focus run without the
 // system-tier confirmation the raw escape hatch always forces.
-// Spec: docs/port/tools-families.md §4.14.
 package mcpx
 
 import (
@@ -61,7 +60,7 @@ type Deps struct {
 }
 
 // Tools returns the MCP family (discovery + passthrough + the wrappers in this
-// slice). Order matches the TS registration order for the subset implemented here.
+// slice).
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{
 		newStatusTool(deps),

@@ -1,13 +1,12 @@
 // Package commands is the slash-command subsystem: the pure-data COMMAND_REGISTRY
 // (single source of truth for names/syntax/palette/help — drives suggestions, help
 // blobs, and both handler surfaces) plus the two handlers (REPL prints via render;
-// UI returns structured cards) and the rich /doctor checklist. Port of
-// src/commandRegistry.ts + src/cli/commands.ts + src/cli/commandData.ts.
+// UI returns structured cards) and the rich /doctor checklist.
 package commands
 
 import "strings"
 
-// CommandMeta is one row of the registry (commandRegistry.ts CommandMeta).
+// CommandMeta is one row of the registry.
 type CommandMeta struct {
 	// Name is the bare command word (no leading slash).
 	Name string
@@ -53,6 +52,19 @@ func PaletteEntries() [][2]string {
 	return out
 }
 
+// PaletteRow is a palette entry carrying the usage Syntax form, so the composer can show an
+// inline argument hint ("/audit [n]") for the highlighted command.
+type PaletteRow struct{ Name, Desc, Syntax string }
+
+// PaletteRows returns the full palette rows (name + palette blurb + syntax).
+func PaletteRows() []PaletteRow {
+	out := make([]PaletteRow, 0, len(COMMAND_REGISTRY))
+	for _, c := range COMMAND_REGISTRY {
+		out = append(out, PaletteRow{Name: "/" + c.Name, Desc: c.Palette, Syntax: c.Syntax})
+	}
+	return out
+}
+
 // HelpLines returns each command's "syntax<pad>help" line.
 func HelpLines() []string {
 	out := make([]string, 0, len(COMMAND_REGISTRY))
@@ -62,7 +74,46 @@ func HelpLines() []string {
 	return out
 }
 
-// PanelKey identifies an on-demand UI panel (commandData.ts PanelKey).
+// suggestCommand returns the closest registry command name within edit distance 2 (a "did
+// you mean?" for a mistyped slash command), or "" when nothing is close enough to suggest.
+func suggestCommand(cmd string) string {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if cmd == "" {
+		return ""
+	}
+	best, bestD := "", 3 // strictly < 3, i.e. at most 2 edits
+	for _, c := range COMMAND_REGISTRY {
+		if d := levenshtein(cmd, c.Name); d < bestD {
+			best, bestD = c.Name, d
+		}
+	}
+	return best
+}
+
+// levenshtein is the classic edit distance (insertions/deletions/substitutions), rune-aware
+// so multi-byte input doesn't skew the count.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
+}
+
+// PanelKey identifies an on-demand UI panel.
 type PanelKey string
 
 const (

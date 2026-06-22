@@ -12,8 +12,8 @@ import (
 
 // pump.go bridges the runtime's agent.EventSink (which the loop calls on its own
 // goroutines) into Bubble Tea's single Update loop using the idiomatic
-// channel + re-armed-command pattern (ui-input.md §6.1) — NEVER Program.Send per
-// token. The coalescer (§6.2) buffers adjacent assistant tokens and flushes them as
+// channel + re-armed-command pattern — NEVER Program.Send per
+// token. The coalescer buffers adjacent assistant tokens and flushes them as
 // one msg ≤16-33ms or before any non-token event, preserving order, never dropping.
 //
 // ORDERING (CODE-REVIEW #1/#2/#6): the coalescer "drain buffer + enqueue event" is
@@ -104,7 +104,7 @@ type eventPump struct {
 }
 
 // coalesceWindow is one frame at ~30fps; flushing on this cadence keeps Update at
-// ≤30-60 msgs/sec regardless of token rate (§6.2).
+// ≤30-60 msgs/sec regardless of token rate.
 const coalesceWindow = 25 * time.Millisecond
 
 // newEventPump builds a pump with a buffered channel so the runtime never blocks on

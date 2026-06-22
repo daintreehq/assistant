@@ -8,8 +8,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Ports verificationPass.test.ts: runVerificationPass paths and the
-// acceptance-contract gate inside runTerminalWatcherCheck.
+// Covers runVerificationPass paths and the acceptance-contract gate inside
+// runTerminalWatcherCheck.
 
 func pulseMCP(sc map[string]any, text string, isErr bool, connected bool) *progMCP {
 	m := newProgMCP(map[string]termCfg{})

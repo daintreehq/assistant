@@ -1,12 +1,21 @@
 # copytree ignore — gitignore semantics, applied on top of .gitignore.
-# Keep the AI context compact by excluding tests, which dominate the tree.
+# Keep the AI context compact by excluding what the Go toolchain generates or
+# what carries no semantic value for reading the source. Build output, the
+# binary, *.test/*.out, coverage, profiles, .env*, logs and state.db are already
+# handled by .gitignore, so they're not repeated here.
 
-# The entire test suite lives here (vitest: tests/**/*.test.{ts,tsx}).
-tests/
+# The test suite dominates the tree (~half of all .go files). The Go toolchain
+# names every test file `*_test.go`, so this single pattern catches all of them
+# wherever they live — no need for a defensive second rule like the TS config had.
+*_test.go
 
-# Defensive: catch test files placed anywhere else in the tree.
-*.test.ts
-*.test.tsx
-*.spec.ts
-*.spec.tsx
-__tests__/
+# Conventional Go test fixtures — data-only, irrelevant to reading the code.
+testdata/
+
+# Vendored dependencies, if ever checked in (`go mod vendor`): third-party
+# source we don't author and don't want bloating the context.
+vendor/
+
+# Dependency checksums — 12 KiB of opaque hashes with zero semantic value for an
+# AI reading the project. go.mod (module path + the dep list) is kept; go.sum is not.
+go.sum

@@ -8,7 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Ports prWatcherEngine.test.ts edges not in prwatcher_test.go: baseline-on-first-
+// Covers PR-watcher edges not in prwatcher_test.go: baseline-on-first-
 // observation, forge.getPR args (cwd/projectPath fallback + bounded timeout),
 // closed→stop, activity@info (no double-publish), silent-unchanged, payload shapes,
 // the disconnected/throws/isError/unrecognizable transient guards, and the two-step

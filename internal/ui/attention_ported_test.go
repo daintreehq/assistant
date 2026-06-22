@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// attention_ported_test.go ports tests/ui/useAttentionSignal.test.tsx onto the Go
+// attention_ported_test.go exercises the attention signal on the Go
 // cockpit: one BEL ding per fresh attention batch (none on an empty batch), and the
 // OSC-2 window title badge that carries the inbox count and resets to plain when it
 // drains. The live cockpit emits the BEL as a tea.Cmd (bellCmd) and the title via

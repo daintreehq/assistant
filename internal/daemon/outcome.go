@@ -163,16 +163,16 @@ func moreUrgent(a, b CheckOutcome) bool {
 }
 
 // hashTail is a stable 32-bit hash of a terminal tail, base36 — persisted in
-// outHash and compared across ticks. Reproduces the TS algorithm EXACTLY:
-// h=(h<<5)-h+c with int32 truncation per code unit, then the unsigned 32-bit
-// value in base36. Bit-exactness matters: outHash is persisted across processes
-// and compared every tick, so a divergence between a watcher's prior hash (from
-// TS or a prior Go run) and the current one would re-classify on every check.
+// outHash and compared across ticks. The algorithm is h=(h<<5)-h+c with int32
+// truncation per UTF-16 code unit, then the unsigned 32-bit value in base36.
+// Bit-exactness matters: outHash is persisted across processes and compared every
+// tick, so a divergence between a watcher's prior hash and the current one would
+// re-classify on every check.
 //
-// TS feeds charCodeAt, i.e. UTF-16 code units — a non-BMP rune (e.g. an emoji in
-// the terminal tail) is two surrogate-pair units. Ranging a Go string yields
-// whole runes, which would feed a single >0xFFFF code point and diverge. Encode
-// to UTF-16 first so each code unit matches charCodeAt one-for-one.
+// The hash feeds UTF-16 code units — a non-BMP rune (e.g. an emoji in the
+// terminal tail) is two surrogate-pair units. Ranging a Go string yields whole
+// runes, which would feed a single >0xFFFF code point and diverge. Encode to
+// UTF-16 first so each code unit is hashed one-for-one.
 func hashTail(s string) string {
 	var h int32
 	for _, u := range utf16.Encode([]rune(s)) {
@@ -216,9 +216,9 @@ func NextOutputState(prev *TerminalState, tail string, now int64) (TerminalState
 	return st, ms
 }
 
-// rateLimitSignature mirrors RATE_LIMIT_SIGNATURE (reliability.ts). RE2 lacks the
-// (?:...) lookaround-free constructs used here are all supported, so this
-// compiles natively. Case-insensitive.
+// rateLimitSignature matches recent terminal output that signals a provider rate
+// limit. The (?:...) lookaround-free constructs used here are all supported by
+// RE2, so this compiles natively. Case-insensitive.
 var rateLimitSignature = regexp.MustCompile(`(?i)\b(?:429|529)\b|too many requests|rate[ _-]?limit(?:ed|ing|s)?|quota (?:exceeded|exhausted)|insufficient[_ ]quota|retry[ -]?after\b|resource (?:exhausted|temporarily unavailable)|server is temporarily limiting|\boverloaded\b|you(?:'ve| have) hit your limit|exceed (?:your|the) .{0,40}rate limit`)
 
 // detectRateLimitSignature reports whether a bounded recent tail slice shows a

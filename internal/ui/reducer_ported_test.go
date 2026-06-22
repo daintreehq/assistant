@@ -8,9 +8,9 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// reducer_ported_test.go ports the transcript-reducer and controller queue/cancel/
-// clear behaviors of tests/ui/{transcriptReducer,controllerClearTerminal,
-// controllerQueueCancel,scrollbackReset}.test.tsx onto the Go Update reducers.
+// reducer_ported_test.go exercises the transcript-reducer and controller
+// queue/cancel/clear behaviors (transcript reducer, controller clear-terminal,
+// controller queue-cancel, scrollback reset) on the Go Update reducers.
 // The Bubble Tea cockpit drives these through pump events + the work-serialization
 // slice, so we assert the synchronous state mutations directly.
 

@@ -2,8 +2,7 @@ package domain
 
 import "encoding/json"
 
-// EventTarget scopes a queue event to a Daintree object. All fields optional;
-// schemas.ts marks this .strict().
+// EventTarget scopes a queue event to a Daintree object. All fields optional.
 type EventTarget struct {
 	ProjectID     string `json:"projectId,omitempty"`
 	WorktreeID    string `json:"worktreeId,omitempty"`
@@ -21,7 +20,7 @@ type RecommendedAction struct {
 }
 
 // QueuePublishArgs is the input to Queue.publish. epistemicKind MUST be declared
-// (a .strict() decode would otherwise strip it before it reaches the DB).
+// (a strict decode would otherwise strip it before it reaches the DB).
 type QueuePublishArgs struct {
 	Source             EventSource         `json:"source"`
 	Severity           Severity            `json:"severity"`
@@ -35,7 +34,7 @@ type QueuePublishArgs struct {
 	EpistemicKind      EpistemicKind       `json:"epistemicKind,omitempty"`
 }
 
-// WatcherVerdict is the small-model output contract (schemas.ts .strict()).
+// WatcherVerdict is the small-model output contract.
 // Defaults applied after decode: Evidence []; RecommendedAction "none".
 type WatcherVerdict struct {
 	Classification    WatcherClassification `json:"classification"`
@@ -54,10 +53,10 @@ type ModelJudgeAnswer struct {
 	Matched    bool    `json:"matched"`
 }
 
-// VerificationResult is the read-only completion verification (schemas.ts
-// .strip()). Verdict .catch("unknown"): a legacy blob with old enum values
-// (clean/dirty) must deserialize safely to "unknown" — callers should normalize
-// an unrecognized verdict to VerdictUnknown after decode.
+// VerificationResult is the read-only completion verification. A legacy blob
+// with old enum values (clean/dirty) must deserialize safely to "unknown" —
+// callers should normalize an unrecognized verdict to VerdictUnknown after
+// decode.
 type VerificationResult struct {
 	Verdict            VerificationVerdict `json:"verdict"`
 	HasGitChanges      bool                `json:"hasGitChanges"`
@@ -69,8 +68,8 @@ type VerificationResult struct {
 	UnresolvedWarnings []string            `json:"unresolvedWarnings"`
 }
 
-// JsonlEvent is a one-shot --json stream line (schemas.ts .passthrough()).
-// Extra per-type fields are preserved in Extra.
+// JsonlEvent is a one-shot --json stream line. Extra per-type fields are
+// preserved in Extra.
 type JsonlEvent struct {
 	Type  JsonlEventType             `json:"type"`
 	Ts    int64                      `json:"ts"`
@@ -94,7 +93,7 @@ type JsonResultEnvelope struct {
 }
 
 // classEpistemicKind maps a classification to its provenance when no model was
-// used. Port of classificationEpistemicKind (schemas.ts §2.8).
+// used.
 var classObservedWithoutModel = newEnumSet(
 	ClassTerminalExited, ClassWaitingForInput, ClassRateLimited,
 )

@@ -91,7 +91,7 @@ func TestDispatchInvalidArgsRejectsUnknownFields(t *testing.T) {
 func TestDispatchArgsValidatedBeforeTierGate(t *testing.T) {
 	r := NewRegistry()
 	// A git tool requires system tier; with supervisor tier + bad args we must see
-	// INVALID_ARGS, not TIER_DENIED (§14.2 ordering).
+	// INVALID_ARGS, not TIER_DENIED (validation precedes the tier gate).
 	_ = r.Register(echoTool("g.echo", domain.RiskGit))
 	s := &fakeStore{}
 	res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"bad":1}`),
@@ -135,7 +135,7 @@ func TestDispatchConfirmThrowIsDecline(t *testing.T) {
 	_ = r.Register(echoTool("g.echo", domain.RiskGit))
 	s := &fakeStore{}
 	ctx := baseCtx(s, nil, domain.TierSystem, domain.ActorMain)
-	// A returned error must be treated as a decline, never approval (§14.7).
+	// A returned error must be treated as a decline, never approval.
 	ctx.Confirm = func(_ context.Context, _ ConfirmRequest) (bool, error) { return true, errors.New("boom") }
 	res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx)
 	if res.Error.Code != "USER_DECLINED" {

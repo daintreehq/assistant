@@ -1,9 +1,9 @@
 package prompts
 
 // Small-model sub-agent prompts (cheap classification/judgement/summary/extract).
-// The system prompts are byte-stable consts; the user-prompt builders use the same
-// fixed templates + fallbacks as the TS — they are the contract the small model is
-// tuned against, so port them byte-for-byte.
+// The system prompts are byte-stable consts; the user-prompt builders use fixed
+// templates + fallbacks — they are the contract the small model is tuned against,
+// so keep them byte-stable.
 
 // WatcherSystemPrompt is the terminal-watcher classifier prompt. The model-facing
 // classification value set is the 14 (completed_unverified is engine-only and NOT
@@ -107,7 +107,7 @@ const SummarizerSystemPrompt = `You summarize terminal output for a developer's 
 Begin with the summary itself. Do NOT think out loud or restate the task — no "We need to summarize…", "The output shows…", "Let me…" — that narration wastes your limited token budget and gets the actual summary truncated. Decide silently, then write only the summary.`
 
 // SummarizerUserArgs are the templated fields of buildSummarizerUserPrompt. Note:
-// Tail has NO fallback here (the TS interpolates it raw).
+// Tail has NO fallback here (it is interpolated raw).
 type SummarizerUserArgs struct {
 	Purpose string
 	Tail    string
@@ -178,8 +178,7 @@ func BuildExtractorUserPrompt(a ExtractorUserArgs) string {
 		"Extract now."
 }
 
-// or returns v when non-empty, else the fallback (mirrors the TS `?? fallback` /
-// `|| fallback` idioms used in the templates).
+// or returns v when non-empty, else the fallback.
 func or(v, fallback string) string {
 	if v == "" {
 		return fallback
@@ -187,7 +186,7 @@ func or(v, fallback string) string {
 	return v
 }
 
-// joinComma joins ids with ", " (the TS terminalIds.join(", ")).
+// joinComma joins ids with ", ".
 func joinComma(ids []string) string {
 	out := ""
 	for i, s := range ids {

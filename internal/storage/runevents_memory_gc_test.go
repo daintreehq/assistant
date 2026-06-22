@@ -118,7 +118,7 @@ func TestConversationPersistsAndOrdersBySeq(t *testing.T) {
 	}
 }
 
-// ---- memory FTS edges (db.test.ts memories block) ----
+// ---- memory FTS edges ----
 
 func TestRecallMemoriesAndOrEdges(t *testing.T) {
 	s := openTest(t, 1)
@@ -218,7 +218,7 @@ func TestRecallSurvivesPinUnpinCycle(t *testing.T) {
 	}
 }
 
-// ---- gcRetentionSweep full matrix (db.test.ts issue #145) ----
+// ---- gcRetentionSweep full matrix ----
 
 const gcNOW = int64(9_000_000_000_000)
 const gcOLD = int64(1000)

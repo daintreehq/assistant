@@ -3,7 +3,7 @@
 // queries audit_log via the AuditStore seam and returns the serialized content in
 // the tool result; it never touches the filesystem, so it respects the
 // no-file-edit invariant. The caller (the model, or a CLI user via `/audit
-// export`) decides what to do with the returned string. Spec: §4.11.
+// export`) decides what to do with the returned string.
 package auditx
 
 import (
@@ -204,8 +204,8 @@ type exportArgs struct {
 }
 
 // Validate enforces `limit: int().min(1).max(5000)` so a negative/oversized row
-// cap is rejected rather than forwarded unbounded to the store query. Spec parity
-// with auditTools.ts (and the /audit export CLI 1–5000 bound).
+// cap is rejected rather than forwarded unbounded to the store query. Matches the
+// /audit export CLI 1–5000 bound.
 func (a *exportArgs) Validate() error {
 	if a.Limit != nil && (*a.Limit < 1 || *a.Limit > 5000) {
 		return fmt.Errorf("limit must be between 1 and 5000")

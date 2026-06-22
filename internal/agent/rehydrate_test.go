@@ -21,7 +21,7 @@ func TestRehydrateDupSeqResumesEmptyAtMaxSeqPlusOne(t *testing.T) {
 	// A dup-seq tangle is a safe fresh start, but it must RESUME (ok=true) with an
 	// EMPTY working history and continue numbering at maxSeq+1 — NOT return "fresh"
 	// (which would restart persisting at seq 0 and keep colliding with the dirty
-	// rows on every later resume). Spec §7.2 / §17.4.
+	// rows on every later resume).
 	rows := []domain.ConversationMessageRecord{
 		msgRow(0, "system", "a"), msgRow(0, "system", "b"), // duplicate seq 0
 		msgRow(7, "user", "later"), // the largest seq among the dirty rows

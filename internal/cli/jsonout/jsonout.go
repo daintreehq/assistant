@@ -1,4 +1,4 @@
-// Package jsonout is the one-shot JSONL sink (port of src/cli/jsonSink.ts), schema
+// Package jsonout is the one-shot JSONL sink, schema
 // v1. It implements agent.EventSink: every event becomes one stdout line
 // {type, ts, seq, ...payload}; finish() writes the terminal `result` envelope and
 // returns the process exit code.
@@ -204,7 +204,7 @@ func (s *Sink) ExitCode() int {
 }
 
 // rawArgsAsAny decodes the raw JSON args string to a generic value, falling back
-// to the raw string when it isn't valid JSON (matching the TS behavior).
+// to the raw string when it isn't valid JSON.
 func rawArgsAsAny(raw string) any {
 	if raw == "" {
 		return map[string]any{}

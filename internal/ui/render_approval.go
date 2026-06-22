@@ -8,11 +8,11 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// render_approval.go renders the approval sheet (ui-input.md §4): a full-width
+// render_approval.go renders the approval sheet: a full-width
 // bordered card directly ABOVE the composer, leading with the consequence, visually
 // defaulting to DECLINE, understandable with color stripped.
 
-// titleFor returns the risk-specific question (§4).
+// titleFor returns the risk-specific question.
 func titleFor(req tools.ConfirmRequest) string {
 	switch req.Risk {
 	case domain.RiskGit:
@@ -38,7 +38,7 @@ func titleFor(req tools.ConfirmRequest) string {
 }
 
 // consequenceFor returns the consequence to lead with: the tool's own phrasing OR
-// the per-risk fallback (use ||-style so a blank also falls back, §4).
+// the per-risk fallback (use ||-style so a blank also falls back).
 func consequenceFor(req tools.ConfirmRequest) string {
 	if strings.TrimSpace(req.Consequence) != "" {
 		return req.Consequence
@@ -46,7 +46,7 @@ func consequenceFor(req tools.ConfirmRequest) string {
 	return riskConsequence(req.Risk)
 }
 
-// riskConsequence is the per-risk fallback consequence (all 8 risk classes, §4).
+// riskConsequence is the per-risk fallback consequence (all 8 risk classes).
 func riskConsequence(r domain.RiskClass) string {
 	switch r {
 	case domain.RiskTerminal:
@@ -70,8 +70,14 @@ func riskConsequence(r domain.RiskClass) string {
 	}
 }
 
-// renderApproval renders the sheet. showArgs reveals reason+args (V toggles).
-func renderApproval(th theme.Theme, req tools.ConfirmRequest, showArgs bool, width int) string {
+// maxArgRows caps how many wrapped rows the inspect panel shows for the args blob.
+const maxArgRows = 4
+
+// renderApproval renders the sheet from the pending confirm state. showArgs reveals the
+// tool description + full args (V toggles); requireType swaps the single-key action row
+// for a typed-confirmation prompt on the highest-risk actions.
+func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
+	req := p.req
 	var b strings.Builder
 	g := th.Glyphs
 
@@ -84,31 +90,84 @@ func renderApproval(th theme.Theme, req tools.ConfirmRequest, showArgs bool, wid
 	// Tool (dim secondary).
 	b.WriteString(th.Dim().Render(truncateCells("tool     "+req.ToolName, width)))
 
-	if showArgs {
+	if p.showArgs {
 		if req.Summary != "" {
 			b.WriteByte('\n')
-			b.WriteString(th.Dim().Render(truncateCells("reason   "+req.Summary, width)))
+			// 'about' — this is the tool's own description (what it does), NOT a per-call
+			// rationale, so it must not be mislabeled "reason".
+			b.WriteString(th.Dim().Render(truncateCells("about    "+req.Summary, width)))
 		}
 		if len(req.Args) > 0 {
 			b.WriteByte('\n')
-			b.WriteString(th.Muted().Render(truncateCells("args     "+compactArgs(string(req.Args), width-9), width)))
+			b.WriteString(th.Dim().Render("args"))
+			b.WriteByte('\n')
+			// Show the FULL args wrapped across rows (capped) rather than one squashed,
+			// truncated blob — the load-bearing detail (command text, push target, call
+			// method) is exactly what gets cut off otherwise.
+			b.WriteString(th.Muted().Render(argsBlock(string(req.Args), width, maxArgRows)))
 		}
 	}
 
-	// Action row — DECLINE is the default (rendered inverse/highlighted).
 	b.WriteByte('\n')
+	if p.requireType {
+		b.WriteString(renderTypedConfirm(th, p, width))
+	} else {
+		b.WriteString(renderActionRow(th, req))
+	}
+	return b.String()
+}
+
+// renderActionRow renders the standard single-key action row — DECLINE is the visual
+// default (inverse). The A (approve & remember) affordance appears only for risk classes
+// eligible for the session allow-list.
+func renderActionRow(th theme.Theme, req tools.ConfirmRequest) string {
 	approve := th.Body().Render("Y approve")
 	decline := th.Body().Reverse(true).Render(" N decline ")
 	inspect := th.Dim().Render("V inspect")
 	esc := th.Dim().Render("Esc")
-	b.WriteString(approve + "  " + decline + "  " + inspect + "  " + esc)
+	if rememberable(req.Risk) {
+		allow := th.Dim().Render("A allow tool")
+		return approve + "  " + decline + "  " + allow + "  " + inspect + "  " + esc
+	}
+	return approve + "  " + decline + "  " + inspect + "  " + esc
+}
 
+// renderTypedConfirm renders the high-risk typed-confirmation prompt: the expected
+// phrase, the input typed so far (with a caret), and the Enter/decline actions. The
+// Enter label brightens once the typed phrase matches.
+func renderTypedConfirm(th theme.Theme, p *pendingConfirm, width int) string {
+	var b strings.Builder
+	b.WriteString(th.Danger().Render(truncateCells(`This action is irreversible. Type "`+confirmPhrase+`" to approve:`, width)))
+	b.WriteByte('\n')
+	caret := th.Body().Reverse(true).Render(" ")
+	b.WriteString(th.Body().Render(truncateCells("› "+p.confirmInput, width-1)) + caret)
+	b.WriteByte('\n')
+	enter := th.Dim().Render("Enter approve")
+	if strings.EqualFold(strings.TrimSpace(p.confirmInput), confirmPhrase) {
+		enter = th.Body().Render("Enter approve")
+	}
+	// In typed mode N is a typeable letter, so only Esc declines.
+	b.WriteString(enter + "  " + th.Body().Reverse(true).Render(" Esc decline "))
 	return b.String()
 }
 
-// compactArgs collapses a JSON args blob to one truncated line for the inspect
-// panel (whitespace squashed; truncated to max cells).
+// compactArgs collapses a JSON args blob to one truncated line (whitespace squashed;
+// truncated to max cells) — used by the activity tree's single-line tool rows. Secrets
+// are masked first (redactArgs) so a token never reaches the ^X expanded row.
 func compactArgs(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Join(strings.Fields(redactArgs(s)), " ")
 	return truncateCells(s, max)
+}
+
+// argsBlock renders an args JSON blob as up to maxRows wrapped rows (whitespace squashed
+// first), ellipsising the last row if the args overflow the budget. Secrets are masked
+// first (redactArgs) so a credential never renders in the approval sheet.
+func argsBlock(s string, width, maxRows int) string {
+	s = strings.Join(strings.Fields(redactArgs(s)), " ")
+	lines := strings.Split(wrapCells(s, width), "\n")
+	if len(lines) > maxRows {
+		lines = lines[:maxRows]
+		lines[maxRows-1] = truncateCells(lines[maxRows-1]+" …", width)
+	}
+	return strings.Join(lines, "\n")
 }

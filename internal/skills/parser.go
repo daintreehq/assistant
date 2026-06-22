@@ -14,10 +14,9 @@ import (
 //	---
 //	<body markdown>
 //
-// We deliberately hand-roll the frontmatter parser (spec §2.3) instead of
-// pulling in a general YAML library: the shape is owned and constrained, and a
-// general parser would accept inputs the TS source rejects (and vice versa),
-// breaking the validation contract.
+// We deliberately hand-roll the frontmatter parser instead of pulling in a
+// general YAML library: the shape is owned and constrained, and a general parser
+// would accept inputs this validation contract is meant to reject.
 
 // fenceRe matches the opening/closing --- fence, CRLF-tolerant, trailing spaces
 // or tabs allowed on the fence lines. Group 1 = frontmatter; group 2 = body.
@@ -58,7 +57,7 @@ const (
 	scalarList
 )
 
-// coerceScalar reproduces spec §2.4 exactly: trim, then in order — strip one
+// coerceScalar coerces one frontmatter entry: trim, then in order — strip one
 // layer of matching quotes (no further coercion); true/false → bool; plain
 // signed integer (no dots) → int; else the trimmed string.
 func coerceScalar(raw string) scalar {
@@ -84,7 +83,7 @@ func coerceScalar(raw string) scalar {
 	return scalar{kind: scalarString, str: v}
 }
 
-// parseFrontmatter implements the hand-rolled tiny grammar (spec §2.3). It walks
+// parseFrontmatter implements the hand-rolled tiny grammar. It walks
 // the frontmatter block line by line. Duplicate keys, indented strays, and
 // malformed lines all error with the filename.
 func parseFrontmatter(filename, block string) (map[string]scalar, error) {
@@ -148,7 +147,7 @@ func parseFrontmatter(filename, block string) (map[string]scalar, error) {
 	return out, nil
 }
 
-// parseSkillFile parses one skill file's content (spec §2.2). filename is used
+// parseSkillFile parses one skill file's content. filename is used
 // only for error messages.
 func parseSkillFile(content, filename string) (Skill, error) {
 	text := content
@@ -171,14 +170,14 @@ func parseSkillFile(content, filename string) (Skill, error) {
 
 	sk, err := buildSkill(filename, meta, strings.TrimSpace(body))
 	if err != nil {
-		// Mirror the TS "<filename>: invalid skill — <message>" envelope.
+		// Wrap in the "<filename>: invalid skill — <message>" envelope.
 		return Skill{}, fmt.Errorf("%s: invalid skill — %s", filename, err.Error())
 	}
 	return sk, nil
 }
 
 // buildSkill assembles a Skill from coerced frontmatter + body and validates it
-// the way the Zod schema would (spec §1.2). Errors carry no filename prefix —
+// against the schema. Errors carry no filename prefix —
 // parseSkillFile wraps them in the "invalid skill" envelope.
 func buildSkill(_ string, meta map[string]scalar, body string) (Skill, error) {
 	sk := Skill{

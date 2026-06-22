@@ -6,7 +6,7 @@
 // attaches a supervising terminal watcher. The spawn is an idempotent saga: a
 // write-ahead DB record before the side-effecting MCP call, deterministic
 // idempotency key over the task identity, and a reconcile-via-terminal-list path
-// so an ambiguous/crashed launch never double-spawns. Spec: §4.13.
+// so an ambiguous/crashed launch never double-spawns.
 package agenttaskx
 
 import (
@@ -54,8 +54,7 @@ type Deps struct {
 	DaemonActive func() bool
 }
 
-// daemonActive resolves the nil-safe DaemonActive (absent ⇒ assume active, like
-// the TS `ctx.daemonActive ? ctx.daemonActive() : true`).
+// daemonActive resolves the nil-safe DaemonActive (absent ⇒ assume active).
 func (d Deps) daemonActive() bool {
 	if d.DaemonActive == nil {
 		return true

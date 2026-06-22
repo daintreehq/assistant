@@ -6,8 +6,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Ports the epistemicKind mapping (epistemicKind.test.ts §classificationEpistemicKind)
-// and the DecideOutcome provenance tagging (watcherEngine.test.ts §decideOutcome #85).
+// Covers the epistemicKind mapping (classificationEpistemicKind) and the
+// DecideOutcome provenance tagging.
 
 func TestClassificationEpistemicKind_Mapping(t *testing.T) {
 	// Deterministic terminal exit = observed; a model-claimed one = inferred.

@@ -15,7 +15,7 @@ type ToolError struct {
 //	auditId  id of the audit_log row this call produced (set by the registry)
 //
 // Result carries the typed payload as `any` here so the domain stays generic;
-// concrete tool packages can decode it. Spec: docs/port/domain-config.md §2.6.
+// concrete tool packages can decode it.
 type ToolResult struct {
 	Ok      bool       `json:"ok"`
 	Summary string     `json:"summary"`
@@ -32,8 +32,7 @@ func Ok(summary string, result any) ToolResult {
 // FailOption tunes a failure result.
 type FailOption func(*ToolError)
 
-// Unrecoverable marks a failure as non-recoverable (the default is recoverable,
-// matching the TS fail() default).
+// Unrecoverable marks a failure as non-recoverable (the default is recoverable).
 func Unrecoverable() FailOption {
 	return func(e *ToolError) { e.Recoverable = false }
 }
@@ -43,8 +42,8 @@ func WithDetails(details any) FailOption {
 	return func(e *ToolError) { e.Details = details }
 }
 
-// Fail builds a failed ToolResult. summary mirrors the error message, matching
-// the TS fail(code, message) behaviour. Defaults to recoverable=true.
+// Fail builds a failed ToolResult. summary mirrors the error message.
+// Defaults to recoverable=true.
 func Fail(code, message string, opts ...FailOption) ToolResult {
 	e := &ToolError{Code: code, Message: message, Recoverable: true}
 	for _, opt := range opts {

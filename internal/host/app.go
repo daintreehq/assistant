@@ -8,11 +8,10 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// App is the SEAM to the full assistant runtime (TS cli/app.ts). cli/app.ts has
-// not been ported yet, so the host depends on this interface and the cockpit/cli
-// wave fills it with the concrete App. It mirrors the surface index.ts uses:
-// wire the agent event sink + confirm hook, connect MCP best-effort, start the
-// daemon, drive the session, and shut down.
+// App is the SEAM to the full assistant runtime. The host depends on this
+// interface and the cockpit/cli wave fills it with the concrete App. The surface
+// it needs: wire the agent event sink + confirm hook, connect MCP best-effort,
+// start the daemon, drive the session, and shut down.
 //
 // The host NEVER touches the DB, models, or tools directly — everything flows
 // through this seam, so this package compiles in isolation against the providers
@@ -62,10 +61,9 @@ type AppHooks struct {
 	Confirm func(ctx context.Context, req ConfirmRequest) bool
 }
 
-// AppFactory builds the App for a booted session. Mirrors App.create({sessionId,
-// overrides}); MCP url/token/tier/projectId come from env via loadConfig, NOT the
-// descriptor. The cockpit/cli wave provides the concrete factory; the host stores
-// it so it can be tested with a fake.
+// AppFactory builds the App for a booted session. MCP url/token/tier/projectId
+// come from env via loadConfig, NOT the descriptor. The cockpit/cli wave provides
+// the concrete factory; the host stores it so it can be tested with a fake.
 type AppFactory func(ctx context.Context, params AppParams) (App, error)
 
 // AppParams is the descriptor-derived input to AppFactory. appSessionId is

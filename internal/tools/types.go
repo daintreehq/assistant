@@ -8,9 +8,6 @@
 // package and register their Tools via NewRegistry/Register. The canonical Tool
 // type plus ToolContext, ToolProgress, ConfirmRequest, and the constructors are
 // all exported for them.
-//
-// Spec: docs/port/tools-core.md (registry/dispatch/audit), §8 (Tool/ToolContext),
-// docs/port/_interaction-ux.md §4 (liveness: ToolCallID + ReportProgress).
 package tools
 
 import (
@@ -53,7 +50,7 @@ var NoArgs = map[string]any{
 }
 
 // ToolProgress is one in-tool progress beat the registry (and long handlers)
-// emit so the live footer never looks frozen. Spec: _interaction-ux.md §4.
+// emit so the live footer never looks frozen.
 type ToolProgress struct {
 	// Phase is one of "validating" | "awaiting_approval" | "running" | "retrying".
 	Phase string `json:"phase"`
@@ -87,7 +84,7 @@ type ConfirmRequest struct {
 // raw args plus the ToolContext, and must NEVER panic to the caller — the
 // registry recovers panics into a TOOL_THREW failure, but handlers should still
 // return Fail(...) for expected errors. context.Context carries cancellation
-// (Escape-to-cancel) and replaces the TS AbortSignal.
+// (Escape-to-cancel).
 type Handler func(ctx context.Context, args json.RawMessage, tctx *ToolContext) ToolResult
 
 // DecodeFunc optionally validates/coerces raw args before the handler runs. It
@@ -97,7 +94,7 @@ type Handler func(ctx context.Context, args json.RawMessage, tctx *ToolContext) 
 type DecodeFunc func(raw json.RawMessage) (json.RawMessage, error)
 
 // Tool is the canonical typed tool adapter. Internal Name is dotted (fs.read);
-// the registry maps it to/from the OpenAI wire name (fs__read). Spec: §8.1.
+// the registry maps it to/from the OpenAI wire name (fs__read).
 type Tool struct {
 	// Name is the internal dotted name (fs.read, daintree.call).
 	Name string
@@ -121,7 +118,6 @@ type Tool struct {
 // gracefully when they are absent. Cross-subsystem deps (Store, MCPClient,
 // Queue, Router) are reached through the SMALL consumer-defined interfaces in
 // deps.go — NOT the concrete packages — so this package compiles in isolation.
-// Spec: §8.3 + _interaction-ux.md §4.
 type ToolContext struct {
 	// --- required ---
 	Config      config.AppConfig // carries Tier, AutoApprove (read in dispatch)
@@ -132,13 +128,13 @@ type ToolContext struct {
 	ProjectPath string           // project root (fs path containment)
 	Actor       domain.ToolActor // gates the confirmation branch
 	// Confirm approves a mutating action. A returned error is treated as a
-	// DECLINE (never an approval), mirroring the TS thrown-confirm → declined.
+	// DECLINE (never an approval).
 	Confirm func(ctx context.Context, req ConfirmRequest) (bool, error)
 	// Log emits an out-of-band line to the user.
 	Log func(msg string)
 
 	// --- liveness (always present in the cockpit; may be zero in tests) ---
-	// ToolCallID identifies this call's live footer row. Spec: _interaction-ux.md §4.
+	// ToolCallID identifies this call's live footer row.
 	ToolCallID string
 	// ReportProgress emits an in-tool progress beat. The registry calls it for the
 	// standard validating→awaiting_approval→running phases; long handlers call it

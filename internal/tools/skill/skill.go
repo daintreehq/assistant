@@ -3,11 +3,9 @@
 // demand (skill.find → small-model selector → inject). The run-state tools track
 // stepwise progress keyed to the live session so a multi-step runbook can resume.
 //
-// The TS ToolContext carried skillSource/loadSkills/findSkills inline; the Go
-// core ToolContext does not expose them, so this family takes them through Deps
-// (consumer-defined interfaces) rather than reaching into ToolContext.
-//
-// Spec: docs/port/tools-families.md §4.10 (skillRunTools.ts).
+// The core ToolContext does not expose skillSource/loadSkills/findSkills, so this
+// family takes them through Deps (consumer-defined interfaces) rather than
+// reaching into ToolContext.
 package skill
 
 import (
@@ -416,8 +414,8 @@ func upsertStep(steps *[]domain.SkillStepProgress, step domain.SkillStepProgress
 // decodeSteps parses a stored SkillStepProgress[], DROPPING corrupted entries
 // (non-object members, or a member with an unrecognized status). Go's slice
 // unmarshal aborts on the first bad element and leaves a zero-value placeholder,
-// so we decode per-entry and keep only well-formed steps — matching the TS
-// contract that tolerates a corrupted checkpoint blob.
+// so we decode per-entry and keep only well-formed steps — tolerating a
+// corrupted checkpoint blob.
 func decodeSteps(raw string) []domain.SkillStepProgress {
 	var entries []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {

@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// WatchCondition is the recursive watch DSL (schemas.ts §2.3). It is a
-// z.lazy union discriminated by the present key. Each leaf/combinator is
-// modelled as a pointer field; exactly one is non-nil for a valid condition.
+// WatchCondition is the recursive watch DSL. It is a union discriminated by the
+// present key. Each leaf/combinator is modelled as a pointer field; exactly one
+// is non-nil for a valid condition.
 //
 // Degenerate conditions are rejected at decode time — a watcher built from one
 // could never fire, producing false supervision (the human believes a terminal
@@ -31,7 +31,6 @@ type WatchCondition struct {
 }
 
 // IsComposite reports whether the condition is a combinator (all/any/not).
-// Port of isCompositeCondition (schemas.ts §2.8).
 func (c *WatchCondition) IsComposite() bool {
 	return c != nil && (len(c.All) > 0 || len(c.Any) > 0 || c.Not != nil)
 }
@@ -51,8 +50,7 @@ type rawWatchCondition struct {
 }
 
 // UnmarshalJSON decodes a WatchCondition and validates the discriminated-union
-// guards. Each branch in schemas.ts is .strict(); here we dispatch on the
-// present key and reject degenerate conditions.
+// guards. We dispatch on the present key and reject degenerate conditions.
 func (c *WatchCondition) UnmarshalJSON(data []byte) error {
 	var raw rawWatchCondition
 	dec := json.NewDecoder(strings.NewReader(string(data)))

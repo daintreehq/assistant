@@ -38,7 +38,7 @@ func (e *UnavailableError) Code() string { return UnavailableCode }
 var ErrUnavailable = &UnavailableError{}
 
 // newUnavailable builds an UnavailableError from the current lastError, falling
-// back to the canonical message when empty (matches the TS constructor default).
+// back to the canonical message when empty.
 func newUnavailable(lastError string) *UnavailableError {
 	if lastError == "" {
 		lastError = "Daintree MCP is not connected"

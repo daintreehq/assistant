@@ -10,7 +10,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/safety"
 )
 
-// Dispatch error codes (model-facing recovery signals — exact strings, §11).
+// Dispatch error codes (model-facing recovery signals — exact strings).
 const (
 	codeUnknownTool     = "UNKNOWN_TOOL"
 	codeInvalidArgs     = "INVALID_ARGS"
@@ -24,7 +24,7 @@ const (
 	codeNotOffered = "TOOL_NOT_OFFERED"
 )
 
-// Audit outcomes (audit_log.outcome — §1.4).
+// Audit outcomes (audit_log.outcome).
 const (
 	outcomeOK      = "ok"
 	outcomeError   = "error"
@@ -33,8 +33,8 @@ const (
 )
 
 // Dispatch is the pipeline. It NEVER returns an error (the ToolResult carries
-// every failure) and NEVER panics to the caller. Ordering is load-bearing
-// (§4, §14): lookup → decode/validate → tier gate → confirm/grant → run →
+// every failure) and NEVER panics to the caller. Ordering is load-bearing:
+// lookup → decode/validate → tier gate → confirm/grant → run →
 // recover → audit. `started` is captured FIRST so even fast-fails carry a real
 // durationMs. The returned ToolResult has AuditID set when the audit row wrote.
 func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMessage, tctx *ToolContext) (result ToolResult) {
@@ -73,7 +73,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 
 	// 2. Arg validation. Empty args → {} . Run the tool's Decode (replaces Zod);
 	//    on success use the PARSED args (defaults/coercion applied). No Decode ⇒
-	//    pass through unvalidated. Validation precedes the tier gate (§14.2): a
+	//    pass through unvalidated. Validation precedes the tier gate: a
 	//    malformed call to a high-tier tool returns INVALID_ARGS, not TIER_DENIED.
 	tctx.reportProgress(ToolProgress{Phase: ProgressValidating, Message: "validating request"})
 	args := rawArgs
@@ -91,7 +91,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		args = parsed
 	}
 
-	// 3. Tier gate (BEFORE confirmation, §14.3): a tier-denied tool never reaches
+	// 3. Tier gate (BEFORE confirmation): a tier-denied tool never reaches
 	//    the grant/confirm logic.
 	decision := safety.Decide(tool.Risk, tctx.Config.Tier)
 	if !decision.Allowed {
@@ -126,7 +126,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 			tctx.reportProgress(ToolProgress{Phase: ProgressAwaitingApproval, Message: "waiting for approval"})
 			approved := false
 			if tctx.Confirm != nil {
-				// A thrown/errored confirm is treated as a DECLINE, never approval (§14.7).
+				// A thrown/errored confirm is treated as a DECLINE, never approval.
 				ok, err := tctx.Confirm(ctx, ConfirmRequest{
 					ToolName:    name,
 					Risk:        tool.Risk,
@@ -160,7 +160,7 @@ func toolOffered(name string, active []string) bool {
 }
 
 // tryGrant attempts the atomic grant consume for a non-interactive actor. Only
-// attempted when ActorID is set (§14.4). Returns the consumed grant or nil.
+// attempted when ActorID is set. Returns the consumed grant or nil.
 func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *ToolContext, _ int64) *domain.AutomationGrantRecord {
 	if tctx.ActorID == "" || tctx.DB == nil {
 		return nil
@@ -175,7 +175,7 @@ func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *
 
 // runHandler invokes the handler with panic recovery and audits the outcome.
 // A grant-authorized handler that FAILS is still audited as "error", not
-// "grant_ok" (§14.5) — only a successful grant call is grant_ok. Never panics.
+// "grant_ok" — only a successful grant call is grant_ok. Never panics.
 func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, args json.RawMessage,
 	tctx *ToolContext, started int64, okOutcome string, grant *domain.AutomationGrantRecord) (res ToolResult) {
 
@@ -185,7 +185,7 @@ func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, args
 		defer func() {
 			if rec := recover(); rec != nil {
 				// Handlers must never panic to the caller; convert to a recoverable
-				// TOOL_THREW (matching the TS try/catch → fail).
+				// TOOL_THREW failure.
 				out = Fail(codeToolThrew, fmt.Sprintf("%v", rec))
 			}
 		}()
@@ -202,7 +202,7 @@ func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, args
 // audit writes the two best-effort side-channels (debug log + DB insert), each
 // wrapped so a failure can never break the tool call. On a successful DB insert
 // the new row id is stamped onto res.AuditID. Returns the (possibly stamped)
-// result. Spec: §6.
+// result.
 func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 	tctx *ToolContext, started int64, outcome string, res ToolResult, grant *domain.AutomationGrantRecord) ToolResult {
 
@@ -253,7 +253,7 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 			rj := capJSON(safeJSON(res.Result))
 			rec.ResultJson = &rj
 		}
-		// Grant provenance is stamped ONLY on a grant_ok row (§6.2), so a non-grant
+		// Grant provenance is stamped ONLY on a grant_ok row, so a non-grant
 		// row never carries a misleading source.
 		if outcome == outcomeGrantOK && grant != nil {
 			src := grant.Source
@@ -275,7 +275,7 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 }
 
 // publishDenial publishes the best-effort "Autonomous action blocked" queue event
-// for a non-interactive actor (§4 Branch A). The dedupeKey is intentionally
+// for a non-interactive actor (Branch A). The dedupeKey is intentionally
 // TICK-FREE so repeated denials of the same (actor, tool) collapse into one
 // count-bumped inbox row; the actorId segment keeps distinct watchers/timers from
 // collapsing together. Wrapped so it can never break the call.

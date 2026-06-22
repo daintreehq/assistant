@@ -117,7 +117,7 @@ var workflowUpdateCols = newColSet("issueNumber", "issueUrl", "issueTitle", "bra
 // UpdateWorkflowRun applies an allowlisted patch with a NO-OP GUARD: it only
 // proceeds when the patch changes an allowed column OTHER than updatedAt, then
 // force-sets updatedAt = now (never taken from the patch). completedAt IS
-// caller-settable (KEEP, storage.md §6 workflow runs).
+// caller-settable (KEEP).
 func (s *Store) UpdateWorkflowRun(id string, patch map[string]any) error {
 	if !patchHasAllowedKey(patch, workflowUpdateCols) {
 		return nil // no-op: avoid bumping updatedAt for an empty/irrelevant patch

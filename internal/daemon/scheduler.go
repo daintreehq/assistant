@@ -10,14 +10,14 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// SchedulerDeps wires the scheduler to its dependencies (scheduler.ts §2.1).
+// SchedulerDeps wires the scheduler to its dependencies.
 type SchedulerDeps struct {
 	Store    Store
 	Queue    Queue
 	Registry Registry
 	// CtxFor builds a CheckContext for a non-interactive actor ("watcher"/"timer").
-	// Mirrors the TS ctxFor(actor, actorId?) — it supplies the MCP/model/projectPath
-	// for that actor. ctx is the scheduler's tick context (cancellation).
+	// It supplies the MCP/model/projectPath for that actor. ctx is the scheduler's
+	// tick context (cancellation).
 	CtxFor func(ctx context.Context, actor domain.ToolActor, actorID string) *CheckContext
 	// TickMS overrides the tick interval (defaults to SchedulerTickMS).
 	TickMS int64
@@ -71,9 +71,9 @@ func (s *Scheduler) SetOnAttention(cb func(events []domain.QueueEvent)) {
 	s.mu.Unlock()
 }
 
-// Start begins ticking. Idempotent. The loop ends on Stop (context cancel). Unlike
-// the TS unref'd interval there is no "don't keep the process alive" concern — the
-// goroutine's lifecycle is owned by Stop/context cancellation.
+// Start begins ticking. Idempotent. The loop ends on Stop (context cancel). There
+// is no "don't keep the process alive" concern — the goroutine's lifecycle is
+// owned by Stop/context cancellation.
 func (s *Scheduler) Start(parent context.Context) {
 	s.stateMu.Lock()
 	if s.ticker != nil {

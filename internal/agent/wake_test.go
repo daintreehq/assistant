@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// --- helpers (port of tests/wake.test.ts factories) ---
+// --- helpers ---
 
 func makeWakeEvent(over func(*domain.QueueEvent)) domain.QueueEvent {
 	e := domain.QueueEvent{

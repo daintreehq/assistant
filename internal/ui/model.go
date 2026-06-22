@@ -13,7 +13,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// model.go is the root tea.Model state (ui-input.md §7.3, ui-transcript.md §12). It
+// model.go is the root tea.Model state. It
 // owns the transcript, the explicit run phase, the work-serialization slice (the
 // single-flight lock + FIFO queue + wake queue), the scrollback commit queue, view
 // state, and the resize/clear nonces. ALL mutation happens in Update.
@@ -33,6 +33,14 @@ type pendingConfirm struct {
 	req      tools.ConfirmRequest
 	resolve  chan bool
 	showArgs bool
+
+	// shownAt stamps when the sheet appeared, so a typed-ahead / buffered affirmative
+	// can be debounced for a short window (the accidental-approve guard).
+	shownAt int64
+	// requireType marks the highest-risk actions (system / git history-rewrite): single-
+	// key approval is disabled and the user must type confirmInput == confirmPhrase.
+	requireType  bool
+	confirmInput string
 }
 
 // Model is the root cockpit model.
@@ -55,6 +63,11 @@ type Model struct {
 	activePanel PanelKey // /watchers,/inbox,/timers,/audit,/help filter
 	composer    composer.Model
 	pending     *pendingConfirm
+
+	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
+	// approval sheet's A action, consulted in onApprovalRequested). In-memory and session-
+	// scoped — never persisted — and never holds a git/system tool (rememberable()).
+	approvedTools map[string]bool
 
 	// boot splash overlay (never gates input).
 	//
@@ -82,7 +95,7 @@ type Model struct {
 	masthead    mastheadParams
 	commitArmed bool // first scrollback commit deferred one render cycle (see scheduleCommit)
 
-	// work serialization (§6.3/§6.4).
+	// work serialization.
 	inFlight    bool                // exactly one Session.Send outstanding
 	activeTurn  string              // id of the live TurnCell (for streaming routing)
 	queuedInput []queuedTurn        // FIFO user follow-ups typed while busy
@@ -105,11 +118,21 @@ type Model struct {
 	sizedOnce     bool // first WindowSizeMsg seen (its redraw is suppressed)
 	attentionN    int
 
-	// spinner frame (advanced on a periodic tick) for animated active rows.
-	spinnerFrame int
+	// spinner frame (advanced on a periodic tick) for animated active rows. The tick only
+	// runs while a turn is in flight (spinnerRunning) — idle, it lapses so the process can
+	// quiesce instead of repainting ~10×/s forever.
+	spinnerFrame   int
+	spinnerRunning bool
 
 	// shutdown signalling.
 	quitting bool
+
+	// staged Ctrl+C (the interrupt-then-quit contract): the first
+	// press cancels any in-flight turn (or, when idle, just arms) and surfaces "press
+	// again to exit"; a second press within quitArmWindow quits. quitArmGen dedupes the
+	// expiry tick so a lapsed timer can't disarm a freshly re-armed prompt.
+	quitArmed  bool
+	quitArmGen int
 }
 
 // queuedTurn is one queued user follow-up: the prompt text + its visible TurnCell
@@ -151,6 +174,17 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		},
 	}
 	m.splash = newSplash(m.columns)
+
+	// No standalone welcome line: the composer placeholder ("Ask Daintree… · / for commands"),
+	// the hint row, and "?" for help already cover discoverability, so a banner would just be
+	// clutter under the masthead. We DO surface a genuine degraded state up front, though:
+	// a missing model key at boot rather than only failing on the first turn (clig.dev).
+	if a.Config.FireworksAPIKey == "" {
+		m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
+			ID: domain.NewID("note_"), Level: NoteError, Ts: domain.NowMS(),
+			Text: "FIREWORKS_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.",
+		}})
+	}
 	return m
 }
 
@@ -161,16 +195,16 @@ var UIVersion = "0.1.0"
 // paletteCommands maps the command registry's entries into composer.Command rows so
 // the palette can't drift from the handlers that accept them.
 func paletteCommands() []composer.Command {
-	entries := commands.PaletteEntries()
-	out := make([]composer.Command, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, composer.Command{Name: e[0], Desc: e[1]})
+	rows := commands.PaletteRows()
+	out := make([]composer.Command, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, composer.Command{Name: r.Name, Desc: r.Desc, Syntax: r.Syntax})
 	}
 	return out
 }
 
 // composerFocus reports whether the composer owns keys: home view AND no pending
-// approval sheet (ui-input.md §7.3). Crucially NOT gated on busy — the composer
+// approval sheet. Crucially NOT gated on busy — the composer
 // stays editable while a turn runs.
 func (m *Model) composerFocus() bool {
 	return m.view == viewHome && m.pending == nil

@@ -9,7 +9,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// TestDispatchStampsRunID ports registry.test.ts: a dispatch within a run carries
+// TestDispatchStampsRunID: a dispatch within a run carries
 // ctx.RunID onto its audit row, and a scheduler-built ctx (no RunID) leaves it
 // absent.
 func TestDispatchStampsRunID(t *testing.T) {
@@ -65,7 +65,7 @@ func countingCtx(q *countingQueue, actorID string) *ToolContext {
 	}
 }
 
-// TestDispatchRepeatedDenialsShareDedupeKey ports registry.test.ts: repeated
+// TestDispatchRepeatedDenialsShareDedupeKey: repeated
 // autonomous denials of the same tool by the same actor publish a single STABLE
 // dedupeKey (the storage Queue then count-bumps one inbox row).
 func TestDispatchRepeatedDenialsShareDedupeKey(t *testing.T) {
@@ -85,7 +85,7 @@ func TestDispatchRepeatedDenialsShareDedupeKey(t *testing.T) {
 	}
 }
 
-// TestDispatchDistinctActorsDoNotCollapse ports registry.test.ts: distinct actor
+// TestDispatchDistinctActorsDoNotCollapse: distinct actor
 // ids must NOT collapse — the actorId segment keeps each watcher/timer separate.
 func TestDispatchDistinctActorsDoNotCollapse(t *testing.T) {
 	r := NewRegistry()

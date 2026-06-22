@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// DoctorProbeResult is the outcome of the actions.getContext doctor probe (§9).
+// DoctorProbeResult is the outcome of the actions.getContext doctor probe.
 type DoctorProbeResult struct {
 	OK         bool          // pass iff the round-trip succeeded and !res.IsError
 	Detail     string        // human-readable explanation (failure reason or "ok")
@@ -18,15 +18,14 @@ type DoctorProbeResult struct {
 // workbench tier, no confirmation — verifies end-to-end access without mutating.
 const doctorProbeTool = "actions.getContext"
 
-// Doctor runs the actions.getContext probe (§9). It ONLY runs when connected.
+// Doctor runs the actions.getContext probe. It ONLY runs when connected.
 //  1. listTools() (5s). If actions.getContext is not advertised → fail with a
 //     "workbench tier may be unavailable" message.
 //  2. else callTool("actions.getContext", {}) (5s); pass iff !res.IsError; report
 //     round-trip ms. A returned error = live transport failure/timeout (not a tier
 //     issue).
 //
-// Both calls get the 5s doctorProbeTimeout via a derived context (the TS
-// withTimeout helper).
+// Both calls get the 5s doctorProbeTimeout via a derived context.
 func (c *Client) Doctor(ctx context.Context) DoctorProbeResult {
 	if !c.IsConnected() {
 		return DoctorProbeResult{Reachable: false, Detail: "Daintree MCP is not connected"}

@@ -10,7 +10,7 @@ import (
 )
 
 // memStore is an in-memory EventStore that faithfully reproduces the SQL
-// semantics (§6.5/§6.6) the real store must implement: the ATOMIC
+// semantics the real store must implement: the ATOMIC
 // dedupe-or-insert (newest open non-expired row, bump without touching createdAt,
 // prior snapshot returned), notifiedAt re-arm, and the digest filter+order. A
 // mutex makes the upsert atomic so concurrent-publish tests are meaningful. It
@@ -27,7 +27,7 @@ func newMemStore() *memStore {
 }
 
 // findOpenByDedupe returns the newest open non-expired row for a key (caller holds
-// the lock). Mirrors ORDER BY COALESCE(updatedAt,createdAt) DESC.
+// the lock). Matches ORDER BY COALESCE(updatedAt,createdAt) DESC.
 func (m *memStore) findOpenByDedupe(key string, now int64) *domain.QueueEvent {
 	var best *domain.QueueEvent
 	for _, id := range m.order {

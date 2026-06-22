@@ -50,7 +50,7 @@ type ToolRunner interface {
 // batch): the runner wires Progress into the registry's ReportProgress so an
 // in-tool substep ("launching terminal") reaches the live footer tagged with the
 // active call's id. Progress is "" on the no-op turns (tests); the runner is
-// nil-safe. Spec: _interaction-ux.md §4.
+// nil-safe.
 type TurnContext struct {
 	RunID           string
 	ActiveToolNames []string
@@ -77,7 +77,7 @@ type SkillCatalog interface {
 }
 
 // MessageStore is the persistence seam (satisfied by *storage.Store). All writes
-// are best-effort — a DB failure must never break a live turn (§17.13).
+// are best-effort — a DB failure must never break a live turn.
 type MessageStore interface {
 	InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error)
 	InsertSkillSelection(rec domain.SkillSelectionLogRecord) (domain.SkillSelectionLogRecord, error)
@@ -87,7 +87,7 @@ type MessageStore interface {
 // resumed session: the three control messages are rebuilt fresh (so the cached
 // prefix stays byte-stable) but NOT re-persisted (they already exist in the DB);
 // seq continues from InitialSeq. A nil RestoredMessages is a fresh session
-// (controls persisted). Spec: agent-loop.md §5.
+// (controls persisted).
 type SessionDeps struct {
 	Router        Router
 	Tools         ToolRunner

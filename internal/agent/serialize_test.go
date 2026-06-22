@@ -84,7 +84,7 @@ func TestSerializeTruncatesWithoutStoreUnretrievable(t *testing.T) {
 func TestSerializeCapIsCharsNotBytes(t *testing.T) {
 	// "の" is 3 bytes but 1 rune. A blob just under the CHAR cap whose BYTE length is
 	// well over it must NOT truncate — the cap is in characters (utf8.RuneCount), not
-	// bytes (len). Spec §9 / §15.3.
+	// bytes (len).
 	runes := domain.MaxToolResultChars - 200 // leave headroom for the JSON envelope
 	blob := strings.Repeat("の", runes)
 	res := domain.Ok("multibyte", map[string]any{"blob": blob})

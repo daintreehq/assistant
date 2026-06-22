@@ -11,7 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// liveness_test.go locks in the interactive liveness contract (_interaction-ux.md):
+// liveness_test.go locks in the interactive liveness contract:
 // explicit-phase status, the synchronous ack, the announced-then-promoted tool
 // batch, ordered prose/tool interleaving, visible+promoted queued follow-ups,
 // synchronous Cancelling, and the composer never being gated by the splash. These
@@ -226,7 +226,7 @@ func TestToolProgress_SetsActiveActivityDetail(t *testing.T) {
 	if a := cell.findActivity("a"); a.ProgressMsg != "launching terminal" {
 		t.Fatalf("unrelated progress must not overwrite: %+v", a)
 	}
-	// The active row renders the live substep as its detail (§4).
+	// The active row renders the live substep as its detail.
 	row := renderActivityRow(m.theme, *cell.findActivity("a"), true, false, 0, domain.NowMS(), 80)
 	if !strings.Contains(stripAnsi(row), "launching terminal") {
 		t.Fatalf("active row did not show the live substep: %q", stripAnsi(row))

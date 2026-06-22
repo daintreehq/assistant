@@ -1,9 +1,9 @@
 package mcp
 
-// Read-only retry/timeout primitives ported from src/reliability.ts. These live
-// inside internal/mcp (rather than a shared internal/reliability) because the MCP
-// client is their only consumer in this phase; if a second subsystem needs them,
-// promote the file to its own package then.
+// Read-only retry/timeout primitives. These live inside internal/mcp (rather than
+// a shared internal/reliability) because the MCP client is their only consumer in
+// this phase; if a second subsystem needs them, promote the file to its own
+// package then.
 
 import (
 	"context"
@@ -38,7 +38,7 @@ var mcpReadRetryPolicy = retryPolicy{
 const mcpReadTimeout = 20000 * time.Millisecond
 
 // doctorProbeTimeout is the caller-side 5s budget on both listTools() and the
-// actions.getContext call in the doctor probe (§9).
+// actions.getContext call in the doctor probe.
 const doctorProbeTimeout = 5000 * time.Millisecond
 
 // jitterRand is a dedicated non-crypto PRNG. Full jitter intentionally uses a
@@ -61,8 +61,8 @@ func randInt63n(n int64) int64 {
 
 // fullJitterDelay returns a uniform random delay in
 // [0, min(maxMs, baseMs * 2^max(0,attempt))]. attempt is 0-based. Full jitter
-// (not equal/decorrelated) avoids retry thundering herds. Ported exactly: the
-// ceiling is inclusive (floor(random()*(ceiling+1)) in TS) — here Intn(ceiling+1).
+// (not equal/decorrelated) avoids retry thundering herds. The ceiling is
+// inclusive — Intn(ceiling+1).
 func fullJitterDelay(attempt int, base, max time.Duration) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -142,8 +142,7 @@ func isRetriableMcpError(err error) bool {
 }
 
 // abortableSleep sleeps for d or returns early with ctx.Err() the moment ctx is
-// done (cancel or deadline). Go-idiomatic replacement for abortableSleep — no
-// listener leak (the TS note about Node #54614 AbortSignal.any is moot here).
+// done (cancel or deadline). No listener leak.
 func abortableSleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()
@@ -176,8 +175,8 @@ func errMsg(err error) string {
 // isBindingTerminal reports whether a tool-result text carries one of Daintree's
 // terminal binding markers (SESSION_BINDING_GONE / BINDING_STALE). Exposed as a
 // helper so callers (and tests) can confirm these are classified terminal, never
-// retriable. The client itself does not parse them (matches client.ts), but the
-// predicate documents the contract in one place.
+// retriable. The client itself does not parse them, but the predicate documents
+// the contract in one place.
 func isBindingTerminal(text string) bool {
 	if text == "" {
 		return false

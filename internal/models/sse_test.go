@@ -95,7 +95,7 @@ func TestBuildStreamToolCallsSyntheticID(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("want 1 call")
 	}
-	// hashString("tool{}") = -868060422 → abs 868060422 (verified against the TS).
+	// hashString("tool{}") = -868060422 → abs 868060422.
 	if calls[0].ID != "call_868060422" {
 		t.Fatalf("synthetic id = %q, want call_868060422", calls[0].ID)
 	}

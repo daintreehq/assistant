@@ -10,13 +10,12 @@ import (
 // here: exactly the methods the dispatch pipeline / exemplar tools call on other
 // subsystems. We deliberately do NOT import the concrete storage/mcp/queue/models
 // packages (that would create import cycles and couple the build) — the concrete
-// types will satisfy these by structural match. Spec: tools-core.md §8.3.
+// types will satisfy these by structural match.
 
 // Store is the slice of the storage layer the registry touches: the audit insert
 // and the atomic grant consume. InsertAudit returns the new row id (mutated onto
 // the ToolResult as AuditID). ConsumeGrant returns the consumed grant (non-nil)
 // when a matching, live grant authorized the (actor, tool, risk); nil otherwise.
-// Spec: tools-core.md §6.2, §9.
 type Store interface {
 	// InsertAudit persists one audit row and returns its id. Best-effort at the
 	// call site (wrapped so it can never break a tool call).
@@ -46,7 +45,7 @@ type MCPCallResult struct {
 
 // Queue is the slice of the attention queue the registry uses to publish the
 // "Autonomous action blocked" denial event for non-interactive actors. Publishing
-// is best-effort (wrapped so it can never break the call). Spec: tools-core.md §4.
+// is best-effort (wrapped so it can never break the call).
 type Queue interface {
 	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)
 }

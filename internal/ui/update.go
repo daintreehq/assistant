@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// update.go is the single reducer (ui-input.md §6.4: NEVER mutate the model outside
+// update.go is the single reducer (NEVER mutate the model outside
 // Update). It folds runtime/pump msgs + key events into the transcript, drives the
 // explicit RunPhase, serializes work (single-flight + FIFO queue + wake priority),
 // and schedules scrollback commits.
@@ -21,7 +21,8 @@ func (m Model) Init() tea.Cmd {
 		m.pump.waitEvent(),
 		func() tea.Msg { return BootstrapMsg{} },
 		dashboardTickCmd(),
-		spinnerTickCmd(),
+		// The spinner tick is NOT armed at boot — it starts on the first in-flight turn
+		// (afterStateChange) and lapses when idle, so an idle cockpit doesn't repaint ~10×/s.
 		// Arm the first scrollback commit one render cycle in, so Bubble Tea has flushed
 		// the SHORT footer (and sized its cell buffer to it) before the masthead's first
 		// tea.Println — BT defers cellbuf resize to the flush, so an immediate Println
@@ -106,6 +107,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DashboardSnapshotMsg:
 		m.dashboard = msg.Snapshot
+		// The attention badge is recomputed from each snapshot so it DECREMENTS as items
+		// resolve — previously it only ratcheted up via onAttention and never came back down.
+		m.attentionN = len(m.dashboard.Inbox)
 		// The first snapshot is the OTHER half of the startup-settled gate (MCP connect
 		// resolved AND the first dashboard snapshot is in). A later tick is a no-op here.
 		if !m.bootSnapshotIn {
@@ -116,7 +120,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		m.spinnerFrame++
+		// Keep ticking only while a turn is in flight; idle, let it lapse (afterStateChange
+		// re-arms it the instant the next turn starts) so the cockpit can quiesce.
+		if !m.inFlight {
+			m.spinnerRunning = false
+			return m, nil
+		}
 		return m, spinnerTickCmd()
+
+	case QuitArmExpireMsg:
+		// The staged-Ctrl+C window lapsed; disarm unless a newer press re-armed (gen).
+		if msg.Gen == m.quitArmGen {
+			m.quitArmed = false
+		}
+		return m.afterStateChange(nil)
 
 	case SplashTickMsg:
 		cmd := m.splash.advance()
@@ -196,6 +213,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // cmd (none for most). It mutates the active TurnCell's ordered steps + phase.
 func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 	t := m.activeTurnCell()
+	if t != nil {
+		// Any streamed event is a heartbeat — reset the stall timer (see renderLiveStatus).
+		t.LastActivityAt = domain.NowMS()
+	}
 	switch ev.kind {
 	case pumpPhase:
 		if t != nil && t.Phase != ev.phase {
@@ -355,19 +376,32 @@ func (m *Model) addNote(level NoteLevel, text string) {
 // the composer's busy/focus flags. Returns (model, cmd).
 func (m Model) afterStateChange(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	m.syncComposer()
+	spin := m.ensureSpinnerForState()
 	commit := m.scheduleCommit()
 	// Flush the active turn's completed rows AFTER scheduling the queue commit so the
 	// masthead (queue) is ordered ahead of any prose Println (flushActiveTurn also gates
 	// on headerDone). Emitting the flush in the SAME batch is fine: tea.Println preserves
 	// emit order, and the queue's masthead commit is enqueued first here.
 	flush := m.flushActiveTurn()
-	return m, tea.Batch(extra, commit, flush)
+	return m, tea.Batch(extra, commit, flush, spin)
+}
+
+// ensureSpinnerForState starts the ~10fps spinner tick when a turn is in flight and the
+// tick isn't already running. Returns nil (no extra wakeups) when idle or already ticking;
+// spinnerTickMsg stops it once the turn settles.
+func (m *Model) ensureSpinnerForState() tea.Cmd {
+	if m.inFlight && !m.spinnerRunning {
+		m.spinnerRunning = true
+		return spinnerTickCmd()
+	}
+	return nil
 }
 
 // syncComposer pushes the current busy/focus state into the composer each reduction.
 func (m *Model) syncComposer() {
 	m.composer.SetBusy(m.inFlight)
 	m.composer.SetFocus(m.composerFocus())
+	m.composer.SetWidth(m.contentW()) // so ↑/↓ follow soft-wrapped visual rows
 }
 
 // scheduleCommit asks the queue for the next commit cmd at the current width.
@@ -407,7 +441,7 @@ func (m *Model) finishBootIfReady() tea.Cmd {
 // completeBoot performs the boot→cockpit hand-off: drop the splash, re-arm the commit
 // queue (bump redrawNonce → resetKey change → committed=0, headerDone=false), and run
 // the ordered wipe-then-recommit so the masthead lands flush on a clean host screen
-// with the composer live beneath it. Mirrors onRedraw, but driven by the boot gate.
+// with the composer live beneath it. Like a redraw, but driven by the boot gate.
 func (m *Model) completeBoot() tea.Cmd {
 	m.booting = false
 	m.splash.done = true

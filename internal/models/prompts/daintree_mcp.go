@@ -192,7 +192,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 
 // DocumentedMCPToolNames is the hand-maintained list of 60 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
-// server's list means the doc went stale). Verbatim, in the same order as the TS.
+// server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{
 	"actions.getContext",
 	"actions.list",

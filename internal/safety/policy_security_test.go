@@ -10,7 +10,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// TestDecideMatrix ports the decide() cases from policy.test.ts: the full
+// TestDecideMatrix covers the Decide cases: the full
 // (risk, tier) allowed/needsConfirmation contract plus the higher-tier reason.
 func TestDecideMatrix(t *testing.T) {
 	// supervisor denies 'terminal' with no confirmation and a higher-tier reason.
@@ -44,7 +44,7 @@ func TestDecideMatrix(t *testing.T) {
 	}
 }
 
-// TestTierAllowsRiskFullMatrix mirrors the exhaustive matrix in policy.test.ts:
+// TestTierAllowsRiskFullMatrix covers the exhaustive matrix:
 // each tier's exact allowed risk-class set, every other class denied.
 func TestTierAllowsRiskFullMatrix(t *testing.T) {
 	allowed := map[domain.Tier][]domain.RiskClass{
@@ -78,12 +78,12 @@ func TestTierAllowsRiskFullMatrix(t *testing.T) {
 	}
 }
 
-// TestIsSensitivePathVariantMatrix ports fsToolsSecurity.test.ts isSensitivePath
-// (#1): the basename-only check missed segment/suffix/case variants. Every
-// credential-bearing shape must flag; ordinary source files must not.
+// TestIsSensitivePathVariantMatrix covers isSensitivePath: a basename-only check
+// would miss segment/suffix/case variants. Every credential-bearing shape must
+// flag; ordinary source files must not.
 func TestIsSensitivePathVariantMatrix(t *testing.T) {
 	sensitive := []string{
-		// basenames / suffixes / dirs the TS suite asserts.
+		// basenames / suffixes / dirs that must flag.
 		".env", "config/.env.production", "server.key", "certs/cert.pem",
 		".ssh/id_ed25519", "home/.aws/credentials",
 		// segment / suffix / case variants the basename-only check missed.
@@ -105,7 +105,7 @@ func TestIsSensitivePathVariantMatrix(t *testing.T) {
 	}
 }
 
-// TestResolveInsideProjectSymlinkEscape ports noFileEditGuard.test.ts: a
+// TestResolveInsideProjectSymlinkEscape verifies the no-file-edit guard: a
 // repo-local symlink that resolves OUTSIDE the project is blocked even though it
 // is lexically inside; a genuine in-project file still resolves.
 func TestResolveInsideProjectSymlinkEscape(t *testing.T) {
@@ -141,7 +141,7 @@ func TestResolveInsideProjectSymlinkEscape(t *testing.T) {
 	}
 }
 
-// TestIsForbiddenToolNameCaseAndPatch ports noFileEditGuard.test.ts: the guard is
+// TestIsForbiddenToolNameCaseAndPatch verifies the no-file-edit guard is
 // case-insensitive and catches apply_patch / edit_file; read-only names are not
 // flagged, and AssertNoFileEditTools names every offender.
 func TestIsForbiddenToolNameCaseAndPatch(t *testing.T) {

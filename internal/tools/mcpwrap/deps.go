@@ -4,8 +4,6 @@
 // action via a shared passthrough forwarder. Unlike daintree.call (the raw
 // escape hatch), these carry exact arg JSON-schemas + risk classes so the model
 // can't drop a required argument.
-//
-// Spec: docs/port/tools-families.md §4.14 (mcpTools.ts wrappers).
 package mcpwrap
 
 import (

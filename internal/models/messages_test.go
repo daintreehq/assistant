@@ -7,7 +7,7 @@ import (
 )
 
 // hashString must match the JS string-hash bit-for-bit (synthesized tool-call ids
-// appear in transcripts). Expected values verified against the TS implementation.
+// appear in transcripts).
 func TestHashStringBitExact(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -18,7 +18,7 @@ func TestHashStringBitExact(t *testing.T) {
 		{"agentTask.spawnForEdits", -978115529, 978115529},
 		{"", 0, 0},
 		{"a", 97, 97},
-		{"héllo", 103094734, 103094734},  // multi-byte rune (charCodeAt code units)
+		{"héllo", 103094734, 103094734},  // multi-byte rune (UTF-16 code units)
 		{"𝟘abc", 1283596095, 1283596095}, // non-BMP rune → surrogate pair
 		{"tool{}", -868060422, 868060422},
 	}

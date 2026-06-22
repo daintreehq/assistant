@@ -11,8 +11,8 @@ import (
 // boundary on a SECOND Open of the same file: non-terminal watchers (active /
 // created / paused) flip to cancelled and their grants are revoked, while
 // terminal-state watchers and their grants survive, and a same-actorId timer
-// grant is untouched (scope-by-actorType). Mirrors db.test.ts "cancels
-// non-terminal watchers from a prior session and revokes their grants on reopen".
+// grant is untouched (scope-by-actorType). The sweep cancels non-terminal
+// watchers from a prior session and revokes their grants on reopen.
 func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(2000)
@@ -92,8 +92,7 @@ func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
 }
 
 // TestReopenCancelsPRStateWatcher — a pr_state watcher is session-scoped like a
-// terminal one; the kind-agnostic sweep cancels it and revokes its grant
-// (db.test.ts "cancels a prior session's pr_state watcher …").
+// terminal one; the kind-agnostic sweep cancels it and revokes its grant.
 func TestReopenCancelsPRStateWatcher(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(2000)
@@ -125,8 +124,8 @@ func TestReopenCancelsPRStateWatcher(t *testing.T) {
 // TestReopenResolvesWatcherInboxEvents — open watcher-sourced events (terminal /
 // worktree / pr) are resolved on reopen so they don't resurface, while non-watcher
 // sources persist and an ALREADY-resolved watcher event keeps its original
-// resolvedAt (the `resolvedAt IS NULL` guard never re-stamps). Mirrors db.test.ts
-// "resolves open watcher-sourced inbox events on reopen, sparing other sources".
+// resolvedAt (the `resolvedAt IS NULL` guard never re-stamps). Open
+// watcher-sourced inbox events are resolved on reopen, sparing other sources.
 func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(5000)
@@ -203,8 +202,8 @@ func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
 
 // TestReopenFailsStaleAgentLaunches — a non-terminal saga from a prior session is
 // failed (errorCode SESSION_ENDED) so its idempotencyKey no longer blocks a fresh
-// launch; a confirmed saga is untouched. Mirrors db.test.ts "cancelStaleAgentLaunches
-// retires non-terminal records from a prior session on reopen".
+// launch; a confirmed saga is untouched. Stale non-terminal records from a prior
+// session are retired on reopen.
 func TestReopenFailsStaleAgentLaunches(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := openFile(t, path, 1000)

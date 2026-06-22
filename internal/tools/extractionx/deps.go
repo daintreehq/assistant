@@ -8,7 +8,7 @@
 // and publishes the outcome to the attention queue, OUTLIVING the turn (so it must
 // not carry the turn's cancellation). The poll loop reuses the watcher DSL
 // vocabulary; modelJudge conditions are intentionally unsupported here (they would
-// re-run the classifier every tick). Spec: docs/port/tools-families.md §4.9.
+// re-run the classifier every tick).
 package extractionx
 
 import (

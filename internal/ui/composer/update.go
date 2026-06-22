@@ -12,14 +12,14 @@ type Outcome struct {
 	// the turn; on acceptance it calls AcceptSubmit (records history + clears).
 	Submit *SubmitResult
 	// Cancel signals Esc on an EMPTY buffer while busy — the pull-back / cancel is
-	// owned by the root (ui-input.md §1.3, §1.6). The composer does NOT handle
+	// owned by the root. The composer does NOT handle
 	// cancellation itself; it just reports the gesture UP.
 	Cancel bool
 }
 
 // AcceptSubmit finalizes a submit the parent accepted: record the prompt into
 // history (collapsing duplicates, capping at 200) and clear the buffer
-// (ui-input.md §1.7). The parent calls this only when sendUserMessage did NOT
+// the buffer. The parent calls this only when sendUserMessage did NOT
 // reject; on rejection it leaves the buffer untouched so the text isn't lost.
 func (m *Model) AcceptSubmit(trimmed string) {
 	m.recordHistory(trimmed)
@@ -31,12 +31,12 @@ func (m *Model) AcceptSubmit(trimmed string) {
 // parent gives the composer the key FIRST only when it is focused; the app
 // chords (Ctrl-C/O/X, off-home Esc) are handled by the root, so any chord that
 // is not a defined editing op falls through here without inserting text
-// (ui-input.md §1.8, §2).
+// without inserting text.
 func (m *Model) Update(msg tea.Msg) Outcome {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		// Bracketed multi-line paste: inserted VERBATIM with \r\n? → \n
-		// normalization, NOT run through the per-key chord logic (ui-input.md §1.8).
+		// normalization, NOT run through the per-key chord logic.
 		m.insert(msg.Content)
 		return Outcome{}
 	case keyMsg:
@@ -45,7 +45,7 @@ func (m *Model) Update(msg tea.Msg) Outcome {
 	return Outcome{}
 }
 
-// handleKey implements the full keymap. ORDER MATTERS (ui-input.md §1.2): Enter
+// handleKey implements the full keymap. ORDER MATTERS: Enter
 // is matched before the ctrl/meta editing chords so modifier+Enter combos aren't
 // swallowed by a chord branch; cursor motion / history is matched before the
 // ctrl/meta passthrough so modified arrows aren't swallowed.
@@ -56,7 +56,12 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 	shift := mod&tea.ModShift != 0
 	super := mod&tea.ModSuper != 0
 
-	// 1) Enter / newline — handled FIRST (ui-input.md §1.2).
+	// 0) Reverse-i-search (Ctrl-R) owns ALL keys while active.
+	if m.searching {
+		return m.handleSearchKey(k)
+	}
+
+	// 1) Enter / newline — handled FIRST.
 	if isEnter(k) {
 		// Modifier+Enter (Shift/Alt/Ctrl) inserts a newline when the terminal
 		// surfaces the modifier (e.g. kitty keyboard protocol).
@@ -83,7 +88,7 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		return Outcome{Submit: &SubmitResult{Text: trim(m.buffer), OK: true}}
 	}
 
-	// 2) Escape (ui-input.md §1.3). The composer assigns meaning:
+	// 2) Escape. The composer assigns meaning:
 	//    nonempty → clear; empty+busy → report Cancel UP; empty+idle → no-op.
 	if k.Code == tea.KeyEscape || k.Code == tea.KeyEsc {
 		if !m.trimEmpty() {
@@ -96,19 +101,31 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		return Outcome{}
 	}
 
-	// 3) Tab — slash-command completion of the TOP match (ui-input.md §1.9). When
-	// the palette is non-empty, set the buffer to "<cmd> " (trailing space). No
-	// cycle-through-matches. Only when focused & not busy (palette is suppressed
-	// otherwise, matching suggestionsFor's gate in the parent).
-	if k.Code == tea.KeyTab && mod == 0 {
-		if s := m.activeSuggestions(); len(s) > 0 {
-			m.buffer = s[0].Name + " "
+	// 3) Slash-palette navigation. While the palette is open, ↑/↓ and
+	// Shift-Tab move the highlighted row and Tab ACCEPTS it (fills "<cmd> "); when the palette
+	// is closed these keys fall through to history/line motion below.
+	if sugg := m.activeSuggestions(); len(sugg) > 0 {
+		switch {
+		case k.Code == tea.KeyUp || (k.Code == tea.KeyTab && shift):
+			m.paletteSel = paletteWrap(m.paletteSel-1, len(sugg))
+			return Outcome{}
+		case k.Code == tea.KeyDown:
+			m.paletteSel = paletteWrap(m.paletteSel+1, len(sugg))
+			return Outcome{}
+		case k.Code == tea.KeyTab && mod == 0:
+			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
+			m.buffer = sugg[sel].Name + " "
 			m.cursor = m.runeLen()
+			m.paletteSel = 0
+			return Outcome{}
 		}
+	}
+	// A Tab with no open palette is consumed (never inserts a literal tab).
+	if k.Code == tea.KeyTab && mod == 0 {
 		return Outcome{}
 	}
 
-	// 4) Cursor motion & history recall (ui-input.md §1.4) — before ctrl/meta
+	// 4) Cursor motion & history recall — before ctrl/meta
 	// passthrough so modified arrows / editing chords aren't swallowed.
 	switch k.Code {
 	case tea.KeyLeft:
@@ -156,16 +173,21 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 			m.cursor = lineEndOf(runesOf(m.buffer), m.cursor)
 			return Outcome{}
 		case 'd':
-			// Ctrl-D = forward delete a rune (ui-input.md §1.5).
+			// Ctrl-D = forward delete a rune.
 			m.killForwardChar()
 			return Outcome{}
 		case 'w':
-			// Ctrl-W = kill previous word.
-			m.killRange(prevWord(runesOf(m.buffer), m.cursor), m.cursor)
+			// Ctrl-W = kill the previous WORD (whitespace-delimited / unix-word-rubout), so a
+			// single kill wipes a whole path or URL back to the preceding space.
+			m.killRange(prevBigWord(runesOf(m.buffer), m.cursor), m.cursor)
+			return Outcome{}
+		case 'r':
+			// Ctrl-R = reverse-i-search through prompt history.
+			m.startSearch()
 			return Outcome{}
 		case 'k':
 			// Ctrl-K = kill to end of line; AT EOL it eats the '\n' (joins the next
-			// line). Ported from MultilineInput.tsx (ui-input.md §1.5).
+			// line).
 			rs := runesOf(m.buffer)
 			end := lineEndOf(rs, m.cursor)
 			to := end
@@ -188,7 +210,7 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		return Outcome{}
 	}
 
-	// 6) Alt/Meta chords (Emacs word motion + word kill, ui-input.md §1.4/§1.5).
+	// 6) Alt/Meta chords (Emacs word motion + word kill).
 	if alt && !ctrl {
 		switch k.Code {
 		case 'b':
@@ -208,16 +230,61 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 
 	// 7) Printable input. Insert the glyph at the cursor. KeyPressMsg carries the
 	// printable characters in Text; guard with isPrintable as defense so a raw
-	// escape sequence can never leak (ui-input.md §1.8).
+	// escape sequence can never leak.
 	if k.Text != "" && isPrintable(k.Text) {
 		m.insert(k.Text)
 	}
 	return Outcome{}
 }
 
+// handleSearchKey drives reverse-i-search (Ctrl-R) while active: typed runes filter prompt
+// history (newest-first), Ctrl-R steps to the next older match, Backspace edits the query,
+// Esc cancels (restoring the pre-search draft), Enter accepts the match and submits it, and
+// any other key exits search KEEPING the match and is then processed normally.
+func (m *Model) handleSearchKey(k keyMsg) Outcome {
+	switch {
+	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
+		m.buffer = m.searchPrevBuf
+		m.cursor = clampInt(m.searchPrevCursor, 0, m.runeLen())
+		m.endSearch()
+		return Outcome{}
+	case isEnter(k):
+		m.endSearch()
+		if m.trimEmpty() {
+			return Outcome{}
+		}
+		return Outcome{Submit: &SubmitResult{Text: trim(m.buffer), OK: true}}
+	case isCtrlRune(k, 'r'):
+		if next := m.reverseSearch(m.searchQuery, m.searchHit); next >= 0 {
+			m.searchHit = next
+			m.recall(m.history[next])
+		}
+		return Outcome{}
+	case k.Code == tea.KeyBackspace:
+		if r := []rune(m.searchQuery); len(r) > 0 {
+			m.searchQuery = string(r[:len(r)-1])
+			m.applySearch()
+		}
+		return Outcome{}
+	}
+	if k.Text != "" && isPrintable(k.Text) {
+		m.searchQuery += k.Text
+		m.applySearch()
+		return Outcome{}
+	}
+	// Any other key (arrows, ctrl chords) leaves search keeping the match, then re-routes.
+	m.endSearch()
+	return m.handleKey(k)
+}
+
+// isCtrlRune reports whether k is Ctrl+<r> (lowercase rune), tolerating the upper-case and
+// control-code encodings terminals use.
+func isCtrlRune(k keyMsg, r rune) bool {
+	return k.Mod&tea.ModCtrl != 0 && (k.Code == r || k.Code == r-32)
+}
+
 // handleBackspace dispatches Backspace by modifier precedence (super → killLine,
-// Alt → kill prev word, else plain char delete), matching MultilineInput.tsx
-// (ui-input.md §1.5).
+// Alt → kill prev word, else plain char delete).
 func (m *Model) handleBackspace(super, alt bool) {
 	switch {
 	case super:
@@ -251,7 +318,7 @@ func (m *Model) killForwardChar() {
 }
 
 // activeSuggestions returns the palette rows visible right now: only when the
-// composer is focused, not busy, and the draft opens with "/" (ui-input.md §1.9).
+// composer is focused, not busy, and the draft opens with "/".
 func (m *Model) activeSuggestions() []Command {
 	if !m.focus || m.busy {
 		return nil
@@ -260,7 +327,7 @@ func (m *Model) activeSuggestions() []Command {
 }
 
 // isEnter reports whether a key counts as Enter: Return, keypad-Enter, or a bare
-// line-feed all submit (ui-input.md §1.2 item 4).
+// line-feed all submit.
 func isEnter(k keyMsg) bool {
 	switch k.Code {
 	case tea.KeyEnter, tea.KeyKpEnter:

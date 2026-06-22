@@ -8,7 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Additional jsonSink.test.ts parity: a failed tool call still exits 0 (recoverable
+// Additional sink behavior: a failed tool call still exits 0 (recoverable
 // model context), a cancelled turn drops its streamed buffer, an error event flushes
 // buffered prose first, an unserializable tool error degrades the line (not throw),
 // and events emitted after finish are dropped.

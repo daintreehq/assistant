@@ -8,13 +8,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// composer_ported_test.go ports the remaining MultilineInput.test.tsx editor-key
+// composer_ported_test.go exercises the remaining editor-key
 // contract (forward-delete, Home/^A/^E, Alt+D, ^U, never-insert-chords) and the
-// Composer.test.tsx presentation (single › glyph, queued-count surface/omit, restore
+// composer presentation (single › glyph, queued-count surface/omit, restore
 // then edit+submit, the ^O hint promotion). The existing composer_test.go covers
 // kill-ring/word-motion/history/slash/paste/wrap; this fills the gaps.
 
-// --- editor key contract (MultilineInput.test.tsx) ---
+// --- editor key contract ---
 
 func TestForwardDeleteAtCursor(t *testing.T) {
 	m := newModel()
@@ -90,7 +90,7 @@ func TestMultilinePasteNeverSubmits(t *testing.T) {
 	}
 }
 
-// --- presentation (Composer.test.tsx) ---
+// --- presentation ---
 
 func TestView_SinglePromptGlyph(t *testing.T) {
 	m := newModel()

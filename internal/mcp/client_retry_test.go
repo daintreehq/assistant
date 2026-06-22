@@ -10,7 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
-// Port of mcpClientRetry.test.ts (#123). Read-only callers retry a transient
+// Client-retry contract (#123). Read-only callers retry a transient
 // transport error; mutating callers stay single-shot (Retries defaults to 0); a
 // non-transient error is never retried even when retries are allowed; the timeout is
 // threaded into the per-attempt deadline; and binding-terminal markers

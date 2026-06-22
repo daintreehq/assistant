@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Ports watcherMultiTerminal.test.ts: batching, recentOutput-vs-getOutput
+// Covers multi-terminal watcher behavior: batching, recentOutput-vs-getOutput
 // fallback, deep getOutput on contains, terminal.list cross-checks, explore-mode
 // waitingReason routing, mixed-batch classification, and supervisor promotion.
 

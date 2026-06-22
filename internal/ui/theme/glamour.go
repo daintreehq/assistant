@@ -7,7 +7,7 @@ import (
 )
 
 // GlamourStyles builds the glamour v2 ansi.StyleConfig for this theme, mirroring
-// the semantic styling map in ui-transcript.md §8:
+// the semantic styling map:
 //
 //	body prose      → terminal default foreground (NEVER forced white)
 //	headings        → accent green + bold

@@ -11,7 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// view.go renders ONLY the live footer (ui-transcript.md §1/§5/§6): the active turn
+// view.go renders ONLY the live footer: the active turn
 // + LiveRunStatus (driven by domain.RunPhase) + approval sheet OR composer + status
 // line. Everything sealed lives in native scrollback and never appears here. The
 // View also carries the window title (attention count) and stays on the NORMAL
@@ -32,7 +32,7 @@ func (m Model) View() tea.View {
 	return v
 }
 
-// windowTitle mirrors the unresolved attention count (ui-transcript.md §11):
+// windowTitle mirrors the unresolved attention count:
 // "Daintree ⚠ N" when N>0, else "Daintree".
 func (m Model) windowTitle() string {
 	n := m.attentionN
@@ -67,18 +67,24 @@ func (m Model) footer() string {
 	var b strings.Builder
 	switch m.view {
 	case viewOperations:
-		b.WriteString(indentLines(renderOperations(m.theme, m.dashboard, m.activePanel, domain.NowMS(), w), LeftPad))
+		// Bound the deck like the help view so a long ops list can't make the inline View
+		// taller than the terminal and scroll its top into native scrollback (#1613).
+		ops := clampHeight(renderOperations(m.theme, m.dashboard, m.activePanel, domain.NowMS(), w), m.rows-2, m.theme)
+		b.WriteString(indentLines(ops, LeftPad))
 		b.WriteByte('\n')
 		b.WriteString(indentLines(m.theme.Dim().Render("Esc back · ^O home"), LeftPad))
 		return b.String()
 	case viewHelp:
-		b.WriteString(indentLines(renderCommandCellText(m.theme, "Help", commands.HelpTextUI(), w), LeftPad))
+		// Bound the (now-reachable) help so a long list can't make the inline View taller
+		// than the terminal — that would scroll the top into native scrollback (#1613).
+		help := clampHeight(renderCommandCellText(m.theme, "Help", commands.HelpTextUI(), w), m.rows-2, m.theme)
+		b.WriteString(indentLines(help, LeftPad))
 		b.WriteByte('\n')
 		b.WriteString(indentLines(m.theme.Dim().Render("Esc back"), LeftPad))
 		return b.String()
 	}
 
-	// Home (ControlRoom.tsx band order): the live in-flight turn → StatusLine → Composer.
+	// Home band order: the live in-flight turn → StatusLine → Composer.
 	// The status/approval + composer form the FIXED bottom band (always whole); the live
 	// turn sits above it.
 	//
@@ -128,14 +134,36 @@ func (m Model) footer() string {
 func (m Model) bottomBand(w int) string {
 	var b strings.Builder
 	if m.pending != nil {
-		b.WriteString(indentLines(renderApproval(m.theme, m.pending.req, m.pending.showArgs, w), LeftPad))
+		b.WriteString(indentLines(renderApproval(m.theme, m.pending, w), LeftPad))
 		b.WriteString("\n\n")
 	} else if sl := m.statusView(w); sl != "" {
 		b.WriteString(indentLines(sl, LeftPad))
 		b.WriteString("\n\n")
 	}
+	// Staged-Ctrl+C cue: a single warning line directly above the composer while the
+	// quit is armed, so the confirming second press is discoverable.
+	if m.quitArmed {
+		b.WriteString(indentLines(m.theme.Warning().Render("Press Ctrl+C again to exit"), LeftPad))
+		b.WriteByte('\n')
+	}
 	b.WriteString(indentLines(m.composerView(w), LeftPad))
 	return b.String()
+}
+
+// clampHeight keeps the first n lines of s, replacing the last kept line with a dim "…"
+// marker when truncated, so a long STATIC view (help / ops deck) can never make the inline
+// View taller than the terminal (which would scroll its top into native scrollback, #1613).
+func clampHeight(s string, n int, th theme.Theme) string {
+	if n < 1 {
+		n = 1
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	lines = lines[:n]
+	lines[n-1] = th.Dim().Render("… (resize taller for the full list)")
+	return strings.Join(lines, "\n")
 }
 
 // lineCount is the number of text lines in s (0 for empty). Footer content is pre-
@@ -221,7 +249,7 @@ func (m Model) composerView(w int) string {
 		QueueDepth:  len(m.queuedInput),
 		Cancellable: &cancellable,
 		Attention:   m.attentionN > 0,
-		Placeholder: "Ask Daintree…",
+		Placeholder: "Ask Daintree…  ·  / for commands",
 	})
 }
 
@@ -252,7 +280,6 @@ func (m Model) statusView(w int) string {
 		Model:       m.model,
 		AttentionN:  m.attentionN,
 		TopSeverity: m.dashboard.topSeverity(),
-		Agents:      len(m.dashboard.Agents),
 		Degraded:    m.degraded,
 		ActiveTone:  aTone,
 		ActiveLabel: aLabel,

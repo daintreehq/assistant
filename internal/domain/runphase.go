@@ -3,7 +3,7 @@ package domain
 // RunPhase is the explicit run lifecycle of the active turn. The cockpit's
 // liveness is driven from this value, NEVER inferred from "is assistantText
 // empty" (that inference is the bug that makes spinners vanish mid-work).
-// Shared between the agent loop and the UI. Spec: docs/port/_interaction-ux.md §1.
+// Shared between the agent loop and the UI.
 type RunPhase int
 
 const (

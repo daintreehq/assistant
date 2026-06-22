@@ -9,8 +9,8 @@ import (
 // ArtifactStore is the per-session overflow store: oversized serialized tool
 // results are stashed here under an artifact_<uuid8> id and surfaced to the model
 // via a truncation stub so it can page them back with artifact.read. It keeps
-// INSERTION ORDER (TS Map iteration) so eviction is oldest-first. Bounded at
-// MaxStoredArtifacts (64). Spec: agent-loop.md §9.
+// INSERTION ORDER so eviction is oldest-first. Bounded at
+// MaxStoredArtifacts (64).
 type ArtifactStore struct {
 	keys []string          // insertion-ordered ids (for oldest-first eviction)
 	data map[string]string // id → full serialized result
@@ -31,7 +31,7 @@ func (a *ArtifactStore) Get(id string) (string, bool) {
 }
 
 // set stores a value under a fresh id, evicting oldest-first while at/over the
-// cap (the while-loop matches the TS eviction before insert).
+// cap (eviction happens before insert).
 func (a *ArtifactStore) set(value string) string {
 	for len(a.keys) >= domain.MaxStoredArtifacts {
 		oldest := a.keys[0]
@@ -46,7 +46,7 @@ func (a *ArtifactStore) set(value string) string {
 
 // truncationResult is the inner `result` object of an overflow stub. Field order
 // is load-bearing (the artifact-read round-trip test re-serializes a slice and
-// checks it stays under the cap — spec §9 wire-shape contract). Optional fields
+// checks it stays under the cap — wire-shape contract). Optional fields
 // use omitempty / pointers so an absent artifactId/errorCode is dropped, never
 // emitted as null.
 type truncationResult struct {
@@ -68,8 +68,8 @@ type truncationStub struct {
 }
 
 // fullPayload is the normal (non-truncated) serialized result. result/error are
-// emitted with omitempty so they match the TS JSON.stringify({ok,summary,result,
-// error}) shape (undefined fields dropped).
+// emitted with omitempty so the {ok,summary,result,error} shape drops empty
+// fields.
 type fullPayload struct {
 	Ok      bool              `json:"ok"`
 	Summary string            `json:"summary"`
@@ -79,7 +79,7 @@ type fullPayload struct {
 
 // SerializeToolResult serializes a tool result to JSON, truncating an oversized
 // one into a valid-JSON artifact stub (NEVER a sliced-invalid mid-JSON string —
-// spec §9 / issue #78). When the full serialization exceeds MaxToolResultChars
+// issue #78). When the full serialization exceeds MaxToolResultChars
 // (8000) it stashes the whole thing in artifactStore (if provided) and returns a
 // stub the model can page with artifact.read. artifactStore may be nil (e.g.
 // rehydration), in which case the note says the full result is unretrievable.
@@ -95,17 +95,17 @@ func SerializeToolResult(res domain.ToolResult, artifactStore *ArtifactStore) st
 		b = fb
 	}
 	s := string(b)
-	// The cap is in CHARACTERS, not bytes (TS compares JSON string .length, a
-	// UTF-16/char count — not Buffer.byteLength). A multibyte-heavy result whose
+	// The cap is in CHARACTERS, not bytes (it compares the JSON string's
+	// character count, not its byte length). A multibyte-heavy result whose
 	// byte length exceeds the cap but whose rune count does not must NOT truncate.
 	totalChars := charLen(s)
-	totalBytes := len(s) // Buffer.byteLength → byte length
+	totalBytes := len(s) // byte length
 	if totalChars <= domain.MaxToolResultChars {
 		return s
 	}
 
 	// Overflow path — build a valid-JSON stub. Slice on rune boundaries so a
-	// multibyte rune is never split (spec §15.3).
+	// multibyte rune is never split.
 	preview := sliceChars(s, domain.TruncationPreviewChars)
 	previewLen := charLen(preview)
 
@@ -162,8 +162,8 @@ func sliceChars(s string, n int) string {
 	return s
 }
 
-// charLen returns the rune count of s (the faithful char-count for slicing; see
-// spec §15.3 on the UTF-16 vs rune divergence — rune count is chosen).
+// charLen returns the rune count of s (the faithful char-count for slicing;
+// rune count is chosen over a UTF-16 code-unit count).
 func charLen(s string) int {
 	count := 0
 	for range s {

@@ -4,14 +4,11 @@
 //
 // This package imports NO other internal package and nothing from the UI,
 // network, or storage layers. It is the shared spine every other package
-// compiles against. Port specs:
-//   - docs/port/domain-config.md  (§2 schemas, §8 ids/timestamps)
-//   - docs/port/_contracts.md     (tool/risk/severity inventory)
-//   - docs/port/_interaction-ux.md (RunPhase / TurnStep model — shared agent+ui)
+// compiles against.
 package domain
 
 // RiskClass drives the confirmation matrix and tier gating.
-// Order per schemas.ts RiskClass (NB: differs from CLAUDE.md prose).
+// Order differs from CLAUDE.md prose.
 type RiskClass string
 
 const (
@@ -247,7 +244,7 @@ const (
 	ActionOpenReview    RecommendedActionVerb = "open_review"
 )
 
-// --- plain string-union types (schemas.ts §2.5) ---
+// --- plain string-union types ---
 
 // AutomationGrantActorType is the actor an automation grant authorizes.
 type AutomationGrantActorType string

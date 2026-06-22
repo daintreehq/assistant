@@ -1,5 +1,5 @@
 // Package config resolves the assistant's runtime configuration with the
-// trusted-env security boundary. Spec: docs/port/domain-config.md §1.
+// trusted-env security boundary.
 //
 // Resolution order (highest priority first):
 //  1. explicit overrides (CLI flags)
@@ -33,7 +33,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// DEFAULTS holds the built-in default values (domain-config.md §1.3). These are
+// DEFAULTS holds the built-in default values. These are
 // the CODE defaults (glm-5p2 / deepseek-v4-flash), NOT the CLAUDE.md prose.
 var DEFAULTS = struct {
 	FireworksBaseURL string
@@ -58,7 +58,7 @@ var stateRootSubpath = filepath.Join(".daintree", "assistant-cli")
 var logDirSubpath = filepath.Join(".daintree", "logs")
 
 // AppConfig is the fully resolved configuration. Optional string fields are ""
-// when unset (the TS optionals).
+// when unset.
 type AppConfig struct {
 	ProjectPath string
 	StateDir    string
@@ -125,7 +125,7 @@ var (
 // slug + "-" + sha256(rawId)[:8 hex]. Slug: lowercase, [^a-z0-9_-]→"-", collapse
 // repeated "-", strip leading/trailing "-", truncate to 40, strip trailing "-"
 // again. If the slug is empty, just the 8-hex hash. WIRE-COMPATIBLE: path names
-// depend on this exact algorithm. Spec: domain-config.md §1.7.
+// depend on this exact algorithm.
 func ProjectIDToDir(rawID string) string {
 	sum := sha256.Sum256([]byte(rawID))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -268,7 +268,7 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	return cfg, nil
 }
 
-// resolveTier implements the fail-closed tier resolution (domain-config.md §1.5).
+// resolveTier implements the fail-closed tier resolution.
 // Default when unset is system; an explicitly-set INVALID value falls back to the
 // least-privileged supervisor, never silently to system.
 func resolveTier(override *string, trusted string) domain.Tier {
@@ -327,8 +327,8 @@ func derefOr(p *string, fallback string) string {
 	return *p
 }
 
-// DescribeConfig returns a secret-redacted view for /status (domain-config.md
-// §1.7). fireworksApiKey and mcpToken are redacted; projectInstructions shown as
+// DescribeConfig returns a secret-redacted view for /status.
+// fireworksApiKey and mcpToken are redacted; projectInstructions shown as
 // a byte count; mcpUrl notes degraded mode when unset.
 func DescribeConfig(cfg AppConfig) map[string]string {
 	out := map[string]string{
@@ -363,7 +363,7 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 }
 
 // placeholderUnset surfaces a Daintree-injected (non-secret) value, or the
-// "(unset)" placeholder when it is empty — matches the TS describeConfig contract.
+// "(unset)" placeholder when it is empty.
 func placeholderUnset(s string) string {
 	if s == "" {
 		return "(unset)"

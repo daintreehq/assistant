@@ -131,11 +131,11 @@ func TestHashTail_Stable(t *testing.T) {
 	}
 }
 
-// TestHashTail_NonASCIIUTF16Parity locks the UTF-16-code-unit parity with the TS
-// charCodeAt hash. A non-BMP rune (🚀) is two surrogate-pair code units there;
-// ranging the Go string by rune would feed ONE code point > 0xFFFF and diverge,
-// re-classifying the watcher every tick. The expected values are the TS algorithm
-// over UTF-16 units (0xD83D,0xDE80 for 🚀): h=(h<<5)-h+unit, >>>0, base36.
+// TestHashTail_NonASCIIUTF16Parity locks the UTF-16-code-unit hashing. A non-BMP
+// rune (🚀) is two surrogate-pair code units; ranging the Go string by rune would
+// feed ONE code point > 0xFFFF and diverge, re-classifying the watcher every tick.
+// The expected values are the hash algorithm over UTF-16 units (0xD83D,0xDE80 for
+// 🚀): h=(h<<5)-h+unit, >>>0, base36.
 func TestHashTail_NonASCIIUTF16Parity(t *testing.T) {
 	if got := hashTail("🚀"); got != "1202r" {
 		t.Fatalf("hashTail(🚀) = %q, want 1202r (UTF-16 surrogate-pair parity)", got)

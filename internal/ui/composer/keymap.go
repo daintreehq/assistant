@@ -4,7 +4,7 @@ import "charm.land/bubbles/v2/key"
 
 // Hint is one entry in the adaptive hint row: a key cue and its action label.
 // We reuse Bubbles' key.Binding for the underlying help primitives, but the
-// composer's hints are PROMOTED/REORDERED per state (ui-input.md §1.11), so we
+// composer's hints are PROMOTED/REORDERED per state, so we
 // carry a flat {Key, Action} the renderer can order — the binding only supplies
 // the canonical help text.
 type Hint struct {
@@ -34,7 +34,7 @@ func defaultKeymap() keymap {
 }
 
 // hintRow builds the adaptive hint row. The ORDER adapts but the SET is stable
-// (promotion, not new chrome) — ported from Composer.tsx §1.11:
+// (promotion, not new chrome):
 //   - cancelActive = cancellable (fall back to busy when the caller doesn't
 //     distinguish turn kinds).
 //   - leadWithOps = actionable attention pending AND no cancellable turn in

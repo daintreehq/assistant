@@ -1,6 +1,6 @@
 package domain
 
-// Schema constants (schemas.ts §2.7).
+// Schema constants.
 const (
 	// VerificationEvidencePrefix marks an evidence string that carries a
 	// serialized VerificationResult.
@@ -11,7 +11,7 @@ const (
 	JSONOutputSchemaVersion = 1
 )
 
-// OneShotExitCode is the one-shot exit-code mapping (schemas.ts ONE_SHOT_EXIT_CODE).
+// OneShotExitCode is the one-shot exit-code mapping.
 // Code 3 (ToolFailure) is RESERVED and never emitted today — the loop has no
 // terminal tool-failure signal — but kept stable so a future change can adopt it
 // without renumbering.
@@ -27,7 +27,7 @@ var OneShotExitCode = struct {
 	ToolFailure: 3,
 }
 
-// Agent-loop magic constants (_contracts.md §6, agent/loop.ts).
+// Agent-loop magic constants.
 const (
 	MaxToolIterations         = 12
 	RepeatFailureWarn         = 2

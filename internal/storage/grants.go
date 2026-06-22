@@ -228,7 +228,7 @@ func (s *Store) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 // grantAuthorizes reports whether a grant authorizes (toolName, riskClass) by the
 // union rule: toolName in the allowed-names list OR riskClass in the allowed-risk
 // list. JSON parsing is tolerant — null/garbage ⇒ an empty list (no panic, no
-// false grant). Spec: storage.md §6 grants.
+// false grant).
 func grantAuthorizes(g domain.AutomationGrantRecord, toolName string, riskClass domain.RiskClass) bool {
 	names := parseStringList(g.AllowedToolNamesJson)
 	for _, n := range names {

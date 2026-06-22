@@ -1,5 +1,5 @@
 // Package mcp connects the assistant to Daintree's local MCP server and exposes a
-// small, degradation-tolerant API. Spec: docs/port/mcp.md.
+// small, degradation-tolerant API.
 //
 // Transport: Streamable HTTP primary, legacy SSE fallback, both with a
 // `Authorization: Bearer <token>` header. The client NEVER throws on
@@ -87,8 +87,7 @@ type Options struct {
 }
 
 // Client is the high-level DaintreeMcpClient. All mutable state is guarded by mu
-// because callers (UI hook, daemon ticks, doctor) may invoke concurrently — the TS
-// original relied on the single-threaded event loop.
+// because callers (UI hook, daemon ticks, doctor) may invoke concurrently.
 type Client struct {
 	cfg config.AppConfig
 
@@ -179,7 +178,6 @@ func (c *Client) statusLocked() Status {
 }
 
 // Connect attempts a connection. NEVER returns an error — always returns Status.
-// See spec §4 for the exact control flow.
 func (c *Client) Connect(ctx context.Context) Status {
 	c.mu.Lock()
 	// 1. Already connected.
@@ -272,7 +270,7 @@ func (c *Client) applyConnected(session *sdkmcp.ClientSession, kind string) {
 	}
 }
 
-// Reconnect closes, resets all state, then connects. See spec §4. Close() already
+// Reconnect closes, resets all state, then connects. Close() already
 // detached+closed the prior low client; here we bump the generation so any call
 // still in flight against the old session can't degrade the fresh one Connect
 // installs.
@@ -306,7 +304,7 @@ func (c *Client) warmToolCache(ctx context.Context) {
 }
 
 // runDriftCheck records server info + missing-documented-tool warnings. Warning
-// only; never affects connected. See spec §7. Two isolated zones: a server-info
+// only; never affects connected. Two isolated zones: a server-info
 // fetch failure must not suppress the drift comparison.
 func (c *Client) runDriftCheck() {
 	c.mu.Lock()
@@ -387,7 +385,7 @@ func (c *Client) markDegraded(err error, gen uint64) {
 	closeLowLevel(old)
 }
 
-// ListTools returns tools cache-first unless force. See spec §5. A real (non-abort)
+// ListTools returns tools cache-first unless force. A real (non-abort)
 // failure degrades the connection.
 func (c *Client) ListTools(ctx context.Context, force bool) ([]ToolInfo, error) {
 	return c.listTools(ctx, force, true)
@@ -440,8 +438,8 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	return out, nil
 }
 
-// CallTool dispatches a tool with retry (read-only callers) + normalization. See
-// spec §6. RETRY-BEFORE-DEGRADE ordering is load-bearing: degrading first would
+// CallTool dispatches a tool with retry (read-only callers) + normalization.
+// RETRY-BEFORE-DEGRADE ordering is load-bearing: degrading first would
 // make the next ensure() throw, killing the retry.
 //
 // READ-ONLY RETRY GUARD: CallOptions.Retries is honored ONLY for tools on the
@@ -536,7 +534,7 @@ func (c *Client) Close() error {
 
 // bearerRoundTripper injects `Authorization: Bearer <token>` on every request.
 // The Go MCP SDK transports take an *http.Client but no header hook, so we wrap
-// the RoundTripper (spec §11: "wrap the underlying *http.Client to inject bearer").
+// the RoundTripper (wrap the underlying *http.Client to inject bearer).
 type bearerRoundTripper struct {
 	token string
 	base  http.RoundTripper

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -9,11 +10,11 @@ import (
 )
 
 // render_turn.go renders a TurnCell (and its user message) to a styled string from
-// its ordered Steps (_interaction-ux.md §5, ui-transcript.md §3-§5). The renderer
+// its ordered Steps. The renderer
 // takes width + expanded + now and is pure given (cell, theme, md, width, ...) so
 // the scrollback queue can re-render frozen blocks fresh on resize.
 
-// renderUserMessage renders the "YOU" card (UserMessageCard.tsx): a dim+bold "YOU"
+// renderUserMessage renders the "YOU" card: a dim+bold "YOU"
 // label on its OWN line, then the wrapped message body with one left accent bar
 // (▏, U+258F) per row. A system-origin turn (UserText == "") renders nothing.
 func renderUserMessage(th theme.Theme, text string, width int) string {
@@ -22,7 +23,7 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	}
 	g := th.Glyphs
 	// The bar carries the visual weight; the dim+bold "YOU" label is a quiet
-	// who-said-what anchor above it (UserMessageCard.tsx). The bar color comes from
+	// who-said-what anchor above it. The bar color comes from
 	// the theme's UserMessageSurface (a cool neutral gray, NOT accent green — green
 	// is reserved for Daintree's identity).
 	surface := th.UserMessageSurface()
@@ -40,7 +41,7 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	// Quiet anchor on its own line — dim so it never competes with the bar.
 	b.WriteString(th.Dim().Bold(true).Render("YOU"))
 	// Reserve the bar column (1) + the gap/padding (1) + a right breathing margin
-	// (UserMessageCard.tsx: inner = max(10, width-4)); one bar per wrapped row.
+	// (inner = max(10, width-4)); one bar per wrapped row.
 	inner := width - 4
 	if inner < 10 {
 		inner = 10
@@ -58,7 +59,7 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 }
 
 // renderMarker renders the "◆ DAINTREE" marker line, with a dim "· received" only
-// while phase == received (ui-transcript.md §5).
+// while phase == received.
 func renderMarker(th theme.Theme, phase domain.RunPhase, active bool) string {
 	g := th.Glyphs
 	marker := th.Accent().Render(g.Brand + " DAINTREE")
@@ -67,6 +68,11 @@ func renderMarker(th theme.Theme, phase domain.RunPhase, active bool) string {
 	}
 	return marker
 }
+
+// stallThresholdMs is how long the active turn can go with no streamed token / tool
+// event before the live status flips to a "still working" cue — distinguishing a slow
+// model/tool from a hung one (the liveness gap).
+const stallThresholdMs = 5000
 
 // renderLiveStatus renders the LiveRunStatus line ("⠋ Analyzing request · 0.4s")
 // for the silent-work phases ONLY (driven by the explicit phase, never emptiness).
@@ -84,10 +90,17 @@ func renderLiveStatus(th theme.Theme, t *TurnCell, spinnerFrame int, now int64) 
 	if len(g.Spinner) > 0 {
 		spin = g.Spinner[spinnerFrame%len(g.Spinner)]
 	}
-	// LiveRunStatus.tsx: the spinner (ThinkingDot) is a PLAIN <text> (terminal
-	// default fg, no tone), and the label + elapsed are DIM (attribute-only faint),
-	// NOT muted gray. Elapsed shows only once ≥300ms (elapsedToken).
-	return th.Body().Render(spin) + th.Dim().Render(" "+label+elapsedToken(t.PhaseStartedAt, now))
+	// Elapsed is CUMULATIVE over the whole turn (t.StartedAt), not the current phase, so it
+	// doesn't reset to 0 on every transition. Shown only once ≥300ms (elapsedToken).
+	elapsed := elapsedToken(t.StartedAt, now)
+	// Stalled: nothing has streamed for stallThresholdMs — surface "still working" in the
+	// warning tone so a slow model/tool reads differently from a hung one.
+	if t.LastActivityAt > 0 && now-t.LastActivityAt > stallThresholdMs {
+		return th.Body().Render(spin) + th.Warning().Render(" "+label+" · still working"+elapsed)
+	}
+	// The spinner (ThinkingDot) is a PLAIN <text> (terminal default fg,
+	// no tone), and the label + elapsed are DIM (attribute-only faint), NOT muted gray.
+	return th.Body().Render(spin) + th.Dim().Render(" "+label+elapsed)
 }
 
 // renderTurn renders the full turn cell: user message, marker, ordered steps
@@ -113,7 +126,10 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	if pre := renderTurnPreamble(th, t, width, active, active || hasResponded(t)); pre != "" {
 		parts = append(parts, pre)
 	}
-	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
+	// Footer/seal render: showTail = active, so an active turn surfaces its still-growing
+	// final paragraph as a dim live preview (the flush passes showTail=false to keep that
+	// paragraph out of scrollback). A sealed turn (active=false) renders full markdown.
+	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active, active); body != "" {
 		parts = append(parts, body)
 	}
 	if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
@@ -132,7 +148,7 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 	var b strings.Builder
 	if um := renderUserMessage(th, t.UserText, width); um != "" {
 		b.WriteString(um)
-		// UserMessageCard.tsx marginBottom={1}: a blank line separates the YOU card
+		// A blank line separates the YOU card
 		// from the ◆ DAINTREE marker so the exchange breathes.
 		b.WriteString("\n\n")
 	}
@@ -155,7 +171,7 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 // Tool grouping is computed over the sub-range; the incremental flush only ever passes a
 // range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
 // branch tree is never split across the flush frontier.
-func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast bool) string {
+func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast, showTail bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
 		to = len(steps)
@@ -183,7 +199,7 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 		switch step.Kind {
 		case StepProse:
 			live := liveLast && g == lastIdx
-			if rendered := renderProse(md, step, contentW, live); rendered != "" {
+			if rendered := renderProse(md, th, step, contentW, live, showTail); rendered != "" {
 				if afterTool {
 					b.WriteByte('\n')
 				}
@@ -250,7 +266,13 @@ func hasProse(t *TurnCell) bool {
 // "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
 // reflowing paragraph; md.Render(settled-prefix) is a byte-exact prefix of the eventual full
 // render, so the flush and the seal agree row-for-row.
-func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live bool) string {
+//
+// showTail splits the two consumers: the FOOTER (showTail=true) surfaces the still-growing
+// paragraph as a dim, un-glamoured live preview BELOW the settled markdown so the answer is
+// visible as it streams; the FLUSH (showTail=false) withholds it, so only completed
+// paragraphs ever commit to scrollback. The preview re-renders as markdown the instant the
+// paragraph completes.
+func renderProse(md *markdown.Renderer, th theme.Theme, step TurnStep, contentW int, live, showTail bool) string {
 	if step.Text == "" {
 		return ""
 	}
@@ -258,17 +280,48 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live bool) 
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
 	idx := strings.LastIndex(step.Text, "\n\n")
+	var settled, tail string
 	if idx < 0 {
-		return "" // no completed paragraph yet — withhold the still-growing one
+		tail = step.Text // no completed paragraph yet — it is all still growing
+	} else {
+		settled = strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
+		tail = step.Text[idx+2:]
 	}
-	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
+	if !showTail {
+		// Flush path: only completed paragraphs are immutable, so withhold the growing one.
+		return settled
+	}
+	preview := livePreview(th, tail, contentW)
+	switch {
+	case settled != "" && preview != "":
+		return settled + "\n" + preview
+	case preview != "":
+		return preview
+	default:
+		return settled
+	}
+}
+
+// livePreview renders the in-progress paragraph as flowing dim text wrapped to width — an
+// un-glamoured live preview (markdown syntax shows literally until the paragraph seals).
+// Each row is dimmed individually so the faint attribute survives the row breaks.
+func livePreview(th theme.Theme, text string, width int) string {
+	flowed := strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	if flowed == "" {
+		return ""
+	}
+	lines := strings.Split(wrapCells(flowed, width), "\n")
+	for i, l := range lines {
+		lines[i] = th.Dim().Render(l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.
 func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 	g := th.Glyphs
 	glyph, tone := noteGlyph(th, n.Level)
-	// TurnCellView.tsx note row: a single toned span carries the continuation spine
+	// Note row: a single toned span carries the continuation spine
 	// + the toned glyph + a separating space ("│ " already ends in a space), then the
 	// note text renders at BODY color (a bare child — NOT dim). The spine tone is
 	// green info / yellow warn / red error.
@@ -276,7 +329,7 @@ func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 	return truncateCells(spine+th.Body().Render(n.Text), width)
 }
 
-// noteGlyph maps a note level to (glyph, tone), mirroring TurnCellView.tsx:
+// noteGlyph maps a note level to (glyph, tone):
 // error → failed glyph + danger, warn → attention "!" + warning, else → bullet "·"
 // + the "active" tone (cyan info — NOT accent green).
 func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
@@ -285,7 +338,7 @@ func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 	case NoteError:
 		return g.Failed, "danger"
 	case NoteWarn:
-		// theme.ts `attention` glyph is "!" in BOTH the unicode and ASCII sets.
+		// The attention glyph is "!" in BOTH the unicode and ASCII sets.
 		return "!", "warning"
 	case NoteSuccess:
 		// A filled connection dot in accent green (the "● Connected to Daintree MCP"
@@ -335,8 +388,17 @@ func collectToolGroups(steps []TurnStep) []toolGroup {
 	return groups
 }
 
-// renderToolGroup renders a contiguous activity run as a branch tree.
+// renderToolGroup renders a contiguous activity run as a branch tree. In the DEFAULT
+// (collapsed) view a FINISHED homogeneous read/inspect batch compacts to one summary row
+// (ui-transcript.md §4 / _interaction-ux.md §6: "✓ Inspected 6 files · 412ms"); ^X /
+// expanded reveals the individual rows again. Compaction is a pure function of
+// (expanded, activities) so the incremental flush and the seal render it identically.
 func renderToolGroup(th theme.Theme, acts []Activity, expanded bool, spinnerFrame int, now int64, width int) string {
+	if !expanded {
+		if label, total, ok := compactableBatch(acts); ok {
+			return renderBatchSummaryRow(th, label, total, width)
+		}
+	}
 	var b strings.Builder
 	for i, a := range acts {
 		if i > 0 {
@@ -345,4 +407,77 @@ func renderToolGroup(th theme.Theme, acts []Activity, expanded bool, spinnerFram
 		b.WriteString(renderActivityRow(th, a, i == len(acts)-1, expanded, spinnerFrame, now, width))
 	}
 	return b.String()
+}
+
+// batchSummaryTemplate maps a compactable read/inspect tool to its "%d"-pluralized batch
+// label. ONLY the high-frequency, read-only tools collapse — every other batch renders
+// each row so distinct verbs/targets stay visible. "" means "never compact this tool".
+func batchSummaryTemplate(name string) string {
+	switch name {
+	case "fs.read":
+		return "Inspected %d files"
+	case "fs.list":
+		return "Listed %d directories"
+	case "fs.search":
+		return "Searched %d times"
+	case "terminal.read":
+		return "Read %d terminals"
+	default:
+		return ""
+	}
+}
+
+// compactableBatch decides whether a contiguous tool run collapses to one summary row. It
+// qualifies only when the run has ≥2 calls that are ALL the same compactable tool AND ALL
+// succeeded — a single call is already minimal, and a failure/cancel must stay expanded so
+// its outcome is never hidden behind a tidy summary. Returns the rendered label and the
+// batch's wall-clock duration (first start → last end).
+func compactableBatch(acts []Activity) (label string, totalMs int64, ok bool) {
+	if len(acts) < 2 {
+		return "", 0, false
+	}
+	tmpl := batchSummaryTemplate(acts[0].Name)
+	if tmpl == "" {
+		return "", 0, false
+	}
+	var minStart, maxEnd int64
+	for _, a := range acts {
+		if a.Name != acts[0].Name || a.State != ActDone {
+			return "", 0, false
+		}
+		if a.StartedAt > 0 && (minStart == 0 || a.StartedAt < minStart) {
+			minStart = a.StartedAt
+		}
+		if a.EndedAt > maxEnd {
+			maxEnd = a.EndedAt
+		}
+	}
+	if minStart > 0 && maxEnd >= minStart {
+		totalMs = maxEnd - minStart
+	}
+	return fmt.Sprintf(tmpl, len(acts)), totalMs, true
+}
+
+// renderBatchSummaryRow renders the collapsed batch row "<branch> ✓ <label> <total>", with
+// the duration right-aligned into the same gutter the per-row tree uses so a compacted and
+// an expanded batch share one column grid. The batch is a closed group → the last branch.
+func renderBatchSummaryRow(th theme.Theme, label string, totalMs int64, width int) string {
+	g := th.Glyphs
+	var b strings.Builder
+	b.WriteString(th.Muted().Render(g.BranchLast))
+	b.WriteByte(' ')
+	b.WriteString(styleFor(th, "success", g.Done))
+	b.WriteByte(' ')
+	b.WriteString(th.Body().Render(label))
+	if totalMs > 0 {
+		right := formatDuration(totalMs)
+		used := cellWidth(b.String())
+		if p := width - cellWidth(right) - used; p > 0 {
+			b.WriteString(strings.Repeat(" ", p))
+		} else {
+			b.WriteByte(' ')
+		}
+		b.WriteString(th.Dim().Render(right))
+	}
+	return truncateCells(b.String(), width)
 }

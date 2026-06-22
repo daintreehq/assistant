@@ -16,8 +16,8 @@ func userContent(req JSONRequest) string {
 	return ""
 }
 
-// Mirrors skillSelector.test.ts "returns the small model's chosen skill ids for
-// the query" — the selection (ids + taskType) is surfaced verbatim.
+// Returns the small model's chosen skill ids for the query — the selection
+// (ids + taskType) is surfaced verbatim.
 func TestSelectorReturnsChosenIDs(t *testing.T) {
 	reg := parityRegistry(t)
 	r := &stubRouter{sel: SkillSelection{

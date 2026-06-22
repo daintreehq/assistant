@@ -12,7 +12,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// buildSecurityFixture lays out the fsToolsSecurity.test.ts tree: a .env, a
+// buildSecurityFixture lays out the security fixture tree: a .env, a
 // private key, an ordinary source file, a NUL-byte binary, several credential
 // stores at varying depths (each with a unique marker so a leak would surface),
 // an ordinary sibling, an uppercase credential dir, and (when supported) a
@@ -81,8 +81,8 @@ func callRead(t *testing.T, root, path string, maxBytes int) tools.ToolResult {
 	return callTool(t, newReadTool(), root, string(b))
 }
 
-// TestSearchPrunesCredentialDirsAtWalkTime is the load-bearing security test
-// (fsToolsSecurity.test.ts #122): the walk must NEVER descend into a credential
+// TestSearchPrunesCredentialDirsAtWalkTime is the load-bearing security test:
+// the walk must NEVER descend into a credential
 // dir. We assert it white-box against walkFiles — the dir's marker file never
 // appears in the walk output, proving the prune fires at walk time (not as a
 // post-hoc isSensitivePath filter on already-collected paths).
@@ -110,8 +110,8 @@ func TestSearchPrunesCredentialDirsAtWalkTime(t *testing.T) {
 	}
 }
 
-// TestSearchNeverReturnsCredentialMarkers ports the fsToolsSecurity.test.ts
-// matrix: searching for each credential dir's unique marker yields zero matches.
+// TestSearchNeverReturnsCredentialMarkers covers the matrix: searching for each
+// credential dir's unique marker yields zero matches.
 func TestSearchNeverReturnsCredentialMarkers(t *testing.T) {
 	root := buildSecurityFixture(t)
 	for _, marker := range []string{"SSH_MARKER_aaa", "AWS_MARKER_bbb", "ENV_MARKER_ccc", "KUBE_MARKER_ddd"} {
@@ -126,7 +126,7 @@ func TestSearchNeverReturnsCredentialMarkers(t *testing.T) {
 	}
 }
 
-// TestSearchSkipsDotEnvContents ports fsToolsSecurity.test.ts: a query that WOULD
+// TestSearchSkipsDotEnvContents: a query that WOULD
 // match inside .env never returns the .env file.
 func TestSearchSkipsDotEnvContents(t *testing.T) {
 	root := buildSecurityFixture(t)
@@ -141,7 +141,7 @@ func TestSearchSkipsDotEnvContents(t *testing.T) {
 	}
 }
 
-// TestListOmitsCredentialDirsAtAnyDepth ports fsToolsSecurity.test.ts: a deep
+// TestListOmitsCredentialDirsAtAnyDepth: a deep
 // listing never surfaces a credential segment anywhere in an entry path.
 func TestListOmitsCredentialDirsAtAnyDepth(t *testing.T) {
 	root := buildSecurityFixture(t)
@@ -159,7 +159,7 @@ func TestListOmitsCredentialDirsAtAnyDepth(t *testing.T) {
 	}
 }
 
-// TestListRefusesCredentialDirDirectly ports fsToolsSecurity.test.ts: listing a
+// TestListRefusesCredentialDirDirectly: listing a
 // credential dir directly (or nested) is refused with FS_SENSITIVE, not an empty
 // success that could be misread as "directory is empty".
 func TestListRefusesCredentialDirDirectly(t *testing.T) {
@@ -172,7 +172,7 @@ func TestListRefusesCredentialDirDirectly(t *testing.T) {
 	}
 }
 
-// TestListStillListsOrdinaryNested ports fsToolsSecurity.test.ts: nested itself is
+// TestListStillListsOrdinaryNested: nested itself is
 // fine — its .aws child is pruned but readme.txt survives.
 func TestListStillListsOrdinaryNested(t *testing.T) {
 	root := buildSecurityFixture(t)
@@ -198,7 +198,7 @@ func TestListStillListsOrdinaryNested(t *testing.T) {
 	}
 }
 
-// TestListRefusesSymlinkToCredentialDir ports fsToolsSecurity.test.ts: a
+// TestListRefusesSymlinkToCredentialDir: a
 // benign-named symlink (cloud → nested/.aws) that RESOLVES to a credential store
 // is refused with FS_SENSITIVE.
 func TestListRefusesSymlinkToCredentialDir(t *testing.T) {

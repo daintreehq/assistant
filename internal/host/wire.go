@@ -1,20 +1,19 @@
-// Package host ports the embedded assistant-host protocol (src/host/**) to Go.
+// Package host implements the embedded assistant-host protocol.
 //
-// TRANSPORT CHANGE vs TS: the TS host spoke over an Electron utility-process
-// MessagePort (structured-clone objects). This Go port speaks stdio NDJSON —
-// one JSON object per line: stdin carries the inbound command stream (first line
-// = SessionDescriptor, every subsequent line = a HostCommand); stdout carries
-// the outbound HostEvent stream; stderr carries human-readable diagnostics.
-// Protocol JSON is NEVER written to stderr (and diagnostics are NEVER written to
-// stdout) — Daintree Zod-validates stdout line-by-line and rejects unknown shapes.
+// The transport is stdio NDJSON — one JSON object per line: stdin carries the
+// inbound command stream (first line = SessionDescriptor, every subsequent line =
+// a HostCommand); stdout carries the outbound HostEvent stream; stderr carries
+// human-readable diagnostics. Protocol JSON is NEVER written to stderr (and
+// diagnostics are NEVER written to stdout) — Daintree Zod-validates stdout
+// line-by-line and rejects unknown shapes.
 //
-// This file is the pure protocol layer (TS protocol.ts): the version constant,
-// the verbatim string vocabularies, the wire event/command types with their JSON
-// shapes, the severity map, and the descriptor/command parsers. No I/O.
+// This file is the pure protocol layer: the version constant, the verbatim string
+// vocabularies, the wire event/command types with their JSON shapes, the severity
+// map, and the descriptor/command parsers. No I/O.
 //
-// Spec: docs/port/host.md (authoritative). The wire contract — event names,
-// command names, field names, vocabulary values, PROTOCOL_VERSION — is the one
-// hard external contract and must stay byte-for-byte with Daintree.
+// The wire contract — event names, command names, field names, vocabulary values,
+// PROTOCOL_VERSION — is the one hard external contract and must stay byte-for-byte
+// with Daintree.
 package host
 
 import (
@@ -27,10 +26,8 @@ import (
 // PROTOCOL_VERSION is the wire-format version. MUST equal Daintree's
 // ASSISTANT_HOST_PROTOCOL_VERSION; Daintree Zod-rejects an unrecognized version.
 //
-// Bumped from the TS value of 1 → 2 for the transport swap (Electron MessagePort
-// structured-clone objects → stdio NDJSON line frames). The framing is a breaking
-// change for any consumer that parsed the old port messages, so the version moves
-// in lockstep. Recorded in docs/port/_newdeps.md and the _scaffold note.
+// It is 2: the transport is stdio NDJSON line frames. The framing is a breaking
+// change for any consumer of an older format, so the version moves in lockstep.
 const ProtocolVersion = 2
 
 // ---------------------------------------------------------------------------
@@ -109,8 +106,8 @@ const (
 	ShutdownExit      HostShutdownReason = "exit"
 )
 
-// severityByResult mirrors Daintree mcpServer.ts SEVERITY_BY_RESULT. It never
-// maps to "critical".
+// severityByResult mirrors Daintree's SEVERITY_BY_RESULT. It never maps to
+// "critical".
 var severityByResult = map[AuditResult]AuditSeverity{
 	AuditSuccess:             SeverityInfo,
 	AuditDedup:               SeverityInfo,
@@ -121,8 +118,7 @@ var severityByResult = map[AuditResult]AuditSeverity{
 	AuditError:               SeverityErrorSev,
 }
 
-// SeverityForResult maps an AuditResult to its AuditSeverity (unknown → error,
-// matching the TS fallthrough on the const map's only undefined case).
+// SeverityForResult maps an AuditResult to its AuditSeverity (unknown → error).
 func SeverityForResult(r AuditResult) AuditSeverity {
 	if sev, ok := severityByResult[r]; ok {
 		return sev
@@ -148,13 +144,13 @@ type SessionDescriptor struct {
 	ResumeSessionID string `json:"resumeSessionId,omitempty"`
 }
 
-// ParseDescriptor decodes + validates a descriptor line. Mirrors the TS
-// isSessionDescriptor narrowing: the six required fields must be present with the
-// right JSON types; resumeSessionId is optional and NOT type-checked. A failing
-// line yields an error (caller emits host:error code bad-descriptor + teardown).
+// ParseDescriptor decodes + validates a descriptor line: the six required fields
+// must be present with the right JSON types; resumeSessionId is optional and NOT
+// type-checked. A failing line yields an error (caller emits host:error code
+// bad-descriptor + teardown).
 func ParseDescriptor(line []byte) (SessionDescriptor, error) {
-	// Decode into a loose map first so we can assert presence+type exactly like
-	// the TS typeof checks (a missing field must fail, not default to zero).
+	// Decode into a loose map first so we can assert presence+type exactly (a
+	// missing field must fail, not default to zero).
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return SessionDescriptor{}, fmt.Errorf("descriptor is not a JSON object: %w", err)
@@ -206,8 +202,8 @@ func wantNumber(raw map[string]json.RawMessage, key string, dst *int64) error {
 	}
 	// A JSON number token starts with '-' or a digit. json.Number (a string kind)
 	// will happily decode a QUOTED number `"7"`, so we must reject a leading quote
-	// ourselves to honor the TS `typeof === "number"` gate (a quoted number is a
-	// string, not a number).
+	// ourselves to honor the number-type gate (a quoted number is a string, not a
+	// number).
 	trimmed := bytes.TrimSpace(v)
 	if len(trimmed) == 0 || trimmed[0] == '"' {
 		return fmt.Errorf("descriptor field %q must be a number", key)
@@ -310,9 +306,9 @@ func normalizeDecision(s string) ConfirmationDecision {
 	}
 }
 
-// ParseCommand decodes + validates an inbound command line. Mirrors the TS
-// isHostCommand rule: object with a string sessionId, then a per-type field
-// check. An unknown type or a missing required field → errNotCommand (drop).
+// ParseCommand decodes + validates an inbound command line: object with a string
+// sessionId, then a per-type field check. An unknown type or a missing required
+// field → errNotCommand (drop).
 func ParseCommand(line []byte) (HostCommand, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(line, &raw); err != nil {

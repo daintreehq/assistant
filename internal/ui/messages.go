@@ -8,7 +8,7 @@ import (
 
 // messages.go is the typed tea.Msg vocabulary the root Model reduces in Update.
 // Every payload is a concrete struct — NO anonymous any payloads — so the message
-// flow is statically checked. Spec: ui-input.md §6/§7, ui-transcript.md §11.
+// flow is statically checked.
 //
 // These come from three sources: the runtime event pump (agent events coalesced
 // into UI msgs), the controller (turn/command/wake completion), and UI-internal
@@ -74,7 +74,7 @@ type PreviewTickMsg struct{}
 // AssistantStartMsg — a new model round is about to stream.
 type AssistantStartMsg struct{}
 
-// AssistantTokensMsg carries COALESCED assistant text (§6.2), never a single
+// AssistantTokensMsg carries COALESCED assistant text, never a single
 // per-token chunk. The coalescer concatenates adjacent tokens in arrival order and
 // flushes ≤16-33ms or before any non-token event.
 type AssistantTokensMsg struct{ Text string }
@@ -93,7 +93,7 @@ type AssistantCancelledMsg struct{ Content string }
 type PhaseMsg struct{ Phase domain.RunPhase }
 
 // ToolBatchMsg announces every parsed tool call as queued BEFORE sequential
-// dispatch (§3) so the footer shows the whole batch at once.
+// dispatch so the footer shows the whole batch at once.
 type ToolBatchMsg struct{ Calls []agent.BatchedToolCall }
 
 // ToolStateMsg promotes one announced call (queued→active→done/failed/waiting).
@@ -160,6 +160,9 @@ type CommandCompleteMsg struct {
 	Text            string
 	ClearTranscript bool
 	Quit            bool
+	// SwitchPanel switches the live view instead of printing a card: PanelHelp → the help
+	// view; PanelInbox/Watchers/Timers/Audit → the ops deck focused on that section.
+	SwitchPanel PanelKey
 }
 
 // --- approval lifecycle ---
@@ -211,7 +214,11 @@ type AttentionBatchMsg struct{ Events []domain.QueueEvent }
 // confirms, cancel the in-flight turn, then quit.
 type ShutdownMsg struct{}
 
-// RedrawMsg is the debounced resize "nuclear redraw" trigger (§11). It re-commits
+// QuitArmExpireMsg disarms the staged-Ctrl+C "press again to exit" window once it
+// lapses. Gen guards against a stale timer disarming a freshly re-armed prompt.
+type QuitArmExpireMsg struct{ Gen int }
+
+// RedrawMsg is the debounced resize "nuclear redraw" trigger. It re-commits
 // the masthead + whole transcript fresh at the new width; the transcript model is
 // left intact (separate from /clear). Nonce dedupes a drag storm.
 type RedrawMsg struct{ Nonce int }

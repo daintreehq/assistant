@@ -8,8 +8,7 @@ import (
 
 // Dashboard is the operations snapshot the deck + status rollup render from. It is
 // built off the loop (in a tea.Cmd) so Update stays cheap, then handed in via
-// DashboardSnapshotMsg. Mirrors the TS `dashboard` reducer state (inbox/timers/
-// audit/agents). Spec: ui-input.md §3.
+// DashboardSnapshotMsg. It holds the inbox, timers, audit, and agents state.
 type Dashboard struct {
 	Inbox    []domain.QueueEvent  // severityAtLeast=attention, urgency-sorted
 	Timers   []domain.TimerRecord // scheduled, soonest first
@@ -19,7 +18,7 @@ type Dashboard struct {
 }
 
 // AgentRow is one supervised agent: one watcher merged with its watched terminal's
-// preview (ui-input.md §3.1). The user thinks "one agent doing one job", not a
+// preview. The user thinks "one agent doing one job", not a
 // watcher and a terminal separately.
 type AgentRow struct {
 	ID             string
@@ -35,7 +34,7 @@ type AgentRow struct {
 }
 
 // BuildAgentRows merges watchers with terminal previews into agent rows, sorted by
-// urgency then recency (ui-input.md §3.1/§3.2). It is pure and Bubble-Tea-free so it
+// urgency then recency. It is pure and Bubble-Tea-free so it
 // stays unit-testable. Previews are matched by terminal id parsed from targetsJson;
 // the row id prefers the terminal id.
 func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
@@ -61,7 +60,7 @@ func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
 			NeedsAttention: prio <= 1,
 		})
 	}
-	// Urgency (lower priority first), ties broken by most-recent StartedAt (§3.2).
+	// Urgency (lower priority first), ties broken by most-recent StartedAt.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Priority != rows[j].Priority {
 			return rows[i].Priority < rows[j].Priority

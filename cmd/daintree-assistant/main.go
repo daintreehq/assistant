@@ -68,12 +68,11 @@ const (
 	routeHost
 )
 
-// parseArgs parses the CLI surface into cli.Options + a route. It mirrors the
-// commander program in docs/port/cli.md §1.1: the same flags, the `doctor`
-// subcommand, and `host --stdio`. Unlike Go's stock flag parsing, flags and the
-// positional prompt may be interspersed (commander allowed it, and Daintree/users
-// rely on forms like `--json "prompt"`); the loop below re-parses after each
-// positional so a trailing flag is still seen.
+// parseArgs parses the CLI surface into cli.Options + a route: the flags, the
+// `doctor` subcommand, and `host --stdio`. Unlike Go's stock flag parsing, flags
+// and the positional prompt may be interspersed (Daintree/users rely on forms
+// like `--json "prompt"`); the loop below re-parses after each positional so a
+// trailing flag is still seen.
 func parseArgs(args []string) (cli.Options, route) {
 	fs := flag.NewFlagSet("daintree-assistant", flag.ContinueOnError)
 

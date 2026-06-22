@@ -19,8 +19,7 @@ const (
 // ThinkFilter incrementally separates <think>…</think> reasoning from visible
 // content across streamed deltas, holding back a possibly-partial tag at the tail
 // so a split token ("<thi" / "<think>" straddling two chunks) is never
-// mis-emitted. Operates on bytes to mirror the TS code-unit behavior (the tags
-// are ASCII).
+// mis-emitted. Operates on bytes (the tags are ASCII).
 type ThinkFilter struct {
 	inThink   bool
 	buf       []byte
@@ -106,7 +105,7 @@ func keepBack(s []byte, tag string) int {
 }
 
 // thinkBlockRe matches a full <think>…</think> block, non-greedy + dot-all, for
-// stripThink. Mirrors the TS /<think>[\s\S]*?<\/think>/g.
+// stripThink.
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 // stripThink removes complete <think>…</think> blocks (used by the json path),

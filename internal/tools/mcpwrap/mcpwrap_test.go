@@ -40,7 +40,7 @@ func findTool(ts []*tools.Tool, name string) *tools.Tool {
 }
 
 // recipe.run must force the top-level recipeId to win over a nested
-// arguments.recipeId (§8.11) — the most error-prone merge in the family.
+// arguments.recipeId — the most error-prone merge in the family.
 func TestRecipeRunRecipeIDWins(t *testing.T) {
 	m := &fakeMCP{connected: true, result: tools.MCPCallResult{Text: "ok"}}
 	tool := findTool(Tools(Deps{}), "recipe.run")
@@ -110,7 +110,7 @@ func TestGitSnapshotTrims(t *testing.T) {
 }
 
 // workflow.startWorkOnIssue must NOT forward the assistant-side attachWatcher
-// flag to Daintree (§8.10).
+// flag to Daintree.
 func TestStartWorkOnIssueDoesNotForwardAttachWatcher(t *testing.T) {
 	m := &fakeMCP{connected: true, result: tools.MCPCallResult{Text: "ok"}}
 	tool := findTool(Tools(Deps{}), "workflow.startWorkOnIssue")

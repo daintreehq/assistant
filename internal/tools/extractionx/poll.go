@@ -193,8 +193,7 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 }
 
 // delay sleeps ms, resolving early when ctx is cancelled (Escape-to-cancel
-// mid-wait stops the poll loop on its next iteration). Replaces the TS setTimeout
-// + unref + abort-listener with a context-aware timer (§4.9).
+// mid-wait stops the poll loop on its next iteration). A context-aware timer.
 func delay(ctx context.Context, ms int) {
 	t := time.NewTimer(time.Duration(ms) * time.Millisecond)
 	defer t.Stop()

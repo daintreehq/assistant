@@ -16,9 +16,9 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
-// Port of tests/commandData.test.ts (handleUiCommand + the disconnected /doctor
-// probe). Builds an offline App against a temp state dir and drives the structured
-// cockpit slash handler, asserting the per-command behaviors: /status, /permissions
+// Exercises handleUiCommand + the disconnected /doctor probe. Builds an offline
+// App against a temp state dir and drives the structured cockpit slash handler,
+// asserting the per-command behaviors: /status, /permissions
 // switch + reject-unknown, /inbox, /audit (grant_ok source bracket, sourceless row,
 // export json/csv/bad-format, list), /explain (empty/list/timeline/unknown/malformed/
 // truncation/full-arg-runId), /tools, /models, /help, /clear, unknown-command, and

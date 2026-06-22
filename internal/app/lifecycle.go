@@ -14,7 +14,7 @@ import (
 )
 
 // ConnectMcp connects the MCP transport, rolls up any tool drift to one log line,
-// and refreshes the session's runtime context (app.ts §2.7).
+// and refreshes the session's runtime context.
 func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Connect(ctx)
 	a.warnOnDrift(st)
@@ -22,7 +22,7 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	return st
 }
 
-// ReconnectMcp re-establishes the transport (app.ts §2.7).
+// ReconnectMcp re-establishes the transport.
 func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Reconnect(ctx)
 	a.warnOnDrift(st)
@@ -31,7 +31,7 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 }
 
 // warnOnDrift emits ONE rollup log line when the live server advertises fewer
-// tools than documented (app.ts §2.7). Preview shows the first 3 names.
+// tools than documented. Preview shows the first 3 names.
 func (a *App) warnOnDrift(st mcp.Status) {
 	if len(st.DriftToolNames) == 0 {
 		return
@@ -57,8 +57,8 @@ func (a *App) warnOnDrift(st mcp.Status) {
 }
 
 // StartScheduler builds and starts the in-process daemon (idempotent). A second
-// call rebinds the attention callback rather than leaking a second ticker
-// (app.ts §2.7). After the first start the runtime context is refreshed so the
+// call rebinds the attention callback rather than leaking a second ticker.
+// After the first start the runtime context is refreshed so the
 // prompt reflects an active scheduler.
 func (a *App) StartScheduler(ctx context.Context, onAttention func(events []domain.QueueEvent)) *daemon.Scheduler {
 	if a.scheduler != nil {
@@ -77,7 +77,7 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 	return a.scheduler
 }
 
-// daemonCtxFor builds a per-actor daemon.CheckContext (the TS ctxFor). The
+// daemonCtxFor builds a per-actor daemon.CheckContext. The
 // non-interactive actor reaches read-only MCP + the small-model classifier/judge.
 func (a *App) daemonCtxFor(ctx context.Context, actor domain.ToolActor, actorID string) *daemon.CheckContext {
 	return &daemon.CheckContext{
@@ -91,7 +91,7 @@ func (a *App) daemonCtxFor(ctx context.Context, actor domain.ToolActor, actorID 
 }
 
 // SetHooks merges partial hook updates so prior confirm/log/events survive when
-// only one is replaced (app.ts §2.7). The session's eventProxy reads them live.
+// only one is replaced. The session's eventProxy reads them live.
 func (a *App) SetHooks(h AppHooks) {
 	a.hooksMu.Lock()
 	defer a.hooksMu.Unlock()
@@ -107,7 +107,7 @@ func (a *App) SetHooks(h AppHooks) {
 }
 
 // Shutdown tears the dependencies down in reverse: stop+drain the scheduler, close
-// MCP, close the store (app.ts §2.7). Safe to call once.
+// MCP, close the store. Safe to call once.
 func (a *App) Shutdown() error {
 	// Cancel the app-scoped background context first so any detached jobs
 	// (terminal.extract.async) stop touching MCP/Router/Store before we close them.

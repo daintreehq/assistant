@@ -9,7 +9,7 @@ import (
 // fallbacks being width-1 stand-ins (so a tree row doesn't shift), which is why
 // each glyph has an explicit ASCII twin rather than being dropped.
 //
-// Ported from theme.ts: brand ◆, activity states (◦ queued, ◌ active, ◷ waiting,
+// Glyphs: brand ◆, activity states (◦ queued, ◌ active, ◷ waiting,
 // ✓ done, × failed), the approval diamond ◇, tree branches (├─ └─ │), and the
 // inline separators · ▌ ▏.
 type GlyphSet struct {

@@ -1,5 +1,4 @@
-// Transient-failure resilience primitives for the model client (port of the
-// model-relevant slice of src/reliability.ts).
+// Transient-failure resilience primitives for the model client.
 //
 // A single 5xx, a dropped socket, or a momentarily hung request should not kill a
 // turn. These are the small, dependency-free primitives that make calls resilient:
@@ -10,11 +9,11 @@
 //
 // Per-attempt timeouts are NOT modeled here: in Go each attempt derives a
 // context.WithTimeout (60s chat/json, 300s stream) at the call site, so the
-// "don't combine AbortSignals per attempt" Node #54614 caveat is moot.
+// "don't combine AbortSignals per attempt" caveat is moot.
 //
 // The MCP-read retry policy, the rate-limit OUTPUT-signature detector, and the
-// MCP error predicate from reliability.ts belong to the MCP/watcher subsystems and
-// are deliberately NOT ported here (see models.md §11).
+// MCP error predicate belong to the MCP/watcher subsystems and are deliberately
+// NOT included here.
 package models
 
 import (

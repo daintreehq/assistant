@@ -11,7 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
-// FormatRunList renders the /explain run list (commandRegistry §6.7).
+// FormatRunList renders the /explain run list.
 func FormatRunList(runs []domain.RunSummaryRecord) string {
 	if len(runs) == 0 {
 		return "(no runs recorded yet — run a turn first, then /explain)"
@@ -28,7 +28,7 @@ func FormatRunList(runs []domain.RunSummaryRecord) string {
 	return strings.Join(lines, "\n")
 }
 
-// FormatRunTimeline renders a single run's replay (commandRegistry §6.7). It
+// FormatRunTimeline renders a single run's replay. It
 // parses each event payload defensively and joins audit outcomes for tool results.
 func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditRecord) string {
 	auditByID := make(map[string]domain.AuditRecord, len(auditRows))
@@ -97,7 +97,7 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 	return strings.Join(lines, "\n")
 }
 
-// --- audit export (commandRegistry §6.4 audit) ---
+// --- audit export ---
 
 // AuditExportResult is the parsed `/audit export` request.
 type AuditExportResult struct {

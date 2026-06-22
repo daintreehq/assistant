@@ -7,14 +7,13 @@ import (
 	"time"
 )
 
-// Port of tests/hostInterrupt.test.ts (issue #141): the host `interrupt` command
-// must actually abort the in-flight turn (cancel its context, reject pending
-// approvals, then display-interrupt), not merely suppress display output.
+// Host interrupt contract (issue #141): the host `interrupt` command must actually
+// abort the in-flight turn (cancel its context, reject pending approvals, then
+// display-interrupt), not merely suppress display output.
 //
-// As in the TS test, src/host/index.ts boots the full App at import and can't be
-// driven directly, so we mirror the exact per-turn wiring from loop.go
-// (handlePrompt / handleInterrupt / finishPromptTurn — the busy flag, the
-// generation identity guard, the turnCancel context) and drive it with a
+// The full App can't be driven directly, so we mirror the exact per-turn wiring
+// from loop.go (handlePrompt / handleInterrupt / finishPromptTurn — the busy flag,
+// the generation identity guard, the turnCancel context) and drive it with a
 // cooperative fake session that genuinely watches ctx.Done() and models a tool
 // parked awaiting approval. We use the REAL Bridge for the approval bookkeeping so
 // the deadlock path (settlePendingApprovals unblocking a parked confirm) is the

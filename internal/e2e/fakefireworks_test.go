@@ -3,8 +3,7 @@
 // MCP server (go-sdk Streamable HTTP over httptest). These exercise the full wiring
 // — app.Create → Session.Send → tool dispatch → result feedback → persistence — and
 // the binary-level --json one-shot, which no unit test covers (jsonout_test.go
-// exercises the sink in isolation, not the wired binary). Spec: docs/port
-// _test-parity.md "E2E GAPS".
+// exercises the sink in isolation, not the wired binary).
 package e2e
 
 import (

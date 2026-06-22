@@ -7,9 +7,9 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Additional hostBridge.test.ts parity: an empty final response closes the turn as
+// Additional bridge behaviors: an empty final response closes the turn as
 // "unknown", a tool reports its real duration in ms with the danger hint, and the
-// full result→audit {result, severity} map (the it.each cases) holds.
+// full result→audit {result, severity} map holds.
 
 func TestBridgeEmptyFinalResponseIsUnknown(t *testing.T) {
 	c := &collector{}

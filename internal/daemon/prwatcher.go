@@ -49,7 +49,7 @@ type prFields struct {
 // RunPrWatcherCheck runs one PR-state watcher check: poll forge.getPR, diff vs the
 // last-seen state in optionsJson, publish any transition, persist the new baseline.
 // Transient failures reschedule without publishing. Corrupt options disable the
-// watcher. Port of runPrWatcherCheck (prWatcherEngine.ts §5.2).
+// watcher.
 func RunPrWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) PrCheckResult {
 	now := domain.NowMS()
 

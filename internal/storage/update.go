@@ -50,7 +50,7 @@ func patchHasAllowedKey(patch map[string]any, allowed colSet) bool {
 }
 
 // applyUpdate builds a dynamic UPDATE touching only allowlisted columns from the
-// patch map (port of the TS applyUpdate + toSqlValue). No-op when the patch sets
+// patch map. No-op when the patch sets
 // no allowed key. Column names come ONLY from the fixed allowlist (never the patch
 // keys directly into SQL beyond the membership check) so interpolation is safe.
 //

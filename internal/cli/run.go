@@ -29,7 +29,7 @@ func DefaultCockpitRunner(context.Context, *app.App) error {
 	return errors.New("cockpit not built")
 }
 
-// Options are the parsed CLI flags + the one-shot prompt (index.ts CliOptions).
+// Options are the parsed CLI flags + the one-shot prompt.
 type Options struct {
 	McpURL    string
 	McpToken  string
@@ -94,7 +94,7 @@ func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
 	return o
 }
 
-// Run routes per the top-level dispatch (index.ts §1.2):
+// Run routes per the top-level dispatch:
 //
 //	prompt        → RunOneShot
 //	--json no prompt → usage error (exit 1, stderr)
@@ -110,7 +110,7 @@ func Run(ctx context.Context, opts Options) int {
 	return RunInteractive(ctx, opts)
 }
 
-// RunOneShot is the scriptable path (index.ts §1.4). In JSON mode stdout carries
+// RunOneShot is the scriptable path. In JSON mode stdout carries
 // ONLY the JSONL stream; every human line goes to stderr.
 func RunOneShot(ctx context.Context, opts Options) int {
 	stderrR := render.New(os.Stderr)
@@ -199,8 +199,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	return domain.OneShotExitCode.Success
 }
 
-// RunInteractive routes to the cockpit (TTY + !classic) or the classic REPL
-// (index.ts §1.5; the Bun re-exec is deleted — single static binary).
+// RunInteractive routes to the cockpit (TTY + !classic) or the classic REPL.
 func RunInteractive(ctx context.Context, opts Options) int {
 	ttyOK := stdinIsTTY() && stdoutIsTTY()
 	wantsCockpit := !opts.Classic && ttyOK
@@ -234,7 +233,7 @@ func RunInteractive(ctx context.Context, opts Options) int {
 	return startRepl(ctx, a)
 }
 
-// RunDoctor is the TERSE doctor subcommand banner (index.ts §1.6) — distinct from
+// RunDoctor is the TERSE doctor subcommand banner — distinct from
 // the rich /doctor slash checklist.
 func RunDoctor(ctx context.Context, opts Options) int {
 	r := render.Stdout()
@@ -282,7 +281,7 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	return domain.OneShotExitCode.Success
 }
 
-// announceDebugLog opens the log and prints a gray notice when active (index.ts §1.7).
+// announceDebugLog opens the log and prints a gray notice when active.
 func announceDebugLog(a *app.App) {
 	path := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
 		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})

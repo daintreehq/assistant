@@ -66,7 +66,7 @@ func intFromNull(n sql.NullInt64) *int {
 }
 
 // boolToInt maps a *bool to the 0/1 INTEGER storage form (nil ⇒ 0). isSupervisor
-// is the only boolean column; the TS toSqlValue coerced it the same way.
+// is the only boolean column.
 func boolToInt(p *bool) int {
 	if p != nil && *p {
 		return 1
@@ -74,7 +74,7 @@ func boolToInt(p *bool) int {
 	return 0
 }
 
-// sevCase is the SQL CASE that mirrors domain.SeverityRank (storage.md §4). It
+// sevCase is the SQL CASE that mirrors domain.SeverityRank. It
 // MUST stay in sync with the Go map — generated below from RankOf to avoid drift.
 // Note `done`(2) ranks BELOW attention/blocked/urgent/error; unknown ⇒ ELSE 1.
 var sevCase = buildSevCase()
@@ -102,7 +102,7 @@ func buildSevCase() string {
 
 // escapeFTSQuery tokenizes on whitespace and quotes EACH token, doubling any
 // internal `"`, then space-joins → FTS5 implicit-AND keyword search. This is a
-// security boundary (storage.md §8): raw user input passed to MATCH raises a
+// security boundary: raw user input passed to MATCH raises a
 // SQLite syntax error / lets the user inject FTS operators. Returns "" if the
 // query has no tokens (caller short-circuits to an empty result).
 func escapeFTSQuery(query string) string {

@@ -4,13 +4,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// scrollback.go implements the commit-queue protocol (ui-transcript.md §2). Sealed
+// scrollback.go implements the commit-queue protocol. Sealed
 // cells + the masthead become immutable ScrollbackBlocks committed to the host's
 // native scrollback ONE at a time, via Bubble Tea's print-above-program command
 // (tea.Println). Each commit is acked by a ScrollbackCommittedMsg that pops the
 // queue head, advances the committed cursor (dropping the sealed cell from the live
 // footer), and schedules the next. Masthead is committed first. NO portal/settle/
-// replay — that OpenTUI machinery does not port.
+// replay machinery.
 
 // ScrollbackKind tags an immutable block.
 type ScrollbackKind int
@@ -50,7 +50,7 @@ type scrollbackQueue struct {
 // applyResetKey re-arms the queue when the reset key changes (a /clear or resize
 // redraw): committed=0, headerDone=false, and a bumped generation. Length alone
 // can't detect a clear (a fresh confirmation card can make the new length equal the
-// old committed count), so the monotonic key makes the reset deterministic (§2).
+// old committed count), so the monotonic key makes the reset deterministic.
 //
 // #4 generation safety: a commit emitted under a PRIOR generation may still ack
 // AFTER the reset. Without the generation, that stale ack would mark the NEW
@@ -85,7 +85,7 @@ func (q *scrollbackQueue) liveStart(n int) int {
 // or a commit is already in flight. The block factory renders the sealed cell at
 // index i at the current width. headerBlock renders the masthead.
 //
-// Commit order (§2): masthead first, then sealed transcript cells in index order
+// Commit order: masthead first, then sealed transcript cells in index order
 // from the committed cursor forward. A cell is eligible only when isSealed.
 func (q *scrollbackQueue) nextCommit(
 	cells []TranscriptCell,
@@ -145,7 +145,7 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 // styled Rendered string and falls back to Plain when rendering produced nothing,
 // then emits a ScrollbackCommittedMsg ack carrying the block id. tea.Println prints
 // ABOVE the live program and persists across renders — exactly the native-scrollback
-// commit (ui-transcript.md §1 mapping).
+// commit.
 func commitCmd(blk ScrollbackBlock) tea.Cmd {
 	text := blk.Rendered
 	if text == "" {

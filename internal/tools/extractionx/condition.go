@@ -98,9 +98,9 @@ func collectModelJudges(c *domain.WatchCondition) []string {
 	return order
 }
 
-// hashTail is a stable 32-bit hash of a terminal tail, base36, reproducing the TS
-// algorithm exactly (h=(h<<5)-h+c with int32 truncation, then the unsigned 32-bit
-// value in base36). Bit-exactness matters — a divergence would mis-track output.
+// hashTail is a stable 32-bit hash of a terminal tail, base36 (h=(h<<5)-h+c with
+// int32 truncation, then the unsigned 32-bit value in base36). Bit-exactness
+// matters — a divergence would mis-track output.
 func hashTail(s string) string {
 	var h int32
 	for _, c := range s {

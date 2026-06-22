@@ -2,8 +2,8 @@ package domain
 
 import "time"
 
-// EpochMS is wall-clock milliseconds since the Unix epoch (the TS Date.now()
-// representation). Every persisted *At timestamp is an EpochMS, EXCEPT the
+// EpochMS is wall-clock milliseconds since the Unix epoch. Every persisted *At
+// timestamp is an EpochMS, EXCEPT the
 // debug-log header/line timestamps (ISO-8601) and the log-filename date.
 type EpochMS = int64
 

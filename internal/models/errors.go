@@ -1,7 +1,7 @@
 package models
 
 // Sentinel error types for the model layer. The `code` strings are a downstream
-// contract (callers switch on them), so they must match the TS exactly.
+// contract (callers switch on them), so they must stay stable.
 
 // FireworksUnavailableError is raised by guard() before any wire call when the
 // client can't talk to Fireworks (offline mode, or no API key).

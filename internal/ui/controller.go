@@ -17,7 +17,7 @@ import (
 // Send (one outstanding turn), routes approval confirms to the sheet, and runs
 // /clear. Per the concurrency rule, the controller NEVER mutates the model — it only
 // launches goroutines that send tea.Msgs back (turn/wake/command completion). The
-// model owns the FIFO queue + wake-priority drain in Update (§6.3/§6.4).
+// model owns the FIFO queue + wake-priority drain in Update.
 
 // controller wraps the App + the pump and exposes turn/command/confirm bridges as
 // tea.Cmds that run a Session.Send off the loop and report completion via a msg.
@@ -84,7 +84,7 @@ func (c *controller) runTurn(parent context.Context, turnID, prompt string, read
 }
 
 // runWake launches an autonomous wake reactor turn (readOnly) — the model only
-// inspects & reports, never mutates (ui-input.md §6.3). Completion rides the ordered
+// inspects & reports, never mutates. Completion rides the ordered
 // pump stream tagged with the wake cell id (#1).
 func (c *controller) runWake(parent context.Context, turnID, prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(parent)
@@ -127,6 +127,9 @@ func (c *controller) runCommand(parent context.Context, line string) tea.Cmd {
 			Text:            res.Text,
 			ClearTranscript: res.ClearTranscript,
 			Quit:            res.Quit,
+			// commands.PanelKey and ui.PanelKey share the same string values; convert across
+			// the package seam so the cockpit can act on the requested view switch.
+			SwitchPanel: PanelKey(res.SwitchPanel),
 		}
 	}
 }

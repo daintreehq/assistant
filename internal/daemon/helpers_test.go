@@ -37,7 +37,7 @@ type termCfg struct {
 	exitCode      *int
 }
 
-// progMCP is a programmable MCP fake that mirrors the TS fakeMcp used across the
+// progMCP is a programmable MCP fake used across the
 // watcher multi-terminal / rate-limit / verification suites: a batched
 // terminal.getStatus keyed by includeOutput, a per-terminal terminal.getOutput, a
 // configurable terminal.list inventory, and a git pulse. It records every call so
@@ -149,8 +149,8 @@ func stringIDs(v any) []string {
 	return nil
 }
 
-// progModel routes Classify vs Judge independently, the Go analogue of the TS
-// judgeRouter: judgeFn decides each yes/no from (question, tail).
+// progModel routes Classify vs Judge independently: judgeFn decides each yes/no
+// from (question, tail).
 type progModel struct {
 	verdict  domain.WatcherVerdict
 	classErr error

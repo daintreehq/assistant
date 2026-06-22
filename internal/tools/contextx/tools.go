@@ -10,7 +10,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// Summarizer prompts, ported verbatim from models/prompts/index.ts. Kept byte-stable.
+// Summarizer prompts. Kept byte-stable.
 const summarizerSystemPrompt = `You summarize terminal output for a developer's supervisor view. Be terse and factual. Never dump raw logs. Focus on: what the process is doing, any errors, any question it is asking, test results, and changed files. Output 1-4 short sentences plus, if relevant, a short bullet list of errors/files. Do not speculate beyond the provided text.
 
 Begin with the summary itself. Do NOT think out loud or restate the task — no "We need to summarize…", "The output shows…", "Let me…" — that narration wastes your limited token budget and gets the actual summary truncated. Decide silently, then write only the summary.`
@@ -276,8 +276,8 @@ func newReadTool(deps Deps) tools.Tool {
 	}
 }
 
-// lastRunes returns the last n characters (runes) of s, matching the TS
-// .slice(-tailBytes) on a JS string the model consumes.
+// lastRunes returns the last n characters (runes) of s — the tail the model
+// consumes.
 func lastRunes(s string, n int) string {
 	if n <= 0 {
 		return ""

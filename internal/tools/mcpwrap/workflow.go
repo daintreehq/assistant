@@ -9,9 +9,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// supervisorDefaultCadenceMs is the cadence of a CLI-spawned supervisor watcher
-// (watcherCadence.ts SUPERVISOR_DEFAULT_CADENCE_MS). Defined locally so this
-// package needs no shared-cadence import.
+// supervisorDefaultCadenceMs is the cadence of a CLI-spawned supervisor watcher.
+// Defined locally so this package needs no shared-cadence import.
 const supervisorDefaultCadenceMs = 3000
 
 // foregroundOnlyNote is appended to a summary whenever a session-scoped watcher
@@ -26,7 +25,7 @@ type workflowMcpArgs struct {
 	// RequestKey is forwarded to Daintree for idempotency.
 	RequestKey string `json:"requestKey,omitempty"`
 	// AttachWatcher is ASSISTANT-SIDE ONLY (never forwarded). Pointer so we can
-	// distinguish "omitted" (default true) from an explicit false. Spec: §8.10.
+	// distinguish "omitted" (default true) from an explicit false.
 	AttachWatcher *bool `json:"attachWatcher,omitempty"`
 }
 
@@ -111,7 +110,7 @@ type supervisorContext struct {
 // attachSupervisorWatcher reads the spawned terminal from the passthrough result
 // and (unless one already supervises it) inserts a supervisor watcher. A missing
 // terminalId or insert failure NEVER fails the call — setup still succeeded; we
-// only annotate the summary. Spec: §4.14 attachSupervisorWatcher.
+// only annotate the summary.
 func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolContext, res tools.ToolResult) tools.ToolResult {
 	sc := extractSupervisorContext(res.Result)
 	if sc == nil || sc.TerminalID == "" {

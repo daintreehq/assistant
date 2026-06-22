@@ -20,7 +20,7 @@ func marshalStringSlice(ss []string) (string, error) {
 	return string(b), nil
 }
 
-// Describe renders the "/skills loaded" text (spec §7.8). Empty bundle ⇒ the
+// Describe renders the "/skills loaded" text. Empty bundle ⇒ the
 // no-skills line; else a header with count + bundle hash and one line per item.
 func (a *ActiveSkills) Describe() string {
 	if len(a.bundle.Items) == 0 {

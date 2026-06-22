@@ -8,8 +8,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Additional serializeToolResult truncation edges (port of the #78 cases in
-// tests/agentSessionCompact.test.ts not already covered by serialize_test.go).
+// Additional serializeToolResult truncation edges not already covered by
+// serialize_test.go.
 
 func TestSerializeSmallPayloadNoStub(t *testing.T) {
 	s := SerializeToolResult(domain.Ok("tiny", "hello"), nil)
@@ -71,7 +71,7 @@ func TestSerializeFailedOversizedSurfacesErrorClass(t *testing.T) {
 func TestSerializeRepagedSliceDoesNotReOverflow(t *testing.T) {
 	// Escape-heavy content doubles under each JSON encode. Storing it, then re-paging
 	// a slice back through SerializeToolResult must stay valid + inline — not produce
-	// a second nested stub (escape amplification, spec §9).
+	// a second nested stub (escape amplification).
 	store := NewArtifactStore()
 	heavy := strings.Repeat("\\", 8000)
 	stub := SerializeToolResult(domain.Ok("heavy", heavy), store)

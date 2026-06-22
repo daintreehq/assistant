@@ -26,8 +26,6 @@ type watcherOptions struct {
 // per-terminal change detection and output-staleness tracking; the most urgent
 // per-terminal outcome drives the watcher's aggregate state. Corrupt watcher state
 // is disabled with a visible error event rather than throwing every tick.
-//
-// Port of runTerminalWatcherCheck (watcherEngine.ts §7.5).
 func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckOutcome {
 	now := domain.NowMS()
 

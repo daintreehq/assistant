@@ -5,10 +5,10 @@ import (
 	"strings"
 )
 
-// Pure MCP result parsers (mcp/resultHelpers.ts). Daintree's terminal tools
-// return their payload only in the text content blocks, never structuredContent —
-// so these read structuredContent FIRST then fall back to the text body. Never
-// throw; a missing/garbled source yields the empty result.
+// Pure MCP result parsers. Daintree's terminal tools return their payload only in
+// the text content blocks, never structuredContent — so these read
+// structuredContent FIRST then fall back to the text body. Never throw; a
+// missing/garbled source yields the empty result.
 
 // parseMcpArray extracts a named array (e.g. "terminals"), merging entries from
 // BOTH structuredContent[field] and a JSON-encoded text body. structuredContent

@@ -57,7 +57,7 @@ type baseArgs struct {
 // Validate enforces the Zod numeric bounds on the shared poll/extract knobs so a
 // negative maxAttempts can't make the cap arithmetic degenerate and an oversized
 // tailBytes/maxTokens can't be silently honored. Promoted onto extractArgs and
-// extractAsyncArgs via embedding. Bounds mirror extractionTools.ts: pollIntervalMs
+// extractAsyncArgs via embedding. Bounds: pollIntervalMs
 // 0–60000, maxAttempts 1–120, tailBytes 1–100000, maxTokens 1–2000.
 func (b *baseArgs) Validate() error {
 	// terminalIds is required + bounded (Zod: array(string.min(1)).min(1).max(16)).
@@ -327,12 +327,12 @@ func newExtractAsyncTool(deps Deps) tools.Tool {
 				return rejected
 			}
 
-			// requestId is a bare UUID (the TS uses randomUUID()), reused as the
+			// requestId is a bare UUID, reused as the
 			// queue dedupeKey default. Not a prefixed domain ID.
 			requestID := uuid.NewString()
 			// Fire in the background; the result lands in the attention queue. This
 			// work OUTLIVES the turn, so it must NOT carry the turn's cancellation
-			// (the TS strips ctx.signal) — but it MUST be cancellable when the App
+			// — but it MUST be cancellable when the App
 			// shuts down, so detach to the APP-SCOPED context, not a fresh
 			// context.Background() (which would leak into closed deps after Shutdown).
 			// Bound it with a deadline derived from the poll knobs (a generous 2×
@@ -353,8 +353,7 @@ func newExtractAsyncTool(deps Deps) tools.Tool {
 
 // runAsyncExtraction runs the poll+extract, then optionally a pass/fail verdict,
 // and publishes the outcome to the attention queue. Never throws: any failure
-// becomes an `error` event so the result always lands in the inbox. Exported
-// behavior mirrors runAsyncExtraction in extractionTools.ts.
+// becomes an `error` event so the result always lands in the inbox.
 func runAsyncExtraction(ctx context.Context, deps Deps, base resolvedBase, a extractAsyncArgs, requestID string) {
 	label := a.Title
 	if label == "" {

@@ -12,9 +12,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
-// UICommandResult is the structured return of the cockpit slash handler
-// (commandData.ts UiCommandResult). The cockpit renders a card / switches a panel;
-// nothing is printed.
+// UICommandResult is the structured return of the cockpit slash handler.
+// The cockpit renders a card / switches a panel; nothing is printed.
 type UICommandResult struct {
 	Handled         bool
 	Quit            bool
@@ -82,18 +81,43 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 	case "reconnect":
 		return UICommandResult{Handled: true, Title: "Reconnect", Text: reconnectRun(ctx, a)}
 	default:
+		if s := suggestCommand(cmd); s != "" {
+			return UICommandResult{Handled: true, Title: "Unknown command", Text: "Unknown command /" + cmd + " — did you mean /" + s + "? (/help lists all commands)"}
+		}
 		return UICommandResult{Handled: true, Title: "Unknown command", Text: "Unknown command /" + cmd + ". Try /help."}
 	}
 }
 
-// HelpTextUI is the cockpit help blob (commandRegistry §6.6).
+// HelpTextUI is the cockpit help blob: the command list followed by
+// the key cheat-sheet, so /help (and the ? view) document the whole keymap in one place.
 func HelpTextUI() string {
 	lines := append([]string{}, HelpLines()...)
-	lines = append(lines, "", "Keys: ? help · ^O toggle ops deck · ^C exit. Anything else goes to the assistant.")
+	lines = append(lines, "")
+	lines = append(lines, KeyHelpLines()...)
+	lines = append(lines, "", "Anything else goes to the assistant.")
 	return strings.Join(lines, "\n")
 }
 
-// HelpTextREPL is the REPL help blob (commandRegistry §6.6).
+// KeyHelpLines is the SINGLE source of truth for the cockpit key cheat-sheet — surfaced by
+// /help and the ? view, and kept in sync with the actual dispatch in internal/ui
+// (update_handlers + composer). One list so the help can never drift from the keymap.
+func KeyHelpLines() []string {
+	return []string{
+		"Keys",
+		`  Enter           send  ·  Shift/Alt+Enter or trailing \ then Enter → newline`,
+		"  ↑ / ↓           recall prompt history",
+		"  /               command palette  ·  Tab complete  ·  ↑/↓ navigate",
+		"  Esc             clear the input  ·  while busy, retract the last queued turn (else cancel)",
+		"  Ctrl+C          cancel the running turn  ·  press again to exit",
+		"  Ctrl+D          exit at an empty prompt",
+		"  Ctrl+O          toggle the operations deck",
+		"  Ctrl+X          toggle raw tool detail",
+		"  ?               show this help (at an empty prompt)",
+		"  Editing         Ctrl+A/E home/end · Ctrl+W/U/K kill · Ctrl+Y yank · Alt+B/F word · Alt+D kill-word",
+	}
+}
+
+// HelpTextREPL is the REPL help blob.
 func HelpTextREPL() string {
 	lines := []string{"Commands"}
 	for _, l := range HelpLines() {
@@ -299,7 +323,7 @@ func permissionsText(a *app.App, arg string) string {
 	return "Tier set to " + string(t) + "."
 }
 
-// skillsLoadCap is the per-load skill cap (commandRegistry §6.4).
+// skillsLoadCap is the per-load skill cap.
 const skillsLoadCap = 3
 
 func skillsText(ctx context.Context, a *app.App, rest []string) string {
@@ -407,8 +431,7 @@ func reconnectRun(ctx context.Context, a *app.App) string {
 func intPtr(n int) *int { return &n }
 
 // buildCompactionTranscript flattens the non-system history to "role: text"
-// (empty text → "[tool call]"), joined by newlines and sliced to maxChars
-// (commandRegistry §6.4 compact).
+// (empty text → "[tool call]"), joined by newlines and sliced to maxChars.
 func buildCompactionTranscript(a *app.App, maxChars int) string {
 	var b strings.Builder
 	for _, m := range a.Session.Messages() {

@@ -7,14 +7,12 @@
 // session-scoped (cancelled on the next Db open) and every sub-thread publishes
 // to the attention queue instead of interrupting the main thread.
 //
-// Port of src/daemon/{scheduler,watcherEngine,prWatcherEngine}.ts +
-// src/watcherCadence.ts + the rate-limit/MCP-read knobs from src/reliability.ts.
-// See docs/port/daemon.md. The pure helpers (EvaluateCondition, DecideOutcome,
-// DeriveVerification, NextOutputState, HashTail, CollectModelJudges,
-// HasTextCondition) carry no MCP/model dependency and are unit-tested directly.
+// The pure helpers (EvaluateCondition, DecideOutcome, DeriveVerification,
+// NextOutputState, HashTail, CollectModelJudges, HasTextCondition) carry no
+// MCP/model dependency and are unit-tested directly.
 package daemon
 
-// --- Cadence / timing constants (watcherCadence.ts) --------------------------
+// --- Cadence / timing constants ----------------------------------------------
 
 // SchedulerTickMS is the scheduler tick interval AND the floor for any
 // supervisor cadence — a supervisor watcher cannot check faster than the tick.
@@ -39,7 +37,7 @@ const PRWatcherCadenceMS int64 = 60_000
 // regardless of this window.
 const WatcherSpawnGraceMS int64 = 20_000
 
-// --- Watcher-engine private knobs (watcherEngine.ts / reliability.ts) --------
+// --- Watcher-engine private knobs --------------------------------------------
 
 // rateLimitCooldownMS is the minimum next-check delay once a terminal is seen
 // rate-limited: nextCheckAt = now + max(cadenceMs, rateLimitCooldownMS).
@@ -52,8 +50,8 @@ const rateLimitCooldownMS int64 = 60_000
 const McpReadTimeoutMS int64 = 20_000
 
 // McpReadMaxRetries is the ADDITIONAL attempts after the first for read-only MCP
-// calls (2 ⇒ up to 3 total). Mirrors MCP_READ_RETRY_POLICY.maxRetries. Exported so
-// the integrator can request the documented retry budget on the read-only seam.
+// calls (2 ⇒ up to 3 total). Exported so the integrator can request the
+// documented retry budget on the read-only seam.
 const McpReadMaxRetries = 2
 
 // rateLimitTailWindow is the largest tail slice scanned for a rate-limit
@@ -72,7 +70,7 @@ const judgeConfidenceFloor = 0.6
 // it never truncates legitimate slow work; it only caps an indefinite hang.
 const itemDeadlineMS int64 = 120_000
 
-// --- Terminal-preview constants (useTerminalPreview.ts — UI only) ------------
+// --- Terminal-preview constants (UI only) ------------------------------------
 
 // MaxTerminals caps the number of preview cards.
 const MaxTerminals = 4

@@ -7,7 +7,7 @@
 // cyan = code/links, warning/danger/blocked = operational severity, muted = chrome.
 // The mode is resolved ONCE from the environment (DAINTREE_THEME / NO_COLOR /
 // DAINTREE_ASCII + locale) so the whole render tree agrees on whether color and
-// unicode are live. Source of truth ported from src/ui/theme.ts.
+// unicode are live.
 package theme
 
 import (
@@ -115,7 +115,7 @@ type Palette struct {
 	Text color.Color
 }
 
-// Truecolor hexes (dark theme baseline). Mirrors theme.ts `ui.color`.
+// Truecolor hexes (dark theme baseline).
 const (
 	hexAccent  = "#6EE7B7" // accent green
 	hexBrand   = "#36CE94" // brand green (masthead / splash base)

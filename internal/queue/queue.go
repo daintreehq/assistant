@@ -1,9 +1,8 @@
 // Package queue implements the attention queue: every sub-thread (timers,
 // watchers, workflows, model workers) reports here instead of interrupting the
 // main thread. Events are deduplicated by dedupeKey and surfaced via the /inbox
-// digest. Port of src/queue.ts plus the queue-relevant pieces of
-// src/storage/db.ts (upsertEvent / listEvents / resolveEvent / markNotified and
-// the severity ordering). Spec: docs/port/domain-config.md §6.
+// digest. It owns upsertEvent / listEvents / resolveEvent / markNotified and
+// the severity ordering.
 //
 // The persistence of the `events` table is delegated to a consumer-defined
 // EventStore interface (declared here, in the consumer, NOT in internal/ports —
@@ -95,7 +94,7 @@ func New(store EventStore, now Clock) *Queue {
 // the store when the publish omits them; recommendedActions are overwritten
 // outright (cleared to NULL when none).
 //
-// Notification RE-ARM (§ stable-dedupe): a deduped event keeps its notifiedAt on a
+// Notification RE-ARM (stable-dedupe): a deduped event keeps its notifiedAt on a
 // bump, so once delivered it never re-surfaces — correct for an identical repeat
 // (a "still working" tick must not re-interrupt), WRONG for a material change (a
 // severity escalation or a classification/title change the human needs to see).
@@ -143,7 +142,7 @@ func materialNotificationChange(prior, next domain.QueueEvent) bool {
 	return false
 }
 
-// Digest returns the ordered, filtered open events (§6.5).
+// Digest returns the ordered, filtered open events.
 func (q *Queue) Digest(ctx context.Context, opts domain.QueueDigestOptions) ([]domain.QueueEvent, error) {
 	return q.store.ListEvents(ctx, opts, q.now())
 }
@@ -176,7 +175,7 @@ var severityIcon = map[domain.Severity]string{
 }
 
 // Format renders a compact, human/LLM-facing /inbox digest. Glyphs and layout
-// are a product contract — preserve them exactly (§6.1). Empty ⇒ "Inbox is
+// are a product contract — preserve them exactly. Empty ⇒ "Inbox is
 // empty.".
 func (q *Queue) Format(events []domain.QueueEvent) string {
 	return Format(events)

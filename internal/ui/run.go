@@ -30,8 +30,8 @@ func Run(ctx context.Context, a *app.App) error {
 
 	// progRef lets the confirm-hook closure reach the program that is created below
 	// (the one callback that can't ride the re-armed command, because the runtime
-	// goroutine blocks on the resolve channel — we use Program.Send for it, per
-	// ui-input.md §6.1's documented fallback). The controller is a pointer field on
+	// goroutine blocks on the resolve channel — we use Program.Send for it, the
+	// documented fallback). The controller is a pointer field on
 	// the model, so wiring it before NewProgram means the program's stored copy sees
 	// it (a pointer copies by reference).
 	var prog *tea.Program

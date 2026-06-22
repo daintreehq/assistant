@@ -5,7 +5,6 @@
 // and raw scrollback into terse digests instead of dumping everything inline.
 // context.snapshot is best-effort and must NEVER throw even when Daintree MCP is
 // down; terminal.summarize/read fail cleanly when MCP is unavailable.
-// Spec: docs/port/tools-families.md §4.8.
 package contextx
 
 import (

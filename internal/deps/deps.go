@@ -7,16 +7,16 @@
 package deps
 
 import (
-	// UI stack — Bubble Tea cockpit (docs/port/_interaction-ux.md, ui-cockpit.md).
+	// UI stack — Bubble Tea cockpit.
 	_ "charm.land/bubbles/v2/textarea"
 	_ "charm.land/bubbletea/v2"
 	_ "charm.land/glamour/v2"
 	_ "charm.land/lipgloss/v2"
 	_ "github.com/charmbracelet/x/ansi"
 
-	// Storage — pure-Go SQLite driver (docs/port/_contracts.md §7).
+	// Storage — pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
 
-	// MCP — official Go SDK for the Daintree MCP client (docs/port/DAINTREE_MCP.md).
+	// MCP — official Go SDK for the Daintree MCP client.
 	_ "github.com/modelcontextprotocol/go-sdk/mcp"
 )

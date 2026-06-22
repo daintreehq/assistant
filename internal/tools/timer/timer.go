@@ -2,8 +2,6 @@
 // timer.cancel. Timers persist in SQLite and resume on the next launch (unlike
 // session-scoped watchers). A schedule firing only happens while the assistant
 // is open (foreground-only daemon) — every creator appends a lifecycle NOTE.
-//
-// Spec: docs/port/tools-families.md §4.3 (timerTools.ts).
 package timer
 
 import (
@@ -176,7 +174,7 @@ func newScheduleTool(deps Deps) *tools.Tool {
 				}
 			}
 
-			// fireAt = parse(fireAt) ?? now+delayMs ?? NaN → TIMER_FIRE_AT (§4.3).
+			// fireAt = parse(fireAt) ?? now+delayMs ?? NaN → TIMER_FIRE_AT.
 			now := domain.NowMS()
 			var fireAt int64
 			switch {

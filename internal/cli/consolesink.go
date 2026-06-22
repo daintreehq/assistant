@@ -1,7 +1,6 @@
 // Package cli owns CLI routing (one-shot / classic REPL / doctor / cockpit seam),
-// the human console sink, and the classic line REPL. Port of src/cli/{index,
-// consoleSink,repl,render}.ts. The Bubble Tea cockpit is a separate wave reached
-// through the CockpitRunner seam.
+// the human console sink, and the classic line REPL. The Bubble Tea cockpit is a
+// separate wave reached through the CockpitRunner seam.
 package cli
 
 import (
@@ -10,15 +9,37 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// consoleSink maps agent events to render calls (consoleSink.ts). It is the human
+// consoleSink maps agent events to render calls. It is the human
 // (non-JSON) one-shot + REPL sink.
-type consoleSink struct{ r *render.Renderer }
+type consoleSink struct {
+	r         *render.Renderer
+	tty       bool
+	lastPhase domain.RunPhase
+}
 
-// NewConsoleSink builds a console sink over a renderer.
-func NewConsoleSink(r *render.Renderer) agent.EventSink { return &consoleSink{r: r} }
+// NewConsoleSink builds a console sink over a renderer. It records whether stdout is a
+// TTY so the "silent work" phase cues stay off piped/one-shot output.
+func NewConsoleSink(r *render.Renderer) agent.EventSink {
+	return &consoleSink{r: r, tty: stdoutIsTTY()}
+}
 
-// Phase is not rendered in the console (it drives the cockpit footer only).
-func (s *consoleSink) Phase(domain.RunPhase) {}
+// Phase surfaces the "silent work" gaps (analyze / integrate) as a dim status line so
+// the console doesn't sit mute through model latency — the gap between Enter and the
+// first token. TTY-only (piped/JSON-adjacent output stays clean for parsers), deduped
+// on transitions, and deliberately NON-rewriting: a plain dim line that scrolls, with
+// no cursor games that would collide with interleaved tool/log output.
+func (s *consoleSink) Phase(p domain.RunPhase) {
+	if !s.tty || p == s.lastPhase {
+		return
+	}
+	s.lastPhase = p
+	switch p {
+	case domain.PhaseAnalyzing:
+		s.r.Line(s.r.Gray("· analyzing request…"))
+	case domain.PhaseIntegrating:
+		s.r.Line(s.r.Gray("· integrating results…"))
+	}
+}
 
 func (s *consoleSink) AssistantStart()             { s.r.AssistantStart() }
 func (s *consoleSink) AssistantToken(t string)     { s.r.StreamToken(t) }

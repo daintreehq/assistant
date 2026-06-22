@@ -19,9 +19,10 @@ type mastheadParams struct {
 	Destructive bool // a git/system action awaiting confirmation → red tier
 }
 
-// renderMasthead renders the committed masthead (ui-transcript.md §7). The closing
-// rule is a FIXED-WIDTH run of "─" snapshotted at the commit width — never a
-// fill-to-terminal-width rule, which the host would reflow on a narrow resize.
+// renderMasthead renders the committed masthead. The closing rule
+// spans the full chrome width (end-to-end). That is safe because a terminal resize now
+// triggers a NUCLEAR REDRAW (onRedraw): the masthead is wiped and re-committed fresh at the
+// new width, so the rule always matches the current width and never wraps on shrink.
 func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 	g := th.Glyphs
 	var b strings.Builder
@@ -42,7 +43,7 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 	// 4. Tier line — QUIET (dim) at rest for every tier; red ONLY when a
 	// destructive action awaits confirmation. The tier→gloss separator is the
 	// active glyph set's bullet (· unicode / - ascii), NOT a hardcoded "·", so the
-	// DAINTREE_ASCII fallback flows through (mirrors Header.tsx `set.bullet`).
+	// DAINTREE_ASCII fallback flows through (the glyph set's `set.bullet`).
 	b.WriteByte('\n')
 	tierStyle := th.Dim()
 	if p.Destructive {
@@ -55,7 +56,8 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 	}
 	b.WriteString(truncateCells(tierLine, width))
 
-	// 5. Fixed-width closing rule.
+	// 5. Full-width closing rule (end-to-end). Re-rendered fresh at the new width on every
+	// resize via the nuclear redraw (onRedraw), so it can't wrap on shrink.
 	b.WriteByte('\n')
 	b.WriteString(th.Muted().Render(strings.Repeat(g.Rule, width)))
 
@@ -70,7 +72,7 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 	return b.String()
 }
 
-// tierGloss is the dim one-liner after the tier name (§7).
+// tierGloss is the dim one-liner after the tier name.
 func tierGloss(t domain.Tier) string {
 	switch t {
 	case domain.TierSupervisor:
@@ -84,10 +86,10 @@ func tierGloss(t domain.Tier) string {
 	}
 }
 
-// statusParams is the live status rollup's input (ui-transcript.md §6).
+// statusParams is the live status rollup's input.
 //
 // The active-agent badge is carried as its INGREDIENTS, not a pre-formatted
-// string: StatusLine.tsx inlines the StateBadge as a tone-tinted "<glyph> LABEL"
+// string: the StateBadge is inlined as a tone-tinted "<glyph> LABEL"
 // span (color from the badge tone, glyph from the same tone) followed by a DIM run
 // of " id [· goal] [duration]". Passing a flat string would lose the tone color,
 // the leading state glyph, and the dim styling of the id — so we rebuild it here.
@@ -98,7 +100,6 @@ type statusParams struct {
 	Model       string
 	AttentionN  int
 	TopSeverity domain.Severity
-	Agents      int
 	Degraded    bool
 
 	// Active-agent badge ingredients ("" ActiveLabel ⇒ no agent working). ActiveTone
@@ -116,7 +117,7 @@ type statusParams struct {
 }
 
 // renderStatusLine renders the ≤56-cell compact rollup; it speaks ONLY when it has
-// something to say (renders "" otherwise — no "Standing by" placeholder, §6).
+// something to say (renders "" otherwise — no "Standing by" placeholder).
 func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	g := th.Glyphs
 	cap := width
@@ -134,8 +135,8 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	}
 
 	// Active-agent badge: a tone-tinted "<glyph> LABEL" run (color + glyph from the
-	// tone), then a DIM " id [· goal] [duration]" run — exactly as StatusLine.tsx
-	// inlines the StateBadge. Falls back to the pre-formatted ActiveAgent string
+	// tone), then a DIM " id [· goal] [duration]" run — exactly as the inlined
+	// StateBadge. Falls back to the pre-formatted ActiveAgent string
 	// only when no structured label is supplied (legacy callers).
 	active := p.ActiveLabel != "" || p.ActiveAgent != ""
 	if p.ActiveLabel != "" {
@@ -177,9 +178,6 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 		tone := severityTone(p.TopSeverity)
 		segs = append(segs, styleFor(th, tone, "!"+itoa(p.AttentionN)))
 	}
-	if p.Agents > 0 {
-		segs = append(segs, th.Dim().Render("agents "+itoa(p.Agents)))
-	}
 
 	if len(segs) == 0 {
 		return ""
@@ -188,10 +186,10 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	return truncateCells(strings.Join(segs, sep), cap)
 }
 
-// toneGlyphFor is the badge glyph that always accompanies a tone's color (mirrors
-// theme.ts toneGlyph): active ◌, success ✓, danger ×, neutral ·. warning/blocked
-// use the literal attention mark "!" (theme.ts `set.attention`), which has no
-// dedicated GlyphSet field. ASCII fallback flows through the unicode set members.
+// toneGlyphFor is the badge glyph that always accompanies a tone's color: active
+// ◌, success ✓, danger ×, neutral ·. warning/blocked use the literal attention
+// mark "!", which has no dedicated GlyphSet field. ASCII fallback flows through the
+// unicode set members.
 func toneGlyphFor(g theme.GlyphSet, tone string) string {
 	switch tone {
 	case "active", "info":
@@ -234,17 +232,17 @@ func severityTone(s domain.Severity) string {
 }
 
 // renderNoteCell renders a standalone NoteCell (one line, leading blank owned by
-// the cell, §3).
+// the cell).
 func renderNoteCell(th theme.Theme, n *NoteCell, width int) string {
 	g := th.Glyphs
 	glyph, tone := noteGlyph(th, n.Level)
 	// Tone the │ continuation spine with the note tone (green info / red error)
-	// instead of flat muted gray (§7) — matches the greenish MCP-connected note.
+	// instead of flat muted gray — matches the greenish MCP-connected note.
 	cont := styleFor(th, tone, g.Continuation)
 	return truncateCells(cont+styleFor(th, tone, glyph)+" "+th.Body().Render(n.Text), width)
 }
 
-// renderCommandCell renders a slash-command result into the transcript (§3).
+// renderCommandCell renders a slash-command result into the transcript.
 func renderCommandCell(th theme.Theme, c *CommandCell, width int) string {
 	var b strings.Builder
 	if c.Title != "" {

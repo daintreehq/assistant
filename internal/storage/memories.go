@@ -148,7 +148,7 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 
 // ForgetMemory soft-deletes (stamp deletedAt+updatedAt WHERE deletedAt IS NULL).
 // It does NOT mutate content, so the FTS old.content still matches on a later
-// hard-delete sweep (KEEP, storage.md §3.12). Reports whether changed.
+// hard-delete sweep (KEEP). Reports whether changed.
 func (s *Store) ForgetMemory(id string, now int64) (bool, error) {
 	if now <= 0 {
 		now = s.now()

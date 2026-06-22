@@ -3,7 +3,7 @@
 // are injected into the main model's context when relevant to the user's task.
 // Skills are "the behavior layer that replaces fine-tuning".
 //
-// Flow (port spec docs/port/skills.md §0):
+// Flow:
 //  1. Every skill's headers render into a static catalog (message[1]).
 //  2. The model calls skill.find with a NL query.
 //  3. A cheap small-model selector returns the best 0-3 skill ids.
@@ -18,8 +18,7 @@ package skills
 
 // SkillRisk is the riskiest action class a skill's body drives. The value set
 // mirrors tool risk classes; default when omitted is "read". Validation rejects
-// any other value at load. (Spec §1.1 — set matters, not the slightly different
-// declaration order from the tool-risk doc.)
+// any other value at load. (Set membership matters, not declaration order.)
 type SkillRisk string
 
 const (
@@ -38,7 +37,7 @@ var validSkillRisk = map[SkillRisk]bool{
 	RiskProject: true, RiskGit: true, RiskExternal: true, RiskSystem: true,
 }
 
-// Default field values (spec §1.2).
+// Default field values.
 const (
 	defaultPriority = 0
 	defaultMaxTurns = 8
@@ -64,7 +63,7 @@ type Skill struct {
 // SkillMetadata is the .pick() subset the selector ever sees: exactly id, title,
 // summary, whenToUse, tags, priority — NEVER body/version/risk/maxTurns/
 // requiredTools. Keeping this subset exact bounds selector input cost and the
-// injection surface (spec §1.3).
+// injection surface.
 type SkillMetadata struct {
 	ID        string   `json:"id"`
 	Title     string   `json:"title"`
@@ -90,7 +89,7 @@ func (s Skill) Metadata() SkillMetadata {
 }
 
 // SkillSelection is the structured JSON the small selector model returns
-// (spec §1.4). skillIds capped at 3; confidence in [0,1].
+// skillIds capped at 3; confidence in [0,1].
 type SkillSelection struct {
 	SkillIDs   []string `json:"skillIds"`
 	Confidence float64  `json:"confidence"`
@@ -99,7 +98,7 @@ type SkillSelection struct {
 }
 
 // SkillFindResult is the plain (non-validated) return of the skill.find engine
-// (spec §1.5). ok is false ONLY when the selector model errored/cancelled; the
+// ok is false ONLY when the selector model errored/cancelled; the
 // loaded set is then left unchanged.
 type SkillFindResult struct {
 	Ok             bool            `json:"ok"`

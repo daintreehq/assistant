@@ -62,8 +62,7 @@ func indexNames(t *testing.T, s *Store, table string) map[string]bool {
 }
 
 // TestFreshSchemaShape asserts a fresh DB builds the whole current schema and
-// stamps user_version=1 — the single-baseline contract (db.test.ts "builds the
-// complete schema and lands user_version at 1").
+// stamps user_version=1 — the single-baseline contract.
 func TestFreshSchemaShape(t *testing.T) {
 	s := openTest(t, 1)
 
@@ -163,8 +162,7 @@ func readBusyTimeout(t *testing.T, s *Store) int {
 }
 
 // TestBusyTimeoutPersistsAcrossReopen — busy_timeout is per-connection and must
-// be re-applied on every Open, even when the file already has WAL set (db.test.ts
-// "sets busy_timeout on every connection to a file DB").
+// be re-applied on every Open, even when the file already has WAL set.
 func TestBusyTimeoutPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := openFile(t, path, 1)
@@ -179,8 +177,7 @@ func TestBusyTimeoutPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-// TestDueTimersWindow — DueTimers returns only scheduled timers with fireAt <= now
-// (db.test.ts "dueTimers returns only scheduled timers with fireAt <= now").
+// TestDueTimersWindow — DueTimers returns only scheduled timers with fireAt <= now.
 func TestDueTimersWindow(t *testing.T) {
 	now := int64(1_000_000)
 	s := openTest(t, now)
@@ -209,7 +206,7 @@ func TestDueTimersWindow(t *testing.T) {
 }
 
 // TestDueWatchersWindow — DueWatchers returns only active watchers with
-// nextCheckAt <= now (db.test.ts "dueWatchers returns only active watchers …").
+// nextCheckAt <= now.
 func TestDueWatchersWindow(t *testing.T) {
 	now := int64(2_000_000)
 	s := openTest(t, now)

@@ -17,7 +17,7 @@ const (
 	defaultAgentID = "claude"
 )
 
-// editConstraintsBlock is appended to an edit-mode spawned-agent prompt (docs §18).
+// editConstraintsBlock is appended to an edit-mode spawned-agent prompt.
 const editConstraintsBlock = "Make changes only in this worktree. Do not modify unrelated files. Run relevant tests if practical. Report back changed files, tests run, remaining risks. If you need clarification, stop and ask."
 
 // exploreConstraintsBlock is appended to an explore-mode (read-only) prompt.
@@ -27,7 +27,7 @@ var wsRun = regexp.MustCompile(`\s+`)
 
 // buildAgentPrompt composes the agent prompt from the task, caller-supplied
 // context hints, the mode-specific constraints block, and the acceptance
-// criteria. Mirrors buildAgentPrompt in agentTaskTools.ts.
+// criteria.
 func buildAgentPrompt(a *spawnArgs) string {
 	lines := []string{strings.TrimSpace(a.TaskPrompt)}
 	var ctxLines []string
@@ -200,7 +200,7 @@ func reconcileViaTerminalList(ctx context.Context, mcp MCPClient, name, agentID,
 // computeIdempotencyKey derives a deterministic 16-hex key over the task IDENTITY
 // (taskPrompt, worktreeId|"", agentId, mode) — title/context excluded so a retry
 // that tweaks them still dedupes. Keys are sorted for a canonical JSON before
-// sha256 (a flat object, so a key-sort suffices). Mirrors the TS algorithm.
+// sha256 (a flat object, so a key-sort suffices).
 func computeIdempotencyKey(taskPrompt, worktreeID, agentID, mode string) string {
 	parts := map[string]string{
 		"taskPrompt": taskPrompt,

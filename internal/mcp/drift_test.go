@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Port of mcpDrift.test.ts (#7). The drift baseline (DocumentedMcpToolNames) is the
+// Drift contract (#7). The drift baseline (DocumentedMcpToolNames) is the
 // hand-maintained set of tools the live Daintree server is expected to advertise.
 // Drift is missing-only: documented names absent from the live surface produce ONE
 // warning each; extra live tools are ignored; an empty live list is "unknown" not

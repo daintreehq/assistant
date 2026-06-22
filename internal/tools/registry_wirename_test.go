@@ -14,15 +14,15 @@ import (
 var openAINameRePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 // dottedTool is a minimal read-only tool carrying an arbitrary dotted name, used
-// to exercise the wire-name alias layer (registry.test.ts §"wire-name alias").
+// to exercise the wire-name alias layer.
 func dottedTool(name string) *Tool {
 	return &Tool{Name: name, Risk: domain.RiskRead,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *ToolContext) ToolResult { return Ok("ran", nil) }}
 }
 
-// TestWireNameExactRoundTrip ports the exact projections from registry.test.ts:
+// TestWireNameExactRoundTrip exercises the exact projections:
 // test.read → test__read, multi-dot names sanitize EVERY segment, and an unknown
-// wire name resolves to "" (Go's undefined).
+// wire name resolves to "".
 func TestWireNameExactRoundTrip(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Register(dottedTool("test.read"))
@@ -57,7 +57,7 @@ func TestWireNameExactRoundTrip(t *testing.T) {
 	}
 }
 
-// TestWireNameTooLongThrows ports registry.test.ts: a sanitized wire name over 64
+// TestWireNameTooLongThrows: a sanitized wire name over 64
 // chars must fail projection (the model can't use an illegal function name).
 func TestWireNameTooLongThrows(t *testing.T) {
 	r := NewRegistry()
@@ -74,7 +74,7 @@ func TestWireNameTooLongThrows(t *testing.T) {
 	}
 }
 
-// TestWireNameCollisionThrows ports registry.test.ts: two internal names that map
+// TestWireNameCollisionThrows: two internal names that map
 // to the same wire name (fs.read and fs__read both → fs__read) must be detected.
 func TestWireNameCollisionThrows(t *testing.T) {
 	r := NewRegistry()
@@ -87,7 +87,7 @@ func TestWireNameCollisionThrows(t *testing.T) {
 	}
 }
 
-// TestWireNameFilteredAliasMapOnly ports registry.test.ts: a narrowed projection
+// TestWireNameFilteredAliasMapOnly: a narrowed projection
 // only puts the filtered tools in the alias map.
 func TestWireNameFilteredAliasMapOnly(t *testing.T) {
 	r := NewRegistry()
@@ -107,7 +107,7 @@ func TestWireNameFilteredAliasMapOnly(t *testing.T) {
 	}
 }
 
-// TestEveryToolProjectsToLegalWireName ports the registry.test.ts guarantee that
+// TestEveryToolProjectsToLegalWireName guarantees that
 // every projected wire name is OpenAI-legal, dot-free, and round-trips.
 func TestEveryToolProjectsToLegalWireName(t *testing.T) {
 	r := NewRegistry()
@@ -134,7 +134,7 @@ func TestEveryToolProjectsToLegalWireName(t *testing.T) {
 	}
 }
 
-// TestDispatchByInternalNameAfterProjection ports registry.test.ts: dispatch still
+// TestDispatchByInternalNameAfterProjection: dispatch still
 // works by the internal dotted name after a wire projection.
 func TestDispatchByInternalNameAfterProjection(t *testing.T) {
 	r := NewRegistry()

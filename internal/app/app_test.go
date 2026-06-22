@@ -11,7 +11,7 @@ import (
 )
 
 // newOfflineApp builds a fully-wired App against a temp-dir state DB in offline
-// mode (no network, no model calls). It mirrors the TS appSchedulerContext setup
+// mode (no network, no model calls). It applies the scheduler-context setup
 // (overrides: offline + stateDir + projectPath + operator tier) but exercises the
 // real DefaultToolBuilder so AssertSafe runs over the whole wired tool set.
 func newOfflineApp(t *testing.T) *App {
@@ -104,8 +104,8 @@ func TestCreateSeedsThreeControlMessages(t *testing.T) {
 	}
 }
 
-// TestSchedulerContextDormantBeforeStart ports appSchedulerContext.test.ts case 1:
-// before StartScheduler, PromptContext().SchedulerActive is false and the runtime
+// TestSchedulerContextDormantBeforeStart: before StartScheduler,
+// PromptContext().SchedulerActive is false and the runtime
 // context message (message[1]) carries the dormant note.
 func TestSchedulerContextDormantBeforeStart(t *testing.T) {
 	a := newOfflineApp(t)
@@ -120,8 +120,8 @@ func TestSchedulerContextDormantBeforeStart(t *testing.T) {
 	}
 }
 
-// TestSchedulerContextActiveAfterStart ports appSchedulerContext.test.ts case 2:
-// after StartScheduler, SchedulerActive flips true and the dormant note is cleared
+// TestSchedulerContextActiveAfterStart: after StartScheduler,
+// SchedulerActive flips true and the dormant note is cleared
 // from the refreshed runtime context message.
 func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	a := newOfflineApp(t)
@@ -140,7 +140,7 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 
 // TestStartSchedulerIdempotent asserts a second StartScheduler call does not leak a
 // second ticker — it rebinds onto the existing scheduler and returns the same
-// instance (the app.ts §2.7 idempotency invariant).
+// instance (the idempotency invariant).
 func TestStartSchedulerIdempotent(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()

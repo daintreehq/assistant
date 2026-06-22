@@ -7,14 +7,14 @@ import (
 )
 
 // maxAuditJSON caps the audited JSON length; preview keeps the stored row near
-// the cap rather than ballooning on large file/scrollback results. Spec: §6.3.
+// the cap rather than ballooning on large file/scrollback results.
 const (
 	maxAuditJSON    = 4000
 	previewHeadroom = 200 // wrapper+escaping headroom → preview = first 3800 chars
 )
 
 // safeJSON marshals v to a string; on a marshal error returns the sentinel
-// "<unserializable>" so the audit path never throws. Spec: §6.3.
+// "<unserializable>" so the audit path never throws.
 func safeJSON(v any) string {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -25,7 +25,7 @@ func safeJSON(v any) string {
 
 // capJSON truncates an oversized JSON blob to a redacted preview + byte count.
 // `bytes` is the UTF-8 byte length of the FULL blob; the preview is the first
-// (maxAuditJSON-previewHeadroom) chars (runes). Spec: §6.3.
+// (maxAuditJSON-previewHeadroom) chars (runes).
 func capJSON(s string) string {
 	// Threshold on rune count (TS uses UTF-16 .length; rune-count is the faithful
 	// single-unit choice and keeps multibyte slicing valid).
@@ -84,7 +84,7 @@ func (e *DecodeError) Error() string { return e.Message }
 // DecodeStrict decodes raw into *out, REJECTING unknown fields (the Go analogue
 // of a Zod .strict() schema). Use it to build a Tool.Decode that both validates
 // shape and rejects extra keys. The returned canonical args (re-marshaled from
-// *out) carry defaults/coercion so the handler sees the parsed form (§4 step 2).
+// *out) carry defaults/coercion so the handler sees the parsed form.
 //
 // Usage in a tool family:
 //

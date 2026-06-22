@@ -18,7 +18,7 @@ const callableNote = "`callable: false` means the tool exists but is not offered
 
 // makeCallable builds a predicate reporting whether a discovered MCP tool is
 // offered in the current turn's projection. activeToolNames==nil ⇒ unconstrained
-// (every tool callable); mirrors the TS `undefined` sentinel.
+// (every tool callable).
 func makeCallable(activeToolNames []string) func(string) bool {
 	if activeToolNames == nil {
 		return func(string) bool { return true }
@@ -165,7 +165,7 @@ func newSearchTool(deps Deps) tools.Tool {
 // wrapper the model must use instead. Forwarding one of these raw through the
 // escape hatch would bypass the wrapper's typed validation (a dropped/renamed
 // required arg silently reaching Daintree), so we redirect. The first block is the
-// original §4.14 set; the second block adds the remaining typed-wrapper MCP action
+// original core set; the second block adds the remaining typed-wrapper MCP action
 // names (recipe/worktree/workflow/forge passthroughs) that were registered with a
 // typed wrapper but were NOT being denied here. Keys are matched case-insensitively
 // after whitespace normalization (see normalizeMCPName) so a "Recipe.Run" or a

@@ -179,7 +179,7 @@ func bytesTrimSpace(b json.RawMessage) []byte {
 
 // wireMessage is the reduced shape we actually send to Fireworks. Pointers /
 // omitempty honour the omit-when-undefined rule (never send null for an absent
-// optional field, except where the TS deliberately coalesces null content to "").
+// optional field, except where null content is deliberately coalesced to "").
 type wireMessage struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content,omitempty"`
@@ -211,10 +211,9 @@ func toWireMessages(messages []ChatMessage) ([]wireMessage, error) {
 			out = append(out, wireMessage{Role: "tool", Content: c, ToolCallID: m.ToolCallID})
 		case "assistant":
 			wm := wireMessage{Role: "assistant"}
-			// Assistant content: a string, or the JS `null` literal for a pure
-			// tool-call turn. We mirror the TS `content: m.content` passthrough,
-			// where a null content serializes as JSON null (not omitted) so the
-			// provider sees an explicit null on a tool-call turn.
+			// Assistant content: a string, or the `null` literal for a pure
+			// tool-call turn. A null content serializes as JSON null (not omitted)
+			// so the provider sees an explicit null on a tool-call turn.
 			if m.ContentNull && m.Parts == nil {
 				wm.Content = json.RawMessage("null")
 			} else {
@@ -283,21 +282,21 @@ func normalizeToolCalls(calls []rawToolCall) []ToolCallRequest {
 	return out
 }
 
-// hashString reproduces the JS string hash bit-for-bit so synthesized tool-call
-// ids match the TS transcripts: h = (h<<5)-h + charCodeAt(i), forced to int32 each
-// step. Iterates over UTF-16 code units (charCodeAt), NOT runes — a non-BMP rune
-// contributes two code units, exactly as JS does.
+// hashString is a DJB2-style hash over UTF-16 code units, NOT runes, forced to
+// int32 each step — so synthesized tool-call ids stay stable across transcripts:
+// h = (h<<5) - h + <UTF-16 code unit at i>. A non-BMP rune contributes two code
+// units.
 func hashString(s string) int32 {
 	var h int32
 	for _, u := range utf16Units(s) {
 		h = (h << 5) - h + int32(u)
-		// h |= 0 in JS forces a 32-bit signed truncation; int32 arithmetic already
+		// A 32-bit signed truncation is required each step; int32 arithmetic already
 		// wraps, so no extra masking is needed.
 	}
 	return h
 }
 
-// utf16Units returns the UTF-16 code units of s (what JS charCodeAt iterates).
+// utf16Units returns the UTF-16 code units of s.
 func utf16Units(s string) []uint16 {
 	var units []uint16
 	for _, r := range s {

@@ -9,14 +9,14 @@ import (
 )
 
 // historyLimit caps the recallable prompt history kept for ↑/↓ during a session
-// (ui-input.md §1.7). History is session-scoped and never persisted.
+// History is session-scoped and never persisted.
 const historyLimit = 200
 
 // Model is the dedicated composer editor. The buffer is a single flat string
 // with embedded '\n'; the cursor is a flat RUNE offset clamped to [0, len] on
 // every mutation. History, the single-slot kill-ring, and the slash palette all
 // live here — the parent never reaches in except via the one sanctioned
-// Restore(text) path (the pull-back, ui-input.md §1.6).
+// Restore(text) path (the pull-back).
 type Model struct {
 	buffer string
 	cursor int // flat rune offset, always clamped to [0, runeLen(buffer)]
@@ -29,16 +29,32 @@ type Model struct {
 	draft     string
 
 	// killRing is a SINGLE slot (the last killed text), not an Emacs ring. Ctrl-Y
-	// inserts it verbatim with no rotation (ui-input.md §1.5).
+	// inserts it verbatim with no rotation.
 	killRing string
 
-	// commands is the slash-palette source, injected as data (ui-input.md §1.9).
+	// commands is the slash-palette source, injected as data.
 	commands []Command
 
 	// busy/focus drive palette visibility and the busy cue; they do NOT gate
-	// editing — the composer stays editable while a turn runs (ui-input.md §1.10).
+	// editing — the composer stays editable while a turn runs.
 	busy  bool
 	focus bool
+
+	// paletteSel is the highlighted slash-suggestion row (index into the active
+	// suggestions); ↑/↓ and Tab/Shift-Tab move it, Tab/Enter accepts it.
+	paletteSel int
+
+	// reverse-i-search (Ctrl-R): while searching, typed runes filter prompt history and the
+	// buffer shows the current match. searchPrev* restore the draft if the search is cancelled.
+	searching        bool
+	searchQuery      string
+	searchHit        int // index into history of the current match, -1 = none
+	searchPrevBuf    string
+	searchPrevCursor int
+
+	// lastWidth is the content width the composer last rendered at (set in View, read by the
+	// visual-row-aware vertical motion in Update so ↑/↓ follow soft-wrapped rows).
+	lastWidth int
 
 	keys  keymap
 	theme theme.Theme
@@ -69,6 +85,10 @@ func (m *Model) SetFocus(f bool) { m.focus = f }
 // SetBusy updates the busy flag (drives the busy cue and palette suppression).
 func (m *Model) SetBusy(b bool) { m.busy = b }
 
+// SetWidth records the content width the composer renders at, so visual-row vertical motion
+// (↑/↓) follows soft-wrapped rows. The parent pushes it each reduction (syncComposer).
+func (m *Model) SetWidth(w int) { m.lastWidth = w }
+
 // Focused reports whether the composer currently owns keys.
 func (m *Model) Focused() bool { return m.focus }
 
@@ -88,7 +108,7 @@ func (m *Model) Reset() {
 	m.draft = ""
 }
 
-// Restore is the ONE sanctioned parent→composer write (ui-input.md §1.6): the
+// Restore is the ONE sanctioned parent→composer write: the
 // pull-back pushes the original text back into the buffer for editing, cursor
 // parked at end. Modeled as a direct method (the parent owns the composer as an
 // embedded struct); a RestoreDraftMsg in Update is the alternative seam.
@@ -100,8 +120,7 @@ func (m *Model) Restore(text string) {
 }
 
 // recordHistory appends an accepted prompt for recall, collapsing an immediate
-// duplicate and capping at historyLimit (keep the newest 200). Ported from
-// Composer.tsx `submit` (ui-input.md §1.7).
+// duplicate and capping at historyLimit (keep the newest 200).
 func (m *Model) recordHistory(trimmed string) {
 	if n := len(m.history); n > 0 && m.history[n-1] == trimmed {
 		return
@@ -129,6 +148,7 @@ func (m *Model) insert(text string) {
 	if text == "" {
 		return
 	}
+	m.paletteSel = 0 // typing re-filters the palette → reset the highlight to the top match
 	rs := runesOf(m.buffer)
 	ins := runesOf(text)
 	cur := clampInt(m.cursor, 0, len(rs))
@@ -141,7 +161,6 @@ func (m *Model) insert(text string) {
 
 // killRange normalizes order, no-ops if empty, stores the removed slice into the
 // single-slot kill-ring, removes it, and parks the cursor at the lower bound.
-// Ported from MultilineInput.tsx `killRange` (ui-input.md §1.5).
 func (m *Model) killRange(from, to int) {
 	rs := runesOf(m.buffer)
 	a, b := from, to
@@ -172,16 +191,69 @@ func (m *Model) recall(text string) {
 	m.cursor = m.runeLen()
 }
 
-// --- vertical motion + history recall (ui-input.md §1.4) ---
+// --- reverse-i-search (Ctrl-R) ---
+
+// startSearch enters reverse history search; a no-op with no history.
+func (m *Model) startSearch() {
+	if len(m.history) == 0 {
+		return
+	}
+	m.searching = true
+	m.searchQuery = ""
+	m.searchHit = -1
+	m.searchPrevBuf = m.buffer
+	m.searchPrevCursor = m.cursor
+}
+
+// endSearch leaves search mode, keeping whatever is currently in the buffer (the match).
+func (m *Model) endSearch() {
+	m.searching = false
+	m.searchQuery = ""
+	m.searchHit = -1
+	m.histIndex = -1
+}
+
+// reverseSearch returns the index of the most recent history entry strictly OLDER than
+// `before` whose text contains query (case-insensitive), or -1. before == len(history)
+// searches all of it; passing the current hit advances to the next older match.
+func (m *Model) reverseSearch(query string, before int) int {
+	if strings.TrimSpace(query) == "" {
+		return -1
+	}
+	q := strings.ToLower(query)
+	if before < 0 || before > len(m.history) {
+		before = len(m.history)
+	}
+	for i := before - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(m.history[i]), q) {
+			return i
+		}
+	}
+	return -1
+}
+
+// applySearch re-runs the search from the newest entry after the query changed, recalling
+// the match into the buffer (leaving the buffer as-is on a failed search).
+func (m *Model) applySearch() {
+	hit := m.reverseSearch(m.searchQuery, len(m.history))
+	m.searchHit = hit
+	if hit >= 0 {
+		m.recall(m.history[hit])
+	}
+}
+
+// --- vertical motion + history recall ---
 
 // moveUp moves up a logical line keeping the column; on the TOP line it walks
 // backward through prompt history.
 func (m *Model) moveUp() {
 	rs := runesOf(m.buffer)
-	lines := splitLines(rs)
-	row, col := locate(rs, m.cursor)
-	if row > 0 {
-		m.cursor = offsetOf(lines, row-1, col)
+	rows := buildVisualRows(rs, m.wrapWidth())
+	vr, vc := cursorVisual(rows, m.cursor)
+	if vr > 0 {
+		// Move by VISUAL row (soft-wrapped), not logical line, so ↑ on a wrapped paragraph
+		// steps up one screen row instead of jumping straight into history recall.
+		m.cursor = offsetAtVisual(rows, vr-1, vc)
 		return
 	}
 	if len(m.history) == 0 {
@@ -205,10 +277,10 @@ func (m *Model) moveUp() {
 // walks forward through history, restoring the live draft past the newest entry.
 func (m *Model) moveDown() {
 	rs := runesOf(m.buffer)
-	lines := splitLines(rs)
-	row, col := locate(rs, m.cursor)
-	if row < len(lines)-1 {
-		m.cursor = offsetOf(lines, row+1, col)
+	rows := buildVisualRows(rs, m.wrapWidth())
+	vr, vc := cursorVisual(rows, m.cursor)
+	if vr < len(rows)-1 {
+		m.cursor = offsetAtVisual(rows, vr+1, vc)
 		return
 	}
 	// On the bottom line: forward history.
@@ -235,7 +307,7 @@ type SubmitResult struct {
 }
 
 // trimEmpty reports whether the buffer is whitespace-only (for Esc semantics: a
-// stray space must not swallow the cancel gesture, ui-input.md §1.3).
+// stray space must not swallow the cancel gesture).
 func (m *Model) trimEmpty() bool { return strings.TrimSpace(m.buffer) == "" }
 
 // keyMsg is the only key event shape we handle (a key press). v2 also delivers

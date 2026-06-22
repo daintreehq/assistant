@@ -5,7 +5,6 @@
 //
 // These strings (risk classes, tier names, error codes, forbidden fragments)
 // are model/schema/audit contracts — preserve their exact spelling.
-// Spec: docs/port/tools-core.md §5.
 package safety
 
 import (
@@ -18,7 +17,6 @@ import (
 
 // tierAllowed maps each tier to the risk classes it may perform AT ALL.
 // operator deliberately lacks git/system; only system tier has them.
-// Spec: tools-core.md §5.1.
 var tierAllowed = map[domain.Tier]map[domain.RiskClass]bool{
 	domain.TierSupervisor: setOf(domain.RiskRead, domain.RiskLocal, domain.RiskUI),
 	domain.TierOperator: setOf(
@@ -34,7 +32,7 @@ var tierAllowed = map[domain.Tier]map[domain.RiskClass]bool{
 
 // alwaysConfirm is the set of risk classes that always require an explicit
 // confirmation (or a scoped grant for non-interactive actors) before running.
-// read/local/ui never confirm. Spec: tools-core.md §5.1.
+// read/local/ui never confirm.
 var alwaysConfirm = setOf(
 	domain.RiskTerminal, domain.RiskProject,
 	domain.RiskGit, domain.RiskExternal, domain.RiskSystem,
@@ -62,7 +60,7 @@ type PolicyDecision struct {
 
 // DecideOptions carries the optional pre-resolved-approval flag. The dispatch
 // path does NOT pass it (the grant check happens after Decide in the registry);
-// it exists for callers that pre-resolve approval. Spec: tools-core.md §5.1.
+// it exists for callers that pre-resolve approval.
 type DecideOptions struct {
 	HasScopedApproval bool
 }
@@ -106,7 +104,7 @@ func setOf[T comparable](vals ...T) map[T]bool {
 
 // FileEditAttemptError is raised when a file-mutating tool name is detected at
 // registration OR when daintree.call forwards a forbidden raw MCP name. Its code
-// FILE_EDIT_FORBIDDEN is model-facing. Spec: tools-core.md §5.2.
+// FILE_EDIT_FORBIDDEN is model-facing.
 type FileEditAttemptError struct {
 	Message string
 }
@@ -126,7 +124,6 @@ func (e *FileEditAttemptError) Code() string { return FileEditForbiddenCode }
 // fs__write OpenAI wire form, delete/remove/rename/save variants, and more patch
 // spellings) so a write tool can't be wired in under a near-miss name. Matching is
 // a case-insensitive substring test, so each entry catches its name variants.
-// Spec: tools-core.md §5.2.
 var forbiddenToolFragments = []string{
 	"write_file",
 	"writefile",
@@ -140,7 +137,7 @@ var forbiddenToolFragments = []string{
 	"file.edit",
 	"patch.apply",
 
-	// Hardening additions (beyond the TS list).
+	// Hardening additions.
 	"fs__write", // OpenAI wire form of fs.write (dots → "__")
 	"savefile",  // saveFile / save_file
 	"save_file",
@@ -194,7 +191,7 @@ func AssertNoFileEditTools(toolNames []string) error {
 //
 // The read-only fs tools refuse to read credential-bearing files: their contents
 // would otherwise leak into the durable audit log / conversation history.
-// Matching is case-insensitive. Spec: tools-core.md §5.3.
+// Matching is case-insensitive.
 
 var secretBasenames = setOf(
 	".env", ".envrc", ".npmrc", ".netrc", ".pgpass", ".htpasswd",
@@ -229,7 +226,7 @@ func IsSensitiveSegment(seg string) bool {
 // IsSensitivePath reports whether relOrPath names a credential-bearing file or
 // lives under a credential dir anywhere in the path. EVERY segment is checked so
 // a sensitive file/dir nested anywhere (nested/.env/x, home/.aws/credentials) is
-// caught. Spec: tools-core.md §5.3.
+// caught.
 func IsSensitivePath(relOrPath string) bool {
 	lower := strings.ToLower(relOrPath)
 	base := filepath.Base(lower)
@@ -259,7 +256,7 @@ func IsSensitivePath(relOrPath string) bool {
 // target, guaranteeing it stays inside the project root. It runs two passes:
 // (1) lexical (catches ../ traversal even for not-yet-existing paths) and
 // (2) symlink-resolved (a repo-local symlink can't point outside the project).
-// On escape it returns a *FileEditAttemptError. Spec: tools-core.md §5.4.
+// On escape it returns a *FileEditAttemptError.
 func ResolveInsideProject(projectPath, rel string) (string, error) {
 	lexicalRoot, err := filepath.Abs(projectPath)
 	if err != nil {
@@ -296,7 +293,7 @@ func assertInside(root, p, rel string) error {
 
 // realpathOfExisting resolves symlinks on the nearest existing ancestor of p and
 // re-appends the missing remainder, so a not-yet-existing path still gets its
-// existing prefix symlink-resolved (matching the TS realpathOfExisting).
+// existing prefix symlink-resolved.
 func realpathOfExisting(p string) string {
 	p = filepath.Clean(p)
 	missing := ""

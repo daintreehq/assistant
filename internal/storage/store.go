@@ -4,12 +4,11 @@
 // grants, the workflow ledger, agent-launch sagas, skill run state, and
 // cross-session project memories (with an FTS5 recall index).
 //
-// Port of src/storage/db.ts. The TS Bun/Node dual driver (sqliteDriver.ts) is
-// dropped — Go uses modernc.org/sqlite (pure Go, CGO-free) directly. The store is
+// Uses modernc.org/sqlite (pure Go, CGO-free) directly. The store is
 // single-writer (SetMaxOpenConns(1)) to preserve the no-interleave assumption the
 // "atomic" grant consume / event upsert / resolve rely on. Construction is a
 // session boundary: stale watchers cancelled, stale agent-launch sagas failed,
-// retention swept. Spec: docs/port/storage.md.
+// retention swept.
 package storage
 
 import (
@@ -27,12 +26,12 @@ import (
 var schemaSQL string
 
 const (
-	// dayMS is one day in epoch milliseconds (db.ts DAY_MS).
+	// dayMS is one day in epoch milliseconds.
 	dayMS int64 = 86_400_000
 	// busyTimeoutMS is the lock-retry budget for a single-writer local CLI; set
-	// FIRST so it covers the WAL transition's write lock (storage.md §2).
+	// FIRST so it covers the WAL transition's write lock.
 	busyTimeoutMS = 5000
-	// schedulerTickMS is the supervisor cadence floor (watcherCadence.ts).
+	// schedulerTickMS is the supervisor cadence floor.
 	schedulerTickMS int = 3000
 	// pruneChunk caps run-id deletes per batch under SQLITE_MAX_VARIABLE_NUMBER 999.
 	pruneChunk = 900
@@ -41,7 +40,7 @@ const (
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
-// of MaxAge OR the last KeepN rows (storage.md §5).
+// of MaxAge OR the last KeepN rows.
 type Retention struct {
 	AuditLogMaxAge       time.Duration
 	AuditLogKeepRows     int
@@ -55,7 +54,7 @@ type Retention struct {
 	MemoriesDeletedAge   time.Duration // hard-delete soft-deleted memories past undo window
 }
 
-// DefaultRetention mirrors db.ts DEFAULT_RETENTION exactly.
+// DefaultRetention is the default retention policy.
 var DefaultRetention = Retention{
 	AuditLogMaxAge:       time.Duration(30*dayMS) * time.Millisecond,
 	AuditLogKeepRows:     5000,
@@ -70,7 +69,7 @@ var DefaultRetention = Retention{
 }
 
 // Options configures a Store. Both fields are test seams: pin the sweep clock and
-// shrink retention windows (mirrors the TS DbOptions { now, retention }).
+// shrink retention windows.
 type Options struct {
 	// Now returns "current" epoch-ms; nil ⇒ domain.NowMS.
 	Now func() int64
@@ -78,7 +77,7 @@ type Options struct {
 	Retention *Retention
 }
 
-// Store is the concrete persistence layer (port of the TS Db class).
+// Store is the concrete persistence layer.
 type Store struct {
 	db        *sql.DB
 	now       func() int64
@@ -105,9 +104,9 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// Single connection preserves the TS synchronous-driver no-interleave guarantee
-	// that "atomic" check-and-decrement (grants) / check-and-set (events, resolve)
-	// rely on; Go's pool would otherwise let goroutines interleave.
+	// Single connection preserves the no-interleave guarantee that "atomic"
+	// check-and-decrement (grants) / check-and-set (events, resolve) rely on;
+	// Go's pool would otherwise let goroutines interleave.
 	db.SetMaxOpenConns(1)
 
 	s := &Store{db: db, now: nowFn, retention: ret}
@@ -134,15 +133,15 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale agent launches: %w", err)
 	}
-	// Best-effort housekeeping: a sweep failure must NEVER abort construction
-	// (storage.md §7.4). Swallow the error here.
+	// Best-effort housekeeping: a sweep failure must NEVER abort construction.
+	// Swallow the error here.
 	_ = s.GCRetentionSweep(now)
 
 	return s, nil
 }
 
 // applyPragmas runs the three connection PRAGMAs in order; busy_timeout first so
-// it covers the WAL write lock on a fresh file (storage.md §2).
+// it covers the WAL write lock on a fresh file.
 func (s *Store) applyPragmas() error {
 	stmts := []string{
 		fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMS),

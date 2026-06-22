@@ -9,7 +9,7 @@ import (
 // UserMessageSurface is the per-mode color set for the human's turn card (the YOU
 // card: a left accent bar over a subtle fill — NOT a four-sided box). The fill
 // must stay subtle (a near-background tint) so the user's message reads as a quiet
-// surface, not a loud panel. Mirrors userMessageSurface(mode) in theme.ts §9.
+// surface, not a loud panel.
 //
 // A nil Fill means "no background fill" (ansi/none): 16-color backgrounds clash
 // unpredictably, and no-color mode leans on the dim bar alone.

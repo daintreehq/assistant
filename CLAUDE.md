@@ -9,8 +9,8 @@ Guidance for working in this repository.
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
 > The SQLite schema is a single clean baseline (`schemaUserVersion = 1`) — on a
-> schema change, hard-reset the DB (`make db-reset` / `rm -rf ~/.daintree/assistant-cli`)
-> rather than accumulate a migration chain.
+> schema change, hard-reset the DB (`rm -rf ~/.daintree/assistant-cli`) rather than
+> accumulate a migration chain.
 
 `github.com/daintreehq/daintree-assistant` — a single native **Go** binary, a local
 CLI **orchestration assistant for Daintree** ("Daintree's local operations officer").
@@ -49,7 +49,7 @@ make install                                                  # go install with 
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
-go test ./...                # all tests (336+), no network — fakes for MCP + models
+go test ./...                # all tests (980+ across 44 packages), no network — fakes for MCP + models
 go vet ./...                 # static checks
 make test-race               # go test -race ./...
 gofmt -l .                   # must print nothing (CI fails on unformatted files)
@@ -100,6 +100,8 @@ internal/
                  scrollback, splash, composer/ theme/ markdown/
   host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
+  deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
+  e2e/           end-to-end tests only: built-binary, fake Fireworks/MCP, inline-contract, turn/race
 ```
 
 **Data flow:** `app.App.Create()` builds every dependency once (Store, MCP, Queue,
@@ -154,16 +156,16 @@ publish to the **attention queue** instead of interrupting the main thread.
   commit ONCE via `tea.Println` (a strict, one-in-flight commit queue, masthead-first,
   ack'd by `ScrollbackCommittedMsg`), and only a small **live footer** (in-flight turn +
   status + composer) repaints. NEVER render the whole transcript into the `View()` string
-  — that is the Go equivalent of the OpenTUI `main-screen` garble. The **masthead has NO
-  full-width rule** (a committed rule would wrap on host shrink). `/clear` is the ONLY
-  scrollback wipe (`internal/terminal/clear.go`, `\x1b[2J\x1b[3J\x1b[H`, TTY-gated). See
-  `docs/BUBBLE_TEA.md` and `docs/port/_interaction-ux.md`.
+  — that garbles the layout the instant the transcript outgrows the terminal height. The
+  **masthead has NO full-width rule** (a committed rule would wrap on host shrink).
+  `/clear` is the ONLY scrollback wipe (`internal/terminal/clear.go`,
+  `\x1b[2J\x1b[3J\x1b[H`, TTY-gated). See `docs/BUBBLE_TEA.md`.
 - **Explicit liveness, ordered turn model.** The active turn is driven by a first-class
   `domain.RunPhase` (Received → Analyzing → Generating → ToolQueued/Running →
   Integrating → Complete/Failed/Cancelled), NOT inferred from "is the assistant text
   empty". A turn is an ordered `[]TurnStep` (prose / tool / status / note), not a flat
   string + a separate activities slice — so `preamble → tools → conclusion` renders in
-  true chronological order. See `docs/port/_interaction-ux.md`.
+  true chronological order. See `docs/BUBBLE_TEA.md`.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcher.go`):
   deterministic signals (agent state, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
@@ -202,5 +204,4 @@ subdir when a project id is set).
 
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`, `docs/FIREWORKS.md`,
-`docs/SKILLS.md` (how to author assistant skills), `docs/port/*.md` (the build-to
-port specs the rewrite was implemented against).
+`docs/SKILLS.md` (how to author assistant skills).

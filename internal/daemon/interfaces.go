@@ -12,9 +12,8 @@ import (
 // daemon never imports another Phase-C package, so it compiles in isolation. An
 // integrator wires the concrete storage/queue/mcp/models/tools types to these.
 
-// Store is the persistence surface the daemon uses. Methods mirror the SQLite
-// contract in docs/port/daemon.md §4.4. patch maps are column→value; the storage
-// layer allowlists columns (TIMER_UPDATE_COLS / WATCHER_UPDATE_COLS).
+// Store is the persistence surface the daemon uses. patch maps are column→value;
+// the storage layer allowlists columns (TIMER_UPDATE_COLS / WATCHER_UPDATE_COLS).
 type Store interface {
 	// DueTimers returns scheduled timers with fireAt<=now, ordered by fireAt,
 	// each at most once per tick (key to sleep-catchup single-fire).
@@ -127,7 +126,7 @@ type Registry interface {
 }
 
 // CheckContext bundles the per-actor dependencies a watcher/timer check needs.
-// It is the Go analogue of the TS ToolContext, narrowed to what the daemon uses.
+// It is narrowed to what the daemon uses.
 // ctxFor (SchedulerDeps.CtxFor) builds one for a given non-interactive actor.
 type CheckContext struct {
 	// Ctx carries cancellation (extraction polls supply a cancellable context;

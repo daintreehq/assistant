@@ -6,7 +6,7 @@ import (
 )
 
 // These strings are part of the main-thread prompt and feed the model's
-// behavior; they must be byte-for-byte stable (prompt-cache relevant, spec §8).
+// behavior; they must be byte-for-byte stable (prompt-cache relevant).
 
 // skillCatalogPreamble is the fixed header the catalog entries are wrapped in.
 // "%s" is the joined entries.
@@ -19,7 +19,7 @@ Available skills:
 %s`
 
 // BuildSkillCatalogMessage renders the static catalog appended to message[1]
-// (spec §8.1). Empty input ⇒ "" (caller omits the section).
+// Empty input ⇒ "" (caller omits the section).
 func BuildSkillCatalogMessage(metas []SkillMetadata) string {
 	if len(metas) == 0 {
 		return ""
@@ -31,7 +31,7 @@ func BuildSkillCatalogMessage(metas []SkillMetadata) string {
 	return fmt.Sprintf(skillCatalogPreamble, strings.Join(entries, "\n"))
 }
 
-// loadedSkillsEmpty is emitted when no skills are loaded (spec §8.2).
+// loadedSkillsEmpty is emitted when no skills are loaded.
 const loadedSkillsEmpty = `# Loaded skills
 No task-specific skills are currently loaded. Use the base operating instructions.`
 
@@ -43,7 +43,7 @@ The following skills are task-specific operating instructions. Apply them when r
 Step tracking: when a skill has numbered steps, call ` + "`skill.step.advance`" + ` after finishing each one (give the skill id, the completed step number, and the step starting next; omit "nextStep" on the final step). If you are resuming a skill or unsure where you left off, call ` + "`skill.run.get`" + ` first to read the saved checkpoint.
 %s`
 
-// BuildLoadedSkillsMessage renders message[2] from a bundle (spec §8.2). Empty
+// BuildLoadedSkillsMessage renders message[2] from a bundle. Empty
 // bundle ⇒ the empty-loaded text.
 func BuildLoadedSkillsMessage(bundle RenderedSkillBundle) string {
 	if len(bundle.Items) == 0 {

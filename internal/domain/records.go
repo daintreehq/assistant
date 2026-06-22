@@ -1,6 +1,6 @@
 package domain
 
-// Persisted DB-row records (schemas.ts §2.4). All *At fields are epoch-ms
+// Persisted DB-row records. All *At fields are epoch-ms
 // int64. Optionals are pointers. `*Json` fields hold a JSON-serialized string of
 // the named shape; the storage layer (de)serializes them.
 
@@ -198,7 +198,7 @@ type AgentLaunchRecord struct {
 	UpdatedAt      int64            `json:"updatedAt"`
 }
 
-// QueueEvent is a live attention-queue event (queue.ts §6.2). updatedAt advances
+// QueueEvent is a live attention-queue event. updatedAt advances
 // on each dedupe bump; createdAt stays fixed (recency).
 type QueueEvent struct {
 	ID                 string              `json:"id"`
@@ -218,7 +218,7 @@ type QueueEvent struct {
 	Count              int                 `json:"count"`
 }
 
-// QueueDigestOptions filters a queue digest (queue.ts §6.3).
+// QueueDigestOptions filters a queue digest.
 type QueueDigestOptions struct {
 	SeverityAtLeast *Severity
 	MaxItems        *int

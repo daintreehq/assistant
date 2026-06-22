@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Layout constants (ui-transcript.md §9, §12). Every committed/live line is
+// Layout constants. Every committed/live line is
 // measured by terminal CELL width (ansi.StringWidth), never runes/bytes, so wide
 // glyphs and combining marks can't misplace a caret or overflow into the autowrap
 // column.

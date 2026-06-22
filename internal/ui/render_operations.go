@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// render_operations.go renders the operations deck (ui-input.md §3): five sections
+// render_operations.go renders the operations deck: five sections
 // in strict human-priority order; empty sections vanish entirely so urgency owns
 // the space. A non-nil activePanel filters to one section ("focus" is a filter, not
 // a scroll).
@@ -31,7 +31,7 @@ func renderOperations(th theme.Theme, d Dashboard, panel PanelKey, now int64, wi
 	show := func(p PanelKey) bool { return panel == PanelNone || panel == p }
 
 	// A focused-but-empty section shows ONLY the honest placeholder, never the section
-	// title (ui-input.md §3: the title would imply data that isn't there).
+	// title (the title would imply data that isn't there).
 	section := func(title string, lines []string, focused bool) string {
 		if focused && len(stripBlank(lines)) == 0 {
 			return th.Dim().Render("Nothing here yet.")
@@ -82,7 +82,7 @@ func stripBlank(lines []string) []string {
 }
 
 // renderSection renders a titled section; returns "" when the body has no lines
-// (empty sections vanish, §3). A focused-but-empty section emits an honest line.
+// (empty sections vanish). A focused-but-empty section emits an honest line.
 func renderSection(th theme.Theme, title string, lines []string) string {
 	// Strip empty lines.
 	var body []string
@@ -215,7 +215,7 @@ func auditLines(th theme.Theme, d Dashboard, width int, focused bool) []string {
 }
 
 // epistemicTag renders a 3-letter provenance tag ("" when absent, so legacy rows
-// are unchanged). It is a trust signal, not decoration (§3.3).
+// are unchanged). It is a trust signal, not decoration.
 func epistemicTag(k domain.EpistemicKind) string {
 	switch k {
 	case domain.EpistemicObserved:

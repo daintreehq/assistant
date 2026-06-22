@@ -10,9 +10,9 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// handleCommand dispatches one validated command (TS handleCommand). It must NOT
+// handleCommand dispatches one validated command. It must NOT
 // block the command loop on a running Send — prompt/wake run on worker goroutines
-// while interrupt/approval:decide keep being serviced. Spec §7 / §13 concurrency.
+// while interrupt/approval:decide keep being serviced.
 func (h *Host) handleCommand(cmd HostCommand) {
 	if !h.ready || h.bridge == nil || h.app == nil {
 		h.report("not-ready", "Host is still starting.")
@@ -101,7 +101,7 @@ func (h *Host) finishPromptTurn(gen uint64) {
 	}
 }
 
-// handleInterrupt is the three coordinated actions (TS interrupt, §8). Order
+// handleInterrupt is the three coordinated actions. Order
 // matters: abort the turn signal, reject pending approvals (an awaited confirm
 // can't be unparked by the signal alone), then the display-side bridge interrupt.
 func (h *Host) handleInterrupt() {
@@ -121,7 +121,7 @@ func (h *Host) cancelTurn() {
 	}
 }
 
-// reactWake runs an autonomous, read-only wake turn (TS reactWake, §7). Gated by
+// reactWake runs an autonomous, read-only wake turn. Gated by
 // busy/ready; drains pendingWake; chains itself if more remain. Wake turns do NOT
 // register turnCancel (unabortable by design).
 func (h *Host) reactWake() {
@@ -193,7 +193,7 @@ func (h *Host) reactWake() {
 
 // teardown emits host:shutdown FIRST (so Daintree sees the reason even if the App
 // shutdown hangs), drains pending approvals, shuts the App, flushes, and exits.
-// Idempotent via teardownOnce. Spec §7 teardown().
+// Idempotent via teardownOnce.
 func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 	h.teardownOnce.Do(func() {
 		// Reject every outstanding approval so a parked dispatch unblocks (declined).
@@ -217,7 +217,7 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 				_ = h.app.Shutdown(context.Background())
 			}()
 		}
-		// Flush stdout, then exit (the TS setImmediate(exit) flush analog).
+		// Flush stdout, then exit (deferred so the final write lands first).
 		h.exit(0)
 	})
 }

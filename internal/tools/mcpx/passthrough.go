@@ -8,7 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// MCP-family error codes (model-facing — §4.14).
+// MCP-family error codes (model-facing).
 const (
 	codeMCPUnavailable  = "MCP_UNAVAILABLE"
 	codeMCPToolError    = "MCP_TOOL_ERROR"

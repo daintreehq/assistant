@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// cancelStaleWatchers runs on DB open (session boundary). KEEP EXACT ORDER
-// (storage.md §3 cancelStaleWatchers, §7.1):
+// cancelStaleWatchers runs on DB open (session boundary). KEEP EXACT ORDER:
 //
 //  1. revoke automation_grants for watcher actors whose watcher is non-terminal
 //     (status in active/created/paused) and not already revoked;
@@ -68,8 +67,8 @@ func (s *Store) cancelStaleWatchers(now int64) error {
 }
 
 // cancelStaleAgentLaunches fails any non-terminal spawn saga on open so a fresh
-// launch's idempotencyKey isn't blocked by a dead in-flight record (storage.md
-// §7.2). COALESCE preserves any pre-existing error code/message.
+// launch's idempotencyKey isn't blocked by a dead in-flight record.
+// COALESCE preserves any pre-existing error code/message.
 func (s *Store) cancelStaleAgentLaunches(now int64) error {
 	_, err := s.db.Exec(`
 		UPDATE agent_launches
@@ -84,7 +83,7 @@ func (s *Store) cancelStaleAgentLaunches(now int64) error {
 	return nil
 }
 
-// GCRetentionSweep enforces the retention policy. ORDER (storage.md §7.3): prune
+// GCRetentionSweep enforces the retention policy. ORDER: prune
 // whole old runs FIRST (co-deletes their audit rows so audit's own count floor is
 // spent on retained rows, preserving the run_events↔audit_log pairing), then the
 // age+count sweep on audit_log/conversation/skill_selection_log, then hard-delete

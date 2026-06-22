@@ -5,8 +5,8 @@ import (
 )
 
 // tablesToRecordLists rewrites GitHub-flavored markdown pipe tables into a
-// width-agnostic record list BEFORE handing the source to glamour. Reason
-// (ui-transcript.md §8): a fixed-width grid table shreds in the narrow inline
+// width-agnostic record list BEFORE handing the source to glamour. Reason:
+// a fixed-width grid table shreds in the narrow inline
 // cockpit, and glamour does not table-wrap safely at narrow widths either. The
 // record-list form:
 //

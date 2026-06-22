@@ -7,7 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
-// splash_ported_test.go ports tests/ui/StartupSplash.test.tsx: the boot splash draws
+// splash_ported_test.go exercises the boot splash: it draws
 // in (more ink over frames), sizes naturally with top breathing room + horizontal
 // centering, and — crucially — a too-narrow terminal SKIPS the mark but still fires
 // its done timer so boot never hangs. The composer-never-gated contract already lives
@@ -16,9 +16,8 @@ import (
 func splashTheme() theme.Theme { return darkTheme() }
 
 func TestSplash_FrameDataShape(t *testing.T) {
-	// The frames are transcribed VERBATIM from splash/frames.ts: exactly 20 frames, each
-	// 18 lines of 48 columns, using only U+2588 (█) and spaces. Any drift here means the
-	// art was edited by hand — it must be regenerated from the TS source instead.
+	// The frames have a fixed shape: exactly 20 frames, each 18 lines of 48 columns,
+	// using only U+2588 (█) and spaces. Any drift here means the art was edited by hand.
 	if len(splashFrames) != SplashFrames {
 		t.Fatalf("splashFrames length = %d, want %d", len(splashFrames), SplashFrames)
 	}

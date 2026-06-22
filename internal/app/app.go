@@ -1,4 +1,4 @@
-// Package app is the single composition root (port of src/cli/app.ts). App.Create
+// Package app is the single composition root. App.Create
 // builds every dependency once in a fixed order — config → store → mcp → queue →
 // router → tools registry → skills → agent session → (lazy) scheduler — exposes a
 // ToolContext factory, the main AgentSession, and drives both the CLI and the

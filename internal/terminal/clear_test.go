@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// Port of tests/terminalClear.test.ts (clearHostTerminal) plus coverage for the
-// untested Bell / SetTitle helpers. The TS contract: the clear sequence is exactly
-// erase-viewport + erase-scrollback + cursor-home, it is written ONLY on a real
-// TTY, it is a no-op when stdout is absent or not a terminal, and a failing write
-// is swallowed so a broken pipe can't crash the caller.
+// Covers HostTerminalClear plus the Bell / SetTitle helpers. The contract: the
+// clear sequence is exactly erase-viewport + erase-scrollback + cursor-home, it is
+// written ONLY on a real TTY, it is a no-op when stdout is absent or not a terminal,
+// and a failing write is swallowed so a broken pipe can't crash the caller.
 
 // ttyWriter is a fake *os.File-shaped writer we can mark as a TTY and make fail.
 // ClearHost/Bell/SetTitle gate on isTTY(w), which type-asserts to *os.File and

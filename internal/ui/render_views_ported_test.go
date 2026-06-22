@@ -9,12 +9,12 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
 )
 
-// render_views_ported_test.go ports the rendered-view assertions of
-// tests/ui/ActivityTree.test.tsx, ApprovalSheet.test.tsx, OperationsView.test.tsx,
-// and Transcript.test.tsx onto the Go render helpers (which return styled strings;
-// we strip ANSI and assert on the visible text + branch/width invariants).
+// render_views_ported_test.go exercises the rendered-view assertions for the
+// ActivityTree, ApprovalSheet, OperationsView, and Transcript on the Go render
+// helpers (which return styled strings; we strip ANSI and assert on the visible
+// text + branch/width invariants).
 
-// --- ActivityTree (tests/ui/ActivityTree.test.tsx) ---
+// --- ActivityTree ---
 
 func TestActivityRow_FailureSummaryAlongsideTarget(t *testing.T) {
 	th := darkTheme()
@@ -50,9 +50,12 @@ func TestActivityRow_SquareLastBranchNotArc(t *testing.T) {
 	if th.Glyphs.BranchLast != "└─" {
 		t.Fatalf("BranchLast = %q, want square └─", th.Glyphs.BranchLast)
 	}
+	// Distinct, non-compactable tools so the multi-row branch tree renders (a finished
+	// homogeneous read batch now compacts to one summary row — see compaction_test.go);
+	// this test is about the ├─/└─ grammar, not compaction.
 	acts := []Activity{
-		{ID: "a", Name: "fs.read", State: ActDone, StartedAt: 0, EndedAt: 5},
-		{ID: "b", Name: "fs.read", State: ActDone, StartedAt: 0, EndedAt: 5},
+		{ID: "a", Name: "agentTask.spawnForEdits", State: ActDone, StartedAt: 0, EndedAt: 5},
+		{ID: "b", Name: "watcher.terminal.create", State: ActDone, StartedAt: 0, EndedAt: 5},
 	}
 	group := stripAnsi(renderToolGroup(th, acts, false, 0, 5, 72))
 	if !strings.Contains(group, "├─") || !strings.Contains(group, "└─") {
@@ -76,7 +79,7 @@ func TestActivityRow_LongDetailTruncatesAwayFromDuration(t *testing.T) {
 	}
 }
 
-// --- ApprovalSheet (tests/ui/ApprovalSheet.test.tsx) ---
+// --- ApprovalSheet ---
 
 func confirmReq(tool string, risk domain.RiskClass, consequence string) tools.ConfirmRequest {
 	return tools.ConfirmRequest{
@@ -91,7 +94,7 @@ func confirmReq(tool string, risk domain.RiskClass, consequence string) tools.Co
 func TestApproval_LeadsWithConsequenceToolNameSecondary(t *testing.T) {
 	th := darkTheme()
 	req := confirmReq("git.push", domain.RiskGit, "Pushes your branch to the remote, visible to collaborators.")
-	out := stripAnsi(renderApproval(th, req, false, 72))
+	out := stripAnsi(renderApproval(th, &pendingConfirm{req: req}, 72))
 	if !strings.Contains(out, "Push branch to origin?") {
 		t.Errorf("title missing: %q", out)
 	}
@@ -110,7 +113,7 @@ func TestApproval_LeadsWithConsequenceToolNameSecondary(t *testing.T) {
 }
 
 func TestApproval_NeverRendersRawRiskAsField(t *testing.T) {
-	out := stripAnsi(renderApproval(darkTheme(), confirmReq("git.push", domain.RiskGit, ""), false, 72))
+	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("git.push", domain.RiskGit, "")}, 72))
 	// The old "risk  git" labelled row is gone — consequence language replaces it.
 	if strings.Contains(out, "risk     git") || strings.Contains(out, "risk  git") {
 		t.Errorf("raw risk-class field must not render: %q", out)
@@ -125,7 +128,7 @@ func TestApproval_PerRiskConsequenceFallback(t *testing.T) {
 		domain.RiskProject, domain.RiskGit, domain.RiskExternal, domain.RiskSystem,
 	}
 	for _, r := range risks {
-		out := stripAnsi(renderApproval(darkTheme(), confirmReq("some.tool", r, "   "), false, 72))
+		out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("some.tool", r, "   ")}, 72))
 		var affects string
 		for _, l := range strings.Split(out, "\n") {
 			if strings.Contains(l, "affects") {
@@ -141,7 +144,7 @@ func TestApproval_PerRiskConsequenceFallback(t *testing.T) {
 		}
 	}
 	// System gives a system-level gloss.
-	sys := stripAnsi(renderApproval(darkTheme(), confirmReq("daintree.call", domain.RiskSystem, ""), false, 72))
+	sys := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("daintree.call", domain.RiskSystem, "")}, 72))
 	if !strings.Contains(sys, "system-level action") {
 		t.Errorf("system fallback missing: %q", sys)
 	}
@@ -150,11 +153,11 @@ func TestApproval_PerRiskConsequenceFallback(t *testing.T) {
 func TestApproval_HidesReasonArgsUntilInspect(t *testing.T) {
 	th := darkTheme()
 	req := confirmReq("git.push", domain.RiskExternal, "")
-	collapsed := stripAnsi(renderApproval(th, req, false, 72))
+	collapsed := stripAnsi(renderApproval(th, &pendingConfirm{req: req}, 72))
 	if strings.Contains(collapsed, "ready for review") || strings.Contains(collapsed, "fix/x") {
 		t.Errorf("reason/args must be hidden until inspect: %q", collapsed)
 	}
-	expanded := stripAnsi(renderApproval(th, req, true, 72))
+	expanded := stripAnsi(renderApproval(th, &pendingConfirm{req: req, showArgs: true}, 72))
 	if !strings.Contains(expanded, "ready for review") {
 		t.Errorf("reason must reveal under inspect: %q", expanded)
 	}
@@ -164,13 +167,13 @@ func TestApproval_HidesReasonArgsUntilInspect(t *testing.T) {
 }
 
 func TestApproval_TerminalInputTitledDistinctly(t *testing.T) {
-	out := stripAnsi(renderApproval(darkTheme(), confirmReq("terminal.sendInput", domain.RiskTerminal, ""), false, 72))
+	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("terminal.sendInput", domain.RiskTerminal, "")}, 72))
 	if !strings.Contains(out, "Send input to terminal?") {
 		t.Errorf("terminal-input title missing: %q", out)
 	}
 }
 
-// --- OperationsView (tests/ui/OperationsView.test.tsx) ---
+// --- OperationsView ---
 
 func opsDash(over func(*Dashboard)) Dashboard {
 	d := Dashboard{}
@@ -257,7 +260,7 @@ func TestOps_FocusedPanelRendersOnlyThatSection(t *testing.T) {
 		{PanelWatchers, "AGENTS", "term_8"},
 		{PanelInbox, "NEEDS ATTENTION", "Tests failed in term_8"},
 		{PanelTimers, "SCHEDULED", "nudge"},
-		{PanelAudit, "RECENT", "git.push"}, // raw tool name (OperationsView.tsx shows r.toolName verbatim)
+		{PanelAudit, "RECENT", "git.push"}, // raw tool name (r.toolName shown verbatim)
 	}
 	allLabels := []string{"NEEDS ATTENTION", "AGENTS", "SCHEDULED", "RECENT"}
 	for _, c := range cases {
@@ -283,7 +286,7 @@ func TestOps_FocusedEmptyPanelHonestPlaceholder(t *testing.T) {
 	}
 }
 
-// --- Transcript (tests/ui/Transcript.test.tsx) ---
+// --- Transcript ---
 
 func transcriptTurn() *TurnCell {
 	return &TurnCell{

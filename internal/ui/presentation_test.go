@@ -6,8 +6,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// presentation_test.go ports tests/ui/presentation.test.ts: presentTool maps
-// first-party tools to human verbs (never raw fn() syntax for unknowns), and
+// presentation_test.go: presentTool maps first-party tools to human verbs (never
+// raw fn() syntax for unknowns), and
 // BuildAgentRows merges/orders watchers + threads the epistemic kind (persisted
 // preference, classification fallback, raw passthrough).
 
@@ -18,7 +18,7 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		"watcher.terminal.create": "Watching",
 		"fs.read":                 "Read",
 		"fs.list":                 "Listed",
-		// The scheduling verb is keyed on the real tool name (presentation/tools.ts).
+		// The scheduling verb is keyed on the real tool name.
 		"timer.schedule": "Scheduled",
 	}
 	for name, want := range cases {
@@ -30,7 +30,7 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 
 func TestPresentTool_UnknownFallsBackToInternalName(t *testing.T) {
 	// Unknown tools fall back to the RAW internal name — NEVER raw "fn(" syntax, and
-	// NOT title-cased (presentation/tools.ts: the fallback is `{ label: name }`).
+	// NOT title-cased.
 	got := presentTool("some.exotic.tool")
 	if got != "some.exotic.tool" {
 		t.Errorf("presentTool unknown leaf = %q, want raw internal name some.exotic.tool", got)

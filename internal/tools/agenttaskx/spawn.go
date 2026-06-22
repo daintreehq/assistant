@@ -11,10 +11,10 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// SupervisorDefaultCadenceMs is the supervisor-watcher cadence (watcherCadence.ts).
+// SupervisorDefaultCadenceMs is the supervisor-watcher cadence.
 const supervisorDefaultCadenceMs = 3000
 
-// agentTask error codes (model-facing — §4.13).
+// agentTask error codes (model-facing).
 const (
 	codeMCPUnavailable       = "MCP_UNAVAILABLE"
 	codeCancelled            = "CANCELLED"

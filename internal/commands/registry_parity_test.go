@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Port of tests/commandRegistry.test.ts: the registry is the single source of truth
+// The registry is the single source of truth
 // for slash commands; its exact ordered set is pinned (so silently dropping a
 // command like /models — the original #50 bug — fails here), every entry carries
 // non-empty palette/syntax/help with the syntax matching the name, and help lines

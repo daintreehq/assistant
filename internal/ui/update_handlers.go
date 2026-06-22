@@ -27,17 +27,29 @@ func dashboardTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return DashboardTickMsg{} })
 }
 
-// --- key routing (ui-input.md §2) ---
+// --- key routing ---
 
 func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Ctrl+C is ALWAYS live (including during splash).
+	// Ctrl+C is ALWAYS live (including during splash). It is STAGED — never a
+	// single-press hard kill: the first press cancels any in-flight turn (or, when
+	// idle, just arms) and a second press within quitArmWindow quits (onCtrlC).
 	if isCtrl(k, 'c') {
+		return m.onCtrlC()
+	}
+	// Ctrl+D at an EMPTY composer is EOF → quit (readline convention). With text in
+	// the buffer it falls through to the composer's forward-delete.
+	if isCtrl(k, 'd') && m.pending == nil && m.composerFocus() && m.composer.Value() == "" {
 		return m.onShutdown()
+	}
+	// Any other key disarms a pending "press Ctrl+C again to exit": the second-press
+	// window only counts an IMMEDIATE second Ctrl+C.
+	if m.quitArmed {
+		m.quitArmed = false
 	}
 	// #10: do NOT swallow keys during boot. The composer renders before MCP/project
 	// resolve, so it must accept input during the splash (the splash is a pure
-	// overlay, never an input gate). Only Ctrl+C is special above; everything else
-	// falls through to the normal routing (which ends at the focused composer).
+	// overlay, never an input gate). Only Ctrl+C/Ctrl+D are special above; everything
+	// else falls through to the normal routing (which ends at the focused composer).
 
 	// Approval sheet owns Y/N/V/Esc while up.
 	if m.pending != nil {
@@ -59,10 +71,17 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.expanded = !m.expanded
 		return m.afterStateChange(nil)
 	}
-	// Off-home Esc returns home (home-Esc is the composer's — §2).
+	// Off-home Esc returns home (home-Esc is the composer's).
 	if (k.Code == tea.KeyEscape || k.Code == tea.KeyEsc) && m.view != viewHome {
 		m.view = viewHome
 		m.activePanel = PanelNone
+		return m.afterStateChange(nil)
+	}
+
+	// "?" on an EMPTY composer opens the help/keys view (the standard at-empty-prompt help
+	// trigger); with text in the buffer it types literally.
+	if k.Code == '?' && m.composerFocus() && m.composer.Value() == "" {
+		m.view = viewHelp
 		return m.afterStateChange(nil)
 	}
 
@@ -73,8 +92,9 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.onSubmit(out.Submit.Text)
 		}
 		if out.Cancel {
-			// Esc-empty-while-busy → synchronous Cancelling…, then abort.
-			return m.onCancel()
+			// Esc-empty-while-busy: retract the newest queued follow-up if there is one,
+			// else cancel the active turn (Ctrl-C always cancels the turn regardless).
+			return m.onEscWhileBusy()
 		}
 		return m.afterStateChange(nil)
 	}
@@ -86,7 +106,47 @@ func isCtrl(k tea.KeyPressMsg, r rune) bool {
 	return k.Mod&tea.ModCtrl != 0 && (k.Code == r || k.Code == r-32)
 }
 
-// --- work serialization (ui-input.md §6.3/§6.4) ---
+// onCtrlC implements the staged Ctrl+C contract (the interrupt-then-
+// quit standard — never a single-press hard kill). A second press while the quit is
+// armed exits; the first press cancels any in-flight turn (it stays alive otherwise)
+// and arms a short "press again to exit" window that lapses via quitArmExpireCmd.
+func (m Model) onCtrlC() (tea.Model, tea.Cmd) {
+	if m.quitArmed {
+		return m.onShutdown()
+	}
+	if m.pending != nil {
+		// A Ctrl-C while an approval sheet is up declines it (fail closed) and dismisses it.
+		select {
+		case m.pending.resolve <- false:
+		default:
+		}
+		m.pending = nil
+	}
+	if m.inFlight {
+		// Mirror onCancel: set Cancelling… synchronously so the UI never looks frozen,
+		// then abort the in-flight turn's context. The cockpit stays alive — exiting
+		// needs a deliberate second press.
+		if t := m.activeTurnCell(); t != nil {
+			t.Phase = domain.PhaseCancelling
+			t.PhaseStartedAt = domain.NowMS()
+		}
+		m.controller.cancelTurn()
+	}
+	m.quitArmed = true
+	m.quitArmGen++
+	return m.afterStateChange(quitArmExpireCmd(m.quitArmGen))
+}
+
+// quitArmWindow is how long a first Ctrl+C stays "armed" for the confirming second
+// press before it lapses back to the normal cancel-first behavior.
+const quitArmWindow = 1500 * time.Millisecond
+
+// quitArmExpireCmd fires a QuitArmExpireMsg after the window; gen guards staleness.
+func quitArmExpireCmd(gen int) tea.Cmd {
+	return tea.Tick(quitArmWindow, func(time.Time) tea.Msg { return QuitArmExpireMsg{Gen: gen} })
+}
+
+// --- work serialization ---
 
 // onSubmit accepts a non-empty submit: a slash command runs as a command; plain
 // text starts a turn (if idle) or queues a visible dimmed follow-up (if busy).
@@ -112,9 +172,11 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 
 // startTurn creates the active TurnCell and dispatches Session.Send single-flight.
 func (m Model) startTurn(text string) (tea.Model, tea.Cmd) {
+	now := domain.NowMS()
 	cell := &TurnCell{
 		ID: domain.NewID("turn_"), UserText: text, State: TurnActive,
-		Phase: domain.PhaseReceived, PhaseStartedAt: domain.NowMS(), Ts: domain.NowMS(),
+		Phase: domain.PhaseReceived, PhaseStartedAt: now, Ts: now,
+		StartedAt: now, LastActivityAt: now,
 	}
 	m.transcript = append(m.transcript, TranscriptCell{Turn: cell})
 	m.activeTurn = cell.ID
@@ -129,9 +191,12 @@ func (m *Model) promoteQueued(q queuedTurn) tea.Cmd {
 	for i := range m.transcript {
 		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == q.cellID {
 			c := m.transcript[i].Turn
+			now := domain.NowMS()
 			c.Queued = false
 			c.Phase = domain.PhaseReceived
-			c.PhaseStartedAt = domain.NowMS()
+			c.PhaseStartedAt = now
+			c.StartedAt = now // cumulative elapsed counts from when it STARTS, not when queued
+			c.LastActivityAt = now
 			m.activeTurn = c.ID
 			break
 		}
@@ -152,6 +217,40 @@ func (m Model) onCancel() (tea.Model, tea.Cmd) {
 	}
 	m.controller.cancelTurn()
 	return m.afterStateChange(nil)
+}
+
+// onEscWhileBusy handles Esc on an empty composer while a turn runs. With queued
+// follow-ups it retracts the MOST RECENT one back into the composer (so a queued thought
+// can be edited or dropped before it fires); with none it cancels the active turn. The
+// active turn can always be cancelled with Ctrl-C regardless of the queue, so Esc owning
+// the retract here doesn't strand the user.
+func (m Model) onEscWhileBusy() (tea.Model, tea.Cmd) {
+	if len(m.queuedInput) > 0 {
+		return m.retractLastQueued()
+	}
+	return m.onCancel()
+}
+
+// retractLastQueued pops the newest queued follow-up: drop its dimmed cell and pull its
+// text back into the composer for editing or removal.
+func (m Model) retractLastQueued() (tea.Model, tea.Cmd) {
+	n := len(m.queuedInput)
+	q := m.queuedInput[n-1]
+	m.queuedInput = m.queuedInput[:n-1]
+	m.removeTurnCell(q.cellID)
+	m.composer.Restore(q.prompt)
+	return m.afterStateChange(nil)
+}
+
+// removeTurnCell drops the transcript cell whose turn id matches (a still-live queued
+// cell — never a committed one). A no-op if not found.
+func (m *Model) removeTurnCell(id string) {
+	for i := range m.transcript {
+		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == id {
+			m.transcript = append(m.transcript[:i], m.transcript[i+1:]...)
+			return
+		}
+	}
 }
 
 // onTurnComplete seals the active turn and drains the next unit of work (FIFO user
@@ -175,6 +274,16 @@ func (m Model) onTurnComplete(msg TurnCompleteMsg) (tea.Model, tea.Cmd) {
 			t.State = terminalTurnState(t.Phase, msg.Reply)
 		}
 		t.Phase = domain.PhaseComplete
+		// Durable cancelled marker: the turn's committed header is already flushed and
+		// can't be re-badged, so a standalone note records the cancellation in scrollback —
+		// otherwise a cancelled turn reads identically to a completed one.
+		if t.State == TurnCancelled {
+			// Re-stamp any announced-but-unresolved tool rows (the agent emits no UI
+			// ToolResult for the calls it abandons) so they don't freeze as ◦ queued / ◌
+			// active in scrollback, falsely implying they're still running.
+			t.cancelPending()
+			m.addNote(NoteInfo, "Turn cancelled.")
+		}
 	}
 	m.activeTurn = ""
 	m.inFlight = false
@@ -228,7 +337,8 @@ func (m Model) drainPending() (tea.Model, tea.Cmd) {
 		m.pendingWake = nil
 		m.activeWake = burst
 		prompt := wakePrompt(burst)
-		cell := &TurnCell{ID: domain.NewID("turn_"), State: TurnActive, Phase: domain.PhaseReceived, PhaseStartedAt: domain.NowMS(), Ts: domain.NowMS()}
+		wnow := domain.NowMS()
+		cell := &TurnCell{ID: domain.NewID("turn_"), State: TurnActive, Phase: domain.PhaseReceived, PhaseStartedAt: wnow, Ts: wnow, StartedAt: wnow, LastActivityAt: wnow}
 		m.transcript = append(m.transcript, TranscriptCell{Turn: cell})
 		m.activeTurn = cell.ID
 		m.inFlight = true
@@ -273,7 +383,18 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 	if msg.ClearTranscript {
 		return m.onClear(msg.Title, msg.Text)
 	}
-	// Render the result as a CommandCell in the transcript.
+	// A panel-switching command (/help, /inbox, /watchers, /timers, /audit) switches the
+	// live view in place rather than printing a card — the view itself renders the content.
+	if msg.SwitchPanel != PanelNone {
+		if msg.SwitchPanel == PanelHelp {
+			m.view = viewHelp
+		} else {
+			m.view = viewOperations
+			m.activePanel = msg.SwitchPanel
+		}
+		return m.afterStateChange(nil)
+	}
+	// Otherwise render the result as a CommandCell in the transcript.
 	m.transcript = append(m.transcript, TranscriptCell{Command: &CommandCell{
 		ID: domain.NewID("cmd_"), Title: msg.Title, Text: msg.Text, Ts: domain.NowMS(),
 	}})
@@ -310,10 +431,25 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	return m, tea.Sequence(hostClearCmd(), m.scheduleCommit())
 }
 
-// --- approval (ui-input.md §4) ---
+// --- approval ---
 
 func (m Model) onApprovalRequested(msg ApprovalRequestedMsg) (tea.Model, tea.Cmd) {
-	m.pending = &pendingConfirm{req: msg.Request, resolve: msg.Resolve}
+	// Session allow-list: a tool the user previously chose to "approve & don't ask again"
+	// (and whose risk is eligible to remember) is auto-approved without surfacing the
+	// sheet at all. The dispatch layer still audits the call.
+	if rememberable(msg.Request.Risk) && m.approvedTools[msg.Request.ToolName] {
+		select {
+		case msg.Resolve <- true:
+		default:
+		}
+		return m.afterStateChange(nil)
+	}
+	m.pending = &pendingConfirm{
+		req:         msg.Request,
+		resolve:     msg.Resolve,
+		shownAt:     domain.NowMS(),
+		requireType: needsTypedConfirm(msg.Request.Risk),
+	}
 	if t := m.activeTurnCell(); t != nil {
 		t.Phase = domain.PhaseAwaitingApproval
 		t.PhaseStartedAt = domain.NowMS()
@@ -322,16 +458,74 @@ func (m Model) onApprovalRequested(msg ApprovalRequestedMsg) (tea.Model, tea.Cmd
 }
 
 func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.pending == nil {
+		return m, nil
+	}
+	// Typed-confirmation mode (system / git history-rewrite): single-key approval is
+	// disabled; the user types confirmPhrase + Enter. Esc still declines.
+	if m.pending.requireType {
+		return m.onTypedApprovalKey(k)
+	}
+
 	switch {
 	case k.Code == 'y' || k.Code == 'Y':
-		return m.resolveApproval(true)
+		return m.approveAfterDebounce(false)
+	case k.Code == 'a' || k.Code == 'A':
+		// Approve AND remember this tool for the session (eligible risks only).
+		if !rememberable(m.pending.req.Risk) {
+			return m, bellCmd()
+		}
+		return m.approveAfterDebounce(true)
 	case k.Code == 'n' || k.Code == 'N' || k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
-		// Esc DECLINES (it does not just dismiss).
+		// Decline — the safe default, live immediately (no debounce).
+		return m.resolveApproval(false)
+	case k.Code == tea.KeyEnter || k.Code == tea.KeyKpEnter:
+		// Enter triggers the visual DEFAULT (decline) rather than being silently swallowed.
 		return m.resolveApproval(false)
 	case k.Code == 'v' || k.Code == 'V':
-		if m.pending != nil {
-			m.pending.showArgs = !m.pending.showArgs
+		m.pending.showArgs = !m.pending.showArgs
+		return m.afterStateChange(nil)
+	}
+	// Any other key: acknowledge with the bell rather than swallowing it silently.
+	return m, bellCmd()
+}
+
+// approveAfterDebounce approves the pending action, but ignores the affirmative (with a
+// bell) inside the debounce window so a typed-ahead / buffered key can't fire an action
+// the user never read. remember additionally adds the tool to the session allow-list.
+func (m Model) approveAfterDebounce(remember bool) (tea.Model, tea.Cmd) {
+	if domain.NowMS()-m.pending.shownAt < approveDebounceMs {
+		return m, bellCmd()
+	}
+	if remember {
+		if m.approvedTools == nil {
+			m.approvedTools = map[string]bool{}
 		}
+		m.approvedTools[m.pending.req.ToolName] = true
+	}
+	return m.resolveApproval(true)
+}
+
+// onTypedApprovalKey drives the typed-confirmation sheet for the highest-risk actions.
+// Esc declines; Enter approves only when the typed phrase matches; Backspace edits; any
+// other printable rune builds the phrase ('n' is a valid letter, so only Esc declines).
+func (m Model) onTypedApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
+		return m.resolveApproval(false)
+	case k.Code == tea.KeyEnter || k.Code == tea.KeyKpEnter:
+		if strings.EqualFold(strings.TrimSpace(m.pending.confirmInput), confirmPhrase) {
+			return m.resolveApproval(true)
+		}
+		return m, bellCmd() // phrase not yet matched
+	case k.Code == tea.KeyBackspace:
+		if r := []rune(m.pending.confirmInput); len(r) > 0 {
+			m.pending.confirmInput = string(r[:len(r)-1])
+		}
+		return m.afterStateChange(nil)
+	}
+	if k.Text != "" && isPrintableText(k.Text) {
+		m.pending.confirmInput += k.Text
 		return m.afterStateChange(nil)
 	}
 	return m, nil
@@ -358,18 +552,60 @@ func (m Model) onApprovalResolved(msg ApprovalResolvedMsg) (tea.Model, tea.Cmd) 
 	return m.resolveApproval(msg.Approved)
 }
 
-// --- attention (ui-transcript.md §11) ---
+// approveDebounceMs is the window after the approval sheet appears during which the
+// affirmative is ignored (rung back with a bell), so a typed-ahead / buffered key can't
+// auto-approve an action the user never read.
+const approveDebounceMs = 300
+
+// confirmPhrase is the word a user must type to approve a typed-confirmation action.
+const confirmPhrase = "confirm"
+
+// rememberable reports whether a risk class may be added to the session "don't ask
+// again" allow-list. The highest-risk classes (git, system) are always re-confirmed.
+func rememberable(r domain.RiskClass) bool {
+	switch r {
+	case domain.RiskGit, domain.RiskSystem:
+		return false
+	}
+	return true
+}
+
+// needsTypedConfirm marks the most irreversible actions — system-level calls (daintree.call)
+// and ALL git operations (the only RiskGit tools are git.snapshotRevert / git.snapshotDelete,
+// which discard or delete uncommitted work) — that demand a typed phrase, not a single keypress.
+func needsTypedConfirm(risk domain.RiskClass) bool {
+	switch risk {
+	case domain.RiskSystem, domain.RiskGit:
+		return true
+	}
+	return false
+}
+
+// isPrintableText reports whether s is safe printable text to append to an input field
+// (no control runes), so a raw escape sequence can't leak into the confirm phrase.
+func isPrintableText(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// --- attention ---
 
 func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	if len(msg.Events) == 0 {
 		return m, nil
 	}
-	// Feed the wake queue + bump the attention count.
+	// Feed the wake queue + optimistically bump the badge for the sub-tick window before the
+	// next dashboard snapshot recomputes the AUTHORITATIVE count (which also decrements as
+	// items resolve — DashboardSnapshotMsg). onAttention no longer OWNS the count.
 	m.pendingWake = append(m.pendingWake, msg.Events...)
-	m.attentionN = len(m.dashboard.Inbox)
-	if m.attentionN == 0 {
-		m.attentionN = len(msg.Events)
-	}
+	m.attentionN += len(msg.Events)
 	// Ring the BEL once per fresh batch (on the event, not a count increment).
 	cmd := bellCmd()
 	// If idle, the drain fires the wake reactor.
@@ -380,21 +616,24 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	return m.afterStateChange(cmd)
 }
 
-// --- resize / redraw (ui-transcript.md §11) ---
+// --- resize / redraw ---
 
 func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.columns = msg.Width
 	m.rows = msg.Height
-	// THE inline-cockpit resize rule: do NOTHING but record the geometry. We must NOT
-	// touch native scrollback on resize. Re-emitting committed content (a "nuclear
-	// redraw" — clear scrollback + re-tea.Println everything) is an OpenTUI concept that
-	// is actively wrong in Bubble Tea: the HOST terminal reflows prior scrollback itself,
-	// and Bubble Tea re-renders the live footer at the new width automatically on this
-	// very WindowSizeMsg. Re-committing instead fought BT's renderer and the host reflow —
-	// it flashed the screen between the masthead and the footer and dropped the input
-	// (the masthead's tea.Println lands at a stale cell-buffer height; repeated SIGWINCH
-	// from the embedder turned that into a strobe). The footer just re-flows; that's it.
-	return m, nil
+	// The FIRST size just establishes geometry (nothing is committed yet at boot, so there
+	// is nothing to redraw). Every LATER resize schedules a DEBOUNCED NUCLEAR REDRAW
+	// (onRedraw): wipe the host + re-commit the masthead and the whole transcript fresh at
+	// the new width, then repaint the sticky footer. Without it, Bubble Tea's in-place
+	// repaint strands stale footer-rule fragments across the screen on a resize. The 150ms
+	// debounce coalesces a SIGWINCH drag-storm into a single redraw.
+	if !m.sizedOnce {
+		m.sizedOnce = true
+		return m, nil
+	}
+	m.resizePending++
+	nonce := m.resizePending
+	return m, tea.Tick(resizeRedrawDelay, func(time.Time) tea.Msg { return RedrawMsg{Nonce: nonce} })
 }
 
 // resizeRedrawDelay debounces resize drags (TS uses 150ms).
@@ -542,9 +781,14 @@ func (m Model) onShutdown() (tea.Model, tea.Cmd) {
 		}
 		m.pending = nil
 	}
-	// Future confirms auto-decline so a dispatch can't block on a dead modal.
-	m.app.SetHooks(appAutoDecline())
-	m.controller.cancelTurn()
+	// Future confirms auto-decline so a dispatch can't block on a dead modal. Teardown
+	// must never panic, so guard the wiring (the headless harness has no app/controller).
+	if m.app != nil {
+		m.app.SetHooks(appAutoDecline())
+	}
+	if m.controller != nil {
+		m.controller.cancelTurn()
+	}
 	return m, tea.Quit
 }
 
@@ -596,8 +840,8 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 	}
 	rendered = indentLines(rendered, LeftPad)
 	if rendered != "" {
-		// Each sealed cell OWNS the single blank line ABOVE it (shared layout rule §3:
-		// Transcript/TurnCellView marginTop={1}). Committed via its own tea.Println,
+		// Each sealed cell OWNS the single blank line ABOVE it (shared layout rule:
+		// a marginTop of one blank line). Committed via its own tea.Println,
 		// the leading "\n" is what separates this turn from the masthead and from the
 		// prior turn in native scrollback — without it the history packs together with
 		// no breathing room.

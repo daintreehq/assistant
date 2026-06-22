@@ -10,7 +10,7 @@ import (
 
 // compactionMarkerPrefix and the clear marker bound the rehydration boundary. The
 // compaction marker is matched by PREFIX, the clear marker by EXACT equality.
-// Preserve the em-dash characters (U+2014). Spec: agent-loop.md §2/§7/§17.7.
+// Preserve the em-dash characters (U+2014).
 const (
 	compactionMarkerPrefix = "[conversation compacted"
 	compactionMarker       = "[conversation compacted — earlier turns dropped from context]"
@@ -29,8 +29,8 @@ type RehydrateResult struct {
 	DirtyFreshStart bool
 }
 
-// RehydrateSession reconstructs the working model history from persisted rows
-// (agent-loop.md §7). Returns (result, true) to resume, or (_, false) to start
+// RehydrateSession reconstructs the working model history from persisted rows.
+// Returns (result, true) to resume, or (_, false) to start
 // fresh. Fresh-start fallbacks: empty rows, or a dup-seq tangle (the fingerprint
 // of a historical double-write bug — replaying it is worse than losing it).
 func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult, bool) {
@@ -38,7 +38,7 @@ func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult,
 		return RehydrateResult{}, false
 	}
 
-	// initialSeq = max(seq)+1 via an O(n) reduce (NOT a spread-max — §17.5).
+	// initialSeq = max(seq)+1 via an O(n) reduce (NOT a spread-max).
 	// Computed first so the dup-seq safe-fresh-start below can continue numbering
 	// PAST the dirty rows rather than restarting at 0.
 	maxSeq := 0
@@ -50,7 +50,7 @@ func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult,
 	initialSeq := maxSeq + 1
 
 	// Dup-seq detection: a non-unique seq set is the fingerprint of a prior buggy
-	// double-write (§7.2 / §17.4). We can't trust the ordering, so we start with an
+	// double-write. We can't trust the ordering, so we start with an
 	// EMPTY working history — but we resume (not "false"/fresh) at maxSeq+1 so the
 	// fresh control rows and every subsequent append are numbered ABOVE the dirty
 	// rows and never collide with them again. Returning "fresh" here would restart
@@ -96,8 +96,8 @@ func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult,
 	return RehydrateResult{RestoredMessages: msgs, InitialSeq: initialSeq}, true
 }
 
-// recordToChatMessage rebuilds a ChatMessage from a persisted row (§7.1). Empty
-// content becomes a null content (TS `content: null`). Malformed tool-call JSON is
+// recordToChatMessage rebuilds a ChatMessage from a persisted row. Empty
+// content becomes a null content. Malformed tool-call JSON is
 // dropped silently — one bad row never aborts a resume.
 func recordToChatMessage(r domain.ConversationMessageRecord) models.ChatMessage {
 	m := models.ChatMessage{Role: r.Role}
@@ -120,7 +120,7 @@ func recordToChatMessage(r domain.ConversationMessageRecord) models.ChatMessage 
 }
 
 // dropOrphanToolResults filters out role=="tool" messages whose tool_call_id was
-// never declared by a PRECEDING assistant tool_calls (§7.2). Fireworks rejects an
+// never declared by a PRECEDING assistant tool_calls. Fireworks rejects an
 // orphan tool result (its parent's toolCallsJson was malformed/lost). The pass is
 // strictly forward and declarations accumulate as we go, so a tool result is kept
 // only when an EARLIER assistant message already declared its id — a result that
@@ -151,7 +151,7 @@ func dropOrphanToolResults(messages []models.ChatMessage) []models.ChatMessage {
 	return out
 }
 
-// dropOrphanToolCallTail cuts an incomplete trailing tool exchange (§7.3): if the
+// dropOrphanToolCallTail cuts an incomplete trailing tool exchange: if the
 // LAST assistant message with tool_calls has any call id NOT answered by a later
 // tool message, slice the history to just before that assistant message. Only the
 // tail is checked — a mid-history break implies an already-unusable DB.

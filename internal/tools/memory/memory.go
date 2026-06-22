@@ -2,8 +2,6 @@
 // memory.list, memory.save, memory.forget, memory.pin, memory.unpin. Memories
 // are FTS5-backed (recall is BM25-ranked) and scoped to one project (one DB ==
 // one project, so there is no projectId). forget is a soft-delete.
-//
-// Spec: docs/port/tools-families.md §4.6 (memoryTools.ts).
 package memory
 
 import (
@@ -21,7 +19,7 @@ const (
 	codeMemoryNotFound = "MEMORY_NOT_FOUND"
 )
 
-// Practical input caps (rune counts) the TS Zod schema doesn't express. An
+// Practical input caps (rune counts). An
 // unbounded recall query becomes an expensive FTS5 MATCH; unbounded saved content
 // / category / id bloat the index and the MATCH parser. These are generous —
 // far above any legitimate use — and exist to stop pathological/adversarial input,

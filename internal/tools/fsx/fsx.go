@@ -4,7 +4,7 @@
 // resolved with safety.ResolveInsideProject so traversal outside the project is
 // impossible, and credential-bearing paths are refused (the read-time secret
 // guard) so their contents never leak into the durable audit log / conversation
-// history. Spec: docs/port/tools-families.md §4.1.
+// history.
 package fsx
 
 import (
@@ -27,8 +27,8 @@ import (
 // Kept as a struct for symmetry with the other families and future growth.
 type Deps struct{}
 
-// fs-family error codes (model-facing — §4.1). recoverable defaults reproduced
-// exactly: FS_SENSITIVE / FS_READ / FS_BINARY are recoverable:false (retrying
+// fs-family error codes (model-facing). recoverable defaults:
+// FS_SENSITIVE / FS_READ / FS_BINARY are recoverable:false (retrying
 // can't help), FS_LIST / FS_SEARCH are recoverable (transient walk failures).
 const (
 	codeFSList      = "FS_LIST"
@@ -38,7 +38,7 @@ const (
 	codeFSBinary    = "FS_BINARY"
 )
 
-// skipDirs are directory names skipped by every recursive walk (§4.1).
+// skipDirs are directory names skipped by every recursive walk.
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "build": true,
 	"coverage": true, ".next": true, ".turbo": true, ".cache": true, "vendor": true,
@@ -54,7 +54,7 @@ const (
 // looksBinary is the heuristic binary sniff: a NUL byte in the first chunk, or a
 // >30% ratio of non-text control bytes over min(len,4096), means we should not
 // treat the buffer as UTF-8 text. Allow tab(9) newline(10) CR(13) and the
-// printable range (≥32); count the rest. Mirrors the TS looksBinary byte-for-byte.
+// printable range (≥32); count the rest.
 func looksBinary(buf []byte) bool {
 	n := len(buf)
 	if n > 4096 {
@@ -119,7 +119,7 @@ type listArgs struct {
 }
 
 // Validate enforces the Zod bound `depth: int().positive().max(10)` so a negative
-// or absurd depth can never drive an unbounded recursive walk. Spec parity: §4.1.
+// or absurd depth can never drive an unbounded recursive walk.
 func (a *listArgs) Validate() error {
 	if a.Depth != nil && (*a.Depth < 1 || *a.Depth > 10) {
 		return fmt.Errorf("depth must be between 1 and 10")
@@ -174,7 +174,7 @@ func handleList(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 	}
 	abs, err := safety.ResolveInsideProject(tctx.ProjectPath, rel)
 	if err != nil {
-		// Mirror the TS catch → FS_LIST wrapping: a traversal escape surfaces under
+		// Wrap a traversal escape under FS_LIST: it surfaces under
 		// the family's own error code, not the generic "denied".
 		return tools.Fail(codeFSList, err.Error(), tools.Unrecoverable())
 	}
@@ -238,7 +238,7 @@ func handleList(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 		}
 	}
 	recurse(rootRel(rel), "", 0)
-	// Match the TS localeCompare ordering closely enough with a plain sort — entry
+	// A plain sort suffices — entry
 	// names are project paths, so byte order is the faithful deterministic choice.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	if entries == nil {
@@ -261,7 +261,7 @@ type readArgs struct {
 
 // Validate enforces `maxBytes: int().positive().max(200_000)`. A negative maxBytes
 // would otherwise reach make([]byte, toRead) with a negative length and panic; an
-// oversized one is rejected rather than silently honored. Spec parity: §4.1.
+// oversized one is rejected rather than silently honored.
 func (a *readArgs) Validate() error {
 	if a.MaxBytes != nil && (*a.MaxBytes < 1 || *a.MaxBytes > defaultMaxBytes) {
 		return fmt.Errorf("maxBytes must be between 1 and %d", defaultMaxBytes)
@@ -304,7 +304,7 @@ func handleRead(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 	// authoritative TOCTOU-safe guard; this just produces the friendly error code.
 	abs, err := safety.ResolveInsideProject(tctx.ProjectPath, a.Path)
 	if err != nil {
-		// Mirror the TS catch → FS_READ wrapping (fsTools.test.ts asserts a ../
+		// Wrap under FS_READ (a ../
 		// traversal returns FS_READ), not the generic "denied".
 		return tools.Fail(codeFSRead, err.Error(), tools.Unrecoverable())
 	}
@@ -382,7 +382,7 @@ type searchArgs struct {
 
 // Validate enforces `maxResults: int().positive().max(500)` so a negative cap
 // (which would make the `len(matches) >= max` guard true immediately, or worse)
-// or an unbounded one is rejected. Spec parity: §4.1.
+// or an unbounded one is rejected.
 func (a *searchArgs) Validate() error {
 	if a.MaxResults != nil && (*a.MaxResults < 1 || *a.MaxResults > 500) {
 		return fmt.Errorf("maxResults must be between 1 and 500")
@@ -470,7 +470,7 @@ func handleSearch(_ context.Context, raw json.RawMessage, tctx *tools.ToolContex
 
 	rootPath, err := safety.ResolveInsideProject(tctx.ProjectPath, ".")
 	if err != nil {
-		// Mirror the TS catch → FS_SEARCH wrapping, not the generic "denied".
+		// Wrap under FS_SEARCH, not the generic "denied".
 		return tools.Fail(codeFSSearch, err.Error(), tools.Unrecoverable())
 	}
 	// Confined root for the per-file content reads: a walked file's path is
@@ -534,8 +534,8 @@ func handleSearch(_ context.Context, raw json.RawMessage, tctx *tools.ToolContex
 		map[string]any{"query": a.Query, "glob": suffix, "capped": capped, "matches": matches})
 }
 
-// sliceRunes truncates s to at most n runes (matching the TS .slice(0,300) on a
-// JS string, which the model sees; rune-count is the faithful single-unit choice).
+// sliceRunes truncates s to at most n runes (rune-count is the faithful
+// single-unit choice for what the model sees).
 func sliceRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

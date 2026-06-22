@@ -6,16 +6,16 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Autonomous wake-up helpers (port of src/agent/wake.ts). A terminal-watcher
-// queue event means a supervised agent finished, is waiting, or failed — exactly
-// when the assistant should look and report. Those events feed a READ-ONLY turn
-// (Send with ReadOnly) so a background trigger can inspect and report but never
-// run a mutating tool unattended. Spec: agent-loop.md §10.
+// Autonomous wake-up helpers. A terminal-watcher queue event means a supervised
+// agent finished, is waiting, or failed — exactly when the assistant should look
+// and report. Those events feed a READ-ONLY turn (Send with ReadOnly) so a
+// background trigger can inspect and report but never run a mutating tool
+// unattended.
 
 // IsActionableWake reports whether a surfaced attention event should autonomously
 // wake the model (run a turn) versus just appear in the inbox. Only a
 // terminal-watcher event carrying a real terminalId qualifies — model/user
-// queue events can't trigger an autonomous turn (§10.2).
+// queue events can't trigger an autonomous turn.
 func IsActionableWake(e domain.QueueEvent) bool {
 	return e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != ""
 }
@@ -25,7 +25,7 @@ func IsActionableWake(e domain.QueueEvent) bool {
 // prompt. alreadySummarized carries terminal ids already reported this session
 // (cross-burst memory): a terminal already in the set is downgraded to a one-line
 // ack so a lifecycle that surfaces several events (waiting_for_input then
-// terminal_exited) is summarized once, not two or three times (§10.3). Reproduce
+// terminal_exited) is summarized once, not two or three times. Reproduce
 // the templates verbatim — the "(already reported …)" text is model-facing.
 func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]struct{}) string {
 	// Seed from the caller's cross-burst memory, then grow locally so a terminal
@@ -93,7 +93,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 // a model-layer failure — it returns one of these sentinel strings. Wake reactors
 // must treat such a reply as a failure and NOT record the terminals as summarized,
 // or a transient outage would permanently downgrade later lifecycle events to acks
-// and silently swallow the real summary. Spec §10.1 / §17.14.
+// and silently swallow the real summary.
 var wakeFailurePrefixes = []string{
 	"Model unavailable:",
 	"Model error:",

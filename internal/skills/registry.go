@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// SkillSource is the narrow swappable seam (spec §3) that callers (the skill.load
+// SkillSource is the narrow swappable seam that callers (the skill.load
 // tool) rely on, so the backing store can later become a hosted service.
 // SkillRegistry satisfies it.
 type SkillSource interface {
@@ -13,18 +13,16 @@ type SkillSource interface {
 	Get(id string) (Skill, bool)
 }
 
-// SkillRegistry is the in-memory catalog. TS backs it with an insertion-ordered
-// Map; Go maps iterate randomly, so we keep a parallel ordered id slice to make
-// list()/metadataForSelection() deterministic — catalog text stability matters
-// for prompt caching (spec §4 ordering caveat).
+// SkillRegistry is the in-memory catalog. Go maps iterate randomly, so we keep a
+// parallel ordered id slice to make list()/metadataForSelection() deterministic —
+// catalog text stability matters for prompt caching.
 type SkillRegistry struct {
 	byID  map[string]Skill
 	order []string
 }
 
 // NewRegistry builds a registry from an initial set. Each entry is re-validated
-// (a zero-id or invalid-risk skill is rejected) and duplicate ids are an error
-// (spec §4).
+// (a zero-id or invalid-risk skill is rejected) and duplicate ids are an error.
 func NewRegistry(initial []Skill) (*SkillRegistry, error) {
 	r := &SkillRegistry{byID: make(map[string]Skill, len(initial))}
 	for _, sk := range initial {
@@ -40,8 +38,8 @@ func NewRegistry(initial []Skill) (*SkillRegistry, error) {
 	return r, nil
 }
 
-// validateSkill re-checks a Skill the way the Zod schema would on registry
-// construction. The file loader already validates, but a registry can be built
+// validateSkill re-checks a Skill's schema on registry construction. The file
+// loader already validates, but a registry can be built
 // from any source, so we guard here too.
 func validateSkill(sk Skill) error {
 	if sk.ID == "" {
@@ -104,7 +102,7 @@ func (r *SkillRegistry) All() []Skill {
 }
 
 // GetMany resolves ids → skills, silently dropping unknown ids and preserving
-// input order (spec §4).
+// input order.
 func (r *SkillRegistry) GetMany(ids []string) []Skill {
 	out := make([]Skill, 0, len(ids))
 	for _, id := range ids {
@@ -116,7 +114,7 @@ func (r *SkillRegistry) GetMany(ids []string) []Skill {
 }
 
 // MetadataForSelection maps each skill to the 6-field selector subset, in
-// catalog order. Never includes bodies (spec §4).
+// catalog order. Never includes bodies.
 func (r *SkillRegistry) MetadataForSelection() []SkillMetadata {
 	out := make([]SkillMetadata, 0, len(r.order))
 	for _, id := range r.order {
@@ -125,7 +123,7 @@ func (r *SkillRegistry) MetadataForSelection() []SkillMetadata {
 	return out
 }
 
-// --- Built-in registry & named handles (spec §5) ---
+// --- Built-in registry & named handles ---
 
 // Named-handle ids. These exist so code/tests referencing a specific skill fail
 // fast on a rename/removal.
@@ -154,7 +152,7 @@ var (
 
 // BuiltinRegistry loads the embedded (or env-overridden) skills once and returns
 // a registry over them. One bad file or a missing named handle errors at first
-// use, preserving fail-loud (spec §5). The result is memoized; subsequent calls
+// use, preserving fail-loud. The result is memoized; subsequent calls
 // return the same registry.
 func BuiltinRegistry() (*SkillRegistry, error) {
 	builtinOnce.Do(func() {

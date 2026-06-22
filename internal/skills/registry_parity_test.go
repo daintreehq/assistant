@@ -28,7 +28,7 @@ func parityRegistry(t *testing.T) *SkillRegistry {
 	return reg
 }
 
-// Mirrors skillRegistry.test.ts "validates the built-in skills and exposes all".
+// Validates the built-in skills and exposes all of them.
 func TestRegistryExposesAllSkills(t *testing.T) {
 	reg := parityRegistry(t)
 	if len(reg.List()) != 3 {

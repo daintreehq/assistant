@@ -2,9 +2,7 @@
 
 The interactive cockpit is built on **Bubble Tea v2** (`charm.land/bubbletea/v2`, with
 `bubbles/v2`, `lipgloss/v2`, and `glamour/v2` for markdown). This document is the
-authoritative contract for how it renders and behaves. It replaces the old OpenTUI port
-doc; the deeper build-to specs live in `docs/port/ui-transcript.md`,
-`docs/port/ui-input.md`, and `docs/port/_interaction-ux.md`.
+authoritative contract for how it renders and behaves.
 
 Everything that imports Bubble Tea lives under `internal/ui`. That is the UI boundary:
 the runtime emits structured `agent.AgentEvent`s and the cockpit consumes them.
@@ -39,11 +37,10 @@ string is ONLY the live footer — never the whole transcript.
 
 ### Why not render the whole tree into a viewport
 
-The TypeScript cockpit first tried OpenTUI `main-screen`: it repaints the entire tree
-into a FIXED viewport and does NOT spill overflow into native scrollback, so the instant
-the tree grew taller than the terminal the layout garbled. The Go equivalent of that
-failure mode is "render the entire transcript into the `View()` string every frame" —
-**do not do that.** Sealed content is committed to scrollback and dropped from `View()`.
+Repainting the entire transcript into a FIXED viewport — the whole transcript in the
+`View()` string every frame — does NOT spill overflow into native scrollback, so the
+instant the tree grows taller than the terminal the layout garbles. **Do not do that.**
+Sealed content is committed to scrollback and dropped from `View()`.
 
 ## 2. The scrollback commit-queue protocol
 
@@ -103,8 +100,6 @@ flush coalesced tokens straight through.
 
 ## 4. Liveness: explicit RunPhase, ordered TurnSteps
 
-Cross-reference: `docs/port/_interaction-ux.md` is the authoritative liveness spec.
-
 The active turn is driven by a first-class `domain.RunPhase`, **never** inferred from
 `streaming && assistantText == ""`:
 
@@ -140,7 +135,7 @@ line edges, `Ctrl-Y` yank, the trailing-backslash + Enter newline fallback,
 modifier+Enter newline, verbatim bracketed paste, slash-command Tab completion, and "Esc
 clears / Esc-empty-while-busy cancels". App chords (`Ctrl-C`, `Ctrl-O`, `Ctrl-X`, off-home
 `Esc`) are handled by the shell in `Update`, routed by current view + focus (there is no
-global key bus). See `docs/port/ui-input.md`.
+global key bus).
 
 ## 6. The no-alt-screen / no-mouse contract (enforced)
 
@@ -192,7 +187,7 @@ managed render path — there is **no** raw per-frame painting.
 - **No full-transcript viewport.** Never render the whole transcript into `View()`;
   sealed content lives in native scrollback only.
 - **No resize replay.** Don't reflow committed blocks in place; re-render fresh at the new
-  width (or rely on the host's native reflow). There is no OpenTUI-style replay record.
+  width (or rely on the host's native reflow). There is no replay record.
 - **Never render markdown async from `View`.** `View()` is pure and synchronous; do
   markdown/glamour work in `Update` (or once when a cell seals), never as a side effect of
   rendering.

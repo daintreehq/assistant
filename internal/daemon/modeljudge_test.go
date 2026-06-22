@@ -6,8 +6,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Ports the runTerminalWatcherCheck modelJudge end-to-end suite (watcherEngine.test.ts
-// §"runTerminalWatcherCheck modelJudge end-to-end") and the watcherRateLimit suite.
+// Covers the runTerminalWatcherCheck modelJudge end-to-end behavior and the
+// watcher rate-limit behavior.
 
 const judgeQ = "Did the migration finish?"
 
@@ -135,7 +135,7 @@ func TestWatcher_JudgePerTerminalAgainstOwnTail(t *testing.T) {
 	}
 }
 
-// --- rate limit (watcherRateLimit.test.ts) -----------------------------------
+// --- rate limit --------------------------------------------------------------
 
 func TestWatcher_RateLimitPublishesOnceAndBacksOff(t *testing.T) {
 	store := newFakeStore()

@@ -164,9 +164,9 @@ and [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md).
 ## Commands (cockpit or classic REPL)
 
 ```
-/status  /inbox  /tools [q]  /timers  /watchers  /audit  /models
+/status  /inbox  /tools [q]  /timers  /watchers  /audit  /models  /reconnect
 /permissions [tier]  /skills [loaded|find <query>|load <id…>|clear]
-/compact  /clear  /doctor  /help  /quit
+/explain [runId]  /compact  /clear  /doctor  /help  /quit
 ```
 
 In the cockpit these render as command cards (and may focus a deck view); in `--classic`
@@ -191,22 +191,26 @@ into the binary via `go:embed` from `internal/skills/files/*.md`. See
 
 ## Tools the model can call
 
-| Group        | Tools                                                                       |
-| ------------ | --------------------------------------------------------------------------- |
-| Project read | `fs.list` `fs.read` `fs.search`                                             |
-| Daintree     | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
-| Context      | `context.snapshot` `terminal.summarize`                                    |
-| Timers       | `timer.schedule` `timer.list` `timer.cancel`                               |
-| Watchers     | `watcher.terminal.create` `watcher.list` `watcher.cancel`                 |
-| Queue        | `queue.publish` `queue.digest` `queue.resolve`                             |
-| Extraction   | `terminal.extract` `terminal.extract.async`                               |
-| Agent tasks  | `agentTask.spawnForEdits` (the no-file-edit escape hatch)                  |
-| Grants       | `grant.create` `grant.list` `grant.revoke`                                 |
-| Workflows    | `workflow.create` `workflow.get` `workflow.list` `workflow.update`        |
-| Skill runs   | `skill.step.advance` `skill.run.get` `skill.load`                          |
-| Audit        | `audit.export`                                                             |
-| Memory       | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
-| Artifacts    | `artifact.read`                                                            |
+| Group             | Tools                                                                       |
+| ----------------- | --------------------------------------------------------------------------- |
+| Project read      | `fs.list` `fs.read` `fs.search`                                             |
+| Daintree (raw)    | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
+| Terminal control  | `terminal.focus` `terminal.sendCommand` `terminal.read` `terminal.arm` `terminal.disarm` `terminal.disarmAll` |
+| Context           | `context.snapshot` `terminal.summarize`                                    |
+| Extraction        | `terminal.extract` `terminal.extract.async`                               |
+| Timers            | `timer.schedule` `timer.list` `timer.cancel`                               |
+| Watchers          | `watcher.terminal.create` `watcher.watchPR` `watcher.list` `watcher.cancel` |
+| Queue             | `queue.publish` `queue.digest` `queue.resolve`                             |
+| Workflows         | `workflow.create` `workflow.get` `workflow.list` `workflow.update` `workflow.startWorkOnIssue` `workflow.prepBranchForReview` |
+| Recipes/worktrees | `recipe.list` `recipe.run` `worktree.createWithRecipe`                     |
+| Context export    | `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` |
+| Forge             | `forge.getPR`                                                              |
+| Agent tasks       | `agentTask.spawnForEdits` (the no-file-edit escape hatch)                  |
+| Grants            | `grant.create` `grant.list` `grant.revoke`                                 |
+| Skill runs        | `skill.find` `skill.load` `skill.run.get` `skill.step.advance`            |
+| Audit             | `audit.export`                                                             |
+| Memory            | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
+| Artifacts         | `artifact.read`                                                            |
 
 ## Environment variables
 
@@ -239,7 +243,7 @@ tail -f ~/.daintree/logs/2026-06-21-ses_ab12cd34.log
 ## Testing
 
 ```bash
-go test ./...        # all tests (336+), no network — fakes for MCP + models
+go test ./...        # all tests (980+ across 44 packages), no network — fakes for MCP + models
 go test -race ./...
 go vet ./...
 gofmt -l .           # must print nothing

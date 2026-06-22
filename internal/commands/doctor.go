@@ -11,7 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
-// DoctorCheck is one row of the rich /doctor checklist (commandData.ts §6.5).
+// DoctorCheck is one row of the rich /doctor checklist.
 type DoctorCheck struct {
 	Label  string
 	OK     bool
@@ -23,10 +23,10 @@ type DoctorCheck struct {
 // calls. EXTERNAL CONTRACT — keep verbatim.
 const doctorProbeTool = "actions.getContext"
 
-// doctorProbeTimeout bounds both listTools and the probe call (commandData.ts).
+// doctorProbeTimeout bounds both listTools and the probe call.
 const doctorProbeTimeout = 5 * time.Second
 
-// RunDoctor runs the rich /doctor checklist (commandData.ts §6.5). Order matters.
+// RunDoctor runs the rich /doctor checklist. Order matters.
 // It may opportunistically reconnect when the URL/token are present but the
 // session is cold.
 func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {

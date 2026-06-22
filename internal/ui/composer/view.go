@@ -9,7 +9,7 @@ import (
 // ViewParams carries the per-frame chrome state the parent owns (it is NOT in
 // the composer's own state because it is derived from the controller each
 // frame): the busy stage label, queue depth, the cancellable/attention flags,
-// and the right-aligned context hint (ui-input.md §1.11).
+// and the right-aligned context hint.
 type ViewParams struct {
 	Width       int    // total cell width available (terminal cols minus insets)
 	Stage       string // live stage label while busy (NEVER "Thinking"; "Processing…" fallback)
@@ -22,42 +22,57 @@ type ViewParams struct {
 
 // promptGlyph is the single input marker. Daintree is already named in the
 // header, so the composer line just shows a caret-style prompt (U+203A + space,
-// ASCII fallback "> "). Ported from Composer.tsx `prompt={set.active === "◌" ? "› " : "> "}`.
+// ASCII fallback "> ").
 const promptGlyph = "› "
 const promptGlyphASCII = "> "
 
-// palettePadLeft mirrors the original palette box `paddingLeft={2}`: the slash
-// suggestions hang two cells in from the chrome edge so they read as a sub-list
-// under the input rather than aligning with it. Ported from Composer.tsx.
+// palettePadLeft is the palette box left padding: the slash suggestions hang two
+// cells in from the chrome edge so they read as a sub-list under the input rather
+// than aligning with it.
 const palettePadLeft = 2
 
 // View renders the composer as a string block (palette rows, the input line(s)
 // with the caret, the busy cue, and the hint row). Everything is measured by
 // terminal CELL width via ansi.StringWidth so wide runes and combining marks
-// don't misplace the caret or overflow (ui-input.md §0; the non-negotiable
+// don't misplace the caret or overflow (the non-negotiable
 // cell-measurement rule). The caller is responsible for the left inset / right
 // gutter; Width is the usable content width.
 func (m *Model) View(p ViewParams) string {
 	var b strings.Builder
 
 	// --- slash palette (above the input) ---
-	// Ported from Composer.tsx: a column of up to 5 rows, `paddingLeft={2}` and
-	// `marginBottom={1}` (a blank line BELOW the block, before the rule). Each row
-	// is the command name in info cyan padded to 14 cells, then the dim description.
+	// A column of up to 5 rows, with two cells of left padding and a blank line
+	// BELOW the block (before the rule). Each row is the command name in info cyan
+	// padded to 14 cells, then the dim description.
 	if sugg := m.activeSuggestions(); len(sugg) > 0 {
 		pad := strings.Repeat(" ", palettePadLeft)
-		for _, c := range sugg {
-			name := m.theme.Info().Render(padCells(c.Name, 14))
+		sel := clampInt(m.paletteSel, 0, len(sugg)-1)
+		for i, c := range sugg {
+			marker := "  "
+			nameStyle := m.theme.Info()
+			if i == sel {
+				// Highlight the selected row so Tab's target is visible (the audit gap).
+				marker = m.theme.Info().Render("› ")
+				nameStyle = m.theme.Body().Reverse(true)
+			}
+			name := nameStyle.Render(padCells(c.Name, 14))
 			desc := m.theme.Dim().Render(c.Desc)
-			row := truncateCells(name+desc, p.Width-palettePadLeft)
+			row := marker + truncateCells(name+desc, p.Width-palettePadLeft-2)
 			b.WriteString(pad + row)
 			b.WriteByte('\n')
 		}
+		// Inline usage + accept hint for the highlighted command (surfaces the arg form).
+		hint := "Tab complete · ↑↓ move · Enter run"
+		if syn := sugg[sel].Syntax; syn != "" {
+			hint = syn + "   " + hint
+		}
+		b.WriteString(pad + m.theme.Dim().Render(truncateCells(hint, p.Width-palettePadLeft)))
+		b.WriteByte('\n')
 		// marginBottom={1}: a blank line separates the palette from the rule.
 		b.WriteByte('\n')
 	}
 
-	// --- rule ABOVE the input (Composer.tsx `<Divider />`) ---
+	// --- rule ABOVE the input ---
 	// Brackets the input top so the field reads unmistakably as the place text
 	// goes. Full chrome width, muted/dim — matches the masthead's closing rule.
 	b.WriteString(m.renderRule(p.Width))
@@ -69,14 +84,14 @@ func (m *Model) View(p ViewParams) string {
 	// --- queued follow-ups cue (under the input) ---
 	// The LIVE run status (Generating / tool tree …) belongs in the TRANSCRIPT
 	// under the DAINTREE marker, NOT here under the input. The input stays clean;
-	// we only surface silently-queued follow-ups so they aren't invisible (#95).
-	// Ported verbatim from Composer.tsx: `busy && queueDepth > 0 ? "N queued"`.
+	// we only surface silently-queued follow-ups so they aren't invisible (#95):
+	// when busy and the queue is non-empty, show "N queued".
 	if m.busy && p.QueueDepth > 0 {
 		b.WriteByte('\n')
-		b.WriteString(m.theme.Dim().Render(truncateCells(itoa(p.QueueDepth)+" queued", p.Width)))
+		b.WriteString(m.theme.Dim().Render(truncateCells(itoa(p.QueueDepth)+" queued · Esc edits last", p.Width)))
 	}
 
-	// --- rule BELOW the input (Composer.tsx second `<Divider />`) ---
+	// --- rule BELOW the input ---
 	// Brackets the input bottom; the hints below sit OUTSIDE the rule.
 	b.WriteByte('\n')
 	b.WriteString(m.renderRule(p.Width))
@@ -85,7 +100,7 @@ func (m *Model) View(p ViewParams) string {
 	b.WriteByte('\n')
 	b.WriteString(m.renderHints(p))
 
-	// --- context line (Composer.tsx trailing `{contextHint}`) ---
+	// --- context line (trailing context hint) ---
 	// Dim session summary ("agents N · tmr M" when connected, else "MCP degraded").
 	if p.ContextHint != "" {
 		b.WriteByte('\n')
@@ -96,7 +111,7 @@ func (m *Model) View(p ViewParams) string {
 }
 
 // renderRule draws the full-width horizontal rule that brackets the input top and
-// bottom (Composer.tsx `<Divider />`). It mirrors the masthead's closing rule:
+// bottom. It mirrors the masthead's closing rule:
 // a run of the rule glyph in the muted/dim tone, spanning the whole chrome width
 // (render_chrome.go uses `th.Muted().Render(strings.Repeat(g.Rule, width))`).
 func (m *Model) renderRule(width int) string {
@@ -106,8 +121,8 @@ func (m *Model) renderRule(width int) string {
 	return m.theme.Muted().Render(strings.Repeat(m.theme.Glyphs.Rule, width))
 }
 
-// promptStr resolves the prompt glyph for the active glyph set, mirroring
-// Composer.tsx `set.active === "◌" ? "› " : "> "`: the unicode set carries the
+// promptStr resolves the prompt glyph for the active glyph set
+// (`set.active === "◌" ? "› " : "> "`): the unicode set carries the
 // chevron, the ASCII fallback the plain ">".
 func (m *Model) promptStr() string {
 	if m.theme.Glyphs.Active == "◌" {
@@ -121,11 +136,16 @@ func (m *Model) promptStr() string {
 // indented to align under it. When the buffer is empty the placeholder is shown
 // dimmed with the caret at the start.
 func (m *Model) renderInput(p ViewParams) string {
+	// Reverse-i-search replaces the normal input line while Ctrl-R is active.
+	if m.searching {
+		return m.renderSearch(p)
+	}
+
 	rs := runesOf(m.buffer)
 	prompt := m.promptStr()
 
 	if len(rs) == 0 {
-		// Empty buffer. Ported from MultilineInput.tsx's `value.length === 0` branch:
+		// Empty buffer:
 		//   focused + placeholder → the placeholder's FIRST char is the inverse
 		//     (block) caret, the REST is dim. The caret IS the first glyph, not a
 		//     separate cell before the text.
@@ -178,18 +198,12 @@ func (m *Model) renderInput(p ViewParams) string {
 
 	var out strings.Builder
 	firstRow := true
-	trailingCaret := false
 	for row, line := range lines {
 		segs := wrapSegments(line, avail)
 		// Resolve the caret to a (segment, sub-column) only on the line it sits on.
 		caretSeg, caretSub := -1, 0
 		if row == curRow {
 			caretSeg, caretSub = locateSegment(segs, curCol)
-			// A caret past the last rune of the last segment on the LAST logical line
-			// has no glyph to invert — defer it to an explicit trailing cell below.
-			if row == len(lines)-1 && caretSeg == len(segs)-1 && caretSub >= len(segs[caretSeg]) {
-				trailingCaret = true
-			}
 		}
 		for s, seg := range segs {
 			if firstRow {
@@ -199,13 +213,42 @@ func (m *Model) renderInput(p ViewParams) string {
 				out.WriteByte('\n')
 				out.WriteString(indent)
 			}
+			// renderLine now draws a trailing caret on ANY visual row whose caret lands at/
+			// after its end, so the cursor stays visible at the EOL of an interior wrapped or
+			// logical line — not only on the buffer's last line.
 			out.WriteString(m.renderLine(seg, s == caretSeg, caretSub))
 		}
 	}
-	if trailingCaret {
-		out.WriteString(m.caretCell(' '))
-	}
 	return out.String()
+}
+
+// wrapWidth is the cell width the input text wraps at: the content width minus the prompt
+// glyph (continuation rows are indented under it). It MUST match the render so visual-row
+// vertical motion lands on the same rows the user sees. A 0/unknown width means "no wrap"
+// (logical-line motion) until the first real render width arrives via SetWidth.
+func (m *Model) wrapWidth() int {
+	if m.lastWidth <= 0 {
+		return 1 << 30
+	}
+	w := m.lastWidth - ansi.StringWidth(m.promptStr())
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// renderSearch draws the reverse-i-search line in place of the normal input while Ctrl-R is
+// active: a "(reverse-i-search)`query`:" prompt followed by the current match (the buffer).
+func (m *Model) renderSearch(p ViewParams) string {
+	label := "(reverse-i-search)`" + m.searchQuery + "`: "
+	if m.searchHit < 0 && m.searchQuery != "" {
+		label = "(failed reverse-i-search)`" + m.searchQuery + "`: "
+	}
+	avail := p.Width - ansi.StringWidth(label)
+	if avail < 1 {
+		avail = 1
+	}
+	return m.theme.Dim().Render(label) + m.theme.Body().Render(truncateCells(m.buffer, avail))
 }
 
 // wrapSegments word-wraps a single logical line into visual segments each at most
@@ -272,12 +315,15 @@ func locateSegment(segs [][]rune, col int) (seg, sub int) {
 	return last, col - (acc - len(segs[last]))
 }
 
-// renderLine renders one logical line; when withCaret, the rune at col is drawn
-// as an inverse caret cell (or a trailing caret when col is at/after EOL — that
-// trailing case is handled by the caller for the last line).
+// renderLine renders one visual row; when withCaret, the rune at col is drawn as an inverse
+// caret cell. A caret at/after the row's end draws a trailing caret cell INLINE on this row,
+// so the cursor stays visible at the EOL of any wrapped/interior line (not just the last).
 func (m *Model) renderLine(line []rune, withCaret bool, col int) string {
-	if !withCaret || col >= len(line) {
+	if !withCaret {
 		return string(line)
+	}
+	if col >= len(line) {
+		return string(line) + m.caretCell(' ')
 	}
 	var b strings.Builder
 	b.WriteString(string(line[:col]))
@@ -297,10 +343,10 @@ func (m *Model) caretCell(r rune) string {
 }
 
 // renderHints draws the adaptive hint row. cancelActive defaults to busy when
-// the caller doesn't distinguish turn kinds (Cancellable == nil), per §1.11. Each
-// key is info cyan and its action dim, joined by a dim " · " separator. Ported
-// from Composer.tsx: keys in `ui.color.info`, actions + separators in DIM. The
-// context hint lives on its OWN line below (handled by View), never inline here.
+// the caller doesn't distinguish turn kinds (Cancellable == nil). Each key is info
+// cyan and its action dim, joined by a dim " · " separator: keys in the info color,
+// actions + separators in DIM. The context hint lives on its OWN line below
+// (handled by View), never inline here.
 func (m *Model) renderHints(p ViewParams) string {
 	cancelActive := m.busy
 	if p.Cancellable != nil {

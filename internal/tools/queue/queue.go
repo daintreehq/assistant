@@ -1,8 +1,6 @@
 // Package queue holds the attention-queue tools: queue.publish, queue.digest,
 // queue.resolve. All sub-threads publish here instead of interrupting the main
 // thread; the human reads the digest.
-//
-// Spec: docs/port/tools-families.md §4.4 (queueTools.ts).
 package queue
 
 import (
@@ -56,7 +54,7 @@ func (d Deps) queue() Queue { return d.Queue }
 //
 // NB: the model-facing JSON-schema intentionally OMITS epistemicKind from
 // properties even though the decoder accepts it (the model never sets it;
-// internal callers do). Reproduce as-is. Spec: §4.4 note.
+// internal callers do).
 
 var publishSchema = json.RawMessage(`{
   "type": "object",

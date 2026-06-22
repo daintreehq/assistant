@@ -65,9 +65,9 @@ var copyTreeGenerateSchema = json.RawMessage(`{
   "required": []
 }`)
 
-// copyTreeForwardMap rebuilds the verbatim args map the TS passes (it forwards the
+// copyTreeForwardMap rebuilds the verbatim args map forwarded to Daintree: the
 // whole parsed args object, so worktreeId/options travel as-is; omitted fields are
-// simply absent).
+// simply absent.
 func (a copyTreeGenerateArgs) forwardMap() map[string]any {
 	m := map[string]any{}
 	if a.WorktreeID != "" {

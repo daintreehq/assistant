@@ -11,9 +11,9 @@ import (
 )
 
 // embeddedSkills mirrors the repo-root skills/ directory inside the module so the
-// binary is self-contained. This replaces the TS findSkillsDir package-root walk
-// (a Node runtime-resolution artifact). The on-disk override path
-// (DAINTREE_ASSISTANT_SKILLS_DIR) is preserved for dev and tests.
+// binary is self-contained — no package-root walk to resolve the skills dir at
+// runtime. The on-disk override path (DAINTREE_ASSISTANT_SKILLS_DIR) is preserved
+// for dev and tests.
 //
 //go:embed all:files/*.md
 var embeddedSkills embed.FS
@@ -23,11 +23,11 @@ const embeddedDir = "files"
 
 // SkillsDirEnv overrides the skill source with an on-disk directory (absolute
 // path; mainly for tests). When set (trimmed non-empty), skills load from the
-// real filesystem instead of the embedded FS (spec §2.7 / §9.3).
+// real filesystem instead of the embedded FS.
 const SkillsDirEnv = "DAINTREE_ASSISTANT_SKILLS_DIR"
 
-// isSkillFile reports whether a directory entry name is a loadable skill file
-// (spec §2.5): lowercased ends ".md", does NOT start with "." or "_", and is not
+// isSkillFile reports whether a directory entry name is a loadable skill file:
+// lowercased ends ".md", does NOT start with "." or "_", and is not
 // "readme.md".
 func isSkillFile(name string) bool {
 	lower := strings.ToLower(name)
@@ -44,7 +44,7 @@ func isSkillFile(name string) bool {
 }
 
 // LoadSkills loads every skill, honoring the env override. One bad file aborts
-// the whole load (fail-loud at boot, spec §2.6). Skills are returned in
+// the whole load (fail-loud at boot). Skills are returned in
 // filename-sorted order for deterministic catalog text (prompt-cache stability).
 func LoadSkills() ([]Skill, error) {
 	if dir := strings.TrimSpace(os.Getenv(SkillsDirEnv)); dir != "" {
@@ -85,7 +85,7 @@ func loadSkillsFromEmbedded() ([]Skill, error) {
 	return skills, nil
 }
 
-// loadSkillsFromDir reads skill files from an on-disk directory (spec §2.6):
+// loadSkillsFromDir reads skill files from an on-disk directory:
 // filter isSkillFile → lexicographic filename sort → parse each. One bad file
 // aborts the entire load.
 func loadSkillsFromDir(dir string) ([]Skill, error) {
@@ -120,9 +120,8 @@ func loadSkillsFromDir(dir string) ([]Skill, error) {
 func content2string(b []byte) string { return string(b) }
 
 // parseAndCheck parses one file and enforces that the filename (sans ".md")
-// equals the dotted skill id. The TS loader does not enforce this, but the Go
-// port treats a filename/id mismatch as a load error so a rename can't silently
-// orphan a named handle.
+// equals the dotted skill id. A filename/id mismatch is a load error so a rename
+// can't silently orphan a named handle.
 func parseAndCheck(content, name string) (Skill, error) {
 	sk, err := parseSkillFile(content, name)
 	if err != nil {

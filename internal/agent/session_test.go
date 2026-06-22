@@ -248,7 +248,7 @@ func TestToolBatchAnnouncedBeforeDispatch(t *testing.T) {
 func TestToolProgressForwardedToSink(t *testing.T) {
 	// A tool reporting an in-tool substep (via the registry's ReportProgress, carried
 	// through turn.Progress) must surface as a ToolProgress(callID, msg) event tagged
-	// with the active call's id (_interaction-ux.md §4).
+	// with the active call's id.
 	sink := &captureSink{}
 	tools := &fakeTools{result: domain.Ok("ok", nil), emitProgress: []string{"launching terminal", ""}}
 	r := &fakeRouter{
