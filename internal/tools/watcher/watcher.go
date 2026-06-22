@@ -1,8 +1,11 @@
 // Package watcher holds the terminal/PR watcher tools: watcher.terminal.create,
 // watcher.watchPR, watcher.list, watcher.cancel. Watchers are session-scoped —
 // they supervise terminals that live only for the session and never resume on a
-// new launch (unlike durable timers). Every creator appends a foreground-only
-// lifecycle NOTE.
+// new launch (unlike durable timers). Because they only tick while the
+// foreground scheduler is running, both creators hard-fail (non-retryable
+// WATCHER_REQUIRES_INTERACTIVE) when the daemon is inactive (one-shot / --json
+// mode) instead of inserting a row that the next Store.Open would orphan; a
+// successful create appends a foreground-only lifecycle NOTE.
 package watcher
 
 import (
@@ -23,8 +26,9 @@ const (
 )
 
 const (
-	codeInvalidArgs     = "INVALID_ARGS"
-	codeWatcherNotFound = "WATCHER_NOT_FOUND"
+	codeInvalidArgs                = "INVALID_ARGS"
+	codeWatcherNotFound            = "WATCHER_NOT_FOUND"
+	codeWatcherRequiresInteractive = "WATCHER_REQUIRES_INTERACTIVE"
 )
 
 // Store is the slice of storage the watcher tools touch.
@@ -80,12 +84,28 @@ func daemonActive(tctx *tools.ToolContext) bool {
 }
 
 // lifecycleNote is the session-scoped foreground-only NOTE. Watchers do NOT
-// resume on a new launch (distinct from timers).
-func lifecycleNote(active bool) string {
-	if active {
-		return " NOTE: watchers are session-scoped and foreground-only — this one stops when the assistant closes and does not resume."
+// resume on a new launch (distinct from timers). Creators hard-fail before
+// reaching this note when the daemon is inactive (see requireDaemon), so the
+// "scheduler not running" case never appears on a successful create.
+func lifecycleNote() string {
+	return " NOTE: watchers are session-scoped and foreground-only — this one stops when the assistant closes and does not resume."
+}
+
+// requireDaemon returns a non-retryable failure when the foreground scheduler is
+// not running (one-shot / --json mode). Watchers are session-scoped and only
+// tick while the assistant is open, so creating one without a live daemon would
+// insert a row that the next Store.Open immediately cancels — an orphan. We
+// short-circuit before any insert. A nil DaemonActive means the caller did not
+// wire the field, so we assume active (daemonActive handles that). Returns nil
+// when the daemon is active and creation may proceed.
+func requireDaemon(tctx *tools.ToolContext, tool string) *tools.ToolResult {
+	if daemonActive(tctx) {
+		return nil
 	}
-	return " NOTE: the scheduler is NOT running, so this watcher will not check until the assistant is reopened (and watchers do not resume across sessions)."
+	res := tools.Fail(codeWatcherRequiresInteractive,
+		tool+": watchers are foreground-only and require an interactive session — they do not run in one-shot or --json mode. Open the assistant cockpit to create a watcher.",
+		tools.Unrecoverable())
+	return &res
 }
 
 // --- watcher.terminal.create ---
@@ -165,6 +185,14 @@ func newTerminalCreateTool(deps Deps) *tools.Tool {
 				nextCheck = now + *a.StartAfterMs
 			}
 
+			// Hard-fail before any insert when the daemon is not running:
+			// watchers only tick in the foreground, so persisting one here would
+			// orphan a row that the next Store.Open cancels. Args are validated
+			// above, so INVALID_ARGS still beats this gate.
+			if fail := requireDaemon(tctx, "watcher.terminal.create"); fail != nil {
+				return *fail
+			}
+
 			targets, _ := json.Marshal(a.TerminalIDs)
 			isSup := false
 			rec := domain.WatcherRecord{
@@ -203,10 +231,9 @@ func newTerminalCreateTool(deps Deps) *tools.Tool {
 					id = newID
 				}
 			}
-			active := daemonActive(tctx)
 			return tools.Ok(
-				fmt.Sprintf("Watching %d terminal(s): %q (%s).%s", len(a.TerminalIDs), a.Title, modelTier, lifecycleNote(active)),
-				map[string]any{"id": id, "nextCheckAt": nextCheck, "daemonActive": active},
+				fmt.Sprintf("Watching %d terminal(s): %q (%s).%s", len(a.TerminalIDs), a.Title, modelTier, lifecycleNote()),
+				map[string]any{"id": id, "nextCheckAt": nextCheck},
 			)
 		},
 	}
@@ -273,6 +300,13 @@ func newWatchPRTool(deps Deps) *tools.Tool {
 				nextCheck = now + *a.StartAfterMs
 			}
 
+			// Hard-fail before any insert when the daemon is not running (see
+			// watcher.terminal.create): a PR watcher created without a live
+			// foreground scheduler would orphan a row cancelled on next open.
+			if fail := requireDaemon(tctx, "watcher.watchPR"); fail != nil {
+				return *fail
+			}
+
 			// targetsJson is a display label so the NOT NULL column stays valid.
 			targets, _ := json.Marshal([]string{fmt.Sprintf("PR #%d", a.PRNumber)})
 			opts := prWatcherOptions{CWD: a.CWD, PRNumber: a.PRNumber}
@@ -304,15 +338,13 @@ func newWatchPRTool(deps Deps) *tools.Tool {
 					id = newID
 				}
 			}
-			active := daemonActive(tctx)
 			return tools.Ok(
-				fmt.Sprintf("Watching PR #%d.%s", a.PRNumber, lifecycleNote(active)),
+				fmt.Sprintf("Watching PR #%d.%s", a.PRNumber, lifecycleNote()),
 				map[string]any{
-					"id":           id,
-					"prNumber":     a.PRNumber,
-					"cadenceMs":    prWatcherCadenceMs,
-					"nextCheckAt":  nextCheck,
-					"daemonActive": active,
+					"id":          id,
+					"prNumber":    a.PRNumber,
+					"cadenceMs":   prWatcherCadenceMs,
+					"nextCheckAt": nextCheck,
 				},
 			)
 		},

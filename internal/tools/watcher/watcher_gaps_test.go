@@ -58,10 +58,15 @@ func TestTerminalCreateWatchConditionMatrix(t *testing.T) {
 	}
 }
 
-// The lifecycle note differs across scheduler running / not / absent. Watchers do
-// NOT resume across sessions (unlike timers).
+// Lifecycle behaviour across scheduler running / stopped / absent. When the
+// daemon runs (or is absent → assume-active), creation succeeds with the
+// session-scoped foreground-only NOTE. When the daemon is stopped (one-shot /
+// --json mode), creation hard-fails with a non-retryable
+// WATCHER_REQUIRES_INTERACTIVE and inserts nothing. Watchers do NOT resume
+// across sessions (unlike timers).
 func TestTerminalCreateLifecycleNotice(t *testing.T) {
-	tool := find(Tools(Deps{Store: &memStore{}}), "watcher.terminal.create")
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "watcher.terminal.create")
 	args := json.RawMessage(`{"terminalIds":["t1"],"title":"build","goal":"green"}`)
 
 	on := true
@@ -74,14 +79,32 @@ func TestTerminalCreateLifecycleNotice(t *testing.T) {
 
 	off := false
 	stopped := tool.Handle(context.Background(), args, ctxDaemon(&off))
-	if !stopped.Ok || !strings.Contains(stopped.Summary, "scheduler is NOT running") ||
-		!strings.Contains(stopped.Summary, "will not check") {
-		t.Fatalf("stopped note: %q", stopped.Summary)
+	if stopped.Ok || stopped.Error.Code != codeWatcherRequiresInteractive || stopped.Error.Recoverable {
+		t.Fatalf("stopped: expected non-retryable %s, got %+v", codeWatcherRequiresInteractive, stopped)
+	}
+	if len(st.inserted) != 1 {
+		t.Fatalf("stopped must not insert a watcher row, got %d total inserts", len(st.inserted))
 	}
 
 	absent := tool.Handle(context.Background(), args, ctxDaemon(nil))
 	if !absent.Ok || !strings.Contains(absent.Summary, "session-scoped") {
 		t.Fatalf("absent note: %q", absent.Summary)
+	}
+}
+
+// watchPR hard-fails identically when the daemon is inactive: non-retryable
+// WATCHER_REQUIRES_INTERACTIVE and zero rows inserted (no orphan).
+func TestWatchPRDaemonInactive(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "watcher.watchPR")
+
+	off := false
+	res := tool.Handle(context.Background(), json.RawMessage(`{"prNumber":42}`), ctxDaemon(&off))
+	if res.Ok || res.Error.Code != codeWatcherRequiresInteractive || res.Error.Recoverable {
+		t.Fatalf("expected non-retryable %s, got %+v", codeWatcherRequiresInteractive, res)
+	}
+	if len(st.inserted) != 0 {
+		t.Fatalf("inactive daemon must not insert a watcher row, got %d", len(st.inserted))
 	}
 }
 
