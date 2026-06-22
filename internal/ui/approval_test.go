@@ -255,6 +255,59 @@ func TestApproval_PressingAEmitsGrantNote(t *testing.T) {
 	}
 }
 
+func TestApproval_GrantIsToolScoped(t *testing.T) {
+	m, ch := approvalPending(t, confirmReq("terminal.sendInput", domain.RiskTerminal, ""))
+	m.pending.shownAt = domain.NowMS() - 1000
+	mm := asModel(t, mustModel(m.onApprovalKey(runeKey('a'))))
+	if v, ok := approvalDecision(ch); !ok || !v {
+		t.Fatalf("A did not approve (ok=%v v=%v)", ok, v)
+	}
+	// A DIFFERENT tool must still surface its own sheet — grants are keyed by exact tool
+	// name, never by risk class.
+	mm2, autoApproved := autoApprove(t, mm, "project.createWorktree", domain.RiskProject)
+	if autoApproved || mm2.pending == nil {
+		t.Fatal("a grant for one tool wrongly auto-approved a different tool")
+	}
+}
+
+func TestApproval_StaleEntriesDoNotAutoApprove(t *testing.T) {
+	// 0 (spent) and any negative other than the -1 sentinel must NOT grant — guards the
+	// explicit "count > 0 || count == allowForeverCount" check against a bare != 0.
+	for _, count := range []int{0, -2, -7} {
+		m := harnessModel()
+		m.approvedTools = map[string]int{"terminal.sendInput": count}
+		mm, autoApproved := autoApprove(t, m, "terminal.sendInput", domain.RiskTerminal)
+		if autoApproved || mm.pending == nil {
+			t.Fatalf("stale entry %d auto-approved instead of surfacing the sheet", count)
+		}
+	}
+}
+
+func TestApproval_PreseededGitNeverAutoApproves(t *testing.T) {
+	// Even a (never-set-in-practice) forever grant on a git tool must not auto-approve:
+	// rememberable() gates the auto path, so it falls through to typed-confirmation.
+	m := harnessModel()
+	m.approvedTools = map[string]int{"git.snapshotDelete": allowForeverCount}
+	ch := make(chan bool, 1)
+	mm := asModel(t, mustModel(m.Update(ApprovalRequestedMsg{
+		Request: confirmReq("git.snapshotDelete", domain.RiskGit, ""), Resolve: ch,
+	})))
+	if mm.pending == nil || !mm.pending.requireType {
+		t.Fatal("a preseeded git grant bypassed typed-confirmation")
+	}
+	if _, ok := approvalDecision(ch); ok {
+		t.Fatal("a preseeded git grant auto-resolved")
+	}
+}
+
+func TestApprovals_UnknownSubcommandReportsUsage(t *testing.T) {
+	m := harnessModel()
+	mm := asModel(t, mustModel(m.onSubmit("/approvals bogus")))
+	if card := lastCommandCell(t, mm); !strings.Contains(card.Text, "Usage") {
+		t.Fatalf("/approvals bogus = %q, want a usage hint", card.Text)
+	}
+}
+
 func TestApproval_GitEntersTypedConfirm(t *testing.T) {
 	// The only RiskGit tools (git.snapshotRevert / git.snapshotDelete) discard or delete
 	// uncommitted work — they must require a TYPED confirmation, never single-key approve,

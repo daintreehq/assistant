@@ -503,6 +503,10 @@ func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case k.Code == 'a' || k.Code == 'A':
 		// Approve AND remember this tool for a BOUNDED number of further calls (eligible
 		// risks only). A small bound keeps a forgotten A press from being a standing grant.
+		// The rememberable guard here (and on F) is forward-defensive: today the only
+		// non-rememberable classes (git/system) already route to typed-confirm above and
+		// never reach this switch, but a future non-typed-confirm class would still be
+		// kept off the allow-list.
 		if !rememberable(m.pending.req.Risk) {
 			return m, bellCmd()
 		}
@@ -570,13 +574,17 @@ func (m *Model) handleApprovalsCommand(text string) (title, body string, ok bool
 	if len(fields) == 0 || !strings.EqualFold(fields[0], "approvals") {
 		return "", "", false
 	}
-	if len(fields) > 1 && strings.EqualFold(fields[1], "clear") {
-		n := len(m.approvedTools)
-		m.approvedTools = nil
-		if n == 0 {
-			return "Approvals", "No session approvals to clear.", true
+	if len(fields) > 1 {
+		if strings.EqualFold(fields[1], "clear") {
+			n := len(m.approvedTools)
+			m.approvedTools = nil
+			if n == 0 {
+				return "Approvals", "No session approvals to clear.", true
+			}
+			return "Approvals", fmt.Sprintf("Cleared %d session approval(s).", n), true
 		}
-		return "Approvals", fmt.Sprintf("Cleared %d session approval(s).", n), true
+		// Unknown subcommand — report usage rather than silently listing.
+		return "Approvals", "Usage: /approvals [clear]", true
 	}
 	return "Approvals", approvalsListText(m.approvedTools), true
 }
