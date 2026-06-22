@@ -103,8 +103,11 @@ clean:
 # change is handled by wiping and rebuilding rather than a migration chain.
 # Honours the state-dir override; falls back to ~/.daintree/assistant-cli. The
 # empty-string guard is a safety net so a misconfigured STATE_DIR never expands
-# into a bare `rm -rf`. Idempotent: rm -rf on a missing dir exits 0.
+# into a bare `rm -rf`. Idempotent: rm -rf on a missing dir exits 0. Safe to run
+# while the assistant is open — POSIX unlink keeps the live session's open file
+# descriptors valid until it exits; the next launch creates a fresh state.db.
+# The `--` stops a STATE_DIR that begins with `-` from being read as a flag.
 db-reset:
 	@if [ -z "$(STATE_DIR)" ]; then echo "db-reset: STATE_DIR is empty, refusing to rm -rf" >&2; exit 1; fi
 	@echo "db-reset: removing $(STATE_DIR)"
-	rm -rf "$(STATE_DIR)"
+	rm -rf -- "$(STATE_DIR)"
