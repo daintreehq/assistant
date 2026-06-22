@@ -151,30 +151,119 @@ func (m *Model) renderInput(p ViewParams) string {
 		return prompt + first + rest
 	}
 
-	// Split into logical lines, place the caret on its (row,col), and prefix the
-	// first line with the prompt, the rest with matching indent so wrapped logical
-	// lines stay readable. We measure indent by the prompt's cell width.
+	// Split into logical lines, then WORD-WRAP each one to the available content
+	// width so a long line stays fully visible instead of running off the right
+	// edge. The prompt glyph leads the very first visual row; every continuation
+	// row (whether from a hard '\n' or a soft wrap) is indented to align under it,
+	// measured by the prompt's cell width. We place the caret on whichever VISUAL
+	// row holds the cursor rune and let the terminal position the inverse cell, so
+	// no cell arithmetic is needed for wide runes here.
+	//
+	// Wrapping MUST happen inside the composer: footer() bounds the live region by
+	// counting "\n"-delimited rows as display rows (view.go lineCount), so an
+	// unwrapped over-wide line would undercount and corrupt that budget.
 	lines := splitLines(rs)
-	curRow, curCol := locate(rs, m.cursor)
 	indent := strings.Repeat(" ", ansi.StringWidth(prompt))
+	avail := p.Width - ansi.StringWidth(prompt)
+	if avail < 1 {
+		avail = 1
+	}
+	curRow, curCol := locate(rs, m.cursor)
 
 	var out strings.Builder
+	firstRow := true
+	trailingCaret := false
 	for row, line := range lines {
-		if row == 0 {
-			out.WriteString(prompt)
-		} else {
-			out.WriteByte('\n')
-			out.WriteString(indent)
+		segs := wrapSegments(line, avail)
+		// Resolve the caret to a (segment, sub-column) only on the line it sits on.
+		caretSeg, caretSub := -1, 0
+		if row == curRow {
+			caretSeg, caretSub = locateSegment(segs, curCol)
+			// A caret past the last rune of the last segment on the LAST logical line
+			// has no glyph to invert — defer it to an explicit trailing cell below.
+			if row == len(lines)-1 && caretSeg == len(segs)-1 && caretSub >= len(segs[caretSeg]) {
+				trailingCaret = true
+			}
 		}
-		out.WriteString(m.renderLine(line, row == curRow, curCol))
+		for s, seg := range segs {
+			if firstRow {
+				out.WriteString(prompt)
+				firstRow = false
+			} else {
+				out.WriteByte('\n')
+				out.WriteString(indent)
+			}
+			out.WriteString(m.renderLine(seg, s == caretSeg, caretSub))
+		}
 	}
-	// If the caret sits at the very end on a final empty position, ensure a caret
-	// cell is shown (renderLine handles in-line carets; a caret at EOL of the last
-	// line needs an explicit trailing cell).
-	if curRow == len(lines)-1 && curCol >= len(lines[curRow]) {
+	if trailingCaret {
 		out.WriteString(m.caretCell(' '))
 	}
 	return out.String()
+}
+
+// wrapSegments word-wraps a single logical line into visual segments each at most
+// `width` cells wide. Concatenating the segments reproduces the line EXACTLY (no
+// runes dropped, no spaces collapsed) so the cursor column maps cleanly onto a
+// segment. Breaks prefer the last space at/under the width boundary, keeping that
+// space at the END of the current segment so continuation rows never start with a
+// stray space; a single word longer than the width is hard-broken. An empty line
+// yields one empty segment so it still occupies a visual row.
+func wrapSegments(line []rune, width int) [][]rune {
+	if width < 1 {
+		width = 1
+	}
+	if len(line) == 0 {
+		return [][]rune{{}}
+	}
+	var segs [][]rune
+	for i := 0; i < len(line); {
+		// Greedily take as many runes as fit in `width` cells (always at least one,
+		// so a single over-wide rune still makes progress).
+		w, j := 0, i
+		for j < len(line) {
+			rw := ansi.StringWidth(string(line[j]))
+			if j > i && w+rw > width {
+				break
+			}
+			w += rw
+			j++
+		}
+		end := j
+		if j < len(line) {
+			// Broke mid-line: prefer a space boundary — break AFTER the last space in
+			// (i, j) so the space trails the current segment rather than leading the next.
+			for k := j - 1; k > i; k-- {
+				if isSpace(line[k]) {
+					end = k + 1
+					break
+				}
+			}
+		}
+		segs = append(segs, line[i:end])
+		i = end
+	}
+	return segs
+}
+
+// locateSegment maps a column within a logical line to its (segment index, column
+// within that segment) for the wrapped layout. Segments concatenate to the whole
+// line, so the mapping is exact. A column at a segment boundary resolves to the
+// START of the next segment; a column at the line's end resolves to one past the
+// end of the LAST segment (the caller draws a trailing caret there).
+func locateSegment(segs [][]rune, col int) (seg, sub int) {
+	acc := 0
+	for i, s := range segs {
+		if col < acc+len(s) {
+			return i, col - acc
+		}
+		acc += len(s)
+	}
+	last := len(segs) - 1
+	if last < 0 {
+		return 0, 0
+	}
+	return last, col - (acc - len(segs[last]))
 }
 
 // renderLine renders one logical line; when withCaret, the rune at col is drawn

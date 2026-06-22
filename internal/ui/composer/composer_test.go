@@ -262,6 +262,67 @@ func TestWrapByCells(t *testing.T) {
 	}
 }
 
+func TestRenderInputWordWraps(t *testing.T) {
+	// A long single logical line must wrap onto multiple visual rows (each within
+	// the content width) instead of running off the right edge. footer() bounds the
+	// live region by counting "\n"-delimited rows, so every rendered row must be
+	// within Width — that contract is what this guards.
+	m := newModel()
+	const width = 24
+	words := "the quick brown fox jumps over the lazy dog and keeps on running forever"
+	typeRunes(&m, words)
+
+	out := m.View(ViewParams{Width: width, Placeholder: ""})
+
+	// Inspect every rendered line's cell width and collect the wrapped input rows.
+	var inputRows []string
+	for _, line := range strings.Split(stripAnsiC(out), "\n") {
+		if w := ansiWidth(line); w > width {
+			t.Fatalf("rendered line exceeds width %d: %d (%q)", width, w, line)
+		}
+		// The wrapped input rows carry the prompt or the indent; collect the prose by
+		// trimming the leading prompt/indent (both 2 cells).
+		if strings.HasPrefix(line, "› ") || strings.HasPrefix(line, "  ") {
+			inputRows = append(inputRows, strings.TrimPrefix(strings.TrimPrefix(line, "› "), "  "))
+		}
+	}
+	if len(inputRows) < 3 {
+		t.Fatalf("expected the long line to wrap onto several rows, got %d: %v", len(inputRows), inputRows)
+	}
+	// Re-joining the wrapped rows (segments keep their trailing spaces) reproduces
+	// the original text exactly — no runes dropped, no spaces collapsed.
+	joined := strings.TrimRight(strings.Join(inputRows, ""), " ")
+	if joined != words {
+		t.Fatalf("wrapped rows must reconstruct the input:\n got %q\nwant %q", joined, words)
+	}
+}
+
+func TestWrapSegmentsExactReconstruction(t *testing.T) {
+	cases := []string{
+		"hello world this is a long sentence",
+		"supercalifragilisticexpialidocious-is-one-very-long-unbreakable-word",
+		"日本語 テスト wide runes mixed in",
+		"",
+		"short",
+	}
+	for _, c := range cases {
+		line := []rune(c)
+		segs := wrapSegments(line, 10)
+		var rebuilt []rune
+		for _, s := range segs {
+			if ansiWidth(string(s)) > 10 && len(s) > 1 {
+				// Only a single over-wide rune may exceed the width; a multi-rune segment
+				// must fit.
+				t.Fatalf("segment exceeds width for %q: %q", c, string(s))
+			}
+			rebuilt = append(rebuilt, s...)
+		}
+		if string(rebuilt) != c {
+			t.Fatalf("wrapSegments lost runes for %q: rebuilt %q", c, string(rebuilt))
+		}
+	}
+}
+
 func TestUpDownColumnMemory(t *testing.T) {
 	m := newModel()
 	typeRunes(&m, "longline")

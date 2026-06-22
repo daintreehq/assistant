@@ -221,7 +221,7 @@ func (m Model) composerView(w int) string {
 		QueueDepth:  len(m.queuedInput),
 		Cancellable: &cancellable,
 		Attention:   m.attentionN > 0,
-		Placeholder: "Ask Daintree to supervise, delegate, or inspect…",
+		Placeholder: "Ask Daintree…",
 	})
 }
 
