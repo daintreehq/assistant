@@ -138,3 +138,65 @@ func join(parts []string, sep string) string {
 	}
 	return out
 }
+
+// truncateCommand renders a command for a single-line, human-facing summary:
+// newlines/tabs collapse to a space (so a heredoc or multi-line command can't
+// break the inline render at render_operations.go) and the result is clipped to
+// max runes with a "..." marker. Rune-aware so a multibyte command is never cut
+// mid-codepoint.
+func truncateCommand(s string, max int) string {
+	// Collapse any whitespace run (incl. \r\n, tabs) to a single space and trim
+	// the ends — keeps the summary one line and free of leading indentation.
+	// prevSpace starts true so a leading whitespace run is dropped entirely.
+	var b []rune
+	prevSpace := true
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if !prevSpace {
+				b = append(b, ' ')
+				prevSpace = true
+			}
+			continue
+		}
+		b = append(b, r)
+		prevSpace = false
+	}
+	// Trim a single trailing space left by the collapse.
+	if len(b) > 0 && b[len(b)-1] == ' ' {
+		b = b[:len(b)-1]
+	}
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "..."
+}
+
+// terminalSendCommandPassthrough runs the shared passthrough then replaces its
+// generic "Called terminal.sendCommand." summary with a concrete, self-describing
+// one: "Sent to terminal <id>: <command>." The assistant already knows the
+// terminalId + command from the validated args, so the human-facing record (audit
+// Summary + live transcript) is specific and correlated even though Daintree's
+// response carries no acceptance/echo field to verify against. The original result
+// payload (text + structuredContent) is preserved verbatim.
+func terminalSendCommandPassthrough(ctx context.Context, mcp MCPClient, terminalID, command string, args map[string]any) tools.ToolResult {
+	res := passthrough(ctx, mcp, "terminal.sendCommand", args, "")
+	if !res.Ok {
+		return res
+	}
+	result, _ := res.Result.(map[string]any)
+	return tools.Ok(fmt.Sprintf("Sent to terminal %s: %s.", terminalID, truncateCommand(command, 80)), result)
+}
+
+// copyTreeInjectPassthrough mirrors terminalSendCommandPassthrough for
+// copyTree.injectToTerminal: the injected payload is a large, unnamed copy-tree
+// digest, so the summary names the destination terminal rather than echoing
+// content — "Injected copy tree into terminal <id>." replacing the generic
+// "Called copyTree.injectToTerminal."
+func copyTreeInjectPassthrough(ctx context.Context, mcp MCPClient, terminalID string, args map[string]any) tools.ToolResult {
+	res := passthrough(ctx, mcp, "copyTree.injectToTerminal", args, "")
+	if !res.Ok {
+		return res
+	}
+	result, _ := res.Result.(map[string]any)
+	return tools.Ok(fmt.Sprintf("Injected copy tree into terminal %s.", terminalID), result)
+}
