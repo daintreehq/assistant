@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -86,8 +87,9 @@ func TestApproval_AllowToolRemembersForSession(t *testing.T) {
 	if v, ok := approvalDecision(ch); !ok || !v {
 		t.Fatalf("A did not approve (ok=%v v=%v)", ok, v)
 	}
-	if !mm.approvedTools["terminal.sendInput"] {
-		t.Fatal("A did not add the tool to the session allow-list")
+	if mm.approvedTools["terminal.sendInput"] != approveDefaultCount {
+		t.Fatalf("A did not seed the bounded session allow-list (got %d, want %d)",
+			mm.approvedTools["terminal.sendInput"], approveDefaultCount)
 	}
 	// A subsequent request for the SAME tool auto-approves without a sheet.
 	ch2 := make(chan bool, 1)
@@ -99,6 +101,157 @@ func TestApproval_AllowToolRemembersForSession(t *testing.T) {
 	}
 	if v, ok := approvalDecision(ch2); !ok || !v {
 		t.Fatal("a remembered tool was not auto-approved")
+	}
+}
+
+// autoApprove fires one ApprovalRequestedMsg for tool/risk and returns the resulting model
+// plus whether it auto-resolved true without surfacing a sheet.
+func autoApprove(t *testing.T, m Model, tool string, risk domain.RiskClass) (Model, bool) {
+	t.Helper()
+	ch := make(chan bool, 1)
+	mm := asModel(t, mustModel(m.Update(ApprovalRequestedMsg{
+		Request: confirmReq(tool, risk, ""), Resolve: ch,
+	})))
+	v, ok := approvalDecision(ch)
+	return mm, mm.pending == nil && ok && v
+}
+
+func TestApproval_BoundedCountDecrementsAndRePrompts(t *testing.T) {
+	m, ch := approvalPending(t, confirmReq("terminal.sendInput", domain.RiskTerminal, ""))
+	m.pending.shownAt = domain.NowMS() - 1000 // past debounce
+	mm := asModel(t, mustModel(m.onApprovalKey(runeKey('a'))))
+	if v, ok := approvalDecision(ch); !ok || !v {
+		t.Fatalf("A did not approve (ok=%v v=%v)", ok, v)
+	}
+	if got := mm.approvedTools["terminal.sendInput"]; got != approveDefaultCount {
+		t.Fatalf("A seeded count %d, want %d", got, approveDefaultCount)
+	}
+	// Each of the granted calls auto-approves without a sheet and decrements the count,
+	// dropping the entry once the grant is spent.
+	for i := 0; i < approveDefaultCount; i++ {
+		var ok bool
+		mm, ok = autoApprove(t, mm, "terminal.sendInput", domain.RiskTerminal)
+		if !ok {
+			t.Fatalf("bounded auto-approve %d did not resolve true without a sheet", i)
+		}
+	}
+	if _, present := mm.approvedTools["terminal.sendInput"]; present {
+		t.Fatal("a spent bounded grant was not dropped from the allow-list")
+	}
+	// The grant is spent — the next request must surface the sheet again (not auto-resolve).
+	ch3 := make(chan bool, 1)
+	mm = asModel(t, mustModel(mm.Update(ApprovalRequestedMsg{
+		Request: confirmReq("terminal.sendInput", domain.RiskTerminal, ""), Resolve: ch3,
+	})))
+	if mm.pending == nil {
+		t.Fatal("a spent bounded grant did not re-surface the approval sheet")
+	}
+	if _, ok := approvalDecision(ch3); ok {
+		t.Fatal("a spent bounded grant auto-resolved instead of re-prompting")
+	}
+}
+
+func TestApproval_AllowForeverNeverDecrements(t *testing.T) {
+	m, ch := approvalPending(t, confirmReq("terminal.sendInput", domain.RiskTerminal, ""))
+	m.pending.shownAt = domain.NowMS() - 1000
+	mm := asModel(t, mustModel(m.onApprovalKey(runeKey('f'))))
+	if v, ok := approvalDecision(ch); !ok || !v {
+		t.Fatalf("F did not approve (ok=%v v=%v)", ok, v)
+	}
+	if got := mm.approvedTools["terminal.sendInput"]; got != allowForeverCount {
+		t.Fatalf("F seeded count %d, want forever sentinel %d", got, allowForeverCount)
+	}
+	// Far more calls than the bounded default must never exhaust a forever grant.
+	for i := 0; i < approveDefaultCount+3; i++ {
+		var ok bool
+		mm, ok = autoApprove(t, mm, "terminal.sendInput", domain.RiskTerminal)
+		if !ok {
+			t.Fatalf("forever grant failed to auto-approve call %d", i)
+		}
+	}
+	if got := mm.approvedTools["terminal.sendInput"]; got != allowForeverCount {
+		t.Fatalf("forever grant decayed to %d", got)
+	}
+}
+
+func TestApproval_FDoesNotRememberGit(t *testing.T) {
+	// Git/system actions enter typed-confirmation mode, so 'f' is just a phrase character
+	// there — it must never become an approve-and-remember-forever shortcut.
+	m, ch := approvalPending(t, confirmReq("git.snapshotDelete", domain.RiskGit, ""))
+	if m.pending == nil || !m.pending.requireType {
+		t.Fatal("an irreversible git action did not enter typed-confirmation mode")
+	}
+	m2 := asModel(t, mustModel(m.onApprovalKey(runeKey('f'))))
+	if _, ok := approvalDecision(ch); ok {
+		t.Fatal("'f' approved an irreversible git action in typed-confirm mode")
+	}
+	if len(m2.approvedTools) != 0 {
+		t.Fatal("a git tool was added to the session allow-list via F (must never be remembered)")
+	}
+}
+
+// lastCommandCell returns the most recent CommandCell in the transcript (the card a slash
+// command renders), failing the test if there is none.
+func lastCommandCell(t *testing.T, m Model) *CommandCell {
+	t.Helper()
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		if m.transcript[i].Command != nil {
+			return m.transcript[i].Command
+		}
+	}
+	t.Fatal("no command cell in transcript")
+	return nil
+}
+
+func TestApprovals_CommandListsAndClears(t *testing.T) {
+	m := harnessModel()
+	m.approvedTools = map[string]int{
+		"terminal.sendInput":     3,
+		"project.createWorktree": allowForeverCount,
+	}
+	// /approvals lists each active grant with its remaining count / forever marker.
+	mm := asModel(t, mustModel(m.onSubmit("/approvals")))
+	card := lastCommandCell(t, mm)
+	if card.Title != "Approvals" {
+		t.Fatalf("/approvals card title = %q, want Approvals", card.Title)
+	}
+	if !strings.Contains(card.Text, "terminal.sendInput") || !strings.Contains(card.Text, "3 more") {
+		t.Fatalf("/approvals list missing the bounded grant: %q", card.Text)
+	}
+	if !strings.Contains(card.Text, "forever this session") {
+		t.Fatalf("/approvals list missing the forever grant: %q", card.Text)
+	}
+	// /approvals clear empties the allow-list and reports how many it cleared.
+	mm2 := asModel(t, mustModel(mm.onSubmit("/approvals clear")))
+	if len(mm2.approvedTools) != 0 {
+		t.Fatalf("/approvals clear left %d grants", len(mm2.approvedTools))
+	}
+	if c := lastCommandCell(t, mm2); !strings.Contains(c.Text, "Cleared") {
+		t.Fatalf("/approvals clear card = %q, want a Cleared… note", c.Text)
+	}
+}
+
+func TestApprovals_CommandEmptyState(t *testing.T) {
+	m := harnessModel()
+	mm := asModel(t, mustModel(m.onSubmit("/approvals")))
+	card := lastCommandCell(t, mm)
+	if !strings.Contains(card.Text, "No active session approvals") {
+		t.Fatalf("/approvals empty-state text = %q", card.Text)
+	}
+}
+
+func TestApproval_PressingAEmitsGrantNote(t *testing.T) {
+	m, _ := approvalPending(t, confirmReq("terminal.sendInput", domain.RiskTerminal, ""))
+	m.pending.shownAt = domain.NowMS() - 1000
+	mm := asModel(t, mustModel(m.onApprovalKey(runeKey('a'))))
+	var found bool
+	for _, c := range mm.transcript {
+		if c.Note != nil && strings.Contains(c.Note.Text, "terminal.sendInput") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pressing A did not announce the grant in scrollback")
 	}
 }
 

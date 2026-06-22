@@ -77,6 +77,51 @@ func TestUIPermissionsSwitchAndReject(t *testing.T) {
 	}
 }
 
+// TestUIPermissionsWarnsOnSessionTierChange: changing the tier away from the boot tier
+// (operator, from newOfflineApp) warns it's session-only and names the env var to set.
+func TestUIPermissionsWarnsOnSessionTierChange(t *testing.T) {
+	a := newOfflineApp(t) // boots at operator → InitialTier=operator
+	r := ui(a, "/permissions supervisor")
+	if !strings.Contains(r.Text, "session only") {
+		t.Fatalf("tier change missing the session-only warning: %q", r.Text)
+	}
+	if !strings.Contains(r.Text, "DAINTREE_ASSISTANT_TIER=supervisor") {
+		t.Fatalf("tier change missing the make-it-stick hint: %q", r.Text)
+	}
+	if !strings.Contains(r.Text, "operator") {
+		t.Fatalf("tier change should name the revert (boot) tier operator: %q", r.Text)
+	}
+	// The bare query keeps warning while the live tier still diverges from boot.
+	if r = ui(a, "/permissions"); !strings.Contains(r.Text, "session only") {
+		t.Fatalf("bare /permissions should keep warning while diverged: %q", r.Text)
+	}
+}
+
+// TestUIPermissionsNoWarnWhenTierUnchanged: re-asserting the boot tier (or just querying
+// it) must not emit the session-only warning.
+func TestUIPermissionsNoWarnWhenTierUnchanged(t *testing.T) {
+	a := newOfflineApp(t) // boots at operator
+	if r := ui(a, "/permissions operator"); strings.Contains(r.Text, "session only") {
+		t.Fatalf("re-asserting the boot tier should not warn: %q", r.Text)
+	}
+	if r := ui(a, "/permissions"); strings.Contains(r.Text, "session only") {
+		t.Fatalf("bare /permissions warned with a matching tier: %q", r.Text)
+	}
+}
+
+// TestUIApprovalsHandledFallback: /approvals is registered, so HandleUICommand must handle
+// it (the cockpit intercepts it earlier; the REPL surface just points to the cockpit).
+func TestUIApprovalsHandledFallback(t *testing.T) {
+	a := newOfflineApp(t)
+	r := ui(a, "/approvals")
+	if !r.Handled || r.Title != "Approvals" {
+		t.Fatalf("/approvals not handled: %+v", r)
+	}
+	if !strings.Contains(r.Text, "cockpit") {
+		t.Fatalf("/approvals fallback should point to the cockpit: %q", r.Text)
+	}
+}
+
 func TestUIInboxSwitchesPanel(t *testing.T) {
 	a := newOfflineApp(t)
 	r := ui(a, "/inbox")

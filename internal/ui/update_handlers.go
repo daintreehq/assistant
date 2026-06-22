@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -156,6 +157,12 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 	m.composer.AcceptSubmit(text)
 
 	if strings.HasPrefix(text, "/") {
+		// /approvals inspects or clears the session allow-list. That state lives on the UI
+		// Model (not the App), so it's handled here rather than through the commands
+		// package, which only sees *app.App and couldn't read or mutate this map.
+		if title, body, ok := m.handleApprovalsCommand(text); ok {
+			return m.onCommandComplete(CommandCompleteMsg{Title: title, Text: body})
+		}
 		// Slash command: run off the loop (some hit the model). Keep single-flight
 		// independent — a command isn't a model turn.
 		return m, m.controller.runCommand(m.ctx, text)
@@ -447,13 +454,25 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 func (m Model) onApprovalRequested(msg ApprovalRequestedMsg) (tea.Model, tea.Cmd) {
 	// Session allow-list: a tool the user previously chose to "approve & don't ask again"
 	// (and whose risk is eligible to remember) is auto-approved without surfacing the
-	// sheet at all. The dispatch layer still audits the call.
-	if rememberable(msg.Request.Risk) && m.approvedTools[msg.Request.ToolName] {
-		select {
-		case msg.Resolve <- true:
-		default:
+	// sheet at all. The dispatch layer still audits the call. The stored value is a
+	// remaining-count, so check the sentinel explicitly (count > 0 OR the forever
+	// sentinel) rather than a bare != 0 — a stale negative other than -1 must not grant.
+	name := msg.Request.ToolName
+	if rememberable(msg.Request.Risk) {
+		if count := m.approvedTools[name]; count == allowForeverCount || count > 0 {
+			// Bounded grants decrement and drop at zero so the sheet re-surfaces; the
+			// forever sentinel (-1) is left untouched.
+			if count == 1 {
+				delete(m.approvedTools, name)
+			} else if count > 0 {
+				m.approvedTools[name] = count - 1
+			}
+			select {
+			case msg.Resolve <- true:
+			default:
+			}
+			return m.afterStateChange(nil)
 		}
-		return m.afterStateChange(nil)
 	}
 	m.pending = &pendingConfirm{
 		req:         msg.Request,
@@ -480,13 +499,21 @@ func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case k.Code == 'y' || k.Code == 'Y':
-		return m.approveAfterDebounce(false)
+		return m.approveAfterDebounce(0)
 	case k.Code == 'a' || k.Code == 'A':
-		// Approve AND remember this tool for the session (eligible risks only).
+		// Approve AND remember this tool for a BOUNDED number of further calls (eligible
+		// risks only). A small bound keeps a forgotten A press from being a standing grant.
 		if !rememberable(m.pending.req.Risk) {
 			return m, bellCmd()
 		}
-		return m.approveAfterDebounce(true)
+		return m.approveAfterDebounce(approveDefaultCount)
+	case k.Code == 'f' || k.Code == 'F':
+		// Approve AND remember this tool for the WHOLE session, unbounded (eligible risks
+		// only) — the pre-bounded-A behavior, now an explicit opt-in.
+		if !rememberable(m.pending.req.Risk) {
+			return m, bellCmd()
+		}
+		return m.approveAfterDebounce(allowForeverCount)
 	case k.Code == 'n' || k.Code == 'N' || k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
 		// Decline — the safe default, live immediately (no debounce).
 		return m.resolveApproval(false)
@@ -503,18 +530,78 @@ func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // approveAfterDebounce approves the pending action, but ignores the affirmative (with a
 // bell) inside the debounce window so a typed-ahead / buffered key can't fire an action
-// the user never read. remember additionally adds the tool to the session allow-list.
-func (m Model) approveAfterDebounce(remember bool) (tea.Model, tea.Cmd) {
+// the user never read. grantCount seeds the session allow-list: 0 = approve once (Y),
+// approveDefaultCount = bounded "auto-approve N more" (A), allowForeverCount = forever
+// this session (F). A non-zero grant is recorded only for rememberable risks, and is
+// announced once in scrollback so the grant is visible the moment it happens.
+func (m Model) approveAfterDebounce(grantCount int) (tea.Model, tea.Cmd) {
 	if domain.NowMS()-m.pending.shownAt < approveDebounceMs {
 		return m, bellCmd()
 	}
-	if remember {
+	if grantCount != 0 && rememberable(m.pending.req.Risk) {
 		if m.approvedTools == nil {
-			m.approvedTools = map[string]bool{}
+			m.approvedTools = map[string]int{}
 		}
-		m.approvedTools[m.pending.req.ToolName] = true
+		name := m.pending.req.ToolName
+		m.approvedTools[name] = grantCount
+		m.addNote(NoteInfo, approvalGrantNote(name, grantCount))
 	}
 	return m.resolveApproval(true)
+}
+
+// approvalGrantNote describes a freshly granted session approval for the scrollback, so
+// pressing A/F is announced at the moment it happens rather than only being discoverable
+// later via /approvals.
+func approvalGrantNote(tool string, count int) string {
+	if count == allowForeverCount {
+		return "Approved " + tool + " for the rest of this session (/approvals to review)."
+	}
+	return fmt.Sprintf("Approved %s for %d more call(s) this session (/approvals to review).", tool, count)
+}
+
+// handleApprovalsCommand intercepts /approvals and /approvals clear at the UI layer. It
+// returns the result card's (title, body) and ok=true when the line is an /approvals
+// command; ok=false means some other slash command that should fall through to the normal
+// dispatch. The session allow-list lives on the Model, so this can't route through the
+// commands package (which only receives *app.App). Pointer receiver: /approvals clear
+// mutates the map.
+func (m *Model) handleApprovalsCommand(text string) (title, body string, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "/")))
+	if len(fields) == 0 || !strings.EqualFold(fields[0], "approvals") {
+		return "", "", false
+	}
+	if len(fields) > 1 && strings.EqualFold(fields[1], "clear") {
+		n := len(m.approvedTools)
+		m.approvedTools = nil
+		if n == 0 {
+			return "Approvals", "No session approvals to clear.", true
+		}
+		return "Approvals", fmt.Sprintf("Cleared %d session approval(s).", n), true
+	}
+	return "Approvals", approvalsListText(m.approvedTools), true
+}
+
+// approvalsListText renders the active session allow-list with each tool's remaining
+// auto-approvals ("forever this session" for the F sentinel), sorted for a stable view.
+func approvalsListText(approved map[string]int) string {
+	if len(approved) == 0 {
+		return "No active session approvals. Press A (bounded) or F (forever this session) on an approval prompt to add one."
+	}
+	names := make([]string, 0, len(approved))
+	for name := range approved {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		detail := fmt.Sprintf("%d more", approved[name])
+		if approved[name] == allowForeverCount {
+			detail = "forever this session"
+		}
+		b.WriteString(fmt.Sprintf("%-26s %s\n", name, detail))
+	}
+	b.WriteString("\n/approvals clear resets all.")
+	return b.String()
 }
 
 // onTypedApprovalKey drives the typed-confirmation sheet for the highest-risk actions.
@@ -567,6 +654,15 @@ func (m Model) onApprovalResolved(msg ApprovalResolvedMsg) (tea.Model, tea.Cmd) 
 // affirmative is ignored (rung back with a bell), so a typed-ahead / buffered key can't
 // auto-approve an action the user never read.
 const approveDebounceMs = 300
+
+// approveDefaultCount is how many further calls pressing A auto-approves for the same tool
+// before the sheet re-surfaces. A small bound (vs. the unbounded F) keeps a forgotten A
+// press from becoming a standing grant — mirroring the use-count-bounded automation grants.
+const approveDefaultCount = 5
+
+// allowForeverCount is the sentinel stored for F ("allow for the whole session"): an
+// unbounded grant that auto-approves and never decrements. 0/missing means "ask".
+const allowForeverCount = -1
 
 // confirmPhrase is the word a user must type to approve a typed-confirmation action.
 const confirmPhrase = "confirm"

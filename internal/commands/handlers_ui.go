@@ -63,6 +63,11 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		return UICommandResult{Handled: true, Title: "Models", Text: modelsText(a)}
 	case "permissions":
 		return UICommandResult{Handled: true, Title: "Permissions", Text: permissionsText(a, arg)}
+	case "approvals":
+		// The session approval allow-list lives on the cockpit Model (the UI intercepts
+		// /approvals before this handler — see ui.onSubmit). The REPL has no interactive
+		// per-call approvals, so this surface only explains where the command applies.
+		return UICommandResult{Handled: true, Title: "Approvals", Text: "Session tool approvals are managed in the cockpit. Press A (bounded) or F (forever this session) on an approval prompt; run /approvals there to list or clear them."}
 	case "skills":
 		return UICommandResult{Handled: true, Title: "Skills", Text: skillsText(ctx, a, rest)}
 	case "compact":
@@ -312,7 +317,8 @@ func permissionsText(a *app.App, arg string) string {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		return "Current tier: " + string(a.Tier()) + "\n" +
-			"supervisor: read/local/ui · operator: +terminal/project/external · system: +git/system"
+			"supervisor: read/local/ui · operator: +terminal/project/external · system: +git/system" +
+			tierDivergenceNote(a)
 	}
 	t := domain.Tier(arg)
 	if !t.IsValid() {
@@ -320,7 +326,20 @@ func permissionsText(a *app.App, arg string) string {
 	}
 	a.SetTier(t)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
-	return "Tier set to " + string(t) + "."
+	return "Tier set to " + string(t) + "." + tierDivergenceNote(a)
+}
+
+// tierDivergenceNote warns, in a leading-newline suffix, when the live tier differs from
+// the boot tier (resolved from env/DEFAULTS): the change is session-only and reverts next
+// launch, with the exact env var to set to make it stick. Empty when the tier matches the
+// boot tier (or no boot tier was recorded) so the common case stays quiet.
+func tierDivergenceNote(a *app.App) string {
+	if a.InitialTier == "" || a.Tier() == a.InitialTier {
+		return ""
+	}
+	return "\nThis applies to the current session only; next launch reverts to " +
+		string(a.InitialTier) + ". Set DAINTREE_ASSISTANT_TIER=" + string(a.Tier()) +
+		" to make it stick."
 }
 
 // skillsLoadCap is the per-load skill cap.
