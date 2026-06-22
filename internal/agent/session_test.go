@@ -36,6 +36,7 @@ func (r *fakeRouter) Chat(ctx context.Context, tier domain.ModelTier, opts model
 	return models.ChatResult{Content: "summary"}, nil
 }
 func (r *fakeRouter) ModelFor(tier domain.ModelTier) string { return "minimax-m3" }
+func (r *fakeRouter) FlushMeter() []models.TierUsage        { return nil }
 
 type fakeTools struct {
 	// dispatch returns this result for every call (the repeat-failure scenario).

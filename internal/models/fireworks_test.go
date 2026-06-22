@@ -76,7 +76,7 @@ func TestPromptCacheKeyWireRules(t *testing.T) {
 	}
 
 	// json must NEVER send prompt_cache_key and defaults temperature to 0.
-	_, _ = c.JSON(context.Background(), ChatOptions{Model: "m", PromptCacheKey: "daintree-main",
+	_, _, _ = c.JSON(context.Background(), ChatOptions{Model: "m", PromptCacheKey: "daintree-main",
 		Messages: []ChatMessage{TextMessage("user", "give JSON")}})
 	if _, present := lastBody["prompt_cache_key"]; present {
 		t.Errorf("json: prompt_cache_key must be absent, got %v", lastBody["prompt_cache_key"])

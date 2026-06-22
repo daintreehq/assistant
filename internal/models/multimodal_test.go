@@ -91,7 +91,7 @@ func TestJSONForwardsMultimodalAndRequestsJSONObject(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv.URL)
-	_, err := c.JSON(context.Background(), ChatOptions{Model: "m", Messages: []ChatMessage{
+	_, _, err := c.JSON(context.Background(), ChatOptions{Model: "m", Messages: []ChatMessage{
 		{Role: "user", Parts: []ChatContentPart{TextPart("read this"), ImageDataPart("p", "")}},
 	}})
 	if err != nil {

@@ -363,6 +363,7 @@ func (blockStreamRouter) Chat(context.Context, domain.ModelTier, models.ChatOpti
 	return models.ChatResult{Content: "s"}, nil
 }
 func (blockStreamRouter) ModelFor(domain.ModelTier) string { return "m" }
+func (blockStreamRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // noopRunner satisfies agent.ToolRunner with no tools (the turn never dispatches).
 type noopRunner struct{}

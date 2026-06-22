@@ -33,6 +33,7 @@ func (slowStreamRouter) Chat(context.Context, domain.ModelTier, models.ChatOptio
 	return models.ChatResult{Content: "s"}, nil
 }
 func (slowStreamRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
+func (slowStreamRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestConcurrentTurnAndCommandsRace runs a turn while other goroutines call
 // Messages/Artifacts/InjectNote (read/append) and Clear/Compact/SetSkills (mutating

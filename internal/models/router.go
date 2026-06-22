@@ -28,18 +28,21 @@ type DebugLogger interface {
 }
 
 // Router maps tiers onto models and wraps FireworksClient with the image-tier gate
-// and debug tracing.
+// and debug tracing. It also owns the session usage meter: every Chat/Stream/JSON
+// call records its token usage here so the cost footer reflects EVERY model call
+// in a turn, not just the large-thread stream (see usage.go).
 type Router struct {
-	FW  *FireworksClient
-	cfg RouterConfig
-	log DebugLogger
+	FW    *FireworksClient
+	cfg   RouterConfig
+	log   DebugLogger
+	meter *usageAccumulator
 }
 
 // NewRouter builds a router. fw may be nil, in which case the caller is expected to
 // supply one via NewRouterWithClient; this constructor requires an explicit client
 // because the model-id config and the client's connection config are separate seams.
 func NewRouter(cfg RouterConfig, fw *FireworksClient, log DebugLogger) *Router {
-	return &Router{FW: fw, cfg: cfg, log: log}
+	return &Router{FW: fw, cfg: cfg, log: log, meter: newUsageAccumulator()}
 }
 
 // ModelFor resolves a tier to its concrete model id. default falls through to large.
@@ -94,6 +97,7 @@ func (r *Router) Chat(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 		return ChatResult{}, r.classifyErr("chat", tier, model, err)
 	}
 	r.logResponse("chat", tier, model, res)
+	r.recordUsage(tier, model, res.Usage)
 	return res, nil
 }
 
@@ -110,6 +114,7 @@ func (r *Router) Stream(ctx context.Context, tier domain.ModelTier, opts ChatOpt
 		return ChatResult{}, r.classifyErr("stream", tier, model, err)
 	}
 	r.logResponse("stream", tier, model, res)
+	r.recordUsage(tier, model, res.Usage)
 	return res, nil
 }
 
@@ -123,12 +128,35 @@ func (r *Router) JSON(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	model := r.ModelFor(tier)
 	opts.Model = model
 	r.logRequest("json", tier, model, opts)
-	out, err := r.FW.JSON(ctx, opts)
+	out, usage, err := r.FW.JSON(ctx, opts)
 	if err != nil {
 		return "", r.classifyErr("json", tier, model, err)
 	}
+	r.recordUsage(tier, model, usage)
 	r.logDebug("model.response", map[string]any{"kind": "json", "tier": string(tier), "model": model, "result": out})
 	return out, nil
+}
+
+// recordUsage folds one completed call's usage into the Router-level meter. nil
+// usage (provider reported nothing) is ignored. Safe to call concurrently from
+// background goroutines (watcher/timer JSON calls) — the accumulator locks.
+func (r *Router) recordUsage(tier domain.ModelTier, model string, u *Usage) {
+	if r.meter == nil {
+		return
+	}
+	r.meter.Add(tier, model, u)
+}
+
+// FlushMeter drains the accumulated per-tier usage since the last flush. The
+// session calls this once per streamed round (in emitUsage) to roll EVERY model
+// call — the large-thread stream plus the small-tier background work (skill
+// selection, watcher verdicts, extraction, summaries) — into one UsageEvent.
+// Returns nil when nothing was metered.
+func (r *Router) FlushMeter() []TierUsage {
+	if r.meter == nil {
+		return nil
+	}
+	return r.meter.FlushAndReset()
 }
 
 // classifyErr traces a cancelled turn under model.cancelled (a clean user abort,

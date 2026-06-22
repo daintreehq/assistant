@@ -39,7 +39,7 @@ func TestJSONNormalisesAbortToCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := c.JSON(ctx, ChatOptions{Model: "m", Messages: []ChatMessage{TextMessage("user", "hi")}})
+	_, _, err := c.JSON(ctx, ChatOptions{Model: "m", Messages: []ChatMessage{TextMessage("user", "hi")}})
 	if _, ok := err.(*CancelledError); !ok {
 		t.Fatalf("json abort: want *CancelledError, got %T (%v)", err, err)
 	}
