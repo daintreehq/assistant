@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -607,6 +608,70 @@ func isPrintableText(s string) bool {
 
 // --- attention ---
 
+// attentionSeverityGlyph mirrors the /inbox severity glyphs (queue.severityIcon) so a
+// transcript attention note reads the same as the inbox digest. We deliberately do NOT
+// import internal/queue — internal/ui only depends on domain, and the 7-glyph set is
+// tiny and stable, so a local switch is cheaper than a new package edge. Unknown
+// severities fall back to the info glyph, matching queue.Format's ELSE-1 fallback.
+func attentionSeverityGlyph(sev domain.Severity) string {
+	switch sev {
+	case domain.SeverityDebug:
+		return "·"
+	case domain.SeverityDone:
+		return "✓"
+	case domain.SeverityAttention:
+		return "!"
+	case domain.SeverityBlocked:
+		return "⛔"
+	case domain.SeverityUrgent:
+		return "‼"
+	case domain.SeverityError:
+		return "✗"
+	default: // info + any unknown severity
+		return "ℹ"
+	}
+}
+
+// severityToNoteLevel tones the transcript note's spine by severity: the loudest classes
+// render danger-red, "attention" warns, "done" reads success, info/debug stay neutral.
+// The precise per-severity glyph still lives in the note TEXT (attentionSeverityGlyph) so
+// the line matches /inbox; this only colors the spine for at-a-glance triage.
+func severityToNoteLevel(sev domain.Severity) NoteLevel {
+	switch sev {
+	case domain.SeverityUrgent, domain.SeverityBlocked, domain.SeverityError:
+		return NoteError
+	case domain.SeverityAttention:
+		return NoteWarn
+	case domain.SeverityDone:
+		return NoteSuccess
+	default: // info, debug, unknown
+		return NoteInfo
+	}
+}
+
+// attentionNoteText builds the glanceable one-liner echoed into the transcript when a
+// sub-thread routes attention: "<glyph> <Title> — [term <id>]/[wt <id>] (×N)". The target
+// and coalesce-count suffixes mirror queue.Format's logic (terminal wins over worktree;
+// "×N" only when the event coalesced) so the line reads like the /inbox digest — the one
+// formatting difference is the " — " separator before the target, which reads better inline
+// than the digest's bare space. Both suffixes drop out when absent.
+func attentionNoteText(e domain.QueueEvent) string {
+	glyph := attentionSeverityGlyph(e.Severity)
+	target := ""
+	if e.Target != nil {
+		if e.Target.TerminalID != "" {
+			target = " — [term " + e.Target.TerminalID + "]"
+		} else if e.Target.WorktreeID != "" {
+			target = " — [wt " + e.Target.WorktreeID + "]"
+		}
+	}
+	dup := ""
+	if e.Count > 1 {
+		dup = fmt.Sprintf(" (×%d)", e.Count)
+	}
+	return glyph + " " + e.Title + target + dup
+}
+
 func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	if len(msg.Events) == 0 {
 		return m, nil
@@ -616,6 +681,17 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	// items resolve — DashboardSnapshotMsg). onAttention no longer OWNS the count.
 	m.pendingWake = append(m.pendingWake, msg.Events...)
 	m.attentionN += len(msg.Events)
+	// Echo each fresh event into the transcript as a committed note — the durable,
+	// scroll-back-able ledger line #175 asks for, glanceable where the operator is already
+	// looking instead of only a BEL + badge bump. We emit one note per event with NO
+	// UI-side dedupe: the scheduler delivers each event once per MATERIAL change (notify()
+	// pulls Digest{NotifiedIsNull} then MarkNotified, and the queue re-arms NotifiedAt only
+	// on a real severity/title/summary change — daemon/scheduler.go, queue.go). So a repeat
+	// is always a genuine escalation worth a fresh line, never spam. Appended BEFORE
+	// drainPending so any wake turn seals AFTER these notes (true chronological order).
+	for _, e := range msg.Events {
+		m.addNote(severityToNoteLevel(e.Severity), attentionNoteText(e))
+	}
 	// Ring the BEL once per fresh batch (on the event, not a count increment).
 	cmd := bellCmd()
 	// If idle, the drain fires the wake reactor.
