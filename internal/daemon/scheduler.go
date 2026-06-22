@@ -170,6 +170,26 @@ func (s *Scheduler) Tick(ctx context.Context, now int64) {
 		s.running = false
 		s.stateMu.Unlock()
 	}()
+	// A panic in the pass BODY itself — DueTimers/DueWatchers, the job fan-out, or
+	// notify()/MarkNotified — sits OUTSIDE the per-item recovers and would otherwise
+	// unwind out of the daemon goroutine and SILENTLY KILL ALL SUPERVISION for the rest
+	// of the session (no more timers fire, no watcher ever completes). Recover here so the
+	// next tick still runs, and best-effort surface it as an attention event (the publish
+	// is itself guarded so a panic inside Queue/Store can't re-escape and kill the loop).
+	defer func() {
+		if r := recover(); r != nil {
+			func() {
+				defer func() { _ = recover() }()
+				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
+					Source:    domain.SourceSystem,
+					Severity:  domain.SeverityError,
+					Title:     "Supervision error",
+					Summary:   fmt.Sprintf("A background scheduler tick panicked and was recovered: %v", r),
+					DedupeKey: "daemon-tick-panic",
+				})
+			}()
+		}
+	}()
 
 	s.runPass(ctx, now)
 }

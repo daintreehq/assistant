@@ -370,3 +370,28 @@ func (c *countingStore) DueTimers(now int64) ([]domain.TimerRecord, error) {
 	atomic.AddInt32(&c.dueTimerCalls, 1)
 	return c.fakeStore.DueTimers(now)
 }
+
+// panicDueStore makes DueTimers panic — simulating a panic in the pass BODY (outside the
+// per-item recovers), to prove the top-level tick recover keeps the daemon goroutine alive.
+type panicDueStore struct{ *fakeStore }
+
+func (panicDueStore) DueTimers(now int64) ([]domain.TimerRecord, error) {
+	panic("boom in DueTimers")
+}
+
+// TestScheduler_TickPanicDoesNotKillDaemon: a panic in the pass body must be recovered so
+// the daemon survives and later ticks still run — otherwise one bad tick silently kills ALL
+// supervision for the session. A recovered panic also surfaces a supervision-error event.
+func TestScheduler_TickPanicDoesNotKillDaemon(t *testing.T) {
+	store := panicDueStore{newFakeStore()}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+
+	// Must NOT propagate the panic out of Tick.
+	s.Tick(context.Background(), 200)
+	if len(queue.published) == 0 {
+		t.Error("a recovered tick panic should surface a supervision-error event")
+	}
+	// A subsequent tick still runs (the goroutine wasn't killed) — also must not panic.
+	s.Tick(context.Background(), 300)
+}
