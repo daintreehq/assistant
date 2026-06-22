@@ -14,6 +14,16 @@ LDFLAGS   := -X main.version=$(VERSION)
 # Reproducible builds: -trimpath strips local filesystem paths from the binary.
 GOFLAGS   := -trimpath
 
+# State directory hard-reset target (db-reset). Mirrors internal/config's
+# resolution: honour the DAINTREE_ASSISTANT_STATE_DIR override (used verbatim
+# there) and otherwise fall back to the flat root ~/.daintree/assistant-cli.
+# $(strip) collapses a whitespace-only override to empty so $(or) still picks
+# the default instead of passing garbage to rm -rf. Immediate (:=) so the path
+# is fixed and can be echoed before the recipe runs. We reset the whole root,
+# not a per-project subdir — replicating config's project-slug logic here would
+# duplicate Go, and the issue's intent is a clean slate.
+STATE_DIR := $(or $(strip $(DAINTREE_ASSISTANT_STATE_DIR)),$(HOME)/.daintree/assistant-cli)
+
 # Install location. Daintree's host does NOT hardcode a path — it locates the
 # binary by a shell PATH lookup (`which` on Unix, `where` on Windows), with the
 # DAINTREE_CLI_PATH_PREPEND env var taking precedence and an npm-global-prefix
@@ -49,7 +59,7 @@ endif
 
 .DEFAULT_GOAL := build
 
-.PHONY: build install test test-race vet fmt generate run clean
+.PHONY: build install test test-race vet fmt generate run clean db-reset
 
 ## build: compile the binary into ./bin with version + trimpath.
 build:
@@ -87,3 +97,17 @@ run: build
 ## clean: remove build artifacts.
 clean:
 	rm -rf $(BIN_DIR)
+
+## db-reset: hard-reset the assistant SQLite state dir (respects DAINTREE_ASSISTANT_STATE_DIR).
+# The schema is a single clean baseline (schemaUserVersion = 1), so a schema
+# change is handled by wiping and rebuilding rather than a migration chain.
+# Honours the state-dir override; falls back to ~/.daintree/assistant-cli. The
+# empty-string guard is a safety net so a misconfigured STATE_DIR never expands
+# into a bare `rm -rf`. Idempotent: rm -rf on a missing dir exits 0. Safe to run
+# while the assistant is open — POSIX unlink keeps the live session's open file
+# descriptors valid until it exits; the next launch creates a fresh state.db.
+# The `--` stops a STATE_DIR that begins with `-` from being read as a flag.
+db-reset:
+	@if [ -z "$(STATE_DIR)" ]; then echo "db-reset: STATE_DIR is empty, refusing to rm -rf" >&2; exit 1; fi
+	@echo "db-reset: removing $(STATE_DIR)"
+	rm -rf -- "$(STATE_DIR)"

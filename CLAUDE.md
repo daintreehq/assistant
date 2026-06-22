@@ -9,8 +9,9 @@ Guidance for working in this repository.
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
 > The SQLite schema is a single clean baseline (`schemaUserVersion = 1`) — on a
-> schema change, hard-reset the DB (`rm -rf ~/.daintree/assistant-cli`) rather than
-> accumulate a migration chain.
+> schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
+> state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
+> migration chain.
 
 `github.com/daintreehq/daintree-assistant` — a single native **Go** binary, a local
 CLI **orchestration assistant for Daintree** ("Daintree's local operations officer").
@@ -56,8 +57,9 @@ gofmt -l .                   # must print nothing (CI fails on unformatted files
 ```
 
 `make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
-`generate` (`go generate ./...`) · `run` · `clean`. `rtk` can mask the real `go`
-output, so verify a clean build/test with the real binary if a result looks off.
+`generate` (`go generate ./...`) · `run` · `clean` · `db-reset` (hard-reset the
+state dir). `rtk` can mask the real `go` output, so verify a clean build/test
+with the real binary if a result looks off.
 
 There is **no ESLint/Prettier/Biome equivalent**: the only gates are `go build`,
 `go vet`, `go test`, and a `gofmt` check. The full cockpit architecture contract is
