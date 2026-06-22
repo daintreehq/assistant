@@ -21,6 +21,10 @@ type Store interface {
 	DueTimers(now int64) ([]domain.TimerRecord, error)
 	// UpdateTimer applies an allowlisted column patch to a timer row.
 	UpdateTimer(id string, patch map[string]any) error
+	// ClaimDueTimer atomically applies the patch ONLY while the timer is still the due row
+	// the scheduler read (status 'scheduled' AND fireAt == expectFireAt); returns true iff a
+	// row matched. A false return means it was cancelled/edited concurrently — skip firing.
+	ClaimDueTimer(id string, expectFireAt int64, patch map[string]any) (bool, error)
 	// DueWatchers returns active watchers with nextCheckAt<=now, ordered by
 	// nextCheckAt.
 	DueWatchers(now int64) ([]domain.WatcherRecord, error)

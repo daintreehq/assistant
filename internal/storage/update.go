@@ -82,6 +82,40 @@ func (s *Store) applyUpdate(table string, allowed colSet, id string, patch map[s
 	return nil
 }
 
+// applyUpdateGuarded is applyUpdate with EXTRA, caller-supplied WHERE conditions appended
+// (and their bind args), returning the number of rows affected so the caller can detect that
+// the row no longer matched the guard (e.g. it was concurrently cancelled or edited) and
+// react instead of blindly overwriting it. Returns (0, nil) when the patch sets no allowed
+// key. whereExtra must begin with " AND " and reference only fixed column names.
+func (s *Store) applyUpdateGuarded(table string, allowed colSet, id string, patch map[string]any, whereExtra string, whereArgs ...any) (int64, error) {
+	keys := make([]string, 0, len(patch))
+	for k := range patch {
+		if allowed.has(k) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	sort.Strings(keys)
+
+	sets := make([]string, 0, len(keys))
+	args := make([]any, 0, len(keys)+1+len(whereArgs))
+	for _, k := range keys {
+		sets = append(sets, k+" = ?")
+		args = append(args, toSQLValue(patch[k]))
+	}
+	args = append(args, id)
+	args = append(args, whereArgs...)
+	q := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?%s", table, strings.Join(sets, ", "), whereExtra)
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("update %s: %w", table, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // toSQLValue coerces a patch value to a driver-bindable form: bool→1/0, *bool→1/0
 // (nil→NULL), and dereferenced pointer scalars; nil→NULL; everything else passes
 // through (the driver handles string/int/float/[]byte).

@@ -181,3 +181,30 @@ func TestConsumeGrantSingleUseExhausts(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// TestClaimDueTimer_Guard locks the atomic claim used to fix the daemon/main-turn race: a
+// claim succeeds only while the timer is STILL 'scheduled' at the read fireAt, and refuses to
+// write back (and thus resurrect / double-fire) a cancelled or already-advanced row.
+func TestClaimDueTimer_Guard(t *testing.T) {
+	s := openTest(t, 1000)
+	rec, err := s.InsertTimer(domain.TimerRecord{Title: "t", FireAt: 100, Status: "scheduled", PayloadType: "enqueue", PayloadJson: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1. A matching claim succeeds and advances the row out of 'scheduled'.
+	if ok, err := s.ClaimDueTimer(rec.ID, 100, map[string]any{"status": "fired", "lastFiredAt": int64(1000)}); err != nil || !ok {
+		t.Fatalf("matching claim should succeed: ok=%v err=%v", ok, err)
+	}
+	// 2. A second claim at the same (now stale) state fails — no double-fire.
+	if ok, _ := s.ClaimDueTimer(rec.ID, 100, map[string]any{"status": "scheduled", "fireAt": int64(200)}); ok {
+		t.Error("a claim against an already-advanced timer must fail (no double-fire)")
+	}
+	// 3. A timer cancelled after the due read can't be claimed — no resurrection.
+	rec2, _ := s.InsertTimer(domain.TimerRecord{Title: "t2", FireAt: 100, Status: "scheduled", PayloadType: "enqueue", PayloadJson: "{}"})
+	if err := s.UpdateTimer(rec2.ID, map[string]any{"status": "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.ClaimDueTimer(rec2.ID, 100, map[string]any{"status": "scheduled", "fireAt": int64(200)}); ok {
+		t.Error("a cancelled timer must not be claimable (no resurrection)")
+	}
+}

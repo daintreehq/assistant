@@ -114,6 +114,18 @@ func (s *Store) UpdateTimer(id string, patch map[string]any) error {
 	return s.applyUpdate("timers", timerUpdateCols, id, patch)
 }
 
+// ClaimDueTimer atomically applies `patch` to a timer ONLY while it is still the due row the
+// scheduler read — status 'scheduled' AND fireAt == expectFireAt. It returns true iff a row
+// was updated. A false return means the main turn cancelled, rescheduled, or edited the timer
+// since DueTimers: the scheduler must then SKIP firing it and never write it back (which would
+// RESURRECT a just-cancelled timer). Finalizing via this claim BEFORE firing also closes the
+// double-fire window — an overrunning tick can't re-select an already-advanced row.
+func (s *Store) ClaimDueTimer(id string, expectFireAt int64, patch map[string]any) (bool, error) {
+	n, err := s.applyUpdateGuarded("timers", timerUpdateCols, id, patch,
+		" AND status = 'scheduled' AND fireAt = ?", expectFireAt)
+	return n > 0, err
+}
+
 // ---- watchers ----
 
 // InsertWatcher inserts a watcher. Defaults id (wch_), status 'active' (NB: the

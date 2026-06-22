@@ -323,6 +323,20 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 		payloadType = rec.PayloadType
 	}
 
+	// CLAIM the timer BEFORE firing: atomically advance it to its post-fire state, but only
+	// while it is still the due row DueTimers read (same status+fireAt). If the claim fails,
+	// the main turn cancelled or edited it under us — do NOT fire, and never write it back
+	// (which would resurrect a cancelled timer). Finalizing first also stops an overrunning
+	// tick from re-selecting it (no double-fire). Grants are revoked only on a TERMINAL claim.
+	patch, terminal := rescheduleePatch(rec, now)
+	claimed, _ := s.deps.Store.ClaimDueTimer(rec.ID, rec.FireAt, patch)
+	if !claimed {
+		return
+	}
+	if terminal {
+		_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
+	}
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -389,8 +403,8 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 			}
 		}
 	}()
-
-	s.reschedule(rec, now)
+	// The timer was already advanced by the claim above (ClaimDueTimer), so there is no
+	// reschedule here — re-writing it would race a cancel that arrived during the fire.
 }
 
 // disableCorruptTimer publishes a visible error and disables a corrupt timer row.
@@ -404,8 +418,10 @@ func (s *Scheduler) disableCorruptTimer(rec domain.TimerRecord, now int64, err e
 	_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
 }
 
-// reschedule advances a fired timer: repeat (with sleep catch-up) or finish.
-func (s *Scheduler) reschedule(rec domain.TimerRecord, now int64) {
+// rescheduleePatch computes a fired timer's post-fire COLUMN PATCH without writing it, plus
+// whether the timer is now TERMINAL (fired/done → its grants should be revoked). The caller
+// applies the patch atomically via ClaimDueTimer so it never overwrites a concurrent cancel.
+func rescheduleePatch(rec domain.TimerRecord, now int64) (patch map[string]any, terminal bool) {
 	runCount := rec.RunCount + 1
 	repeats := rec.RepeatEveryMs != nil && *rec.RepeatEveryMs > 0
 	repeatDone := !repeats ||
@@ -418,16 +434,12 @@ func (s *Scheduler) reschedule(rec domain.TimerRecord, now int64) {
 		if repeats {
 			status = "done"
 		}
-		_ = s.deps.Store.UpdateTimer(rec.ID, map[string]any{
-			"status": status, "runCount": runCount, "lastFiredAt": now,
-		})
-		_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
-		return
+		return map[string]any{"status": status, "runCount": runCount, "lastFiredAt": now}, true
 	}
 	// Catch-up: schedule next fire relative to NOW, not the missed deadline, so a
 	// long sleep produces a single catch-up fire rather than a storm.
-	_ = s.deps.Store.UpdateTimer(rec.ID, map[string]any{
+	return map[string]any{
 		"fireAt": now + *rec.RepeatEveryMs, "runCount": runCount,
 		"lastFiredAt": now, "status": "scheduled",
-	})
+	}, false
 }

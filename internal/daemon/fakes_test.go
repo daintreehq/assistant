@@ -60,6 +60,32 @@ func (f *fakeStore) UpdateTimer(id string, patch map[string]any) error {
 	return nil
 }
 
+func (f *fakeStore) ClaimDueTimer(id string, expectFireAt int64, patch map[string]any) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.timers {
+		if f.timers[i].ID != id {
+			continue
+		}
+		// The guard: only claim a row STILL scheduled with the fireAt the scheduler read.
+		if f.timers[i].Status != "scheduled" || f.timers[i].FireAt != expectFireAt {
+			return false, nil
+		}
+		f.timerPatches[id] = patch
+		if v, ok := patch["status"].(string); ok {
+			f.timers[i].Status = v
+		}
+		if v, ok := patch["fireAt"].(int64); ok {
+			f.timers[i].FireAt = v
+		}
+		if v, ok := patch["runCount"].(int); ok {
+			f.timers[i].RunCount = v
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (f *fakeStore) DueWatchers(now int64) ([]domain.WatcherRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

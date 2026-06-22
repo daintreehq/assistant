@@ -395,3 +395,28 @@ func TestScheduler_TickPanicDoesNotKillDaemon(t *testing.T) {
 	// A subsequent tick still runs (the goroutine wasn't killed) — also must not panic.
 	s.Tick(context.Background(), 300)
 }
+
+// claimFailsStore simulates the main turn cancelling/editing a timer in the window between
+// DueTimers (returns it as due) and the fire (the claim no longer matches → false).
+type claimFailsStore struct{ *fakeStore }
+
+func (claimFailsStore) ClaimDueTimer(string, int64, map[string]any) (bool, error) {
+	return false, nil
+}
+
+// TestScheduler_ClaimRace_CancelledTimerDoesNotFire: a timer cancelled between the due read
+// and the fire must NOT fire its payload (and is never written back / resurrected) — the
+// claim guard catches it.
+func TestScheduler_ClaimRace_CancelledTimerDoesNotFire(t *testing.T) {
+	store := claimFailsStore{newFakeStore()}
+	store.timers = []domain.TimerRecord{{
+		ID: "tmr_1", Title: "Reminder", FireAt: 100, Status: "scheduled",
+		PayloadType: "enqueue", PayloadJson: `{"type":"enqueue","message":"ping"}`,
+	}}
+	queue := newFakeQueue()
+	s := newScheduler(store, queue, &fakeRegistry{}, nil)
+	s.Tick(context.Background(), 200)
+	if len(queue.published) != 0 {
+		t.Errorf("a timer that lost the claim (cancelled under us) must NOT fire; got %d published", len(queue.published))
+	}
+}
