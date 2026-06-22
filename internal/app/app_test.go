@@ -69,15 +69,16 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 66 tools; we assert that exact count so a
-// silent family add/drop is caught.
+// over it. The parity worklist expects 68 tools (incl. the agentTask.status /
+// agentTask.list readers); we assert that exact count so a silent family add/drop
+// is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 66 {
-		t.Errorf("registered tools = %d, want 66", got)
+	if got != 68 {
+		t.Errorf("registered tools = %d, want 68", got)
 	}
 	// AssertSafe ran inside Create (boot would have failed otherwise); re-run it to
 	// pin the invariant that the full wired set carries no file-edit tool.

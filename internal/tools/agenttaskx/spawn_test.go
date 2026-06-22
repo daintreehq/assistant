@@ -149,6 +149,28 @@ func (s *sagaStore) UpdateAgentLaunch(id string, patch map[string]any) error {
 
 func (s *sagaStore) get(id string) *domain.AgentLaunchRecord { return s.launches[id] }
 
+func (s *sagaStore) GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error) {
+	r, ok := s.launches[id]
+	if !ok {
+		return nil, nil
+	}
+	cp := *r
+	return &cp, nil
+}
+
+// ListAgentLaunches returns the launches newest-first (reverse insertion order,
+// which approximates updatedAt DESC for the test data), bounded by limit.
+func (s *sagaStore) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var out []domain.AgentLaunchRecord
+	for i := len(s.order) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, *s.launches[s.order[i]])
+	}
+	return out, nil
+}
+
 func launchOK(terminalID string) MCPCallResult {
 	return MCPCallResult{StructuredContent: map[string]any{"terminalId": terminalID, "location": "grid"}}
 }

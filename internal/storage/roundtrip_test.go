@@ -276,6 +276,52 @@ func TestAgentLaunchDefaultsAndFindActive(t *testing.T) {
 	}
 }
 
+// ---- agent launches: list newest-first + limit + default-clamp + empty ----
+
+func TestListAgentLaunches(t *testing.T) {
+	s := openTest(t, 5000)
+	// Empty store returns an empty (non-nil-error) result, never an error.
+	if got, err := s.ListAgentLaunches(5); err != nil || len(got) != 0 {
+		t.Fatalf("empty list want 0 rows no error, got %d rows, err %v", len(got), err)
+	}
+	// Seed three sagas with distinct updatedAt so DESC order is unambiguous and
+	// independent of insertion order (200 inserted last but is the middle row).
+	seed := []struct {
+		key string
+		up  int64
+	}{{"k1", 100}, {"k2", 300}, {"k3", 200}}
+	for _, sd := range seed {
+		if _, err := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+			IdempotencyKey: sd.key, AgentID: "c", Mode: "edit", Title: sd.key, Name: "n",
+			CreatedAt: sd.up, UpdatedAt: sd.up,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Newest-first by updatedAt: 300, 200, 100.
+	all, err := s.ListAgentLaunches(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 rows, got %d", len(all))
+	}
+	if all[0].UpdatedAt != 300 || all[1].UpdatedAt != 200 || all[2].UpdatedAt != 100 {
+		t.Fatalf("want updatedAt DESC 300,200,100; got %d,%d,%d",
+			all[0].UpdatedAt, all[1].UpdatedAt, all[2].UpdatedAt)
+	}
+	// limit honored: only the two newest.
+	top, _ := s.ListAgentLaunches(2)
+	if len(top) != 2 || top[0].UpdatedAt != 300 || top[1].UpdatedAt != 200 {
+		t.Fatalf("limit 2 should return the newest two, got %+v", top)
+	}
+	// limit <= 0 clamps to the default (20), returning all three here.
+	def, _ := s.ListAgentLaunches(0)
+	if len(def) != 3 {
+		t.Fatalf("limit<=0 should clamp to the default and return all 3, got %d", len(def))
+	}
+}
+
 // ---- skill run state: unique key throws + list order + immutable cols ----
 
 func TestSkillRunStateUniqueAndImmutable(t *testing.T) {

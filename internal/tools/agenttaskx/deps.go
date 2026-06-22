@@ -38,11 +38,15 @@ type MCPClient interface {
 //   - FindActiveAgentLaunch returns the newest non-terminal saga for a key.
 //   - InsertAgentLaunch write-ahead-logs the saga BEFORE the MCP call.
 //   - UpdateAgentLaunch applies an allowlisted patch (stage/terminalId/…).
+//   - GetAgentLaunch reads one saga by id (agentTask.status), or (nil, nil).
+//   - ListAgentLaunches reads the newest-first sagas (agentTask.list).
 type Store interface {
 	InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, error)
 	FindActiveAgentLaunch(idempotencyKey string) (*domain.AgentLaunchRecord, error)
 	InsertAgentLaunch(rec domain.AgentLaunchRecord) (domain.AgentLaunchRecord, error)
 	UpdateAgentLaunch(id string, patch map[string]any) error
+	GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error)
+	ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error)
 }
 
 // Deps wires the agentTask family. DaemonActive reports whether the scheduler is
@@ -62,7 +66,13 @@ func (d Deps) daemonActive() bool {
 	return d.DaemonActive()
 }
 
-// Tools returns the agentTask family.
+// Tools returns the agentTask family: the spawn escape hatch plus two RiskRead
+// readers (status by id, list newest-first) so the model can inspect the spawn
+// saga without re-launching anything.
 func Tools(deps Deps) []tools.Tool {
-	return []tools.Tool{newSpawnForEditsTool(deps)}
+	return []tools.Tool{
+		newSpawnForEditsTool(deps),
+		newStatusTool(deps),
+		newListTool(deps),
+	}
 }
