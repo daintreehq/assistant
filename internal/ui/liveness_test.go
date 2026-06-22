@@ -31,6 +31,34 @@ func liveModel(columns int) Model {
 	return m
 }
 
+// TestClearDuringTurn_ReleasesSingleFlight is the regression for the /clear-while-busy
+// deadlock: a slash command runs regardless of single-flight (onSubmit), so /clear can land
+// mid-turn. It must abort the in-flight turn AND drop inFlight — else the stale completion
+// hits the RunID barrier in onTurnComplete and leaves the cockpit permanently busy with
+// queued follow-ups stranded (drainPending only runs while inFlight is false).
+func TestClearDuringTurn_ReleasesSingleFlight(t *testing.T) {
+	m := liveModel(80)
+	m.queue.headerDone = true
+	cell := &TurnCell{ID: "turn_1", UserText: "do a thing", State: TurnActive, Phase: domain.PhaseGenerating}
+	m.transcript = []TranscriptCell{{Turn: cell}}
+	m.activeTurn = "turn_1"
+	m.inFlight = true
+
+	next, _ := m.onClear("Conversation cleared", "fresh")
+	nm := next.(Model)
+	if nm.inFlight {
+		t.Fatal("/clear during an in-flight turn must release the single-flight lock (inFlight=false)")
+	}
+	if nm.activeTurn != "" {
+		t.Errorf("activeTurn should be cleared, got %q", nm.activeTurn)
+	}
+	// The now-stale completion for the aborted turn must NOT re-lock or seal anything.
+	after, _ := nm.onTurnComplete(TurnCompleteMsg{RunID: "turn_1", Reply: domain.CancelledReply})
+	if after.(Model).inFlight {
+		t.Error("a stale completion after /clear must keep inFlight false (not re-lock the cockpit)")
+	}
+}
+
 // --- 1. Explicit phase drives the live status (never an emptiness heuristic) ---
 
 func TestLiveStatusLabel_FromPhase(t *testing.T) {

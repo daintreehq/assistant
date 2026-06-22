@@ -104,8 +104,13 @@ func renderLiveStatus(th theme.Theme, t *TurnCell, spinnerFrame int, now int64) 
 func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, contentW int, expanded bool, spinnerFrame int, now int64) string {
 	active := t.State == TurnActive
 	var parts []string
-	// The marker shows once the turn is active OR has said anything (the historical rule).
-	if pre := renderTurnPreamble(th, t, width, active, active || hasProse(t)); pre != "" {
+	// The marker shows once the turn is active OR has produced ANY output. It must be
+	// hasResponded (any step), NOT hasProse: the incremental flush ALWAYS commits the
+	// marker (flush.go renderTurnPreamble showMarker=true while the turn is active), so a
+	// SEALED tool-only / note-only turn (no prose) must still render the marker — otherwise
+	// the sealed render is one row shorter than the flushed prefix and sealTail's row-count
+	// fallback drops the turn's first tool/note row from scrollback.
+	if pre := renderTurnPreamble(th, t, width, active, active || hasResponded(t)); pre != "" {
 		parts = append(parts, pre)
 	}
 	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
@@ -207,6 +212,14 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// hasResponded reports whether the turn has produced ANY rendered output (a prose,
+// tool, or note step) — i.e. the "◆ DAINTREE" marker belongs above it. Gates the marker
+// on the SEALED render so it matches what the incremental flush already committed (see
+// the renderTurn marker comment).
+func hasResponded(t *TurnCell) bool {
+	return len(t.Steps) > 0
 }
 
 // hasProse reports whether the turn has produced any prose text yet.

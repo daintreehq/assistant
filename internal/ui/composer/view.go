@@ -146,6 +146,12 @@ func (m *Model) renderInput(p ViewParams) string {
 		avail := p.Width - ansi.StringWidth(prompt)
 		ph := truncateCells(p.Placeholder, avail)
 		phr := []rune(ph)
+		if len(phr) == 0 {
+			// Very narrow terminal: the prompt fills the width (avail <= 0) or the first
+			// placeholder rune is too wide to fit, so there is no glyph to host the inverse
+			// caret. Show a bare caret instead of indexing phr[0] (which would panic).
+			return prompt + m.caretCell(' ')
+		}
 		first := m.caretCell(phr[0])
 		rest := m.theme.Dim().Render(string(phr[1:]))
 		return prompt + first + rest

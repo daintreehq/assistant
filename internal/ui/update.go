@@ -306,11 +306,20 @@ func (m *Model) applyUsage(u agent.UsageEvent) {
 	// CTX% is "% of the model's context window in use" — divide by the window, NOT the
 	// (much smaller) auto-compact threshold, so a 1M-window model reads ~1% on a short
 	// conversation rather than a misleading 13%. Fall back to the threshold only if no
-	// window was reported (older events / tests).
-	if denom := u.ContextWindow; denom > 0 {
-		m.contextPct = (u.ContextTokens * 100) / denom
-	} else if u.ContextThreshold > 0 {
-		m.contextPct = (u.ContextTokens * 100) / u.ContextThreshold
+	// window was reported (older events / tests). int64 avoids overflow on large token
+	// counts; clamp to [0,100] so an over-full context reads "100%", never above.
+	denom := u.ContextWindow
+	if denom <= 0 {
+		denom = u.ContextThreshold
+	}
+	if denom > 0 {
+		pct := int(int64(u.ContextTokens) * 100 / int64(denom))
+		if pct < 0 {
+			pct = 0
+		} else if pct > 100 {
+			pct = 100
+		}
+		m.contextPct = pct
 	}
 	if u.CostUsd != nil {
 		m.cost += *u.CostUsd

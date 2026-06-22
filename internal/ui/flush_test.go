@@ -167,6 +167,36 @@ func TestFlush_ActiveToolNotFlushed(t *testing.T) {
 	}
 }
 
+// TestFlush_ToolOnlyTurnKeepsMarkerAndRows is the regression for the seal marker mismatch:
+// a turn that produces ONLY tool steps (no prose) flushes its preamble WITH the "◆ DAINTREE"
+// marker, so the SEALED render must also carry the marker (hasResponded, not hasProse) — else
+// sealTail's row-count fallback strips one row too many and drops the first tool row.
+func TestFlush_ToolOnlyTurnKeepsMarkerAndRows(t *testing.T) {
+	turn := &TurnCell{ID: "turn_1", UserText: "QUESTIONX", State: TurnActive, Steps: []TurnStep{
+		toolStep("a1", "memory.list", "TOOLDETAILX", ActDone),
+	}}
+	m := armedModel(turn)
+
+	final := m.activeTurnFinalRows(turn)
+	flushedChunk := ansi.Strip(strings.Join(final[turn.FlushedRows:], "\n"))
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("a tool-only turn must at least flush its preamble")
+	}
+	turn.State = TurnComplete
+	blk := m.sealedBlock(0)
+	combined := flushedChunk + "\n" + ansi.Strip(blk.Rendered)
+
+	if !strings.Contains(combined, "DAINTREE") {
+		t.Errorf("tool-only turn lost the marker (tool tree orphaned in scrollback):\n%s", combined)
+	}
+	if n := strings.Count(combined, "TOOLDETAILX"); n != 1 {
+		t.Errorf("tool detail appears %d times across flush+seal, want exactly 1 (row-count fallback dropped/duped it):\n%s", n, combined)
+	}
+	if n := strings.Count(combined, "QUESTIONX"); n != 1 {
+		t.Errorf("user text appears %d times, want 1:\n%s", n, combined)
+	}
+}
+
 // TestFlush_GatedOnMastheadCommitted proves no row flushes ABOVE the masthead.
 func TestFlush_GatedOnMastheadCommitted(t *testing.T) {
 	m, _ := streamingProse("ALPHALINE done.\nBETALINE live")

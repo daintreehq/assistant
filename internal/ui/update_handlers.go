@@ -284,6 +284,15 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 // queue (bump clearNonce → resetKey change), and re-commit the masthead + the fresh
 // confirmation card. The host wipe runs as a tea.Cmd AFTER the cleared tree commits.
 func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
+	// A slash command runs regardless of single-flight (onSubmit), so /clear can land while
+	// a turn is in flight. Abort that turn's runtime context and DROP the single-flight lock
+	// here: otherwise its now-stale completion hits the RunID barrier in onTurnComplete and
+	// returns WITHOUT clearing inFlight, leaving the cockpit permanently "busy" and queued
+	// follow-ups stranded (drainPending only runs while inFlight is false).
+	if m.inFlight {
+		m.controller.cancelTurn()
+		m.inFlight = false
+	}
 	m.transcript = nil
 	m.activeTurn = ""
 	m.queuedInput = nil
