@@ -138,3 +138,37 @@ func TestPaletteNavAndTabAccept(t *testing.T) {
 		t.Fatalf("Tab should accept the highlighted command %q; got %q", want, m.Value())
 	}
 }
+
+// TestEnterAcceptsHighlightedCommand is the regression for the "/cl"+Enter bug: with
+// the palette open and "/clear" highlighted, plain Enter must ACCEPT the highlight and
+// submit "/clear" — not the raw partial "/cl" (which the registry rejects as unknown).
+func TestEnterAcceptsHighlightedCommand(t *testing.T) {
+	m := newModel()
+	typeRunes(&m, "/cl")
+	out := press(&m, tea.KeyEnter, 0)
+	if out.Submit == nil || out.Submit.Text != "/clear" {
+		t.Fatalf("Enter on a partial should submit the highlighted command; got %+v", out.Submit)
+	}
+}
+
+// TestEnterAcceptsCaseInsensitive covers the uppercase entry ("/CL"): the highlight is
+// still "/clear", so Enter submits the canonical, lower-case command name.
+func TestEnterAcceptsCaseInsensitive(t *testing.T) {
+	m := newModel()
+	typeRunes(&m, "/CL")
+	out := press(&m, tea.KeyEnter, 0)
+	if out.Submit == nil || out.Submit.Text != "/clear" {
+		t.Fatalf("Enter should normalize case to the highlighted command; got %+v", out.Submit)
+	}
+}
+
+// TestEnterAcceptPreservesArgs ensures accepting the highlight keeps the args the user
+// already typed after the command token ("/inb urgent" → "/inbox urgent").
+func TestEnterAcceptPreservesArgs(t *testing.T) {
+	m := newModel()
+	typeRunes(&m, "/inb urgent")
+	out := press(&m, tea.KeyEnter, 0)
+	if out.Submit == nil || out.Submit.Text != "/inbox urgent" {
+		t.Fatalf("Enter should complete the command token but keep the args; got %+v", out.Submit)
+	}
+}

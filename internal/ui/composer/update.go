@@ -1,6 +1,8 @@
 package composer
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -80,6 +82,15 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 			m.setBuffer(next, m.cursor) // cursor stays in place (now after the \n)
 			return Outcome{}
 		}
+		// Slash palette open → plain Enter ACCEPTS the highlighted row, then submits it
+		// (the "Enter run" hint). Without this a partial like "/cl" would submit RAW and
+		// the registry would reject it as unknown even though "/clear" is highlighted
+		// right above the input. We rewrite only the command token and keep any args the
+		// user already typed ("/aud 5" → "/audit 5"), so accepting never drops arguments.
+		if sugg := m.activeSuggestions(); len(sugg) > 0 {
+			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
+			m.acceptSuggestion(sugg[sel].Name)
+		}
 		// Plain Enter submits the RAW, untrimmed buffer; the parent trims and rejects
 		// empties. We pre-trim here only to suppress an empty submit (no-op).
 		if m.trimEmpty() {
@@ -113,6 +124,8 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 			m.paletteSel = paletteWrap(m.paletteSel+1, len(sugg))
 			return Outcome{}
 		case k.Code == tea.KeyTab && mod == 0:
+			// Tab completes the highlighted command and parks a trailing space so the
+			// user can keep typing args; it intentionally REPLACES the whole buffer.
 			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
 			m.buffer = sugg[sel].Name + " "
 			m.cursor = m.runeLen()
@@ -317,10 +330,30 @@ func (m *Model) killForwardChar() {
 	m.setBuffer(next, m.cursor)
 }
 
+// acceptSuggestion rewrites the buffer's leading command token with the chosen
+// command name, PRESERVING anything the user already typed after the first
+// whitespace (the args). This is the Enter-to-run accept: "/cl" → "/clear",
+// "/aud 5" → "/audit 5". Unlike Tab it adds no trailing space, since the next
+// step is an immediate submit. The token boundary matches suggestionsFor's
+// (space or tab) so the part we keep is exactly the part the palette ignored
+// when filtering.
+func (m *Model) acceptSuggestion(name string) {
+	rest := ""
+	if i := strings.IndexAny(m.buffer, " \t"); i >= 0 {
+		rest = m.buffer[i:]
+	}
+	m.buffer = name + rest
+	m.cursor = m.runeLen()
+	m.paletteSel = 0
+}
+
 // activeSuggestions returns the palette rows visible right now: only when the
-// composer is focused, not busy, and the draft opens with "/".
+// composer is focused, not busy, not in reverse-i-search, and the draft opens
+// with "/". Suppressing it while searching matters because handleSearchKey owns
+// ALL keys then (section 0) — ↑/↓/Tab/Enter drive the search, not the palette —
+// so a palette claiming "Enter run" over a "/"-prefixed match would be a lie.
 func (m *Model) activeSuggestions() []Command {
-	if !m.focus || m.busy {
+	if !m.focus || m.busy || m.searching {
 		return nil
 	}
 	return suggestionsFor(m.commands, m.buffer)
