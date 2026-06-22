@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -62,8 +63,15 @@ func scanEvent(sc scanner) (domain.QueueEvent, error) {
 func (s *Store) UpsertEvent(args domain.QueuePublishArgs) (domain.QueueEvent, error) {
 	now := s.now()
 	var expiresAt *int64
-	if args.TTLMs != nil {
-		ea := now + *args.TTLMs
+	// A non-positive TTL is treated as "no expiry" (a 0/negative ttlMs would otherwise set
+	// expiresAt <= now, making the event INSTANTLY invisible to ListEvents). A huge TTL is
+	// clamped so now+ttl can't overflow int64 into a negative (also instantly-expired) value.
+	if args.TTLMs != nil && *args.TTLMs > 0 {
+		ttl := *args.TTLMs
+		if ttl > math.MaxInt64-now {
+			ttl = math.MaxInt64 - now
+		}
+		ea := now + ttl
 		expiresAt = &ea
 	}
 	targetJson := marshalPtr(args.Target)

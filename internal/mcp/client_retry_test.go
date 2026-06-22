@@ -52,17 +52,18 @@ func TestCallToolThreadsTimeout(t *testing.T) {
 	}
 }
 
-// TestCallToolNoTimeoutNoDeadline: a zero timeout leaves the caller ctx untouched
-// (no derived deadline).
-func TestCallToolNoTimeoutNoDeadline(t *testing.T) {
+// TestCallToolDefaultTimeoutBackstop: a zero CallOptions.Timeout still derives a
+// per-attempt deadline (defaultCallTimeout) so a server that accepts the request but never
+// responds cannot hang the turn forever.
+func TestCallToolDefaultTimeoutBackstop(t *testing.T) {
 	low := &deadlineFakeLow{result: rawResult{Text: "ok"}}
 	c := New(testCfg(), Options{ClientOverride: low})
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "x", nil, CallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(low.hadDeadline) != 1 || low.hadDeadline[0] {
-		t.Errorf("expected no deadline when Timeout==0, got %v", low.hadDeadline)
+	if len(low.hadDeadline) != 1 || !low.hadDeadline[0] {
+		t.Errorf("expected a default deadline when Timeout==0 (hung-server backstop), got %v", low.hadDeadline)
 	}
 }
 

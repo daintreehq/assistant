@@ -1,11 +1,45 @@
 package storage
 
 import (
+	"math"
 	"sync"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
+
+// TestUpsertEventNonPositiveTTLStaysVisible locks the ttlMs guard: a 0/negative ttlMs must
+// be treated as "no expiry" (the event stays visible), never set expiresAt <= now (which
+// would make it instantly invisible to ListEvents); a huge ttlMs must not overflow int64
+// into a past timestamp.
+func TestUpsertEventNonPositiveTTLStaysVisible(t *testing.T) {
+	s := openTest(t, 1000)
+	neg := int64(-100)
+	zero := int64(0)
+	huge := int64(math.MaxInt64)
+	for _, ttl := range []*int64{&neg, &zero, &huge} {
+		ev, err := s.UpsertEvent(domain.QueuePublishArgs{
+			Source: domain.SourceSystem, Severity: domain.SeverityInfo,
+			Title: "t", Summary: "s", TTLMs: ttl,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.ListEvents(domain.QueueDigestOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range got {
+			if e.ID == ev.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("event with ttlMs=%d must remain visible (treated as no-expiry), got %d events", *ttl, len(got))
+		}
+	}
+}
 
 // TestUpsertEventConcurrentDedupeNoDoubleInsert drives many goroutines publishing
 // the SAME dedupeKey at once. Pre-fix, the lookup + insert were separate s.db calls

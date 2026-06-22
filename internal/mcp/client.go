@@ -35,6 +35,14 @@ const (
 	transportSSE            = "sse"
 )
 
+// defaultCallTimeout backstops a single CallTool when the caller sets no Timeout (the
+// main-turn tool adapters pass CallOptions{}). Without it, a Daintree server that accepts
+// the request but never responds would block the turn INDEFINITELY (the user could still
+// Esc, but an un-cancelled turn would hang forever). MCP RPCs to Daintree are request/
+// response — long work runs async — so this is deliberately generous; the daemon poll path
+// sets its own, shorter McpReadTimeoutMS, which still takes precedence.
+const defaultCallTimeout = 120 * time.Second
+
 // sseRewriteRe rewrites a trailing /mcp or /mcp/ to /sse for the SSE fallback. A
 // path that does not end in /mcp is left unchanged.
 var sseRewriteRe = regexp.MustCompile(`/mcp/?$`)
@@ -461,16 +469,16 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 			return CallResult{}, err // UnavailableError: never retried, never degrades.
 		}
 
-		// Per-attempt deadline derived from the caller ctx (don't fuse signals).
-		callCtx := ctx
-		var cancel context.CancelFunc
-		if opts.Timeout > 0 {
-			callCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		// Per-attempt deadline derived from the caller ctx (don't fuse signals). A caller
+		// that sets no Timeout still gets defaultCallTimeout so a silent server can't hang
+		// the turn forever.
+		timeout := opts.Timeout
+		if timeout <= 0 {
+			timeout = defaultCallTimeout
 		}
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		res, err = low.CallTool(callCtx, name, args)
-		if cancel != nil {
-			cancel()
-		}
+		cancel()
 		if err == nil {
 			break
 		}
