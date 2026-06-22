@@ -56,11 +56,13 @@ func (a *App) sessionEndedNote(schedulerActive bool) []string {
 	return a.sessionEndedWatchers
 }
 
-// consumeSessionEndedNote marks the one-time session-ended-watchers NOTE consumed
+// ConsumeSessionEndedNote marks the one-time session-ended-watchers NOTE consumed
 // and refreshes message[1] to strip it, so it surfaces on the first interactive turn
 // and never again this session. Idempotent and cheap after the first call (no-op when
-// already consumed or when there was no NOTE to begin with).
-func (a *App) consumeSessionEndedNote() {
+// already consumed or when there was no NOTE to begin with). Exported so the embedded
+// host (which drives Session.Send directly, not App.Send) can consume it after its
+// first prompt turn too.
+func (a *App) ConsumeSessionEndedNote() {
 	a.noteMu.Lock()
 	if a.sessionEndedNoteConsumed || len(a.sessionEndedWatchers) == 0 {
 		a.noteMu.Unlock()
@@ -81,7 +83,7 @@ func (a *App) consumeSessionEndedNote() {
 // starts the scheduler, so the NOTE is never seeded there).
 func (a *App) Send(ctx context.Context, userInput string, opts agent.SendOptions) (string, error) {
 	reply, err := a.Session.Send(ctx, userInput, opts)
-	a.consumeSessionEndedNote()
+	a.ConsumeSessionEndedNote()
 	return reply, err
 }
 

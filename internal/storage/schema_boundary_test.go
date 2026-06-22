@@ -1,11 +1,41 @@
 package storage
 
 import (
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
+
+// TestStaleSchemaVersionFailsLoudly asserts that opening a DB initialized at an older
+// baseline (user_version < schemaUserVersion, non-zero) fails with an actionable
+// "make db-reset" error rather than limping into a cryptic 'no such column' from the
+// session-boundary sweep. Pre-release policy hard-resets; this keeps the failure
+// discoverable.
+func TestStaleSchemaVersionFailsLoudly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	// Stamp a fresh file with an older baseline version (driver registered via store.go).
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path, &Options{Now: func() int64 { return 1 }})
+	if err == nil {
+		t.Fatal("expected a stale-schema error opening a v1 baseline DB, got nil")
+	}
+	if !strings.Contains(err.Error(), "make db-reset") {
+		t.Fatalf("stale-schema error must point to 'make db-reset', got: %v", err)
+	}
+}
 
 // openFile opens a fresh file-backed store at a temp path with a frozen clock so
 // the session-boundary routines (cancel stale watchers / fail stale launches /

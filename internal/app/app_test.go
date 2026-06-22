@@ -167,7 +167,7 @@ func TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive(t *testing.T) {
 	}
 
 	// First turn consumes it → stripped from message[1], and it stays gone.
-	a.consumeSessionEndedNote()
+	a.ConsumeSessionEndedNote()
 	if got := a.PromptContext().SessionEndedWatchers; got != nil {
 		t.Fatalf("note must be consumed after the first turn, got %v", got)
 	}

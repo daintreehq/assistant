@@ -166,15 +166,25 @@ func (s *Store) applyPragmas() error {
 	return nil
 }
 
-// migrate is a single no-op baseline keyed on PRAGMA user_version (the schema's
-// IF NOT EXISTS builds everything). Dev policy hard-resets rather than chaining.
+// migrate keys off PRAGMA user_version. The schema's IF NOT EXISTS DDL builds a
+// fresh file's whole current shape, so there is no migration chain. Dev policy
+// hard-resets on a schema change rather than chaining — so a file initialized at an
+// OLDER baseline (its tables lack newly-added columns) is failed LOUDLY here with the
+// fix, instead of limping into a cryptic "no such column" from the very next
+// session-boundary statement.
 func (s *Store) migrate() error {
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	if v >= schemaUserVersion {
+		// Current — or a newer DB opened by older code; leave forward-compat untouched.
 		return nil
+	}
+	// v == 0 is a brand-new file: the CREATE TABLE DDL just built the current shape,
+	// so we only stamp the version. Any v in (0, schemaUserVersion) is a stale baseline.
+	if v != 0 {
+		return fmt.Errorf("database schema is stale (version %d, current %d) — run 'make db-reset' to reset it (honours DAINTREE_ASSISTANT_STATE_DIR)", v, schemaUserVersion)
 	}
 	// PRAGMA user_version doesn't accept bound params.
 	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion)); err != nil {

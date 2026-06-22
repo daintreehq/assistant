@@ -44,6 +44,19 @@ type Store interface {
 // sweep). Kept in sync with internal/storage/sweeps.go.
 const reasonUserCancelled = "user_cancelled"
 
+// isTerminalStatus reports whether a watcher has already reached an end state, so
+// watcher.cancel won't re-cancel it and clobber its endedReason. Mirrors the
+// watcher status vocabulary in domain.WatcherRecord; the cancellable states are
+// created/active/paused.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "condition_met", "timeout", "error", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
 // Deps is the dependency set for the watcher family.
 type Deps struct {
 	Store Store
@@ -362,6 +375,14 @@ func newCancelTool(deps Deps) *tools.Tool {
 			existing, err := deps.Store.GetWatcher(context.Background(), a.ID)
 			if err != nil || existing == nil {
 				return tools.Fail(codeWatcherNotFound, "watcher.cancel: no such watcher: "+a.ID, tools.Unrecoverable())
+			}
+			// Refuse to re-cancel an already-terminal watcher: it has run its course
+			// (condition_met/timeout/error) or already ended (cancelled — including a
+			// 'session_ended' session-boundary teardown). Overwriting would clobber its
+			// endedReason and destroy the very distinction this records.
+			if isTerminalStatus(existing.Status) {
+				return tools.Fail(codeWatcherNotFound,
+					"watcher.cancel: watcher "+a.ID+" already ended ("+existing.Status+")", tools.Unrecoverable())
 			}
 			if err := deps.Store.CancelWatcher(context.Background(), a.ID, reasonUserCancelled); err != nil {
 				return tools.Fail(domain.CodeInternal, "watcher.cancel: "+err.Error())

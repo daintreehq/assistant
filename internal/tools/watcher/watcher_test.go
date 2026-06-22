@@ -123,7 +123,7 @@ func TestWatchPRFixedCadence(t *testing.T) {
 // distinguishable from the session-boundary sweep's 'session_ended') and revokes the
 // watcher's automation grants.
 func TestCancelStampsUserCancelledReason(t *testing.T) {
-	st := &memStore{inserted: []domain.WatcherRecord{{ID: "wch_1", Kind: "terminal", Title: "t"}}}
+	st := &memStore{inserted: []domain.WatcherRecord{{ID: "wch_1", Kind: "terminal", Title: "t", Status: "active"}}}
 	tool := find(Tools(Deps{Store: st}), "watcher.cancel")
 	res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_1"}`), &tools.ToolContext{})
 	if !res.Ok {
@@ -137,6 +137,23 @@ func TestCancelStampsUserCancelledReason(t *testing.T) {
 	}
 	if st.revokedActor != "wch_1" {
 		t.Fatalf("revoked actor: got %q want wch_1", st.revokedActor)
+	}
+}
+
+// Re-cancelling an already-terminal watcher (here a 'session_ended' teardown, which
+// is status='cancelled') is refused so it can't clobber the existing endedReason —
+// the distinction this records would otherwise be destroyed.
+func TestCancelRefusesAlreadyEndedWatcher(t *testing.T) {
+	for _, status := range []string{"cancelled", "condition_met", "timeout", "error"} {
+		st := &memStore{inserted: []domain.WatcherRecord{{ID: "wch_1", Kind: "terminal", Title: "t", Status: status}}}
+		tool := find(Tools(Deps{Store: st}), "watcher.cancel")
+		res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_1"}`), &tools.ToolContext{})
+		if res.Ok || res.Error.Code != codeWatcherNotFound {
+			t.Fatalf("status %q: expected WATCHER_NOT_FOUND, got %+v", status, res)
+		}
+		if st.cancelledID != "" {
+			t.Fatalf("status %q: must not re-cancel/clobber a terminal watcher, got %q", status, st.cancelledID)
+		}
 	}
 }
 
