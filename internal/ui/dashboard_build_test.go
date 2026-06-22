@@ -149,6 +149,65 @@ func TestBuildAgentRows_OrphanedWatcherIDStillSynthesizes(t *testing.T) {
 	}
 }
 
+func TestBuildAgentRows_CancelledWatcherDoesNotMaskLaunchRoster(t *testing.T) {
+	// The watcher row is STILL in the DB after cancellation (ListWatchers("") returns
+	// every status, incl. prior-session watchers force-cancelled on DB open). It must
+	// not be treated as live and mask its launch — the agent should show its saga state.
+	w := watcherRec("wch_done", string(domain.ClassCompletedSuccess), nil)
+	w.Status = "cancelled"
+	term := "term_3"
+	wid := "wch_done"
+	launches := []domain.AgentLaunchRecord{{
+		ID: "agt_1", Title: "shipped agent", WatcherID: &wid, TerminalID: &term,
+		Stage: domain.LaunchConfirmed, CreatedAt: 7,
+	}}
+	rows := BuildAgentRows([]domain.WatcherRecord{w}, nil, launches)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (cancelled watcher defers to its launch row)", len(rows))
+	}
+	if rows[0].ID != "term_3" || rows[0].Badge != "WORKING" {
+		t.Errorf("row = %+v, want the saga-derived term_3/WORKING row, not the stale watcher", rows[0])
+	}
+}
+
+func TestBuildAgentRows_LaunchWithNilWatcherIDNoTerminalDuplicate(t *testing.T) {
+	// A live watcher owns term_1; a launch on the same terminal never recorded its
+	// WatcherID. Terminal-id dedupe must collapse them to one row (the live watcher's).
+	w := watcherRec("wch_1", string(domain.ClassStillWorking), nil)
+	w.TargetsJson = `["term_1"]`
+	term := "term_1"
+	launches := []domain.AgentLaunchRecord{{
+		ID: "agt_1", Title: "same terminal", TerminalID: &term, Stage: domain.LaunchConfirmed, CreatedAt: 5,
+	}}
+	rows := BuildAgentRows([]domain.WatcherRecord{w}, nil, launches)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (no terminal-based duplicate)", len(rows))
+	}
+	if rows[0].ID != "wch_1" {
+		t.Errorf("ID = %q, want wch_1 (the live watcher owns the shared terminal)", rows[0].ID)
+	}
+}
+
+func TestPreviewWatchers_ExcludesNonActiveWatchers(t *testing.T) {
+	// A cancelled terminal watcher must not consume a preview slot (its terminal is
+	// likely dead) — only the live watcher's terminal is a target.
+	active := watcherRec("wch_live", string(domain.ClassStillWorking), nil)
+	active.TargetsJson = `["term_live"]`
+	cancelled := watcherRec("wch_dead", string(domain.ClassCompletedSuccess), nil)
+	cancelled.Status = "cancelled"
+	cancelled.TargetsJson = `["term_dead"]`
+	pws := previewWatchers([]domain.WatcherRecord{active, cancelled}, nil)
+	gotTerms := map[string]bool{}
+	for _, pw := range pws {
+		for _, id := range pw.TerminalIDs {
+			gotTerms[id] = true
+		}
+	}
+	if !gotTerms["term_live"] || gotTerms["term_dead"] {
+		t.Errorf("preview terminals = %v, want term_live only (cancelled watcher excluded)", gotTerms)
+	}
+}
+
 func TestLaunchBadge_StageMapping(t *testing.T) {
 	cases := []struct {
 		stage    domain.AgentLaunchStage

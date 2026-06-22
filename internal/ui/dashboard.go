@@ -60,8 +60,22 @@ func BuildAgentRows(watchers []domain.WatcherRecord, previews []daemon.TerminalP
 
 	rows := make([]AgentRow, 0, len(watchers)+len(launches))
 	live := make(map[string]bool, len(watchers))
+	coveredTerminals := make(map[string]bool)
 	for _, w := range watchers {
+		// Only a live (in-progress) watcher owns an agent row. A terminal-status watcher
+		// (condition_met/timeout/cancelled/error — including a prior-session watcher
+		// force-cancelled on DB open) is NOT "live": it defers to the durable launch
+		// roster below, so a completed/cancelled agent shows its saga stage rather than a
+		// stale classification, and stale watchers don't clutter the deck.
+		if !liveWatcherStatus(w.Status) {
+			continue
+		}
 		live[w.ID] = true
+		for _, tid := range terminalIDs(w.TargetsJson) {
+			if tid != "" {
+				coveredTerminals[tid] = true
+			}
+		}
 		kind := domain.EpistemicKind("")
 		if w.LastEpistemicKind != nil {
 			kind = *w.LastEpistemicKind
@@ -96,9 +110,17 @@ func BuildAgentRows(watchers []domain.WatcherRecord, previews []daemon.TerminalP
 		if l.TerminalID != nil {
 			terminalID = *l.TerminalID
 		}
+		// Terminal-id dedupe: the same agent can reach here without a WatcherID join
+		// (a live watcher whose launch never recorded its WatcherID, or two sagas that
+		// re-attached to one terminal). Cover the terminal once — newest-first ordering
+		// means the freshest saga wins — so the agent shows as a single row.
+		if terminalID != "" && coveredTerminals[terminalID] {
+			continue
+		}
 		id := l.ID
 		if terminalID != "" {
 			id = terminalID
+			coveredTerminals[terminalID] = true
 		}
 		badge, prio := launchBadge(l.Stage)
 		row := AgentRow{
@@ -147,6 +169,21 @@ func previewSnippet(tail string) string {
 		}
 	}
 	return ""
+}
+
+// liveWatcherStatus reports whether a watcher is still in-progress (an agent actively
+// supervised) versus a terminal status (condition_met/timeout/cancelled/error). Only a
+// live watcher owns an agent row + a preview slot; a terminal one defers to the durable
+// launch roster so it shows saga state instead of a stale classification — and a
+// prior-session cancelled watcher neither clutters the deck nor wastes a poll on its
+// dead terminal. Unknown statuses fail closed to NOT-live (treated as terminal).
+func liveWatcherStatus(status string) bool {
+	switch status {
+	case "active", "created", "paused":
+		return true
+	default: // condition_met, timeout, cancelled, error, ""
+		return false
+	}
 }
 
 // launchBadge maps a spawn-saga stage to a short badge + priority for a launch-only

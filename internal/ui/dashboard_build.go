@@ -102,7 +102,10 @@ func previewWatchers(watchers []domain.WatcherRecord, launches []domain.AgentLau
 	out := make([]daemon.PreviewWatcher, 0, len(watchers)+len(launches))
 	covered := make(map[string]bool)
 	for _, w := range watchers {
-		if w.Kind != "terminal" {
+		// Only live terminal watchers own preview cards. A terminal-status watcher
+		// (incl. a prior-session one cancelled on DB open) would otherwise burn a
+		// MaxTerminals slot polling a dead terminal and starve a live launch's card.
+		if w.Kind != "terminal" || !liveWatcherStatus(w.Status) {
 			continue
 		}
 		ids := terminalIDs(w.TargetsJson)
