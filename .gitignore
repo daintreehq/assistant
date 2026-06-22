@@ -1,7 +1,11 @@
 # Build output
 /bin/
 /dist/
-daintree-assistant
+# Root-anchored: ignore a stray binary built in the repo root (e.g. `go build
+# ./cmd/daintree-assistant` with no -o), WITHOUT swallowing the
+# cmd/daintree-assistant/ SOURCE directory — an unanchored `daintree-assistant`
+# matched that directory too and silently kept the entrypoint un-trackable.
+/daintree-assistant
 *.exe
 
 # Go test / profiling artifacts
