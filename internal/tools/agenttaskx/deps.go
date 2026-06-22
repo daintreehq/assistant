@@ -35,6 +35,7 @@ type MCPClient interface {
 // mirror storage.Store exactly so the concrete *Store satisfies this by structural
 // match (consumer-interface idiom — we do NOT import the storage subsystem).
 //   - InsertWatcher persists the supervising watcher (returns the assigned id).
+//   - ListWatchers reads watchers by status (superviseTerminal dedupes on "active").
 //   - FindActiveAgentLaunch returns the newest non-terminal saga for a key.
 //   - InsertAgentLaunch write-ahead-logs the saga BEFORE the MCP call.
 //   - UpdateAgentLaunch applies an allowlisted patch (stage/terminalId/…).
@@ -42,6 +43,7 @@ type MCPClient interface {
 //   - ListAgentLaunches reads the newest-first sagas (agentTask.list).
 type Store interface {
 	InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, error)
+	ListWatchers(status string) ([]domain.WatcherRecord, error)
 	FindActiveAgentLaunch(idempotencyKey string) (*domain.AgentLaunchRecord, error)
 	InsertAgentLaunch(rec domain.AgentLaunchRecord) (domain.AgentLaunchRecord, error)
 	UpdateAgentLaunch(id string, patch map[string]any) error
@@ -66,12 +68,14 @@ func (d Deps) daemonActive() bool {
 	return d.DaemonActive()
 }
 
-// Tools returns the agentTask family: the spawn escape hatch plus two RiskRead
-// readers (status by id, list newest-first) so the model can inspect the spawn
-// saga without re-launching anything.
+// Tools returns the agentTask family: the spawn escape hatch, the superviseTerminal
+// adopt tool (re-attach supervision to an already-running terminal without
+// re-spawning), plus two RiskRead readers (status by id, list newest-first) so the
+// model can inspect the spawn saga without re-launching anything.
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{
 		newSpawnForEditsTool(deps),
+		newSuperviseTerminalTool(deps),
 		newStatusTool(deps),
 		newListTool(deps),
 	}

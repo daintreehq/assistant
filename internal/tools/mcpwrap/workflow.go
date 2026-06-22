@@ -138,30 +138,16 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 		title = fmt.Sprintf("watch issue #%d", *sc.IssueNumber)
 	}
 
-	targets, _ := json.Marshal([]string{sc.TerminalID})
-	options := map[string]any{"spawnMode": "edit"}
-	if sc.WorktreeID != "" {
-		options["verificationScope"] = map[string]any{"worktreeId": sc.WorktreeID}
-	}
-	optionsJSON, _ := json.Marshal(options)
-	optStr := string(optionsJSON)
-	isSup := true
-	now := domain.NowMS()
-
-	rec := domain.WatcherRecord{
-		ID:           domain.NewID(domain.PrefixWatcher),
-		Kind:         "terminal",
-		Title:        title,
-		Goal:         "Supervise the spawned agent until the work is complete and verified.",
-		TargetsJson:  string(targets),
-		CadenceMs:    supervisorDefaultCadenceMs,
-		IsSupervisor: &isSup,
-		ModelTier:    domain.ModelSmall,
-		OptionsJson:  &optStr,
-		Status:       "active",
-		NextCheckAt:  now,
-		CreatedAt:    now,
-	}
+	// Assemble the supervisor record via the shared builder so this attach can never
+	// drift from the spawn-for-edits / superviseTerminal attach paths.
+	rec := domain.BuildSupervisorWatcherRecord(domain.SupervisorWatcherSpec{
+		TerminalID: sc.TerminalID,
+		WorktreeID: sc.WorktreeID,
+		Title:      title,
+		Goal:       "Supervise the spawned agent until the work is complete and verified.",
+		CadenceMs:  supervisorDefaultCadenceMs,
+		SpawnMode:  "edit",
+	})
 	if err := deps.Store.InsertWatcher(ctx, rec); err != nil {
 		// Insert failure is a warning, not a failed call.
 		return res

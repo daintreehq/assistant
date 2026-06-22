@@ -292,29 +292,18 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 		}
 		// Scope the post-completion git verification to this worktree (when known),
 		// record the spawn mode, and persist the acceptance contract so the
-		// supervisor gates completion on evidence, not git cleanliness alone.
-		opts := map[string]any{"spawnMode": a.Mode}
-		if worktreeID != "" {
-			opts["verificationScope"] = map[string]any{"worktreeId": worktreeID}
-		}
-		if criteria := strings.TrimSpace(a.AcceptanceCriteria); criteria != "" {
-			opts["acceptanceCriteria"] = criteria
-		}
-		optsJSON, _ := json.Marshal(opts)
-		targetsJSON, _ := json.Marshal([]string{terminalID})
-		optsStr := string(optsJSON)
-
-		watcher, werr := deps.DB.InsertWatcher(domain.WatcherRecord{
-			Kind:         "terminal",
-			Title:        "watch " + a.Title,
-			Goal:         goal,
-			TargetsJson:  string(targetsJSON),
-			CadenceMs:    cadence,
-			IsSupervisor: boolPtr(true),
-			ModelTier:    domain.ModelSmall,
-			NextCheckAt:  domain.NowMS(),
-			OptionsJson:  &optsStr,
-		})
+		// supervisor gates completion on evidence, not git cleanliness alone. The
+		// record is assembled by the shared builder so this attach can never drift
+		// from the workflow / superviseTerminal attach paths.
+		watcher, werr := deps.DB.InsertWatcher(domain.BuildSupervisorWatcherRecord(domain.SupervisorWatcherSpec{
+			TerminalID:         terminalID,
+			WorktreeID:         worktreeID,
+			Title:              "watch " + a.Title,
+			Goal:               goal,
+			CadenceMs:          cadence,
+			SpawnMode:          a.Mode,
+			AcceptanceCriteria: strings.TrimSpace(a.AcceptanceCriteria),
+		}))
 		if werr != nil {
 			// Watcher bookkeeping failed, but the agent IS running — surface the gap
 			// instead of failing a successful launch. Record stays terminal_bound.
@@ -404,5 +393,3 @@ func orStr(p *string, fallback string) string {
 	}
 	return fallback
 }
-
-func boolPtr(b bool) *bool { return &b }

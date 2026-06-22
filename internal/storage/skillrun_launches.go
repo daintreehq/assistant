@@ -202,6 +202,37 @@ func (s *Store) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error)
 	return out, rows.Err()
 }
 
+// ListConfirmedAgentLaunchesWithTerminal returns the newest-first confirmed spawn
+// sagas that bound a terminal — the boot-reconcile candidates. A 'confirmed' saga
+// SURVIVES the session-end sweep (cancelStaleAgentLaunches fails only non-terminal
+// stages), so a confirmed row with a non-null terminalId from a prior session means
+// a visible agent was launched whose supervisor watcher has since been cancelled on
+// open. Boot reconciliation cross-joins these against the live terminal.list to find
+// still-running orphans. Bounded by limit (<=0 ⇒ 20).
+func (s *Store) ListConfirmedAgentLaunchesWithTerminal(limit int) ([]domain.AgentLaunchRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		"SELECT "+agentLaunchCols+`
+		   FROM agent_launches
+		  WHERE stage = 'confirmed' AND terminalId IS NOT NULL AND terminalId != ''
+		  ORDER BY updatedAt DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list confirmed agent launches with terminal: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.AgentLaunchRecord
+	for rows.Next() {
+		a, err := scanAgentLaunch(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // FindActiveAgentLaunch returns the newest NON-TERMINAL saga for an idempotency
 // key (stage NOT IN confirmed/failed), or (nil, nil) — so a fresh launch can
 // re-attach instead of double-spawning.
