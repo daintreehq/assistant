@@ -230,3 +230,24 @@ func TestUsageEventCachedSumWhenAnyTierReports(t *testing.T) {
 		t.Fatalf("cachedTokens = %v want 40", ev.CachedTokens)
 	}
 }
+
+// A partial cost (some tier priced, some not) shows the KNOWN total rather than
+// collapsing to "no data" — a rough running estimate is more useful than nothing.
+func TestUsagePartialCostWhenOneTierUnpriced(t *testing.T) {
+	large := pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200)           // priced
+	unpriced := pricedTier(domain.ModelSmall, "mystery-model-x", 500, 100) // unknown rate → nil cost
+	if large.CostUsd == nil {
+		t.Fatal("large tier should be priced")
+	}
+	if unpriced.CostUsd != nil {
+		t.Fatal("unknown-rate tier should have nil cost")
+	}
+	ev := sendTiers(t, []models.TierUsage{large, unpriced})
+	if ev.CostUsd == nil || *ev.CostUsd != *large.CostUsd {
+		t.Fatalf("costUsd = %v want partial %v", ev.CostUsd, large.CostUsd)
+	}
+	// Token counts still sum across BOTH tiers regardless of pricing.
+	if ev.PromptTokens != 1500 || ev.CompletionTokens != 300 {
+		t.Fatalf("tokens = %+v", ev)
+	}
+}

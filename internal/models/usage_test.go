@@ -249,3 +249,94 @@ func TestRouterDoesNotMeterFailedCall(t *testing.T) {
 		t.Fatal("failed call must not be metered")
 	}
 }
+
+// A non-streaming Chat call is metered too (guards against the recordUsage call
+// silently dropping off the Chat path).
+func TestRouterFlushMeterAfterChat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":40,"completion_tokens":8,"total_tokens":48}}`)
+	}))
+	defer srv.Close()
+	r := NewRouter(RouterConfig{LargeModel: "glm-5p2", MediumModel: "glm-5p2", SmallModel: "deepseek-v4-flash"}, newTestClient(srv.URL), nil)
+	if _, err := r.Chat(context.Background(), domain.ModelLarge,
+		ChatOptions{Messages: []ChatMessage{TextMessage("user", "hi")}}); err != nil {
+		t.Fatal(err)
+	}
+	tiers := r.FlushMeter()
+	if len(tiers) != 1 {
+		t.Fatalf("tiers = %d want 1", len(tiers))
+	}
+	if tiers[0].Tier != string(domain.ModelLarge) || tiers[0].Model != "glm-5p2" {
+		t.Fatalf("tier/model = %q/%q", tiers[0].Tier, tiers[0].Model)
+	}
+	if tiers[0].PromptTokens != 40 || tiers[0].CompletionTokens != 8 {
+		t.Fatalf("tokens = %+v", tiers[0])
+	}
+}
+
+// When TotalTokens is absent the bucket falls back to prompt+completion; a bucket
+// mixing absent and explicit totals across calls sums each call's own total.
+func TestUsageAccumulatorMixedTotalTokensNilAndExplicit(t *testing.T) {
+	a := newUsageAccumulator()
+	a.Add(domain.ModelSmall, "deepseek-v4-flash", &Usage{PromptTokens: ip(10), CompletionTokens: ip(2)}) // total nil → 12
+	a.Add(domain.ModelSmall, "deepseek-v4-flash", &Usage{PromptTokens: ip(50), CompletionTokens: ip(8), TotalTokens: ip(120)})
+	tu := a.FlushAndReset()[0]
+	if tu.PromptTokens != 60 || tu.CompletionTokens != 10 {
+		t.Fatalf("prompt/completion = %d/%d", tu.PromptTokens, tu.CompletionTokens)
+	}
+	if tu.TotalTokens != 132 { // (10+2) + 120
+		t.Fatalf("totalTokens = %d want 132", tu.TotalTokens)
+	}
+}
+
+// Add and FlushAndReset racing (the documented background-call-mid-drain case)
+// must be race-free AND lossless: every Add lands in exactly one flush. Run -race.
+func TestUsageAccumulatorConcurrentAddDuringFlush(t *testing.T) {
+	a := newUsageAccumulator()
+	const n = 200
+	var (
+		mu        sync.Mutex
+		gotPrompt int
+	)
+	stop := make(chan struct{})
+	var flushers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		flushers.Add(1)
+		go func() {
+			defer flushers.Done()
+			drain := func() {
+				for _, tu := range a.FlushAndReset() {
+					mu.Lock()
+					gotPrompt += tu.PromptTokens
+					mu.Unlock()
+				}
+			}
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					drain()
+				}
+			}
+		}()
+	}
+	var adders sync.WaitGroup
+	for i := 0; i < n; i++ {
+		adders.Add(1)
+		go func() {
+			defer adders.Done()
+			a.Add(domain.ModelSmall, "deepseek-v4-flash", &Usage{PromptTokens: ip(10), CompletionTokens: ip(2)})
+		}()
+	}
+	adders.Wait()
+	close(stop)
+	flushers.Wait()
+	// Final drain for anything added after the last flusher loop iteration.
+	for _, tu := range a.FlushAndReset() {
+		gotPrompt += tu.PromptTokens
+	}
+	if gotPrompt != n*10 {
+		t.Fatalf("summed prompt across flushes = %d want %d (lost or double-counted)", gotPrompt, n*10)
+	}
+}

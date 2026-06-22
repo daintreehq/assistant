@@ -247,7 +247,12 @@ func (w watcherModelAdapter) Judge(ctx context.Context, in daemon.JudgeInput) (d
 	return ans, nil
 }
 
-// callJSON runs one temperature-0 JSON request with a system+user prompt.
+// callJSON runs one temperature-0 JSON request with a system+user prompt. These
+// run on daemon goroutines, off any user turn — their usage accumulates in the
+// SAME shared Router meter and is attributed to whichever turn's emitUsage drains
+// it next (an idle session with no following turn simply discards it). That
+// approximate per-turn attribution is the accepted trade-off for a running
+// session-cost estimate (see internal/models/usage.go).
 func (w watcherModelAdapter) callJSON(ctx context.Context, tier domain.ModelTier, system, user string) (string, error) {
 	temp := 0.0
 	return w.router.JSON(ctx, tier, models.ChatOptions{

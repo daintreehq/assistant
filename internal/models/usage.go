@@ -122,6 +122,9 @@ func (a *usageAccumulator) FlushAndReset() []TierUsage {
 			cached := b.cached
 			tu.CachedTokens = &cached
 		}
+		// b.cached is 0 when no call in this bucket reported cache usage, so the
+		// whole prompt prices at the full input rate — the correct upper bound when
+		// the provider gave no cache breakdown (we never under-bill on missing data).
 		if cost, ok := EstimateCostUsd(key.model, b.prompt, b.completion, b.cached); ok {
 			tu.CostUsd = &cost
 		}
