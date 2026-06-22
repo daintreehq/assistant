@@ -59,7 +59,7 @@ endif
 
 .DEFAULT_GOAL := build
 
-.PHONY: build install test test-race vet fmt generate run clean db-reset
+.PHONY: build install test test-race test-pty vet fmt generate run clean db-reset
 
 ## build: compile the binary into ./bin with version + trimpath.
 build:
@@ -77,6 +77,10 @@ test:
 ## test-race: run the suite under the race detector.
 test-race:
 	go test -race ./...
+
+## test-pty: run the real PTY render harness (allocates a pseudoterminal; not in the default suite).
+test-pty:
+	go test -v -tags pty -run TestPTY ./internal/e2e/...
 
 ## vet: run go vet across all packages.
 vet:
