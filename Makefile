@@ -80,7 +80,7 @@ test-race:
 
 ## test-pty: run the real PTY render harness (allocates a pseudoterminal; not in the default suite).
 test-pty:
-	go test -v -tags pty -run TestPTY ./internal/e2e/...
+	go test -count=1 -v -tags pty -run TestPTY ./internal/e2e/...
 
 ## vet: run go vet across all packages.
 vet:

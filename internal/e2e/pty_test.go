@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -61,28 +62,52 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		sentinel = "PTYDONESENTINEL"
 	)
 
-	// Two scripted rounds: round 1 streams a completed paragraph then a tool call;
-	// round 2 streams a second paragraph and a final paragraph carrying the sentinel.
-	// Each marker sits in its own \n\n-terminated paragraph so flush.go commits it.
+	// Two scripted rounds streaming MANY short \n\n-terminated paragraphs (round 1 ends
+	// in a tool call; round 2 ends with the sentinel). Each paragraph is a separate SSE
+	// token, so flush.go commits them one-by-one. The count matters: if the incremental
+	// flush ever broke, every completed paragraph would pile into the live footer and the
+	// peak-height invariant would blow past its bound — with only one or two paragraphs the
+	// footer never gets tall enough to prove the flush is working. Markers sit in their own
+	// paragraphs; the total exceeds the screen height so the VT scrollback path is exercised.
+	const nFill = 4
+	round1 := []string{"Intro " + markerA + " is settled.\n\n"}
+	for i := 0; i < nFill; i++ {
+		round1 = append(round1, fmt.Sprintf("Filler %d of the first batch streamed and settled.\n\n", i))
+	}
+	round2 := []string{"Middle " + markerB + " is settled.\n\n"}
+	for i := 0; i < nFill; i++ {
+		round2 = append(round2, fmt.Sprintf("Filler %d of the second batch streamed and settled.\n\n", i))
+	}
+	round2 = append(round2, "Wrapped up "+sentinel+" now.\n\n")
 	fake := newFakeFireworks(t,
 		sseRound{
-			contentTokens: []string{"Paragraph one " + markerA + " is settled.\n\n"},
+			contentTokens: round1,
 			toolName:      "memory__list",
 			toolArgs:      `{"limit":3}`,
 			usage:         &fakeUsage{prompt: 40, completion: 8, total: 48},
 		},
 		sseRound{
-			contentTokens: []string{
-				"Paragraph two " + markerB + " also settled.\n\n",
-				"Wrapped up " + sentinel + " now.\n\n",
-			},
-			usage: &fakeUsage{prompt: 60, completion: 12, total: 72, cached: 20},
+			contentTokens: round2,
+			usage:         &fakeUsage{prompt: 60, completion: 12, total: 72, cached: 20},
 		},
 	)
 
 	const startRows, startCols = 40, 100
 	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(),
+	// Drop DAINTREE_ASCII from the inherited env: its mere PRESENCE (any value, even
+	// empty) forces the ASCII glyph set (theme/glyphs.go unicodeOK), which would swap the
+	// composer prompt glyph we wait on from "›" to ">" and hang Phase 1 with no real
+	// regression. Then force a UTF-8 locale (LC_ALL wins POSIX precedence) so an inherited
+	// LANG=C / non-UTF locale can't trip the same fallback.
+	env := make([]string, 0, len(os.Environ())+12)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
 		"FIREWORKS_BASE_URL="+fake.baseURL(),
 		"FIREWORKS_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
@@ -98,6 +123,12 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start binary under pty: %v", err)
 	}
+	// Guarantee teardown on every exit path (incl. an early t.Fatal): Kill is idempotent
+	// on an exited process and Close is safe to repeat, so this never double-frees.
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
 
 	screen := newVTScreen(startRows, startCols)
 	var rawMu sync.Mutex
@@ -155,7 +186,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	}
 
 	// --- Phase 2: drive a streamed multi-paragraph turn (+ tool batch) ---
-	screen.ResetPeakCursorUp() // measure footer height for the turn only, not the taller pre-commit boot footer
+	screen.ResetPeakFrameHeight() // measure footer height for the turn only, not the boot footer
 	if _, err := ptm.Write([]byte("summarize my memory\r")); err != nil {
 		t.Fatalf("write prompt to pty: %v", err)
 	}
@@ -167,11 +198,11 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 
 	// Invariant 1: the live footer stayed bounded — completed prose flushed to
 	// scrollback as it streamed rather than piling into the footer. A non-trivial
-	// peak (> 0) also proves the measurement is live, not vacuous.
-	peak := screen.PeakCursorUp()
-	t.Logf("turn peak live-View height: %d rows (bound %d)", peak, maxFooterRows)
+	// peak (> 0) also proves the measurement is live (a commit was observed), not vacuous.
+	peak := screen.PeakFrameHeight()
+	t.Logf("turn peak live-View (footer) height: %d rows (bound %d)", peak, maxFooterRows)
 	if peak <= 0 {
-		t.Errorf("never observed a footer repaint during the turn (peak cursor-up = %d) — the height invariant is vacuous", peak)
+		t.Errorf("never observed a scrollback commit during the turn (peak frame height = %d) — the height invariant is vacuous", peak)
 	}
 	if peak > maxFooterRows {
 		t.Errorf("live View peaked at %d rows during the turn, want <= %d — the footer swallowed the streamed response (bubbletea#1613 class)", peak, maxFooterRows)
@@ -185,9 +216,11 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	}
 
 	// --- Phase 3: settled resize → exactly one masthead re-commit at the new width ---
-	if err := pty.Setsize(ptm, &pty.Winsize{Rows: 24, Cols: 72}); err != nil {
+	const newRows, newCols = 24, 72
+	if err := pty.Setsize(ptm, &pty.Winsize{Rows: newRows, Cols: newCols}); err != nil {
 		t.Fatalf("resize pty: %v", err)
 	}
+	screen.Resize(newRows, newCols) // keep the VT model's geometry in step with the terminal
 	if !waitFor(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
 		t.Fatalf("resize did not re-commit the masthead (%d occurrences, want >= %d)", rawCount(mastheadText), preMasthead+1)
 	}
@@ -205,7 +238,11 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 	select {
-	case <-waitErr:
+	case err := <-waitErr:
+		// /quit → onShutdown → tea.Quit → exit 0; surface any unexpected non-zero exit.
+		if err != nil {
+			t.Logf("cockpit exited with error after /quit: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
 		<-waitErr

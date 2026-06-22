@@ -19,9 +19,11 @@ import (
 // The byte choreography it must follow was captured from the real binary:
 //   - tea.Println (a scrollback commit) = CSI nA (cursor up to the top of the live
 //     region) + CSI nL (Insert Line, make room) + the committed text.
-//   - In-place footer repaint = CSI nA + per-line CSI K (Erase Line) + text. The n
-//     of that cursor-up is the live View height — peakCursorUp tracks its max so the
-//     footer-height invariant can bound it.
+//   - The live-View (footer) height is recovered from each commit's geometry: insertAbove
+//     emits CursorUp(offset+h-1) then InsertLine(offset), so h = up - offset + 1 — exactly
+//     bubbletea's View height, the footer the #1613 fix keeps small. peakFrame tracks the max
+//     of that. (In-place footer repaints move the cursor unpredictably via the ultraviolet
+//     diff renderer, so height is NOT read from repaint cursor-ups — only from commits.)
 //   - A settled resize wipes everything with CSI 2J (erase all) + CSI 3J (erase
 //     scrollback) + CSI H (home) before recommitting fresh at the new width.
 //
@@ -36,7 +38,8 @@ type vtScreen struct {
 	row, col   int      // 0-based cursor
 	savedR     int
 	savedC     int
-	peakCUU    int // largest CSI nA distance seen since the last resetPeakCursorUp
+	peakFrame  int // tallest live-View (frame) height seen at a commit since the last reset
+	pendingUp  int // a just-seen CSI nA distance, awaiting its follower (IL ⇒ commit)
 	parser     *ansi.Parser
 }
 
@@ -83,6 +86,7 @@ func (s *vtScreen) Feed(b []byte) {
 // --- parser callbacks (all run under s.mu via Feed) ---
 
 func (s *vtScreen) onPrint(r rune) {
+	s.pendingUp = 0 // a printable after a CSI nA ⇒ it was a repaint move, not a commit
 	if s.col >= s.cols {
 		// DECAWM autowrap: the pending column folds to the next line before placing.
 		s.col = 0
@@ -95,6 +99,7 @@ func (s *vtScreen) onPrint(r rune) {
 }
 
 func (s *vtScreen) onExecute(b byte) {
+	s.pendingUp = 0 // a control char after a CSI nA ⇒ it was a repaint move, not a commit
 	switch b {
 	case '\n': // LF
 		s.lineFeed()
@@ -133,17 +138,30 @@ func (s *vtScreen) scrollUp(n int) {
 }
 
 func (s *vtScreen) onCSI(cmd ansi.Cmd, params ansi.Params) {
+	final := cmd.Final()
+	p0, _, _ := params.Param(0, 1) // first param, default 1
+	// Resolve a deferred CSI nA. A tea.Println commit (insertAbove) emits CursorUp(offset+h-1)
+	// then InsertLine(offset), so when an Insert Line follows the cursor-up we recover the live
+	// frame height h = up - offset + 1 — bubbletea's View height, exactly the footer the #1613
+	// fix keeps small (note: the raw cursor-up distance OVERSHOOTS h by the committed chunk
+	// size, so it must NOT be used directly). Any other follower is an in-place repaint move,
+	// which the ultraviolet diff renderer emits unpredictably, so we don't measure height there.
+	if s.pendingUp > 0 {
+		if final == 'L' {
+			if h := s.pendingUp - p0 + 1; h > s.peakFrame {
+				s.peakFrame = h
+			}
+		}
+		s.pendingUp = 0
+	}
 	// Ignore prefixed sequences (DEC private modes like CSI ?25l, CSI >4;2m, kitty
 	// CSI =1;1u) — none affect the cell/cursor state this model tracks.
 	if cmd.Prefix() != 0 {
 		return
 	}
-	p0, _, _ := params.Param(0, 1) // first param, default 1
-	switch cmd.Final() {
-	case 'A': // CUU — cursor up; its distance is the live-View height being repainted
-		if p0 > s.peakCUU {
-			s.peakCUU = p0
-		}
+	switch final {
+	case 'A': // CUU — cursor up; defer until its follower reveals repaint vs commit
+		s.pendingUp = p0
 		s.row = clamp(s.row-p0, 0, s.rows-1)
 	case 'B', 'e': // CUD / VPR — cursor down
 		s.row = clamp(s.row+p0, 0, s.rows-1)
@@ -316,20 +334,40 @@ func (s *vtScreen) CountLineSubstr(sub string) int {
 	return n
 }
 
-// PeakCursorUp returns the largest CSI nA distance seen since the last reset — the
-// peak live-View height the renderer repainted.
-func (s *vtScreen) PeakCursorUp() int {
+// PeakFrameHeight returns the tallest live-View (footer) height observed at a commit
+// since the last reset — recovered from each insertAbove's CursorUp/InsertLine geometry.
+func (s *vtScreen) PeakFrameHeight() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peakCUU
+	return s.peakFrame
 }
 
-// ResetPeakCursorUp zeroes the peak so a later read measures only one phase
+// ResetPeakFrameHeight zeroes the peak so a later read measures only one phase
 // (e.g. the streamed turn, isolated from the taller pre-commit boot footer).
-func (s *vtScreen) ResetPeakCursorUp() {
+func (s *vtScreen) ResetPeakFrameHeight() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.peakCUU = 0
+	s.peakFrame = 0
+	s.pendingUp = 0
+}
+
+// Resize re-grids the screen to a new size, preserving overlapping cell content and
+// clamping the cursor — the VT model's reaction to SIGWINCH. The cockpit's nuclear
+// redraw repaints everything fresh afterward (CSI 2J/3J/H), so exact transient
+// content does not matter; this just keeps grid geometry in step with the terminal.
+func (s *vtScreen) Resize(rows, cols int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ng := blankGrid(rows, cols)
+	for r := 0; r < rows && r < s.rows; r++ {
+		for c := 0; c < cols && c < s.cols; c++ {
+			ng[r][c] = s.grid[r][c]
+		}
+	}
+	s.grid = ng
+	s.rows, s.cols = rows, cols
+	s.row = clamp(s.row, 0, rows-1)
+	s.col = clamp(s.col, 0, cols-1)
 }
 
 func firstParam(p ansi.Params, def int) int {
