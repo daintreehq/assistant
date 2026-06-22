@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -61,15 +62,95 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 	b.WriteByte('\n')
 	b.WriteString(th.Muted().Render(strings.Repeat(g.Rule, width)))
 
-	// 6. Debug-log badge, BELOW the rule. "◌ logging" label in warning yellow (the
-	// active glyph), then a dim " · <path>". The label is pinned (never clipped to
-	// "loggin"); only the path truncates — truncateCells keeps left-priority cells.
+	// 6. Debug-log badge, BELOW the rule — the hollow "◌ logging" label in warning
+	// yellow, then a dim " · <path>". The path is $HOME-collapsed to ~ and WRAPS across
+	// rows rather than truncating with … so the full filename stays visible/copyable
+	// (see renderLogBadge).
 	if p.Logging {
 		b.WriteByte('\n')
-		badge := th.Warning().Render(g.Active+" logging") + th.Dim().Render(" "+g.Bullet+" "+p.LogFile)
-		b.WriteString(truncateCells(badge, width))
+		b.WriteString(renderLogBadge(th, p.LogFile, width))
 	}
 	return b.String()
+}
+
+// renderLogBadge renders the debug-log badge: a hollow "◌ logging" label (warning
+// amber) then a dim " · <path>". The path is $HOME-collapsed to a ~-relative form and
+// HARD-WRAPS across rows when it can't fit — it used to truncate with an ellipsis,
+// which hid the useful tail (the session id + .log). Continuation rows sit at the
+// chrome's left edge (no extra indent) so the path stays clean to copy; every row is
+// held to `width` cells so a narrow terminal never overflows.
+func renderLogBadge(th theme.Theme, path string, width int) string {
+	g := th.Glyphs
+	label := th.Warning().Render(g.Active + " logging")
+	if path == "" || width < 1 {
+		return truncateCells(label, width)
+	}
+	disp := collapseHome(path)
+	sep := " " + g.Bullet + " "
+	headW := cellWidth(g.Active+" logging") + cellWidth(sep)
+	// Pathologically narrow chrome (label+sep alone overflow the width): fall back to a
+	// single truncated row rather than emit empty continuation rows.
+	avail := width - headW
+	if avail < 1 {
+		return truncateCells(label+th.Dim().Render(sep+disp), width)
+	}
+
+	// Greedy hard-wrap by CELLS: the first row fills the space left after the label, the
+	// continuation rows get the full width. Paths are space-less, so we break mid-token
+	// (a word-wrapper would just truncate the whole path onto one row).
+	//
+	// We break when the rune won't fit AND there's somewhere better to put it: either the
+	// row already holds something (curW > 0), or we're still on the narrow first row
+	// (limit < width) and a full-width continuation row would give the rune more room.
+	// That second clause defends the no-overflow invariant against a wide (2-cell)
+	// leading grapheme whose width exceeds the tiny first-row budget — it lands on a
+	// full-width row instead of spilling past `width`. (A lone grapheme wider than the
+	// FULL width is only possible on a sub-2-column terminal, which is degenerate.)
+	var rows []string
+	var cur strings.Builder
+	curW, limit := 0, avail
+	for _, r := range disp {
+		rw := cellWidth(string(r))
+		if curW+rw > limit && (curW > 0 || limit < width) {
+			rows = append(rows, cur.String())
+			cur.Reset()
+			curW, limit = 0, width
+		}
+		cur.WriteRune(r)
+		curW += rw
+	}
+	if cur.Len() > 0 {
+		rows = append(rows, cur.String())
+	}
+
+	var b strings.Builder
+	for i, row := range rows {
+		if i == 0 {
+			b.WriteString(label + th.Dim().Render(sep+row))
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString(th.Dim().Render(row))
+	}
+	return b.String()
+}
+
+// collapseHome rewrites a $HOME-prefixed absolute path to its ~-relative form for
+// display (the home dir is noise and eats width). It collapses only on a true path-
+// segment boundary, so a sibling like "/home/bobby" is never mangled when HOME is
+// "/home/bob"; falls back to the raw path when HOME is unknown or unrelated.
+func collapseHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, home+string(os.PathSeparator)) {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 // tierGloss is the dim one-liner after the tier name.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/commands"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 	"github.com/daintreehq/daintree-assistant/internal/ui/composer"
@@ -176,6 +177,11 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 			ProjectName: provisionalName,
 			Tier:        a.Tier(),
 			Logging:     a.Config.DebugLog,
+			// The debug log is opened (StartDebugLog) on the interactive path BEFORE
+			// this runner is invoked, so the active path is already resolvable here —
+			// surface it in the badge so the operator sees exactly where the trace
+			// goes. Empty when logging is off; the badge is gated on Logging anyway.
+			LogFile: debuglog.CurrentDebugLogPath(),
 		},
 	}
 	m.splash = newSplash(m.columns)

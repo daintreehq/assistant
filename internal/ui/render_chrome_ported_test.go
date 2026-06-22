@@ -89,6 +89,118 @@ func TestMasthead_RuleBelowTierLoggingBelowRule(t *testing.T) {
 	if !strings.Contains(out, "/t.log") {
 		t.Errorf("logging line should surface the log path: %q", out)
 	}
+	// The badge leads with the hollow dotted glyph ("◌ logging").
+	if !strings.Contains(out, "◌ logging") {
+		t.Errorf("logging badge should lead with the hollow dotted glyph: %q", out)
+	}
+}
+
+func TestCollapseHome(t *testing.T) {
+	t.Setenv("HOME", "/home/bob")
+	cases := map[string]string{
+		"/home/bob/.daintree/logs/x.log": "~/.daintree/logs/x.log",
+		"/home/bob":                      "~",
+		"/home/bobby/x":                  "/home/bobby/x", // sibling, NOT collapsed
+		"/var/log/x":                     "/var/log/x",
+	}
+	for in, want := range cases {
+		if got := collapseHome(in); got != want {
+			t.Errorf("collapseHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestMasthead_LogPathWrapsNotTruncated: the log path must ~-collapse and wrap across
+// rows (no ellipsis), keeping the whole filename visible while every row stays within
+// the terminal width.
+func TestMasthead_LogPathWrapsNotTruncated(t *testing.T) {
+	t.Setenv("HOME", "/home/bob")
+	const cols = 30
+	path := "/home/bob/.daintree/logs/2026-06-22-ses_1a8b2c3d4e5f.log"
+	out := stripAnsi(renderMasthead(darkTheme(), mastheadParams{
+		Version: "0.1.0", Tier: domain.TierSystem, Logging: true, LogFile: path,
+	}, cols))
+	// Scope the no-ellipsis check to the badge region (from "◌ logging" on) — the
+	// unrelated tier-gloss line legitimately truncates at this narrow width.
+	idx := strings.Index(out, "◌ logging")
+	if idx < 0 {
+		t.Fatalf("no logging badge in masthead: %q", out)
+	}
+	badge := out[idx:]
+	if strings.Contains(badge, "…") {
+		t.Errorf("log path must wrap, not truncate with an ellipsis: %q", badge)
+	}
+	if strings.Contains(out, "/home/bob") {
+		t.Errorf("log path should be ~-collapsed: %q", out)
+	}
+	// Rejoining the wrapped rows must yield the whole collapsed path contiguously
+	// (continuation rows carry only the path, no label, so the join is clean).
+	joined := strings.ReplaceAll(out, "\n", "")
+	if !strings.Contains(joined, "~/.daintree/logs/2026-06-22-ses_1a8b2c3d4e5f.log") {
+		t.Errorf("full collapsed path not present across wrapped rows: %q", out)
+	}
+	for i, l := range strings.Split(out, "\n") {
+		if w := cellWidth(l); w > cols {
+			t.Errorf("row %d width %d exceeds cols %d: %q", i, w, cols, l)
+		}
+	}
+}
+
+// logRow returns the single masthead row carrying the "logging" badge.
+func logRow(t *testing.T, out string) string {
+	t.Helper()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "logging") {
+			return l
+		}
+	}
+	t.Fatalf("no logging row in masthead: %q", out)
+	return ""
+}
+
+// TestMasthead_LogPathFitsOneRow: at a comfortable width the ~-collapsed path sits on
+// the single badge row, untruncated — wrapping is the narrow-terminal fallback, not the
+// common case.
+func TestMasthead_LogPathFitsOneRow(t *testing.T) {
+	t.Setenv("HOME", "/home/bob")
+	out := stripAnsi(renderMasthead(darkTheme(), mastheadParams{
+		Version: "0.1.0", Tier: domain.TierSystem, Logging: true,
+		LogFile: "/home/bob/.daintree/logs/2026-06-22-ses_1a8b.log",
+	}, 80))
+	row := logRow(t, out)
+	if !strings.Contains(row, "◌ logging · ~/.daintree/logs/2026-06-22-ses_1a8b.log") {
+		t.Errorf("path should sit ~-collapsed on one row: %q", row)
+	}
+	if strings.Contains(row, "…") {
+		t.Errorf("a wide terminal must not truncate the path: %q", row)
+	}
+}
+
+// TestMasthead_LogBadgeEmptyPathNoDanglingSeparator: with logging on but no path yet,
+// the badge is just the label — never "◌ logging ·" with a dangling separator.
+func TestMasthead_LogBadgeEmptyPathNoDanglingSeparator(t *testing.T) {
+	out := stripAnsi(renderMasthead(darkTheme(), mastheadParams{
+		Version: "0.1.0", Tier: domain.TierSystem, Logging: true, LogFile: "",
+	}, 60))
+	row := logRow(t, out)
+	if strings.TrimSpace(row) != "◌ logging" {
+		t.Errorf("empty-path badge should be just the label, got %q", row)
+	}
+}
+
+// TestMasthead_LogPathWideRuneNoOverflow: a wide (2-cell) leading grapheme whose width
+// exceeds the one-cell first-row budget must wrap to a full-width row, never spill past
+// the terminal width. Exercises the wrap loop's wide-grapheme guard.
+func TestMasthead_LogPathWideRuneNoOverflow(t *testing.T) {
+	const cols = 13 // headW(12) + 1 → the first-row path budget is a single cell
+	out := stripAnsi(renderMasthead(darkTheme(), mastheadParams{
+		Version: "0.1.0", Tier: domain.TierSystem, Logging: true, LogFile: "中文/trace.log",
+	}, cols))
+	for i, l := range strings.Split(out, "\n") {
+		if w := cellWidth(l); w > cols {
+			t.Errorf("row %d width %d exceeds cols %d: %q", i, w, cols, l)
+		}
+	}
 }
 
 func TestMasthead_NarrowNoRowOverflow(t *testing.T) {
