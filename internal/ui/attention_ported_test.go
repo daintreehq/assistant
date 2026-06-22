@@ -172,6 +172,123 @@ func TestAttention_EmptyBatchEmitsNoNote(t *testing.T) {
 	}
 }
 
+// TestAttention_NoteCoalesceCount: a coalesced event (Count > 1) carries the "×N" suffix,
+// matching the /inbox digest; Count of 0 or 1 shows nothing.
+func TestAttention_NoteCoalesceCount(t *testing.T) {
+	m := liveModel(80)
+	m.inFlight = true
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "flapping", Severity: domain.SeverityAttention, Target: &domain.EventTarget{TerminalID: "term_5"}, Count: 3},
+		{Title: "single", Severity: domain.SeverityInfo, Count: 1},
+	}})
+	notes := noteTexts(next.(Model))
+	want := []string{"! flapping — [term term_5] (×3)", "ℹ single"}
+	if len(notes) != len(want) {
+		t.Fatalf("got %d notes: %v", len(notes), notes)
+	}
+	for i, w := range want {
+		if notes[i] != w {
+			t.Errorf("note[%d] = %q, want %q", i, notes[i], w)
+		}
+	}
+}
+
+// TestAttention_NoteNonNilEmptyTargetHasNoSuffix: a non-nil Target with both ids empty
+// must render no target fragment (no "[term ]"/"[wt ]" and no " — " separator).
+func TestAttention_NoteNonNilEmptyTargetHasNoSuffix(t *testing.T) {
+	m := liveModel(80)
+	m.inFlight = true
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "scopeless", Severity: domain.SeverityInfo, Target: &domain.EventTarget{}},
+	}})
+	notes := noteTexts(next.(Model))
+	if len(notes) != 1 || notes[0] != "ℹ scopeless" {
+		t.Fatalf("a non-nil empty target must render no suffix: %v", notes)
+	}
+}
+
+// TestAttention_IdleEmitsNoteBeforeWakeTurn covers the production idle path: when nothing
+// is in flight, onAttention drains the burst (firing the wake reactor turn). The note must
+// land in the transcript BEFORE the wake TurnCell so the ledger reads chronologically.
+func TestAttention_IdleEmitsNoteBeforeWakeTurn(t *testing.T) {
+	m := liveModel(80) // idle: inFlight defaults to false
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "needs input", Severity: domain.SeverityUrgent, Target: &domain.EventTarget{TerminalID: "term_8"}},
+	}})
+	nm := next.(Model)
+	if len(nm.transcript) < 2 {
+		t.Fatalf("idle path must append a note AND a wake turn, got %d cells", len(nm.transcript))
+	}
+	if nm.transcript[0].Note == nil {
+		t.Fatalf("first cell must be the attention note, got %+v", nm.transcript[0])
+	}
+	if nm.transcript[0].Note.Text != "‼ needs input — [term term_8]" {
+		t.Errorf("note text = %q", nm.transcript[0].Note.Text)
+	}
+	foundTurnAfterNote := false
+	for _, c := range nm.transcript[1:] {
+		if c.Turn != nil {
+			foundTurnAfterNote = true
+		}
+	}
+	if !foundTurnAfterNote {
+		t.Error("the wake TurnCell must follow the note, not precede it")
+	}
+}
+
+// TestAttention_MaterialReDeliveryEmitsFreshNote locks in the escalation policy: the
+// scheduler re-delivers an event id on a material change, and the UI deliberately emits a
+// second note (carrying the escalated glyph/title) rather than deduping it away.
+func TestAttention_MaterialReDeliveryEmitsFreshNote(t *testing.T) {
+	m := liveModel(80)
+	m.inFlight = true
+	tgt := &domain.EventTarget{TerminalID: "term_1"}
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{ID: "evt_1", Title: "waiting", Severity: domain.SeverityAttention, Target: tgt},
+	}})
+	nm := next.(Model)
+	next2, _ := nm.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{ID: "evt_1", Title: "merge conflict", Severity: domain.SeverityBlocked, Target: tgt},
+	}})
+	notes := noteTexts(next2.(Model))
+	want := []string{"! waiting — [term term_1]", "⛔ merge conflict — [term term_1]"}
+	if len(notes) != len(want) {
+		t.Fatalf("a material re-delivery must add a fresh note, got %d: %v", len(notes), notes)
+	}
+	for i, w := range want {
+		if notes[i] != w {
+			t.Errorf("note[%d] = %q, want %q", i, notes[i], w)
+		}
+	}
+}
+
+// TestAttention_GlyphAndLevelTable pins the full severity → (glyph, spine level) mapping so
+// a future addition to domain.Severity can't silently fall through both helpers.
+func TestAttention_GlyphAndLevelTable(t *testing.T) {
+	cases := []struct {
+		sev   domain.Severity
+		glyph string
+		level NoteLevel
+	}{
+		{domain.SeverityDebug, "·", NoteInfo},
+		{domain.SeverityInfo, "ℹ", NoteInfo},
+		{domain.SeverityDone, "✓", NoteSuccess},
+		{domain.SeverityAttention, "!", NoteWarn},
+		{domain.SeverityBlocked, "⛔", NoteError},
+		{domain.SeverityUrgent, "‼", NoteError},
+		{domain.SeverityError, "✗", NoteError},
+		{domain.Severity("unknown"), "ℹ", NoteInfo},
+	}
+	for _, c := range cases {
+		if g := attentionSeverityGlyph(c.sev); g != c.glyph {
+			t.Errorf("glyph(%q) = %q, want %q", c.sev, g, c.glyph)
+		}
+		if lv := severityToNoteLevel(c.sev); lv != c.level {
+			t.Errorf("level(%q) = %d, want %d", c.sev, lv, c.level)
+		}
+	}
+}
+
 func TestWindowTitle_BadgeWithCountAndResetToPlain(t *testing.T) {
 	m := liveModel(80)
 	// No attention → plain title.

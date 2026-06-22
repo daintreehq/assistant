@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -649,24 +650,26 @@ func severityToNoteLevel(sev domain.Severity) NoteLevel {
 }
 
 // attentionNoteText builds the glanceable one-liner echoed into the transcript when a
-// sub-thread routes attention: "<glyph> <Title> — [term <id>]/[wt <id>]". The target
-// suffix mirrors queue.Format exactly (terminal wins over worktree; nothing when the
-// event carries no target) so the line matches the /inbox digest, and the " — " separator
-// is dropped when there is no target.
+// sub-thread routes attention: "<glyph> <Title> — [term <id>]/[wt <id>] (×N)". The target
+// and coalesce-count suffixes mirror queue.Format's logic (terminal wins over worktree;
+// "×N" only when the event coalesced) so the line reads like the /inbox digest — the one
+// formatting difference is the " — " separator before the target, which reads better inline
+// than the digest's bare space. Both suffixes drop out when absent.
 func attentionNoteText(e domain.QueueEvent) string {
 	glyph := attentionSeverityGlyph(e.Severity)
 	target := ""
 	if e.Target != nil {
 		if e.Target.TerminalID != "" {
-			target = "[term " + e.Target.TerminalID + "]"
+			target = " — [term " + e.Target.TerminalID + "]"
 		} else if e.Target.WorktreeID != "" {
-			target = "[wt " + e.Target.WorktreeID + "]"
+			target = " — [wt " + e.Target.WorktreeID + "]"
 		}
 	}
-	if target == "" {
-		return glyph + " " + e.Title
+	dup := ""
+	if e.Count > 1 {
+		dup = fmt.Sprintf(" (×%d)", e.Count)
 	}
-	return glyph + " " + e.Title + " — " + target
+	return glyph + " " + e.Title + target + dup
 }
 
 func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
@@ -680,9 +683,11 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	m.attentionN += len(msg.Events)
 	// Echo each fresh event into the transcript as a committed note — the durable,
 	// scroll-back-able ledger line #175 asks for, glanceable where the operator is already
-	// looking instead of only a BEL + badge bump. Emission is 1:1 with events because the
-	// scheduler delivers each event exactly once (notify() → Digest{NotifiedIsNull} →
-	// MarkNotified, daemon/scheduler.go), so no UI-side dedupe is needed. Appended BEFORE
+	// looking instead of only a BEL + badge bump. We emit one note per event with NO
+	// UI-side dedupe: the scheduler delivers each event once per MATERIAL change (notify()
+	// pulls Digest{NotifiedIsNull} then MarkNotified, and the queue re-arms NotifiedAt only
+	// on a real severity/title/summary change — daemon/scheduler.go, queue.go). So a repeat
+	// is always a genuine escalation worth a fresh line, never spam. Appended BEFORE
 	// drainPending so any wake turn seals AFTER these notes (true chronological order).
 	for _, e := range msg.Events {
 		m.addNote(severityToNoteLevel(e.Severity), attentionNoteText(e))
