@@ -391,10 +391,17 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 			return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
 		}
 		sum := "Agent is waiting for input."
+		ev := []string{fmt.Sprintf("agentState=waiting%s", parens(waitingReason))}
 		if waitingReason == "question" {
 			sum = "Agent is asking a question."
+			// Fold the actual question text (terminal tail) into the summary and
+			// evidence so the operator sees WHAT is being asked, not just that
+			// something is. Deterministic — no model call; tail is already read.
+			if snip := tailSnippet(signals.Tail, 2, 200); snip != "" {
+				sum = fmt.Sprintf("Agent is asking a question: %q", snip)
+				ev = append(ev, fmt.Sprintf("question: %q", snip))
+			}
 		}
-		ev := []string{fmt.Sprintf("agentState=waiting%s", parens(waitingReason))}
 		return domain.ClassWaitingForInput, 0.9, sum, ev, signals, false
 
 	case agentState == "completed":

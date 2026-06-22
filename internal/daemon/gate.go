@@ -136,16 +136,31 @@ func finalizeGate(v domain.VerificationResult, baseEvidence []string, class doma
 
 // recommendedActionsFor builds the recommended actions attached to a published
 // watcher event. terminal.focus is the real UI tool (open_review is display-only).
+// For a blocked agent (waiting/permission) we additionally surface a reply path:
+// terminal.sendCommand with an empty command template. terminal.focus stays FIRST
+// (look-before-you-leap), and the reply action is a suggestion the operator/model
+// fills in — its command is validated non-empty only at dispatch time, so the empty
+// stub is a valid template here. It carries RiskTerminal + RequiresConfirmation so
+// the mutating reply is always confirmed.
 func recommendedActionsFor(class domain.WatcherClassification, terminalID string) []domain.RecommendedAction {
 	switch class {
 	case domain.ClassWaitingForInput, domain.ClassPermissionPrompt:
-		return []domain.RecommendedAction{{
-			Label:                "Focus terminal",
-			ToolName:             "terminal.focus",
-			Args:                 map[string]any{"terminalId": terminalID},
-			Risk:                 domain.RiskUI,
-			RequiresConfirmation: false,
-		}}
+		return []domain.RecommendedAction{
+			{
+				Label:                "Focus terminal",
+				ToolName:             "terminal.focus",
+				Args:                 map[string]any{"terminalId": terminalID},
+				Risk:                 domain.RiskUI,
+				RequiresConfirmation: false,
+			},
+			{
+				Label:                "Reply to agent",
+				ToolName:             "terminal.sendCommand",
+				Args:                 map[string]any{"terminalId": terminalID, "command": ""},
+				Risk:                 domain.RiskTerminal,
+				RequiresConfirmation: true,
+			},
+		}
 	case domain.ClassCompletedUnverified:
 		return []domain.RecommendedAction{{
 			Label:                "Review completion",
@@ -156,4 +171,24 @@ func recommendedActionsFor(class domain.WatcherClassification, terminalID string
 		}}
 	}
 	return nil
+}
+
+// tailSnippet returns the last up to maxLines non-empty, trimmed lines of s joined
+// with " | ", capped to maxChars bytes (matching the codebase's byte-slice tail
+// convention; rune-safety isn't required for a debug snippet). Returns "" when s
+// has no non-blank content. Used to fold the actual question text from a blocked
+// agent's terminal tail into the published event so the operator sees what is asked.
+func tailSnippet(s string, maxLines, maxChars int) string {
+	lines := strings.Split(s, "\n")
+	kept := make([]string, 0, maxLines)
+	for i := len(lines) - 1; i >= 0 && len(kept) < maxLines; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			kept = append([]string{l}, kept...)
+		}
+	}
+	out := strings.Join(kept, " | ")
+	if len(out) > maxChars {
+		out = out[:maxChars] + "…"
+	}
+	return out
 }
