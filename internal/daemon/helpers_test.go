@@ -60,6 +60,7 @@ type progMCP struct {
 
 	// resource-subscription seam
 	supportsSub  bool
+	subErr       error
 	subscribed   []string
 	unsubscribed []string
 }
@@ -92,6 +93,9 @@ func (m *progMCP) SupportsSubscribe() bool { return m.supportsSub }
 func (m *progMCP) Subscribe(_ context.Context, uri string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.subErr != nil {
+		return m.subErr
+	}
 	m.subscribed = append(m.subscribed, uri)
 	return nil
 }

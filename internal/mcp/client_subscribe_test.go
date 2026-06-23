@@ -118,10 +118,58 @@ func TestResourceUpdatedDropsWhenFull(t *testing.T) {
 }
 
 func TestResubscribeReissuesAll(t *testing.T) {
-	c := newInjected(&fakeLow{})
+	low := &fakeLow{supportsSub: true}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	_ = c.Subscribe(context.Background(), "daintree://agent/a/state")
+	_ = c.Subscribe(context.Background(), "daintree://agent/b/state")
 	fresh := &fakeLow{}
 	c.resubscribe(fresh, []string{"daintree://agent/a/state", "daintree://agent/b/state"})
 	if len(fresh.subscribed) != 2 {
-		t.Fatalf("resubscribe must re-issue every URI on the fresh session, got %v", fresh.subscribed)
+		t.Fatalf("resubscribe must re-issue every live URI on the fresh session, got %v", fresh.subscribed)
+	}
+}
+
+// TestSharedURIRefcount: two local subscribers (e.g. two watchers on the same
+// terminal) share one wire subscription. Only the first Subscribe and the last
+// Unsubscribe hit the wire, so one watcher stopping can't revoke the other's push.
+func TestSharedURIRefcount(t *testing.T) {
+	low := &fakeLow{supportsSub: true}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	const uri = "daintree://agent/shared/state"
+
+	_ = c.Subscribe(context.Background(), uri)
+	_ = c.Subscribe(context.Background(), uri)
+	if len(low.subscribed) != 1 {
+		t.Errorf("a shared URI must issue exactly one wire Subscribe, got %v", low.subscribed)
+	}
+
+	// First withdrawal: the other subscriber still needs it → no wire Unsubscribe.
+	_ = c.Unsubscribe(context.Background(), uri)
+	if len(low.unsubscribed) != 0 {
+		t.Errorf("first Unsubscribe must NOT hit the wire while a subscriber remains, got %v", low.unsubscribed)
+	}
+	// Last withdrawal: now it's safe to tear down.
+	_ = c.Unsubscribe(context.Background(), uri)
+	if len(low.unsubscribed) != 1 || low.unsubscribed[0] != uri {
+		t.Errorf("last Unsubscribe must issue the wire Unsubscribe, got %v", low.unsubscribed)
+	}
+}
+
+// TestResubscribeSkipsUnsubscribed: a URI dropped between the reconnect snapshot
+// and the resubscribe goroutine must NOT be resurrected on the fresh session.
+func TestResubscribeSkipsUnsubscribed(t *testing.T) {
+	low := &fakeLow{supportsSub: true}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	const uri = "daintree://agent/gone/state"
+	_ = c.Subscribe(context.Background(), uri)
+	_ = c.Unsubscribe(context.Background(), uri) // refcount → 0, forgotten
+
+	fresh := &fakeLow{}
+	c.resubscribe(fresh, []string{uri}) // stale snapshot still lists it
+	if len(fresh.subscribed) != 0 {
+		t.Errorf("resubscribe must skip a URI no longer wanted, got %v", fresh.subscribed)
 	}
 }

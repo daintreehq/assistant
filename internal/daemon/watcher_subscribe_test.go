@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -195,6 +196,63 @@ func TestReadStatusesExtractsAgentID(t *testing.T) {
 	}
 	if batch.ByID["t1"].AgentID != "agt-9" {
 		t.Errorf("agentId not parsed: %+v", batch.ByID["t1"])
+	}
+}
+
+func TestWatcher_SubscribeErrorRetriedNextTick(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{
+		"term-a": {agentID: "agt-1", agentState: "waiting", recentOutput: strptr("")},
+	})
+	mcp.supportsSub = true
+	mcp.subErr = errors.New("subscribe rejected")
+	rec := watcherWith("wch_e", []string{"term-a"})
+	store.watchers = []domain.WatcherRecord{rec}
+
+	// Tick 1: subscribe fails → not subscribed, cadence NOT widened.
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, workingModel()), rec)
+	st := persistedTerminalState(t, store, "wch_e", "term-a")
+	if st.Subscribed {
+		t.Fatal("a failed subscribe must leave Subscribed=false")
+	}
+	patch := store.watchPatches["wch_e"]
+	next, _ := patch["nextCheckAt"].(int64)
+	last, _ := patch["lastCheckedAt"].(int64)
+	if next-last != int64(rec.CadenceMs) {
+		t.Errorf("a watcher that failed to subscribe must keep the normal cadence %d, got %d", rec.CadenceMs, next-last)
+	}
+
+	// Tick 2: subscribe now succeeds; the persisted (Subscribed=false) state must let
+	// it retry rather than be permanently suppressed.
+	mcp.subErr = nil
+	rec2 := watcherWith("wch_e", []string{"term-a"},
+		withOptions(watcherOptions{PerTerminal: map[string]TerminalState{"term-a": st}}))
+	store.watchers = []domain.WatcherRecord{rec2}
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, workingModel()), rec2)
+	if subs := mcp.subscribeCalls(); len(subs) != 1 || subs[0] != "daintree://agent/agt-1/state" {
+		t.Fatalf("the next tick must retry the subscribe, got %v", subs)
+	}
+}
+
+func TestWatcher_MultiTargetNoWidenWhenOneUnsubscribed(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{
+		"term-a": {agentID: "agt-1", agentState: "waiting", recentOutput: strptr("")},
+		"term-b": {agentState: "waiting", recentOutput: strptr("")}, // no agentId → never subscribed
+	})
+	mcp.supportsSub = true
+	rec := watcherWith("wch_m", []string{"term-a", "term-b"})
+	store.watchers = []domain.WatcherRecord{rec}
+
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, workingModel()), rec)
+
+	patch := store.watchPatches["wch_m"]
+	next, _ := patch["nextCheckAt"].(int64)
+	last, _ := patch["lastCheckedAt"].(int64)
+	if got := next - last; got != int64(rec.CadenceMs) {
+		t.Errorf("an un-subscribable target must keep the watcher on the normal cadence %d, got %d", rec.CadenceMs, got)
 	}
 }
 

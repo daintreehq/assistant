@@ -118,11 +118,15 @@ type Client struct {
 	driftWarnings  []string
 	driftToolNames []string
 	serverInfo     *ServerInfo
-	// subs is the set of resource URIs this client intends to hold a subscription
-	// for. Guarded by mu. A subscription is SESSION-scoped (lost when the session is
-	// replaced), so applyConnected re-issues every URI in this set on each new
-	// session — the watcher therefore never has to re-subscribe across a reconnect.
-	subs map[string]struct{}
+	// subs reference-counts the resource URIs this client holds a subscription for,
+	// keyed URI→local-subscriber-count. Guarded by mu. The server holds ONE
+	// subscription per (session, URI), but two watchers can watch the same terminal,
+	// so only the first local subscriber issues the wire Subscribe and only the last
+	// withdrawal issues the wire Unsubscribe — otherwise one watcher stopping would
+	// silently kill the other's push path. A subscription is SESSION-scoped (lost
+	// when the session is replaced), so applyConnected re-issues every live URI on
+	// each new session, sparing the watcher any cross-reconnect re-subscribe.
+	subs map[string]int
 }
 
 // closeLowLevel closes a detached low-level client off the hot path, swallowing
@@ -143,7 +147,7 @@ func New(cfg config.AppConfig, opts Options) *Client {
 		cfg:             cfg,
 		transportKind:   transportNone,
 		resourceUpdates: make(chan string, resourceUpdateBuffer),
-		subs:            map[string]struct{}{},
+		subs:            map[string]int{},
 	}
 	// Build the SDK client once, with the resource-updated handler wired in before
 	// any Connect. An injected override never connects through it, but constructing
@@ -339,10 +343,19 @@ func (c *Client) applyConnected(session *sdkmcp.ClientSession, kind string) {
 // resubscribe re-issues a snapshot of subscription URIs against a specific
 // (freshly-connected) low client. Best-effort: a failure on one URI is ignored;
 // the periodic reconcile tick is the backstop, and the next reconnect retries.
+// Each URI is re-checked against c.subs first — a concurrent Unsubscribe between
+// the applyConnected snapshot and now may have dropped it, and we must not
+// resurrect a subscription nothing wants anymore.
 func (c *Client) resubscribe(low LowLevelClient, uris []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCallTimeout)
 	defer cancel()
 	for _, u := range uris {
+		c.mu.Lock()
+		want := c.subs[u] > 0
+		c.mu.Unlock()
+		if !want {
+			continue
+		}
 		_ = low.Subscribe(ctx, u)
 	}
 }
@@ -630,23 +643,54 @@ func (c *Client) Subscribe(ctx context.Context, uri string) error {
 	if err != nil {
 		return err
 	}
-	// Record the intent BEFORE the call so a reconnect racing in re-issues this URI
-	// even if the call below fails or the session is replaced mid-flight.
+	// Reserve a refcount slot under the lock so exactly one caller observes the 0→1
+	// edge even under concurrent subscribers to the same URI. Only that first caller
+	// issues the wire Subscribe — the server tracks one subscription per (session,
+	// URI), so a second wire call is redundant and a later single Unsubscribe would
+	// otherwise revoke it for everyone.
 	c.mu.Lock()
 	if c.subs == nil {
-		c.subs = map[string]struct{}{}
+		c.subs = map[string]int{}
 	}
-	c.subs[uri] = struct{}{}
+	was := c.subs[uri]
+	c.subs[uri] = was + 1
 	c.mu.Unlock()
-	return low.Subscribe(ctx, uri)
+	if was > 0 {
+		return nil
+	}
+	if err := low.Subscribe(ctx, uri); err != nil {
+		// Roll the reservation back so a later retry re-issues the wire Subscribe.
+		c.mu.Lock()
+		if c.subs[uri] > 0 {
+			c.subs[uri]--
+			if c.subs[uri] == 0 {
+				delete(c.subs, uri)
+			}
+		}
+		c.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
-// Unsubscribe cancels a prior Subscribe and forgets the URI so a later reconnect
-// won't resurrect it. Best-effort, same non-degrading contract.
+// Unsubscribe drops one local subscriber's interest in a URI. Only the LAST
+// withdrawal (refcount → 0) issues the wire Unsubscribe and forgets the URI, so one
+// watcher stopping never tears down a subscription another watcher still relies on.
+// Best-effort, same non-degrading contract.
 func (c *Client) Unsubscribe(ctx context.Context, uri string) error {
 	c.mu.Lock()
-	delete(c.subs, uri)
+	remaining := 0
+	if c.subs[uri] > 0 {
+		c.subs[uri]--
+		remaining = c.subs[uri]
+		if remaining == 0 {
+			delete(c.subs, uri)
+		}
+	}
 	c.mu.Unlock()
+	if remaining > 0 {
+		return nil // another local subscriber still needs the wire subscription
+	}
 	low, _, err := c.ensure()
 	if err != nil {
 		return err
