@@ -152,6 +152,9 @@ func TestDropOrphanToolResults(t *testing.T) {
 	if len(res.RestoredMessages) != 2 {
 		t.Fatalf("restored %d want 2 (orphan tool result dropped)", len(res.RestoredMessages))
 	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1 (the orphan tool result)", res.DroppedRows)
+	}
 	for _, m := range res.RestoredMessages {
 		if m.Role == "tool" && m.ToolCallID == "orphan_9" {
 			t.Fatal("orphan tool result was not dropped")
@@ -174,8 +177,68 @@ func TestDropOrphanToolCallTail(t *testing.T) {
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("restored %d want 1 (incomplete tool-call tail cut)", len(res.RestoredMessages))
 	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1 (the cut assistant tail row)", res.DroppedRows)
+	}
 	if res.RestoredMessages[0].Role != "user" {
 		t.Fatalf("survivor role = %q want user", res.RestoredMessages[0].Role)
+	}
+}
+
+// TestRehydrateDroppedRowsAccumulatesAllKinds proves DroppedRows sums every drop
+// kind across the three passes: a malformed tool-call row (calls lost, +1), an
+// orphan tool result with no declaration (+1), and an incomplete trailing tool-call
+// exchange — the tail assistant declares two calls but only one is answered, so the
+// cut removes the assistant row plus its one answered (now partial) result (+2).
+// Total 4.
+func TestRehydrateDroppedRowsAccumulatesAllKinds(t *testing.T) {
+	// The tail assistant declares call_a AND call_b; only call_a is answered. The
+	// call_a result is declared (survives the orphan pass) but the whole exchange is
+	// incomplete, so the tail cut removes both the assistant row and that result.
+	tail := `[{"id":"call_a","type":"function","function":{"name":"fs.read","arguments":"{}"}},` +
+		`{"id":"call_b","type":"function","function":{"name":"fs.list","arguments":"{}"}}]`
+	bad := "{not json"
+	rows := []domain.ConversationMessageRecord{
+		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
+		// (a) malformed tool-call JSON: text kept, calls dropped → +1 (this row survives).
+		{Seq: 3, Role: "assistant", Content: "kept", ToolCallsJson: strp(bad)},
+		// (b) orphan tool result — its id is never declared → +1 in the orphan pass.
+		{Seq: 4, Role: "tool", Content: "{}", ToolCallID: strp("ghost")},
+		// (c) incomplete trailing exchange — declares call_a + call_b, only call_a
+		//     answered. The tail cut removes the assistant row + the call_a result → +2.
+		{Seq: 5, Role: "assistant", Content: "", ToolCallsJson: strp(tail)},
+		{Seq: 6, Role: "tool", Content: "{}", ToolCallID: strp("call_a")},
+	}
+	res, ok := RehydrateSession(rows)
+	if !ok {
+		t.Fatal("expected resume")
+	}
+	if res.DroppedRows != 4 {
+		t.Fatalf("DroppedRows = %d want 4 (1 malformed + 1 orphan + 2 tail-cut)", res.DroppedRows)
+	}
+	// Only the malformed-but-text-bearing assistant row survives.
+	if len(res.RestoredMessages) != 1 || res.RestoredMessages[0].StringContent != "kept" {
+		t.Fatalf("survivors = %+v want exactly the 'kept' assistant row", res.RestoredMessages)
+	}
+}
+
+// TestRehydrateCleanResumeNoDrops guards against false positives: a well-formed
+// history reports zero drops.
+func TestRehydrateCleanResumeNoDrops(t *testing.T) {
+	call := `[{"id":"call_1","type":"function","function":{"name":"fs.read","arguments":"{}"}}]`
+	rows := []domain.ConversationMessageRecord{
+		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
+		msgRow(3, "user", "hello"),
+		{Seq: 4, Role: "assistant", Content: "", ToolCallsJson: strp(call)},
+		{Seq: 5, Role: "tool", Content: "{}", ToolCallID: strp("call_1")},
+		msgRow(6, "assistant", "done"),
+	}
+	res, ok := RehydrateSession(rows)
+	if !ok {
+		t.Fatal("expected resume")
+	}
+	if res.DroppedRows != 0 {
+		t.Fatalf("DroppedRows = %d want 0 (clean history)", res.DroppedRows)
 	}
 }
 

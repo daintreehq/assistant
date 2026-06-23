@@ -211,6 +211,16 @@ func Create(opts CreateOptions) (*App, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	// Hard core-tool drift gate: agent.coreToolNames is a hand-maintained list
+	// offered to the model on EVERY turn. If a rename or removal drops one of those
+	// names from the registry it would boot clean and then silently vanish from the
+	// per-turn projection — the model starved of a core tool with no signal. Catch
+	// the drift loudly at construction, like AssertSafe.
+	if err := a.Registry.AssertRegistered("core tools", agent.CoreToolNames()); err != nil {
+		baseCancel()
+		_ = store.Close()
+		return nil, err
+	}
 
 	initial, err := skills.LoadSkills()
 	if err != nil {
@@ -252,11 +262,23 @@ func Create(opts CreateOptions) (*App, error) {
 	var restored []models.ChatMessage
 	initialSeq := 0
 	dirtyFreshStart := false
+	droppedRows := 0
 	if rows, lerr := store.ListMessages(sessionID); lerr == nil {
 		if res, ok := agent.RehydrateSession(rows); ok {
 			restored = res.RestoredMessages
 			initialSeq = res.InitialSeq
 			dirtyFreshStart = res.DirtyFreshStart
+			droppedRows = res.DroppedRows
+			// Rehydration silently elides corrupt/orphan rows to keep the resume valid.
+			// A non-zero count is observable evidence of upstream corruption: record it
+			// at boot (the session also emits one info event on the first resumed turn).
+			if droppedRows > 0 {
+				debuglog.LogDebug(
+					debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
+					"session.rehydrate.dropped",
+					map[string]any{"count": droppedRows, "sessionId": sessionID},
+				)
+			}
 		}
 	}
 
@@ -268,19 +290,20 @@ func Create(opts CreateOptions) (*App, error) {
 	)
 
 	a.Session = agent.NewSession(agent.SessionDeps{
-		Router:           a.Router,
-		Tools:            newToolRunner(a),
-		SkillSelector:    skillSelectorAdapter{router: a.Router},
-		SkillCatalog:     skillReg,
-		Store:            store,
-		MemoryStore:      store,
-		PromptContext:    a.PromptContext(),
-		SessionID:        sessionID,
-		RestoredMessages: restored,
-		InitialSeq:       initialSeq,
-		DirtyFreshStart:  dirtyFreshStart,
-		Events:           events,
-		RunRef:           a.runRef,
+		Router:               a.Router,
+		Tools:                newToolRunner(a),
+		SkillSelector:        skillSelectorAdapter{router: a.Router},
+		SkillCatalog:         skillReg,
+		Store:                store,
+		MemoryStore:          store,
+		PromptContext:        a.PromptContext(),
+		SessionID:            sessionID,
+		RestoredMessages:     restored,
+		InitialSeq:           initialSeq,
+		DirtyFreshStart:      dirtyFreshStart,
+		DroppedRehydrateRows: droppedRows,
+		Events:               events,
+		RunRef:               a.runRef,
 		// App-scoped parent for the detached post-compaction distill goroutine —
 		// cancelled in Shutdown (via baseCancel) so it never touches a closed
 		// Router/Store; DrainBackgroundWork joins it there before they close.

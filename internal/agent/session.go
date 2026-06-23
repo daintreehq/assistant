@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"sync"
@@ -119,6 +120,13 @@ type Session struct {
 	// applySkillBundleLocked) so the turn loop never races a /skills find slash
 	// command, which calls FindSkills off the turn goroutine.
 	toolProj toolProjCache
+
+	// pendingDropCount carries RehydrateResult.DroppedRows from NewSession to the
+	// first turn. Emitting the info event in NewSession would no-op (no live runID
+	// yet, and the AgentEvents hook is wired AFTER Create returns), so the note is
+	// deferred to runTurn — after runRef is stamped — and fired exactly once, then
+	// zeroed. Single-flight Send serializes turns, so no lock guards it.
+	pendingDropCount int
 }
 
 // toolProjCache holds the last OpenAITools projection plus the key that produced
@@ -145,11 +153,12 @@ func NewSession(deps SessionDeps) *Session {
 		deps.RunRef = &RunIDRef{}
 	}
 	s := &Session{
-		deps:      deps,
-		events:    deps.Events,
-		artifacts: NewArtifactStore(),
-		runRef:    deps.RunRef,
-		bgCtx:     deps.BackgroundCtx,
+		deps:             deps,
+		events:           deps.Events,
+		artifacts:        NewArtifactStore(),
+		runRef:           deps.RunRef,
+		bgCtx:            deps.BackgroundCtx,
+		pendingDropCount: deps.DroppedRehydrateRows,
 	}
 	// Detached distill work parents off the app-scoped context; fall back to
 	// Background when unwired (tests) so the goroutine still has a valid parent.
@@ -337,6 +346,17 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	// label the run by what prompted it. Emitted before AssistantStart and before
 	// the cancel check below, so even an immediately-aborted turn carries a label.
 	s.events.TurnPrompt(userInput)
+
+	// One-shot resume-corruption note: if rehydration silently elided corrupt or
+	// orphan rows, surface it ONCE, now that a live runID is stamped (the durable
+	// sink early-returns without one) and the UI proxy's hook is wired. Emitting in
+	// NewSession would no-op on both sinks. Single-flight serializes turns, so the
+	// read-and-zero needs no lock.
+	if s.pendingDropCount > 0 {
+		n := s.pendingDropCount
+		s.pendingDropCount = 0
+		s.events.Info(fmt.Sprintf("Session resumed: %d malformed or orphan row(s) dropped from saved history.", n))
+	}
 
 	// 1. Cancel BEFORE any model work leaves no orphan turn (issue #61 pull-back).
 	if ctx.Err() != nil {
@@ -1059,16 +1079,18 @@ func (s *Session) truncateLocked(keepN int) {
 	// below) never alias the backing array we are about to overwrite.
 	tail := make([]models.ChatMessage, len(working))
 	copy(tail, working)
-	tail = dropOrphanToolResults(tail)
-	tail = dropOrphanToolCallTail(tail)
+	// The drop counts are irrelevant on this lossy-truncation path (it intentionally
+	// sheds history without surfacing a corruption note); discard them.
+	tail, _ = dropOrphanToolResults(tail)
+	tail, _ = dropOrphanToolCallTail(tail)
 	// Shed from the head until under the hard ceiling, re-cleaning orphans after each
 	// drop so the tail stays a valid history. The controls are fixed, so only their
 	// contribution is constant; estimateMessagesTokens is summed fresh on the tail.
 	controlTokens := estimateMessagesTokens(s.messages[:domain.ControlMessageCount])
 	for len(tail) > 0 && controlTokens+estimateMessagesTokens(tail) >= domain.AutoCompactHardTruncationThreshold {
 		tail = tail[1:]
-		tail = dropOrphanToolResults(tail)
-		tail = dropOrphanToolCallTail(tail)
+		tail, _ = dropOrphanToolResults(tail)
+		tail, _ = dropOrphanToolCallTail(tail)
 	}
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))

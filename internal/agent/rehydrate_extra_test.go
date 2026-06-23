@@ -114,12 +114,39 @@ func TestRehydrateMalformedToolCallJSONKeepsText(t *testing.T) {
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("restored %d want 1", len(res.RestoredMessages))
 	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1 (the lost tool-call list)", res.DroppedRows)
+	}
 	m := res.RestoredMessages[0]
 	if m.Role != "assistant" || m.StringContent != "text" {
 		t.Fatalf("message mangled: %+v", m)
 	}
 	if len(m.ToolCalls) != 0 {
 		t.Fatal("malformed tool-call JSON should drop only the calls, keeping the text")
+	}
+}
+
+func TestRehydrateMalformedToolCallsTextlessAvoidsNullContent(t *testing.T) {
+	// A malformed tool-call row with EMPTY content must not resume as a null-content
+	// assistant with no tool_calls ({role:"assistant", content:null} is only valid
+	// alongside tool_calls). It must downgrade to an empty string instead.
+	bad := "{not json"
+	rows := append(controlRows(),
+		domain.ConversationMessageRecord{Seq: 3, Role: "assistant", Content: "", ToolCallsJson: &bad},
+	)
+	res, _ := RehydrateSession(rows)
+	if len(res.RestoredMessages) != 1 {
+		t.Fatalf("restored %d want 1", len(res.RestoredMessages))
+	}
+	m := res.RestoredMessages[0]
+	if m.ContentNull {
+		t.Fatal("a textless malformed-tool-call row must NOT resume with null content")
+	}
+	if len(m.ToolCalls) != 0 || m.StringContent != "" {
+		t.Fatalf("want empty-string content and no tool calls, got %+v", m)
+	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1", res.DroppedRows)
 	}
 }
 
@@ -136,6 +163,9 @@ func TestRehydrateTrimsPartialMultiToolBatch(t *testing.T) {
 	// The incomplete assistant turn AND its partial result are trimmed.
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("restored %d want 1 (whole partial batch trimmed)", len(res.RestoredMessages))
+	}
+	if res.DroppedRows != 2 {
+		t.Fatalf("DroppedRows = %d want 2 (assistant row + its partial result)", res.DroppedRows)
 	}
 	if res.RestoredMessages[0].StringContent != "do both" {
 		t.Fatalf("survivor = %q want 'do both'", res.RestoredMessages[0].StringContent)
@@ -156,11 +186,14 @@ func TestDropOrphanToolResultsIsForwardPass(t *testing.T) {
 		// A properly-ordered result AFTER its declaration is kept.
 		{Role: "tool", ToolCallID: "call_x", StringContent: "answered"},
 	}
-	out := dropOrphanToolResults(msgs)
+	out, dropped := dropOrphanToolResults(msgs)
 
 	// The premature tool result is dropped; the assistant + the in-order result stay.
 	if len(out) != 2 {
 		t.Fatalf("kept %d messages want 2 (premature orphan dropped)", len(out))
+	}
+	if dropped != 1 {
+		t.Fatalf("dropped = %d want 1 (the premature orphan)", dropped)
 	}
 	if out[0].Role != "assistant" {
 		t.Fatalf("out[0] = %q want assistant (premature tool result must be gone)", out[0].Role)
