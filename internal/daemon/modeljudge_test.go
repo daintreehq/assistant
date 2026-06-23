@@ -187,6 +187,29 @@ func TestWatcher_JudgeAlwaysUsesSmallTier(t *testing.T) {
 	}
 }
 
+// The two issue concerns are independent: a working agent must skip the
+// CLASSIFIER (concern 1) while alertWhen/stopWhen JUDGES still run (a judge is a
+// user-declared condition, not a tier-burning auto-classification).
+func TestWatcher_WorkingSkipsClassifierButRunsJudge(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{"term-a": {agentState: "working", recentOutput: strptr("Running migration...")}})
+	rec := watcherWith("wch_wj", []string{"term-a"}, withAlert(`{"modelJudge":"`+judgeQ+`"}`))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	model := &tierRecorder{judgeFn: func(_, _ string) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9, Reason: "still"}
+	}}
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+
+	if _, cCalled := model.classifyTier(); cCalled {
+		t.Error("a working agent must NOT consult the classifier")
+	}
+	if _, jCalled := model.judgeTier(); !jCalled {
+		t.Error("alertWhen modelJudge must still consult the judge for a working agent")
+	}
+}
+
 // --- rate limit --------------------------------------------------------------
 
 func TestWatcher_RateLimitPublishesOnceAndBacksOff(t *testing.T) {
