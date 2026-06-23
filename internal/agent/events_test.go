@@ -109,6 +109,28 @@ func TestRunEventSinkTypedSeqOrderedRows(t *testing.T) {
 	}
 }
 
+func TestRunEventSinkTurnPromptIsFirstRow(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.TurnPrompt("explain the build failure")
+	sink.AssistantStart()
+
+	rows := store.forRun("run_1")
+	if got := typesOf(rows); !equalStrings(got, []string{"turn:prompt", "assistant:start"}) {
+		t.Fatalf("types = %v want [turn:prompt assistant:start]", got)
+	}
+	if rows[0].Seq != 0 {
+		t.Fatalf("turn:prompt must be seq 0, got %d", rows[0].Seq)
+	}
+	var p map[string]any
+	mustUnmarshal(t, *rows[0].Payload, &p)
+	if p["prompt"] != "explain the build failure" {
+		t.Fatalf("turn:prompt payload = %v", p)
+	}
+}
+
 func TestRunEventSinkDropsFinalRoundTokens(t *testing.T) {
 	store := &fakeRunEventStore{}
 	ref := &RunIDRef{}
@@ -243,6 +265,7 @@ func (throwingSink) ToolResult(ToolResultEvent)  { panic("boom") }
 func (throwingSink) Error(string)                { panic("boom") }
 func (throwingSink) Info(string)                 { panic("boom") }
 func (throwingSink) Usage(UsageEvent)            { panic("boom") }
+func (throwingSink) TurnPrompt(string)           { panic("boom") }
 
 // recordingSink captures a flat string log of received events.
 type recordingSink struct {
@@ -250,6 +273,7 @@ type recordingSink struct {
 	log []string
 }
 
+func (r *recordingSink) TurnPrompt(p string)      { r.log = append(r.log, "prompt:"+p) }
 func (r *recordingSink) AssistantStart()          { r.log = append(r.log, "start") }
 func (r *recordingSink) AssistantEnd(c, _ string) { r.log = append(r.log, "end:"+c) }
 func (r *recordingSink) Info(m string)            { r.log = append(r.log, "info:"+m) }
@@ -258,10 +282,11 @@ func TestMultiSinkDeliversWhenOneThrows(t *testing.T) {
 	healthy := &recordingSink{}
 	// Throwing sink FIRST so its panic can't short-circuit the healthy one.
 	fan := NewMultiSink(throwingSink{}, healthy)
+	fan.TurnPrompt("p")
 	fan.AssistantStart()
 	fan.AssistantEnd("hi", "")
 	fan.Info("note")
-	want := []string{"start", "end:hi", "info:note"}
+	want := []string{"prompt:p", "start", "end:hi", "info:note"}
 	if !equalStrings(healthy.log, want) {
 		t.Fatalf("healthy log = %v want %v", healthy.log, want)
 	}

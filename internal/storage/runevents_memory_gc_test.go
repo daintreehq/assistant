@@ -81,6 +81,37 @@ func TestListRunsAggregateAndLimit(t *testing.T) {
 	}
 }
 
+func TestListRunsLabelsFromTurnPrompt(t *testing.T) {
+	s := openTest(t, 1)
+	// run WITH a turn:prompt → labeled by the prompt (verbatim, untruncated in storage).
+	s.InsertRunEvent(domain.RunEventRecord{RunID: "run_lbl", Seq: 0, Ts: 1000, Type: "turn:prompt", Payload: strPtr(`{"prompt":"which worktrees are ready?"}`)})
+	s.InsertRunEvent(domain.RunEventRecord{RunID: "run_lbl", Seq: 1, Ts: 1100, Type: "assistant:start"})
+	// run with NO turn:prompt → empty label.
+	s.InsertRunEvent(domain.RunEventRecord{RunID: "run_nolbl", Seq: 0, Ts: 900, Type: "assistant:start"})
+	// run whose FIRST turn:prompt (lowest seq) wins over a later one.
+	s.InsertRunEvent(domain.RunEventRecord{RunID: "run_two", Seq: 1, Ts: 800, Type: "turn:prompt", Payload: strPtr(`{"prompt":"second"}`)})
+	s.InsertRunEvent(domain.RunEventRecord{RunID: "run_two", Seq: 0, Ts: 700, Type: "turn:prompt", Payload: strPtr(`{"prompt":"first"}`)})
+
+	runs, _ := s.ListRuns(0)
+	byID := map[string]domain.RunSummaryRecord{}
+	for _, r := range runs {
+		byID[r.RunID] = r
+	}
+	if byID["run_lbl"].Label != "which worktrees are ready?" {
+		t.Fatalf("labeled run wrong: %q", byID["run_lbl"].Label)
+	}
+	if byID["run_nolbl"].Label != "" {
+		t.Fatalf("unlabeled run should have empty label, got %q", byID["run_nolbl"].Label)
+	}
+	if byID["run_two"].Label != "first" {
+		t.Fatalf("first turn:prompt (lowest seq) should win, got %q", byID["run_two"].Label)
+	}
+	// turn:prompt counts as an event in the aggregate.
+	if byID["run_lbl"].EventCount != 2 {
+		t.Fatalf("event count should include turn:prompt, got %d", byID["run_lbl"].EventCount)
+	}
+}
+
 func TestListAuditByRunIDScopedAndOrdered(t *testing.T) {
 	s := openTest(t, 1)
 	s.InsertAudit(domain.AuditRecord{Ts: 200, Actor: domain.ActorMain, ToolName: "fs.read", ArgsJson: "{}", Outcome: "ok", DurationMs: 1, Summary: "b", RunID: strPtr("run_x")})

@@ -172,6 +172,10 @@ func (s *Sink) Info(message string) {
 // Usage is not part of the JSONL one-shot stream.
 func (s *Sink) Usage(agent.UsageEvent) {}
 
+// TurnPrompt is durable-log-only vocabulary (persisted for /explain); the JSONL
+// one-shot stream does not echo it.
+func (s *Sink) TurnPrompt(string) {}
+
 // Finish writes the terminal `result` envelope (idempotent) and returns the exit
 // code. After Finish no further line is emitted.
 func (s *Sink) Finish() int {

@@ -17,6 +17,7 @@ type orderSink struct {
 	log []string
 }
 
+func (s *orderSink) TurnPrompt(p string)         { s.log = append(s.log, "prompt:"+p) }
 func (s *orderSink) AssistantStart()             { s.log = append(s.log, "start") }
 func (s *orderSink) AssistantToken(t string)     { s.log = append(s.log, "tok:"+t) }
 func (s *orderSink) AssistantEnd(c, _ string)    { s.log = append(s.log, "end:"+c) }
@@ -56,10 +57,40 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	if out != "Hello" {
 		t.Fatalf("reply = %q", out)
 	}
-	want := []string{"start", "tok:Hel", "tok:lo", "end:Hello"}
+	// turn:prompt is emitted FIRST (before the assistant round) so /explain can
+	// label the run by what prompted it.
+	want := []string{"prompt:hi", "start", "tok:Hel", "tok:lo", "end:Hello"}
 	if !equalStrings(sink.log, want) {
 		t.Fatalf("event log = %v want %v", sink.log, want)
 	}
+}
+
+func TestEmitTurnPromptPrecedesAssistantStart(t *testing.T) {
+	sink := &orderSink{}
+	r := &fakeRouter{
+		results: []models.ChatResult{{Content: "ok"}},
+		streams: [][]string{{"ok"}},
+	}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "label me", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pi, si := indexOfLog(sink.log, "prompt:label me"), indexOfLog(sink.log, "start")
+	if pi < 0 || si < 0 || pi >= si {
+		t.Fatalf("turn:prompt must precede assistant:start: %v", sink.log)
+	}
+}
+
+// indexOfLog returns the first index of want in log, or -1.
+func indexOfLog(log []string, want string) int {
+	for i, e := range log {
+		if e == want {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestEmitTranslatesWireNameInToolEvents(t *testing.T) {

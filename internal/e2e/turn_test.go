@@ -68,6 +68,7 @@ func (r *recordingSink) ToolResult(ev agent.ToolResultEvent) {
 func (r *recordingSink) Error(m string)         { r.log("error:" + m) }
 func (r *recordingSink) Info(string)            {}
 func (r *recordingSink) Usage(agent.UsageEvent) { r.log("usage") }
+func (r *recordingSink) TurnPrompt(string)      {}
 
 func (r *recordingSink) snapshot() []string {
 	r.mu.Lock()

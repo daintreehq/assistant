@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -173,14 +174,19 @@ func (s *Store) ListRunEvents(runID string) ([]domain.RunEventRecord, error) {
 }
 
 // ListRuns aggregates run_events into per-run summaries (MIN/MAX ts, count),
-// newest-last-activity first. There is no run table.
+// newest-last-activity first. Each summary's Label is the run's originating prompt,
+// pulled via a correlated subquery over its first turn:prompt event (NULL when the
+// run has none). There is no run table.
 func (s *Store) ListRuns(limit int) ([]domain.RunSummaryRecord, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.Query(fmt.Sprintf(`
-		SELECT runId, MIN(ts) AS firstTs, MAX(ts) AS lastTs, COUNT(*) AS eventCount
-		  FROM run_events
+		SELECT runId, MIN(ts) AS firstTs, MAX(ts) AS lastTs, COUNT(*) AS eventCount,
+		       (SELECT p.payload FROM run_events p
+		         WHERE p.runId = r.runId AND p.type = 'turn:prompt'
+		         ORDER BY p.seq ASC LIMIT 1) AS promptPayload
+		  FROM run_events r
 		 GROUP BY runId
 		 ORDER BY lastTs DESC
 		 LIMIT %d`, limit))
@@ -191,10 +197,29 @@ func (s *Store) ListRuns(limit int) ([]domain.RunSummaryRecord, error) {
 	var out []domain.RunSummaryRecord
 	for rows.Next() {
 		var r domain.RunSummaryRecord
-		if err := rows.Scan(&r.RunID, &r.FirstTs, &r.LastTs, &r.EventCount); err != nil {
+		var promptPayload sql.NullString
+		if err := rows.Scan(&r.RunID, &r.FirstTs, &r.LastTs, &r.EventCount, &promptPayload); err != nil {
 			return nil, err
 		}
+		r.Label = promptFromPayload(promptPayload)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// promptFromPayload extracts the "prompt" string from a turn:prompt event payload
+// ({"prompt":"…"}). Empty when the column is NULL/blank or unparseable —
+// truncation and whitespace normalization are the formatter's job, so storage
+// keeps the value verbatim.
+func promptFromPayload(payload sql.NullString) string {
+	if !payload.Valid || payload.String == "" {
+		return ""
+	}
+	var m struct {
+		Prompt string `json:"prompt"`
+	}
+	if json.Unmarshal([]byte(payload.String), &m) != nil {
+		return ""
+	}
+	return m.Prompt
 }
