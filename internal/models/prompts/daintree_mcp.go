@@ -81,7 +81,12 @@ Your local tools wrap Daintree:
   panel.focus -> terminal.focus; terminal.sendCommand,
   terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
   copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
-  same-named typed wrappers. Reach for the wrapper, not this.
+  same-named typed wrappers. Reach for the wrapper, not this. Some useful Daintree
+  tools have NO wrapper and are reachable only this way — e.g. worktree.compareDiff
+  (read-only: the files that differ between two worktrees' branches). The forge.open*
+  / worktree.open* actions are renderer/UI-only (they open a browser/editor) — they do
+  nothing useful headless, so don't call them. Use tool.search / daintree.listTools to
+  discover unwrapped tools before guessing a name.
 
 ## Playbook: spawn an agent and relay what it said
 This is the common "open an agent, ask it something, tell me the answer" flow.
