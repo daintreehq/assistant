@@ -144,6 +144,11 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale agent launches: %w", err)
 	}
+	// Fresh-start inbox: resolve EVERY open attention event from prior sessions so a
+	// new run begins with an empty inbox (the !N badge at 0) — supervision and its
+	// notifications never carry over. Best-effort; events published THIS session
+	// (after Open returns) are unaffected.
+	_, _ = s.ResolveAllOpenEvents(now)
 	// Best-effort housekeeping: a sweep failure must NEVER abort construction.
 	// Swallow the error here.
 	_ = s.GCRetentionSweep(now)

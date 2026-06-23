@@ -501,6 +501,11 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	m.activeTurn = ""
 	m.queuedInput = nil
 	m.pendingWake = nil
+	// The handler already resolved every open inbox event (ClearInbox), so drop the
+	// live attention badge to 0 immediately rather than waiting for the next dashboard
+	// tick to recompute it from the now-empty inbox.
+	m.attentionN = 0
+	m.dashboard.Inbox = nil
 	m.clearNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
 	// The "conversation cleared" confirmation card.

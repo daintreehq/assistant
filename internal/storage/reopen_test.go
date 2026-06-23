@@ -154,11 +154,12 @@ func TestReopenCancelsPRStateWatcher(t *testing.T) {
 }
 
 // TestReopenResolvesWatcherInboxEvents — open watcher-sourced events (terminal /
-// worktree / pr) are resolved on reopen so they don't resurface, while non-watcher
-// sources persist and an ALREADY-resolved watcher event keeps its original
-// resolvedAt (the `resolvedAt IS NULL` guard never re-stamps). Open
-// watcher-sourced inbox events are resolved on reopen, sparing other sources.
-func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
+// TestReopenResolvesAllInboxEvents — a fresh launch starts with a COMPLETELY empty
+// inbox: every open event from a prior session (watcher, worktree, pr, timer, AND
+// system) is resolved on reopen so nothing resurfaces (the !N badge starts at 0).
+// An ALREADY-resolved event keeps its original resolvedAt (the `resolvedAt IS NULL`
+// guard never re-stamps).
+func TestReopenResolvesAllInboxEvents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(5000)
 	first := openFile(t, path, now)
@@ -177,7 +178,7 @@ func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
 	pub(domain.SourcePRWatcher, domain.SeverityAttention, "PR #7 merged", "pr_watcher:wch_old:state_change")
 	pub(domain.SourceTimer, domain.SeverityInfo, "timer fired", "")
 	pub(domain.SourceSystem, domain.SeverityInfo, "system note", "")
-	// An already-resolved watcher event: its resolvedAt must survive untouched.
+	// An already-resolved event: its resolvedAt must survive untouched.
 	resolved := pub(domain.SourceTerminalWatcher, domain.SeverityDone, "earlier alert", "earlier")
 	if _, err := first.ResolveEvent(resolved.ID); err != nil {
 		t.Fatal(err)
@@ -190,45 +191,30 @@ func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
 	s := openFile(t, path, now2)
 	defer s.Close()
 
-	open, _ := s.ListEvents(domain.QueueDigestOptions{})
-	for _, e := range open {
-		if e.Source == domain.SourceTerminalWatcher || e.Source == domain.SourceWorktreeWatcher || e.Source == domain.SourcePRWatcher {
-			t.Fatalf("watcher event %q should be resolved", e.Title)
-		}
-	}
-	var sawTimer, sawSystem bool
-	for _, e := range open {
-		if e.Source == domain.SourceTimer {
-			sawTimer = true
-		}
-		if e.Source == domain.SourceSystem {
-			sawSystem = true
-		}
-	}
-	if !sawTimer || !sawSystem {
-		t.Fatalf("timer + system events must persist (timer=%v system=%v)", sawTimer, sawSystem)
+	// Fresh start: NO open events of ANY source survive the reopen.
+	if open, _ := s.ListEvents(domain.QueueDigestOptions{}); len(open) != 0 {
+		t.Fatalf("a fresh launch must have an empty inbox, got %d open event(s): %v", len(open), open)
 	}
 
-	// The three open watcher events are resolved (not deleted) — visible with
-	// IncludeResolved and stamped, EXCEPT the already-resolved one keeps its stamp.
+	// All five freshly-published events are resolved (not deleted) — still visible
+	// with IncludeResolved and stamped — EXCEPT the already-resolved one keeps its
+	// original stamp.
 	all, _ := s.ListEvents(domain.QueueDigestOptions{IncludeResolved: true})
 	sweptCount := 0
 	for _, e := range all {
-		isWatcher := e.Source == domain.SourceTerminalWatcher || e.Source == domain.SourceWorktreeWatcher || e.Source == domain.SourcePRWatcher
-		if isWatcher && e.Title != "earlier alert" {
-			sweptCount++
-			if e.ResolvedAt == nil {
-				t.Fatalf("swept watcher event %q must be stamped resolved", e.Title)
-			}
-		}
 		if e.Title == "earlier alert" {
 			if e.ResolvedAt == nil || origResolvedAt == nil || *e.ResolvedAt != *origResolvedAt {
 				t.Fatalf("already-resolved event must keep original resolvedAt %v, got %v", origResolvedAt, e.ResolvedAt)
 			}
+			continue
+		}
+		sweptCount++
+		if e.ResolvedAt == nil || *e.ResolvedAt != now2 {
+			t.Fatalf("swept event %q must be stamped resolved at %d, got %v", e.Title, now2, e.ResolvedAt)
 		}
 	}
-	if sweptCount != 3 {
-		t.Fatalf("want 3 swept watcher events, got %d", sweptCount)
+	if sweptCount != 5 {
+		t.Fatalf("want 5 swept events (all sources), got %d", sweptCount)
 	}
 }
 
@@ -286,6 +272,41 @@ func TestCancelLiveWatchersClearsMidSession(t *testing.T) {
 		if e.Source == domain.SourceTerminalWatcher {
 			t.Fatalf("watcher event %q should be resolved after clear", e.Title)
 		}
+	}
+}
+
+// TestResolveAllOpenEvents — the /clear inbox wipe primitive. Every open event of
+// any source resolves, the call is idempotent, and it returns the count.
+func TestResolveAllOpenEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	now := int64(8000)
+	s := openFile(t, path, now)
+	defer s.Close()
+
+	mk := func(src domain.EventSource, title, dedupe string) {
+		if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+			Source: src, Severity: domain.SeverityAttention, Title: title, Summary: "s", DedupeKey: dedupe,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk(domain.SourceTerminalWatcher, "agent waiting", "watcher:w:t")
+	mk(domain.SourceSystem, "system note", "sys")
+	mk(domain.SourceTimer, "timer fired", "tmr")
+
+	n, err := s.ResolveAllOpenEvents(now + 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("want 3 resolved, got %d", n)
+	}
+	if open, _ := s.ListEvents(domain.QueueDigestOptions{}); len(open) != 0 {
+		t.Fatalf("inbox must be empty after ResolveAllOpenEvents, got %d", len(open))
+	}
+	// Idempotent: a second call resolves nothing.
+	if n2, _ := s.ResolveAllOpenEvents(now + 2); n2 != 0 {
+		t.Fatalf("second call should resolve 0, got %d", n2)
 	}
 }
 

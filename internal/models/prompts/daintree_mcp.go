@@ -99,9 +99,12 @@ Your local tools wrap Daintree:
 This is the common "open an agent, ask it something, tell me the answer" flow.
 Run it like this — do NOT hand-poll the terminal in a loop:
 1. Spawn with agentTask.spawnForEdits (mode "explore" for a read-only question,
-   "edit" for changes), ALWAYS with watcher.create: true. The watcher is what
-   reads the agent for you. Give a clear watcher.goal ("...then surface the
-   agent's answer").
+   "edit" for changes), ALWAYS attaching a watcher. The watcher is a NESTED
+   object argument, never a flattened/dotted key: pass
+   watcher: {"create": true, "goal": "...then surface the agent's answer"} —
+   NOT a top-level "watcher.create" field (the strict decoder rejects unknown
+   fields, so a dotted or flattened key fails validation). The watcher is what
+   reads the agent for you; give its goal a clear "...then surface the answer".
 2. Then STOP and end your turn. The watcher supervises the agent in the
    background and publishes to the attention queue when it settles — you do not
    need to wait inside the turn. For an "explore" agent, reaching agentState

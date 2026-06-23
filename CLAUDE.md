@@ -190,6 +190,44 @@ and returns the path so the caller can print `logging to <file>`. The cockpit sh
 `◌ LOG` badge + the path when active. The logger is a no-op when disabled and never
 throws. Tests pin `DAINTREE_ASSISTANT_DEBUG_LOG=0` / pass an explicit `logDir`.
 
+### Reading logs to improve the system (the core dev loop)
+
+The session logs in `~/.daintree/logs/<date>-<sessionId>.log` are the **ground truth**
+for how the model and tools actually behaved — not how we assume they behave. A
+recurring, first-class development activity here is: the user hands you a real session
+log (or a complaint about a session), you read it to find where the model misjudged,
+misused a tool, or got confused, and you fix the **system** so the same mistake can't
+recur. Treat every "the assistant did X wrong" report as a log-archaeology task, then a
+prompt/schema/tool fix — not a one-off patch.
+
+How to read a log fast (it is structured text — grep it, don't eyeball megabytes):
+- `tool.call … ok=false` / `outcome=error` — every rejected or failed tool call, with
+  the offending `args:` block and the `error:` envelope (code + message) right under it.
+  This is the highest-signal entry point: it shows the EXACT arguments the model emitted.
+- `model.request` / `model.response` — the full prompt sent and the assistant's reply
+  (including `toolCalls` with raw `arguments` JSON). Use these to see what the model was
+  *told* vs. what it *did*.
+- `watcher.created` / `spawn.launched` / `watcher.*` — the watcher/agent lifecycle.
+
+The fix philosophy — **fix the guidance, not just the symptom.** When the model misuses
+a tool, the root cause is almost always ambiguous or misleading instruction, NOT a dumb
+model. The model can only act on what the base prompt (`internal/models/prompts/`), the
+skills (`internal/skills/files/*.md`), and the tool `Description`/`Schema` told it.
+So a model mistake is usually a *documentation* bug in one of those three surfaces — and
+the durable fix updates them in lockstep so the model can't repeat it. Prefer making the
+correct shape impossible to get wrong (show literal argument shapes, not prose
+abstractions) over adding lenient parsing.
+
+Worked example (2026-06-23): the model called `agentTask.spawnForEdits` with a flattened
+key `"watcher<arg_key>create": true` and the strict decoder rejected it
+(`json: unknown field`). Root cause: the prompt + skill described the arg in prose as the
+dotted path `watcher.create: true`, but the schema is a **nested object**
+`watcher: {create, goal, cadenceMs}`. The model encoded the dotted prose literally. Fix:
+the playbook and skill now show `watcher: {"create": true, "goal": "..."}` explicitly and
+warn against a dotted/flattened key — no code change, a prose fix at the source of the
+confusion. (Editing the base prompt is free here: it just cache-misses on the changed
+tokens, never goes stale — see the prompt-cache invariant above.)
+
 ## Key environment variables
 
 `FIREWORKS_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /

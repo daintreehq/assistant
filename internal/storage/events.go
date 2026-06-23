@@ -251,6 +251,24 @@ func (s *Store) ResolveEvent(id string) (bool, error) {
 	return n > 0, nil
 }
 
+// ResolveAllOpenEvents resolves EVERY currently-open event (resolvedAt IS NULL),
+// stamping `now`. This is the clean-slate inbox wipe: on session open and on /clear,
+// every prior attention item is cleared so a run starts with an empty inbox (the !N
+// badge at 0). Idempotent — an already-resolved event keeps its original stamp.
+// Events published THIS session after the call are unaffected. Returns the count
+// resolved.
+func (s *Store) ResolveAllOpenEvents(now int64) (int, error) {
+	res, err := s.db.Exec("UPDATE events SET resolvedAt = ? WHERE resolvedAt IS NULL", now)
+	if err != nil {
+		return 0, fmt.Errorf("resolve all open events: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("resolve all open events rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // ---- small JSON marshal helpers for the store-owned columns ----
 
 func marshalPtr(t *domain.EventTarget) any {

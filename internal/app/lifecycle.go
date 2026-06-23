@@ -92,6 +92,13 @@ func (a *App) ClearWatchers() (int, error) {
 	return len(titles), err
 }
 
+// ClearInbox resolves every open attention event for a clean-slate inbox (the !N
+// badge → 0). Used by /clear alongside ClearWatchers; the session-boundary open does
+// the same on the next launch. Returns how many events were resolved. Best-effort.
+func (a *App) ClearInbox() (int, error) {
+	return a.Store.ResolveAllOpenEvents(domain.NowMS())
+}
+
 // daemonCtxFor builds a per-actor daemon.CheckContext. The
 // non-interactive actor reaches read-only MCP + the small-model classifier/judge.
 func (a *App) daemonCtxFor(ctx context.Context, actor domain.ToolActor, actorID string) *daemon.CheckContext {
