@@ -105,12 +105,18 @@ type Tool struct {
 	// Consequence is short human Y/N prose for the approval sheet (optional).
 	Consequence string
 	// Schema is the raw JSON Schema object emitted as OpenAI `parameters`.
-	// Stored as json.RawMessage; the registry unmarshals it for projection.
+	// Stored as json.RawMessage; the registry canonicalizes it at registration.
 	Schema json.RawMessage
 	// Decode optionally validates/coerces args (replaces Zod). May be nil.
 	Decode DecodeFunc
 	// Handle is the implementation.
 	Handle Handler
+
+	// projectionParams is the canonical compact JSON the projection emits as the
+	// tool's `parameters`, computed ONCE from Schema at Register (the cold path) so
+	// OpenAITools never re-unmarshals the schema on the hot projection path (rebuilt
+	// up to MaxToolIterations× per turn). Populated by Register; never set by callers.
+	projectionParams json.RawMessage
 }
 
 // ToolContext is everything a handler can reach. Built once at startup; the

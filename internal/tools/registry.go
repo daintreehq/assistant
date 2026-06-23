@@ -39,11 +39,37 @@ func NewRegistry() *Registry {
 	}
 }
 
+// noArgsParams is the canonical compact params object emitted for a tool with an
+// empty/nil Schema — a permissive empty object so projection never fails on a
+// no-arg tool. It is the byte-for-byte output of json.Marshal'ing
+// map{"type":"object","properties":{}} (keys sort: "properties" < "type"),
+// matching the value the projection previously built inline per call.
+var noArgsParams = json.RawMessage(`{"properties":{},"type":"object"}`)
+
 // Register inserts a tool. Returns an error (fail-fast) on a duplicate internal
-// name — registration happens once at startup, so a duplicate is a wiring bug.
+// name or a malformed JSON Schema — registration happens once at startup, so
+// either is a wiring bug.
 func (r *Registry) Register(t *Tool) error {
 	if _, exists := r.tools[t.Name]; exists {
 		return fmt.Errorf("Duplicate tool registration: %s", t.Name)
+	}
+	// Canonicalize the schema ONCE here (the cold path) into the exact compact bytes
+	// the projection emits, so OpenAITools never re-unmarshals it on the hot path
+	// (rebuilt up to MaxToolIterations× per turn). Unmarshal→marshal yields the same
+	// sorted-key compact form the per-call json.Marshal produced before, keeping the
+	// wire bytes (and the prompt cache) byte-stable. A bad schema fails fast here.
+	if len(t.Schema) > 0 {
+		var v any
+		if err := json.Unmarshal(t.Schema, &v); err != nil {
+			return fmt.Errorf("tool '%s' has invalid JSON Schema: %w", t.Name, err)
+		}
+		canon, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("tool '%s' schema re-encode failed: %w", t.Name, err)
+		}
+		t.projectionParams = canon
+	} else {
+		t.projectionParams = noArgsParams
 	}
 	r.tools[t.Name] = t
 	// Track registration order so List/OpenAITools project deterministically across
@@ -89,18 +115,20 @@ func (r *Registry) AssertSafe() error {
 	return safety.AssertNoFileEditTools(names)
 }
 
-// ChatTool is the OpenAI function-spec projection. Parameters is the raw JSON
-// Schema object.
+// ChatTool is the OpenAI function-spec projection. Parameters is the canonical
+// raw JSON Schema object (pre-decoded at registration).
 type ChatTool struct {
 	Type     string           `json:"type"` // always "function"
 	Function ChatToolFunction `json:"function"`
 }
 
-// ChatToolFunction is the inner function spec of a ChatTool.
+// ChatToolFunction is the inner function spec of a ChatTool. Parameters carries
+// the canonical schema bytes verbatim (json.RawMessage) so the adapter can forward
+// them to the model spec without a re-marshal round-trip.
 type ChatToolFunction struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Parameters  any    `json:"parameters"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 // OpenAITools projects the registry to OpenAI function specs and REBUILDS both
@@ -152,24 +180,13 @@ func (r *Registry) OpenAITools(filterNames []string) ([]ChatTool, error) {
 		wireToInternal[wire] = name
 		internalToWire[name] = wire
 
-		// Decode the raw schema into a generic value for emission; an empty/nil
-		// schema becomes a permissive empty object so projection never fails on a
-		// no-arg tool.
-		var params any
-		if len(t.Schema) > 0 {
-			if err := json.Unmarshal(t.Schema, &params); err != nil {
-				return nil, fmt.Errorf("tool '%s' has invalid JSON Schema: %w", name, err)
-			}
-		} else {
-			params = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
-
+		// Emit the canonical params pre-decoded at Register — no per-call unmarshal.
 		out = append(out, ChatTool{
 			Type: "function",
 			Function: ChatToolFunction{
 				Name:        wire,
 				Description: t.Description,
-				Parameters:  params,
+				Parameters:  t.projectionParams,
 			},
 		})
 	}

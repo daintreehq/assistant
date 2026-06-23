@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -109,6 +110,27 @@ type Session struct {
 	// context.Background() when unset). Cancelled on App.Shutdown so a distill call
 	// never outlives the closed Router/Store. Immutable after NewSession.
 	bgCtx context.Context
+
+	// toolProj memoizes the OpenAITools projection across the (up to 12) iterations
+	// of a turn AND across turns. The projection is pure work keyed by the offered
+	// toolset (allowedNames + the read-only flag); it only changes when skill.find/
+	// skill.load mutates the active-skill set, which invalidates it in
+	// applySkillBundleLocked. Touched only on the turn goroutine (the loop reads it
+	// lock-free, exactly as buildToolFilter already reads activeSkills) — SetSkills,
+	// the one cross-goroutine mutator, rejects mid-turn.
+	toolProj toolProjCache
+}
+
+// toolProjCache holds the last OpenAITools projection plus the key that produced
+// it. unconstrained tracks the nil-filter (full registry) identity separately
+// because slices.Equal treats nil and []string{} as equal, but nil means "all
+// tools" while a narrowed set never does.
+type toolProjCache struct {
+	valid         bool
+	unconstrained bool              // allowedNames was nil (the full registry)
+	readOnly      bool              // the read-only flag that produced tools
+	allowedNames  []string          // the filter that produced tools (cache key)
+	tools         []models.ChatTool // the cached projection
 }
 
 // NewSession builds a Session: the skill catalog + the three control messages.
@@ -380,8 +402,10 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 		turn.ActiveToolNames = allowedNames
 
-		// Project tools (a failure is a WAKE_FAILURE_PREFIX — keep verbatim).
-		tools, err := s.deps.Tools.OpenAITools(allowedNames)
+		// Project tools, reusing the cached projection when the offered toolset is
+		// unchanged since the last build (the common path — no skill mutation). A
+		// failure is a WAKE_FAILURE_PREFIX — keep verbatim.
+		tools, err := s.projectTools(allowedNames, opts.ReadOnly)
 		if err != nil {
 			msg := "Tool projection failed: " + err.Error()
 			s.events.Phase(domain.PhaseFailed)
@@ -743,6 +767,42 @@ func (s *Session) buildToolFilter() []string {
 		}
 	}
 	return out
+}
+
+// projectTools returns the OpenAITools projection for (allowedNames, readOnly),
+// reusing the cached projection when the offered toolset is unchanged since the
+// last build. allowedNames==nil is the full (unconstrained) registry — a distinct
+// cache identity from any narrowed set, tracked via the unconstrained flag because
+// slices.Equal treats nil and []string{} as equal. The cache is invalidated only
+// when skill.find/skill.load rewrites the active set (applySkillBundleLocked), so
+// across a turn's iterations (and across turns) with a stable skill set this skips
+// re-unmarshalling every tool schema and rebuilding the registry's wire-name maps.
+//
+// On a cache HIT the registry's wire-name alias maps are NOT rebuilt: the
+// OpenAITools call that populated the cache for THIS exact projection left them
+// correct, and nothing on the turn goroutine rewrites them between here and
+// runToolBatch's ResolveWireName lookups. (The pre-existing cross-session race on
+// those shared registry maps — a watcher turn projecting a different set — predates
+// this cache and is unchanged by it.)
+func (s *Session) projectTools(allowedNames []string, readOnly bool) ([]models.ChatTool, error) {
+	c := &s.toolProj
+	unconstrained := allowedNames == nil
+	if c.valid && c.readOnly == readOnly && c.unconstrained == unconstrained &&
+		(unconstrained || slices.Equal(c.allowedNames, allowedNames)) {
+		return c.tools, nil
+	}
+	tools, err := s.deps.Tools.OpenAITools(allowedNames)
+	if err != nil {
+		return nil, err
+	}
+	*c = toolProjCache{
+		valid:         true,
+		unconstrained: unconstrained,
+		readOnly:      readOnly,
+		allowedNames:  allowedNames,
+		tools:         tools,
+	}
+	return tools, nil
 }
 
 // resolveInternal maps a wire name back to its internal name, falling through to
@@ -1184,6 +1244,9 @@ func (s *Session) applySkillBundleLocked(sks []skills.Skill) {
 	if len(s.messages) > 2 {
 		s.messages[2] = models.TextMessage("system", prompts.BuildLoadedSkillsMessage(toPromptBundle(s.skillBundle)))
 	}
+	// The active-skill set drives buildToolFilter, so the memoized projection is now
+	// stale — drop it so the next iteration rebuilds against the new toolset.
+	s.toolProj = toolProjCache{}
 }
 
 // logSelection best-effort records what the QUERY resolved (newlyKnown, NOT the
