@@ -18,6 +18,7 @@ requiredTools:
   - daintree.status
   - worktree.list
   - worktree.getCurrent
+  - git.getProjectPulse
   - daintree.listTools
   - tool.search
   - daintree.call
