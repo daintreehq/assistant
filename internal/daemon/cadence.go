@@ -37,6 +37,15 @@ const PRWatcherCadenceMS int64 = 60_000
 // regardless of this window.
 const WatcherSpawnGraceMS int64 = 20_000
 
+// SubscribedReconcileMS is the widened re-check interval for a terminal watcher
+// whose targets are ALL subscribed to their agent-state resource and currently
+// quiet (waiting/idle — not actively producing output) with no text condition. A
+// push notification re-checks such a watcher immediately, so the periodic poll
+// only needs to reconcile a dropped/missed notification, not catch transitions —
+// dropping the ~20 calls/min of steady idle polling by ~10×. A working terminal,
+// a text-condition watcher, or any unsubscribed target keeps the normal cadence.
+const SubscribedReconcileMS int64 = 30_000
+
 // --- Watcher-engine private knobs --------------------------------------------
 
 // rateLimitCooldownMS is the minimum next-check delay once a terminal is seen

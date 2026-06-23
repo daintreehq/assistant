@@ -189,6 +189,13 @@ type TerminalState struct {
 	Seen            bool   `json:"seen,omitempty"`
 	ReadFailures    int    `json:"readFailures,omitempty"`
 	LastClassifyKey string `json:"lastClassifyKey,omitempty"`
+	// Subscribed records that this terminal's agent-state resource (ResourceURI,
+	// built from AgentID) is subscribed in the CURRENT session, so the check skips
+	// re-subscribing every tick. AgentID/ResourceURI are persisted so a reconnect
+	// can re-issue the (session-scoped) subscription without a fresh getStatus read.
+	AgentID     string `json:"agentId,omitempty"`
+	ResourceURI string `json:"resourceUri,omitempty"`
+	Subscribed  bool   `json:"subscribed,omitempty"`
 }
 
 // NextOutputState advances a terminal's output-tracking state. When the tail

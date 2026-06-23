@@ -43,6 +43,12 @@ const (
 // sets its own, shorter McpReadTimeoutMS, which still takes precedence.
 const defaultCallTimeout = 120 * time.Second
 
+// resourceUpdateBuffer bounds the resource-update wake-signal channel. The SDK
+// handler runs on the JSON-RPC receive loop and forwards a dirty URI with a
+// non-blocking send, dropping it when the buffer is full (the periodic reconcile
+// tick is the backstop). Sized generously so a burst of transitions is rarely lost.
+const resourceUpdateBuffer = 64
+
 // sseRewriteRe rewrites a trailing /mcp or /mcp/ to /sse for the SSE fallback. A
 // path that does not end in /mcp is left unchanged.
 var sseRewriteRe = regexp.MustCompile(`/mcp/?$`)
@@ -91,6 +97,16 @@ type Options struct {
 type Client struct {
 	cfg config.AppConfig
 
+	// sdkClient is the SDK client built ONCE in New with the resource-updated
+	// handler wired in. The handler must be present BEFORE Connect (it cannot be
+	// attached to an existing client) and is set on the *Client, so it survives
+	// reconnects — only the subscriptions themselves are re-issued per new session.
+	// Immutable after New, so it needs no lock. nil only for an injected test client.
+	sdkClient *sdkmcp.Client
+	// resourceUpdates is the buffered wake-signal channel the SDK handler forwards
+	// dirty resource URIs onto. Immutable after New (read by the daemon loop).
+	resourceUpdates chan string
+
 	mu             sync.Mutex
 	low            LowLevelClient // active low-level client (nil when disconnected)
 	generation     uint64         // bumped whenever c.low is installed/detached; identity tag for in-flight calls
@@ -102,6 +118,11 @@ type Client struct {
 	driftWarnings  []string
 	driftToolNames []string
 	serverInfo     *ServerInfo
+	// subs is the set of resource URIs this client intends to hold a subscription
+	// for. Guarded by mu. A subscription is SESSION-scoped (lost when the session is
+	// replaced), so applyConnected re-issues every URI in this set on each new
+	// session — the watcher therefore never has to re-subscribe across a reconnect.
+	subs map[string]struct{}
 }
 
 // closeLowLevel closes a detached low-level client off the hot path, swallowing
@@ -118,7 +139,19 @@ func closeLowLevel(low LowLevelClient) {
 // from construction with transport "injected" — but the cache is NOT warmed here
 // (Connect warms it once).
 func New(cfg config.AppConfig, opts Options) *Client {
-	c := &Client{cfg: cfg, transportKind: transportNone}
+	c := &Client{
+		cfg:             cfg,
+		transportKind:   transportNone,
+		resourceUpdates: make(chan string, resourceUpdateBuffer),
+		subs:            map[string]struct{}{},
+	}
+	// Build the SDK client once, with the resource-updated handler wired in before
+	// any Connect. An injected override never connects through it, but constructing
+	// it is pure (no I/O), so we always do — keeping the reconnect path uniform.
+	c.sdkClient = sdkmcp.NewClient(
+		&sdkmcp.Implementation{Name: clientName, Version: clientVersion},
+		&sdkmcp.ClientOptions{ResourceUpdatedHandler: c.onResourceUpdated},
+	)
 	if opts.ClientOverride != nil {
 		c.low = opts.ClientOverride
 		c.connected = true
@@ -126,6 +159,27 @@ func New(cfg config.AppConfig, opts Options) *Client {
 	}
 	return c
 }
+
+// onResourceUpdated is the SDK ResourceUpdatedHandler. It runs SYNCHRONOUSLY on the
+// JSON-RPC receive loop, so it must NEVER block — calling Subscribe/ReadResource
+// here would deadlock the session. It only forwards the dirty resource URI as a
+// wake signal via a non-blocking send; the daemon does the actual read off-loop.
+// The notification carries no payload (just "this URI changed"). A full buffer
+// drops the signal, which is safe: the periodic reconcile tick still catches up.
+func (c *Client) onResourceUpdated(_ context.Context, req *sdkmcp.ResourceUpdatedNotificationRequest) {
+	if req == nil || req.Params == nil {
+		return
+	}
+	select {
+	case c.resourceUpdates <- req.Params.URI:
+	default:
+	}
+}
+
+// ResourceUpdates exposes the wake-signal channel: each value is a resource URI the
+// server reported as changed for a subscription this client holds. The daemon loop
+// selects on it to trigger an immediate watcher re-check instead of waiting a tick.
+func (c *Client) ResourceUpdates() <-chan string { return c.resourceUpdates }
 
 // IsConnected reports the connection flag.
 func (c *Client) IsConnected() bool {
@@ -224,7 +278,7 @@ func (c *Client) Connect(ctx context.Context) Status {
 
 	// 5/6. Try Streamable HTTP first.
 	httpClient := bearerHTTPClient(token)
-	session, httpErr := connectStreamableHTTP(ctx, u.String(), httpClient)
+	session, httpErr := c.connectStreamableHTTP(ctx, u.String(), httpClient)
 	if httpErr == nil {
 		c.applyConnected(session, transportStreamableHTTP)
 		c.warmToolCache(ctx)
@@ -234,7 +288,7 @@ func (c *Client) Connect(ctx context.Context) Status {
 	// 7. SSE fallback. Rewrite a trailing /mcp(/) → /sse; other paths unchanged.
 	sseURL := *u
 	sseURL.Path = sseRewriteRe.ReplaceAllString(sseURL.Path, "/sse")
-	session, sseErr := connectSSE(ctx, sseURL.String(), httpClient)
+	session, sseErr := c.connectSSE(ctx, sseURL.String(), httpClient)
 	if sseErr == nil {
 		c.applyConnected(session, transportSSE)
 		c.warmToolCache(ctx)
@@ -264,9 +318,32 @@ func (c *Client) applyConnected(session *sdkmcp.ClientSession, kind string) {
 	c.connected = true
 	c.transportKind = kind
 	c.lastError = ""
+	// Snapshot the intended subscriptions to re-issue on this fresh session — a
+	// subscription does not survive a session swap, so without this a reconnect
+	// would silently stop delivering resource notifications.
+	var uris []string
+	for u := range c.subs {
+		uris = append(uris, u)
+	}
 	c.mu.Unlock()
 	if old != nil && old != LowLevelClient(fresh) {
 		closeLowLevel(old)
+	}
+	if len(uris) > 0 {
+		// Off the connect path: re-subscribing is a series of network calls and must
+		// not block Connect. Issue against the freshly-installed session directly.
+		go c.resubscribe(fresh, uris)
+	}
+}
+
+// resubscribe re-issues a snapshot of subscription URIs against a specific
+// (freshly-connected) low client. Best-effort: a failure on one URI is ignored;
+// the periodic reconcile tick is the backstop, and the next reconnect retries.
+func (c *Client) resubscribe(low LowLevelClient, uris []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCallTimeout)
+	defer cancel()
+	for _, u := range uris {
+		_ = low.Subscribe(ctx, u)
 	}
 }
 
@@ -530,6 +607,64 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// --- resource subscription ---
+
+// SupportsSubscribe reports whether the live server advertised
+// capabilities.resources.subscribe. False when disconnected — a caller must treat
+// it as "fall back to polling", never as a hard error.
+func (c *Client) SupportsSubscribe() bool {
+	low, _, err := c.ensure()
+	if err != nil {
+		return false
+	}
+	return low.SupportsSubscribe()
+}
+
+// Subscribe registers interest in a resource URI so the server pushes
+// resources/updated notifications (routed to ResourceUpdates). Single-shot: a
+// failure is returned, not retried, and does NOT degrade the connection — one URI
+// the server rejects must not tear down a healthy session (the next read degrades
+// it if the transport is truly dead). The caller bounds the call via ctx.
+func (c *Client) Subscribe(ctx context.Context, uri string) error {
+	low, _, err := c.ensure()
+	if err != nil {
+		return err
+	}
+	// Record the intent BEFORE the call so a reconnect racing in re-issues this URI
+	// even if the call below fails or the session is replaced mid-flight.
+	c.mu.Lock()
+	if c.subs == nil {
+		c.subs = map[string]struct{}{}
+	}
+	c.subs[uri] = struct{}{}
+	c.mu.Unlock()
+	return low.Subscribe(ctx, uri)
+}
+
+// Unsubscribe cancels a prior Subscribe and forgets the URI so a later reconnect
+// won't resurrect it. Best-effort, same non-degrading contract.
+func (c *Client) Unsubscribe(ctx context.Context, uri string) error {
+	c.mu.Lock()
+	delete(c.subs, uri)
+	c.mu.Unlock()
+	low, _, err := c.ensure()
+	if err != nil {
+		return err
+	}
+	return low.Unsubscribe(ctx, uri)
+}
+
+// ReadResource fetches a resource's current text contents. Read-only and idempotent
+// but kept single-shot (the caller bounds it via ctx) — a stale read is harmless,
+// so degrading/retrying here buys nothing the reconcile tick doesn't already cover.
+func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
+	low, _, err := c.ensure()
+	if err != nil {
+		return "", err
+	}
+	return low.ReadResource(ctx, uri)
+}
+
 // --- transport construction ---
 
 // bearerRoundTripper injects `Authorization: Bearer <token>` on every request.
@@ -551,16 +686,16 @@ func bearerHTTPClient(token string) *http.Client {
 	return &http.Client{Transport: &bearerRoundTripper{token: token, base: http.DefaultTransport}}
 }
 
-// connectStreamableHTTP connects via the SDK's Streamable HTTP transport.
-func connectStreamableHTTP(ctx context.Context, endpoint string, hc *http.Client) (*sdkmcp.ClientSession, error) {
-	cli := sdkmcp.NewClient(&sdkmcp.Implementation{Name: clientName, Version: clientVersion}, nil)
+// connectStreamableHTTP connects via the SDK's Streamable HTTP transport. It
+// reuses c.sdkClient (built once in New) so the resource-updated handler is
+// already registered — a per-connect NewClient would drop notifications.
+func (c *Client) connectStreamableHTTP(ctx context.Context, endpoint string, hc *http.Client) (*sdkmcp.ClientSession, error) {
 	tr := &sdkmcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: hc}
-	return cli.Connect(ctx, tr, nil)
+	return c.sdkClient.Connect(ctx, tr, nil)
 }
 
-// connectSSE connects via the SDK's legacy SSE transport.
-func connectSSE(ctx context.Context, endpoint string, hc *http.Client) (*sdkmcp.ClientSession, error) {
-	cli := sdkmcp.NewClient(&sdkmcp.Implementation{Name: clientName, Version: clientVersion}, nil)
+// connectSSE connects via the SDK's legacy SSE transport, reusing c.sdkClient.
+func (c *Client) connectSSE(ctx context.Context, endpoint string, hc *http.Client) (*sdkmcp.ClientSession, error) {
 	tr := &sdkmcp.SSEClientTransport{Endpoint: endpoint, HTTPClient: hc}
-	return cli.Connect(ctx, tr, nil)
+	return c.sdkClient.Connect(ctx, tr, nil)
 }

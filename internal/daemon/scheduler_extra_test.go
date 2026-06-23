@@ -181,7 +181,10 @@ type forgeRoutingMCP struct {
 	calledTerminal bool
 }
 
-func (m *forgeRoutingMCP) Connected() bool { return true }
+func (m *forgeRoutingMCP) Connected() bool                               { return true }
+func (m *forgeRoutingMCP) SupportsSubscribe() bool                       { return false }
+func (m *forgeRoutingMCP) Subscribe(_ context.Context, _ string) error   { return nil }
+func (m *forgeRoutingMCP) Unsubscribe(_ context.Context, _ string) error { return nil }
 func (m *forgeRoutingMCP) CallRead(_ context.Context, name string, _ map[string]any) (MCPResult, error) {
 	switch name {
 	case "forge.getPR":

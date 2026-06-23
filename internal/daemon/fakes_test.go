@@ -100,6 +100,18 @@ func (f *fakeStore) DueWatchers(now int64) ([]domain.WatcherRecord, error) {
 	return out, f.dueWatcherErr
 }
 
+func (f *fakeStore) ListWatchers(status string) ([]domain.WatcherRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []domain.WatcherRecord
+	for _, w := range f.watchers {
+		if status == "" || w.Status == status {
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) UpdateWatcher(id string, patch map[string]any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -108,6 +120,9 @@ func (f *fakeStore) UpdateWatcher(id string, patch map[string]any) error {
 		if f.watchers[i].ID == id {
 			if v, ok := patch["status"].(string); ok {
 				f.watchers[i].Status = v
+			}
+			if v, ok := patch["nextCheckAt"].(int64); ok {
+				f.watchers[i].NextCheckAt = v
 			}
 		}
 	}
@@ -200,6 +215,12 @@ type fakeMCP struct {
 	results   map[string]MCPResult
 	errs      map[string]error
 	calls     []string
+
+	// resource-subscription seam
+	supportsSub  bool
+	subscribed   []string
+	unsubscribed []string
+	subErr       error
 }
 
 func newFakeMCP() *fakeMCP {
@@ -218,6 +239,21 @@ func (m *fakeMCP) CallRead(ctx context.Context, name string, args map[string]any
 }
 
 func (m *fakeMCP) Connected() bool { return m.connected }
+
+func (m *fakeMCP) SupportsSubscribe() bool { return m.supportsSub }
+
+func (m *fakeMCP) Subscribe(ctx context.Context, uri string) error {
+	if m.subErr != nil {
+		return m.subErr
+	}
+	m.subscribed = append(m.subscribed, uri)
+	return nil
+}
+
+func (m *fakeMCP) Unsubscribe(ctx context.Context, uri string) error {
+	m.unsubscribed = append(m.unsubscribed, uri)
+	return nil
+}
 
 type fakeModel struct {
 	verdict domain.WatcherVerdict

@@ -11,7 +11,10 @@ import (
 // rawMCP returns a fixed MCPResult per tool name, recording calls.
 type rawMCP struct{ byName map[string]MCPResult }
 
-func (m rawMCP) Connected() bool { return true }
+func (m rawMCP) Connected() bool                               { return true }
+func (m rawMCP) SupportsSubscribe() bool                       { return false }
+func (m rawMCP) Subscribe(_ context.Context, _ string) error   { return nil }
+func (m rawMCP) Unsubscribe(_ context.Context, _ string) error { return nil }
 func (m rawMCP) CallRead(_ context.Context, name string, _ map[string]any) (MCPResult, error) {
 	if r, ok := m.byName[name]; ok {
 		return r, nil

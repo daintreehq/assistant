@@ -23,6 +23,14 @@ type fakeLow struct {
 	callCalls   int
 	serverInfo  *ServerInfo
 	closeCalled bool
+
+	// resource-subscription seam
+	supportsSub  bool
+	subscribed   []string
+	unsubscribed []string
+	subErr       error
+	readResults  map[string]string
+	readErr      error
 }
 
 func (f *fakeLow) ListTools(ctx context.Context) ([]rawTool, error) {
@@ -50,6 +58,38 @@ func (f *fakeLow) CallTool(ctx context.Context, name string, args map[string]any
 
 func (f *fakeLow) GetServerVersion() *ServerInfo { return f.serverInfo }
 func (f *fakeLow) Close() error                  { f.closeCalled = true; return nil }
+
+func (f *fakeLow) SupportsSubscribe() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.supportsSub
+}
+
+func (f *fakeLow) Subscribe(ctx context.Context, uri string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.subErr != nil {
+		return f.subErr
+	}
+	f.subscribed = append(f.subscribed, uri)
+	return nil
+}
+
+func (f *fakeLow) Unsubscribe(ctx context.Context, uri string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unsubscribed = append(f.unsubscribed, uri)
+	return nil
+}
+
+func (f *fakeLow) ReadResource(ctx context.Context, uri string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return "", f.readErr
+	}
+	return f.readResults[uri], nil
+}
 
 func newInjected(low LowLevelClient) *Client {
 	return New(config.AppConfig{McpURL: "http://x/mcp", McpToken: "t"}, Options{ClientOverride: low})

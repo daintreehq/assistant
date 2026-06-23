@@ -22,7 +22,10 @@ type prMCP struct {
 	calls     []map[string]any
 }
 
-func (m *prMCP) Connected() bool { return m.connected }
+func (m *prMCP) Connected() bool                               { return m.connected }
+func (m *prMCP) SupportsSubscribe() bool                       { return false }
+func (m *prMCP) Subscribe(_ context.Context, _ string) error   { return nil }
+func (m *prMCP) Unsubscribe(_ context.Context, _ string) error { return nil }
 func (m *prMCP) CallRead(_ context.Context, name string, args map[string]any) (MCPResult, error) {
 	if name != "forge.getPR" {
 		return MCPResult{IsError: true}, nil

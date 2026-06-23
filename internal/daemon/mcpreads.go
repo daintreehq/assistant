@@ -57,7 +57,11 @@ func parseMcpString(res MCPResult, field string) (string, bool) {
 // terminal.getStatus call. Integer fields are validated to reject NaN/Infinity/
 // fractional/null/string values (→ nil).
 type TerminalStatusEntry struct {
-	TerminalID       string
+	TerminalID string
+	// AgentID keys the subscribable agent-state resource
+	// (daintree://agent/{agentId}/state). Empty for a non-agent terminal, which
+	// then stays on the polling path (nothing to subscribe to).
+	AgentID          string
 	AgentState       string
 	WaitingReason    string
 	Error            string
@@ -65,6 +69,16 @@ type TerminalStatusEntry struct {
 	ExitCode         *int
 	SpawnedAt        *int64
 	LastTransitionAt *int64
+}
+
+// agentStateResourceURI builds the subscribable resource URI for an agent's FSM
+// state. Empty agentId → empty URI (caller must not subscribe). Kept in one place
+// so the subscribe, re-subscribe, and unsubscribe paths form the URI identically.
+func agentStateResourceURI(agentID string) string {
+	if agentID == "" {
+		return ""
+	}
+	return "daintree://agent/" + agentID + "/state"
 }
 
 // StatusBatch is the result of a batched status read. Ok=false ⇒ the call failed
@@ -105,6 +119,7 @@ func readStatuses(ctx *CheckContext, terminalIDs []string, includeOutput bool) S
 		}
 		byID[id] = TerminalStatusEntry{
 			TerminalID:       id,
+			AgentID:          asString(e["agentId"]),
 			AgentState:       asString(e["agentState"]),
 			WaitingReason:    asString(e["waitingReason"]),
 			Error:            asString(e["error"]),
