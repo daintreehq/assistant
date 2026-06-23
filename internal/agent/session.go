@@ -614,6 +614,11 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			" times this turn with the same arguments and it failed the same way each time" + codeSuffix +
 			". Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again."
 		s.pushMessage(models.TextMessage("user", nudge))
+		// Surface the stuck loop to the human too. The nudge above only steers the model;
+		// without this, a tool repeating the same failure stayed invisible in the footer
+		// until the turn either recovered or burned all the way to the abort threshold.
+		s.events.Warn(worstRepeat.name + " keeps failing the same way" + codeSuffix +
+			" — nudging the assistant to change approach.")
 	}
 	return "", false
 }

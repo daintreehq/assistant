@@ -63,8 +63,14 @@ type Model struct {
 	view        viewMode
 	expanded    bool     // ^X raw tool detail
 	activePanel PanelKey // /watchers,/inbox,/timers,/audit,/help filter
-	composer    composer.Model
-	pending     *pendingConfirm
+	// Per-deck scroll offsets (top line index). The ops deck and help view can outgrow a
+	// short terminal; rather than truncate (the old "resize taller" dead-end), they scroll.
+	// Kept SEPARATE so switching ^O↔? preserves each deck's position. Reset to 0 on entry
+	// to a deck and clamped to its content height in onKey (see clampWindow / deck routing).
+	opsScroll  int
+	helpScroll int
+	composer   composer.Model
+	pending    *pendingConfirm
 
 	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
 	// approval sheet's A / F actions, consulted in onApprovalRequested). The value is a

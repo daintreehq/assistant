@@ -127,7 +127,9 @@ func KeyHelpLines() []string {
 		"  Ctrl+D          exit at an empty prompt",
 		"  Ctrl+O          toggle the operations deck",
 		"  Ctrl+X          toggle raw tool detail",
+		"  Ctrl+L          redraw the screen (recover a corrupted footer)",
 		"  ?               show this help (at an empty prompt)",
+		"  ↑/↓ PgUp/PgDn   scroll the operations deck / help when it overflows",
 		"  Editing         Ctrl+A/E home/end · Ctrl+W/U/K kill · Ctrl+Y yank · Alt+B/F word · Alt+D kill-word",
 	}
 }

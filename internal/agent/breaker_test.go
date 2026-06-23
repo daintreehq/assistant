@@ -56,7 +56,10 @@ func TestBreakerWarnsAtSecondIdenticalFailure(t *testing.T) {
 		rounds[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{"path":"x"}`)}}
 	}
 	r := &fakeRouter{results: rounds}
-	s := NewSession(baseDeps(r, tools))
+	sink := &captureSink{}
+	deps := baseDeps(r, tools)
+	deps.Events = sink
+	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +72,14 @@ func TestBreakerWarnsAtSecondIdenticalFailure(t *testing.T) {
 	}
 	if !nudged {
 		t.Fatal("expected a one-time system nudge after the second identical failure")
+	}
+	// Gap #212: the warn must also surface to the HUMAN (footer), not only nudge the model.
+	// Exactly one Warn (the stuckNudged dedupe), naming the tool and the failure code.
+	if len(sink.warnings) != 1 {
+		t.Fatalf("expected exactly one Warn event surfaced to the user, got %d: %v", len(sink.warnings), sink.warnings)
+	}
+	if !strings.Contains(sink.warnings[0], "fs.read") || !strings.Contains(sink.warnings[0], "INVALID_ARGS") {
+		t.Fatalf("warn should name the tool and failure code; got %q", sink.warnings[0])
 	}
 }
 

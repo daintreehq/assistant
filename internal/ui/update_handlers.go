@@ -54,6 +54,17 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// overlay, never an input gate). Only Ctrl+C/Ctrl+D are special above; everything
 	// else falls through to the normal routing (which ends at the focused composer).
 
+	// Ctrl+L: manual redraw — a recovery key for when the live footer renders corrupted
+	// (a resize glitch, a stray control sequence, a race). Bare tea.ClearScreen resets
+	// Bubble Tea's internal cell buffer so the NEXT View() repaints every cell fresh.
+	// CRITICAL: it does NOT wipe native scrollback — unlike onRedraw (resize) which adds
+	// hostClearCmd() to also purge \x1b[3J. So this is a pure footer repaint that leaves
+	// the committed transcript untouched. Available in EVERY view (it is a recovery key),
+	// so it sits ahead of the approval gate.
+	if isCtrl(k, 'l') {
+		return m, tea.ClearScreen
+	}
+
 	// Approval sheet owns Y/N/V/Esc while up.
 	if m.pending != nil {
 		return m.onApprovalKey(k)
@@ -66,6 +77,7 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.activePanel = PanelNone
 			m.view = viewOperations
+			m.opsScroll = 0 // a freshly-opened deck starts at the top
 		}
 		return m.afterStateChange(nil)
 	}
@@ -78,13 +90,40 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if (k.Code == tea.KeyEscape || k.Code == tea.KeyEsc) && m.view != viewHome {
 		m.view = viewHome
 		m.activePanel = PanelNone
+		m.opsScroll, m.helpScroll = 0, 0 // leaving a deck clears its scroll
 		return m.afterStateChange(nil)
+	}
+
+	// Operations / help decks SCROLL instead of truncating. composerFocus is false in these
+	// views, so vertical-motion keys are otherwise unused here — route them to the active
+	// deck's offset, clamped to its content (maxDeckScroll). Placed before the "?" / composer
+	// blocks since those only fire on the home view.
+	if m.view == viewOperations || m.view == viewHelp {
+		page := m.rows - 3 // a page leaves ~one line of overlap for context
+		if page < 1 {
+			page = 1
+		}
+		switch k.Code {
+		case tea.KeyUp:
+			return m.scrollActiveDeck(-1)
+		case tea.KeyDown:
+			return m.scrollActiveDeck(1)
+		case tea.KeyPgUp:
+			return m.scrollActiveDeck(-page)
+		case tea.KeyPgDown:
+			return m.scrollActiveDeck(page)
+		case tea.KeyHome:
+			return m.scrollActiveDeck(-1 << 30)
+		case tea.KeyEnd:
+			return m.scrollActiveDeck(1 << 30)
+		}
 	}
 
 	// "?" on an EMPTY composer opens the help/keys view (the standard at-empty-prompt help
 	// trigger); with text in the buffer it types literally.
 	if k.Code == '?' && m.composerFocus() && m.composer.Value() == "" {
 		m.view = viewHelp
+		m.helpScroll = 0 // a freshly-opened deck starts at the top
 		return m.afterStateChange(nil)
 	}
 
@@ -107,6 +146,30 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // isCtrl reports whether k is Ctrl+<r> (lowercase rune).
 func isCtrl(k tea.KeyPressMsg, r rune) bool {
 	return k.Mod&tea.ModCtrl != 0 && (k.Code == r || k.Code == r-32)
+}
+
+// scrollActiveDeck moves the active deck's scroll offset by delta lines, clamped to the
+// deck's valid range (maxDeckScroll), and repaints. A clamped no-op press still repaints —
+// harmless and keeps the handler uniform. Only viewOperations / viewHelp call this.
+func (m Model) scrollActiveDeck(delta int) (tea.Model, tea.Cmd) {
+	max := m.maxDeckScroll()
+	if m.view == viewHelp {
+		m.helpScroll = clampScroll(m.helpScroll+delta, max)
+	} else {
+		m.opsScroll = clampScroll(m.opsScroll+delta, max)
+	}
+	return m.afterStateChange(nil)
+}
+
+// clampScroll bounds a scroll offset to [0, max].
+func clampScroll(v, max int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // onCtrlC implements the staged Ctrl+C contract (the interrupt-then-
@@ -406,9 +469,11 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 	if msg.SwitchPanel != PanelNone {
 		if msg.SwitchPanel == PanelHelp {
 			m.view = viewHelp
+			m.helpScroll = 0 // a freshly-opened deck starts at the top (mirrors the ?/^O entry paths)
 		} else {
 			m.view = viewOperations
 			m.activePanel = msg.SwitchPanel
+			m.opsScroll = 0
 		}
 		return m.afterStateChange(nil)
 	}

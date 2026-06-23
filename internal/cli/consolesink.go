@@ -62,6 +62,7 @@ func (s *consoleSink) ToolResult(ev agent.ToolResultEvent) {
 }
 
 func (s *consoleSink) Error(m string)         { s.r.Line(""); s.r.Error(m) }
+func (s *consoleSink) Warn(m string)          { s.r.Warn(m) }
 func (s *consoleSink) Info(m string)          { s.r.Info(m) }
 func (s *consoleSink) Usage(agent.UsageEvent) {}
 func (s *consoleSink) TurnPrompt(string)      {}

@@ -51,8 +51,10 @@ func runStageLabel(p domain.RunPhase) string {
 	case domain.PhaseCancelling:
 		return "Cancelling…"
 	case domain.PhaseGenerating:
-		// Streaming prose communicates itself; keep the cue minimal.
-		return ""
+		// Match the transcript's LiveRunStatus verb ("Writing") so the composer cue and
+		// the live status agree. Returning "" here let the cue fall through to the generic
+		// "Processing…" fallback, which disagreed with the "Writing" label above the turn.
+		return "Writing…"
 	default:
 		return "Processing…"
 	}

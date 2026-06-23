@@ -106,6 +106,7 @@ type EventSink interface {
 	ToolResult(ev ToolResultEvent) // a call settled
 
 	Error(message string) // fatal-for-this-turn
+	Warn(message string)  // non-fatal warning (e.g. a tool loop repeating the same failure)
 	Info(message string)  // informational
 	Usage(ev UsageEvent)  // per-round token accounting (no-op in sinks that ignore)
 
@@ -136,6 +137,7 @@ func (NoopEventSink) ToolProgress(string, string) {}
 func (NoopEventSink) ToolCall(ToolCallEvent)      {}
 func (NoopEventSink) ToolResult(ToolResultEvent)  {}
 func (NoopEventSink) Error(string)                {}
+func (NoopEventSink) Warn(string)                 {}
 func (NoopEventSink) Info(string)                 {}
 func (NoopEventSink) Usage(UsageEvent)            {}
 func (NoopEventSink) TurnPrompt(string)           {}
@@ -217,6 +219,11 @@ func (m *MultiSink) ToolResult(ev ToolResultEvent) {
 func (m *MultiSink) Error(msg string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.Error(msg) })
+	}
+}
+func (m *MultiSink) Warn(msg string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Warn(msg) })
 	}
 }
 func (m *MultiSink) Info(msg string) {
@@ -351,6 +358,10 @@ func (s *RunEventSink) ToolResult(ev ToolResultEvent) {
 func (s *RunEventSink) Error(msg string) {
 	s.flushContent()
 	s.write("error", map[string]any{"message": msg})
+}
+
+func (s *RunEventSink) Warn(msg string) {
+	s.write("warning", map[string]any{"message": msg})
 }
 
 func (s *RunEventSink) Info(msg string) {

@@ -197,6 +197,9 @@ func (b *Bridge) Error(message string) {
 	b.closeTurn(OutcomeUnknown)
 }
 
+// Warn has no protocol channel — intentionally dropped (like Info).
+func (b *Bridge) Warn(string) {}
+
 // Info has no protocol channel — intentionally dropped.
 func (b *Bridge) Info(string) {}
 
