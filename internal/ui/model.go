@@ -6,6 +6,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/commands"
+	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -112,12 +113,21 @@ type Model struct {
 	summarizedTerminals map[string]struct{}
 
 	// dashboard + usage rollup.
-	dashboard  Dashboard
-	hasUsage   bool
-	contextPct int
-	cost       float64
-	model      string
-	degraded   bool
+	dashboard Dashboard
+	// preview-throttle state. The deck ticks ~1s but terminal previews poll at
+	// PreviewPollMS (2500ms), so the off-loop build only re-fetches when
+	// now-lastPreviewFetchedAt clears that gate; between fetches it folds the cached
+	// tails back in. previewFetchInFlight is single-flight backpressure: a slow MCP
+	// fetch must not let a second build pile on behind it on the next tick. Both are
+	// advanced in Update from DashboardSnapshotMsg so the reducer never reads the clock.
+	lastPreviewFetchedAt int64
+	previewFetchInFlight bool
+	previewCache         []daemon.TerminalPreview
+	hasUsage             bool
+	contextPct           int
+	cost                 float64
+	model                string
+	degraded             bool
 
 	// out-of-band cues.
 	clearNonce    int

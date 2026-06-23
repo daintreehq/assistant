@@ -949,12 +949,22 @@ func (m Model) bootstrapCmd() tea.Cmd {
 }
 
 // buildDashboardCmd builds an operations snapshot off the loop (DashboardSnapshotMsg).
+// It captures the preview-throttle state from the Model and reads the clock INSIDE the
+// closure (off the loop), so Update never touches time; the result carries the new
+// fetch timestamp + tails back so Update can advance that state on the next snapshot.
 func (m Model) buildDashboardCmd() tea.Cmd {
 	a := m.app
 	ctx := m.ctx
+	lastFetched := m.lastPreviewFetchedAt
+	cached := m.previewCache
 	return func() tea.Msg {
-		snap := buildDashboard(ctx, a)
-		return DashboardSnapshotMsg{Snapshot: snap}
+		res := buildDashboard(ctx, a, dashboardBuildOptions{
+			MCP:                  a.DaemonMCP(),
+			NowMS:                domain.NowMS(),
+			LastPreviewFetchedAt: lastFetched,
+			CachedPreviews:       cached,
+		})
+		return DashboardSnapshotMsg{Snapshot: res.Dashboard, Previews: res.Previews, FetchedAt: res.FetchedAt}
 	}
 }
 

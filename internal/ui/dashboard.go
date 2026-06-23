@@ -1,8 +1,11 @@
 package ui
 
 import (
+	"encoding/json"
 	"sort"
+	"strings"
 
+	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
@@ -14,7 +17,11 @@ type Dashboard struct {
 	Timers   []domain.TimerRecord // scheduled, soonest first
 	Audit    []domain.AuditRecord // most-recent first
 	Watchers []domain.WatcherRecord
-	Agents   []AgentRow // built rows (one per watcher merged with its preview)
+	// Launches is the durable spawn roster (newest-first). It is LEFT-JOINed onto the
+	// live watchers in BuildAgentRows so an agent whose session-scoped watcher has been
+	// cancelled/completed stays on the deck from its stored saga instead of vanishing.
+	Launches []domain.AgentLaunchRecord
+	Agents   []AgentRow // built rows (watchers ⟕ launches, each merged with its preview)
 }
 
 // AgentRow is one supervised agent: one watcher merged with its watched terminal's
@@ -33,13 +40,42 @@ type AgentRow struct {
 	NeedsAttention bool
 }
 
-// BuildAgentRows merges watchers with terminal previews into agent rows, sorted by
-// urgency then recency. It is pure and Bubble-Tea-free so it
-// stays unit-testable. Previews are matched by terminal id parsed from targetsJson;
-// the row id prefers the terminal id.
-func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
-	rows := make([]AgentRow, 0, len(watchers))
+// BuildAgentRows merges live watchers, terminal previews, and the durable spawn
+// roster into one ordered set of agent rows, sorted by urgency then recency. It is
+// pure and Bubble-Tea-free so it stays unit-testable.
+//
+// A watcher and its spawn saga are the SAME agent to the user, so launches are
+// LEFT-JOINed onto the watchers on the launch's WatcherID: a live watcher owns the
+// row (badge from its classification); a launch whose watcher is gone
+// (cancelled/completed) or never attached (a spawn that failed early) is synthesized
+// from its saga stage so the agent does not vanish from the deck. Previews are matched
+// to either by terminal id and fold the live AgentState + a one-line tail into the row.
+func BuildAgentRows(watchers []domain.WatcherRecord, previews []daemon.TerminalPreview, launches []domain.AgentLaunchRecord) []AgentRow {
+	previewByTerminal := make(map[string]daemon.TerminalPreview, len(previews))
+	for _, p := range previews {
+		if p.TerminalID != "" {
+			previewByTerminal[p.TerminalID] = p
+		}
+	}
+
+	rows := make([]AgentRow, 0, len(watchers)+len(launches))
+	live := make(map[string]bool, len(watchers))
+	coveredTerminals := make(map[string]bool)
 	for _, w := range watchers {
+		// Only a live (in-progress) watcher owns an agent row. A terminal-status watcher
+		// (condition_met/timeout/cancelled/error — including a prior-session watcher
+		// force-cancelled on DB open) is NOT "live": it defers to the durable launch
+		// roster below, so a completed/cancelled agent shows its saga stage rather than a
+		// stale classification, and stale watchers don't clutter the deck.
+		if !liveWatcherStatus(w.Status) {
+			continue
+		}
+		live[w.ID] = true
+		for _, tid := range terminalIDs(w.TargetsJson) {
+			if tid != "" {
+				coveredTerminals[tid] = true
+			}
+		}
 		kind := domain.EpistemicKind("")
 		if w.LastEpistemicKind != nil {
 			kind = *w.LastEpistemicKind
@@ -49,7 +85,7 @@ func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
 			kind = domain.ClassificationEpistemicKind(domain.WatcherClassification(*w.LastClassification), false)
 		}
 		badge, prio := watcherBadge(w)
-		rows = append(rows, AgentRow{
+		row := AgentRow{
 			ID:             w.ID,
 			Title:          w.Title,
 			Goal:           w.Goal,
@@ -58,8 +94,47 @@ func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
 			EpistemicKind:  kind,
 			StartedAt:      w.CreatedAt,
 			NeedsAttention: prio <= 1,
-		})
+		}
+		applyPreview(&row, previewByTerminal[firstTerminalID(w.TargetsJson)])
+		rows = append(rows, row)
 	}
+
+	// LEFT-JOIN the roster: a launch whose watcher is still live is already on the
+	// deck as that watcher row — skip it (no duplicate). A launch with no live watcher
+	// is synthesized from its saga stage so the agent stays visible.
+	for _, l := range launches {
+		if l.WatcherID != nil && live[*l.WatcherID] {
+			continue
+		}
+		terminalID := ""
+		if l.TerminalID != nil {
+			terminalID = *l.TerminalID
+		}
+		// Terminal-id dedupe: the same agent can reach here without a WatcherID join
+		// (a live watcher whose launch never recorded its WatcherID, or two sagas that
+		// re-attached to one terminal). Cover the terminal once — newest-first ordering
+		// means the freshest saga wins — so the agent shows as a single row.
+		if terminalID != "" && coveredTerminals[terminalID] {
+			continue
+		}
+		id := l.ID
+		if terminalID != "" {
+			id = terminalID
+			coveredTerminals[terminalID] = true
+		}
+		badge, prio := launchBadge(l.Stage)
+		row := AgentRow{
+			ID:             id,
+			Title:          firstNonEmpty(l.Title, l.Name),
+			Badge:          badge,
+			Priority:       prio,
+			StartedAt:      l.CreatedAt,
+			NeedsAttention: prio <= 1,
+		}
+		applyPreview(&row, previewByTerminal[terminalID])
+		rows = append(rows, row)
+	}
+
 	// Urgency (lower priority first), ties broken by most-recent StartedAt.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Priority != rows[j].Priority {
@@ -68,6 +143,88 @@ func BuildAgentRows(watchers []domain.WatcherRecord) []AgentRow {
 		return rows[i].StartedAt > rows[j].StartedAt
 	})
 	return rows
+}
+
+// applyPreview folds a matched terminal preview's live state into a row. A zero-value
+// preview (no card for that terminal this tick) is a no-op, leaving the row's state
+// blank. The tail is collapsed to a single line and shown to the HUMAN only — it is
+// NEVER fed to the main model.
+func applyPreview(row *AgentRow, p daemon.TerminalPreview) {
+	if p.AgentState != "" {
+		row.AgentState = p.AgentState
+	}
+	if snippet := previewSnippet(p.Tail); snippet != "" {
+		row.Preview = snippet
+	}
+}
+
+// previewSnippet reduces a multi-line preview tail to its last non-blank line for the
+// single-line agent row (the full tail lives in a human-only card elsewhere). Embedded
+// newlines would otherwise corrupt the deck layout.
+func previewSnippet(tail string) string {
+	lines := strings.Split(tail, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(lines[i]); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// liveWatcherStatus reports whether a watcher is still in-progress (an agent actively
+// supervised) versus a terminal status (condition_met/timeout/cancelled/error). Only a
+// live watcher owns an agent row + a preview slot; a terminal one defers to the durable
+// launch roster so it shows saga state instead of a stale classification — and a
+// prior-session cancelled watcher neither clutters the deck nor wastes a poll on its
+// dead terminal. Unknown statuses fail closed to NOT-live (treated as terminal).
+func liveWatcherStatus(status string) bool {
+	switch status {
+	case "active", "created", "paused":
+		return true
+	default: // condition_met, timeout, cancelled, error, ""
+		return false
+	}
+}
+
+// launchBadge maps a spawn-saga stage to a short badge + priority for a launch-only
+// row (its watcher is gone or never attached). Mirrors watcherBadge's priority scale
+// (lower = more urgent): a failed spawn needs attention, an ambiguous one wants
+// review, an in-flight or confirmed spawn is just working.
+func launchBadge(stage domain.AgentLaunchStage) (string, int) {
+	switch stage {
+	case domain.LaunchFailed:
+		return "FAILED", 1
+	case domain.LaunchAmbiguous:
+		return "REVIEW", 2
+	case domain.LaunchConfirmed:
+		return "WORKING", 3
+	default: // launch_requested, agent_started, terminal_bound, watcher_attached
+		return "STARTING", 3
+	}
+}
+
+// terminalIDs parses a watcher's targetsJson (a JSON string[]). Malformed JSON
+// degrades to nil — a snapshot build must never break the UI.
+func terminalIDs(targetsJson string) []string {
+	if targetsJson == "" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(targetsJson), &ids); err != nil {
+		return nil
+	}
+	return ids
+}
+
+// firstTerminalID returns the first non-empty terminal id a watcher targets, used to
+// match its preview card.
+func firstTerminalID(targetsJson string) string {
+	for _, id := range terminalIDs(targetsJson) {
+		if id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // watcherBadge maps a watcher's last classification to a short badge label + a

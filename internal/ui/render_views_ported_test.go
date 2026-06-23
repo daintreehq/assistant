@@ -186,7 +186,7 @@ func opsDash(over func(*Dashboard)) Dashboard {
 func TestOps_OrdersSectionsAndMergesAgents(t *testing.T) {
 	d := opsDash(func(d *Dashboard) {
 		d.Watchers = []domain.WatcherRecord{watcherRec("wch_1", string(domain.ClassStillWorking), nil)}
-		d.Agents = BuildAgentRows(d.Watchers)
+		d.Agents = BuildAgentRows(d.Watchers, nil, nil)
 		d.Agents[0].ID = "term_8"
 	})
 	out := stripAnsi(renderOperations(darkTheme(), d, PanelNone, 0, 72))
@@ -206,7 +206,7 @@ func TestOps_AgentRowEpistemicProvenance(t *testing.T) {
 	obs := domain.EpistemicObserved
 	d := opsDash(func(d *Dashboard) {
 		d.Watchers = []domain.WatcherRecord{watcherRec("wch_1", string(domain.ClassTerminalExited), &obs)}
-		d.Agents = BuildAgentRows(d.Watchers)
+		d.Agents = BuildAgentRows(d.Watchers, nil, nil)
 	})
 	out := stripAnsi(renderOperations(darkTheme(), d, PanelNone, 0, 72))
 	if !strings.Contains(out, "obs") {
@@ -246,7 +246,7 @@ func TestOps_HidesEmptySectionsStandingBy(t *testing.T) {
 func TestOps_FocusedPanelRendersOnlyThatSection(t *testing.T) {
 	full := opsDash(func(d *Dashboard) {
 		d.Watchers = []domain.WatcherRecord{watcherRec("wch_1", string(domain.ClassStillWorking), nil)}
-		d.Agents = BuildAgentRows(d.Watchers)
+		d.Agents = BuildAgentRows(d.Watchers, nil, nil)
 		d.Agents[0].ID = "term_8"
 		d.Inbox = []domain.QueueEvent{{Title: "Tests failed in term_8", Severity: domain.SeverityUrgent, Count: 1}}
 		d.Timers = []domain.TimerRecord{{Title: "nudge", FireAt: 1}}

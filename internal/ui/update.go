@@ -103,10 +103,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.afterStateChange(m.finishBootIfReady())
 
 	case DashboardTickMsg:
+		// Single-flight backpressure: if a prior build is still polling MCP for
+		// previews (a slow read must not let builds pile up at the ~1s tick), skip this
+		// build and just re-arm the ticker. The in-flight build will refresh the deck.
+		if m.previewFetchInFlight {
+			return m, dashboardTickCmd()
+		}
+		m.previewFetchInFlight = true
 		return m, tea.Batch(m.buildDashboardCmd(), dashboardTickCmd())
 
 	case DashboardSnapshotMsg:
 		m.dashboard = msg.Snapshot
+		// Advance preview-throttle state. previewCache always mirrors the tails in
+		// effect (fetched or reused); lastPreviewFetchedAt only moves on a real poll
+		// (FetchedAt>0) so the PreviewPollMS gate measures from the last actual fetch.
+		m.previewFetchInFlight = false
+		m.previewCache = msg.Previews
+		if msg.FetchedAt > 0 {
+			m.lastPreviewFetchedAt = msg.FetchedAt
+		}
 		// The attention badge is recomputed from each snapshot so it DECREMENTS as items
 		// resolve — previously it only ratcheted up via onAttention and never came back down.
 		m.attentionN = len(m.dashboard.Inbox)

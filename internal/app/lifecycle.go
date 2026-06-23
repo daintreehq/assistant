@@ -156,6 +156,12 @@ func (a daemonRegistryAdapter) Dispatch(ctx context.Context, actor domain.ToolAc
 	return res, nil
 }
 
+// DaemonMCP exposes the same read-only MCP adapter the daemon ticks use, so the
+// cockpit's off-loop dashboard build can drive daemon.FetchPreviews through it. The
+// adapter just wraps a pointer (no I/O to construct) and *mcp.Client is concurrent-
+// safe, so the UI hook and the scheduler can share one client without coordination.
+func (a *App) DaemonMCP() daemon.MCP { return daemonMcpAdapter{c: a.MCP} }
+
 // daemonMcpAdapter adapts *mcp.Client onto the daemon.MCP read-only seam, mapping
 // the normalized CallResult onto daemon.MCPResult (structuredContent + text).
 type daemonMcpAdapter struct{ c *mcp.Client }

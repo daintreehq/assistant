@@ -2,6 +2,7 @@ package ui
 
 import (
 	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -61,13 +62,16 @@ type CommitArmMsg struct{}
 type DashboardTickMsg struct{}
 
 // DashboardSnapshotMsg carries a freshly built operations snapshot (built off the
-// loop so Update stays cheap).
+// loop so Update stays cheap). Previews/FetchedAt thread the preview-throttle state
+// back to the Model: the agent rows already have their AgentState/Preview folded in,
+// so these two fields exist only so Update can advance lastPreviewFetchedAt and the
+// previewCache without calling the clock in the pure reducer. FetchedAt is 0 (and
+// Previews nil) when this tick reused the cache instead of polling MCP.
 type DashboardSnapshotMsg struct {
-	Snapshot Dashboard
+	Snapshot  Dashboard
+	Previews  []daemon.TerminalPreview
+	FetchedAt int64
 }
-
-// PreviewTickMsg drives the terminal-preview refresh cadence (agent row previews).
-type PreviewTickMsg struct{}
 
 // --- agent run events (already mapped off agent.EventSink) ---
 
