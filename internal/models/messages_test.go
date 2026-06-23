@@ -72,6 +72,53 @@ func TestToWireMessagesOmission(t *testing.T) {
 	}
 }
 
+// A malformed-JSON tool-call arguments string (the large model occasionally emits
+// one — e.g. a mangled "watcher<arg_key>create" key, or invalid JSON) must NOT be
+// replayed verbatim: the provider re-validates the WHOLE history and 400s the entire
+// request when any assistant tool call's arguments are not a JSON object, poisoning
+// every subsequent turn. toWireMessages coerces an empty / malformed / non-object
+// value to "{}" at the wire boundary so the conversation stays recoverable.
+func TestToWireMessagesSanitizesMalformedToolArgs(t *testing.T) {
+	cases := map[string]string{
+		"unterminated": `{"watcher<arg_key>create": true,`, // invalid JSON
+		"not-object":   `[1,2,3]`,                          // valid JSON, not an object
+		"json-null":    `null`,                             // valid JSON null, not an object
+		"empty":        ``,                                 // empty string
+		"bare-scalar":  `42`,                               // valid JSON number, not an object
+	}
+	for name, badArgs := range cases {
+		t.Run(name, func(t *testing.T) {
+			msgs := []ChatMessage{
+				{Role: "assistant", ContentNull: true, ToolCalls: []ToolCallRequest{
+					{ID: "c1", Type: "function", Function: ToolCallFunction{Name: "agentTask__spawnForEdits", Arguments: badArgs}},
+				}},
+			}
+			wm, err := toWireMessages(msgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := json.Marshal(wm)
+			if !strings.Contains(string(b), `"arguments":"{}"`) {
+				t.Fatalf("malformed args (%s) must be coerced to {} on the wire: %s", name, b)
+			}
+		})
+	}
+}
+
+// A valid JSON-object args string passes through the wire boundary untouched.
+func TestToWireMessagesKeepsValidToolArgs(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "assistant", ContentNull: true, ToolCalls: []ToolCallRequest{
+			{ID: "c1", Type: "function", Function: ToolCallFunction{Name: "x", Arguments: `{"mode":"explore"}`}},
+		}},
+	}
+	wm, _ := toWireMessages(msgs)
+	b, _ := json.Marshal(wm)
+	if !strings.Contains(string(b), `"arguments":"{\"mode\":\"explore\"}"`) {
+		t.Fatalf("valid object args must pass through untouched: %s", b)
+	}
+}
+
 // A multimodal user message forwards its parts verbatim (array preserved).
 func TestToWireMessagesMultimodal(t *testing.T) {
 	msgs := []ChatMessage{{

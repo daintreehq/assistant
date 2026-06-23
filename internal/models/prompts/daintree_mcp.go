@@ -99,12 +99,13 @@ Your local tools wrap Daintree:
 This is the common "open an agent, ask it something, tell me the answer" flow.
 Run it like this — do NOT hand-poll the terminal in a loop:
 1. Spawn with agentTask.spawnForEdits (mode "explore" for a read-only question,
-   "edit" for changes), ALWAYS attaching a watcher. The watcher is a NESTED
-   object argument, never a flattened/dotted key: pass
-   watcher: {"create": true, "goal": "...then surface the agent's answer"} —
-   NOT a top-level "watcher.create" field (the strict decoder rejects unknown
-   fields, so a dotted or flattened key fails validation). The watcher is what
-   reads the agent for you; give its goal a clear "...then surface the answer".
+   "edit" for changes), ALWAYS attaching a watcher. Request it with FLAT top-level
+   scalars: watch: true and watchGoal: "...then surface the agent's answer"
+   (watchGoal alone also attaches it). Emit them as their own top-level keys — never
+   a dotted/flattened "watcher.create" key, which the strict decoder rejects as an
+   unknown field. (A complete legacy nested watcher: {"create": true, "goal": "..."}
+   object is still accepted, but prefer the flat fields.) The watcher reads the agent
+   for you; give watchGoal a clear "...surface the answer".
 2. Then STOP and end your turn. The watcher supervises the agent in the
    background and publishes to the attention queue when it settles — you do not
    need to wait inside the turn. For an "explore" agent, reaching agentState
@@ -140,14 +141,15 @@ the exact literal text; even then request a bounded tail and never echo the whol
 frame. Use terminal.extract to pull a SPECIFIC field out of noisy output (a number,
 a filename, a yes/no).
 
-If an extract or summarize comes back cut off — its result ends mid-sentence, or
-carries a "truncated"/maxTokens-cap warning — that is the EXTRACTOR hitting its
-own token budget, NOT the source agent's answer being incomplete. Do NOT re-run
-extract/summarize with the same or "continue from where it stopped" arguments:
-the small model truncates at the same place every time. For terminal.extract, raise
-its maxTokens once (terminal.summarize has no maxTokens — it uses a fixed cap); for
-a cut-off summarize, or when you genuinely need the full literal text, fall back to
-a bounded terminal.read. Re-running a truncated call never un-truncates it.
+If a terminal.extract comes back cut off — its result ends mid-sentence, or carries a
+"truncated"/maxTokens-cap warning — that is terminal.extract hitting its OWN token
+budget, NOT the source agent's answer being incomplete. Do NOT re-run it with the same
+or "continue from where it stopped" arguments: the small model truncates at the same
+place every time. Raise terminal.extract's maxTokens once, or fall back to a bounded
+terminal.read for the literal text. terminal.summarize is UNCAPPED — it emits the whole
+summary and does not truncate at a fixed budget, so its result is complete; the rare
+"may be cut off" note only means the small model reached its own output limit, where a
+bounded terminal.read is the fallback.
 
 If the spawn result carries a watcherWarning / no watcherId, the watcher did NOT
 attach (e.g. a Daintree/storage error). Say so plainly. Then either retry the

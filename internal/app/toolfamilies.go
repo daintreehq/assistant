@@ -93,11 +93,19 @@ func (m mcpxMCPAdapter) ListTools(ctx context.Context, force bool) ([]mcpx.MCPTo
 /* ----------------------------- Router adapters --------------------------- */
 
 // contextRouterAdapter maps *models.Router onto contextx.Router (terminal.summarize
-// runs router.Chat("small", …)). The family supplies a maxTokens cap.
+// runs router.Chat("small", …)). maxTokens <= 0 means "no explicit cap".
 type contextRouterAdapter struct{ router *models.Router }
 
 func (r contextRouterAdapter) Chat(ctx context.Context, tier domain.ModelTier, messages []contextx.ChatMessage, maxTokens int) (contextx.ChatResult, error) {
-	res, err := r.router.Chat(ctx, tier, models.ChatOptions{Messages: toModelMessages(roleContents(messages)), MaxTokens: &maxTokens})
+	// maxTokens <= 0 means "no explicit output cap": leave max_tokens unset so the
+	// provider emits the WHOLE summary instead of truncating mid-sentence. The input
+	// tail is already bounded, so this can't run away (same pattern as the uncapped
+	// compaction summary). A positive value still caps the output.
+	var capPtr *int
+	if maxTokens > 0 {
+		capPtr = &maxTokens
+	}
+	res, err := r.router.Chat(ctx, tier, models.ChatOptions{Messages: toModelMessages(roleContents(messages)), MaxTokens: capPtr})
 	if err != nil {
 		return contextx.ChatResult{}, err
 	}

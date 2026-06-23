@@ -500,6 +500,32 @@ func TestSpawnOkWhenWatcherAttachThrows(t *testing.T) {
 	}
 }
 
+// Regression: a watcher requested via the FLAT fields (not the legacy nested object)
+// that fails to attach must ALSO leave the saga terminal_bound — the "settled"
+// decision keys off the resolved want-watcher, not a.Watcher. Otherwise a flat-watch
+// attach failure finalizes as confirmed and a retry can't re-attach (fresh-launches).
+func TestSpawnFlatWatchAttachFailureStaysRecoverable(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1")}
+	st := newSagaStore()
+	st.insertWatcherErr = errBoom("disk full")
+	a := baseSpawn()
+	yes := true
+	a.Watch = &yes
+	a.WatchGoal = "surface the answer"
+
+	res := runSpawn(Deps{MCP: mcp, DB: st}, a)
+	if !res.Ok {
+		t.Fatalf("launch should stay ok despite watcher failure: %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if _, has := m["watcherId"]; has {
+		t.Fatal("watcherId should be absent on attach failure")
+	}
+	if st.get(m["launchId"].(string)).Stage != domain.TerminalBound {
+		t.Fatalf("flat-watch attach failure must stay terminal_bound, got %s", st.get(m["launchId"].(string)).Stage)
+	}
+}
+
 func TestSpawnExploreModeReadOnlyConstraints(t *testing.T) {
 	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1")}
 	a := baseSpawn()
@@ -630,6 +656,73 @@ func TestSpawnHonoursExplicitCadenceOverride(t *testing.T) {
 	}
 	if st.watchers[0].CadenceMs != 30000 {
 		t.Fatalf("cadence override not honoured: %d", st.watchers[0].CadenceMs)
+	}
+}
+
+// --- flat watcher fields (the taught shape; the nested object is legacy) --------
+
+func TestSpawnFlatWatchFieldsAttachWatcher(t *testing.T) {
+	// watch:true + watchGoal as FLAT top-level scalars attach a supervisor watcher —
+	// no nested object (the shape the large model mangles into "watcher<...>create").
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_x")}
+	st := newSagaStore()
+	a := baseSpawn()
+	yes := true
+	a.Watch = &yes
+	a.WatchGoal = "surface the agent's answer"
+	if r := runSpawn(Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}, a); !r.Ok {
+		t.Fatalf("expected ok, got %+v", r.Error)
+	}
+	if len(st.watchers) != 1 {
+		t.Fatalf("flat watch fields must attach a watcher, got %d", len(st.watchers))
+	}
+	if st.watchers[0].Goal != "surface the agent's answer" {
+		t.Fatalf("watchGoal not honoured: %q", st.watchers[0].Goal)
+	}
+}
+
+func TestSpawnWatchGoalAloneImpliesWatcher(t *testing.T) {
+	// Providing watchGoal without an explicit watch:true still attaches a watcher.
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_x")}
+	st := newSagaStore()
+	a := baseSpawn()
+	a.WatchGoal = "watch and report"
+	if r := runSpawn(Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}, a); !r.Ok {
+		t.Fatalf("expected ok, got %+v", r.Error)
+	}
+	if len(st.watchers) != 1 {
+		t.Fatalf("watchGoal alone must attach a watcher, got %d", len(st.watchers))
+	}
+}
+
+func TestSpawnWatchFalseSuppressesLegacyNestedWatcher(t *testing.T) {
+	// An explicit flat watch:false wins over a legacy nested watcher.create:true.
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_x")}
+	st := newSagaStore()
+	a := baseSpawn()
+	no := false
+	a.Watch = &no
+	a.Watcher = &spawnWatcher{Create: true}
+	if r := runSpawn(Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}, a); !r.Ok {
+		t.Fatalf("expected ok, got %+v", r.Error)
+	}
+	if len(st.watchers) != 0 {
+		t.Fatalf("watch:false must suppress the watcher, got %d", len(st.watchers))
+	}
+}
+
+func TestSpawnFlatWatchCadenceOverride(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_x")}
+	st := newSagaStore()
+	a := baseSpawn()
+	cad := 45000
+	a.WatchGoal = "watch"
+	a.WatchCadenceMs = &cad
+	if r := runSpawn(Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}, a); !r.Ok {
+		t.Fatalf("expected ok, got %+v", r.Error)
+	}
+	if st.watchers[0].CadenceMs != 45000 {
+		t.Fatalf("flat watchCadenceMs override not honoured: %d", st.watchers[0].CadenceMs)
 	}
 }
 

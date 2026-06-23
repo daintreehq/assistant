@@ -52,7 +52,8 @@ type ChatResult struct {
 
 // Router is the slice of model access this family uses (terminal.summarize runs
 // router.chat("small", …)). Locally defined consumer interface — does NOT import
-// internal/models. maxTokens is passed so the summarizer caps its output.
+// internal/models. maxTokens caps the model's output; maxTokens <= 0 means "no cap"
+// (the summarizer uses 0 so a bounded-tail summary is never truncated mid-sentence).
 type Router interface {
 	Chat(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (ChatResult, error)
 }

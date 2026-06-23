@@ -228,7 +228,7 @@ func toWireMessages(messages []ChatMessage) ([]wireMessage, error) {
 				for _, t := range m.ToolCalls {
 					wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
 						ID: t.ID, Type: "function",
-						Function: ToolCallFunction{Name: t.Function.Name, Arguments: t.Function.Arguments},
+						Function: ToolCallFunction{Name: t.Function.Name, Arguments: validToolArgs(t.Function.Arguments)},
 					})
 				}
 			}
@@ -242,6 +242,28 @@ func toWireMessages(messages []ChatMessage) ([]wireMessage, error) {
 		}
 	}
 	return out, nil
+}
+
+// validToolArgs returns a tool call's arguments as a guaranteed-valid JSON OBJECT
+// string for the OUTGOING request. The provider (Fireworks) re-validates EVERY
+// message in the replayed history and rejects the whole request with a 400 when any
+// assistant tool call's arguments are not a JSON object — so a single malformed-JSON
+// tool call the model emitted (already caught and rejected locally as
+// INVALID_TOOL_ARGS_JSON) would otherwise poison every subsequent turn and kill the
+// session. The raw arguments are still handed to the LOCAL executor unchanged (so it
+// keeps rejecting the bad call); here, at the wire boundary ONLY, an empty /
+// malformed / non-object value is coerced to "{}" so the history stays acceptable and
+// the model can recover next turn. A valid object passes through untouched. "null"
+// unmarshals to a nil map without error, so the explicit nil check rejects it too.
+func validToolArgs(args string) string {
+	if strings.TrimSpace(args) == "" {
+		return "{}"
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &obj); err != nil || obj == nil {
+		return "{}"
+	}
+	return args
 }
 
 // marshalStringOrParts marshals a message's content: a multimodal part array

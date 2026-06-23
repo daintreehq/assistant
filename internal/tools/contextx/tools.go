@@ -163,19 +163,23 @@ func newSummarizeTool(deps Deps) tools.Tool {
 				purpose = fmt.Sprintf("Summarize terminal %s for the supervisor.", a.TerminalID)
 			}
 
+			// No output cap (maxTokens 0): the input tail is already bounded, so the
+			// summarizer must be free to emit the WHOLE summary rather than get cut
+			// off mid-sentence at an arbitrary token count. The small model self-limits
+			// to the terse summary its system prompt asks for.
 			res, cerr := deps.Router.Chat(ctx, domain.ModelSmall, []ChatMessage{
 				{Role: "system", Content: summarizerSystemPrompt},
 				{Role: "user", Content: buildSummarizerUserPrompt(purpose, tail)},
-			}, 512)
+			}, 0)
 			if cerr != nil {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while summarizing terminal.", tools.Unrecoverable())
 				}
 				return tools.Fail(codeSummarize, fmt.Sprintf("Failed to summarize terminal %s: %s", a.TerminalID, cerr.Error()))
 			}
-			// A "length" finishReason means the small model hit its cap mid-summary,
-			// so the text is cut off. Lead with the warning (the serializer
-			// head-truncates an oversized summary) and flag it.
+			// With no output cap, a "length" finishReason is now rare — it can only mean
+			// the small model hit its OWN provider output limit (not a cap we set). Keep
+			// detecting it defensively and flag the gist as partial when it happens.
 			truncated := res.FinishReason == "length"
 			body := strings.TrimSpace(res.Content)
 			if body == "" {
@@ -183,7 +187,7 @@ func newSummarizeTool(deps Deps) tools.Tool {
 			}
 			note := ""
 			if truncated {
-				note = "⚠ This summary is cut off: the summarizer hit its token cap. Relay this gist as-is; only if you genuinely need the exact literal text, fall back to a bounded terminal.read.\n\n"
+				note = "⚠ This summary may be cut off: the small model reached its own output limit. Relay this gist as-is; only if you genuinely need the exact literal text, fall back to a bounded terminal.read.\n\n"
 			}
 			summary := note + body
 			return tools.Ok(summary, map[string]any{

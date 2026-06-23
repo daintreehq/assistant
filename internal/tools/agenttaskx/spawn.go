@@ -44,7 +44,18 @@ type spawnArgs struct {
 	TaskPrompt         string        `json:"taskPrompt"`
 	AcceptanceCriteria string        `json:"acceptanceCriteria,omitempty"`
 	Context            *spawnContext `json:"context,omitempty"`
-	Watcher            *spawnWatcher `json:"watcher,omitempty"`
+	// Watcher supervision is requested with FLAT top-level scalars — the shape the
+	// large model emits reliably. A goal (or watch:true) attaches a supervisor
+	// watcher that reads the agent and surfaces its result when it settles. The
+	// nested Watcher object below is the LEGACY shape: still honored, but no longer
+	// the taught form, because the model mangles a nested key into a flat
+	// "watcher<...>create" path that the strict decoder then rejects. Resolution
+	// precedence: Watch (explicit) → WatchGoal present → legacy Watcher.Create.
+	Watch          *bool  `json:"watch,omitempty"`
+	WatchGoal      string `json:"watchGoal,omitempty"`
+	WatchCadenceMs *int   `json:"watchCadenceMs,omitempty"`
+
+	Watcher *spawnWatcher `json:"watcher,omitempty"`
 }
 
 // Validate enforces the constraints the schema advertises but strict decoding
@@ -65,6 +76,26 @@ func (a *spawnArgs) Validate() error {
 	return nil
 }
 
+// wantsWatcher resolves whether a spawn should attach a supervisor watcher. Flat
+// fields are the taught shape; the legacy nested object is the fallback. Precedence:
+// an explicit Watch wins; otherwise a non-empty WatchGoal implies "supervise it";
+// otherwise the legacy watcher.create. SINGLE source of truth shared by the launch
+// debug field, the attach block, and the saga "settled" decision — so a watcher
+// requested via EITHER shape that fails to attach stays recoverable rather than being
+// finalized as confirmed.
+func wantsWatcher(a *spawnArgs) bool {
+	switch {
+	case a.Watch != nil:
+		return *a.Watch
+	case a.WatchGoal != "":
+		return true
+	case a.Watcher != nil:
+		return a.Watcher.Create
+	default:
+		return false
+	}
+}
+
 var spawnSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
@@ -76,7 +107,10 @@ var spawnSchema = json.RawMessage(`{
     "taskPrompt": { "type": "string", "description": "The instructions for the agent. Constraints are appended automatically." },
     "acceptanceCriteria": { "type": "string", "description": "Task-specific contract that defines 'done'. When set on an edit-mode task, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success. Provide it whenever there is a concrete, checkable definition of done. Ignored for mode:\"explore\"." },
     "context": { "type": "object", "additionalProperties": false, "properties": { "filePaths": { "type": "array", "items": { "type": "string" } }, "includeDiff": { "type": "boolean" } } },
-    "watcher": { "type": "object", "additionalProperties": false, "properties": { "create": { "type": "boolean" }, "goal": { "type": "string" }, "cadenceMs": { "type": "number" } }, "required": ["create"] }
+    "watch": { "type": "boolean", "description": "Attach a supervisor watcher that reads the agent for you and surfaces its result when it settles. Set true to supervise (recommended for any non-trivial spawn). Providing watchGoal also attaches one. Omit, or set false, to skip supervision." },
+    "watchGoal": { "type": "string", "description": "What the supervisor should do once the agent settles, e.g. \"surface a concise summary of what the agent reported\". Providing this attaches a watcher (no need to also set watch)." },
+    "watchCadenceMs": { "type": "number", "description": "Supervisor poll cadence in milliseconds (default 3000)." },
+    "watcher": { "type": "object", "additionalProperties": false, "description": "LEGACY nested form of watch / watchGoal / watchCadenceMs. Prefer the FLAT watchGoal / watch fields above — pass those as top-level scalars, never a nested or dotted watcher key.", "properties": { "create": { "type": "boolean" }, "goal": { "type": "string" }, "cadenceMs": { "type": "number" } }, "required": ["create"] }
   },
   "required": ["title", "taskPrompt"]
 }`)
@@ -86,8 +120,8 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		Name: "agentTask.spawnForEdits",
 		Description: "Spawn a visible Daintree agent in a worktree. Use mode:\"edit\" (default) to make code changes, or " +
 			"mode:\"explore\" for a read-only investigation (the agent is told not to touch files). This is the ONLY way to spawn " +
-			"an agent — never hand-roll a raw agent.launch via daintree.call. The CLI never edits files itself. Optionally attaches " +
-			"a terminal watcher.",
+			"an agent — never hand-roll a raw agent.launch via daintree.call. The CLI never edits files itself. To supervise the " +
+			"agent, set the FLAT fields watch:true and watchGoal:\"…\" (top-level scalars) — do NOT nest them under a \"watcher\" key.",
 		Consequence: "Opens a visible agent terminal in a worktree that can edit project files. Changes stay in the worktree until you commit them.",
 		Risk:        domain.RiskProject,
 		Schema:      spawnSchema,
@@ -109,6 +143,10 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	if ctx.Err() != nil {
 		return tools.Fail(codeCancelled, "Turn cancelled before the agent was launched.", tools.Unrecoverable())
 	}
+
+	// Resolve watcher attachment once so the launch debug field below and the attach /
+	// "settled" logic in finishBoundLaunch key off the SAME decision (see wantsWatcher).
+	wantWatcher := wantsWatcher(a)
 
 	agentID := strings.TrimSpace(a.AgentID)
 	if agentID == "" {
@@ -236,7 +274,7 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 		"via": "agentTask.spawnForEdits", "agentId": agentID, "mode": mode, "name": name,
 		"title": a.Title, "terminalId": terminalID, "worktreeId": resolvedWorktreeID,
 		"taskId": taskID, "idempotencyKey": idempotencyKey, "launchId": record.ID,
-		"watcherRequested": a.Watcher != nil && a.Watcher.Create,
+		"watcherRequested": wantWatcher,
 	})
 
 	if terminalID == "" {
@@ -280,6 +318,11 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 		watcherID = *record.WatcherID
 	}
 	watcherWarning := ""
+	// Same resolution as the spawn-launched debug field: whether a watcher was
+	// requested (flat fields, legacy nested fallback). Drives both the attach below
+	// and the saga "settled" decision so a flat-requested attach failure stays
+	// recoverable (terminal_bound), never confirmed.
+	wantWatcher := wantsWatcher(a)
 
 	// --- Durable workflow ledger -------------------------------------------------
 	// Record the spawned work so /workflows surfaces it and a persistent record
@@ -313,13 +356,19 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 		}
 	}
 
-	if a.Watcher != nil && a.Watcher.Create && watcherID == "" {
-		goal := a.Watcher.Goal
+	// wantWatcher was resolved up front (flat fields, legacy nested fallback).
+	if wantWatcher && watcherID == "" {
+		goal := a.WatchGoal
+		if goal == "" && a.Watcher != nil {
+			goal = a.Watcher.Goal
+		}
 		if goal == "" {
 			goal = "Supervise: " + a.Title
 		}
 		cadence := supervisorDefaultCadenceMs
-		if a.Watcher.CadenceMs != nil {
+		if a.WatchCadenceMs != nil {
+			cadence = *a.WatchCadenceMs
+		} else if a.Watcher != nil && a.Watcher.CadenceMs != nil {
 			cadence = *a.Watcher.CadenceMs
 		}
 		// Scope the post-completion git verification to this worktree (when known),
@@ -371,8 +420,9 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 		}
 	}
 
-	// A watcher requested but unattached leaves the saga recoverable.
-	settled := a.Watcher == nil || !a.Watcher.Create || watcherID != ""
+	// A watcher requested (flat OR legacy) but unattached leaves the saga recoverable
+	// (terminal_bound), so a retry re-attaches instead of fresh-launching another agent.
+	settled := !wantWatcher || watcherID != ""
 	finalStage := domain.LaunchConfirmed
 	if !settled {
 		finalStage = domain.TerminalBound
