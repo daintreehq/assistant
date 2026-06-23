@@ -70,7 +70,8 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Store: grantStoreAdapter{s: a.Store},
 	})...)
 	all = append(all, mcpwrap.Tools(mcpwrap.Deps{
-		Store: mcpwrapWatcherStoreAdapter{s: a.Store},
+		Store:         mcpwrapWatcherStoreAdapter{s: a.Store},
+		WorkflowStore: mcpwrapWorkflowStoreAdapter{s: a.Store},
 	})...)
 	all = append(all, memory.Tools(memory.Deps{
 		Store: memoryStoreAdapter{s: a.Store},

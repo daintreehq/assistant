@@ -15,6 +15,7 @@ type fakeStore struct {
 	watchers      []domain.WatcherRecord
 	timerPatches  map[string]map[string]any
 	watchPatches  map[string]map[string]any
+	workflowPatch map[string]map[string]any
 	revoked       map[string]int
 	dueTimerErr   error
 	dueWatcherErr error
@@ -22,9 +23,10 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		timerPatches: map[string]map[string]any{},
-		watchPatches: map[string]map[string]any{},
-		revoked:      map[string]int{},
+		timerPatches:  map[string]map[string]any{},
+		watchPatches:  map[string]map[string]any{},
+		workflowPatch: map[string]map[string]any{},
+		revoked:       map[string]int{},
 	}
 }
 
@@ -139,6 +141,13 @@ func (f *fakeStore) RevokeGrantsByActor(actorID string, now int64) (int, error) 
 	defer f.mu.Unlock()
 	f.revoked[actorID]++
 	return 1, nil
+}
+
+func (f *fakeStore) UpdateWorkflowRun(id string, patch map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.workflowPatch[id] = patch
+	return nil
 }
 
 type fakeQueue struct {

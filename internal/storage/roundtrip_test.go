@@ -465,3 +465,48 @@ func TestAuditRunIDRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// The workflowRunId back-link round-trips on both the watcher and agent-launch
+// records, defaults to nil when absent, and is settable through the allowlisted
+// update (issue #206 — the durable-ledger link).
+func TestWatcherAndAgentLaunchWorkflowRunIDRoundTrip(t *testing.T) {
+	s := openTest(t, 1)
+
+	// Watcher: insert carrying a back-link → read it back.
+	w, _ := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w", Goal: "g", TargetsJson: "[]", CadenceMs: 1000,
+		ModelTier: domain.ModelSmall, NextCheckAt: 1, WorkflowRunID: strPtr("wfr_1"),
+	})
+	if gw, _ := s.GetWatcher(w.ID); gw.WorkflowRunID == nil || *gw.WorkflowRunID != "wfr_1" {
+		t.Fatalf("watcher workflowRunId not round-tripped: %v", gw.WorkflowRunID)
+	}
+	// Absent → nil; settable via the allowlisted update.
+	bare, _ := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w2", Goal: "g", TargetsJson: "[]", CadenceMs: 1000,
+		ModelTier: domain.ModelSmall, NextCheckAt: 1,
+	})
+	if gb, _ := s.GetWatcher(bare.ID); gb.WorkflowRunID != nil {
+		t.Fatalf("absent watcher workflowRunId must be nil, got %v", gb.WorkflowRunID)
+	}
+	if err := s.UpdateWatcher(bare.ID, map[string]any{"workflowRunId": "wfr_2"}); err != nil {
+		t.Fatal(err)
+	}
+	if gb, _ := s.GetWatcher(bare.ID); gb.WorkflowRunID == nil || *gb.WorkflowRunID != "wfr_2" {
+		t.Fatalf("watcher workflowRunId update not applied: %v", gb.WorkflowRunID)
+	}
+
+	// Agent launch: same round-trip + allowlisted update.
+	a, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "k", AgentID: "claude", Mode: "edit", Title: "t", Name: "n",
+		WorkflowRunID: strPtr("wfr_3"),
+	})
+	if ga, _ := s.GetAgentLaunch(a.ID); ga.WorkflowRunID == nil || *ga.WorkflowRunID != "wfr_3" {
+		t.Fatalf("agent launch workflowRunId not round-tripped: %v", ga.WorkflowRunID)
+	}
+	if err := s.UpdateAgentLaunch(a.ID, map[string]any{"workflowRunId": "wfr_4"}); err != nil {
+		t.Fatal(err)
+	}
+	if ga, _ := s.GetAgentLaunch(a.ID); ga.WorkflowRunID == nil || *ga.WorkflowRunID != "wfr_4" {
+		t.Fatalf("agent launch workflowRunId update not applied: %v", ga.WorkflowRunID)
+	}
+}

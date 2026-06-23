@@ -86,16 +86,27 @@ func (m *scriptMCP) lastLaunchArgs() map[string]any {
 
 // sagaStore is a stateful in-memory Store reproducing the saga semantics:
 // FindActiveAgentLaunch returns the newest NON-terminal row for a key; inserts
-// and patches mutate in place. insertWatcherErr forces a watcher-attach failure.
+// and patches mutate in place. insertWatcherErr forces a watcher-attach failure;
+// insertWorkflowErr forces a ledger-insert failure (to prove best-effort).
 type sagaStore struct {
-	launches         map[string]*domain.AgentLaunchRecord
-	order            []string
-	watchers         []domain.WatcherRecord
-	insertWatcherErr error
-	nextID           int
+	launches          map[string]*domain.AgentLaunchRecord
+	order             []string
+	watchers          []domain.WatcherRecord
+	workflowRuns      map[string]*domain.WorkflowRunRecord
+	workflowOrder     []string
+	workflowPatches   map[string]map[string]any
+	insertWatcherErr  error
+	insertWorkflowErr error
+	nextID            int
 }
 
-func newSagaStore() *sagaStore { return &sagaStore{launches: map[string]*domain.AgentLaunchRecord{}} }
+func newSagaStore() *sagaStore {
+	return &sagaStore{
+		launches:        map[string]*domain.AgentLaunchRecord{},
+		workflowRuns:    map[string]*domain.WorkflowRunRecord{},
+		workflowPatches: map[string]map[string]any{},
+	}
+}
 
 func (s *sagaStore) InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, error) {
 	if s.insertWatcherErr != nil {
@@ -160,10 +171,53 @@ func (s *sagaStore) UpdateAgentLaunch(id string, patch map[string]any) error {
 	if v, ok := patch["watcherId"].(string); ok {
 		r.WatcherID = &v
 	}
+	if v, ok := patch["workflowRunId"].(string); ok {
+		r.WorkflowRunID = &v
+	}
+	return nil
+}
+
+// InsertWorkflowRun records a ledger row (assigning a wfr_ id) unless
+// insertWorkflowErr is set, which models a best-effort ledger failure.
+func (s *sagaStore) InsertWorkflowRun(rec domain.WorkflowRunRecord) (domain.WorkflowRunRecord, error) {
+	if s.insertWorkflowErr != nil {
+		return domain.WorkflowRunRecord{}, s.insertWorkflowErr
+	}
+	if rec.ID == "" {
+		rec.ID = domain.NewID(domain.PrefixWorkflow)
+	}
+	cp := rec
+	s.workflowRuns[rec.ID] = &cp
+	s.workflowOrder = append(s.workflowOrder, rec.ID)
+	return cp, nil
+}
+
+// UpdateWorkflowRun records the patch and applies the columns the tests assert on.
+func (s *sagaStore) UpdateWorkflowRun(id string, patch map[string]any) error {
+	r, ok := s.workflowRuns[id]
+	if !ok {
+		return nil
+	}
+	s.workflowPatches[id] = patch
+	if v, ok := patch["status"].(string); ok {
+		r.Status = domain.WorkflowRunStatus(v)
+	}
+	if v, ok := patch["watcherIdsJson"].(string); ok {
+		r.WatcherIdsJson = &v
+	}
 	return nil
 }
 
 func (s *sagaStore) get(id string) *domain.AgentLaunchRecord { return s.launches[id] }
+
+// onlyWorkflowRun returns the single ledger row (failing if not exactly one).
+func (s *sagaStore) onlyWorkflowRun(t *testing.T) *domain.WorkflowRunRecord {
+	t.Helper()
+	if len(s.workflowOrder) != 1 {
+		t.Fatalf("expected exactly one workflow run, got %d", len(s.workflowOrder))
+	}
+	return s.workflowRuns[s.workflowOrder[0]]
+}
 
 func (s *sagaStore) GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error) {
 	r, ok := s.launches[id]
@@ -635,5 +689,131 @@ func TestSpawnAppliesNameAndWhitespaceFallbacks(t *testing.T) {
 	}
 	if blankMCP.lastLaunchArgs()["name"] != "Claude: task" {
 		t.Fatalf("blank fallback: %v", blankMCP.lastLaunchArgs()["name"])
+	}
+}
+
+// --- durable workflow ledger (issue #206) -----------------------------------
+
+// A successful spawn-with-watcher records the work in the durable ledger: an
+// active row linked to the terminal AND the watcher, the watcher back-links the
+// row, the saga carries the runId, and the result surfaces it.
+func TestSpawnPopulatesWorkflowLedger(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_9")}
+	st := newSagaStore()
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+	a.Watcher = &spawnWatcher{Create: true}
+
+	res := runSpawn(Deps{MCP: mcp, DB: st}, a)
+	if !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	run := st.onlyWorkflowRun(t)
+	if run.Status != domain.WorkflowActive {
+		t.Fatalf("ledger status: got %q want active", run.Status)
+	}
+	if run.WorktreeID == nil || *run.WorktreeID != "wt-1" {
+		t.Fatalf("ledger worktreeId: %v", run.WorktreeID)
+	}
+	if run.TerminalIdsJson == nil || *run.TerminalIdsJson != `["term_9"]` {
+		t.Fatalf("ledger terminalIdsJson: %v", run.TerminalIdsJson)
+	}
+	// The watcher's id is recorded on the row, and the watcher back-links the row.
+	w := st.watchers[0]
+	if run.WatcherIdsJson == nil || *run.WatcherIdsJson != `["`+w.ID+`"]` {
+		t.Fatalf("ledger watcherIdsJson: %v (watcher %s)", run.WatcherIdsJson, w.ID)
+	}
+	if w.WorkflowRunID == nil || *w.WorkflowRunID != run.ID {
+		t.Fatalf("watcher must back-link run %s, got %v", run.ID, w.WorkflowRunID)
+	}
+	// The saga carries the runId (idempotency anchor) and the result surfaces it.
+	if rec := st.get(res.Result.(map[string]any)["launchId"].(string)); rec.WorkflowRunID == nil || *rec.WorkflowRunID != run.ID {
+		t.Fatalf("saga must carry workflowRunId %s, got %v", run.ID, rec.WorkflowRunID)
+	}
+	if res.Result.(map[string]any)["workflowRunId"] != run.ID {
+		t.Fatalf("result workflowRunId: %v want %s", res.Result.(map[string]any)["workflowRunId"], run.ID)
+	}
+}
+
+// A spawn WITHOUT a watcher still records the work (the ledger is about the spawn,
+// not the supervision) — the row is left active with no watcher link.
+func TestSpawnRecordsLedgerWithoutWatcher(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_x")}
+	st := newSagaStore()
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+
+	if r := runSpawn(Deps{MCP: mcp, DB: st}, a); !r.Ok {
+		t.Fatalf("expected ok, got %+v", r.Error)
+	}
+	run := st.onlyWorkflowRun(t)
+	if run.Status != domain.WorkflowActive || run.WatcherIdsJson != nil {
+		t.Fatalf("unsupervised spawn should record an active, watcher-less row: %+v", run)
+	}
+}
+
+// The ledger insert is best-effort: a failure NEVER fails a successful spawn, and
+// no watcher back-link is recorded (the run id is empty).
+func TestSpawnOkWhenLedgerInsertFails(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1")}
+	st := newSagaStore()
+	st.insertWorkflowErr = errBoom("disk full")
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+	a.Watcher = &spawnWatcher{Create: true}
+
+	res := runSpawn(Deps{MCP: mcp, DB: st}, a)
+	if !res.Ok {
+		t.Fatalf("ledger failure must not fail the spawn: %+v", res.Error)
+	}
+	if len(st.workflowOrder) != 0 {
+		t.Fatalf("no ledger row should persist on insert failure, got %d", len(st.workflowOrder))
+	}
+	// The watcher still attaches, but carries no back-link.
+	if len(st.watchers) != 1 || st.watchers[0].WorkflowRunID != nil {
+		t.Fatalf("watcher should attach without a back-link, got %+v", st.watchers)
+	}
+	if _, has := res.Result.(map[string]any)["workflowRunId"]; has {
+		t.Fatal("result must omit workflowRunId when the ledger insert failed")
+	}
+}
+
+// An idempotent retry (saga left terminal_bound after a watcher-attach failure)
+// re-uses the SAME ledger row rather than inserting a duplicate.
+func TestSpawnLedgerIdempotentOnRetry(t *testing.T) {
+	st := newSagaStore()
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+	a.Watcher = &spawnWatcher{Create: true}
+
+	// First attempt: ledger row created, but the watcher attach fails → saga parks
+	// at terminal_bound carrying the runId.
+	st.insertWatcherErr = errBoom("disk full")
+	first := &scriptMCP{connected: true, launchResult: launchOK("term_1")}
+	r1 := runSpawn(Deps{MCP: first, DB: st}, a)
+	if !r1.Ok {
+		t.Fatalf("first attempt should stay ok: %+v", r1.Error)
+	}
+	if len(st.workflowOrder) != 1 {
+		t.Fatalf("first attempt should create one ledger row, got %d", len(st.workflowOrder))
+	}
+	runID := st.workflowOrder[0]
+
+	// Second attempt: same task → idempotent hit on the bound terminal; watcher now
+	// attaches. The ledger row is re-used (no duplicate) and gains the watcher link.
+	st.insertWatcherErr = nil
+	second := &scriptMCP{connected: true, launchResult: launchOK("should_not_relaunch")}
+	r2 := runSpawn(Deps{MCP: second, DB: st}, a)
+	if !r2.Ok {
+		t.Fatalf("retry should succeed: %+v", r2.Error)
+	}
+	if second.launchCount() != 0 {
+		t.Fatalf("idempotent retry must not relaunch, launched %d", second.launchCount())
+	}
+	if len(st.workflowOrder) != 1 || st.workflowOrder[0] != runID {
+		t.Fatalf("retry must re-use the ledger row, got %v", st.workflowOrder)
+	}
+	if st.workflowRuns[runID].WatcherIdsJson == nil {
+		t.Fatal("retry should record the now-attached watcher on the re-used row")
 	}
 }

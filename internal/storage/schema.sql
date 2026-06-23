@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS watchers (
   -- watcher.cancel). NULL on active rows and on natural terminal states
   -- (condition_met/timeout/error). endedAt is the epoch-ms of that cancel.
   endedReason        TEXT,
-  endedAt            INTEGER
+  endedAt            INTEGER,
+  -- Back-link to the durable workflow_runs ledger row a supervisor watcher drives.
+  -- NULL for non-supervisor / manually-created watchers. When set, the daemon advances
+  -- that row's status as the watcher reaches a terminal state.
+  workflowRunId      TEXT
 );
 
 -- 3.3 events — attention-queue inbox. createdAt is pinned; updatedAt is the
@@ -185,7 +189,10 @@ CREATE TABLE IF NOT EXISTS agent_launches (
   errorCode      TEXT,
   errorMessage   TEXT,
   createdAt      INTEGER NOT NULL,
-  updatedAt      INTEGER NOT NULL
+  updatedAt      INTEGER NOT NULL,
+  -- Back-link to the durable workflow_runs ledger row this spawn created. Set once
+  -- the ledger row exists so an idempotent retry re-uses it instead of duplicating.
+  workflowRunId  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_launches_key ON agent_launches(idempotencyKey, stage, updatedAt);
 

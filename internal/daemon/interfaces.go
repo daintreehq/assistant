@@ -36,6 +36,10 @@ type Store interface {
 	// RevokeGrantsByActor revokes all live automation grants for an actor id
 	// (called on every timer/watcher terminal state). Returns rows changed.
 	RevokeGrantsByActor(actorID string, now int64) (int, error)
+	// UpdateWorkflowRun applies an allowlisted column patch to a workflow ledger row.
+	// Called best-effort when a supervisor watcher that back-links a workflow run
+	// (rec.WorkflowRunID) reaches a terminal state, to advance the run's status.
+	UpdateWorkflowRun(id string, patch map[string]any) error
 }
 
 // Queue is the attention-queue surface the daemon publishes to and reads from in

@@ -217,16 +217,33 @@ func (a grantStoreAdapter) RevokeGrant(_ context.Context, id string) (bool, erro
 
 // mcpwrapWatcherStoreAdapter maps *storage.Store onto mcpwrap.WatcherStore (the
 // workflow.startWorkOnIssue supervisor-watcher attach). Strips ctx; InsertWatcher
-// drops the returned record (the family only needs success/failure).
+// returns the persisted record (its id back-links the workflow ledger row).
 type mcpwrapWatcherStoreAdapter struct{ s *storage.Store }
 
-func (a mcpwrapWatcherStoreAdapter) InsertWatcher(_ context.Context, rec domain.WatcherRecord) error {
-	_, err := a.s.InsertWatcher(rec)
-	return err
+func (a mcpwrapWatcherStoreAdapter) InsertWatcher(_ context.Context, rec domain.WatcherRecord) (domain.WatcherRecord, error) {
+	return a.s.InsertWatcher(rec)
 }
 
 func (a mcpwrapWatcherStoreAdapter) ListWatchers(_ context.Context, status string) ([]domain.WatcherRecord, error) {
 	return a.s.ListWatchers(status)
+}
+
+// mcpwrapWorkflowStoreAdapter maps *storage.Store onto mcpwrap.WorkflowStore (the
+// workflow.startWorkOnIssue durable-ledger insert). Strips ctx; InsertWorkflowRun
+// projects the persisted record down to its id; UpdateWorkflowRun forwards the
+// allowlisted patch directly.
+type mcpwrapWorkflowStoreAdapter struct{ s *storage.Store }
+
+func (a mcpwrapWorkflowStoreAdapter) InsertWorkflowRun(_ context.Context, rec domain.WorkflowRunRecord) (string, error) {
+	out, err := a.s.InsertWorkflowRun(rec)
+	if err != nil {
+		return "", err
+	}
+	return out.ID, nil
+}
+
+func (a mcpwrapWorkflowStoreAdapter) UpdateWorkflowRun(_ context.Context, id string, patch map[string]any) error {
+	return a.s.UpdateWorkflowRun(id, patch)
 }
 
 /* ----------------------------- Skill adapters ---------------------------- */

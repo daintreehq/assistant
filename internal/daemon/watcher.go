@@ -240,6 +240,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	})
 	if claimed && stop {
 		_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
+		// Advance the linked workflow ledger row as this supervisor terminates, so
+		// /workflows reflects the outcome. Best-effort: a ledger failure never
+		// disrupts the watcher finalize. condition_met (incl. a clean terminal
+		// exit) → done; timeout → failed.
+		advanceLinkedWorkflow(ctx, rec, status, now)
 	}
 
 	headline.Stop = stop
@@ -505,6 +510,8 @@ func classifyTail(ctx *CheckContext, rec domain.WatcherRecord, options *watcherO
 func disableWatcher(ctx *CheckContext, rec domain.WatcherRecord, now int64, reason string) CheckOutcome {
 	_ = ctx.Store.UpdateWatcher(rec.ID, map[string]any{"status": "error", "lastCheckedAt": now})
 	_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
+	// A corrupt-state supervisor fails its linked workflow ledger row (best-effort).
+	advanceLinkedWorkflow(ctx, rec, "error", now)
 	_ = ctx.Queue.Publish(domain.QueuePublishArgs{
 		Source:        domain.SourceTerminalWatcher,
 		Severity:      domain.SeverityError,
@@ -526,6 +533,25 @@ func disableWatcher(ctx *CheckContext, rec domain.WatcherRecord, now int64, reas
 }
 
 // --- small helpers -----------------------------------------------------------
+
+// advanceLinkedWorkflow maps a terminating supervisor's watcher status onto its
+// linked workflow ledger row and stamps completedAt. No-op when the watcher carries
+// no WorkflowRunID (non-supervisor / manually-created watchers). Best-effort: a
+// ledger failure must never disrupt the watcher finalize. Status mapping:
+// condition_met (incl. a clean terminal exit) → done; timeout/error → failed.
+func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherStatus string, now int64) {
+	if rec.WorkflowRunID == nil || *rec.WorkflowRunID == "" {
+		return
+	}
+	wfStatus := domain.WorkflowDone
+	if watcherStatus == "timeout" || watcherStatus == "error" {
+		wfStatus = domain.WorkflowFailed
+	}
+	_ = ctx.Store.UpdateWorkflowRun(*rec.WorkflowRunID, map[string]any{
+		"status":      string(wfStatus),
+		"completedAt": now,
+	})
+}
 
 func humanize(c domain.WatcherClassification) string {
 	return strings.ReplaceAll(string(c), "_", " ")

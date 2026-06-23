@@ -113,15 +113,15 @@ func (s *Store) UpdateSkillRunState(id string, patch map[string]any) error {
 
 // ---- agent_launches ----
 
-const agentLaunchCols = `id,idempotencyKey,agentId,worktreeId,mode,title,name,terminalId,watcherId,stage,errorCode,errorMessage,createdAt,updatedAt`
+const agentLaunchCols = `id,idempotencyKey,agentId,worktreeId,mode,title,name,terminalId,watcherId,stage,errorCode,errorMessage,createdAt,updatedAt,workflowRunId`
 
 func scanAgentLaunch(sc scanner) (domain.AgentLaunchRecord, error) {
 	var a domain.AgentLaunchRecord
 	var stage string
-	var worktreeID, terminalID, watcherID, errorCode, errorMessage sql.NullString
+	var worktreeID, terminalID, watcherID, errorCode, errorMessage, workflowRunID sql.NullString
 	if err := sc.Scan(&a.ID, &a.IdempotencyKey, &a.AgentID, &worktreeID, &a.Mode,
 		&a.Title, &a.Name, &terminalID, &watcherID, &stage, &errorCode, &errorMessage,
-		&a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.CreatedAt, &a.UpdatedAt, &workflowRunID); err != nil {
 		return domain.AgentLaunchRecord{}, err
 	}
 	a.WorktreeID = strFromNull(worktreeID)
@@ -130,6 +130,7 @@ func scanAgentLaunch(sc scanner) (domain.AgentLaunchRecord, error) {
 	a.Stage = domain.AgentLaunchStage(stage)
 	a.ErrorCode = strFromNull(errorCode)
 	a.ErrorMessage = strFromNull(errorMessage)
+	a.WorkflowRunID = strFromNull(workflowRunID)
 	return a, nil
 }
 
@@ -152,12 +153,12 @@ func (s *Store) InsertAgentLaunch(rec domain.AgentLaunchRecord) (domain.AgentLau
 	_, err := s.db.Exec(`
 		INSERT INTO agent_launches
 		  (id,idempotencyKey,agentId,worktreeId,mode,title,name,terminalId,watcherId,
-		   stage,errorCode,errorMessage,createdAt,updatedAt)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   stage,errorCode,errorMessage,createdAt,updatedAt,workflowRunId)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.ID, rec.IdempotencyKey, rec.AgentID, nullStr(rec.WorktreeID), rec.Mode,
 		rec.Title, rec.Name, nullStr(rec.TerminalID), nullStr(rec.WatcherID),
 		string(rec.Stage), nullStr(rec.ErrorCode), nullStr(rec.ErrorMessage),
-		rec.CreatedAt, rec.UpdatedAt)
+		rec.CreatedAt, rec.UpdatedAt, nullStr(rec.WorkflowRunID))
 	if err != nil {
 		return domain.AgentLaunchRecord{}, fmt.Errorf("insert agent launch: %w", err)
 	}
@@ -252,7 +253,7 @@ func (s *Store) FindActiveAgentLaunch(idempotencyKey string) (*domain.AgentLaunc
 }
 
 var agentLaunchUpdateCols = newColSet("agentId", "worktreeId", "mode", "title", "name",
-	"terminalId", "watcherId", "stage", "errorCode", "errorMessage")
+	"terminalId", "watcherId", "stage", "errorCode", "errorMessage", "workflowRunId")
 var agentLaunchUpdateColsWithTime = unionColSet(agentLaunchUpdateCols, "updatedAt")
 
 // UpdateAgentLaunch force-sets updatedAt = now and applies the allowlisted patch.

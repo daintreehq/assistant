@@ -36,9 +36,10 @@ const (
 	// pruneChunk caps run-id deletes per batch under SQLITE_MAX_VARIABLE_NUMBER 999.
 	pruneChunk = 900
 	// schemaUserVersion is the single baseline; dev hard-resets rather than chain.
-	// Bumped to 2 when the watchers table gained endedReason/endedAt — a schema change
-	// is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 2
+	// Bumped to 2 when the watchers table gained endedReason/endedAt; to 3 when watchers
+	// and agent_launches gained workflowRunId (durable workflow-ledger back-links) — a
+	// schema change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 3
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
