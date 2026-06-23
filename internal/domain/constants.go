@@ -53,3 +53,23 @@ const (
 	CancelledReply = "Turn cancelled"
 	ClearMarker    = "[conversation cleared — context reset to initial state]"
 )
+
+// ungrantableTools can never be covered by an automation grant — keyed by
+// internal dotted tool name. Granting the grant tools themselves would let an
+// automation mint its own authority; granting daintree.call (the raw, unbounded
+// MCP escape hatch, RiskSystem) would let a watcher/timer reach ANY Daintree MCP
+// method unattended, bypassing the per-method typed-wrapper gating that is the
+// whole point of the wrappers. Both grant.create (the minting path) and the
+// denial-event recommender consult this so neither ever offers an impossible
+// grant.
+var ungrantableTools = map[string]bool{
+	"grant.create":  true,
+	"grant.revoke":  true,
+	"daintree.call": true,
+}
+
+// IsUngrantableTool reports whether a tool can never be covered by an automation
+// grant (see ungrantableTools for the rationale). The single source of truth so
+// grant.create's validation and the blocked-event grant recommendation stay in
+// lockstep.
+func IsUngrantableTool(name string) bool { return ungrantableTools[name] }

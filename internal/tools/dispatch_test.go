@@ -309,6 +309,80 @@ func TestDispatchNonInteractiveBlockedRecommendsGrant(t *testing.T) {
 	}
 }
 
+// A watcher blocked on an UNGRANTABLE tool (e.g. daintree.call) is still blocked
+// with SeverityBlocked, but carries NO grant.create recommendation — grant.create
+// would reject that tool, so a one-click "unblock" that silently fails is worse
+// than offering nothing.
+func TestDispatchNonInteractiveBlockedUngrantableToolNoAction(t *testing.T) {
+	r := NewRegistry()
+	// daintree.call is in the ungrantable set; give it a confirm-required risk so it
+	// reaches Branch A.
+	_ = r.Register(echoTool("daintree.call", domain.RiskGit))
+	s := &fakeStore{}
+	q := &fakeQueue{}
+	ctx := baseCtx(s, q, domain.TierSystem, domain.ActorWatcher)
+	ctx.ActorID = "wch_1"
+	res := r.Dispatch(context.Background(), "daintree.call", json.RawMessage(`{"x":1}`), ctx)
+	if res.Error.Code != "CONFIRMATION_REQUIRED" {
+		t.Fatalf("want CONFIRMATION_REQUIRED, got %+v", res.Error)
+	}
+	if len(q.published) != 1 {
+		t.Fatalf("a denial event should be published, got %d", len(q.published))
+	}
+	if q.published[0].Severity != domain.SeverityBlocked {
+		t.Fatalf("denial event should be SeverityBlocked, got %q", q.published[0].Severity)
+	}
+	if len(q.published[0].RecommendedActions) != 0 {
+		t.Fatalf("ungrantable tool must not get a grant.create recommendation, got %d",
+			len(q.published[0].RecommendedActions))
+	}
+}
+
+// A non-interactive actor that is neither watcher nor timer (e.g. workflow) is
+// blocked with SeverityBlocked but gets no grant.create recommendation —
+// grant.create's actorType only accepts watcher|timer, so a suggestion for any
+// other actor would be invalid.
+func TestDispatchNonInteractiveBlockedNonGrantableActorNoAction(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("g.echo", domain.RiskGit))
+	s := &fakeStore{}
+	q := &fakeQueue{}
+	ctx := baseCtx(s, q, domain.TierSystem, domain.ActorWorkflow)
+	ctx.ActorID = "wf_1"
+	res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx)
+	if res.Error.Code != "CONFIRMATION_REQUIRED" {
+		t.Fatalf("want CONFIRMATION_REQUIRED, got %+v", res.Error)
+	}
+	if len(q.published) != 1 {
+		t.Fatalf("a denial event should be published, got %d", len(q.published))
+	}
+	if q.published[0].Severity != domain.SeverityBlocked {
+		t.Fatalf("denial event should be SeverityBlocked, got %q", q.published[0].Severity)
+	}
+	if len(q.published[0].RecommendedActions) != 0 {
+		t.Fatalf("non-grantable actor must not get a grant.create recommendation, got %d",
+			len(q.published[0].RecommendedActions))
+	}
+}
+
+// The happy grant path must NOT publish a denial event — a blocked-event leak
+// here would spam the inbox on every authorized autonomous call.
+func TestDispatchNonInteractiveGrantOKPublishesNoDenial(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("g.echo", domain.RiskGit))
+	s := &fakeStore{grant: &domain.AutomationGrantRecord{ID: "grt_abc", Source: domain.GrantSourceLocal}}
+	q := &fakeQueue{}
+	ctx := baseCtx(s, q, domain.TierSystem, domain.ActorWatcher)
+	ctx.ActorID = "wch_1"
+	res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx)
+	if !res.Ok {
+		t.Fatalf("grant should authorize the call, got %+v", res.Error)
+	}
+	if len(q.published) != 0 {
+		t.Fatalf("an authorized call must publish no denial event, got %d", len(q.published))
+	}
+}
+
 func TestDispatchNonInteractiveGrantOK(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Register(echoTool("g.echo", domain.RiskGit))

@@ -167,6 +167,12 @@ func toolOffered(name string, active []string) bool {
 
 // tryGrant attempts the atomic grant consume for a non-interactive actor. Only
 // attempted when ActorID is set. Returns the consumed grant or nil.
+//
+// A storage error is treated as "no grant" (fail-safe: deny rather than approve
+// on a flaky DB). The caller then publishes a denial recommending grant.create —
+// so on a transient ConsumeGrant failure with a *valid* grant present, the human
+// may be nudged to mint a duplicate. Accepted: the alternative (trusting a failed
+// read) would let an unauthorized call through, which is the worse failure.
 func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *ToolContext, _ int64) *domain.AutomationGrantRecord {
 	if tctx.ActorID == "" || tctx.DB == nil {
 		return nil
@@ -314,7 +320,13 @@ func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolCon
 		actorIDSeg = tctx.ActorID + ":"
 	}
 	var actions []domain.RecommendedAction
-	if tctx.ActorID != "" && (tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer) {
+	// Only recommend grant.create when a grant could actually authorize this tool:
+	// the actor must be a grantable type (watcher/timer — grant.create's actorType
+	// enum) with a known ActorID, and the tool must not be ungrantable (e.g.
+	// daintree.call). Recommending a grant that grant.create would reject is worse
+	// than no recommendation — it's a one-click "unblock" that silently fails.
+	if tctx.ActorID != "" && (tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer) &&
+		!domain.IsUngrantableTool(name) {
 		actions = []domain.RecommendedAction{{
 			Label:    fmt.Sprintf("Authorize %s %s to run %s", tctx.Actor, tctx.ActorID, name),
 			ToolName: "grant.create",
