@@ -205,6 +205,11 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0,
 		RiskOf: func(string) (domain.RiskClass, bool) { return domain.RiskLocal, true }})
 
+	// A long value must collapse to a "<string: N chars>" marker (proves redaction
+	// genuinely runs); a short value passes through verbatim — deliberate parity
+	// with tool:started's wire redaction (redactArgs is length-only, not
+	// credential-aware; the credential-masking redactor lives in the cockpit path).
+	longVal := strings.Repeat("a", 100)
 	done := make(chan bool, 1)
 	go func() {
 		done <- b.Confirm(context.Background(), ConfirmRequest{
@@ -212,7 +217,7 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 			Summary:     "create automation grant?",
 			RiskClass:   domain.RiskSystem,
 			Consequence: "grants unattended actor authority",
-			RawArgs:     `{"scope":"git","secret":"hunter2"}`,
+			RawArgs:     `{"scope":"git","payload":"` + longVal + `"}`,
 		})
 	}()
 
@@ -241,11 +246,17 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 	if req.Consequence != "grants unattended actor authority" {
 		t.Errorf("consequence=%q not forwarded", req.Consequence)
 	}
-	// redactArgs produces a single-level object; keys must survive but no field is
-	// dropped here (both values are short), so assert the redacted form is non-empty
-	// JSON carrying the keys.
-	if req.ArgsSummary == "" || !strings.Contains(req.ArgsSummary, "scope") || !strings.Contains(req.ArgsSummary, "secret") {
-		t.Errorf("argsSummary=%q want redacted object with scope+secret keys", req.ArgsSummary)
+	// redactArgs produces a single-level object: keys survive, the short value
+	// passes through verbatim, and the long value is collapsed to a length marker
+	// (never crossing the wire raw).
+	if !strings.Contains(req.ArgsSummary, "scope") {
+		t.Errorf("argsSummary=%q dropped the scope key", req.ArgsSummary)
+	}
+	if !strings.Contains(req.ArgsSummary, "<string: 100 chars>") {
+		t.Errorf("argsSummary=%q want long value collapsed to a length marker", req.ArgsSummary)
+	}
+	if strings.Contains(req.ArgsSummary, longVal) {
+		t.Errorf("argsSummary leaked the long value verbatim: %q", req.ArgsSummary)
 	}
 
 	// Encoded wire object must surface the three optional keys.
