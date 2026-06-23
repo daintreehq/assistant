@@ -121,13 +121,19 @@ func (a *App) SetHooks(h AppHooks) {
 // MCP, close the store. Safe to call once.
 func (a *App) Shutdown() error {
 	// Cancel the app-scoped background context first so any detached jobs
-	// (terminal.extract.async) stop touching MCP/Router/Store before we close them.
+	// (terminal.extract.async, the post-compaction distill goroutine) stop touching
+	// MCP/Router/Store before we close them.
 	if a.baseCancel != nil {
 		a.baseCancel()
 	}
 	if a.scheduler != nil {
 		a.scheduler.Stop()
 		a.scheduler.Drain()
+	}
+	// Join the session's detached distill goroutine BEFORE closing the Router/Store it
+	// writes to. baseCancel above already cancelled its context, so this returns fast.
+	if a.Session != nil {
+		a.Session.DrainBackgroundWork()
 	}
 	if a.MCP != nil {
 		_ = a.MCP.Close()
