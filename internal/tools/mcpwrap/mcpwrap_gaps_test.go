@@ -26,6 +26,7 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 		"forge.getIssue":               domain.RiskRead,
 		"forge.listPRs":                domain.RiskRead,
 		"forge.getPR":                  domain.RiskRead,
+		"git.getProjectPulse":          domain.RiskRead,
 		"git.snapshotDelete":           domain.RiskGit,
 		"git.snapshotRevert":           domain.RiskGit,
 		"workflow.startWorkOnIssue":    domain.RiskExternal,

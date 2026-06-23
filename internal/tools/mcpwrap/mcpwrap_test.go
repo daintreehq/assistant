@@ -64,18 +64,20 @@ func TestRecipeRunRecipeIDWins(t *testing.T) {
 	}
 }
 
-// The worktree reads forward to the right Daintree action name, carry RiskRead
-// (supervisor-tier reachable, no confirmation — unlike system-tier daintree.call),
-// and pass the MCP envelope's structuredContent straight through to the model.
-// An omitted arguments record forwards an empty (non-nil) map, matching forgeRead's
-// nil-guard, and an opaque nested arguments object is forwarded verbatim.
-func TestWorktreeReadsForwardAndPassThrough(t *testing.T) {
+// The opaque-args reads (worktree.list / worktree.getCurrent / git.getProjectPulse)
+// forward to the right Daintree action name, carry RiskRead (supervisor-tier
+// reachable, no confirmation — unlike system-tier daintree.call), and pass the MCP
+// envelope's structuredContent straight through to the model. An omitted arguments
+// record forwards an empty (non-nil) map, matching forgeRead's nil-guard, and an
+// opaque nested arguments object is forwarded verbatim.
+func TestOpaqueArgReadsForwardAndPassThrough(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		target string
 	}{
 		{"worktree.list", "worktree.list"},
 		{"worktree.getCurrent", "worktree.getCurrent"},
+		{"git.getProjectPulse", "git.getProjectPulse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := findTool(Tools(Deps{}), tc.target)
@@ -136,8 +138,8 @@ func TestWorktreeReadsForwardAndPassThrough(t *testing.T) {
 // A Daintree-side refusal (IsError) maps to MCP_TOOL_ERROR, and the strict
 // top-level schema rejects an unknown key locally (only a nested arguments object
 // is allowed) before any transport call.
-func TestWorktreeReadsErrorPaths(t *testing.T) {
-	for _, name := range []string{"worktree.list", "worktree.getCurrent"} {
+func TestOpaqueArgReadsErrorPaths(t *testing.T) {
+	for _, name := range []string{"worktree.list", "worktree.getCurrent", "git.getProjectPulse"} {
 		tool := findTool(Tools(Deps{}), name)
 
 		// Daintree refuses → MCP_TOOL_ERROR (not a transport failure).
@@ -155,10 +157,10 @@ func TestWorktreeReadsErrorPaths(t *testing.T) {
 	}
 }
 
-// A disconnected MCP must surface MCP_UNAVAILABLE for the worktree reads too,
+// A disconnected MCP must surface MCP_UNAVAILABLE for the opaque-args reads too,
 // never reaching the transport.
-func TestWorktreeReadsDisconnected(t *testing.T) {
-	for _, name := range []string{"worktree.list", "worktree.getCurrent"} {
+func TestOpaqueArgReadsDisconnected(t *testing.T) {
+	for _, name := range []string{"worktree.list", "worktree.getCurrent", "git.getProjectPulse"} {
 		m := &fakeMCP{connected: false}
 		tool := findTool(Tools(Deps{}), name)
 		res := tool.Handle(context.Background(), json.RawMessage(`{}`), ctxWith(m))

@@ -41,6 +41,9 @@ Your local tools wrap Daintree:
   copyTree.injectToTerminal — inject that digest into a terminal (mutating,
   always confirmed). copyTree.generateAndCopyFile — copy it to the OS clipboard
   as a file (system tier, always confirmed).
+- git.getProjectPulse — read a worktree's git pulse (branch state, uncommitted
+  changes, recent commits) for the current or a named worktree (read tier, no
+  confirmation). Prefer it over daintree.call for a read-only git check.
 - git.snapshotRevert / git.snapshotDelete — revert a worktree to, or delete, its
   pre-agent git snapshot (system tier, always confirmed, IRREVERSIBLE).
 - terminal.arm / terminal.disarm / terminal.disarmAll — add a terminal to, remove a
@@ -80,13 +83,13 @@ Your local tools wrap Daintree:
   terminal.summarize (model gist) / terminal.extract (pull a field);
   panel.focus -> terminal.focus; terminal.sendCommand,
   terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
-  copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
-  same-named typed wrappers. Reach for the wrapper, not this. Some useful Daintree
-  tools have NO wrapper and are reachable only this way — e.g. worktree.compareDiff
-  (read-only: the files that differ between two worktrees' branches). The forge.open*
-  / worktree.open* actions are renderer/UI-only (they open a browser/editor) — they do
-  nothing useful headless, so don't call them. Use tool.search / daintree.listTools to
-  discover unwrapped tools before guessing a name.
+  copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete,
+  git.getProjectPulse -> their same-named typed wrappers. Reach for the wrapper,
+  not this. Some useful Daintree tools have NO wrapper and are reachable only this
+  way — e.g. worktree.compareDiff (read-only: the files that differ between two
+  worktrees' branches). The forge.open* / worktree.open* actions are renderer/UI-only
+  (they open a browser/editor) — they do nothing useful headless, so don't call them.
+  Use tool.search / daintree.listTools to discover unwrapped tools before guessing a name.
 
 ## Playbook: spawn an agent and relay what it said
 This is the common "open an agent, ask it something, tell me the answer" flow.
