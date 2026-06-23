@@ -32,17 +32,18 @@ type DebugLogger interface {
 // call records its token usage here so the cost footer reflects EVERY model call
 // in a turn, not just the large-thread stream (see usage.go).
 type Router struct {
-	FW    *FireworksClient
-	cfg   RouterConfig
-	log   DebugLogger
-	meter *usageAccumulator
+	FW     *FireworksClient
+	cfg    RouterConfig
+	log    DebugLogger
+	meter  *usageAccumulator
+	elider *logElider
 }
 
 // NewRouter builds a router. fw may be nil, in which case the caller is expected to
 // supply one via NewRouterWithClient; this constructor requires an explicit client
 // because the model-id config and the client's connection config are separate seams.
 func NewRouter(cfg RouterConfig, fw *FireworksClient, log DebugLogger) *Router {
-	return &Router{FW: fw, cfg: cfg, log: log, meter: newUsageAccumulator()}
+	return &Router{FW: fw, cfg: cfg, log: log, meter: newUsageAccumulator(), elider: newLogElider()}
 }
 
 // ModelFor resolves a tier to its concrete model id. default falls through to large.
@@ -184,7 +185,10 @@ func (r *Router) logRequest(kind string, tier domain.ModelTier, model string, op
 		"kind": kind, "tier": string(tier), "model": model,
 		"toolChoice": opts.ToolChoice,
 		"toolNames":  toolNames,
-		"messages":   redactMessages(opts.Messages),
+		// Elide message contents already logged this session: the 22 KB system prompt
+		// and the entire prior history repeat byte-for-byte every request, which made
+		// the full-fidelity trace grow O(turns²) (see logElider).
+		"messages": r.elider.elide(redactMessages(opts.Messages)),
 	})
 }
 

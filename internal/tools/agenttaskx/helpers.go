@@ -197,16 +197,20 @@ func reconcileViaTerminalList(ctx context.Context, mcp MCPClient, name, agentID,
 	return ""
 }
 
-// computeIdempotencyKey derives a deterministic 16-hex key over the task IDENTITY
-// (taskPrompt, worktreeId|"", agentId, mode) — title/context excluded so a retry
-// that tweaks them still dedupes. Keys are sorted for a canonical JSON before
-// sha256 (a flat object, so a key-sort suffices).
-func computeIdempotencyKey(taskPrompt, worktreeID, agentID, mode string) string {
+// computeIdempotencyKey derives a deterministic 16-hex key over the EXACT arguments
+// forwarded to agent.launch (the composed prompt, worktreeId|"", agentId, and the
+// terminal name). Daintree dedupes on this key as requestKey AND rejects a reuse with
+// different arguments ("same requestKey, different arguments"), so the key must mirror
+// those args faithfully — keying a hand-picked subset let a title tweak (which changes
+// `name`) reuse the key and hard-collide. mode/context/acceptanceCriteria fold in via
+// `prompt`. Keys are sorted for a canonical JSON before sha256 (a flat object, so a
+// key-sort suffices).
+func computeIdempotencyKey(prompt, worktreeID, agentID, name string) string {
 	parts := map[string]string{
-		"taskPrompt": taskPrompt,
+		"prompt":     prompt,
 		"worktreeId": worktreeID,
 		"agentId":    agentID,
-		"mode":       mode,
+		"name":       name,
 	}
 	keys := make([]string, 0, len(parts))
 	for k := range parts {

@@ -23,6 +23,7 @@ const (
 	codeAgentLaunchAmbiguous = "AGENT_LAUNCH_AMBIGUOUS"
 	codeNoTerminalID         = "NO_TERMINAL_ID"
 	codeLaunchNotFound       = "LAUNCH_NOT_FOUND"
+	codeUnknownAgent         = "UNKNOWN_AGENT"
 )
 
 type spawnContext struct {
@@ -162,7 +163,12 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	// Normalize the worktree once: an explicit empty string is treated like an
 	// omitted worktree (so it doesn't change the idempotency key or get forwarded).
 	worktreeID := strings.TrimSpace(a.WorktreeID)
-	idempotencyKey := computeIdempotencyKey(a.TaskPrompt, worktreeID, agentID, mode)
+	// Key the saga over the EXACT args forwarded to agent.launch (agentId, name,
+	// prompt, worktreeId). Daintree rejects "same requestKey, different arguments", so
+	// the key MUST be a faithful function of those args — keying a hand-picked subset
+	// (the old (taskPrompt, mode) shape) made a title tweak reuse the key with a
+	// changed name and collide. mode/context/acceptanceCriteria fold in via `prompt`.
+	idempotencyKey := computeIdempotencyKey(prompt, worktreeID, agentID, name)
 
 	// --- Idempotent retry: is there a live launch saga for this exact task? ---
 	existing, _ := deps.DB.FindActiveAgentLaunch(idempotencyKey)
@@ -199,6 +205,32 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 			"via": "agentTask.spawnForEdits", "launchId": existing.ID,
 			"idempotencyKey": idempotencyKey, "priorStage": existing.Stage,
 		})
+	}
+
+	// Validate the agent id against Daintree's configured agents BEFORE a FRESH launch
+	// (after the idempotent-retry lookup, so reconciling an in-flight saga is never
+	// blocked by a stale roster, and an already-bound idempotent hit skips this read).
+	// Daintree's agent.launch silently accepts ANY agentId and launches a terminal that
+	// immediately detaches with zero output, so a typo or a mis-transcribed name
+	// (spoken "antigravity" heard as "antiravity") fails invisibly and then walls a
+	// retry on a key collision. Catch it here with the available roster + a "did you
+	// mean" hint; fail OPEN when the roster can't be read so a discovery hiccup never
+	// blocks a legitimate spawn.
+	if ok, available, suggestion := resolveAgentID(ctx, deps.MCP, agentID); !ok {
+		msg := fmt.Sprintf("Unknown agent %q — Daintree has no agent configured with that id.", agentID)
+		if suggestion != "" {
+			msg += fmt.Sprintf(" Did you mean %q?", suggestion)
+		}
+		msg += " Available agents: " + strings.Join(available, ", ") +
+			". A spoken or typed agent name is often approximate — pick the right id from this list and re-spawn."
+		return tools.Fail(codeUnknownAgent, msg, tools.WithDetails(map[string]any{
+			"requestedAgentId": agentID, "availableAgents": available, "suggestion": suggestion,
+		}))
+	}
+	// The roster read above can take a beat; if the turn was cancelled meanwhile, stop
+	// before writing the saga or launching (don't leave an orphaned record).
+	if ctx.Err() != nil {
+		return tools.Fail(codeCancelled, "Turn cancelled before the agent was launched.", tools.Unrecoverable())
 	}
 
 	// --- Fresh launch: write the saga record BEFORE the side-effecting call. ---

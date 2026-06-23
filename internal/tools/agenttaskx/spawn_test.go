@@ -21,13 +21,14 @@ type recordedCall struct {
 // throw, and a recorded call log. It also runs an optional hook on agent.launch
 // (used to model an abort torn mid-launch).
 type scriptMCP struct {
-	connected    bool
-	launchResult MCPCallResult
-	launchThrows bool
-	launchErr    error
-	listResult   MCPCallResult
-	onLaunch     func()
-	calls        []recordedCall
+	connected     bool
+	launchResult  MCPCallResult
+	launchThrows  bool
+	launchErr     error
+	listResult    MCPCallResult
+	agentSettings MCPCallResult // agentSettings.get response; zero value ⇒ fail-open roster
+	onLaunch      func()
+	calls         []recordedCall
 }
 
 func (m *scriptMCP) Connected() bool { return m.connected }
@@ -48,6 +49,8 @@ func (m *scriptMCP) CallTool(_ context.Context, name string, args map[string]any
 		return m.launchResult, nil
 	case "terminal.list":
 		return m.listResult, nil
+	case "agentSettings.get":
+		return m.agentSettings, nil
 	}
 	return MCPCallResult{}, nil
 }
@@ -556,23 +559,31 @@ func TestSpawnMCPDisconnectedFailsClean(t *testing.T) {
 	}
 }
 
-func TestSpawnDeterministicRequestKey(t *testing.T) {
+func TestSpawnRequestKeyMirrorsForwardedArgs(t *testing.T) {
 	a := baseSpawn()
 	a.TaskPrompt = "Repair the OAuth callback handler."
 	a.WorktreeID = "wt-1"
+	// Identical args produce an identical requestKey, so a genuine double-fire dedupes.
 	mcpA := &scriptMCP{connected: true, launchResult: launchOK("t")}
-	mcpB := &scriptMCP{connected: true, launchResult: launchOK("t")}
+	mcpA2 := &scriptMCP{connected: true, launchResult: launchOK("t")}
 	_ = runSpawn(Deps{MCP: mcpA, DB: newSagaStore()}, a)
-	b := a
-	b.Title = "different title" // title is excluded from the identity
-	_ = runSpawn(Deps{MCP: mcpB, DB: newSagaStore()}, b)
+	_ = runSpawn(Deps{MCP: mcpA2, DB: newSagaStore()}, a)
 	keyA := mcpA.lastLaunchArgs()["requestKey"].(string)
-	keyB := mcpB.lastLaunchArgs()["requestKey"].(string)
-	if keyA != keyB {
-		t.Fatalf("requestKey not deterministic across title change: %s vs %s", keyA, keyB)
+	if keyA != mcpA2.lastLaunchArgs()["requestKey"].(string) {
+		t.Fatal("identical args must produce an identical requestKey")
 	}
 	if len(keyA) != 16 {
 		t.Fatalf("requestKey length %d, want 16", len(keyA))
+	}
+	// A title change alters the forwarded `name`, so it MUST change the requestKey.
+	// The old shape excluded the title and reused the key with a changed name, which
+	// tripped Daintree's "same requestKey, different arguments" collision on retry.
+	b := a
+	b.Title = "different title"
+	mcpB := &scriptMCP{connected: true, launchResult: launchOK("t")}
+	_ = runSpawn(Deps{MCP: mcpB, DB: newSagaStore()}, b)
+	if mcpB.lastLaunchArgs()["requestKey"] == keyA {
+		t.Fatal("a title change must change the requestKey (it changes the forwarded name)")
 	}
 	// A different worktree changes the key.
 	c := a

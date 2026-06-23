@@ -188,7 +188,12 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   terminalId, location } ONLY (no worktreeId, no taskId). "name" is a short
   human-readable label for the spawned agent's terminal/tab so parallel agents stay
   distinguishable. "model" (optional string) overrides the model the spawned agent
-  runs under — omit it to use the agent's default.
+  runs under — omit it to use the agent's default. agent.launch does NOT validate
+  agentId — an unknown or mis-transcribed id launches a dead, silent terminal.
+- agentSettings.get() -> { agents } keyed by AGENT id is the authoritative roster of
+  launchable agents (claude, codex, gemini, antigravity, …). agentTask.spawnForEdits
+  checks the requested agentId against this roster and rejects an unknown one, so a
+  user-spoken agent name is only a hint — resolve it rather than passing it through.
 - To focus a terminal, Daintree uses panel.focus({ panelId }) — the terminal id IS
   the panelId. There is NO terminal.focus MCP tool (the local wrapper maps to it).
 - Read tools (workbench tier, no confirmation): actions.getContext / list / search /
@@ -224,7 +229,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`
 
-// DocumentedMCPToolNames is the hand-maintained list of 57 verified Daintree MCP
+// DocumentedMCPToolNames is the hand-maintained list of 58 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
 // server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{
@@ -237,6 +242,7 @@ var DocumentedMCPToolNames = []string{
 	"agent.focusNextWorking",
 	"agent.focusPreviousAgent",
 	"agent.launch",
+	"agentSettings.get",
 	"copyTree.generate",
 	"copyTree.generateAndCopyFile",
 	"copyTree.injectToTerminal",

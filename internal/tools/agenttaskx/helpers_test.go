@@ -5,21 +5,30 @@ import (
 	"testing"
 )
 
-func TestComputeIdempotencyKeyDeterministicAndIdentityScoped(t *testing.T) {
-	k1 := computeIdempotencyKey("do the thing", "wt1", "claude", "edit")
-	k2 := computeIdempotencyKey("do the thing", "wt1", "claude", "edit")
+func TestComputeIdempotencyKeyMirrorsForwardedArgs(t *testing.T) {
+	k1 := computeIdempotencyKey("do the thing", "wt1", "claude", "Claude: x")
+	k2 := computeIdempotencyKey("do the thing", "wt1", "claude", "Claude: x")
 	if k1 != k2 {
 		t.Fatalf("key not deterministic: %s vs %s", k1, k2)
 	}
 	if len(k1) != 16 {
 		t.Fatalf("key length = %d, want 16", len(k1))
 	}
-	// A different mode changes the key.
-	if computeIdempotencyKey("do the thing", "wt1", "claude", "explore") == k1 {
-		t.Error("mode should affect the key")
+	// The name (derived from the title) is a forwarded arg, so it MUST change the key —
+	// the regression that walled retries was a name change reusing the same requestKey.
+	if computeIdempotencyKey("do the thing", "wt1", "claude", "Claude: y") == k1 {
+		t.Error("name should affect the key")
+	}
+	// A different composed prompt changes the key.
+	if computeIdempotencyKey("do another thing", "wt1", "claude", "Claude: x") == k1 {
+		t.Error("prompt should affect the key")
+	}
+	// A different agent changes the key.
+	if computeIdempotencyKey("do the thing", "wt1", "codex", "Claude: x") == k1 {
+		t.Error("agentId should affect the key")
 	}
 	// An empty worktree must be canonical (the handler normalizes "" the same way).
-	if computeIdempotencyKey("t", "", "claude", "edit") == computeIdempotencyKey("t", "wt", "claude", "edit") {
+	if computeIdempotencyKey("t", "", "claude", "n") == computeIdempotencyKey("t", "wt", "claude", "n") {
 		t.Error("worktree should affect the key")
 	}
 }
