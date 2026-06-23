@@ -42,6 +42,7 @@ func TestDaintreeCallDenylistEvasionAndCoverage(t *testing.T) {
 		{"workflow.prepBranchForReview", "workflow wrapper"},
 		{"WORKFLOW.STARTWORKONISSUE", "case-shifted wrapper"},
 		{"forge.getPR", "forge wrapper"},
+		{"git.getProjectPulse", "git read wrapper"},
 	}
 	for _, c := range cases {
 		res := dispatch(c.name)
