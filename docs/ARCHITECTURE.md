@@ -158,8 +158,8 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   fast with `USE_TYPED_WRAPPER` when a typed equivalent exists (e.g. `agent.launch` →
   `agentTask.spawnForEdits`). Members: `forge.listIssues` / `getIssue` / `listPRs` /
   `getPR` (read), `worktree.list` / `getCurrent` (read) / `createWithRecipe` (project),
-  `recipe.list` (read) / `recipe.run` (terminal), `git.snapshotRevert` / `snapshotDelete`
-  (system), `workflow.startWorkOnIssue` / `prepBranchForReview` (external) /
+  `recipe.list` (read) / `recipe.run` (project), `git.snapshotRevert` / `snapshotDelete`
+  (git), `workflow.startWorkOnIssue` / `prepBranchForReview` (external) /
   `focusNextAttention` (ui).
 - **contextx** — `context.snapshot` (read; MCP status + best-effort context/worktree/
   terminal lists + open queue digest, never throws if MCP is down), `terminal.summarize`

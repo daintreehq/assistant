@@ -195,7 +195,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`
 
-// DocumentedMCPToolNames is the hand-maintained list of 60 verified Daintree MCP
+// DocumentedMCPToolNames is the hand-maintained list of 57 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
 // server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{

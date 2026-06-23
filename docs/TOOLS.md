@@ -69,8 +69,9 @@ func handleThing(ctx context.Context, args json.RawMessage, tctx *tools.ToolCont
   failure and still audits — but a handler should return `Fail(...)` for *expected*
   errors rather than relying on the firewall.
 - **Honor `ctx` cancellation** — a turn can be cancelled (Escape). Long handlers should
-  watch `ctx.Done()` and call `tctx.ReportProgress(...)` for substeps so the live footer
-  never looks frozen.
+  watch `ctx.Done()`. To surface a substep, emit a beat via `tctx.ReportProgress(...)` —
+  but **nil-check it first**: the field is unset outside the cockpit (tests, the classic
+  REPL), so calling it unconditionally panics.
 - **Side-channels never break a call.** Audit (debug log + DB row) and progress beats are
   panic-guarded by the registry — you never call confirm or audit yourself.
 
@@ -162,7 +163,8 @@ filled by the caller (handlers degrade gracefully when an optional field is zero
 
 - **Always present:** `Config` (carries `Tier`, `AutoApprove`), `MCP`, `DB`, `Queue`,
   `Router`, `ProjectPath`, `Actor`, `Confirm`, `Log`.
-- **Liveness:** `ToolCallID`, `ReportProgress` (emit substep beats; nil-safe).
+- **Liveness:** `ToolCallID`, `ReportProgress` (emit substep beats — may be nil; guard it
+  before calling, see the handler contract above).
 - **Per-turn / per-actor:** `SessionID`, `ActorID` (the `wch_…`/`tmr_…` — required for the
   grant lookup), `RunID` (stamped on the audit row), `ActiveToolNames` (the turn's
   allowlist; nil ⇒ all), `DaemonActive`.
@@ -194,9 +196,12 @@ The registry is the source of truth (`internal/tools` + the wiring in
 | `artifactx` | `artifact.read` |
 | `agenttaskx` | `agentTask.spawnForEdits` `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
 
-`mcpwrap` are typed wrappers over Daintree MCP actions; a raw `daintree.call` to a tool
-that has a wrapper is refused with `USE_TYPED_WRAPPER` and redirected. Reach for the
-wrapper, not the raw call. The model-facing reference for the Daintree MCP surface is
+`mcpwrap` are typed wrappers over Daintree MCP actions. Forwarding many of these raw
+through `daintree.call` is refused with `USE_TYPED_WRAPPER` and redirected to the wrapper
+(the exact denylist is `wrappedMCPTools` in `internal/tools/mcpx/discovery.go` — it covers
+the tools whose wrapper does validation worth protecting, so a few simple read passthroughs
+aren't on it). Reach for the wrapper, not the raw call. The model-facing reference for the
+Daintree MCP surface is
 [`DAINTREE_MCP.md`](DAINTREE_MCP.md) (and the embedded prompt in
 `internal/models/prompts/daintree_mcp.go`).
 
