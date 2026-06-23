@@ -260,7 +260,7 @@ func (h *Host) boot(desc SessionDescriptor) {
 	app.SetHooks(AppHooks{
 		AgentEvents: h.bridge,
 		Confirm: func(ctx context.Context, req ConfirmRequest) bool {
-			return h.bridge.Confirm(ctx, req.ToolName, req.Summary)
+			return h.bridge.Confirm(ctx, req)
 		},
 	})
 

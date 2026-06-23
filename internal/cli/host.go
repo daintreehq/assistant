@@ -60,7 +60,13 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 			if hooks.Confirm == nil {
 				return false, nil
 			}
-			return hooks.Confirm(cctx, host.ConfirmRequest{ToolName: req.ToolName, Summary: req.Summary}), nil
+			return hooks.Confirm(cctx, host.ConfirmRequest{
+				ToolName:    req.ToolName,
+				Summary:     req.Summary,
+				RiskClass:   req.Risk,
+				Consequence: req.Consequence,
+				RawArgs:     string(req.Args),
+			}), nil
 		},
 	})
 }

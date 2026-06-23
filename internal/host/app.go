@@ -49,12 +49,23 @@ type App interface {
 	Shutdown(ctx context.Context) error
 }
 
-// ConfirmRequest is the minimal confirm payload the host bridges to an approval.
-// The App adapts its tool-context ConfirmRequest (tools.ConfirmRequest) into this
-// when calling the installed hook — the host needs only the tool name + summary.
+// ConfirmRequest is the confirm payload the host bridges to an approval. The App
+// adapts its tool-context ConfirmRequest (tools.ConfirmRequest) into this when
+// calling the installed hook. Beyond the tool name + summary, it carries the
+// display context the approval:requested wire event surfaces so Daintree's
+// timeline matches a local cockpit approval: the risk class, the human-readable
+// consequence, and the raw args (redacted by the bridge before they cross the
+// wire). RiskClass is passed through (not re-derived from the registry) so a
+// tool's explicit per-confirm override — e.g. grant.create electing RiskSystem —
+// reaches the UI verbatim.
 type ConfirmRequest struct {
-	ToolName string
-	Summary  string
+	ToolName    string
+	Summary     string
+	RiskClass   domain.RiskClass
+	Consequence string
+	// RawArgs is the raw JSON args string the model emitted. The bridge redacts it
+	// (redactArgs) before emitting the wire event — it never crosses verbatim.
+	RawArgs string
 }
 
 // AppHooks bundles the hooks the host installs on the App.

@@ -51,7 +51,7 @@ func (s *cooperativeSession) send(ctx context.Context, text string, needsApprova
 	}
 	if needsApproval {
 		// Park awaiting approval, like a mutating tool in dispatch.
-		approved := s.bridge.Confirm(ctx, "delete.files", "delete files")
+		approved := s.bridge.Confirm(ctx, ConfirmRequest{ToolName: "delete.files", Summary: "delete files"})
 		_ = approved
 		// Approval settled (declined on interrupt) — the loop re-checks the signal.
 		if ctx.Err() != nil {
