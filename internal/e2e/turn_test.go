@@ -66,6 +66,7 @@ func (r *recordingSink) ToolResult(ev agent.ToolResultEvent) {
 	r.log("tool:result:" + ev.Name)
 }
 func (r *recordingSink) Error(m string)         { r.log("error:" + m) }
+func (r *recordingSink) Warn(m string)          { r.log("warn:" + m) }
 func (r *recordingSink) Info(string)            {}
 func (r *recordingSink) Usage(agent.UsageEvent) { r.log("usage") }
 func (r *recordingSink) TurnPrompt(string)      {}

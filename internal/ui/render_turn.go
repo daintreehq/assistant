@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -302,11 +303,44 @@ func renderProse(md *markdown.Renderer, th theme.Theme, step TurnStep, contentW 
 	}
 }
 
+// Live-preview markdown strippers. glamour PANICS on partial/incomplete markdown, so the
+// still-growing paragraph tail can't be rendered — it is shown as DIM plain text. Without
+// stripping, the literal markers (**bold**, `code`, leading "# ") show raw until the
+// paragraph seals and the real render replaces them, which reads as noise. These regexps
+// clean the common inline markers for the cosmetic preview ONLY. They are deliberately
+// CONSERVATIVE: a lone "*" (e.g. "3*4") or an intra-word "_" (e.g. "foo_bar") is left
+// untouched — only PAIRED markers around real content are stripped, never a single marker.
+// Bold runs before emphasis so the single-marker pass never bites into a "**" pair.
+var (
+	mdHeaderRe    = regexp.MustCompile(`(?m)^[ \t]*#{1,6}[ \t]+`)
+	mdBoldStarRe  = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	mdBoldUnderRe = regexp.MustCompile(`(^|[^\w])__([^_]+)__([^\w]|$)`)
+	mdEmphStarRe  = regexp.MustCompile(`\*(\S(?:[^*]*\S)?)\*`)
+	mdEmphUnderRe = regexp.MustCompile(`(^|[^\w])_([^_]+)_([^\w]|$)`)
+	mdCodeRe      = regexp.MustCompile("`([^`]+)`")
+)
+
+// stripLivePreviewMarkdown removes the common inline markdown markers from the streaming
+// paragraph tail so the dim live preview reads as clean prose rather than raw syntax. It
+// is intentionally conservative (see the regexps above) — false negatives (a marker left
+// in) are harmless cosmetic noise; false positives (mangling "3*4" or "foo_bar") are not.
+func stripLivePreviewMarkdown(s string) string {
+	s = mdHeaderRe.ReplaceAllString(s, "")
+	s = mdBoldStarRe.ReplaceAllString(s, "$1")
+	s = mdBoldUnderRe.ReplaceAllString(s, "$1$2$3")
+	s = mdEmphStarRe.ReplaceAllString(s, "$1")
+	s = mdEmphUnderRe.ReplaceAllString(s, "$1$2$3")
+	s = mdCodeRe.ReplaceAllString(s, "$1")
+	return s
+}
+
 // livePreview renders the in-progress paragraph as flowing dim text wrapped to width — an
-// un-glamoured live preview (markdown syntax shows literally until the paragraph seals).
+// un-glamoured live preview (inline markdown markers are stripped by stripLivePreviewMarkdown
+// since glamour can't render the partial paragraph; the full render replaces it on seal).
 // Each row is dimmed individually so the faint attribute survives the row breaks.
 func livePreview(th theme.Theme, text string, width int) string {
-	flowed := strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	// Strip BEFORE flowing newlines to spaces so the (?m) header regex still sees line starts.
+	flowed := strings.TrimSpace(strings.ReplaceAll(stripLivePreviewMarkdown(text), "\n", " "))
 	if flowed == "" {
 		return ""
 	}

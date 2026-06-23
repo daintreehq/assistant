@@ -81,20 +81,23 @@ func (m Model) footer() string {
 	var b strings.Builder
 	switch m.view {
 	case viewOperations:
-		// Bound the deck like the help view so a long ops list can't make the inline View
-		// taller than the terminal and scroll its top into native scrollback (#1613).
-		ops := clampHeight(renderOperations(m.theme, m.dashboard, m.activePanel, domain.NowMS(), w), m.rows-2, m.theme)
+		// Bound the deck to a SCROLLABLE window of m.rows-2 lines so a long ops list can't
+		// make the inline View taller than the terminal (#1613). ↑/↓/PgUp/PgDn move opsScroll
+		// (onKey); clampWindow keeps the window height-safe and draws the scroll cues.
+		ops := clampWindow(m.deckBody(w), m.opsScroll, m.rows-2, m.theme)
 		b.WriteString(indentLines(ops, LeftPad))
 		b.WriteByte('\n')
-		b.WriteString(indentLines(m.theme.Dim().Render("Esc back · ^O home"), LeftPad))
+		// truncateCells keeps the cue inside the content width on a narrow pane (full key
+		// list lives in the help view); ↑↓ signals the deck scrolls.
+		b.WriteString(indentLines(truncateCells(m.theme.Dim().Render("Esc back · ^O home · ↑↓ scroll"), w), LeftPad))
 		return b.String()
 	case viewHelp:
-		// Bound the (now-reachable) help so a long list can't make the inline View taller
-		// than the terminal — that would scroll the top into native scrollback (#1613).
-		help := clampHeight(renderCommandCellText(m.theme, "Help", commands.HelpTextUI(), w), m.rows-2, m.theme)
+		// Same scrollable-window treatment as the ops deck so the (now-reachable) help can't
+		// overflow the terminal and scroll its top into native scrollback (#1613).
+		help := clampWindow(m.deckBody(w), m.helpScroll, m.rows-2, m.theme)
 		b.WriteString(indentLines(help, LeftPad))
 		b.WriteByte('\n')
-		b.WriteString(indentLines(m.theme.Dim().Render("Esc back"), LeftPad))
+		b.WriteString(indentLines(truncateCells(m.theme.Dim().Render("Esc back · ↑↓ scroll"), w), LeftPad))
 		return b.String()
 	}
 
@@ -180,20 +183,71 @@ func (m Model) bottomBand(w int) string {
 	return b.String()
 }
 
-// clampHeight keeps the first n lines of s, replacing the last kept line with a dim "…"
-// marker when truncated, so a long STATIC view (help / ops deck) can never make the inline
-// View taller than the terminal (which would scroll its top into native scrollback, #1613).
-func clampHeight(s string, n int, th theme.Theme) string {
+// deckBody renders the scrollable body for whichever footer deck is active (operations or
+// help), at content width w. Shared by footer() (to display) and maxDeckScroll (to bound the
+// scroll offset against the REAL rendered line count). Returns "" on the home view.
+func (m Model) deckBody(w int) string {
+	switch m.view {
+	case viewOperations:
+		return renderOperations(m.theme, m.dashboard, m.activePanel, domain.NowMS(), w)
+	case viewHelp:
+		return renderCommandCellText(m.theme, "Help", commands.HelpTextUI(), w)
+	}
+	return ""
+}
+
+// maxDeckScroll is the largest valid top-line offset for the active deck: total rendered
+// lines minus the visible window height (m.rows-2), floored at 0. onKey clamps opsScroll /
+// helpScroll to this so the last page always fills the window and scroll keys never run off
+// the end into dead presses. Measured the SAME way clampWindow splits, so the two agree.
+func (m Model) maxDeckScroll() int {
+	visible := m.rows - 2
+	if visible < 1 {
+		visible = 1
+	}
+	total := len(strings.Split(m.deckBody(m.contentW()), "\n"))
+	if max := total - visible; max > 0 {
+		return max
+	}
+	return 0
+}
+
+// clampWindow renders a SCROLLABLE window of at most n lines from s, starting at top-line
+// `offset`. It replaces the old clampHeight (which kept the first n lines and dead-ended with
+// a "resize taller" marker): a long ops/help deck now SCROLLS instead of truncating.
+//
+// Height invariant (#1613): the result is ALWAYS <= n lines. The "↑ more"/"↓ more" scroll
+// cues REPLACE the top/bottom row of the window — they consume a budget row, never add one —
+// so the footer can't grow taller than the terminal. offset is clamped to [0, total-n] here
+// defensively even though onKey already bounds it.
+func clampWindow(s string, offset, n int, th theme.Theme) string {
 	if n < 1 {
 		n = 1
 	}
 	lines := strings.Split(s, "\n")
-	if len(lines) <= n {
-		return s
+	total := len(lines)
+	if total <= n {
+		return s // fits whole — no scrolling, no cues
 	}
-	lines = lines[:n]
-	lines[n-1] = th.Dim().Render("… (resize taller for the full list)")
-	return strings.Join(lines, "\n")
+	maxOff := total - n
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOff {
+		offset = maxOff
+	}
+	window := append([]string(nil), lines[offset:offset+n]...)
+	// Overwrite the boundary rows with scroll cues when content is hidden above/below. This
+	// hides one real row at each truncated edge (the cost of a fixed-height viewport); the
+	// hidden row scrolls into view as the offset moves, and the first/last lines are always
+	// reachable at offset 0 / maxOff where their edge cue is absent.
+	if offset > 0 {
+		window[0] = th.Dim().Render("↑ more")
+	}
+	if offset < maxOff {
+		window[n-1] = th.Dim().Render("↓ more")
+	}
+	return strings.Join(window, "\n")
 }
 
 // lineCount is the number of text lines in s (0 for empty). Footer content is pre-

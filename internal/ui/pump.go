@@ -262,6 +262,10 @@ func (p *eventPump) Error(msg string) {
 	p.emit(pumpEvent{kind: pumpError, level: NoteError, msg: msg})
 }
 
+func (p *eventPump) Warn(msg string) {
+	p.emit(pumpEvent{kind: pumpLog, level: NoteWarn, msg: msg})
+}
+
 func (p *eventPump) Info(msg string) {
 	p.emit(pumpEvent{kind: pumpLog, level: NoteInfo, msg: msg})
 }

@@ -216,6 +216,7 @@ func (p *eventProxy) ToolProgress(id, msg string)            { p.sink().ToolProg
 func (p *eventProxy) ToolCall(ev agent.ToolCallEvent)        { p.sink().ToolCall(ev) }
 func (p *eventProxy) ToolResult(ev agent.ToolResultEvent)    { p.sink().ToolResult(ev) }
 func (p *eventProxy) Error(m string)                         { p.sink().Error(m) }
+func (p *eventProxy) Warn(m string)                          { p.sink().Warn(m) }
 func (p *eventProxy) Info(m string)                          { p.sink().Info(m) }
 func (p *eventProxy) Usage(ev agent.UsageEvent)              { p.sink().Usage(ev) }
 func (p *eventProxy) TurnPrompt(in string)                   { p.sink().TurnPrompt(in) }

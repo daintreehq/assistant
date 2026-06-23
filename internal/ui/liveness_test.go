@@ -91,7 +91,7 @@ func TestRunStageLabel_NeverThinking_GenericProcessing(t *testing.T) {
 		domain.PhaseAwaitingApproval: "Waiting for approval…",
 		domain.PhaseToolRunning:      "Inspecting project…",
 		domain.PhaseCancelling:       "Cancelling…",
-		domain.PhaseGenerating:       "",
+		domain.PhaseGenerating:       "Writing…",
 	}
 	for p, w := range want {
 		if got := runStageLabel(p); got != w {

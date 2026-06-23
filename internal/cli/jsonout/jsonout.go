@@ -163,6 +163,14 @@ func (s *Sink) Error(message string) {
 	s.emit("error", map[string]any{"message": message})
 }
 
+// Warn emits a "warning" line. Unlike Error it does NOT flip the terminal status/exit
+// code — a warning (e.g. a tool loop repeating the same failure) is non-fatal.
+func (s *Sink) Warn(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emit("warning", map[string]any{"message": message})
+}
+
 func (s *Sink) Info(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

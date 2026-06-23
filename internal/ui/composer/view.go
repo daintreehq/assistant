@@ -97,8 +97,12 @@ func (m *Model) View(p ViewParams) string {
 	b.WriteString(m.renderRule(p.Width))
 
 	// --- adaptive hint row ---
-	b.WriteByte('\n')
-	b.WriteString(m.renderHints(p))
+	// renderHints returns "" during reverse-i-search; skip the leading newline too so
+	// the search line isn't trailed by a stray blank row.
+	if hints := m.renderHints(p); hints != "" {
+		b.WriteByte('\n')
+		b.WriteString(hints)
+	}
 
 	// --- context line (trailing context hint) ---
 	// Dim session summary ("agents N · tmr M" when connected, else "MCP degraded").
@@ -348,6 +352,12 @@ func (m *Model) caretCell(r rune) string {
 // actions + separators in DIM. The context hint lives on its OWN line below
 // (handled by View), never inline here.
 func (m *Model) renderHints(p ViewParams) string {
+	// Reverse-i-search owns the whole composer band: renderInput already swaps the
+	// input line for renderSearch, so the normal hint row (which advertises "/" and
+	// "↑" as live) is stale and misleading while Ctrl-R is active. Suppress it.
+	if m.searching {
+		return ""
+	}
 	cancelActive := m.busy
 	if p.Cancellable != nil {
 		cancelActive = *p.Cancellable

@@ -263,6 +263,7 @@ func (throwingSink) ToolProgress(string, string) { panic("boom") }
 func (throwingSink) ToolCall(ToolCallEvent)      { panic("boom") }
 func (throwingSink) ToolResult(ToolResultEvent)  { panic("boom") }
 func (throwingSink) Error(string)                { panic("boom") }
+func (throwingSink) Warn(string)                 { panic("boom") }
 func (throwingSink) Info(string)                 { panic("boom") }
 func (throwingSink) Usage(UsageEvent)            { panic("boom") }
 func (throwingSink) TurnPrompt(string)           { panic("boom") }
@@ -277,6 +278,7 @@ type recordingSink struct {
 func (r *recordingSink) TurnPrompt(p string)      { r.log = append(r.log, "prompt:"+p) }
 func (r *recordingSink) AssistantStart()          { r.log = append(r.log, "start") }
 func (r *recordingSink) AssistantEnd(c, _ string) { r.log = append(r.log, "end:"+c) }
+func (r *recordingSink) Warn(m string)            { r.log = append(r.log, "warn:"+m) }
 func (r *recordingSink) Info(m string)            { r.log = append(r.log, "info:"+m) }
 
 func TestMultiSinkDeliversWhenOneThrows(t *testing.T) {

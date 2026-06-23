@@ -100,6 +100,7 @@ type captureSink struct {
 	batched      int
 	progress     []progressBeat
 	rateLimited  bool
+	warnings     []string
 }
 
 // progressBeat records one ToolProgress(callID, msg) the session emitted.
@@ -118,6 +119,7 @@ func (c *captureSink) ToolProgress(id, msg string) {
 	c.progress = append(c.progress, progressBeat{id: id, msg: msg})
 }
 func (c *captureSink) ModelRateLimited() { c.rateLimited = true }
+func (c *captureSink) Warn(msg string)   { c.warnings = append(c.warnings, msg) }
 
 func toolCall(id, wireName, args string) models.ToolCallRequest {
 	return models.ToolCallRequest{ID: id, Type: "function",
