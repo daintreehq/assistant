@@ -124,4 +124,11 @@ type SessionDeps struct {
 
 	Events EventSink // defaults to NoopEventSink
 	RunRef *RunIDRef // stamped with the current run id per turn; defaults to a fresh ref
+
+	// BackgroundCtx is the APP-SCOPED context for detached work that must OUTLIVE a
+	// single turn (the post-compaction distill goroutine) but NOT outlive the app —
+	// wire app.baseCtx so distill calls are cancelled on App.Shutdown rather than
+	// touching a closed Router/Store. Optional; nil defaults to context.Background()
+	// in NewSession (the test default, where no distill outlives the test).
+	BackgroundCtx context.Context
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
@@ -84,6 +85,30 @@ type Session struct {
 	events       EventSink
 	artifacts    *ArtifactStore
 	runRef       *RunIDRef
+
+	// compactFailures counts CONSECUTIVE small-model auto-compact summary failures
+	// (guarded by s.mu). It arms the lossy-truncation fallback once it reaches
+	// AutoCompactFailureThreshold AND the history is over the hard ceiling; ANY
+	// successful compaction resets it to 0 (a single transient outage must not
+	// permanently disable the soft, model-summarized path).
+	compactFailures int
+
+	// wg tracks detached background work (the post-compaction distill goroutine) so
+	// App.Shutdown and tests can DrainBackgroundWork() before the deps it touches
+	// (Router/MemoryStore) are torn down. sync.WaitGroup is goroutine-safe — no lock.
+	wg sync.WaitGroup
+
+	// draining (guarded by s.mu) is the gate that makes the drain race-free. The turn
+	// ctx is NOT derived from bgCtx, so a summary can still succeed while Shutdown is
+	// draining; gating wg.Add under the SAME lock that sets draining guarantees an Add
+	// never races wg.Wait at counter zero (the WaitGroup Add-after-Wait hazard) and no
+	// distill is spawned onto an already-closing Router/Store. Terminal once set.
+	draining bool
+
+	// bgCtx is the app-scoped parent for that detached work (from deps.BackgroundCtx;
+	// context.Background() when unset). Cancelled on App.Shutdown so a distill call
+	// never outlives the closed Router/Store. Immutable after NewSession.
+	bgCtx context.Context
 }
 
 // NewSession builds a Session: the skill catalog + the three control messages.
@@ -102,6 +127,12 @@ func NewSession(deps SessionDeps) *Session {
 		events:    deps.Events,
 		artifacts: NewArtifactStore(),
 		runRef:    deps.RunRef,
+		bgCtx:     deps.BackgroundCtx,
+	}
+	// Detached distill work parents off the app-scoped context; fall back to
+	// Background when unwired (tests) so the goroutine still has a valid parent.
+	if s.bgCtx == nil {
+		s.bgCtx = context.Background()
 	}
 	// Static catalog (every available skill's headers), built once.
 	s.skillCatalog = prompts.BuildSkillCatalogMessage(toPromptMetadata(deps.SkillCatalog.MetadataForSelection()))
@@ -208,6 +239,9 @@ func (s *Session) clearLocked() {
 	if len(s.messages) > domain.ControlMessageCount {
 		s.messages = s.messages[:domain.ControlMessageCount]
 	}
+	// History is gone — the auto-compact failure streak is moot; don't let a stale
+	// count trip the lossy fallback on the next outage.
+	s.compactFailures = 0
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
@@ -229,6 +263,11 @@ func (s *Session) Compact(summary string) error {
 // in-turn auto-compact (which already runs under the turn, where inFlight is set,
 // so the public guard would reject it).
 func (s *Session) compactLocked(summary string) {
+	// Any successful compaction (auto OR manual /compact) re-establishes the bound, so
+	// the consecutive-failure streak resets here — its single source of truth — rather
+	// than only on the auto path. Prevents a stale count from a prior outage tripping
+	// the lossy fallback right after the user manually compacted.
+	s.compactFailures = 0
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
 	note := models.TextMessage("user", compactedNotePrefix+summary)
@@ -791,8 +830,16 @@ func (s *Session) estimateTokens() int {
 
 // estimateTokensLocked sums message text + tool-call arg JSON; caller MUST hold s.mu.
 func (s *Session) estimateTokensLocked() int {
+	return estimateMessagesTokens(s.messages)
+}
+
+// estimateMessagesTokens approximates the token size of a message slice the same way
+// estimateTokensLocked does (text + tool-call arg JSON, / CharsPerToken, ceil'd).
+// Lock-free and operates only on the passed slice, so truncateLocked can size a
+// prospective retained tail before committing it to s.messages.
+func estimateMessagesTokens(msgs []models.ChatMessage) int {
 	chars := 0
-	for _, m := range s.messages {
+	for _, m := range msgs {
 		chars += charLen(m.ContentToText())
 		for _, tc := range m.ToolCalls {
 			chars += charLen(tc.Function.Arguments)
@@ -801,17 +848,32 @@ func (s *Session) estimateTokensLocked() int {
 	return int(math.Ceil(float64(chars) / float64(domain.CharsPerToken)))
 }
 
-// maybeAutoCompact summarizes the conversation with the small model when it has
-// grown past the token threshold, replacing the working history with a short note.
-// Best-effort: any failure leaves the conversation untouched and the turn proceeds.
+// distillBackgroundTimeout bounds the detached post-compaction distill call so a
+// hung or slow small model can never pin the background goroutine indefinitely — the
+// work is best-effort and not load-bearing for the turn.
+const distillBackgroundTimeout = 30 * time.Second
+
+// maybeAutoCompact summarizes the conversation with the small model when it has grown
+// past the token threshold, replacing the working history with a short note. The
+// summary call is on the turn's critical path (its result IS the compacted note), but
+// the follow-on distillation is fired on a DETACHED goroutine so the large-model
+// stream starts immediately instead of stalling on a second small-model round-trip.
+// Best-effort: a successful summary compacts; a SUSTAINED summary outage falls back to
+// a no-model lossy truncation so history can't grow unbounded (issue #202).
 func (s *Session) maybeAutoCompact(ctx context.Context) {
 	// Build the summary input under the lock (read a stable snapshot), then run the
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
 	// it compacts via compactLocked (the public Compact would self-reject).
 	s.mu.Lock()
-	if s.estimateTokensLocked() <= domain.AutoCompactTokenThreshold || len(s.messages) <= domain.ControlMessageCount+1 {
+	est := s.estimateTokensLocked()
+	// Skip when under the soft threshold, OR when there's no real history to
+	// summarize (≤1 working message) — UNLESS that lone message is itself over the
+	// hard ceiling, in which case the bounded-growth fallback must still get a chance
+	// to run rather than letting a single oversized message grow context unbounded.
+	if est <= domain.AutoCompactTokenThreshold ||
+		(len(s.messages) <= domain.ControlMessageCount+1 && est < domain.AutoCompactHardTruncationThreshold) {
 		s.mu.Unlock()
-		return // under threshold, or no real history
+		return
 	}
 	// Flatten multimodal history to text (the small model is text-only; an image
 	// turn would otherwise trip the vision tier gate and silently fail every
@@ -834,25 +896,140 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	s.mu.Unlock()
 
 	result, err := s.deps.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{Messages: summaryMsgs})
-	if err != nil {
-		s.events.Info("Auto-compact skipped: summary failed")
+	summary := ""
+	if err == nil {
+		summary = trimSpace(result.Content)
+	}
+	if err != nil || summary == "" {
+		// A user cancel landing mid-summary is the turn tearing down, NOT a provider
+		// outage — don't count it toward the fallback and don't mutate history while
+		// the turn is aborting (issue #61: leave no orphan state).
+		if ctx.Err() != nil {
+			return
+		}
+		s.mu.Lock()
+		truncated := s.noteCompactFailureLocked()
+		s.mu.Unlock()
+		switch {
+		case truncated:
+			s.events.Info("Auto-compact fallback: truncated old history (summary unavailable)")
+		case err != nil:
+			s.events.Info("Auto-compact skipped: summary failed")
+		default:
+			s.events.Info("Auto-compact skipped: empty summary")
+		}
 		return
 	}
-	summary := trimSpace(result.Content)
-	if summary == "" {
-		s.events.Info("Auto-compact skipped: empty summary")
-		return
-	}
-	// Distill durable facts from the transcript BEFORE compaction discards it
-	// (best-effort, outside the lock; a nil MemoryStore skips it with no model call).
-	saved := s.distillCompact(ctx, transcript)
+
+	// Summary in hand: compact IMMEDIATELY so the large-model stream is unblocked,
+	// then distill durable facts off the critical path. compactLocked resets the
+	// failure streak so one transient outage never permanently disarms the soft path.
 	s.mu.Lock()
 	s.compactLocked(summary)
 	s.mu.Unlock()
-	if saved > 0 {
-		s.events.Info("Distilled " + itoa(saved) + " " + pluralMemory(saved) + " before compacting")
-	}
 	s.events.Info("Auto-compacted conversation")
+
+	s.startDistill(transcript)
+}
+
+// noteCompactFailureLocked records a failed/empty auto-compact summary and, once
+// failures have been SUSTAINED (>= AutoCompactFailureThreshold) AND the history has
+// ballooned past the hard ceiling, performs a no-model lossy head-truncation so a
+// small-model outage can't grow the conversation without bound. Resets the counter
+// after truncating (the bound has been re-established). Caller MUST hold s.mu.
+// Returns true iff it truncated.
+func (s *Session) noteCompactFailureLocked() (truncated bool) {
+	s.compactFailures++
+	if s.compactFailures >= domain.AutoCompactFailureThreshold &&
+		s.estimateTokensLocked() >= domain.AutoCompactHardTruncationThreshold {
+		s.truncateLocked(domain.AutoCompactHardTruncationKeepMessages) // resets compactFailures
+		return true
+	}
+	return false
+}
+
+// truncateLocked is the no-model lossy fallback for a sustained small-model outage:
+// keep the three control messages plus at most the most-recent keepN working
+// messages (oldest dropped first), then shed further from the head of that tail until
+// the estimate is back under the hard ceiling — guaranteeing the bound even when a
+// single retained message is itself enormous. Orphaned tool results and an incomplete
+// trailing tool call are cleaned exactly as a resume would, so the retained tail is a
+// valid model history Fireworks won't reject. A compaction marker is persisted (so a
+// later resume rebuilds from the truncation boundary) followed by each retained
+// message at a fresh monotonic seq. Caller MUST hold s.mu.
+func (s *Session) truncateLocked(keepN int) {
+	// The bound is being re-established by this truncation, so the failure streak that
+	// armed it resets here (the single reset point for the fallback path).
+	s.compactFailures = 0
+	working := s.messages[domain.ControlMessageCount:]
+	if len(working) > keepN {
+		working = working[len(working)-keepN:]
+	}
+	// Copy before any reslice of s.messages so the cleanup passes (and the re-append
+	// below) never alias the backing array we are about to overwrite.
+	tail := make([]models.ChatMessage, len(working))
+	copy(tail, working)
+	tail = dropOrphanToolResults(tail)
+	tail = dropOrphanToolCallTail(tail)
+	// Shed from the head until under the hard ceiling, re-cleaning orphans after each
+	// drop so the tail stays a valid history. The controls are fixed, so only their
+	// contribution is constant; estimateMessagesTokens is summed fresh on the tail.
+	controlTokens := estimateMessagesTokens(s.messages[:domain.ControlMessageCount])
+	for len(tail) > 0 && controlTokens+estimateMessagesTokens(tail) >= domain.AutoCompactHardTruncationThreshold {
+		tail = tail[1:]
+		tail = dropOrphanToolResults(tail)
+		tail = dropOrphanToolCallTail(tail)
+	}
+	s.messages = s.messages[:domain.ControlMessageCount]
+	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
+	for _, m := range tail {
+		s.messages = append(s.messages, m)
+		s.persistMessageLocked(m)
+	}
+}
+
+// startDistill mines durable facts from the just-discarded transcript on a DETACHED
+// goroutine so the user's turn streams immediately. It parents off the app-scoped
+// bgCtx (cancelled on App.Shutdown) with a bounded timeout, and is tracked by s.wg so
+// DrainBackgroundWork can join it before the Router/MemoryStore it touches tear down.
+// A nil MemoryStore makes distillCompact a no-op, so skip the goroutine entirely.
+// IMPORTANT: it must NOT emit events — the prod RunEventSink is single-goroutine
+// (turn-only) and unguarded, so an Info call from here would race the streaming turn.
+func (s *Session) startDistill(transcript string) {
+	if s.deps.MemoryStore == nil {
+		return
+	}
+	bg, cancel := context.WithTimeout(s.bgCtx, distillBackgroundTimeout)
+	// Register under s.mu and ONLY when not draining, so wg.Add is ordered against the
+	// draining flag that DrainBackgroundWork sets before wg.Wait — closing the
+	// Add-after-Wait race (the turn ctx isn't derived from bgCtx, so a summary can
+	// succeed mid-Shutdown and reach here even after baseCancel).
+	s.mu.Lock()
+	if s.draining {
+		s.mu.Unlock()
+		cancel()
+		return
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		defer cancel()
+		s.distillCompact(bg, transcript)
+	}()
+}
+
+// DrainBackgroundWork closes the spawn gate, then blocks until all in-flight detached
+// background work (the post-compaction distill goroutine) has finished. App.Shutdown
+// calls it before closing the Router/Store those goroutines touch; tests call it to
+// make the otherwise-async distill observable. Terminal: once drained, no further
+// distill is spawned (the session is being torn down). Safe to call when nothing is
+// in flight (a no-op Wait).
+func (s *Session) DrainBackgroundWork() {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+	s.wg.Wait()
 }
 
 // distillTranscriptMaxRunes caps the transcript fed to the distillation model — the
@@ -904,14 +1081,6 @@ func (s *Session) distillCompact(ctx context.Context, transcript string) (saved 
 		}
 	}
 	return saved
-}
-
-// pluralMemory renders the singular/plural noun for a saved-memory count.
-func pluralMemory(n int) string {
-	if n == 1 {
-		return "memory"
-	}
-	return "memories"
 }
 
 // Artifacts exposes the session's overflow store so the artifact.read tool family

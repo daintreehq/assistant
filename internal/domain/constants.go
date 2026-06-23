@@ -40,6 +40,27 @@ const (
 	AutoCompactTokenThreshold = 60000
 	CharsPerToken             = 4
 
+	// AutoCompactFailureThreshold is the number of CONSECUTIVE small-model summary
+	// failures that must accumulate before the auto-compact fallback (lossy
+	// truncation) kicks in. A single transient 429/outage must not destroy history;
+	// only a sustained outage that has let the conversation balloon does.
+	AutoCompactFailureThreshold = 3
+
+	// AutoCompactHardTruncationThreshold is the SECONDARY (hard) token ceiling that,
+	// combined with AutoCompactFailureThreshold consecutive summary failures, triggers
+	// a no-model lossy head-truncation. Set well above AutoCompactTokenThreshold (the
+	// soft, model-summarized threshold) yet far below LargeContextWindowTokens so the
+	// large-model turn still has ample headroom — the fallback bounds growth long
+	// before the context window is at risk.
+	AutoCompactHardTruncationThreshold = 200_000
+
+	// AutoCompactHardTruncationKeepMessages is how many of the most-recent working
+	// messages the lossy fallback retains (the oldest are dropped first). Recency is
+	// what matters most for agent continuity; the head is what normal compaction would
+	// have summarized away anyway. Truncation sheds further if the retained tail still
+	// exceeds the hard threshold.
+	AutoCompactHardTruncationKeepMessages = 16
+
 	// LargeContextWindowTokens is the main (large) model's context window, used as the
 	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
 	// "% toward auto-compaction". glm-5p2 carries a ~1M-token window; the gauge must reflect

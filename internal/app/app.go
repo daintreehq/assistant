@@ -281,6 +281,10 @@ func Create(opts CreateOptions) (*App, error) {
 		DirtyFreshStart:  dirtyFreshStart,
 		Events:           events,
 		RunRef:           a.runRef,
+		// App-scoped parent for the detached post-compaction distill goroutine —
+		// cancelled in Shutdown (via baseCancel) so it never touches a closed
+		// Router/Store; DrainBackgroundWork joins it there before they close.
+		BackgroundCtx: a.baseCtx,
 	})
 
 	return a, nil
