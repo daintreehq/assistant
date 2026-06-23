@@ -171,6 +171,48 @@ func (m *progModel) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAn
 	return domain.ModelJudgeAnswer{}, nil
 }
 
+// tierRecorder records the ModelTier passed to Classify/Judge so a test can assert
+// the watcher pins the small tier regardless of the stored rec.ModelTier. Judges
+// run in parallel goroutines, so access is mutex-guarded.
+type tierRecorder struct {
+	mu      sync.Mutex
+	cTier   domain.ModelTier
+	jTier   domain.ModelTier
+	cCalled bool
+	jCalled bool
+	verdict domain.WatcherVerdict
+	judgeFn func(question, tail string) domain.ModelJudgeAnswer
+}
+
+func (m *tierRecorder) Classify(_ context.Context, in ClassifyInput) (domain.WatcherVerdict, error) {
+	m.mu.Lock()
+	m.cTier, m.cCalled = in.Tier, true
+	m.mu.Unlock()
+	return m.verdict, nil
+}
+
+func (m *tierRecorder) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error) {
+	m.mu.Lock()
+	m.jTier, m.jCalled = in.Tier, true
+	m.mu.Unlock()
+	if m.judgeFn != nil {
+		return m.judgeFn(in.Question, in.Tail), nil
+	}
+	return domain.ModelJudgeAnswer{}, nil
+}
+
+func (m *tierRecorder) classifyTier() (domain.ModelTier, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cTier, m.cCalled
+}
+
+func (m *tierRecorder) judgeTier() (domain.ModelTier, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.jTier, m.jCalled
+}
+
 func strptr(s string) *string { return &s }
 
 // watcherWith builds a terminal watcher record with options/alert/stop conditions.

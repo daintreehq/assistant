@@ -87,13 +87,14 @@ func TestBuildAgentRows_OrdersByUrgency(t *testing.T) {
 }
 
 func TestBuildAgentRows_PrefersPersistedEpistemicKind(t *testing.T) {
-	// still_working would derive "inferred", but a stored kind is authoritative.
-	obs := domain.EpistemicObserved
+	// still_working derives "observed" (deterministic working bypass), but a stored
+	// kind is authoritative — here a persisted "inferred" overrides the derivation.
+	inf := domain.EpistemicInferred
 	rows := BuildAgentRows([]domain.WatcherRecord{
-		watcherRec("a", string(domain.ClassStillWorking), &obs),
+		watcherRec("a", string(domain.ClassStillWorking), &inf),
 	}, nil, nil)
-	if rows[0].EpistemicKind != domain.EpistemicObserved {
-		t.Errorf("epistemicKind = %q, want observed (persisted wins)", rows[0].EpistemicKind)
+	if rows[0].EpistemicKind != domain.EpistemicInferred {
+		t.Errorf("epistemicKind = %q, want inferred (persisted wins)", rows[0].EpistemicKind)
 	}
 }
 
@@ -103,7 +104,7 @@ func TestBuildAgentRows_ClassificationFallback(t *testing.T) {
 		want           domain.EpistemicKind
 	}{
 		{string(domain.ClassTerminalExited), domain.EpistemicObserved},
-		{string(domain.ClassStillWorking), domain.EpistemicInferred},
+		{string(domain.ClassStillWorking), domain.EpistemicObserved},
 		{string(domain.ClassUnknown), domain.EpistemicUnverified},
 	}
 	for _, c := range cases {

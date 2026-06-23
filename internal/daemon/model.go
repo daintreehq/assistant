@@ -21,7 +21,11 @@ func lastOutputAtLabel(msSinceOutput *int64) string {
 // check.
 func classifyWithModel(ctx *CheckContext, rec domain.WatcherRecord, signals WatcherSignals, previous string) domain.WatcherVerdict {
 	verdict, err := ctx.Model.Classify(ctx.Ctx, ClassifyInput{
-		Tier:          rec.ModelTier,
+		// Classification ALWAYS runs on the cheap small tier. rec.ModelTier governs
+		// MAIN-THREAD routing only; a watcher stored as "medium" routes to the LARGE
+		// model (glm-5p2) in v1, so passing it through here would silently burn the
+		// expensive model on every classify call.
+		Tier:          domain.ModelSmall,
 		Goal:          rec.Goal,
 		AgentState:    signals.AgentState,
 		RuntimeStatus: signals.RuntimeStatus,
@@ -66,7 +70,9 @@ func runModelJudges(ctx *CheckContext, questions []string, rec domain.WatcherRec
 		go func(question string) {
 			defer wg.Done()
 			answer, err := ctx.Model.Judge(ctx.Ctx, JudgeInput{
-				Tier:          rec.ModelTier,
+				// Always small — same rationale as classifyWithModel (rec.ModelTier
+				// would route "medium" judges onto the large model).
+				Tier:          domain.ModelSmall,
 				Question:      question,
 				Goal:          rec.Goal,
 				AgentState:    signals.AgentState,

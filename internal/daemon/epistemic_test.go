@@ -26,9 +26,18 @@ func TestClassificationEpistemicKind_Mapping(t *testing.T) {
 		t.Errorf("waiting_for_input (model) → inferred, got %s", got)
 	}
 
+	// still_working is observed when deterministic (the working-agent bypass skips
+	// the model) and inferred only when a model judged a non-working tail.
+	if got := domain.ClassificationEpistemicKind(domain.ClassStillWorking, false); got != domain.EpistemicObserved {
+		t.Errorf("still_working (deterministic) → observed, got %s", got)
+	}
+	if got := domain.ClassificationEpistemicKind(domain.ClassStillWorking, true); got != domain.EpistemicInferred {
+		t.Errorf("still_working (model) → inferred, got %s", got)
+	}
+
 	// Model-only and completion classes → inferred.
 	for _, c := range []domain.WatcherClassification{
-		domain.ClassPermissionPrompt, domain.ClassStillWorking, domain.ClassTestsFailed,
+		domain.ClassPermissionPrompt, domain.ClassTestsFailed,
 		domain.ClassTestsPassed, domain.ClassCommandFailed, domain.ClassMergeConflict,
 		domain.ClassCompletedSuccess, domain.ClassCompletedUnverified, domain.ClassCompletedUnknown,
 	} {
