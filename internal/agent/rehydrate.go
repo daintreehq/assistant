@@ -131,6 +131,13 @@ func recordToChatMessage(r domain.ConversationMessageRecord) (models.ChatMessage
 			lostCalls = true
 		}
 	}
+	// A null content is a valid wire shape ONLY alongside tool_calls. When the calls
+	// were just dropped as malformed and the row carried no text, downgrade null→""
+	// so the resumed row stays a valid {role:"assistant", content:""} rather than a
+	// provider-rejectable {content:null} with no tool_calls.
+	if lostCalls && len(m.ToolCalls) == 0 && m.ContentNull {
+		m.ContentNull = false
+	}
 	if r.Role == "tool" && r.ToolCallID != nil {
 		m.ToolCallID = *r.ToolCallID
 	}

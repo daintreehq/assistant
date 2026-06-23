@@ -126,6 +126,30 @@ func TestRehydrateMalformedToolCallJSONKeepsText(t *testing.T) {
 	}
 }
 
+func TestRehydrateMalformedToolCallsTextlessAvoidsNullContent(t *testing.T) {
+	// A malformed tool-call row with EMPTY content must not resume as a null-content
+	// assistant with no tool_calls ({role:"assistant", content:null} is only valid
+	// alongside tool_calls). It must downgrade to an empty string instead.
+	bad := "{not json"
+	rows := append(controlRows(),
+		domain.ConversationMessageRecord{Seq: 3, Role: "assistant", Content: "", ToolCallsJson: &bad},
+	)
+	res, _ := RehydrateSession(rows)
+	if len(res.RestoredMessages) != 1 {
+		t.Fatalf("restored %d want 1", len(res.RestoredMessages))
+	}
+	m := res.RestoredMessages[0]
+	if m.ContentNull {
+		t.Fatal("a textless malformed-tool-call row must NOT resume with null content")
+	}
+	if len(m.ToolCalls) != 0 || m.StringContent != "" {
+		t.Fatalf("want empty-string content and no tool calls, got %+v", m)
+	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1", res.DroppedRows)
+	}
+}
+
 func TestRehydrateTrimsPartialMultiToolBatch(t *testing.T) {
 	calls := `[{"id":"call_1","type":"function","function":{"name":"fs.read","arguments":"{}"}},` +
 		`{"id":"call_2","type":"function","function":{"name":"fs.list","arguments":"{}"}}]`
