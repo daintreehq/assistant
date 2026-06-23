@@ -1059,6 +1059,11 @@ func (m Model) onShutdown() (tea.Model, tea.Cmd) {
 func (m *Model) headerBlock() ScrollbackBlock {
 	w := m.chromeW()
 	rendered := indentLines(renderMasthead(m.theme, m.masthead, w), LeftPad)
+	if rendered != "" {
+		// The masthead owns the first transcript spacer. That keeps the row below the
+		// rule/logging badge present from frame one, before the first note/turn commits.
+		rendered += "\n"
+	}
 	return ScrollbackBlock{ID: headerID, Kind: BlockMasthead, Rendered: rendered, Plain: stripAnsi(rendered), Width: w}
 }
 
@@ -1100,12 +1105,11 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 		kind = BlockCommand
 	}
 	rendered = indentLines(rendered, LeftPad)
-	if rendered != "" {
+	if rendered != "" && i > 0 {
 		// Each sealed cell OWNS the single blank line ABOVE it (shared layout rule:
-		// a marginTop of one blank line). Committed via its own tea.Println,
-		// the leading "\n" is what separates this turn from the masthead and from the
-		// prior turn in native scrollback — without it the history packs together with
-		// no breathing room.
+		// a marginTop of one blank line). Cell 0 is the exception: the masthead block
+		// owns that first spacer so it is visible from the initial hand-off frame and
+		// does not pop in when the first note/turn commits.
 		rendered = "\n" + rendered
 	}
 	return ScrollbackBlock{ID: cell.ID(), Kind: kind, Rendered: rendered, Plain: stripAnsi(rendered), Width: w}

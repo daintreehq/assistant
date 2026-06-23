@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,26 @@ func TestScrollback_ResetKeyReArms(t *testing.T) {
 	q.applyResetKey(5)
 	if !q.headerDone || q.committed != 2 {
 		t.Error("applyResetKey with an unchanged key must be a no-op")
+	}
+}
+
+func TestScrollback_MastheadOwnsFirstSpacer(t *testing.T) {
+	m := testModel(80)
+	header := m.headerBlock()
+	if !strings.HasSuffix(header.Rendered, "\n") {
+		t.Fatalf("masthead block must reserve the first transcript spacer, got %q", header.Rendered)
+	}
+
+	m.transcript = []TranscriptCell{
+		{Note: &NoteCell{ID: "note_1", Level: NoteSuccess, Text: "Connected to Daintree MCP"}},
+		{Note: &NoteCell{ID: "note_2", Level: NoteWarn, Text: "Second note"}},
+	}
+	first := m.sealedBlock(0)
+	if strings.HasPrefix(first.Rendered, "\n") {
+		t.Fatalf("first transcript cell must use the masthead spacer, got %q", first.Rendered)
+	}
+	second := m.sealedBlock(1)
+	if !strings.HasPrefix(second.Rendered, "\n") {
+		t.Fatalf("later transcript cells must keep their leading spacer, got %q", second.Rendered)
 	}
 }

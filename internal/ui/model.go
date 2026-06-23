@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"path/filepath"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/commands"
@@ -176,8 +175,6 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 	cmp := composer.New(th)
 	cmp.SetCommands(paletteCommands())
 
-	provisionalName := filepath.Base(a.Config.ProjectPath)
-
 	m := Model{
 		ctx:                 ctx,
 		app:                 a,
@@ -196,7 +193,7 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		booting: false,
 		masthead: mastheadParams{
 			Version:     UIVersion,
-			ProjectName: provisionalName,
+			ProjectName: projectNamePlaceholder,
 			Tier:        a.Tier(),
 			Logging:     a.Config.DebugLog,
 			// The debug log is opened (StartDebugLog) on the interactive path BEFORE
@@ -224,6 +221,8 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 // UIVersion is stamped into the masthead. Kept as a package var so a build can
 // override it; the cli already prints its own version separately.
 var UIVersion = "0.1.0"
+
+const projectNamePlaceholder = "Daintree project"
 
 // paletteCommands maps the command registry's entries into composer.Command rows so
 // the palette can't drift from the handlers that accept them.

@@ -130,3 +130,42 @@ func TestSplash_AdvanceTicksThenLingers(t *testing.T) {
 		t.Error("last frame advance() must return the linger hold cmd")
 	}
 }
+
+func TestBootHandoffFramePrepaintsCockpitAndParksAtFooter(t *testing.T) {
+	m := testModel(72)
+	m.rows = 30
+	m.syncComposer()
+
+	header := m.headerBlock().Rendered
+	frame := m.bootHandoffFrame()
+	plain := stripAnsi(frame)
+
+	if !strings.Contains(frame, "\x1b[?2026h") || !strings.Contains(frame, "\x1b[?2026l") {
+		t.Fatal("boot handoff frame must use synchronized output")
+	}
+	if !strings.Contains(frame, "\x1b[2J\x1b[3J\x1b[H") {
+		t.Fatal("boot handoff frame must clear screen and scrollback before painting")
+	}
+	if !strings.Contains(plain, "Daintree Assistant") {
+		t.Fatalf("boot handoff frame missing masthead: %q", plain)
+	}
+	if !strings.Contains(plain, "Ask Daintree") {
+		t.Fatalf("boot handoff frame missing initial composer footer: %q", plain)
+	}
+	lines := strings.Split(strings.ReplaceAll(plain, "\r\n", "\n"), "\n")
+	headerLines := strings.Split(strings.TrimSuffix(stripAnsi(header), "\n"), "\n")
+	if len(lines) <= len(headerLines) || strings.TrimSpace(lines[len(headerLines)]) != "" {
+		t.Fatalf("boot handoff frame must reserve a blank line below the masthead, got %q", plain)
+	}
+
+	cursorAtFooter := "\x1b[" + itoa(lineCount(header)+1) + ";1H"
+	if !strings.Contains(frame, cursorAtFooter) {
+		t.Fatalf("boot handoff frame must park cursor at footer origin %q, frame %q", cursorAtFooter, frame)
+	}
+}
+
+func TestBootHandoffFrameEmpty(t *testing.T) {
+	if got := renderBootHandoffFrame("", ""); got != "" {
+		t.Fatalf("empty boot handoff frame = %q, want empty", got)
+	}
+}

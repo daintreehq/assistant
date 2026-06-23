@@ -171,10 +171,24 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 			return nil
 		}
 	}
-	chunk := indentLines(strings.Join(final[t.FlushedRows:target], "\n"), LeftPad)
+	start := t.FlushedRows
+	if start == 0 && m.activeTurnIsFirstTranscriptCell(t.ID) {
+		// Row 0 is the leading separator in the canonical turn rows. For transcript
+		// cell 0, the masthead already reserved that spacer, so count it as flushed
+		// without printing it again.
+		start = 1
+	}
 	t.FlushedRows = target
 	t.flushedRowsText = strings.Join(final[:target], "\n")
+	if start >= target {
+		return nil
+	}
+	chunk := indentLines(strings.Join(final[start:target], "\n"), LeftPad)
 	return tea.Println(chunk)
+}
+
+func (m *Model) activeTurnIsFirstTranscriptCell(id string) bool {
+	return len(m.transcript) > 0 && m.transcript[0].Turn != nil && m.transcript[0].Turn.ID == id
 }
 
 // sealTail returns the portion of the SEALED turn's canonical rows (un-indented) NOT yet in
