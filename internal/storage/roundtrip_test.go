@@ -345,6 +345,53 @@ func TestListAgentLaunchesDefaultCapTruncates(t *testing.T) {
 	}
 }
 
+// ---- agent launches: boot-reconcile candidates (confirmed + bound terminal) ----
+
+func TestListConfirmedAgentLaunchesWithTerminal(t *testing.T) {
+	s := openTest(t, 6000)
+	// Empty store → no rows, no error.
+	if got, err := s.ListConfirmedAgentLaunchesWithTerminal(10); err != nil || len(got) != 0 {
+		t.Fatalf("empty want 0 rows no error, got %d rows, err %v", len(got), err)
+	}
+	term := func(v string) *string { return &v }
+	seed := []domain.AgentLaunchRecord{
+		// confirmed + terminal → INCLUDED (oldest update).
+		{IdempotencyKey: "a", AgentID: "claude", Mode: "edit", Title: "A", Name: "n",
+			Stage: domain.LaunchConfirmed, TerminalID: term("term_a"), CreatedAt: 100, UpdatedAt: 100},
+		// confirmed but NO terminal → excluded.
+		{IdempotencyKey: "b", AgentID: "claude", Mode: "edit", Title: "B", Name: "n",
+			Stage: domain.LaunchConfirmed, CreatedAt: 200, UpdatedAt: 200},
+		// failed + terminal → excluded (terminal stage, but not confirmed).
+		{IdempotencyKey: "c", AgentID: "claude", Mode: "edit", Title: "C", Name: "n",
+			Stage: domain.LaunchFailed, TerminalID: term("term_c"), CreatedAt: 300, UpdatedAt: 300},
+		// confirmed + terminal → INCLUDED (newest update — must lead).
+		{IdempotencyKey: "d", AgentID: "claude", Mode: "edit", Title: "D", Name: "n",
+			Stage: domain.LaunchConfirmed, TerminalID: term("term_d"), CreatedAt: 400, UpdatedAt: 400},
+	}
+	for _, r := range seed {
+		if _, err := s.InsertAgentLaunch(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListConfirmedAgentLaunchesWithTerminal(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 confirmed-with-terminal rows, got %d: %+v", len(got), got)
+	}
+	// newest-first by updatedAt: term_d (400) before term_a (100).
+	if got[0].TerminalID == nil || *got[0].TerminalID != "term_d" ||
+		got[1].TerminalID == nil || *got[1].TerminalID != "term_a" {
+		t.Fatalf("want [term_d, term_a] newest-first, got %+v", got)
+	}
+	// limit honored: only the newest.
+	top, _ := s.ListConfirmedAgentLaunchesWithTerminal(1)
+	if len(top) != 1 || top[0].TerminalID == nil || *top[0].TerminalID != "term_d" {
+		t.Fatalf("limit 1 should return only term_d, got %+v", top)
+	}
+}
+
 // ---- skill run state: unique key throws + list order + immutable cols ----
 
 func TestSkillRunStateUniqueAndImmutable(t *testing.T) {

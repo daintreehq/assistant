@@ -11,6 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
+	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
 )
 
 // ConnectMcp connects the MCP transport, rolls up any tool drift to one log line,
@@ -75,6 +76,16 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 	a.scheduler.Start(ctx)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return a.scheduler
+}
+
+// RunBootReconcile re-surfaces prior-session agents that are still running but lost
+// their supervision at the session boundary (see agenttaskx.BootReconcile). It must
+// be called on INTERACTIVE boot only (REPL / cockpit) — never the one-shot path,
+// which has no scheduler to deliver the published events. Read-only and best-effort:
+// the error is returned for logging but is never fatal, and callers fire it as a
+// goroutine so a slow terminal.list never delays the prompt.
+func (a *App) RunBootReconcile(ctx context.Context) error {
+	return agenttaskx.BootReconcile(ctx, agentTaskMCPAdapter{c: a.MCP}, a.Store, a.Queue)
 }
 
 // daemonCtxFor builds a per-actor daemon.CheckContext. The

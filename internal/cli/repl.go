@@ -81,6 +81,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 	st := a.MCP.Status()
 	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) })
 
+	// Re-surface any prior-session agents still running without supervision
+	// (interactive only — one-shot never reaches here). Fire-and-forget so a slow
+	// terminal.list never delays the prompt; events arrive via the attention callback.
+	go func() { _ = a.RunBootReconcile(base) }()
+
 	printBanner(r, a, st.Connected, st.Transport)
 	if !st.Connected {
 		r.Warn("Running in degraded local mode — Daintree MCP not connected. Use /reconnect once Daintree is up.")

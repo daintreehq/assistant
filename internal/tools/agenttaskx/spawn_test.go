@@ -108,6 +108,22 @@ func (s *sagaStore) InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecor
 	return rec, nil
 }
 
+// ListWatchers returns the seeded/inserted watchers matching status (empty status ⇒
+// all; an unset record Status is treated as "active", mirroring storage).
+func (s *sagaStore) ListWatchers(status string) ([]domain.WatcherRecord, error) {
+	var out []domain.WatcherRecord
+	for _, w := range s.watchers {
+		st := w.Status
+		if st == "" {
+			st = "active"
+		}
+		if status == "" || st == status {
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
+
 func (s *sagaStore) FindActiveAgentLaunch(key string) (*domain.AgentLaunchRecord, error) {
 	terminal := map[domain.AgentLaunchStage]bool{
 		domain.LaunchConfirmed: true, domain.LaunchFailed: true,
