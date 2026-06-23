@@ -40,7 +40,6 @@ var validSkillRisk = map[SkillRisk]bool{
 // Default field values.
 const (
 	defaultPriority = 0
-	defaultMaxTurns = 8
 	defaultRisk     = RiskRead
 )
 
@@ -54,16 +53,14 @@ type Skill struct {
 	WhenToUse     string    `json:"whenToUse"`
 	Tags          []string  `json:"tags"`
 	Priority      int       `json:"priority"`
-	MaxTurns      int       `json:"maxTurns"`
 	Risk          SkillRisk `json:"risk"`
 	RequiredTools []string  `json:"requiredTools"`
 	Body          string    `json:"body"`
 }
 
 // SkillMetadata is the .pick() subset the selector ever sees: exactly id, title,
-// summary, whenToUse, tags, priority — NEVER body/version/risk/maxTurns/
-// requiredTools. Keeping this subset exact bounds selector input cost and the
-// injection surface.
+// summary, whenToUse, tags, priority — NEVER body/version/risk/requiredTools.
+// Keeping this subset exact bounds selector input cost and the injection surface.
 type SkillMetadata struct {
 	ID        string   `json:"id"`
 	Title     string   `json:"title"`

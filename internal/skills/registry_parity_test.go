@@ -16,7 +16,7 @@ func parityRegistry(t *testing.T) *SkillRegistry {
 	mk := func(id string) Skill {
 		return Skill{
 			ID: id, Title: id, Version: "1.0.0", Summary: "summary-" + id,
-			WhenToUse: "whenToUse-" + id, Tags: []string{}, MaxTurns: 8,
+			WhenToUse: "whenToUse-" + id, Tags: []string{},
 			Risk: RiskRead, RequiredTools: []string{},
 			Body: "Procedure: do the thing for " + id,
 		}
@@ -49,7 +49,7 @@ func TestRegistryExposesAllSkills(t *testing.T) {
 func TestRegistryRejectsDuplicateID(t *testing.T) {
 	mk := func() Skill {
 		return Skill{ID: "dup", Title: "T", Version: "1.0.0", Summary: "s",
-			WhenToUse: "w", MaxTurns: 8, Risk: RiskRead, Body: "b"}
+			WhenToUse: "w", Risk: RiskRead, Body: "b"}
 	}
 	_, err := NewRegistry([]Skill{mk(), mk()})
 	if err == nil || !strings.Contains(err.Error(), "Duplicate skill id") {

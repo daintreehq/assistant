@@ -63,9 +63,6 @@ func validateSkill(sk Skill) error {
 	if !validSkillRisk[sk.Risk] {
 		return fmt.Errorf("skill %q: invalid risk %q", sk.ID, sk.Risk)
 	}
-	if sk.MaxTurns <= 0 {
-		return fmt.Errorf("skill %q: maxTurns must be positive", sk.ID)
-	}
 	return nil
 }
 
