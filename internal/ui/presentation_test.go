@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
 // presentation_test.go: presentTool maps first-party tools to human verbs (never
@@ -20,6 +21,9 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		"fs.list":                 "Listed",
 		// The scheduling verb is keyed on the real tool name.
 		"timer.schedule": "Scheduled",
+		// Pulling a runbook reads as "Loading skill" (both the NL find and the by-id load).
+		"skill.find": "Loading skill",
+		"skill.load": "Loading skill",
 	}
 	for name, want := range cases {
 		if got := presentTool(name); got != want {
@@ -39,6 +43,26 @@ func TestPresentTool_UnknownFallsBackToInternalName(t *testing.T) {
 		if p := presentTool(name); contains(p, "(") {
 			t.Errorf("presentTool(%q) = %q must not contain a paren (raw fn syntax)", name, p)
 		}
+	}
+}
+
+// A settled skill.find/skill.load that loaded a runbook earns the ✦ skill glyph; a
+// find that matched nothing keeps the plain ✓ (the sparkle must mean "skill now live").
+func TestSkillLoadedGlyph(t *testing.T) {
+	th := theme.Resolve()
+	loaded := Activity{Name: "skill.find", State: ActDone, Detail: "Orchestrate multiple agents on one problem"}
+	if !skillLoaded(loaded) {
+		t.Fatal("skill.find that resolved to a titled skill should count as loaded")
+	}
+	if g, _ := activityGlyph(th, loaded, 0); g != th.Glyphs.Skill {
+		t.Errorf("loaded-skill glyph = %q, want Skill glyph %q", g, th.Glyphs.Skill)
+	}
+	nomatch := Activity{Name: "skill.find", State: ActDone, Detail: skillNoMatchSummary}
+	if skillLoaded(nomatch) {
+		t.Fatal("a no-match find must NOT count as loaded")
+	}
+	if g, _ := activityGlyph(th, nomatch, 0); g != th.Glyphs.Done {
+		t.Errorf("no-match glyph = %q, want plain Done glyph %q", g, th.Glyphs.Done)
 	}
 }
 

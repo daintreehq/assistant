@@ -20,6 +20,7 @@ type GlyphSet struct {
 	Approval     string   // ◇ — waiting for approval
 	Done         string   // ✓ — activity complete
 	Failed       string   // × — activity failed
+	Skill        string   // ✦ — a skill runbook was loaded (a "leveled-up" done)
 	BranchMid    string   // ├─ — non-last tree branch
 	BranchLast   string   // └─ — last tree branch (square, not the arc ╰)
 	Continuation string   // │  — note/continuation prefix
@@ -40,6 +41,7 @@ var unicodeGlyphs = GlyphSet{
 	Approval:     "◇",
 	Done:         "✓",
 	Failed:       "×",
+	Skill:        "✦",
 	BranchMid:    "├─",
 	BranchLast:   "└─",
 	Continuation: "│ ",
@@ -55,13 +57,17 @@ var unicodeGlyphs = GlyphSet{
 // asciiGlyphs is the shape-parallel fallback. Each stand-in keeps row alignment:
 // the two-cell branches map to two-cell ASCII, the one-cell badges to one cell.
 var asciiGlyphs = GlyphSet{
-	Brand:        "#",
-	Queued:       "o",
-	Active:       "*",
-	Waiting:      "~",
-	Approval:     "?",
-	Done:         "+",
-	Failed:       "x",
+	Brand:    "#",
+	Queued:   "o",
+	Active:   "*",
+	Waiting:  "~",
+	Approval: "?",
+	Done:     "+",
+	Failed:   "x",
+	// "*" is the natural ASCII star/sparkle. It doubles as the Active base, but that
+	// only renders while a row is RUNNING (the spinner ramp draws instead), so a
+	// settled "*" reads unambiguously as a loaded skill.
+	Skill:        "*",
 	BranchMid:    "|-",
 	BranchLast:   "`-",
 	Continuation: "| ",

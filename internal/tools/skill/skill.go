@@ -139,7 +139,7 @@ func newFindTool(deps Deps) *tools.Tool {
 					"activeSkillIds": active,
 				})
 			}
-			return tools.Ok(fmt.Sprintf("Selected %d skill(s).", len(result.Selected)), map[string]any{
+			return tools.Ok(loadedSkillsSummary(result.Selected), map[string]any{
 				"query":          query,
 				"selected":       result.Selected,
 				"reason":         result.Reason,
@@ -147,6 +147,28 @@ func newFindTool(deps Deps) *tools.Tool {
 			})
 		},
 	}
+}
+
+// loadedSkillsSummary renders the result gist for a successful skill.find: the
+// title(s) of the skill(s) just loaded, comma-joined. The cockpit shows this as the
+// "Loading skill" row's detail (internal/ui/render_activity.go), and the model reads
+// it as the tool-result summary — so it names what was actually pulled rather than a
+// bare count. Callers only reach here on a match, so the slice is non-empty.
+func loadedSkillsSummary(sel []SkillInfo) string {
+	titles := make([]string, 0, len(sel))
+	for _, s := range sel {
+		titles = append(titles, skillTitle(s.Title, s.ID))
+	}
+	return strings.Join(titles, ", ")
+}
+
+// skillTitle is the title, falling back to the id when a skill has no title (so a
+// row/summary is never blank).
+func skillTitle(title, id string) string {
+	if t := strings.TrimSpace(title); t != "" {
+		return t
+	}
+	return id
 }
 
 // --- skill.load ---
@@ -192,7 +214,7 @@ func newLoadTool(deps Deps) *tools.Tool {
 			if active == nil {
 				active = []string{}
 			}
-			return tools.Ok("Loaded skill "+info.Title+".", map[string]any{
+			return tools.Ok(skillTitle(info.Title, info.ID), map[string]any{
 				"id":             info.ID,
 				"title":          info.Title,
 				"summary":        info.Summary,
