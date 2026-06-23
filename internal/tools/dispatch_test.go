@@ -38,7 +38,7 @@ func (q *fakeQueue) Publish(_ context.Context, args domain.QueuePublishArgs) (do
 
 func lastAudit(s *fakeStore) domain.AuditRecord { return s.audits[len(s.audits)-1] }
 
-func baseCtx(store *fakeStore, q *fakeQueue, tier domain.Tier, actor domain.ToolActor) *ToolContext {
+func baseCtx(store *fakeStore, q Queue, tier domain.Tier, actor domain.ToolActor) *ToolContext {
 	return &ToolContext{
 		Config: config.AppConfig{Tier: tier},
 		DB:     store,
@@ -219,6 +219,93 @@ func TestDispatchNonInteractiveBlockedNoGrant(t *testing.T) {
 	}
 	if q.published[0].DedupeKey != "denied:watcher:g.echo" {
 		t.Fatalf("tick-free dedupeKey wrong: %q", q.published[0].DedupeKey)
+	}
+	// A blocked autonomous action must cross the attention filter (SeverityBlocked),
+	// not sit silently as info.
+	if q.published[0].Severity != domain.SeverityBlocked {
+		t.Fatalf("denial event should be SeverityBlocked, got %q", q.published[0].Severity)
+	}
+	// With no actorId there's nothing to scope a grant to, so no recommended action.
+	if len(q.published[0].RecommendedActions) != 0 {
+		t.Fatalf("no actorId → no recommended action, got %d", len(q.published[0].RecommendedActions))
+	}
+}
+
+// A watcher/timer WITH an actorId but no matching grant is blocked AND handed a
+// one-click grant.create recommendation, pre-filled with the exact scope to
+// authorize just this tool — so the human can approve in a single step.
+func TestDispatchNonInteractiveBlockedRecommendsGrant(t *testing.T) {
+	cases := []struct {
+		name      string
+		actor     domain.ToolActor
+		actorID   string
+		actorType string
+	}{
+		{"watcher", domain.ActorWatcher, "wch_1", "watcher"},
+		{"timer", domain.ActorTimer, "tmr_9", "timer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			_ = r.Register(echoTool("g.echo", domain.RiskGit))
+			// grant nil → ConsumeGrant returns no grant → blocked path.
+			s := &fakeStore{}
+			q := &fakeQueue{}
+			ctx := baseCtx(s, q, domain.TierSystem, tc.actor)
+			ctx.ActorID = tc.actorID
+			res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx)
+			if res.Error.Code != "CONFIRMATION_REQUIRED" || res.Error.Recoverable {
+				t.Fatalf("want CONFIRMATION_REQUIRED non-recoverable, got %+v", res.Error)
+			}
+			if !s.consumeCalled {
+				t.Fatal("grant consume should be attempted when an actorId is present")
+			}
+			if len(q.published) != 1 {
+				t.Fatalf("a denial event should be published, got %d", len(q.published))
+			}
+			ev := q.published[0]
+			if ev.Severity != domain.SeverityBlocked {
+				t.Fatalf("denial event should be SeverityBlocked, got %q", ev.Severity)
+			}
+			// The actorId segment keeps distinct actors from collapsing together.
+			wantKey := "denied:" + string(tc.actor) + ":" + tc.actorID + ":g.echo"
+			if ev.DedupeKey != wantKey {
+				t.Fatalf("dedupeKey wrong: got %q want %q", ev.DedupeKey, wantKey)
+			}
+			if len(ev.RecommendedActions) != 1 {
+				t.Fatalf("want exactly one recommended action, got %d", len(ev.RecommendedActions))
+			}
+			act := ev.RecommendedActions[0]
+			if act.ToolName != "grant.create" {
+				t.Fatalf("recommended action should target grant.create, got %q", act.ToolName)
+			}
+			if act.Risk != domain.RiskLocal {
+				t.Fatalf("recommended action risk should match grant.create (local), got %q", act.Risk)
+			}
+			if !act.RequiresConfirmation {
+				t.Fatal("minting a mutating grant must require confirmation")
+			}
+			args, ok := act.Args.(map[string]any)
+			if !ok {
+				t.Fatalf("recommended action args should be a map, got %T", act.Args)
+			}
+			if args["actorId"] != tc.actorID {
+				t.Fatalf("args.actorId = %v, want %q", args["actorId"], tc.actorID)
+			}
+			if args["actorType"] != tc.actorType {
+				t.Fatalf("args.actorType = %v, want %q", args["actorType"], tc.actorType)
+			}
+			tools, ok := args["allowedToolNames"].([]string)
+			if !ok || len(tools) != 1 || tools[0] != "g.echo" {
+				t.Fatalf("args.allowedToolNames should be [g.echo], got %v", args["allowedToolNames"])
+			}
+			if args["ttlMs"] != defaultGrantTTLMs {
+				t.Fatalf("args.ttlMs = %v, want %d", args["ttlMs"], defaultGrantTTLMs)
+			}
+			if args["maxUses"] != defaultGrantMaxUses {
+				t.Fatalf("args.maxUses = %v, want %d", args["maxUses"], defaultGrantMaxUses)
+			}
+		})
 	}
 }
 

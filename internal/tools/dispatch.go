@@ -280,11 +280,30 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 	return res
 }
 
+// Pre-filled defaults for the grant.create recommended action surfaced on a
+// denial event. Conservative and clearly bounded — enough to unblock a typical
+// supervised session without minting a long-lived standing authority. The human
+// can edit both before approving; the values stay within grant.create's own
+// caps (maxGrantTTLMs / maxGrantUses).
+const (
+	defaultGrantTTLMs   = int64(60 * 60 * 1000) // 1 hour
+	defaultGrantMaxUses = 10
+)
+
 // publishDenial publishes the best-effort "Autonomous action blocked" queue event
 // for a non-interactive actor (Branch A). The dedupeKey is intentionally
 // TICK-FREE so repeated denials of the same (actor, tool) collapse into one
 // count-bumped inbox row; the actorId segment keeps distinct watchers/timers from
 // collapsing together. Wrapped so it can never break the call.
+//
+// The event is SeverityBlocked (not Info) so it crosses the attention notify
+// filter and reaches the wake queue with the ⛔ blocked rendering — a blocked
+// autonomous action genuinely needs a human to unblock it. When the actor is a
+// watcher/timer with a known ActorID, it also carries a RecommendedAction that
+// pre-fills grant.create with the exact scope to authorize this one tool, so the
+// human can approve in a single step instead of hand-assembling a grant. The
+// action is gated on actor == watcher|timer because grant.create's actorType
+// only accepts those two — any other actor would produce an invalid suggestion.
 func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolContext, summary string) {
 	defer func() { _ = recover() }()
 	if tctx.Queue == nil {
@@ -294,11 +313,28 @@ func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolCon
 	if tctx.ActorID != "" {
 		actorIDSeg = tctx.ActorID + ":"
 	}
+	var actions []domain.RecommendedAction
+	if tctx.ActorID != "" && (tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer) {
+		actions = []domain.RecommendedAction{{
+			Label:    fmt.Sprintf("Authorize %s %s to run %s", tctx.Actor, tctx.ActorID, name),
+			ToolName: "grant.create",
+			Args: map[string]any{
+				"actorId":          tctx.ActorID,
+				"actorType":        string(tctx.Actor), // "watcher" | "timer"
+				"allowedToolNames": []string{name},
+				"ttlMs":            defaultGrantTTLMs,
+				"maxUses":          defaultGrantMaxUses,
+			},
+			Risk:                 domain.RiskLocal, // grant.create's registered risk
+			RequiresConfirmation: true,             // minting a mutating grant always confirms
+		}}
+	}
 	_, _ = tctx.Queue.Publish(ctx, domain.QueuePublishArgs{
-		Source:    domain.SourceSystem,
-		Severity:  domain.SeverityInfo,
-		Title:     "Autonomous action blocked: " + name,
-		Summary:   summary,
-		DedupeKey: fmt.Sprintf("denied:%s:%s%s", tctx.Actor, actorIDSeg, name),
+		Source:             domain.SourceSystem,
+		Severity:           domain.SeverityBlocked,
+		Title:              "Autonomous action blocked: " + name,
+		Summary:            summary,
+		DedupeKey:          fmt.Sprintf("denied:%s:%s%s", tctx.Actor, actorIDSeg, name),
+		RecommendedActions: actions,
 	})
 }
