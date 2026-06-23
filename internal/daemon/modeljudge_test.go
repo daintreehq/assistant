@@ -135,6 +135,58 @@ func TestWatcher_JudgePerTerminalAgainstOwnTail(t *testing.T) {
 	}
 }
 
+// --- tier pinning ------------------------------------------------------------
+
+// Watcher classification must ALWAYS run on the small tier, even when the watcher
+// record carries ModelTier=medium (which routes to the large model on the main
+// thread). A non-working agentState with fresh output is the path that still
+// reaches the classifier.
+func TestWatcher_ClassifierAlwaysUsesSmallTier(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "running", "recentOutput": "linking…",
+	})
+	rec := termWatcher("wch_ct", []string{"t1"})
+	rec.ModelTier = domain.ModelMedium
+	store.watchers = []domain.WatcherRecord{rec}
+
+	model := &tierRecorder{verdict: domain.WatcherVerdict{
+		Classification: domain.ClassStillWorking, Confidence: 0.6, Summary: "working",
+	}}
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+	tier, called := model.classifyTier()
+	if !called {
+		t.Fatal("the classifier was expected to run for a non-working agentState with output")
+	}
+	if tier != domain.ModelSmall {
+		t.Errorf("classifier must pin the small tier even when rec.ModelTier=medium, got %s", tier)
+	}
+}
+
+// Judges must ALSO pin the small tier regardless of rec.ModelTier.
+func TestWatcher_JudgeAlwaysUsesSmallTier(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{"term-a": {agentState: "working", recentOutput: strptr("migrating…")}})
+	rec := watcherWith("wch_jt", []string{"term-a"}, withAlert(`{"modelJudge":"`+judgeQ+`"}`))
+	rec.ModelTier = domain.ModelMedium
+	store.watchers = []domain.WatcherRecord{rec}
+
+	model := &tierRecorder{judgeFn: func(_, _ string) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9, Reason: "still"}
+	}}
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+	tier, called := model.judgeTier()
+	if !called {
+		t.Fatal("the judge was expected to run for the alertWhen modelJudge condition")
+	}
+	if tier != domain.ModelSmall {
+		t.Errorf("judge must pin the small tier even when rec.ModelTier=medium, got %s", tier)
+	}
+}
+
 // --- rate limit --------------------------------------------------------------
 
 func TestWatcher_RateLimitPublishesOnceAndBacksOff(t *testing.T) {

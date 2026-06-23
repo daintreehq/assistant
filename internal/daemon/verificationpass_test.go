@@ -74,8 +74,12 @@ func TestWatcher_CompletedCleanIsSuccessWithVerifiedEvidence(t *testing.T) {
 func TestWatcher_ModelClaimedCompletionRoutedThroughGate(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	// FSM working, model classifies completed_success, but worktree is dirty.
-	mcp := newProgMCP(map[string]termCfg{"term-a": {agentState: "working", recentOutput: strptr("All done! Task complete.")}})
+	// A non-working agentState reaches the model (a "working" agent is now
+	// deterministically still_working and never consults it — see
+	// TestWatcher_WorkingAgentBypassesModel). The model here claims
+	// completed_success, but the worktree is dirty, so the git gate must demote it
+	// to completed_unverified.
+	mcp := newProgMCP(map[string]termCfg{"term-a": {agentState: "running", recentOutput: strptr("All done! Task complete.")}})
 	mcp.pulse = &MCPResult{StructuredContent: map[string]any{"isDirty": true, "changedFiles": float64(2)}}
 	rec := watcherWith("wch_mc", []string{"term-a"})
 	store.watchers = []domain.WatcherRecord{rec}

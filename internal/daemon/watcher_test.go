@@ -201,26 +201,52 @@ func TestWatcher_RateLimitedBacksOff(t *testing.T) {
 	}
 }
 
-func TestWatcher_ModelClassifiesWorkingTail(t *testing.T) {
+// A working agent must NOT consult the model even when its tail looks alarming
+// (intermediate "FAIL" output is not a terminal verdict). agentState=="working" is
+// authoritative, so the engine returns still_working deterministically — the guard
+// model would error if reached.
+func TestWatcher_WorkingAgentBypassesModel(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
 	mcp := newFakeMCP()
 	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
 		"terminalId": "t1", "agentState": "working", "recentOutput": "FAIL: 3 tests failed",
 	})
-	model := &fakeModel{verdict: domain.WatcherVerdict{
-		Classification: domain.ClassTestsFailed, Confidence: 0.9, Summary: "3 tests failed",
-		Evidence: []string{"FAIL"}, RecommendedAction: domain.ActionNone,
-	}}
 	rec := termWatcher("wch_m", []string{"t1"})
 	store.watchers = []domain.WatcherRecord{rec}
 
-	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
-	if out.Classification != domain.ClassTestsFailed {
-		t.Fatalf("model verdict should drive classification, got %s", out.Classification)
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{classErr: errModelMustNotRun}), rec)
+	if out.Classification != domain.ClassStillWorking {
+		t.Fatalf("a working agent must bypass the model → still_working, got %s", out.Classification)
 	}
-	if out.EpistemicKind != domain.EpistemicInferred {
-		t.Errorf("a model-derived verdict should be inferred, got %s", out.EpistemicKind)
+	if out.EpistemicKind != domain.EpistemicObserved {
+		t.Errorf("a model-free still_working must be observed, got %s", out.EpistemicKind)
+	}
+	// still_working is not "meaningful" → nothing surfaces to the operator.
+	if len(queue.published) != 0 {
+		t.Errorf("a still-working agent must not publish, got %d events", len(queue.published))
+	}
+}
+
+// The same bypass must hold on the list-fallback path: getStatus dropped the
+// terminal but terminal.list still reports it working, so the engine deep-reads
+// the tail — and must still skip the model for a working agent.
+func TestWatcher_WorkingViaListFallbackBypassesModel(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult() // t1 absent from getStatus
+	mcp.results["terminal.list"] = MCPResult{Text: `{"terminals":[{"id":"t1","agentState":"working"}]}`}
+	mcp.results["terminal.getOutput"] = MCPResult{StructuredContent: map[string]any{"content": "building module 3/9…"}}
+	rec := aged(termWatcher("wch_lf", []string{"t1"}))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{classErr: errModelMustNotRun}), rec)
+	if out.Classification != domain.ClassStillWorking {
+		t.Fatalf("list-fallback working agent must bypass the model → still_working, got %s", out.Classification)
+	}
+	if out.EpistemicKind != domain.EpistemicObserved {
+		t.Errorf("a model-free still_working must be observed, got %s", out.EpistemicKind)
 	}
 }
 

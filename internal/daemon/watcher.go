@@ -473,6 +473,20 @@ func classifyTail(ctx *CheckContext, rec domain.WatcherRecord, options *watcherO
 			"Agent appears rate-limited by its model provider (API limit in recent output).",
 			[]string{"rate-limit signature in recent output"}, signals, false
 	}
+	// A working agent is deterministically "still working" — agentState is an
+	// authoritative MCP fact, so the model has nothing to add. Skip it. This is the
+	// hot path the issue is about: a chatty working agent emits NEW output on most
+	// 3s ticks, and the tail-hash dedup below only suppresses IDENTICAL repeats — so
+	// without this guard every fresh line burned a (mis-tiered) model call. The
+	// rate-limit check above still wins, so a throttled working agent is surfaced.
+	// Latch lastClassifyKey to keep per-terminal state consistent with the model path.
+	if agentState == "working" {
+		base := perTerminal[terminalID]
+		base.LastClassifyKey = classifyKey
+		perTerminal[terminalID] = base
+		return domain.ClassStillWorking, 0.8, "Agent is still working.",
+			[]string{"agentState=working"}, signals, false
+	}
 	if prevState != nil && prevState.LastClassifyKey == classifyKey {
 		return domain.ClassNoChange, 0.5, "No change in terminal signals since last classification.", nil, signals, false
 	}

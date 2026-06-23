@@ -95,11 +95,11 @@ type JsonResultEnvelope struct {
 // classEpistemicKind maps a classification to its provenance when no model was
 // used.
 var classObservedWithoutModel = newEnumSet(
-	ClassTerminalExited, ClassWaitingForInput, ClassRateLimited,
+	ClassTerminalExited, ClassWaitingForInput, ClassRateLimited, ClassStillWorking,
 )
 
 var classAlwaysInferred = newEnumSet(
-	ClassPermissionPrompt, ClassStillWorking, ClassTestsFailed, ClassTestsPassed,
+	ClassPermissionPrompt, ClassTestsFailed, ClassTestsPassed,
 	ClassCommandFailed, ClassMergeConflict, ClassCompletedSuccess,
 	ClassCompletedUnverified, ClassCompletedUnknown,
 )
@@ -108,8 +108,9 @@ var classAlwaysInferred = newEnumSet(
 // the resulting fact. usedModel reflects whether the small model produced the
 // classification (vs. a deterministic signal).
 //
-//   - terminal_exited / waiting_for_input / rate_limited → inferred iff usedModel
-//     else observed.
+//   - terminal_exited / waiting_for_input / rate_limited / still_working → inferred
+//     iff usedModel else observed (a working agent is observed model-free; a model-
+//     judged still_working stays inferred).
 //   - the "always inferred" set → inferred.
 //   - everything else (no_change / unknown / needs_large_model / unrecognized) →
 //     unverified.
