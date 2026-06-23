@@ -439,6 +439,48 @@ func TestWatcherDefaultLifetime(t *testing.T) {
 	if w2.StopAfterMs == nil || *w2.StopAfterMs != explicit {
 		t.Fatalf("explicit stopAfterMs want %d, got %v", explicit, w2.StopAfterMs)
 	}
+
+	// A large startAfterMs is folded into the default ceiling so the watcher still gets
+	// a full lifetime of watching past the start delay (timeout is measured from
+	// createdAt) — it must not time out before its first check.
+	startAfter := int64(90_000_000) // ~25h, > the 24h default
+	w3, err := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w3", Goal: "g", TargetsJson: "[]",
+		CadenceMs: 120000, ModelTier: domain.ModelSmall, NextCheckAt: 1,
+		StartAfterMs: &startAfter,
+	})
+	if err != nil {
+		t.Fatalf("insert startAfter: %v", err)
+	}
+	wantStop := domain.WatcherDefaultLifetimeMS + startAfter
+	if w3.StopAfterMs == nil || *w3.StopAfterMs != wantStop {
+		t.Fatalf("startAfter default stopAfterMs want %d, got %v", wantStop, w3.StopAfterMs)
+	}
+	if *w3.StopAfterMs <= startAfter {
+		t.Fatalf("default ceiling %d must exceed startAfterMs %d", *w3.StopAfterMs, startAfter)
+	}
+}
+
+// TestSupervisorWatcherDefaultLifetime proves the storage chokepoint caps supervisor
+// watchers too: BuildSupervisorWatcherRecord deliberately omits StopAfterMs, so a
+// supervising watcher would otherwise poll forever. Routing it through the real
+// InsertWatcher must stamp the 24h ceiling.
+func TestSupervisorWatcherDefaultLifetime(t *testing.T) {
+	s := openTest(t, 1)
+	rec := domain.BuildSupervisorWatcherRecord(domain.SupervisorWatcherSpec{
+		TerminalID: "t1", Title: "watch edits", Goal: "supervise the edit agent",
+		CadenceMs: 3000, SpawnMode: "edit",
+	})
+	if rec.StopAfterMs != nil {
+		t.Fatalf("precondition: supervisor builder must leave StopAfterMs nil, got %v", rec.StopAfterMs)
+	}
+	w, err := s.InsertWatcher(rec)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if w.StopAfterMs == nil || *w.StopAfterMs != domain.WatcherDefaultLifetimeMS {
+		t.Fatalf("supervisor default stopAfterMs want %d, got %v", domain.WatcherDefaultLifetimeMS, w.StopAfterMs)
+	}
 }
 
 func TestRetentionPrunesRunWithAuditPairing(t *testing.T) {

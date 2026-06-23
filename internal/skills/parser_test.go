@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -92,6 +93,22 @@ maxTurns: 0
 body`
 	if _, err := parseSkillFile(f, "x.y.md"); err != nil {
 		t.Fatalf("removed maxTurns key must be tolerated, got error: %v", err)
+	}
+}
+
+func TestMaxTurnsAbsentFromSerializedSkill(t *testing.T) {
+	// Guard against someone re-adding a maxTurns field (with a JSON tag) later:
+	// a parsed skill must never marshal a "maxTurns" key.
+	sk, err := parseSkillFile(validFile, "daintree.test.basic.md")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	b, err := json.Marshal(sk)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "maxTurns") {
+		t.Errorf("serialized skill must not contain maxTurns: %s", b)
 	}
 }
 
