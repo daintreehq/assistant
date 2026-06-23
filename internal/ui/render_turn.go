@@ -315,7 +315,10 @@ var (
 	mdHeaderRe    = regexp.MustCompile(`(?m)^[ \t]*#{1,6}[ \t]+`)
 	mdBoldStarRe  = regexp.MustCompile(`\*\*([^*]+)\*\*`)
 	mdBoldUnderRe = regexp.MustCompile(`(^|[^\w])__([^_]+)__([^\w]|$)`)
-	mdEmphStarRe  = regexp.MustCompile(`\*(\S(?:[^*]*\S)?)\*`)
+	// Single-marker emphasis requires NON-WORD boundaries on both sides (start/space/punct),
+	// so intra-word/inter-digit stars like "3*4" and "3*4*5" are left intact — only true
+	// "*emph*" spans (flanked by word boundaries) are stripped.
+	mdEmphStarRe  = regexp.MustCompile(`(^|[^\w*])\*(\S(?:[^*]*\S)?)\*([^\w*]|$)`)
 	mdEmphUnderRe = regexp.MustCompile(`(^|[^\w])_([^_]+)_([^\w]|$)`)
 	mdCodeRe      = regexp.MustCompile("`([^`]+)`")
 )
@@ -328,7 +331,7 @@ func stripLivePreviewMarkdown(s string) string {
 	s = mdHeaderRe.ReplaceAllString(s, "")
 	s = mdBoldStarRe.ReplaceAllString(s, "$1")
 	s = mdBoldUnderRe.ReplaceAllString(s, "$1$2$3")
-	s = mdEmphStarRe.ReplaceAllString(s, "$1")
+	s = mdEmphStarRe.ReplaceAllString(s, "$1$2$3")
 	s = mdEmphUnderRe.ReplaceAllString(s, "$1$2$3")
 	s = mdCodeRe.ReplaceAllString(s, "$1")
 	return s

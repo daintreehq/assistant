@@ -240,12 +240,17 @@ func clampWindow(s string, offset, n int, th theme.Theme) string {
 	// Overwrite the boundary rows with scroll cues when content is hidden above/below. This
 	// hides one real row at each truncated edge (the cost of a fixed-height viewport); the
 	// hidden row scrolls into view as the offset moves, and the first/last lines are always
-	// reachable at offset 0 / maxOff where their edge cue is absent.
-	if offset > 0 {
-		window[0] = th.Dim().Render("↑ more")
-	}
-	if offset < maxOff {
-		window[n-1] = th.Dim().Render("↓ more")
+	// reachable at offset 0 / maxOff where their edge cue is absent. Only do this when the
+	// window has a row to spare beyond the two cues (n >= 3): at the 1-2 row floor (rows<=4),
+	// cues on both edges would hide EVERY interior line, so show the raw window instead — the
+	// "↑↓ scroll" footer hint still signals it scrolls.
+	if n >= 3 {
+		if offset > 0 {
+			window[0] = th.Dim().Render("↑ more")
+		}
+		if offset < maxOff {
+			window[n-1] = th.Dim().Render("↓ more")
+		}
 	}
 	return strings.Join(window, "\n")
 }

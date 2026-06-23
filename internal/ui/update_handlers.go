@@ -469,9 +469,11 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 	if msg.SwitchPanel != PanelNone {
 		if msg.SwitchPanel == PanelHelp {
 			m.view = viewHelp
+			m.helpScroll = 0 // a freshly-opened deck starts at the top (mirrors the ?/^O entry paths)
 		} else {
 			m.view = viewOperations
 			m.activePanel = msg.SwitchPanel
+			m.opsScroll = 0
 		}
 		return m.afterStateChange(nil)
 	}

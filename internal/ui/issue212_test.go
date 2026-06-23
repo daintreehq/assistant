@@ -88,6 +88,54 @@ func TestClampWindowScrolls(t *testing.T) {
 	}
 }
 
+// TestClampWindowSmallBudget covers the rows<=4 floor: at n<3 the scroll cues would consume
+// every row, so they are suppressed and the raw window shows — keeping all content reachable
+// and the height bounded to exactly n.
+func TestClampWindowSmallBudget(t *testing.T) {
+	th := theme.Resolve()
+	full := strings.Join([]string{"a", "b", "c", "d", "e"}, "\n")
+
+	for _, n := range []int{1, 2} {
+		// Every line must be reachable at SOME offset (no row hidden behind a cue).
+		seen := map[string]bool{}
+		for off := 0; off <= 5; off++ {
+			w := clampWindow(full, off, n, th)
+			if got := lineCount(w); got > n {
+				t.Fatalf("n=%d off=%d: window is %d lines, exceeds budget %d", n, off, got, n)
+			}
+			if strings.Contains(ansi.Strip(w), "more") {
+				t.Errorf("n=%d: no scroll cue should show at the floor, got %q", n, ansi.Strip(w))
+			}
+			for _, ln := range strings.Split(ansi.Strip(w), "\n") {
+				seen[ln] = true
+			}
+		}
+		for _, ln := range []string{"a", "b", "c", "d", "e"} {
+			if !seen[ln] {
+				t.Errorf("n=%d: line %q is unreachable across all offsets", n, ln)
+			}
+		}
+	}
+}
+
+// TestCommandCompleteResetsDeckScroll covers the slash-command deck entry (/help, /watchers,
+// …): like the ?/^O key paths, a freshly-opened deck must start at the top.
+func TestCommandCompleteResetsDeckScroll(t *testing.T) {
+	m := testModel(60)
+	m.helpScroll = 4
+	m.opsScroll = 3
+
+	next, _ := m.onCommandComplete(CommandCompleteMsg{Title: "Help", SwitchPanel: PanelHelp})
+	if nm := next.(Model); nm.helpScroll != 0 {
+		t.Errorf("/help must reset helpScroll to 0, got %d", nm.helpScroll)
+	}
+
+	next2, _ := m.onCommandComplete(CommandCompleteMsg{Title: "Watchers", SwitchPanel: PanelWatchers})
+	if nm := next2.(Model); nm.opsScroll != 0 {
+		t.Errorf("/watchers must reset opsScroll to 0, got %d", nm.opsScroll)
+	}
+}
+
 // TestHelpDeckScrolls drives the full key path: a tall help deck in a short terminal scrolls
 // via the arrow keys, never overflows the terminal height, and End jumps to the bottom.
 func TestHelpDeckScrolls(t *testing.T) {
@@ -101,12 +149,14 @@ func TestHelpDeckScrolls(t *testing.T) {
 	}
 	assertNoHeightOverflow(t, "help-scroll-top", v, m.rows)
 
-	// Down advances the offset (clamped to content).
+	// Down advances the offset (clamped to content) and the View stays height-safe at the
+	// intermediate offset (both cues showing — the worst case for the #1613 budget).
 	next, _ := m.onKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	nm := next.(Model)
 	if nm.helpScroll != 1 {
 		t.Fatalf("Down must advance helpScroll to 1, got %d", nm.helpScroll)
 	}
+	assertNoHeightOverflow(t, "help-scroll-mid", nm.View().Content, nm.rows)
 
 	// End jumps to the bottom: the down-cue is gone, the up-cue shows, height stays safe.
 	next2, _ := nm.onKey(tea.KeyPressMsg{Code: tea.KeyEnd})
@@ -168,8 +218,9 @@ func TestStripLivePreviewMarkdown(t *testing.T) {
 		}
 	}
 
-	// Conservative: non-markdown text with stray markers must pass through untouched.
-	for _, s := range []string{"3*4", "foo_bar", "a * b", "2 * 3 = 6", "snake_case_name"} {
+	// Conservative: non-markdown text with stray/inter-token markers must pass through
+	// untouched — including multi-star arithmetic ("3*4*5") and snake_case identifiers.
+	for _, s := range []string{"3*4", "3*4*5", "a*b*c", "foo_bar", "a * b", "2 * 3 = 6", "snake_case_name"} {
 		if got := stripLivePreviewMarkdown(s); got != s {
 			t.Errorf("strip(%q) must be unchanged, got %q", s, got)
 		}
