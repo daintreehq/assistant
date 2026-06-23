@@ -11,21 +11,36 @@ import (
 // internal/tools/watcher/watcher.go.
 const reasonSessionEnded = "session_ended"
 
-// cancelStaleWatchers runs on DB open (session boundary). KEEP EXACT ORDER:
+// ReasonSessionCleared is the endedReason stamped when /clear tears every live
+// watcher down mid-session for a completely clean slate — distinct from
+// reasonSessionEnded (session boundary) and 'user_cancelled' (a single
+// watcher.cancel) so the UI/audit can tell the three apart.
+const ReasonSessionCleared = "session_cleared"
+
+// cancelStaleWatchers runs on DB open (session boundary): it cancels every live
+// watcher stamping reasonSessionEnded. A new session never inherits a prior
+// session's watchers. Returns the titles cancelled so the caller can surface a
+// one-time "these stopped because the prior session ended" NOTE (nil when none).
+func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
+	return s.CancelLiveWatchers(now, reasonSessionEnded)
+}
+
+// CancelLiveWatchers tears down EVERY live (active/created/paused) watcher in ONE
+// transaction. KEEP EXACT ORDER:
 //
 //  1. revoke automation_grants for watcher actors whose watcher is non-terminal
 //     (status in active/created/paused) and not already revoked;
 //  2. snapshot the titles about to be cancelled, then flip those watchers to
-//     status='cancelled' stamping endedReason='session_ended' + endedAt;
+//     status='cancelled' stamping the given endedReason + endedAt;
 //  3. resolve all open events sourced from the three watcher sources.
 //
 // Order matters: revoke BEFORE the flip so no grant is ever live for a watcher we
 // just cancelled. Terminal-status watchers (condition_met/timeout/cancelled/error)
 // are left for the UI history. Scoped to the 3 watcher sources so timer/system/
-// user events persist across sessions. Returns the titles of the watchers it
-// cancelled so the caller can surface a one-time "these stopped because the prior
-// session ended" NOTE (nil when none).
-func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
+// user events persist. Shared by the session-boundary sweep (reasonSessionEnded)
+// and /clear (ReasonSessionCleared). Returns the cancelled watchers' titles (nil
+// when none).
+func (s *Store) CancelLiveWatchers(now int64, reason string) ([]string, error) {
 	const liveStatuses = "('active','created','paused')"
 
 	// Wrap the ordered statements in ONE transaction so the session boundary either
@@ -77,11 +92,12 @@ func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
 	// would block the UPDATE below.
 	_ = rows.Close()
 
-	// (2b) cancel non-terminal watchers, stamping WHY (session_ended) + WHEN so the UI
-	// and store can tell a session-boundary teardown from a deliberate user cancel.
+	// (2b) cancel non-terminal watchers, stamping WHY (the caller's reason) + WHEN so
+	// the UI and store can tell a session-boundary teardown, a /clear, and a deliberate
+	// user cancel apart.
 	if _, err := tx.Exec(
 		`UPDATE watchers SET status = 'cancelled', endedReason = ?, endedAt = ? WHERE status IN `+liveStatuses,
-		reasonSessionEnded, now); err != nil {
+		reason, now); err != nil {
 		_ = tx.Rollback()
 		return nil, fmt.Errorf("cancel watchers: %w", err)
 	}

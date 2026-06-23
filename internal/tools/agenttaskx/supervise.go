@@ -60,8 +60,8 @@ func newSuperviseTerminalTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "agentTask.superviseTerminal",
 		Description: "Adopt an ALREADY-RUNNING agent terminal into supervision without re-spawning it. Use this to re-attach a " +
-			"supervisor watcher to a terminal that is running but unsupervised — e.g. an agent from a previous session surfaced " +
-			"by boot reconciliation, or a terminal that lost its watcher. Provide the terminalId; supply acceptanceCriteria when " +
+			"supervisor watcher to a terminal that is running but unsupervised — e.g. an agent from a previous session, or a " +
+			"terminal that lost its watcher. Provide the terminalId; supply acceptanceCriteria when " +
 			"there is a concrete definition of done. This does NOT launch an agent and does NOT edit files.",
 		Consequence: "Attaches a session-scoped supervisor watcher to a running agent terminal (no new agent is launched).",
 		Risk:        domain.RiskTerminal,

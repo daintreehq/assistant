@@ -232,6 +232,63 @@ func TestReopenResolvesWatcherInboxEvents(t *testing.T) {
 	}
 }
 
+// TestCancelLiveWatchersClearsMidSession — the /clear path. CancelLiveWatchers tears
+// down EVERY live watcher mid-session (no reopen) stamping ReasonSessionCleared,
+// revokes its grant, and resolves its open watcher event — a clean slate while the
+// session stays open. Mirrors the session-boundary sweep but with the clear reason.
+func TestCancelLiveWatchersClearsMidSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	now := int64(7000)
+	s := openFile(t, path, now)
+	defer s.Close()
+
+	if _, err := s.InsertWatcher(domain.WatcherRecord{
+		ID: "wch_live", Kind: "terminal", Title: "supervise edits", Goal: "supervise",
+		TargetsJson: `["term_1"]`, CadenceMs: 5000, ModelTier: domain.ModelSmall,
+		NextCheckAt: 0, Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.InsertGrant(domain.AutomationGrantRecord{
+		ID: "grt_live", ActorID: "wch_live", ActorType: domain.GrantActorWatcher,
+		AllowedRiskClassesJson: strPtr(`["terminal"]`), ExpiresAt: 9999999999999, MaxUses: 5,
+	})
+	if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+		Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "agent waiting", Summary: "s", DedupeKey: "watcher:wch_live:term_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	titles, err := s.CancelLiveWatchers(now, ReasonSessionCleared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(titles) != 1 || titles[0] != "supervise edits" {
+		t.Fatalf("want [supervise edits], got %v", titles)
+	}
+
+	w, _ := s.GetWatcher("wch_live")
+	if w == nil || w.Status != "cancelled" {
+		t.Fatalf("watcher should be cancelled, got %v", w)
+	}
+	if w.EndedReason == nil || *w.EndedReason != ReasonSessionCleared {
+		t.Fatalf("want endedReason %q, got %v", ReasonSessionCleared, w.EndedReason)
+	}
+	if g, _ := s.GetGrant("grt_live"); g == nil || g.RevokedAt == nil {
+		t.Fatal("watcher grant must be revoked on clear")
+	}
+	if dw, _ := s.DueWatchers(now); len(dw) != 0 {
+		t.Fatalf("no watcher should be due after clear, got %d", len(dw))
+	}
+	open, _ := s.ListEvents(domain.QueueDigestOptions{})
+	for _, e := range open {
+		if e.Source == domain.SourceTerminalWatcher {
+			t.Fatalf("watcher event %q should be resolved after clear", e.Title)
+		}
+	}
+}
+
 // TestReopenFailsStaleAgentLaunches — a non-terminal saga from a prior session is
 // failed (errorCode SESSION_ENDED) so its idempotencyKey no longer blocks a fresh
 // launch; a confirmed saga is untouched. Stale non-terminal records from a prior

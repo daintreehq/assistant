@@ -998,10 +998,6 @@ func (m Model) bootstrapCmd() tea.Cmd {
 			}
 			return MCPDegradedMsg{Reason: reason}
 		}
-		// Re-surface any prior-session agents still running without supervision. Off in
-		// its own goroutine so the terminal.list round-trip never delays MCPConnectedMsg;
-		// events arrive through the scheduler's attention callback (the pump).
-		go func() { _ = a.RunBootReconcile(ctx) }()
 		count := 0
 		if st.ToolCount != nil {
 			count = *st.ToolCount
