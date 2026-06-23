@@ -129,6 +129,24 @@ func TestApproval_RendersRiskClassRow(t *testing.T) {
 	}
 }
 
+func TestApproval_TypedConfirmRenderPath(t *testing.T) {
+	// With requireType set, the sheet renders the typed-confirm prompt (irreversible
+	// warning + phrase) INSTEAD of the single-key action row, while still surfacing the
+	// risk row. This is the highest-risk render branch and was previously unasserted.
+	req := confirmReq("daintree.call", domain.RiskSystem, "")
+	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: req, requireType: true}, 72))
+	if !strings.Contains(out, "risk     system") {
+		t.Errorf("typed-confirm sheet must still render the risk row: %q", out)
+	}
+	if !strings.Contains(out, "irreversible") || !strings.Contains(out, confirmPhrase) {
+		t.Errorf("typed-confirm prompt missing the irreversible / type-phrase copy: %q", out)
+	}
+	// The single-key allow-list affordances must be absent in typed mode.
+	if strings.Contains(out, "A allow") || strings.Contains(out, "F always") {
+		t.Errorf("typed-confirm sheet must not show the single-key allow/always affordances: %q", out)
+	}
+}
+
 func TestApproval_DaintreeCallTitleIsSpecific(t *testing.T) {
 	// daintree.call (RiskSystem) is the raw MCP escape hatch; its title must NOT be the
 	// generic system-level question that hides the riskiest forge writes.
