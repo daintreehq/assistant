@@ -58,6 +58,20 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 	}
 }
 
+// A disconnected MCP must point the model at /reconnect — the recovery command
+// that works in both the REPL and the cockpit (issue #211).
+func TestPassthroughDisconnectedNamesReconnect(t *testing.T) {
+	m := &fakeMCP{connected: false}
+	tool := findTool(Tools(Deps{}), "forge.listIssues")
+	res := tool.Handle(context.Background(), json.RawMessage(`{}`), ctxWith(m))
+	if res.Ok || res.Error.Code != codeMCPUnavailable {
+		t.Fatalf("disconnected wrapper should be MCP_UNAVAILABLE, got %+v", res)
+	}
+	if !strings.Contains(res.Error.Message, "/reconnect") {
+		t.Errorf("disconnected hint must name /reconnect: %q", res.Error.Message)
+	}
+}
+
 // A whitespace-only required field is rejected locally — never forwarded to MCP.
 func TestGitSnapshotRejectsBlankWorktreeLocally(t *testing.T) {
 	m := &fakeMCP{connected: true, result: mcpResult("ok")}

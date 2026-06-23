@@ -74,14 +74,14 @@ func newListToolsTool(deps Deps) tools.Tool {
 		Decode: tools.StrictDecoder(func() any { return &struct{}{} }),
 		Handle: func(ctx context.Context, _ json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			if !deps.MCP.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected; cannot list tools.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected; cannot list tools. Use /reconnect to retry once Daintree is available.")
 			}
 			list, err := deps.MCP.ListTools(ctx, false)
 			if err != nil {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while listing MCP tools.", tools.Unrecoverable())
 				}
-				return tools.Fail(codeMCPUnavailable, "Could not list Daintree MCP tools: "+err.Error())
+				return tools.Fail(codeMCPUnavailable, "Could not list Daintree MCP tools: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 			callableOf := makeCallable(tctx.ActiveToolNames)
 			out := make([]map[string]any, 0, len(list))
@@ -126,7 +126,7 @@ func newSearchTool(deps Deps) tools.Tool {
 			var a searchArgs
 			_ = json.Unmarshal(raw, &a)
 			if !deps.MCP.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected; cannot search MCP tools.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected; cannot search MCP tools. Use /reconnect to retry once Daintree is available.")
 			}
 			max := 20
 			if a.Max != nil {
@@ -137,7 +137,7 @@ func newSearchTool(deps Deps) tools.Tool {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while searching MCP tools.", tools.Unrecoverable())
 				}
-				return tools.Fail(codeMCPUnavailable, "Could not search Daintree MCP tools: "+err.Error())
+				return tools.Fail(codeMCPUnavailable, "Could not search Daintree MCP tools: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 			callableOf := makeCallable(tctx.ActiveToolNames)
 			q := strings.ToLower(a.Query)
@@ -268,7 +268,7 @@ func newCallTool(deps Deps) tools.Tool {
 			}
 			// 3. Connectivity.
 			if !deps.MCP.Connected() {
-				return tools.Fail(codeMCPUnavailable, fmt.Sprintf("Daintree MCP is not connected; cannot call %s.", a.Name))
+				return tools.Fail(codeMCPUnavailable, fmt.Sprintf("Daintree MCP is not connected; cannot call %s. Use /reconnect to retry once Daintree is available.", a.Name))
 			}
 			// 4. Forward.
 			callArgsMap := make(map[string]any, len(a.Arguments)+1)

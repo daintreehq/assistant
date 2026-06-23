@@ -37,7 +37,7 @@ func mcpFrom(tctx *tools.ToolContext) MCPClient {
 func passthrough(ctx context.Context, tctx *tools.ToolContext, mcpName string, args map[string]any, requestKey string) tools.ToolResult {
 	mcp := mcpFrom(tctx)
 	if mcp == nil || !mcp.Connected() {
-		return tools.Fail(codeMCPUnavailable, fmt.Sprintf("Daintree MCP is not connected; cannot call %s.", mcpName))
+		return tools.Fail(codeMCPUnavailable, fmt.Sprintf("Daintree MCP is not connected; cannot call %s. Use /reconnect to retry once Daintree is available.", mcpName))
 	}
 
 	call := make(map[string]any, len(args)+1)

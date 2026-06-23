@@ -15,6 +15,7 @@ type fakeMCP struct {
 	result    MCPCallResult
 	lastName  string
 	lastArgs  map[string]any
+	listErr   error // when set, ListTools returns it (a stale connection that drops mid-RPC)
 }
 
 func (f *fakeMCP) Connected() bool { return f.connected }
@@ -26,7 +27,9 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) 
 	f.lastArgs = args
 	return f.result, nil
 }
-func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) { return nil, nil }
+func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) {
+	return nil, f.listErr
+}
 
 func TestExtractArmedSet(t *testing.T) {
 	// structuredContent wins.

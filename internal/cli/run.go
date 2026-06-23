@@ -148,6 +148,18 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		}
 	}
 
+	// Preflight: without a model key the turn can only fail on the first model call,
+	// so surface that up front (matching the cockpit's boot note) and exit before a
+	// dead round-trip, pointing at `doctor` for a fuller setup check.
+	if a.Config.FireworksAPIKey == "" {
+		reportError(errors.New("FIREWORKS_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup."))
+		_ = a.Shutdown()
+		if sink != nil {
+			return sink.Finish()
+		}
+		return domain.OneShotExitCode.Error
+	}
+
 	confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
 		// One-shot is non-interactive → auto-decline.
 		msg := fmt.Sprintf("Skipping %s (%s) — confirmation needed; run interactively to approve.", req.ToolName, req.Risk)
@@ -246,10 +258,17 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	a.ConnectMcp(ctx)
 	st := a.MCP.Status()
 
+	// Track whether any gating check failed so the exit code reflects health instead
+	// of always reporting success — scripts and CI gate on `doctor`'s exit code. A
+	// missing model key is the one hard failure here; a disconnected MCP is a valid
+	// degraded local mode, not a doctor failure.
+	anyFail := false
+
 	r.Line("Daintree Assistant — doctor")
 	fwk := "present"
 	if a.Config.FireworksAPIKey == "" {
 		fwk = "MISSING — set FIREWORKS_API_KEY"
+		anyFail = true
 	}
 	r.Line("  fireworks key  : " + fwk)
 	mcpURL := a.Config.McpURL
@@ -278,6 +297,9 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	r.Line("  tier           : " + string(a.Tier()))
 
 	_ = a.Shutdown()
+	if anyFail {
+		return domain.OneShotExitCode.Error
+	}
 	return domain.OneShotExitCode.Success
 }
 

@@ -3,6 +3,7 @@ package contextx
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -77,6 +78,10 @@ func TestReadSurfacesMCPUnavailable(t *testing.T) {
 	res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})
 	if res.Ok || res.Error.Code != codeMCPUnavailable {
 		t.Fatalf("want MCP_UNAVAILABLE, got %+v", res)
+	}
+	// The disconnected read must point at /reconnect (issue #211).
+	if !strings.Contains(res.Error.Message, "/reconnect") {
+		t.Errorf("disconnected read hint must name /reconnect: %q", res.Error.Message)
 	}
 }
 

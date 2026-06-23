@@ -98,6 +98,9 @@ func parseArgs(args []string) (cli.Options, route) {
 		fmt.Fprintln(w, "  daintree-assistant host --stdio       embedded host: stdio NDJSON transport")
 		fmt.Fprintln(w, "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(w, "\nWithout FIREWORKS_API_KEY, read-only slash commands still work: /tools, /skills, /doctor.")
+		fmt.Fprintln(w, "A project .env may set FIREWORKS_API_KEY and DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL;")
+		fmt.Fprintln(w, "the Daintree MCP URL/token come only from the real environment, never a project .env.")
 	}
 
 	// Interspersed parse: collect every non-flag token as a positional while still

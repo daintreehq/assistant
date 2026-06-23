@@ -197,7 +197,7 @@ func newExtractTool(deps Deps) tools.Tool {
 			var a extractArgs
 			_ = json.Unmarshal(raw, &a)
 			if !deps.Reader.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
@@ -314,7 +314,7 @@ func newExtractAsyncTool(deps Deps) tools.Tool {
 			var a extractAsyncArgs
 			_ = json.Unmarshal(raw, &a)
 			if !deps.Reader.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {

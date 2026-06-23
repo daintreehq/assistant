@@ -103,7 +103,7 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	if !deps.MCP.Connected() {
 		return tools.Fail(codeMCPUnavailable,
-			"Daintree MCP is not connected, so no agent can be spawned to make edits. Connect Daintree (set DAINTREE_MCP_URL / DAINTREE_MCP_TOKEN) and retry.")
+			"Daintree MCP is not connected, so no agent can be spawned to make edits. Connect Daintree (set DAINTREE_MCP_URL / DAINTREE_MCP_TOKEN), then use /reconnect to retry.")
 	}
 	// The user already cancelled before we issued the launch.
 	if ctx.Err() != nil {

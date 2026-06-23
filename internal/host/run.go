@@ -36,7 +36,8 @@ func Run(ctx context.Context, factory AppFactory) int {
 	// diagnostic + exit 1.
 	if isTerminal(os.Stdin) {
 		_, _ = io.WriteString(os.Stderr,
-			"host: --stdio requires a piped command stream on stdin, not a terminal.\n")
+			"host: --stdio requires a piped command stream on stdin, not a terminal.\n"+
+				"Run `daintree-assistant` for the interactive cockpit, or pass a prompt for one-shot mode.\n")
 		return 1
 	}
 	Serve(ctx, factory, os.Stdin, os.Stdout, os.Stderr)
