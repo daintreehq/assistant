@@ -25,7 +25,9 @@ requiredTools:
   - agentTask.status
   - agentTask.list
   - watcher.terminal.create
+  - watcher.cancel
   - queue.digest
+  - queue.resolve
 ---
 Use when: the task needs a visible agent — either to change files (implement, refactor, fix, tests, docs) or to explore/investigate a project read-only.
 Procedure:
@@ -36,5 +38,6 @@ Procedure:
 5. For edit mode the taskPrompt must tell the agent to: make changes only in the selected worktree; run relevant tests if practical; report changed files, tests run, and remaining risks. For explore mode: investigate without touching files and report findings. (The wrapper appends the matching constraints automatically.)
 6. Never edit files yourself.
 7. After the call returns, report what actually happened: quote the real terminalId/watcherId from the result. If the launch errored or returned no terminalId, or the watcher reports the terminal exited, say so — do not claim a clean launch.
+8. Close the loop. Once the watcher settles and you have relayed the agent's result, clear that inbox item with `queue.resolve {"id": "<the inbox id>"}` so it stops counting as needing attention — a finished agent's watcher has already stopped ITSELF, so there is nothing to cancel, only the lingering inbox item to resolve. Never call `watcher.cancel` on an already-finished watch (it is refused as "already ended"). If instead you abandon a STILL-ACTIVE watch — you got what you needed early, or the task was dropped — cancel it with `watcher.cancel {"id": "<watcherId>"}` and say so plainly, noting you can re-attach later. Leave OPEN any item that still needs the user (an agent waiting on a question).
 Confirmation: spawning the agent mutates real state — confirm before launch per the active tier.
 Report back: the terminal id, the watcher id if created, and the expected next update.

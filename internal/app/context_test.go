@@ -31,3 +31,27 @@ func TestReadOnlyToolNamesMemoizedDefensiveCopy(t *testing.T) {
 		}
 	}
 }
+
+// TestReadOnlyToolNamesWakeHousekeeping: the read-only-turn set INCLUDES the tiny
+// wake-housekeeping allowlist (queue.resolve) despite it being RiskLocal — so the
+// autonomous reactor can clear a finished watch's attention item on a read-only
+// wake turn — while still EXCLUDING every other mutating tool (watcher.cancel,
+// queue.publish).
+func TestReadOnlyToolNamesWakeHousekeeping(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	tr := newToolRunner(a)
+
+	set := map[string]struct{}{}
+	for _, n := range tr.ReadOnlyToolNames() {
+		set[n] = struct{}{}
+	}
+	if _, ok := set["queue.resolve"]; !ok {
+		t.Fatal("read-only set must include the wake-housekeeping tool queue.resolve")
+	}
+	for _, n := range []string{"watcher.cancel", "queue.publish"} {
+		if _, ok := set[n]; ok {
+			t.Fatalf("read-only set must NOT include mutating tool %q", n)
+		}
+	}
+}

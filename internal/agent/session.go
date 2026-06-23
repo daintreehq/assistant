@@ -53,6 +53,29 @@ func IsSkillContextMutating(name string) bool {
 	return ok
 }
 
+// WakeHousekeepingTools are NON-read-risk tools nonetheless permitted on an
+// autonomous read-only wake turn: harmless self-bookkeeping the reactor must be
+// able to do to tidy up after it reports. queue.resolve only marks the assistant's
+// OWN attention-queue item resolved — it touches no project/git/terminal/forge
+// state, has no external effect, and is reversible — so allowing it does not breach
+// the "no consequential unattended mutation" intent of a read-only wake turn. It
+// lets the reactor clear a finished watch's attention item the moment it reports it,
+// instead of stranding a stale "needs attention" badge until the next user turn
+// (the only other turn on which a RiskLocal tool is callable). Watcher.cancel is
+// deliberately NOT here: a finished watch already stopped itself, and a still-active
+// watch (e.g. completed_unverified) is kept on purpose — cancelling one is a
+// deliberate user-turn decision, never autonomous.
+var WakeHousekeepingTools = map[string]struct{}{
+	"queue.resolve": {},
+}
+
+// IsWakeHousekeeping reports whether a tool is wake-safe self-bookkeeping — allowed
+// on a read-only wake turn despite not being read-risk (see WakeHousekeepingTools).
+func IsWakeHousekeeping(name string) bool {
+	_, ok := WakeHousekeepingTools[name]
+	return ok
+}
+
 // CoreToolNames returns a copy of the always-offered core tool names.
 func CoreToolNames() []string {
 	out := make([]string, len(coreToolNames))

@@ -274,13 +274,22 @@ func (t *toolRunner) ReadOnlyToolNames() []string {
 	t.roNamesOnce.Do(func() {
 		t.roNames = []string{}
 		for _, tool := range t.app.Registry.List() {
-			if tool.Risk != domain.RiskRead {
+			// Read-risk tools form the base of the autonomous-wake set, minus the
+			// skill-context-mutating ones (skill.find / skill.load).
+			if tool.Risk == domain.RiskRead {
+				if agent.IsSkillContextMutating(tool.Name) {
+					continue
+				}
+				t.roNames = append(t.roNames, tool.Name)
 				continue
 			}
-			if agent.IsSkillContextMutating(tool.Name) {
-				continue
+			// A tiny explicit allowlist of harmless self-bookkeeping tools is also
+			// permitted on a read-only wake turn (agent.WakeHousekeepingTools): notably
+			// queue.resolve, so the reactor can clear a finished watch's attention item
+			// the moment it reports it rather than stranding the badge.
+			if agent.IsWakeHousekeeping(tool.Name) {
+				t.roNames = append(t.roNames, tool.Name)
 			}
-			t.roNames = append(t.roNames, tool.Name)
 		}
 	})
 	return append([]string{}, t.roNames...)

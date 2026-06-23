@@ -139,6 +139,46 @@ func TestBuildWakePromptFirstTimeEventLineFreeOfAckMarker(t *testing.T) {
 	}
 }
 
+func TestBuildWakePromptSurfacesInboxIDForResolve(t *testing.T) {
+	// The reactor needs the inbox id to resolve THIS exact item on a read-only wake
+	// turn — every per-event line must carry "(inbox <id>)".
+	prompt := BuildWakePrompt(
+		[]domain.QueueEvent{termWakeEvent("t1", func(e *domain.QueueEvent) { e.ID = "evt-77" })},
+		nil,
+	)
+	if !strings.Contains(prompt, "(inbox evt-77)") {
+		t.Fatalf("event line must surface the inbox id for queue.resolve:\n%s", prompt)
+	}
+}
+
+func TestBuildWakePromptInstructsInboxHygiene(t *testing.T) {
+	// A finished watch, once reported, should be resolved (not cancelled — its
+	// watcher already stopped itself). The hygiene guidance is present on BOTH the
+	// summarize branch and the acknowledge-only branch.
+	full := BuildWakePrompt([]domain.QueueEvent{termWakeEvent("t1", nil)}, nil)
+	ackOnly := BuildWakePrompt([]domain.QueueEvent{termWakeEvent("t1", nil)}, setOf("t1"))
+	for name, prompt := range map[string]string{"summarize": full, "ack-only": ackOnly} {
+		if !strings.Contains(prompt, "queue.resolve") {
+			t.Fatalf("%s branch missing queue.resolve hygiene guidance:\n%s", name, prompt)
+		}
+		if !strings.Contains(prompt, "nothing left to cancel") {
+			t.Fatalf("%s branch missing the already-stopped/no-cancel nuance:\n%s", name, prompt)
+		}
+	}
+}
+
+func TestIsWakeHousekeeping(t *testing.T) {
+	// queue.resolve is the one wake-safe housekeeping tool; cancel/publish are not.
+	if !IsWakeHousekeeping("queue.resolve") {
+		t.Fatal("queue.resolve must be wake-housekeeping")
+	}
+	for _, n := range []string{"watcher.cancel", "queue.publish", "queue.digest", "fs.read"} {
+		if IsWakeHousekeeping(n) {
+			t.Fatalf("%q must NOT be wake-housekeeping", n)
+		}
+	}
+}
+
 func TestBuildWakePromptIssue39Lifecycle(t *testing.T) {
 	// A terminal summarized in one burst is a follow-up in the next — the caller
 	// threads its summarizedTerminals set across bursts.

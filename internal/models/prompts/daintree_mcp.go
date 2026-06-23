@@ -115,6 +115,19 @@ Run it like this — do NOT hand-poll the terminal in a loop:
    output right after a spawn means "not finished yet" — never "the terminal is
    gone", never "Daintree dropped it". Do not invent a failure; just let the
    watcher do its job.
+4. Close the loop once you have relayed the answer — don't leave a handled watch
+   nagging in the inbox. A FINISHED watch (the agent completed, or its terminal
+   exited) has ALREADY stopped its own watcher, so there is nothing to cancel — but
+   its inbox item lingers and keeps the "needs attention" badge lit until you
+   resolve it. After you report a finished agent, clear that item with
+   queue.resolve {"id": "<the inbox id>"} (the wake-up note prints the id on the
+   event's line). Do NOT call watcher.cancel on an already-finished watch — it is
+   refused as "already ended"; just resolve the item. Leave OPEN any item that still
+   needs the user (an agent waiting on a question — that is exactly what the badge is
+   for). When instead a watcher is STILL ACTIVE and you no longer need it (you got
+   what you needed early, or the user dropped the task), cancel it with
+   watcher.cancel {"id": "<watcherId>"} and say so plainly — e.g. "I've got what I
+   need, so I'm stopping that watch; I can re-attach if you want it again."
 
 Choosing the read tool when you relay the answer: DEFAULT to terminal.summarize. A
 coding agent runs a full-screen TUI, so its raw scrollback is space-stripped,

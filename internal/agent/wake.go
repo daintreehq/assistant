@@ -55,6 +55,13 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 			base += ": " + e.Summary
 		}
 		base += term
+		if e.ID != "" {
+			// Surface the inbox id so the reactor can resolve THIS exact item once it
+			// has reported a finished watch. queue.resolve is permitted on a read-only
+			// wake turn as harmless self-bookkeeping (see WakeHousekeepingTools); without
+			// the id the model would have to queue.digest and match the event by hand.
+			base += " (inbox " + e.ID + ")"
+		}
 		if terminalID != "" {
 			if _, ok := seen[terminalID]; ok {
 				anyFollowUp = true
@@ -83,6 +90,13 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 	if anyNew && anyFollowUp {
 		parts = append(parts, "Some events below are marked (already reported): you have already summarized that terminal this session. For those, do NOT summarize again — just acknowledge the transition in one short line.")
 	}
+	// Inbox hygiene — applies to BOTH the summarize and the acknowledge branch. A
+	// watch that is OVER no longer needs the user's attention once you have reported
+	// it, but its supervisor-promoted "attention" item lingers (and keeps the badge
+	// lit) until something resolves it. You CAN'T resolve it on a normal autonomous
+	// turn — but queue.resolve is whitelisted here — so clear it now. A finished
+	// watch's watcher has already stopped ITSELF, so there is nothing to cancel.
+	parts = append(parts, "When you have reported (or acknowledged) a watch that is OVER — an agent that finished/completed, or a terminal that exited — clear its inbox item with queue.resolve {\"id\":\"<the inbox id on that event's line>\"} so it stops counting as needing attention; its watcher already stopped itself, so there is nothing left to cancel. Do NOT resolve an item that still needs the user to act (an agent waiting on a question) — leave that one open.")
 	parts = append(parts, "", "New events:")
 	parts = append(parts, lines...)
 	return strings.Join(parts, "\n")

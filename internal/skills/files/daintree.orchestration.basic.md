@@ -23,6 +23,7 @@ requiredTools:
   - tool.search
   - daintree.call
   - queue.digest
+  - queue.resolve
   - terminal.read
   - terminal.summarize
   - terminal.extract
@@ -47,5 +48,5 @@ Procedure:
    watcher.terminal.create({ terminalIds: ["term_1"], title: "build", goal: "wait for green",
      stopWhen: { any: [{ contains: "BUILD SUCCEEDED" }, { stateIs: "exited" }] },
      alertWhen: { modelJudge: "Did the build fail or report errors?" } })
-6. Use queue.digest to summarize sub-thread updates.
+6. Use queue.digest to summarize sub-thread updates. When you have fully handled an inbox item — reported a finished agent, surfaced a result the user has now seen — resolve it with queue.resolve {"id": "<id>"} so the "needs attention" badge reflects only what still needs the user; a finished watch has already stopped its own watcher, so resolve the item rather than trying to watcher.cancel it. Leave OPEN anything still awaiting the user (an agent waiting on a question).
 Report back: a concise status, any watcher/timer ids, and the next checkpoint.
