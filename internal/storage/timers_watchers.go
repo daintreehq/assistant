@@ -145,6 +145,15 @@ func (s *Store) InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, e
 	if rec.IsSupervisor != nil && *rec.IsSupervisor && rec.CadenceMs < schedulerTickMS {
 		rec.CadenceMs = schedulerTickMS
 	}
+	// Stamp a default lifetime ceiling when the caller omitted one, so no watcher
+	// (terminal, PR, or supervisor) can poll forever — the timeout check is gated on
+	// stopAfterMs != nil and completed_unverified never terminates on its own. This is
+	// the single creation chokepoint for every path (tools, agenttaskx, mcpwrap), so
+	// the default lands once here rather than at each call site. An explicit stopAfterMs
+	// always wins.
+	if rec.StopAfterMs == nil {
+		rec.StopAfterMs = ptrI64(domain.WatcherDefaultLifetimeMS)
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO watchers
 		  (id,kind,title,goal,targetsJson,cadenceMs,isSupervisor,modelTier,startAfterMs,

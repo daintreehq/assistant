@@ -183,7 +183,6 @@ func buildSkill(_ string, meta map[string]scalar, body string) (Skill, error) {
 	sk := Skill{
 		Tags:          []string{},
 		Priority:      defaultPriority,
-		MaxTurns:      defaultMaxTurns,
 		Risk:          defaultRisk,
 		RequiredTools: []string{},
 		Body:          body,
@@ -214,14 +213,6 @@ func buildSkill(_ string, meta map[string]scalar, body string) (Skill, error) {
 	if sc, ok := meta["priority"]; ok {
 		if sk.Priority, err = intValue(sc, "priority"); err != nil {
 			return Skill{}, err
-		}
-	}
-	if sc, ok := meta["maxTurns"]; ok {
-		if sk.MaxTurns, err = intValue(sc, "maxTurns"); err != nil {
-			return Skill{}, err
-		}
-		if sk.MaxTurns <= 0 {
-			return Skill{}, fmt.Errorf("maxTurns must be a positive integer")
 		}
 	}
 	if sc, ok := meta["risk"]; ok {

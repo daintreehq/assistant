@@ -406,6 +406,41 @@ func TestSupervisorCadenceFloor(t *testing.T) {
 	}
 }
 
+func TestWatcherDefaultLifetime(t *testing.T) {
+	s := openTest(t, 1)
+	// No stopAfterMs supplied ⇒ InsertWatcher stamps the 24h ceiling so the
+	// watcher can't poll forever (the timeout check is gated on stopAfterMs != nil).
+	w, err := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w", Goal: "g", TargetsJson: "[]",
+		CadenceMs: 120000, ModelTier: domain.ModelSmall, NextCheckAt: 1,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if w.StopAfterMs == nil || *w.StopAfterMs != domain.WatcherDefaultLifetimeMS {
+		t.Fatalf("default stopAfterMs want %d, got %v", domain.WatcherDefaultLifetimeMS, w.StopAfterMs)
+	}
+	// The default must persist, not just live on the returned record.
+	got, _ := s.GetWatcher(w.ID)
+	if got == nil || got.StopAfterMs == nil || *got.StopAfterMs != domain.WatcherDefaultLifetimeMS {
+		t.Fatalf("persisted stopAfterMs want %d, got %v", domain.WatcherDefaultLifetimeMS, got.StopAfterMs)
+	}
+
+	// An explicit stopAfterMs is preserved verbatim — the default never overrides it.
+	explicit := int64(3_600_000)
+	w2, err := s.InsertWatcher(domain.WatcherRecord{
+		Kind: "terminal", Title: "w2", Goal: "g", TargetsJson: "[]",
+		CadenceMs: 120000, ModelTier: domain.ModelSmall, NextCheckAt: 1,
+		StopAfterMs: &explicit,
+	})
+	if err != nil {
+		t.Fatalf("insert explicit: %v", err)
+	}
+	if w2.StopAfterMs == nil || *w2.StopAfterMs != explicit {
+		t.Fatalf("explicit stopAfterMs want %d, got %v", explicit, w2.StopAfterMs)
+	}
+}
+
 func TestRetentionPrunesRunWithAuditPairing(t *testing.T) {
 	now := int64(1_700_000_000_000)
 	// tiny windows so a single old run/audit is swept.

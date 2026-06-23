@@ -94,3 +94,16 @@ var ungrantableTools = map[string]bool{
 // grant.create's validation and the blocked-event grant recommendation stay in
 // lockstep.
 func IsUngrantableTool(name string) bool { return ungrantableTools[name] }
+
+// Watcher lifetime defaults.
+const (
+	// WatcherDefaultLifetimeMS is the lifetime ceiling stamped onto a watcher
+	// created without an explicit stopAfterMs. Without it a watcher polls forever:
+	// the timeout check is gated on stopAfterMs != nil, and completed_unverified is
+	// a non-terminal state by design, so nothing else stops the loop. 24 h is
+	// generous — a forgotten terminal or PR watcher can't run away — and an explicit
+	// stopAfterMs always overrides it. Lives in domain (not daemon/cadence.go) so the
+	// storage layer, the single watcher-insert chokepoint, can apply it. No overflow
+	// risk: epoch-ms (~1.77e12) + 8.64e7 stays far inside int64.
+	WatcherDefaultLifetimeMS int64 = 86_400_000 // 24 h
+)

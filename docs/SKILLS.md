@@ -79,7 +79,6 @@ Report back: the ids created and the next checkpoint.
 | `priority` | int | — | Tie-breaker when >3 skills match. Higher wins. Default `0`. |
 | `risk` | enum | — | `read \| local \| ui \| terminal \| project \| git \| external \| system`. The riskiest class the body drives. Default `read`. |
 | `requiredTools` | string[] | — | Per-turn tool allowlist — **see the gotcha**. Default `[]`. |
-| `maxTurns` | int | — | Soft cap on how long the skill stays loaded. Default `8`. |
 
 The frontmatter parser accepts: `key: scalar` (string / int / bool, quotes
 optional), inline arrays `key: [a, b, c]`, and block lists (`key:` then `  - item`

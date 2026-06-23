@@ -140,7 +140,7 @@ var terminalCreateSchema = json.RawMessage(`{
     "goal": { "type": "string" },
     "cadenceMs": { "type": "integer", "minimum": 1 },
     "startAfterMs": { "type": "integer", "minimum": 0 },
-    "stopAfterMs": { "type": "integer", "minimum": 1 },
+    "stopAfterMs": { "type": "integer", "minimum": 1, "description": "Lifetime ceiling in ms; defaults to 86400000 (24 h) when omitted — a watcher never runs forever." },
     "stopWhen": { "$comment": "WATCH_CONDITION", "type": "object" },
     "alertWhen": { "$comment": "WATCH_CONDITION", "type": "object" },
     "modelTier": { "type": "string", "enum": ["small", "medium"] }
@@ -262,7 +262,7 @@ var watchPRSchema = json.RawMessage(`{
     "cwd": { "type": "string" },
     "title": { "type": "string" },
     "startAfterMs": { "type": "integer", "minimum": 0 },
-    "stopAfterMs": { "type": "integer", "minimum": 1 }
+    "stopAfterMs": { "type": "integer", "minimum": 1, "description": "Lifetime ceiling in ms; defaults to 86400000 (24 h) when omitted — a watcher never runs forever." }
   }
 }`)
 

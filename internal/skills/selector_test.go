@@ -33,7 +33,7 @@ func testRegistry(t *testing.T) *SkillRegistry {
 	t.Helper()
 	mk := func(id, ver string) Skill {
 		return Skill{ID: id, Title: id, Version: ver, Summary: "s", WhenToUse: "w",
-			Tags: []string{}, MaxTurns: 8, Risk: RiskRead, RequiredTools: []string{}, Body: "b"}
+			Tags: []string{}, Risk: RiskRead, RequiredTools: []string{}, Body: "b"}
 	}
 	reg, err := NewRegistry([]Skill{
 		mk("a.one", "1.0.0"), mk("b.two", "2.0.0"), mk("c.three", "3.0.0"), mk("d.four", "4.0.0"),
@@ -149,7 +149,7 @@ func TestFindSkillsSelectorErrorLeavesSetUnchanged(t *testing.T) {
 func TestBuildToolFilter(t *testing.T) {
 	mk := func(id string, tools ...string) Skill {
 		return Skill{ID: id, Title: id, Version: "1.0.0", Summary: "s", WhenToUse: "w",
-			Tags: []string{}, MaxTurns: 8, Risk: RiskRead, RequiredTools: tools, Body: "b"}
+			Tags: []string{}, Risk: RiskRead, RequiredTools: tools, Body: "b"}
 	}
 	reg, _ := NewRegistry([]Skill{mk("a.one", "alpha", "beta"), mk("b.two", "beta", "gamma")})
 	core := []string{"skill.find", "skill.load"}

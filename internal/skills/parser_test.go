@@ -38,9 +38,8 @@ func TestParseValidSkill(t *testing.T) {
 	if sk.Priority != 5 {
 		t.Errorf("priority = %d", sk.Priority)
 	}
-	if sk.MaxTurns != 4 {
-		t.Errorf("maxTurns = %d", sk.MaxTurns)
-	}
+	// validFile still carries a `maxTurns:` line; the field was removed, so the
+	// parser must now silently tolerate the unknown key rather than reject it.
 	if sk.Risk != RiskProject {
 		t.Errorf("risk = %q", sk.Risk)
 	}
@@ -56,7 +55,7 @@ func TestParseValidSkill(t *testing.T) {
 }
 
 func TestParseDefaults(t *testing.T) {
-	// No priority/maxTurns/risk/tags/requiredTools ⇒ defaults.
+	// No priority/risk/tags/requiredTools ⇒ defaults.
 	f := `---
 id: x.y
 title: T
@@ -69,11 +68,30 @@ body`
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if sk.Priority != 0 || sk.MaxTurns != 8 || sk.Risk != RiskRead {
-		t.Errorf("defaults wrong: prio=%d max=%d risk=%q", sk.Priority, sk.MaxTurns, sk.Risk)
+	if sk.Priority != 0 || sk.Risk != RiskRead {
+		t.Errorf("defaults wrong: prio=%d risk=%q", sk.Priority, sk.Risk)
 	}
 	if len(sk.Tags) != 0 || len(sk.RequiredTools) != 0 {
 		t.Errorf("expected empty slices")
+	}
+}
+
+func TestRemovedMaxTurnsTolerated(t *testing.T) {
+	// maxTurns was removed (issue #207): a watcher/skill lifetime cap that the
+	// agent loop never read. A leftover `maxTurns:` line must now be silently
+	// ignored — including maxTurns: 0, which the old parser rejected as
+	// non-positive — so old skill files keep loading.
+	f := `---
+id: x.y
+title: T
+version: 1.0.0
+summary: s
+whenToUse: w
+maxTurns: 0
+---
+body`
+	if _, err := parseSkillFile(f, "x.y.md"); err != nil {
+		t.Fatalf("removed maxTurns key must be tolerated, got error: %v", err)
 	}
 }
 
@@ -90,7 +108,6 @@ func TestParseErrors(t *testing.T) {
 		{"duplicate key", "---\nid: x.y\nid: z\ntitle: T\nversion: 1.0.0\nsummary: s\nwhenToUse: w\n---\nbody", "duplicate frontmatter key"},
 		{"malformed line", "---\nid: x.y\nthis is not a kv line\n---\nbody", "malformed frontmatter line"},
 		{"stray indent", "---\nid: x.y\n  stray\n---\nbody", "unexpected indented line"},
-		{"non-positive maxTurns", "---\nid: x.y\ntitle: T\nversion: 1.0.0\nsummary: s\nwhenToUse: w\nmaxTurns: 0\n---\nbody", "positive"},
 		{"priority not int", "---\nid: x.y\ntitle: T\nversion: 1.0.0\nsummary: s\nwhenToUse: w\npriority: high\n---\nbody", "priority must be an integer"},
 	}
 	for _, c := range cases {
