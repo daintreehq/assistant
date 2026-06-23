@@ -172,6 +172,12 @@ publish to the **attention queue** instead of interrupting the main thread.
   deterministic signals (agent state, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
   on a read-only git-cleanliness check before any irreversible action is suggested.
+- **Fresh starts are fresh.** A new session's cockpit must start clean: no stale
+  attention queue items, no old failed turns visible, no leftover watcher status.
+  The masthead, status bar, and deck reflect only what happens in this session.
+  (Timers persist across runs and resume; conversation events persist in storage
+  but aren't surfaced in the UI unless explicitly requested. Only session-derived
+  UI surfaces must be blank on startup — stale deck rows or inbox items are bugs.)
 - **Comment style:** dense, "why"-focused block comments on non-obvious logic. Match it.
   Tests use Go's `testing` package; UI tests render through Bubble Tea's `View()` and
   assert on the string (no native renderer needed). `:memory:` SQLite and fakes for

@@ -124,8 +124,11 @@ func BuildAgentRows(watchers []domain.WatcherRecord, previews []daemon.TerminalP
 		// open), so it shows as STARTING. A SETTLED stage (confirmed/failed/ambiguous)
 		// can outlive its session, so it earns a row only while its terminal is still
 		// live in the current previews; otherwise it is dead history and is skipped.
-		_, terminalLive := previewByTerminal[terminalID]
-		if launchStageSettled(l.Stage) && !terminalLive {
+		// A terminal is "live" when the preview reports a non-empty AgentState (a
+		// successful terminal.getStatus response), not just when a preview struct exists
+		// (FetchPreviews creates a placeholder for every target, even dead terminals).
+		preview, terminalLive := previewByTerminal[terminalID]
+		if launchStageSettled(l.Stage) && (!terminalLive || preview.AgentState == "") {
 			continue
 		}
 		id := l.ID

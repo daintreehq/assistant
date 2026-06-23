@@ -67,8 +67,9 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 	}
 
 	// Terminal previews: build the target set from live terminal watchers plus any
-	// roster terminal not already covered by a watcher, then EITHER poll MCP (when the
-	// PreviewPollMS gate has elapsed and the link is up) OR reuse the cached tails.
+	// roster terminal not already covered by a watcher, then EITHER poll MCP (first
+	// build, or when the PreviewPollMS gate has elapsed and the link is up) OR reuse
+	// the cached tails.
 	targets := daemon.BuildPreviewTargets(previewWatchers(watchers, d.Launches))
 	previews, fetchedAt := resolvePreviews(ctx, opts, targets)
 
@@ -78,16 +79,20 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 
 // resolvePreviews returns the terminal previews in effect this build and the fetch
 // timestamp. The deck ticks ~1s but previews refresh at PreviewPollMS, so it polls MCP
-// ONLY when the gate has elapsed and the link is up; otherwise it reuses the cached
-// tails filtered to the still-active targets. fetchedAt is opts.NowMS on a real poll
-// and 0 on reuse, so the caller advances lastPreviewFetchedAt only on an actual fetch.
+// on the first build (LastPreviewFetchedAt == 0) or when the gate has elapsed and the
+// link is up; otherwise it reuses the cached tails filtered to the still-active targets.
+// fetchedAt is opts.NowMS on a real poll and 0 on reuse, so the caller advances
+// lastPreviewFetchedAt only on an actual fetch. The first-build fetch ensures fresh
+// starts: prior-session dead terminals are detected immediately rather than lingering
+// until the gate elapses.
 // Split out from buildDashboard so the throttle gate is unit-testable without a Store.
 func resolvePreviews(ctx context.Context, opts dashboardBuildOptions, targets []daemon.PreviewTarget) ([]daemon.TerminalPreview, int64) {
 	if len(targets) == 0 {
 		return nil, 0
 	}
+	// First build or gate elapsed: fetch fresh previews from MCP.
 	if opts.MCP != nil && opts.MCP.Connected() &&
-		opts.NowMS-opts.LastPreviewFetchedAt >= daemon.PreviewPollMS {
+		(opts.LastPreviewFetchedAt == 0 || opts.NowMS-opts.LastPreviewFetchedAt >= daemon.PreviewPollMS) {
 		return daemon.FetchPreviews(ctx, opts.MCP, targets, opts.NowMS), opts.NowMS
 	}
 	return filterPreviews(opts.CachedPreviews, targets), 0

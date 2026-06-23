@@ -80,6 +80,27 @@ func TestResolvePreviews_SkipsWhenDisconnected(t *testing.T) {
 	}
 }
 
+func TestResolvePreviews_FirstBuildAlwaysFetches(t *testing.T) {
+	// The first build (LastPreviewFetchedAt == 0) must always fetch, even when
+	// NowMS is less than PreviewPollMS. This ensures prior-session dead terminals
+	// are detected immediately on startup rather than lingering until the gate elapses.
+	mcp := &fakePreviewMCP{connected: true}
+	targets := []daemon.PreviewTarget{{TerminalID: "term_1"}}
+	// 1000ms < PreviewPollMS (2500): without the fix, this would skip fetch.
+	// With LastPreviewFetchedAt == 0, it must fetch regardless.
+	previews, fetchedAt := resolvePreviews(context.Background(),
+		dashboardBuildOptions{MCP: mcp, NowMS: 1_000, LastPreviewFetchedAt: 0}, targets)
+	if atomic.LoadInt32(&mcp.calls) == 0 {
+		t.Fatal("first build (LastPreviewFetchedAt == 0): expected an MCP poll even within gate, got none")
+	}
+	if fetchedAt != 1_000 {
+		t.Errorf("fetchedAt = %d, want 1000 (first build always stamps NowMS)", fetchedAt)
+	}
+	if len(previews) != 1 || previews[0].TerminalID != "term_1" {
+		t.Errorf("previews = %+v, want one card for term_1", previews)
+	}
+}
+
 func TestResolvePreviews_NoTargets(t *testing.T) {
 	mcp := &fakePreviewMCP{connected: true}
 	previews, fetchedAt := resolvePreviews(context.Background(),
@@ -152,6 +173,22 @@ func TestBuildAgentRows_SettledLaunchWithoutLiveTerminalHidden(t *testing.T) {
 	}
 	if rows := BuildAgentRows(nil, nil, launches); len(rows) != 0 {
 		t.Fatalf("settled launches with no live terminal must be hidden, got %+v", rows)
+	}
+}
+
+func TestBuildAgentRows_SettledLaunchWithDeadTerminalHidden(t *testing.T) {
+	// A settled launch whose terminal preview exists but has empty AgentState
+	// (the terminal is dead/gone, MCP returned no status) must also be hidden.
+	// This covers the case where FetchPreviews creates a placeholder preview for
+	// every target, but the terminal.getStatus call returns nothing for dead terminals.
+	term := "term_dead_preview"
+	launches := []domain.AgentLaunchRecord{
+		{ID: "agt_failed", Title: "old failed spawn", TerminalID: &term, Stage: domain.LaunchFailed, CreatedAt: 5},
+	}
+	// Preview exists but AgentState is empty — terminal is not actually live.
+	previews := []daemon.TerminalPreview{{TerminalID: "term_dead_preview", AgentState: "", UpdatedAt: 100}}
+	if rows := BuildAgentRows(nil, previews, launches); len(rows) != 0 {
+		t.Fatalf("settled launch with dead terminal (empty AgentState) must be hidden, got %+v", rows)
 	}
 }
 
