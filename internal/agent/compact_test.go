@@ -686,3 +686,66 @@ func TestTruncateLockedRehydratesFromMarker(t *testing.T) {
 		}
 	}
 }
+
+// --- review fixes ---
+
+// TestStartDistillSkippedWhileDraining proves the Add-after-Wait gate: once
+// DrainBackgroundWork has set draining, a subsequent startDistill spawns nothing — so
+// no wg.Add can race wg.Wait at counter zero and no distill touches a closing
+// Router/Store during App.Shutdown.
+func TestStartDistillSkippedWhileDraining(t *testing.T) {
+	r := &jsonChatRouter{content: `["x"]`}
+	s, _ := compactSession(t, r)
+	s.deps.MemoryStore = &fakeMemoryStore{}
+
+	s.DrainBackgroundWork() // nothing in flight → returns immediately, sets draining
+	s.startDistill("user: did X\nassistant: ok")
+	s.DrainBackgroundWork() // joins anything that (incorrectly) spawned
+
+	if r.chatCalls != 0 {
+		t.Fatalf("distill must be skipped once draining, got %d Chat calls", r.chatCalls)
+	}
+}
+
+// TestAutoCompactFailureCounterResetByManualCompact proves a manual /compact clears the
+// auto-compact failure streak — otherwise a stale count from a prior outage could trip
+// the lossy fallback right after the user manually compacted.
+func TestAutoCompactFailureCounterResetByManualCompact(t *testing.T) {
+	r := &errChatRouter{err: errors.New("provider down")}
+	s, _ := compactSession(t, r)
+	s.InjectNote("keep-small")
+	s.InjectNote(strings.Repeat("x", (domain.AutoCompactTokenThreshold+20_000)*domain.CharsPerToken))
+	ctx := context.Background()
+
+	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx)
+	if s.compactFailures != 2 {
+		t.Fatalf("compactFailures = %d after two outages, want 2", s.compactFailures)
+	}
+	if err := s.Compact("manual summary"); err != nil {
+		t.Fatal(err)
+	}
+	if s.compactFailures != 0 {
+		t.Fatalf("manual compact must reset the failure streak, got %d", s.compactFailures)
+	}
+}
+
+// TestAutoCompactSingleHugeMessageTruncates proves the early-return guard no longer
+// strands a single working message that is itself over the hard ceiling: with a failing
+// summarizer, the bounded-growth fallback still fires and shrinks it under the ceiling.
+func TestAutoCompactSingleHugeMessageTruncates(t *testing.T) {
+	r := &errChatRouter{err: errors.New("provider down")}
+	s, _ := compactSession(t, r)
+	s.InjectNote(overHardThresholdNote()) // ONE working message, over the hard ceiling
+	ctx := context.Background()
+
+	for i := 0; i < domain.AutoCompactFailureThreshold; i++ {
+		s.maybeAutoCompact(ctx)
+	}
+	if got := s.estimateTokens(); got >= domain.AutoCompactHardTruncationThreshold {
+		t.Fatalf("a single over-ceiling message must still be truncated, got %d tokens", got)
+	}
+	if r.calls != domain.AutoCompactFailureThreshold {
+		t.Fatalf("summary attempted %d times, want %d (guard must not skip an over-ceiling lone message)", r.calls, domain.AutoCompactFailureThreshold)
+	}
+}

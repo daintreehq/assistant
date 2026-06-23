@@ -98,6 +98,13 @@ type Session struct {
 	// (Router/MemoryStore) are torn down. sync.WaitGroup is goroutine-safe — no lock.
 	wg sync.WaitGroup
 
+	// draining (guarded by s.mu) is the gate that makes the drain race-free. The turn
+	// ctx is NOT derived from bgCtx, so a summary can still succeed while Shutdown is
+	// draining; gating wg.Add under the SAME lock that sets draining guarantees an Add
+	// never races wg.Wait at counter zero (the WaitGroup Add-after-Wait hazard) and no
+	// distill is spawned onto an already-closing Router/Store. Terminal once set.
+	draining bool
+
 	// bgCtx is the app-scoped parent for that detached work (from deps.BackgroundCtx;
 	// context.Background() when unset). Cancelled on App.Shutdown so a distill call
 	// never outlives the closed Router/Store. Immutable after NewSession.
@@ -232,6 +239,9 @@ func (s *Session) clearLocked() {
 	if len(s.messages) > domain.ControlMessageCount {
 		s.messages = s.messages[:domain.ControlMessageCount]
 	}
+	// History is gone — the auto-compact failure streak is moot; don't let a stale
+	// count trip the lossy fallback on the next outage.
+	s.compactFailures = 0
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
@@ -253,6 +263,11 @@ func (s *Session) Compact(summary string) error {
 // in-turn auto-compact (which already runs under the turn, where inFlight is set,
 // so the public guard would reject it).
 func (s *Session) compactLocked(summary string) {
+	// Any successful compaction (auto OR manual /compact) re-establishes the bound, so
+	// the consecutive-failure streak resets here — its single source of truth — rather
+	// than only on the auto path. Prevents a stale count from a prior outage tripping
+	// the lossy fallback right after the user manually compacted.
+	s.compactFailures = 0
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
 	note := models.TextMessage("user", compactedNotePrefix+summary)
@@ -850,9 +865,15 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
 	// it compacts via compactLocked (the public Compact would self-reject).
 	s.mu.Lock()
-	if s.estimateTokensLocked() <= domain.AutoCompactTokenThreshold || len(s.messages) <= domain.ControlMessageCount+1 {
+	est := s.estimateTokensLocked()
+	// Skip when under the soft threshold, OR when there's no real history to
+	// summarize (≤1 working message) — UNLESS that lone message is itself over the
+	// hard ceiling, in which case the bounded-growth fallback must still get a chance
+	// to run rather than letting a single oversized message grow context unbounded.
+	if est <= domain.AutoCompactTokenThreshold ||
+		(len(s.messages) <= domain.ControlMessageCount+1 && est < domain.AutoCompactHardTruncationThreshold) {
 		s.mu.Unlock()
-		return // under threshold, or no real history
+		return
 	}
 	// Flatten multimodal history to text (the small model is text-only; an image
 	// turn would otherwise trip the vision tier gate and silently fail every
@@ -901,10 +922,9 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	}
 
 	// Summary in hand: compact IMMEDIATELY so the large-model stream is unblocked,
-	// then distill durable facts off the critical path. compactFailures resets on any
-	// success so one transient outage never permanently disarms the soft path.
+	// then distill durable facts off the critical path. compactLocked resets the
+	// failure streak so one transient outage never permanently disarms the soft path.
 	s.mu.Lock()
-	s.compactFailures = 0
 	s.compactLocked(summary)
 	s.mu.Unlock()
 	s.events.Info("Auto-compacted conversation")
@@ -922,8 +942,7 @@ func (s *Session) noteCompactFailureLocked() (truncated bool) {
 	s.compactFailures++
 	if s.compactFailures >= domain.AutoCompactFailureThreshold &&
 		s.estimateTokensLocked() >= domain.AutoCompactHardTruncationThreshold {
-		s.truncateLocked(domain.AutoCompactHardTruncationKeepMessages)
-		s.compactFailures = 0
+		s.truncateLocked(domain.AutoCompactHardTruncationKeepMessages) // resets compactFailures
 		return true
 	}
 	return false
@@ -939,6 +958,9 @@ func (s *Session) noteCompactFailureLocked() (truncated bool) {
 // later resume rebuilds from the truncation boundary) followed by each retained
 // message at a fresh monotonic seq. Caller MUST hold s.mu.
 func (s *Session) truncateLocked(keepN int) {
+	// The bound is being re-established by this truncation, so the failure streak that
+	// armed it resets here (the single reset point for the fallback path).
+	s.compactFailures = 0
 	working := s.messages[domain.ControlMessageCount:]
 	if len(working) > keepN {
 		working = working[len(working)-keepN:]
@@ -978,7 +1000,18 @@ func (s *Session) startDistill(transcript string) {
 		return
 	}
 	bg, cancel := context.WithTimeout(s.bgCtx, distillBackgroundTimeout)
+	// Register under s.mu and ONLY when not draining, so wg.Add is ordered against the
+	// draining flag that DrainBackgroundWork sets before wg.Wait — closing the
+	// Add-after-Wait race (the turn ctx isn't derived from bgCtx, so a summary can
+	// succeed mid-Shutdown and reach here even after baseCancel).
+	s.mu.Lock()
+	if s.draining {
+		s.mu.Unlock()
+		cancel()
+		return
+	}
 	s.wg.Add(1)
+	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
@@ -986,11 +1019,18 @@ func (s *Session) startDistill(transcript string) {
 	}()
 }
 
-// DrainBackgroundWork blocks until all detached background work (the post-compaction
-// distill goroutine) has finished. App.Shutdown calls it before closing the
-// Router/Store those goroutines touch; tests call it to make the otherwise-async
-// distill observable. Safe to call when nothing is in flight (a no-op Wait).
-func (s *Session) DrainBackgroundWork() { s.wg.Wait() }
+// DrainBackgroundWork closes the spawn gate, then blocks until all in-flight detached
+// background work (the post-compaction distill goroutine) has finished. App.Shutdown
+// calls it before closing the Router/Store those goroutines touch; tests call it to
+// make the otherwise-async distill observable. Terminal: once drained, no further
+// distill is spawned (the session is being torn down). Safe to call when nothing is
+// in flight (a no-op Wait).
+func (s *Session) DrainBackgroundWork() {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+	s.wg.Wait()
+}
 
 // distillTranscriptMaxRunes caps the transcript fed to the distillation model — the
 // small model needs only enough context to extract facts, not the full summary input.
