@@ -331,3 +331,69 @@ func TestCancelBeforeWorkLeavesNoOrphan(t *testing.T) {
 		t.Fatal("cancelled turn must not push the user message (no orphan turn)")
 	}
 }
+
+// TestRehydrateDropNoteEmitsOnceOnFirstTurn proves the resume-corruption note:
+// when NewSession is handed a non-zero DroppedRehydrateRows, the session emits
+// exactly one Info event — on the first turn, after TurnPrompt — and never again
+// on subsequent turns.
+func TestRehydrateDropNoteEmitsOnceOnFirstTurn(t *testing.T) {
+	sink := &recordingSink{}
+	r := &fakeRouter{results: []models.ChatResult{{Content: "done"}, {Content: "done"}}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	deps.DroppedRehydrateRows = 2
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var infos []string
+	for _, e := range sink.log {
+		if strings.HasPrefix(e, "info:") {
+			infos = append(infos, e)
+		}
+	}
+	if len(infos) != 1 {
+		t.Fatalf("info events = %v want exactly 1 (emit once across two turns)", infos)
+	}
+	if !strings.Contains(infos[0], "2 malformed or orphan") {
+		t.Fatalf("info note = %q want it to report the 2 dropped rows", infos[0])
+	}
+	// The note must follow the first turn's prompt, not precede it.
+	promptIdx, infoIdx := -1, -1
+	for i, e := range sink.log {
+		if promptIdx == -1 && strings.HasPrefix(e, "prompt:") {
+			promptIdx = i
+		}
+		if infoIdx == -1 && strings.HasPrefix(e, "info:") {
+			infoIdx = i
+		}
+	}
+	if !(promptIdx >= 0 && infoIdx > promptIdx) {
+		t.Fatalf("info note (idx %d) must come after the first TurnPrompt (idx %d); log=%v", infoIdx, promptIdx, sink.log)
+	}
+}
+
+// TestNoRehydrateDropNoteWhenZero confirms a clean resume (zero dropped rows)
+// emits no info note at all.
+func TestNoRehydrateDropNoteWhenZero(t *testing.T) {
+	sink := &recordingSink{}
+	r := &fakeRouter{results: []models.ChatResult{{Content: "done"}}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	// DroppedRehydrateRows left at 0.
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range sink.log {
+		if strings.HasPrefix(e, "info:") {
+			t.Fatalf("unexpected info note on a clean resume: %q", e)
+		}
+	}
+}

@@ -121,6 +121,10 @@ type SessionDeps struct {
 	// DirtyFreshStart ⇒ the resume was forced empty by a dup-seq tangle; NewSession
 	// persists a clear breadcrumb at InitialSeq so the durable log records the reset.
 	DirtyFreshStart bool
+	// DroppedRehydrateRows is RehydrateResult.DroppedRows — how many corrupt/orphan
+	// rows rehydration elided. When non-zero, the session emits one info event on the
+	// first resumed turn so the silent drop becomes observable.
+	DroppedRehydrateRows int
 
 	Events EventSink // defaults to NoopEventSink
 	RunRef *RunIDRef // stamped with the current run id per turn; defaults to a fresh ref

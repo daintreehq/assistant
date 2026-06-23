@@ -27,6 +27,13 @@ type RehydrateResult struct {
 	// the dirty rows). NewSession persists a clear breadcrumb so the durable log
 	// records the reset boundary at the new, collision-free seq.
 	DirtyFreshStart bool
+	// DroppedRows counts what rehydration silently elided to keep the resume valid:
+	// rows whose tool-call JSON was malformed (the call list lost, text kept), tool
+	// results orphaned from any declaring assistant message, and an incomplete
+	// trailing tool exchange. Each is a correct, intentional drop, but a non-zero
+	// total is observable evidence of upstream corruption — the caller surfaces it
+	// (one info event on the first resumed turn + a boot debug-log line).
+	DroppedRows int
 }
 
 // RehydrateSession reconstructs the working model history from persisted rows.
@@ -86,37 +93,48 @@ func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult,
 		}
 	}
 
+	dropped := 0
 	msgs := make([]models.ChatMessage, 0, len(working))
 	for _, r := range working {
-		msgs = append(msgs, recordToChatMessage(r))
+		m, lostCalls := recordToChatMessage(r)
+		if lostCalls {
+			dropped++
+		}
+		msgs = append(msgs, m)
 	}
-	msgs = dropOrphanToolResults(msgs)
-	msgs = dropOrphanToolCallTail(msgs)
+	msgs, orphanDrops := dropOrphanToolResults(msgs)
+	dropped += orphanDrops
+	msgs, tailDrops := dropOrphanToolCallTail(msgs)
+	dropped += tailDrops
 
-	return RehydrateResult{RestoredMessages: msgs, InitialSeq: initialSeq}, true
+	return RehydrateResult{RestoredMessages: msgs, InitialSeq: initialSeq, DroppedRows: dropped}, true
 }
 
 // recordToChatMessage rebuilds a ChatMessage from a persisted row. Empty
-// content becomes a null content. Malformed tool-call JSON is
-// dropped silently — one bad row never aborts a resume.
-func recordToChatMessage(r domain.ConversationMessageRecord) models.ChatMessage {
+// content becomes a null content. Malformed tool-call JSON is dropped — one bad
+// row never aborts a resume — and the returned bool reports that drop so the
+// caller can count it (the only loss this function can incur; text is preserved).
+func recordToChatMessage(r domain.ConversationMessageRecord) (models.ChatMessage, bool) {
 	m := models.ChatMessage{Role: r.Role}
 	if r.Content == "" {
 		m.ContentNull = true
 	} else {
 		m.StringContent = r.Content
 	}
+	lostCalls := false
 	if r.Role == "assistant" && r.ToolCallsJson != nil && *r.ToolCallsJson != "" {
 		var calls []models.ToolCallRequest
 		if err := json.Unmarshal([]byte(*r.ToolCallsJson), &calls); err == nil {
 			m.ToolCalls = calls
+		} else {
+			// On error: drop calls, keep text — and report the loss.
+			lostCalls = true
 		}
-		// On error: drop calls, keep text (silent).
 	}
 	if r.Role == "tool" && r.ToolCallID != nil {
 		m.ToolCallID = *r.ToolCallID
 	}
-	return m
+	return m, lostCalls
 }
 
 // dropOrphanToolResults filters out role=="tool" messages whose tool_call_id was
@@ -127,7 +145,8 @@ func recordToChatMessage(r domain.ConversationMessageRecord) models.ChatMessage 
 // precedes its (future) declaration is still an orphan in transcript order and is
 // dropped. Pre-collecting ids from the whole history would wrongly keep it.
 // Non-tool messages are always kept (and declare their ids before later results).
-func dropOrphanToolResults(messages []models.ChatMessage) []models.ChatMessage {
+// The returned int is the number of orphan results dropped (len(in) - len(out)).
+func dropOrphanToolResults(messages []models.ChatMessage) ([]models.ChatMessage, int) {
 	declared := make(map[string]struct{})
 	out := make([]models.ChatMessage, 0, len(messages))
 	for _, m := range messages {
@@ -148,14 +167,16 @@ func dropOrphanToolResults(messages []models.ChatMessage) []models.ChatMessage {
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, len(messages) - len(out)
 }
 
 // dropOrphanToolCallTail cuts an incomplete trailing tool exchange: if the
 // LAST assistant message with tool_calls has any call id NOT answered by a later
 // tool message, slice the history to just before that assistant message. Only the
-// tail is checked — a mid-history break implies an already-unusable DB.
-func dropOrphanToolCallTail(messages []models.ChatMessage) []models.ChatMessage {
+// tail is checked — a mid-history break implies an already-unusable DB. The
+// returned int is how many messages the cut removed (the assistant row plus any
+// partial results after it); 0 when nothing is cut.
+func dropOrphanToolCallTail(messages []models.ChatMessage) ([]models.ChatMessage, int) {
 	lastCall := -1
 	for i, m := range messages {
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
@@ -163,7 +184,7 @@ func dropOrphanToolCallTail(messages []models.ChatMessage) []models.ChatMessage 
 		}
 	}
 	if lastCall == -1 {
-		return messages
+		return messages, 0
 	}
 	answered := make(map[string]struct{})
 	for _, m := range messages[lastCall+1:] {
@@ -174,8 +195,8 @@ func dropOrphanToolCallTail(messages []models.ChatMessage) []models.ChatMessage 
 	for _, tc := range messages[lastCall].ToolCalls {
 		if _, ok := answered[tc.ID]; !ok {
 			// Incomplete trailing exchange — cut it.
-			return messages[:lastCall]
+			return messages[:lastCall], len(messages) - lastCall
 		}
 	}
-	return messages
+	return messages, 0
 }

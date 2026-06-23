@@ -115,6 +115,26 @@ func (r *Registry) AssertSafe() error {
 	return safety.AssertNoFileEditTools(names)
 }
 
+// AssertRegistered checks that every name in names is registered, returning an
+// error listing the missing ones. It is the drift guard for hand-maintained name
+// lists (e.g. agent.coreToolNames) that must stay in lockstep with the registry:
+// a rename or removal that drops a name from the registry would otherwise boot
+// clean and then silently starve the model of a tool it was promised. label names
+// the offending list for the error message. The check preserves the input order
+// so the diagnostic is deterministic.
+func (r *Registry) AssertRegistered(label string, names []string) error {
+	var missing []string
+	for _, name := range names {
+		if !r.Has(name) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s not registered in the tool registry: %s", label, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // ChatTool is the OpenAI function-spec projection. Parameters is the canonical
 // raw JSON Schema object (pre-decoded at registration).
 type ChatTool struct {

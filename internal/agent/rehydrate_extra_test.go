@@ -114,6 +114,9 @@ func TestRehydrateMalformedToolCallJSONKeepsText(t *testing.T) {
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("restored %d want 1", len(res.RestoredMessages))
 	}
+	if res.DroppedRows != 1 {
+		t.Fatalf("DroppedRows = %d want 1 (the lost tool-call list)", res.DroppedRows)
+	}
 	m := res.RestoredMessages[0]
 	if m.Role != "assistant" || m.StringContent != "text" {
 		t.Fatalf("message mangled: %+v", m)
@@ -137,6 +140,9 @@ func TestRehydrateTrimsPartialMultiToolBatch(t *testing.T) {
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("restored %d want 1 (whole partial batch trimmed)", len(res.RestoredMessages))
 	}
+	if res.DroppedRows != 2 {
+		t.Fatalf("DroppedRows = %d want 2 (assistant row + its partial result)", res.DroppedRows)
+	}
 	if res.RestoredMessages[0].StringContent != "do both" {
 		t.Fatalf("survivor = %q want 'do both'", res.RestoredMessages[0].StringContent)
 	}
@@ -156,11 +162,14 @@ func TestDropOrphanToolResultsIsForwardPass(t *testing.T) {
 		// A properly-ordered result AFTER its declaration is kept.
 		{Role: "tool", ToolCallID: "call_x", StringContent: "answered"},
 	}
-	out := dropOrphanToolResults(msgs)
+	out, dropped := dropOrphanToolResults(msgs)
 
 	// The premature tool result is dropped; the assistant + the in-order result stay.
 	if len(out) != 2 {
 		t.Fatalf("kept %d messages want 2 (premature orphan dropped)", len(out))
+	}
+	if dropped != 1 {
+		t.Fatalf("dropped = %d want 1 (the premature orphan)", dropped)
 	}
 	if out[0].Role != "assistant" {
 		t.Fatalf("out[0] = %q want assistant (premature tool result must be gone)", out[0].Role)

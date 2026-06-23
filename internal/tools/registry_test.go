@@ -42,6 +42,40 @@ func TestAssertSafeRejectsFileEditTools(t *testing.T) {
 	}
 }
 
+func TestAssertRegisteredPassesWhenAllPresent(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(noopTool("fs.read"))
+	_ = r.Register(noopTool("fs.list"))
+	if err := r.AssertRegistered("core tools", []string{"fs.read", "fs.list"}); err != nil {
+		t.Fatalf("all names registered should pass: %v", err)
+	}
+	// An empty list is vacuously satisfied.
+	if err := r.AssertRegistered("core tools", nil); err != nil {
+		t.Fatalf("empty list should pass: %v", err)
+	}
+}
+
+func TestAssertRegisteredReportsMissingNames(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(noopTool("fs.read"))
+	err := r.AssertRegistered("core tools", []string{"fs.read", "fs.search", "memory.recall"})
+	if err == nil {
+		t.Fatal("AssertRegistered must fail when a name is missing")
+	}
+	// The error names the offending list and every missing entry (drift diagnostic).
+	if !strings.Contains(err.Error(), "core tools") {
+		t.Fatalf("error should name the list label; got %q", err.Error())
+	}
+	for _, want := range []string{"fs.search", "memory.recall"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should list missing %q; got %q", want, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "fs.read") {
+		t.Fatalf("error must not list the registered name fs.read; got %q", err.Error())
+	}
+}
+
 func TestWireNameRoundTrip(t *testing.T) {
 	r := NewRegistry()
 	_ = r.RegisterAll(noopTool("fs.read"), noopTool("daintree.call"))
