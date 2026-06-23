@@ -14,9 +14,9 @@ import (
 // TestRegistryExactOrderedSet pins the canonical command order (issue #50).
 func TestRegistryExactOrderedSet(t *testing.T) {
 	want := []string{
-		"status", "inbox", "tools", "timers", "watchers", "audit", "explain",
-		"models", "permissions", "approvals", "skills", "memory", "compact", "clear", "doctor",
-		"reconnect", "help", "quit",
+		"status", "inbox", "tools", "timers", "watchers", "grants", "workflows", "launches",
+		"audit", "explain", "models", "permissions", "approvals", "skills", "memory", "compact",
+		"clear", "doctor", "reconnect", "help", "quit",
 	}
 	if len(COMMAND_REGISTRY) != len(want) {
 		t.Fatalf("registry has %d commands, want %d", len(COMMAND_REGISTRY), len(want))

@@ -164,6 +164,21 @@ func SerializeAudit(rows []domain.AuditRecord, format string) string {
 
 // --- small helpers ---
 
+// decodeJSONStringList tolerantly decodes a *string JSON-array column (e.g. a
+// grant's allowedRiskClassesJson) into []string; nil/empty/garbage ⇒ nil (never
+// errors). Mirrors storage.parseStringList, kept here so the command formatters
+// don't reach into the storage package's unexported helpers.
+func decodeJSONStringList(p *string) []string {
+	if p == nil || *p == "" {
+		return nil
+	}
+	var out []string
+	if json.Unmarshal([]byte(*p), &out) != nil {
+		return nil
+	}
+	return out
+}
+
 func parseEventPayload(p *string) map[string]any {
 	if p == nil || *p == "" {
 		return map[string]any{}

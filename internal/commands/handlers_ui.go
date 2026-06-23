@@ -57,6 +57,12 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		return UICommandResult{Handled: true, SwitchPanel: PanelTimers, Title: "Timers", Text: timersText(a)}
 	case "watchers":
 		return UICommandResult{Handled: true, SwitchPanel: PanelWatchers, Title: "Watchers", Text: watchersText(a)}
+	case "grants":
+		return UICommandResult{Handled: true, Title: "Grants", Text: grantsText(a)}
+	case "workflows":
+		return UICommandResult{Handled: true, Title: "Workflows", Text: workflowsText(a, arg)}
+	case "launches":
+		return UICommandResult{Handled: true, Title: "Launches", Text: launchesText(a)}
 	case "audit":
 		return UICommandResult{Handled: true, SwitchPanel: PanelAudit, Title: "Audit", Text: auditText(a, rest, false)}
 	case "explain":
@@ -247,6 +253,148 @@ func watchersText(a *app.App) string {
 		rows = append(rows, fmt.Sprintf("%s %s — %s [%s]", w.ID, w.Title, w.Goal, last))
 	}
 	return strings.Join(rows, "\n")
+}
+
+// grantsText renders the LIVE automation grants (the store filters out revoked,
+// expired, and use-exhausted ones). One line per grant — id, actor, source,
+// uses-remaining/max, expiry, and what the grant authorizes — mirroring the
+// timers/watchers card shape.
+func grantsText(a *app.App) string {
+	grants, err := a.Store.ListGrants("", 0)
+	if err != nil {
+		return "Failed to list grants: " + err.Error()
+	}
+	if len(grants) == 0 {
+		return "(none)"
+	}
+	var rows []string
+	for _, g := range grants {
+		rows = append(rows, fmt.Sprintf("%s %s:%s [%s] uses=%d/%d expires=%s — %s",
+			g.ID, string(g.ActorType), g.ActorID, string(g.Source),
+			g.UsesRemaining, g.MaxUses, localTime(g.ExpiresAt), grantAllowSummary(g)))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// grantAllowSummary describes what a grant authorizes: its allowed risk classes
+// and/or tool names (the authorization is their union). "(any)" is a defensive
+// fallback for a grant carrying neither list (or unparseable JSON columns); live
+// grants normally hold at least one, so an empty tail is not expected in practice.
+func grantAllowSummary(g domain.AutomationGrantRecord) string {
+	var parts []string
+	if risks := decodeJSONStringList(g.AllowedRiskClassesJson); len(risks) > 0 {
+		parts = append(parts, "risks="+strings.Join(risks, ","))
+	}
+	if tools := decodeJSONStringList(g.AllowedToolNamesJson); len(tools) > 0 {
+		parts = append(parts, "tools="+strings.Join(tools, ","))
+	}
+	if len(parts) == 0 {
+		return "(any)"
+	}
+	return strings.Join(parts, " ")
+}
+
+// workflowsDisplayCap bounds the /workflows card (ListWorkflowRuns imposes no limit
+// of its own); overflow is summarized as a "+N more" trailer.
+const workflowsDisplayCap = 20
+
+// workflowsText renders workflow runs. Bare /workflows shows the active runs (the
+// common "what's in flight" view); "all" drops the filter; any other arg is a
+// status filter (pending|active|blocked|done|cancelled|failed). Newest-first, capped
+// at workflowsDisplayCap.
+func workflowsText(a *app.App, arg string) string {
+	// Normalize case so "/workflows Active" matches the stored lowercase status (a
+	// literal SQL WHERE) instead of silently returning "(none)".
+	status := strings.ToLower(strings.TrimSpace(arg))
+	switch status {
+	case "":
+		status = string(domain.WorkflowActive)
+	case "all":
+		status = ""
+	}
+	runs, err := a.Store.ListWorkflowRuns(status)
+	if err != nil {
+		return "Failed to list workflows: " + err.Error()
+	}
+	if len(runs) == 0 {
+		return "(none)"
+	}
+	more := 0
+	if len(runs) > workflowsDisplayCap {
+		more = len(runs) - workflowsDisplayCap
+		runs = runs[:workflowsDisplayCap]
+	}
+	var rows []string
+	for _, w := range runs {
+		rows = append(rows, fmt.Sprintf("%s [%s] %s%s",
+			w.ID, string(w.Status), localTime(w.UpdatedAt), workflowRef(w)))
+	}
+	if more > 0 {
+		rows = append(rows, fmt.Sprintf("(+%d more)", more))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// workflowRef appends the most identifying human-readable context for a run — issue
+// number (+title), else branch, else PR number — as a " — …" suffix (empty when the
+// run carries none of them).
+func workflowRef(w domain.WorkflowRunRecord) string {
+	switch {
+	case w.IssueNumber != nil:
+		s := fmt.Sprintf(" — issue #%d", *w.IssueNumber)
+		if w.IssueTitle != nil && *w.IssueTitle != "" {
+			s += " " + *w.IssueTitle
+		}
+		return s
+	case w.Branch != nil && *w.Branch != "":
+		return " — " + *w.Branch
+	case w.PRNumber != nil:
+		return fmt.Sprintf(" — PR #%d", *w.PRNumber)
+	default:
+		return ""
+	}
+}
+
+// launchesText renders the recent agent-spawn sagas (newest first, store-capped at
+// 20). One line per launch — id, stage, last-update time, mode, title — with a
+// trailing error suffix when the saga carries one.
+func launchesText(a *app.App) string {
+	launches, err := a.Store.ListAgentLaunches(0)
+	if err != nil {
+		return "Failed to list launches: " + err.Error()
+	}
+	if len(launches) == 0 {
+		return "(none)"
+	}
+	var rows []string
+	for _, l := range launches {
+		line := fmt.Sprintf("%s [%s] %s %s — %s",
+			l.ID, string(l.Stage), localTime(l.UpdatedAt), l.Mode, l.Title)
+		if l.ErrorCode != nil || l.ErrorMessage != nil {
+			line += " — error: " + launchError(l)
+		}
+		rows = append(rows, line)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// launchError joins a launch's error code and message for display (either may be nil).
+func launchError(l domain.AgentLaunchRecord) string {
+	code, msg := "", ""
+	if l.ErrorCode != nil {
+		code = *l.ErrorCode
+	}
+	if l.ErrorMessage != nil {
+		msg = *l.ErrorMessage
+	}
+	switch {
+	case code != "" && msg != "":
+		return code + ": " + msg
+	case code != "":
+		return code
+	default:
+		return msg
+	}
 }
 
 // auditText renders the audit view. rest[0]=="export" triggers a serialized dump.
