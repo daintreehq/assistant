@@ -332,6 +332,18 @@ func TestStatusLine_Degraded(t *testing.T) {
 	}
 }
 
+func TestStatusLine_ModelRateLimited(t *testing.T) {
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{ModelRateLimited: true}, 80))
+	if !strings.Contains(out, "Model rate-limited") {
+		t.Errorf("model-rate-limited badge missing: %q", out)
+	}
+	// Cleared state stays silent (surfaced by exception only).
+	clear := stripAnsi(renderStatusLine(darkTheme(), statusParams{}, 80))
+	if strings.Contains(clear, "Model rate-limited") {
+		t.Errorf("badge must not render when not rate-limited: %q", clear)
+	}
+}
+
 func TestStatusLine_HealthyMcpIsSilent(t *testing.T) {
 	// A healthy link is announced ONCE as a top status note (update.go), never a permanent
 	// footer segment — so the status line says nothing about MCP while connected.

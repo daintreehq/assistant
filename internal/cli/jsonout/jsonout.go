@@ -176,6 +176,10 @@ func (s *Sink) Usage(agent.UsageEvent) {}
 // one-shot stream does not echo it.
 func (s *Sink) TurnPrompt(string) {}
 
+// ModelRateLimited is a live-only health cue; not part of the JSONL stream. The
+// "Model rate-limited" reply still lands as the terminal envelope's content.
+func (s *Sink) ModelRateLimited() {}
+
 // Finish writes the terminal `result` envelope (idempotent) and returns the exit
 // code. After Finish no further line is emitted.
 func (s *Sink) Finish() int {

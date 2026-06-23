@@ -65,3 +65,7 @@ func (s *consoleSink) Error(m string)         { s.r.Line(""); s.r.Error(m) }
 func (s *consoleSink) Info(m string)          { s.r.Info(m) }
 func (s *consoleSink) Usage(agent.UsageEvent) {}
 func (s *consoleSink) TurnPrompt(string)      {}
+
+// ModelRateLimited is a live-cockpit health badge; the console already prints the
+// "Model rate-limited" reply, so there's nothing extra to render here.
+func (s *consoleSink) ModelRateLimited() {}

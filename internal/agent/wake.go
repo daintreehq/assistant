@@ -96,6 +96,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 // and silently swallow the real summary.
 var wakeFailurePrefixes = []string{
 	"Model unavailable:",
+	"Model rate-limited:",
 	"Model error:",
 	"Tool projection failed:",
 	"Reached the tool-iteration limit",

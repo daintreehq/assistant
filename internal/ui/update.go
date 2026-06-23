@@ -298,6 +298,8 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 		}
 	case pumpUsage:
 		m.applyUsage(ev.usage)
+	case pumpModelRateLimited:
+		m.modelRateLimited = true
 	case pumpLog:
 		m.addNote(ev.level, ev.msg)
 	case pumpError:
@@ -339,6 +341,9 @@ func toolFailSummary(r domain.ToolResult) string {
 // applyUsage updates the CTX% / cost / model rollup from a usage event.
 func (m *Model) applyUsage(u agent.UsageEvent) {
 	m.hasUsage = true
+	// A successful round means the provider answered — clear any model-rate-limit
+	// health badge raised by a prior exhausted-429 turn.
+	m.modelRateLimited = false
 	// CTX% is "% of the model's context window in use" — divide by the window, NOT the
 	// (much smaller) auto-compact threshold, so a 1M-window model reads ~1% on a short
 	// conversation rather than a misleading 13%. Fall back to the threshold only if no

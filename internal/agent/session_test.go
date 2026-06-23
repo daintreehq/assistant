@@ -99,6 +99,7 @@ type captureSink struct {
 	states       []string
 	batched      int
 	progress     []progressBeat
+	rateLimited  bool
 }
 
 // progressBeat records one ToolProgress(callID, msg) the session emitted.
@@ -116,6 +117,7 @@ func (c *captureSink) ToolState(id string, st ToolState) { c.states = append(c.s
 func (c *captureSink) ToolProgress(id, msg string) {
 	c.progress = append(c.progress, progressBeat{id: id, msg: msg})
 }
+func (c *captureSink) ModelRateLimited() { c.rateLimited = true }
 
 func toolCall(id, wireName, args string) models.ToolCallRequest {
 	return models.ToolCallRequest{ID: id, Type: "function",
@@ -272,6 +274,31 @@ func TestToolProgressForwardedToSink(t *testing.T) {
 	}
 	if sink.progress[0].id != "call-1" || sink.progress[0].msg != "launching terminal" {
 		t.Fatalf("progress beat = %+v, want {id:call-1 msg:launching terminal}", sink.progress[0])
+	}
+}
+
+func TestClassifyRateLimitedStreamError(t *testing.T) {
+	// A streamed RateLimitedError (retry budget exhausted on a 429) classifies to a
+	// byte-stable "Model rate-limited:" reply, fires the ModelRateLimited health cue,
+	// and is a wake-failure sentinel so a background wake won't record it as a result.
+	sink := &captureSink{}
+	r := &errRouter{err: &models.RateLimitedError{Message: "provider quota/throughput exceeded", RetryAfterMs: 1500}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+
+	reply, err := s.Send(context.Background(), "hi", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(reply, "Model rate-limited:") {
+		t.Fatalf("reply = %q, want a \"Model rate-limited:\" prefix", reply)
+	}
+	if !IsWakeFailureReply(reply) {
+		t.Fatalf("reply %q must be a wake-failure sentinel", reply)
+	}
+	if !sink.rateLimited {
+		t.Fatal("ModelRateLimited health cue was not fired")
 	}
 }
 

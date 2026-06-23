@@ -218,6 +218,7 @@ func (p *eventProxy) Error(m string)                         { p.sink().Error(m)
 func (p *eventProxy) Info(m string)                          { p.sink().Info(m) }
 func (p *eventProxy) Usage(ev agent.UsageEvent)              { p.sink().Usage(ev) }
 func (p *eventProxy) TurnPrompt(in string)                   { p.sink().TurnPrompt(in) }
+func (p *eventProxy) ModelRateLimited()                      { p.sink().ModelRateLimited() }
 
 // --- toolRunner: the agent.ToolRunner over *tools.Registry + buildContext ---
 
