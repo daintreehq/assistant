@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -226,7 +227,14 @@ func (p *eventProxy) ModelRateLimited()                      { p.sink().ModelRat
 // projects tools to OpenAI specs (converting the tools.ChatTool shape to the
 // models.ChatTool shape), resolves wire names, lists the read-only set, and builds
 // the per-call ToolContext (stamped with the turn's run id + allowed names).
-type toolRunner struct{ app *App }
+type toolRunner struct {
+	app *App
+	// roNamesOnce/roNames memoize the read-only-turn tool set. It is derived purely
+	// from the registry, which is append-only after startup, so it is computed once
+	// and reused (watcher/timer wake turns call it repeatedly).
+	roNamesOnce sync.Once
+	roNames     []string
+}
 
 func newToolRunner(a *App) *toolRunner { return &toolRunner{app: a} }
 
@@ -237,13 +245,14 @@ func (t *toolRunner) OpenAITools(filterNames []string) ([]models.ChatTool, error
 	}
 	out := make([]models.ChatTool, 0, len(specs))
 	for _, sp := range specs {
-		params, _ := json.Marshal(sp.Function.Parameters)
+		// Parameters are already canonical schema bytes (json.RawMessage) — forward
+		// them verbatim, no re-marshal round-trip.
 		out = append(out, models.ChatTool{
 			Type: sp.Type,
 			Function: models.ChatToolFunc{
 				Name:        sp.Function.Name,
 				Description: sp.Function.Description,
-				Parameters:  params,
+				Parameters:  sp.Function.Parameters,
 			},
 		})
 	}
@@ -255,19 +264,25 @@ func (t *toolRunner) ResolveWireName(wireName string) string {
 }
 
 // ReadOnlyToolNames returns read-risk tools minus the skill-context-mutating ones
-// (skill.find/skill.load) — the autonomous-wake-turn set (agent.SessionDeps).
+// (skill.find/skill.load) — the autonomous-wake-turn set (agent.SessionDeps). The
+// set is computed once (the registry is append-only after startup) and a defensive
+// copy is returned so a caller can't mutate the memoized slice. The result is
+// always non-nil: an empty (non-nil) slice means "no read-only tools" — a narrowed
+// turn offering nothing — whereas a nil filter would be read as "all tools".
 func (t *toolRunner) ReadOnlyToolNames() []string {
-	var out []string
-	for _, tool := range t.app.Registry.List() {
-		if tool.Risk != domain.RiskRead {
-			continue
+	t.roNamesOnce.Do(func() {
+		t.roNames = []string{}
+		for _, tool := range t.app.Registry.List() {
+			if tool.Risk != domain.RiskRead {
+				continue
+			}
+			if agent.IsSkillContextMutating(tool.Name) {
+				continue
+			}
+			t.roNames = append(t.roNames, tool.Name)
 		}
-		if agent.IsSkillContextMutating(tool.Name) {
-			continue
-		}
-		out = append(out, tool.Name)
-	}
-	return out
+	})
+	return append([]string{}, t.roNames...)
 }
 
 // Dispatch builds the per-call ToolContext from the turn and runs the call. It

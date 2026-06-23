@@ -87,6 +87,67 @@ func TestOpenAIToolsFilterNarrows(t *testing.T) {
 	}
 }
 
+// schemaTool builds a read-only tool carrying an explicit JSON Schema.
+func schemaTool(name, schema string) *Tool {
+	return &Tool{Name: name, Risk: domain.RiskRead, Schema: json.RawMessage(schema),
+		Handle: func(_ context.Context, _ json.RawMessage, _ *ToolContext) ToolResult { return Ok("ok", nil) }}
+}
+
+// TestRegisterInvalidSchemaFails: a malformed JSON Schema is a wiring bug and must
+// fail fast at registration (the cold path), not at the first projection.
+func TestRegisterInvalidSchemaFails(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(schemaTool("bad.tool", `{not valid json`)); err == nil {
+		t.Fatal("Register must reject a malformed JSON Schema")
+	}
+}
+
+// TestRegisterEmptySchemaDefaultsToNoArgs: a tool with no schema projects the
+// canonical permissive empty object (byte-for-byte the prior inline default).
+func TestRegisterEmptySchemaDefaultsToNoArgs(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(noopTool("fs.read")); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := r.OpenAITools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(specs[0].Function.Parameters); got != `{"properties":{},"type":"object"}` {
+		t.Fatalf("empty-schema params = %s want the canonical no-arg object", got)
+	}
+}
+
+// TestRegisterSchemaCanonicalizedAndImmutable: the schema is canonicalized (sorted-
+// compact) ONCE at registration; mutating the source Tool.Schema afterward does not
+// change the projection, and the projection is byte-stable across calls.
+func TestRegisterSchemaCanonicalizedAndImmutable(t *testing.T) {
+	r := NewRegistry()
+	tool := schemaTool("search.run", "{\n  \"type\": \"object\",\n  \"properties\": { \"q\": { \"type\": \"string\" } }\n}")
+	if err := r.Register(tool); err != nil {
+		t.Fatal(err)
+	}
+	// Mutate the source schema AFTER registration — the captured projection is frozen.
+	tool.Schema = json.RawMessage(`{"type":"object","properties":{}}`)
+
+	specs, err := r.OpenAITools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"properties":{"q":{"type":"string"}},"type":"object"}`
+	if got := string(specs[0].Function.Parameters); got != want {
+		t.Fatalf("projected params = %s want canonical %s", got, want)
+	}
+	// Byte-stable across calls (prompt-cache stability invariant).
+	specs2, err := r.OpenAITools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(specs2[0].Function.Parameters) != want {
+		t.Fatalf("projection params must be byte-stable across calls, got %s", specs2[0].Function.Parameters)
+	}
+}
+
 func TestExemplarFsReadSecretGuard(t *testing.T) {
 	tool := NewFsReadTool()
 	tctx := &ToolContext{Config: config.AppConfig{}, ProjectPath: t.TempDir(), Actor: domain.ActorMain}
