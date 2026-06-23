@@ -100,17 +100,23 @@ func TestGrantCreateReadScopeNoConfirm(t *testing.T) {
 	}
 }
 
-// A mutating scope requires confirm; a declined confirm fails as USER_DECLINED.
+// A mutating scope requires confirm; a declined confirm fails as USER_DECLINED. The
+// confirm request must carry NeedsTypedConfirm=true (grant.create is RiskSystem), so
+// minting a mutating grant is as hard to approve as any other system-level action.
 func TestGrantCreateMutatingScopeConfirmDeclined(t *testing.T) {
 	tool := find(Tools(Deps{Store: &memStore{}}), "grant.create")
+	var seen tools.ConfirmRequest
 	ctx := &tools.ToolContext{
 		Actor:   domain.ActorMain,
-		Confirm: func(context.Context, tools.ConfirmRequest) (bool, error) { return false, nil },
+		Confirm: func(_ context.Context, req tools.ConfirmRequest) (bool, error) { seen = req; return false, nil },
 	}
 	p := decode(t, tool, `{"actorId":"wch_1","actorType":"watcher","allowedRiskClasses":["git"],"ttlMs":1000,"maxUses":1}`)
 	res := tool.Handle(context.Background(), p, ctx)
 	if res.Ok || res.Error.Code != codeUserDeclined {
 		t.Fatalf("expected USER_DECLINED, got %+v", res)
+	}
+	if !seen.NeedsTypedConfirm {
+		t.Fatal("grant.create confirm must require a typed phrase (RiskSystem)")
 	}
 }
 

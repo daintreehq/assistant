@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/safety"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
 )
@@ -88,6 +89,9 @@ func confirmReq(tool string, risk domain.RiskClass, consequence string) tools.Co
 		Summary:     "the branch is ready for review",
 		Consequence: consequence,
 		Args:        []byte(`{"branch":"fix/x","remote":"origin"}`),
+		// Mirror the dispatch/grant construction so cockpit fixtures gate typed-confirm
+		// exactly as production does (the field is the single source of truth now).
+		NeedsTypedConfirm: safety.NeedsTypedConfirm(risk),
 	}
 }
 
@@ -112,11 +116,51 @@ func TestApproval_LeadsWithConsequenceToolNameSecondary(t *testing.T) {
 	}
 }
 
-func TestApproval_NeverRendersRawRiskAsField(t *testing.T) {
-	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("git.push", domain.RiskGit, "")}, 72))
-	// The old "risk  git" labelled row is gone — consequence language replaces it.
-	if strings.Contains(out, "risk     git") || strings.Contains(out, "risk  git") {
-		t.Errorf("raw risk-class field must not render: %q", out)
+func TestApproval_RendersRiskClassRow(t *testing.T) {
+	// The approval sheet surfaces the safety taxonomy bucket as a labelled, column-
+	// aligned dim row so the human sees WHICH risk class they're approving — not just
+	// the consequence prose. (This inverts the earlier "never render raw risk" rule:
+	// hiding the taxonomy at decision time was the bug, per issue #210.)
+	for _, risk := range []domain.RiskClass{domain.RiskGit, domain.RiskSystem, domain.RiskTerminal} {
+		out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("some.tool", risk, "")}, 72))
+		if !strings.Contains(out, "risk     "+string(risk)) {
+			t.Errorf("risk %q: approval sheet must render the labelled risk row: %q", risk, out)
+		}
+	}
+}
+
+func TestApproval_TypedConfirmRenderPath(t *testing.T) {
+	// With requireType set, the sheet renders the typed-confirm prompt (irreversible
+	// warning + phrase) INSTEAD of the single-key action row, while still surfacing the
+	// risk row. This is the highest-risk render branch and was previously unasserted.
+	req := confirmReq("daintree.call", domain.RiskSystem, "")
+	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: req, requireType: true}, 72))
+	if !strings.Contains(out, "risk     system") {
+		t.Errorf("typed-confirm sheet must still render the risk row: %q", out)
+	}
+	if !strings.Contains(out, "irreversible") || !strings.Contains(out, confirmPhrase) {
+		t.Errorf("typed-confirm prompt missing the irreversible / type-phrase copy: %q", out)
+	}
+	// The single-key allow-list affordances must be absent in typed mode.
+	if strings.Contains(out, "A allow") || strings.Contains(out, "F always") {
+		t.Errorf("typed-confirm sheet must not show the single-key allow/always affordances: %q", out)
+	}
+}
+
+func TestApproval_DaintreeCallTitleIsSpecific(t *testing.T) {
+	// daintree.call (RiskSystem) is the raw MCP escape hatch; its title must NOT be the
+	// generic system-level question that hides the riskiest forge writes.
+	out := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("daintree.call", domain.RiskSystem, "")}, 72))
+	if !strings.Contains(out, "Call a raw MCP tool?") {
+		t.Errorf("daintree.call must get its specific title, not the generic system question: %q", out)
+	}
+	if strings.Contains(out, "Run a system-level action?") {
+		t.Errorf("daintree.call still shows the generic system-level title: %q", out)
+	}
+	// A different RiskSystem tool keeps the generic phrasing (exact-name match only).
+	other := stripAnsi(renderApproval(darkTheme(), &pendingConfirm{req: confirmReq("grant.create", domain.RiskSystem, "")}, 72))
+	if !strings.Contains(other, "Run a system-level action?") {
+		t.Errorf("a non-daintree.call RiskSystem tool should keep the generic title: %q", other)
 	}
 }
 

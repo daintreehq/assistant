@@ -48,6 +48,35 @@ func TestAlwaysConfirmSet(t *testing.T) {
 	}
 }
 
+func TestNeedsTypedConfirm(t *testing.T) {
+	// Only git/system (the irreversible subset of always-confirm) demand a typed phrase.
+	typed := []domain.RiskClass{domain.RiskGit, domain.RiskSystem}
+	single := []domain.RiskClass{
+		domain.RiskRead, domain.RiskLocal, domain.RiskUI,
+		domain.RiskTerminal, domain.RiskProject, domain.RiskExternal,
+	}
+	for _, r := range typed {
+		if !NeedsTypedConfirm(r) {
+			t.Errorf("NeedsTypedConfirm(%s) should be true", r)
+		}
+	}
+	for _, r := range single {
+		if NeedsTypedConfirm(r) {
+			t.Errorf("NeedsTypedConfirm(%s) should be false", r)
+		}
+	}
+	// An unknown/bogus risk class is never typed-confirm (zero value of the set).
+	if NeedsTypedConfirm(domain.RiskClass("bogus")) {
+		t.Error("NeedsTypedConfirm(bogus) should be false")
+	}
+	// Every typed-confirm class is also an always-confirm class (it is a strict subset).
+	for _, r := range typed {
+		if !AlwaysConfirm(r) {
+			t.Errorf("typed-confirm class %s must also be always-confirm", r)
+		}
+	}
+}
+
 func TestDecide(t *testing.T) {
 	// Tier-denied: read-only tier cannot do git.
 	d := Decide(domain.RiskGit, domain.TierSupervisor)

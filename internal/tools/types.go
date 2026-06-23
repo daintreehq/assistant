@@ -78,6 +78,11 @@ type ConfirmRequest struct {
 	Summary     string           `json:"summary"`
 	Consequence string           `json:"consequence,omitempty"`
 	Args        json.RawMessage  `json:"args,omitempty"`
+	// NeedsTypedConfirm is the pre-computed safety.NeedsTypedConfirm(Risk) verdict,
+	// stamped at construction so every approval surface (cockpit, classic REPL)
+	// enforces the typed-phrase requirement for git/system actions without
+	// re-deriving the rule. Zero value (false) ⇒ a single-key approval is enough.
+	NeedsTypedConfirm bool `json:"needsTypedConfirm,omitempty"`
 }
 
 // Handler is a tool implementation. It receives the (already validated/decoded)

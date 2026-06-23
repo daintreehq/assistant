@@ -58,6 +58,14 @@ type App interface {
 // wire). RiskClass is passed through (not re-derived from the registry) so a
 // tool's explicit per-confirm override — e.g. grant.create electing RiskSystem —
 // reaches the UI verbatim.
+//
+// Intentional scope boundary: this bridge deliberately drops NeedsTypedConfirm.
+// The embedded host does not render its own approval sheet — it delegates the
+// decision to its external caller (Daintree's orchestration UI), which owns the
+// approval UX. The typed-confirm friction (issue #210) is enforced on the surfaces
+// that DO render the sheet — the cockpit and the classic REPL — not here. The
+// risk-class label travels on RiskClass above so the external timeline can still
+// display it.
 type ConfirmRequest struct {
 	ToolName    string
 	Summary     string

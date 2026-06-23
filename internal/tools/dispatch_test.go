@@ -183,6 +183,35 @@ func TestDispatchMainConfirmApproved(t *testing.T) {
 	}
 }
 
+// The confirm prompt carries the pre-computed NeedsTypedConfirm verdict so every
+// surface enforces the typed-phrase requirement without re-deriving it: git/system
+// → true, terminal → false.
+func TestDispatchConfirmCarriesNeedsTypedConfirm(t *testing.T) {
+	cases := []struct {
+		risk domain.RiskClass
+		want bool
+	}{
+		{domain.RiskGit, true},
+		{domain.RiskSystem, true},
+		{domain.RiskTerminal, false},
+	}
+	for _, c := range cases {
+		r := NewRegistry()
+		_ = r.Register(echoTool("c.echo", c.risk))
+		s := &fakeStore{}
+		ctx := baseCtx(s, nil, domain.TierSystem, domain.ActorMain)
+		var got ConfirmRequest
+		ctx.Confirm = func(_ context.Context, req ConfirmRequest) (bool, error) { got = req; return true, nil }
+		res := r.Dispatch(context.Background(), "c.echo", json.RawMessage(`{"x":1}`), ctx)
+		if !res.Ok {
+			t.Fatalf("risk %s: approved call should succeed, got %+v", c.risk, res.Error)
+		}
+		if got.NeedsTypedConfirm != c.want {
+			t.Errorf("risk %s: ConfirmRequest.NeedsTypedConfirm = %v, want %v", c.risk, got.NeedsTypedConfirm, c.want)
+		}
+	}
+}
+
 func TestDispatchAutoApproveSkipsPrompt(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Register(echoTool("g.echo", domain.RiskGit))

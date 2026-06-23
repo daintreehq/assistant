@@ -327,6 +327,30 @@ func TestApproval_GitEntersTypedConfirm(t *testing.T) {
 	}
 }
 
+func TestApproval_RequireTypeReadsFieldNotRisk(t *testing.T) {
+	// The cockpit must gate typed-confirm on the pre-stamped NeedsTypedConfirm field, NOT
+	// re-derive it from the risk class. Decouple the two to prove it (regression guard
+	// against restoring the deleted needsTypedConfirm(risk) helper):
+	//  - a RiskTerminal request with the field SET must enter typed-confirm,
+	//  - a RiskGit request with the field CLEARED must not.
+	terminalTyped := tools.ConfirmRequest{ToolName: "x.terminal", Risk: domain.RiskTerminal, NeedsTypedConfirm: true}
+	mm := asModel(t, mustModel(harnessModel().Update(
+		ApprovalRequestedMsg{Request: terminalTyped, Resolve: make(chan bool, 1)})))
+	if mm.pending == nil || !mm.pending.requireType {
+		t.Fatal("cockpit ignored NeedsTypedConfirm=true on a non-git/system risk (re-deriving from risk?)")
+	}
+
+	gitUntyped := tools.ConfirmRequest{ToolName: "git.push", Risk: domain.RiskGit, NeedsTypedConfirm: false}
+	mm2 := asModel(t, mustModel(harnessModel().Update(
+		ApprovalRequestedMsg{Request: gitUntyped, Resolve: make(chan bool, 1)})))
+	if mm2.pending == nil {
+		t.Fatal("git request did not surface an approval sheet")
+	}
+	if mm2.pending.requireType {
+		t.Fatal("cockpit re-derived typed-confirm from RiskGit instead of trusting the cleared field")
+	}
+}
+
 func TestApproval_TypedConfirmForSystem(t *testing.T) {
 	m, ch := approvalPending(t, confirmReq("daintree.call", domain.RiskSystem, ""))
 	if m.pending == nil || !m.pending.requireType {

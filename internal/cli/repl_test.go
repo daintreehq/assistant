@@ -10,6 +10,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
 // repl_test.go locks the REPL interrupt contract (runCancellable) and the console
@@ -51,6 +52,69 @@ func TestRunCancellable_SignalCancelsTheUnit(t *testing.T) {
 func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return &consoleSink{r: render.New(&buf), tty: tty}, &buf
+}
+
+// The classic-REPL confirm handler must mirror the cockpit's friction off the safety
+// gate's verdict: git/system (NeedsTypedConfirm) demand the typed phrase, everything
+// else keeps the single-key [y/N]. This is the divergence issue #210 fixes — the same
+// action must be equally hard to approve on either surface.
+func TestBuildConfirmFunc(t *testing.T) {
+	cases := []struct {
+		name      string
+		typed     bool
+		answer    string
+		wantApprv bool
+	}{
+		{"typed phrase approves", true, "confirm", true},
+		{"typed wrong phrase declines", true, "nope", false},
+		{"typed bare y does NOT approve", true, "y", false},
+		{"typed phrase trimmed+casefolded approves", true, "  CONFIRM  ", true},
+		{"typed empty declines", true, "", false},
+		{"single-key y approves", false, "y", true},
+		{"single-key yes approves", false, "yes", true},
+		{"single-key n declines", false, "n", false},
+		{"single-key empty declines (safe default)", false, "", false},
+		{"single-key confirm word does NOT approve", false, "confirm", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := render.New(&buf)
+			ask := func(string) string { return c.answer }
+			fn := buildConfirmFunc(r, ask)
+			got, err := fn(context.Background(), tools.ConfirmRequest{
+				ToolName:          "git.snapshotDelete",
+				Risk:              domain.RiskGit,
+				Summary:           "discard uncommitted work",
+				NeedsTypedConfirm: c.typed,
+			})
+			if err != nil {
+				t.Fatalf("confirm returned error: %v", err)
+			}
+			if got != c.wantApprv {
+				t.Fatalf("approve = %v, want %v (typed=%v answer=%q)", got, c.wantApprv, c.typed, c.answer)
+			}
+		})
+	}
+}
+
+// A typed-confirm prompt must actually ASK for the phrase (not the bare [y/N]), so the
+// human sees the heightened friction.
+func TestBuildConfirmFunc_TypedPromptText(t *testing.T) {
+	var buf bytes.Buffer
+	r := render.New(&buf)
+	var prompted string
+	ask := func(p string) string { prompted = p; return "confirm" }
+	fn := buildConfirmFunc(r, ask)
+	_, _ = fn(context.Background(), tools.ConfirmRequest{
+		ToolName: "daintree.call", Risk: domain.RiskSystem, NeedsTypedConfirm: true,
+	})
+	if !strings.Contains(prompted, replConfirmPhrase) {
+		t.Fatalf("typed-confirm prompt should ask for the phrase %q, got %q", replConfirmPhrase, prompted)
+	}
+	if strings.Contains(prompted, "[y/N]") {
+		t.Fatalf("typed-confirm must not offer the single-key [y/N] prompt, got %q", prompted)
+	}
 }
 
 func TestConsoleSinkPhase_TTYShowsSilentWork(t *testing.T) {
