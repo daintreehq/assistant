@@ -66,10 +66,11 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		return r.audit(ctx, name, rawArgs, tctx, started, outcomeError, res, nil)
 	}
 
-	// 1b. Read-only projection enforcement (defense in depth). When the caller
-	//     supplied an explicit per-turn allowlist (ActiveToolNames non-nil), a tool
-	//     outside it was projection-excluded and must NOT be callable, even by a
-	//     direct dispatch that bypassed the schema. nil ⇒ unconstrained (all tools).
+	// 1b. Per-turn projection enforcement (defense in depth). When the caller
+	//     supplied an explicit per-turn allowlist (ActiveToolNames non-nil — i.e. a
+	//     loaded skill narrowed the toolset to core ∪ requiredTools), a tool outside
+	//     it was projection-excluded and must NOT be callable, even by a direct
+	//     dispatch that bypassed the schema. nil ⇒ unconstrained (all tools).
 	if tctx != nil && tctx.ActiveToolNames != nil && !toolOffered(name, tctx.ActiveToolNames) {
 		res := Fail(codeNotOffered, fmt.Sprintf(
 			"%s is not offered this turn (the active toolset was narrowed); it cannot be invoked now.", name),

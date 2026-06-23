@@ -140,7 +140,7 @@ func TestBuildWakePromptFirstTimeEventLineFreeOfAckMarker(t *testing.T) {
 }
 
 func TestBuildWakePromptSurfacesInboxIDForResolve(t *testing.T) {
-	// The reactor needs the inbox id to resolve THIS exact item on a read-only wake
+	// The reactor needs the inbox id to resolve THIS exact item on a wake
 	// turn — every per-event line must carry "(inbox <id>)".
 	prompt := BuildWakePrompt(
 		[]domain.QueueEvent{termWakeEvent("t1", func(e *domain.QueueEvent) { e.ID = "evt-77" })},
@@ -163,18 +163,6 @@ func TestBuildWakePromptInstructsInboxHygiene(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "nothing left to cancel") {
 			t.Fatalf("%s branch missing the already-stopped/no-cancel nuance:\n%s", name, prompt)
-		}
-	}
-}
-
-func TestIsWakeHousekeeping(t *testing.T) {
-	// queue.resolve is the one wake-safe housekeeping tool; cancel/publish are not.
-	if !IsWakeHousekeeping("queue.resolve") {
-		t.Fatal("queue.resolve must be wake-housekeeping")
-	}
-	for _, n := range []string{"watcher.cancel", "queue.publish", "queue.digest", "fs.read"} {
-		if IsWakeHousekeeping(n) {
-			t.Fatalf("%q must NOT be wake-housekeeping", n)
 		}
 	}
 }

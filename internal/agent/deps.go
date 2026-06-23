@@ -30,8 +30,8 @@ type Router interface {
 
 // ToolRunner is the tool-registry seam (satisfied by an adapter over
 // *tools.Registry). It projects tools to OpenAI specs, resolves wire→internal
-// names, lists read-risk tools, and dispatches a call for this turn (carrying the
-// per-turn runId/signal/allowed-names through the registry's ToolContext).
+// names, and dispatches a call for this turn (carrying the per-turn
+// runId/signal/allowed-names through the registry's ToolContext).
 type ToolRunner interface {
 	// OpenAITools projects the (optionally filtered) tools to model-facing specs.
 	// filterNames are INTERNAL dotted names; nil ⇒ the full registry.
@@ -39,9 +39,6 @@ type ToolRunner interface {
 	// ResolveWireName maps a wire name back to its internal name (from the most
 	// recent OpenAITools projection); "" when unknown.
 	ResolveWireName(wireName string) string
-	// ReadOnlyToolNames returns the internal names of read-risk tools, minus the
-	// skill-context-mutating tools (skill.find/skill.load) — the read-only-turn set.
-	ReadOnlyToolNames() []string
 	// Dispatch runs one tool call by internal name for the given turn. The runner
 	// owns building the per-call ToolContext from runCtx (runId, signal, allowed
 	// names). It NEVER returns an error — every failure is a domain.ToolResult.
@@ -59,7 +56,6 @@ type ToolRunner interface {
 type TurnContext struct {
 	RunID           string
 	ActiveToolNames []string
-	ReadOnly        bool
 	// CallID identifies the call currently being dispatched (the live footer row).
 	CallID string
 	// Progress forwards an in-tool substep message for CallID. Nil-safe.

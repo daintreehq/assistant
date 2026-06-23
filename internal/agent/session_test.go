@@ -42,7 +42,6 @@ type fakeTools struct {
 	// dispatch returns this result for every call (the repeat-failure scenario).
 	result       domain.ToolResult
 	dispatched   int
-	readOnly     []string
 	lastTurn     TurnContext
 	dispatchSeen []string
 	// emitProgress, when set, is invoked inside Dispatch to mimic a tool reporting an
@@ -54,7 +53,6 @@ func (t *fakeTools) OpenAITools(filter []string) ([]models.ChatTool, error) { re
 func (t *fakeTools) ResolveWireName(w string) string {
 	return strings.ReplaceAll(w, "__", ".")
 }
-func (t *fakeTools) ReadOnlyToolNames() []string { return t.readOnly }
 func (t *fakeTools) Dispatch(ctx context.Context, name, args string, turn TurnContext) domain.ToolResult {
 	t.dispatched++
 	t.lastTurn = turn
@@ -179,19 +177,27 @@ func TestRepeatedFailureBreakerAborts(t *testing.T) {
 	}
 }
 
-func TestWakeReadOnlyRefusesDisallowedTool(t *testing.T) {
-	// Read-only turn: allowedSet = {fs.read}. A call to terminal.write (not in the
-	// set) must be refused with READ_ONLY_TURN and NEVER reach Dispatch.
-	tools := &fakeTools{readOnly: []string{"fs.read"}, result: domain.Ok("ok", nil)}
+func TestNarrowedTurnRefusesUnofferedTool(t *testing.T) {
+	// A loaded skill narrows the turn to core ∪ its requiredTools. A call to a tool
+	// OUTSIDE that set (terminal.summarize is neither a core tool nor a spawn-skill
+	// tool) must be refused with TOOL_NOT_OFFERED and NEVER reach Dispatch — the
+	// double-gate that defends a narrowed turn against a hallucinated / wire-name-
+	// fallthrough tool name. This is NOT a read-only restriction: every turn (user OR
+	// autonomous wake) has full capability; only a loaded skill narrows the offered set.
+	tools := &fakeTools{result: domain.Ok("ok", nil)}
 	r := &fakeRouter{
 		results: []models.ChatResult{
-			{ToolCalls: []models.ToolCallRequest{toolCall("c1", "terminal__write", `{}`)}},
+			{ToolCalls: []models.ToolCallRequest{toolCall("c1", "terminal__summarize", `{}`)}},
 			{Content: "done after refusal"},
 		},
 	}
-	s := NewSession(baseDeps(r, tools))
+	s := skillSession(t, realRegistry(t), r, tools)
+	// Pre-load the spawn skill so this turn's projection is narrowed (non-nil allowedSet).
+	s.mu.Lock()
+	s.activeSkills = []string{skills.IDSpawnAgentForEdits}
+	s.mu.Unlock()
 
-	reply, err := s.Send(context.Background(), "wake", SendOptions{ReadOnly: true})
+	reply, err := s.Send(context.Background(), "go", SendOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,17 +205,17 @@ func TestWakeReadOnlyRefusesDisallowedTool(t *testing.T) {
 		t.Fatalf("reply = %q", reply)
 	}
 	if tools.dispatched != 0 {
-		t.Fatalf("disallowed tool reached Dispatch %d times, want 0", tools.dispatched)
+		t.Fatalf("unoffered tool reached Dispatch %d times, want 0", tools.dispatched)
 	}
-	// The tool reply pushed to history must carry the READ_ONLY_TURN refusal.
+	// The tool reply pushed to history must carry the TOOL_NOT_OFFERED refusal.
 	var refusalSeen bool
 	for _, m := range s.Messages() {
-		if m.Role == "tool" && strings.Contains(m.StringContent, "READ_ONLY_TURN") {
+		if m.Role == "tool" && strings.Contains(m.StringContent, "TOOL_NOT_OFFERED") {
 			refusalSeen = true
 		}
 	}
 	if !refusalSeen {
-		t.Fatal("expected a READ_ONLY_TURN refusal tool result in history")
+		t.Fatal("expected a TOOL_NOT_OFFERED refusal tool result in history")
 	}
 }
 

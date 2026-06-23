@@ -8,9 +8,11 @@ import (
 
 // Autonomous wake-up helpers. A terminal-watcher queue event means a supervised
 // agent finished, is waiting, or failed — exactly when the assistant should look
-// and report. Those events feed a READ-ONLY turn (Send with ReadOnly) so a
-// background trigger can inspect and report but never run a mutating tool
-// unattended.
+// and react. Those events feed a normal, FULL-CAPABILITY turn: the wake reactor can
+// inspect and report, AND take action (relay between agents with terminal.sendCommand,
+// spawn, resolve the inbox item) — the per-call confirmation/tier gate, not a turn-wide
+// read-only narrowing, decides what may mutate. This is what makes autonomous
+// multi-agent orchestration (agent A finishes → wake → relay to agent B) possible.
 
 // IsActionableWake reports whether a surfaced attention event should autonomously
 // wake the model (run a turn) versus just appear in the inbox. Only a
@@ -20,9 +22,9 @@ func IsActionableWake(e domain.QueueEvent) bool {
 	return e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != ""
 }
 
-// BuildWakePrompt builds the internal nudge fed to the model on a watcher wake. It
-// is sent as a read-only turn; the model's reaction is what surfaces, not this
-// prompt. alreadySummarized carries terminal ids already reported this session
+// BuildWakePrompt builds the internal nudge fed to the model on a watcher wake. The
+// model's reaction is what surfaces, not this prompt. alreadySummarized carries
+// terminal ids already reported this session
 // (cross-burst memory): a terminal already in the set is downgraded to a one-line
 // ack so a lifecycle that surfaces several events (waiting_for_input then
 // terminal_exited) is summarized once, not two or three times. Reproduce
@@ -57,9 +59,8 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 		base += term
 		if e.ID != "" {
 			// Surface the inbox id so the reactor can resolve THIS exact item once it
-			// has reported a finished watch. queue.resolve is permitted on a read-only
-			// wake turn as harmless self-bookkeeping (see WakeHousekeepingTools); without
-			// the id the model would have to queue.digest and match the event by hand.
+			// has reported a finished watch; without the id the model would have to
+			// queue.digest and match the event by hand.
 			base += " (inbox " + e.ID + ")"
 		}
 		if terminalID != "" {
@@ -93,8 +94,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 	// Inbox hygiene — applies to BOTH the summarize and the acknowledge branch. A
 	// watch that is OVER no longer needs the user's attention once you have reported
 	// it, but its supervisor-promoted "attention" item lingers (and keeps the badge
-	// lit) until something resolves it. You CAN'T resolve it on a normal autonomous
-	// turn — but queue.resolve is whitelisted here — so clear it now. A finished
+	// lit) until something resolves it — so clear it now with queue.resolve. A finished
 	// watch's watcher has already stopped ITSELF, so there is nothing to cancel.
 	parts = append(parts, "When you have reported (or acknowledged) a watch that is OVER — an agent that finished/completed, or a terminal that exited — clear its inbox item with queue.resolve {\"id\":\"<the inbox id on that event's line>\"} so it stops counting as needing attention; its watcher already stopped itself, so there is nothing left to cancel. Do NOT resolve an item that still needs the user to act (an agent waiting on a question) — leave that one open.")
 	parts = append(parts, "", "New events:")

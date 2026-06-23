@@ -63,7 +63,7 @@ func newController(a *app.App, pump *eventPump, send func(tea.Msg)) *controller 
 // longer active (#1). Completion rides the SAME ordered pump stream as the turn's
 // events (pump.Complete), so it can never overtake queued AgentEventMsgs. The model
 // must have already verified the single-flight lock is free before calling this.
-func (c *controller) runTurn(parent context.Context, turnID, prompt string, readOnly bool) tea.Cmd {
+func (c *controller) runTurn(parent context.Context, turnID, prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(parent)
 	c.mu.Lock()
 	c.cancel = cancel
@@ -71,7 +71,7 @@ func (c *controller) runTurn(parent context.Context, turnID, prompt string, read
 	return func() tea.Msg {
 		// App.Send (not Session.Send) so the first user turn consumes the one-time
 		// session-ended-watchers NOTE from message[1].
-		reply, err := c.app.Send(ctx, prompt, agent.SendOptions{ReadOnly: readOnly})
+		reply, err := c.app.Send(ctx, prompt, agent.SendOptions{})
 		c.mu.Lock()
 		c.cancel = nil
 		c.mu.Unlock()
@@ -85,16 +85,17 @@ func (c *controller) runTurn(parent context.Context, turnID, prompt string, read
 	}
 }
 
-// runWake launches an autonomous wake reactor turn (readOnly) — the model only
-// inspects & reports, never mutates. Completion rides the ordered
-// pump stream tagged with the wake cell id (#1).
+// runWake launches an autonomous wake reactor turn — a full-capability turn (same as
+// a user turn) so the reactor can both report AND act (relay between agents, resolve
+// the inbox item). The per-call confirmation/tier gate governs any mutation.
+// Completion rides the ordered pump stream tagged with the wake cell id (#1).
 func (c *controller) runWake(parent context.Context, turnID, prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(parent)
 	c.mu.Lock()
 	c.cancel = cancel
 	c.mu.Unlock()
 	return func() tea.Msg {
-		reply, err := c.app.Session.Send(ctx, prompt, agent.SendOptions{ReadOnly: true})
+		reply, err := c.app.Session.Send(ctx, prompt, agent.SendOptions{})
 		c.mu.Lock()
 		c.cancel = nil
 		c.mu.Unlock()

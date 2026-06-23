@@ -20,8 +20,13 @@ const (
 // editConstraintsBlock is appended to an edit-mode spawned-agent prompt.
 const editConstraintsBlock = "Make changes only in this worktree. Do not modify unrelated files. Run relevant tests if practical. Report back changed files, tests run, remaining risks. If you need clarification, stop and ask."
 
-// exploreConstraintsBlock is appended to an explore-mode (read-only) prompt.
-const exploreConstraintsBlock = "This is a READ-ONLY exploration: do not create, modify, or delete any files, and do not run commands that mutate state. Investigate and report back: the project's structure, key components, how the pieces fit together, and anything notable (risks, tech debt, surprises). If the task is ambiguous, state your assumptions and proceed; only stop to ask if you are genuinely blocked."
+// exploreConstraintsBlock is appended to an explore-mode (read-only) prompt. It
+// expresses ONLY the read-only guardrail + ambiguity guidance — it must NOT dictate
+// WHAT to investigate. The taskPrompt already says what to do; assuming every explore
+// is a codebase survey ("report the project's structure, key components, risks…")
+// contradicts any non-codebase task the assistant delegates (e.g. "give me one
+// interesting fact"), producing a self-contradictory prompt. Keep it task-neutral.
+const exploreConstraintsBlock = "This is a read-only task: do not create, modify, or delete any files, and do not run commands that mutate state. Do exactly what the task above asks, then report back. If the task is ambiguous, state your assumptions and proceed; only stop to ask if you are genuinely blocked."
 
 var wsRun = regexp.MustCompile(`\s+`)
 

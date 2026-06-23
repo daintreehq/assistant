@@ -67,7 +67,6 @@ type signalTool struct {
 
 func (t *signalTool) OpenAITools([]string) ([]models.ChatTool, error) { return nil, nil }
 func (t *signalTool) ResolveWireName(w string) string                 { return w }
-func (t *signalTool) ReadOnlyToolNames() []string                     { return nil }
 func (t *signalTool) Dispatch(ctx context.Context, name, args string, turn TurnContext) domain.ToolResult {
 	t.seen = append(t.seen, ctx)
 	return domain.Ok("ok", nil)
@@ -103,7 +102,6 @@ type abortingTool struct {
 
 func (t *abortingTool) OpenAITools([]string) ([]models.ChatTool, error) { return nil, nil }
 func (t *abortingTool) ResolveWireName(w string) string                 { return w }
-func (t *abortingTool) ReadOnlyToolNames() []string                     { return nil }
 func (t *abortingTool) Dispatch(ctx context.Context, name, args string, turn TurnContext) domain.ToolResult {
 	t.dispatched++
 	t.cancel() // user hit Escape while this tool ran

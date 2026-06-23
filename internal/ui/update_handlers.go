@@ -253,7 +253,7 @@ func (m Model) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.transcript = append(m.transcript, TranscriptCell{Turn: cell})
 	m.activeTurn = cell.ID
 	m.inFlight = true
-	cmd := m.controller.runTurn(m.ctx, cell.ID, text, false)
+	cmd := m.controller.runTurn(m.ctx, cell.ID, text)
 	return m.afterStateChange(cmd)
 }
 
@@ -274,7 +274,7 @@ func (m *Model) promoteQueued(q queuedTurn) tea.Cmd {
 		}
 	}
 	m.inFlight = true
-	return m.controller.runTurn(m.ctx, q.cellID, q.prompt, false)
+	return m.controller.runTurn(m.ctx, q.cellID, q.prompt)
 }
 
 // onCancel sets phase Cancelling SYNCHRONOUSLY (so the UI never looks frozen) then
@@ -422,12 +422,12 @@ func (m Model) drainPending() (tea.Model, tea.Cmd) {
 		return m.afterStateChange(cmd)
 	}
 	if len(m.pendingWake) > 0 {
-		// Build one wake reactor prompt over the pending burst, fed read-only. Keep the
+		// Build one wake reactor prompt over the pending burst. Keep the
 		// burst in activeWake so a failed wake can requeue it once (#9).
 		burst := m.pendingWake
 		m.pendingWake = nil
 		m.activeWake = burst
-		// Use the shared wake-reactor prompt (cross-burst dedup + the read-only
+		// Use the shared wake-reactor prompt (cross-burst dedup + the
 		// "NOT typed by the user" framing) so the cockpit and the host react
 		// identically and a terminal already summarized this session is downgraded
 		// to a one-line ack instead of being re-summarized.

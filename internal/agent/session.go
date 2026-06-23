@@ -29,6 +29,13 @@ var coreToolNames = []string{
 	"tool.search",
 	"terminal.read",
 	"terminal.extract",
+	// terminal.sendCommand is core: talking to a running agent (relaying between
+	// agents, answering a question it waits on) is a fundamental operation that must
+	// stay callable on EVERY turn — including a skill-narrowed one. Without it here,
+	// a loaded skill that omits it from requiredTools (e.g. spawn-visible-agent) would
+	// silently make relaying impossible, and the base prompt's "always available"
+	// claim would be false. The per-call confirmation/tier gate still governs it.
+	"terminal.sendCommand",
 	"skill.step.advance",
 	"skill.run.get",
 	"skill.find",
@@ -36,44 +43,6 @@ var coreToolNames = []string{
 	"memory.recall",
 	"memory.list",
 	"artifact.read",
-}
-
-// SkillContextMutatingTools are read-risk tools withheld on read-only wake turns
-// (they mutate the loaded-skill set). The ToolRunner adapter uses this set when
-// building ReadOnlyToolNames so both sides share one source of truth.
-var SkillContextMutatingTools = map[string]struct{}{
-	"skill.find": {},
-	"skill.load": {},
-}
-
-// IsSkillContextMutating reports whether a tool mutates the loaded-skill set (and
-// so is withheld on a read-only wake turn).
-func IsSkillContextMutating(name string) bool {
-	_, ok := SkillContextMutatingTools[name]
-	return ok
-}
-
-// WakeHousekeepingTools are NON-read-risk tools nonetheless permitted on an
-// autonomous read-only wake turn: harmless self-bookkeeping the reactor must be
-// able to do to tidy up after it reports. queue.resolve only marks the assistant's
-// OWN attention-queue item resolved — it touches no project/git/terminal/forge
-// state, has no external effect, and is reversible — so allowing it does not breach
-// the "no consequential unattended mutation" intent of a read-only wake turn. It
-// lets the reactor clear a finished watch's attention item the moment it reports it,
-// instead of stranding a stale "needs attention" badge until the next user turn
-// (the only other turn on which a RiskLocal tool is callable). Watcher.cancel is
-// deliberately NOT here: a finished watch already stopped itself, and a still-active
-// watch (e.g. completed_unverified) is kept on purpose — cancelling one is a
-// deliberate user-turn decision, never autonomous.
-var WakeHousekeepingTools = map[string]struct{}{
-	"queue.resolve": {},
-}
-
-// IsWakeHousekeeping reports whether a tool is wake-safe self-bookkeeping — allowed
-// on a read-only wake turn despite not being read-risk (see WakeHousekeepingTools).
-func IsWakeHousekeeping(name string) bool {
-	_, ok := WakeHousekeepingTools[name]
-	return ok
 }
 
 // CoreToolNames returns a copy of the always-offered core tool names.
@@ -137,7 +106,7 @@ type Session struct {
 
 	// toolProj memoizes the OpenAITools projection across the (up to 12) iterations
 	// of a turn AND across turns. The projection is pure work keyed by the offered
-	// toolset (allowedNames + the read-only flag); it only changes when skill.find/
+	// toolset (allowedNames); it only changes when skill.find/
 	// skill.load mutates the active-skill set, which invalidates it in
 	// applySkillBundleLocked. Guarded by s.mu (read in resolveTurnTools, zeroed in
 	// applySkillBundleLocked) so the turn loop never races a /skills find slash
@@ -159,7 +128,6 @@ type Session struct {
 type toolProjCache struct {
 	valid         bool
 	unconstrained bool              // allowedNames was nil (the full registry)
-	readOnly      bool              // the read-only flag that produced tools
 	allowedNames  []string          // the filter that produced tools (cache key)
 	tools         []models.ChatTool // the cached projection
 }
@@ -329,11 +297,13 @@ func (s *Session) compactLocked(summary string) {
 	s.persistMessageLocked(note)
 }
 
-// SendOptions tunes a turn. ReadOnly marks an autonomous wake turn (read-risk
-// tools only, enforced at dispatch).
-type SendOptions struct {
-	ReadOnly bool
-}
+// SendOptions tunes a turn. Reserved for future per-turn options; currently empty.
+// Every turn — user-driven OR an autonomous watcher wake — runs with the SAME full
+// tool capability. (Wake turns were once narrowed to read-only inspection; that
+// extra layer is gone — the per-call confirmation/tier gate in Dispatch is the one
+// authority on what may mutate, so a wake turn can relay between agents, send
+// terminal input, spawn, etc., exactly like a user turn.)
+type SendOptions struct{}
 
 // Send mints a run id, runs one turn, and clears the run ref in finally. It is
 // single-flight: a concurrent call returns ErrTurnInProgress. The reply string is
@@ -403,7 +373,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	// 4. Push the user message.
 	s.pushMessage(models.TextMessage("user", userInput))
 
-	turn := TurnContext{RunID: runID, ReadOnly: opts.ReadOnly}
+	turn := TurnContext{RunID: runID}
 
 	failureCounts := make(map[string]int)
 	stuckNudged := false
@@ -421,10 +391,9 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//      set (and message[2]) mid-turn, so a newly-loaded skill's requiredTools
 		//      must be offered on the very next model call of the SAME turn — and a turn
 		//      that began with a skill already loaded must not be narrowed to a stale
-		//      set. Read-only wake turns withhold the skill-mutating tools, so their
-		//      projection can't change; recomputing is still correct (it's stable) and
-		//      keeps a single code path. Only message[2]/tools change here — the cached
-		//      base prefix [0] stays byte-stable (prompt-cache invariant).
+		//      set. Recomputing every iteration is cheap (cache HIT when the skill set
+		//      is unchanged) and keeps a single code path. Only message[2]/tools change
+		//      here — the cached base prefix [0] stays byte-stable (prompt-cache invariant).
 		//
 		//      The filter + projection are computed under s.mu (released before the
 		//      stream). A /skills find slash command runs OFF the turn goroutine
@@ -432,7 +401,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//      cached projection via applySkillBundleLocked, so this read side must be
 		//      synchronized with those writes. The cached projection is reused when the
 		//      offered toolset is unchanged (the common path — no skill mutation).
-		allowedNames, allowedSet, tools, err := s.resolveTurnTools(opts.ReadOnly)
+		allowedNames, allowedSet, tools, err := s.resolveTurnTools()
 		if err != nil {
 			// A failure is a WAKE_FAILURE_PREFIX — keep verbatim.
 			msg := "Tool projection failed: " + err.Error()
@@ -565,12 +534,17 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
 		case allowedSet != nil && !setHas(allowedSet, internalName):
-			// Read-only-turn refusal, double-gated (the list filter alone is
-			// insufficient — ResolveWireName can fall through to a raw name).
-			res = domain.Fail("READ_ONLY_TURN",
-				"Mutating tools are disabled on autonomous wake-up turns; only read-only inspection is allowed.",
+			// Tool-not-offered refusal, double-gated (the list filter alone is
+			// insufficient — ResolveWireName can fall through to a raw name). An
+			// active skill narrowed this turn's toolset to core ∪ its requiredTools;
+			// the model called something outside that set (a hallucinated name, or a
+			// wire-name fallthrough). NOT a read-only restriction — every turn,
+			// user or autonomous wake, has the same capability; only a loaded skill
+			// narrows it. Tell the model how to widen it.
+			res = domain.Fail("TOOL_NOT_OFFERED",
+				internalName+" is not offered in this turn's tool spec (an active skill narrowed the toolset). Load a skill that offers it with skill.find/skill.load, or pick a tool that is offered.",
 				domain.Unrecoverable())
-			res.Summary = internalName + " is not available on an autonomous read-only turn."
+			res.Summary = internalName + " is not offered in this turn's tool spec."
 		default:
 			argsJSON := call.Function.Arguments
 			if argsJSON == "" {
@@ -783,20 +757,15 @@ func (s *Session) emitUsage() {
 // applySkillBundleLocked's writes (activeSkills + the cached projection), which a
 // /skills find slash command can trigger off the turn goroutine. Returns nil
 // allowedNames/allowedSet for an unconstrained (full-registry) turn.
-func (s *Session) resolveTurnTools(readOnly bool) ([]string, map[string]struct{}, []models.ChatTool, error) {
+func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.ChatTool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var allowedNames []string
-	if readOnly {
-		allowedNames = s.deps.Tools.ReadOnlyToolNames()
-	} else {
-		allowedNames = s.buildToolFilterLocked()
-	}
+	allowedNames := s.buildToolFilterLocked()
 	// Preserve nil semantics: an unconstrained turn (nil) offers the FULL registry,
-	// and both the read-only-turn refusal in runToolBatch and the dispatch gate key
+	// and both the tool-not-offered refusal in runToolBatch and the dispatch gate key
 	// off allowedSet being nil ⇒ "all tools callable". Materialize the set only when
-	// the turn is actually narrowed.
+	// the turn is actually narrowed (a skill is loaded).
 	var allowedSet map[string]struct{}
 	if allowedNames != nil {
 		allowedSet = make(map[string]struct{}, len(allowedNames))
@@ -804,7 +773,7 @@ func (s *Session) resolveTurnTools(readOnly bool) ([]string, map[string]struct{}
 			allowedSet[n] = struct{}{}
 		}
 	}
-	tools, err := s.projectToolsLocked(allowedNames, readOnly)
+	tools, err := s.projectToolsLocked(allowedNames)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -838,7 +807,7 @@ func (s *Session) buildToolFilterLocked() []string {
 	return out
 }
 
-// projectToolsLocked returns the OpenAITools projection for (allowedNames, readOnly),
+// projectToolsLocked returns the OpenAITools projection for allowedNames,
 // reusing the cached projection when the offered toolset is unchanged since the last
 // build. allowedNames==nil is the full (unconstrained) registry — a distinct cache
 // identity from any narrowed set, tracked via the unconstrained flag because
@@ -855,10 +824,10 @@ func (s *Session) buildToolFilterLocked() []string {
 // only ever called from this turn loop, so no other goroutine overwrites those
 // shared maps between here and runToolBatch's ResolveWireName lookups (which run
 // later on the same turn goroutine).
-func (s *Session) projectToolsLocked(allowedNames []string, readOnly bool) ([]models.ChatTool, error) {
+func (s *Session) projectToolsLocked(allowedNames []string) ([]models.ChatTool, error) {
 	c := &s.toolProj
 	unconstrained := allowedNames == nil
-	if c.valid && c.readOnly == readOnly && c.unconstrained == unconstrained &&
+	if c.valid && c.unconstrained == unconstrained &&
 		(unconstrained || slices.Equal(c.allowedNames, allowedNames)) {
 		return c.tools, nil
 	}
@@ -869,7 +838,6 @@ func (s *Session) projectToolsLocked(allowedNames []string, readOnly bool) ([]mo
 	*c = toolProjCache{
 		valid:         true,
 		unconstrained: unconstrained,
-		readOnly:      readOnly,
 		// Copy the key so a later in-place mutation of the offered-names slice (it is
 		// also handed to turn.ActiveToolNames) can't corrupt the cache identity.
 		allowedNames: append([]string(nil), allowedNames...),

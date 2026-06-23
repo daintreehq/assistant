@@ -66,31 +66,6 @@ func TestToolProjectionReusedAcrossTurns(t *testing.T) {
 	}
 }
 
-// TestToolProjectionReadOnlyKeyDistinct: a read-only wake turn and a normal turn
-// have distinct projection keys (the read-only flag is part of the cache identity),
-// so each builds its own projection.
-func TestToolProjectionReadOnlyKeyDistinct(t *testing.T) {
-	r := &fakeRouter{results: []models.ChatResult{
-		{Content: "ro"}, // turn 1: read-only wake, immediate answer
-		{Content: "rw"}, // turn 2: normal, immediate answer
-	}}
-	tr := &countingTools{fakeTools: &fakeTools{
-		result:   domain.Ok("ok", nil),
-		readOnly: []string{"fs.read", "fs.list"},
-	}}
-	s := skillSession(t, realRegistry(t), r, tr)
-
-	if _, err := s.Send(context.Background(), "wake", SendOptions{ReadOnly: true}); err != nil {
-		t.Fatalf("Send RO: %v", err)
-	}
-	if _, err := s.Send(context.Background(), "normal", SendOptions{}); err != nil {
-		t.Fatalf("Send RW: %v", err)
-	}
-	if tr.projectCalls != 2 {
-		t.Fatalf("read-only and normal turns have distinct keys ⇒ 2 builds, got %d", tr.projectCalls)
-	}
-}
-
 // TestProjectToolsNilVsEmptyDistinctIdentity: a nil filter (full registry) and a
 // non-nil empty filter (no tools) are DISTINCT cache identities — the unconstrained
 // sentinel must not let slices.Equal(nil, []string{}) collapse them. Exercises
@@ -101,17 +76,17 @@ func TestProjectToolsNilVsEmptyDistinctIdentity(t *testing.T) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.projectToolsLocked(nil, false); err != nil {
+	if _, err := s.projectToolsLocked(nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.projectToolsLocked([]string{}, false); err != nil {
+	if _, err := s.projectToolsLocked([]string{}); err != nil {
 		t.Fatal(err)
 	}
 	if tr.projectCalls != 2 {
 		t.Fatalf("nil (full registry) and empty (no tools) are distinct identities ⇒ 2 builds, got %d", tr.projectCalls)
 	}
 	// Re-projecting the same empty key is a cache hit (no third build).
-	if _, err := s.projectToolsLocked([]string{}, false); err != nil {
+	if _, err := s.projectToolsLocked([]string{}); err != nil {
 		t.Fatal(err)
 	}
 	if tr.projectCalls != 2 {

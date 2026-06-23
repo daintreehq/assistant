@@ -415,7 +415,6 @@ type noopRunner struct{}
 
 func (noopRunner) OpenAITools([]string) ([]models.ChatTool, error) { return nil, nil }
 func (noopRunner) ResolveWireName(string) string                   { return "" }
-func (noopRunner) ReadOnlyToolNames() []string                     { return nil }
 func (noopRunner) Dispatch(context.Context, string, string, agent.TurnContext) domain.ToolResult {
 	return domain.Ok("ok", nil)
 }

@@ -9,9 +9,9 @@ import (
 )
 
 // wake_unify_test.go locks the cockpit↔host wake convergence: the cockpit now uses
-// the shared agent.BuildWakePrompt (cross-burst dedup + read-only framing) and
-// records summarized terminals on a REAL reply only, mirroring the host so the same
-// terminal isn't re-summarized across lifecycle bursts.
+// the shared agent.BuildWakePrompt (cross-burst dedup + the "NOT typed by the user"
+// framing) and records summarized terminals on a REAL reply only, mirroring the host
+// so the same terminal isn't re-summarized across lifecycle bursts.
 
 func wakeEvent(terminalID, title string) domain.QueueEvent {
 	return domain.QueueEvent{Title: title, Target: &domain.EventTarget{TerminalID: terminalID}}

@@ -124,8 +124,9 @@ func (h *Host) cancelTurn() {
 	}
 }
 
-// reactWake runs an autonomous, read-only wake turn. Gated by
-// busy/ready; drains pendingWake; chains itself if more remain. Wake turns do NOT
+// reactWake runs an autonomous wake turn — full capability, like a user turn, so the
+// reactor can act (relay between agents, resolve inbox items), not just report. Gated
+// by busy/ready; drains pendingWake; chains itself if more remain. Wake turns do NOT
 // register turnCancel (unabortable by design).
 func (h *Host) reactWake() {
 	h.turnMu.Lock()
@@ -156,7 +157,7 @@ func (h *Host) reactWake() {
 			}
 		}()
 		prompt := agent.BuildWakePrompt(events, already)
-		reply, err := h.app.Session().Send(h.runCtx, prompt, agent.SendOptions{ReadOnly: true})
+		reply, err := h.app.Session().Send(h.runCtx, prompt, agent.SendOptions{})
 		if err != nil {
 			h.report("wake-failed", fmt.Sprintf("wake send failed: %v", err))
 			h.turnMu.Lock()

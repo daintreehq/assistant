@@ -370,28 +370,6 @@ func TestFindSkillsSelectorErrorKeepsSkills(t *testing.T) {
 	}
 }
 
-// --- read-only (wake) turn projection ---
-
-// roTools is a runner whose ReadOnlyToolNames returns only the read tool, so the
-// wake turn offers nothing else.
-type roTools struct {
-	*captureStreamTools
-}
-
-func (r *roTools) ReadOnlyToolNames() []string { return []string{"inspect.read"} }
-
-func TestWakeTurnOffersOnlyReadOnlyNames(t *testing.T) {
-	tools := &roTools{captureStreamTools: &captureStreamTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}}
-	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
-	s := skillSession(t, realRegistry(t), r, tools)
-	if _, err := s.Send(context.Background(), "[wake]", SendOptions{ReadOnly: true}); err != nil {
-		t.Fatal(err)
-	}
-	if len(tools.last) != 1 || tools.last[0] != "inspect.read" {
-		t.Fatalf("wake turn projection = %v want [inspect.read]", tools.last)
-	}
-}
-
 func containsStr(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {

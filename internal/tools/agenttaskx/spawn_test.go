@@ -539,8 +539,13 @@ func TestSpawnExploreModeReadOnlyConstraints(t *testing.T) {
 		t.Fatalf("explore spawn failed: %+v", res.Error)
 	}
 	prompt := mcp.lastLaunchArgs()["prompt"].(string)
-	if !strings.Contains(prompt, "READ-ONLY exploration") {
+	if !strings.Contains(prompt, "read-only task") {
 		t.Fatal("explore prompt missing read-only language")
+	}
+	// The explore constraints must NOT inject a codebase-survey assumption — that
+	// contradicts a non-codebase delegated task (see exploreConstraintsBlock).
+	if strings.Contains(prompt, "project's structure") || strings.Contains(prompt, "tech debt") {
+		t.Fatal("explore prompt leaked a codebase-survey assumption")
 	}
 	if strings.Contains(prompt, "only in this worktree") || strings.Contains(prompt, "changed files") {
 		t.Fatal("explore prompt leaked edit-mode language")
