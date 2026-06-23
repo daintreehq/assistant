@@ -896,6 +896,7 @@ func (m Model) onRedraw(msg RedrawMsg) (tea.Model, tea.Cmd) {
 	}
 	m.redrawNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
+	m.resetFlushState()
 	// A resize changes the View dimensions, so the renderer's cell buffer is sized to
 	// the OLD geometry until it re-flushes. Recommitting the masthead immediately would
 	// tea.Println it at that stale height and wipe the footer (charmbracelet/bubbletea

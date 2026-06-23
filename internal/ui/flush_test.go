@@ -101,6 +101,68 @@ func TestFlush_NoDupAcrossSeal(t *testing.T) {
 	}
 }
 
+// TestFlush_RedrawResetsActiveFlushState locks the resize-redraw bug where host
+// scrollback was wiped but the active turn still believed its prefix was present
+// there. That made the response disappear from both scrollback and the footer,
+// leaving only the freshly re-committed masthead visible.
+func TestFlush_RedrawResetsActiveFlushState(t *testing.T) {
+	m, turn := streamingProse("ALPHALINE first paragraph.\n\nBETALINE second paragraph.\n\nGAMMALIVE final paragraph still going")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("expected a flush before redraw")
+	}
+	if turn.FlushedRows == 0 || turn.flushedRowsText == "" {
+		t.Fatal("test setup failed: turn did not record flushed rows")
+	}
+	if strings.Contains(ansi.Strip(m.liveCellsView(m.contentW())), "ALPHALINE") {
+		t.Fatal("test setup failed: flushed prefix should have left the live footer")
+	}
+
+	m.resizePending = 1
+	next, _ := m.onRedraw(RedrawMsg{Nonce: 1})
+	m = next.(Model)
+
+	if turn.FlushedRows != 0 || turn.flushedRowsText != "" {
+		t.Fatalf("redraw must reset active flushed rows, got rows=%d text=%q", turn.FlushedRows, turn.flushedRowsText)
+	}
+	live := ansi.Strip(m.liveCellsView(m.contentW()))
+	if !strings.Contains(live, "ALPHALINE") {
+		t.Fatalf("previously flushed active content must be renderable again after host wipe:\n%s", live)
+	}
+}
+
+// TestFlush_RedrawResetsSealedFlushState covers the same host-wipe problem after a
+// turn has sealed: replaying the transcript at a new size must re-commit the whole
+// sealed turn, not just the tail that was not incrementally flushed in the old host
+// scrollback.
+func TestFlush_RedrawResetsSealedFlushState(t *testing.T) {
+	m, turn := streamingProse("ALPHALINE first paragraph.\n\nBETALINE second paragraph.\n\nGAMMALIVE final paragraph still going")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("expected a flush before seal")
+	}
+	turn.sealProse()
+	turn.State = TurnComplete
+	m.activeTurn = ""
+	m.inFlight = false
+
+	if strings.Contains(ansi.Strip(m.sealedBlock(0).Rendered), "ALPHALINE") {
+		t.Fatal("test setup failed: sealed tail should skip the already-flushed prefix")
+	}
+
+	m.resizePending = 1
+	next, _ := m.onRedraw(RedrawMsg{Nonce: 1})
+	m = next.(Model)
+
+	if turn.FlushedRows != 0 || turn.flushedRowsText != "" {
+		t.Fatalf("redraw must reset sealed flushed rows, got rows=%d text=%q", turn.FlushedRows, turn.flushedRowsText)
+	}
+	sealed := ansi.Strip(m.sealedBlock(0).Rendered)
+	for _, word := range []string{"ALPHALINE", "BETALINE", "GAMMALIVE"} {
+		if !strings.Contains(sealed, word) {
+			t.Fatalf("redraw replay must include %q after host wipe:\n%s", word, sealed)
+		}
+	}
+}
+
 // TestFlush_SingleParagraphHeld proves a lone in-progress paragraph (no completed line) is
 // NOT flushed — it is held whole in the footer until it seals, then committed once. This is
 // the case that must never freeze a raw partial copy in scrollback.

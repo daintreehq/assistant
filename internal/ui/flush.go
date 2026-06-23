@@ -187,6 +187,20 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 	return tea.Println(chunk)
 }
 
+// resetFlushState forgets every per-turn "already printed to host scrollback" cursor.
+// Call this whenever host scrollback itself is wiped and the transcript will be
+// re-committed from the model. Without it, a resize redraw can clear the flushed
+// prefix from the terminal, then skip that same prefix during replay because the
+// model still believes those rows are already present.
+func (m *Model) resetFlushState() {
+	for i := range m.transcript {
+		if t := m.transcript[i].Turn; t != nil {
+			t.FlushedRows = 0
+			t.flushedRowsText = ""
+		}
+	}
+}
+
 func (m *Model) activeTurnIsFirstTranscriptCell(id string) bool {
 	return len(m.transcript) > 0 && m.transcript[0].Turn != nil && m.transcript[0].Turn.ID == id
 }
