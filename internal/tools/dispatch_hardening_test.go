@@ -87,6 +87,33 @@ func TestDispatchPanicInDecodeIsConvertedAndAudited(t *testing.T) {
 	}
 }
 
+// panickyQueue panics on Publish, exercising the recover guard in publishDenial.
+type panickyQueue struct{}
+
+func (*panickyQueue) Publish(_ context.Context, _ domain.QueuePublishArgs) (domain.QueueEvent, error) {
+	panic("boom in publish")
+}
+
+// publishDenial is best-effort: a panic from the attention queue must be
+// contained and never break the tool call. The blocked actor still gets its
+// CONFIRMATION_REQUIRED result; only the (failed) notification is lost.
+func TestDispatchPublishDenialPanicIsContained(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("g.echo", domain.RiskGit))
+	s := &fakeStore{}
+
+	ctx := baseCtx(s, &panickyQueue{}, domain.TierSystem, domain.ActorWatcher)
+	ctx.ActorID = "wch_1" // present → grant attempted (nil) → denial published → queue panics
+
+	res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx)
+	if res.Error.Code != "CONFIRMATION_REQUIRED" || res.Error.Recoverable {
+		t.Fatalf("a panicking denial publish must not change the result, got %+v", res.Error)
+	}
+	if lastAudit(s).Outcome != outcomeDenied {
+		t.Fatalf("blocked call audited as %s, want denied", lastAudit(s).Outcome)
+	}
+}
+
 // A panicking ReportProgress must not crash dispatch (reportProgress is now
 // panic-safe). The tool still runs to completion.
 func TestDispatchPanicInReportProgressIsContained(t *testing.T) {
