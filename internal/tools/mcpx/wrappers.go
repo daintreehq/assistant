@@ -3,6 +3,7 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -194,6 +195,81 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 			}
 			return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command,
 				map[string]any{"terminalId": a.TerminalID, "command": a.Command})
+		},
+	}
+}
+
+/* ------------------------------- terminal.close --------------------------- */
+
+type terminalCloseArgs struct {
+	TerminalID  string   `json:"terminalId,omitempty"`
+	TerminalIDs []string `json:"terminalIds,omitempty"`
+}
+
+// ids merges the singular terminalId and the plural terminalIds into one
+// whitespace-trimmed, de-duplicated, order-preserving list. Accepting BOTH shapes
+// keeps the tool forgiving: the model reaches for `terminalId` by analogy with
+// every other terminal.* wrapper, but `terminalIds` is the whole point of this one
+// — retiring a spawned cohort in ONE confirmed call rather than N.
+func (a terminalCloseArgs) ids() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	add(a.TerminalID)
+	for _, id := range a.TerminalIDs {
+		add(id)
+	}
+	return out
+}
+
+// Validate runs at DECODE time (StrictDecoder honours the Validator seam) — i.e.
+// BEFORE the confirmation prompt in dispatch — so an empty/blank call (`{}`,
+// `{"terminalIds":[]}`, whitespace-only ids) is rejected as invalid args up front
+// instead of prompting the user to confirm a close that then fails. The handler
+// keeps the same guard as defense-in-depth for any path that skips Decode.
+func (a terminalCloseArgs) Validate() error {
+	if len(a.ids()) == 0 {
+		return errors.New("provide terminalId (a single id) or terminalIds (a list); at least one non-empty terminal id is required")
+	}
+	return nil
+}
+
+var terminalCloseSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "terminalId": { "type": "string", "description": "A single Daintree terminal id to close." },
+    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "Several terminal ids to close in ONE confirmed call (e.g. retiring a spawned cohort) — prefer this over calling terminal.close once per id." }
+  },
+  "required": []
+}`)
+
+func newTerminalCloseTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.close",
+		Description: "Close Daintree terminal(s) you created — moves each to the trash and ends the agent/process running in it. Pass a single " +
+			"terminalId, or terminalIds:[...] to close a whole cohort in ONE confirmed call. Mutating, so it always confirms. Typed wrapper around " +
+			"the Daintree terminal.close MCP tool. (terminal.kill, reachable via daintree.call, deletes PERMANENTLY instead of trashing — prefer close.)",
+		Consequence: "Closes the named Daintree terminal(s), moving them to the trash and ending whatever agent or process is running in each.",
+		Risk:        domain.RiskTerminal,
+		Schema:      terminalCloseSchema,
+		Decode:      tools.StrictDecoder(func() any { return &terminalCloseArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a terminalCloseArgs
+			_ = json.Unmarshal(raw, &a)
+			ids := a.ids()
+			if len(ids) == 0 {
+				return tools.Fail(domain.CodeValidation,
+					"terminal.close: provide terminalId (a single id) or terminalIds (a list); at least one non-empty terminal id is required.")
+			}
+			return terminalClosePassthrough(ctx, deps.MCP, ids)
 		},
 	}
 }

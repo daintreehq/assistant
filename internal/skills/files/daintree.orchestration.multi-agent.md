@@ -54,7 +54,7 @@ Procedure:
 
 5. Synthesize and report ONE clean answer — the tally, the winner, the merged result — not a transcript of every terminal. Quote real terminalIds where useful.
 
-6. Close out. Resolve handled inbox items with queue.resolve {"id":"<inbox id>"}; cancel any watcher you no longer need with watcher.cancel {"id":"<watcherId>"} and say so. The cohort's terminals stay open and idle — leave them unless the user wants them closed; you can send another round to them anytime with terminal.sendCommand.
+6. Close out. Resolve handled inbox items with queue.resolve {"id":"<inbox id>"}; cancel any watcher you no longer need with watcher.cancel {"id":"<watcherId>"} and say so. The cohort's terminals stay open and idle — leave them unless the user wants them closed; you can send another round to them anytime with terminal.sendCommand. When the user DOES ask you to close/clean up the terminals, retire the whole cohort in one confirmed call with terminal.close({ terminalIds: ["<id>","<id>",…] }) — don't tool.search for a close tool (terminal.close is always callable) and don't loop it once per id.
 
 Anti-patterns to avoid (these are how this task fails):
 - Padding agent prompts, or appending instructions that contradict the ask. Short and clean wins.

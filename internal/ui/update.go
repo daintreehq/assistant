@@ -82,9 +82,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.degraded = false
 		// Surface the link as a TOP status note (green "● Connected to Daintree MCP"), not a
 		// permanent footer segment: the assistant exists to drive Daintree over MCP, so the
-		// connection is worth announcing ONCE, in the transcript, the moment it settles —
-		// right under the masthead. (The footer only flags the link BY EXCEPTION when down.)
-		m.addNote(NoteSuccess, "Connected to Daintree MCP")
+		// connection is worth announcing ONCE, right under the masthead. (The footer only
+		// flags the link BY EXCEPTION when down.)
+		//
+		// But ONLY while the transcript is still just the masthead — before any turn has run.
+		// The boot connect is async (bootstrapCmd → MCPConnectedMsg) and the 8s bootCap can
+		// drop the cockpit in before it resolves, so the user may already have run a turn that
+		// SUCCESSFULLY called an MCP tool. Notes commit to scrollback in transcript order, so
+		// appending the banner after that turn would land it mid-transcript — a confusing
+		// "just connected" line below a turn that already proved the link was up. If work has
+		// started, stay silent: m.degraded is false and the footer reflects the link by
+		// exception, so a live connection needs no late banner. (In the normal/idle case the
+		// transcript is still empty here, so the banner shows and commits under the masthead.)
+		if !m.transcriptHasWork() {
+			m.addNote(NoteSuccess, "Connected to Daintree MCP")
+		}
 		return m.onMcpResolved()
 
 	case MCPDegradedMsg:
@@ -395,6 +407,21 @@ func (m *Model) addSeverityNote(level NoteLevel, sev domain.Severity, text strin
 	m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
 		ID: domain.NewID("note_"), Level: level, Severity: sev, Text: text, Ts: domain.NowMS(),
 	}})
+}
+
+// transcriptHasWork reports whether any turn or slash-command cell has been added to the
+// transcript yet (notes — top status lines — don't count). It gates the one-time boot
+// connect banner so it's only appended while the transcript is still just the masthead,
+// committing directly under it rather than below a turn the user already ran. It scans
+// appended-but-not-yet-committed cells too (committed cells stay in m.transcript, tracked
+// by a cursor), so it stays correct even after early commits.
+func (m Model) transcriptHasWork() bool {
+	for _, c := range m.transcript {
+		if c.Turn != nil || c.Command != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // afterStateChange is the common tail: schedule the next scrollback commit (if the

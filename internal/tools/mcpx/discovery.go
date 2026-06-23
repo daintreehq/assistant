@@ -175,6 +175,7 @@ var wrappedMCPTools = map[string]string{
 	"terminal.getOutput":           "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
 	"panel.focus":                  "terminal.focus",
 	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
+	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one confirmed call)`,
 	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",
 	"terminal.disarm":              "terminal.disarm (typed wrapper — pass terminalId)",
 	"terminal.disarmAll":           "terminal.disarmAll (typed wrapper — no args needed)",

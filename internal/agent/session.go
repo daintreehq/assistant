@@ -36,6 +36,14 @@ var coreToolNames = []string{
 	// silently make relaying impossible, and the base prompt's "always available"
 	// claim would be false. The per-call confirmation/tier gate still governs it.
 	"terminal.sendCommand",
+	// terminal.close is core for the same reason: retiring an agent terminal you spawned
+	// is a fundamental cohort-lifecycle operation, and the base prompt tells the model it
+	// is "always here — don't tool.search for it". A loaded skill (e.g. the multi-agent
+	// orchestration runbook, whose closing step calls it) narrows tools to core ∪
+	// requiredTools, so without terminal.close here that very runbook would be told to
+	// close terminals with a tool it cannot call. The per-call confirm/tier gate still
+	// governs it. (terminal.kill — permanent delete — stays behind daintree.call.)
+	"terminal.close",
 	"skill.step.advance",
 	"skill.run.get",
 	"skill.find",

@@ -189,6 +189,61 @@ func terminalSendCommandPassthrough(ctx context.Context, mcp MCPClient, terminal
 	return tools.Ok(fmt.Sprintf("Sent to terminal %s: %s.", terminalID, truncateCommand(command, 80)), result)
 }
 
+// terminalClosePassthrough closes a batch of terminals through the Daintree
+// terminal.close MCP tool (which takes ONE terminalId per call), looping so the
+// model can retire a whole spawned cohort in a SINGLE confirmed wrapper call
+// instead of N system-tier daintree.call confirmations. It reports faithfully (the
+// "report tool outcomes faithfully" rule): the summary names every id that closed
+// and every id that did not, and the result is a FAILURE if ANY close failed — a
+// partial outcome is never narrated as a clean success. A connection/cancellation
+// failure aborts the rest of the batch, since every remaining call would fail the
+// same way and hammering a dead link is pointless.
+func terminalClosePassthrough(ctx context.Context, mcp MCPClient, ids []string) tools.ToolResult {
+	var closed, failed, notAttempted []string
+	var abort tools.ToolResult // the fatal result (dead link / cancel) that stopped the batch
+	aborted := false
+	for i, id := range ids {
+		res := passthrough(ctx, mcp, "terminal.close", map[string]any{"terminalId": id}, "")
+		if res.Ok {
+			closed = append(closed, id)
+			continue
+		}
+		failed = append(failed, id)
+		if res.Error != nil && (res.Error.Code == codeMCPUnavailable || res.Error.Code == codeCancelled) {
+			// The link is gone or the turn was cancelled — every REMAINING id would fail
+			// identically. Stop, record the rest as not-attempted (so none silently
+			// vanishes from the report), and keep the abort's own code/recoverability
+			// (CANCELLED is unrecoverable; MCP_UNAVAILABLE carries the /reconnect hint)
+			// rather than flattening it to MCP_TOOL_ERROR below.
+			abort = res
+			aborted = true
+			notAttempted = append(notAttempted, ids[i+1:]...)
+			break
+		}
+	}
+	if len(failed) == 0 {
+		return tools.Ok(fmt.Sprintf("Closed %d terminal(s): %s.", len(closed), join(closed, ", ")),
+			map[string]any{"closed": closed})
+	}
+	// Name EVERY unclosed id (errored + not-attempted) so a partial outcome is never
+	// narrated as a clean success.
+	unclosed := append(append([]string{}, failed...), notAttempted...)
+	details := map[string]any{"closed": closed, "failed": failed}
+	if len(notAttempted) > 0 {
+		details["notAttempted"] = notAttempted
+	}
+	if aborted {
+		msg := fmt.Sprintf("Closed %d of %d terminal(s) before the batch aborted; did not close: %s. %s",
+			len(closed), len(ids), join(unclosed, ", "), abort.Error.Message)
+		if !abort.Error.Recoverable {
+			return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details), tools.Unrecoverable())
+		}
+		return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details))
+	}
+	msg := fmt.Sprintf("Closed %d of %d terminal(s); failed to close: %s.", len(closed), len(ids), join(unclosed, ", "))
+	return tools.Fail(codeMCPToolError, msg, tools.WithDetails(details))
+}
+
 // copyTreeInjectPassthrough mirrors terminalSendCommandPassthrough for
 // copyTree.injectToTerminal: the injected payload is a large, unnamed copy-tree
 // digest, so the summary names the destination terminal rather than echoing

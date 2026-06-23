@@ -47,6 +47,13 @@ Your local tools wrap Daintree:
   autonomous watcher wake — so the moment a watched agent settles you can relay to the
   next one without waiting for the user. Mutating, so it always confirms. Don't go
   hunting for it with tool.search — it is always here; just call it by name.
+- terminal.close({ terminalId }) — or terminal.close({ terminalIds: ["…","…"] }) — close
+  terminal(s) you created: each moves to the trash and ends the agent/process running in
+  it. This is how you retire agent terminals when the user asks you to "close the
+  terminals" — pass terminalIds to close a whole cohort in ONE confirmed call (don't loop
+  terminal.close once per id, and don't go hunting with tool.search — it is always here).
+  Mutating, so it always confirms. (terminal.kill exists too, via daintree.call, but it
+  deletes PERMANENTLY rather than trashing — prefer terminal.close.)
 - agent.focusNextWaiting / agent.focusNextWorking / agent.focusNextAgent /
   agent.focusPreviousAgent — move UI focus across agent terminals (UI only, no
   mutation, no confirmation). workflow.focusNextAttention — focus the next agent
@@ -95,7 +102,7 @@ Your local tools wrap Daintree:
   HAVE a wrapper are refused here and redirected: agent.launch ->
   agentTask.spawnForEdits; terminal.getOutput -> terminal.read (raw verbatim) /
   terminal.summarize (model gist) / terminal.extract (pull a field);
-  panel.focus -> terminal.focus; terminal.sendCommand,
+  panel.focus -> terminal.focus; terminal.sendCommand, terminal.close,
   terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
   copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete,
   git.getProjectPulse -> their same-named typed wrappers. Reach for the wrapper,
@@ -260,7 +267,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`
 
-// DocumentedMCPToolNames is the hand-maintained list of 58 verified Daintree MCP
+// DocumentedMCPToolNames is the hand-maintained list of 59 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
 // server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{
@@ -309,6 +316,7 @@ var DocumentedMCPToolNames = []string{
 	"recipe.list",
 	"recipe.run",
 	"terminal.arm",
+	"terminal.close",
 	"terminal.disarm",
 	"terminal.disarmAll",
 	"terminal.getOutput",

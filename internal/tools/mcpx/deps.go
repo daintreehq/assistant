@@ -70,6 +70,7 @@ func Tools(deps Deps) []tools.Tool {
 		newTerminalFocusTool(deps),
 		newCopyTreeGenerateTool(deps),
 		newTerminalSendCommandTool(deps),
+		newTerminalCloseTool(deps),
 		newTerminalArmTool(deps),
 		newTerminalDisarmTool(deps),
 		newTerminalDisarmAllTool(deps),
