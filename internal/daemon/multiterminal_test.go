@@ -222,7 +222,13 @@ func TestWatcher_ExploreWaitingReasonRouting(t *testing.T) {
 			mcp := newProgMCP(map[string]termCfg{
 				"term-x": {agentState: "waiting", waitingReason: tc.waitingReason, recentOutput: strptr("$ ")},
 			})
-			rec := watcherWith("wch_e", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: tc.spawnMode}))
+			// SeenWorking seeds the working→waiting transition so an explore-idle
+			// reading is a genuine completion (not the pre-start prompt the watcher
+			// must NOT misread on the first tick).
+			rec := watcherWith("wch_e", []string{"term-x"}, withOptions(watcherOptions{
+				SpawnMode:   tc.spawnMode,
+				PerTerminal: map[string]TerminalState{"term-x": {SeenWorking: true}},
+			}))
 			store.watchers = []domain.WatcherRecord{rec}
 
 			out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
@@ -246,12 +252,87 @@ func TestWatcher_ExploreCompletionTerminalEvenWhenDirty(t *testing.T) {
 	// must still be terminal (not completed_unverified looping forever).
 	mcp.pulse = &MCPResult{StructuredContent: map[string]any{"isDirty": true, "changedFiles": float64(3)}}
 	rec := watcherWith("wch_ed", []string{"term-x"},
-		withOptions(watcherOptions{SpawnMode: "explore", VerificationScope: &verificationScope{WorktreeID: "wt-x"}}))
+		withOptions(watcherOptions{SpawnMode: "explore", VerificationScope: &verificationScope{WorktreeID: "wt-x"},
+			PerTerminal: map[string]TerminalState{"term-x": {SeenWorking: true}}}))
 	store.watchers = []domain.WatcherRecord{rec}
 
 	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
 	if out.Classification != domain.ClassCompletedSuccess {
 		t.Fatalf("explore idle is completion regardless of git state, got %s", out.Classification)
+	}
+}
+
+// Regression (false "completed success" ~3s after spawn): a freshly spawned
+// explore agent parks at "waiting" (at its prompt, before the injected prompt is
+// submitted) for several seconds. The first watcher tick must NOT misread that
+// pre-start prompt as completion — it may report completion only after a real
+// working→waiting transition. Drives three ticks: prompt → working → prompt.
+func TestWatcher_ExploreFreshWaitingDefersUntilSeenWorking(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+
+	// Tick 1: just spawned, parked at its prompt, never worked yet (inside grace).
+	mcp := newProgMCP(map[string]termCfg{
+		"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ ")},
+	})
+	rec := watcherWith("wch_fresh", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"}))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out.Classification == domain.ClassCompletedSuccess || out.Stop {
+		t.Fatalf("fresh explore agent at prompt must NOT complete on first tick; got %s stop=%v", out.Classification, out.Stop)
+	}
+	if store.watchPatches["wch_fresh"]["status"] != "active" {
+		t.Error("watcher must stay active while the agent is still starting up")
+	}
+	if hasAttentionFor(queue, "term-x") {
+		t.Error("no completion attention should be published before the agent has worked")
+	}
+
+	// Tick 2: agent is now working — replay the persisted state forward.
+	rec.OptionsJson = ptrStr(store.watchPatches["wch_fresh"]["optionsJson"].(string))
+	mcp.perTerminal["term-x"] = termCfg{agentState: "working", recentOutput: strptr("⏺ Reading files…")}
+	out2 := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out2.Classification != domain.ClassStillWorking || out2.Stop {
+		t.Fatalf("working agent → still_working (active), got %s stop=%v", out2.Classification, out2.Stop)
+	}
+
+	// Tick 3: agent returned to its prompt — NOW it is a genuine completion.
+	rec.OptionsJson = ptrStr(store.watchPatches["wch_fresh"]["optionsJson"].(string))
+	mcp.perTerminal["term-x"] = termCfg{agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ ")}
+	out3 := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out3.Classification != domain.ClassCompletedSuccess || !out3.Stop {
+		t.Fatalf("working→waiting transition → completed_success+stop, got %s stop=%v", out3.Classification, out3.Stop)
+	}
+}
+
+// resolveAbsent counterpart of the working→waiting gate: getStatus omits the
+// terminal but terminal.list reports it freshly "waiting" (parked at its prompt,
+// never worked). Inside the spawn grace an explore watcher must DEFER (no_change,
+// active); past the grace the same idle is accepted as completion via the safety
+// net (covering the never-seen-working fallback path explicitly).
+func TestWatcher_ExploreAbsentFreshWaitingDefers(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{}) // getStatus omits term-x
+	mcp.list = []map[string]any{{"id": "term-x", "agentState": "waiting", "waitingReason": "prompt"}}
+	rec := watcherWith("wch_abs", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"})) // fresh → inside grace
+
+	store.watchers = []domain.WatcherRecord{rec}
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out.Classification == domain.ClassCompletedSuccess || out.Stop {
+		t.Fatalf("fresh explore agent absent-but-listed-waiting must NOT complete; got %s stop=%v", out.Classification, out.Stop)
+	}
+	if store.watchPatches["wch_abs"]["status"] != "active" {
+		t.Error("watcher must stay active while the agent is still starting up")
+	}
+
+	// Past the spawn grace, the never-seen-working safety net accepts the idle.
+	recAged := aged(rec)
+	store.watchers = []domain.WatcherRecord{recAged}
+	outAged := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), recAged)
+	if outAged.Classification != domain.ClassCompletedSuccess || !outAged.Stop {
+		t.Fatalf("explore absent-listed-waiting past grace → completed_success+stop, got %s stop=%v", outAged.Classification, outAged.Stop)
 	}
 }
 

@@ -131,8 +131,9 @@ var summarizeSchema = json.RawMessage(`{
 func newSummarizeTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.summarize",
-		Description: "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. Use this instead of " +
-			"dumping raw scrollback into context. Read-only; requires Daintree MCP.",
+		Description: "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. This is the DEFAULT way to " +
+			"relay what an agent said: a coding agent's raw scrollback is garbled, repainted TUI output, so summarizing it gives clean prose " +
+			"and keeps it out of your context. Prefer this over terminal.read unless the user needs the exact literal text. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: summarizeSchema,
 		Decode: tools.StrictDecoder(func() any { return &summarizeArgs{} }),
@@ -182,7 +183,7 @@ func newSummarizeTool(deps Deps) tools.Tool {
 			}
 			note := ""
 			if truncated {
-				note = "⚠ This summary is cut off: the summarizer hit its token cap. For the complete text use terminal.read (raw scrollback, no model, no cap).\n\n"
+				note = "⚠ This summary is cut off: the summarizer hit its token cap. Relay this gist as-is; only if you genuinely need the exact literal text, fall back to a bounded terminal.read.\n\n"
 			}
 			summary := note + body
 			return tools.Ok(summary, map[string]any{
@@ -231,10 +232,10 @@ var readSchema = json.RawMessage(`{
 func newReadTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.read",
-		Description: "Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap. Use this to relay " +
-			"exactly what an agent said, or when you need the literal text. Prefer this over terminal.summarize/terminal.extract " +
-			"whenever you want the output reproduced rather than interpreted: those route through a small model that paraphrases and " +
-			"can truncate. Read-only; requires Daintree MCP.",
+		Description: "Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap. Use this ONLY when you need " +
+			"the exact literal text (the user asked for a precise quote, or you must inspect exact output). For the common 'tell me what the " +
+			"agent said' case, prefer terminal.summarize: a coding agent's raw scrollback is garbled, repainted TUI output that bloats context " +
+			"and reads as broken when pasted back. Request a bounded tail and never echo the whole frame to the user. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: readSchema,
 		Decode: tools.StrictDecoder(func() any { return &readArgs{} }),
@@ -261,13 +262,18 @@ func newReadTool(deps Deps) tools.Tool {
 			if a.TailBytes != nil {
 				content = lastRunes(content, *a.TailBytes)
 			}
-			summary := content
-			if summary == "" {
-				summary = "(no output captured)"
-			}
 			lineCount := 0
 			if content != "" {
 				lineCount = len(strings.Split(content, "\n"))
+			}
+			// Summary is a concise descriptor, NOT the scrollback itself. The raw
+			// content lives in result.content (what the model reads when it wants the
+			// verbatim text); echoing it into the summary too both doubled the model's
+			// context and let the cockpit render a slice of garbled terminal bytes as
+			// the activity-row detail. Keep the summary clean and bounded.
+			summary := fmt.Sprintf("Read %d line(s) (%d chars) from terminal.", lineCount, len([]rune(content)))
+			if content == "" {
+				summary = "No output captured from terminal."
 			}
 			return tools.Ok(summary, map[string]any{
 				"terminalId": a.TerminalID, "content": content, "lineCount": lineCount,

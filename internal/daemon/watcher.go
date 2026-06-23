@@ -143,7 +143,7 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			UsedModel:      usedModel,
 		})
 
-		// Persist per-terminal state: latch prev + seen.
+		// Persist per-terminal state: latch prev + seen + seenWorking.
 		base := perTerminal[terminalID]
 		seen := false
 		if prevState != nil {
@@ -152,6 +152,17 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		seen = seen || hasEntry || (list != nil && listHas(list, terminalID))
 		base.Prev = string(outcome.Classification)
 		base.Seen = seen
+		// Latch SeenWorking the first time this terminal's agent is observed working
+		// (present getStatus or the list fallback both surface it via signals). Once
+		// set it stays set — the gate is "have we EVER seen it work", not "is it
+		// working now". This is what turns a later "waiting" into a real completion
+		// rather than the pre-start prompt.
+		if prevState != nil && prevState.SeenWorking {
+			base.SeenWorking = true
+		}
+		if signals.AgentState == "working" {
+			base.SeenWorking = true
+		}
 		perTerminal[terminalID] = base
 
 		// Resource subscription bookkeeping. A present agent terminal (has an
@@ -162,7 +173,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		if hasEntry && entry.AgentID != "" {
 			st := ensureSubscribed(ctx, supportsSub, entry.AgentID, perTerminal[terminalID])
 			perTerminal[terminalID] = st
-			quietSubscribed = st.Subscribed && isQuietState(entry.AgentState)
+			// A not-yet-started agent reads as "waiting" (quiet) but we must NOT widen
+			// the poll for it — we want the fast tick to catch its working transition
+			// promptly even if the push is missed. Only an agent we've already seen
+			// work counts as genuinely quiet/idle.
+			quietSubscribed = st.Subscribed && st.SeenWorking && isQuietState(entry.AgentState)
 		}
 		if !quietSubscribed {
 			allQuietSubscribed = false
@@ -320,13 +335,19 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 
 		case agentState == "waiting":
 			if options.SpawnMode == "explore" && listed.WaitingReason != "question" {
-				// Explore-idle = finished its turn. Explore is READ-ONLY by intent, so its
-				// completion is terminal regardless of git state and is NOT routed through the
-				// git-clean gate (the summary claims only "finished its turn", never a clean/
-				// verified tree, and the daemon attaches no irreversible action). Enforcing that
-				// an explore agent truly cannot edit belongs at the Daintree spawn layer.
-				ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, terminal.list)", parens(listed.WaitingReason))}
-				return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+				// Explore-idle = finished its turn — but ONLY after a real working→waiting
+				// transition (or the spawn grace has elapsed); see exploreSettledComplete.
+				// Explore is READ-ONLY by intent, so a genuine completion is terminal
+				// regardless of git state and is NOT routed through the git-clean gate (the
+				// summary claims only "finished its turn", never a clean/verified tree, and
+				// the daemon attaches no irreversible action). Enforcing that an explore
+				// agent truly cannot edit belongs at the Daintree spawn layer.
+				if exploreSettledComplete(prevState, rec, now) {
+					ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working; terminal.list)", parens(listed.WaitingReason))}
+					return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+				}
+				ev := []string{fmt.Sprintf("agentState=waiting%s (explore, not yet started; terminal.list)", parens(listed.WaitingReason))}
+				return domain.ClassNoChange, 0.5, "Explore agent spawned; waiting to start its turn.", ev, signals, false
 			}
 			sum := "Agent is waiting for input."
 			if listed.WaitingReason == "question" {
@@ -424,12 +445,20 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 
 	case agentState == "waiting":
 		if options.SpawnMode == "explore" && waitingReason != "question" {
-			// Explore-idle = finished its turn. Explore is READ-ONLY by intent, so its completion
-			// is terminal regardless of git state and is intentionally NOT git-gated (the summary
-			// claims only "finished its turn", never a clean/verified tree; no irreversible action
-			// is attached). Enforcing that explore truly cannot edit is a Daintree-spawn concern.
-			ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle)", parens(waitingReason))}
-			return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+			// Explore-idle = finished its turn — but ONLY after a real working→waiting
+			// transition (or the spawn grace has elapsed); see exploreSettledComplete. A
+			// freshly spawned agent parks at "waiting" before it picks up the prompt, so
+			// without the gate the first tick misreads that pre-start prompt as "done".
+			// Explore is READ-ONLY by intent, so a genuine completion is terminal
+			// regardless of git state and is intentionally NOT git-gated (the summary
+			// claims only "finished its turn", never a clean/verified tree; no
+			// irreversible action is attached).
+			if exploreSettledComplete(prevState, rec, now) {
+				ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working)", parens(waitingReason))}
+				return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+			}
+			ev := []string{fmt.Sprintf("agentState=waiting%s (explore, not yet started)", parens(waitingReason))}
+			return domain.ClassNoChange, 0.5, "Explore agent spawned; waiting to start its turn.", ev, signals, false
 		}
 		sum := "Agent is waiting for input."
 		ev := []string{fmt.Sprintf("agentState=waiting%s", parens(waitingReason))}
@@ -641,6 +670,21 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 		"status":      string(wfStatus),
 		"completedAt": now,
 	})
+}
+
+// exploreSettledComplete reports whether an explore-mode agent now sitting at
+// "waiting" should be treated as having finished its turn. The primary signal is a
+// real working→waiting transition (SeenWorking latched on a prior tick). As a
+// safety net, once the spawn-grace window has elapsed a stable idle is accepted
+// even if the working tick was never caught (an agent that finished between two
+// checks, or a server that never surfaced "working") — that keeps the watcher from
+// stalling forever while still killing the first-tick false completion, which fires
+// well inside the grace window.
+func exploreSettledComplete(prevState *TerminalState, rec domain.WatcherRecord, now int64) bool {
+	if prevState != nil && prevState.SeenWorking {
+		return true
+	}
+	return now-rec.CreatedAt >= WatcherSpawnGraceMS
 }
 
 func humanize(c domain.WatcherClassification) string {

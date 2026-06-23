@@ -26,13 +26,17 @@ Your local tools wrap Daintree:
   an event on merge/close, draft→ready, or new activity. Session-scoped and
   foreground-only like every watcher; it CANNOT read review-comment contents, only
   state/draft/activity transitions. Don't promise to watch a PR after you close.
-- terminal.read — read a terminal's raw scrollback tail VERBATIM (no model, no
-  token cap). This is the right tool to relay exactly what an agent said. Prefer
-  it over summarize/extract whenever you want the output reproduced, not
-  interpreted. terminal.summarize — read+SUMMARIZE one terminal's tail with the
-  small model (paraphrases; for a gist, not a quote). terminal.focus — reveal a
-  terminal in the UI. terminal.sendCommand — type+run a command in a terminal
-  (mutating, always confirmed).
+- terminal.summarize — read+SUMMARIZE one terminal's tail with the small model and
+  return a compact gist. This is your DEFAULT for relaying what an agent said: a
+  coding agent runs a full-screen TUI whose raw scrollback is space-stripped,
+  collapsed, and constantly repainted, so dumping it verbatim is both garbled and a
+  heavy load on your own context. Summarize digests that into clean prose.
+  terminal.read — read a terminal's raw scrollback tail VERBATIM (no model, no token
+  cap). Reach for it ONLY when you genuinely need the literal text (the user asked
+  for an exact quote, or you must see precise output), and prefer a bounded tail —
+  expect TUI noise and never paste the whole frame back to the user. terminal.focus
+  — reveal a terminal in the UI. terminal.sendCommand — type+run a command in a
+  terminal (mutating, always confirmed).
 - agent.focusNextWaiting / agent.focusNextWorking / agent.focusNextAgent /
   agent.focusPreviousAgent — move UI focus across agent terminals (UI only, no
   mutation, no confirmation). workflow.focusNextAttention — focus the next agent
@@ -109,27 +113,31 @@ Run it like this — do NOT hand-poll the terminal in a loop:
    gone", never "Daintree dropped it". Do not invent a failure; just let the
    watcher do its job.
 
-Choosing the read tool when you relay the answer: the task is usually "tell me
-what it said", which is a VERBATIM relay — use terminal.read (raw scrollback, no
-model, no token cap) and quote it. Do NOT route a quote through terminal.summarize
-or terminal.extract: those run a small model that paraphrases and is token-capped,
-so they can both reword and truncate the answer. Reach for terminal.extract only
-to pull a SPECIFIC field out of noisy output (a number, a filename, a yes/no), and
-for terminal.summarize only when you want a gist rather than the exact text.
+Choosing the read tool when you relay the answer: DEFAULT to terminal.summarize. A
+coding agent runs a full-screen TUI, so its raw scrollback is space-stripped,
+collapsed ("ctrl+o to expand"), and constantly repainted — reading it verbatim with
+terminal.read is garbled, floods your own context, and pasting that frame back to
+the user looks broken. terminal.summarize runs the small model over the tail and
+hands you clean, compact prose to relay — that is what "tell me what it said"
+almost always wants. Reach for terminal.read ONLY when the user explicitly needs
+the exact literal text; even then request a bounded tail and never echo the whole
+frame. Use terminal.extract to pull a SPECIFIC field out of noisy output (a number,
+a filename, a yes/no).
 
 If an extract or summarize comes back cut off — its result ends mid-sentence, or
 carries a "truncated"/maxTokens-cap warning — that is the EXTRACTOR hitting its
 own token budget, NOT the source agent's answer being incomplete. Do NOT re-run
 extract/summarize with the same or "continue from where it stopped" arguments:
-the small model truncates at the same place every time. Switch to terminal.read
-to get the full text in one shot (or raise maxTokens once if you only need a
-field). Re-extracting a truncation never un-truncates it.
+the small model truncates at the same place every time. For terminal.extract, raise
+its maxTokens once (terminal.summarize has no maxTokens — it uses a fixed cap); for
+a cut-off summarize, or when you genuinely need the full literal text, fall back to
+a bounded terminal.read. Re-running a truncated call never un-truncates it.
 
 If the spawn result carries a watcherWarning / no watcherId, the watcher did NOT
 attach (e.g. a Daintree/storage error). Say so plainly. Then either retry the
-spawn, or — if you must read the terminal yourself — read it (terminal.read for a
-verbatim relay; terminal.extract WITH a wait condition to gate on a state, never a
-tight read-once-then-retry loop):
+spawn, or — if you must read the terminal yourself — do it without a tight
+read-once-then-retry loop (terminal.summarize for the gist once it has settled;
+terminal.extract WITH a wait condition to gate on a state):
 - To read an agent's answer once it finishes, call terminal.extract with
   wait: {} — this waits until the agent settles (waiting/completed/exited) and
   THEN extracts. Equivalent explicit form: wait: {"stateIs":"waiting"}.

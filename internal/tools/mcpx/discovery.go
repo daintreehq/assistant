@@ -172,7 +172,7 @@ func newSearchTool(deps Deps) tools.Tool {
 // padded " recipe.run " variant cannot bypass the redirect.
 var wrappedMCPTools = map[string]string{
 	"agent.launch":                 `agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)`,
-	"terminal.getOutput":           "terminal.read (raw scrollback VERBATIM — use this to relay what an agent said), terminal.summarize (model gist of the tail), or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
+	"terminal.getOutput":           "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), or terminal.extract (pull specific text/JSON, optionally waiting for a condition)",
 	"panel.focus":                  "terminal.focus",
 	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
 	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",

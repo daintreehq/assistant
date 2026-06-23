@@ -124,7 +124,13 @@ func TestWatcher_WidensCadenceWhenSubscribedAndQuiet(t *testing.T) {
 		"term-a": {agentID: "agt-1", agentState: "waiting", recentOutput: strptr("")},
 	})
 	mcp.supportsSub = true
-	rec := watcherWith("wch_w", []string{"term-a"}) // CadenceMs 10_000
+	// Steady state: the agent has already worked and is now subscribed + idle.
+	// SeenWorking is required before idle counts as "quiet" — a not-yet-started
+	// agent stays on the fast cadence so its working transition is caught promptly.
+	opts := watcherOptions{PerTerminal: map[string]TerminalState{
+		"term-a": {Subscribed: true, AgentID: "agt-1", ResourceURI: "daintree://agent/agt-1/state", Seen: true, SeenWorking: true},
+	}}
+	rec := watcherWith("wch_w", []string{"term-a"}, withOptions(opts)) // CadenceMs 10_000
 	store.watchers = []domain.WatcherRecord{rec}
 
 	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, workingModel()), rec)
@@ -134,6 +140,33 @@ func TestWatcher_WidensCadenceWhenSubscribedAndQuiet(t *testing.T) {
 	last, _ := patch["lastCheckedAt"].(int64)
 	if got := next - last; got != SubscribedReconcileMS {
 		t.Errorf("subscribed+quiet should widen cadence to %d, got %d", SubscribedReconcileMS, got)
+	}
+}
+
+// Negative of the widen test: subscribed + idle but NEVER seen working (just
+// spawned, parked at its prompt). The poll must stay on the fast cadence so the
+// agent's working transition is caught promptly even if the push is missed.
+func TestWatcher_DoesNotWidenCadenceBeforeSeenWorking(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{
+		"term-a": {agentID: "agt-1", agentState: "waiting", recentOutput: strptr("")},
+	})
+	mcp.supportsSub = true
+	// Subscribed in a prior tick, but SeenWorking has never latched.
+	opts := watcherOptions{PerTerminal: map[string]TerminalState{
+		"term-a": {Subscribed: true, AgentID: "agt-1", ResourceURI: "daintree://agent/agt-1/state"},
+	}}
+	rec := watcherWith("wch_nw", []string{"term-a"}, withOptions(opts)) // CadenceMs 10_000
+	store.watchers = []domain.WatcherRecord{rec}
+
+	RunTerminalWatcherCheck(ctxFor(store, queue, mcp, workingModel()), rec)
+
+	patch := store.watchPatches["wch_nw"]
+	next, _ := patch["nextCheckAt"].(int64)
+	last, _ := patch["lastCheckedAt"].(int64)
+	if got := next - last; got != int64(rec.CadenceMs) {
+		t.Errorf("not-yet-worked agent must stay on the normal cadence %d, not widen to %d; got %d", rec.CadenceMs, SubscribedReconcileMS, got)
 	}
 }
 

@@ -71,7 +71,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 	// present; an all-follow-up batch swaps in acknowledge-only guidance instead.
 	var guidance string
 	if anyNew {
-		guidance = "Decide what to do. If a watched terminal finished, is waiting for input, or failed, read it and give the user a concise update — use terminal.read to relay what the agent said verbatim, terminal.summarize for a gist, or terminal.extract to pull a specific field. If it isn't worth acting on, say so in one line."
+		guidance = "Decide what to do. If a watched terminal finished, is waiting for input, or failed, give the user a concise update — DEFAULT to terminal.summarize for a clean gist of what the agent said (its raw scrollback is garbled TUI noise and bloats your context); use terminal.extract to pull a specific field, and terminal.read only when the user needs the exact literal text. Relay the gist; do NOT paste raw terminal output. If it isn't worth acting on, say so in one line."
 	} else {
 		guidance = "Every event below is a terminal you have already reported this session — these are lifecycle transitions only. Acknowledge each in one short line; do NOT call terminal.read/terminal.summarize/terminal.extract again."
 	}

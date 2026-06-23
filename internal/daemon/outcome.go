@@ -183,10 +183,17 @@ func hashTail(s string) string {
 
 // TerminalState is per-terminal memory persisted in the watcher's optionsJson.
 type TerminalState struct {
-	Prev            string `json:"prev,omitempty"`
-	OutHash         string `json:"outHash,omitempty"`
-	OutAt           int64  `json:"outAt,omitempty"`
-	Seen            bool   `json:"seen,omitempty"`
+	Prev    string `json:"prev,omitempty"`
+	OutHash string `json:"outHash,omitempty"`
+	OutAt   int64  `json:"outAt,omitempty"`
+	Seen    bool   `json:"seen,omitempty"`
+	// SeenWorking latches once this terminal's agent has actually been observed in
+	// the "working" state. It is the working→waiting completion gate: a freshly
+	// spawned agent parks at "waiting" (at its prompt, before the injected prompt is
+	// submitted) for several seconds, so a "waiting" reading is only a real
+	// end-of-turn once we have first seen it work. Without this latch the first tick
+	// (~3s, inside the spawn grace) misreads the pre-start prompt as "completed".
+	SeenWorking     bool   `json:"seenWorking,omitempty"`
 	ReadFailures    int    `json:"readFailures,omitempty"`
 	LastClassifyKey string `json:"lastClassifyKey,omitempty"`
 	// Subscribed records that this terminal's agent-state resource (ResourceURI,
