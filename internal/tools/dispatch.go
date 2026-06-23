@@ -134,11 +134,12 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 			if tctx.Confirm != nil {
 				// A thrown/errored confirm is treated as a DECLINE, never approval.
 				ok, err := tctx.Confirm(ctx, ConfirmRequest{
-					ToolName:    name,
-					Risk:        tool.Risk,
-					Summary:     tool.Description,
-					Consequence: tool.Consequence,
-					Args:        args,
+					ToolName:          name,
+					Risk:              tool.Risk,
+					Summary:           tool.Description,
+					Consequence:       tool.Consequence,
+					Args:              args,
+					NeedsTypedConfirm: safety.NeedsTypedConfirm(tool.Risk),
 				})
 				approved = err == nil && ok
 			}

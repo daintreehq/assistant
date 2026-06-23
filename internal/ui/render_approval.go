@@ -15,6 +15,13 @@ import (
 
 // titleFor returns the risk-specific question.
 func titleFor(req tools.ConfirmRequest) string {
+	// daintree.call is the raw MCP escape hatch (RiskSystem). Name it specifically so
+	// the riskiest forge writes don't hide under the generic system-level title; the
+	// exact-name match precedes the risk switch so a future RiskSystem tool still gets
+	// the generic phrasing.
+	if req.ToolName == "daintree.call" {
+		return "Call a raw MCP tool?"
+	}
 	switch req.Risk {
 	case domain.RiskGit:
 		// Distinguish the common git verbs by tool name when we can.
@@ -90,6 +97,11 @@ func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
 	b.WriteByte('\n')
 	// Tool (dim secondary).
 	b.WriteString(th.Dim().Render(truncateCells("tool     "+req.ToolName, width)))
+	b.WriteByte('\n')
+	// Risk class (dim secondary) — surfaces the safety taxonomy bucket at the moment
+	// of decision so the human can see WHICH class of action they're approving, not
+	// just its consequence prose. Column-aligned with the affects/tool rows.
+	b.WriteString(th.Dim().Render(truncateCells("risk     "+string(req.Risk), width)))
 
 	if p.showArgs {
 		if req.Summary != "" {

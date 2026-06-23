@@ -38,6 +38,14 @@ var alwaysConfirm = setOf(
 	domain.RiskGit, domain.RiskExternal, domain.RiskSystem,
 )
 
+// typedConfirm is the SUBSET of alwaysConfirm whose actions are irreversible
+// enough to demand a typed phrase (not a single keypress) from the interactive
+// human: system-level calls (daintree.call) and ALL git operations (the only
+// RiskGit tools discard or delete uncommitted work). This is a single policy
+// axis so every surface — cockpit AND classic REPL — gates the same action with
+// equal friction, rather than each UI re-deriving the rule for itself.
+var typedConfirm = setOf(domain.RiskGit, domain.RiskSystem)
+
 // TierAllowsRisk reports whether tier may perform risk at all.
 func TierAllowsRisk(tier domain.Tier, risk domain.RiskClass) bool {
 	allowed, ok := tierAllowed[tier]
@@ -49,6 +57,12 @@ func TierAllowsRisk(tier domain.Tier, risk domain.RiskClass) bool {
 
 // AlwaysConfirm reports whether the risk class is in the always-confirm set.
 func AlwaysConfirm(risk domain.RiskClass) bool { return alwaysConfirm[risk] }
+
+// NeedsTypedConfirm reports whether the risk class demands a typed-phrase
+// confirmation (git/system) rather than a single-key approval. It is the single
+// source of truth carried on tools.ConfirmRequest.NeedsTypedConfirm so the
+// cockpit and the classic REPL enforce the same friction for the same action.
+func NeedsTypedConfirm(risk domain.RiskClass) bool { return typedConfirm[risk] }
 
 // PolicyDecision is the result of evaluating a (risk, tier) pair.
 type PolicyDecision struct {

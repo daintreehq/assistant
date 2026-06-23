@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/safety"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
@@ -155,7 +156,8 @@ func newCreateTool(deps Deps) *tools.Tool {
 						Consequence: "Pre-authorizes an automation actor to run mutating tools unattended.",
 						Summary: fmt.Sprintf("Pre-authorize %s %s to run %s unattended (%d use(s), TTL %dms)?",
 							a.ActorType, a.ActorID, scopeDescription(risks, toolNames), a.MaxUses, a.TTLMs),
-						Args: args,
+						Args:              args,
+						NeedsTypedConfirm: safety.NeedsTypedConfirm(domain.RiskSystem),
 					})
 					approved = err == nil && ok
 				}

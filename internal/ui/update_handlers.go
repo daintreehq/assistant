@@ -540,10 +540,13 @@ func (m Model) onApprovalRequested(msg ApprovalRequestedMsg) (tea.Model, tea.Cmd
 		}
 	}
 	m.pending = &pendingConfirm{
-		req:         msg.Request,
-		resolve:     msg.Resolve,
-		shownAt:     domain.NowMS(),
-		requireType: needsTypedConfirm(msg.Request.Risk),
+		req:     msg.Request,
+		resolve: msg.Resolve,
+		shownAt: domain.NowMS(),
+		// The typed-confirm requirement is decided once at the safety gate and carried
+		// on the request, so the cockpit and the classic REPL gate the same action with
+		// identical friction (no per-surface re-derivation).
+		requireType: msg.Request.NeedsTypedConfirm,
 	}
 	if t := m.activeTurnCell(); t != nil {
 		t.Phase = domain.PhaseAwaitingApproval
@@ -748,17 +751,6 @@ func rememberable(r domain.RiskClass) bool {
 		return false
 	}
 	return true
-}
-
-// needsTypedConfirm marks the most irreversible actions — system-level calls (daintree.call)
-// and ALL git operations (the only RiskGit tools are git.snapshotRevert / git.snapshotDelete,
-// which discard or delete uncommitted work) — that demand a typed phrase, not a single keypress.
-func needsTypedConfirm(risk domain.RiskClass) bool {
-	switch risk {
-	case domain.RiskSystem, domain.RiskGit:
-		return true
-	}
-	return false
 }
 
 // isPrintableText reports whether s is safe printable text to append to an input field

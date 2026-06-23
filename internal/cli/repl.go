@@ -46,18 +46,7 @@ func startRepl(ctx context.Context, a *app.App) int {
 		return strings.TrimSpace(line)
 	}
 
-	// Known limitation: a Ctrl-C WHILE this approval prompt is waiting for y/N input does
-	// NOT cancel the turn — the classic REPL runs in cooked mode, so the blocking line read
-	// can't be interrupted by a signal (no raw-mode key handling here, unlike the cockpit).
-	// The decision is reached by typing n / Enter (declines, the safe default); Ctrl-C takes
-	// effect once control returns to the main prompt loop.
-	confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
-		r.Warn(r.Bold(req.ToolName) + " (" + string(req.Risk) + ") wants to run:\n     " +
-			req.Summary + "\n     args: " + render.Truncate(string(req.Args), 200))
-		answer := ask(r.Yellow("   approve? [y/N] "))
-		a := strings.ToLower(strings.TrimSpace(answer))
-		return a == "y" || a == "yes", nil
-	}
+	confirm := buildConfirmFunc(r, ask)
 	logHook := func(m string) { r.Line(r.Gray("  · " + m)) }
 
 	a.SetHooks(app.AppHooks{
@@ -134,6 +123,38 @@ func startRepl(ctx context.Context, a *app.App) int {
 	_ = a.Shutdown()
 	r.Line(r.Gray("Goodbye."))
 	return 0
+}
+
+// replConfirmPhrase is the word the human must type to approve a typed-confirm
+// action in the classic REPL. It matches internal/ui's confirmPhrase so git/
+// system actions are equally hard to approve on either surface — keep in sync.
+const replConfirmPhrase = "confirm"
+
+// buildConfirmFunc builds the classic-REPL approval handler. It mirrors the
+// cockpit's two-tier friction off the safety gate's verdict (req.NeedsTypedConfirm):
+// the riskiest git/system actions demand the human type "confirm" (not a bare y),
+// while everything else keeps the single-key [y/N] prompt. Extracted from the
+// inline closure so the typed-confirm branch is unit-testable without a real stdin.
+//
+// Known limitation: a Ctrl-C WHILE this prompt is waiting for input does NOT cancel
+// the turn — the classic REPL runs in cooked mode, so the blocking line read can't
+// be interrupted by a signal (no raw-mode key handling here, unlike the cockpit).
+// The decision is reached by typing n / Enter (declines, the safe default); Ctrl-C
+// takes effect once control returns to the main prompt loop.
+func buildConfirmFunc(r *render.Renderer, ask func(string) string) func(context.Context, tools.ConfirmRequest) (bool, error) {
+	return func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
+		r.Warn(r.Bold(req.ToolName) + " (" + string(req.Risk) + ") wants to run:\n     " +
+			req.Summary + "\n     args: " + render.Truncate(string(req.Args), 200))
+		if req.NeedsTypedConfirm {
+			// Irreversible (git/system): require the typed phrase, never a single key.
+			r.Warn(`This action is irreversible.`)
+			answer := ask(r.Yellow(`   type "` + replConfirmPhrase + `" to approve: `))
+			return strings.EqualFold(strings.TrimSpace(answer), replConfirmPhrase), nil
+		}
+		answer := ask(r.Yellow("   approve? [y/N] "))
+		a := strings.ToLower(strings.TrimSpace(answer))
+		return a == "y" || a == "yes", nil
+	}
 }
 
 // runReplTurn runs one user turn under a cancellable child context. A Ctrl-C (sigCh)
