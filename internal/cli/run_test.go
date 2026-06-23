@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -51,5 +54,30 @@ func TestRunOneShot_MissingKeyReturnsEarlyError(t *testing.T) {
 	opts.HasPrompt = true
 	if code := RunOneShot(context.Background(), opts); code != domain.OneShotExitCode.Error {
 		t.Fatalf("one-shot with no key must exit Error(%d) before a model call, got %d", domain.OneShotExitCode.Error, code)
+	}
+}
+
+// The missing-key preflight must short-circuit BEFORE any model request — proving
+// it is genuinely early (no dead round-trip), not just error-shaped. The model
+// client is pointed at a counting server that a removed preflight would hit.
+func TestRunOneShot_MissingKeyMakesNoModelRequest(t *testing.T) {
+	var modelHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&modelHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("FIREWORKS_API_KEY", "")
+	t.Setenv("FIREWORKS_BASE_URL", srv.URL) // a real model call would land here
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	// NOT offline: a removed preflight would build a live client and dial srv.
+	opts := Options{Project: t.TempDir(), Prompt: "hello", HasPrompt: true}
+
+	if code := RunOneShot(context.Background(), opts); code != domain.OneShotExitCode.Error {
+		t.Fatalf("one-shot with no key must exit Error(%d), got %d", domain.OneShotExitCode.Error, code)
+	}
+	if n := atomic.LoadInt32(&modelHits); n != 0 {
+		t.Fatalf("preflight must short-circuit before any model request; got %d", n)
 	}
 }

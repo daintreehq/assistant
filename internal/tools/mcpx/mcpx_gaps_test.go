@@ -3,6 +3,7 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -70,6 +71,35 @@ func TestMCPUnavailableErrorsNameReconnect(t *testing.T) {
 		}
 		if !strings.Contains(res.Error.Message, "/reconnect") {
 			t.Errorf("%s hint must name /reconnect: %q", tc.name, res.Error.Message)
+		}
+	}
+}
+
+// A connection that reports Connected()==true but then errors mid-RPC (a stale
+// link dropping during ListTools/search) is also MCP_UNAVAILABLE, and must carry
+// the same /reconnect recovery hint as the up-front disconnected check.
+func TestMCPStaleConnectionErrorsNameReconnect(t *testing.T) {
+	stale := &fakeMCP{connected: true, listErr: errors.New("stream reset")}
+
+	cases := []struct {
+		name string
+		tool tools.Tool
+		args string
+	}{
+		{"daintree.listTools", newListToolsTool(Deps{MCP: stale}), `{}`},
+		{"tool.search", newSearchTool(Deps{MCP: stale}), `{"query":"x"}`},
+	}
+	for _, tc := range cases {
+		decoded, err := tc.tool.Decode(json.RawMessage(tc.args))
+		if err != nil {
+			t.Fatalf("%s decode: %v", tc.name, err)
+		}
+		res := tc.tool.Handle(context.Background(), decoded, &tools.ToolContext{})
+		if res.Ok || res.Error.Code != codeMCPUnavailable {
+			t.Fatalf("%s mid-RPC failure should be MCP_UNAVAILABLE, got %+v", tc.name, res)
+		}
+		if !strings.Contains(res.Error.Message, "/reconnect") {
+			t.Errorf("%s stale-connection hint must name /reconnect: %q", tc.name, res.Error.Message)
 		}
 	}
 }

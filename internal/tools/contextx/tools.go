@@ -141,7 +141,7 @@ func newSummarizeTool(deps Deps) tools.Tool {
 			_ = json.Unmarshal(raw, &a)
 
 			if !deps.MCP.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
 			if ctx.Err() != nil {
 				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
@@ -246,7 +246,7 @@ func newReadTool(deps Deps) tools.Tool {
 				maxLines = *a.MaxLines
 			}
 			if !deps.MCP.Connected() {
-				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read.")
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
 			if ctx.Err() != nil {
 				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())

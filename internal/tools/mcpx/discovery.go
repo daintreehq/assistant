@@ -81,7 +81,7 @@ func newListToolsTool(deps Deps) tools.Tool {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while listing MCP tools.", tools.Unrecoverable())
 				}
-				return tools.Fail(codeMCPUnavailable, "Could not list Daintree MCP tools: "+err.Error())
+				return tools.Fail(codeMCPUnavailable, "Could not list Daintree MCP tools: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 			callableOf := makeCallable(tctx.ActiveToolNames)
 			out := make([]map[string]any, 0, len(list))
@@ -137,7 +137,7 @@ func newSearchTool(deps Deps) tools.Tool {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while searching MCP tools.", tools.Unrecoverable())
 				}
-				return tools.Fail(codeMCPUnavailable, "Could not search Daintree MCP tools: "+err.Error())
+				return tools.Fail(codeMCPUnavailable, "Could not search Daintree MCP tools: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 			callableOf := makeCallable(tctx.ActiveToolNames)
 			q := strings.ToLower(a.Query)
