@@ -299,7 +299,7 @@ func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 }
 
 // noteGlyph maps a note level to (glyph, tone):
-// error → failed glyph + danger, warn → attention "!" + warning, else → bullet "·"
+// error → failed glyph + danger, warn → attention mark + warning, else → bullet "·"
 // + the "active" tone (cyan info — NOT accent green).
 func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 	g := th.Glyphs
@@ -307,8 +307,8 @@ func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 	case NoteError:
 		return g.Failed, "danger"
 	case NoteWarn:
-		// The attention glyph is "!" in BOTH the unicode and ASCII sets.
-		return "!", "warning"
+		// Attention mark from the GlyphSet (unicode "»" / ASCII "!").
+		return g.Attention, "warning"
 	case NoteSuccess:
 		// A filled connection dot in accent green (the "● Connected to Daintree MCP"
 		// status line). ASCII fallback uses the done glyph so it never renders blank.

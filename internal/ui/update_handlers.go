@@ -786,30 +786,6 @@ func isPrintableText(s string) bool {
 
 // --- attention ---
 
-// attentionSeverityGlyph mirrors the /inbox severity glyphs (queue.severityIcon) so a
-// transcript attention note reads the same as the inbox digest. We deliberately do NOT
-// import internal/queue — internal/ui only depends on domain, and the 7-glyph set is
-// tiny and stable, so a local switch is cheaper than a new package edge. Unknown
-// severities fall back to the info glyph, matching queue.Format's ELSE-1 fallback.
-func attentionSeverityGlyph(sev domain.Severity) string {
-	switch sev {
-	case domain.SeverityDebug:
-		return "·"
-	case domain.SeverityDone:
-		return "✓"
-	case domain.SeverityAttention:
-		return "!"
-	case domain.SeverityBlocked:
-		return "⛔"
-	case domain.SeverityUrgent:
-		return "‼"
-	case domain.SeverityError:
-		return "✗"
-	default: // info + any unknown severity
-		return "ℹ"
-	}
-}
-
 // severityToNoteLevel tones the transcript note's spine by severity: the loudest classes
 // render danger-red, "attention" warns, "done" reads success, info/debug stay neutral.
 // The precise per-severity glyph still lives in the note TEXT (attentionSeverityGlyph) so
@@ -828,13 +804,15 @@ func severityToNoteLevel(sev domain.Severity) NoteLevel {
 }
 
 // attentionNoteText builds the glanceable one-liner echoed into the transcript when a
-// sub-thread routes attention: "<glyph> <Title> — [term <id>]/[wt <id>] (×N)". The target
-// and coalesce-count suffixes mirror queue.Format's logic (terminal wins over worktree;
-// "×N" only when the event coalesced) so the line reads like the /inbox digest — the one
-// formatting difference is the " — " separator before the target, which reads better inline
-// than the digest's bare space. Both suffixes drop out when absent.
+// sub-thread routes attention: "<Title> — [term <id>]/[wt <id>] (×N)". The precise
+// severity glyph is NOT baked in here — the renderer draws it ONCE on the toned spine
+// (renderNoteCell, keyed off NoteCell.Severity), which is what removed the old "! !"
+// doubling. The target and coalesce-count suffixes mirror queue.Format's logic
+// (terminal wins over worktree; "×N" only when the event coalesced) so the line reads
+// like the /inbox digest — the one formatting difference is the " — " separator before
+// the target, which reads better inline than the digest's bare space. Both suffixes
+// drop out when absent.
 func attentionNoteText(e domain.QueueEvent) string {
-	glyph := attentionSeverityGlyph(e.Severity)
 	target := ""
 	if e.Target != nil {
 		if e.Target.TerminalID != "" {
@@ -847,7 +825,7 @@ func attentionNoteText(e domain.QueueEvent) string {
 	if e.Count > 1 {
 		dup = fmt.Sprintf(" (×%d)", e.Count)
 	}
-	return glyph + " " + e.Title + target + dup
+	return e.Title + target + dup
 }
 
 func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
@@ -868,7 +846,7 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	// is always a genuine escalation worth a fresh line, never spam. Appended BEFORE
 	// drainPending so any wake turn seals AFTER these notes (true chronological order).
 	for _, e := range msg.Events {
-		m.addNote(severityToNoteLevel(e.Severity), attentionNoteText(e))
+		m.addSeverityNote(severityToNoteLevel(e.Severity), e.Severity, attentionNoteText(e))
 	}
 	// Ring the BEL once per fresh batch (on the event, not a count increment).
 	cmd := bellCmd()

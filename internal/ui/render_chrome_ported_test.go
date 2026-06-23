@@ -319,9 +319,11 @@ func TestStatusLine_CostHiddenWhenUnknown(t *testing.T) {
 }
 
 func TestStatusLine_AttentionChip(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{AttentionN: 2, TopSeverity: domain.SeverityUrgent}, 80))
-	if !strings.Contains(out, "!2") {
-		t.Errorf("attention chip !2 missing: %q", out)
+	th := darkTheme()
+	out := stripAnsi(renderStatusLine(th, statusParams{AttentionN: 2, TopSeverity: domain.SeverityUrgent}, 80))
+	want := th.Glyphs.Attention + "2" // "»2" unicode / "!2" ASCII
+	if !strings.Contains(out, want) {
+		t.Errorf("attention chip %q missing: %q", want, out)
 	}
 }
 

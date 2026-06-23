@@ -385,8 +385,15 @@ func (m *Model) activeTurnCell() *TurnCell {
 
 // addNote appends a standalone NoteCell to the transcript (out-of-band line).
 func (m *Model) addNote(level NoteLevel, text string) {
+	m.addSeverityNote(level, "", text)
+}
+
+// addSeverityNote appends a standalone NoteCell that carries its precise queue
+// severity, so the renderer draws ONE precise spine glyph instead of a coarse level
+// glyph plus a duplicate in the text. A "" severity behaves exactly like addNote.
+func (m *Model) addSeverityNote(level NoteLevel, sev domain.Severity, text string) {
 	m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
-		ID: domain.NewID("note_"), Level: level, Text: text, Ts: domain.NowMS(),
+		ID: domain.NewID("note_"), Level: level, Severity: sev, Text: text, Ts: domain.NowMS(),
 	}})
 }
 

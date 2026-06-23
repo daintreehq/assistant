@@ -90,10 +90,12 @@ func TestAttention_EmitsTranscriptNotePerEvent(t *testing.T) {
 	nm := next.(Model)
 
 	notes := noteTexts(nm)
+	// The precise glyph now renders on the spine (renderNoteCell), not baked into the
+	// note text — so the text is glyph-free (this is the de-dup that removed "! !").
 	want := []string{
-		"‼ needs input — [term term_8]",
-		"✓ Deploy finished — [wt wt_3]",
-		"! watcher armed",
+		"needs input — [term term_8]",
+		"Deploy finished — [wt wt_3]",
+		"watcher armed",
 	}
 	if len(notes) != len(want) {
 		t.Fatalf("expected one transcript note per event, got %d: %v", len(notes), notes)
@@ -122,13 +124,14 @@ func TestAttention_NoteTerminalWinsOverWorktree(t *testing.T) {
 		{Title: "both set", Severity: domain.SeverityInfo, Target: &domain.EventTarget{TerminalID: "term_2", WorktreeID: "wt_9"}},
 	}})
 	notes := noteTexts(next.(Model))
-	if len(notes) != 1 || notes[0] != "ℹ both set — [term term_2]" {
+	if len(notes) != 1 || notes[0] != "both set — [term term_2]" {
 		t.Fatalf("terminal must win over worktree in the target suffix: %v", notes)
 	}
 }
 
 // TestAttention_NoteUnknownSeverityFallsBackToInfo proves the ELSE-1 fallback: a severity
-// the cockpit doesn't recognize still renders (the info glyph + neutral tone), never blank.
+// the cockpit doesn't recognize still renders (neutral info tone), never blank. The glyph
+// itself now lives on the spine; here we assert the text and the spine level.
 func TestAttention_NoteUnknownSeverityFallsBackToInfo(t *testing.T) {
 	m := liveModel(80)
 	m.inFlight = true
@@ -137,7 +140,7 @@ func TestAttention_NoteUnknownSeverityFallsBackToInfo(t *testing.T) {
 	}})
 	nm := next.(Model)
 	notes := noteTexts(nm)
-	if len(notes) != 1 || notes[0] != "ℹ mystery" {
+	if len(notes) != 1 || notes[0] != "mystery" {
 		t.Fatalf("unknown severity must fall back to the info glyph: %v", notes)
 	}
 	if lv := noteLevels(nm)[0]; lv != NoteInfo {
@@ -145,8 +148,8 @@ func TestAttention_NoteUnknownSeverityFallsBackToInfo(t *testing.T) {
 	}
 }
 
-// TestAttention_NoteNilTargetHasNoSuffix: a targetless event renders just "<glyph> <Title>"
-// with no trailing " — " separator.
+// TestAttention_NoteNilTargetHasNoSuffix: a targetless event renders just "<Title>"
+// with no trailing " — " separator (the glyph is on the spine, not in the text).
 func TestAttention_NoteNilTargetHasNoSuffix(t *testing.T) {
 	m := liveModel(80)
 	m.inFlight = true
@@ -157,8 +160,8 @@ func TestAttention_NoteNilTargetHasNoSuffix(t *testing.T) {
 	if len(notes) != 1 || strings.Contains(notes[0], "—") {
 		t.Fatalf("a targetless event must not render the ' — ' separator: %v", notes)
 	}
-	if notes[0] != "ℹ no target" {
-		t.Errorf("note = %q, want %q", notes[0], "ℹ no target")
+	if notes[0] != "no target" {
+		t.Errorf("note = %q, want %q", notes[0], "no target")
 	}
 }
 
@@ -182,7 +185,7 @@ func TestAttention_NoteCoalesceCount(t *testing.T) {
 		{Title: "single", Severity: domain.SeverityInfo, Count: 1},
 	}})
 	notes := noteTexts(next.(Model))
-	want := []string{"! flapping — [term term_5] (×3)", "ℹ single"}
+	want := []string{"flapping — [term term_5] (×3)", "single"}
 	if len(notes) != len(want) {
 		t.Fatalf("got %d notes: %v", len(notes), notes)
 	}
@@ -202,7 +205,7 @@ func TestAttention_NoteNonNilEmptyTargetHasNoSuffix(t *testing.T) {
 		{Title: "scopeless", Severity: domain.SeverityInfo, Target: &domain.EventTarget{}},
 	}})
 	notes := noteTexts(next.(Model))
-	if len(notes) != 1 || notes[0] != "ℹ scopeless" {
+	if len(notes) != 1 || notes[0] != "scopeless" {
 		t.Fatalf("a non-nil empty target must render no suffix: %v", notes)
 	}
 }
@@ -222,7 +225,7 @@ func TestAttention_IdleEmitsNoteBeforeWakeTurn(t *testing.T) {
 	if nm.transcript[0].Note == nil {
 		t.Fatalf("first cell must be the attention note, got %+v", nm.transcript[0])
 	}
-	if nm.transcript[0].Note.Text != "‼ needs input — [term term_8]" {
+	if nm.transcript[0].Note.Text != "needs input — [term term_8]" {
 		t.Errorf("note text = %q", nm.transcript[0].Note.Text)
 	}
 	foundTurnAfterNote := false
@@ -238,7 +241,7 @@ func TestAttention_IdleEmitsNoteBeforeWakeTurn(t *testing.T) {
 
 // TestAttention_MaterialReDeliveryEmitsFreshNote locks in the escalation policy: the
 // scheduler re-delivers an event id on a material change, and the UI deliberately emits a
-// second note (carrying the escalated glyph/title) rather than deduping it away.
+// second note (carrying the escalated severity/title) rather than deduping it away.
 func TestAttention_MaterialReDeliveryEmitsFreshNote(t *testing.T) {
 	m := liveModel(80)
 	m.inFlight = true
@@ -251,7 +254,7 @@ func TestAttention_MaterialReDeliveryEmitsFreshNote(t *testing.T) {
 		{ID: "evt_1", Title: "merge conflict", Severity: domain.SeverityBlocked, Target: tgt},
 	}})
 	notes := noteTexts(next2.(Model))
-	want := []string{"! waiting — [term term_1]", "⛔ merge conflict — [term term_1]"}
+	want := []string{"waiting — [term term_1]", "merge conflict — [term term_1]"}
 	if len(notes) != len(want) {
 		t.Fatalf("a material re-delivery must add a fresh note, got %d: %v", len(notes), notes)
 	}
@@ -265,6 +268,7 @@ func TestAttention_MaterialReDeliveryEmitsFreshNote(t *testing.T) {
 // TestAttention_GlyphAndLevelTable pins the full severity → (glyph, spine level) mapping so
 // a future addition to domain.Severity can't silently fall through both helpers.
 func TestAttention_GlyphAndLevelTable(t *testing.T) {
+	gs := darkTheme().Glyphs
 	cases := []struct {
 		sev   domain.Severity
 		glyph string
@@ -273,19 +277,38 @@ func TestAttention_GlyphAndLevelTable(t *testing.T) {
 		{domain.SeverityDebug, "·", NoteInfo},
 		{domain.SeverityInfo, "ℹ", NoteInfo},
 		{domain.SeverityDone, "✓", NoteSuccess},
-		{domain.SeverityAttention, "!", NoteWarn},
+		{domain.SeverityAttention, gs.Attention, NoteWarn}, // theme-aware: "»" unicode / "!" ASCII
 		{domain.SeverityBlocked, "⛔", NoteError},
 		{domain.SeverityUrgent, "‼", NoteError},
 		{domain.SeverityError, "✗", NoteError},
 		{domain.Severity("unknown"), "ℹ", NoteInfo},
 	}
 	for _, c := range cases {
-		if g := attentionSeverityGlyph(c.sev); g != c.glyph {
+		if g := attentionSeverityGlyph(gs, c.sev); g != c.glyph {
 			t.Errorf("glyph(%q) = %q, want %q", c.sev, g, c.glyph)
 		}
 		if lv := severityToNoteLevel(c.sev); lv != c.level {
 			t.Errorf("level(%q) = %d, want %d", c.sev, lv, c.level)
 		}
+	}
+}
+
+// TestRenderNoteCell_AttentionSingleGlyphNoDuplication is the regression guard for the
+// old "! !" doubling: an attention NoteCell renders its precise severity glyph ONCE (on
+// the spine), with glyph-free text — never the spine glyph plus a duplicate in the text.
+func TestRenderNoteCell_AttentionSingleGlyphNoDuplication(t *testing.T) {
+	th := darkTheme()
+	g := th.Glyphs.Attention
+	n := &NoteCell{Level: NoteWarn, Severity: domain.SeverityAttention, Text: "watch done — [term t1]"}
+	out := stripAnsi(renderNoteCell(th, n, 120))
+	if c := strings.Count(out, g); c != 1 {
+		t.Fatalf("expected exactly one attention glyph %q, got %d in %q", g, c, out)
+	}
+	if strings.Contains(out, g+" "+g) {
+		t.Fatalf("attention glyph must not be doubled: %q", out)
+	}
+	if !strings.Contains(out, "watch done — [term t1]") {
+		t.Fatalf("note text missing from render: %q", out)
 	}
 }
 

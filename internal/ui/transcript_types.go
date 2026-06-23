@@ -135,8 +135,13 @@ type TurnCell struct {
 type NoteCell struct {
 	ID    string
 	Level NoteLevel
-	Text  string
-	Ts    int64
+	// Severity, when set, is the precise queue severity of an attention-routed note.
+	// The renderer uses it to draw ONE precise glyph on the spine (toned by Level)
+	// rather than the coarse level glyph plus a duplicate baked into Text. Empty for
+	// ordinary notes (log lines, "Turn cancelled"), which fall back to the level glyph.
+	Severity domain.Severity
+	Text     string
+	Ts       int64
 }
 
 // CommandCell is the result of a slash command rendered into the transcript.

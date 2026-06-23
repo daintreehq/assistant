@@ -266,7 +266,7 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	}
 	if p.AttentionN > 0 {
 		tone := severityTone(p.TopSeverity)
-		segs = append(segs, styleFor(th, tone, "!"+itoa(p.AttentionN)))
+		segs = append(segs, styleFor(th, tone, th.Glyphs.Attention+itoa(p.AttentionN)))
 	}
 
 	if len(segs) == 0 {
@@ -277,9 +277,8 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 }
 
 // toneGlyphFor is the badge glyph that always accompanies a tone's color: active
-// ◌, success ✓, danger ×, neutral ·. warning/blocked use the literal attention
-// mark "!", which has no dedicated GlyphSet field. ASCII fallback flows through the
-// unicode set members.
+// ◌, success ✓, danger ×, neutral ·. warning/blocked use the attention mark
+// (GlyphSet.Attention — unicode "»" / ASCII "!").
 func toneGlyphFor(g theme.GlyphSet, tone string) string {
 	switch tone {
 	case "active", "info":
@@ -289,7 +288,7 @@ func toneGlyphFor(g theme.GlyphSet, tone string) string {
 	case "danger":
 		return g.Failed
 	case "warning", "blocked":
-		return "!"
+		return g.Attention
 	default:
 		return g.Bullet
 	}
@@ -321,11 +320,43 @@ func severityTone(s domain.Severity) string {
 	}
 }
 
+// attentionSeverityGlyph mirrors the /inbox severity glyphs (queue.severityIcon) so a
+// transcript attention note reads the same as the inbox digest. internal/ui depends only
+// on domain (never internal/queue), and the 7-glyph set is tiny and stable, so a local
+// switch is cheaper than a package edge. The attention mark comes from the GlyphSet so it
+// picks up the unicode "»" / ASCII "!" fallback; the rest are stable literals. Unknown
+// severities fall back to the info glyph, matching queue.Format's ELSE-1 fallback.
+func attentionSeverityGlyph(g theme.GlyphSet, sev domain.Severity) string {
+	switch sev {
+	case domain.SeverityDebug:
+		return "·"
+	case domain.SeverityDone:
+		return "✓"
+	case domain.SeverityAttention:
+		return g.Attention
+	case domain.SeverityBlocked:
+		return "⛔"
+	case domain.SeverityUrgent:
+		return "‼"
+	case domain.SeverityError:
+		return "✗"
+	default: // info + any unknown severity
+		return "ℹ"
+	}
+}
+
 // renderNoteCell renders a standalone NoteCell (one line, leading blank owned by
 // the cell).
 func renderNoteCell(th theme.Theme, n *NoteCell, width int) string {
 	g := th.Glyphs
 	glyph, tone := noteGlyph(th, n.Level)
+	// An attention-routed note carries its precise severity: draw THAT one glyph (still
+	// toned by Level) instead of the coarse level glyph PLUS a duplicate baked into the
+	// text — the source of the old "! !" doubling. Ordinary notes leave Severity "" and
+	// keep the level glyph.
+	if n.Severity != "" {
+		glyph = attentionSeverityGlyph(g, n.Severity)
+	}
 	// Tone the │ continuation spine with the note tone (green info / red error)
 	// instead of flat muted gray — matches the greenish MCP-connected note.
 	cont := styleFor(th, tone, g.Continuation)

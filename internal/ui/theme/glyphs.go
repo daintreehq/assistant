@@ -24,6 +24,7 @@ type GlyphSet struct {
 	BranchLast   string   // └─ — last tree branch (square, not the arc ╰)
 	Continuation string   // │  — note/continuation prefix
 	Bullet       string   // ·  — inline separator / info bullet
+	Attention    string   // »  — attention marker (note spine + inbox badge); ASCII "!"
 	Caret        string   // ▌ — streaming caret
 	Bar          string   // ▏ — user-message accent bar (U+258F)
 	Rule         string   // ─ — horizontal rule unit
@@ -43,6 +44,7 @@ var unicodeGlyphs = GlyphSet{
 	BranchLast:   "└─",
 	Continuation: "│ ",
 	Bullet:       "·",
+	Attention:    "»",
 	Caret:        "▌",
 	Bar:          "▏",
 	Rule:         "─",
@@ -64,6 +66,7 @@ var asciiGlyphs = GlyphSet{
 	BranchLast:   "`-",
 	Continuation: "| ",
 	Bullet:       "-",
+	Attention:    "!",
 	Caret:        "|",
 	Bar:          "|",
 	Rule:         "-",
