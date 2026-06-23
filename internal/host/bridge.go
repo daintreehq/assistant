@@ -270,7 +270,13 @@ func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
 // Confirm is the tool-confirm hook: mint an approval, emit approval:requested,
 // and block until decided / timed out / drained. Returns true iff approved. Runs
 // on the agent's dispatch goroutine; the command loop resolves via decide/drain.
-func (b *Bridge) Confirm(ctx context.Context, toolName, summary string) bool {
+//
+// The emitted approval:requested carries the request's display context — risk
+// class (passed through verbatim, so a per-confirm override survives), the
+// human-readable consequence, and a redacted args summary (redactArgs, the same
+// helper tool:started uses) — so Daintree's timeline matches a local cockpit
+// approval. Empty fields are omitted by the event encoder.
+func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	approvalID := genID("apr")
 	resolve := make(chan ConfirmationDecision, 1)
 
@@ -290,10 +296,13 @@ func (b *Bridge) Confirm(ctx context.Context, toolName, summary string) bool {
 
 	b.post(EvApprovalRequested{
 		ApprovalID:  approvalID,
-		ToolID:      toolName,
-		Summary:     summary,
+		ToolID:      req.ToolName,
+		Summary:     req.Summary,
 		RequestedAt: now,
 		TurnID:      turnID,
+		RiskClass:   req.RiskClass,
+		Consequence: req.Consequence,
+		ArgsSummary: redactArgs(req.RawArgs),
 	})
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:

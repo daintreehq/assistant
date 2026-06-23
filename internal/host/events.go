@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
 // HostEvent is the outbound (host → Daintree) wire union. Every event carries a
@@ -146,13 +148,18 @@ func (e EvToolSettled) encode(sid string) ([]byte, error) {
 	return marshalEvent("tool:settled", sid, f)
 }
 
-// EvApprovalRequested — approval:requested. turnId optional.
+// EvApprovalRequested — approval:requested. turnId optional. riskClass,
+// consequence, and argsSummary are optional display context (parity with a local
+// cockpit approval); each is omitted from the wire object when empty.
 type EvApprovalRequested struct {
 	ApprovalID  string
 	ToolID      string
 	Summary     string
 	RequestedAt int64
 	TurnID      string
+	RiskClass   domain.RiskClass
+	Consequence string
+	ArgsSummary string
 }
 
 func (e EvApprovalRequested) encode(sid string) ([]byte, error) {
@@ -164,6 +171,15 @@ func (e EvApprovalRequested) encode(sid string) ([]byte, error) {
 	}
 	if e.TurnID != "" {
 		f["turnId"] = e.TurnID
+	}
+	if e.RiskClass != "" {
+		f["riskClass"] = string(e.RiskClass)
+	}
+	if e.Consequence != "" {
+		f["consequence"] = e.Consequence
+	}
+	if e.ArgsSummary != "" {
+		f["argsSummary"] = e.ArgsSummary
 	}
 	return marshalEvent("approval:requested", sid, f)
 }

@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -167,7 +168,9 @@ func TestBridgeApprovalDecide(t *testing.T) {
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0})
 
 	done := make(chan bool, 1)
-	go func() { done <- b.Confirm(context.Background(), "git.push", "push?") }()
+	go func() {
+		done <- b.Confirm(context.Background(), ConfirmRequest{ToolName: "git.push", Summary: "push?"})
+	}()
 
 	// Wait for the approval:requested to land, then decide approved.
 	var approvalID string
@@ -191,10 +194,102 @@ func TestBridgeApprovalDecide(t *testing.T) {
 	}
 }
 
+// TestBridgeApprovalEnrichment asserts the approval:requested event carries the
+// request's display context: the risk class is passed through verbatim (so a
+// per-confirm override survives — it is NOT re-derived from riskOf), the
+// consequence is forwarded, and the raw args are redacted via redactArgs.
+func TestBridgeApprovalEnrichment(t *testing.T) {
+	c := &collector{}
+	// riskOf returns a DIFFERENT class than the request carries, to prove the
+	// emitted event uses the passed-through RiskClass, not the registry lookup.
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0,
+		RiskOf: func(string) (domain.RiskClass, bool) { return domain.RiskLocal, true }})
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- b.Confirm(context.Background(), ConfirmRequest{
+			ToolName:    "grant.create",
+			Summary:     "create automation grant?",
+			RiskClass:   domain.RiskSystem,
+			Consequence: "grants unattended actor authority",
+			RawArgs:     `{"scope":"git","secret":"hunter2"}`,
+		})
+	}()
+
+	var req *EvApprovalRequested
+	deadline := time.After(time.Second)
+	for req == nil {
+		select {
+		case <-deadline:
+			t.Fatal("no approval:requested emitted")
+		default:
+		}
+		for _, e := range c.snapshot() {
+			if ar, ok := e.(EvApprovalRequested); ok {
+				ar := ar
+				req = &ar
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	b.ResolveApproval(req.ApprovalID, DecisionApproved)
+	<-done
+
+	if req.RiskClass != domain.RiskSystem {
+		t.Errorf("riskClass=%q want %q (passed through, not re-derived)", req.RiskClass, domain.RiskSystem)
+	}
+	if req.Consequence != "grants unattended actor authority" {
+		t.Errorf("consequence=%q not forwarded", req.Consequence)
+	}
+	// redactArgs produces a single-level object; keys must survive but no field is
+	// dropped here (both values are short), so assert the redacted form is non-empty
+	// JSON carrying the keys.
+	if req.ArgsSummary == "" || !strings.Contains(req.ArgsSummary, "scope") || !strings.Contains(req.ArgsSummary, "secret") {
+		t.Errorf("argsSummary=%q want redacted object with scope+secret keys", req.ArgsSummary)
+	}
+
+	// Encoded wire object must surface the three optional keys.
+	raw, err := req.encode("s")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if obj["riskClass"] != "system" {
+		t.Errorf("wire riskClass=%v want system", obj["riskClass"])
+	}
+	if obj["consequence"] != "grants unattended actor authority" {
+		t.Errorf("wire consequence=%v", obj["consequence"])
+	}
+	if _, ok := obj["argsSummary"]; !ok {
+		t.Error("wire argsSummary missing")
+	}
+}
+
+// TestApprovalRequestedEncodeOmitsEmpty asserts the optional display fields are
+// omitted from the wire object when empty (no empty strings / nulls leak).
+func TestApprovalRequestedEncodeOmitsEmpty(t *testing.T) {
+	raw, err := EvApprovalRequested{ApprovalID: "apr_1", ToolID: "git.push", Summary: "push?", RequestedAt: 5}.encode("s")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, k := range []string{"riskClass", "consequence", "argsSummary", "turnId"} {
+		if _, ok := obj[k]; ok {
+			t.Errorf("empty field %q must be omitted, got %v", k, obj[k])
+		}
+	}
+}
+
 func TestBridgeApprovalTimeout(t *testing.T) {
 	c := &collector{}
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 10})
-	got := b.Confirm(context.Background(), "git.push", "push?")
+	got := b.Confirm(context.Background(), ConfirmRequest{ToolName: "git.push", Summary: "push?"})
 	if got {
 		t.Fatal("timed-out confirm returned true")
 	}
@@ -214,7 +309,9 @@ func TestBridgeSettlePendingApprovals(t *testing.T) {
 	c := &collector{}
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post, ApprovalTimeoutMs: 0})
 	done := make(chan bool, 1)
-	go func() { done <- b.Confirm(context.Background(), "git.push", "p") }()
+	go func() {
+		done <- b.Confirm(context.Background(), ConfirmRequest{ToolName: "git.push", Summary: "p"})
+	}()
 	// Let the approval register.
 	time.Sleep(10 * time.Millisecond)
 	b.SettlePendingApprovals(DecisionRejected)
