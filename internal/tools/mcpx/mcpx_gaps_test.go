@@ -34,6 +34,46 @@ func TestDaintreeCallDenylistNamesWrapper(t *testing.T) {
 	}
 }
 
+// A disconnected MCP must point the model at /reconnect — the recovery command
+// that works in both the REPL and the cockpit (issue #211). Covers the shared
+// passthrough plus the three discovery tools that report disconnection.
+func TestMCPUnavailableErrorsNameReconnect(t *testing.T) {
+	disc := &fakeMCP{connected: false}
+
+	// The shared passthrough every typed wrapper delegates to.
+	pres := passthrough(context.Background(), disc, "worktree.list", nil, "")
+	if pres.Ok || pres.Error.Code != codeMCPUnavailable {
+		t.Fatalf("disconnected passthrough should be MCP_UNAVAILABLE, got %+v", pres)
+	}
+	if !strings.Contains(pres.Error.Message, "/reconnect") {
+		t.Errorf("passthrough hint must name /reconnect: %q", pres.Error.Message)
+	}
+
+	// The discovery tools that surface a disconnected MCP to the model.
+	cases := []struct {
+		name string
+		tool tools.Tool
+		args string
+	}{
+		{"daintree.listTools", newListToolsTool(Deps{MCP: disc}), `{}`},
+		{"tool.search", newSearchTool(Deps{MCP: disc}), `{"query":"x"}`},
+		{"daintree.call", newCallTool(Deps{MCP: disc}), `{"name":"worktree.list"}`},
+	}
+	for _, tc := range cases {
+		decoded, err := tc.tool.Decode(json.RawMessage(tc.args))
+		if err != nil {
+			t.Fatalf("%s decode: %v", tc.name, err)
+		}
+		res := tc.tool.Handle(context.Background(), decoded, &tools.ToolContext{})
+		if res.Ok || res.Error.Code != codeMCPUnavailable {
+			t.Fatalf("%s disconnected should be MCP_UNAVAILABLE, got %+v", tc.name, res)
+		}
+		if !strings.Contains(res.Error.Message, "/reconnect") {
+			t.Errorf("%s hint must name /reconnect: %q", tc.name, res.Error.Message)
+		}
+	}
+}
+
 // daintree.call forwards requestKey as a dedicated top-level param (not buried in
 // the arguments payload).
 func TestDaintreeCallForwardsRequestKeyAsParam(t *testing.T) {

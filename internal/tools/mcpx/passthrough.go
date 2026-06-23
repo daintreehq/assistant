@@ -25,7 +25,7 @@ const (
 func passthrough(ctx context.Context, mcp MCPClient, mcpName string, args map[string]any, requestKey string) tools.ToolResult {
 	if mcp == nil || !mcp.Connected() {
 		return tools.Fail(codeMCPUnavailable,
-			fmt.Sprintf("Daintree MCP is not connected; cannot call %s.", mcpName))
+			fmt.Sprintf("Daintree MCP is not connected; cannot call %s. Use /reconnect to retry once Daintree is available.", mcpName))
 	}
 	callArgs := make(map[string]any, len(args)+1)
 	for k, v := range args {
