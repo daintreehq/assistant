@@ -52,7 +52,11 @@ Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getS
 > `terminal.waitForAny`.
 
 Worktrees: `worktree.list`, `worktree.getCurrent`, `worktree.createWithRecipe`,
-`worktree.delete`, `worktree.setActive`, `worktree.refresh`, `worktree.listBranches`.
+`worktree.delete`, `worktree.setActive`, `worktree.refresh`, `worktree.listBranches`,
+`worktree.compareDiff` (read-only: the files that differ between two worktrees' branches).
+Resource lifecycle: `worktree.resource.provision`, `worktree.resource.teardown`,
+`worktree.resource.pause`, `worktree.resource.resume`, `worktree.resource.status`,
+`worktree.resource.connect`.
 
 Git: `git.getProjectPulse`, `git.getStagingStatus`, `git.commit`, `git.push`,
 `git.stageFile`, `git.unstageFile`, `git.snapshotList`, `git.snapshotRevert`.
@@ -65,6 +69,12 @@ Forge (PR writes): `forge.createPR`, `forge.closePR`, `forge.reopenPR`, `forge.m
 `forge.convertPRToDraft`, `forge.markPRReadyForReview`, `forge.commentOnPR`, `forge.editPR`.
 Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismissReview`,
 `forge.requestReviewers`. All forge writes are `external`-risk and always confirmed.
+
+> The `forge.open*` actions (`forge.openIssue`, `forge.openPR`, `forge.openIssues`,
+> `forge.openPRs`, `forge.openCommits`) exist on the Daintree server but are
+> **renderer/UI-only** — they open a browser/editor window via Electron IPC and do
+> nothing useful for a headless MCP client, so the CLI deliberately omits them. Use the
+> `forge.list*` / `forge.get*` reads instead.
 
 Agents/Recipes: `agent.launch`, `agent.terminal`, `recipe.list`, `recipe.run`.
 
@@ -160,3 +170,22 @@ when Daintree closes the gap.
 
 For discovery beyond the lists above, use `tool.search` / `daintree.listTools` rather than
 guessing tool names.
+
+## Keeping the references in sync
+
+There are three CLI-side records of the Daintree MCP surface; when Daintree's tool surface
+changes, update them together:
+
+1. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. May list more raw
+   Daintree tools than the model is told about (the catalog above is illustrative, not the
+   model's allowlist).
+2. **The model prompt** (`internal/models/prompts/daintree_mcp.go`, `daintreeMCPReference`)
+   — the cached, model-facing reference. It names the local wrappers plus a few high-value
+   unwrapped tools, and reminds the model to use `tool.search` for the rest. It deliberately
+   does **not** enumerate every server tool.
+3. **The drift baseline** — `DocumentedMCPToolNames` (prompts) and `DocumentedMcpToolNames`
+   (`internal/mcp/tools.go`), kept identical and pinned by tests. This is an **exact,
+   minimal, verified** subset: at startup the CLI checks each name is still on the live
+   server (a missing one signals the doc went stale). Drift is *missing-only* — extra live
+   tools (like `worktree.compareDiff` or the `worktree.resource.*` family) are expected and
+   ignored, so they don't need to be added here to be callable via `daintree.call`.

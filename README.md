@@ -43,8 +43,8 @@ cp .env.example .env      # set FIREWORKS_API_KEY
 ./bin/daintree-assistant doctor     # environment check (MCP / Fireworks key / project / tier)
 ```
 
-`make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
-`generate` · `run` · `clean`.
+`make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·
+`generate` · `run` · `clean` · `db-reset` (hard-reset the SQLite state dir).
 
 ## Running it
 
@@ -159,14 +159,18 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/FIREWORKS.md`](docs/FIREWORKS.md),
-and [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md).
+[`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md), [`docs/TOOLS.md`](docs/TOOLS.md)
+(adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (authoring skills), and
+[`docs/RUNTIME.md`](docs/RUNTIME.md) (auto-compaction + model error behavior).
 
 ## Commands (cockpit or classic REPL)
 
 ```
-/status  /inbox  /tools [q]  /timers  /watchers  /audit  /models  /reconnect
-/permissions [tier]  /skills [loaded|find <query>|load <id…>|clear]
-/explain [runId]  /compact  /clear  /doctor  /help  /quit
+/status  /inbox [sev]  /tools [query]  /timers  /watchers  /grants
+/workflows [status]  /launches  /audit [n]  /explain [runId]  /models
+/permissions [tier]  /approvals [clear]  /skills [loaded|find <query>|load <id…>|clear]
+/memory [list|pin <id>|unpin <id>|forget <id>]  /compact  /clear  /doctor
+/reconnect  /help  /quit
 ```
 
 In the cockpit these render as command cards (and may focus a deck view); in `--classic`
@@ -191,21 +195,26 @@ into the binary via `go:embed` from `internal/skills/files/*.md`. See
 
 ## Tools the model can call
 
+A current snapshot; the registry (`internal/tools`) is the source of truth, and
+[`docs/TOOLS.md`](docs/TOOLS.md) is the contributor reference for adding one.
+
 | Group             | Tools                                                                       |
 | ----------------- | --------------------------------------------------------------------------- |
 | Project read      | `fs.list` `fs.read` `fs.search`                                             |
 | Daintree (raw)    | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
-| Terminal control  | `terminal.focus` `terminal.sendCommand` `terminal.read` `terminal.arm` `terminal.disarm` `terminal.disarmAll` |
-| Context           | `context.snapshot` `terminal.summarize`                                    |
+| Terminal control  | `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` |
+| Focus (UI)        | `agent.focusNextWaiting` `agent.focusNextWorking` `agent.focusNextAgent` `agent.focusPreviousAgent` `workflow.focusNextAttention` |
+| Context           | `context.snapshot` `terminal.read` `terminal.summarize`                    |
 | Extraction        | `terminal.extract` `terminal.extract.async`                               |
 | Timers            | `timer.schedule` `timer.list` `timer.cancel`                               |
 | Watchers          | `watcher.terminal.create` `watcher.watchPR` `watcher.list` `watcher.cancel` |
 | Queue             | `queue.publish` `queue.digest` `queue.resolve`                             |
 | Workflows         | `workflow.create` `workflow.get` `workflow.list` `workflow.update` `workflow.startWorkOnIssue` `workflow.prepBranchForReview` |
-| Recipes/worktrees | `recipe.list` `recipe.run` `worktree.createWithRecipe`                     |
+| Recipes/worktrees | `recipe.list` `recipe.run` `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` |
+| Git snapshots     | `git.snapshotRevert` `git.snapshotDelete`                                  |
 | Context export    | `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` |
-| Forge             | `forge.getPR`                                                              |
-| Agent tasks       | `agentTask.spawnForEdits` (the no-file-edit escape hatch)                  |
+| Forge             | `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR`         |
+| Agent tasks       | `agentTask.spawnForEdits` (no-file-edit escape hatch) `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
 | Grants            | `grant.create` `grant.list` `grant.revoke`                                 |
 | Skill runs        | `skill.find` `skill.load` `skill.run.get` `skill.step.advance`            |
 | Audit             | `audit.export`                                                             |

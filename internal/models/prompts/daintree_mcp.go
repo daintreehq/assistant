@@ -81,7 +81,12 @@ Your local tools wrap Daintree:
   panel.focus -> terminal.focus; terminal.sendCommand,
   terminal.arm, terminal.disarm, terminal.disarmAll, copyTree.injectToTerminal,
   copyTree.generateAndCopyFile, git.snapshotRevert, git.snapshotDelete -> their
-  same-named typed wrappers. Reach for the wrapper, not this.
+  same-named typed wrappers. Reach for the wrapper, not this. Some useful Daintree
+  tools have NO wrapper and are reachable only this way — e.g. worktree.compareDiff
+  (read-only: the files that differ between two worktrees' branches). The forge.open*
+  / worktree.open* actions are renderer/UI-only (they open a browser/editor) — they do
+  nothing useful headless, so don't call them. Use tool.search / daintree.listTools to
+  discover unwrapped tools before guessing a name.
 
 ## Playbook: spawn an agent and relay what it said
 This is the common "open an agent, ask it something, tell me the answer" flow.
@@ -190,7 +195,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`
 
-// DocumentedMCPToolNames is the hand-maintained list of 60 verified Daintree MCP
+// DocumentedMCPToolNames is the hand-maintained list of 57 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
 // server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{
