@@ -115,9 +115,9 @@ type Session struct {
 	// of a turn AND across turns. The projection is pure work keyed by the offered
 	// toolset (allowedNames + the read-only flag); it only changes when skill.find/
 	// skill.load mutates the active-skill set, which invalidates it in
-	// applySkillBundleLocked. Touched only on the turn goroutine (the loop reads it
-	// lock-free, exactly as buildToolFilter already reads activeSkills) — SetSkills,
-	// the one cross-goroutine mutator, rejects mid-turn.
+	// applySkillBundleLocked. Guarded by s.mu (read in resolveTurnTools, zeroed in
+	// applySkillBundleLocked) so the turn loop never races a /skills find slash
+	// command, which calls FindSkills off the turn goroutine.
 	toolProj toolProjCache
 }
 
@@ -382,36 +382,22 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//      projection can't change; recomputing is still correct (it's stable) and
 		//      keeps a single code path. Only message[2]/tools change here — the cached
 		//      base prefix [0] stays byte-stable (prompt-cache invariant).
-		var allowedNames []string
-		if opts.ReadOnly {
-			allowedNames = s.deps.Tools.ReadOnlyToolNames()
-		} else {
-			allowedNames = s.buildToolFilter()
-		}
-		// Preserve nil semantics: buildToolFilter returns nil for an unconstrained
-		// turn (the FULL registry), and BOTH the read-only-turn refusal in
-		// runToolBatch and the dispatch projection gate key off allowedSet/
-		// ActiveToolNames being nil ⇒ "all tools callable". Only materialize the set
-		// (and the allowlist) when the turn is actually narrowed.
-		var allowedSet map[string]struct{}
-		if allowedNames != nil {
-			allowedSet = make(map[string]struct{}, len(allowedNames))
-			for _, n := range allowedNames {
-				allowedSet[n] = struct{}{}
-			}
-		}
-		turn.ActiveToolNames = allowedNames
-
-		// Project tools, reusing the cached projection when the offered toolset is
-		// unchanged since the last build (the common path — no skill mutation). A
-		// failure is a WAKE_FAILURE_PREFIX — keep verbatim.
-		tools, err := s.projectTools(allowedNames, opts.ReadOnly)
+		//
+		//      The filter + projection are computed under s.mu (released before the
+		//      stream). A /skills find slash command runs OFF the turn goroutine
+		//      (independent of single-flight) and can rewrite activeSkills + zero the
+		//      cached projection via applySkillBundleLocked, so this read side must be
+		//      synchronized with those writes. The cached projection is reused when the
+		//      offered toolset is unchanged (the common path — no skill mutation).
+		allowedNames, allowedSet, tools, err := s.resolveTurnTools(opts.ReadOnly)
 		if err != nil {
+			// A failure is a WAKE_FAILURE_PREFIX — keep verbatim.
 			msg := "Tool projection failed: " + err.Error()
 			s.events.Phase(domain.PhaseFailed)
 			s.events.Error(msg)
 			return msg
 		}
+		turn.ActiveToolNames = allowedNames
 
 		// 10b. New round.
 		if i == 0 {
@@ -743,10 +729,45 @@ func (s *Session) emitUsage() {
 	s.events.Usage(ev)
 }
 
-// buildToolFilter returns the per-turn tool projection. No active skills ⇒ nil
+// resolveTurnTools computes the per-iteration tool filter, its membership set, and
+// the projected specs under s.mu — a short, in-memory critical section released
+// before the (long) model stream. Holding the lock serializes this read against
+// applySkillBundleLocked's writes (activeSkills + the cached projection), which a
+// /skills find slash command can trigger off the turn goroutine. Returns nil
+// allowedNames/allowedSet for an unconstrained (full-registry) turn.
+func (s *Session) resolveTurnTools(readOnly bool) ([]string, map[string]struct{}, []models.ChatTool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var allowedNames []string
+	if readOnly {
+		allowedNames = s.deps.Tools.ReadOnlyToolNames()
+	} else {
+		allowedNames = s.buildToolFilterLocked()
+	}
+	// Preserve nil semantics: an unconstrained turn (nil) offers the FULL registry,
+	// and both the read-only-turn refusal in runToolBatch and the dispatch gate key
+	// off allowedSet being nil ⇒ "all tools callable". Materialize the set only when
+	// the turn is actually narrowed.
+	var allowedSet map[string]struct{}
+	if allowedNames != nil {
+		allowedSet = make(map[string]struct{}, len(allowedNames))
+		for _, n := range allowedNames {
+			allowedSet[n] = struct{}{}
+		}
+	}
+	tools, err := s.projectToolsLocked(allowedNames, readOnly)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return allowedNames, allowedSet, tools, nil
+}
+
+// buildToolFilterLocked returns the per-turn tool projection. No active skills ⇒ nil
 // (the FULL registry — an unconstrained turn must not be starved of tools).
-// Else: unique(core ∪ skills.requiredTools).
-func (s *Session) buildToolFilter() []string {
+// Else: unique(core ∪ skills.requiredTools). Caller MUST hold s.mu (it reads
+// activeSkills, which a concurrent skill mutation rewrites under the lock).
+func (s *Session) buildToolFilterLocked() []string {
 	if len(s.activeSkills) == 0 {
 		return nil
 	}
@@ -769,22 +790,24 @@ func (s *Session) buildToolFilter() []string {
 	return out
 }
 
-// projectTools returns the OpenAITools projection for (allowedNames, readOnly),
-// reusing the cached projection when the offered toolset is unchanged since the
-// last build. allowedNames==nil is the full (unconstrained) registry — a distinct
-// cache identity from any narrowed set, tracked via the unconstrained flag because
+// projectToolsLocked returns the OpenAITools projection for (allowedNames, readOnly),
+// reusing the cached projection when the offered toolset is unchanged since the last
+// build. allowedNames==nil is the full (unconstrained) registry — a distinct cache
+// identity from any narrowed set, tracked via the unconstrained flag because
 // slices.Equal treats nil and []string{} as equal. The cache is invalidated only
 // when skill.find/skill.load rewrites the active set (applySkillBundleLocked), so
 // across a turn's iterations (and across turns) with a stable skill set this skips
-// re-unmarshalling every tool schema and rebuilding the registry's wire-name maps.
+// re-projecting every tool spec and rebuilding the registry's wire-name maps.
+// Caller MUST hold s.mu (it reads/writes the toolProj cache, which a concurrent
+// skill mutation zeroes under the lock).
 //
 // On a cache HIT the registry's wire-name alias maps are NOT rebuilt: the
 // OpenAITools call that populated the cache for THIS exact projection left them
-// correct, and nothing on the turn goroutine rewrites them between here and
-// runToolBatch's ResolveWireName lookups. (The pre-existing cross-session race on
-// those shared registry maps — a watcher turn projecting a different set — predates
-// this cache and is unchanged by it.)
-func (s *Session) projectTools(allowedNames []string, readOnly bool) ([]models.ChatTool, error) {
+// correct. There is exactly one agent.Session in the process and OpenAITools is
+// only ever called from this turn loop, so no other goroutine overwrites those
+// shared maps between here and runToolBatch's ResolveWireName lookups (which run
+// later on the same turn goroutine).
+func (s *Session) projectToolsLocked(allowedNames []string, readOnly bool) ([]models.ChatTool, error) {
 	c := &s.toolProj
 	unconstrained := allowedNames == nil
 	if c.valid && c.readOnly == readOnly && c.unconstrained == unconstrained &&
@@ -799,8 +822,10 @@ func (s *Session) projectTools(allowedNames []string, readOnly bool) ([]models.C
 		valid:         true,
 		unconstrained: unconstrained,
 		readOnly:      readOnly,
-		allowedNames:  allowedNames,
-		tools:         tools,
+		// Copy the key so a later in-place mutation of the offered-names slice (it is
+		// also handed to turn.ActiveToolNames) can't corrupt the cache identity.
+		allowedNames: append([]string(nil), allowedNames...),
+		tools:        tools,
 	}
 	return tools, nil
 }

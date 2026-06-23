@@ -266,9 +266,12 @@ func (t *toolRunner) ResolveWireName(wireName string) string {
 // ReadOnlyToolNames returns read-risk tools minus the skill-context-mutating ones
 // (skill.find/skill.load) — the autonomous-wake-turn set (agent.SessionDeps). The
 // set is computed once (the registry is append-only after startup) and a defensive
-// copy is returned so a caller can't mutate the memoized slice.
+// copy is returned so a caller can't mutate the memoized slice. The result is
+// always non-nil: an empty (non-nil) slice means "no read-only tools" — a narrowed
+// turn offering nothing — whereas a nil filter would be read as "all tools".
 func (t *toolRunner) ReadOnlyToolNames() []string {
 	t.roNamesOnce.Do(func() {
+		t.roNames = []string{}
 		for _, tool := range t.app.Registry.List() {
 			if tool.Risk != domain.RiskRead {
 				continue
@@ -279,10 +282,7 @@ func (t *toolRunner) ReadOnlyToolNames() []string {
 			t.roNames = append(t.roNames, tool.Name)
 		}
 	})
-	if t.roNames == nil {
-		return nil
-	}
-	return append([]string(nil), t.roNames...)
+	return append([]string{}, t.roNames...)
 }
 
 // Dispatch builds the per-call ToolContext from the turn and runs the call. It

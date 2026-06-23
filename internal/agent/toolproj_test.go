@@ -91,6 +91,63 @@ func TestToolProjectionReadOnlyKeyDistinct(t *testing.T) {
 	}
 }
 
+// TestProjectToolsNilVsEmptyDistinctIdentity: a nil filter (full registry) and a
+// non-nil empty filter (no tools) are DISTINCT cache identities — the unconstrained
+// sentinel must not let slices.Equal(nil, []string{}) collapse them. Exercises
+// projectToolsLocked directly under the lock it requires.
+func TestProjectToolsNilVsEmptyDistinctIdentity(t *testing.T) {
+	tr := &countingTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
+	s := skillSession(t, realRegistry(t), plainRouter(), tr)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.projectToolsLocked(nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.projectToolsLocked([]string{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if tr.projectCalls != 2 {
+		t.Fatalf("nil (full registry) and empty (no tools) are distinct identities ⇒ 2 builds, got %d", tr.projectCalls)
+	}
+	// Re-projecting the same empty key is a cache hit (no third build).
+	if _, err := s.projectToolsLocked([]string{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if tr.projectCalls != 2 {
+		t.Fatalf("repeat empty key should hit the cache, got %d builds", tr.projectCalls)
+	}
+}
+
+// TestConcurrentSlashFindDuringTurnNoRace: a /skills find slash command calls
+// FindSkills off the turn goroutine while a multi-iteration turn projects tools.
+// Both touch s.toolProj/s.activeSkills; resolveTurnTools and applySkillBundleLocked
+// must serialize under s.mu. This is the regression test for the cache-vs-slash-find
+// data race — run the suite under -race to exercise it.
+func TestConcurrentSlashFindDuringTurnNoRace(t *testing.T) {
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c1", "fs__read", `{}`)}},
+		{ToolCalls: []models.ToolCallRequest{toolCall("c2", "fs__read", `{}`)}},
+		{ToolCalls: []models.ToolCallRequest{toolCall("c3", "fs__read", `{}`)}},
+		{Content: "done"},
+	}}
+	tr := &countingTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
+	s := skillSession(t, realRegistry(t), r, tr)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			// Mirrors handlers_ui.go's /skills find path: FindSkills off the turn goroutine.
+			s.FindSkills(context.Background(), "edit a file")
+		}
+	}()
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	<-done
+}
+
 // TestToolProjectionInvalidatedOnSkillLoadThenReused: a mid-turn skill.load rewrites
 // the active set (round 0 full → invalidate → round 1 narrowed), and the unchanged
 // narrowed set in round 2 is a cache hit. Exactly two projections: full, then the
