@@ -27,6 +27,10 @@ type Store interface {
 	// DueWatchers returns active watchers with nextCheckAt<=now, ordered by
 	// nextCheckAt.
 	DueWatchers(now int64) ([]domain.WatcherRecord, error)
+	// ListWatchers returns watchers by status (""=all), ordered by createdAt. The
+	// daemon uses it on a resource-update wake (to nudge active terminal watchers
+	// due) and after a reconnect (to re-issue lost subscriptions).
+	ListWatchers(status string) ([]domain.WatcherRecord, error)
 	// UpdateWatcher applies an allowlisted column patch to a watcher row.
 	UpdateWatcher(id string, patch map[string]any) error
 	// ClaimDueWatcher atomically applies the patch ONLY while the watcher is still 'active';
@@ -75,6 +79,15 @@ type MCP interface {
 	CallRead(ctx context.Context, name string, args map[string]any) (MCPResult, error)
 	// Connected reports whether the client currently has a live session.
 	Connected() bool
+	// SupportsSubscribe reports whether the live server advertised
+	// resources.subscribe. When false the watcher stays on the polling path.
+	SupportsSubscribe() bool
+	// Subscribe registers interest in a resource URI so the server pushes
+	// resource-updated notifications (a transition wakes the watcher immediately
+	// instead of waiting a tick). Best-effort: a failure leaves the watcher polling.
+	Subscribe(ctx context.Context, uri string) error
+	// Unsubscribe cancels a prior Subscribe (on watcher terminal/cleanup).
+	Unsubscribe(ctx context.Context, uri string) error
 }
 
 // WatcherModel is the small-model seam the terminal watcher uses. The prompt

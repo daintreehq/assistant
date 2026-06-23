@@ -23,6 +23,11 @@ type SchedulerDeps struct {
 	TickMS int64
 	// OnAttention is called with newly-created attention+ events after each tick.
 	OnAttention func(events []domain.QueueEvent)
+	// ResourceUpdates is the MCP client's resource-update wake channel (each value
+	// is a changed resource URI). When a subscribed terminal's agent state pushes a
+	// transition, the loop nudges active terminal watchers due and ticks immediately
+	// instead of waiting the next interval. nil disables the fast path (poll-only).
+	ResourceUpdates <-chan string
 }
 
 // Scheduler is the in-process daemon. One pass per tick: fire due timers, run due
@@ -89,6 +94,7 @@ func (s *Scheduler) Start(parent context.Context) {
 	loopDone := s.loopDone
 	s.stateMu.Unlock()
 
+	resourceUpdates := s.deps.ResourceUpdates
 	go func() {
 		defer close(loopDone)
 		for {
@@ -101,6 +107,19 @@ func (s *Scheduler) Start(parent context.Context) {
 				// scheduler has stopped), so a ticker event selected just as Stop()
 				// fires can't launch a fresh pass against the canceled ctx.
 				s.Tick(ctx, domain.NowMS())
+			case uri, ok := <-resourceUpdates:
+				// A subscribed agent-state resource changed: re-check NOW rather than
+				// waiting up to a full interval. Coalesce a burst (drain the rest of the
+				// buffer) into one pass — the individual URI doesn't matter, the wake
+				// just nudges active terminal watchers due. A closed channel (nilled) is
+				// never selected again, so the loop falls back to ticker-only.
+				if !ok {
+					resourceUpdates = nil
+					continue
+				}
+				_ = uri
+				drainResourceUpdates(resourceUpdates)
+				s.onResourceWake(ctx)
 			}
 		}
 	}()
@@ -192,6 +211,40 @@ func (s *Scheduler) Tick(ctx context.Context, now int64) {
 	}()
 
 	s.runPass(ctx, now)
+}
+
+// onResourceWake handles a resource-update notification: it brings every active
+// terminal watcher forward (nextCheckAt = now) and runs one immediate pass, so a
+// pushed agent-state transition is reflected without waiting the tick interval. It
+// nudges ALL terminal watchers rather than mapping the URI to a specific one —
+// notifications are infrequent (one per transition) and a watcher re-check is cheap
+// and idempotent, so this avoids a stateful URI→watcher index. The Tick no-overlap
+// guard means a wake colliding with an in-flight pass is dropped; the nudged
+// nextCheckAt persists, so the next tick still picks it up (bounded by the interval).
+func (s *Scheduler) onResourceWake(ctx context.Context) {
+	now := domain.NowMS()
+	if watchers, err := s.deps.Store.ListWatchers("active"); err == nil {
+		for _, w := range watchers {
+			// Only terminal watchers subscribe; a not-yet-due one is pulled forward so
+			// the immediate pass's DueWatchers(now) returns it.
+			if w.Kind == "terminal" && w.NextCheckAt > now {
+				_ = s.deps.Store.UpdateWatcher(w.ID, map[string]any{"nextCheckAt": now})
+			}
+		}
+	}
+	s.Tick(ctx, now)
+}
+
+// drainResourceUpdates empties the buffered wake channel without blocking, so a
+// burst of transitions coalesces into the single pass onResourceWake already ran.
+func drainResourceUpdates(ch <-chan string) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // runPass is the unguarded body of one tick: fire due timers, run due watchers,

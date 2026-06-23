@@ -35,8 +35,14 @@ func (d *deadlineFakeLow) CallTool(ctx context.Context, name string, args map[st
 	}
 	return d.result, nil
 }
-func (d *deadlineFakeLow) GetServerVersion() *ServerInfo { return nil }
-func (d *deadlineFakeLow) Close() error                  { return nil }
+func (d *deadlineFakeLow) GetServerVersion() *ServerInfo                     { return nil }
+func (d *deadlineFakeLow) Close() error                                      { return nil }
+func (d *deadlineFakeLow) SupportsSubscribe() bool                           { return false }
+func (d *deadlineFakeLow) Subscribe(ctx context.Context, uri string) error   { return nil }
+func (d *deadlineFakeLow) Unsubscribe(ctx context.Context, uri string) error { return nil }
+func (d *deadlineFakeLow) ReadResource(ctx context.Context, uri string) (string, error) {
+	return "", nil
+}
 
 // TestCallToolThreadsTimeout: a non-zero CallOptions.Timeout derives a per-attempt
 // deadline on the context handed to the low-level callTool.

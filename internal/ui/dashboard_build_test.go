@@ -27,7 +27,10 @@ func (f *fakePreviewMCP) CallRead(ctx context.Context, name string, args map[str
 	atomic.AddInt32(&f.calls, 1)
 	return daemon.MCPResult{}, nil
 }
-func (f *fakePreviewMCP) Connected() bool { return f.connected }
+func (f *fakePreviewMCP) Connected() bool                               { return f.connected }
+func (f *fakePreviewMCP) SupportsSubscribe() bool                       { return false }
+func (f *fakePreviewMCP) Subscribe(_ context.Context, _ string) error   { return nil }
+func (f *fakePreviewMCP) Unsubscribe(_ context.Context, _ string) error { return nil }
 
 func TestResolvePreviews_FetchesWhenGateElapsed(t *testing.T) {
 	mcp := &fakePreviewMCP{connected: true}

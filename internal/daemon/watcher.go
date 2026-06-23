@@ -57,6 +57,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	}
 
 	connected := ctx.MCP.Connected()
+	// When the server supports resource subscription, an agent terminal's FSM
+	// transitions are PUSHED (waking this watcher immediately) rather than only
+	// caught on the tick. supportsSub gates the per-terminal subscribe below; the
+	// initial getStatus read still discovers the agentId and is the fallback.
+	supportsSub := connected && ctx.MCP.SupportsSubscribe()
 
 	// One batched terminal.getStatus for ALL targets (with inline output).
 	statuses := StatusBatch{Ok: false, ByID: map[string]TerminalStatusEntry{}}
@@ -74,6 +79,12 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	}
 
 	outcomes := make([]CheckOutcome, 0, len(targets))
+
+	// allQuietSubscribed gates the widened reconcile cadence: it stays true only if
+	// EVERY target is subscribed and currently quiet (waiting/idle). One working,
+	// unsubscribed, or absent target keeps the normal cadence so progress is still
+	// sampled. Starts false for an empty target list (nothing to widen).
+	allQuietSubscribed := len(targets) > 0
 
 	for _, terminalID := range targets {
 		prevState := terminalStatePtr(perTerminal, terminalID)
@@ -142,6 +153,20 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		base.Prev = string(outcome.Classification)
 		base.Seen = seen
 		perTerminal[terminalID] = base
+
+		// Resource subscription bookkeeping. A present agent terminal (has an
+		// agentId) gets subscribed once per session so its transitions are pushed;
+		// the persisted Subscribed flag makes this idempotent across ticks. Track
+		// whether this terminal is "subscribed and quiet" to decide cadence below.
+		quietSubscribed := false
+		if hasEntry && entry.AgentID != "" {
+			st := ensureSubscribed(ctx, supportsSub, entry.AgentID, perTerminal[terminalID])
+			perTerminal[terminalID] = st
+			quietSubscribed = st.Subscribed && isQuietState(entry.AgentState)
+		}
+		if !quietSubscribed {
+			allQuietSubscribed = false
+		}
 
 		// Publish.
 		if outcome.ShouldPublish {
@@ -212,6 +237,14 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	if rateLimited && rateLimitCooldownMS > cadence {
 		cadence = rateLimitCooldownMS
 	}
+	// Subscribed + quiet: rely on the push for timely transitions and widen the poll
+	// to a reconcile interval (catches a dropped notification) — this is where the
+	// ~20 calls/min of steady idle polling collapses to ~0. Held back when a text
+	// condition needs fresh scrollback every tick, and never lowers a longer cadence
+	// (rate-limit cooldown still wins).
+	if allQuietSubscribed && !needsDeepTail && !stop && SubscribedReconcileMS > cadence {
+		cadence = SubscribedReconcileMS
+	}
 	nextCheckAt := now + cadence
 
 	status := "active"
@@ -245,6 +278,9 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		// disrupts the watcher finalize. condition_met (incl. a clean terminal
 		// exit) → done; timeout → failed.
 		advanceLinkedWorkflow(ctx, rec, status, now)
+		// The watcher is done — release its resource subscriptions so the server
+		// stops pushing for terminals nothing is watching anymore.
+		unsubscribeAll(ctx, perTerminal)
 	}
 
 	headline.Stop = stop
@@ -543,6 +579,46 @@ func disableWatcher(ctx *CheckContext, rec domain.WatcherRecord, now int64, reas
 		ShouldPublish:  false,
 		Stop:           true,
 		StopReason:     StopTerminal,
+	}
+}
+
+// --- subscription helpers ----------------------------------------------------
+
+// ensureSubscribed records a terminal's agent-state resource URI and, when the
+// server supports subscription and we are not already subscribed this session,
+// issues the Subscribe. The persisted AgentID/ResourceURI let the mcp client
+// re-issue the (session-scoped) subscription after a reconnect; Subscribed makes
+// the per-tick call idempotent. A failed Subscribe leaves Subscribed=false so the
+// next tick retries — the polling path covers the gap meanwhile.
+func ensureSubscribed(ctx *CheckContext, supportsSub bool, agentID string, st TerminalState) TerminalState {
+	uri := agentStateResourceURI(agentID)
+	st.AgentID = agentID
+	st.ResourceURI = uri
+	if !supportsSub || uri == "" || st.Subscribed {
+		return st
+	}
+	if err := ctx.MCP.Subscribe(ctx.Ctx, uri); err == nil {
+		st.Subscribed = true
+	}
+	return st
+}
+
+// isQuietState reports whether an agent FSM state is settled at a prompt and
+// producing no output to sample. Only quiet, subscribed terminals widen the poll
+// cadence: a working agent still needs periodic output reads, and a completed/
+// exited agent stops the watcher outright.
+func isQuietState(agentState string) bool {
+	return agentState == "waiting" || agentState == "idle"
+}
+
+// unsubscribeAll best-effort releases every subscription the watcher holds, called
+// once on terminal stop. Errors are ignored — the session teardown drops whatever
+// is left, and a stale server-side subscription only triggers a harmless re-check.
+func unsubscribeAll(ctx *CheckContext, perTerminal map[string]TerminalState) {
+	for _, st := range perTerminal {
+		if st.Subscribed && st.ResourceURI != "" {
+			_ = ctx.MCP.Unsubscribe(ctx.Ctx, st.ResourceURI)
+		}
 	}
 }
 

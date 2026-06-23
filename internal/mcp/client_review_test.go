@@ -43,6 +43,12 @@ func (f *countingLow) Close() error {
 	atomic.AddInt32(&f.closes, 1)
 	return nil
 }
+func (f *countingLow) SupportsSubscribe() bool                           { return false }
+func (f *countingLow) Subscribe(ctx context.Context, uri string) error   { return nil }
+func (f *countingLow) Unsubscribe(ctx context.Context, uri string) error { return nil }
+func (f *countingLow) ReadResource(ctx context.Context, uri string) (string, error) {
+	return "", nil
+}
 func (f *countingLow) closeCount() int32 { return atomic.LoadInt32(&f.closes) }
 
 // --- #1: degrade must not leak the low client ---

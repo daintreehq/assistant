@@ -35,6 +35,16 @@ type LowLevelClient interface {
 	ListTools(ctx context.Context) ([]rawTool, error)
 	CallTool(ctx context.Context, name string, args map[string]any) (rawResult, error)
 	GetServerVersion() *ServerInfo // may return nil
+	// SupportsSubscribe reports whether the connected server advertised
+	// capabilities.resources.subscribe (nil-safe; false when unknown).
+	SupportsSubscribe() bool
+	// Subscribe/Unsubscribe register/cancel interest in a resource URI. The server
+	// then pushes resources/updated notifications routed to the Client's handler.
+	Subscribe(ctx context.Context, uri string) error
+	Unsubscribe(ctx context.Context, uri string) error
+	// ReadResource fetches a resource's current contents, returning the FIRST
+	// content block's text ("" when the resource has no text body).
+	ReadResource(ctx context.Context, uri string) (string, error)
 	Close() error
 }
 
@@ -116,6 +126,56 @@ func (s *sdkLowLevel) GetServerVersion() *ServerInfo {
 		return nil
 	}
 	return &ServerInfo{Name: init.ServerInfo.Name, Version: init.ServerInfo.Version}
+}
+
+// SupportsSubscribe walks InitializeResult().Capabilities.Resources.Subscribe with
+// a full nil-chain guard — a freshly-connected session may not have an
+// InitializeResult yet, and a server may omit any link in the capabilities chain.
+func (s *sdkLowLevel) SupportsSubscribe() bool {
+	if s.session == nil {
+		return false
+	}
+	init := s.session.InitializeResult()
+	if init == nil || init.Capabilities == nil || init.Capabilities.Resources == nil {
+		return false
+	}
+	return init.Capabilities.Resources.Subscribe
+}
+
+func (s *sdkLowLevel) Subscribe(ctx context.Context, uri string) error {
+	if s.session == nil {
+		return nil
+	}
+	return s.session.Subscribe(ctx, &sdkmcp.SubscribeParams{URI: uri})
+}
+
+func (s *sdkLowLevel) Unsubscribe(ctx context.Context, uri string) error {
+	if s.session == nil {
+		return nil
+	}
+	return s.session.Unsubscribe(ctx, &sdkmcp.UnsubscribeParams{URI: uri})
+}
+
+// ReadResource returns the first content block's text. A resource-updated
+// notification carries NO payload (only a "dirty" URI), so the read after it is
+// how the new state is actually fetched. Blob-only/empty resources yield "".
+func (s *sdkLowLevel) ReadResource(ctx context.Context, uri string) (string, error) {
+	if s.session == nil {
+		return "", nil
+	}
+	res, err := s.session.ReadResource(ctx, &sdkmcp.ReadResourceParams{URI: uri})
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	for _, c := range res.Contents {
+		if c != nil && c.Text != "" {
+			return c.Text, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *sdkLowLevel) Close() error {

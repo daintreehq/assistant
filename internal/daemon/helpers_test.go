@@ -20,7 +20,10 @@ var errModelMustNotRun = errors.New("model must not be consulted")
 // closed terminal.
 type statusErrMCP struct{}
 
-func (statusErrMCP) Connected() bool { return true }
+func (statusErrMCP) Connected() bool                               { return true }
+func (statusErrMCP) SupportsSubscribe() bool                       { return false }
+func (statusErrMCP) Subscribe(_ context.Context, _ string) error   { return nil }
+func (statusErrMCP) Unsubscribe(_ context.Context, _ string) error { return nil }
 func (statusErrMCP) CallRead(_ context.Context, name string, _ map[string]any) (MCPResult, error) {
 	if name == "terminal.getStatus" {
 		return MCPResult{Text: "boom", IsError: true}, nil
@@ -30,6 +33,7 @@ func (statusErrMCP) CallRead(_ context.Context, name string, _ map[string]any) (
 
 // termCfg is one terminal's scripted state for the programmable MCP fake.
 type termCfg struct {
+	agentID       string // emitted as agentId in getStatus (keys the subscribable resource)
 	agentState    string
 	waitingReason string
 	recentOutput  *string // nil ⇒ omitted from getStatus (forces getOutput fallback)
@@ -53,6 +57,12 @@ type progMCP struct {
 	listResult *MCPResult
 	pulse      *MCPResult // git.getProjectPulse override (default clean)
 	calls      []mcpCall
+
+	// resource-subscription seam
+	supportsSub  bool
+	subErr       error
+	subscribed   []string
+	unsubscribed []string
 }
 
 type mcpCall struct {
@@ -78,6 +88,37 @@ func (m *progMCP) callsFor(name string) []mcpCall {
 
 func (m *progMCP) Connected() bool { return m.connected }
 
+func (m *progMCP) SupportsSubscribe() bool { return m.supportsSub }
+
+func (m *progMCP) Subscribe(_ context.Context, uri string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.subErr != nil {
+		return m.subErr
+	}
+	m.subscribed = append(m.subscribed, uri)
+	return nil
+}
+
+func (m *progMCP) Unsubscribe(_ context.Context, uri string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unsubscribed = append(m.unsubscribed, uri)
+	return nil
+}
+
+func (m *progMCP) subscribeCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.subscribed...)
+}
+
+func (m *progMCP) unsubscribeCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.unsubscribed...)
+}
+
 func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) (MCPResult, error) {
 	m.mu.Lock()
 	m.calls = append(m.calls, mcpCall{name: name, args: args})
@@ -94,6 +135,9 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 				continue // omitted ⇒ absent from getStatus
 			}
 			e := map[string]any{"terminalId": id}
+			if cfg.agentID != "" {
+				e["agentId"] = cfg.agentID
+			}
 			if cfg.agentState != "" {
 				e["agentState"] = cfg.agentState
 			}

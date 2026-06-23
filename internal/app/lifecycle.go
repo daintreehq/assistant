@@ -67,11 +67,14 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 		return a.scheduler
 	}
 	a.scheduler = daemon.NewScheduler(daemon.SchedulerDeps{
-		Store:       a.Store,
-		Queue:       daemonQueueAdapter{q: a.Queue},
-		Registry:    daemonRegistryAdapter{app: a},
-		CtxFor:      a.daemonCtxFor,
-		OnAttention: onAttention,
+		Store:    a.Store,
+		Queue:    daemonQueueAdapter{q: a.Queue},
+		Registry: daemonRegistryAdapter{app: a},
+		CtxFor:   a.daemonCtxFor,
+		// Resource-update wake channel: a pushed agent-state transition triggers an
+		// immediate watcher re-check instead of waiting the next tick interval.
+		ResourceUpdates: a.MCP.ResourceUpdates(),
+		OnAttention:     onAttention,
 	})
 	a.scheduler.Start(ctx)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
@@ -184,6 +187,23 @@ func (a *App) DaemonMCP() daemon.MCP { return daemonMcpAdapter{c: a.MCP} }
 type daemonMcpAdapter struct{ c *mcp.Client }
 
 func (a daemonMcpAdapter) Connected() bool { return a.c.IsConnected() }
+
+func (a daemonMcpAdapter) SupportsSubscribe() bool { return a.c.SupportsSubscribe() }
+
+// Subscribe/Unsubscribe forward to the client's resource-subscription surface,
+// bounding each control call by the same per-read timeout the daemon uses for
+// CallRead so a wedged subscribe can't hang the watcher's tick.
+func (a daemonMcpAdapter) Subscribe(ctx context.Context, uri string) error {
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(daemon.McpReadTimeoutMS)*time.Millisecond)
+	defer cancel()
+	return a.c.Subscribe(cctx, uri)
+}
+
+func (a daemonMcpAdapter) Unsubscribe(ctx context.Context, uri string) error {
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(daemon.McpReadTimeoutMS)*time.Millisecond)
+	defer cancel()
+	return a.c.Unsubscribe(cctx, uri)
+}
 
 // daemonReadCallOptions builds the per-request CallOptions for a read-only daemon
 // MCP call from the daemon's documented cadence constants. Bounding each attempt
