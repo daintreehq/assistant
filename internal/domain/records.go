@@ -50,6 +50,11 @@ type WatcherRecord struct {
 	// happened.
 	EndedReason *string `json:"endedReason,omitempty"`
 	EndedAt     *int64  `json:"endedAt,omitempty"`
+	// WorkflowRunID back-links a supervisor watcher to the durable workflow ledger
+	// row created when its work was spawned (nil for non-supervisor / manually-created
+	// watchers). When set, the daemon advances that row's status as the watcher reaches
+	// a terminal state (condition_met → done, timeout/error → failed).
+	WorkflowRunID *string `json:"workflowRunId,omitempty"`
 }
 
 // AuditRecord is one row of the audit log.
@@ -207,6 +212,10 @@ type AgentLaunchRecord struct {
 	ErrorMessage   *string          `json:"errorMessage,omitempty"`
 	CreatedAt      int64            `json:"createdAt"`
 	UpdatedAt      int64            `json:"updatedAt"`
+	// WorkflowRunID links a spawn saga to its durable workflow ledger row. Set once
+	// the ledger row is created (best-effort, after a terminal binds) so an idempotent
+	// retry re-uses the same row instead of inserting a duplicate. nil until then.
+	WorkflowRunID *string `json:"workflowRunId,omitempty"`
 }
 
 // QueueEvent is a live attention-queue event. updatedAt advances

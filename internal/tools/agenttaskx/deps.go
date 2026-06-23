@@ -41,6 +41,9 @@ type MCPClient interface {
 //   - UpdateAgentLaunch applies an allowlisted patch (stage/terminalId/…).
 //   - GetAgentLaunch reads one saga by id (agentTask.status), or (nil, nil).
 //   - ListAgentLaunches reads the newest-first sagas (agentTask.list).
+//   - InsertWorkflowRun records the spawned work in the durable ledger (so /workflows
+//     surfaces it); UpdateWorkflowRun back-fills its links best-effort. Both mirror
+//     *storage.Store exactly, so the concrete store satisfies this without an adapter.
 type Store interface {
 	InsertWatcher(rec domain.WatcherRecord) (domain.WatcherRecord, error)
 	ListWatchers(status string) ([]domain.WatcherRecord, error)
@@ -49,6 +52,8 @@ type Store interface {
 	UpdateAgentLaunch(id string, patch map[string]any) error
 	GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error)
 	ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error)
+	InsertWorkflowRun(rec domain.WorkflowRunRecord) (domain.WorkflowRunRecord, error)
+	UpdateWorkflowRun(id string, patch map[string]any) error
 }
 
 // Deps wires the agentTask family. DaemonActive reports whether the scheduler is

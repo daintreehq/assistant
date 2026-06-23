@@ -281,6 +281,38 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 	}
 	watcherWarning := ""
 
+	// --- Durable workflow ledger -------------------------------------------------
+	// Record the spawned work so /workflows surfaces it and a persistent record
+	// survives a restart. Best-effort: a ledger failure NEVER fails a successful
+	// spawn (mirrors the watcher-attach contract below). Idempotent: a saga that
+	// already carries a workflowRunId (an idempotent-hit / re-attach reaching this
+	// path again) re-uses that row instead of inserting a duplicate.
+	workflowRunID := ""
+	if record.WorkflowRunID != nil {
+		workflowRunID = *record.WorkflowRunID
+	}
+	if workflowRunID == "" {
+		run, lerr := deps.DB.InsertWorkflowRun(domain.WorkflowRunRecord{
+			Status:          domain.WorkflowActive,
+			WorktreeID:      ptr(worktreeID),
+			TerminalIdsJson: ptr(jsonIDArray(terminalID)),
+		})
+		if lerr != nil {
+			logDebug(deps, "workflow.ledger_insert_failed", map[string]any{
+				"via": "agentTask.spawnForEdits", "agentId": agentID, "title": a.Title, "error": lerr.Error(),
+			})
+		} else {
+			workflowRunID = run.ID
+			record.WorkflowRunID = &run.ID
+			// Stamp the back-link so an idempotent retry of this saga re-uses the row.
+			_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{"workflowRunId": run.ID})
+			logDebug(deps, "workflow.ledger_created", map[string]any{
+				"via": "agentTask.spawnForEdits", "workflowRunId": run.ID,
+				"terminalId": terminalID, "worktreeId": worktreeID, "title": a.Title,
+			})
+		}
+	}
+
 	if a.Watcher != nil && a.Watcher.Create && watcherID == "" {
 		goal := a.Watcher.Goal
 		if goal == "" {
@@ -295,7 +327,7 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 		// supervisor gates completion on evidence, not git cleanliness alone. The
 		// record is assembled by the shared builder so this attach can never drift
 		// from the workflow / superviseTerminal attach paths.
-		watcher, werr := deps.DB.InsertWatcher(domain.BuildSupervisorWatcherRecord(domain.SupervisorWatcherSpec{
+		wrec := domain.BuildSupervisorWatcherRecord(domain.SupervisorWatcherSpec{
 			TerminalID:         terminalID,
 			WorktreeID:         worktreeID,
 			Title:              "watch " + a.Title,
@@ -303,7 +335,13 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 			CadenceMs:          cadence,
 			SpawnMode:          a.Mode,
 			AcceptanceCriteria: strings.TrimSpace(a.AcceptanceCriteria),
-		}))
+		})
+		// Back-link the watcher to its ledger row so the daemon advances that row's
+		// status as the watcher reaches a terminal state.
+		if workflowRunID != "" {
+			wrec.WorkflowRunID = &workflowRunID
+		}
+		watcher, werr := deps.DB.InsertWatcher(wrec)
 		if werr != nil {
 			// Watcher bookkeeping failed, but the agent IS running — surface the gap
 			// instead of failing a successful launch. Record stays terminal_bound.
@@ -316,6 +354,10 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 			_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{
 				"stage": string(domain.WatcherAttached), "watcherId": watcherID,
 			})
+			// Record the supervising watcher on the ledger row (best-effort).
+			if workflowRunID != "" {
+				_ = deps.DB.UpdateWorkflowRun(workflowRunID, map[string]any{"watcherIdsJson": jsonIDArray(watcherID)})
+			}
 			logDebug(deps, "watcher.created", map[string]any{
 				"watcherId": watcher.ID, "kind": "terminal", "isSupervisor": true,
 				"via": "agentTask.spawnForEdits", "agentId": agentID, "mode": a.Mode,
@@ -375,6 +417,9 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 	if watcherID != "" {
 		result["watcherId"] = watcherID
 	}
+	if workflowRunID != "" {
+		result["workflowRunId"] = workflowRunID
+	}
 	if watcherWarning != "" {
 		result["watcherWarning"] = watcherWarning
 	}
@@ -392,4 +437,17 @@ func orStr(p *string, fallback string) string {
 		return *p
 	}
 	return fallback
+}
+
+// jsonIDArray marshals a single id into a JSON string-array ("[\"x\"]") for the
+// ledger's *IdsJson columns, or "" when the id is empty (ptr() then maps "" → NULL).
+func jsonIDArray(id string) string {
+	if id == "" {
+		return ""
+	}
+	b, err := json.Marshal([]string{id})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }

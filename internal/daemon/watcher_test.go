@@ -262,3 +262,121 @@ func TestWatcher_ExploreIdleIsCompletion(t *testing.T) {
 		t.Fatalf("explore idle-at-prompt → completed_success, got %s", out.Classification)
 	}
 }
+
+// --- linked workflow ledger advance (issue #206) ----------------------------
+
+// A supervisor that reaches condition_met advances its linked workflow row to
+// done and stamps completedAt.
+func TestWatcher_AdvancesLinkedWorkflowOnConditionMet(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0), "recentOutput": "done",
+	})
+	rec := termWatcher("wch_wf", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_done")
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop {
+		t.Fatalf("exited should stop, got stop=%v", out.Stop)
+	}
+	p := store.workflowPatch["wfr_done"]
+	if p == nil {
+		t.Fatal("a stopped supervisor must advance its linked workflow row")
+	}
+	if p["status"] != string(domain.WorkflowDone) {
+		t.Errorf("condition_met → done, got %v", p["status"])
+	}
+	if _, ok := p["completedAt"].(int64); !ok {
+		t.Errorf("advance must stamp completedAt, got %v", p["completedAt"])
+	}
+}
+
+// A supervisor that times out fails its linked workflow row.
+func TestWatcher_TimeoutFailsLinkedWorkflow(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "working", "recentOutput": "still going",
+	})
+	rec := termWatcher("wch_to", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_to")
+	rec.StopAfterMs = ptrInt64(1) // created at 0; now >> 1 → timed out
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop || out.StopReason != StopTimeout {
+		t.Fatalf("expected timeout stop, got stop=%v reason=%v", out.Stop, out.StopReason)
+	}
+	if store.workflowPatch["wfr_to"]["status"] != string(domain.WorkflowFailed) {
+		t.Errorf("timeout → failed, got %v", store.workflowPatch["wfr_to"]["status"])
+	}
+}
+
+// A corrupt-state supervisor fails its linked workflow row.
+func TestWatcher_CorruptDisablesFailsLinkedWorkflow(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	rec := domain.WatcherRecord{
+		ID: "wch_badwf", Kind: "terminal", Title: "Bad", Goal: "g",
+		TargetsJson: `not json`, CadenceMs: 3000, ModelTier: domain.ModelSmall,
+		Status: "active", WorkflowRunID: ptrStr("wfr_bad"),
+	}
+	store.watchers = []domain.WatcherRecord{rec}
+
+	_ = RunTerminalWatcherCheck(ctxFor(store, queue, newFakeMCP(), &fakeModel{}), rec)
+	if store.workflowPatch["wfr_bad"]["status"] != string(domain.WorkflowFailed) {
+		t.Errorf("corrupt watcher → linked workflow failed, got %v", store.workflowPatch["wfr_bad"]["status"])
+	}
+}
+
+// A lost finalize claim (the watcher was cancelled mid-check) must NOT advance the
+// workflow row — mirrors the grant-revoke skip, so a cancelled run isn't clobbered.
+func TestWatcher_LostClaimDoesNotAdvanceWorkflow(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0),
+	})
+	rec := termWatcher("wch_lost", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_lost")
+	// The store's copy was cancelled out from under the check, so ClaimDueWatcher fails.
+	cancelled := rec
+	cancelled.Status = "cancelled"
+	store.watchers = []domain.WatcherRecord{cancelled}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop {
+		t.Fatalf("exited still reports stop in the outcome")
+	}
+	if len(store.workflowPatch) != 0 {
+		t.Fatalf("a lost claim must NOT advance the workflow row, got %v", store.workflowPatch)
+	}
+	if store.revoked["wch_lost"] != 0 {
+		t.Fatalf("a lost claim must NOT revoke grants either, got %v", store.revoked)
+	}
+}
+
+// A watcher with no workflow link never touches a ledger row on stop.
+func TestWatcher_NoWorkflowLinkNoAdvance(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0),
+	})
+	rec := termWatcher("wch_nolink", []string{"t1"}) // WorkflowRunID nil
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop {
+		t.Fatalf("exited should stop")
+	}
+	if len(store.workflowPatch) != 0 {
+		t.Fatalf("a watcher with no workflow link must not touch a ledger row, got %v", store.workflowPatch)
+	}
+}

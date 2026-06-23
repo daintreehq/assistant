@@ -99,18 +99,22 @@ func newWorkflowPrepBranchForReviewTool() *tools.Tool {
 }
 
 // supervisorContext is the slice of the passthrough's structuredContent we read
-// to attach a watcher.
+// to attach a watcher and seed the workflow ledger row. issueUrl/branch are
+// best-effort enrichments (absent on older Daintree builds → left empty).
 type supervisorContext struct {
 	TerminalID  string `json:"terminalId"`
 	WorktreeID  string `json:"worktreeId"`
 	IssueTitle  string `json:"issueTitle"`
 	IssueNumber *int   `json:"issueNumber"`
+	IssueURL    string `json:"issueUrl"`
+	Branch      string `json:"branch"`
 }
 
-// attachSupervisorWatcher reads the spawned terminal from the passthrough result
-// and (unless one already supervises it) inserts a supervisor watcher. A missing
-// terminalId or insert failure NEVER fails the call — setup still succeeded; we
-// only annotate the summary.
+// attachSupervisorWatcher reads the spawned terminal from the passthrough result,
+// records the work in the durable workflow ledger, and (unless one already
+// supervises it) inserts a supervisor watcher back-linked to that ledger row. A
+// missing terminalId, a ledger failure, or a watcher-insert failure NEVER fails the
+// call — setup still succeeded; we only annotate the summary.
 func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolContext, res tools.ToolResult) tools.ToolResult {
 	sc := extractSupervisorContext(res.Result)
 	if sc == nil || sc.TerminalID == "" {
@@ -121,14 +125,48 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 		return res
 	}
 
-	// Dedup: reuse an existing active supervisor already targeting the terminal.
+	// Dedup: an active supervisor already targeting the terminal means we must not
+	// attach a second one. If it already carries a workflow link, the work is already
+	// recorded — nothing to do. If it does NOT (e.g. an adopted superviseTerminal or a
+	// manually-created watcher), fall through to record the work in the ledger but
+	// skip the duplicate watcher.
+	skipWatcher := false
 	if existing, err := deps.Store.ListWatchers(ctx, "active"); err == nil {
 		for i := range existing {
 			w := &existing[i]
 			if w.IsSupervisor != nil && *w.IsSupervisor && watcherTargets(w, sc.TerminalID) {
-				return res
+				if w.WorkflowRunID != nil && *w.WorkflowRunID != "" {
+					return res // already supervised AND recorded
+				}
+				skipWatcher = true
+				break
 			}
 		}
+	}
+
+	// Record the spawned work in the durable ledger BEFORE the watcher, so the
+	// watcher can back-link to it (the daemon then advances the row's status as the
+	// watcher progresses). Best-effort: a ledger failure never fails setup.
+	workflowRunID := ""
+	if deps.WorkflowStore != nil {
+		if runID, err := deps.WorkflowStore.InsertWorkflowRun(ctx, domain.WorkflowRunRecord{
+			Status:          domain.WorkflowActive,
+			IssueNumber:     sc.IssueNumber,
+			IssueURL:        strOrNil(sc.IssueURL),
+			IssueTitle:      strOrNil(sc.IssueTitle),
+			Branch:          strOrNil(sc.Branch),
+			WorktreeID:      strOrNil(sc.WorktreeID),
+			TerminalIdsJson: strOrNil(jsonIDArray(sc.TerminalID)),
+		}); err == nil {
+			workflowRunID = runID
+		}
+	}
+
+	// A link-less supervisor already watches the terminal: the work is now recorded,
+	// but attaching a second watcher would violate the one-supervisor-per-terminal
+	// invariant, so we stop here (the row stays active for a human/model to advance).
+	if skipWatcher {
+		return res
 	}
 
 	title := "watch issue"
@@ -148,12 +186,51 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 		CadenceMs:  supervisorDefaultCadenceMs,
 		SpawnMode:  "edit",
 	})
-	if err := deps.Store.InsertWatcher(ctx, rec); err != nil {
-		// Insert failure is a warning, not a failed call.
+	if workflowRunID != "" {
+		rec.WorkflowRunID = &workflowRunID
+	}
+	watcher, err := deps.Store.InsertWatcher(ctx, rec)
+	if err != nil {
+		// The agent IS running, but supervision could not be wired. Path A has no
+		// idempotency anchor for the ledger row, so an active row left here would let
+		// a retry insert a duplicate active row. Close it (best-effort) so a retry
+		// records a fresh one instead.
+		if workflowRunID != "" && deps.WorkflowStore != nil {
+			_ = deps.WorkflowStore.UpdateWorkflowRun(ctx, workflowRunID, map[string]any{
+				"status":      string(domain.WorkflowFailed),
+				"completedAt": domain.NowMS(),
+			})
+		}
 		return res
+	}
+	// Record the supervising watcher on the ledger row (best-effort).
+	if workflowRunID != "" && deps.WorkflowStore != nil {
+		_ = deps.WorkflowStore.UpdateWorkflowRun(ctx, workflowRunID, map[string]any{"watcherIdsJson": jsonIDArray(watcher.ID)})
 	}
 	res.Summary += foregroundOnlyNote
 	return res
+}
+
+// strOrNil maps an empty string to a nil *string (so the ledger column stays NULL)
+// and a non-empty one to its address.
+func strOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// jsonIDArray marshals a single id into a JSON string-array ("[\"x\"]") for the
+// ledger's *IdsJson columns, or "" when the id is empty (strOrNil maps "" → NULL).
+func jsonIDArray(id string) string {
+	if id == "" {
+		return ""
+	}
+	b, err := json.Marshal([]string{id})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // extractSupervisorContext pulls the supervisor fields from the passthrough

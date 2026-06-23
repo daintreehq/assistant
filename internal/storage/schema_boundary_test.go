@@ -98,7 +98,7 @@ func TestFreshSchemaShape(t *testing.T) {
 
 	mustHaveCols := map[string][]string{
 		"events":            {"updatedAt", "notifiedAt"},
-		"watchers":          {"isSupervisor", "lastEpistemicKind", "endedReason", "endedAt"},
+		"watchers":          {"isSupervisor", "lastEpistemicKind", "endedReason", "endedAt", "workflowRunId"},
 		"automation_grants": {"source"},
 		"audit_log":         {"grantSource", "grantId", "runId"},
 		"run_events":        {"id", "runId", "seq", "ts", "type", "payload"},
@@ -109,7 +109,7 @@ func TestFreshSchemaShape(t *testing.T) {
 			"status", "startedAt", "updatedAt", "completedAt"},
 		"agent_launches": {"id", "idempotencyKey", "agentId", "worktreeId", "mode",
 			"title", "name", "terminalId", "watcherId", "stage", "errorCode",
-			"errorMessage", "createdAt", "updatedAt"},
+			"errorMessage", "createdAt", "updatedAt", "workflowRunId"},
 		"memories": {"id", "content", "category", "source", "pinnedAt", "deletedAt",
 			"createdAt", "updatedAt"},
 	}
