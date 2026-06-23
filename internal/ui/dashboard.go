@@ -117,6 +117,17 @@ func BuildAgentRows(watchers []domain.WatcherRecord, previews []daemon.TerminalP
 		if terminalID != "" && coveredTerminals[terminalID] {
 			continue
 		}
+		// Session-scope the deck. A launch row with no live watcher must still be
+		// anchored to something current, or a prior session's dead saga resurfaces — the
+		// "× FAILED" of a spawn whose terminal is long gone. An IN-FLIGHT stage is
+		// guaranteed this-session (prior-session non-terminal sagas are cleared on DB
+		// open), so it shows as STARTING. A SETTLED stage (confirmed/failed/ambiguous)
+		// can outlive its session, so it earns a row only while its terminal is still
+		// live in the current previews; otherwise it is dead history and is skipped.
+		_, terminalLive := previewByTerminal[terminalID]
+		if launchStageSettled(l.Stage) && !terminalLive {
+			continue
+		}
 		id := l.ID
 		if terminalID != "" {
 			id = terminalID
@@ -182,6 +193,20 @@ func liveWatcherStatus(status string) bool {
 	case "active", "created", "paused":
 		return true
 	default: // condition_met, timeout, cancelled, error, ""
+		return false
+	}
+}
+
+// launchStageSettled reports whether a spawn saga has reached a terminal outcome
+// (confirmed/failed/ambiguous) rather than an in-flight stage. A settled saga can
+// outlive its session, so the deck renders it only while its terminal is still live;
+// an in-flight saga is always current, because prior-session non-terminal sagas are
+// cleared on DB open. Unknown stages are treated as in-flight (fail open to shown).
+func launchStageSettled(stage domain.AgentLaunchStage) bool {
+	switch stage {
+	case domain.LaunchConfirmed, domain.LaunchFailed, domain.LaunchAmbiguous:
+		return true
+	default: // launch_requested, agent_started, terminal_bound, watcher_attached
 		return false
 	}
 }

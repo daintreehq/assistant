@@ -310,36 +310,34 @@ func TestResolveAllOpenEvents(t *testing.T) {
 	}
 }
 
-// TestReopenFailsStaleAgentLaunches — a non-terminal saga from a prior session is
-// failed (errorCode SESSION_ENDED) so its idempotencyKey no longer blocks a fresh
-// launch; a confirmed saga is untouched. Stale non-terminal records from a prior
-// session are retired on reopen.
-func TestReopenFailsStaleAgentLaunches(t *testing.T) {
+// TestReopenResetsStaleAgentLaunches — the session-open reset CLEARS the dead spawn
+// roster across a real reopen: a prior session's in-flight/ambiguous/failed (and
+// confirmed-without-terminal) sagas are DELETED, so a stale "× FAILED" never greets the
+// user and a fresh idempotencyKey isn't blocked. The one survivor is a confirmed saga
+// that bound a terminal — kept so a still-running orphan agent can be re-adopted.
+func TestReopenResetsStaleAgentLaunches(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := openFile(t, path, 1000)
 	inflight, _ := first.InsertAgentLaunch(domain.AgentLaunchRecord{
 		IdempotencyKey: "stale", AgentID: "claude", Mode: "edit", Title: "t", Name: "n",
 		Stage: domain.LaunchAmbiguous,
 	})
-	done, _ := first.InsertAgentLaunch(domain.AgentLaunchRecord{
+	term := "terminal-7"
+	kept, _ := first.InsertAgentLaunch(domain.AgentLaunchRecord{
 		IdempotencyKey: "done", AgentID: "claude", Mode: "edit", Title: "t", Name: "n",
-		Stage: domain.LaunchConfirmed,
+		Stage: domain.LaunchConfirmed, TerminalID: &term,
 	})
 	_ = first.Close()
 
 	s := openFile(t, path, 2000)
 	defer s.Close()
 	if a, _ := s.FindActiveAgentLaunch("stale"); a != nil {
-		t.Fatalf("failed saga must not be active")
+		t.Fatalf("cleared saga must not be active")
 	}
-	got, _ := s.GetAgentLaunch(inflight.ID)
-	if got == nil || got.Stage != domain.LaunchFailed {
-		t.Fatalf("stale saga should be failed, got %v", got)
+	if got, _ := s.GetAgentLaunch(inflight.ID); got != nil {
+		t.Fatalf("stale saga should be deleted on reopen, got %v", got)
 	}
-	if got.ErrorCode == nil || *got.ErrorCode != "SESSION_ENDED" {
-		t.Fatalf("errorCode want SESSION_ENDED, got %v", got.ErrorCode)
-	}
-	if cg, _ := s.GetAgentLaunch(done.ID); cg == nil || cg.Stage != domain.LaunchConfirmed {
-		t.Fatalf("confirmed saga must be untouched")
+	if cg, _ := s.GetAgentLaunch(kept.ID); cg == nil || cg.Stage != domain.LaunchConfirmed {
+		t.Fatalf("confirmed-with-terminal saga must survive, got %v", cg)
 	}
 }

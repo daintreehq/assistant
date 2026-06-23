@@ -7,7 +7,7 @@
 // Uses modernc.org/sqlite (pure Go, CGO-free) directly. The store is
 // single-writer (SetMaxOpenConns(1)) to preserve the no-interleave assumption the
 // "atomic" grant consume / event upsert / resolve rely on. Construction is a
-// session boundary: stale watchers cancelled, stale agent-launch sagas failed,
+// session boundary: stale watchers cancelled, the dead spawn roster cleared,
 // retention swept.
 package storage
 
@@ -94,8 +94,8 @@ type Store struct {
 }
 
 // Open opens (or creates) the SQLite file at dbPath, applies PRAGMAs, execs the
-// schema, then runs the session-boundary routines: cancel stale watchers, fail
-// stale agent launches, and a best-effort retention sweep. Pass ":memory:" for an
+// schema, then runs the session-boundary routines: cancel stale watchers, reset the
+// dead spawn roster, and a best-effort retention sweep. Pass ":memory:" for an
 // in-memory store in tests.
 func Open(dbPath string, opts *Options) (*Store, error) {
 	nowFn := domain.NowMS
@@ -140,9 +140,9 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		return nil, fmt.Errorf("cancel stale watchers: %w", err)
 	}
 	s.sessionEndedWatchers = endedTitles
-	if err := s.cancelStaleAgentLaunches(now); err != nil {
+	if err := s.resetStaleAgentLaunches(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("cancel stale agent launches: %w", err)
+		return nil, fmt.Errorf("reset stale agent launches: %w", err)
 	}
 	// Fresh-start inbox: resolve EVERY open attention event from prior sessions so a
 	// new run begins with an empty inbox (the !N badge at 0) — supervision and its

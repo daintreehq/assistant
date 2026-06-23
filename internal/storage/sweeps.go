@@ -120,19 +120,22 @@ func (s *Store) CancelLiveWatchers(now int64, reason string) ([]string, error) {
 	return titles, nil
 }
 
-// cancelStaleAgentLaunches fails any non-terminal spawn saga on open so a fresh
-// launch's idempotencyKey isn't blocked by a dead in-flight record.
-// COALESCE preserves any pre-existing error code/message.
-func (s *Store) cancelStaleAgentLaunches(now int64) error {
+// resetStaleAgentLaunches clears the spawn roster on open (session boundary), a
+// STRICT reset so a new session never inherits a prior session's dead sagas — the
+// "× FAILED" of a long-gone spawn must not greet the user on restart. It DELETES every
+// launch EXCEPT a confirmed one that bound a terminal: that single class is kept
+// because the spawned agent's terminal can outlive an assistant restart (Daintree owns
+// it), so the deck can re-show a still-running orphan — gated by a live-terminal check
+// (see launchStageSettled) so a confirmed-but-dead saga still never resurfaces. Every
+// other stage (failed, ambiguous, and all in-flight) is dead the moment the session
+// ends, so deleting them also frees a fresh launch's idempotencyKey instead of leaving
+// a blocked in-flight record (no surviving non-terminal row for FindActiveAgentLaunch).
+func (s *Store) resetStaleAgentLaunches() error {
 	_, err := s.db.Exec(`
-		UPDATE agent_launches
-		   SET stage        = 'failed',
-		       errorCode    = COALESCE(errorCode, 'SESSION_ENDED'),
-		       errorMessage = COALESCE(errorMessage, 'session ended before confirmation'),
-		       updatedAt    = ?
-		 WHERE stage NOT IN ('confirmed','failed')`, now)
+		DELETE FROM agent_launches
+		 WHERE NOT (stage = 'confirmed' AND terminalId IS NOT NULL AND terminalId != '')`)
 	if err != nil {
-		return fmt.Errorf("fail stale agent launches: %w", err)
+		return fmt.Errorf("reset stale agent launches: %w", err)
 	}
 	return nil
 }

@@ -180,8 +180,8 @@ func (s *Store) GetAgentLaunch(id string) (*domain.AgentLaunchRecord, error) {
 
 // ListAgentLaunches returns the newest-first spawn sagas, bounded by limit
 // (limit <= 0 defaults to 20 — the invariant lives here so callers can pass an
-// unvalidated cap). In practice session-scoped: non-terminal rows from prior
-// sessions are failed on DB open (cancelStaleAgentLaunches).
+// unvalidated cap). In practice session-scoped: the dead spawn roster is cleared on
+// DB open (resetStaleAgentLaunches keeps only confirmed-with-terminal sagas).
 func (s *Store) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error) {
 	if limit <= 0 {
 		limit = 20
@@ -204,12 +204,12 @@ func (s *Store) ListAgentLaunches(limit int) ([]domain.AgentLaunchRecord, error)
 }
 
 // ListConfirmedAgentLaunchesWithTerminal returns the newest-first confirmed spawn
-// sagas that bound a terminal — the boot-reconcile candidates. A 'confirmed' saga
-// SURVIVES the session-end sweep (cancelStaleAgentLaunches fails only non-terminal
-// stages), so a confirmed row with a non-null terminalId from a prior session means
-// a visible agent was launched whose supervisor watcher has since been cancelled on
-// open. Boot reconciliation cross-joins these against the live terminal.list to find
-// still-running orphans. Bounded by limit (<=0 ⇒ 20).
+// sagas that bound a terminal — the boot-reconcile candidates. A confirmed-with-
+// terminal saga is the ONLY class the session-open reset keeps (resetStaleAgentLaunches
+// deletes every other stage), so a row here from a prior session means a visible agent
+// was launched whose supervisor watcher has since been cancelled on open. Boot
+// reconciliation cross-joins these against the live terminal.list to find still-running
+// orphans. Bounded by limit (<=0 ⇒ 20).
 func (s *Store) ListConfirmedAgentLaunchesWithTerminal(limit int) ([]domain.AgentLaunchRecord, error) {
 	if limit <= 0 {
 		limit = 20

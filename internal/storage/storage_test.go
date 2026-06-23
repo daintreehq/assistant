@@ -331,35 +331,45 @@ func TestSessionBoundaryCancelsWatchersAndGrants(t *testing.T) {
 	_ = s1.Close()
 }
 
-func TestCancelStaleAgentLaunches(t *testing.T) {
+func TestResetStaleAgentLaunches(t *testing.T) {
 	now := int64(3000)
 	s := openTest(t, now)
-	a, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+	term := "terminal-9"
+	// An in-flight saga (no terminal) is dead the moment the session ends → deleted.
+	inflight, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
 		IdempotencyKey: "key1", AgentID: "ag", Mode: "edit", Title: "t", Name: "n",
 		Stage: domain.TerminalBound,
 	})
-	conf, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+	// A terminal-but-dead saga (failed) is pure history → deleted.
+	failed, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
 		IdempotencyKey: "key2", AgentID: "ag", Mode: "edit", Title: "t", Name: "n",
+		Stage: domain.LaunchFailed,
+	})
+	// A confirmed saga with NO terminal is anomalous and not re-adoptable → deleted.
+	confNoTerm, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "key3", AgentID: "ag", Mode: "edit", Title: "t", Name: "n",
 		Stage: domain.LaunchConfirmed,
 	})
-	if err := s.cancelStaleAgentLaunches(now); err != nil {
+	// A confirmed saga that bound a terminal is the ONLY survivor (orphan re-adoption).
+	keep, _ := s.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "key4", AgentID: "ag", Mode: "edit", Title: "t", Name: "n",
+		Stage: domain.LaunchConfirmed, TerminalID: &term,
+	})
+	if err := s.resetStaleAgentLaunches(); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.GetAgentLaunch(a.ID)
-	if got.Stage != domain.LaunchFailed {
-		t.Fatalf("non-terminal saga should fail, got %s", got.Stage)
+	for _, id := range []string{inflight.ID, failed.ID, confNoTerm.ID} {
+		if got, _ := s.GetAgentLaunch(id); got != nil {
+			t.Fatalf("dead saga %s should be deleted, got stage %s", id, got.Stage)
+		}
 	}
-	if got.ErrorCode == nil || *got.ErrorCode != "SESSION_ENDED" {
-		t.Fatalf("errorCode should default SESSION_ENDED, got %v", got.ErrorCode)
-	}
-	// FindActiveAgentLaunch must no longer return the failed saga.
+	// FindActiveAgentLaunch must not return the cleared in-flight saga.
 	if found, _ := s.FindActiveAgentLaunch("key1"); found != nil {
-		t.Fatalf("failed saga must not be active")
+		t.Fatalf("cleared in-flight saga must not be active")
 	}
-	// a confirmed (terminal) saga is untouched.
-	cg, _ := s.GetAgentLaunch(conf.ID)
-	if cg.Stage != domain.LaunchConfirmed {
-		t.Fatalf("confirmed saga must be untouched")
+	// The confirmed-with-terminal saga survives for boot reconciliation.
+	if kg, _ := s.GetAgentLaunch(keep.ID); kg == nil || kg.Stage != domain.LaunchConfirmed {
+		t.Fatalf("confirmed-with-terminal saga must survive, got %v", kg)
 	}
 }
 

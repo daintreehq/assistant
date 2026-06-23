@@ -106,15 +106,16 @@ func TestBuildAgentRows_PopulatesPreview(t *testing.T) {
 }
 
 func TestBuildAgentRows_LaunchOnlyRowStaysVisible(t *testing.T) {
-	// No watchers (the agent's watcher was cancelled), but the saga is on the roster:
-	// the agent must NOT vanish from the deck.
+	// No watchers (the agent's watcher was cancelled), but the saga is on the roster AND
+	// its terminal is still live this session: the agent must NOT vanish from the deck.
 	term := "term_9"
 	launches := []domain.AgentLaunchRecord{{
 		ID: "agt_1", Title: "fix flaky test", TerminalID: &term, Stage: domain.LaunchConfirmed, CreatedAt: 5,
 	}}
-	rows := BuildAgentRows(nil, nil, launches)
+	previews := []daemon.TerminalPreview{{TerminalID: "term_9", AgentState: "running"}}
+	rows := BuildAgentRows(nil, previews, launches)
 	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1 (launch-only agent must stay visible)", len(rows))
+		t.Fatalf("rows = %d, want 1 (launch-only agent with a live terminal must stay visible)", len(rows))
 	}
 	if rows[0].ID != "term_9" {
 		t.Errorf("ID = %q, want term_9 (prefers terminal id)", rows[0].ID)
@@ -139,16 +140,30 @@ func TestBuildAgentRows_JoinsLaunchToLiveWatcherNoDuplicate(t *testing.T) {
 	}
 }
 
-func TestBuildAgentRows_OrphanedWatcherIDStillSynthesizes(t *testing.T) {
-	// The launch points at a watcher that is no longer live (cancelled) → it must be
-	// synthesized from the saga, not silently dropped.
+func TestBuildAgentRows_SettledLaunchWithoutLiveTerminalHidden(t *testing.T) {
+	// A settled saga (failed or confirmed) whose terminal is no longer live is dead
+	// history from a prior session — it must NOT resurface on the deck. This is the
+	// "× FAILED greets you on restart" bug: the strict session reset hides it.
 	gone := "wch_gone"
+	term := "term_dead"
+	launches := []domain.AgentLaunchRecord{
+		{ID: "agt_failed", Title: "old fail", WatcherID: &gone, Stage: domain.LaunchFailed, CreatedAt: 5},
+		{ID: "agt_conf", Title: "old confirmed", TerminalID: &term, Stage: domain.LaunchConfirmed, CreatedAt: 6},
+	}
+	if rows := BuildAgentRows(nil, nil, launches); len(rows) != 0 {
+		t.Fatalf("settled launches with no live terminal must be hidden, got %+v", rows)
+	}
+}
+
+func TestBuildAgentRows_InFlightLaunchAlwaysShown(t *testing.T) {
+	// An in-flight saga is guaranteed this-session (prior-session non-terminal sagas are
+	// cleared on DB open), so it shows as STARTING even before its terminal/preview exists.
 	launches := []domain.AgentLaunchRecord{{
-		ID: "agt_1", Title: "orphan", WatcherID: &gone, Stage: domain.LaunchFailed, CreatedAt: 5,
+		ID: "agt_new", Title: "spinning up", Stage: domain.TerminalBound, CreatedAt: 5,
 	}}
 	rows := BuildAgentRows(nil, nil, launches)
-	if len(rows) != 1 || rows[0].Badge != "FAILED" || !rows[0].NeedsAttention {
-		t.Fatalf("orphaned launch: want one FAILED needs-attention row, got %+v", rows)
+	if len(rows) != 1 || rows[0].Badge != "STARTING" {
+		t.Fatalf("in-flight launch must show as STARTING, got %+v", rows)
 	}
 }
 
@@ -164,7 +179,9 @@ func TestBuildAgentRows_CancelledWatcherDoesNotMaskLaunchRoster(t *testing.T) {
 		ID: "agt_1", Title: "shipped agent", WatcherID: &wid, TerminalID: &term,
 		Stage: domain.LaunchConfirmed, CreatedAt: 7,
 	}}
-	rows := BuildAgentRows([]domain.WatcherRecord{w}, nil, launches)
+	// The terminal is still live this session, so the saga-derived row survives.
+	previews := []daemon.TerminalPreview{{TerminalID: "term_3", AgentState: "waiting"}}
+	rows := BuildAgentRows([]domain.WatcherRecord{w}, previews, launches)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1 (cancelled watcher defers to its launch row)", len(rows))
 	}
