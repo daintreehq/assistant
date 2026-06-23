@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -127,10 +126,11 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	if pre := renderTurnPreamble(th, t, width, active, active || hasResponded(t)); pre != "" {
 		parts = append(parts, pre)
 	}
-	// Footer/seal render: showTail = active, so an active turn surfaces its still-growing
-	// final paragraph as a dim live preview (the flush passes showTail=false to keep that
-	// paragraph out of scrollback). A sealed turn (active=false) renders full markdown.
-	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active, active); body != "" {
+	// liveLast = active: while the turn is active its genuine LAST prose step renders only its
+	// COMPLETED paragraphs — the still-growing final paragraph is WITHHELD (renderProse), so
+	// neither the footer nor the flush ever shows a half-paragraph. A sealed turn (active=false)
+	// renders every paragraph as full markdown.
+	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
 		parts = append(parts, body)
 	}
 	if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
@@ -163,16 +163,17 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 // turn (to < 0 means "to the end"): prose as styled markdown, contiguous tool runs as
 // one branch tree, notes inline. liveLast governs whether the turn's genuine LAST prose
 // step (global index len(Steps)-1) is treated as LIVE — committed paragraph by paragraph
-// with its still-growing final paragraph WITHHELD (renderProse). It applies ONLY to that
-// last step and ONLY when liveLast is set, so an earlier prose step that streamed before a
-// tool batch renders as FINAL markdown (its whole text), even though its sticky Streaming
-// flag is still true. The flush passes liveLast=true so it commits only completed
-// paragraphs; the seal renders with liveLast=false so the withheld paragraph commits once.
+// with its still-growing final paragraph WITHHELD entirely (renderProse). It applies ONLY
+// to that last step and ONLY when liveLast is set, so an earlier prose step that streamed
+// before a tool batch renders as FINAL markdown (its whole text), even though its sticky
+// Streaming flag is still true. The flush and the footer both pass liveLast=true so they
+// agree row-for-row on the withheld paragraph; the seal renders with liveLast=false so the
+// withheld paragraph commits once as full markdown.
 //
 // Tool grouping is computed over the sub-range; the incremental flush only ever passes a
 // range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
 // branch tree is never split across the flush frontier.
-func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast, showTail bool) string {
+func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
 		to = len(steps)
@@ -200,7 +201,7 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 		switch step.Kind {
 		case StepProse:
 			live := liveLast && g == lastIdx
-			if rendered := renderProse(md, th, step, contentW, live, showTail); rendered != "" {
+			if rendered := renderProse(md, step, contentW, live); rendered != "" {
 				if afterTool {
 					b.WriteByte('\n')
 				}
@@ -256,102 +257,33 @@ func hasProse(t *TurnCell) bool {
 // When live (the genuinely-streaming LAST step of an active turn) it commits PARAGRAPH BY
 // PARAGRAPH: only the text up to the last blank line ("\n\n") is settled, and that renders
 // as markdown (it flushes to scrollback — flush.go). The still-growing final paragraph is
-// WITHHELD until it completes — prose surfaces one finished, fully-parsed markdown paragraph
-// at a time rather than streaming token by token. This is deliberately the simpler model
-// the user asked for: no live token caret, no max-height live block that fills then
+// WITHHELD entirely — it appears NOWHERE (not in the footer, not in scrollback) until it
+// completes, at which point it becomes a settled paragraph and renders as full markdown. So
+// prose surfaces one finished, fully-parsed markdown paragraph at a time rather than streaming
+// token by token: no live token caret, no max-height dim preview block that fills then
 // truncates, no raw→markdown reflow when a paragraph seals. The "⠋ Writing" live status
-// (renderLiveStatus) is the only motion between paragraphs.
+// (renderLiveStatus) is the only motion between committed paragraphs.
 //
 // `live` is decided by POSITION (is this the turn's last step), never by the step's sticky
 // Streaming flag, so a half-rendered paragraph can never be frozen mid-turn into scrollback.
 // "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
 // reflowing paragraph; md.Render(settled-prefix) is a byte-exact prefix of the eventual full
-// render, so the flush and the seal agree row-for-row.
-//
-// showTail splits the two consumers: the FOOTER (showTail=true) surfaces the still-growing
-// paragraph as a dim, un-glamoured live preview BELOW the settled markdown so the answer is
-// visible as it streams; the FLUSH (showTail=false) withholds it, so only completed
-// paragraphs ever commit to scrollback. The preview re-renders as markdown the instant the
-// paragraph completes.
-func renderProse(md *markdown.Renderer, th theme.Theme, step TurnStep, contentW int, live, showTail bool) string {
+// render, so the flush (which commits completed paragraphs) and the seal agree row-for-row.
+func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live bool) string {
 	if step.Text == "" {
 		return ""
 	}
 	if !live {
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
+	// Live last step: render only the COMPLETED paragraphs (everything up to the final blank
+	// line). The still-growing paragraph after it is withheld until it seals — both the footer
+	// and the flush call this with the same `live`, so they agree on exactly what is held back.
 	idx := strings.LastIndex(step.Text, "\n\n")
-	var settled, tail string
 	if idx < 0 {
-		tail = step.Text // no completed paragraph yet — it is all still growing
-	} else {
-		settled = strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
-		tail = step.Text[idx+2:]
+		return "" // no completed paragraph yet — the whole step is still growing, so withhold it
 	}
-	if !showTail {
-		// Flush path: only completed paragraphs are immutable, so withhold the growing one.
-		return settled
-	}
-	preview := livePreview(th, tail, contentW)
-	switch {
-	case settled != "" && preview != "":
-		return settled + "\n" + preview
-	case preview != "":
-		return preview
-	default:
-		return settled
-	}
-}
-
-// Live-preview markdown strippers. glamour PANICS on partial/incomplete markdown, so the
-// still-growing paragraph tail can't be rendered — it is shown as DIM plain text. Without
-// stripping, the literal markers (**bold**, `code`, leading "# ") show raw until the
-// paragraph seals and the real render replaces them, which reads as noise. These regexps
-// clean the common inline markers for the cosmetic preview ONLY. They are deliberately
-// CONSERVATIVE: a lone "*" (e.g. "3*4") or an intra-word "_" (e.g. "foo_bar") is left
-// untouched — only PAIRED markers around real content are stripped, never a single marker.
-// Bold runs before emphasis so the single-marker pass never bites into a "**" pair.
-var (
-	mdHeaderRe    = regexp.MustCompile(`(?m)^[ \t]*#{1,6}[ \t]+`)
-	mdBoldStarRe  = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	mdBoldUnderRe = regexp.MustCompile(`(^|[^\w])__([^_]+)__([^\w]|$)`)
-	// Single-marker emphasis requires NON-WORD boundaries on both sides (start/space/punct),
-	// so intra-word/inter-digit stars like "3*4" and "3*4*5" are left intact — only true
-	// "*emph*" spans (flanked by word boundaries) are stripped.
-	mdEmphStarRe  = regexp.MustCompile(`(^|[^\w*])\*(\S(?:[^*]*\S)?)\*([^\w*]|$)`)
-	mdEmphUnderRe = regexp.MustCompile(`(^|[^\w])_([^_]+)_([^\w]|$)`)
-	mdCodeRe      = regexp.MustCompile("`([^`]+)`")
-)
-
-// stripLivePreviewMarkdown removes the common inline markdown markers from the streaming
-// paragraph tail so the dim live preview reads as clean prose rather than raw syntax. It
-// is intentionally conservative (see the regexps above) — false negatives (a marker left
-// in) are harmless cosmetic noise; false positives (mangling "3*4" or "foo_bar") are not.
-func stripLivePreviewMarkdown(s string) string {
-	s = mdHeaderRe.ReplaceAllString(s, "")
-	s = mdBoldStarRe.ReplaceAllString(s, "$1")
-	s = mdBoldUnderRe.ReplaceAllString(s, "$1$2$3")
-	s = mdEmphStarRe.ReplaceAllString(s, "$1$2$3")
-	s = mdEmphUnderRe.ReplaceAllString(s, "$1$2$3")
-	s = mdCodeRe.ReplaceAllString(s, "$1")
-	return s
-}
-
-// livePreview renders the in-progress paragraph as flowing dim text wrapped to width — an
-// un-glamoured live preview (inline markdown markers are stripped by stripLivePreviewMarkdown
-// since glamour can't render the partial paragraph; the full render replaces it on seal).
-// Each row is dimmed individually so the faint attribute survives the row breaks.
-func livePreview(th theme.Theme, text string, width int) string {
-	// Strip BEFORE flowing newlines to spaces so the (?m) header regex still sees line starts.
-	flowed := strings.TrimSpace(strings.ReplaceAll(stripLivePreviewMarkdown(text), "\n", " "))
-	if flowed == "" {
-		return ""
-	}
-	lines := strings.Split(wrapCells(flowed, width), "\n")
-	for i, l := range lines {
-		lines[i] = th.Dim().Render(l)
-	}
-	return strings.Join(lines, "\n")
+	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.

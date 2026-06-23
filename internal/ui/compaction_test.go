@@ -114,7 +114,7 @@ func TestCompaction_FlushPrefixAndSealAgree(t *testing.T) {
 	if k < 4 {
 		t.Fatalf("the closed read batch should be finalized (k>=4), got %d", k)
 	}
-	prefix := stripAnsi(renderTurnSteps(th, md, turn, 0, k, w, cw, false, 0, 1, true, false))
+	prefix := stripAnsi(renderTurnSteps(th, md, turn, 0, k, w, cw, false, 0, 1, true))
 	if !strings.Contains(prefix, "Inspected 3 files") {
 		t.Fatalf("the flushed prefix must compact the read batch: %q", prefix)
 	}

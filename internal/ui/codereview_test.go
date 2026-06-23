@@ -171,11 +171,24 @@ func TestOnClear_MastheadRecommitsAfterClear(t *testing.T) {
 	if m.queue.gen == genBefore {
 		t.Error("clear must bump the commit generation (#4)")
 	}
-	// onClear's returned Sequence already scheduled the masthead recommit (the commit
-	// is in flight under the new generation). Acking it under the CURRENT gen marks
-	// the masthead done again — proving the masthead recommits after a clear.
+	// Like onRedraw/completeBoot, clear DISARMS commits and re-arms them one render cycle out
+	// (commitArmCmd → CommitArmMsg) so the masthead recommits above a re-flushed footer rather
+	// than at a stale height (#1613). So nothing is in flight yet right after onClear.
+	if m.commitArmed {
+		t.Fatal("clear must disarm commits so the masthead recommit is deferred one cycle")
+	}
+	if m.queue.inFlight {
+		t.Fatal("clear must DEFER the masthead recommit, not schedule it immediately")
+	}
+	// Simulate the CommitArmMsg tick (commitArmed flips true, afterStateChange → scheduleCommit):
+	// the masthead commit goes in flight under the new generation. Acking it marks the masthead
+	// done again — proving the masthead recommits after a clear.
+	m.commitArmed = true
+	if cmd := m.scheduleCommit(); cmd == nil {
+		t.Fatal("once re-armed, clear must schedule the masthead recommit")
+	}
 	if !m.queue.inFlight {
-		t.Fatal("clear must schedule the masthead recommit (in flight)")
+		t.Fatal("the re-armed commit must be in flight")
 	}
 	m.queue.ack(headerID, m.queue.gen, len(m.transcript))
 	if !m.queue.headerDone {

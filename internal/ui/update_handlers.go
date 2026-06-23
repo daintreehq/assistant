@@ -512,11 +512,23 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	m.transcript = append(m.transcript, TranscriptCell{Command: &CommandCell{
 		ID: domain.NewID("cmd_"), Title: title, Text: text, Ts: domain.NowMS(),
 	}})
-	// #3: order the host wipe BEFORE the re-commit (tea.Sequence, NOT tea.Batch). With
-	// an unordered Batch the host clear could wipe the freshly committed masthead/card,
-	// or a stale commit could print after the clear. Sequence runs the wipe to
-	// completion, then the commit cmd emits the fresh masthead + card.
-	return m, tea.Sequence(hostClearCmd(), m.scheduleCommit())
+	// Wipe-then-recommit, the SAME ordered shape as onRedraw/completeBoot:
+	//
+	//  - hostClearCmd erases the host screen + scrollback. But that raw escape also wipes the
+	//    live footer (composer + status line) WITHOUT telling Bubble Tea — its diff renderer
+	//    still believes those cells are on screen, so it writes nothing for the unchanged
+	//    footer and the composer stays blank until the next content change (the user typing).
+	//    tea.ClearScreen resets BT's OWN cell buffer, forcing a full repaint so the composer
+	//    reappears immediately.
+	//  - DISARM commits and re-arm them one cycle out (commitArmCmd): committing the masthead
+	//    in the same breath as tea.ClearScreen would tea.Println it before the footer has
+	//    re-flushed, laying it out at a stale height (charmbracelet/bubbletea#1613). The deferred
+	//    arm lets the footer settle first, then the masthead + card recommit above it.
+	//
+	// Sequence (NOT Batch) keeps the order: wipe → reset buffer → (deferred) recommit, so a
+	// stale commit can never print after the clear nor wipe a freshly committed masthead.
+	m.commitArmed = false
+	return m, tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
 }
 
 // --- approval ---
