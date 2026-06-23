@@ -16,6 +16,9 @@ type memStore struct {
 	cancelledID     string
 	cancelledReason string
 	revokedActor    string
+	// workflowPatch records the last UpdateWorkflowRun (id → patch) so tests can
+	// assert watcher.cancel advances a linked ledger row.
+	workflowPatch map[string]map[string]any
 }
 
 func (m *memStore) InsertWatcher(_ context.Context, rec domain.WatcherRecord) (string, error) {
@@ -40,6 +43,13 @@ func (m *memStore) CancelWatcher(_ context.Context, id, reason string) error {
 func (m *memStore) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {
 	m.revokedActor = actorID
 	return 0, nil
+}
+func (m *memStore) UpdateWorkflowRun(_ context.Context, id string, patch map[string]any) error {
+	if m.workflowPatch == nil {
+		m.workflowPatch = map[string]map[string]any{}
+	}
+	m.workflowPatch[id] = patch
+	return nil
 }
 
 func find(ts []*tools.Tool, name string) *tools.Tool {
@@ -137,6 +147,41 @@ func TestCancelStampsUserCancelledReason(t *testing.T) {
 	}
 	if st.revokedActor != "wch_1" {
 		t.Fatalf("revoked actor: got %q want wch_1", st.revokedActor)
+	}
+}
+
+// Cancelling a supervisor that back-links a workflow run closes that ledger row
+// (to 'cancelled' + completedAt) — the daemon never re-checks a cancelled watcher,
+// so the run would otherwise stay 'active' forever. A watcher with no link is a
+// no-op on the ledger.
+func TestCancelClosesLinkedWorkflowRun(t *testing.T) {
+	runID := "wfr_1"
+	st := &memStore{inserted: []domain.WatcherRecord{
+		{ID: "wch_1", Kind: "terminal", Title: "t", Status: "active", WorkflowRunID: &runID},
+	}}
+	tool := find(Tools(Deps{Store: st}), "watcher.cancel")
+	if res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_1"}`), &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	p := st.workflowPatch[runID]
+	if p == nil {
+		t.Fatal("cancelling a linked supervisor must advance its workflow row")
+	}
+	if p["status"] != string(domain.WorkflowCancelled) {
+		t.Fatalf("workflow status: got %v want cancelled", p["status"])
+	}
+	if _, ok := p["completedAt"].(int64); !ok {
+		t.Fatalf("cancel must stamp completedAt, got %v", p["completedAt"])
+	}
+
+	// A watcher with no workflow link leaves the ledger untouched.
+	st2 := &memStore{inserted: []domain.WatcherRecord{{ID: "wch_2", Kind: "terminal", Title: "t", Status: "active"}}}
+	tool2 := find(Tools(Deps{Store: st2}), "watcher.cancel")
+	if res := tool2.Handle(context.Background(), json.RawMessage(`{"id":"wch_2"}`), &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if len(st2.workflowPatch) != 0 {
+		t.Fatalf("a link-less watcher must not touch the ledger, got %v", st2.workflowPatch)
 	}
 }
 

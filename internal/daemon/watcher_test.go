@@ -333,6 +333,34 @@ func TestWatcher_CorruptDisablesFailsLinkedWorkflow(t *testing.T) {
 	}
 }
 
+// A lost finalize claim (the watcher was cancelled mid-check) must NOT advance the
+// workflow row — mirrors the grant-revoke skip, so a cancelled run isn't clobbered.
+func TestWatcher_LostClaimDoesNotAdvanceWorkflow(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0),
+	})
+	rec := termWatcher("wch_lost", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_lost")
+	// The store's copy was cancelled out from under the check, so ClaimDueWatcher fails.
+	cancelled := rec
+	cancelled.Status = "cancelled"
+	store.watchers = []domain.WatcherRecord{cancelled}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop {
+		t.Fatalf("exited still reports stop in the outcome")
+	}
+	if len(store.workflowPatch) != 0 {
+		t.Fatalf("a lost claim must NOT advance the workflow row, got %v", store.workflowPatch)
+	}
+	if store.revoked["wch_lost"] != 0 {
+		t.Fatalf("a lost claim must NOT revoke grants either, got %v", store.revoked)
+	}
+}
+
 // A watcher with no workflow link never touches a ledger row on stop.
 func TestWatcher_NoWorkflowLinkNoAdvance(t *testing.T) {
 	store := newFakeStore()

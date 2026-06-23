@@ -125,14 +125,21 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 		return res
 	}
 
-	// Dedup: reuse an existing active supervisor already targeting the terminal. A
-	// hit also implies the ledger row already exists (this terminal was set up
-	// before), so we skip BOTH a duplicate watcher and a duplicate ledger insert.
+	// Dedup: an active supervisor already targeting the terminal means we must not
+	// attach a second one. If it already carries a workflow link, the work is already
+	// recorded — nothing to do. If it does NOT (e.g. an adopted superviseTerminal or a
+	// manually-created watcher), fall through to record the work in the ledger but
+	// skip the duplicate watcher.
+	skipWatcher := false
 	if existing, err := deps.Store.ListWatchers(ctx, "active"); err == nil {
 		for i := range existing {
 			w := &existing[i]
 			if w.IsSupervisor != nil && *w.IsSupervisor && watcherTargets(w, sc.TerminalID) {
-				return res
+				if w.WorkflowRunID != nil && *w.WorkflowRunID != "" {
+					return res // already supervised AND recorded
+				}
+				skipWatcher = true
+				break
 			}
 		}
 	}
@@ -153,6 +160,13 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 		}); err == nil {
 			workflowRunID = runID
 		}
+	}
+
+	// A link-less supervisor already watches the terminal: the work is now recorded,
+	// but attaching a second watcher would violate the one-supervisor-per-terminal
+	// invariant, so we stop here (the row stays active for a human/model to advance).
+	if skipWatcher {
+		return res
 	}
 
 	title := "watch issue"
@@ -177,7 +191,16 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 	}
 	watcher, err := deps.Store.InsertWatcher(ctx, rec)
 	if err != nil {
-		// Insert failure is a warning, not a failed call.
+		// The agent IS running, but supervision could not be wired. Path A has no
+		// idempotency anchor for the ledger row, so an active row left here would let
+		// a retry insert a duplicate active row. Close it (best-effort) so a retry
+		// records a fresh one instead.
+		if workflowRunID != "" && deps.WorkflowStore != nil {
+			_ = deps.WorkflowStore.UpdateWorkflowRun(ctx, workflowRunID, map[string]any{
+				"status":      string(domain.WorkflowFailed),
+				"completedAt": domain.NowMS(),
+			})
+		}
 		return res
 	}
 	// Record the supervising watcher on the ledger row (best-effort).

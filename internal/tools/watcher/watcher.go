@@ -41,6 +41,10 @@ type Store interface {
 	// teardown. The watcher tools always pass "user_cancelled".
 	CancelWatcher(ctx context.Context, id, reason string) error
 	RevokeGrantsByActor(ctx context.Context, actorID string) (int, error)
+	// UpdateWorkflowRun advances a workflow ledger row this watcher back-links. A
+	// user cancel must close the linked run here — the daemon never re-checks a
+	// cancelled watcher, so the row would otherwise stay 'active' forever.
+	UpdateWorkflowRun(ctx context.Context, id string, patch map[string]any) error
 }
 
 // reasonUserCancelled is the endedReason stamped when a user cancels a watcher via
@@ -420,6 +424,15 @@ func newCancelTool(deps Deps) *tools.Tool {
 				return tools.Fail(domain.CodeInternal, "watcher.cancel: "+err.Error())
 			}
 			_, _ = deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
+			// If this watcher supervises a durable workflow run, close that row too —
+			// the daemon never re-checks a cancelled watcher, so the run would otherwise
+			// stay 'active' forever. Best-effort: a ledger failure never fails the cancel.
+			if existing.WorkflowRunID != nil && *existing.WorkflowRunID != "" {
+				_ = deps.Store.UpdateWorkflowRun(context.Background(), *existing.WorkflowRunID, map[string]any{
+					"status":      string(domain.WorkflowCancelled),
+					"completedAt": domain.NowMS(),
+				})
+			}
 			return tools.Ok("Cancelled watcher "+a.ID+".", map[string]any{"id": a.ID})
 		},
 	}

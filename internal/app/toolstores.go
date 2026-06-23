@@ -178,6 +178,12 @@ func (a watcherStoreAdapter) RevokeGrantsByActor(_ context.Context, actorID stri
 	return a.s.RevokeGrantsByActor(actorID, domain.NowMS())
 }
 
+// UpdateWorkflowRun forwards the allowlisted patch so watcher.cancel can close a
+// supervised run's ledger row (the daemon never re-checks a cancelled watcher).
+func (a watcherStoreAdapter) UpdateWorkflowRun(_ context.Context, id string, patch map[string]any) error {
+	return a.s.UpdateWorkflowRun(id, patch)
+}
+
 /* ------------------------------- workflow -------------------------------- */
 
 type workflowStoreAdapter struct{ s *storage.Store }

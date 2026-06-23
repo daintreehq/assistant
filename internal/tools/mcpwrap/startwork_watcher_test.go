@@ -10,12 +10,17 @@ import (
 )
 
 // watcherStore captures inserted watchers and serves a configurable active list.
+// insertErr forces an InsertWatcher failure (best-effort attach path).
 type watcherStore struct {
-	inserted []domain.WatcherRecord
-	active   []domain.WatcherRecord
+	inserted  []domain.WatcherRecord
+	active    []domain.WatcherRecord
+	insertErr error
 }
 
 func (s *watcherStore) InsertWatcher(_ context.Context, rec domain.WatcherRecord) (domain.WatcherRecord, error) {
+	if s.insertErr != nil {
+		return domain.WatcherRecord{}, s.insertErr
+	}
 	if rec.ID == "" {
 		rec.ID = domain.NewID(domain.PrefixWatcher)
 	}
@@ -142,13 +147,15 @@ func TestStartWorkPopulatesWorkflowLedger(t *testing.T) {
 	}
 }
 
-// A dedup (an active supervisor already on the terminal) records NO new ledger row
-// — the row already exists from the prior setup.
-func TestStartWorkDedupSkipsLedger(t *testing.T) {
+// A dedup against a supervisor that ALREADY carries a workflow link (the common
+// retry case: the prior setup recorded the work) records NO new ledger row and
+// attaches no watcher.
+func TestStartWorkDedupWithLinkSkipsEverything(t *testing.T) {
 	isSup := true
+	runID := "wfr_prior"
 	targets, _ := json.Marshal([]string{"term_1"})
 	st := &watcherStore{active: []domain.WatcherRecord{
-		{ID: "wch_old", IsSupervisor: &isSup, TargetsJson: string(targets), Status: "active"},
+		{ID: "wch_old", IsSupervisor: &isSup, TargetsJson: string(targets), Status: "active", WorkflowRunID: &runID},
 	}}
 	wf := newWFStore()
 	m := &fakeMCP{connected: true, result: launchResult(map[string]any{"terminalId": "term_1"})}
@@ -156,9 +163,58 @@ func TestStartWorkDedupSkipsLedger(t *testing.T) {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
 	if len(wf.inserted) != 0 {
-		t.Fatalf("dedup must not insert a ledger row, got %d", len(wf.inserted))
+		t.Fatalf("a linked-supervisor dedup must not insert a ledger row, got %d", len(wf.inserted))
+	}
+	if len(st.inserted) != 0 {
+		t.Fatalf("a linked-supervisor dedup must not attach a second watcher, got %d", len(st.inserted))
 	}
 }
+
+// A dedup against a supervisor with NO workflow link (e.g. an adopted
+// superviseTerminal watcher) still records the work in the ledger, but does NOT
+// attach a duplicate watcher.
+func TestStartWorkLinklessSupervisorRecordsLedgerNoWatcher(t *testing.T) {
+	isSup := true
+	targets, _ := json.Marshal([]string{"term_1"})
+	st := &watcherStore{active: []domain.WatcherRecord{
+		{ID: "wch_adopted", IsSupervisor: &isSup, TargetsJson: string(targets), Status: "active"},
+	}}
+	wf := newWFStore()
+	m := &fakeMCP{connected: true, result: launchResult(map[string]any{"terminalId": "term_1"})}
+	if res := runStartWork(t, Deps{Store: st, WorkflowStore: wf}, m, `{"arguments":{"issueNumber":7}}`); !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if len(wf.inserted) != 1 {
+		t.Fatalf("a link-less supervisor must NOT suppress the ledger row, inserted %d", len(wf.inserted))
+	}
+	if len(st.inserted) != 0 {
+		t.Fatalf("must not attach a second watcher to an already-supervised terminal, got %d", len(st.inserted))
+	}
+}
+
+// If the ledger row inserts but the watcher insert fails, the row is closed (not
+// left active) so a retry can't accumulate duplicate active rows.
+func TestStartWorkClosesLedgerOnWatcherInsertFailure(t *testing.T) {
+	st := &watcherStore{insertErr: errBoom("disk full")}
+	wf := newWFStore()
+	m := &fakeMCP{connected: true, result: launchResult(map[string]any{"terminalId": "term_1", "issueTitle": "x"})}
+	res := runStartWork(t, Deps{Store: st, WorkflowStore: wf}, m, `{"arguments":{"issueNumber":7}}`)
+	if !res.Ok {
+		t.Fatalf("a watcher-insert failure must not fail setup: %+v", res.Error)
+	}
+	if len(wf.inserted) != 1 {
+		t.Fatalf("expected one ledger row, got %d", len(wf.inserted))
+	}
+	p := wf.patches[wf.inserted[0].ID]
+	if p == nil || p["status"] != string(domain.WorkflowFailed) {
+		t.Fatalf("orphaned ledger row should be closed to failed, got %v", p)
+	}
+}
+
+// errBoom is a tiny error type for forcing store failures.
+type errBoom string
+
+func (e errBoom) Error() string { return string(e) }
 
 // attachWatcher:false skips attachment entirely.
 func TestStartWorkAttachWatcherFalseSkips(t *testing.T) {
