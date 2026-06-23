@@ -32,8 +32,29 @@ type Store interface {
 	InsertWatcher(ctx context.Context, rec domain.WatcherRecord) (string, error)
 	ListWatchers(ctx context.Context, status string) ([]domain.WatcherRecord, error)
 	GetWatcher(ctx context.Context, id string) (*domain.WatcherRecord, error)
-	UpdateWatcherStatus(ctx context.Context, id, status string) error
+	// CancelWatcher flips the watcher to 'cancelled' and stamps WHY (the reason) +
+	// WHEN, so a deliberate user cancel is distinguishable from a session-boundary
+	// teardown. The watcher tools always pass "user_cancelled".
+	CancelWatcher(ctx context.Context, id, reason string) error
 	RevokeGrantsByActor(ctx context.Context, actorID string) (int, error)
+}
+
+// reasonUserCancelled is the endedReason stamped when a user cancels a watcher via
+// the watcher.cancel tool (vs. 'session_ended' stamped by the session-boundary
+// sweep). Kept in sync with internal/storage/sweeps.go.
+const reasonUserCancelled = "user_cancelled"
+
+// isTerminalStatus reports whether a watcher has already reached an end state, so
+// watcher.cancel won't re-cancel it and clobber its endedReason. Mirrors the
+// watcher status vocabulary in domain.WatcherRecord; the cancellable states are
+// created/active/paused.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "condition_met", "timeout", "error", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 // Deps is the dependency set for the watcher family.
@@ -355,7 +376,15 @@ func newCancelTool(deps Deps) *tools.Tool {
 			if err != nil || existing == nil {
 				return tools.Fail(codeWatcherNotFound, "watcher.cancel: no such watcher: "+a.ID, tools.Unrecoverable())
 			}
-			if err := deps.Store.UpdateWatcherStatus(context.Background(), a.ID, "cancelled"); err != nil {
+			// Refuse to re-cancel an already-terminal watcher: it has run its course
+			// (condition_met/timeout/error) or already ended (cancelled — including a
+			// 'session_ended' session-boundary teardown). Overwriting would clobber its
+			// endedReason and destroy the very distinction this records.
+			if isTerminalStatus(existing.Status) {
+				return tools.Fail(codeWatcherNotFound,
+					"watcher.cancel: watcher "+a.ID+" already ended ("+existing.Status+")", tools.Unrecoverable())
+			}
+			if err := deps.Store.CancelWatcher(context.Background(), a.ID, reasonUserCancelled); err != nil {
 				return tools.Fail(domain.CodeInternal, "watcher.cancel: "+err.Error())
 			}
 			_, _ = deps.Store.RevokeGrantsByActor(context.Background(), a.ID)

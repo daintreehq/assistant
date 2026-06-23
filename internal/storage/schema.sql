@@ -41,7 +41,14 @@ CREATE TABLE IF NOT EXISTS watchers (
   lastEpistemicKind  TEXT,
   lastCheckedAt      INTEGER,
   nextCheckAt        INTEGER NOT NULL,
-  createdAt          INTEGER NOT NULL
+  createdAt          INTEGER NOT NULL,
+  -- WHY a watcher reached a terminal 'cancelled' status, so a session-boundary
+  -- teardown ('session_ended', stamped by cancelStaleWatchers on the next open) is
+  -- distinguishable from a deliberate user cancel ('user_cancelled', stamped by
+  -- watcher.cancel). NULL on active rows and on natural terminal states
+  -- (condition_met/timeout/error). endedAt is the epoch-ms of that cancel.
+  endedReason        TEXT,
+  endedAt            INTEGER
 );
 
 -- 3.3 events — attention-queue inbox. createdAt is pinned; updatedAt is the

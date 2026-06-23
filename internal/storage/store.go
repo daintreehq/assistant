@@ -36,7 +36,9 @@ const (
 	// pruneChunk caps run-id deletes per batch under SQLITE_MAX_VARIABLE_NUMBER 999.
 	pruneChunk = 900
 	// schemaUserVersion is the single baseline; dev hard-resets rather than chain.
-	schemaUserVersion = 1
+	// Bumped to 2 when the watchers table gained endedReason/endedAt — a schema change
+	// is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 2
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
@@ -82,6 +84,12 @@ type Store struct {
 	db        *sql.DB
 	now       func() int64
 	retention Retention
+
+	// sessionEndedWatchers holds the titles of watchers cancelStaleWatchers cancelled
+	// on THIS Open because the prior session ended (nil when none). It is a one-shot
+	// carryover: the composition root reads it once to surface a single "these stopped
+	// when the last session ended" NOTE. Set only during Open; never mutated after.
+	sessionEndedWatchers []string
 }
 
 // Open opens (or creates) the SQLite file at dbPath, applies PRAGMAs, execs the
@@ -125,10 +133,12 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 	}
 
 	now := s.now()
-	if err := s.cancelStaleWatchers(now); err != nil {
+	endedTitles, err := s.cancelStaleWatchers(now)
+	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale watchers: %w", err)
 	}
+	s.sessionEndedWatchers = endedTitles
 	if err := s.cancelStaleAgentLaunches(now); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cancel stale agent launches: %w", err)
@@ -156,15 +166,25 @@ func (s *Store) applyPragmas() error {
 	return nil
 }
 
-// migrate is a single no-op baseline keyed on PRAGMA user_version (the schema's
-// IF NOT EXISTS builds everything). Dev policy hard-resets rather than chaining.
+// migrate keys off PRAGMA user_version. The schema's IF NOT EXISTS DDL builds a
+// fresh file's whole current shape, so there is no migration chain. Dev policy
+// hard-resets on a schema change rather than chaining — so a file initialized at an
+// OLDER baseline (its tables lack newly-added columns) is failed LOUDLY here with the
+// fix, instead of limping into a cryptic "no such column" from the very next
+// session-boundary statement.
 func (s *Store) migrate() error {
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	if v >= schemaUserVersion {
+		// Current — or a newer DB opened by older code; leave forward-compat untouched.
 		return nil
+	}
+	// v == 0 is a brand-new file: the CREATE TABLE DDL just built the current shape,
+	// so we only stamp the version. Any v in (0, schemaUserVersion) is a stale baseline.
+	if v != 0 {
+		return fmt.Errorf("database schema is stale (version %d, current %d) — run 'make db-reset' to reset it (honours DAINTREE_ASSISTANT_STATE_DIR)", v, schemaUserVersion)
 	}
 	// PRAGMA user_version doesn't accept bound params.
 	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion)); err != nil {
@@ -178,6 +198,19 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DB returns the raw handle (escape hatch, mainly for tests). Port of raw().
 func (s *Store) DB() *sql.DB { return s.db }
+
+// SessionEndedWatchers returns the titles of watchers that THIS Open cancelled
+// because the prior session ended (nil when none). Read once by the composition
+// root to surface a one-time NOTE; returns a defensive copy so the caller can't
+// mutate the store's slice.
+func (s *Store) SessionEndedWatchers() []string {
+	if len(s.sessionEndedWatchers) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.sessionEndedWatchers))
+	copy(out, s.sessionEndedWatchers)
+	return out
+}
 
 // ---- ports.Store seam (the minimum the agent loop compiles against) ----
 

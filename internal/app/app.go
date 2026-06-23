@@ -102,6 +102,16 @@ type App struct {
 	// against it to warn that a narrowed/broadened tier is session-only and reverts next
 	// launch. Immutable after Create, so it needs no lock.
 	InitialTier domain.Tier
+
+	// noteMu guards the one-time session-ended-watchers carryover. The carryover is set
+	// once in Create (from the store's open-time sweep) and surfaces as a NOTE in
+	// message[1] from the first scheduler-active PromptContext until the first
+	// interactive turn consumes it (sessionEndedNoteConsumed). PromptContext reads it on
+	// agent/tool goroutines while Send (on the turn goroutine) consumes it, so both the
+	// slice and the flag must be serialized.
+	noteMu                   sync.Mutex
+	sessionEndedWatchers     []string
+	sessionEndedNoteConsumed bool
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
@@ -163,6 +173,10 @@ func Create(opts CreateOptions) (*App, error) {
 		baseCtx:     baseCtx,
 		baseCancel:  baseCancel,
 		InitialTier: cfg.Tier,
+		// Watchers a prior session left running were cancelled by store.Open's sweep;
+		// carry their titles so the first scheduler-active runtime context surfaces a
+		// one-time NOTE offering to re-create them.
+		sessionEndedWatchers: store.SessionEndedWatchers(),
 	}
 
 	// mcp → queue → router → registry → skills.

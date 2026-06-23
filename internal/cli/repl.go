@@ -130,7 +130,9 @@ func startRepl(ctx context.Context, a *app.App) int {
 // REPL loops back to the prompt instead of surfacing the cancellation as an error.
 func runReplTurn(base context.Context, a *app.App, sigCh <-chan os.Signal, line string) error {
 	return runCancellable(base, sigCh, func(ctx context.Context) error {
-		_, err := a.Session.Send(ctx, line, agent.SendOptions{})
+		// App.Send (not Session.Send) so the first user turn consumes the one-time
+		// session-ended-watchers NOTE from message[1].
+		_, err := a.Send(ctx, line, agent.SendOptions{})
 		return err
 	})
 }

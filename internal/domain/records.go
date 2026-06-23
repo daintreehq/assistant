@@ -43,6 +43,13 @@ type WatcherRecord struct {
 	LastCheckedAt      *int64         `json:"lastCheckedAt,omitempty"`
 	NextCheckAt        int64          `json:"nextCheckAt"` // required
 	CreatedAt          int64          `json:"createdAt"`
+	// EndedReason distinguishes a session-boundary teardown ("session_ended", set by
+	// cancelStaleWatchers on the next open) from a deliberate user cancel
+	// ("user_cancelled", set by watcher.cancel). nil on active rows and on natural
+	// terminal states (condition_met/timeout/error). EndedAt is when that cancel
+	// happened.
+	EndedReason *string `json:"endedReason,omitempty"`
+	EndedAt     *int64  `json:"endedAt,omitempty"`
 }
 
 // AuditRecord is one row of the audit log.

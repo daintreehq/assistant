@@ -289,12 +289,24 @@ func TestSessionBoundaryCancelsWatchersAndGrants(t *testing.T) {
 	// Re-open the SAME db handle path won't share :memory:, so test the routine in place:
 	// reach into the boundary routine on a fresh open by reusing the same connection.
 	// Simplest faithful check: invoke cancelStaleWatchers directly (session boundary).
-	if err := s1.cancelStaleWatchers(now); err != nil {
+	endedTitles, err := s1.cancelStaleWatchers(now)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// It returns the cancelled watcher's title for the one-time carryover NOTE.
+	if len(endedTitles) != 1 || endedTitles[0] != "w" {
+		t.Fatalf("cancelStaleWatchers titles want [w], got %v", endedTitles)
 	}
 	gw, _ := s1.GetWatcher(w.ID)
 	if gw == nil || gw.Status != "cancelled" {
 		t.Fatalf("watcher should be cancelled, got %v", gw)
+	}
+	// And stamps the session-boundary reason + time (distinct from a user cancel).
+	if gw.EndedReason == nil || *gw.EndedReason != "session_ended" {
+		t.Fatalf("want endedReason session_ended, got %v", gw.EndedReason)
+	}
+	if gw.EndedAt == nil || *gw.EndedAt != now {
+		t.Fatalf("want endedAt %d, got %v", now, gw.EndedAt)
 	}
 	live, _ := s1.ListGrants(w.ID, now)
 	if len(live) != 0 {

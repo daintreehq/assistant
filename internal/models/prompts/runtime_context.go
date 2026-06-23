@@ -28,7 +28,18 @@ type MainPromptContext struct {
 	// never in the cached base prefix, so a pin/unpin surfaces on the next
 	// RefreshRuntimeContext without disturbing message[0].
 	PinnedMemories string
+	// SessionEndedWatchers carries the titles of watchers a prior session left running
+	// that the current session's open had to cancel (because watchers are
+	// session-scoped). Non-empty → a one-time NOTE tells the model to offer to
+	// re-create them. The composition root clears it after the first interactive turn
+	// so it surfaces exactly once, not on every RefreshRuntimeContext.
+	SessionEndedWatchers []string
 }
+
+// sessionEndedWatchersMaxTitles caps how many watcher titles the session-ended NOTE
+// lists inline; the remainder collapse to "+N more" so a session that left many
+// watchers running can't bloat message[1].
+const sessionEndedWatchersMaxTitles = 5
 
 // tierBlurb is the verbatim one-line description per permission tier.
 var tierBlurb = map[domain.Tier]string{
@@ -63,6 +74,9 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 	if !ctx.SchedulerActive {
 		lines = append(lines, "NOTE: the scheduler is NOT running in this session, so everything is dormant — nothing is being supervised right now. Timers are persisted and will resume and catch up on the next interactive launch. Watchers are session-scoped: any created here are discarded when this session ends and do NOT resume on the next launch. Tell the user rather than implying anything is being supervised.")
 	}
+	if note := sessionEndedWatchersNote(ctx.SessionEndedWatchers); note != "" {
+		lines = append(lines, note)
+	}
 	if ctx.ProjectInstructions != "" {
 		lines = append(lines,
 			"",
@@ -81,6 +95,47 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// sessionEndedWatchersNote renders the one-time "the prior session ended and these
+// watchers stopped" NOTE, or "" when there were none. The count reflects the true
+// total; the inline title list is capped at sessionEndedWatchersMaxTitles with a
+// "+N more" tail. Titles are flattened to a single line (a raw newline would break
+// message[1] or inject a stray heading).
+func sessionEndedWatchersNote(titles []string) string {
+	if len(titles) == 0 {
+		return ""
+	}
+	n := len(titles)
+	shown := titles
+	suffix := ""
+	if n > sessionEndedWatchersMaxTitles {
+		shown = titles[:sessionEndedWatchersMaxTitles]
+		suffix = ", +" + itoa(n-sessionEndedWatchersMaxTitles) + " more"
+	}
+	labels := make([]string, len(shown))
+	for i, t := range shown {
+		labels[i] = quoteTitle(flattenLine(t))
+	}
+	noun, verb := "watchers", "were"
+	if n == 1 {
+		noun, verb = "watcher", "was"
+	}
+	return "NOTE: " + itoa(n) + " " + noun + " " + verb + " stopped because the previous session ended: " +
+		strings.Join(labels, ", ") + suffix +
+		". Watchers are session-scoped and do NOT resume automatically; offer to re-create them if still relevant."
+}
+
+// flattenLine collapses CR/LF runs to single spaces so a multi-line title can't
+// break the single-line NOTE (mirrors the pinned-memory flattening in app/context).
+func flattenLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.TrimSpace(s)
+}
+
+// quoteTitle wraps a (already flattened) title in double quotes for the NOTE list.
+func quoteTitle(s string) string { return `"` + s + `"` }
 
 // BuildMainSystemPrompt composes the cached base prefix and the runtime context
 // into a single string (legacy single-prompt view), joined with "\n\n".

@@ -78,6 +78,63 @@ func TestBuildRuntimeContextMessage(t *testing.T) {
 	}
 }
 
+// TestSessionEndedWatchersNote covers the one-time "the prior session ended and these
+// watchers stopped" NOTE: it appears only when titles are present, pluralizes/counts
+// correctly, lists titles, caps the inline list with "+N more", and flattens embedded
+// newlines so it stays a single line.
+func TestSessionEndedWatchersNote(t *testing.T) {
+	base := MainPromptContext{
+		Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true,
+	}
+
+	// None → no NOTE.
+	if out := BuildRuntimeContextMessage(base); strings.Contains(out, "previous session ended") {
+		t.Fatal("unexpected session-ended NOTE when no watchers carried over")
+	}
+
+	// One → singular noun + verb, count 1, the title quoted.
+	one := base
+	one.SessionEndedWatchers = []string{"deploy log"}
+	out := BuildRuntimeContextMessage(one)
+	if !strings.Contains(out, "NOTE: 1 watcher was stopped because the previous session ended: \"deploy log\".") {
+		t.Fatalf("singular session-ended NOTE missing/wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "do NOT resume automatically; offer to re-create them") {
+		t.Fatalf("re-create guidance missing:\n%s", out)
+	}
+
+	// Many → plural noun, capped inline list + "+N more" (7 titles, cap 5 → 2 more).
+	many := base
+	many.SessionEndedWatchers = []string{"w1", "w2", "w3", "w4", "w5", "w6", "w7"}
+	out = BuildRuntimeContextMessage(many)
+	if !strings.Contains(out, "NOTE: 7 watchers were stopped") {
+		t.Fatalf("plural count wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "\"w5\", +2 more.") {
+		t.Fatalf("title cap/+N more wrong:\n%s", out)
+	}
+	if strings.Contains(out, "\"w6\"") || strings.Contains(out, "\"w7\"") {
+		t.Fatalf("titles past the cap must be collapsed into +N more:\n%s", out)
+	}
+
+	// Embedded newline in a title must be flattened (else it breaks message[1]).
+	nl := base
+	nl.SessionEndedWatchers = []string{"line1\nline2"}
+	out = BuildRuntimeContextMessage(nl)
+	noteLine := ""
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, "NOTE: 1 watcher was stopped") {
+			noteLine = ln
+		}
+	}
+	if noteLine == "" {
+		t.Fatalf("flattened single-line NOTE not found:\n%s", out)
+	}
+	if !strings.Contains(noteLine, "\"line1 line2\"") {
+		t.Fatalf("title newline not flattened to a space:\n%s", noteLine)
+	}
+}
+
 func TestBuildSkillMessages(t *testing.T) {
 	if BuildSkillCatalogMessage(nil) != "" {
 		t.Fatal("empty catalog must be empty string")

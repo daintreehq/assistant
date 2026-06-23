@@ -69,7 +69,9 @@ func (c *controller) runTurn(parent context.Context, turnID, prompt string, read
 	c.cancel = cancel
 	c.mu.Unlock()
 	return func() tea.Msg {
-		reply, err := c.app.Session.Send(ctx, prompt, agent.SendOptions{ReadOnly: readOnly})
+		// App.Send (not Session.Send) so the first user turn consumes the one-time
+		// session-ended-watchers NOTE from message[1].
+		reply, err := c.app.Send(ctx, prompt, agent.SendOptions{ReadOnly: readOnly})
 		c.mu.Lock()
 		c.cancel = nil
 		c.mu.Unlock()

@@ -139,6 +139,43 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	}
 }
 
+// TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive asserts the one-time
+// session-ended-watchers NOTE: gated on the scheduler (dormant sessions never show
+// it), surfaced in message[1] once the scheduler is active, and stripped after the
+// first turn consumes it (the storage carryover itself is covered by reopen_test.go).
+func TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	// Stand in for a prior session having left a watcher running that the open-time
+	// sweep cancelled and carried forward.
+	a.sessionEndedWatchers = []string{"deploy watcher"}
+
+	// Dormant (no scheduler) → gated off, no NOTE in message[1].
+	if got := a.PromptContext().SessionEndedWatchers; got != nil {
+		t.Fatalf("note must be gated off before StartScheduler, got %v", got)
+	}
+	if msg := a.Session.Messages()[1].ContentToText(); strings.Contains(msg, "previous session ended") {
+		t.Fatalf("dormant runtime context must not carry the note:\n%s", msg)
+	}
+
+	// Scheduler active → NOTE appears in message[1].
+	a.StartScheduler(context.Background(), nil)
+	if msg := a.Session.Messages()[1].ContentToText(); !strings.Contains(msg, "previous session ended") ||
+		!strings.Contains(msg, `"deploy watcher"`) {
+		t.Fatalf("active runtime context missing the session-ended note:\n%s", msg)
+	}
+
+	// First turn consumes it → stripped from message[1], and it stays gone.
+	a.ConsumeSessionEndedNote()
+	if got := a.PromptContext().SessionEndedWatchers; got != nil {
+		t.Fatalf("note must be consumed after the first turn, got %v", got)
+	}
+	if msg := a.Session.Messages()[1].ContentToText(); strings.Contains(msg, "previous session ended") {
+		t.Fatalf("consumed note must be stripped from message[1]:\n%s", msg)
+	}
+}
+
 // TestStartSchedulerIdempotent asserts a second StartScheduler call does not leak a
 // second ticker — it rebinds onto the existing scheduler and returns the same
 // instance (the idempotency invariant).
