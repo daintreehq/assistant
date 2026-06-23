@@ -58,30 +58,85 @@ func TestTerminalCreateWatchConditionMatrix(t *testing.T) {
 	}
 }
 
-// The lifecycle note differs across scheduler running / not / absent. Watchers do
-// NOT resume across sessions (unlike timers).
+// Lifecycle behaviour across scheduler running / stopped / absent. When the
+// daemon runs (or is absent → assume-active), creation succeeds with the
+// session-scoped foreground-only NOTE. When the daemon is stopped (one-shot /
+// --json mode), creation hard-fails with a non-retryable
+// WATCHER_REQUIRES_INTERACTIVE and inserts nothing. Watchers do NOT resume
+// across sessions (unlike timers).
 func TestTerminalCreateLifecycleNotice(t *testing.T) {
-	tool := find(Tools(Deps{Store: &memStore{}}), "watcher.terminal.create")
 	args := json.RawMessage(`{"terminalIds":["t1"],"title":"build","goal":"green"}`)
 
+	// Each sub-case gets a fresh store so its insert count is unambiguous.
 	on := true
-	running := tool.Handle(context.Background(), args, ctxDaemon(&on))
+	stOn := &memStore{}
+	running := find(Tools(Deps{Store: stOn}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(&on))
 	if !running.Ok || !strings.Contains(running.Summary, "session-scoped") ||
 		!strings.Contains(running.Summary, "does not resume") ||
 		strings.Contains(running.Summary, "scheduler is NOT running") {
 		t.Fatalf("running note: %q", running.Summary)
 	}
-
-	off := false
-	stopped := tool.Handle(context.Background(), args, ctxDaemon(&off))
-	if !stopped.Ok || !strings.Contains(stopped.Summary, "scheduler is NOT running") ||
-		!strings.Contains(stopped.Summary, "will not check") {
-		t.Fatalf("stopped note: %q", stopped.Summary)
+	if len(stOn.inserted) != 1 {
+		t.Fatalf("running should insert exactly one watcher, got %d", len(stOn.inserted))
 	}
 
-	absent := tool.Handle(context.Background(), args, ctxDaemon(nil))
+	off := false
+	stOff := &memStore{}
+	stopped := find(Tools(Deps{Store: stOff}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(&off))
+	if stopped.Ok || stopped.Error.Code != codeWatcherRequiresInteractive || stopped.Error.Recoverable {
+		t.Fatalf("stopped: expected non-retryable %s, got %+v", codeWatcherRequiresInteractive, stopped)
+	}
+	if len(stOff.inserted) != 0 {
+		t.Fatalf("stopped must not insert a watcher row, got %d", len(stOff.inserted))
+	}
+
+	absent := find(Tools(Deps{Store: &memStore{}}), "watcher.terminal.create").
+		Handle(context.Background(), args, ctxDaemon(nil))
 	if !absent.Ok || !strings.Contains(absent.Summary, "session-scoped") {
 		t.Fatalf("absent note: %q", absent.Summary)
+	}
+}
+
+// Arg validation must run before the daemon gate, so a call with both invalid
+// args and an inactive daemon reports INVALID_ARGS — not
+// WATCHER_REQUIRES_INTERACTIVE — and inserts nothing.
+func TestWatcherCreateArgsBeatDaemonGate(t *testing.T) {
+	off := false
+	cases := []struct {
+		tool string
+		args string
+	}{
+		{"watcher.terminal.create", `{"terminalIds":[],"title":"x","goal":"g"}`},
+		{"watcher.watchPR", `{"prNumber":0}`},
+	}
+	for _, tc := range cases {
+		st := &memStore{}
+		res := find(Tools(Deps{Store: st}), tc.tool).
+			Handle(context.Background(), json.RawMessage(tc.args), ctxDaemon(&off))
+		if res.Ok || res.Error.Code != codeInvalidArgs {
+			t.Fatalf("%s: expected %s to beat the daemon gate, got %+v", tc.tool, codeInvalidArgs, res)
+		}
+		if len(st.inserted) != 0 {
+			t.Fatalf("%s: invalid args must not insert, got %d", tc.tool, len(st.inserted))
+		}
+	}
+}
+
+// watchPR hard-fails identically when the daemon is inactive: non-retryable
+// WATCHER_REQUIRES_INTERACTIVE and zero rows inserted (no orphan).
+func TestWatchPRDaemonInactive(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "watcher.watchPR")
+
+	off := false
+	res := tool.Handle(context.Background(), json.RawMessage(`{"prNumber":42}`), ctxDaemon(&off))
+	if res.Ok || res.Error.Code != codeWatcherRequiresInteractive || res.Error.Recoverable {
+		t.Fatalf("expected non-retryable %s, got %+v", codeWatcherRequiresInteractive, res)
+	}
+	if len(st.inserted) != 0 {
+		t.Fatalf("inactive daemon must not insert a watcher row, got %d", len(st.inserted))
 	}
 }
 
