@@ -261,7 +261,6 @@ func TestIsWakeFailureReplyRecognizesSentinels(t *testing.T) {
 		"Model rate-limited: provider quota/throughput exceeded",
 		"Model error: boom",
 		"Tool projection failed: dup name",
-		"Reached the tool-iteration limit without a final answer.",
 		"Turn cancelled",
 		"Stopped: called watcher.terminal.create 3 times this turn with identical arguments, each failing the same way (INVALID_ARGS: ...).",
 	}

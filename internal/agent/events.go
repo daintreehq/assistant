@@ -1,7 +1,8 @@
 // Package agent drives the main-thread agentic turn loop. AgentSession runs ONE
 // user (or autonomous) turn to completion: optional auto-compact → skill
 // re-selection → assemble the three control messages → stream the large model →
-// dispatch tool calls → feed results back (≤12 iterations). It owns conversation
+// dispatch tool calls → feed results back (looping until the model stops calling
+// tools; no per-turn round cap). It owns conversation
 // persistence/rehydration, the repeated-failure circuit breaker, oversized-tool-
 // result truncation into session artifacts, and a liveness-rich structured event
 // stream.

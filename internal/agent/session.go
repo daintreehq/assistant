@@ -120,8 +120,8 @@ type Session struct {
 	// never outlives the closed Router/Store. Immutable after NewSession.
 	bgCtx context.Context
 
-	// toolProj memoizes the OpenAITools projection across the (up to 12) iterations
-	// of a turn AND across turns. The projection is pure work keyed by the offered
+	// toolProj memoizes the OpenAITools projection across the iterations of a turn
+	// AND across turns. The projection is pure work keyed by the offered
 	// toolset (allowedNames); it only changes when skill.find/
 	// skill.load mutates the active-skill set, which invalidates it in
 	// applySkillBundleLocked. Guarded by s.mu (read in resolveTurnTools, zeroed in
@@ -469,12 +469,18 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	failureCounts := make(map[string]int)
 	stuckNudged := false
 
-	// The agentic loop. `iter` counts model rounds against MaxToolIterations. A message
-	// the human typed mid-turn (InjectPrompt) is folded into history at the TOP of a
-	// round (foldInInjections), so the very next model snapshot includes it — "between
-	// tasks" pickup. A fresh user instruction is legitimate new work, so folding one in
-	// RESETS the iteration budget and the per-turn failure breaker: a redirect must not
-	// be starved by a near-exhausted budget nor aborted by the PRIOR tool's failures.
+	// The agentic loop. `iter` counts model rounds purely to drive the phase display
+	// (Analyzing on the first round, Integrating thereafter) — there is deliberately NO
+	// per-turn round ceiling. A long-running autonomous workflow (e.g. orchestrating a
+	// multi-round game across several agent terminals) legitimately needs many rounds
+	// and must be free to keep going; the genuine runaway guard is the per-tool failure
+	// breaker in runToolBatch (the same call failing the same way aborts at
+	// RepeatFailureAbort), not a blunt round cap. A message the human typed mid-turn
+	// (InjectPrompt) is folded into history at the TOP of a round (foldInInjections), so
+	// the very next model snapshot includes it — "between tasks" pickup. A fresh user
+	// instruction is legitimate new work, so folding one in RESETS the per-turn failure
+	// breaker (a redirect must not be aborted by the PRIOR tool's failures) and re-shows
+	// the Analyzing phase.
 	iter := 0
 	resetForInjection := func() {
 		iter = 0
@@ -491,19 +497,27 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 
 		// 10a′. Fold in any message typed during the previous round's stream/tools so
-		//       THIS round's snapshot carries it. A fresh instruction resets the budget.
+		//       THIS round's snapshot carries it. A fresh instruction resets the breaker.
 		if s.foldInInjections() > 0 {
 			resetForInjection()
 		}
 
-		// 10b. Iteration ceiling — guards a runaway MODEL, not the user (a fresh
-		//      injection above resets it). Checked AFTER the fold-in so a late message
-		//      that just reset the budget still gets its round before we ever bail out.
-		if iter >= domain.MaxToolIterations {
-			msg := "Reached the tool-iteration limit without a final answer."
-			s.events.Phase(domain.PhaseFailed)
-			s.events.Error(msg)
-			return msg
+		// 10a″. Per-round auto-compact (best-effort). With no iteration ceiling a single
+		//       turn can append unboundedly many rounds, so context must be re-bounded
+		//       HERE or a long autonomous workflow would grow history until it hit the
+		//       model's hard context limit. Cheap when under the soft threshold (an
+		//       estimate + early return); only summarizes when over. Gated on iter>0: the
+		//       pre-turn compact (step 2) already covered iter==0, and a fresh injection
+		//       above resets iter to 0 — so a just-delivered user message is never
+		//       summarized away in the same round it is first folded in. Cancel-safe: a
+		//       cancel landing in the summary window leaves no orphan turn (issue #61).
+		if iter > 0 {
+			s.maybeAutoCompact(ctx)
+			if ctx.Err() != nil {
+				s.events.Phase(domain.PhaseCancelled)
+				s.events.AssistantCancelled("")
+				return domain.CancelledReply
+			}
 		}
 
 		// 5/9. (Re)compute the tool projection at the START of every iteration. A

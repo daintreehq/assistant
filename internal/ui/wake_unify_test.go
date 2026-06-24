@@ -65,7 +65,6 @@ func TestWake_ModelFailureSentinelNotRecorded(t *testing.T) {
 	for _, sentinel := range []string{
 		"Model unavailable: offline",
 		"Model error: 500",
-		"Reached the tool-iteration limit without a final answer.",
 	} {
 		m := liveModel(80)
 		m.activeTurn = "wake_x"

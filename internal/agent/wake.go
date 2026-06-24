@@ -113,7 +113,6 @@ var wakeFailurePrefixes = []string{
 	"Model rate-limited:",
 	"Model error:",
 	"Tool projection failed:",
-	"Reached the tool-iteration limit",
 	"Stopped: called ",
 	"Turn cancelled",
 }

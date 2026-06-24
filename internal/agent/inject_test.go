@@ -118,34 +118,27 @@ func TestInjectPrompt_AtFinalAnswerBoundaryKeepsTurnAlive(t *testing.T) {
 	}
 }
 
-// Folding in a fresh user instruction RESETS the iteration budget so a message typed
-// late in a long turn isn't starved by the near-exhausted MaxToolIterations ceiling.
-func TestInjectPrompt_ResetsIterationBudget(t *testing.T) {
-	var s *Session
-	// MaxToolIterations rounds of tool calls would exhaust the budget; the (Max-1)th
-	// round injects a message, which resets the counter so the final round still runs.
-	rounds := make([]models.ChatResult, domain.MaxToolIterations+1)
-	for i := 0; i < domain.MaxToolIterations; i++ {
-		rounds[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}
+// A turn has NO per-turn round ceiling: a long-running autonomous workflow must be
+// able to drive far more rounds than any old cap and still reach its final answer.
+// The only runaway guard is the same-call failure breaker — and these calls all
+// succeed, so nothing trips it no matter how many rounds run.
+func TestLongTurn_HasNoIterationCeiling(t *testing.T) {
+	const rounds = 40 // far beyond the old 12-round cap
+	results := make([]models.ChatResult, rounds+1)
+	for i := 0; i < rounds; i++ {
+		results[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}
 	}
-	rounds[domain.MaxToolIterations] = models.ChatResult{Content: "final"}
-	r := &injectRouter{
-		results: rounds,
-		onRound: func(round int) {
-			if round == domain.MaxToolIterations-1 {
-				s.InjectPrompt("keep going, also do X")
-			}
-		},
-	}
+	results[rounds] = models.ChatResult{Content: "final"}
+	r := &injectRouter{results: results}
 	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	s = NewSession(deps)
+	s := NewSession(deps)
 
 	reply, err := s.Send(context.Background(), "start", SendOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reply != "final" {
-		t.Fatalf("reply = %q, want final — the injection should have reset the iteration budget", reply)
+		t.Fatalf("reply = %q after %d rounds, want final — a long turn must not be capped", reply, rounds)
 	}
 }
 

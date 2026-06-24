@@ -41,7 +41,8 @@ func TestChatNonStream(t *testing.T) {
 
 // The small tier is forced to reasoning_effort:"none" so every DeepSeek-v4-flash call
 // (judge / summary / extraction / classification) runs thinking-free and fast; the
-// large tier sends NO reasoning_effort (orchestration reasoning stays on); an explicit
+// large tier defaults to "high" (glm-5p2's provider default is "max", which we pin
+// down so orchestration doesn't pay max-effort thinking every turn); an explicit
 // caller value wins on any tier.
 func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
 	var lastBody map[string]any
@@ -60,10 +61,16 @@ func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
 		t.Fatalf("small tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
-	// large tier → omitted entirely
+	// large tier → defaults to "high"
 	_, _ = r.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if v, present := lastBody["reasoning_effort"]; present {
-		t.Fatalf("large tier: reasoning_effort must be omitted, got %v", v)
+	if lastBody["reasoning_effort"] != "high" {
+		t.Fatalf("large tier: reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	}
+
+	// medium tier (routes to the large model id) → also defaults to "high"
+	_, _ = r.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "high" {
+		t.Fatalf("medium tier: reasoning_effort = %v, want high", lastBody["reasoning_effort"])
 	}
 
 	// explicit caller value wins even on the small tier

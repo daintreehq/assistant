@@ -55,7 +55,7 @@ func (r *Registry) Register(t *Tool) error {
 	}
 	// Canonicalize the schema ONCE here (the cold path) into the exact compact bytes
 	// the projection emits, so OpenAITools never re-unmarshals it on the hot path
-	// (rebuilt up to MaxToolIterations× per turn). Unmarshal→marshal yields the same
+	// (rebuilt once per model round, of which a turn may run many). Unmarshal→marshal yields the same
 	// sorted-key compact form the per-call json.Marshal produced before, keeping the
 	// wire bytes (and the prompt cache) byte-stable. A bad schema fails fast here.
 	if len(t.Schema) > 0 {

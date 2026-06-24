@@ -120,7 +120,8 @@ type Tool struct {
 	// projectionParams is the canonical compact JSON the projection emits as the
 	// tool's `parameters`, computed ONCE from Schema at Register (the cold path) so
 	// OpenAITools never re-unmarshals the schema on the hot projection path (rebuilt
-	// up to MaxToolIterations× per turn). Populated by Register; never set by callers.
+	// once per model round, of which a turn may run many). Populated by Register; never
+	// set by callers.
 	projectionParams json.RawMessage
 }
 

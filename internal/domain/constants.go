@@ -29,7 +29,6 @@ var OneShotExitCode = struct {
 
 // Agent-loop magic constants.
 const (
-	MaxToolIterations         = 12
 	RepeatFailureWarn         = 2
 	RepeatFailureAbort        = 3
 	ControlMessageCount       = 3
