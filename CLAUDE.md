@@ -196,6 +196,31 @@ and returns the path so the caller can print `logging to <file>`. The cockpit sh
 `◌ LOG` badge + the path when active. The logger is a no-op when disabled and never
 throws. Tests pin `DAINTREE_ASSISTANT_DEBUG_LOG=0` / pass an explicit `logDir`.
 
+### Replaying MCP calls by hand (live debugging)
+
+When debug logging is enabled, the **raw Daintree MCP URL + bearer token** are written to
+the top of every session log as an `mcp.credentials` line (right after `session.start`,
+emitted on each connect/reconnect). With those you can hit the **same** MCP the assistant
+uses and see the exact responses a tool got — invaluable when a tool (e.g.
+`terminal.extract` / `terminal.awaitAll`) behaves wrong but the model loop only shows the
+post-parse result. (This credential line is a TEMPORARY debug aid — see the `TODO: remove`
+on `App.logMcpCredentials` in `internal/app/lifecycle.go`; it only writes under
+`DAINTREE_ASSISTANT_DEBUG_LOG=1`, never in normal runs.)
+
+Connecting (Streamable HTTP, `github.com/modelcontextprotocol/go-sdk`): POST JSON-RPC to
+the URL with `Authorization: Bearer <token>`, `Content-Type: application/json`, and
+`Accept: application/json, text/event-stream`. Handshake = `initialize` (capture the
+`Mcp-Session-Id` response header) → `notifications/initialized` → then `tools/call`
+(`terminal.list`, `terminal.getStatus`, `terminal.getOutput`, …) passing
+`Mcp-Session-Id` on every follow-up. Responses come back as SSE `data:` lines.
+
+To understand what a finish-wait actually *fetches* and how it decides "done", read
+`internal/app/toolterminal.go` (`ReadStatuses` → `terminal.getStatus` with
+`includeOutput`; `ReadOutput` → `terminal.getOutput`) alongside
+`internal/tools/extractionx/awaitall.go` (the cohort poll loop) and
+`internal/domain/finish.go` (`FinishPreFilter` — note an empty/whitespace tail is never
+judged, so a status read that returns blank `recentOutput` strands a finished agent).
+
 ### Reading logs to improve the system (the core dev loop)
 
 The session logs in `~/.daintree/logs/<date>-<sessionId>.log` are the **ground truth**

@@ -276,18 +276,32 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 // fetched by the batched ReadStatuses(includeOutput) — keeping each poll tick to that
 // one batched call rather than a serial deep terminal.getOutput per terminal (which,
 // at the MCP client's default per-call timeout, could otherwise stretch a tick's
-// wall-clock). It only falls back to a deep read when the batched read carried no
-// inline output (recentOutput nil). An absent terminal has no tail.
+// wall-clock). It falls back to a deep read when the batched read carried no USABLE
+// inline output — recentOutput nil OR whitespace-only. An absent terminal has no tail.
 func awaitReadTail(ctx context.Context, deps Deps, id string, entry TerminalStatusEntry, present, absent bool) string {
 	if absent {
 		return ""
 	}
-	if present && entry.RecentOutput != nil {
+	// Use the inline tail ONLY when it actually carries content. A present-but-blank
+	// recentOutput is a real failure mode, not "no output": some agent TUIs bottom-pad
+	// their viewport (Codex parks its composer high and fills the rest of the screen with
+	// blank lines), so the screen-grid grab Daintree returns inline is all whitespace even
+	// though the agent has finished and its answer sits just ABOVE the window. Trusting
+	// that blank tail makes finish-detection see TailEmpty and never judge the agent — it
+	// then rides the wait to the attempt cap as "still working" (the exact awaitAll hang
+	// this fixes). So when the inline tail is whitespace-only, fall back to the deep
+	// terminal.getOutput read, which returns output history (the real content).
+	if present && entry.RecentOutput != nil && strings.TrimSpace(*entry.RecentOutput) != "" {
 		return lastRunes(*entry.RecentOutput, awaitTailBytes)
 	}
 	read := deps.Reader.ReadOutput(ctx, id, awaitTailBytes)
 	if read.OK {
 		return read.Value
+	}
+	// Deep read failed (transport hiccup) — fall back to whatever inline we held, even if
+	// blank, rather than losing a tail we already had.
+	if present && entry.RecentOutput != nil {
+		return lastRunes(*entry.RecentOutput, awaitTailBytes)
 	}
 	return ""
 }

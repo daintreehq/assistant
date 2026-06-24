@@ -69,8 +69,12 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		switch {
 		case absent:
 			tail = ""
-		case entry.RecentOutput != nil && len([]rune(*entry.RecentOutput)) >= tailBytes:
-			// The inline tail already covers the requested window — use it.
+		case entry.RecentOutput != nil && len([]rune(*entry.RecentOutput)) >= tailBytes && strings.TrimSpace(*entry.RecentOutput) != "":
+			// The inline tail already covers the requested window AND carries content — use
+			// it. A blank inline (even one long enough to cover the window — e.g. a fully
+			// blank-padded screen grab) must NOT short-circuit the deep read, or a finished
+			// agent with a bottom-padded TUI reads as empty and never settles. Short inline
+			// tails already fall through to the deep read below.
 			tail = lastRunes(*entry.RecentOutput, tailBytes)
 		default:
 			read := deps.Reader.ReadOutput(ctx, id, tailBytes)

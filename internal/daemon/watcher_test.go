@@ -24,6 +24,49 @@ func statusResult(entries ...map[string]any) MCPResult {
 	return MCPResult{Text: string(body)}
 }
 
+// A finished agent whose batched recentOutput is BLANK (some agent TUIs bottom-pad their
+// viewport — Codex parks its composer high and fills the rest of the screen with blank
+// lines) must not strand the background watcher: resolvePresent falls back to the deep
+// terminal.getOutput read for the real tail, exactly like the in-turn awaitAll path. A
+// NON-blank inline tail still skips the deep read (the cheap fast path). Without the
+// blank-tail guard the watcher would feed an empty tail to the finished judge forever.
+func TestWatcher_BlankRecentOutputFallsBackToDeepRead(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recent   string
+		wantDeep bool
+	}{
+		{"blank inline falls back to deep read", "\r\n\r\n\r\n\r\n", true},
+		{"content inline skips deep read", "the agent's real answer", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			queue := newFakeQueue()
+			mcp := newFakeMCP()
+			mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+				"terminalId": "t1", "agentState": "waiting", "waitingReason": "prompt",
+				"recentOutput": tc.recent,
+			})
+			mcp.results["terminal.getOutput"] = MCPResult{StructuredContent: map[string]any{"content": "deep scrollback content"}}
+			rec := termWatcher("wch_blank", []string{"t1"})
+			store.watchers = []domain.WatcherRecord{rec}
+
+			RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+
+			calledDeep := false
+			for _, c := range mcp.calls {
+				if c == "terminal.getOutput" {
+					calledDeep = true
+				}
+			}
+			if calledDeep != tc.wantDeep {
+				t.Fatalf("recentOutput=%q: deep terminal.getOutput called=%v, want %v (calls=%v)",
+					tc.recent, calledDeep, tc.wantDeep, mcp.calls)
+			}
+		})
+	}
+}
+
 func TestWatcher_WaitingForInputPublishesAttention(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()

@@ -54,15 +54,26 @@ type ModelJudgeAnswer struct {
 }
 
 // FinishedJudgeQuestion is the ONE byte-stable yes/no question that confirms an
-// agent terminal has genuinely finished its turn. A bare agentState=="waiting" is
-// an UNRELIABLE proxy: an agent parks at "waiting" before it picks up the prompt,
-// pauses mid-task, or (the real-world failure mode) gets flipped to "waiting" by
-// Daintree when its window is backgrounded. So the watcher engine AND the
-// terminal.extract settle gate both ask the small model THIS question against the
+// agent terminal has finished THIS TURN. A bare agentState=="waiting" is an
+// UNRELIABLE proxy: an agent parks at "waiting" before it picks up the prompt,
+// stalls cut off mid-output, or (the real-world failure mode) gets flipped to
+// "waiting" by Daintree when its window is backgrounded. So the watcher engine AND
+// the terminal.extract settle gate both ask the small model THIS question against the
 // terminal tail before concluding "finished". Shared by internal/daemon
 // (judgeAgentFinished) and internal/tools/extractionx (confirmFinished) so the two
 // consumers cannot drift — the small model is tuned against a single phrasing.
-const FinishedJudgeQuestion = "Has this agent COMPLETED its turn — finished the work and returned to an idle prompt? Answer YES only when the most recent output shows the work is actually done: a final answer, a summary, or a clear completion/sign-off. Answer NO if it is still working, mid-task, paused, or merely sitting at a prompt. A bare 'waiting' state, an idle prompt, or silence ALONE is never proof of completion — there must be visible evidence the work itself finished."
+//
+// CRITICAL — TURN completion, NOT task completion. The orchestration model relays
+// between agents: the instant an agent produces its response and returns to an idle,
+// ready prompt, the orchestrator should act (read its output, relay it, send the next
+// round). So "finished" means "done generating FOR NOW and awaiting input" — TRUE even
+// when the broader task / conversation / game has more rounds to come. The prior phrasing
+// asked whether "the work is actually done", so a multi-round agent that posted its
+// message and went idle was judged "still mid-task" and the wait burned its whole budget
+// (an interactive Thieves'-game cohort hung terminal.awaitAll for ~3 minutes while all
+// three agents sat idle at their prompts). An idle prompt AFTER produced output is the
+// signal to act, not a non-finish.
+const FinishedJudgeQuestion = "Has this agent finished generating its response for this turn and returned to an idle prompt that is ready for new input? Answer YES only when the tail shows SUBSTANTIVE output the agent itself produced this turn (a message, answer, result, or sign-off) AND the terminal is now sitting idle at a ready prompt. This counts as finished EVEN IF the overall task, conversation, or game has more rounds to come — an agent that posted its message and is back at a ready idle prompt has finished its turn; you are judging TURN completion, NOT whether the whole task is done. Answer NO if the agent is still actively working or generating, is cut off partway through its output (a live spinner, a tool call in flight, or an unfinished message), is stalled or silent without having produced a response, or has not produced anything yet. Do NOT count shell prompts, banners, menus, status lines, or other UI chrome as produced output — there must be a real response from the agent before an idle prompt means finished."
 
 // VerificationResult is the read-only completion verification. A legacy blob
 // with old enum values (clean/dirty) must deserialize safely to "unknown" —

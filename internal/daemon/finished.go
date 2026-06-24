@@ -18,17 +18,21 @@ import (
 // a CONFIDENT yes — never the mere fact that it parked at a prompt. Returns the raw
 // answer (for evidence text + the caller's confident/transient dedupe decision) and
 // the finished bool.
-func judgeAgentFinished(ctx *CheckContext, rec domain.WatcherRecord, signals WatcherSignals) (domain.ModelJudgeAnswer, bool) {
-	// No evidence to judge → unknown → fail-closed. (An empty tail can't prove an
-	// agent finished; judging nothing risks hardening a transport hiccup into a false
-	// completion.)
+// The returned `judged` bool reports whether the model was ACTUALLY consulted — false
+// on the fail-closed early-return (no tail / disconnected). Callers use it to avoid
+// stamping the judge cooldown (or claiming a model spend) for a judge that never ran.
+func judgeAgentFinished(ctx *CheckContext, rec domain.WatcherRecord, signals WatcherSignals) (answer domain.ModelJudgeAnswer, finished, judged bool) {
+	// No evidence to judge → unknown → fail-closed WITHOUT a model call. (An empty tail
+	// can't prove an agent finished; judging nothing risks hardening a transport hiccup
+	// into a false completion. judged=false so the caller doesn't poison the cooldown — a
+	// blank tail this tick, e.g. a failed deep read, must not suppress the next REAL judge.)
 	if !ctx.MCP.Connected() || strings.TrimSpace(signals.Tail) == "" {
-		return domain.ModelJudgeAnswer{}, false
+		return domain.ModelJudgeAnswer{}, false, false
 	}
 	results := runModelJudges(ctx, []string{domain.FinishedJudgeQuestion}, rec, signals)
 	a, ok := results[domain.FinishedJudgeQuestion]
 	confident := ok && a.Confidence >= judgeConfidenceFloor
-	return a, confident && a.Matched
+	return a, confident && a.Matched, true
 }
 
 // finishJudgeCooldownMS bounds how often the finished judge runs for one terminal.
@@ -73,11 +77,18 @@ func confirmExploreFinished(
 	if finishJudgeOnCooldown(prevState, now) {
 		return false, false, domain.ModelJudgeAnswer{}
 	}
-	ans, ok := judgeAgentFinished(ctx, rec, signals)
-	base := perTerminal[terminalID]
-	base.LastFinishJudgeAt = now
-	perTerminal[terminalID] = base
-	return ok, true, ans
+	ans, ok, judged := judgeAgentFinished(ctx, rec, signals)
+	// Advance the cooldown ONLY when a model judge actually ran. judgeAgentFinished
+	// fail-closes WITHOUT a model call on a blank tail (e.g. a failed deep read this
+	// tick); stamping then would suppress the next REAL judge for a whole window and
+	// strand a genuinely-finished agent. usedModel mirrors `judged` so the outcome's
+	// epistemic kind isn't mislabeled as model-derived when no model was consulted.
+	if judged {
+		base := perTerminal[terminalID]
+		base.LastFinishJudgeAt = now
+		perTerminal[terminalID] = base
+	}
+	return ok, judged, ans
 }
 
 // finishedEvidence folds a judge answer's reason into a one-line evidence string,

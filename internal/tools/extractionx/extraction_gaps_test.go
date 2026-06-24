@@ -158,4 +158,23 @@ func TestReadSignalsInlineVsDeepFallback(t *testing.T) {
 	if r.signals.Tail != "full deep scrollback" {
 		t.Fatalf("deep tail not used: %q", r.signals.Tail)
 	}
+
+	// recentOutput LONG ENOUGH to cover the window but WHITESPACE-ONLY (a bottom-padded
+	// TUI's screen grab, e.g. Codex) must NOT short-circuit the deep read — otherwise the
+	// blank inline is used and a finished agent reads as empty and never settles. The deep
+	// getOutput fallback must drive the tail instead.
+	blankLong := &fakeReader{
+		statuses: StatusReadResult{OK: true, ByID: map[string]TerminalStatusEntry{
+			"a": {AgentState: "waiting", WaitingReason: "prompt", RecentOutput: strp("\r\n\r\n\r\n")},
+		}},
+		deepOut: map[string]string{"a": "the real finished answer"},
+	}
+	r = readSignals(context.Background(), Deps{Reader: blankLong}, []string{"a"}, 4,
+		map[string]*terminalState{}, 1000)
+	if len(blankLong.deepReads) != 1 || blankLong.deepReads[0] != "a" {
+		t.Fatalf("blank-but-long inline should fall through to a deep read, did %v", blankLong.deepReads)
+	}
+	if r.signals.Tail != "the real finished answer" {
+		t.Fatalf("deep tail should drive when the inline is blank, got %q", r.signals.Tail)
+	}
 }

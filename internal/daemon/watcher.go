@@ -426,10 +426,17 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 	agentState := entry.AgentState
 	waitingReason := entry.WaitingReason
 
-	// Tail: prefer inline recentOutput unless a deep tail is needed; "" is valid.
+	// Tail: prefer inline recentOutput unless a deep tail is needed OR the inline tail is
+	// whitespace-only. A present-but-blank recentOutput is NOT "no output" — some agent
+	// TUIs bottom-pad their viewport (Codex parks its composer high and fills the rest of
+	// the screen with blank lines), so the inline screen-grab is all whitespace even when
+	// the agent has finished and its answer sits just above the window. Trusting that blank
+	// tail makes the finished judge see an empty tail and never confirm completion, so the
+	// watcher supervises forever. Fall back to the deep terminal.getOutput read (output
+	// history = real content) in that case, exactly as the in-turn awaitAll path does.
 	readFailed := false
 	var tail string
-	if !needsDeepTail && entry.RecentOutput != nil {
+	if !needsDeepTail && entry.RecentOutput != nil && strings.TrimSpace(*entry.RecentOutput) != "" {
 		tail = *entry.RecentOutput
 	} else {
 		read := readOutput(ctx, terminalID)

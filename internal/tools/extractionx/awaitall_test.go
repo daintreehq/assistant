@@ -16,6 +16,10 @@ import (
 type cohortReader struct {
 	seq  []map[string]TerminalStatusEntry
 	call int
+	// deep, when set, serves a per-terminal deep terminal.getOutput value — the fallback
+	// the cohort uses when the batched recentOutput is absent or whitespace-only. nil ⇒
+	// the deep read fails (short tails come straight from recentOutput).
+	deep map[string]string
 }
 
 func (r *cohortReader) Connected() bool { return true }
@@ -27,7 +31,10 @@ func (r *cohortReader) ReadStatuses(_ context.Context, _ []string, _ bool) Statu
 	r.call++
 	return StatusReadResult{OK: true, ByID: r.seq[i]}
 }
-func (r *cohortReader) ReadOutput(_ context.Context, _ string, _ int) OutputReadResult {
+func (r *cohortReader) ReadOutput(_ context.Context, id string, _ int) OutputReadResult {
+	if v, ok := r.deep[id]; ok {
+		return OutputReadResult{OK: true, Value: v}
+	}
 	return OutputReadResult{OK: false} // short tails come from recentOutput
 }
 
@@ -103,6 +110,41 @@ func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 	}
 	if router.judgeCalls != 3 {
 		t.Fatalf("each agent judged once on its quiet tail → 3 judge calls, got %d", router.judgeCalls)
+	}
+}
+
+// An agent that finished but whose batched recentOutput is BLANK (e.g. Codex bottom-pads
+// its viewport, so the inline screen-grab is all blank lines) must NOT be stranded: the
+// cohort falls back to the deep terminal.getOutput read, which carries the real content,
+// judges it, and settles it as finished. WITHOUT the blank-tail fallback the blank inline
+// trips TailEmpty, the agent is never judged, and it rides to the cap as "still working".
+func TestAwaitCohort_BlankRecentOutputFallsBackToDeepRead(t *testing.T) {
+	reader := &cohortReader{
+		seq: []map[string]TerminalStatusEntry{
+			{"t1": ent("working", "", "thinking…")},
+			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
+			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
+			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
+		},
+		// The deep read has the genuine, finished content (judge matches on "done").
+		deep: map[string]string{"t1": "There's a lake in Venezuela… done"},
+	}
+	router := &safeRouter{}
+	deps := Deps{Reader: reader, Router: router}
+	ids := []string{"t1"}
+
+	out, _ := awaitCohort(context.Background(), deps, ids, 0, 6, 0,
+		clockSeq(0, 2000, 4000, 6000, 8000, 10000, 12000))
+
+	allFinished, per := awaitResult(t, out, ids)
+	if !allFinished {
+		t.Fatalf("a blank inline tail must fall back to the deep read and settle, got per=%+v", per)
+	}
+	if per["t1"]["status"] != "finished" {
+		t.Fatalf("t1 should be finished via the deep-read fallback, got %v", per["t1"])
+	}
+	if router.judgeCalls == 0 {
+		t.Fatal("the deep-read tail (not the blank inline) should have been judged")
 	}
 }
 
