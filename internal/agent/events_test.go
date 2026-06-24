@@ -257,6 +257,7 @@ func (throwingSink) AssistantStart()             { panic("boom") }
 func (throwingSink) AssistantToken(string)       { panic("boom") }
 func (throwingSink) AssistantEnd(string, string) { panic("boom") }
 func (throwingSink) AssistantCancelled(string)   { panic("boom") }
+func (throwingSink) Interjection(string)         { panic("boom") }
 func (throwingSink) ToolBatch([]BatchedToolCall) { panic("boom") }
 func (throwingSink) ToolState(string, ToolState) { panic("boom") }
 func (throwingSink) ToolProgress(string, string) { panic("boom") }
@@ -278,6 +279,7 @@ type recordingSink struct {
 func (r *recordingSink) TurnPrompt(p string)      { r.log = append(r.log, "prompt:"+p) }
 func (r *recordingSink) AssistantStart()          { r.log = append(r.log, "start") }
 func (r *recordingSink) AssistantEnd(c, _ string) { r.log = append(r.log, "end:"+c) }
+func (r *recordingSink) Interjection(t string)    { r.log = append(r.log, "interject:"+t) }
 func (r *recordingSink) Warn(m string)            { r.log = append(r.log, "warn:"+m) }
 func (r *recordingSink) Info(m string)            { r.log = append(r.log, "info:"+m) }
 

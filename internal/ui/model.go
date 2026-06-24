@@ -15,9 +15,9 @@ import (
 )
 
 // model.go is the root tea.Model state. It
-// owns the transcript, the explicit run phase, the work-serialization slice (the
-// single-flight lock + FIFO queue + wake queue), the scrollback commit queue, view
-// state, and the resize/clear nonces. ALL mutation happens in Update.
+// owns the transcript, the explicit run phase, the work-serialization fields (the
+// single-flight lock + mid-turn injection cue + wake queue), the scrollback commit
+// queue, view state, and the resize/clear nonces. ALL mutation happens in Update.
 
 // viewMode is the active top-level surface.
 type viewMode int
@@ -106,12 +106,17 @@ type Model struct {
 	commitArmed bool // first scrollback commit deferred one render cycle (see scheduleCommit)
 
 	// work serialization.
-	inFlight    bool                // exactly one Session.Send outstanding
-	activeTurn  string              // id of the live TurnCell (for streaming routing)
-	queuedInput []queuedTurn        // FIFO user follow-ups typed while busy
-	pendingWake []domain.QueueEvent // autonomous wakes drained after the user queue
-	activeWake  []domain.QueueEvent // the burst the in-flight wake turn is reacting to (kept for one retry, #9)
-	wakeRetried bool                // per-burst wake retry budget
+	inFlight   bool   // exactly one Session.Send outstanding
+	activeTurn string // id of the live TurnCell (for streaming routing)
+	// pendingInject counts messages typed while busy that the Session has buffered but
+	// not yet folded into the running turn (InjectPrompt). It drives the composer's
+	// "queued for next step" cue; it is incremented on submit-while-busy, decremented
+	// on a successful Esc-retract, and zeroed by the inline interjection event (delivery)
+	// or on cancel/clear. The buffered TEXT lives in the Session, not here.
+	pendingInject int
+	pendingWake   []domain.QueueEvent // autonomous wakes drained after a turn settles
+	activeWake    []domain.QueueEvent // the burst the in-flight wake turn is reacting to (kept for one retry, #9)
+	wakeRetried   bool                // per-burst wake retry budget
 	// summarizedTerminals is the cross-burst memory the wake prompt builder reads so a
 	// terminal already reported this session is downgraded to a one-line ack (mirrors
 	// the host's Host.summarizedTerminals) — recorded only on a real (non-failure) wake.
@@ -159,13 +164,6 @@ type Model struct {
 	// expiry tick so a lapsed timer can't disarm a freshly re-armed prompt.
 	quitArmed  bool
 	quitArmGen int
-}
-
-// queuedTurn is one queued user follow-up: the prompt text + its visible TurnCell
-// id (a dimmed queued turn shown immediately, promoted in place when it starts).
-type queuedTurn struct {
-	prompt string
-	cellID string
 }
 
 // newModel builds the root model over an already-constructed App. The composer is

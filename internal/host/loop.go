@@ -43,9 +43,11 @@ func (h *Host) handleCommand(cmd HostCommand) {
 	}
 }
 
-// handlePrompt runs a command-driven turn. ONE ACTIVE PROMPT invariant: a second
-// prompt while busy is rejected (turn-in-progress), NOT queued. The send runs on
-// a worker goroutine so the command loop keeps servicing interrupt/decide.
+// handlePrompt runs a command-driven turn. A prompt sent while a turn is already
+// running is FOLDED into the running turn (InjectPrompt) — the model picks it up at its
+// next tool-iteration boundary ("between tasks"), matching the cockpit composer — rather
+// than rejected. The send runs on a worker goroutine so the command loop keeps servicing
+// interrupt/decide.
 func (h *Host) handlePrompt(text string) {
 	// Mint the aborter + claim busy under one lock so a worker's finally can't race
 	// the busy check. interrupt cancels turnCancel. The generation counter is the
@@ -56,8 +58,12 @@ func (h *Host) handlePrompt(text string) {
 	if h.busy {
 		h.turnMu.Unlock()
 		cancel()
-		h.report("turn-in-progress",
-			"A turn is already running; interrupt it before sending another prompt.")
+		// Fold it into the in-flight turn instead of rejecting. Daintree's parent already
+		// holds the text it sent, so there's no echo — just a status so it knows the prompt
+		// joined the running turn rather than starting a new one.
+		h.app.Session().InjectPrompt(text)
+		h.report("prompt-folded",
+			"A turn is already running; this message was folded into it and will be picked up between tasks.")
 		return
 	}
 	h.busy = true

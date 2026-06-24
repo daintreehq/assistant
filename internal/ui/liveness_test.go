@@ -27,7 +27,7 @@ func liveModel(columns int) Model {
 	m.commitArmed = true
 	pump := newEventPump()
 	m.pump = pump
-	m.controller = &controller{pump: pump}
+	m.controller = &controller{pump: pump, inject: &fakeInjector{}}
 	return m
 }
 
@@ -275,46 +275,49 @@ func TestOrderedSteps_ProseToolProse(t *testing.T) {
 
 // --- 6. Queued follow-ups are visible and promoted in place ---
 
-func TestQueuedFollowup_VisibleThenPromotedInPlace(t *testing.T) {
+func TestTypedWhileBusy_FoldsIntoRunningTurn(t *testing.T) {
 	m := liveModel(80)
 	// A turn is in flight.
 	next, _ := m.startTurn("first task")
 	m = next.(Model)
 	before := len(m.transcript)
 
-	// Typing while busy queues a VISIBLE dimmed turn (not just a counter).
+	// Typing while busy does NOT create a separate turn cell — it buffers the message
+	// for the running turn and bumps the pending cue.
 	next, _ = m.onSubmit("second task")
 	m = next.(Model)
-	if len(m.transcript) != before+1 {
-		t.Fatalf("queued follow-up did not appear as its own turn cell")
+	if len(m.transcript) != before {
+		t.Fatalf("a typed-while-busy message wrongly created a new transcript cell (was %d, now %d)", before, len(m.transcript))
 	}
-	if len(m.queuedInput) != 1 {
-		t.Fatalf("queuedInput depth = %d, want 1", len(m.queuedInput))
+	if m.pendingInject != 1 {
+		t.Fatalf("pendingInject = %d, want 1", m.pendingInject)
 	}
-	q := m.transcript[len(m.transcript)-1].Turn
-	if !q.Queued || q.UserText != "second task" {
-		t.Fatalf("queued cell wrong: %+v", q)
+	if fi, ok := m.controller.inject.(*fakeInjector); !ok || len(fi.buf) != 1 || fi.buf[0] != "second task" {
+		t.Fatalf("message was not buffered for injection: %+v", m.controller.inject)
 	}
-	// It renders DIMMED in the live footer.
-	if strings.TrimSpace(ansi.Strip(m.liveCellsView(m.contentW()))) == "" {
-		t.Error("queued follow-up not visible in the footer")
+	// The composer surfaces the pending cue.
+	if !strings.Contains(ansi.Strip(m.composerView(80)), "queued") {
+		t.Error("composer did not surface the pending-injection cue")
 	}
 
-	// Promotion happens IN PLACE — the same cell id becomes active, no new cell.
-	qid := q.ID
-	cellCount := len(m.transcript)
-	m.activeTurn = "" // simulate the prior turn having sealed
-	m.inFlight = false
-	cmd := m.promoteQueued(m.queuedInput[0])
-	_ = cmd
-	if len(m.transcript) != cellCount {
-		t.Error("promotion created a second entry (must promote in place)")
+	// When the loop folds it in (the Interjection event), it appears INLINE in the
+	// running turn as a StepInterject, and the pending cue clears.
+	m.applyPumpEvent(pumpEvent{kind: pumpInterject, text: "second task"})
+	at := m.activeTurnCell()
+	if at == nil {
+		t.Fatal("no active turn cell after interjection")
 	}
-	if m.activeTurn != qid {
-		t.Errorf("active turn = %q, want the promoted cell %q", m.activeTurn, qid)
+	var found bool
+	for _, s := range at.Steps {
+		if s.Kind == StepInterject && s.Text == "second task" {
+			found = true
+		}
 	}
-	if m.transcript[len(m.transcript)-1].Turn.Queued {
-		t.Error("promoted cell still flagged Queued")
+	if !found {
+		t.Fatalf("interjection did not render as an inline step: %+v", at.Steps)
+	}
+	if m.pendingInject != 0 {
+		t.Errorf("pendingInject = %d after delivery, want 0", m.pendingInject)
 	}
 }
 

@@ -33,47 +33,33 @@ func TestTurnComplete_CancelledLeavesDurableMarker(t *testing.T) {
 	}
 }
 
-func TestEscWhileBusy_RetractsNewestQueued(t *testing.T) {
+func TestEscWhileBusy_RetractsNewestPendingInjection(t *testing.T) {
 	m := harnessModel()
-	// An active turn plus two queued follow-ups.
+	// An active turn plus two messages typed mid-turn (buffered for injection, LIFO).
 	active := &TurnCell{ID: "turn_a", State: TurnActive, Phase: domain.PhaseGenerating, PhaseStartedAt: domain.NowMS()}
-	q1 := &TurnCell{ID: "turn_q1", UserText: "first queued", State: TurnActive, Queued: true}
-	q2 := &TurnCell{ID: "turn_q2", UserText: "second queued", State: TurnActive, Queued: true}
-	m.transcript = append(m.transcript,
-		TranscriptCell{Turn: active}, TranscriptCell{Turn: q1}, TranscriptCell{Turn: q2})
+	m.transcript = append(m.transcript, TranscriptCell{Turn: active})
 	m.activeTurn = active.ID
 	m.inFlight = true
-	m.queuedInput = []queuedTurn{{prompt: "first queued", cellID: q1.ID}, {prompt: "second queued", cellID: q2.ID}}
+	fi := m.controller.inject.(*fakeInjector)
+	fi.buf = []string{"first queued", "second queued"}
+	m.pendingInject = 2
 
 	next, _ := m.onEscWhileBusy()
 	mm := asModel(t, next)
 
-	if len(mm.queuedInput) != 1 || mm.queuedInput[0].cellID != q1.ID {
-		t.Fatalf("retract did not pop the newest queued entry; queue=%+v", mm.queuedInput)
+	// The newest pending message is pulled back into the composer; the cue decrements.
+	if mm.pendingInject != 1 {
+		t.Fatalf("pendingInject = %d after retract, want 1", mm.pendingInject)
+	}
+	if len(fi.buf) != 1 || fi.buf[0] != "first queued" {
+		t.Fatalf("retract did not pop the newest buffered message; buf=%+v", fi.buf)
 	}
 	if mm.composer.Value() != "second queued" {
 		t.Fatalf("retracted text not pulled into the composer; got %q", mm.composer.Value())
 	}
-	// The retracted cell is gone; the active turn and the still-queued cell remain.
-	var hasQ2, hasQ1, hasActive bool
-	for _, c := range mm.transcript {
-		if c.Turn == nil {
-			continue
-		}
-		switch c.Turn.ID {
-		case q2.ID:
-			hasQ2 = true
-		case q1.ID:
-			hasQ1 = true
-		case active.ID:
-			hasActive = true
-		}
-	}
-	if hasQ2 {
-		t.Fatal("retracted queued cell still present in the transcript")
-	}
-	if !hasQ1 || !hasActive {
-		t.Fatal("retract wrongly removed a cell it should have kept")
+	// The active turn is untouched (retract never cancels).
+	if at := mm.activeTurnCell(); at == nil || at.Phase == domain.PhaseCancelling {
+		t.Fatal("retract wrongly cancelled the active turn")
 	}
 }
 
@@ -91,35 +77,29 @@ func TestEscWhileBusy_NoQueueCancels(t *testing.T) {
 	}
 }
 
-// A message submitted MID-TURN (queued behind the in-flight turn) renders in the live
-// footer, NOT via the sealed-block path — so it must get the SAME marginTop. Regression
-// for the missing blank line above a mid-turn "YOU" card (it was rendering flush against
-// the in-flight assistant prose).
-func TestLiveCellsView_MidTurnUserMessageHasBlankLineAbove(t *testing.T) {
+// A message folded into the running turn renders INLINE as an interjection step (its
+// text appears in chronological place within the active turn's live view), not as a
+// separate queued "YOU" card.
+func TestLiveCellsView_InterjectionRendersInlineInTurn(t *testing.T) {
 	m := harnessModel()
 	active := &TurnCell{
 		ID: "turn_a", UserText: "kick off the work", State: TurnActive,
 		Phase: domain.PhaseGenerating, PhaseStartedAt: domain.NowMS(),
-		Steps: []TurnStep{{Kind: StepProse, Text: "Working on it now."}},
+		Steps: []TurnStep{
+			{Kind: StepProse, Text: "Working on it now."},
+			{Kind: StepInterject, Text: "actually, stop after round 2"},
+		},
 	}
-	queued := &TurnCell{ID: "turn_q", UserText: "actually, stop after round 2", State: TurnActive, Queued: true}
-	m.transcript = append(m.transcript, TranscriptCell{Turn: active}, TranscriptCell{Turn: queued})
+	m.transcript = append(m.transcript, TranscriptCell{Turn: active})
 	m.activeTurn = active.ID
 	m.inFlight = true
 
-	lines := strings.Split(stripAnsi(m.liveCellsView(80)), "\n")
-	// The queued cell's "YOU" card is the LAST YOU in the live region; the line directly
-	// above it must be blank (the margin), never the active turn's prose line.
-	lastYou := -1
-	for i, ln := range lines {
-		if strings.TrimSpace(ln) == "YOU" {
-			lastYou = i
-		}
+	out := stripAnsi(m.liveCellsView(80))
+	if !strings.Contains(out, "actually, stop after round 2") {
+		t.Fatalf("interjection text not rendered inline in the turn:\n%s", out)
 	}
-	if lastYou <= 0 {
-		t.Fatalf("queued user message did not render a YOU card: %q", lines)
-	}
-	if strings.TrimSpace(lines[lastYou-1]) != "" {
-		t.Fatalf("mid-turn YOU card must have a blank line above it, got %q", lines[lastYou-1])
+	// It is part of the active turn — there is no separate second "YOU" card for it.
+	if strings.Count(out, "YOU") > 1 {
+		t.Fatalf("interjection wrongly rendered as a separate YOU card:\n%s", out)
 	}
 }

@@ -74,6 +74,7 @@ const (
 	pumpTokens          // coalesced
 	pumpEnd
 	pumpCancelled
+	pumpInterject // a mid-turn user message folded into the running turn
 	pumpPhase
 	pumpBatch
 	pumpToolState
@@ -219,6 +220,12 @@ func (p *eventPump) AssistantEnd(content, reasoning string) {
 
 func (p *eventPump) AssistantCancelled(content string) {
 	p.emit(pumpEvent{kind: pumpCancelled, text: content})
+}
+
+// Interjection forwards a mid-turn user message (flushing buffered tokens first so it
+// lands after the round it interrupted). The reducer renders it inline in the turn.
+func (p *eventPump) Interjection(text string) {
+	p.emit(pumpEvent{kind: pumpInterject, text: text})
 }
 
 func (p *eventPump) ToolBatch(calls []agent.BatchedToolCall) {

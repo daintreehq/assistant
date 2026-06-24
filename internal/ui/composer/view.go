@@ -13,7 +13,7 @@ import (
 type ViewParams struct {
 	Width       int    // total cell width available (terminal cols minus insets)
 	Stage       string // live stage label while busy (NEVER "Thinking"; "Processing…" fallback)
-	QueueDepth  int    // user follow-ups queued behind the in-flight turn
+	QueueDepth  int    // messages typed while busy, buffered to fold into the running turn
 	Cancellable *bool  // whether the in-flight turn can be aborted; nil → defaults to busy
 	Attention   bool   // actionable attention pending (promotes ^O)
 	ContextHint string // right-aligned session summary
@@ -84,11 +84,11 @@ func (m *Model) View(p ViewParams) string {
 	// --- queued follow-ups cue (under the input) ---
 	// The LIVE run status (Generating / tool tree …) belongs in the TRANSCRIPT
 	// under the DAINTREE marker, NOT here under the input. The input stays clean;
-	// we only surface silently-queued follow-ups so they aren't invisible (#95):
-	// when busy and the queue is non-empty, show "N queued".
+	// we only surface messages buffered to fold into the running turn so they aren't
+	// invisible: when busy and some are pending, show "N queued for next step".
 	if m.busy && p.QueueDepth > 0 {
 		b.WriteByte('\n')
-		b.WriteString(m.theme.Dim().Render(truncateCells(itoa(p.QueueDepth)+" queued · Esc edits last", p.Width)))
+		b.WriteString(m.theme.Dim().Render(truncateCells(itoa(p.QueueDepth)+" queued for next step · Esc edits last", p.Width)))
 	}
 
 	// --- rule BELOW the input ---

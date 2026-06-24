@@ -209,6 +209,7 @@ func (p *eventProxy) AssistantStart()                        { p.sink().Assistan
 func (p *eventProxy) AssistantToken(t string)                { p.sink().AssistantToken(t) }
 func (p *eventProxy) AssistantEnd(c, r string)               { p.sink().AssistantEnd(c, r) }
 func (p *eventProxy) AssistantCancelled(c string)            { p.sink().AssistantCancelled(c) }
+func (p *eventProxy) Interjection(t string)                  { p.sink().Interjection(t) }
 func (p *eventProxy) ToolBatch(b []agent.BatchedToolCall)    { p.sink().ToolBatch(b) }
 func (p *eventProxy) ToolState(id string, s agent.ToolState) { p.sink().ToolState(id, s) }
 func (p *eventProxy) ToolProgress(id, msg string)            { p.sink().ToolProgress(id, msg) }

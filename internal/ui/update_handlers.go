@@ -215,7 +215,7 @@ func quitArmExpireCmd(gen int) tea.Cmd {
 // --- work serialization ---
 
 // onSubmit accepts a non-empty submit: a slash command runs as a command; plain
-// text starts a turn (if idle) or queues a visible dimmed follow-up (if busy).
+// text starts a turn (if idle) or folds into the running turn (if busy).
 func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 	m.composer.AcceptSubmit(text)
 
@@ -232,10 +232,13 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 	}
 
 	if m.inFlight {
-		// Busy → queue a VISIBLE dimmed follow-up turn, promoted in place later.
-		cell := &TurnCell{ID: domain.NewID("turn_"), UserText: text, State: TurnActive, Queued: true, Ts: domain.NowMS()}
-		m.transcript = append(m.transcript, TranscriptCell{Turn: cell})
-		m.queuedInput = append(m.queuedInput, queuedTurn{prompt: text, cellID: cell.ID})
+		// Busy → fold this into the RUNNING turn at its next tool-iteration boundary
+		// ("between tasks") instead of deferring it to a fresh turn. The Session buffers
+		// it (so Esc can still retract it before the model sees it) and emits an inline
+		// interjection step when it is actually folded in; until then the composer shows a
+		// "queued for next step" cue driven by pendingInject.
+		m.controller.injectPrompt(text)
+		m.pendingInject++
 		return m.afterStateChange(nil)
 	}
 
@@ -257,28 +260,10 @@ func (m Model) startTurn(text string) (tea.Model, tea.Cmd) {
 	return m.afterStateChange(cmd)
 }
 
-// promoteQueued promotes an existing queued cell into the active turn IN PLACE
-// (issue #95: never create a second entry). It returns the dispatch cmd.
-func (m *Model) promoteQueued(q queuedTurn) tea.Cmd {
-	for i := range m.transcript {
-		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == q.cellID {
-			c := m.transcript[i].Turn
-			now := domain.NowMS()
-			c.Queued = false
-			c.Phase = domain.PhaseReceived
-			c.PhaseStartedAt = now
-			c.StartedAt = now // cumulative elapsed counts from when it STARTS, not when queued
-			c.LastActivityAt = now
-			m.activeTurn = c.ID
-			break
-		}
-	}
-	m.inFlight = true
-	return m.controller.runTurn(m.ctx, q.cellID, q.prompt)
-}
-
 // onCancel sets phase Cancelling SYNCHRONOUSLY (so the UI never looks frozen) then
-// aborts the in-flight turn's context.
+// aborts the in-flight turn's context. Abandoning the turn also drops any message typed
+// mid-turn but not yet folded in — it was meant for THIS work and must not silently fire
+// on a later turn.
 func (m Model) onCancel() (tea.Model, tea.Cmd) {
 	if !m.inFlight {
 		return m.afterStateChange(nil)
@@ -288,46 +273,40 @@ func (m Model) onCancel() (tea.Model, tea.Cmd) {
 		t.PhaseStartedAt = domain.NowMS()
 	}
 	m.controller.cancelTurn()
+	m.controller.discardPendingInjections()
+	m.pendingInject = 0
 	return m.afterStateChange(nil)
 }
 
-// onEscWhileBusy handles Esc on an empty composer while a turn runs. With queued
-// follow-ups it retracts the MOST RECENT one back into the composer (so a queued thought
-// can be edited or dropped before it fires); with none it cancels the active turn. The
-// active turn can always be cancelled with Ctrl-C regardless of the queue, so Esc owning
-// the retract here doesn't strand the user.
+// onEscWhileBusy handles Esc on an empty composer while a turn runs. A message typed
+// mid-turn (still buffered, not yet folded in) is retracted back into the composer so it
+// can be edited or dropped before the model sees it; with none pending it cancels the
+// active turn. Ctrl-C always cancels regardless, so Esc owning the retract here never
+// strands the user.
 func (m Model) onEscWhileBusy() (tea.Model, tea.Cmd) {
-	if len(m.queuedInput) > 0 {
-		return m.retractLastQueued()
+	if m.pendingInject > 0 {
+		return m.retractPendingInject()
 	}
 	return m.onCancel()
 }
 
-// retractLastQueued pops the newest queued follow-up: drop its dimmed cell and pull its
-// text back into the composer for editing or removal.
-func (m Model) retractLastQueued() (tea.Model, tea.Cmd) {
-	n := len(m.queuedInput)
-	q := m.queuedInput[n-1]
-	m.queuedInput = m.queuedInput[:n-1]
-	m.removeTurnCell(q.cellID)
-	m.composer.Restore(q.prompt)
+// retractPendingInject pulls the newest buffered-but-not-folded message back into the
+// composer for editing or removal. If the Session already folded it in (the model has it),
+// retraction fails and we leave the running turn alone.
+func (m Model) retractPendingInject() (tea.Model, tea.Cmd) {
+	text, ok := m.controller.retractPendingInjection()
+	if !ok {
+		return m.afterStateChange(nil)
+	}
+	if m.pendingInject > 0 {
+		m.pendingInject--
+	}
+	m.composer.Restore(text)
 	return m.afterStateChange(nil)
 }
 
-// removeTurnCell drops the transcript cell whose turn id matches (a still-live queued
-// cell — never a committed one). A no-op if not found.
-func (m *Model) removeTurnCell(id string) {
-	for i := range m.transcript {
-		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == id {
-			m.transcript = append(m.transcript[:i], m.transcript[i+1:]...)
-			return
-		}
-	}
-}
-
-// onTurnComplete seals the active turn and drains the next unit of work (FIFO user
-// follow-up first, then an autonomous wake). queueDepth is read off len(queuedInput)
-// BEFORE the drained item re-enters so it never momentarily reads "1 queued".
+// onTurnComplete seals the active turn and drains the next pending wake (a user message
+// typed mid-turn was already folded into THIS turn — there is no separate user queue).
 func (m Model) onTurnComplete(msg TurnCompleteMsg) (tea.Model, tea.Cmd) {
 	// Ordering barrier (#1): only act on a completion for the CURRENTLY active turn.
 	// A completion tagged with a stale cell id (the turn was already cleared, e.g. by
@@ -410,16 +389,11 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 	return m.drainPending()
 }
 
-// drainPending fires the next queued user follow-up (FIFO), else a pending wake.
+// drainPending fires a pending autonomous wake when the turn settles. (User messages
+// typed mid-turn are folded into the running turn via InjectPrompt, not deferred here.)
 func (m Model) drainPending() (tea.Model, tea.Cmd) {
 	if m.inFlight {
 		return m.afterStateChange(nil)
-	}
-	if len(m.queuedInput) > 0 {
-		next := m.queuedInput[0]
-		m.queuedInput = m.queuedInput[1:]
-		cmd := m.promoteQueued(next)
-		return m.afterStateChange(cmd)
 	}
 	if len(m.pendingWake) > 0 {
 		// Build one wake reactor prompt over the pending burst. Keep the
@@ -491,15 +465,18 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	// A slash command runs regardless of single-flight (onSubmit), so /clear can land while
 	// a turn is in flight. Abort that turn's runtime context and DROP the single-flight lock
 	// here: otherwise its now-stale completion hits the RunID barrier in onTurnComplete and
-	// returns WITHOUT clearing inFlight, leaving the cockpit permanently "busy" and queued
-	// follow-ups stranded (drainPending only runs while inFlight is false).
+	// returns WITHOUT clearing inFlight, leaving the cockpit permanently "busy" and a pending
+	// wake stranded (drainPending only runs while inFlight is false).
 	if m.inFlight {
 		m.controller.cancelTurn()
 		m.inFlight = false
 	}
 	m.transcript = nil
 	m.activeTurn = ""
-	m.queuedInput = nil
+	// Drop any message buffered mid-turn but not yet folded in — a reset wipes pending
+	// input too, so it can't resurface on the next turn.
+	m.controller.discardPendingInjections()
+	m.pendingInject = 0
 	m.pendingWake = nil
 	// The handler already resolved every open inbox event (ClearInbox), so drop the
 	// live attention badge to 0 immediately rather than waiting for the next dashboard

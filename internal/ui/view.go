@@ -304,10 +304,6 @@ func (m Model) liveCellsView(w int) string {
 			} else {
 				s = renderTurn(m.theme, m.md, cell.Turn, w, cw, m.expanded, m.spinnerFrame, domain.NowMS())
 			}
-			if cell.Turn.Queued {
-				// A dimmed queued follow-up turn.
-				s = m.theme.Dim().Render(s)
-			}
 		case cell.Note != nil:
 			s = renderNoteCell(m.theme, cell.Note, w)
 		case cell.Command != nil:
@@ -341,7 +337,7 @@ func (m Model) composerView(w int) string {
 	return m.composer.View(composer.ViewParams{
 		Width:       w,
 		Stage:       stage,
-		QueueDepth:  len(m.queuedInput),
+		QueueDepth:  m.pendingInject,
 		Cancellable: &cancellable,
 		Attention:   m.attentionN > 0,
 		Placeholder: "Ask Daintree…  ·  / for commands",

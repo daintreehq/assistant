@@ -59,7 +59,8 @@ func TestReducer_ClearWipesThenFreshCard(t *testing.T) {
 		{Turn: &TurnCell{ID: "t1", State: TurnComplete}},
 		{Turn: &TurnCell{ID: "t2", State: TurnComplete}},
 	}
-	m.queuedInput = []queuedTurn{{prompt: "x", cellID: "q1"}}
+	m.pendingInject = 1
+	m.controller.inject.(*fakeInjector).buf = []string{"x"}
 	m.pendingWake = []domain.QueueEvent{{Title: "w"}}
 
 	next, _ := m.onClear("Conversation cleared", "fresh start")
@@ -71,9 +72,12 @@ func TestReducer_ClearWipesThenFreshCard(t *testing.T) {
 	if nm.transcript[0].Command == nil || nm.transcript[0].Command.Title != "Conversation cleared" {
 		t.Errorf("clear card wrong: %+v", nm.transcript[0])
 	}
-	// Queue + wake + active turn are dropped.
-	if len(nm.queuedInput) != 0 || len(nm.pendingWake) != 0 || nm.activeTurn != "" {
-		t.Error("clear must drop the queue, wake burst, and active turn")
+	// Pending injection + wake + active turn are dropped.
+	if nm.pendingInject != 0 || len(nm.controller.inject.(*fakeInjector).buf) != 0 {
+		t.Error("clear must drop buffered injections")
+	}
+	if len(nm.pendingWake) != 0 || nm.activeTurn != "" {
+		t.Error("clear must drop the wake burst and active turn")
 	}
 	// The reset key advanced (re-arms the commit queue masthead + card).
 	if nm.clearNonce == m.clearNonce {
@@ -127,82 +131,82 @@ func TestReducer_StaleRedrawIsNoOp(t *testing.T) {
 	}
 }
 
-// --- work serialization: FIFO queue + cancel + pullback (controllerQueueCancel) ---
+// --- work serialization: mid-turn injection (fold into the running turn) ---
 
-func TestQueue_QueuesFollowupWhileBusyAndDrainsFIFO(t *testing.T) {
+func TestInject_BuffersFollowupsWhileBusyInOrder(t *testing.T) {
 	m := liveModel(80)
 	next, _ := m.startTurn("first")
 	m = next.(Model)
-	// Two follow-ups typed while busy → both queue (FIFO), neither starts yet.
+	before := len(m.transcript)
+	// Two messages typed while busy → both buffer for the running turn (no new cells).
 	next, _ = m.onSubmit("second")
 	m = next.(Model)
 	next, _ = m.onSubmit("third")
 	m = next.(Model)
-	if len(m.queuedInput) != 2 {
-		t.Fatalf("queueDepth = %d, want 2", len(m.queuedInput))
+	if len(m.transcript) != before {
+		t.Fatalf("typed-while-busy messages wrongly created new cells: %d → %d", before, len(m.transcript))
 	}
-	if m.queuedInput[0].prompt != "second" || m.queuedInput[1].prompt != "third" {
-		t.Errorf("FIFO order wrong: %+v", m.queuedInput)
+	if m.pendingInject != 2 {
+		t.Fatalf("pendingInject = %d, want 2", m.pendingInject)
 	}
-	// The active turn ends → "second" drains (depth drops to 1, not 2).
+	fi := m.controller.inject.(*fakeInjector)
+	if len(fi.buf) != 2 || fi.buf[0] != "second" || fi.buf[1] != "third" {
+		t.Errorf("buffered order wrong: %+v", fi.buf)
+	}
+	// Completing the turn does NOT spawn a deferred user turn — the messages were folded
+	// into the turn that just ran (the buffer is the Session's; nothing drains here).
 	m.activeTurn = ""
 	m.inFlight = false
 	next, _ = m.onTurnComplete(TurnCompleteMsg{Reply: "done"})
 	m = next.(Model)
-	if len(m.queuedInput) != 1 || m.queuedInput[0].prompt != "third" {
-		t.Errorf("after drain, remaining queue = %+v, want [third]", m.queuedInput)
+	if m.activeTurn != "" {
+		t.Errorf("turn completion must not start a new user turn, activeTurn=%q", m.activeTurn)
 	}
 }
 
-func TestQueue_SlashCommandNotQueuedAsTurn(t *testing.T) {
-	// A slash command runs as a command, never queued behind the in-flight turn.
+func TestInject_SlashCommandNotBuffered(t *testing.T) {
+	// A slash command runs as a command, never buffered as an injection.
 	m := liveModel(80)
 	next, _ := m.startTurn("first")
 	m = next.(Model)
-	depth := len(m.queuedInput)
-	next, _ = m.onSubmit("/clear")
+	depth := m.pendingInject
+	next, _ = m.onSubmit("/help")
 	m = next.(Model)
-	if len(m.queuedInput) != depth {
-		t.Errorf("slash command must not enter the turn queue: depth %d", len(m.queuedInput))
+	if m.pendingInject != depth {
+		t.Errorf("slash command must not buffer as an injection: pendingInject %d", m.pendingInject)
 	}
 }
 
-func TestQueue_CancelSetsCancellingThenDrains(t *testing.T) {
-	// Cancelling the in-flight turn sets Cancelling synchronously; a queued follow-up
-	// still drains once the turn seals.
+func TestInject_CancelSetsCancellingAndDropsPending(t *testing.T) {
+	// Cancelling the in-flight turn sets Cancelling synchronously AND drops any message
+	// typed mid-turn but not yet folded in (it was meant for the abandoned work).
 	m := liveModel(80)
 	next, _ := m.startTurn("first")
 	m = next.(Model)
-	next, _ = m.onSubmit("queued")
+	next, _ = m.onSubmit("steer")
 	m = next.(Model)
 	next, _ = m.onCancel()
 	m = next.(Model)
 	if c := m.activeTurnCell(); c == nil || c.Phase != domain.PhaseCancelling {
 		t.Fatalf("cancel must set Cancelling synchronously: %v", c)
 	}
-	// Seal the cancelled turn → the queued follow-up promotes in place.
-	next, _ = m.onTurnComplete(TurnCompleteMsg{Reply: domain.CancelledReply})
-	m = next.(Model)
-	if len(m.queuedInput) != 0 {
-		t.Errorf("queued follow-up should have drained, queue = %+v", m.queuedInput)
-	}
-	if m.activeTurn == "" {
-		t.Error("queued follow-up should have become the active turn")
+	if m.pendingInject != 0 || len(m.controller.inject.(*fakeInjector).buf) != 0 {
+		t.Errorf("cancel must drop buffered injections; pendingInject=%d buf=%+v",
+			m.pendingInject, m.controller.inject.(*fakeInjector).buf)
 	}
 }
 
-func TestQueue_QueuedTurnVisibleDimmedInFooter(t *testing.T) {
+func TestInject_PendingCueShownWhileBusy(t *testing.T) {
 	m := liveModel(80)
 	next, _ := m.startTurn("first task")
 	m = next.(Model)
 	next, _ = m.onSubmit("second task")
 	m = next.(Model)
-	q := m.transcript[len(m.transcript)-1].Turn
-	if q == nil || !q.Queued || q.UserText != "second task" {
-		t.Fatalf("queued cell wrong: %+v", q)
+	// No separate cell; the pending cue surfaces in the composer.
+	if m.pendingInject != 1 {
+		t.Fatalf("pendingInject = %d, want 1", m.pendingInject)
 	}
-	// It is visible (rendered) in the live footer.
-	if strings.TrimSpace(stripAnsi(m.liveCellsView(m.contentW()))) == "" {
-		t.Error("queued follow-up must be visible in the footer")
+	if !strings.Contains(stripAnsi(m.composerView(80)), "queued") {
+		t.Error("composer must surface the pending-injection cue while busy")
 	}
 }

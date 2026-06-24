@@ -16,6 +16,12 @@ const (
 	compactionMarker       = "[conversation compacted — earlier turns dropped from context]"
 	compactedNotePrefix    = "[compacted summary of earlier conversation]\n"
 	injectNotePrefix       = "[system event]\n"
+	// userInterjectPrefix frames a message the human typed WHILE a turn was already
+	// running, folded into that turn at the next tool-iteration boundary (see
+	// Session.InjectPrompt / foldInInjections). Unlike injectNotePrefix (a daemon
+	// "[system event]"), this is genuine user input — the prefix only tells the model
+	// it arrived mid-task so it can fold the new instruction into the work in flight.
+	userInterjectPrefix = "[the user sent this while you were working — take it into account as you continue]\n"
 )
 
 // RehydrateResult is the reconstructed working history on resume.

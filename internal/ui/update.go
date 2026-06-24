@@ -265,6 +265,18 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 		if t != nil {
 			t.sealProse()
 		}
+	case pumpInterject:
+		// A message the user typed mid-turn was just folded into the running turn. Seal
+		// any live prose (this round became an intermediate one) and append an inline
+		// interjection step in chronological place; the model's response opens a fresh
+		// prose step after it. Clear the pending cue now that it's been delivered.
+		if t != nil {
+			t.sealProse()
+			t.Steps = append(t.Steps, TurnStep{Kind: StepInterject, Text: ev.text})
+		}
+		if m.pendingInject > 0 {
+			m.pendingInject--
+		}
 	case pumpBatch:
 		if t != nil {
 			for _, c := range ev.batch {

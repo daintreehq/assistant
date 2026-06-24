@@ -28,10 +28,27 @@ func harnessModel() Model {
 	m := testModel(100)
 	pump := newEventPump()
 	m.pump = pump
-	m.controller = &controller{pump: pump}
+	m.controller = &controller{pump: pump, inject: &fakeInjector{}}
 	m.composer.SetCommands(paletteCommands())
 	return m
 }
+
+// fakeInjector is the test stand-in for *agent.Session's mid-turn injection buffer. It
+// mirrors the Session's LIFO retract / clear semantics so UI tests exercise the real
+// composer→controller path without a live App.
+type fakeInjector struct{ buf []string }
+
+func (f *fakeInjector) InjectPrompt(text string) { f.buf = append(f.buf, text) }
+func (f *fakeInjector) RetractPendingInjection() (string, bool) {
+	n := len(f.buf)
+	if n == 0 {
+		return "", false
+	}
+	text := f.buf[n-1]
+	f.buf = f.buf[:n-1]
+	return text, true
+}
+func (f *fakeInjector) DiscardPendingInjections() { f.buf = nil }
 
 // step applies one msg through the REAL Update and returns the next Model + any cmd.
 // It re-asserts the concrete type so the harness can keep folding messages.

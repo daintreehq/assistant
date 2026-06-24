@@ -22,6 +22,7 @@ func (s *orderSink) AssistantStart()             { s.log = append(s.log, "start"
 func (s *orderSink) AssistantToken(t string)     { s.log = append(s.log, "tok:"+t) }
 func (s *orderSink) AssistantEnd(c, _ string)    { s.log = append(s.log, "end:"+c) }
 func (s *orderSink) AssistantCancelled(c string) { s.log = append(s.log, "cancelled:"+c) }
+func (s *orderSink) Interjection(t string)       { s.log = append(s.log, "interject:"+t) }
 func (s *orderSink) ToolCall(ev ToolCallEvent)   { s.log = append(s.log, "call:"+ev.Name+":"+ev.ID) }
 func (s *orderSink) ToolResult(ev ToolResultEvent) {
 	ok := "false"

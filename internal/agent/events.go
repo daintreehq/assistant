@@ -91,6 +91,12 @@ type EventSink interface {
 	AssistantEnd(content, reasoning string) // final round; reasoning = <think> body ("" when none)
 	AssistantCancelled(content string)      // user abort mid-flight; content often ""
 
+	// Interjection reports a message the human typed WHILE the turn was running, at the
+	// moment the loop folds it into history (the next tool-iteration boundary, see
+	// Session.foldInInjections). The cockpit renders it inline in the running turn; the
+	// durable log records it so /explain replay shows the mid-turn steer.
+	Interjection(text string)
+
 	// ToolBatch announces every parsed tool call as queued BEFORE sequential
 	// dispatch begins. The loop then promotes each call.
 	ToolBatch(calls []BatchedToolCall)
@@ -131,6 +137,7 @@ func (NoopEventSink) AssistantStart()             {}
 func (NoopEventSink) AssistantToken(string)       {}
 func (NoopEventSink) AssistantEnd(string, string) {}
 func (NoopEventSink) AssistantCancelled(string)   {}
+func (NoopEventSink) Interjection(string)         {}
 func (NoopEventSink) ToolBatch([]BatchedToolCall) {}
 func (NoopEventSink) ToolState(string, ToolState) {}
 func (NoopEventSink) ToolProgress(string, string) {}
@@ -189,6 +196,11 @@ func (m *MultiSink) AssistantEnd(content, reasoning string) {
 func (m *MultiSink) AssistantCancelled(content string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.AssistantCancelled(content) })
+	}
+}
+func (m *MultiSink) Interjection(text string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.Interjection(text) })
 	}
 }
 func (m *MultiSink) ToolBatch(calls []BatchedToolCall) {
@@ -330,6 +342,14 @@ func (s *RunEventSink) AssistantEnd(content, reasoning string) {
 func (s *RunEventSink) AssistantCancelled(content string) {
 	s.contentBuffer = ""
 	s.write("assistant:cancelled", map[string]any{"content": content})
+}
+
+// Interjection persists a mid-turn user message as its own durable row, flushing any
+// buffered prose first so replay shows it AFTER the round it interrupted and before
+// the model's response to it.
+func (s *RunEventSink) Interjection(text string) {
+	s.flushContent()
+	s.write("user:interjection", map[string]any{"text": text})
 }
 
 // ToolBatch/ToolState are live-footer-only; the durable log keys off the concrete

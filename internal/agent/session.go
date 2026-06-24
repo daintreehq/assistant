@@ -127,6 +127,14 @@ type Session struct {
 	// deferred to runTurn — after runRef is stamped — and fired exactly once, then
 	// zeroed. Single-flight Send serializes turns, so no lock guards it.
 	pendingDropCount int
+
+	// pendingInjections buffers messages the human typed WHILE a turn was in flight
+	// (InjectPrompt), guarded by s.mu. The turn folds them into the live history at
+	// the next tool-iteration boundary (foldInInjections), so the model picks them up
+	// "between tasks" — part of the RUNNING turn, not deferred to a fresh one. The UI
+	// shows a pending cue while buffered and an inline step once folded in; the
+	// daemon's InjectNote uses the same iteration-boundary mechanism for its own notes.
+	pendingInjections []string
 }
 
 // toolProjCache holds the last OpenAITools projection plus the key that produced
@@ -248,6 +256,73 @@ func (s *Session) ActiveSkillIDs() []string {
 // the lock, since the daemon can inject while a turn streams).
 func (s *Session) InjectNote(note string) {
 	s.pushMessage(models.TextMessage("user", injectNotePrefix+note))
+}
+
+// InjectPrompt buffers a message the human typed while a turn is in flight. It is
+// folded into the RUNNING turn at the next tool-iteration boundary (foldInInjections)
+// — the model sees it "between tasks" rather than after the whole turn ends. Buffered
+// (not pushed immediately) so the UI can still retract it before the model consumes
+// it. Safe to call from any goroutine.
+func (s *Session) InjectPrompt(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingInjections = append(s.pendingInjections, text)
+}
+
+// RetractPendingInjection removes and returns the most-recently buffered injection
+// that has NOT yet been folded in (LIFO — mirrors the cockpit's Esc-retract of a
+// typed follow-up). ok is false when nothing is buffered (already folded in, or none
+// typed), in which case the caller leaves the running turn alone.
+func (s *Session) RetractPendingInjection() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.pendingInjections)
+	if n == 0 {
+		return "", false
+	}
+	text := s.pendingInjections[n-1]
+	s.pendingInjections = s.pendingInjections[:n-1]
+	return text, true
+}
+
+// DiscardPendingInjections drops every buffered-but-not-folded injection. Called on
+// Ctrl+C cancel and /clear: a redirect typed mid-turn must not silently fire on a
+// later turn once the user abandoned the work it was meant for.
+func (s *Session) DiscardPendingInjections() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingInjections = nil
+}
+
+// drainPendingInjections atomically takes the buffered injections, appends each to
+// the live history as a (prefixed) user message, and returns the RAW texts (for the
+// caller to surface to the UI). Empty ⇒ nil. Because the turn re-snapshots history at
+// the top of every iteration, a message folded in here is in the very next model call.
+func (s *Session) drainPendingInjections() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingInjections) == 0 {
+		return nil
+	}
+	drained := s.pendingInjections
+	s.pendingInjections = nil
+	for _, text := range drained {
+		s.pushMessageLocked(models.TextMessage("user", userInterjectPrefix+text))
+	}
+	return drained
+}
+
+// foldInInjections drains any buffered injections into history and emits an
+// Interjection event per message so the cockpit can render it inline in the running
+// turn. Returns how many were folded in (0 ⇒ nothing pending). Called at every point
+// where the turn would proceed to a model call or end, so a mid-turn message is always
+// picked up at the next boundary and never stranded.
+func (s *Session) foldInInjections() int {
+	drained := s.drainPendingInjections()
+	for _, text := range drained {
+		s.events.Interjection(text)
+	}
+	return len(drained)
 }
 
 // Clear truncates the live history to the three controls and persists a CLEAR
@@ -386,12 +461,41 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	failureCounts := make(map[string]int)
 	stuckNudged := false
 
-	for i := 0; i < domain.MaxToolIterations; i++ {
-		// 10a. Cancel check at the top of each round.
+	// The agentic loop. `iter` counts model rounds against MaxToolIterations. A message
+	// the human typed mid-turn (InjectPrompt) is folded into history at the TOP of a
+	// round (foldInInjections), so the very next model snapshot includes it — "between
+	// tasks" pickup. A fresh user instruction is legitimate new work, so folding one in
+	// RESETS the iteration budget and the per-turn failure breaker: a redirect must not
+	// be starved by a near-exhausted budget nor aborted by the PRIOR tool's failures.
+	iter := 0
+	resetForInjection := func() {
+		iter = 0
+		failureCounts = make(map[string]int)
+		stuckNudged = false
+	}
+	for {
+		// 10a. Cancel check at the top of each round. A cancel always wins over a
+		//      pending injection (those are dropped via DiscardPendingInjections on abort).
 		if ctx.Err() != nil {
 			s.events.Phase(domain.PhaseCancelled)
 			s.events.AssistantCancelled("")
 			return domain.CancelledReply
+		}
+
+		// 10a′. Fold in any message typed during the previous round's stream/tools so
+		//       THIS round's snapshot carries it. A fresh instruction resets the budget.
+		if s.foldInInjections() > 0 {
+			resetForInjection()
+		}
+
+		// 10b. Iteration ceiling — guards a runaway MODEL, not the user (a fresh
+		//      injection above resets it). Checked AFTER the fold-in so a late message
+		//      that just reset the budget still gets its round before we ever bail out.
+		if iter >= domain.MaxToolIterations {
+			msg := "Reached the tool-iteration limit without a final answer."
+			s.events.Phase(domain.PhaseFailed)
+			s.events.Error(msg)
+			return msg
 		}
 
 		// 5/9. (Re)compute the tool projection at the START of every iteration. A
@@ -419,21 +523,21 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 		turn.ActiveToolNames = allowedNames
 
-		// 10b. New round.
-		if i == 0 {
+		// 10c. New round.
+		if iter == 0 {
 			s.events.Phase(domain.PhaseAnalyzing)
 		} else {
 			s.events.Phase(domain.PhaseIntegrating)
 		}
 		s.events.AssistantStart()
 
-		// 10c. Stream the large model. Separate <think> from visible text: the router
+		// 10d. Stream the large model. Separate <think> from visible text: the router
 		//      delivers visible tokens via onToken and the <think> body via
 		//      ChatResult.Reasoning (the ThinkFilter handles the split).
 		gotToken := false
 		// Read an immutable SNAPSHOT of the history under the lock, then stream with
 		// the lock RELEASED — the model call is long, and a concurrent InjectNote
-		// (daemon) must be able to append without racing this read (Fix: session race).
+		// (daemon) or InjectPrompt (user) must be able to append without racing this read.
 		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
 			Messages:       s.snapshotMessages(),
 			Tools:          tools,
@@ -450,32 +554,43 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			return s.classifyStreamError(serr)
 		}
 
-		// 10d. Usage — computed BEFORE appending the assistant message so
+		// 10e. Usage — computed BEFORE appending the assistant message so
 		//      contextTokens reflects the prompt actually sent.
 		s.emitUsage()
 
-		// 10e. Append the assistant message (content null on a pure tool-call turn).
+		// 10f. Append the assistant message (content null on a pure tool-call turn).
 		s.pushMessage(s.assistantMessage(result))
 
-		// 10f. No tool calls ⇒ final answer.
+		// 10g. No tool calls ⇒ the model thinks it's done. But if the user slipped a
+		//      message in during this round, DON'T seal — fold it in and loop so it is
+		//      answered (never strand an injection at the final-answer boundary). The
+		//      just-streamed content stays an unsealed intermediate round (exactly like
+		//      prose that precedes a tool batch), so no AssistantEnd fires yet.
 		if len(result.ToolCalls) == 0 {
+			if s.foldInInjections() > 0 {
+				resetForInjection()
+				continue
+			}
 			s.events.Phase(domain.PhaseComplete)
 			s.events.AssistantEnd(result.Content, result.Reasoning)
 			return result.Content
 		}
 
-		// 10g. Execute the batch. Announce ALL calls as queued BEFORE sequential
+		// 10h. Execute the batch. Announce ALL calls as queued BEFORE sequential
 		//      dispatch, then promote each queued→active→done/failed.
 		if reply, done := s.runToolBatch(ctx, result.ToolCalls, turn, allowedSet, failureCounts, &stuckNudged); done {
+			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
+			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
+			// the model gets the new steer); otherwise the abort stands.
+			if reply != domain.CancelledReply && ctx.Err() == nil && s.foldInInjections() > 0 {
+				resetForInjection()
+				continue
+			}
 			return reply
 		}
-	}
 
-	// 11. Fell out of the loop.
-	msg := "Reached the tool-iteration limit without a final answer."
-	s.events.Phase(domain.PhaseFailed)
-	s.events.Error(msg)
-	return msg
+		iter++
+	}
 }
 
 // runToolBatch dispatches a batch of tool calls sequentially after announcing the

@@ -136,6 +136,11 @@ func (b *Bridge) AssistantEnd(content, _ string) {
 
 func (b *Bridge) AssistantCancelled(string) { b.closeTurn(OutcomeCancelled) }
 
+// Interjection has no host-protocol channel: the Daintree parent already holds the
+// text it sent as the mid-turn prompt (handlePrompt routes it to InjectPrompt while
+// busy), so echoing it back would be redundant. Dropped, like Phase.
+func (b *Bridge) Interjection(string) {}
+
 // ToolBatch/ToolState/ToolProgress are live-footer-only in the loop; the host
 // protocol keys off the concrete tool:started/tool:settled events, so the
 // in-tool substep stream has no host channel and is dropped.

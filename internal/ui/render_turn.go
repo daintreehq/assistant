@@ -226,6 +226,14 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				b.WriteString(renderInlineNote(th, *step.Note, width))
 				b.WriteByte('\n')
 			}
+		case StepInterject:
+			if rendered := renderInterjection(th, step.Text, width); rendered != "" {
+				if afterTool {
+					b.WriteByte('\n')
+				}
+				b.WriteString(rendered)
+				b.WriteByte('\n')
+			}
 		}
 	}
 
@@ -296,6 +304,46 @@ func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 	// green info / yellow warn / red error.
 	spine := styleFor(th, tone, g.Continuation+glyph+" ")
 	return truncateCells(spine+th.Body().Render(n.Text), width)
+}
+
+// renderInterjection renders a message the user typed mid-turn as an inline aside in
+// the running turn: the continuation spine + the user accent bar (▏, the same cue the
+// YOU card uses) + the wrapped text, one spine+bar per visual row. It reuses the
+// user-message surface so a mid-turn steer reads unmistakably as the human's, distinct
+// from the model's prose or a system note. Text is fixed once folded in, so the row
+// count is stable across streaming and seal (the flush boundary relies on that).
+func renderInterjection(th theme.Theme, text string, width int) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	g := th.Glyphs
+	surface := th.UserMessageSurface()
+	barStyle := th.Muted()
+	if surface.Bar != nil {
+		barStyle = th.Dim().Foreground(surface.Bar)
+	}
+	textStyle := th.Body()
+	if surface.Text != nil {
+		textStyle = textStyle.Foreground(surface.Text)
+	}
+	prefix := th.Dim().Render(g.Continuation) + barStyle.Render(g.Bar) + " "
+	// Reserve the spine (2) + bar (1) + gap (1); one prefix per wrapped row.
+	inner := width - 4
+	if inner < 10 {
+		inner = 10
+	}
+	var b strings.Builder
+	first := true
+	for _, para := range strings.Split(text, "\n") {
+		for _, line := range strings.Split(wrapCells(para, inner), "\n") {
+			if !first {
+				b.WriteByte('\n')
+			}
+			first = false
+			b.WriteString(prefix + textStyle.Render(truncateCells(line, inner)))
+		}
+	}
+	return b.String()
 }
 
 // noteGlyph maps a note level to (glyph, tone):

@@ -37,6 +37,7 @@ const (
 	StepProse
 	StepTool
 	StepNote
+	StepInterject // a message the user typed mid-turn, folded into the running turn
 )
 
 // ActivityState is the per-tool lifecycle the activity tree renders.
@@ -94,7 +95,6 @@ type TurnCell struct {
 	State          TurnState
 	Phase          domain.RunPhase // fine-grained live phase (drives LiveRunStatus)
 	PhaseStartedAt int64           // epoch ms; drives the live "· 0.4s" elapsed
-	Queued         bool            // a follow-up typed while busy: dimmed, promoted in place
 	Reasoning      string          // <think> body, revealed under ^X
 	Ts             int64
 
@@ -188,9 +188,9 @@ func (t *TurnCell) activeProseStep() int {
 		if t.Steps[i].Kind == StepProse {
 			return i
 		}
-		// A tool/note step between us and the last prose means prose has resumed:
-		// the caller must open a NEW StepProse rather than merging.
-		if t.Steps[i].Kind == StepTool || t.Steps[i].Kind == StepNote {
+		// A tool/note/interjection step between us and the last prose means prose has
+		// resumed: the caller must open a NEW StepProse rather than merging.
+		if t.Steps[i].Kind == StepTool || t.Steps[i].Kind == StepNote || t.Steps[i].Kind == StepInterject {
 			return -1
 		}
 	}

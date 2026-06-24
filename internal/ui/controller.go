@@ -19,11 +19,21 @@ import (
 // launches goroutines that send tea.Msgs back (turn/wake/command completion). The
 // model owns the FIFO queue + wake-priority drain in Update.
 
+// sessionInjector is the narrow seam the composer uses to fold a typed-while-busy
+// message into the running turn (and retract/discard it). *agent.Session satisfies it
+// in production; UI tests substitute a fake so the harness needs no real App.
+type sessionInjector interface {
+	InjectPrompt(text string)
+	RetractPendingInjection() (string, bool)
+	DiscardPendingInjections()
+}
+
 // controller wraps the App + the pump and exposes turn/command/confirm bridges as
 // tea.Cmds that run a Session.Send off the loop and report completion via a msg.
 type controller struct {
-	app  *app.App
-	pump *eventPump
+	app    *app.App
+	pump   *eventPump
+	inject sessionInjector // mid-turn injection seam (c.app.Session in production)
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc // the in-flight turn's cancel (per user turn)
@@ -34,7 +44,7 @@ type controller struct {
 // a confirm hook that surfaces an ApprovalRequestedMsg and BLOCKS the runtime
 // goroutine on a resolve channel until the user decides (or shutdown auto-declines).
 func newController(a *app.App, pump *eventPump, send func(tea.Msg)) *controller {
-	c := &controller{app: a, pump: pump}
+	c := &controller{app: a, pump: pump, inject: a.Session}
 	a.SetHooks(app.AppHooks{
 		AgentEvents: pump,
 		// Confirm blocks the dispatching goroutine: it pushes the request to the UI
@@ -114,6 +124,31 @@ func (c *controller) cancelTurn() {
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+// injectPrompt buffers a message typed while a turn is in flight; the Session folds it
+// into the running turn at its next tool-iteration boundary ("between tasks"). The
+// short lock inside Session.InjectPrompt makes this safe to call from Update.
+func (c *controller) injectPrompt(text string) {
+	if c.inject != nil {
+		c.inject.InjectPrompt(text)
+	}
+}
+
+// retractPendingInjection pops the newest buffered-but-not-folded injection (LIFO) so
+// the user can edit or drop it; ok is false when nothing is still retractable.
+func (c *controller) retractPendingInjection() (string, bool) {
+	if c.inject == nil {
+		return "", false
+	}
+	return c.inject.RetractPendingInjection()
+}
+
+// discardPendingInjections drops every buffered injection (cancel / clear).
+func (c *controller) discardPendingInjections() {
+	if c.inject != nil {
+		c.inject.DiscardPendingInjections()
 	}
 }
 

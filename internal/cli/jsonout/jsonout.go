@@ -120,6 +120,15 @@ func (s *Sink) AssistantCancelled(content string) {
 	s.emit("assistant:cancelled", map[string]any{"content": content})
 }
 
+// Interjection emits a mid-turn user message as its own JSONL line (flushing buffered
+// prose first so it lands after the round it interrupted).
+func (s *Sink) Interjection(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushContent()
+	s.emit("user:interjection", map[string]any{"text": text})
+}
+
 // ToolBatch / ToolState / ToolProgress are live-footer-only; not part of the JSONL stream.
 func (s *Sink) ToolBatch([]agent.BatchedToolCall) {}
 func (s *Sink) ToolState(string, agent.ToolState) {}

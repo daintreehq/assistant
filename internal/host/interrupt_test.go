@@ -28,9 +28,24 @@ const cancelledReply = "Turn cancelled"
 type cooperativeSession struct {
 	bridge *Bridge
 
-	mu     sync.Mutex
-	finish chan struct{}
-	calls  []sendCall
+	mu       sync.Mutex
+	finish   chan struct{}
+	calls    []sendCall
+	injected []string // prompts folded into the running turn (mirrors Session.InjectPrompt)
+}
+
+// InjectPrompt mirrors Session.InjectPrompt: a prompt sent while busy is buffered for
+// the running turn, not started as a new send.
+func (s *cooperativeSession) InjectPrompt(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injected = append(s.injected, text)
+}
+
+func (s *cooperativeSession) injectedPrompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.injected...)
 }
 
 type sendCall struct {
@@ -103,6 +118,7 @@ type harness struct {
 
 type promptHandle struct {
 	rejected bool
+	folded   bool // a busy prompt was folded into the running turn (InjectPrompt)
 	done     chan struct{}
 }
 
@@ -119,7 +135,10 @@ func (h *harness) prompt(text string, needsApproval bool) promptHandle {
 	if h.busy {
 		h.mu.Unlock()
 		cancel()
-		return promptHandle{rejected: true, done: closedChan()}
+		// Mirror loop.go: a prompt sent while busy is folded into the running turn, not
+		// rejected.
+		h.session.InjectPrompt(text)
+		return promptHandle{folded: true, done: closedChan()}
 	}
 	h.busy = true
 	h.turnGen++
@@ -362,15 +381,22 @@ func TestTerminateUnblocksApprovalDeadlock(t *testing.T) {
 	}
 }
 
-func TestRejectsSecondPromptWhileBusy(t *testing.T) {
+func TestFoldsSecondPromptWhileBusy(t *testing.T) {
 	h := newHarness()
 	h.prompt("first", false)
 	settle()
 	second := h.prompt("second", false)
-	if !second.rejected {
-		t.Fatal("second prompt while busy not rejected")
+	if second.rejected {
+		t.Fatal("second prompt while busy must be folded in, not rejected")
 	}
+	if !second.folded {
+		t.Fatal("second prompt while busy was not folded into the running turn")
+	}
+	// It folds via InjectPrompt — it does NOT start a second send.
 	if h.session.callCount() != 1 {
-		t.Fatalf("rejected prompt still called send: %d calls", h.session.callCount())
+		t.Fatalf("folded prompt still started a new send: %d calls", h.session.callCount())
+	}
+	if got := h.session.injectedPrompts(); len(got) != 1 || got[0] != "second" {
+		t.Fatalf("folded prompt not buffered for injection: %+v", got)
 	}
 }
