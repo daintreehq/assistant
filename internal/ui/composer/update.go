@@ -37,9 +37,21 @@ func (m *Model) AcceptSubmit(trimmed string) {
 func (m *Model) Update(msg tea.Msg) Outcome {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
-		// Bracketed multi-line paste: inserted VERBATIM with \r\n? → \n
-		// normalization, NOT run through the per-key chord logic.
-		m.insert(msg.Content)
+		// Bracketed paste arrives whole (the terminal does the chunking). A SMALL
+		// paste inserts VERBATIM at the cursor with \r\n? → \n normalization, NOT run
+		// through the per-key chord logic. A LARGE paste would grow the composer past
+		// the terminal height and collapse the bottom band to the one-line "terminal
+		// too small" fallback (internal/ui/view.go), so instead we stash the real text
+		// and show a one-line placeholder; the real text is substituted back on submit.
+		// A whitespace-only paste is never stashed: submitText() would trim it to ""
+		// and a stashed placeholder would then silently swallow Enter, stranding the
+		// user. Insert it verbatim instead (the pre-existing whitespace semantics).
+		if norm := normalizeNewlines(msg.Content); isLargePaste(norm) && strings.TrimSpace(norm) != "" {
+			m.stashLargePaste(norm)
+			m.paletteSel = 0
+		} else {
+			m.insert(msg.Content)
+		}
 		return Outcome{}
 	case keyMsg:
 		return m.handleKey(msg)
@@ -91,12 +103,14 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
 			m.acceptSuggestion(sugg[sel].Name)
 		}
-		// Plain Enter submits the RAW, untrimmed buffer; the parent trims and rejects
-		// empties. We pre-trim here only to suppress an empty submit (no-op).
-		if m.trimEmpty() {
+		// Plain Enter submits the trimmed text; the parent rejects empties too. We
+		// suppress an empty submit here as a no-op. submitText() substitutes a stashed
+		// large paste back in, so the placeholder string is never what gets sent.
+		text := m.submitText()
+		if text == "" {
 			return Outcome{}
 		}
-		return Outcome{Submit: &SubmitResult{Text: trim(m.buffer), OK: true}}
+		return Outcome{Submit: &SubmitResult{Text: text, OK: true}}
 	}
 
 	// 2) Escape. The composer assigns meaning:
@@ -126,9 +140,10 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		case k.Code == tea.KeyTab && mod == 0:
 			// Tab completes the highlighted command and parks a trailing space so the
 			// user can keep typing args; it intentionally REPLACES the whole buffer.
+			// Route through setBuffer so any active paste stash is cleared too.
 			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
-			m.buffer = sugg[sel].Name + " "
-			m.cursor = m.runeLen()
+			rs := runesOf(sugg[sel].Name + " ")
+			m.setBuffer(rs, len(rs))
 			m.paletteSel = 0
 			return Outcome{}
 		}
@@ -259,14 +274,16 @@ func (m *Model) handleSearchKey(k keyMsg) Outcome {
 	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
 		m.buffer = m.searchPrevBuf
 		m.cursor = clampInt(m.searchPrevCursor, 0, m.runeLen())
+		m.pasteText = m.searchPrevPaste // keep buffer/placeholder and stash in sync
 		m.endSearch()
 		return Outcome{}
 	case isEnter(k):
 		m.endSearch()
-		if m.trimEmpty() {
+		text := m.submitText()
+		if text == "" {
 			return Outcome{}
 		}
-		return Outcome{Submit: &SubmitResult{Text: trim(m.buffer), OK: true}}
+		return Outcome{Submit: &SubmitResult{Text: text, OK: true}}
 	case isCtrlRune(k, 'r'):
 		if next := m.reverseSearch(m.searchQuery, m.searchHit); next >= 0 {
 			m.searchHit = next
@@ -342,8 +359,9 @@ func (m *Model) acceptSuggestion(name string) {
 	if i := strings.IndexAny(m.buffer, " \t"); i >= 0 {
 		rest = m.buffer[i:]
 	}
-	m.buffer = name + rest
-	m.cursor = m.runeLen()
+	// Route through setBuffer so any active paste stash is cleared too.
+	rs := runesOf(name + rest)
+	m.setBuffer(rs, len(rs))
 	m.paletteSel = 0
 }
 

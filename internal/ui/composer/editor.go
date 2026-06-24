@@ -212,6 +212,41 @@ func normalizeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\r", "\n")
 }
 
+// largePasteLineThreshold / largePasteCharThreshold set when a bracketed paste is
+// "large" enough to stash behind a one-line placeholder instead of inserting it
+// verbatim. Rendered height is the real driver: a paste taller than a few rows
+// pushes the composer past the terminal height, and the fixed bottom band then
+// collapses to the one-line "terminal too small" fallback (internal/ui/view.go) —
+// the input becomes unusable. A very long SINGLE line soft-wraps to the same
+// effect, so the rune count is a second, defensive trip-wire.
+const (
+	largePasteLineThreshold = 5
+	largePasteCharThreshold = 500
+)
+
+// pasteLineCount counts logical lines in an already-newline-normalized string
+// (one more than the number of '\n').
+func pasteLineCount(s string) int { return strings.Count(s, "\n") + 1 }
+
+// isLargePaste reports whether a normalized paste should be stashed behind a
+// placeholder rather than inserted verbatim.
+func isLargePaste(s string) bool {
+	return pasteLineCount(s) >= largePasteLineThreshold || len([]rune(s)) >= largePasteCharThreshold
+}
+
+// largePastePlaceholder is the single-line stand-in shown in the buffer for a
+// stashed large paste (input must be normalized). It MUST contain no '\n' so the
+// composer renders as one row and never trips the too-small fallback. A multi-line
+// paste reports its line count; a single very long line reports its rune count
+// instead, so the summary reads "12 lines" or "640 chars" and never the
+// nonsensical "1 lines".
+func largePastePlaceholder(s string) string {
+	if n := pasteLineCount(s); n > 1 {
+		return "[pasted " + itoa(n) + " lines]"
+	}
+	return "[pasted " + itoa(len([]rune(s))) + " chars]"
+}
+
 func clampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo

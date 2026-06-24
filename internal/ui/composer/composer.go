@@ -32,6 +32,16 @@ type Model struct {
 	// inserts it verbatim with no rotation.
 	killRing string
 
+	// pasteText holds the raw content of a LARGE bracketed paste while m.buffer
+	// shows only a one-line placeholder (largePastePlaceholder). It is the real
+	// text the submit + history paths use. INVARIANT: pasteText != "" implies
+	// m.buffer is that single-line placeholder (no '\n'), so the composer stays one
+	// row tall and never trips the "terminal too small" fallback. Every buffer EDIT
+	// dissolves the stash by clearing pasteText (setBuffer does this for all
+	// mutation paths), so it is self-healing: edit the placeholder and it becomes
+	// ordinary text; submit it and the real paste is sent in full.
+	pasteText string
+
 	// commands is the slash-palette source, injected as data.
 	commands []Command
 
@@ -51,6 +61,7 @@ type Model struct {
 	searchHit        int // index into history of the current match, -1 = none
 	searchPrevBuf    string
 	searchPrevCursor int
+	searchPrevPaste  string // pasteText snapshot, restored if the search is cancelled
 
 	// lastWidth is the content width the composer last rendered at (set in View, read by the
 	// visual-row-aware vertical motion in Update so ↑/↓ follow soft-wrapped rows).
@@ -106,6 +117,7 @@ func (m *Model) Reset() {
 	m.cursor = 0
 	m.histIndex = -1
 	m.draft = ""
+	m.pasteText = ""
 }
 
 // Restore is the ONE sanctioned parent→composer write: the
@@ -113,8 +125,16 @@ func (m *Model) Reset() {
 // parked at end. Modeled as a direct method (the parent owns the composer as an
 // embedded struct); a RestoreDraftMsg in Update is the alternative seam.
 func (m *Model) Restore(text string) {
-	m.buffer = normalizeNewlines(text)
-	m.cursor = len([]rune(m.buffer))
+	norm := normalizeNewlines(text)
+	if isLargePaste(norm) {
+		// A pulled-back large message re-stashes behind its placeholder, otherwise
+		// it would re-grow the composer past the terminal height — the original bug.
+		m.stashLargePaste(norm)
+	} else {
+		m.pasteText = ""
+		m.buffer = norm
+		m.cursor = len([]rune(m.buffer))
+	}
 	m.histIndex = -1
 	m.draft = ""
 }
@@ -131,6 +151,31 @@ func (m *Model) recordHistory(trimmed string) {
 	}
 }
 
+// liveText is the real editable content: the stashed large paste when active,
+// otherwise the raw buffer. The draft snapshot and submit use it so a large paste
+// survives history navigation and is sent in full — the placeholder string is
+// never treated as content.
+func (m *Model) liveText() string {
+	if m.pasteText != "" {
+		return m.pasteText
+	}
+	return m.buffer
+}
+
+// submitText is the trimmed text a submit / history-record should use: the real
+// paste when one is stashed, never the placeholder.
+func (m *Model) submitText() string { return trim(m.liveText()) }
+
+// stashLargePaste parks the real (already-normalized) text in pasteText and shows
+// its one-line placeholder in the buffer, cursor at end. It assigns the buffer
+// DIRECTLY rather than via setBuffer, which would clear the stash, so the
+// pasteText/placeholder invariant holds.
+func (m *Model) stashLargePaste(normalized string) {
+	m.pasteText = normalized
+	m.buffer = largePastePlaceholder(normalized)
+	m.cursor = m.runeLen()
+}
+
 // --- low-level buffer mutation (all in rune space) ---
 
 // runeLen returns the buffer length in runes.
@@ -138,6 +183,9 @@ func (m *Model) runeLen() int { return len([]rune(m.buffer)) }
 
 // setBuffer replaces the buffer from a rune slice and clamps the cursor.
 func (m *Model) setBuffer(rs []rune, cursor int) {
+	// Any buffer mutation dissolves an active large-paste placeholder: the text is
+	// now authored, not a stand-in, so the stash must not shadow it on submit.
+	m.pasteText = ""
 	m.buffer = string(rs)
 	m.cursor = clampInt(cursor, 0, len(rs))
 }
@@ -186,7 +234,14 @@ func (m *Model) killLine() {
 }
 
 // recall replaces the whole buffer (history recall) and parks the cursor at end.
+// A recalled large entry re-stashes behind its placeholder so navigating history
+// never re-grows the composer past the terminal height.
 func (m *Model) recall(text string) {
+	if isLargePaste(text) {
+		m.stashLargePaste(text)
+		return
+	}
+	m.pasteText = ""
 	m.buffer = text
 	m.cursor = m.runeLen()
 }
@@ -203,6 +258,7 @@ func (m *Model) startSearch() {
 	m.searchHit = -1
 	m.searchPrevBuf = m.buffer
 	m.searchPrevCursor = m.cursor
+	m.searchPrevPaste = m.pasteText
 }
 
 // endSearch leaves search mode, keeping whatever is currently in the buffer (the match).
@@ -261,7 +317,9 @@ func (m *Model) moveUp() {
 		return
 	}
 	if m.histIndex < 0 {
-		m.draft = m.buffer
+		// Snapshot the REAL text (a stashed paste, not its placeholder) so an ↑/↓
+		// round-trip back to the draft restores the full paste, not the summary.
+		m.draft = m.liveText()
 	}
 	var idx int
 	if m.histIndex < 0 {
