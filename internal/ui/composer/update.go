@@ -43,7 +43,10 @@ func (m *Model) Update(msg tea.Msg) Outcome {
 		// the terminal height and collapse the bottom band to the one-line "terminal
 		// too small" fallback (internal/ui/view.go), so instead we stash the real text
 		// and show a one-line placeholder; the real text is substituted back on submit.
-		if norm := normalizeNewlines(msg.Content); isLargePaste(norm) {
+		// A whitespace-only paste is never stashed: submitText() would trim it to ""
+		// and a stashed placeholder would then silently swallow Enter, stranding the
+		// user. Insert it verbatim instead (the pre-existing whitespace semantics).
+		if norm := normalizeNewlines(msg.Content); isLargePaste(norm) && strings.TrimSpace(norm) != "" {
 			m.stashLargePaste(norm)
 			m.paletteSel = 0
 		} else {
@@ -137,9 +140,10 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		case k.Code == tea.KeyTab && mod == 0:
 			// Tab completes the highlighted command and parks a trailing space so the
 			// user can keep typing args; it intentionally REPLACES the whole buffer.
+			// Route through setBuffer so any active paste stash is cleared too.
 			sel := clampInt(m.paletteSel, 0, len(sugg)-1)
-			m.buffer = sugg[sel].Name + " "
-			m.cursor = m.runeLen()
+			rs := runesOf(sugg[sel].Name + " ")
+			m.setBuffer(rs, len(rs))
 			m.paletteSel = 0
 			return Outcome{}
 		}
@@ -355,8 +359,9 @@ func (m *Model) acceptSuggestion(name string) {
 	if i := strings.IndexAny(m.buffer, " \t"); i >= 0 {
 		rest = m.buffer[i:]
 	}
-	m.buffer = name + rest
-	m.cursor = m.runeLen()
+	// Route through setBuffer so any active paste stash is cleared too.
+	rs := runesOf(name + rest)
+	m.setBuffer(rs, len(rs))
 	m.paletteSel = 0
 }
 

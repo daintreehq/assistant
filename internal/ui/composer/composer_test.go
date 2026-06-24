@@ -381,6 +381,95 @@ func TestLargePasteReplacesPrefilledBuffer(t *testing.T) {
 	}
 }
 
+func TestWhitespaceOnlyLargePasteInsertsVerbatim(t *testing.T) {
+	m := newModel()
+	// A large but whitespace-only paste must NOT stash (a placeholder would trim to
+	// "" on submit and silently swallow Enter); it inserts verbatim instead.
+	paste := strings.Repeat(" \n", 8) // 8 newlines, whitespace only
+	m.Update(tea.PasteMsg{Content: paste})
+	if m.pasteText != "" {
+		t.Fatalf("whitespace-only paste must not stash; pasteText = %q", m.pasteText)
+	}
+	if strings.Contains(m.Value(), "pasted") {
+		t.Fatalf("whitespace-only paste must not show a placeholder; got %q", m.Value())
+	}
+}
+
+func TestLargePasteThresholdBoundary(t *testing.T) {
+	// Exactly at the line / char thresholds triggers the placeholder; just below
+	// inserts verbatim.
+	cases := []struct {
+		name    string
+		paste   string
+		stashed bool
+	}{
+		{"5 lines (== line threshold)", nLinePaste(5), true},
+		{"4 lines (< line threshold)", nLinePaste(4), false},
+		{"500 chars (== char threshold)", strings.Repeat("a", 500), true},
+		{"499 chars (< char threshold)", strings.Repeat("a", 499), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel()
+			m.Update(tea.PasteMsg{Content: tc.paste})
+			gotStashed := m.pasteText != ""
+			if gotStashed != tc.stashed {
+				t.Fatalf("stashed = %v, want %v (buffer %q)", gotStashed, tc.stashed, m.Value())
+			}
+		})
+	}
+}
+
+func TestLargePasteDoublePaste(t *testing.T) {
+	m := newModel()
+	m.Update(tea.PasteMsg{Content: nLinePaste(8)})
+	pasteB := nLinePaste(12)
+	m.Update(tea.PasteMsg{Content: pasteB})
+	// The second large paste replaces the first stash entirely.
+	if got := m.Value(); got != "[pasted 12 lines]" {
+		t.Fatalf("second paste should replace the stash; got %q", got)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	if sub.Submit == nil || sub.Submit.Text != pasteB {
+		t.Fatalf("submit should carry the second paste; got %+v", sub.Submit)
+	}
+}
+
+func TestTabCompletionClearsStalePaste(t *testing.T) {
+	m := newModel()
+	// Simulate a stale stash, then a Tab completion: the completion must clear it so
+	// a later submit sends the command, not the paste.
+	m.pasteText = nLinePaste(8)
+	typeRunes(&m, "/cl")
+	press(&m, tea.KeyTab, 0)
+	if m.pasteText != "" {
+		t.Fatalf("Tab completion should clear the stash; pasteText = %q", m.pasteText)
+	}
+	if m.Value() != "/clear " {
+		t.Fatalf("Tab completion buffer = %q, want %q", m.Value(), "/clear ")
+	}
+}
+
+func TestSearchEscRestoresStash(t *testing.T) {
+	m := newModel()
+	m.AcceptSubmit("hello") // seed a small history entry so search can start
+	paste := nLinePaste(8)
+	m.Update(tea.PasteMsg{Content: paste}) // stash active: buffer = placeholder
+	pressChord(&m, 'r', tea.ModCtrl)       // Ctrl-R: snapshot buffer + stash
+	typeRunes(&m, "hello")                 // matches the small entry → recall clears stash
+	if m.pasteText != "" {
+		t.Fatalf("matching a small entry should clear the stash; pasteText = %q", m.pasteText)
+	}
+	press(&m, tea.KeyEscape, 0) // cancel: restore the pre-search buffer AND stash
+	if got := m.Value(); got != "[pasted 8 lines]" {
+		t.Fatalf("Esc should restore the placeholder; got %q", got)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	if sub.Submit == nil || sub.Submit.Text != paste {
+		t.Fatalf("restored stash should submit the real paste; got %+v", sub.Submit)
+	}
+}
+
 func TestWrapByCells(t *testing.T) {
 	// View measures by cells, so a wide-rune draft never overflows the width.
 	m := newModel()
