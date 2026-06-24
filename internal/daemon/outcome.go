@@ -196,6 +196,19 @@ type TerminalState struct {
 	SeenWorking     bool   `json:"seenWorking,omitempty"`
 	ReadFailures    int    `json:"readFailures,omitempty"`
 	LastClassifyKey string `json:"lastClassifyKey,omitempty"`
+	// FinishJudgeKey is the OutHash at which the small-model "has the agent finished?"
+	// confirm last returned a CONFIDENT not-finished verdict. The judge runs at
+	// temperature 0, so re-asking it about the SAME tail is wasted tokens (the answer
+	// is deterministic). While the tail hash equals this key we skip the model call
+	// and keep the watcher armed; a changed tail clears the dedupe and re-confirms.
+	// Only a confident NO latches here — a transient model error (confidence 0) is
+	// left un-latched so it retries rather than permanently parking the watcher.
+	FinishJudgeKey string `json:"finishJudgeKey,omitempty"`
+	// LastFinishJudgeAt is the epoch-ms of the last finished-judge run for this
+	// terminal. It throttles the judge to ~once per finishJudgeCooldownMS so a
+	// repainting tail (spinner / elapsed-time counter) can't re-fire the small model
+	// every tick, and gates the absent-path tail read on the same window.
+	LastFinishJudgeAt int64 `json:"lastFinishJudgeAt,omitempty"`
 	// Subscribed records that this terminal's agent-state resource (ResourceURI,
 	// built from AgentID) is subscribed in the CURRENT session, so the check skips
 	// re-subscribing every tick. AgentID/ResourceURI are persisted so a reconnect

@@ -98,9 +98,46 @@ func runVerdict(ctx context.Context, deps Deps, verdictInstruction, resultText s
 	return pass, reason, nil
 }
 
+// settleJudgeConfidenceFloor mirrors daemon.judgeConfidenceFloor (0.6): the minimum
+// confidence for the finished judge's YES (or a CONFIDENT no) to count.
+const settleJudgeConfidenceFloor = 0.6
+
+// confirmFinished asks the shared small-model judge whether the agent has genuinely
+// finished its turn, using the terminal tail — the SAME byte-stable question the
+// watcher's judgeAgentFinished asks (domain.FinishedJudgeQuestion). It is the
+// settle gate's defense against a false "waiting": an agent that paused mid-task or
+// whose window was backgrounded reads as "waiting" but is NOT done.
+//
+// Returns (finished, confident):
+//   - finished=true: a CONFIDENT yes — resolve the poll and extract.
+//   - finished=false, confident=true: a CONFIDENT no — the caller may dedupe this
+//     exact tail (the temp-0 verdict won't change until the tail does).
+//   - finished=false, confident=false: blank tail / model error / low confidence —
+//     the caller should keep polling and re-ask (do NOT dedupe).
+func confirmFinished(ctx context.Context, deps Deps, r *readResult) (finished bool, confident bool) {
+	if strings.TrimSpace(r.combinedTail) == "" {
+		return false, false // no evidence yet — let the tail fill in, then re-ask
+	}
+	ans, err := deps.Router.Judge(ctx, JudgeInput{
+		Tier:          domain.ModelSmall,
+		Question:      domain.FinishedJudgeQuestion,
+		AgentState:    r.signals.AgentState,
+		RuntimeStatus: r.signals.RuntimeStatus,
+		Tail:          r.combinedTail,
+	})
+	if err != nil || ans.Confidence < settleJudgeConfidenceFloor {
+		return false, false // unsure → keep polling
+	}
+	return ans.Matched, true
+}
+
 // rejectModelJudge returns a failed result when the wait carries a modelJudge leaf
-// (re-running the classifier every tick is unsupported). Returns (zero, false)
-// when the wait is clean.
+// (re-running the classifier every tick is unsupported). NOTE: this is NOT the same
+// as the settle gate's finished confirmation — modelJudge is rejected because it
+// would re-run a classifier on EVERY poll tick; the finished confirmation runs only
+// when the deterministic settle already matched AND the seenWorking/grace pre-filter
+// passed (and is deduped on the tail hash), so it is a bounded, one-shot check.
+// Returns (zero, false) when the wait is clean.
 func rejectModelJudge(wait *domain.WatchCondition) (tools.ToolResult, bool) {
 	if wait != nil && len(collectModelJudges(wait)) > 0 {
 		return tools.Fail("UNSUPPORTED_CONDITION",

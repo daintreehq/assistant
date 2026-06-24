@@ -351,9 +351,90 @@ func TestWatcher_ExploreIdleIsCompletion(t *testing.T) {
 	rec.OptionsJson = ptrStr(string(opts))
 	store.watchers = []domain.WatcherRecord{rec}
 
-	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	// `waiting` after working is only a SETTLE candidate now — the small model must
+	// also confirm the agent actually finished. Wire a confident-YES judge so this
+	// asserts the (deterministic gate + confirmed) completion.
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: finishedYesJudge}), rec)
 	if out.Classification != domain.ClassCompletedSuccess {
 		t.Fatalf("explore idle-at-prompt → completed_success, got %s", out.Classification)
+	}
+}
+
+// The dual of the above: an explore agent idle at "waiting" after working, but the
+// small model says it has NOT finished (the false-"waiting" of a backgrounded /
+// paused agent). The watcher must NOT complete — it stays active and re-arms, with
+// no completion attention published.
+func TestWatcher_ExploreWaitingNotConfirmedStaysActive(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "waiting", "recentOutput": "⏺ still digging through TerminalInstanceService…",
+	})
+	rec := termWatcher("wch_nf", []string{"t1"})
+	opts, _ := json.Marshal(watcherOptions{
+		SpawnMode:   "explore",
+		PerTerminal: map[string]TerminalState{"t1": {SeenWorking: true}}, // already worked → settle candidate
+	})
+	rec.OptionsJson = ptrStr(string(opts))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: finishedNoJudge}), rec)
+	if out.Classification == domain.ClassCompletedSuccess || out.Stop {
+		t.Fatalf("unconfirmed waiting must NOT complete; got %s stop=%v", out.Classification, out.Stop)
+	}
+	if store.watchPatches["wch_nf"]["status"] != "active" {
+		t.Error("watcher must stay active when completion is not confirmed")
+	}
+	if hasAttentionFor(queue, "t1") {
+		t.Error("no completion attention should be published when not confirmed finished")
+	}
+}
+
+// The finished judge is throttled per terminal: after a not-finished verdict, a
+// second tick inside the cooldown window must NOT re-consult the small model (this is
+// what stops a repainting/churning tail from burning a judge call every 3s).
+func TestWatcher_ExploreFinishJudgeCooldownSkipsModel(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "waiting", "recentOutput": "⏺ mid-task, paused…",
+	})
+	rec := termWatcher("wch_cd", []string{"t1"})
+	opts, _ := json.Marshal(watcherOptions{
+		SpawnMode:   "explore",
+		PerTerminal: map[string]TerminalState{"t1": {SeenWorking: true}},
+	})
+	rec.OptionsJson = ptrStr(string(opts))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	calls := 0
+	judge := func(q, _ string) domain.ModelJudgeAnswer {
+		if q == domain.FinishedJudgeQuestion {
+			calls++
+		}
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9, Reason: "still working"}
+	}
+
+	// Tick 1: judges (not finished) and stamps LastFinishJudgeAt.
+	out1 := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: judge}), rec)
+	if out1.Classification == domain.ClassCompletedSuccess {
+		t.Fatalf("tick 1 should not complete, got %s", out1.Classification)
+	}
+	if calls != 1 {
+		t.Fatalf("tick 1 should consult the finished judge once, got %d", calls)
+	}
+
+	// Tick 2: replay the persisted state; the two checks run milliseconds apart (well
+	// inside finishJudgeCooldownMS), so the model must be skipped.
+	rec.OptionsJson = ptrStr(store.watchPatches["wch_cd"]["optionsJson"].(string))
+	out2 := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: judge}), rec)
+	if out2.Classification == domain.ClassCompletedSuccess {
+		t.Fatalf("tick 2 should not complete, got %s", out2.Classification)
+	}
+	if calls != 1 {
+		t.Fatalf("tick 2 inside the cooldown must NOT re-judge; total judge calls=%d", calls)
 	}
 }
 

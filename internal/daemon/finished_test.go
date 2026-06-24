@@ -1,0 +1,70 @@
+package daemon
+
+import (
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// judgeAgentFinished is the shared "is this agent actually done?" confirmation. It
+// must be FAIL-CLOSED: only a confident YES reports finished, and an empty tail /
+// disconnected MCP / low confidence all report not-finished without (in the empty /
+// disconnected cases) ever consulting the model.
+
+func finishedSignals(tail string) WatcherSignals {
+	return WatcherSignals{AgentState: "waiting", RuntimeStatus: "running", Tail: tail}
+}
+
+func TestJudgeAgentFinished_ConfidentYes(t *testing.T) {
+	ctx := ctxFor(newFakeStore(), newFakeQueue(), newFakeMCP(), &progModel{judgeFn: finishedYesJudge})
+	_, finished := judgeAgentFinished(ctx, termWatcher("wch", []string{"t1"}), finishedSignals("Investigation complete."))
+	if !finished {
+		t.Fatal("a confident YES should report finished")
+	}
+}
+
+func TestJudgeAgentFinished_ConfidentNo(t *testing.T) {
+	ctx := ctxFor(newFakeStore(), newFakeQueue(), newFakeMCP(), &progModel{judgeFn: finishedNoJudge})
+	_, finished := judgeAgentFinished(ctx, termWatcher("wch", []string{"t1"}), finishedSignals("still working…"))
+	if finished {
+		t.Fatal("a confident NO must report not-finished")
+	}
+}
+
+func TestJudgeAgentFinished_LowConfidenceNotFinished(t *testing.T) {
+	low := func(q, _ string) domain.ModelJudgeAnswer {
+		// Matched YES but BELOW the confidence floor → must not count as finished.
+		return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.4, Reason: "maybe"}
+	}
+	ctx := ctxFor(newFakeStore(), newFakeQueue(), newFakeMCP(), &progModel{judgeFn: low})
+	_, finished := judgeAgentFinished(ctx, termWatcher("wch", []string{"t1"}), finishedSignals("ambiguous output"))
+	if finished {
+		t.Fatal("a YES below the confidence floor must not report finished")
+	}
+}
+
+func TestJudgeAgentFinished_EmptyTailFailClosedNoModelCall(t *testing.T) {
+	mustNotJudge := func(q, _ string) domain.ModelJudgeAnswer {
+		t.Error("judge must NOT be consulted when there is no tail evidence")
+		return domain.ModelJudgeAnswer{}
+	}
+	ctx := ctxFor(newFakeStore(), newFakeQueue(), newFakeMCP(), &progModel{judgeFn: mustNotJudge})
+	_, finished := judgeAgentFinished(ctx, termWatcher("wch", []string{"t1"}), finishedSignals("   "))
+	if finished {
+		t.Fatal("empty tail must fail-closed to not-finished")
+	}
+}
+
+func TestJudgeAgentFinished_DisconnectedFailClosed(t *testing.T) {
+	mcp := newFakeMCP()
+	mcp.connected = false
+	mustNotJudge := func(q, _ string) domain.ModelJudgeAnswer {
+		t.Error("judge must NOT be consulted when MCP is disconnected")
+		return domain.ModelJudgeAnswer{}
+	}
+	ctx := ctxFor(newFakeStore(), newFakeQueue(), mcp, &progModel{judgeFn: mustNotJudge})
+	_, finished := judgeAgentFinished(ctx, termWatcher("wch", []string{"t1"}), finishedSignals("done"))
+	if finished {
+		t.Fatal("disconnected MCP must fail-closed to not-finished")
+	}
+}

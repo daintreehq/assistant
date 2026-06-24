@@ -109,15 +109,23 @@ func hashTail(s string) string {
 	return strconv.FormatUint(uint64(uint32(h)), 36)
 }
 
-// terminalState is the per-terminal output-tracking memory for noOutputForMs.
+// terminalState is the per-terminal output-tracking memory for noOutputForMs and
+// the settle latch.
 type terminalState struct {
 	outHash string
 	outAt   int64
+	// seenWorking latches once this terminal's agent has been observed in the
+	// "working" state. It is the working→waiting settle gate (mirrors daemon's
+	// SeenWorking): a freshly spawned agent parks at "waiting" before it picks up the
+	// prompt, so a "waiting" reading is only a real settle once we have first seen it
+	// work. readSignals sets it; nextOutputState preserves it across poll iterations.
+	seenWorking bool
 }
 
 // nextOutputState advances a terminal's output-tracking state. When the tail
 // changed since last check, outAt becomes now; otherwise it is preserved so the
-// time since the last NEW output keeps growing. Returns the new state and elapsed
+// time since the last NEW output keeps growing. The seenWorking latch is carried
+// forward (monotonic — once true, stays true). Returns the new state and elapsed
 // ms. Pure. Mirrors daemon.NextOutputState.
 func nextOutputState(prev *terminalState, tail string, now int64) (terminalState, int64) {
 	outHash := hashTail(tail)
@@ -129,7 +137,7 @@ func nextOutputState(prev *terminalState, tail string, now int64) (terminalState
 			outAt = now
 		}
 	}
-	st := terminalState{outHash: outHash, outAt: outAt}
+	st := terminalState{outHash: outHash, outAt: outAt, seenWorking: prev != nil && prev.seenWorking}
 	ms := now - outAt
 	if ms < 0 {
 		ms = 0

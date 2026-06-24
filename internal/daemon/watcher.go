@@ -343,8 +343,33 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 				// the daemon attaches no irreversible action). Enforcing that an explore
 				// agent truly cannot edit belongs at the Daintree spawn layer.
 				if exploreSettledComplete(prevState, rec, now) {
-					ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working; terminal.list)", parens(listed.WaitingReason))}
-					return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+					// Confirm finished on the tail (same as the present path) — but the listed
+					// path carries no tail, so read it first. That read is a terminal.getOutput
+					// MCP round-trip, so SKIP it while the finished judge is on cooldown (a
+					// stable idle agent would otherwise be re-read every 3s tick). A failed
+					// read leaves the tail empty and the judge fail-closes (not finished), so
+					// the watcher re-arms rather than falsely completing.
+					if finishJudgeOnCooldown(prevState, now) {
+						ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, awaiting finish confirmation; terminal.list)", parens(listed.WaitingReason))}
+						return domain.ClassNoChange, 0.5, "Explore agent idle but not yet confirmed finished; still watching.", ev, signals, false
+					}
+					if read := readOutput(ctx, terminalID); read.Ok {
+						signals.Tail = read.Value
+					}
+					outHash := hashTail(signals.Tail)
+					finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, outHash, perTerminal, terminalID, now)
+					if !finished {
+						ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, awaiting finish confirmation; terminal.list)", parens(listed.WaitingReason))}
+						if e := finishedEvidence("judge", ans); e != "" {
+							ev = append(ev, e)
+						}
+						return domain.ClassNoChange, 0.5, "Explore agent idle but not yet confirmed finished; still watching.", ev, signals, usedModel
+					}
+					ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working; judge-confirmed finished; terminal.list)", parens(listed.WaitingReason))}
+					if e := finishedEvidence("judge", ans); e != "" {
+						ev = append(ev, e)
+					}
+					return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt, confirmed).", ev, signals, true
 				}
 				ev := []string{fmt.Sprintf("agentState=waiting%s (explore, not yet started; terminal.list)", parens(listed.WaitingReason))}
 				return domain.ClassNoChange, 0.5, "Explore agent spawned; waiting to start its turn.", ev, signals, false
@@ -454,8 +479,25 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 			// claims only "finished its turn", never a clean/verified tree; no
 			// irreversible action is attached).
 			if exploreSettledComplete(prevState, rec, now) {
-				ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working)", parens(waitingReason))}
-				return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt).", ev, signals, false
+				// exploreSettledComplete is only the DETERMINISTIC pre-filter (SeenWorking /
+				// grace). `waiting` itself is unreliable — an agent flips to "waiting" when
+				// it pauses mid-task or when Daintree backgrounds its window, not just when
+				// it is done. So confirm with the small model on the tail before declaring
+				// completion; a not-finished verdict returns a NON-terminal ClassNoChange so
+				// the watcher re-arms instead of falsely stopping. Deduped on the tail hash.
+				finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, outHash, perTerminal, terminalID, now)
+				if !finished {
+					ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, awaiting finish confirmation)", parens(waitingReason))}
+					if e := finishedEvidence("judge", ans); e != "" {
+						ev = append(ev, e)
+					}
+					return domain.ClassNoChange, 0.5, "Explore agent idle but not yet confirmed finished; still watching.", ev, signals, usedModel
+				}
+				ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, after working; judge-confirmed finished)", parens(waitingReason))}
+				if e := finishedEvidence("judge", ans); e != "" {
+					ev = append(ev, e)
+				}
+				return domain.ClassCompletedSuccess, 0.85, "Explore agent finished its turn (idle at prompt, confirmed).", ev, signals, true
 			}
 			ev := []string{fmt.Sprintf("agentState=waiting%s (explore, not yet started)", parens(waitingReason))}
 			return domain.ClassNoChange, 0.5, "Explore agent spawned; waiting to start its turn.", ev, signals, false

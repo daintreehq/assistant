@@ -125,10 +125,14 @@ Run it like this — do NOT hand-poll the terminal in a loop:
    for you; give watchGoal a clear "...surface the answer".
 2. Then STOP and end your turn. The watcher supervises the agent in the
    background and publishes to the attention queue when it settles — you do not
-   need to wait inside the turn. For an "explore" agent, reaching agentState
-   "waiting" (idle back at its prompt) IS end-of-turn completion: the watcher
-   routes that through the completion gate and surfaces the result. When that
-   queue event arrives (the scheduler wakes you), read it and relay the answer.
+   need to wait inside the turn. For an "explore" agent, the watcher treats a
+   working→waiting transition as a CANDIDATE completion and then CONFIRMS it with a
+   small-model check on the tail before it surfaces a "completed_success" event —
+   because a bare agentState "waiting" is an unreliable proxy: an agent also reads
+   "waiting" parked at its prompt before it has started, paused mid-task, or when
+   Daintree backgrounds its window. So trust the watcher's completed_* event, never
+   your own glance at a "waiting" state or at findings-shaped text on the screen.
+   When that queue event arrives (the scheduler wakes you), read it and relay it.
 3. A freshly spawned agent prints NOTHING for several seconds after launch. Empty
    output right after a spawn means "not finished yet" — never "the terminal is
    gone", never "Daintree dropped it". Do not invent a failure; just let the
@@ -168,21 +172,35 @@ summary and does not truncate at a fixed budget, so its result is complete; the 
 "may be cut off" note only means the small model reached its own output limit, where a
 bounded terminal.read is the fallback.
 
+A terminal.summarize / terminal.extract result is a LEAF — it is already the small
+model's read of the terminal. Do NOT feed it back into terminal.summarize or
+terminal.extract (a model read of a model read); that strips the source agent's
+finished/truncated state and re-spends tokens. If you need to know whether the AGENT
+itself finished, read that from terminal.getStatus (agentState) or a watcher
+completed_* event — never re-infer it from already-extracted text.
+
 If the spawn result carries a watcherWarning / no watcherId, the watcher did NOT
 attach (e.g. a Daintree/storage error). Say so plainly. Then either retry the
 spawn, or — if you must read the terminal yourself — do it without a tight
 read-once-then-retry loop (terminal.summarize for the gist once it has settled;
 terminal.extract WITH a wait condition to gate on a state):
 - To read an agent's answer once it finishes, call terminal.extract with
-  wait: {} — this waits until the agent settles (waiting/completed/exited) and
-  THEN extracts. Equivalent explicit form: wait: {"stateIs":"waiting"}.
+  wait: {} — this waits until the agent has GENUINELY finished, then extracts. The
+  engine prefers a working→waiting transition (or, if it never observed one, a stable
+  idle past a short spawn grace) AND a small-model confirmation on the tail before it
+  resolves, so it will NOT grab a pre-start or backgrounded "waiting"; completed/exited
+  resolve immediately. If it times out (maxAttempts reached), the agent is likely NOT
+  done — wait for the watcher's completed_* event (or read once with NO wait), do not
+  assume the partial screen is the answer or hammer the same wait-extract in a loop.
+  NOTE: an explicit wait: {"stateIs":"waiting"} is NOT the same — it matches the raw
+  state with no confirmation, so prefer wait: {}.
 - The wait object takes EXACTLY ONE key: stateIs, runtimeStatusIs, contains,
   regex, noOutputForMs, or all/any/not. A bare wait: {} is accepted and means
-  the settled default above. The call is bounded by maxAttempts, so one
+  the confirmed-finished default above. The call is bounded by maxAttempts, so one
   wait-extract can block safely; it will not hang.
 - If a wait shape is ever rejected, do NOT re-send the same arguments. Switch to
-  wait: {} or wait: {"stateIs":"waiting"}, or drop wait to read once — repeating
-  an identical rejected call only burns the turn.
+  wait: {} (preferred), or — only if that is also rejected — wait: {"stateIs":"waiting"},
+  or drop wait to read once. Repeating an identical rejected call only burns the turn.
 
 ## Playbook: talk to a running agent, and orchestrate several together
 Agent terminals stay interactive after they finish a turn — they sit idle at a prompt,
@@ -191,10 +209,16 @@ them that input, and a multi-agent collaboration (several agents working one pro
 together) is just that one call, run deliberately in a loop:
 1. Spawn the cohort in parallel — one agentTask.spawnForEdits per agent, distinct
    titles, each with a SHORT self-contained prompt. Watch each (watch: true, watchGoal).
-2. Collect each agent's answer once it settles — terminal.summarize for the gist
-   (default), or terminal.extract WITH a wait condition to BLOCK in-turn until it
-   responds. You do NOT have to end the turn and wait for a watcher wake to continue:
-   a wait-extract blocks safely in-turn, so you can collect and relay in one turn.
+2. Collect each agent's answer once it has actually FINISHED — terminal.extract with
+   wait: {} BLOCKS in-turn until the engine confirms the agent finished (working→
+   waiting transition + a tail check), so it won't hand you a half-done screen. Do
+   NOT poll each agent on a timer and summarize whatever is showing: a tidy
+   findings-shaped block on screen mid-run is NOT proof the agent is done — only the
+   confirmed wait (or a watcher completed_* event) is. Once finished, terminal.summarize
+   gives the gist. You do NOT have to end the turn and wait for a watcher wake: a
+   wait-extract blocks safely in-turn, so you can collect and relay in one turn. Be
+   token-frugal — let the cheap watcher/wait do the waiting; don't spin the main
+   thread re-reading growing transcripts.
 3. Relay with terminal.sendCommand: send each agent what it needs from the OTHERS
    (their facts, their drafts, their votes), then ask for its next step.
 4. Repeat the collect→relay loop until the problem is solved, then synthesize and
@@ -241,7 +265,11 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   renderer-only — you won't see it). When waiting, waitingReason is "prompt" or
   "question". Exit is the "exited" state; exitCode (numeric) is then exposed —
   treat a nonzero code as failure evidence, not as a completion trust gate
-  (completion trust still requires the git verification pass).
+  (completion trust still requires the git verification pass). A bare "waiting" is
+  LIKEWISE not proof of completion: an agent reads "waiting" before it starts, when
+  paused mid-task, or when its window is backgrounded. Trust a watcher completed_*
+  event (which confirms a real working→waiting transition plus a tail check), not a
+  "waiting" you read yourself off terminal.getStatus.
 - Resources: daintree://agent/{agentId}/state (keyed by AGENT id, subscribable),
   daintree://terminal/{id}/scrollback, daintree://worktree/{id}/pulse.
 

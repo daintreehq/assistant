@@ -7,6 +7,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
@@ -149,6 +150,23 @@ func (r extractionRouterAdapter) JSON(ctx context.Context, tier domain.ModelTier
 	var any2 any
 	_ = json.Unmarshal([]byte(raw), &any2)
 	return any2, nil
+}
+
+// Judge routes the extract settle gate's finished-confirmation through the SAME
+// shared yes/no judge the watcher uses (judgeYesNo) — NOT through JSON() above,
+// which unwraps {"result":<value>} and would strip the {reason,confidence,matched}
+// envelope. This guarantees the extract tool and the watcher ask the identical
+// question through the identical prompt at the identical (small) tier.
+func (r extractionRouterAdapter) Judge(ctx context.Context, in extractionx.JudgeInput) (domain.ModelJudgeAnswer, error) {
+	return judgeYesNo(ctx, r.router, in.Tier, prompts.JudgeUserArgs{
+		Question:      in.Question,
+		Goal:          in.Goal,
+		AgentState:    in.AgentState,
+		RuntimeStatus: in.RuntimeStatus,
+		WaitingReason: in.WaitingReason,
+		LastOutputAt:  in.LastOutputAt,
+		Tail:          in.Tail,
+	})
 }
 
 // roleContent is the shared role/content pair the family ChatMessage slices map to

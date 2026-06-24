@@ -90,3 +90,36 @@ func TestEscWhileBusy_NoQueueCancels(t *testing.T) {
 		t.Fatalf("Esc with no queue did not cancel the active turn; phase=%v", at)
 	}
 }
+
+// A message submitted MID-TURN (queued behind the in-flight turn) renders in the live
+// footer, NOT via the sealed-block path — so it must get the SAME marginTop. Regression
+// for the missing blank line above a mid-turn "YOU" card (it was rendering flush against
+// the in-flight assistant prose).
+func TestLiveCellsView_MidTurnUserMessageHasBlankLineAbove(t *testing.T) {
+	m := harnessModel()
+	active := &TurnCell{
+		ID: "turn_a", UserText: "kick off the work", State: TurnActive,
+		Phase: domain.PhaseGenerating, PhaseStartedAt: domain.NowMS(),
+		Steps: []TurnStep{{Kind: StepProse, Text: "Working on it now."}},
+	}
+	queued := &TurnCell{ID: "turn_q", UserText: "actually, stop after round 2", State: TurnActive, Queued: true}
+	m.transcript = append(m.transcript, TranscriptCell{Turn: active}, TranscriptCell{Turn: queued})
+	m.activeTurn = active.ID
+	m.inFlight = true
+
+	lines := strings.Split(stripAnsi(m.liveCellsView(80)), "\n")
+	// The queued cell's "YOU" card is the LAST YOU in the live region; the line directly
+	// above it must be blank (the margin), never the active turn's prose line.
+	lastYou := -1
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == "YOU" {
+			lastYou = i
+		}
+	}
+	if lastYou <= 0 {
+		t.Fatalf("queued user message did not render a YOU card: %q", lines)
+	}
+	if strings.TrimSpace(lines[lastYou-1]) != "" {
+		t.Fatalf("mid-turn YOU card must have a blank line above it, got %q", lines[lastYou-1])
+	}
+}

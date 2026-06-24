@@ -317,7 +317,12 @@ func (m Model) liveCellsView(w int) string {
 			parts = append(parts, s)
 		}
 	}
-	return strings.Join(parts, "\n")
+	// Separate live cells with a blank line — the SAME marginTop rule sealedBlock
+	// applies when a cell commits to scrollback (update_handlers.go). Without it a
+	// message submitted MID-TURN (a queued follow-up cell) renders flush against the
+	// in-flight assistant prose, with no gap above its "YOU" card. The active turn's
+	// own flushed-tail suffix is parts[0], so it never gets a spurious leading blank.
+	return strings.Join(parts, "\n\n")
 }
 
 // composerView renders the composer with the current chrome (busy stage label,

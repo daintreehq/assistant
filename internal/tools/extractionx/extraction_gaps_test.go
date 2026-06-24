@@ -8,12 +8,16 @@ import (
 )
 
 // routeRouter records which model surface was used (Chat vs JSON) so we can assert
-// format routing.
+// format routing. judgeFn scripts the settle-gate finished confirmation; judgeCalls
+// counts how often it was consulted (so a test can assert the judge was NOT called
+// on a non-settle path).
 type routeRouter struct {
 	chatCalled bool
 	jsonCalled bool
 	chatRes    ChatResult
 	jsonRes    any
+	judgeFn    func(JudgeInput) domain.ModelJudgeAnswer
+	judgeCalls int
 }
 
 func (r *routeRouter) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (ChatResult, error) {
@@ -23,6 +27,13 @@ func (r *routeRouter) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessag
 func (r *routeRouter) JSON(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (any, error) {
 	r.jsonCalled = true
 	return r.jsonRes, nil
+}
+func (r *routeRouter) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error) {
+	r.judgeCalls++
+	if r.judgeFn != nil {
+		return r.judgeFn(in), nil
+	}
+	return domain.ModelJudgeAnswer{}, nil
 }
 
 // format=text routes through router.Chat (never JSON) and reports text.

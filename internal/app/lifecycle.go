@@ -273,12 +273,7 @@ func (w watcherModelAdapter) Classify(ctx context.Context, in daemon.ClassifyInp
 }
 
 func (w watcherModelAdapter) Judge(ctx context.Context, in daemon.JudgeInput) (domain.ModelJudgeAnswer, error) {
-	fallback := domain.ModelJudgeAnswer{
-		Reason:     "Could not evaluate the question.",
-		Confidence: 0.3,
-		Matched:    false,
-	}
-	user := prompts.BuildJudgeUserPrompt(prompts.JudgeUserArgs{
+	return judgeYesNo(ctx, w.router, in.Tier, prompts.JudgeUserArgs{
 		Question:      in.Question,
 		Goal:          in.Goal,
 		AgentState:    in.AgentState,
@@ -287,7 +282,30 @@ func (w watcherModelAdapter) Judge(ctx context.Context, in daemon.JudgeInput) (d
 		LastOutputAt:  in.LastOutputAt,
 		Tail:          in.Tail,
 	})
-	raw, err := w.callJSON(ctx, in.Tier, prompts.JudgeSystemPrompt, user)
+}
+
+// judgeYesNo runs the shared byte-stable yes/no terminal judge at temperature 0 and
+// decodes the {reason,confidence,matched} answer. BOTH the watcher adapter
+// (watcherModelAdapter.Judge) and the extraction adapter (extractionRouterAdapter.Judge)
+// route through this ONE implementation, so the small model is always asked through
+// the identical JudgeSystemPrompt at the identical tier — the two consumers cannot
+// drift on prompt text, tier, or decode. A model or decode failure degrades to the
+// documented fallback (confidence 0.3, not matched) rather than propagating; the
+// callers also treat a returned error defensively.
+func judgeYesNo(ctx context.Context, router *models.Router, tier domain.ModelTier, args prompts.JudgeUserArgs) (domain.ModelJudgeAnswer, error) {
+	fallback := domain.ModelJudgeAnswer{
+		Reason:     "Could not evaluate the question.",
+		Confidence: 0.3,
+		Matched:    false,
+	}
+	temp := 0.0
+	raw, err := router.JSON(ctx, tier, models.ChatOptions{
+		Messages: []models.ChatMessage{
+			models.TextMessage("system", prompts.JudgeSystemPrompt),
+			models.TextMessage("user", prompts.BuildJudgeUserPrompt(args)),
+		},
+		Temperature: &temp,
+	})
 	if err != nil {
 		return fallback, nil
 	}

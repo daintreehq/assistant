@@ -33,12 +33,13 @@ func (statusErrMCP) CallRead(_ context.Context, name string, _ map[string]any) (
 
 // termCfg is one terminal's scripted state for the programmable MCP fake.
 type termCfg struct {
-	agentID       string // emitted as agentId in getStatus (keys the subscribable resource)
-	agentState    string
-	waitingReason string
-	recentOutput  *string // nil ⇒ omitted from getStatus (forces getOutput fallback)
-	tail          string  // returned by terminal.getOutput
-	exitCode      *int
+	agentID        string // emitted as agentId in getStatus (keys the subscribable resource)
+	agentState     string
+	waitingReason  string
+	recentOutput   *string // nil ⇒ omitted from getStatus (forces getOutput fallback)
+	tail           string  // returned by terminal.getOutput
+	exitCode       *int
+	omitFromStatus bool // present in the map (so getOutput serves its tail) but skipped by getStatus — models the absent-but-listed terminal
 }
 
 // progMCP is a programmable MCP fake used across the
@@ -131,8 +132,8 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 		var terminals []map[string]any
 		for _, id := range ids {
 			cfg, ok := m.perTerminal[id]
-			if !ok {
-				continue // omitted ⇒ absent from getStatus
+			if !ok || cfg.omitFromStatus {
+				continue // omitted ⇒ absent from getStatus (still readable via getOutput)
 			}
 			e := map[string]any{"terminalId": id}
 			if cfg.agentID != "" {
@@ -213,6 +214,26 @@ func (m *progModel) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAn
 		return m.judgeFn(in.Question, in.Tail), nil
 	}
 	return domain.ModelJudgeAnswer{}, nil
+}
+
+// finishedYesJudge confirms the FinishedJudgeQuestion with a confident YES (any
+// other question gets the default not-matched). Used by explore-completion tests
+// where the model agrees the agent genuinely finished its turn.
+func finishedYesJudge(question, _ string) domain.ModelJudgeAnswer {
+	if question == domain.FinishedJudgeQuestion {
+		return domain.ModelJudgeAnswer{Reason: "work complete; idle at prompt", Confidence: 0.9, Matched: true}
+	}
+	return domain.ModelJudgeAnswer{}
+}
+
+// finishedNoJudge answers the FinishedJudgeQuestion with a CONFIDENT no — the model
+// can see the agent is still mid-task (the false-"waiting" case). Used to prove the
+// settle confirmation keeps the watcher armed instead of falsely completing.
+func finishedNoJudge(question, _ string) domain.ModelJudgeAnswer {
+	if question == domain.FinishedJudgeQuestion {
+		return domain.ModelJudgeAnswer{Reason: "still working mid-task", Confidence: 0.9, Matched: false}
+	}
+	return domain.ModelJudgeAnswer{}
 }
 
 // tierRecorder records the ModelTier passed to Classify/Judge so a test can assert

@@ -100,6 +100,7 @@ type resolvedBase struct {
 	format         string
 	jsonSchema     string
 	wait           *domain.WatchCondition
+	isSettleWait   bool // wait was the coerced wait:{} settled default (see poll gate)
 	pollIntervalMs int
 	maxAttempts    int
 	tailBytes      int
@@ -125,6 +126,11 @@ func resolveBase(b baseArgs) (resolvedBase, string) {
 		if isEmptyObject(b.Wait) {
 			w := settledWait()
 			r.wait = &w
+			// Mark this as the SETTLE default so the poll gate applies the
+			// seenWorking/grace pre-filter + the small-model finished confirmation. An
+			// explicit, equivalent {"stateIs":"waiting"} stays strict (no confirmation) —
+			// only the model's natural wait:{} opts into the imperfect-signal handling.
+			r.isSettleWait = true
 		} else if trimmed == "null" {
 			// explicit null → no wait
 		} else {
@@ -152,6 +158,7 @@ func (r resolvedBase) poll() pollArgs {
 	return pollArgs{
 		terminalIDs:    r.terminalIDs,
 		wait:           r.wait,
+		isSettleWait:   r.isSettleWait,
 		pollIntervalMs: r.pollIntervalMs,
 		maxAttempts:    r.maxAttempts,
 		tailBytes:      r.tailBytes,
@@ -169,7 +176,7 @@ var sharedExtractProps = `
     "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "Daintree terminal id(s) to read and extract from." },
     "format": { "type": "string", "enum": ["text", "json"], "description": "Output shape: plain text, or structured JSON (needs jsonSchema)." },
     "jsonSchema": { "type": "string", "description": "When format=json, a description/JSON-Schema of the value to extract." },
-    "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent settles (waiting/completed/exited). Omit to read once." },
+    "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent has genuinely FINISHED its turn: a bare 'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), so {} requires a real working->waiting transition AND a small-model confirmation on the tail before it resolves — it will not return on a momentary idle. completed/exited resolve immediately. Omit to read once." },
     "pollIntervalMs": { "type": "number", "description": "Delay between polls in wait mode, in ms (default 2000)." },
     "maxAttempts": { "type": "number", "description": "Hard cap on poll attempts (default 30, max 120)." },
     "tailBytes": { "type": "number", "description": "Max characters of each terminal's tail fed to the model." },
@@ -179,7 +186,7 @@ var extractSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract. Omit to run a wait/finished gate only (no model call)." },` + sharedExtractProps + `
+    "instruction": { "type": "string", "description": "What to extract. Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge)." },` + sharedExtractProps + `
   },
   "required": ["terminalIds"]
 }`)
@@ -189,7 +196,7 @@ func newExtractTool(deps Deps) tools.Tool {
 		Name: "terminal.extract",
 		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content with the small " +
 			"model — as plain text or structured JSON. Optionally wait (poll) until a condition is met before extracting. Omit " +
-			"`instruction` to use it as a finished/condition gate (returns booleans, no model call). Read-only; requires Daintree MCP.",
+			"`instruction` to use it as a finished/condition gate (returns booleans, no extraction model call). Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: extractSchema,
 		Decode: tools.StrictDecoder(func() any { return &extractArgs{} }),
@@ -215,7 +222,9 @@ func newExtractTool(deps Deps) tools.Tool {
 			poll := pollUntil(ctx, deps, base.poll())
 			elapsedMs := time.Now().UnixMilli() - startedAt
 
-			// Gate-only mode: no instruction ⇒ no model call, just report booleans.
+			// Gate-only mode: no instruction ⇒ no EXTRACTION model call, just report
+			// booleans. (A wait:{} settle may still have invoked the cheap finished judge
+			// inside pollUntil above — that is the small-model confirmation, not extraction.)
 			if a.Instruction == "" {
 				met := "not met"
 				if poll.matched {

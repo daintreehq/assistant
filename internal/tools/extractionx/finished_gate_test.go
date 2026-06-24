@@ -1,0 +1,199 @@
+package extractionx
+
+import (
+	"context"
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// seqReader returns a scripted SEQUENCE of statuses, one per ReadStatuses call
+// (clamping to the last once exhausted), so a test can drive working→waiting across
+// poll attempts. ReadOutput is never needed (recentOutput covers the small tailBytes
+// the tests use), so it just reports a miss.
+type seqReader struct {
+	seq  []StatusReadResult
+	call int
+}
+
+func (r *seqReader) Connected() bool { return true }
+func (r *seqReader) ReadStatuses(_ context.Context, _ []string, _ bool) StatusReadResult {
+	i := r.call
+	if i >= len(r.seq) {
+		i = len(r.seq) - 1
+	}
+	r.call++
+	return r.seq[i]
+}
+func (r *seqReader) ReadOutput(_ context.Context, _ string, _ int) OutputReadResult {
+	return OutputReadResult{OK: false}
+}
+
+func status(state, out string) StatusReadResult {
+	return StatusReadResult{OK: true, ByID: map[string]TerminalStatusEntry{
+		"t1": {AgentState: state, RecentOutput: strp(out)},
+	}}
+}
+
+func settlePollArgs(reader *seqReader, maxAttempts int) (Deps, *routeRouter, pollArgs) {
+	r := &routeRouter{}
+	deps := Deps{Reader: reader, Router: r}
+	w := settledWait()
+	return deps, r, pollArgs{
+		terminalIDs:  []string{"t1"},
+		wait:         &w,
+		isSettleWait: true,
+		maxAttempts:  maxAttempts,
+		tailBytes:    4, // < every recentOutput below → inline path, no deep read / readFailed
+	}
+	// pollIntervalMs 0 ⇒ no delay; the wall-clock stays inside extractSettleGraceMS so
+	// the grace fallback never fires — the latch/judge alone drive the outcome.
+}
+
+// A bare "waiting" on the FIRST read (the agent has never been seen working — the
+// real-world pre-start / backgrounded-window case) must NOT settle: this is exactly
+// the att=1 false-settle the gate closes. The poll resolves only once the agent has
+// worked AND the model confirms it finished.
+func TestPollUntil_SettleWaitRequiresSeenWorkingThenConfirm(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{
+		status("waiting", "ready to start ▷"), // attempt 1: never worked → must defer
+		status("working", "reading files…"),   // attempt 2: latches seenWorking
+		status("waiting", "all done here."),   // attempt 3: settle + confirm
+	}}
+	deps, router, args := settlePollArgs(reader, 5)
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.9, Reason: "done"}
+	}
+
+	res := pollUntil(context.Background(), deps, args)
+	if !res.matched {
+		t.Fatalf("should settle once worked+confirmed, got matched=false after %d attempts", res.attempts)
+	}
+	if res.attempts != 3 {
+		t.Fatalf("should settle on attempt 3 (not the att=1 false settle), got %d", res.attempts)
+	}
+	if router.judgeCalls != 1 {
+		t.Fatalf("judge should be consulted exactly once (only on the post-working waiting), got %d", router.judgeCalls)
+	}
+}
+
+// A settle that the model never confirms (the agent flips to "waiting" but is still
+// mid-task) must keep polling to the cap and time out — never grab mid-flight output.
+// The identical not-finished tail is judged ONCE (dedupe), not every attempt.
+func TestPollUntil_SettleNeverConfirmedTimesOut(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{
+		status("working", "still working…"),
+		status("waiting", "paused mid-task…"), // same tail repeats → dedupe
+	}}
+	deps, router, args := settlePollArgs(reader, 4)
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9, Reason: "still mid-task"}
+	}
+
+	res := pollUntil(context.Background(), deps, args)
+	if res.matched {
+		t.Fatal("unconfirmed settle must NOT match (no mid-flight grab)")
+	}
+	if router.judgeCalls != 1 {
+		t.Fatalf("confident not-finished on an unchanged tail should be judged once (deduped), got %d", router.judgeCalls)
+	}
+}
+
+// completed/exited are authoritative terminal states — a settle wait accepts them
+// immediately, with NO model confirmation (the judge must not be consulted).
+func TestPollUntil_SettleExitedAcceptedWithoutJudge(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{status("exited", "process exited")}}
+	deps, router, args := settlePollArgs(reader, 4)
+
+	res := pollUntil(context.Background(), deps, args)
+	if !res.matched || res.attempts != 1 {
+		t.Fatalf("exited should settle immediately, got matched=%v attempts=%d", res.matched, res.attempts)
+	}
+	if router.judgeCalls != 0 {
+		t.Fatalf("a hard terminal state must not consult the finished judge, got %d calls", router.judgeCalls)
+	}
+}
+
+// An EXPLICIT wait condition (not the coerced wait:{}) stays strict and model-free:
+// a deterministic match returns immediately with no latch and no judge call.
+func TestPollUntil_ExplicitConditionUnchangedNoJudge(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{status("waiting", "at prompt")}}
+	r := &routeRouter{}
+	waiting := domain.AgentWaiting
+	args := pollArgs{
+		terminalIDs:  []string{"t1"},
+		wait:         &domain.WatchCondition{StateIs: &waiting},
+		isSettleWait: false, // explicit stateIs:waiting — strict
+		maxAttempts:  4,
+		tailBytes:    4,
+	}
+	res := pollUntil(context.Background(), Deps{Reader: reader, Router: r}, args)
+	if !res.matched || res.attempts != 1 {
+		t.Fatalf("explicit stateIs:waiting should match immediately, got matched=%v attempts=%d", res.matched, res.attempts)
+	}
+	if r.judgeCalls != 0 {
+		t.Fatalf("explicit condition must not consult the finished judge, got %d calls", r.judgeCalls)
+	}
+}
+
+// clockSeq returns a deterministic clock that yields each value once then clamps to
+// the last — seams pollUntil's wall clock so a test can cross extractSettleGraceMS.
+func clockSeq(vals ...int64) func() int64 {
+	i := 0
+	return func() int64 {
+		v := vals[i]
+		if i < len(vals)-1 {
+			i++
+		}
+		return v
+	}
+}
+
+// Grace fallback: an agent NEVER observed working (finished between reads, or a
+// server that never surfaced "working") still settles once the spawn grace elapses —
+// but ONLY because the model confirms it. The grace relaxes the deterministic
+// pre-filter, never the "is it done" check.
+func TestPollUntil_SettleGraceFallbackConfirms(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{status("waiting", "Investigation complete; idle.")}}
+	deps, router, args := settlePollArgs(reader, 5)
+	// startedAt=0; now reaches 20000 (== grace) on attempt 3, relaxing the pre-filter.
+	args.nowFn = clockSeq(0, 0, 10_000, 20_000, 30_000, 40_000)
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.9, Reason: "done"}
+	}
+	res := pollUntil(context.Background(), deps, args)
+	if !res.matched {
+		t.Fatalf("never-seen-working agent should settle via grace+confirm once past grace; attempts=%d", res.attempts)
+	}
+	if res.attempts < 3 {
+		t.Fatalf("must DEFER inside the grace window, matched too early on attempt %d", res.attempts)
+	}
+}
+
+// The grace relaxes the pre-filter but the small model still gates: a never-confirmed
+// agent times out even past the grace (no settle on a timer alone).
+func TestPollUntil_SettleGraceFallbackStillNeedsConfirm(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{status("waiting", "still chugging along…")}}
+	deps, router, args := settlePollArgs(reader, 5)
+	args.nowFn = clockSeq(0, 0, 10_000, 20_000, 30_000, 40_000, 50_000)
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9, Reason: "still mid-task"}
+	}
+	res := pollUntil(context.Background(), deps, args)
+	if res.matched {
+		t.Fatal("grace must not settle an agent the model never confirms finished")
+	}
+}
+
+// resolveBase marks ONLY the coerced wait:{} as the settle default; an explicit,
+// equivalent {"stateIs":"waiting"} stays strict (isSettleWait=false).
+func TestResolveBase_SettleFlag(t *testing.T) {
+	empty, _ := resolveBase(baseArgs{TerminalIDs: []string{"t1"}, Wait: []byte(`{}`)})
+	if empty.wait == nil || !empty.isSettleWait {
+		t.Fatalf("wait:{} should coerce to the settle default with isSettleWait=true, got %+v", empty.wait)
+	}
+	explicit, _ := resolveBase(baseArgs{TerminalIDs: []string{"t1"}, Wait: []byte(`{"stateIs":"waiting"}`)})
+	if explicit.wait == nil || explicit.isSettleWait {
+		t.Fatalf("explicit stateIs:waiting must NOT be treated as the settle default, isSettleWait=%v", explicit.isSettleWait)
+	}
+}

@@ -67,12 +67,32 @@ type ChatResult struct {
 	FinishReason string
 }
 
+// JudgeInput carries the terminal signals fed to the shared yes/no judge. It is a
+// LOCAL mirror of the daemon's judge input (extractionx must not import
+// internal/daemon) so the settle gate can ask the SAME finished-confirmation
+// question the watcher asks, through the same byte-stable prompt and tier.
+type JudgeInput struct {
+	Tier          domain.ModelTier
+	Question      string
+	Goal          string
+	AgentState    string
+	RuntimeStatus string
+	WaitingReason string
+	LastOutputAt  string
+	Tail          string
+}
+
 // Router is the slice of model access this family uses: Chat (text extraction +
-// verdict) and JSON (structured extraction). JSON returns the parsed `result`
-// value (the model emits {"result": <value>}); the caller serializes it.
+// verdict), JSON (structured extraction), and Judge (the shared yes/no terminal
+// judge). JSON returns the parsed `result` value (the model emits {"result":
+// <value>}); the caller serializes it. Judge reaches the IDENTICAL byte-stable
+// judge the watcher engine uses — always on the small tier, fail-soft (a model
+// error degrades to an unmatched, low-confidence answer) — so the extract settle
+// gate and the watcher agree on what "finished" means.
 type Router interface {
 	Chat(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (ChatResult, error)
 	JSON(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (any, error)
+	Judge(ctx context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error)
 }
 
 // Queue is the slice of the attention queue terminal.extract.async publishes to.

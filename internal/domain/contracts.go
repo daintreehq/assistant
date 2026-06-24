@@ -53,6 +53,17 @@ type ModelJudgeAnswer struct {
 	Matched    bool    `json:"matched"`
 }
 
+// FinishedJudgeQuestion is the ONE byte-stable yes/no question that confirms an
+// agent terminal has genuinely finished its turn. A bare agentState=="waiting" is
+// an UNRELIABLE proxy: an agent parks at "waiting" before it picks up the prompt,
+// pauses mid-task, or (the real-world failure mode) gets flipped to "waiting" by
+// Daintree when its window is backgrounded. So the watcher engine AND the
+// terminal.extract settle gate both ask the small model THIS question against the
+// terminal tail before concluding "finished". Shared by internal/daemon
+// (judgeAgentFinished) and internal/tools/extractionx (confirmFinished) so the two
+// consumers cannot drift — the small model is tuned against a single phrasing.
+const FinishedJudgeQuestion = "Has this agent finished its turn and stopped, returning to an idle prompt AFTER doing work? Answer YES only if the most recent output shows the work is complete or the agent has clearly stopped. Answer NO if it is still working, mid-task, paused, or merely parked at a prompt before it has started the work."
+
 // VerificationResult is the read-only completion verification. A legacy blob
 // with old enum values (clean/dirty) must deserialize safely to "unknown" —
 // callers should normalize an unrecognized verdict to VerdictUnknown after

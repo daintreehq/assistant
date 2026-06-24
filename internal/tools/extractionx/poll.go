@@ -16,6 +16,7 @@ type readResult struct {
 	signals      signals
 	combinedTail string // terminal-labelled tail fed to the model
 	finished     bool   // every target terminal exited (or is gone)
+	seenWorking  bool   // every target terminal has been observed working at least once
 }
 
 // readSignals performs one read across all target terminals, folded into a single
@@ -87,6 +88,13 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 			}
 		} else {
 			out, ms := nextOutputState(prev, tail, now)
+			// Latch the settle gate the first time this agent is seen working — a
+			// "waiting" that follows working is a real settle; a "waiting" before it has
+			// ever worked is the pre-start prompt (or a backgrounded window) and must NOT
+			// end the poll.
+			if agentState == string(domain.AgentWorking) {
+				out.seenWorking = true
+			}
 			states[id] = &out
 			if ms < int64(minMsSinceOutput) {
 				minMsSinceOutput = int(ms)
@@ -130,6 +138,16 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		ms = int64(minMsSinceOutput)
 	}
 
+	// Aggregate the settle latch: only honor a settle once EVERY target has been seen
+	// working at least once (a single not-yet-started target keeps the poll going).
+	seenWorkingAll := len(terminalIDs) > 0
+	for _, id := range terminalIDs {
+		if st := states[id]; st == nil || !st.seenWorking {
+			seenWorkingAll = false
+			break
+		}
+	}
+
 	return readResult{
 		signals: signals{
 			AgentState:    agentState,
@@ -140,6 +158,7 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		},
 		combinedTail: strings.Join(labelled, "\n\n"),
 		finished:     allExited,
+		seenWorking:  seenWorkingAll,
 	}
 }
 
@@ -151,6 +170,19 @@ type pollResult struct {
 	finished     bool
 }
 
+// extractSettleGraceMS mirrors the watcher's spawn grace: if a working tick is
+// never observed (an agent that finished between two reads, or a server that never
+// surfaced "working"), accept a stable settle after this long so the poll can't
+// stall until maxAttempts waiting for a transition it already missed. The model
+// finished-confirmation still gates acceptance, so the grace only relaxes the
+// deterministic pre-filter, never the "is it actually done" check.
+const extractSettleGraceMS = 20_000
+
+// maxSettleJudgeCalls bounds the finished confirmation per poll so a tail that
+// repaints every tick (defeating the hash dedupe) cannot burn one small-model call
+// on every attempt.
+const maxSettleJudgeCalls = 6
+
 // pollArgs bundles the poll-loop inputs.
 type pollArgs struct {
 	terminalIDs    []string
@@ -158,27 +190,100 @@ type pollArgs struct {
 	pollIntervalMs int
 	maxAttempts    int
 	tailBytes      int
+	// nowFn seams the wall clock for tests (the settle grace is time-based). nil ⇒
+	// time.Now().UnixMilli. Production never sets it.
+	nowFn func() int64
+	// isSettleWait is set ONLY when wait is the coerced wait:{} settled default
+	// (waiting/completed/exited). For that case a deterministic match is NOT enough:
+	// a "waiting" agent must also pass the seenWorking/grace pre-filter and a
+	// small-model finished confirmation before the poll resolves. Explicit conditions
+	// (contains/regex/noOutputForMs/an explicit stateIs) stay strict and model-free.
+	isSettleWait bool
 }
 
 // pollUntil reads once, or polls until `wait` is met (or attempts are exhausted).
 // Without a `wait` condition it reads a single time and reports matched=true. The
 // loop is hard-capped by maxAttempts so a never-satisfied condition cannot hang.
 // A cancelled ctx stops polling immediately (reports matched=false).
+//
+// For the coerced settle wait (isSettleWait), a deterministic "waiting" match does
+// NOT resolve the poll on its own — `waiting` is an unreliable proxy for "finished"
+// (an agent flips to waiting when paused mid-task or when its window is
+// backgrounded). The settle is honored only when the agent has been seen working
+// (or the spawn grace elapsed) AND the small model confirms, on the tail, that it
+// genuinely finished. completed/exited are authoritative and accepted immediately.
 func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 	states := make(map[string]*terminalState)
 	attempts := 0
 	var read *readResult
+	nowMS := args.nowFn
+	if nowMS == nil {
+		nowMS = func() int64 { return time.Now().UnixMilli() }
+	}
+	startedAt := nowMS()
+	// lastJudgedHash dedupes the finished confirmation: a temperature-0 judge gives
+	// the same verdict for an unchanged tail, so we don't re-ask about a tail we
+	// already got a CONFIDENT not-finished on. A changed tail clears it implicitly.
+	var lastJudgedHash string
+	// judgeCalls caps the finished confirmation so a CHURNING tail (which busts the
+	// hash dedupe every tick) can't burn a model call on every one of up to
+	// maxAttempts (120) polls. Past the cap the settle simply times out — the agent
+	// wasn't confirmed done, which is the correct, safe outcome.
+	judgeCalls := 0
 
 	for attempts < args.maxAttempts {
 		if ctx.Err() != nil {
 			break
 		}
 		attempts++
-		r := readSignals(ctx, deps, args.terminalIDs, args.tailBytes, states, time.Now().UnixMilli())
+		now := nowMS()
+		r := readSignals(ctx, deps, args.terminalIDs, args.tailBytes, states, now)
 		read = &r
-		if args.wait == nil || evaluateCondition(*args.wait, r.signals) {
+
+		matched := func() bool {
+			if args.wait == nil {
+				return true // read-once
+			}
+			if !evaluateCondition(*args.wait, r.signals) {
+				return false
+			}
+			if !args.isSettleWait {
+				return true // explicit condition: a deterministic match is authoritative
+			}
+			// Coerced settle wait. completed/exited are authoritative terminal states —
+			// accept immediately. Only the soft "waiting" needs confirmation.
+			if r.signals.AgentState != string(domain.AgentWaiting) {
+				return true
+			}
+			// Pre-filter: the agent must have been seen working (or the grace elapsed)
+			// so a pre-start prompt / backgrounded window doesn't read as done. On the
+			// FINAL attempt the grace is bypassed so a short poll budget (maxAttempts *
+			// pollIntervalMs < the 20s grace) can still confirm a fast-finishing agent
+			// that was never observed "working" — the model confirmation still gates it.
+			if !r.seenWorking && now-startedAt < extractSettleGraceMS && attempts < args.maxAttempts {
+				return false
+			}
+			h := hashTail(r.combinedTail)
+			if h == lastJudgedHash {
+				return false // already got a confident not-finished on this exact tail
+			}
+			if judgeCalls >= maxSettleJudgeCalls {
+				return false // churn cap reached — stop re-judging, let the poll time out
+			}
+			fin, confident := confirmFinished(ctx, deps, &r)
+			judgeCalls++
+			if fin {
+				return true
+			}
+			if confident {
+				lastJudgedHash = h // confident NO — skip re-judging an identical tail
+			}
+			return false
+		}()
+		if matched {
 			return pollResult{matched: true, attempts: attempts, combinedTail: r.combinedTail, finished: r.finished}
 		}
+
 		if attempts < args.maxAttempts && args.pollIntervalMs > 0 {
 			delay(ctx, args.pollIntervalMs)
 		}
