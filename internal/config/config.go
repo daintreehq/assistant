@@ -45,8 +45,9 @@ var DEFAULTS = struct {
 	DefaultMcpURL    string
 }{
 	FireworksBaseURL: "https://api.fireworks.ai/inference/v1",
-	LargeModel:       "accounts/fireworks/models/glm-5p2",
-	MediumModel:      "accounts/fireworks/models/glm-5p2",
+	// EXPERIMENT: all tiers on DeepSeek V4 Flash (was glm-5p2 for large/medium).
+	LargeModel:       "accounts/fireworks/models/deepseek-v4-flash",
+	MediumModel:      "accounts/fireworks/models/deepseek-v4-flash",
 	SmallModel:       "accounts/fireworks/models/deepseek-v4-flash",
 	// Declared but NOT applied as a default for mcpUrl; mcpUrl is left empty when
 	// unset → degraded local mode.

@@ -91,14 +91,14 @@ func TestRetryModelCallStopsOnNonRetriable(t *testing.T) {
 }
 
 func TestEstimateCostUsd(t *testing.T) {
-	// glm-5p2: input 0.55, output 2.19 per M. 1000 prompt (200 cached), 500 output.
+	// glm-5p2: input 1.40, cached 0.26, output 4.40 per M. 1000 prompt (200 cached), 500 output.
 	cost, ok := EstimateCostUsd("accounts/fireworks/models/glm-5p2", 1000, 500, 200)
 	if !ok {
 		t.Fatal("expected a known rate")
 	}
-	// fresh=800 → 800*0.55 + 200*0.55*0.5 = 440 + 55 = 495 ; out = 500*2.19 = 1095
-	// total = 1590 / 1e6 = 0.00159
-	want := (800*0.55 + 200*0.55*0.5 + 500*2.19) / 1_000_000
+	// fresh=800 → 800*1.40 + 200*0.26 + 500*4.40 = 1120 + 52 + 2200 = 3372
+	// total = 3372 / 1e6 = 0.003372
+	want := (800*1.40 + 200*0.26 + 500*4.40) / 1_000_000
 	if diff := cost - want; diff > 1e-12 || diff < -1e-12 {
 		t.Fatalf("cost = %v, want %v", cost, want)
 	}

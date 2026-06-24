@@ -35,14 +35,14 @@ func TestEstimateCostUsdMatrix(t *testing.T) {
 			want: 0.3, tol: 1e-6, wantOK: true,
 		},
 		{
-			name:  "cached prompt tokens half-discounted",
+			name:  "cached prompt tokens at cached rate",
 			model: "minimax-m3", prompt: 1_000_000, completion: 0, cached: 1_000_000,
-			want: 0.15, tol: 1e-6, wantOK: true, // 1M*0.30*0.5
+			want: 0.06, tol: 1e-6, wantOK: true, // 1M*0.06
 		},
 		{
 			name:  "cached clamped to prompt total (no negative fresh cost)",
 			model: "minimax-m3", prompt: 100, completion: 0, cached: 1_000,
-			want: (100 * 0.3 * 0.5) / 1_000_000, tol: 1e-9, wantOK: true,
+			want: (100 * 0.06) / 1_000_000, tol: 1e-9, wantOK: true,
 		},
 	}
 	for _, c := range cases {
