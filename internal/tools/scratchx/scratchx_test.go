@@ -1,6 +1,7 @@
 package scratchx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -203,6 +204,27 @@ func TestKeyCapEnforced(t *testing.T) {
 	}
 }
 
+// TestKeyCapFreedByDelete proves deleting a key at the cap frees a slot for a new
+// one (the cap counts live keys, checked after a delete reduces the count).
+func TestKeyCapFreedByDelete(t *testing.T) {
+	s := NewStore()
+	id, _ := s.Create("s")
+	for i := 0; i < maxKeys; i++ {
+		if err := s.Set(id, fmt.Sprintf("k%d", i), json.RawMessage(`1`)); err != nil {
+			t.Fatalf("Set %d: %v", i, err)
+		}
+	}
+	if err := s.Set(id, "extra", json.RawMessage(`1`)); !errors.Is(err, ErrKeysFull) {
+		t.Fatalf("Set at cap err = %v, want ErrKeysFull", err)
+	}
+	if err := s.Delete(id, "k0"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := s.Set(id, "extra", json.RawMessage(`1`)); err != nil {
+		t.Errorf("Set after Delete = %v, want nil (slot freed)", err)
+	}
+}
+
 // --- Cross-session isolation ---
 
 func TestStoresAreIndependent(t *testing.T) {
@@ -321,6 +343,49 @@ func TestToolGetAllKeys(t *testing.T) {
 	}
 }
 
+// TestToolRoundTripPreservesRawJSONBytes proves the store is byte-faithful, not
+// just semantically equal: unusual key order, number formatting, and in-string
+// whitespace survive a set/get round-trip exactly (modulo the decoder's
+// between-token whitespace compaction, which json.Compact models).
+func TestToolRoundTripPreservesRawJSONBytes(t *testing.T) {
+	store := NewStore()
+	ts := Tools(Deps{Store: store})
+	set := toolByName(t, ts, "scratch.set")
+	get := toolByName(t, ts, "scratch.get")
+	id, _ := store.Create("s")
+
+	values := []string{`{"z":2,"a":1.00e+0}`, `"  spaced \t value  "`, `[3,2,1]`}
+	for i, v := range values {
+		key := fmt.Sprintf("k%d", i)
+		run(t, set, fmt.Sprintf(`{"storeId":%q,"key":%q,"value":%s}`, id, key, v))
+		gm := resultMap(t, run(t, get, fmt.Sprintf(`{"storeId":%q,"key":%q}`, id, key)))
+		raw, _ := gm["value"].(json.RawMessage)
+		var want bytes.Buffer
+		if err := json.Compact(&want, []byte(v)); err != nil {
+			t.Fatalf("compact %s: %v", v, err)
+		}
+		if string(raw) != want.String() {
+			t.Errorf("value %d round-trip = %s, want byte-exact %s", i, raw, want.String())
+		}
+	}
+}
+
+// TestToolGetExplicitEmptyKeyIsGetAll: an explicit "key":"" is the whole-store read
+// (not INVALID_ARGS) — scratch.set rejects empty keys, so "" can never name a real
+// entry, which is why the get overload treats it as "no key given".
+func TestToolGetExplicitEmptyKeyIsGetAll(t *testing.T) {
+	store := NewStore()
+	ts := Tools(Deps{Store: store})
+	get := toolByName(t, ts, "scratch.get")
+	id, _ := store.Create("s")
+	_ = store.Set(id, "a", json.RawMessage(`1`))
+
+	m := resultMap(t, run(t, get, fmt.Sprintf(`{"storeId":%q,"key":""}`, id)))
+	if count, _ := m["count"].(int); count != 1 {
+		t.Errorf("explicit empty key count = %v, want 1 (whole-store read)", m["count"])
+	}
+}
+
 func TestToolDeleteAndDrop(t *testing.T) {
 	store := NewStore()
 	ts := Tools(Deps{Store: store})
@@ -414,9 +479,12 @@ func TestDecodeRejectsBadArgs(t *testing.T) {
 	create := toolByName(t, ts, "scratch.create")
 	set := toolByName(t, ts, "scratch.set")
 	get := toolByName(t, ts, "scratch.get")
+	del := toolByName(t, ts, "scratch.delete")
+	drop := toolByName(t, ts, "scratch.drop")
 
 	bigName := strings.Repeat("x", maxNameRunes+1)
 	bigKey := strings.Repeat("k", maxKeyRunes+1)
+	bigID := strings.Repeat("i", maxIDRunes+1)
 	bigVal := `"` + strings.Repeat("v", maxValueRunes) + `"` // quotes push it over the rune cap
 
 	cases := []struct {
@@ -433,6 +501,13 @@ func TestDecodeRejectsBadArgs(t *testing.T) {
 		{set, `{"storeId":"scr_x","key":"` + bigKey + `","value":1}`, "key over cap"},
 		{set, `{"storeId":"scr_x","key":"k","value":` + bigVal + `}`, "value over cap"},
 		{get, `{}`, "missing required storeId"},
+		{del, `{"storeId":"scr_x"}`, "delete missing required key"},
+		{del, `{"storeId":"","key":"k"}`, "delete empty storeId"},
+		{del, `{"storeId":"scr_x","key":""}`, "delete empty key"},
+		{del, `{"storeId":"scr_x","key":"` + bigKey + `"}`, "delete key over cap"},
+		{drop, `{}`, "drop missing required storeId"},
+		{drop, `{"storeId":""}`, "drop empty storeId"},
+		{drop, `{"storeId":"` + bigID + `"}`, "drop storeId over cap"},
 	}
 	for _, c := range cases {
 		if err := decodeErr(c.tool, c.args); err == nil {
