@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/daemon"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
@@ -18,6 +19,7 @@ import (
 // and refreshes the session's runtime context.
 func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Connect(ctx)
+	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
@@ -26,9 +28,43 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 // ReconnectMcp re-establishes the transport.
 func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Reconnect(ctx)
+	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
+}
+
+// logMcpCredentials dumps the RAW Daintree MCP URL and bearer token to the debug log on
+// every (re)connect, so a developer can replay MCP calls by hand — e.g. curl the same
+// endpoint that terminal.extract hits — and see the real server responses while chasing
+// the extract breakage. It deliberately writes the UNREDACTED token (the whole point is to
+// reuse it).
+//
+// TODO: remove this method and its two call sites above once the terminal.extract
+// investigation is closed — it is a temporary debug aid, not a permanent feature.
+//
+// It is doubly gated: it only writes when full debug logging is already enabled
+// (DAINTREE_ASSISTANT_DEBUG_LOG=1) and only into the 0600 per-session log under
+// ~/.daintree/logs. The line's `note` field flags it as temporary so it stays greppable.
+func (a *App) logMcpCredentials(st mcp.Status) {
+	url := a.Config.McpURL
+	if url == "" {
+		url = st.URL // fall back to the resolved/connected URL
+	}
+	if url == "" && a.Config.McpToken == "" {
+		return // nothing to replay against — don't emit a useless line
+	}
+	debuglog.LogDebug(
+		debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		"mcp.credentials",
+		map[string]any{
+			"note":      "TODO: temporary debug — remove this. Raw Daintree MCP URL + bearer token so calls can be replayed by hand to debug terminal.extract.",
+			"url":       url,
+			"token":     a.Config.McpToken,
+			"connected": st.Connected,
+			"transport": st.Transport,
+		},
+	)
 }
 
 // warnOnDrift emits ONE rollup log line when the live server advertises fewer
