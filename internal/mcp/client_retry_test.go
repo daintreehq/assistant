@@ -128,4 +128,27 @@ func TestCallToolRetriesExhaustBudget(t *testing.T) {
 	}
 }
 
+// TestCallToolCancelledDoesNotDegrade: a caller-cancelled CallTool surfaces the error
+// WITHOUT degrading the connection (isAborted matches context.Canceled, the degrade path
+// is `!aborted`). This is the exact contract the startup-context reads rely on — they
+// bound themselves with a CANCEL (not context.WithTimeout) so a slow agentSettings.get /
+// worktree.getCurrent can never tear down a just-established connection. Contrast
+// TestCallToolNonTransientNotRetried, where a non-abort error DOES degrade — which is
+// why a DeadlineExceeded would be wrong for a best-effort startup read.
+func TestCallToolCancelledDoesNotDegrade(t *testing.T) {
+	low := &fakeLow{callErrs: []error{context.Canceled}}
+	c := newInjected(low)
+	c.Connect(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller abort
+
+	if _, err := c.CallTool(ctx, "agentSettings.get", nil, CallOptions{}); err == nil {
+		t.Fatal("expected the cancelled call to surface an error")
+	}
+	if !c.IsConnected() {
+		t.Error("a cancelled (aborted) CallTool must NOT degrade the connection")
+	}
+}
+
 func testCfg() config.AppConfig { return config.AppConfig{McpURL: "http://x/mcp", McpToken: "t"} }

@@ -18,6 +18,13 @@ type MainPromptContext struct {
 	LargeModel     string
 	SmallModel     string
 	ActiveWorktree string // "" → the unknown fallback
+	// ConfiguredAgentIDs is the user-configured Daintree agent roster (agentSettings.get),
+	// surfaced at startup so the model can name a real agent up front instead of guessing
+	// one that agent.launch won't validate (a guessed id spawns a dead, silent terminal).
+	// It is the CONFIGURED subset, NOT Daintree's full installed catalog, so the rendered
+	// line says so; empty → the line is omitted. Lives in message[1], never the cached
+	// base prefix, so a roster refresh surfaces on the next RefreshRuntimeContext.
+	ConfiguredAgentIDs []string
 	// SchedulerActive is false on one-shot / non-interactive paths, where timers
 	// and watchers are persisted but dormant.
 	SchedulerActive bool
@@ -65,9 +72,14 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 		"Project path: " + ctx.ProjectPath,
 		"Project id: " + projectID,
 		"Active worktree: " + activeWorktree,
-		"Daintree MCP: " + ctx.MCPStatusLine,
-		"Models: large=" + ctx.LargeModel + ", small=" + ctx.SmallModel,
 	}
+	if line := configuredAgentsLine(ctx.ConfiguredAgentIDs); line != "" {
+		lines = append(lines, line)
+	}
+	lines = append(lines,
+		"Daintree MCP: "+ctx.MCPStatusLine,
+		"Models: large="+ctx.LargeModel+", small="+ctx.SmallModel,
+	)
 	if !ctx.MCPConnected {
 		lines = append(lines, "NOTE: Daintree MCP is NOT connected. You are in degraded local mode: fs/timer/watcher/queue tools work, but Daintree orchestration tools will fail until a connection is provided. Tell the user clearly rather than pretending.")
 	}
@@ -94,6 +106,29 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 		)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// configuredAgentsLine renders the configured-agents roster line for message[1], or ""
+// when none are configured (the line is then simply omitted rather than misleadingly
+// claiming an empty roster). The framing matches the spawn gate's actual behavior:
+// agentTask.spawnForEdits (the only spawn path) accepts exactly the ids in this roster
+// and rejects others, so naming a configured id up front is what avoids a failed spawn.
+// agentSettings.get returns only the user-CONFIGURED subset, so the line notes other
+// installed agents must be configured first rather than implying this is Daintree's full
+// catalog. Each id is flattened (a raw newline would inject a stray heading into
+// message[1]), mirroring the pinned-memory / session-ended-watcher flattening.
+func configuredAgentsLine(ids []string) string {
+	flat := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := flattenLine(id); s != "" {
+			flat = append(flat, s)
+		}
+	}
+	if len(flat) == 0 {
+		return ""
+	}
+	return "Configured agents: " + strings.Join(flat, ", ") +
+		" — the user-configured Daintree roster that agentTask.spawnForEdits accepts (it rejects ids not configured here). Name one of these to spawn an agent; other installed agents must be configured first."
 }
 
 // sessionEndedWatchersNote renders the one-time "the prior session ended and these

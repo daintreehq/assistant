@@ -112,6 +112,17 @@ type App struct {
 	noteMu                   sync.Mutex
 	sessionEndedWatchers     []string
 	sessionEndedNoteConsumed bool
+
+	// rosterMu guards the startup-context cache: the configured-agents roster and the
+	// current worktree label, both surfaced in message[1]. They are fetched once per
+	// MCP (re)connect by refreshStartupContext (under the boot/reconnect goroutine) and
+	// read by PromptContext on agent/tool goroutines, so — exactly like cfgMu — the
+	// write and those reads must be serialized. RWMutex because reads (one per turn-
+	// context rebuild) vastly outnumber writes (one per connect). NEVER nest it with
+	// cfgMu: PromptContext takes them sequentially, never one inside the other.
+	rosterMu             sync.RWMutex
+	cachedAgentIDs       []string
+	cachedActiveWorktree string
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
