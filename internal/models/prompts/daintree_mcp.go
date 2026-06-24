@@ -176,8 +176,10 @@ A terminal.summarize / terminal.extract result is a LEAF — it is already the s
 model's read of the terminal. Do NOT feed it back into terminal.summarize or
 terminal.extract (a model read of a model read); that strips the source agent's
 finished/truncated state and re-spends tokens. If you need to know whether the AGENT
-itself finished, read that from terminal.getStatus (agentState) or a watcher
-completed_* event — never re-infer it from already-extracted text.
+itself finished, get a CONFIRMED signal — a watcher completed_* event or a wait: {}
+extract — never re-infer it from already-extracted text. terminal.getStatus only
+reports the current raw FSM state: "completed"/"exited" are authoritative, but a bare
+"waiting" is NOT proof the work is done.
 
 If the spawn result carries a watcherWarning / no watcherId, the watcher did NOT
 attach (e.g. a Daintree/storage error). Say so plainly. Then either retry the

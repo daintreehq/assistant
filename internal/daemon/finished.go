@@ -34,16 +34,23 @@ func judgeAgentFinished(ctx *CheckContext, rec domain.WatcherRecord, signals Wat
 // finishJudgeCooldownMS bounds how often the finished judge runs for one terminal.
 // The supervisor cadence is ~3s, so without a floor a parked explore agent whose
 // tail keeps repainting (a spinner, an elapsed-time counter, an ANSI cursor redraw)
-// would defeat the tail-hash dedupe and burn a small-model call every tick. The
-// cooldown caps that to ~once per window regardless of tail churn; completion is
-// still detected within one window. It also gates the absent-path terminal.getOutput
-// read so a stable, idle-but-not-finished agent isn't re-read every tick.
+// would burn a small-model call every tick. The cooldown caps that to ~once per
+// window regardless of tail churn; completion is still detected within one window. It
+// also gates the absent-path terminal.getOutput read so a stable, idle-but-not-
+// finished agent isn't re-read every tick.
+//
+// We deliberately do NOT also dedupe on the tail hash here (the extract poll does,
+// safely). The WATCHER judge's prompt includes lastOutputAt (the silence duration),
+// which keeps GROWING while the tail bytes stay identical — so a byte-stable tail can
+// legitimately flip from "not finished" to "finished" as the agent goes quiet. A
+// permanent tail-hash latch would suppress that flip forever and strand a genuinely
+// finished agent until timeout; re-judging each cooldown window catches it.
 const finishJudgeCooldownMS = 15_000
 
 // finishJudgeOnCooldown reports whether the finished judge ran recently enough that
 // we should skip even READING the tail this tick (used by the absent path, whose
 // tail read is an MCP round-trip). LastFinishJudgeAt advances every time the judge
-// actually runs, so this self-clears once the window elapses.
+// runs, so this self-clears once the window elapses.
 func finishJudgeOnCooldown(prevState *TerminalState, now int64) bool {
 	return prevState != nil && prevState.LastFinishJudgeAt != 0 &&
 		now-prevState.LastFinishJudgeAt < finishJudgeCooldownMS
@@ -51,48 +58,26 @@ func finishJudgeOnCooldown(prevState *TerminalState, now int64) bool {
 
 // confirmExploreFinished gates an explore agent's apparent settle (it is sitting at
 // "waiting" after exploreSettledComplete already passed the deterministic
-// SeenWorking/grace pre-filter) behind the small-model finished judge, throttled two
-// ways so it can't burn tokens on a hot tick:
-//   - COOLDOWN: skip entirely (no model) if the judge ran within finishJudgeCooldownMS
-//     — bounds a churning tail and a stable parked tail alike to ~once per window.
-//   - HASH LATCH: past the cooldown, if the tail is byte-identical to one we already
-//     got a CONFIDENT not-finished on (FinishJudgeKey), skip the model — the verdict
-//     can't change for an unchanged tail at temperature 0.
-//
-// LastFinishJudgeAt advances on every PAST-cooldown invocation (judge or hash-skip),
-// so the absent path's read gate (finishJudgeOnCooldown) also stays fresh and stops
-// re-reading a stable tail. A confident not-finished latches FinishJudgeKey; a
-// transient model error (confidence below the floor) does NOT latch, so it retries
-// after the next cooldown. Returns (finished, usedModel, answer).
+// SeenWorking/grace pre-filter) behind the small-model finished judge, throttled by a
+// cooldown so it can't burn tokens on a hot tick: within finishJudgeCooldownMS of the
+// last judge we skip entirely (no model). Past the cooldown we re-judge — even on a
+// byte-identical tail — because the judge's lastOutputAt input keeps changing, so the
+// verdict can flip as the agent goes quiet. LastFinishJudgeAt advances on every judge
+// so the absent path's read gate also stays fresh. Returns (finished, usedModel,
+// answer); a transient model error / low confidence simply reports not-finished and
+// retries after the next cooldown.
 func confirmExploreFinished(
 	ctx *CheckContext, rec domain.WatcherRecord, signals WatcherSignals,
-	prevState *TerminalState, outHash string, perTerminal map[string]TerminalState, terminalID string, now int64,
+	prevState *TerminalState, perTerminal map[string]TerminalState, terminalID string, now int64,
 ) (finished bool, usedModel bool, answer domain.ModelJudgeAnswer) {
 	if finishJudgeOnCooldown(prevState, now) {
 		return false, false, domain.ModelJudgeAnswer{}
 	}
-	// Past the cooldown — we are doing a check; advance the timer regardless of how it
-	// resolves so the next window is honored (and the absent read gate self-clears).
+	ans, ok := judgeAgentFinished(ctx, rec, signals)
 	base := perTerminal[terminalID]
 	base.LastFinishJudgeAt = now
 	perTerminal[terminalID] = base
-
-	if prevState != nil && prevState.FinishJudgeKey != "" && prevState.FinishJudgeKey == outHash {
-		// Stable tail already confidently judged not-finished; skip the model call.
-		return false, false, domain.ModelJudgeAnswer{}
-	}
-	ans, ok := judgeAgentFinished(ctx, rec, signals)
-	if ok {
-		return true, true, ans
-	}
-	// Latch ONLY a confident not-finished so a model blip (fallback confidence 0)
-	// retries after the cooldown instead of permanently latching this tail.
-	if ans.Confidence >= judgeConfidenceFloor {
-		base = perTerminal[terminalID]
-		base.FinishJudgeKey = outHash
-		perTerminal[terminalID] = base
-	}
-	return false, true, ans
+	return ok, true, ans
 }
 
 // finishedEvidence folds a judge answer's reason into a one-line evidence string,

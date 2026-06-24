@@ -62,7 +62,7 @@ type ModelJudgeAnswer struct {
 // terminal tail before concluding "finished". Shared by internal/daemon
 // (judgeAgentFinished) and internal/tools/extractionx (confirmFinished) so the two
 // consumers cannot drift — the small model is tuned against a single phrasing.
-const FinishedJudgeQuestion = "Has this agent finished its turn and stopped, returning to an idle prompt AFTER doing work? Answer YES only if the most recent output shows the work is complete or the agent has clearly stopped. Answer NO if it is still working, mid-task, paused, or merely parked at a prompt before it has started the work."
+const FinishedJudgeQuestion = "Has this agent COMPLETED its turn — finished the work and returned to an idle prompt? Answer YES only when the most recent output shows the work is actually done: a final answer, a summary, or a clear completion/sign-off. Answer NO if it is still working, mid-task, paused, or merely sitting at a prompt. A bare 'waiting' state, an idle prompt, or silence ALONE is never proof of completion — there must be visible evidence the work itself finished."
 
 // VerificationResult is the read-only completion verification. A legacy blob
 // with old enum values (clean/dirty) must deserialize safely to "unknown" —

@@ -141,6 +141,15 @@ func resolveBase(b baseArgs) (resolvedBase, string) {
 			r.wait = &w
 		}
 	}
+	// A settle wait keys on a SINGLE agent's state (the aggregate agentState is
+	// unset for multiple terminals, so settledWait could never match and the call
+	// would silently run to maxAttempts). Reject it with guidance rather than waste
+	// the budget — issue one waited extract per terminal instead. Explicit
+	// content waits (contains/regex) DO work across terminals (they match the
+	// combined tail), so this only gates the coerced settle default.
+	if r.isSettleWait && len(b.TerminalIDs) > 1 {
+		return resolvedBase{}, "wait: {} waits for ONE agent to finish and cannot span multiple terminals — issue one terminal.extract per terminal (in parallel), each with its own wait: {}."
+	}
 	return r, ""
 }
 
@@ -176,7 +185,7 @@ var sharedExtractProps = `
     "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "Daintree terminal id(s) to read and extract from." },
     "format": { "type": "string", "enum": ["text", "json"], "description": "Output shape: plain text, or structured JSON (needs jsonSchema)." },
     "jsonSchema": { "type": "string", "description": "When format=json, a description/JSON-Schema of the value to extract." },
-    "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent has genuinely FINISHED its turn: a bare 'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), so {} requires a real working->waiting transition AND a small-model confirmation on the tail before it resolves — it will not return on a momentary idle. completed/exited resolve immediately. Omit to read once." },
+    "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent has genuinely FINISHED its turn: a bare 'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), so {} prefers a real working->waiting transition (or a stable idle past a short grace if one was never seen) and ALWAYS confirms with a small-model check on the tail before it resolves — it will not return on a momentary idle. completed/exited resolve immediately. {} is single-terminal (one agent's state); for several terminals issue one waited extract each. Omit to read once." },
     "pollIntervalMs": { "type": "number", "description": "Delay between polls in wait mode, in ms (default 2000)." },
     "maxAttempts": { "type": "number", "description": "Hard cap on poll attempts (default 30, max 120)." },
     "tailBytes": { "type": "number", "description": "Max characters of each terminal's tail fed to the model." },

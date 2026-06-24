@@ -178,10 +178,11 @@ type pollResult struct {
 // deterministic pre-filter, never the "is it actually done" check.
 const extractSettleGraceMS = 20_000
 
-// maxSettleJudgeCalls bounds the finished confirmation per poll so a tail that
-// repaints every tick (defeating the hash dedupe) cannot burn one small-model call
-// on every attempt.
-const maxSettleJudgeCalls = 6
+// settleJudgeCooldownMS RATE-limits the finished confirmation so a tail that repaints
+// every tick (defeating the hash dedupe) cannot burn one small-model call on every
+// attempt. It is a cooldown, NOT a hard cap: a later "done" tail past the window is
+// always still judged, so a real completion is never starved into a false timeout.
+const settleJudgeCooldownMS = 5_000
 
 // pollArgs bundles the poll-loop inputs.
 type pollArgs struct {
@@ -225,11 +226,9 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 	// the same verdict for an unchanged tail, so we don't re-ask about a tail we
 	// already got a CONFIDENT not-finished on. A changed tail clears it implicitly.
 	var lastJudgedHash string
-	// judgeCalls caps the finished confirmation so a CHURNING tail (which busts the
-	// hash dedupe every tick) can't burn a model call on every one of up to
-	// maxAttempts (120) polls. Past the cap the settle simply times out — the agent
-	// wasn't confirmed done, which is the correct, safe outcome.
-	judgeCalls := 0
+	// lastJudgeAt rate-limits the finished confirmation (settleJudgeCooldownMS) so a
+	// churning tail can't judge on every poll, without ever starving a later "done".
+	var lastJudgeAt int64
 
 	for attempts < args.maxAttempts {
 		if ctx.Err() != nil {
@@ -263,15 +262,18 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 			if !r.seenWorking && now-startedAt < extractSettleGraceMS && attempts < args.maxAttempts {
 				return false
 			}
+			if strings.TrimSpace(r.combinedTail) == "" {
+				return false // no evidence yet — nothing to judge, don't spend a model call
+			}
 			h := hashTail(r.combinedTail)
 			if h == lastJudgedHash {
 				return false // already got a confident not-finished on this exact tail
 			}
-			if judgeCalls >= maxSettleJudgeCalls {
-				return false // churn cap reached — stop re-judging, let the poll time out
+			if lastJudgeAt != 0 && now-lastJudgeAt < settleJudgeCooldownMS {
+				return false // rate-limit: a churning tail re-judges at most once per window
 			}
 			fin, confident := confirmFinished(ctx, deps, &r)
-			judgeCalls++
+			lastJudgeAt = now
 			if fin {
 				return true
 			}

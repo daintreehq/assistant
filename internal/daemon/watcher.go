@@ -356,8 +356,7 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 					if read := readOutput(ctx, terminalID); read.Ok {
 						signals.Tail = read.Value
 					}
-					outHash := hashTail(signals.Tail)
-					finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, outHash, perTerminal, terminalID, now)
+					finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, perTerminal, terminalID, now)
 					if !finished {
 						ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, awaiting finish confirmation; terminal.list)", parens(listed.WaitingReason))}
 						if e := finishedEvidence("judge", ans); e != "" {
@@ -485,7 +484,7 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 				// it is done. So confirm with the small model on the tail before declaring
 				// completion; a not-finished verdict returns a NON-terminal ClassNoChange so
 				// the watcher re-arms instead of falsely stopping. Deduped on the tail hash.
-				finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, outHash, perTerminal, terminalID, now)
+				finished, usedModel, ans := confirmExploreFinished(ctx, rec, signals, prevState, perTerminal, terminalID, now)
 				if !finished {
 					ev := []string{fmt.Sprintf("agentState=waiting%s (explore-idle, awaiting finish confirmation)", parens(waitingReason))}
 					if e := finishedEvidence("judge", ans); e != "" {

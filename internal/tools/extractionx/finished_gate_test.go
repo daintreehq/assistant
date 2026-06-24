@@ -2,6 +2,7 @@ package extractionx
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -185,6 +186,49 @@ func TestPollUntil_SettleGraceFallbackStillNeedsConfirm(t *testing.T) {
 	}
 }
 
+// Short poll budget (maxAttempts * pollIntervalMs < the 20s grace) with an agent
+// never observed working: the FINAL attempt bypasses the grace pre-filter so the
+// model can still confirm a fast-finishing agent within the budget.
+func TestPollUntil_SettleFinalAttemptBypassesGrace(t *testing.T) {
+	reader := &seqReader{seq: []StatusReadResult{status("waiting", "Done — wrote the note.")}}
+	deps, router, args := settlePollArgs(reader, 3)
+	args.nowFn = clockSeq(0, 1, 2, 3) // never crosses the 20s grace
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.9}
+	}
+	res := pollUntil(context.Background(), deps, args)
+	if !res.matched || res.attempts != 3 {
+		t.Fatalf("never-seen-working agent on a short budget should confirm on the final attempt (grace bypass), got matched=%v attempts=%d", res.matched, res.attempts)
+	}
+}
+
+// A churning tail must never STARVE a real completion: once a later tail reads as
+// done (past the rate-limit cooldown), it is judged and the poll resolves — the
+// throttle is a rate limit, not a hard cap.
+func TestPollUntil_ChurningTailStillConfirmsWhenDone(t *testing.T) {
+	// 4-char tails (== tailBytes) so each is seen whole and they CHURN (distinct hashes).
+	reader := &seqReader{seq: []StatusReadResult{
+		status("working", "GOGO"),
+		status("waiting", "AAAA"),
+		status("waiting", "BBBB"),
+		status("waiting", "CCCC"),
+		status("waiting", "DONE"),
+	}}
+	deps, router, args := settlePollArgs(reader, 8)
+	// Advance well past the 5s cooldown each tick so every distinct tail is judged.
+	args.nowFn = clockSeq(0, 1000, 8000, 16000, 24000, 32000, 40000, 48000, 56000)
+	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
+		if strings.Contains(in.Tail, "DONE") {
+			return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.9}
+		}
+		return domain.ModelJudgeAnswer{Matched: false, Confidence: 0.9}
+	}
+	res := pollUntil(context.Background(), deps, args)
+	if !res.matched {
+		t.Fatal("a completion after several churned not-finished tails must still be confirmed (no starvation)")
+	}
+}
+
 // resolveBase marks ONLY the coerced wait:{} as the settle default; an explicit,
 // equivalent {"stateIs":"waiting"} stays strict (isSettleWait=false).
 func TestResolveBase_SettleFlag(t *testing.T) {
@@ -195,5 +239,19 @@ func TestResolveBase_SettleFlag(t *testing.T) {
 	explicit, _ := resolveBase(baseArgs{TerminalIDs: []string{"t1"}, Wait: []byte(`{"stateIs":"waiting"}`)})
 	if explicit.wait == nil || explicit.isSettleWait {
 		t.Fatalf("explicit stateIs:waiting must NOT be treated as the settle default, isSettleWait=%v", explicit.isSettleWait)
+	}
+}
+
+// A settle wait:{} across multiple terminals is rejected (it would silently time out
+// because the aggregate agentState never matches); an explicit content wait is not.
+func TestResolveBase_RejectsMultiTerminalSettle(t *testing.T) {
+	if _, errMsg := resolveBase(baseArgs{TerminalIDs: []string{"t1", "t2"}, Wait: []byte(`{}`)}); errMsg == "" {
+		t.Fatal("wait:{} across multiple terminals should be rejected")
+	}
+	if _, errMsg := resolveBase(baseArgs{TerminalIDs: []string{"t1", "t2"}, Wait: []byte(`{"contains":"done"}`)}); errMsg != "" {
+		t.Fatalf("multi-terminal contains wait should be allowed (matches the combined tail), got %q", errMsg)
+	}
+	if _, errMsg := resolveBase(baseArgs{TerminalIDs: []string{"t1"}, Wait: []byte(`{}`)}); errMsg != "" {
+		t.Fatalf("single-terminal wait:{} must still be allowed, got %q", errMsg)
 	}
 }
