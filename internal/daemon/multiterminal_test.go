@@ -264,6 +264,33 @@ func TestWatcher_ExploreCompletionTerminalEvenWhenDirty(t *testing.T) {
 	}
 }
 
+// Regression for the spurious "completed_unverified" double-line the operator saw: an
+// explore agent whose FSM reports the hard "completed" state (not "waiting") must NOT
+// be routed through the git-clean gate (which, for a worktreeId-less explore spawn,
+// only ever returns completed_unverified). Read-only completion is behavioural, so
+// "completed" is accepted directly as success.
+func TestWatcher_ExploreCompletedStateIsSuccessNotUnverified(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newProgMCP(map[string]termCfg{
+		"term-x": {agentState: "completed", recentOutput: strptr("Here is the answer.")},
+	})
+	// A dirty worktree would force completed_unverified IF the explore agent were
+	// (wrongly) git-gated — so this proves the gate is skipped for explore.
+	mcp.pulse = &MCPResult{StructuredContent: map[string]any{"isDirty": true, "changedFiles": float64(2)}}
+	rec := watcherWith("wch_ec", []string{"term-x"},
+		withOptions(watcherOptions{SpawnMode: "explore", VerificationScope: &verificationScope{WorktreeID: "wt-x"},
+			PerTerminal: map[string]TerminalState{"term-x": {SeenWorking: true}}}))
+	store.watchers = []domain.WatcherRecord{rec}
+
+	// A NOT-finished judge is wired to prove "completed" is accepted DETERMINISTICALLY
+	// (a hard FSM fact), never gated behind the small-model finished judge or the git gate.
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: finishedNoJudge}), rec)
+	if out.Classification != domain.ClassCompletedSuccess {
+		t.Fatalf("explore completed must be completed_success (not unverified), got %s", out.Classification)
+	}
+}
+
 // Regression (false "completed success" ~3s after spawn): a freshly spawned
 // explore agent parks at "waiting" (at its prompt, before the injected prompt is
 // submitted) for several seconds. The first watcher tick must NOT misread that

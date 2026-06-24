@@ -147,6 +147,9 @@ func TestFindSkillsSelectorErrorLeavesSetUnchanged(t *testing.T) {
 }
 
 func TestBuildToolFilter(t *testing.T) {
+	// A loaded skill must NEVER narrow the toolset — BuildToolFilter always returns nil
+	// (the full registry), whether or not skills are loaded. Skills are guidance, not a
+	// capability gate.
 	mk := func(id string, tools ...string) Skill {
 		return Skill{ID: id, Title: id, Version: "1.0.0", Summary: "s", WhenToUse: "w",
 			Tags: []string{}, Risk: RiskRead, RequiredTools: tools, Body: "b"}
@@ -155,22 +158,13 @@ func TestBuildToolFilter(t *testing.T) {
 	core := []string{"skill.find", "skill.load"}
 	a := NewActiveSkills(reg, &stubRouter{}, nil, "sess", core)
 
-	// No skills loaded ⇒ nil (unconstrained).
 	if f := a.BuildToolFilter(); f != nil {
-		t.Errorf("expected nil filter when unconstrained, got %v", f)
+		t.Errorf("expected nil (full-registry) filter when unconstrained, got %v", f)
 	}
 
 	a.SetSkills([]string{"a.one", "b.two"})
-	f := a.BuildToolFilter()
-	// Must contain core + union of requiredTools, deduped.
-	want := map[string]bool{"skill.find": true, "skill.load": true, "alpha": true, "beta": true, "gamma": true}
-	if len(f) != len(want) {
-		t.Fatalf("filter = %v (want %d unique)", f, len(want))
-	}
-	for _, name := range f {
-		if !want[name] {
-			t.Errorf("unexpected tool in filter: %q", name)
-		}
+	if f := a.BuildToolFilter(); f != nil {
+		t.Errorf("a loaded skill must NOT narrow the toolset; expected nil filter, got %v", f)
 	}
 }
 

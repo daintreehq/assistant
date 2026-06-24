@@ -16,8 +16,10 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
-// CORE_TOOL_NAMES — always offered to the model regardless of loaded skills. The
-// union with loaded skills' requiredTools forms the per-turn projection. Internal
+// coreToolNames are the essential tools asserted to be registered at boot
+// (app.go's AssertRegistered("core tools")). EVERY turn now offers the FULL registry
+// — a loaded skill never narrows the toolset (see buildToolFilterLocked) — so this is
+// no longer a per-turn projection key; it is just the always-must-exist set. Internal
 // dotted names.
 var coreToolNames = []string{
 	"context.snapshot",
@@ -29,6 +31,12 @@ var coreToolNames = []string{
 	"tool.search",
 	"terminal.read",
 	"terminal.extract",
+	// terminal.awaitAll is core: waiting for a spawned cohort to finish is a
+	// fundamental in-turn orchestration step, the base prompt names it as always
+	// available, and the multi-agent runbook (narrowed to core ∪ requiredTools) leans
+	// on it. Read-only, so no confirmation gate. Keeping it core means a skill that
+	// forgets to list it can still drive a clean cohort wait.
+	"terminal.awaitAll",
 	// terminal.sendCommand is core: talking to a running agent (relaying between
 	// agents, answering a question it waits on) is a fundamental operation that must
 	// stay callable on EVERY turn — including a skill-narrowed one. Without it here,
@@ -657,15 +665,14 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
 		case allowedSet != nil && !setHas(allowedSet, internalName):
-			// Tool-not-offered refusal, double-gated (the list filter alone is
-			// insufficient — ResolveWireName can fall through to a raw name). An
-			// active skill narrowed this turn's toolset to core ∪ its requiredTools;
-			// the model called something outside that set (a hallucinated name, or a
-			// wire-name fallthrough). NOT a read-only restriction — every turn,
-			// user or autonomous wake, has the same capability; only a loaded skill
-			// narrows it. Tell the model how to widen it.
+			// Defensive only: allowedSet is now ALWAYS nil (skills never narrow the
+			// toolset — every turn offers the full registry; see buildToolFilterLocked),
+			// so this branch cannot fire from a loaded skill. It survives purely as a
+			// guard in case a future caller ever passes an explicit allow-list; it is NOT
+			// a skill capability gate, and a skill must never be the reason a tool is
+			// unavailable.
 			res = domain.Fail("TOOL_NOT_OFFERED",
-				internalName+" is not offered in this turn's tool spec (an active skill narrowed the toolset). Load a skill that offers it with skill.find/skill.load, or pick a tool that is offered.",
+				internalName+" is not offered in this turn's tool spec.",
 				domain.Unrecoverable())
 			res.Summary = internalName + " is not offered in this turn's tool spec."
 		default:
@@ -903,31 +910,18 @@ func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.Ch
 	return allowedNames, allowedSet, tools, nil
 }
 
-// buildToolFilterLocked returns the per-turn tool projection. No active skills ⇒ nil
-// (the FULL registry — an unconstrained turn must not be starved of tools).
-// Else: unique(core ∪ skills.requiredTools). Caller MUST hold s.mu (it reads
-// activeSkills, which a concurrent skill mutation rewrites under the lock).
+// buildToolFilterLocked returns the per-turn tool projection. It ALWAYS returns nil
+// (the FULL registry): a loaded skill must NEVER limit which tools the model can call.
+// Skills are GUIDANCE — their body suggests which tools to focus on and how to use
+// them — never a capability gate. Narrowing the toolset to core ∪ requiredTools (the
+// old behaviour) silently made legitimate tools un-callable while a skill was loaded
+// (e.g. a relay skill couldn't attach a watcher; a watcher skill couldn't read a
+// terminal), which is exactly wrong: the right tool for the next step must always be
+// reachable. A skill's `requiredTools` is now metadata only (a focus hint + a
+// startup sanity check that the named tools exist) — it does not constrain the turn.
+// Caller MUST hold s.mu (kept for call-site symmetry; this body reads no shared state).
 func (s *Session) buildToolFilterLocked() []string {
-	if len(s.activeSkills) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var out []string
-	add := func(n string) {
-		if _, ok := seen[n]; !ok {
-			seen[n] = struct{}{}
-			out = append(out, n)
-		}
-	}
-	for _, n := range coreToolNames {
-		add(n)
-	}
-	for _, sk := range s.deps.SkillCatalog.GetMany(s.activeSkills) {
-		for _, t := range sk.RequiredTools {
-			add(t)
-		}
-	}
-	return out
+	return nil
 }
 
 // projectToolsLocked returns the OpenAITools projection for allowedNames,

@@ -381,6 +381,15 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 			return domain.ClassWaitingForInput, 0.9, sum, ev, signals, false
 
 		case agentState == "completed":
+			if options.SpawnMode == "explore" {
+				// Explore is READ-ONLY (see the resolvePresent completed branch): completion
+				// is behavioural, not git-verified, so accept the hard "completed" fact
+				// directly instead of routing through gateCompletion (which only ever
+				// produced a spurious "completed_unverified" for a worktreeId-less explore
+				// spawn). Matches the in-turn domain.FinishPreFilter.
+				ev := []string{"agentState=completed (explore; read-only, not git-gated; terminal.list)"}
+				return domain.ClassCompletedSuccess, 0.9, "Explore agent finished its turn.", ev, signals, false
+			}
 			g := gateCompletion(ctx, options.VerificationScope, []string{"agentState=completed (terminal.list)"},
 				&gateInput{rec: rec, signals: signals, acceptanceCriteria: options.AcceptanceCriteria})
 			return g.classification, g.confidence, g.summary, g.evidence, signals, false
@@ -516,6 +525,18 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 		return domain.ClassWaitingForInput, 0.9, sum, ev, signals, false
 
 	case agentState == "completed":
+		if options.SpawnMode == "explore" {
+			// Explore is READ-ONLY by intent (CLAUDE.md: never edits project files), so
+			// completion is BEHAVIOURAL, never git-verified. Routing it through
+			// gateCompletion only ever produced a spurious "completed_unverified" (an
+			// explore spawn carries no worktreeId, so the git check is "unknown") — the
+			// duplicate "unverified → success" line the operator saw. "completed" is a hard
+			// turn-completion FSM fact (a backgrounded window reads "waiting", not
+			// "completed"), so accept it directly here — matching the in-turn
+			// domain.FinishPreFilter, which also hard-accepts completed/exited.
+			ev := []string{"agentState=completed (explore; read-only, not git-gated)"}
+			return domain.ClassCompletedSuccess, 0.9, "Explore agent finished its turn.", ev, signals, false
+		}
 		g := gateCompletion(ctx, options.VerificationScope, []string{"agentState=completed"},
 			&gateInput{rec: rec, signals: signals, acceptanceCriteria: options.AcceptanceCriteria})
 		return g.classification, g.confidence, g.summary, g.evidence, signals, false

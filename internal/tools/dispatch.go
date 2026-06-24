@@ -66,14 +66,14 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		return r.audit(ctx, name, rawArgs, tctx, started, outcomeError, res, nil)
 	}
 
-	// 1b. Per-turn projection enforcement (defense in depth). When the caller
-	//     supplied an explicit per-turn allowlist (ActiveToolNames non-nil — i.e. a
-	//     loaded skill narrowed the toolset to core ∪ requiredTools), a tool outside
-	//     it was projection-excluded and must NOT be callable, even by a direct
-	//     dispatch that bypassed the schema. nil ⇒ unconstrained (all tools).
+	// 1b. Explicit-allowlist enforcement (defense in depth). Loaded skills NEVER narrow
+	//     the toolset (ActiveToolNames is nil on every normal turn — the full registry
+	//     is always callable), so this gate is effectively dormant. It survives only to
+	//     honour an EXPLICIT allowlist a caller might one day pass (ActiveToolNames
+	//     non-nil); a skill is never the reason it fires. nil ⇒ unconstrained (all tools).
 	if tctx != nil && tctx.ActiveToolNames != nil && !toolOffered(name, tctx.ActiveToolNames) {
 		res := Fail(codeNotOffered, fmt.Sprintf(
-			"%s is not offered this turn (the active toolset was narrowed); it cannot be invoked now.", name),
+			"%s is not in this turn's explicit tool allowlist; it cannot be invoked now.", name),
 			Unrecoverable())
 		return r.audit(ctx, name, rawArgs, tctx, started, outcomeDenied, res, nil)
 	}

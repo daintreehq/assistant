@@ -42,9 +42,10 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 			continue
 		}
 		byID[id] = extractionx.TerminalStatusEntry{
-			AgentState:   mcpString(e["agentState"]),
-			RecentOutput: mcpStringPtr(e["recentOutput"]),
-			ExitCode:     mcpIntPtr(e["exitCode"]),
+			AgentState:    mcpString(e["agentState"]),
+			WaitingReason: mcpString(e["waitingReason"]),
+			RecentOutput:  mcpStringPtr(e["recentOutput"]),
+			ExitCode:      mcpIntPtr(e["exitCode"]),
 		}
 	}
 	return extractionx.StatusReadResult{OK: true, ByID: byID}

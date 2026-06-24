@@ -17,6 +17,7 @@ import (
 // signals are the deterministic signals one read folds into for condition eval.
 type signals struct {
 	AgentState    string
+	WaitingReason string // "question" | "prompt" | "" (meaningful only while waiting)
 	RuntimeStatus string // "running" | "exited"
 	ExitCode      *int
 	Tail          string

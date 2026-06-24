@@ -98,22 +98,21 @@ func runVerdict(ctx context.Context, deps Deps, verdictInstruction, resultText s
 	return pass, reason, nil
 }
 
-// settleJudgeConfidenceFloor mirrors daemon.judgeConfidenceFloor (0.6): the minimum
-// confidence for the finished judge's YES (or a CONFIDENT no) to count.
-const settleJudgeConfidenceFloor = 0.6
-
 // confirmFinished asks the shared small-model judge whether the agent has genuinely
 // finished its turn, using the terminal tail — the SAME byte-stable question the
-// watcher's judgeAgentFinished asks (domain.FinishedJudgeQuestion). It is the
-// settle gate's defense against a false "waiting": an agent that paused mid-task or
-// whose window was backgrounded reads as "waiting" but is NOT done.
+// watcher's judgeAgentFinished asks (domain.FinishedJudgeQuestion), and now with the
+// SAME inputs: the agent state, the waiting reason, AND lastOutputAt (the silence
+// duration). Feeding lastOutputAt is the fix that lets this verdict flip NO→YES as
+// the agent goes quiet, exactly like the watcher — without it (the prior bug) the
+// verdict was frozen and the poll timed out on an agent the watcher had confirmed
+// done. It is the settle gate's defense against a false "waiting": an agent that
+// paused mid-task or whose window was backgrounded reads as "waiting" but is NOT done.
 //
 // Returns (finished, confident):
 //   - finished=true: a CONFIDENT yes — resolve the poll and extract.
-//   - finished=false, confident=true: a CONFIDENT no — the caller may dedupe this
-//     exact tail (the temp-0 verdict won't change until the tail does).
+//   - finished=false, confident=true: a CONFIDENT no — re-judged next cooldown window.
 //   - finished=false, confident=false: blank tail / model error / low confidence —
-//     the caller should keep polling and re-ask (do NOT dedupe).
+//     the caller should keep polling and re-ask.
 func confirmFinished(ctx context.Context, deps Deps, r *readResult) (finished bool, confident bool) {
 	if strings.TrimSpace(r.combinedTail) == "" {
 		return false, false // no evidence yet — let the tail fill in, then re-ask
@@ -122,13 +121,22 @@ func confirmFinished(ctx context.Context, deps Deps, r *readResult) (finished bo
 		Tier:          domain.ModelSmall,
 		Question:      domain.FinishedJudgeQuestion,
 		AgentState:    r.signals.AgentState,
+		WaitingReason: r.signals.WaitingReason,
 		RuntimeStatus: r.signals.RuntimeStatus,
+		LastOutputAt:  lastOutputAtLabel(r.signals.MsSinceOutput),
 		Tail:          r.combinedTail,
 	})
-	if err != nil || ans.Confidence < settleJudgeConfidenceFloor {
+	if err != nil || ans.Confidence < domain.FinishJudgeConfidenceFloor {
 		return false, false // unsure → keep polling
 	}
 	return ans.Matched, true
+}
+
+// lastOutputAtLabel humanizes msSinceOutput as "<floor(ms/1000)>s ago" for the judge
+// prompt — mirrors daemon.lastOutputAtLabel so both finish judges see silence the
+// same way. 0 (just changed / unobserved) renders as "0s ago".
+func lastOutputAtLabel(msSinceOutput int64) string {
+	return fmt.Sprintf("%ds ago", msSinceOutput/1000)
 }
 
 // rejectModelJudge returns a failed result when the wait carries a modelJudge leaf

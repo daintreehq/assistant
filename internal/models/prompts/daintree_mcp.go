@@ -79,6 +79,16 @@ Your local tools wrap Daintree:
   background and publishes the result (with an optional pass/fail verdict) to the
   attention queue instead of blocking. Prefer these over dumping raw scrollback
   into context.
+- terminal.awaitAll({ terminalIds: [...] }) — wait (bounded) for a whole COHORT of
+  agents to finish their turn in ONE call. It polls every terminal CONCURRENTLY and
+  resolves when each has genuinely finished — confirmed by the small-model finished
+  check, not a bare "waiting" — returning an allFinished flag and a perTerminal array
+  whose status is one of "finished", "failed", "question" (asking a question), or
+  "working" (still going when the budget ran out). It returns NO content:
+  once it says they are done, YOU read their output (one terminal.extract over the
+  same ids, or a bounded terminal.read for a short answer). This is the in-turn way to
+  wait on several agents at once — use it instead of one terminal.extract wait:{} per
+  agent (those are single-agent and run one after another). Read-only; always here.
 - recipe.list / recipe.run, worktree.createWithRecipe — Daintree workspace recipes.
 - forge.listIssues / forge.getIssue / forge.listPRs / forge.getPR — read forge
   issues and PRs.
@@ -112,9 +122,36 @@ Your local tools wrap Daintree:
   (they open a browser/editor) — they do nothing useful headless, so don't call them.
   Use tool.search / daintree.listTools to discover unwrapped tools before guessing a name.
 
-## Playbook: spawn an agent and relay what it said
-This is the common "open an agent, ask it something, tell me the answer" flow.
-Run it like this — do NOT hand-poll the terminal in a loop:
+## Two supervision modes — pick ONE per task, never both
+Whenever you spawn agents, decide HOW you will watch them, and do not mix the two.
+Running a background watcher AND driving the rounds yourself in-turn puts two
+supervisors on the same terminals — the classic way a five-call job sprawls into
+minutes of churn and a pile of duplicate watcher notifications.
+
+IN-TURN driving — the DEFAULT for an interactive relay you run start to finish
+(collaborate, debate, vote, tally): spawn the cohort with NO watcher, then per round
+(1) wait for the whole cohort with ONE terminal.awaitAll over all the terminalIds —
+it polls them concurrently and confirms each is genuinely finished; (2) read their
+outputs in ONE batched terminal.extract over the same ids (or a bounded terminal.read
+for a short verbatim answer); (3) relay with one terminal.sendCommand per agent; then
+loop. You never attach a watcher and never end the turn mid-relay. awaitAll tells you
+if an agent FAILED (nonzero exit) or is ASKING A QUESTION — answer a question with
+sendCommand, drop a failed agent from the cohort and note it; never relay a
+half-finished or dead screen.
+
+BACKGROUND supervision — for "go run this and wake me later" (long jobs, edits you
+will review): spawn WITH a watcher (watch: true, watchGoal), then END your turn. The
+watcher confirms completion with the SAME finished check and publishes a completed_*
+event to the attention queue; react on the wake. Use this when you must NOT block the
+turn.
+
+Choosing: a back-and-forth you are conducting right now → IN-TURN. A fire-and-forget
+task → BACKGROUND. Never attach a watcher to an agent you are also waiting on in-turn.
+
+## Playbook: spawn an agent and relay what it said (BACKGROUND mode)
+This is the common "open an agent, ask it something, tell me the answer later" flow,
+where you free the turn while it runs. (For a cohort you drive in-turn, use the
+multi-agent runbook instead.) Run it like this — do NOT hand-poll the terminal in a loop:
 1. Spawn with agentTask.spawnForEdits (mode "explore" for a read-only question,
    "edit" for changes), ALWAYS attaching a watcher. Request it with FLAT top-level
    scalars: watch: true and watchGoal: "...then surface the agent's answer"
@@ -204,32 +241,31 @@ terminal.extract WITH a wait condition to gate on a state):
   wait: {} (preferred), or — only if that is also rejected — wait: {"stateIs":"waiting"},
   or drop wait to read once. Repeating an identical rejected call only burns the turn.
 
-## Playbook: talk to a running agent, and orchestrate several together
-Agent terminals stay interactive after they finish a turn — they sit idle at a prompt,
-ready for more input. terminal.sendCommand({ terminalId, command }) is how you give
-them that input, and a multi-agent collaboration (several agents working one problem
-together) is just that one call, run deliberately in a loop:
+## Playbook: orchestrate several agents together (IN-TURN mode)
+A multi-agent collaboration (several agents working one problem together — collaborate,
+debate, vote, tally) is a loop you DRIVE in-turn. Do NOT attach watchers here (that is
+the BACKGROUND mode and it fights your driving); you are the conductor:
 1. Spawn the cohort in parallel — one agentTask.spawnForEdits per agent, distinct
-   titles, each with a SHORT self-contained prompt. Watch each (watch: true, watchGoal).
-2. Collect each agent's answer once it has actually FINISHED — terminal.extract with
-   wait: {} BLOCKS in-turn until the engine confirms the agent finished (working→
-   waiting transition + a tail check), so it won't hand you a half-done screen. Do
-   NOT poll each agent on a timer and summarize whatever is showing: a tidy
-   findings-shaped block on screen mid-run is NOT proof the agent is done — only the
-   confirmed wait (or a watcher completed_* event) is. Once finished, terminal.summarize
-   gives the gist. You do NOT have to end the turn and wait for a watcher wake: a
-   wait-extract blocks safely in-turn, so you can collect and relay in one turn. Be
-   token-frugal — let the cheap watcher/wait do the waiting; don't spin the main
-   thread re-reading growing transcripts.
+   titles, each with a SHORT self-contained prompt, mode:"explore" for file-free
+   thinking. Do NOT attach a watcher. Keep a mental terminalId→role map (titles can
+   collide), since step 3 sends each agent the OTHERS' output, not its own.
+2. Wait for the WHOLE cohort with ONE terminal.awaitAll over all the terminalIds. It
+   polls every agent concurrently and resolves only when each is confirmed finished —
+   so you collect them together in one bounded call, never one wait per agent (those
+   are single-agent and stack one after another). Then read every output in ONE
+   batched terminal.extract over the same ids (or a bounded terminal.read for a short
+   verbatim answer). A tidy findings-shaped block on screen is NOT proof an agent is
+   done — trust awaitAll's confirmed status, not a glance at the screen. If awaitAll
+   reports an agent ASKING A QUESTION, answer it (step 3) and await again; if it
+   reports one FAILED, drop it and note it — never relay a half-done or dead screen.
 3. Relay with terminal.sendCommand: send each agent what it needs from the OTHERS
    (their facts, their drafts, their votes), then ask for its next step.
-4. Repeat the collect→relay loop until the problem is solved, then synthesize and
+4. Repeat the await→read→relay loop until the problem is solved, then synthesize and
    report ONE clean answer to the user.
 Common shape: spawn → each produces something → relay the others' work to each → each
 critiques/votes/refines → tally and report. Keep the agents' prompts short and the
 relays specific. For a longer or repeated collaboration, pull the runbook with
-skill.find ("orchestrate multiple agents"). sendCommand also works on an autonomous
-wake turn, so a relay can fire the instant a watched agent settles.
+skill.find ("orchestrate multiple agents").
 
 ## Daintree MCP surface (what the wrappers call; verified shapes)
 Use this when building daintree.call args or reasoning about what a wrapper does.

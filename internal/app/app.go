@@ -236,12 +236,13 @@ func Create(opts CreateOptions) (*App, error) {
 	}
 	a.Skills = skillReg
 
-	// Boot-time validation: every skill's declared requiredTools must exist in the
-	// registry. A missing (skillID, tool) pair would otherwise boot clean and then
-	// silently vanish from OpenAITools when that skill is loaded — the model is
-	// starved of a tool it was promised, with no signal. Surface it LOUDLY (debug
-	// log + the Log hook when present). It is a wiring bug in a pre-release codebase,
-	// so we don't hard-fail boot, but it must never pass unnoticed.
+	// Boot-time validation: every skill's declared requiredTools must name a tool that
+	// exists in the registry. requiredTools no longer narrows the toolset (skills never
+	// limit what the model can call — the full registry is offered every turn), but it
+	// is still a focus hint, and a skill that points the model at a NON-EXISTENT tool
+	// name is a documentation bug. Surface it LOUDLY (debug log + the Log hook when
+	// present). It is a wiring bug in a pre-release codebase, so we don't hard-fail
+	// boot, but it must never pass unnoticed.
 	if missing := skills.ValidateRequiredTools(a.Skills.All(), a.Registry); len(missing) > 0 {
 		pairs := make([]string, 0, len(missing))
 		for _, m := range missing {

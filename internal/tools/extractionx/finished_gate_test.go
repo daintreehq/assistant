@@ -54,27 +54,33 @@ func settlePollArgs(reader *seqReader, maxAttempts int) (Deps, *routeRouter, pol
 // A bare "waiting" on the FIRST read (the agent has never been seen working — the
 // real-world pre-start / backgrounded-window case) must NOT settle: this is exactly
 // the att=1 false-settle the gate closes. The poll resolves only once the agent has
-// worked AND the model confirms it finished.
+// worked, its tail has gone QUIET (the shared quiet threshold — an agent whose output
+// is still moving is still working), AND the model confirms it finished. So the final
+// answer printed on attempt 3 is confirmed on attempt 4, once the tail has been quiet.
 func TestPollUntil_SettleWaitRequiresSeenWorkingThenConfirm(t *testing.T) {
 	reader := &seqReader{seq: []StatusReadResult{
 		status("waiting", "ready to start ▷"), // attempt 1: never worked → must defer
 		status("working", "reading files…"),   // attempt 2: latches seenWorking
-		status("waiting", "all done here."),   // attempt 3: settle + confirm
+		status("waiting", "all done here."),   // attempt 3: final answer JUST printed → quiet defers
+		status("waiting", "all done here."),   // attempt 4: tail quiet → settle + confirm
 	}}
-	deps, router, args := settlePollArgs(reader, 5)
+	deps, router, args := settlePollArgs(reader, 6)
+	// att1..3 at t=0 (the answer's outAt latches at 0); att4 at t=2000 so the tail has
+	// been quiet > FinishQuietThresholdMS and the finished judge runs.
+	args.nowFn = clockSeq(0, 0, 0, 2000, 4000, 6000)
 	router.judgeFn = func(in JudgeInput) domain.ModelJudgeAnswer {
 		return domain.ModelJudgeAnswer{Matched: true, Confidence: 0.9, Reason: "done"}
 	}
 
 	res := pollUntil(context.Background(), deps, args)
 	if !res.matched {
-		t.Fatalf("should settle once worked+confirmed, got matched=false after %d attempts", res.attempts)
+		t.Fatalf("should settle once worked+quiet+confirmed, got matched=false after %d attempts", res.attempts)
 	}
-	if res.attempts != 3 {
-		t.Fatalf("should settle on attempt 3 (not the att=1 false settle), got %d", res.attempts)
+	if res.attempts != 4 {
+		t.Fatalf("should settle on attempt 4 (att1 pre-start defer, att3 tail-not-yet-quiet defer), got %d", res.attempts)
 	}
 	if router.judgeCalls != 1 {
-		t.Fatalf("judge should be consulted exactly once (only on the post-working waiting), got %d", router.judgeCalls)
+		t.Fatalf("judge should be consulted exactly once (only on the quiet post-working waiting), got %d", router.judgeCalls)
 	}
 }
 

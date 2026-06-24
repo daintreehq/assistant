@@ -123,19 +123,20 @@ func TestConcurrentSlashFindDuringTurnNoRace(t *testing.T) {
 	<-done
 }
 
-// TestToolProjectionInvalidatedOnSkillLoadThenReused: a mid-turn skill.load rewrites
-// the active set (round 0 full → invalidate → round 1 narrowed), and the unchanged
-// narrowed set in round 2 is a cache hit. Exactly two projections: full, then the
-// narrowed set reused. midturnLoader records one entry per OpenAITools call, so
-// len(projects) IS the build count.
+// TestToolProjectionInvalidatedOnSkillLoadThenReused: a mid-turn skill.load still
+// invalidates the projection cache, so round 1 REBUILDS — but because skills never
+// narrow the toolset, the rebuilt projection is the SAME full registry (nil filter)
+// as round 0. Round 2, with the cache valid and unchanged, is a hit. Exactly two
+// OpenAITools builds; both project the full registry. midturnLoader records one entry
+// per OpenAITools call, so len(projects) IS the build count.
 func TestToolProjectionInvalidatedOnSkillLoadThenReused(t *testing.T) {
 	reg := realRegistry(t)
 	loadCall := toolCall("c1", "skill__load", `{"skillIds":["`+skills.IDSpawnAgentForEdits+`"]}`)
 	readCall := toolCall("c2", "fs__read", `{}`)
 	r := &fakeRouter{results: []models.ChatResult{
-		{ToolCalls: []models.ToolCallRequest{loadCall}}, // round 0: skill.load (mutates the set)
-		{ToolCalls: []models.ToolCallRequest{readCall}}, // round 1: narrowed-set build
-		{Content: "done"}, // round 2: same narrowed key ⇒ cache hit
+		{ToolCalls: []models.ToolCallRequest{loadCall}}, // round 0: skill.load (invalidates the cache)
+		{ToolCalls: []models.ToolCallRequest{readCall}}, // round 1: rebuild (still full)
+		{Content: "done"}, // round 2: unchanged full key ⇒ cache hit
 	}}
 	loader := &midturnLoader{
 		fakeTools: &fakeTools{result: domain.Ok("ok", nil)},
@@ -148,15 +149,15 @@ func TestToolProjectionInvalidatedOnSkillLoadThenReused(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	if len(loader.projects) != 2 {
-		t.Fatalf("expected exactly 2 projections (full, then narrowed-reused), got %d: %v",
+		t.Fatalf("expected exactly 2 projections (full, then full-rebuilt), got %d: %v",
 			len(loader.projects), loader.projects)
 	}
-	// Round 0 is the full registry (nil filter); round 1 is the narrowed skill-aware
-	// set (non-empty) — the invalidation actually rebuilt rather than serving stale.
+	// Both rounds project the full registry (nil filter): the skill load invalidated and
+	// rebuilt the cache, but a skill never narrows, so the rebuilt set is still full.
 	if len(loader.projects[0]) != 0 {
 		t.Fatalf("round 0 should be the full registry (nil filter), got %v", loader.projects[0])
 	}
-	if len(loader.projects[1]) == 0 {
-		t.Fatal("round 1 should be the rebuilt narrowed set, not empty")
+	if len(loader.projects[1]) != 0 {
+		t.Fatalf("round 1 should REBUILD to the full registry (nil filter), not a narrowed set, got %v", loader.projects[1])
 	}
 }

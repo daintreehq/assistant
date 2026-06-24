@@ -39,10 +39,11 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 	minMsSinceOutput := math.MaxInt64
 
 	type part struct {
-		terminalID string
-		tail       string
-		agentState string
-		exitCode   *int
+		terminalID    string
+		tail          string
+		agentState    string
+		waitingReason string
+		exitCode      *int
 	}
 	parts := make([]part, 0, len(terminalIDs))
 
@@ -53,8 +54,10 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		// A TOTAL miss is the #108 symptom, NOT a clean exit.
 		absent := statuses.OK && !present && len(statuses.ByID) > 0
 		agentState := ""
+		waitingReason := ""
 		if present {
 			agentState = entry.AgentState
+			waitingReason = entry.WaitingReason
 		}
 		if absent {
 			agentState = "exited"
@@ -95,6 +98,15 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 			if agentState == string(domain.AgentWorking) {
 				out.seenWorking = true
 			}
+			// Also latch when the tail ADVANCES from a prior baseline: output moving
+			// proves the agent did work even if no poll caught the live "working" instant
+			// (a fast agent that ran between two reads). This closes the round-2 race
+			// where a relayed agent went working→waiting before the poll started, so a
+			// bare seenWorking latch alone would never fire and the wait would stall to
+			// timeout. (prev!=nil so the first read's baseline never counts as "advanced".)
+			if prev != nil && out.outHash != prev.outHash && strings.TrimSpace(tail) != "" {
+				out.seenWorking = true
+			}
 			states[id] = &out
 			if ms < int64(minMsSinceOutput) {
 				minMsSinceOutput = int(ms)
@@ -107,7 +119,7 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		if present {
 			ec = entry.ExitCode
 		}
-		parts = append(parts, part{terminalID: id, tail: tail, agentState: agentState, exitCode: ec})
+		parts = append(parts, part{terminalID: id, tail: tail, agentState: agentState, waitingReason: waitingReason, exitCode: ec})
 	}
 
 	// Labelled tail goes to the model; the raw, unlabelled tail drives contains/regex.
@@ -123,10 +135,12 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 	}
 
 	var agentState string
+	var waitingReason string
 	var exitCode *int
 	runtime := "running"
 	if len(terminalIDs) == 1 {
 		agentState = parts[0].agentState
+		waitingReason = parts[0].waitingReason
 		exitCode = parts[0].exitCode
 		runtime = runtimeFromAgentState(parts[0].agentState)
 	}
@@ -151,6 +165,7 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 	return readResult{
 		signals: signals{
 			AgentState:    agentState,
+			WaitingReason: waitingReason,
 			RuntimeStatus: runtime,
 			ExitCode:      exitCode,
 			Tail:          strings.Join(raw, "\n\n"),
@@ -170,19 +185,9 @@ type pollResult struct {
 	finished     bool
 }
 
-// extractSettleGraceMS mirrors the watcher's spawn grace: if a working tick is
-// never observed (an agent that finished between two reads, or a server that never
-// surfaced "working"), accept a stable settle after this long so the poll can't
-// stall until maxAttempts waiting for a transition it already missed. The model
-// finished-confirmation still gates acceptance, so the grace only relaxes the
-// deterministic pre-filter, never the "is it actually done" check.
-const extractSettleGraceMS = 20_000
-
-// settleJudgeCooldownMS RATE-limits the finished confirmation so a tail that repaints
-// every tick (defeating the hash dedupe) cannot burn one small-model call on every
-// attempt. It is a cooldown, NOT a hard cap: a later "done" tail past the window is
-// always still judged, so a real completion is never starved into a false timeout.
-const settleJudgeCooldownMS = 5_000
+// The settle-wait timing knobs (spawn grace, judge cooldown, quiet threshold,
+// confidence floor) are the shared domain.Finish* constants so this in-turn poll and
+// the background watcher apply ONE finish-detection policy (see domain.FinishPreFilter).
 
 // pollArgs bundles the poll-loop inputs.
 type pollArgs struct {
@@ -222,12 +227,12 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 		nowMS = func() int64 { return time.Now().UnixMilli() }
 	}
 	startedAt := nowMS()
-	// lastJudgedHash dedupes the finished confirmation: a temperature-0 judge gives
-	// the same verdict for an unchanged tail, so we don't re-ask about a tail we
-	// already got a CONFIDENT not-finished on. A changed tail clears it implicitly.
-	var lastJudgedHash string
-	// lastJudgeAt rate-limits the finished confirmation (settleJudgeCooldownMS) so a
-	// churning tail can't judge on every poll, without ever starving a later "done".
+	// lastJudgeAt rate-limits the finished confirmation (domain.SettleFinishCooldownMS)
+	// so a churning tail can't judge on every poll. There is deliberately NO permanent
+	// tail-hash latch: the finished judge's verdict can flip NO→YES as the agent goes
+	// quiet (its lastOutputAt input keeps growing while the bytes stay fixed), so a
+	// hash latch would strand a genuinely-finished-but-static agent until timeout —
+	// the exact divergence that made the watcher confirm done while this poll hung.
 	var lastJudgeAt int64
 
 	for attempts < args.maxAttempts {
@@ -249,38 +254,38 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 			if !args.isSettleWait {
 				return true // explicit condition: a deterministic match is authoritative
 			}
-			// Coerced settle wait. completed/exited are authoritative terminal states —
-			// accept immediately. Only the soft "waiting" needs confirmation.
-			if r.signals.AgentState != string(domain.AgentWaiting) {
+			// Coerced settle wait: a deterministic match is NOT enough. Defer to the
+			// shared finish policy (domain.FinishPreFilter): completed/exited are hard
+			// terminal facts accepted without a model call; a bare "waiting" is resolved
+			// by the small-model finished judge on the tail (authoritative over the
+			// unreliable "waiting" proxy). This is byte-for-byte the watcher's policy, so
+			// the two paths can no longer disagree.
+			lastJudgeAge := int64(0)
+			if lastJudgeAt != 0 {
+				lastJudgeAge = now - lastJudgeAt
+			}
+			shouldJudge, terminalAccept := domain.FinishPreFilter(domain.FinishPreFilterInput{
+				AgentState:       r.signals.AgentState,
+				WaitingReason:    r.signals.WaitingReason,
+				SeenWorking:      r.seenWorking,
+				MsSinceSpawn:     now - startedAt,
+				MsSinceOutput:    r.signals.MsSinceOutput,
+				MsSinceLastJudge: lastJudgeAge,
+				CooldownMS:       domain.SettleFinishCooldownMS,
+				GraceMS:          domain.FinishSettleGraceMS,
+				QuietMS:          domain.FinishQuietThresholdMS,
+				IsFinalAttempt:   attempts >= args.maxAttempts,
+				TailEmpty:        strings.TrimSpace(r.combinedTail) == "",
+			})
+			if terminalAccept {
 				return true
 			}
-			// Pre-filter: the agent must have been seen working (or the grace elapsed)
-			// so a pre-start prompt / backgrounded window doesn't read as done. On the
-			// FINAL attempt the grace is bypassed so a short poll budget (maxAttempts *
-			// pollIntervalMs < the 20s grace) can still confirm a fast-finishing agent
-			// that was never observed "working" — the model confirmation still gates it.
-			if !r.seenWorking && now-startedAt < extractSettleGraceMS && attempts < args.maxAttempts {
+			if !shouldJudge {
 				return false
 			}
-			if strings.TrimSpace(r.combinedTail) == "" {
-				return false // no evidence yet — nothing to judge, don't spend a model call
-			}
-			h := hashTail(r.combinedTail)
-			if h == lastJudgedHash {
-				return false // already got a confident not-finished on this exact tail
-			}
-			if lastJudgeAt != 0 && now-lastJudgeAt < settleJudgeCooldownMS {
-				return false // rate-limit: a churning tail re-judges at most once per window
-			}
-			fin, confident := confirmFinished(ctx, deps, &r)
+			fin, _ := confirmFinished(ctx, deps, &r)
 			lastJudgeAt = now
-			if fin {
-				return true
-			}
-			if confident {
-				lastJudgedHash = h // confident NO — skip re-judging an identical tail
-			}
-			return false
+			return fin
 		}()
 		if matched {
 			return pollResult{matched: true, attempts: attempts, combinedTail: r.combinedTail, finished: r.finished}

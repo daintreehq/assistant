@@ -13,8 +13,10 @@ import (
 )
 
 // callableNote explains the per-result `callable` flag so the model treats a
-// callable:false entry as "known but not offered this turn", not "broken".
-const callableNote = "`callable: false` means the tool exists but is not offered in this turn's tool spec (e.g. an active skill narrowed the toolset) — only `callable: true` tools can be invoked directly now. An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered."
+// callable:false entry as "known but not in this turn's tool spec", not "broken".
+// Loaded skills never narrow the toolset, so in normal operation every registered
+// tool is callable.
+const callableNote = "`callable: false` means the tool exists but is not in this turn's tool spec — only `callable: true` tools can be invoked directly. (Loaded skills do NOT restrict this; the full toolset is normally callable.) An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered."
 
 // makeCallable builds a predicate reporting whether a discovered MCP tool is
 // offered in the current turn's projection. activeToolNames==nil ⇒ unconstrained

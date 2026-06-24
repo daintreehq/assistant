@@ -22,9 +22,10 @@ import (
 // TerminalStatusEntry is the per-terminal status the reader returns for one read.
 // recentOutput may be absent (nil) per entry — callers fall back to a deep read.
 type TerminalStatusEntry struct {
-	AgentState   string
-	RecentOutput *string // nil when absent; "" is a valid "no output yet"
-	ExitCode     *int
+	AgentState    string
+	WaitingReason string  // "question" | "prompt" | "" (meaningful only while waiting)
+	RecentOutput  *string // nil when absent; "" is a valid "no output yet"
+	ExitCode      *int
 }
 
 // StatusReadResult is the outcome of one readStatuses across the target terminals.
@@ -129,5 +130,6 @@ func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{
 		newExtractTool(deps),
 		newExtractAsyncTool(deps),
+		newAwaitAllTool(deps),
 	}
 }

@@ -177,22 +177,21 @@ func TestRepeatedFailureBreakerAborts(t *testing.T) {
 	}
 }
 
-func TestNarrowedTurnRefusesUnofferedTool(t *testing.T) {
-	// A loaded skill narrows the turn to core ∪ its requiredTools. A call to a tool
-	// OUTSIDE that set (terminal.summarize is neither a core tool nor a spawn-skill
-	// tool) must be refused with TOOL_NOT_OFFERED and NEVER reach Dispatch — the
-	// double-gate that defends a narrowed turn against a hallucinated / wire-name-
-	// fallthrough tool name. This is NOT a read-only restriction: every turn (user OR
-	// autonomous wake) has full capability; only a loaded skill narrows the offered set.
+func TestLoadedSkillNeverLimitsCallableTools(t *testing.T) {
+	// A loaded skill must NEVER limit which tools the model can call: skills are
+	// guidance, not a capability gate. With a skill active, a call to a tool that is
+	// NOT in that skill's requiredTools (terminal.summarize) must still reach Dispatch
+	// and succeed — no TOOL_NOT_OFFERED refusal. The full registry is offered on every
+	// turn regardless of loaded skills.
 	tools := &fakeTools{result: domain.Ok("ok", nil)}
 	r := &fakeRouter{
 		results: []models.ChatResult{
 			{ToolCalls: []models.ToolCallRequest{toolCall("c1", "terminal__summarize", `{}`)}},
-			{Content: "done after refusal"},
+			{Content: "done"},
 		},
 	}
 	s := skillSession(t, realRegistry(t), r, tools)
-	// Pre-load the spawn skill so this turn's projection is narrowed (non-nil allowedSet).
+	// Load a skill whose requiredTools does NOT include terminal.summarize.
 	s.mu.Lock()
 	s.activeSkills = []string{skills.IDSpawnAgentForEdits}
 	s.mu.Unlock()
@@ -201,21 +200,17 @@ func TestNarrowedTurnRefusesUnofferedTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "done after refusal" {
+	if reply != "done" {
 		t.Fatalf("reply = %q", reply)
 	}
-	if tools.dispatched != 0 {
-		t.Fatalf("unoffered tool reached Dispatch %d times, want 0", tools.dispatched)
+	if tools.dispatched != 1 {
+		t.Fatalf("a tool outside the skill's requiredTools must still dispatch; got %d dispatches", tools.dispatched)
 	}
-	// The tool reply pushed to history must carry the TOOL_NOT_OFFERED refusal.
-	var refusalSeen bool
+	// No TOOL_NOT_OFFERED refusal may appear — a skill never makes a tool uncallable.
 	for _, m := range s.Messages() {
 		if m.Role == "tool" && strings.Contains(m.StringContent, "TOOL_NOT_OFFERED") {
-			refusalSeen = true
+			t.Fatal("a loaded skill must NOT refuse a tool with TOOL_NOT_OFFERED")
 		}
-	}
-	if !refusalSeen {
-		t.Fatal("expected a TOOL_NOT_OFFERED refusal tool result in history")
 	}
 }
 

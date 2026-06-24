@@ -13,9 +13,9 @@ import (
 // midturnLoader is a ToolRunner that records EVERY per-iteration tool projection
 // and, the first time it dispatches skill.load, mutates the live session by
 // loading a skill — mimicking the real skill.load tool's effect on the active set
-// mid-turn. We then assert the NEXT model iteration's projection already offers the
-// newly-loaded skill's requiredTools (finding 2: the projection is recomputed at
-// the start of each iteration, not once before the loop).
+// mid-turn. We then assert that loading a skill mid-turn does NOT narrow the offered
+// toolset: every iteration still projects the FULL registry (nil filter), because
+// skills are guidance and must never limit which tools the model can call.
 type midturnLoader struct {
 	*fakeTools
 	session  *Session
@@ -41,7 +41,7 @@ func (m *midturnLoader) Dispatch(ctx context.Context, name, args string, turn Tu
 	return domain.Ok("ok", nil)
 }
 
-func TestMidTurnSkillLoadOffersRequiredToolsNextIteration(t *testing.T) {
+func TestMidTurnSkillLoadDoesNotNarrowToolset(t *testing.T) {
 	reg := realRegistry(t)
 
 	// Round 0: the model calls skill.load. Round 1: it answers (no tool calls).
@@ -74,18 +74,10 @@ func TestMidTurnSkillLoadOffersRequiredToolsNextIteration(t *testing.T) {
 	if len(loader.projects[0]) != 0 {
 		t.Fatalf("round 0 should project the full registry (nil filter), got %v", loader.projects[0])
 	}
-	// Round 1: the mid-turn skill.load must have narrowed + offered the skill's
-	// requiredTools on the SAME turn — the regression this test guards.
-	round1 := make(map[string]struct{}, len(loader.projects[1]))
-	for _, n := range loader.projects[1] {
-		round1[n] = struct{}{}
-	}
-	if len(round1) == 0 {
-		t.Fatal("round 1 projection should be the narrowed skill-aware set, not empty")
-	}
-	for _, req := range []string{"agentTask.spawnForEdits", "context.snapshot"} {
-		if _, ok := round1[req]; !ok {
-			t.Fatalf("round 1 must offer the newly-loaded skill's required tool %q; got %v", req, loader.projects[1])
-		}
+	// Round 1: a mid-turn skill.load must STILL project the full registry (nil filter)
+	// — skills never narrow the toolset, so loading one mid-turn cannot shrink what the
+	// model can call.
+	if len(loader.projects[1]) != 0 {
+		t.Fatalf("a mid-turn skill load must NOT narrow the toolset; round 1 should still be the full registry (nil filter), got %v", loader.projects[1])
 	}
 }

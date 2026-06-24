@@ -172,31 +172,15 @@ func (a *ActiveSkills) SetSkills(ids []string) {
 	a.applyBundle(a.registry.GetMany(a.resolveKnownIds(ids)))
 }
 
-// BuildToolFilter is the per-turn tool projection. No loaded skills
-// ⇒ nil ("unconstrained, send the full registry" — never tool-starve an
-// unconstrained turn). Else ⇒ unique(core ∪ loaded skills' requiredTools).
+// BuildToolFilter ALWAYS returns nil: the full registry is offered every turn. A
+// loaded skill must NEVER limit which tools the model can call — skills are guidance,
+// not a capability gate. (This previously returned core ∪ loaded skills'
+// requiredTools, which silently made legitimate tools un-callable while a skill was
+// loaded. The right tool for the next step must always be reachable; the skill body
+// suggests which to focus on.) coreTools/RequiredTools remain for metadata + the
+// boot-time registration sanity check, not for narrowing.
 func (a *ActiveSkills) BuildToolFilter() []string {
-	if len(a.activeIDs) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool)
-	out := make([]string, 0, len(a.coreTools))
-	add := func(name string) {
-		if name == "" || seen[name] {
-			return
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	for _, t := range a.coreTools {
-		add(t)
-	}
-	for _, sk := range a.registry.GetMany(a.activeIDs) {
-		for _, t := range sk.RequiredTools {
-			add(t)
-		}
-	}
-	return out
+	return nil
 }
 
 // logSelection inserts a skill_selection_log row, best-effort. Any

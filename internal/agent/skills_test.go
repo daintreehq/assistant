@@ -255,7 +255,11 @@ func TestSendFullRegistryWhenNoSkillActive(t *testing.T) {
 	}
 }
 
-func TestSendPrunesToCoreUnionRequiredWhenSkillActive(t *testing.T) {
+func TestSendOffersFullRegistryEvenWhenSkillActive(t *testing.T) {
+	// A loaded skill must NEVER narrow the offered toolset — skills are guidance, not a
+	// capability gate. So even with a skill active, the OpenAITools filter is nil (the
+	// FULL registry), exactly as when no skill is loaded. The model keeps access to
+	// every tool; the skill body merely suggests which to focus on.
 	tools := &captureStreamTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
 	s := skillSession(t, realRegistry(t), r, tools)
@@ -263,27 +267,8 @@ func TestSendPrunesToCoreUnionRequiredWhenSkillActive(t *testing.T) {
 	if _, err := s.Send(context.Background(), "implement the feature", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	got := make(map[string]struct{}, len(tools.last))
-	for _, n := range tools.last {
-		got[n] = struct{}{}
-	}
-	// Core tools always present.
-	for _, core := range []string{"context.snapshot", "tool.search", "skill.step.advance", "skill.run.get", "skill.find", "skill.load"} {
-		if _, ok := got[core]; !ok {
-			t.Fatalf("core tool %q pruned", core)
-		}
-	}
-	// The active skill's required tools present.
-	for _, req := range []string{"agentTask.spawnForEdits", "watcher.terminal.create"} {
-		if _, ok := got[req]; !ok {
-			t.Fatalf("required tool %q missing", req)
-		}
-	}
-	// Tools no active skill requires are pruned.
-	for _, pruned := range []string{"timer.schedule", "skill.run"} {
-		if _, ok := got[pruned]; ok {
-			t.Fatalf("tool %q should be pruned", pruned)
-		}
+	if tools.last != nil {
+		t.Fatalf("a loaded skill must NOT narrow the toolset; expected a nil (full-registry) filter, got %v", tools.last)
 	}
 }
 
