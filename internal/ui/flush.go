@@ -157,6 +157,22 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 	if t == nil {
 		return nil
 	}
+	// HOLD until the commit queue's frontier has reached this turn: EVERY transcript cell
+	// ahead of the active turn must already be in scrollback. The queue commits sealed cells
+	// ONE per ack (async), while this flush fires on every afterStateChange — so a still-
+	// uncommitted note sitting between the committed cursor and the turn would be LEAPFROGGED:
+	// the turn's preamble (YOU card + ◆ DAINTREE marker) prints first, then the queue commits
+	// the note BELOW the marker. That is exactly how the one-time "Connected to Daintree MCP"
+	// boot banner (added under the still-empty transcript, then immediately followed by the
+	// user's first turn) ended up mid-turn under ◆ DAINTREE instead of under the masthead.
+	// Holding while committed < activeTurnIndex keeps the active turn the HEAD of the live
+	// region, so its rows can never print ahead of a pending earlier cell. (committed can't run
+	// PAST idx here: nextCommit stops at the first non-sealed cell, i.e. this active turn.) No
+	// deadlock: each commit ack advances the cursor and re-runs afterStateChange, so the queue
+	// drains the earlier notes first, then this flush proceeds.
+	if idx := m.activeTurnIndex(); idx < 0 || m.queue.committed < idx {
+		return nil
+	}
 	final := m.activeTurnFinalRows(t)
 	target := len(final)
 	if target <= t.FlushedRows {

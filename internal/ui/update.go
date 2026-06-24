@@ -407,6 +407,21 @@ func (m *Model) activeTurnCell() *TurnCell {
 	return nil
 }
 
+// activeTurnIndex returns the transcript index of the live TurnCell, or -1 if none.
+// The flush uses it to confirm the commit queue's frontier has reached this turn
+// before printing its rows — so the turn never leapfrogs an earlier uncommitted cell.
+func (m *Model) activeTurnIndex() int {
+	if m.activeTurn == "" {
+		return -1
+	}
+	for i := range m.transcript {
+		if m.transcript[i].Turn != nil && m.transcript[i].Turn.ID == m.activeTurn {
+			return i
+		}
+	}
+	return -1
+}
+
 // addNote appends a standalone NoteCell to the transcript (out-of-band line).
 func (m *Model) addNote(level NoteLevel, text string) {
 	m.addSeverityNote(level, "", text)

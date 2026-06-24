@@ -288,6 +288,45 @@ func TestFlush_GatedOnMastheadCommitted(t *testing.T) {
 	}
 }
 
+// TestFlush_HoldsForUncommittedEarlierCell proves the active turn's preamble never
+// LEAPFROGS an earlier transcript cell still waiting in the commit queue. This is the
+// boot-banner ordering bug: the one-time "Connected to Daintree MCP" note is appended
+// under the still-empty transcript, the user's first turn is appended immediately after,
+// and the flush — which fires on EVERY afterStateChange while the queue commits sealed
+// cells one-per-ack — must NOT print the turn's "◆ DAINTREE" marker before the queue has
+// committed the note. Otherwise the note commits BELOW the marker, mid-turn, instead of
+// directly under the masthead where it belongs.
+func TestFlush_HoldsForUncommittedEarlierCell(t *testing.T) {
+	m := testModel(80)
+	m.commitArmed = true
+	m.queue.headerDone = true
+	m.queue.committed = 0 // the leading "Connected" note has NOT committed yet
+	turn := &TurnCell{ID: "turn_1", UserText: "QUESTIONX", State: TurnActive, Phase: domain.PhaseReceived}
+	m.transcript = []TranscriptCell{
+		{Note: &NoteCell{ID: "note_1", Level: NoteSuccess, Text: "Connected to Daintree MCP"}},
+		{Turn: turn},
+	}
+	m.activeTurn = turn.ID
+
+	// committed (0) < activeTurnIndex (1): the flush must HOLD, leaving the note ahead of the
+	// turn so the queue commits it first (under the masthead).
+	if cmd := m.flushActiveTurn(); cmd != nil {
+		t.Fatal("flush must hold while an earlier cell is still uncommitted (the note would be leapfrogged below the marker)")
+	}
+	if turn.FlushedRows != 0 {
+		t.Errorf("no rows may flush while holding, got FlushedRows=%d", turn.FlushedRows)
+	}
+
+	// Once the queue commits the note (committed advances to the turn's index), the flush proceeds.
+	m.queue.committed = 1
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("flush must proceed once the queue frontier reaches the active turn")
+	}
+	if turn.FlushedRows == 0 {
+		t.Error("the turn's immutable preamble should have flushed once the note committed")
+	}
+}
+
 // TestFlush_LeftPadConsistent proves a completed paragraph shown in the footer (before it
 // flushes) sits at the same LeftPad inset as the committed scrollback — so it never jumps a
 // column on seal. (The still-growing final paragraph BETAWORD is withheld from the footer.)
