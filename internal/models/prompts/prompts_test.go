@@ -136,6 +136,65 @@ func TestSessionEndedWatchersNote(t *testing.T) {
 	}
 }
 
+// TestConfiguredAgentsLine covers the startup configured-agents roster line in
+// message[1]: it renders the ids when present with the honest "configured subset, not
+// the full catalog" framing, sits between the worktree fact and the MCP/Models lines,
+// and is omitted entirely when none are configured (an empty roster must never mislead).
+func TestConfiguredAgentsLine(t *testing.T) {
+	base := MainPromptContext{Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true}
+
+	// None → no line.
+	if out := BuildRuntimeContextMessage(base); strings.Contains(out, "Configured agents:") {
+		t.Fatalf("configured-agents line must be omitted when none are configured:\n%s", out)
+	}
+
+	// Present → the ids render with the honest framing + spawn pointer.
+	withAgents := base
+	withAgents.ConfiguredAgentIDs = []string{"claude", "codex", "antigravity"}
+	out := BuildRuntimeContextMessage(withAgents)
+	if !strings.Contains(out, "Configured agents: claude, codex, antigravity") {
+		t.Fatalf("configured-agents ids missing:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT the full installed catalog") {
+		t.Fatalf("honest configured-subset framing missing:\n%s", out)
+	}
+	if !strings.Contains(out, "agentTask.spawnForEdits") {
+		t.Fatalf("spawn pointer missing:\n%s", out)
+	}
+	// Ordering: after the worktree fact, before the MCP/Models lines.
+	wtIdx := strings.Index(out, "Active worktree:")
+	agIdx := strings.Index(out, "Configured agents:")
+	mcpIdx := strings.Index(out, "Daintree MCP:")
+	if !(wtIdx >= 0 && wtIdx < agIdx && agIdx < mcpIdx) {
+		t.Fatalf("configured-agents line out of order (worktree=%d agents=%d mcp=%d):\n%s", wtIdx, agIdx, mcpIdx, out)
+	}
+}
+
+// TestActiveWorktreeLine covers the three worktree states message[1] distinguishes now
+// that the label is fetched at connect: a known label (the branch) renders verbatim; the
+// explicit "no worktree" sentinel renders as-is; and an empty value (read not attempted
+// or failed) falls back to the "(unknown — read with context.snapshot)" placeholder.
+func TestActiveWorktreeLine(t *testing.T) {
+	base := MainPromptContext{Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true}
+
+	known := base
+	known.ActiveWorktree = "feature/issue-230"
+	if out := BuildRuntimeContextMessage(known); !strings.Contains(out, "Active worktree: feature/issue-230") {
+		t.Fatalf("known worktree branch not rendered:\n%s", out)
+	}
+
+	none := base
+	none.ActiveWorktree = "(none — not in a worktree)"
+	if out := BuildRuntimeContextMessage(none); !strings.Contains(out, "Active worktree: (none — not in a worktree)") {
+		t.Fatalf("explicit no-worktree sentinel not rendered:\n%s", out)
+	}
+
+	// Empty → the unknown placeholder (degraded / not fetched).
+	if out := BuildRuntimeContextMessage(base); !strings.Contains(out, "Active worktree: (unknown — read with context.snapshot)") {
+		t.Fatalf("empty worktree must fall back to unknown placeholder:\n%s", out)
+	}
+}
+
 func TestBuildSkillMessages(t *testing.T) {
 	if BuildSkillCatalogMessage(nil) != "" {
 		t.Fatal("empty catalog must be empty string")

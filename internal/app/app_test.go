@@ -178,6 +178,41 @@ func TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive(t *testing.T) {
 	}
 }
 
+// TestStartupContextRosterSurfacesInRuntimeMessage asserts the cached configured-agents
+// roster and current worktree (populated by refreshStartupContext on connect) propagate
+// through PromptContext into message[1]. The cache is set directly here — the connect
+// fetch itself is exercised by the agenttaskx + parseCurrentWorktreeLabel unit tests;
+// this pins the wiring App cache → MainPromptContext → rendered runtime context.
+func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	// Before any connect the cache is empty → no roster surfaced.
+	if got := a.PromptContext().ConfiguredAgentIDs; len(got) != 0 {
+		t.Fatalf("expected empty roster before connect, got %v", got)
+	}
+
+	// Stand in for a connect having cached the roster + worktree.
+	a.rosterMu.Lock()
+	a.cachedAgentIDs = []string{"claude", "codex"}
+	a.cachedActiveWorktree = "feature/issue-230"
+	a.rosterMu.Unlock()
+
+	pc := a.PromptContext()
+	if len(pc.ConfiguredAgentIDs) != 2 || pc.ActiveWorktree != "feature/issue-230" {
+		t.Fatalf("PromptContext did not surface the cache: %+v", pc)
+	}
+
+	a.Session.RefreshRuntimeContext(pc)
+	msg := a.Session.Messages()[1].ContentToText()
+	if !strings.Contains(msg, "Configured agents: claude, codex") {
+		t.Fatalf("runtime message missing configured-agents roster:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Active worktree: feature/issue-230") {
+		t.Fatalf("runtime message missing active worktree:\n%s", msg)
+	}
+}
+
 // TestStartSchedulerIdempotent asserts a second StartScheduler call does not leak a
 // second ticker — it rebinds onto the existing scheduler and returns the same
 // instance (the idempotency invariant).

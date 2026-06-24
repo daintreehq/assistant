@@ -24,6 +24,14 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 	cfg := a.snapshotConfig()
 	st := a.MCP.Status()
 	schedulerActive := a.scheduler != nil
+	// Read the startup cache (configured-agents roster + current worktree) under its own
+	// lock, SEQUENTIALLY — snapshotConfig already released cfgMu, so rosterMu is never
+	// nested inside cfgMu. refreshStartupContext (the sole writer) populated these on the
+	// last (re)connect; this is a plain field read, no MCP round-trip.
+	a.rosterMu.RLock()
+	agentIDs := a.cachedAgentIDs
+	activeWorktree := a.cachedActiveWorktree
+	a.rosterMu.RUnlock()
 	return prompts.MainPromptContext{
 		Tier:                 cfg.Tier,
 		ProjectPath:          cfg.ProjectPath,
@@ -32,6 +40,8 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 		MCPStatusLine:        mcpStatusLine(st),
 		LargeModel:           cfg.LargeModel,
 		SmallModel:           cfg.SmallModel,
+		ActiveWorktree:       activeWorktree,
+		ConfiguredAgentIDs:   agentIDs,
 		SchedulerActive:      schedulerActive,
 		ProjectInstructions:  cfg.ProjectInstructions,
 		PinnedMemories:       a.pinnedMemoriesBlock(),

@@ -14,13 +14,18 @@ import (
 // ms in practice), so a few seconds is generous slack, not a real ceiling.
 const agentRosterTimeout = 5 * time.Second
 
-// configuredAgentIDs reads Daintree's per-agent settings map (agentSettings.get,
+// ConfiguredAgentIDs reads Daintree's per-agent settings map (agentSettings.get,
 // no args -> { agents: { <id>: {...} } }) and returns the configured agent ids,
 // sorted. Returns nil on any error, timeout, a non-map payload, or an empty map so
 // callers FAIL OPEN — a discovery hiccup must never block a spawn. Unions the
 // structuredContent map and the JSON text body (Daintree returns results in text),
 // mirroring parseTerminalList, so a divergence between the two sources can't drop ids.
-func configuredAgentIDs(ctx context.Context, mcp MCPClient) []string {
+//
+// NOTE: this is the user-CONFIGURED subset, not Daintree's full launchable catalog
+// (the built-in AGENT_REGISTRY is baked into Daintree and exposed by no MCP tool).
+// It is exported so the composition root can also fetch it once at MCP-connect time to
+// surface the roster in the startup runtime context — not just lazily at spawn time.
+func ConfiguredAgentIDs(ctx context.Context, mcp MCPClient) []string {
 	cctx, cancel := context.WithTimeout(ctx, agentRosterTimeout)
 	defer cancel()
 	res, err := mcp.CallTool(cctx, "agentSettings.get", map[string]any{})
@@ -69,7 +74,7 @@ func configuredAgentIDs(ctx context.Context, mcp MCPClient) []string {
 // agent name is caught: Daintree's agent.launch does NOT validate agentId — it
 // silently launches a terminal that immediately detaches with zero output.
 func resolveAgentID(ctx context.Context, mcp MCPClient, agentID string) (ok bool, available []string, suggestion string) {
-	available = configuredAgentIDs(ctx, mcp)
+	available = ConfiguredAgentIDs(ctx, mcp)
 	if len(available) == 0 {
 		return true, nil, "" // fail open: unknown roster, let the launch proceed
 	}

@@ -17,12 +17,12 @@ func agentRoster(ids ...string) MCPCallResult {
 func TestConfiguredAgentIDsParsesBothSources(t *testing.T) {
 	// structuredContent path, returned sorted.
 	sc := &scriptMCP{connected: true, agentSettings: agentRoster("claude", "antigravity")}
-	if got := configuredAgentIDs(context.Background(), sc); len(got) != 2 || got[0] != "antigravity" || got[1] != "claude" {
+	if got := ConfiguredAgentIDs(context.Background(), sc); len(got) != 2 || got[0] != "antigravity" || got[1] != "claude" {
 		t.Fatalf("structuredContent parse = %v, want [antigravity claude]", got)
 	}
 	// Text-body fallback (Daintree returns results in text).
 	tx := &scriptMCP{connected: true, agentSettings: MCPCallResult{Text: `{"agents":{"codex":{},"gemini":{}}}`}}
-	if got := configuredAgentIDs(context.Background(), tx); len(got) != 2 || got[0] != "codex" || got[1] != "gemini" {
+	if got := ConfiguredAgentIDs(context.Background(), tx); len(got) != 2 || got[0] != "codex" || got[1] != "gemini" {
 		t.Fatalf("text parse = %v", got)
 	}
 }
@@ -36,7 +36,7 @@ func TestConfiguredAgentIDsFailsOpen(t *testing.T) {
 		{connected: true},
 	}
 	for i, m := range cases {
-		if got := configuredAgentIDs(context.Background(), m); got != nil {
+		if got := ConfiguredAgentIDs(context.Background(), m); got != nil {
 			t.Fatalf("case %d: want nil (fail open), got %v", i, got)
 		}
 	}
