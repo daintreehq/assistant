@@ -2,8 +2,52 @@ package agenttaskx
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
+
+// blockingMCP blocks CallTool until its context is done, then records the observed ctx
+// error so a test can prove the roster read's bound surfaced as a CANCEL (not a
+// deadline) — the property that keeps a slow agentSettings.get from degrading the shared
+// mcp.Client connection.
+type blockingMCP struct{ ctxErr error }
+
+func (m *blockingMCP) Connected() bool { return true }
+func (m *blockingMCP) CallTool(ctx context.Context, _ string, _ map[string]any) (MCPCallResult, error) {
+	<-ctx.Done()
+	m.ctxErr = ctx.Err()
+	return MCPCallResult{}, ctx.Err()
+}
+
+// errMCP returns a fixed transport error for any call (exercises the err!=nil fail-open).
+type errMCP struct{}
+
+func (errMCP) Connected() bool { return true }
+func (errMCP) CallTool(context.Context, string, map[string]any) (MCPCallResult, error) {
+	return MCPCallResult{}, errBoom("transport down")
+}
+
+// TestConfiguredAgentIDsTimeoutIsCancel asserts the roster read bounds itself with a
+// CANCEL, not a deadline: on timeout the context error the MCP layer observes is
+// context.Canceled (so mcp.Client does NOT degrade the connection on a slow read), and
+// the caller falls open to nil. A non-nil transport error also fails open.
+func TestConfiguredAgentIDsTimeoutIsCancel(t *testing.T) {
+	defer func(prev time.Duration) { agentRosterTimeout = prev }(agentRosterTimeout)
+	agentRosterTimeout = 20 * time.Millisecond
+
+	b := &blockingMCP{}
+	if got := ConfiguredAgentIDs(context.Background(), b); got != nil {
+		t.Fatalf("a timed-out roster read must fail open to nil, got %v", got)
+	}
+	if !errors.Is(b.ctxErr, context.Canceled) {
+		t.Fatalf("roster timeout must surface as context.Canceled (so mcp.Client does not degrade), got %v", b.ctxErr)
+	}
+
+	if got := ConfiguredAgentIDs(context.Background(), errMCP{}); got != nil {
+		t.Fatalf("a transport error must fail open to nil, got %v", got)
+	}
+}
 
 // agentRoster builds an agentSettings.get structuredContent payload from ids.
 func agentRoster(ids ...string) MCPCallResult {

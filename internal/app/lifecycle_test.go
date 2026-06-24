@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +61,16 @@ func TestRefreshStartupContextNotConnectedClears(t *testing.T) {
 	a.rosterMu.RUnlock()
 	if gotIDs != nil || gotWt != "" {
 		t.Fatalf("not-connected refresh must clear the cache, got ids=%v wt=%q", gotIDs, gotWt)
+	}
+
+	// And it propagates: after RefreshRuntimeContext, message[1] drops the stale roster
+	// line and the worktree falls back to the unknown placeholder (honest degraded mode).
+	a.Session.RefreshRuntimeContext(a.PromptContext())
+	msg := a.Session.Messages()[1].ContentToText()
+	if strings.Contains(msg, "Configured agents:") {
+		t.Fatalf("degraded message[1] must not carry a stale roster line:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Active worktree: (unknown — read with context.snapshot)") {
+		t.Fatalf("degraded message[1] must fall back to the unknown worktree placeholder:\n%s", msg)
 	}
 }

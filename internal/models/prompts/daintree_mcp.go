@@ -382,11 +382,11 @@ Use this when building daintree.call args or reasoning about what a wrapper does
   runs under — omit it to use the agent's default. agent.launch does NOT validate
   agentId — an unknown or mis-transcribed id launches a dead, silent terminal.
 - agentSettings.get() -> { agents } keyed by AGENT id is the user-CONFIGURED agent
-  roster (claude, codex, gemini, antigravity, …) — the subset the user has set up, NOT
-  Daintree's full installed catalog, so an id absent from it may still be launchable.
-  The configured roster is also surfaced in the startup runtime context. agentTask.spawnForEdits
-  checks the requested agentId against this roster and rejects an unknown one, so a
-  user-spoken agent name is only a hint — resolve it rather than passing it through.
+  roster (claude, codex, gemini, antigravity, …) — the subset the user has set up, which
+  may be narrower than Daintree's full installed catalog. The configured roster is also
+  surfaced in the startup runtime context. agentTask.spawnForEdits checks the requested
+  agentId against this roster and rejects an unknown one, so a user-spoken agent name is
+  only a hint — resolve it rather than passing it through.
 - To focus a terminal, Daintree uses panel.focus({ panelId }) — the terminal id IS
   the panelId. There is NO terminal.focus MCP tool (the local wrapper maps to it).
 - Read tools (workbench tier, no confirmation): actions.getContext / list / search /

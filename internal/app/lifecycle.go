@@ -69,10 +69,16 @@ func (a *App) refreshStartupContext(ctx context.Context, connected bool) {
 		// agentSettings.get — the user-configured agents roster. ConfiguredAgentIDs bounds
 		// its own read and fails open (nil) on any error, so the roster line simply omits.
 		agentIDs = agenttaskx.ConfiguredAgentIDs(ctx, agentTaskMCPAdapter{c: a.MCP})
-		// worktree.getCurrent — the active worktree label. Bound it so a wedged read can't
-		// stall the connect; on any error/IsError it stays "" → the "(unknown)" placeholder.
-		wctx, cancel := context.WithTimeout(ctx, startupReadTimeout)
+		// worktree.getCurrent — the active worktree label. Bound it with a CANCEL-based
+		// deadline (not context.WithTimeout): mcp.Client degrades the connection on any
+		// non-abort CallTool error, and a DeadlineExceeded is NOT an abort — only a
+		// Canceled is. A best-effort startup read must never tear down a working
+		// connection just because it was slow, so a timeout surfaces as a cancel; on any
+		// error/IsError the label stays "" → the "(unknown)" placeholder.
+		wctx, cancel := context.WithCancel(ctx)
+		timer := time.AfterFunc(startupReadTimeout, cancel)
 		res, err := a.MCP.CallTool(wctx, "worktree.getCurrent", map[string]any{}, mcp.CallOptions{})
+		timer.Stop()
 		cancel()
 		if err == nil && !res.IsError {
 			worktree = parseCurrentWorktreeLabel(res.StructuredContent, res.Text)

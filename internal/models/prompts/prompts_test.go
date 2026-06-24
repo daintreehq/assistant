@@ -148,18 +148,18 @@ func TestConfiguredAgentsLine(t *testing.T) {
 		t.Fatalf("configured-agents line must be omitted when none are configured:\n%s", out)
 	}
 
-	// Present → the ids render with the honest framing + spawn pointer.
+	// Present → the ids render with the spawn-gate framing + spawn pointer.
 	withAgents := base
 	withAgents.ConfiguredAgentIDs = []string{"claude", "codex", "antigravity"}
 	out := BuildRuntimeContextMessage(withAgents)
 	if !strings.Contains(out, "Configured agents: claude, codex, antigravity") {
 		t.Fatalf("configured-agents ids missing:\n%s", out)
 	}
-	if !strings.Contains(out, "NOT the full installed catalog") {
-		t.Fatalf("honest configured-subset framing missing:\n%s", out)
-	}
-	if !strings.Contains(out, "agentTask.spawnForEdits") {
-		t.Fatalf("spawn pointer missing:\n%s", out)
+	// Framing must match the spawn gate (accepts these ids, rejects others) and note the
+	// roster is the configured subset — never claim it's the full catalog or that
+	// unconfigured agents are spawnable.
+	if !strings.Contains(out, "agentTask.spawnForEdits accepts") || !strings.Contains(out, "must be configured first") {
+		t.Fatalf("spawn-gate framing missing:\n%s", out)
 	}
 	// Ordering: after the worktree fact, before the MCP/Models lines.
 	wtIdx := strings.Index(out, "Active worktree:")
@@ -167,6 +167,20 @@ func TestConfiguredAgentsLine(t *testing.T) {
 	mcpIdx := strings.Index(out, "Daintree MCP:")
 	if !(wtIdx >= 0 && wtIdx < agIdx && agIdx < mcpIdx) {
 		t.Fatalf("configured-agents line out of order (worktree=%d agents=%d mcp=%d):\n%s", wtIdx, agIdx, mcpIdx, out)
+	}
+
+	// An id carrying an embedded newline must be flattened to one line — a raw newline
+	// would inject a stray heading into message[1].
+	nl := base
+	nl.ConfiguredAgentIDs = []string{"claude\n# fake heading", "codex"}
+	out = BuildRuntimeContextMessage(nl)
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, "# fake heading") {
+			t.Fatalf("agent id newline not flattened — message[1] line injection:\n%s", out)
+		}
+	}
+	if !strings.Contains(out, "claude # fake heading, codex") {
+		t.Fatalf("flattened agent id not rendered on one line:\n%s", out)
 	}
 }
 

@@ -110,16 +110,25 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 
 // configuredAgentsLine renders the configured-agents roster line for message[1], or ""
 // when none are configured (the line is then simply omitted rather than misleadingly
-// claiming an empty roster). The framing is deliberately honest: agentSettings.get
-// returns only the user-CONFIGURED subset, not Daintree's full installed catalog, so
-// the model must NOT treat an agent's absence here as proof it can't be launched — only
-// as a steer to name a configured one first.
+// claiming an empty roster). The framing matches the spawn gate's actual behavior:
+// agentTask.spawnForEdits (the only spawn path) accepts exactly the ids in this roster
+// and rejects others, so naming a configured id up front is what avoids a failed spawn.
+// agentSettings.get returns only the user-CONFIGURED subset, so the line notes other
+// installed agents must be configured first rather than implying this is Daintree's full
+// catalog. Each id is flattened (a raw newline would inject a stray heading into
+// message[1]), mirroring the pinned-memory / session-ended-watcher flattening.
 func configuredAgentsLine(ids []string) string {
-	if len(ids) == 0 {
+	flat := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := flattenLine(id); s != "" {
+			flat = append(flat, s)
+		}
+	}
+	if len(flat) == 0 {
 		return ""
 	}
-	return "Configured agents: " + strings.Join(ids, ", ") +
-		" — the user-configured Daintree agent roster (agentSettings.get; NOT the full installed catalog, so other agents may also be launchable). Prefer naming one of these when spawning via agentTask.spawnForEdits."
+	return "Configured agents: " + strings.Join(flat, ", ") +
+		" — the user-configured Daintree roster that agentTask.spawnForEdits accepts (it rejects ids not configured here). Name one of these to spawn an agent; other installed agents must be configured first."
 }
 
 // sessionEndedWatchersNote renders the one-time "the prior session ended and these

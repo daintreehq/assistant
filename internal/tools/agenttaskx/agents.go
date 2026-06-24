@@ -9,10 +9,11 @@ import (
 )
 
 // agentRosterTimeout bounds the agentSettings.get read so a hung Daintree can't
-// freeze a spawn for the MCP transport's (much longer) default timeout before the
-// caller falls open. A configured-agents read is a cheap local lookup (single-digit
-// ms in practice), so a few seconds is generous slack, not a real ceiling.
-const agentRosterTimeout = 5 * time.Second
+// freeze a spawn (or a startup-context refresh) for the MCP transport's (much longer)
+// default timeout before the caller falls open. A configured-agents read is a cheap
+// local lookup (single-digit ms in practice), so a few seconds is generous slack, not a
+// real ceiling. A var (not const) only so tests can shorten it.
+var agentRosterTimeout = 5 * time.Second
 
 // ConfiguredAgentIDs reads Daintree's per-agent settings map (agentSettings.get,
 // no args -> { agents: { <id>: {...} } }) and returns the configured agent ids,
@@ -26,8 +27,16 @@ const agentRosterTimeout = 5 * time.Second
 // It is exported so the composition root can also fetch it once at MCP-connect time to
 // surface the roster in the startup runtime context — not just lazily at spawn time.
 func ConfiguredAgentIDs(ctx context.Context, mcp MCPClient) []string {
-	cctx, cancel := context.WithTimeout(ctx, agentRosterTimeout)
+	// Bound the read with a CANCEL-based deadline, NOT context.WithTimeout. The shared
+	// mcp.Client degrades (tears down) the connection on any non-abort CallTool error,
+	// and a context.DeadlineExceeded is NOT treated as an abort — only context.Canceled
+	// is (mcp.isAborted). A roster read is best-effort and must never degrade a working
+	// connection just because it was slow, so a timeout here surfaces as a cancel; the
+	// caller still falls open to nil.
+	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	timer := time.AfterFunc(agentRosterTimeout, cancel)
+	defer timer.Stop()
 	res, err := mcp.CallTool(cctx, "agentSettings.get", map[string]any{})
 	if err != nil || res.IsError {
 		return nil
