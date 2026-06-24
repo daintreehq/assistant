@@ -30,7 +30,7 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 		"git.snapshotDelete":           domain.RiskGit,
 		"git.snapshotRevert":           domain.RiskGit,
 		"workflow.startWorkOnIssue":    domain.RiskExternal,
-		"workflow.prepBranchForReview": domain.RiskExternal,
+		"workflow.prepBranchForReview": domain.RiskRead, // read-only readiness verdict; no commit/push/PR
 		"workflow.focusNextAttention":  domain.RiskUI,
 	}
 	mutating := map[domain.RiskClass]bool{

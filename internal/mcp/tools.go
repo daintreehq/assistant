@@ -99,6 +99,9 @@ var readOnlyToolNames = map[string]struct{}{
 	"forge.listIssues":    {},
 	"forge.listPRs":       {},
 	"recipe.list":         {},
+	// prepBranchForReview is a pure readiness diagnostic (no commit/push/PR), so a
+	// transient transport blip is safe to auto-retry — it can never double-apply.
+	"workflow.prepBranchForReview": {},
 }
 
 // isReadOnlyToolName reports whether name is on the read-only auto-retry allowlist.

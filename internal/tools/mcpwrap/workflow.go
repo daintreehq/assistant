@@ -78,14 +78,17 @@ func newWorkflowStartWorkOnIssueTool(deps Deps) *tools.Tool {
 	}
 }
 
-// newWorkflowPrepBranchForReviewTool builds workflow.prepBranchForReview
-// (external): passthrough only.
+// newWorkflowPrepBranchForReviewTool builds workflow.prepBranchForReview: a
+// READ-ONLY readiness diagnostic (passthrough only). The Daintree action inspects
+// the worktree's working tree + detected test/lint runners and returns a typed
+// go/no-go verdict — it does NOT commit, push, or open a PR (the name is
+// historical). Risk "read": no mutation, so no confirmation. The actual prep
+// (commit/push, open PR) is done afterward with the git.* and forge.* tools.
 func newWorkflowPrepBranchForReviewTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.prepBranchForReview",
-		Description: "Prepare a branch for review in Daintree (push, open PR, etc.).",
-		Risk:        domain.RiskExternal,
-		Consequence: "Pushes the branch and prepares it for review (may open a PR).",
+		Description: "Read-only review-readiness check for a branch: inspects the worktree's working tree + detected runners and returns a go/no-go verdict (ready | blocked_uncommitted_changes | blocked_merge_conflicts | blocked_repo_busy | no_runners_detected) plus the uncommitted/conflict flags, staged/unstaged counts, currentBranch, repoState, and detectedRunners. Does NOT commit, push, or open a PR — do the actual prep with git.* / forge.* once the verdict is 'ready'.",
+		Risk:        domain.RiskRead,
 		Schema:      prepBranchForReviewSchema,
 		Decode:      tools.StrictDecoder(func() any { return &workflowMcpArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {

@@ -44,22 +44,34 @@ clients get an `external` tier (~70 read-safe + creation tools, no dangerous mut
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
 `terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
-`terminal.armByState`.
+`terminal.close`, `terminal.kill`, `terminal.arm` / `terminal.disarm` /
+`terminal.disarmAll`. (`terminal.armByState` / `armAll` and `fleet.*` are renderer-only —
+not MCP-callable; see the arming note below.)
 
 > `terminal.waitUntilIdle` blocks on **one** terminal — targeted use only; never fan out
 > many concurrent waits. Batch reads by passing several `terminalIds` to
 > `terminal.getStatus` instead. There is **no** `terminal.listStatus` and **no**
-> `terminal.waitForAny`.
+> `terminal.waitForAny`. NOTE: over MCP `terminal.waitUntilIdle` runs **main-process
+> only** (the renderer registration is a stub that throws), and an *interactive* session
+> caps the wait at 60s server-side regardless of `timeoutMs` (headless can wait up to
+> ~2h). The CLI does **not** route finish-detection through it — its `terminal.awaitAll`
+> / `terminal.extract wait:{}` poll `terminal.getStatus` + `terminal.getOutput`
+> themselves — so treat it as background-only and don't reach for it.
 
 Worktrees: `worktree.list`, `worktree.getCurrent`, `worktree.createWithRecipe`,
 `worktree.delete`, `worktree.setActive`, `worktree.refresh`, `worktree.listBranches`,
 `worktree.compareDiff` (read-only: the files that differ between two worktrees' branches).
 Resource lifecycle: `worktree.resource.provision`, `worktree.resource.teardown`,
-`worktree.resource.pause`, `worktree.resource.resume`, `worktree.resource.status`,
-`worktree.resource.connect`.
+`worktree.resource.pause`, `worktree.resource.resume`, `worktree.resource.status`.
+(`worktree.resource.connect` is **renderer-only** — no MCP surface, despite earlier
+docs listing it here.)
 
-Git: `git.getProjectPulse`, `git.getStagingStatus`, `git.commit`, `git.push`,
-`git.stageFile`, `git.unstageFile`, `git.snapshotList`, `git.snapshotRevert`.
+Git: `git.getProjectPulse` (HISTORICAL activity/pulse), `git.getStagingStatus` (live
+working-tree state), `git.commit`, `git.push`, `git.stageFile`, `git.unstageFile`,
+`git.snapshotList`, `git.snapshotGet`, `git.snapshotRevert`, `git.snapshotDelete`.
+(Of these, only `git.getProjectPulse`, `git.snapshotRevert`, and `git.snapshotDelete`
+have a typed CLI wrapper — the rest, incl. `git.commit`/`git.push`/`git.getStagingStatus`,
+are reached via `daintree.call`.)
 
 Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`.
 Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssue`,
@@ -68,7 +80,13 @@ Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssu
 Forge (PR writes): `forge.createPR`, `forge.closePR`, `forge.reopenPR`, `forge.mergePR`,
 `forge.convertPRToDraft`, `forge.markPRReadyForReview`, `forge.commentOnPR`, `forge.editPR`.
 Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismissReview`,
-`forge.requestReviewers`. All forge writes are `external`-risk and always confirmed.
+`forge.requestReviewers`. All forge writes are `external`-risk and the CLI always confirms
+them (its own safety layer — note that on the Daintree side several issue writes are
+`danger:safe`, but the CLI confirms regardless). **Only the four forge READS
+(`listIssues`/`getIssue`/`listPRs`/`getPR`) have typed CLI wrappers** — every forge
+WRITE is reached via `daintree.call`. Most PR/review writes return `void`; only
+`forge.createPR`/`forge.editPR` return the PR object (re-read with `forge.getPR` after
+other writes).
 
 > The `forge.open*` actions (`forge.openIssue`, `forge.openPR`, `forge.openIssues`,
 > `forge.openPRs`, `forge.openCommits`) exist on the Daintree server but are
@@ -76,7 +94,24 @@ Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismiss
 > nothing useful for a headless MCP client, so the CLI deliberately omits them. Use the
 > `forge.list*` / `forge.get*` reads instead.
 
-Agents/Recipes: `agent.launch`, `agent.terminal`, `recipe.list`, `recipe.run`.
+Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed by
+**agent** id), `agent.terminal`, `recipe.list`, `recipe.run`.
+
+> `workflow.startWorkOnIssue` is a COMPLETE synchronous Daintree workflow: it creates the
+> worktree + branch, **spawns the work agent** (raw Daintree leaves it UNSUPERVISED),
+> optionally runs a recipe first, best-effort injects worktree context, and optionally
+> assigns the issue — returning `{ issueNumber, issueTitle, issueUrl, worktreeId,
+> worktreePath, branch, terminalId, recipeLaunched, spawnedTerminalCount,
+> failedTerminalCount, assignedToSelf, … }`. The CLI **wrapper** then attaches a
+> supervisor watcher to that terminal (`attachWatcher` defaults true), so from the CLI it
+> is background supervision. `workflow.prepBranchForReview` is **READ-ONLY** despite the
+> name — it returns a go/no-go verdict (`ready` | `blocked_uncommitted_changes` |
+> `blocked_merge_conflicts` | `blocked_repo_busy` | `no_runners_detected`) plus
+> uncommitted/staged counts + detected runners; it does **not** commit/push/open a PR.
+> The CLI wrapper is `risk:read` (no confirmation). Recipes (`recipe.run` /
+> `worktree.createWithRecipe`) spawn ALL their terminals synchronously, and a recipe
+> terminal can be a **live agent** running its CLI with no watcher (agent-sourced runs
+> capped at 3) — a recipe sets up a workspace, it does not supervise.
 
 Code/Files (Daintree-side): `copyTree.generate`, `copyTree.injectToTerminal`,
 `files.search`, `file.view`, `file.openInEditor`.
@@ -86,20 +121,24 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
-  → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, recentOutput? }] }`.
-  There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` (numeric)
-  is present once a terminal has exited; `spawnedAt` / `lastTransitionAt` are epoch-ms
-  timestamps. All three are read defensively (absent/non-numeric → treated as unset).
+  → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
+  There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` is tri-state —
+  a **number** on a clean exit, **null** on a signal kill, **absent** while running — so
+  its *presence* (not value) signals the exit. `spawnedAt` / `lastTransitionAt` are
+  epoch-ms timestamps (`lastTransitionAt` = when the agent entered its CURRENT state, not
+  when it last produced output). `lastCheckResult` (when present) is a best-effort parse
+  of the agent's last test/lint/build summary — useful evidence, **not** authoritative.
+  A per-entry `error` appears for an unknown/dead id. All are read defensively.
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
   `{ terminalId, location }` **only** (no `worktreeId`, no `taskId` in the response).
   `model?` (optional string) overrides the model the spawned agent runs under; omit
   it to use the agent's default.
-- `terminal.armByState({ state: "working"|"waiting"|"finished", scope?: "current"|"all"
-  (default "current"), extend?: boolean })` arms every eligible agent terminal in the
-  given state. The exposed action id is `terminal.armByState`, **not** `fleet.armByState`
-  (the latter is an internal store call, not a callable tool).
+- `terminal.armByState` / `terminal.armAll` / `terminal.armDefault` and the whole
+  `fleet.*` family are **renderer-only** (no `mcpOutputSchema`) — **not** callable over
+  MCP, not even via `daintree.call`. The only MCP-exposed arming surface is
+  `terminal.arm` / `terminal.disarm` / `terminal.disarmAll` (each → `{ armed: string[] }`).
 - Terminal focus is **not** a `terminal.focus` MCP tool — Daintree uses
   `panel.focus({ panelId })` where the terminal id *is* the `panelId`. The local
   `terminal.focus` wrapper maps onto it.
@@ -113,12 +152,23 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
 
 - `"directing"` exists in Daintree's renderer but is **renderer-only** — you will not see
   it over MCP, so the CLI must not depend on it.
-- When `agentState` is `"waiting"`, `waitingReason` is `"prompt"` or `"question"`.
-- Exit is the `"exited"` state; a numeric `exitCode` is then exposed. The CLI treats
-  a nonzero code as failure evidence, **not** as a completion trust gate (completion
-  trust still requires the git verification pass — see gaps below).
-- There is no `agent.getState` tool. Agent state is exposed as the subscribable resource
-  `daintree://agent/{agentId}/state`, keyed by **agent** id (not terminal id).
+- **`"completed"` is TRANSIENT, not terminal.** `working → completed` fires only on a
+  detected completion event, then bounces back to `"waiting"` (next silence) or
+  `"working"` (more output) within seconds (hysteresis ~500ms). A status poll rarely
+  catches it, so a single `"completed"` read must NOT be treated as "done" without the
+  small-model tail check — which is exactly why finish detection keys on a confirmed
+  `working → waiting` (or `exited`) plus a judge, never on catching `"completed"`.
+- `waitingReason` is present **only** while `agentState` is `"waiting"` — `"prompt"`
+  (silence-detected pause) or `"question"` (the agent is asking for input).
+- Exit is the `"exited"` state; `exitCode` is then exposed (tri-state — see shapes above).
+  The CLI treats a nonzero code as failure evidence, **not** as a completion trust gate
+  (completion trust still requires the git verification pass — see gaps below).
+- `agent.getState({ agentId })` **does** exist (keyed by **agent** id, not terminal id) —
+  it returns a live single-agent snapshot (`{ state, waitingReason, exitCode, spawnedAt,
+  terminalId, found }`; an unknown id returns `found:false` rather than erroring). The CLI
+  mostly reads state through `terminal.getStatus`/`terminal.list` (via `context.snapshot`)
+  and has no typed wrapper for it, but it is reachable via `daintree.call`. Agent state is
+  also the subscribable resource `daintree://agent/{agentId}/state`.
 
 `actions.getContext` returns the active project / worktree / focused terminal snapshot.
 
