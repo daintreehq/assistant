@@ -19,6 +19,16 @@ func redactMessages(messages []ChatMessage) []map[string]any {
 	out := make([]map[string]any, 0, len(messages))
 	for _, m := range messages {
 		entry := map[string]any{"role": m.Role}
+		// System messages (the ~22 KB base prompt, runtime-context, loaded-skills control
+		// messages) are byte-stable boilerplate, not what you read a trace to diagnose.
+		// Drop the body entirely — keep only a size marker — so the trace shows the
+		// CONVERSATION and tool flow, not the framing. (The prompt itself lives in source,
+		// internal/models/prompts/, if you ever need the exact text.)
+		if m.Role == "system" {
+			entry["content"] = fmt.Sprintf("<system message elided: %d bytes>", len(m.StringContent))
+			out = append(out, entry)
+			continue
+		}
 		if m.Parts == nil {
 			entry["content"] = m.StringContent
 		} else {

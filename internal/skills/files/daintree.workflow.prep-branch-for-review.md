@@ -100,8 +100,9 @@ mode:"edit" and supervise it. Pick ONE supervision mode, never both:
   `terminal.extract` / `terminal.summarize`, and relay with `terminal.sendCommand`.
 Finish is NEVER a bare `waiting` (an agent shows waiting before it starts, when paused,
 or when backgrounded) and NEVER a transient `completed` (it bounces to waiting/working in
-seconds — don't wait to see it). Trust only a watcher `completed_*` event or
-`terminal.awaitAll` / `terminal.extract wait:{}` (each runs a small-model tail check).
+seconds — don't wait to see it). Confirm via a watcher `completed_*` event or
+`terminal.extract wait:{}` (each runs a small-model tail check), or `terminal.awaitAll`
+(state-based and fast — then read the tail to verify, and re-await one that still looks busy).
 Once the agent has fixed the branch, return to step 3 (re-check) → step 4/5.
 
 ## Report back

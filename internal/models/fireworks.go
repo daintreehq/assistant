@@ -56,6 +56,13 @@ type ChatOptions struct {
 	// PromptCacheKey caches a static system-prompt prefix on the Fireworks side.
 	// Sent ONLY on chat/chatStream (never on json) and only when non-empty.
 	PromptCacheKey string
+	// ReasoningEffort maps to the OpenAI-compatible `reasoning_effort` request field.
+	// "none" disables a reasoning model's <think> phase at the PROVIDER (not just the
+	// client-side ThinkFilter, which strips think AFTER the model already spent the
+	// tokens/latency generating it). The Router forces "none" for the small tier so
+	// every deepseek-v4-flash call (judge / summary / extraction / classification)
+	// stays fast and light. Empty ⇒ omitted (provider default).
+	ReasoningEffort string
 }
 
 // ChatResult is the normalized output of a model call.
@@ -95,16 +102,17 @@ func (c *FireworksClient) guard() error {
 // chatRequestBody is the request payload. Pointer/omitempty fields honour the
 // omit-when-undefined rule: an absent optional is omitted, never sent as null.
 type chatRequestBody struct {
-	Model          string          `json:"model"`
-	Messages       []wireMessage   `json:"messages"`
-	Tools          []ChatTool      `json:"tools,omitempty"`
-	ToolChoice     string          `json:"tool_choice,omitempty"`
-	Temperature    float64         `json:"temperature"`
-	MaxTokens      *int            `json:"max_tokens,omitempty"`
-	PromptCacheKey string          `json:"prompt_cache_key,omitempty"`
-	ResponseFormat *responseFormat `json:"response_format,omitempty"`
-	Stream         bool            `json:"stream,omitempty"`
-	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []wireMessage   `json:"messages"`
+	Tools           []ChatTool      `json:"tools,omitempty"`
+	ToolChoice      string          `json:"tool_choice,omitempty"`
+	Temperature     float64         `json:"temperature"`
+	MaxTokens       *int            `json:"max_tokens,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	PromptCacheKey  string          `json:"prompt_cache_key,omitempty"`
+	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	StreamOptions   *streamOptions  `json:"stream_options,omitempty"`
 }
 
 type responseFormat struct {
@@ -180,9 +188,10 @@ func (c *FireworksClient) buildBody(opts ChatOptions, stream, jsonMode bool) ([]
 		return nil, err
 	}
 	body := chatRequestBody{
-		Model:     opts.Model,
-		Messages:  wm,
-		MaxTokens: opts.MaxTokens,
+		Model:           opts.Model,
+		Messages:        wm,
+		MaxTokens:       opts.MaxTokens,
+		ReasoningEffort: opts.ReasoningEffort,
 	}
 	if jsonMode {
 		// json path: NO tools/tool_choice, default temperature 0, response_format,

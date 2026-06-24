@@ -16,10 +16,10 @@ import (
 type cohortReader struct {
 	seq  []map[string]TerminalStatusEntry
 	call int
-	// deep, when set, serves a per-terminal deep terminal.getOutput value — the fallback
-	// the cohort uses when the batched recentOutput is absent or whitespace-only. nil ⇒
-	// the deep read fails (short tails come straight from recentOutput).
-	deep map[string]string
+	// deep, when set, serves a per-terminal deep terminal.getOutput value. Pure-FSM
+	// awaitAll must NEVER read output, so deepCalls should stay 0 in await tests.
+	deep      map[string]string
+	deepCalls int
 }
 
 func (r *cohortReader) Connected() bool { return true }
@@ -32,10 +32,11 @@ func (r *cohortReader) ReadStatuses(_ context.Context, _ []string, _ bool) Statu
 	return StatusReadResult{OK: true, ByID: r.seq[i]}
 }
 func (r *cohortReader) ReadOutput(_ context.Context, id string, _ int) OutputReadResult {
+	r.deepCalls++
 	if v, ok := r.deep[id]; ok {
 		return OutputReadResult{OK: true, Value: v}
 	}
-	return OutputReadResult{OK: false} // short tails come from recentOutput
+	return OutputReadResult{OK: false}
 }
 
 // safeRouter is a concurrency-safe finished judge (awaitCohort fans the per-terminal
@@ -80,8 +81,9 @@ func awaitResult(t *testing.T, out map[string]*awaitOutcome, ids []string) (bool
 	return allFinished, per
 }
 
-// The cohort finishes on STAGGERED ticks: each agent is judged independently the
-// round after its tail goes quiet, and the wait resolves once all three are done.
+// The cohort finishes on STAGGERED ticks: each agent settles the round it transitions
+// working→waiting (pure FSM — no judge, no extra "quiet" round), and the wait resolves
+// once all three are done.
 func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
 		{"t1": ent("working", "", "w1"), "t2": ent("working", "", "w2"), "t3": ent("working", "", "w3")},
@@ -96,8 +98,8 @@ func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 10, 0,
 		clockSeq(0, 2000, 4000, 6000, 8000, 10000, 12000))
 
-	if attempts != 5 {
-		t.Fatalf("staggered cohort should settle on attempt 5 (each judged the round after its tail quiets), got %d", attempts)
+	if attempts != 4 {
+		t.Fatalf("each agent settles the round it goes working→waiting → done on attempt 4, got %d", attempts)
 	}
 	allFinished, per := awaitResult(t, out, ids)
 	if !allFinished {
@@ -108,43 +110,81 @@ func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 			t.Fatalf("%s should be finished, got %v", id, per[id])
 		}
 	}
-	if router.judgeCalls != 3 {
-		t.Fatalf("each agent judged once on its quiet tail → 3 judge calls, got %d", router.judgeCalls)
+	if router.judgeCalls != 0 {
+		t.Fatalf("pure-FSM awaitAll must make NO model judge call, got %d", router.judgeCalls)
+	}
+	if reader.deepCalls != 0 {
+		t.Fatalf("pure-FSM awaitAll must make NO deep getOutput read, got %d", reader.deepCalls)
 	}
 }
 
-// An agent that finished but whose batched recentOutput is BLANK (e.g. Codex bottom-pads
-// its viewport, so the inline screen-grab is all blank lines) must NOT be stranded: the
-// cohort falls back to the deep terminal.getOutput read, which carries the real content,
-// judges it, and settles it as finished. WITHOUT the blank-tail fallback the blank inline
-// trips TailEmpty, the agent is never judged, and it rides to the cap as "still working".
-func TestAwaitCohort_BlankRecentOutputFallsBackToDeepRead(t *testing.T) {
+// Pure-FSM guarantee: awaitAll settles on agentState ALONE — it never reads terminal
+// output and never calls the model, regardless of what recentOutput holds (a blank,
+// bottom-padded Codex viewport included). This is what removes the read burst that
+// tripped Daintree's getOutput throttle and the per-tick judge latency.
+func TestAwaitCohort_PureFSM_NoModelNoDeepRead(t *testing.T) {
 	reader := &cohortReader{
 		seq: []map[string]TerminalStatusEntry{
 			{"t1": ent("working", "", "thinking…")},
-			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
-			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
-			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")},
+			{"t1": ent("waiting", "prompt", "\r\n\r\n\r\n\r\n")}, // blank/padded tail — irrelevant now
 		},
-		// The deep read has the genuine, finished content (judge matches on "done").
-		deep: map[string]string{"t1": "There's a lake in Venezuela… done"},
+		deep: map[string]string{"t1": "should never be read"},
 	}
 	router := &safeRouter{}
 	deps := Deps{Reader: reader, Router: router}
 	ids := []string{"t1"}
 
-	out, _ := awaitCohort(context.Background(), deps, ids, 0, 6, 0,
+	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 6, 0,
 		clockSeq(0, 2000, 4000, 6000, 8000, 10000, 12000))
 
+	if attempts != 2 {
+		t.Fatalf("working→waiting (seen working) settles on attempt 2, got %d", attempts)
+	}
 	allFinished, per := awaitResult(t, out, ids)
-	if !allFinished {
-		t.Fatalf("a blank inline tail must fall back to the deep read and settle, got per=%+v", per)
+	if !allFinished || per["t1"]["status"] != "finished" {
+		t.Fatalf("t1 should be finished on the working→waiting transition, got per=%+v", per)
 	}
-	if per["t1"]["status"] != "finished" {
-		t.Fatalf("t1 should be finished via the deep-read fallback, got %v", per["t1"])
+	if router.judgeCalls != 0 {
+		t.Fatalf("no model call allowed, got %d judge calls", router.judgeCalls)
 	}
-	if router.judgeCalls == 0 {
-		t.Fatal("the deep-read tail (not the blank inline) should have been judged")
+	if reader.deepCalls != 0 {
+		t.Fatalf("no deep getOutput read allowed, got %d", reader.deepCalls)
+	}
+}
+
+// Pre-start guard: a terminal that reads "waiting" from the very first tick (never seen
+// working) must NOT be declared finished while it is still under the spawn grace — that
+// could be a pre-start prompt. With zero evidence it ever worked, it rides to the cap and
+// is reported "still working" (allFinished=false), NOT a fabricated "finished" — so the
+// caller reads the tail and self-heals rather than relaying a never-started agent.
+func TestAwaitCohort_NeverWorkedWaitingHoldsForGrace(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("waiting", "", "$ ")}, // waiting from the start, never observed working
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1"}
+
+	// Clock stays well under FinishSettleGraceMS (20s) for the whole bounded budget.
+	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000))
+	if attempts != 3 {
+		t.Fatalf("a never-worked 'waiting' must hold until the cap (grace not elapsed), got %d attempts", attempts)
+	}
+	allFinished, per := awaitResult(t, out, ids)
+	if allFinished {
+		t.Fatal("a never-worked, under-grace 'waiting' must NOT count as finished (allFinished=false)")
+	}
+	if per["t1"]["status"] != "working" {
+		t.Fatalf("a never-worked 'waiting' under grace should report still-working, got %v", per["t1"])
+	}
+
+	// But once the grace elapses, the same state settles as finished (fast agent we never
+	// caught mid-work).
+	reader2 := &cohortReader{seq: []map[string]TerminalStatusEntry{{"t1": ent("waiting", "", "$ ")}}}
+	out2, _ := awaitCohort(context.Background(), Deps{Reader: reader2, Router: &safeRouter{}}, ids, 0, 2, 0,
+		clockSeq(0, domain.FinishSettleGraceMS+1))
+	_, per2 := awaitResult(t, out2, ids)
+	if per2["t1"]["status"] != "finished" {
+		t.Fatalf("past the spawn grace a stable 'waiting' settles finished, got %v", per2["t1"])
 	}
 }
 

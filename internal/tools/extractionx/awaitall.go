@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -14,20 +13,30 @@ import (
 
 // terminal.awaitAll is the IN-TURN cohort finish-wait: the orchestrator spawns
 // several agents and calls this ONCE to block (bounded) until every one has
-// genuinely finished its turn. It polls all terminals together and judges each
-// independently through the SAME finish-detection policy (domain.FinishPreFilter +
-// the small-model finished judge) the watcher uses — so a bare "waiting" is never
-// mistaken for done. It returns booleans + per-terminal status only (NO content):
-// the large model then reads the outputs itself (one terminal.extract over the
-// cohort, or a bounded terminal.read), keeping content-judgement on the capable tier
-// and finish-detection on the cheap one.
+// returned to an idle prompt. It is PURE FSM — it polls only the cheap agentState
+// (terminal.getStatus) and settles each terminal on the state machine ALONE:
+//   - completed / exited       → finished (failed if a nonzero exit code);
+//   - waiting + question       → settled as needs-attention (never "finished");
+//   - waiting (other) after a   → finished — a working→waiting transition means the
+//     working→waiting transition  turn is done; if the working tick was never caught
+//     (or a stable idle past grace) (a fast agent), a stable idle past the spawn grace also settles.
+//
+// It makes NO model call and reads NO terminal output — so it is fast, light, and
+// can't trip Daintree's per-tool getOutput throttle by bursting deep reads. It
+// returns booleans + per-terminal status only (NO content): the large model then
+// reads the outputs itself (one terminal.extract over the cohort, or a bounded
+// terminal.read), keeping content-judgement on the capable tier.
+//
+// CAVEAT the orchestrator must own: a bare "waiting" is an imperfect proxy — an agent
+// can momentarily read "waiting" while still mid-work (a backgrounded window, a paused
+// step). awaitAll deliberately does NOT pay a per-tick model judge to chase that;
+// instead the large model SELF-HEALS after the wait — it peeks the last few lines
+// (a no-wait terminal.extract/read), and if a "finished" terminal still looks busy it
+// re-polls/awaits or sets a watcher on that one. The tool Description tells it so.
 //
 // It replaces the N-stacked-waits anti-pattern: terminal.extract wait:{} is
 // single-agent, so a cohort needed one waited extract per agent, and those dispatch
-// SERIALLY — three 60s timeouts in a row. awaitAll polls the whole cohort at once and
-// fans the per-terminal finished judges out concurrently.
-
-const awaitTailBytes = 6_000
+// SERIALLY — three 60s timeouts in a row. awaitAll polls the whole cohort at once.
 
 type awaitArgs struct {
 	TerminalIDs    []string `json:"terminalIds"`
@@ -70,7 +79,7 @@ var awaitSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls them CONCURRENTLY and returns when EVERY one has genuinely finished its turn — confirmed by the small-model finished check, not a bare 'waiting'. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent." },
+    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it." },
     "pollIntervalMs": { "type": "number", "description": "Delay between poll rounds in ms (default 2000)." },
     "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 60 ≈ 120s). Bounded so it cannot hang." }
   },
@@ -80,11 +89,13 @@ var awaitSchema = json.RawMessage(`{
 func newAwaitAllTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.awaitAll",
-		Description: "Wait (bounded) for a COHORT of agent terminals to all finish their turn, polling them concurrently and " +
-			"confirming each with the small-model finished check (not a bare 'waiting'). Returns allFinished plus a perTerminal " +
-			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content; read " +
-			"outputs yourself afterward with terminal.extract or terminal.read. Use this ONCE for the whole cohort instead of " +
-			"one wait per agent. Read-only; requires Daintree MCP.",
+		Description: "Wait (bounded) for a COHORT of agent terminals to all return to an idle prompt. Pure state-machine: it polls " +
+			"agentState only — NO model call, NO output read — so it is fast and light. Returns allFinished plus a perTerminal " +
+			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content. Use this " +
+			"ONCE for the whole cohort instead of one wait per agent. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
+			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
+			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
+			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitArgs{} }),
@@ -114,18 +125,18 @@ type awaitOutcome struct {
 	reason   string
 }
 
-// awaitTerminal is the per-terminal poll memory for a cohort wait.
+// awaitTerminal is the per-terminal poll memory for a cohort wait: whether we've
+// observed it WORKING yet (so a later "waiting" is a genuine working→idle transition,
+// not a never-started pre-start prompt) and its settled outcome (nil until settled).
 type awaitTerminal struct {
-	state     *terminalState
-	lastJudge int64
-	outcome   *awaitOutcome
+	seenWorking bool
+	outcome     *awaitOutcome
 }
 
-// awaitCohort runs the per-terminal poll loop. It returns once every terminal has
-// SETTLED for the await (finished / failed / asking a question) or the attempt cap is
-// hit. nowFn seams the clock for tests (nil ⇒ time.Now). Each terminal is judged
-// INDEPENDENTLY and the per-tick judge calls fan out concurrently, so one slow agent
-// never serializes the others.
+// awaitCohort runs the pure-FSM poll loop. It returns once every terminal has SETTLED
+// (finished / failed / asking a question) or the attempt cap is hit. nowFn seams the
+// clock for tests (nil ⇒ time.Now). Each terminal settles INDEPENDENTLY from its
+// agentState alone — no tail read, no model call — so a tick is one cheap getStatus.
 func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, maxAttempts int, startedAt int64, nowFn func() int64) (map[string]*awaitOutcome, int) {
 	nowMS := nowFn
 	if nowMS == nil {
@@ -144,14 +155,9 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 		attempts++
 		now := nowMS()
 		isFinal := attempts >= maxAttempts
-		statuses := deps.Reader.ReadStatuses(ctx, ids, true)
-
-		type pending struct {
-			id   string
-			tail string
-			sig  signals
-		}
-		var toJudge []pending
+		// FSM only — includeOutput=false keeps the read cheap and never triggers a deep
+		// getOutput fallback (the burst that tripped Daintree's per-tool throttle).
+		statuses := deps.Reader.ReadStatuses(ctx, ids, false)
 
 		for _, id := range ids {
 			t := term[id]
@@ -168,85 +174,26 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				agentState, waitingReason, exitCode = entry.AgentState, entry.WaitingReason, entry.ExitCode
 			}
 			if absent {
-				agentState = "exited"
+				agentState = string(domain.AgentExited)
 			}
-
-			tail := awaitReadTail(ctx, deps, id, entry, present, absent)
-			st, ms := nextOutputState(t.state, tail, now)
 			if agentState == string(domain.AgentWorking) {
-				st.seenWorking = true
+				t.seenWorking = true
 			}
-			if t.state != nil && st.outHash != t.state.outHash && strings.TrimSpace(tail) != "" {
-				st.seenWorking = true
-			}
-			t.state = &st
 
-			// A question blocks on the human/orchestrator — settle it as needs-attention so
-			// the caller can answer it, never wait it out to the cap.
-			if agentState == string(domain.AgentWaiting) && waitingReason == "question" {
-				t.outcome = &awaitOutcome{status: "question", finished: false, reason: "asking a question"}
+			v := awaitSettleFSM(agentState, waitingReason, exitCode, t.seenWorking, now-startedAt, domain.FinishSettleGraceMS)
+			if !v.settled {
 				continue
 			}
-
-			lastJudgeAge := int64(0)
-			if t.lastJudge != 0 {
-				lastJudgeAge = now - t.lastJudge
-			}
-			shouldJudge, terminalAccept := domain.FinishPreFilter(domain.FinishPreFilterInput{
-				AgentState:       agentState,
-				WaitingReason:    waitingReason,
-				SeenWorking:      st.seenWorking,
-				MsSinceSpawn:     now - startedAt,
-				MsSinceOutput:    ms,
-				MsSinceLastJudge: lastJudgeAge,
-				CooldownMS:       domain.SettleFinishCooldownMS,
-				GraceMS:          domain.FinishSettleGraceMS,
-				QuietMS:          domain.FinishQuietThresholdMS,
-				IsFinalAttempt:   isFinal,
-				TailEmpty:        strings.TrimSpace(tail) == "",
-			})
-			if terminalAccept {
-				// completed (success) or exited (success unless nonzero code). An absent
-				// terminal is reported exited with an unknown code.
-				o := &awaitOutcome{status: "finished", finished: true, exitCode: exitCode}
-				if agentState == string(domain.AgentExited) && exitCode != nil && *exitCode != 0 {
-					o.status, o.finished = "failed", true
+			o := &awaitOutcome{status: v.status, finished: v.finished, exitCode: exitCode}
+			switch v.status {
+			case "failed":
+				if exitCode != nil {
 					o.reason = fmt.Sprintf("exited with code %d", *exitCode)
 				}
-				t.outcome = o
-				continue
+			case "question":
+				o.reason = "asking a question"
 			}
-			if shouldJudge {
-				toJudge = append(toJudge, pending{id: id, tail: tail, sig: signals{
-					AgentState:    agentState,
-					WaitingReason: waitingReason,
-					RuntimeStatus: runtimeFromAgentState(agentState),
-					Tail:          tail,
-					MsSinceOutput: ms,
-				}})
-			}
-		}
-
-		// Fan the per-terminal finished judges out concurrently — the whole point of a
-		// cohort wait. Each writes only its own terminal's fields, under the mutex.
-		if len(toJudge) > 0 {
-			var wg sync.WaitGroup
-			var mu sync.Mutex
-			for _, p := range toJudge {
-				wg.Add(1)
-				go func(p pending) {
-					defer wg.Done()
-					fin, _ := confirmFinished(ctx, deps, &readResult{combinedTail: p.tail, signals: p.sig})
-					mu.Lock()
-					t := term[p.id]
-					t.lastJudge = now
-					if fin {
-						t.outcome = &awaitOutcome{status: "finished", finished: true}
-					}
-					mu.Unlock()
-				}(p)
-			}
-			wg.Wait()
+			t.outcome = o
 		}
 
 		settled := true
@@ -271,39 +218,44 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	return out, attempts
 }
 
-// awaitReadTail returns the most recent bounded tail for one terminal. Finish
-// DETECTION only needs the recent tail, so it PREFERS the inline recentOutput already
-// fetched by the batched ReadStatuses(includeOutput) — keeping each poll tick to that
-// one batched call rather than a serial deep terminal.getOutput per terminal (which,
-// at the MCP client's default per-call timeout, could otherwise stretch a tick's
-// wall-clock). It falls back to a deep read when the batched read carried no USABLE
-// inline output — recentOutput nil OR whitespace-only. An absent terminal has no tail.
-func awaitReadTail(ctx context.Context, deps Deps, id string, entry TerminalStatusEntry, present, absent bool) string {
-	if absent {
-		return ""
+// awaitFSMVerdict is the pure-FSM settle decision for one terminal at one tick.
+type awaitFSMVerdict struct {
+	settled  bool
+	status   string // "finished" | "failed" | "question" — valid only when settled
+	finished bool
+}
+
+// awaitSettleFSM decides a terminal's await verdict from its FSM state ALONE — no tail,
+// no model call. completed/exited are hard terminal facts (exited is "failed" on a
+// nonzero code). A "waiting" agent is the only soft case: a question blocks on the
+// orchestrator (settled, NOT finished); any other "waiting" is finished IF we caught it
+// working first (a real working→idle transition) OR a stable idle outlasted the spawn
+// grace (a fast agent we never caught mid-work). A never-worked "waiting" before the
+// grace is a possible pre-start prompt — NOT settled, even on the final attempt: with
+// zero positive evidence the agent ever did anything, "still working" (allFinished=false,
+// which steers the caller to read the tail and self-heal) is more honest than a forced
+// "finished" that a tiny maxAttempts budget could otherwise fabricate. working/idle/
+// directing/unknown never settle either (reported via the caller's nil-outcome path).
+func awaitSettleFSM(agentState, waitingReason string, exitCode *int, seenWorking bool, msSinceSpawn, graceMS int64) awaitFSMVerdict {
+	switch agentState {
+	case string(domain.AgentCompleted):
+		return awaitFSMVerdict{settled: true, status: "finished", finished: true}
+	case string(domain.AgentExited):
+		if exitCode != nil && *exitCode != 0 {
+			return awaitFSMVerdict{settled: true, status: "failed", finished: true}
+		}
+		return awaitFSMVerdict{settled: true, status: "finished", finished: true}
+	case string(domain.AgentWaiting):
+		if waitingReason == "question" {
+			return awaitFSMVerdict{settled: true, status: "question", finished: false}
+		}
+		if seenWorking || msSinceSpawn >= graceMS {
+			return awaitFSMVerdict{settled: true, status: "finished", finished: true}
+		}
+		return awaitFSMVerdict{} // never-worked pre-start 'waiting' before grace — keep polling
+	default:
+		return awaitFSMVerdict{}
 	}
-	// Use the inline tail ONLY when it actually carries content. A present-but-blank
-	// recentOutput is a real failure mode, not "no output": some agent TUIs bottom-pad
-	// their viewport (Codex parks its composer high and fills the rest of the screen with
-	// blank lines), so the screen-grid grab Daintree returns inline is all whitespace even
-	// though the agent has finished and its answer sits just ABOVE the window. Trusting
-	// that blank tail makes finish-detection see TailEmpty and never judge the agent — it
-	// then rides the wait to the attempt cap as "still working" (the exact awaitAll hang
-	// this fixes). So when the inline tail is whitespace-only, fall back to the deep
-	// terminal.getOutput read, which returns output history (the real content).
-	if present && entry.RecentOutput != nil && strings.TrimSpace(*entry.RecentOutput) != "" {
-		return lastRunes(*entry.RecentOutput, awaitTailBytes)
-	}
-	read := deps.Reader.ReadOutput(ctx, id, awaitTailBytes)
-	if read.OK {
-		return read.Value
-	}
-	// Deep read failed (transport hiccup) — fall back to whatever inline we held, even if
-	// blank, rather than losing a tail we already had.
-	if present && entry.RecentOutput != nil {
-		return lastRunes(*entry.RecentOutput, awaitTailBytes)
-	}
-	return ""
 }
 
 // buildAwaitResult folds the per-terminal outcomes into the tool envelope. allFinished

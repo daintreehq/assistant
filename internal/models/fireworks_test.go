@@ -39,6 +39,40 @@ func TestChatNonStream(t *testing.T) {
 	}
 }
 
+// The small tier is forced to reasoning_effort:"none" so every DeepSeek-v4-flash call
+// (judge / summary / extraction / classification) runs thinking-free and fast; the
+// large tier sends NO reasoning_effort (orchestration reasoning stays on); an explicit
+// caller value wins on any tier.
+func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
+	var lastBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = map[string]any{}
+		_ = json.Unmarshal(b, &lastBody)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+	r := NewRouter(RouterConfig{SmallModel: "small-m", LargeModel: "large-m", MediumModel: "med-m"}, newTestClient(srv.URL), nil)
+
+	// small tier → reasoning_effort "none"
+	_, _ = r.JSON(context.Background(), domain.ModelSmall, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("small tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
+	}
+
+	// large tier → omitted entirely
+	_, _ = r.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if v, present := lastBody["reasoning_effort"]; present {
+		t.Fatalf("large tier: reasoning_effort must be omitted, got %v", v)
+	}
+
+	// explicit caller value wins even on the small tier
+	_, _ = r.JSON(context.Background(), domain.ModelSmall, ChatOptions{ReasoningEffort: "low", Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "low" {
+		t.Fatalf("explicit effort: reasoning_effort = %v, want low", lastBody["reasoning_effort"])
+	}
+}
+
 // guard() rejects offline + missing key before any wire call.
 func TestGuard(t *testing.T) {
 	off := NewFireworksClient(FireworksConfig{BaseURL: "x", APIKey: "k", Offline: true})

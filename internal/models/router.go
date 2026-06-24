@@ -60,6 +60,18 @@ func (r *Router) ModelFor(tier domain.ModelTier) string {
 	}
 }
 
+// applyTierReasoning forces the small tier to non-reasoning when the caller left
+// ReasoningEffort unset. The small tier (deepseek-v4-flash) only ever runs terse
+// yes/no judges, summaries, extraction, and classification — a <think> phase there
+// is pure latency/cost, and finish-detection in particular must stay fast. The
+// large (orchestration) tier is untouched (reasoning stays on). A caller that set
+// an explicit effort wins.
+func applyTierReasoning(tier domain.ModelTier, opts *ChatOptions) {
+	if opts.ReasoningEffort == "" && tier == domain.ModelSmall {
+		opts.ReasoningEffort = "none"
+	}
+}
+
 // Describe returns the resolved model ids per tier.
 func (r *Router) Describe() map[string]string {
 	return map[string]string{
@@ -92,6 +104,7 @@ func (r *Router) Chat(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
+	applyTierReasoning(tier, &opts)
 	r.logRequest("chat", tier, model, opts)
 	res, err := r.FW.Chat(ctx, opts)
 	if err != nil {
@@ -109,6 +122,7 @@ func (r *Router) Stream(ctx context.Context, tier domain.ModelTier, opts ChatOpt
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
+	applyTierReasoning(tier, &opts)
 	r.logRequest("stream", tier, model, opts)
 	res, err := r.FW.ChatStream(ctx, opts, onToken)
 	if err != nil {
@@ -128,6 +142,7 @@ func (r *Router) JSON(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
+	applyTierReasoning(tier, &opts)
 	r.logRequest("json", tier, model, opts)
 	out, usage, err := r.FW.JSON(ctx, opts)
 	if err != nil {
