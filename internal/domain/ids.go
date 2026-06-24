@@ -22,6 +22,7 @@ const (
 	PrefixSkillRun    = "rrs_"
 	PrefixMemory      = "mem_"
 	PrefixAgentLaunch = "agt_"
+	PrefixScratch     = "scr_"
 )
 
 // NewID returns prefix followed by the first 8 hex chars of a fresh v4 UUID.
