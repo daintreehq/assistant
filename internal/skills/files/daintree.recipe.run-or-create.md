@@ -32,4 +32,4 @@ Procedure:
 5. Pass an idempotency requestKey for mutating calls when available.
 6. These typed tools work at the operator tier; daintree.call is only the system-tier raw fallback for tools without a wrapper.
 Confirmation: mutating actions require confirmation before execution.
-Report back: what was started, which worktree/terminal ids were created, and whether a watcher should be attached.
+Report back: what was started, which worktree/terminal ids were created, and any recipe outputs or state changes. (Recipes set up workspaces/terminals; they do not run an agent turn, so there is nothing to supervise here. If the user then wants an agent to WORK in a created worktree, that is a separate task with its own supervision mode — in-turn terminal.awaitAll or a background watcher.)
