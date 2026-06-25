@@ -111,23 +111,14 @@ type App struct {
 	// launch. Immutable after Create, so it needs no lock.
 	InitialTier domain.Tier
 
-	// noteMu guards the one-time session-ended-watchers carryover. The carryover is set
-	// once in Create (from the store's open-time sweep) and surfaces as a NOTE in
-	// message[1] from the first scheduler-active PromptContext until the first
-	// interactive turn consumes it (sessionEndedNoteConsumed). PromptContext reads it on
-	// agent/tool goroutines while Send (on the turn goroutine) consumes it, so both the
-	// slice and the flag must be serialized.
-	noteMu                   sync.Mutex
-	sessionEndedWatchers     []string
-	sessionEndedNoteConsumed bool
-
-	// rosterMu guards the startup-context cache: the configured-agents roster and the
-	// current worktree label, both surfaced in message[1]. They are fetched once per
-	// MCP (re)connect by refreshStartupContext (under the boot/reconnect goroutine) and
-	// read by PromptContext on agent/tool goroutines, so — exactly like cfgMu — the
-	// write and those reads must be serialized. RWMutex because reads (one per turn-
-	// context rebuild) vastly outnumber writes (one per connect). NEVER nest it with
-	// cfgMu: PromptContext takes them sequentially, never one inside the other.
+	// rosterMu guards the startup-context cache: the configured-agents roster (surfaced in
+	// message[1] via PromptContext) and the current worktree label (surfaced in the
+	// uncached footer via activeWorktreeForFooter since issue #263). Both are fetched once
+	// per MCP (re)connect by refreshStartupContext (under the boot/reconnect goroutine) and
+	// read on agent/tool goroutines, so — exactly like cfgMu — the write and those reads
+	// must be serialized. RWMutex because reads (one per turn-context rebuild / footer
+	// build) vastly outnumber writes (one per connect). NEVER nest it with cfgMu:
+	// PromptContext takes them sequentially, never one inside the other.
 	rosterMu             sync.RWMutex
 	cachedAgentIDs       []string
 	cachedActiveWorktree string
@@ -201,10 +192,6 @@ func Create(opts CreateOptions) (*App, error) {
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
-		// Watchers a prior session left running were cancelled by store.Open's sweep;
-		// carry their titles so the first scheduler-active runtime context surfaces a
-		// one-time NOTE offering to re-create them.
-		sessionEndedWatchers: store.SessionEndedWatchers(),
 	}
 
 	// mcp → queue → router → registry → skills.
@@ -339,13 +326,19 @@ func Create(opts CreateOptions) (*App, error) {
 	)
 
 	a.Session = agent.NewSession(agent.SessionDeps{
-		Router:               a.Router,
-		Tools:                newToolRunner(a),
-		SkillSelector:        skillSelectorAdapter{router: a.Router},
-		SkillCatalog:         skillReg,
-		Store:                store,
-		MemoryStore:          store,
-		MemoryRecaller:       memoryRecallerAdapter{s: store},
+		Router:             a.Router,
+		Tools:              newToolRunner(a),
+		SkillSelector:      skillSelectorAdapter{router: a.Router},
+		SkillCatalog:       skillReg,
+		Store:              store,
+		MemoryStore:        store,
+		MemoryRecaller:     memoryRecallerAdapter{s: store},
+		PinnedMemoryLister: pinnedMemoryListerAdapter{s: store},
+		// The footer's volatile-state seams (issue #263): the worktree label and the
+		// one-time session-ended note. Both are bound App methods so the wiring is testable
+		// directly; see activeWorktreeForFooter / sessionEndedWatchersForFooter.
+		ActiveWorktreeFunc:   a.activeWorktreeForFooter,
+		SessionEndedWatchers: a.sessionEndedWatchersForFooter,
 		ArtifactPersister:    store,
 		WorkflowRunLister:    store,
 		PromptContext:        a.PromptContext(),

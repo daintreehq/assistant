@@ -45,6 +45,16 @@ func (a memoryRecallerAdapter) RecallMemories(query string, limit int) ([]domain
 	return a.s.RecallMemories(query, storage.MemoryRecallOptions{Limit: &limit})
 }
 
+// pinnedMemoryListerAdapter bridges the agent's narrow per-round footer pinned-memory
+// seam (agent.PinnedMemoryLister — a no-ctx (limit) signature) onto *storage.Store's
+// option-bearing ListMemories with PinnedOnly set. Kept beside the other memory adapters;
+// the footer pinned read is ctx-free and best-effort, so only the limit needs forwarding.
+type pinnedMemoryListerAdapter struct{ s *storage.Store }
+
+func (a pinnedMemoryListerAdapter) ListPinnedMemories(limit int) ([]domain.MemoryRecord, error) {
+	return a.s.ListMemories(storage.MemoryListOptions{PinnedOnly: true, Limit: &limit})
+}
+
 func (a memoryStoreAdapter) ListMemories(_ context.Context, opts memory.ListOptions) ([]domain.MemoryRecord, error) {
 	return a.s.ListMemories(storage.MemoryListOptions{
 		Category:   strPtrOrNil(opts.Category),
@@ -290,6 +300,9 @@ var (
 	// The footer-recall seam needs a thin adapter — *storage.Store.RecallMemories takes
 	// MemoryRecallOptions, not the agent seam's narrow (query, limit).
 	_ agent.MemoryRecaller = memoryRecallerAdapter{}
+	// The footer pinned-memory seam needs a thin adapter — *storage.Store.ListMemories
+	// takes MemoryListOptions, not the agent seam's narrow (limit).
+	_ agent.PinnedMemoryLister = pinnedMemoryListerAdapter{}
 	// *storage.Store directly satisfies the agent artifact-persist seam (its no-ctx,
 	// record-returning InsertArtifact matches the interface exactly).
 	_ agent.ArtifactPersister = (*storage.Store)(nil)

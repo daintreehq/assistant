@@ -52,15 +52,24 @@ func TestBuildRuntimeContextMessage(t *testing.T) {
 	if !strings.Contains(out, "Project id: (none)") {
 		t.Fatal("empty project id fallback missing")
 	}
-	if !strings.Contains(out, "Active worktree: (unknown — read with context.snapshot)") {
-		t.Fatal("worktree fallback missing")
-	}
 	if !strings.Contains(out, "Models: large=L, small=S") {
 		t.Fatal("models line missing")
 	}
 	// connected + scheduler active → no degraded/dormant notes.
 	if strings.Contains(out, "NOTE:") {
 		t.Fatal("unexpected NOTE when fully connected/active")
+	}
+	// Volatile mid-session state moved OUT of message[1] into the uncached footer
+	// (issue #263): the runtime context must no longer carry the worktree line, the
+	// pinned-memory block, or the session-ended-watchers NOTE — those would bust the
+	// prefix cache on every change. They are tested in internal/agent/footer_test.go now.
+	withVolatile := BuildRuntimeContextMessage(MainPromptContext{
+		Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true,
+	})
+	for _, banned := range []string{"Active worktree:", "# Pinned memories", "previous session ended"} {
+		if strings.Contains(withVolatile, banned) {
+			t.Fatalf("message[1] must not carry volatile state %q (it moved to the footer):\n%s", banned, withVolatile)
+		}
 	}
 
 	degraded := BuildRuntimeContextMessage(MainPromptContext{Tier: domain.TierSystem})
@@ -80,66 +89,9 @@ func TestBuildRuntimeContextMessage(t *testing.T) {
 	}
 }
 
-// TestSessionEndedWatchersNote covers the one-time "the prior session ended and these
-// watchers stopped" NOTE: it appears only when titles are present, pluralizes/counts
-// correctly, lists titles, caps the inline list with "+N more", and flattens embedded
-// newlines so it stays a single line.
-func TestSessionEndedWatchersNote(t *testing.T) {
-	base := MainPromptContext{
-		Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true,
-	}
-
-	// None → no NOTE.
-	if out := BuildRuntimeContextMessage(base); strings.Contains(out, "previous session ended") {
-		t.Fatal("unexpected session-ended NOTE when no watchers carried over")
-	}
-
-	// One → singular noun + verb, count 1, the title quoted.
-	one := base
-	one.SessionEndedWatchers = []string{"deploy log"}
-	out := BuildRuntimeContextMessage(one)
-	if !strings.Contains(out, "NOTE: 1 watcher was stopped because the previous session ended: \"deploy log\".") {
-		t.Fatalf("singular session-ended NOTE missing/wrong:\n%s", out)
-	}
-	if !strings.Contains(out, "do NOT resume automatically; offer to re-create them") {
-		t.Fatalf("re-create guidance missing:\n%s", out)
-	}
-
-	// Many → plural noun, capped inline list + "+N more" (7 titles, cap 5 → 2 more).
-	many := base
-	many.SessionEndedWatchers = []string{"w1", "w2", "w3", "w4", "w5", "w6", "w7"}
-	out = BuildRuntimeContextMessage(many)
-	if !strings.Contains(out, "NOTE: 7 watchers were stopped") {
-		t.Fatalf("plural count wrong:\n%s", out)
-	}
-	if !strings.Contains(out, "\"w5\", +2 more.") {
-		t.Fatalf("title cap/+N more wrong:\n%s", out)
-	}
-	if strings.Contains(out, "\"w6\"") || strings.Contains(out, "\"w7\"") {
-		t.Fatalf("titles past the cap must be collapsed into +N more:\n%s", out)
-	}
-
-	// Embedded newline in a title must be flattened (else it breaks message[1]).
-	nl := base
-	nl.SessionEndedWatchers = []string{"line1\nline2"}
-	out = BuildRuntimeContextMessage(nl)
-	noteLine := ""
-	for _, ln := range strings.Split(out, "\n") {
-		if strings.HasPrefix(ln, "NOTE: 1 watcher was stopped") {
-			noteLine = ln
-		}
-	}
-	if noteLine == "" {
-		t.Fatalf("flattened single-line NOTE not found:\n%s", out)
-	}
-	if !strings.Contains(noteLine, "\"line1 line2\"") {
-		t.Fatalf("title newline not flattened to a space:\n%s", noteLine)
-	}
-}
-
 // TestConfiguredAgentsLine covers the startup configured-agents roster line in
 // message[1]: it renders the ids when present with the honest "configured subset, not
-// the full catalog" framing, sits between the worktree fact and the MCP/Models lines,
+// the full catalog" framing, sits between the project-id fact and the MCP/Models lines,
 // and is omitted entirely when none are configured (an empty roster must never mislead).
 func TestConfiguredAgentsLine(t *testing.T) {
 	base := MainPromptContext{Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true}
@@ -162,12 +114,12 @@ func TestConfiguredAgentsLine(t *testing.T) {
 	if !strings.Contains(out, "agentTask.spawnForEdits accepts") || !strings.Contains(out, "must be configured first") {
 		t.Fatalf("spawn-gate framing missing:\n%s", out)
 	}
-	// Ordering: after the worktree fact, before the MCP/Models lines.
-	wtIdx := strings.Index(out, "Active worktree:")
+	// Ordering: after the project-id fact, before the MCP/Models lines.
+	pidIdx := strings.Index(out, "Project id:")
 	agIdx := strings.Index(out, "Configured agents:")
 	mcpIdx := strings.Index(out, "Daintree MCP:")
-	if !(wtIdx >= 0 && wtIdx < agIdx && agIdx < mcpIdx) {
-		t.Fatalf("configured-agents line out of order (worktree=%d agents=%d mcp=%d):\n%s", wtIdx, agIdx, mcpIdx, out)
+	if !(pidIdx >= 0 && pidIdx < agIdx && agIdx < mcpIdx) {
+		t.Fatalf("configured-agents line out of order (projectId=%d agents=%d mcp=%d):\n%s", pidIdx, agIdx, mcpIdx, out)
 	}
 
 	// An id carrying an embedded newline must be flattened to one line — a raw newline
@@ -182,31 +134,6 @@ func TestConfiguredAgentsLine(t *testing.T) {
 	}
 	if !strings.Contains(out, "claude # fake heading, codex") {
 		t.Fatalf("flattened agent id not rendered on one line:\n%s", out)
-	}
-}
-
-// TestActiveWorktreeLine covers the three worktree states message[1] distinguishes now
-// that the label is fetched at connect: a known label (the branch) renders verbatim; the
-// explicit "no worktree" sentinel renders as-is; and an empty value (read not attempted
-// or failed) falls back to the "(unknown — read with context.snapshot)" placeholder.
-func TestActiveWorktreeLine(t *testing.T) {
-	base := MainPromptContext{Tier: domain.TierOperator, MCPConnected: true, SchedulerActive: true}
-
-	known := base
-	known.ActiveWorktree = "feature/issue-230"
-	if out := BuildRuntimeContextMessage(known); !strings.Contains(out, "Active worktree: feature/issue-230") {
-		t.Fatalf("known worktree branch not rendered:\n%s", out)
-	}
-
-	none := base
-	none.ActiveWorktree = "(none — not in a worktree)"
-	if out := BuildRuntimeContextMessage(none); !strings.Contains(out, "Active worktree: (none — not in a worktree)") {
-		t.Fatalf("explicit no-worktree sentinel not rendered:\n%s", out)
-	}
-
-	// Empty → the unknown placeholder (degraded / not fetched).
-	if out := BuildRuntimeContextMessage(base); !strings.Contains(out, "Active worktree: (unknown — read with context.snapshot)") {
-		t.Fatalf("empty worktree must fall back to unknown placeholder:\n%s", out)
 	}
 }
 

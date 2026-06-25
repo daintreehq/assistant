@@ -87,8 +87,6 @@ func (h *hostAppAdapter) StartScheduler(onAttention func(events []domain.QueueEv
 
 func (h *hostAppAdapter) Session() *agent.Session { return h.app.Session }
 
-func (h *hostAppAdapter) ConsumeSessionEndedNote() { h.app.ConsumeSessionEndedNote() }
-
 func (h *hostAppAdapter) RiskOf(toolName string) (domain.RiskClass, bool) {
 	t := h.app.Registry.Get(toolName)
 	if t == nil {

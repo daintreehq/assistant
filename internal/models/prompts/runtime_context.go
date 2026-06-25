@@ -6,18 +6,22 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// MainPromptContext is the dynamic state rendered into message[1] (the runtime
-// context). Everything that changes during a session lives here, after the cached
-// base prefix, so rewriting it never disturbs message[0].
+// MainPromptContext is the SESSION-STABLE state rendered into message[1] (the runtime
+// context), after the cached base prefix. It holds only facts that are constant for a
+// session or change rarely (on MCP (re)connect or a /permissions tier change), so a
+// RefreshRuntimeContext rewrite is infrequent and never disturbs message[0]. State that
+// changes mid-session every turn — the active worktree, pinned/recalled memories, the
+// session-ended-watchers note — deliberately does NOT live here: it would bust the
+// Fireworks prefix cache for every message after [1] on each change. That volatile state
+// is rendered into the UNCACHED turn footer instead (see internal/agent/footer.go).
 type MainPromptContext struct {
-	Tier           domain.Tier
-	ProjectPath    string
-	ProjectID      string // "" → "(none)"
-	MCPConnected   bool
-	MCPStatusLine  string
-	LargeModel     string
-	SmallModel     string
-	ActiveWorktree string // "" → the unknown fallback
+	Tier          domain.Tier
+	ProjectPath   string
+	ProjectID     string // "" → "(none)"
+	MCPConnected  bool
+	MCPStatusLine string
+	LargeModel    string
+	SmallModel    string
 	// ConfiguredAgentIDs is the user-configured Daintree agent roster (agentSettings.get),
 	// surfaced at startup so the model can name a real agent up front instead of guessing
 	// one that agent.launch won't validate (a guessed id spawns a dead, silent terminal).
@@ -30,23 +34,7 @@ type MainPromptContext struct {
 	SchedulerActive bool
 	// ProjectInstructions is the repo-local DAINTREE.md content, if any.
 	ProjectInstructions string
-	// PinnedMemories is the rendered, bounded block of pinned project memories
-	// ("- fact" per line); "" → the block is omitted. It lives here in message[1],
-	// never in the cached base prefix, so a pin/unpin surfaces on the next
-	// RefreshRuntimeContext without disturbing message[0].
-	PinnedMemories string
-	// SessionEndedWatchers carries the titles of watchers a prior session left running
-	// that the current session's open had to cancel (because watchers are
-	// session-scoped). Non-empty → a one-time NOTE tells the model to offer to
-	// re-create them. The composition root clears it after the first interactive turn
-	// so it surfaces exactly once, not on every RefreshRuntimeContext.
-	SessionEndedWatchers []string
 }
-
-// sessionEndedWatchersMaxTitles caps how many watcher titles the session-ended NOTE
-// lists inline; the remainder collapse to "+N more" so a session that left many
-// watchers running can't bloat message[1].
-const sessionEndedWatchersMaxTitles = 5
 
 // tierBlurb is the verbatim one-line description per permission tier.
 var tierBlurb = map[domain.Tier]string{
@@ -62,16 +50,11 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 	if projectID == "" {
 		projectID = "(none)"
 	}
-	activeWorktree := ctx.ActiveWorktree
-	if activeWorktree == "" {
-		activeWorktree = "(unknown — read with context.snapshot)"
-	}
 	lines := []string{
 		"# Runtime context",
 		"Permission tier: " + string(ctx.Tier) + " — " + tierBlurb[ctx.Tier],
 		"Project path: " + ctx.ProjectPath,
 		"Project id: " + projectID,
-		"Active worktree: " + activeWorktree,
 	}
 	if line := configuredAgentsLine(ctx.ConfiguredAgentIDs); line != "" {
 		lines = append(lines, line)
@@ -86,23 +69,12 @@ func BuildRuntimeContextMessage(ctx MainPromptContext) string {
 	if !ctx.SchedulerActive {
 		lines = append(lines, "NOTE: the scheduler is NOT running in this session, so everything is dormant — nothing is being supervised right now. Timers are persisted and will resume and catch up on the next interactive launch. Watchers are session-scoped: any created here are discarded when this session ends and do NOT resume on the next launch. Tell the user rather than implying anything is being supervised.")
 	}
-	if note := sessionEndedWatchersNote(ctx.SessionEndedWatchers); note != "" {
-		lines = append(lines, note)
-	}
 	if ctx.ProjectInstructions != "" {
 		lines = append(lines,
 			"",
 			"# Project instructions",
 			"These are the repo-local norms for this project, authored by the team in its DAINTREE.md. Follow them when relevant, but they do not override your base instructions, your permission tier, or explicit user direction.",
 			ctx.ProjectInstructions,
-		)
-	}
-	if ctx.PinnedMemories != "" {
-		lines = append(lines,
-			"",
-			"# Pinned memories",
-			"Durable facts you or the operator pinned for this project. Treat them as established background context; they do not override your base instructions, your permission tier, or explicit user direction. The full memory store is searchable with memory.recall / memory.list.",
-			ctx.PinnedMemories,
 		)
 	}
 	return strings.Join(lines, "\n")
@@ -131,46 +103,14 @@ func configuredAgentsLine(ids []string) string {
 		" — the user-configured Daintree roster that agentTask.spawnForEdits accepts (it rejects ids not configured here). Name one of these to spawn an agent; other installed agents must be configured first."
 }
 
-// sessionEndedWatchersNote renders the one-time "the prior session ended and these
-// watchers stopped" NOTE, or "" when there were none. The count reflects the true
-// total; the inline title list is capped at sessionEndedWatchersMaxTitles with a
-// "+N more" tail. Titles are flattened to a single line (a raw newline would break
-// message[1] or inject a stray heading).
-func sessionEndedWatchersNote(titles []string) string {
-	if len(titles) == 0 {
-		return ""
-	}
-	n := len(titles)
-	shown := titles
-	suffix := ""
-	if n > sessionEndedWatchersMaxTitles {
-		shown = titles[:sessionEndedWatchersMaxTitles]
-		suffix = ", +" + itoa(n-sessionEndedWatchersMaxTitles) + " more"
-	}
-	labels := make([]string, len(shown))
-	for i, t := range shown {
-		labels[i] = quoteTitle(flattenLine(t))
-	}
-	noun, verb := "watchers", "were"
-	if n == 1 {
-		noun, verb = "watcher", "was"
-	}
-	return "NOTE: " + itoa(n) + " " + noun + " " + verb + " stopped because the previous session ended: " +
-		strings.Join(labels, ", ") + suffix +
-		". Watchers are session-scoped and do NOT resume automatically; offer to re-create them if still relevant."
-}
-
-// flattenLine collapses CR/LF runs to single spaces so a multi-line title can't
-// break the single-line NOTE (mirrors the pinned-memory flattening in app/context).
+// flattenLine collapses CR/LF runs to single spaces so a multi-line value can't
+// break a single-line message[1] entry or inject a stray heading.
 func flattenLine(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", " ")
 	return strings.TrimSpace(s)
 }
-
-// quoteTitle wraps a (already flattened) title in double quotes for the NOTE list.
-func quoteTitle(s string) string { return `"` + s + `"` }
 
 // BuildMainSystemPrompt composes the cached base prefix and the runtime context
 // into a single string (legacy single-prompt view), joined with "\n\n".

@@ -165,6 +165,14 @@ type Session struct {
 	// zeroed. Single-flight Send serializes turns, so no lock guards it.
 	pendingDropCount int
 
+	// sessionEndedNoteShown gates the one-time `# Session note` footer block (watchers a
+	// prior session left running that store-open cancelled). Set true on the FIRST turn
+	// after the titles are read into that turn's footer, so the note surfaces during the
+	// first turn (every round of it) and never again — the footer equivalent of the old
+	// message[1] consume, minus the RefreshRuntimeContext. Mirrors pendingDropCount:
+	// single-flight Send serializes turns, so no lock guards it.
+	sessionEndedNoteShown bool
+
 	// pendingInjections buffers messages the human typed WHILE a turn was in flight
 	// (InjectPrompt), guarded by s.mu. The turn folds them into the live history at
 	// the next tool-iteration boundary (foldInInjections), so the model picks them up
@@ -440,7 +448,14 @@ func (s *Session) compactLocked(summary string) {
 // extra layer is gone — the per-call confirmation/tier gate in Dispatch is the one
 // authority on what may mutate, so a wake turn can relay between agents, send
 // terminal input, spawn, etc., exactly like a user turn.)
-type SendOptions struct{}
+type SendOptions struct {
+	// IsWake marks an autonomous watcher-wake turn (the input is a BuildWakePrompt blob,
+	// NOT typed by the user). The footer's goal anchor reads it to substitute the active
+	// workflow objective for the verbose wake blob (goalAnchorSection). It is a CHANNEL
+	// signal set by the wake caller — never inferred from the prompt text — so a user who
+	// happens to type the wake prefix still gets their own goal anchored.
+	IsWake bool
+}
 
 // Send mints a run id, runs one turn, and clears the run ref in finally. It is
 // single-flight: a concurrent call returns ErrTurnInProgress. The reply string is
@@ -468,10 +483,10 @@ func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) 
 	return s.runTurn(ctx, runID, userInput, opts), nil
 }
 
-// recallMemories runs the per-turn BM25 recall seeded by the originating ask,
-// returning the rows to inject into the footer's `# Relevant memories` section.
+// recallMemories runs the per-turn BM25 recall seeded by the originating ask, returning
+// the rows to inject into the merged memories footer block's `## Relevant` subblock.
 // Best-effort and nil-safe: a missing recaller, a blank ask, or a query error all
-// yield nil (the footer simply omits the section). It NEVER returns an error — a
+// yield nil (the footer simply omits the subblock). It NEVER returns an error — a
 // recall failure must never break a turn (side-channel reads can't break the loop).
 //
 // The blank-ask short-circuit is enforced here (not left to the storage layer's
@@ -528,14 +543,37 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	}
 
 	// 3b. Recall relevant memories ONCE per turn (best-effort), seeded by the
-	//     originating ask. The top BM25 hits are injected into every round's footer
-	//     `# Relevant memories` section so distilled, non-pinned facts resurface
-	//     automatically. Run HERE — after the cancel re-check, before the loop — so a
+	//     originating ask. The top BM25 hits are injected into every round's merged
+	//     memories footer block (`## Relevant` subblock) so distilled, non-pinned facts
+	//     resurface automatically. Run HERE — after the cancel re-check, before the loop — so a
 	//     pre-loop cancel never pays for it AND the FTS5 query fires exactly once per
 	//     turn, not once per model round (composeTurnFooter runs every round). The rows
 	//     are cached and threaded through footerContext below. A nil recaller, a blank ask,
 	//     or a query error all yield nil: a recall failure must never break the turn.
 	recalledMemories := s.recallMemories(userInput)
+
+	// 3c. Session-ended-watchers note: surface the one-time carryover (watchers a prior
+	//     session left running that store.Open cancelled) on the FIRST turn only, then
+	//     never again this session — the footer equivalent of the old message[1] consume.
+	//     Read ONCE here, gated by the shown flag, into a turn-local so the note rides
+	//     EVERY round of this turn (the footer is rebuilt per round) and no later turn. The
+	//     provider is scheduler-gated at the app seam (nil on non-interactive paths where
+	//     re-creating watchers is moot). Set the flag even when the provider yields nothing,
+	//     so a no-watcher first turn doesn't re-probe every later turn — harmless either way.
+	var sessionEndedWatchers []string
+	if !s.sessionEndedNoteShown {
+		s.sessionEndedNoteShown = true
+		if s.deps.SessionEndedWatchers != nil {
+			sessionEndedWatchers = s.deps.SessionEndedWatchers()
+		}
+	}
+
+	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
+	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
+	//     (see goalAnchorSection). This is a CHANNEL signal from the wake caller (SendOptions),
+	//     not inferred from the prompt text — so a user who types the wake prefix still gets
+	//     their own goal anchored.
+	isWake := opts.IsWake
 
 	// 4. Push the user message.
 	s.pushMessage(models.TextMessage("user", userInput))
@@ -637,21 +675,30 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// the lock RELEASED — the model call is long, and a concurrent InjectNote
 		// (daemon) or InjectPrompt (user) must be able to append without racing this read.
 		//
-		// composeTurnFooter appends the UNCACHED turn footer (a `# Current goal` anchor
-		// seeded from userInput, the `# Active workflow runs` block re-read every round,
-		// plus a `# Relevant memories` block from the once-per-turn recall above) AFTER the
+		// composeTurnFooter appends the UNCACHED turn footer (the goal/objective anchor,
+		// the `# Active workflow runs` block, the merged `# Pinned and relevant memories`
+		// block, the `# Active worktree` line, and a one-time `# Session note`) AFTER the
 		// snapshot. It is the TAIL of the request, never part of the cached prefix, so it is
-		// rebuilt fresh every round and can never invalidate the prefix cache. It is NEVER
-		// pushed into s.messages: snapshotMessages returns a fresh make+copy slice (len==cap),
-		// so this append cannot alias back into the live history — the footer stays ephemeral.
-		// recalledMemories is the SAME snapshot every round (recall ran once, before the loop),
-		// so the memory block never re-queries per round; workflowRunsForFooter, by contrast,
-		// IS re-read each round because the open-run ledger changes as the turn's tools run.
+		// rebuilt fresh every round and can never invalidate the prefix cache — which is the
+		// whole point of moving the worktree, pinned memories, and session-ended note OUT of
+		// message[1] (issue #263): those volatile facts now ride the tail, so a worktree
+		// switch or a pin no longer rewrites the cached runtime context. It is NEVER pushed
+		// into s.messages: snapshotMessages returns a fresh make+copy slice (len==cap), so
+		// this append cannot alias back into the live history — the footer stays ephemeral.
+		// Per-round vs per-turn reads: recalledMemories + sessionEndedWatchers + isWake are
+		// the SAME snapshot every round (computed once before the loop); workflowRunsForFooter,
+		// pinnedMemoriesForFooter, and activeWorktree are re-read EACH round because the open-run
+		// ledger, the pin set (a mid-turn memory.pin), and the worktree can all change as the
+		// turn's tools run.
 		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
 			Messages: append(s.snapshotMessages(), composeTurnFooter(footerContext{
-				Goal:             userInput,
-				WorkflowRuns:     s.workflowRunsForFooter(),
-				RelevantMemories: recalledMemories,
+				Goal:                 userInput,
+				IsWake:               isWake,
+				WorkflowRuns:         s.workflowRunsForFooter(),
+				RelevantMemories:     recalledMemories,
+				PinnedMemories:       s.pinnedMemoriesForFooter(),
+				ActiveWorktree:       s.activeWorktree(),
+				SessionEndedWatchers: sessionEndedWatchers,
 			})...),
 			Tools:          tools,
 			ToolChoice:     "auto",
@@ -1150,6 +1197,31 @@ func (s *Session) workflowRunsForFooter() []domain.WorkflowRunRecord {
 	}
 	runs, _ := s.deps.WorkflowRunLister.ListNonTerminalWorkflowRuns(activeWorkflowRunsLimit)
 	return runs
+}
+
+// pinnedMemoriesForFooter reads the current pinned project memories for this round's
+// footer, best-effort: a nil lister (the test/feature-off default) or any DB error both
+// yield nil, so the footer simply omits the pinned subblock rather than failing the turn.
+// Read per round (like workflowRunsForFooter, unlike the per-turn recall) so a memory.pin
+// landing mid-turn surfaces on the very next round — which is why the migration off
+// message[1] needs no RefreshRuntimeContext on pin. Bounded by pinnedMemoriesMaxRows so
+// the read never fetches more rows than the subblock can show.
+func (s *Session) pinnedMemoriesForFooter() []domain.MemoryRecord {
+	if s.deps.PinnedMemoryLister == nil {
+		return nil
+	}
+	rows, _ := s.deps.PinnedMemoryLister.ListPinnedMemories(pinnedMemoriesMaxRows)
+	return rows
+}
+
+// activeWorktree returns the current active-worktree label for this round's footer, ""
+// when no provider is wired (tests) so the `# Active worktree` section is omitted. The
+// provider reads a cached label (not MCP), so the per-round call never blocks the turn.
+func (s *Session) activeWorktree() string {
+	if s.deps.ActiveWorktreeFunc == nil {
+		return ""
+	}
+	return s.deps.ActiveWorktreeFunc()
 }
 
 // pushMessage appends to the live history and persists (best-effort), under the

@@ -108,14 +108,28 @@ type WorkflowRunLister interface {
 
 // MemoryRecaller is the per-turn BM25 recall seam (satisfied by an adapter over
 // *storage.Store). At the START of every turn the session runs ONE keyword recall
-// seeded by the user's originating ask and injects the top hits into the turn
-// footer's `# Relevant memories` section — so distilled, non-pinned facts resurface
-// automatically without the model having to call the recall tool. The narrow
-// (query, limit) signature deliberately keeps storage.MemoryRecallOptions out of the
-// agent package. Optional: a nil MemoryRecaller omits the section entirely (the
-// default in tests). All recall is best-effort — a failure must never break a turn.
+// seeded by the user's originating ask and injects the top hits into the merged
+// `# Pinned and relevant memories` footer block (the `## Relevant` subblock) — so
+// distilled, non-pinned facts resurface automatically without the model having to call
+// the recall tool. The narrow (query, limit) signature deliberately keeps
+// storage.MemoryRecallOptions out of the agent package. Optional: a nil MemoryRecaller
+// omits the subblock (the default in tests). All recall is best-effort — a failure must
+// never break a turn.
 type MemoryRecaller interface {
 	RecallMemories(query string, limit int) ([]domain.MemoryRecord, error)
+}
+
+// PinnedMemoryLister is the read-only pinned-memory seam for the turn footer (satisfied
+// by an adapter over *storage.Store). The session re-reads the current pins EVERY round
+// and renders them in the footer's merged `# Pinned and relevant memories` block, so a
+// pin surfaces without the model calling a tool — and, because the read is per-round
+// (not per-turn like recall), a memory.pin landing mid-turn shows on the very next round,
+// which is why the migration out of message[1] needs no RefreshRuntimeContext on pin. The
+// narrow (limit) signature keeps storage.MemoryListOptions out of the agent package.
+// Optional: a nil lister omits the pinned subblock (the default in tests). All reads are
+// best-effort — a failure must never break a turn.
+type PinnedMemoryLister interface {
+	ListPinnedMemories(limit int) ([]domain.MemoryRecord, error)
 }
 
 // ArtifactPersister is the durable-mirror seam for oversized tool-result overflow
@@ -143,8 +157,27 @@ type SessionDeps struct {
 	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
 	MemoryStore MemoryStore
 	// MemoryRecaller enables per-turn BM25 recall into the footer (optional; nil ⇒ the
-	// `# Relevant memories` section is omitted, the default in tests).
+	// recalled subblock of the merged memories section is omitted, the default in tests).
 	MemoryRecaller MemoryRecaller
+	// PinnedMemoryLister feeds the footer's merged memories block with the current pinned
+	// project memories, re-read every round (optional; nil ⇒ the pinned subblock is
+	// omitted, the default in tests). Best-effort, never breaks the turn.
+	PinnedMemoryLister PinnedMemoryLister
+	// ActiveWorktreeFunc returns the current active-worktree label for the footer's
+	// `# Active worktree` section, called every round so a mid-turn worktree switch
+	// surfaces next round (optional; nil ⇒ the section is omitted). It replaces the old
+	// message[1] "Active worktree:" line so a worktree switch no longer rewrites the
+	// cached runtime context. Must not block — it reads a cached label, not MCP.
+	ActiveWorktreeFunc func() string
+	// SessionEndedWatchers returns the titles of watchers a prior session left running
+	// that this session's store-open had to cancel (watchers are session-scoped). The
+	// footer surfaces them as a one-time `# Session note` on the FIRST turn only, then
+	// never again — replacing the old message[1] one-time NOTE without a
+	// RefreshRuntimeContext consume. A provider func (not a slice) so the app seam can
+	// scheduler-gate it dynamically: it returns nil on non-interactive paths where
+	// re-creating watchers is moot, even though the slice is known at construction.
+	// Optional; nil ⇒ the note never appears (the default in tests).
+	SessionEndedWatchers func() []string
 	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister

@@ -105,7 +105,9 @@ func (c *controller) runWake(parent context.Context, turnID, prompt string) tea.
 	c.cancel = cancel
 	c.mu.Unlock()
 	return func() tea.Msg {
-		reply, err := c.app.Session.Send(ctx, prompt, agent.SendOptions{})
+		// IsWake: this is an autonomous watcher-wake turn, not user-typed — the footer's
+		// goal anchor substitutes the active workflow objective for the wake blob.
+		reply, err := c.app.Session.Send(ctx, prompt, agent.SendOptions{IsWake: true})
 		c.mu.Lock()
 		c.cancel = nil
 		c.mu.Unlock()

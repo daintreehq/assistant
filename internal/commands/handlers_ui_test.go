@@ -568,8 +568,9 @@ func TestUIEveryRegistryCommandHandled(t *testing.T) {
 	}
 }
 
-// TestUIMemoryCommand: /memory list shows the store; pin injects the memory into the
-// prompt context; unpin/forget remove it. Curation must not fall through to unknown.
+// TestUIMemoryCommand: /memory list shows the store; pin marks the memory pinned (and,
+// post issue #263, surfaces it in the uncached footer — never message[1]); unpin/forget
+// reverse it. Curation must not fall through to unknown.
 func TestUIMemoryCommand(t *testing.T) {
 	a := newOfflineApp(t)
 	rec, err := a.Store.InsertMemory(domain.MemoryRecord{Content: "deploy uses fireworks tokens", Source: domain.MemoryUser})
@@ -582,28 +583,24 @@ func TestUIMemoryCommand(t *testing.T) {
 		t.Fatalf("/memory list missing the memory: %q", r.Text)
 	}
 
-	// pin → injected into the runtime prompt context.
+	// pin → the list now marks it pinned (📌); the pin must NOT be injected into message[1]
+	// (it surfaces in the per-round footer now, so no RefreshRuntimeContext runs).
 	if r := ui(a, "/memory pin "+rec.ID); !strings.Contains(r.Text, "Pinned") {
 		t.Fatalf("/memory pin: %q", r.Text)
 	}
-	if !strings.Contains(a.PromptContext().PinnedMemories, "deploy uses fireworks tokens") {
-		t.Fatalf("pinned memory not injected into prompt context: %q", a.PromptContext().PinnedMemories)
+	if r := ui(a, "/memory list"); !strings.Contains(r.Text, "📌") {
+		t.Fatalf("/memory list should mark the pinned memory: %q", r.Text)
 	}
-	// The LIVE session message[1] must reflect the pin (RefreshRuntimeContext ran) —
-	// PromptContext() recomputes from the DB, so it alone would pass without the refresh.
-	if msgs := a.Session.Messages(); len(msgs) < 2 || !strings.Contains(msgs[1].StringContent, "deploy uses fireworks tokens") {
-		t.Fatal("session message[1] not refreshed after pin")
+	if msgs := a.Session.Messages(); len(msgs) >= 2 && strings.Contains(msgs[1].StringContent, "deploy uses fireworks tokens") {
+		t.Fatal("a pin must NOT be injected into message[1] (it surfaces in the footer now)")
 	}
 
-	// unpin → no longer injected.
+	// unpin → the list no longer marks it pinned.
 	if r := ui(a, "/memory unpin "+rec.ID); !strings.Contains(r.Text, "Unpinned") {
 		t.Fatalf("/memory unpin: %q", r.Text)
 	}
-	if a.PromptContext().PinnedMemories != "" {
-		t.Fatalf("unpinned memory should not be injected, got %q", a.PromptContext().PinnedMemories)
-	}
-	if msgs := a.Session.Messages(); len(msgs) >= 2 && strings.Contains(msgs[1].StringContent, "deploy uses fireworks tokens") {
-		t.Fatal("session message[1] still shows the unpinned memory")
+	if r := ui(a, "/memory list"); strings.Contains(r.Text, "📌") {
+		t.Fatalf("/memory list must not mark any memory pinned after unpin: %q", r.Text)
 	}
 
 	// forget removes it from the list.
@@ -615,26 +612,6 @@ func TestUIMemoryCommand(t *testing.T) {
 	r := ui(a, "/memory pin mem_does_not_exist")
 	if !r.Handled || !strings.Contains(r.Text, "No such memory") {
 		t.Fatalf("/memory pin unknown id: %+v", r)
-	}
-}
-
-// TestPinnedMemoryMultilineSanitized: a pinned memory with embedded newlines renders
-// as a single "- fact" line so it can't inject a stray heading into message[1].
-func TestPinnedMemoryMultilineSanitized(t *testing.T) {
-	a := newOfflineApp(t)
-	rec, err := a.Store.InsertMemory(domain.MemoryRecord{Content: "line one\n# fake heading\nline two", Source: domain.MemoryUser})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.Store.PinMemory(rec.ID, domain.NowMS()); err != nil {
-		t.Fatal(err)
-	}
-	block := a.PromptContext().PinnedMemories
-	if strings.Contains(block, "\n# fake heading") {
-		t.Fatalf("embedded newline must be flattened, got: %q", block)
-	}
-	if !strings.Contains(block, "- line one # fake heading line two") {
-		t.Fatalf("content not flattened to one line: %q", block)
 	}
 }
 

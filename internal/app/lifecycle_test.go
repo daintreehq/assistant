@@ -64,13 +64,17 @@ func TestRefreshStartupContextNotConnectedClears(t *testing.T) {
 	}
 
 	// And it propagates: after RefreshRuntimeContext, message[1] drops the stale roster
-	// line and the worktree falls back to the unknown placeholder (honest degraded mode).
+	// line. The worktree is no longer in message[1] (it moved to the footer, issue #263),
+	// so the cleared cache simply makes the footer seam report "" until the next connect.
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	msg := a.Session.Messages()[1].ContentToText()
 	if strings.Contains(msg, "Configured agents:") {
 		t.Fatalf("degraded message[1] must not carry a stale roster line:\n%s", msg)
 	}
-	if !strings.Contains(msg, "Active worktree: (unknown — read with context.snapshot)") {
-		t.Fatalf("degraded message[1] must fall back to the unknown worktree placeholder:\n%s", msg)
+	if strings.Contains(msg, "Active worktree:") {
+		t.Fatalf("worktree must not appear in message[1] (it moved to the footer):\n%s", msg)
+	}
+	if got := a.activeWorktreeForFooter(); got != "" {
+		t.Fatalf("a cleared cache must make the footer worktree seam empty, got %q", got)
 	}
 }

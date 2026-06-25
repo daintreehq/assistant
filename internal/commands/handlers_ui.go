@@ -579,10 +579,11 @@ func describeLoaded(a *app.App) string {
 }
 
 // memoryText powers /memory: bare/list shows the pinned-first memory store, and
-// pin/unpin/forget curate by id. After a pin-state change it refreshes message[1] so
-// the injected pinned block (App.pinnedMemoriesBlock) reflects the change at once.
-// Mirrors skillsText's subcommand shape. The classic REPL reaches this via its
-// default delegation to HandleUICommand, so there is no separate REPL handler.
+// pin/unpin/forget curate by id. A pin-state change needs no runtime-context refresh —
+// pinned memories live in the uncached turn footer now (issue #263), re-read every round,
+// so the change surfaces on the assistant's next turn automatically. Mirrors skillsText's
+// subcommand shape. The classic REPL reaches this via its default delegation to
+// HandleUICommand, so there is no separate REPL handler.
 func memoryText(a *app.App, rest []string) string {
 	const usage = "Usage: /memory list | pin <id> | unpin <id> | forget <id>"
 	sub := ""
@@ -621,8 +622,9 @@ func memoryText(a *app.App, rest []string) string {
 		if rec == nil {
 			return "No such memory: " + id
 		}
-		a.Session.RefreshRuntimeContext(a.PromptContext())
-		return "Pinned " + id + " — it now surfaces in the assistant's context."
+		// No RefreshRuntimeContext: pins live in the uncached turn footer now (issue #263),
+		// re-read every round, so the pin surfaces on the assistant's next turn automatically.
+		return "Pinned " + id + " — it surfaces in the assistant's context on its next turn."
 	case "unpin":
 		id := argAt(rest, 1)
 		if id == "" {
@@ -635,7 +637,8 @@ func memoryText(a *app.App, rest []string) string {
 		if rec == nil {
 			return "No such memory: " + id
 		}
-		a.Session.RefreshRuntimeContext(a.PromptContext())
+		// No RefreshRuntimeContext: the footer re-reads pins every round, so the unpin drops
+		// it from the assistant's context on its next turn.
 		return "Unpinned " + id + "."
 	case "forget":
 		id := argAt(rest, 1)
@@ -649,8 +652,9 @@ func memoryText(a *app.App, rest []string) string {
 		if !found {
 			return "No such memory: " + id
 		}
-		// A forgotten memory might have been pinned — refresh so it leaves the inject.
-		a.Session.RefreshRuntimeContext(a.PromptContext())
+		// A forgotten memory might have been pinned, but no RefreshRuntimeContext is needed:
+		// the footer re-reads pins every round, so it leaves the assistant's context on its
+		// next turn.
 		return "Forgot " + id + "."
 	default:
 		return usage

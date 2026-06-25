@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -24,120 +23,61 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 	cfg := a.snapshotConfig()
 	st := a.MCP.Status()
 	schedulerActive := a.scheduler != nil
-	// Read the startup cache (configured-agents roster + current worktree) under its own
-	// lock, SEQUENTIALLY — snapshotConfig already released cfgMu, so rosterMu is never
-	// nested inside cfgMu. refreshStartupContext (the sole writer) populated these on the
-	// last (re)connect; this is a plain field read, no MCP round-trip.
+	// Read the startup cache (configured-agents roster) under its own lock, SEQUENTIALLY —
+	// snapshotConfig already released cfgMu, so rosterMu is never nested inside cfgMu.
+	// refreshStartupContext (the sole writer) populated it on the last (re)connect; this is
+	// a plain field read, no MCP round-trip. The active-worktree label is NO LONGER read
+	// here: it moved to the uncached footer (issue #263), reached via SessionDeps.ActiveWorktreeFunc.
 	a.rosterMu.RLock()
 	agentIDs := a.cachedAgentIDs
-	activeWorktree := a.cachedActiveWorktree
 	a.rosterMu.RUnlock()
 	return prompts.MainPromptContext{
-		Tier:                 cfg.Tier,
-		ProjectPath:          cfg.ProjectPath,
-		ProjectID:            cfg.ProjectID,
-		MCPConnected:         st.Connected,
-		MCPStatusLine:        mcpStatusLine(st),
-		LargeModel:           cfg.LargeModel,
-		SmallModel:           cfg.SmallModel,
-		ActiveWorktree:       activeWorktree,
-		ConfiguredAgentIDs:   agentIDs,
-		SchedulerActive:      schedulerActive,
-		ProjectInstructions:  cfg.ProjectInstructions,
-		PinnedMemories:       a.pinnedMemoriesBlock(),
-		SessionEndedWatchers: a.sessionEndedNote(schedulerActive),
+		Tier:                cfg.Tier,
+		ProjectPath:         cfg.ProjectPath,
+		ProjectID:           cfg.ProjectID,
+		MCPConnected:        st.Connected,
+		MCPStatusLine:       mcpStatusLine(st),
+		LargeModel:          cfg.LargeModel,
+		SmallModel:          cfg.SmallModel,
+		ConfiguredAgentIDs:  agentIDs,
+		SchedulerActive:     schedulerActive,
+		ProjectInstructions: cfg.ProjectInstructions,
 	}
 }
 
-// sessionEndedNote returns the carried-over titles of watchers cancelled when the
-// prior session ended, but ONLY while the scheduler is active (the interactive path
-// where watchers matter) and the one-time NOTE has not yet been consumed by the
-// first turn. Returns nil otherwise, so message[1] omits the NOTE. Reads the flag +
-// slice under noteMu since a turn goroutine may consume concurrently.
-func (a *App) sessionEndedNote(schedulerActive bool) []string {
-	if !schedulerActive {
-		return nil
-	}
-	a.noteMu.Lock()
-	defer a.noteMu.Unlock()
-	if a.sessionEndedNoteConsumed || len(a.sessionEndedWatchers) == 0 {
-		return nil
-	}
-	return a.sessionEndedWatchers
-}
-
-// ConsumeSessionEndedNote marks the one-time session-ended-watchers NOTE consumed
-// and refreshes message[1] to strip it, so it surfaces on the first interactive turn
-// and never again this session. Idempotent and cheap after the first call (no-op when
-// already consumed or when there was no NOTE to begin with). Exported so the embedded
-// host (which drives Session.Send directly, not App.Send) can consume it after its
-// first prompt turn too.
-func (a *App) ConsumeSessionEndedNote() {
-	a.noteMu.Lock()
-	if a.sessionEndedNoteConsumed || len(a.sessionEndedWatchers) == 0 {
-		a.noteMu.Unlock()
-		return
-	}
-	a.sessionEndedNoteConsumed = true
-	a.noteMu.Unlock()
-	// Rebuild message[1] without the NOTE. PromptContext now returns nil for the
-	// titles (consumed flag is set), so this strips it.
-	a.Session.RefreshRuntimeContext(a.PromptContext())
-}
-
-// Send runs one interactive user turn through the session, then consumes the
-// one-time session-ended-watchers NOTE so it surfaces during exactly the first turn
-// and is stripped from message[1] afterwards. Interactive callers (cockpit/REPL user
-// turns) route through here instead of Session.Send directly; autonomous wake turns
-// and one-shot runs call Session.Send and never trip the consume (one-shot never
-// starts the scheduler, so the NOTE is never seeded there).
+// Send runs one interactive user turn through the session. It is the interactive entry
+// point (cockpit/REPL user turns route through here); autonomous wake turns and one-shot
+// runs call Session.Send directly. The one-time session-ended-watchers note that this
+// wrapper used to consume now lives in the uncached footer, surfaced once by the Session
+// itself (sessionEndedNoteShown) — so Send is a thin pass-through with no post-turn work.
 func (a *App) Send(ctx context.Context, userInput string, opts agent.SendOptions) (string, error) {
-	reply, err := a.Session.Send(ctx, userInput, opts)
-	a.ConsumeSessionEndedNote()
-	return reply, err
+	return a.Session.Send(ctx, userInput, opts)
 }
 
-// pinnedMemoriesMax caps how many pinned memories are injected (pinned-first order,
-// so the most recently pinned win when the operator exceeds it).
-const pinnedMemoriesMax = 20
+// activeWorktreeForFooter returns the current active-worktree label for the footer's
+// `# Active worktree` section (SessionDeps.ActiveWorktreeFunc). It reads the startup cache
+// under rosterMu — the same field PromptContext used to surface in message[1] — so a
+// mid-session switch (refreshStartupContext on reconnect) shows up on the next round
+// without rewriting the cached runtime context (issue #263).
+func (a *App) activeWorktreeForFooter() string {
+	a.rosterMu.RLock()
+	defer a.rosterMu.RUnlock()
+	return a.cachedActiveWorktree
+}
 
-// pinnedMemoriesBlockMaxBytes bounds the rendered pinned-memory block, mirroring the
-// DAINTREE.md project-instructions ceiling (16 KiB) — generous, since pins are short.
-const pinnedMemoriesBlockMaxBytes = 16384
-
-// pinnedMemoriesBlock renders pinned project memories as "- content" lines for
-// message[1] (consumed by prompts.BuildRuntimeContextMessage). Best-effort: a nil
-// Store, a query error, or no pins yields "" (the block is simply omitted). The total
-// is bounded to pinnedMemoriesBlockMaxBytes and never emits a partial trailing line.
-func (a *App) pinnedMemoriesBlock() string {
-	if a.Store == nil {
-		return ""
+// sessionEndedWatchersForFooter returns the carried-over titles of watchers a prior
+// session left running (the store recorded them at open-time), but ONLY while the
+// scheduler is active — the interactive path where the offer to re-create them is
+// meaningful. The footer's one-time `# Session note` reads it once, on the first turn, via
+// SessionDeps.SessionEndedWatchers. a.scheduler is nil until StartScheduler runs, which
+// precedes the first interactive turn — so an interactive run returns the titles and a
+// one-shot/non-interactive run (no scheduler) returns nil. Reads a.scheduler the same
+// lock-free way PromptContext/buildContext do (StartScheduler happens-before turn one).
+func (a *App) sessionEndedWatchersForFooter() []string {
+	if a.scheduler == nil {
+		return nil
 	}
-	limit := pinnedMemoriesMax
-	rows, err := a.Store.ListMemories(storage.MemoryListOptions{PinnedOnly: true, Limit: &limit})
-	if err != nil || len(rows) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, m := range rows {
-		// Flatten embedded newlines so one memory is exactly one "- fact" line — a raw
-		// "\n" would otherwise break the list (or inject a stray heading) into the
-		// system message.
-		content := strings.ReplaceAll(m.Content, "\r\n", " ")
-		content = strings.ReplaceAll(content, "\n", " ")
-		content = strings.ReplaceAll(content, "\r", " ")
-		line := "- " + strings.TrimSpace(content)
-		// +1 for the joining newline; skip a line that would overflow the cap (continue,
-		// not break, so a single oversized pin can't suppress the shorter ones after it).
-		if b.Len()+len(line)+1 > pinnedMemoriesBlockMaxBytes {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(line)
-	}
-	return b.String()
+	return a.Store.SessionEndedWatchers()
 }
 
 // mcpStatusLine renders the connected/not-connected one-liner.
