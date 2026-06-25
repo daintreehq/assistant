@@ -33,6 +33,10 @@ type ToolResultEvent struct {
 	Name    string
 	Result  domain.ToolResult
 	EndedAt int64
+	// FailureCount is the session-cumulative number of times THIS tool name has failed
+	// (this result included), 0 on a successful result. A cheap drift signal (issue
+	// #251) surfaced off the dispatch result, not the audit path.
+	FailureCount int
 }
 
 // BatchedToolCall is one entry in a ToolBatch announcement: a queued tool call,
@@ -66,6 +70,10 @@ type UsageEvent struct {
 	ContextTokens    int
 	ContextThreshold int // auto-compact trigger point (NOT the gauge denominator)
 	ContextWindow    int // model context window — the CTX% gauge denominator
+	// CompactionDepth is how many times the session has compacted so far (issue #251).
+	// A drift signal: rising depth over a long run flags a summary-of-summary chain
+	// degrading detail. Session-scoped; resets to 0 on /clear.
+	CompactionDepth int
 	// CostUsd is nil when the provider reported no usage ("no data"), never a
 	// misleading $0.000.
 	CostUsd *float64
@@ -368,11 +376,12 @@ func (s *RunEventSink) ToolCall(ev ToolCallEvent) {
 
 func (s *RunEventSink) ToolResult(ev ToolResultEvent) {
 	s.write("tool:result", map[string]any{
-		"id":      ev.ID,
-		"name":    ev.Name,
-		"ok":      ev.Result.Ok,
-		"summary": ev.Result.Summary,
-		"auditId": ev.Result.AuditID,
+		"id":           ev.ID,
+		"name":         ev.Name,
+		"ok":           ev.Result.Ok,
+		"summary":      ev.Result.Summary,
+		"auditId":      ev.Result.AuditID,
+		"failureCount": ev.FailureCount,
 	})
 }
 
@@ -398,6 +407,7 @@ func (s *RunEventSink) Usage(ev UsageEvent) {
 		"contextTokens":    ev.ContextTokens,
 		"contextThreshold": ev.ContextThreshold,
 		"contextWindow":    ev.ContextWindow,
+		"compactionDepth":  ev.CompactionDepth,
 		"tier":             ev.Tier,
 		"model":            ev.Model,
 	}

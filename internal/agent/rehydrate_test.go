@@ -122,7 +122,7 @@ func TestRehydrateCompactMarkerKeepsAfter(t *testing.T) {
 		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
 		msgRow(3, "user", "old"), msgRow(4, "assistant", "old reply"),
 		msgRow(5, "system", compactionMarker),
-		msgRow(6, "user", compactedNotePrefix+"the summary"),
+		msgRow(6, "user", compactionNotePrefix(1)+"the summary"),
 	}
 	res, ok := RehydrateSession(rows)
 	if !ok {
@@ -131,7 +131,7 @@ func TestRehydrateCompactMarkerKeepsAfter(t *testing.T) {
 	if len(res.RestoredMessages) != 1 {
 		t.Fatalf("after-compact history len=%d want 1", len(res.RestoredMessages))
 	}
-	if res.RestoredMessages[0].StringContent != compactedNotePrefix+"the summary" {
+	if res.RestoredMessages[0].StringContent != compactionNotePrefix(1)+"the summary" {
 		t.Fatalf("unexpected restored content %q", res.RestoredMessages[0].StringContent)
 	}
 }

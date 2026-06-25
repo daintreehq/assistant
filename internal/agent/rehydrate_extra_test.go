@@ -34,10 +34,10 @@ func TestRehydrateKeepsOnlyLatestSummary(t *testing.T) {
 	rows := append(controlRows(),
 		msgRow(3, "user", "turn one"),
 		msgRow(4, "system", compactionMarker),
-		msgRow(5, "user", compactedNotePrefix+"FIRST"),
+		msgRow(5, "user", compactionNotePrefix(1)+"FIRST"),
 		msgRow(6, "user", "turn two"),
 		msgRow(7, "system", compactionMarker),
-		msgRow(8, "user", compactedNotePrefix+"SECOND"),
+		msgRow(8, "user", compactionNotePrefix(2)+"SECOND"),
 	)
 	res, ok := RehydrateSession(rows)
 	if !ok {
@@ -96,7 +96,7 @@ func TestRehydrateClearAfterCompactDropsAll(t *testing.T) {
 	rows := append(controlRows(),
 		msgRow(3, "user", "turn one"),
 		msgRow(4, "system", compactionMarker),
-		msgRow(5, "user", compactedNotePrefix+"SUMMARY"),
+		msgRow(5, "user", compactionNotePrefix(1)+"SUMMARY"),
 		msgRow(6, "system", domain.ClearMarker),
 	)
 	res, _ := RehydrateSession(rows)

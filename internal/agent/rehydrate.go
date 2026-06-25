@@ -14,7 +14,6 @@ import (
 const (
 	compactionMarkerPrefix = "[conversation compacted"
 	compactionMarker       = "[conversation compacted — earlier turns dropped from context]"
-	compactedNotePrefix    = "[compacted summary of earlier conversation]\n"
 	injectNotePrefix       = "[system event]\n"
 	// userInterjectPrefix frames a message the human typed WHILE a turn was already
 	// running, folded into that turn at the next tool-iteration boundary (see

@@ -117,6 +117,20 @@ type Session struct {
 	// freshly-shrunk history.
 	lastPromptTokens int
 
+	// compactionDepth counts how many times this session has compacted (guarded by
+	// s.mu). Incremented in compactLocked and embedded in the persisted note prefix so
+	// a summary-of-summary chain — each pass re-flattening the prior note — is visible
+	// rather than silently degrading detail over a long run. Reset to 0 on /clear (the
+	// chain is destroyed). Session-scoped only: it does NOT survive a restart (durable
+	// depth tracking is the Wave-3 structured-checkpoint work). See observability.go.
+	compactionDepth int
+
+	// toolFailures is the session-cumulative count of failed tool calls keyed by
+	// internal tool name (guarded by s.mu, lazy-init). DISTINCT from runToolBatch's
+	// per-turn circuit-breaker map: this one accumulates across rounds as a coarse
+	// "which tools keep failing" signal, off the audit path. See observability.go.
+	toolFailures map[string]int
+
 	// wg tracks detached background work (the post-compaction distill goroutine) so
 	// App.Shutdown and tests can DrainBackgroundWork() before the deps it touches
 	// (Router/MemoryStore) are torn down. sync.WaitGroup is goroutine-safe — no lock.
@@ -369,9 +383,12 @@ func (s *Session) clearLocked() {
 	// History is gone — the auto-compact failure streak is moot; don't let a stale
 	// count trip the lossy fallback on the next outage. The stashed real prompt_tokens
 	// described the now-discarded history, so zero it too: the next compaction check
-	// must fall back to the char estimate until a fresh round reports real usage.
+	// must fall back to the char estimate until a fresh round reports real usage. The
+	// compaction chain is destroyed as well, so the depth tag resets to 0 (a depth that
+	// kept climbing past a /clear would be misleading).
 	s.compactFailures = 0
 	s.lastPromptTokens = 0
+	s.compactionDepth = 0
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
@@ -404,9 +421,14 @@ func (s *Session) compactLocked(summary string) {
 	// immediately — a tight, useless re-compaction loop. Zero it so the next check falls
 	// back to the char estimate until a fresh round reports the post-compaction usage.
 	s.lastPromptTokens = 0
+	// Bump the compaction depth and tag the persisted note with it, so a
+	// summary-of-summary chain is observable instead of silently flattening detail
+	// over a long run (issue #251). The tag rides on the user note; the rehydration
+	// boundary keys off the system marker, so this text is free to change.
+	s.compactionDepth++
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
-	note := models.TextMessage("user", compactedNotePrefix+summary)
+	note := models.TextMessage("user", compactionNotePrefix(s.compactionDepth)+summary)
 	s.messages = append(s.messages, note)
 	s.persistMessageLocked(note)
 }
@@ -738,7 +760,21 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res = s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
 		}
 
-		s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: domain.NowMS()})
+		// Session-cumulative per-tool failure tally (issue #251): a coarse "which tools
+		// keep failing" signal that accumulates across rounds, off the audit path. Counts
+		// EVERY failed result (bad-args and not-offered included — a tool the model keeps
+		// misusing is a real drift signal), EXCEPT a result produced while the turn is
+		// being cancelled: a user abort tearing down mid-tool is not a tool failure
+		// (mirrors maybeAutoCompact, which also refuses to count a cancel as an outage).
+		// The increment lands BEFORE the event so FailureCount carries the up-to-date
+		// total; recordToolFailure takes s.mu itself (no lock held here). Ok results and
+		// cancelled results carry 0.
+		failCount := 0
+		if !res.Ok && ctx.Err() == nil {
+			failCount = s.recordToolFailure(internalName)
+		}
+
+		s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: domain.NowMS(), FailureCount: failCount})
 		if res.Ok {
 			s.events.ToolState(call.ID, ToolStateDone)
 		} else {
@@ -892,6 +928,7 @@ func (s *Session) emitUsage() {
 	ev := UsageEvent{
 		ContextThreshold: domain.AutoCompactTokenThreshold,
 		ContextWindow:    domain.LargeContextWindowTokens,
+		CompactionDepth:  s.CompactionDepth(),
 		Tier:             string(domain.ModelLarge),
 		Model:            models.BareModelID(s.deps.Router.ModelFor(domain.ModelLarge)),
 		Tiers:            tiers,
