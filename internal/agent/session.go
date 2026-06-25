@@ -1451,10 +1451,6 @@ func (s *Session) DrainBackgroundWork() {
 	s.wg.Wait()
 }
 
-// distillTranscriptMaxRunes caps the transcript fed to the distillation model — the
-// small model needs only enough context to extract facts, not the full summary input.
-const distillTranscriptMaxRunes = 8000
-
 // distillCompact extracts durable facts from a soon-to-be-discarded transcript via a
 // single small-model call and saves the novel ones as source="compact" memories.
 // Best-effort by construction: a nil MemoryStore, an empty transcript, a model error,
@@ -1467,8 +1463,8 @@ func (s *Session) distillCompact(ctx context.Context, runID, transcript string) 
 	}
 	// Keep the freshest TAIL — durable decisions are most likely near the end of the
 	// conversation, while the head is the part most likely already summarized away.
-	if r := []rune(transcript); len(r) > distillTranscriptMaxRunes {
-		transcript = string(r[len(r)-distillTranscriptMaxRunes:])
+	if r := []rune(transcript); len(r) > domain.DistillTranscriptMaxRunes {
+		transcript = string(r[len(r)-domain.DistillTranscriptMaxRunes:])
 	}
 	if trimSpace(transcript) == "" {
 		return 0

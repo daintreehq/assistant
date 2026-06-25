@@ -663,8 +663,8 @@ func compactRun(ctx context.Context, a *app.App) string {
 	full := transcriptString(a)
 	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
 		Messages: []models.ChatMessage{
-			models.TextMessage("system", "Summarize this assistant session into a tight brief: goals, decisions, open watchers/timers, and next steps. <= 200 words."),
-			models.TextMessage("user", capHead(full, 12000)),
+			models.TextMessage("system", "Summarize this assistant session into a tight brief: goals, decisions, open watchers/timers, and next steps. Preserve verbatim every terminal ID, agent ID, workflow-run ID, watcher ID, branch name, and active grant or approval that appears in the transcript — they are the handles the operator needs to keep working after the history is discarded. <= 200 words."),
+			models.TextMessage("user", capTail(full, 12000)),
 		},
 		MaxTokens: intPtr(400),
 	})
@@ -673,7 +673,7 @@ func compactRun(ctx context.Context, a *app.App) string {
 	}
 	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
 	// discards it.
-	distillInput := capTail(full, distillTranscriptMaxRunes)
+	distillInput := capTail(full, domain.DistillTranscriptMaxRunes)
 	if err := a.Session.Compact(res.Content); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
@@ -687,10 +687,6 @@ func compactRun(ctx context.Context, a *app.App) string {
 	}
 	return msg
 }
-
-// distillTranscriptMaxRunes caps the transcript fed to the distillation model (mirrors
-// the agent path) — the small model needs only enough recent context to extract facts.
-const distillTranscriptMaxRunes = 8000
 
 // distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
 // it extracts durable facts from a soon-to-be-discarded transcript (one small-model
@@ -779,9 +775,10 @@ func reconnectRun(ctx context.Context, a *app.App) string {
 func intPtr(n int) *int { return &n }
 
 // transcriptString flattens the non-system history to "role: text" lines (empty text
-// → "[tool call]"), newline-joined and uncapped. Capping is the caller's choice:
-// capHead for the summary (oldest-first brief) and capTail for distillation (which
-// wants the freshest content, where durable decisions are most likely to live).
+// → "[tool call]"), newline-joined and uncapped. Capping is the caller's choice — both
+// the summary and distillation callers use capTail, keeping the freshest content where
+// active handles (IDs, branches, grants) and durable decisions are most likely to live;
+// the head is the part normal compaction would have summarized away anyway.
 func transcriptString(a *app.App) string {
 	var b strings.Builder
 	for _, m := range a.Session.Messages() {
@@ -798,14 +795,6 @@ func transcriptString(a *app.App) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// capHead keeps the first maxRunes runes (oldest content).
-func capHead(s string, maxRunes int) string {
-	if r := []rune(s); len(r) > maxRunes {
-		return string(r[:maxRunes])
-	}
-	return s
 }
 
 // capTail keeps the last maxRunes runes (freshest content).

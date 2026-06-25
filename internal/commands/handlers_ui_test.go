@@ -806,3 +806,32 @@ func TestUIWorkflowsCapCaseAndInvalid(t *testing.T) {
 		t.Fatalf("/workflows nope should be (none): %q", r.Text)
 	}
 }
+
+// capTail is the recency-preserving cap used by BOTH the manual /compact summary and
+// distillation paths (the oldest-head capHead is gone — issue #253). It must keep the
+// freshest TAIL, leave under-cap input untouched, and slice on rune (not byte)
+// boundaries so multi-byte content is never split mid-rune.
+func TestCapTail(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		maxRunes int
+		want     string
+	}{
+		{"empty", "", 5, ""},
+		{"under cap is identity", "abc", 5, "abc"},
+		{"exactly at cap is identity", "abcde", 5, "abcde"},
+		{"over cap keeps the freshest tail", "abcdefgh", 3, "fgh"},
+		{"zero cap drops everything", "abc", 0, ""},
+		// Multi-byte runes: each emoji is 4 bytes, so a byte-based slice would corrupt
+		// them. capTail must count runes — keeping the last two of three emojis whole.
+		{"counts runes not bytes", "😀😁😂", 2, "😁😂"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := capTail(tc.in, tc.maxRunes); got != tc.want {
+				t.Errorf("capTail(%q, %d) = %q, want %q", tc.in, tc.maxRunes, got, tc.want)
+			}
+		})
+	}
+}
