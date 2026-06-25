@@ -55,7 +55,7 @@ Procedure:
    ```
    queue.publish({ "source": "model_worker", "severity": "blocked",
      "title": "Agent hung — did not finish",
-     "summary": "Agent <terminalId> still working after 2 re-awaits; attached a watcher to notify on completion.",
+     "summary": "Agent <terminalId> still working after 2 re-awaits; attaching a watcher so you're notified when it finishes.",
      "target": { "terminalId": "<terminalId>" }, "dedupeKey": "hung-<terminalId>" })
    watcher.terminal.create({ "terminalIds": ["<terminalId>"], "title": "hung agent recovery",
      "goal": "notify when the stuck agent finishes",

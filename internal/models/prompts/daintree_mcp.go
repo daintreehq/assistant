@@ -152,8 +152,11 @@ Your local tools wrap Daintree:
   and a perTerminal array whose status is one of "finished", "failed", "question"
   (asking a question), or "working" (still going when the budget ran out). It also
   returns top-level stillWorking and askingQuestion arrays of terminal IDs: when the
-  budget runs out, re-await stillWorking directly (no need to scan perTerminal) and
-  route answers to the askingQuestion ids. maxAttempts defaults to 30 (≈60s) and caps
+  budget runs out, re-await stillWorking directly (no need to scan perTerminal) — but
+  AT MOST TWICE (three awaitAll calls total on the same terminal); after that a
+  still-working terminal is hung, so escalate (queue.publish 'blocked' + a watcher) and
+  end the turn instead of awaiting again. Route answers to the askingQuestion ids.
+  maxAttempts defaults to 30 (≈60s) and caps
   at 240 (≈480s) at the default 2s poll — leave it at the default unless the cohort has a
   known-slow agent that needs a single round past 120s. agentState
   is an imperfect signal (an agent can briefly read idle mid-work), so a "finished" is
@@ -402,7 +405,10 @@ the BACKGROUND mode and it fights your driving); you are the conductor:
    awaitAll's "finished" is state-based and imperfect, so if a terminal reported done
    but its tail shows it is still working, self-heal — re-await or watch just that one
    before relaying. If the budget ran out, re-await the top-level stillWorking ids
-   directly (not the whole cohort), and answer the askingQuestion ids (step 3) then
+   directly (not the whole cohort) AT MOST TWICE — three awaitAll calls total on the
+   same terminal. After that the agent is hung: never a fourth await — proceed without
+   it and note it if others finished, else publish a blocked inbox item (queue.publish)
+   and attach a watcher, then end the turn. Answer the askingQuestion ids (step 3) then
    await again; if it reports one FAILED, drop it and note it.
 3. Relay with terminal.sendCommand: send each agent what it needs from the OTHERS
    (their facts, their drafts, their votes), then ask for its next step.

@@ -406,6 +406,24 @@ func TestAwaitCohort_QuestionDoesNotAbortUnsettledPeer(t *testing.T) {
 	}
 }
 
+// Issue #239: the tool surface itself must carry the re-await bound, so the ceiling is
+// visible at point-of-use even when no orchestration skill is loaded. Lock both the tool
+// Description and the terminalIds schema description so a future doc edit can't silently
+// drop the bound or the escalation path.
+func TestAwaitAllTool_DocumentsReawaitBound(t *testing.T) {
+	tool := newAwaitAllTool(Deps{})
+	if !strings.Contains(tool.Description, "at most twice") {
+		t.Errorf("awaitAll Description should document the re-await bound (\"at most twice\")")
+	}
+	if !strings.Contains(tool.Description, "queue.publish") {
+		t.Errorf("awaitAll Description should name the queue.publish escalation path")
+	}
+	schema := string(tool.Schema)
+	if !strings.Contains(schema, "at most twice") {
+		t.Errorf("awaitAll terminalIds schema description should document the re-await bound")
+	}
+}
+
 // maxAttempts is validated against the RAISED opt-in ceiling (240): a known-slow cohort can
 // pass up to 240, but 241+ and non-positive values are still rejected, and omitting it
 // (handler defaults to 30) stays valid.
