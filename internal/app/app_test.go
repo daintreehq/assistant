@@ -70,10 +70,10 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 80 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 81 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
-// terminal.close wrapper, the terminal.awaitAll cohort finish-wait, the
+// terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, and the five scratch.* session-scratch
 // tools); we assert that exact count so a silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
@@ -81,8 +81,8 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 80 {
-		t.Errorf("registered tools = %d, want 80", got)
+	if got != 81 {
+		t.Errorf("registered tools = %d, want 81", got)
 	}
 	// The count bump from 79→80 is the structured-extract split; assert the new tool
 	// by name so the count guard can't be satisfied by some unrelated add/drop.

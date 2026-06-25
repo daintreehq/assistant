@@ -16,6 +16,7 @@ type fakeMCP struct {
 	lastName  string
 	lastArgs  map[string]any
 	listErr   error           // when set, ListTools returns it (a stale connection that drops mid-RPC)
+	toolList  []MCPToolInfo   // when set, ListTools returns it (tool.search / daintree.listTools tests)
 	callCount int             // total CallTool invocations (batch wrappers loop internally)
 	failOn    map[string]bool // terminalId → return an IsError result (close-batch tests)
 	// disconnectAfter > 0 makes Connected() flip false once callCount reaches it, so a
@@ -44,7 +45,7 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) 
 	return f.result, nil
 }
 func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) {
-	return nil, f.listErr
+	return f.toolList, f.listErr
 }
 
 func TestExtractArmedSet(t *testing.T) {

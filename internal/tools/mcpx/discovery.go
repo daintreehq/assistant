@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -109,7 +110,7 @@ var searchSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "query": { "type": "string", "description": "Keyword to match against MCP tool names/descriptions." },
+    "query": { "type": "string", "description": "Keywords to match against MCP tool names/descriptions. Split on spaces; every word must appear (AND). Use a few plain words, not a long phrase." },
     "max": { "type": "number", "description": "Max results to return (default 20)." }
   },
   "required": ["query"]
@@ -118,7 +119,9 @@ var searchSchema = json.RawMessage(`{
 func newSearchTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "tool.search",
-		Description: "Search Daintree MCP tools by keyword (substring match on name/description). Each match carries a `callable` " +
+		Description: "Search Daintree MCP tools by keyword. The query is split on spaces and a tool matches when EVERY word " +
+			"appears in its name or description (order and filler words don't matter), so prefer a couple of plain keywords " +
+			"(e.g. `rename terminal`) over a long phrase — name matches rank first. Each match carries a `callable` " +
 			"flag: tools marked `callable: false` exist but are not offered in this turn's tool spec, so calling them would do " +
 			"nothing — only `callable: true` results can be invoked now.",
 		Risk:   domain.RiskRead,
@@ -134,6 +137,15 @@ func newSearchTool(deps Deps) tools.Tool {
 			if a.Max != nil {
 				max = *a.Max
 			}
+			// Clamp max to a sane window: a non-positive max would silently return zero
+			// matches, and an oversized one could dump the whole 100+ tool catalog back
+			// into context (the exact bloat this discovery tool exists to avoid).
+			if max < 1 {
+				max = 20
+			}
+			if max > 50 {
+				max = 50
+			}
 			list, err := deps.MCP.ListTools(ctx, false)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -142,18 +154,62 @@ func newSearchTool(deps Deps) tools.Tool {
 				return tools.Fail(codeMCPUnavailable, "Could not search Daintree MCP tools: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 			callableOf := makeCallable(tctx.ActiveToolNames)
-			q := strings.ToLower(a.Query)
-			matches := make([]map[string]any, 0)
+			// Tokenize the query: a tool matches when EVERY whitespace-separated term
+			// is a substring of its name or description (AND semantics). The old code
+			// matched the WHOLE query as one substring, so a natural multi-word query
+			// like "terminal rename title" found nothing (no description contains that
+			// exact phrase) even though "rename" alone hit terminal.rename — the model
+			// then burned several rounds re-phrasing and dumping daintree.listTools.
+			// Per-term substring matching makes word order and filler words irrelevant.
+			terms := strings.Fields(strings.ToLower(a.Query))
+			// An all-whitespace (or empty) query has no terms; an AND over zero terms is
+			// vacuously true and would match EVERY tool, so treat it as "no matches"
+			// rather than dumping the catalog.
+			if len(terms) == 0 {
+				return tools.Ok(fmt.Sprintf("Found 0 Daintree MCP tool(s) matching %q.", a.Query),
+					map[string]any{"query": a.Query, "matches": []map[string]any{}, "note": callableNote})
+			}
+			// nameHit ranks a tool above description-only hits: a term landing in the
+			// tool NAME is a far stronger signal than one buried in prose, so name
+			// matches are surfaced first (the model usually wants the obvious tool).
+			type scored struct {
+				row     map[string]any
+				nameHit bool
+			}
+			ranked := make([]scored, 0)
 			for _, t := range list {
+				name := strings.ToLower(t.Name)
+				desc := strings.ToLower(t.Description)
+				hay := name + " " + desc
+				all, nameHit := true, false
+				for _, term := range terms {
+					if !strings.Contains(hay, term) {
+						all = false
+						break
+					}
+					if strings.Contains(name, term) {
+						nameHit = true
+					}
+				}
+				if !all {
+					continue
+				}
+				ranked = append(ranked, scored{
+					row:     map[string]any{"name": t.Name, "description": t.Description, "callable": callableOf(t.Name)},
+					nameHit: nameHit,
+				})
+			}
+			// Stable sort: name hits first, original (Daintree) order preserved within
+			// each group. A stable sort keeps the result deterministic across calls.
+			sort.SliceStable(ranked, func(i, j int) bool {
+				return ranked[i].nameHit && !ranked[j].nameHit
+			})
+			matches := make([]map[string]any, 0, len(ranked))
+			for _, r := range ranked {
 				if len(matches) >= max {
 					break
 				}
-				if strings.Contains(strings.ToLower(t.Name), q) ||
-					strings.Contains(strings.ToLower(t.Description), q) {
-					matches = append(matches, map[string]any{
-						"name": t.Name, "description": t.Description, "callable": callableOf(t.Name),
-					})
-				}
+				matches = append(matches, r.row)
 			}
 			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s) matching %q.", len(matches), a.Query),
 				map[string]any{"query": a.Query, "matches": matches, "note": callableNote})
@@ -176,6 +232,7 @@ var wrappedMCPTools = map[string]string{
 	"agent.launch":                 `agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)`,
 	"terminal.getOutput":           "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), terminal.extract (pull a specific value as plain text, optionally waiting for a condition), or terminal.extract.json (structured fields — requires instruction + jsonSchema)",
 	"panel.focus":                  "terminal.focus",
+	"terminal.rename":              "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
 	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
 	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one confirmed call)`,
 	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",

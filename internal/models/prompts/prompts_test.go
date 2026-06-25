@@ -27,13 +27,14 @@ func TestBaseSystemPromptStable(t *testing.T) {
 }
 
 func TestDocumentedMCPToolNames(t *testing.T) {
-	// 59 verified Daintree MCP tool names (agentSettings.get was added so the spawn
+	// 60 verified Daintree MCP tool names (agentSettings.get was added so the spawn
 	// wrapper can validate agentId against the configured roster; terminal.close backs
-	// the terminal.close wrapper that retires spawned cohorts). Match verbatim.
-	if len(DocumentedMCPToolNames) != 59 {
-		t.Fatalf("got %d tool names, want 59", len(DocumentedMCPToolNames))
+	// the terminal.close wrapper that retires spawned cohorts; terminal.rename backs the
+	// terminal.rename wrapper that retitles terminals). Match verbatim.
+	if len(DocumentedMCPToolNames) != 60 {
+		t.Fatalf("got %d tool names, want 60", len(DocumentedMCPToolNames))
 	}
-	if DocumentedMCPToolNames[0] != "actions.getContext" || DocumentedMCPToolNames[58] != "worktree.list" {
+	if DocumentedMCPToolNames[0] != "actions.getContext" || DocumentedMCPToolNames[59] != "worktree.list" {
 		t.Fatal("tool name order drifted")
 	}
 }

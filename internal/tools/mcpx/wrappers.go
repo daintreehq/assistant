@@ -48,6 +48,53 @@ func newTerminalFocusTool(deps Deps) tools.Tool {
 	}
 }
 
+/* ------------------------------ terminal.rename --------------------------- */
+
+type renameArgs struct {
+	TerminalID string `json:"terminalId"`
+	Name       string `json:"name"`
+}
+
+var renameSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "terminalId": { "type": "string", "description": "Daintree terminal id to rename (the id field from terminal.list)." },
+    "name": { "type": "string", "description": "New tab title. Required: a non-empty name renames programmatically. Keep it short and descriptive (e.g. \"merge pipeline: PRs #10779-84\")." }
+  },
+  "required": ["terminalId", "name"]
+}`)
+
+func newTerminalRenameTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.rename",
+		Description: "Set a terminal/agent tab's title. This is how you ORGANISE the workspace: when several agents are all " +
+			"named \"Claude\" (or you've lost track of a fleet), rename each to what it is actually doing so the tabs read at " +
+			"a glance. Pass terminalId + a short name; rename many in ONE batched round (one call per id, all in the same turn). " +
+			"UI-only, no confirmation. Typed wrapper around the Daintree terminal.rename MCP tool — don't reach for it via " +
+			"tool.search or daintree.call.",
+		Risk:   domain.RiskUI,
+		Schema: renameSchema,
+		Decode: tools.StrictDecoder(func() any { return &renameArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a renameArgs
+			_ = json.Unmarshal(raw, &a)
+			// Daintree's raw terminal.rename treats BOTH args as optional: an omitted
+			// terminalId targets the *focused* terminal, and an omitted name opens the
+			// interactive rename dialog instead of renaming
+			// (terminalLifecycleActions.ts). Both are wrong for an orchestrator — it
+			// must rename a SPECIFIC terminal programmatically, never pop a dialog or
+			// silently retarget the focused tab — so the wrapper requires both and
+			// rejects blanks with a recoverable validation error.
+			if strings.TrimSpace(a.TerminalID) == "" || strings.TrimSpace(a.Name) == "" {
+				return tools.Fail(domain.CodeValidation, "terminal.rename: terminalId and a non-empty name are both required.")
+			}
+			return passthrough(ctx, deps.MCP, "terminal.rename",
+				map[string]any{"terminalId": a.TerminalID, "name": a.Name}, "")
+		},
+	}
+}
+
 /* ------------------------- copyTree.* shared shapes ----------------------- */
 
 // copyTreeOptions is forwarded verbatim; the keys are Daintree's, not ours.

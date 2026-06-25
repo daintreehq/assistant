@@ -68,6 +68,7 @@ func Tools(deps Deps) []tools.Tool {
 		newSearchTool(deps),
 		newCallTool(deps),
 		newTerminalFocusTool(deps),
+		newTerminalRenameTool(deps),
 		newCopyTreeGenerateTool(deps),
 		newTerminalSendCommandTool(deps),
 		newTerminalCloseTool(deps),

@@ -108,6 +108,14 @@ Your local tools wrap Daintree:
   terminal.close once per id, and don't go hunting with tool.search — it is always here).
   Mutating, so it always confirms. (terminal.kill exists too, via daintree.call, but it
   deletes PERMANENTLY rather than trashing — prefer terminal.close.)
+- terminal.rename({ terminalId, name }) — set a terminal/agent tab's title. Use it when
+  several agents share a title (e.g. all "Claude") and need telling apart. If you don't
+  already have the ids, get them from context.snapshot (it embeds the terminal list) — do
+  NOT tool.search for a list tool. Then figure out what each is doing in ONE terminal.extract
+  over all the ids (one model read of the whole cohort beats one terminal.summarize per
+  terminal — tool calls dispatch sequentially, so fewer calls is faster), and rename each.
+  terminal.rename is always here — call it by name; never hunt for it with tool.search.
+  UI-only, so no confirmation.
 - agent.focusNextWaiting / agent.focusNextWorking / agent.focusNextAgent /
   agent.focusPreviousAgent — move UI focus across agent terminals (UI only, no
   mutation, no confirmation). workflow.focusNextAttention — focus the next agent
@@ -487,7 +495,7 @@ Use this when building daintree.call args or reasoning about what a wrapper does
 - For discovery beyond this list, use tool.search / daintree.listTools rather than
   guessing tool names.`
 
-// DocumentedMCPToolNames is the hand-maintained list of 59 verified Daintree MCP
+// DocumentedMCPToolNames is the hand-maintained list of 60 verified Daintree MCP
 // tool names (used at startup to detect drift; any name absent from the live
 // server's list means the doc went stale).
 var DocumentedMCPToolNames = []string{
@@ -542,6 +550,7 @@ var DocumentedMCPToolNames = []string{
 	"terminal.getOutput",
 	"terminal.getStatus",
 	"terminal.list",
+	"terminal.rename",
 	"terminal.sendCommand",
 	"terminal.waitUntilIdle",
 	"workflow.focusNextAttention",
