@@ -9,15 +9,16 @@ import "fmt"
 // on Session; the helpers below are the only writers/readers, so the locking
 // discipline stays in one place.
 
-// compactionNotePrefix builds the persisted compaction-note prefix, tagging it with
-// the running compaction depth so a summary-of-summary chain is visible (each pass
+// compactionNotePrefix builds the persisted compaction-note header, tagging it with the
+// running compaction depth so a checkpoint-of-checkpoint chain is visible (each pass
 // re-flattens the prior note; without the tag, that degradation is invisible). The
-// wording keeps the full original framing — and the "compacted summary" substring
-// other code/tests key on — and only appends "| depth N". The rehydration boundary
-// keys off the SYSTEM compaction marker, not this user note, so changing this text
-// is safe (see rehydrate.go).
+// framing is "[checkpoint | depth N]" (issue #256 replaced the old prose "compacted
+// summary" wording with a structured state object — the auto-compact body is now JSON;
+// the manual /compact path still rides a prose body under this same header). The
+// rehydration boundary keys off the SYSTEM compaction marker, not this user note, so
+// changing this text is safe (see rehydrate.go).
 func compactionNotePrefix(depth int) string {
-	return fmt.Sprintf("[compacted summary of earlier conversation | depth %d]\n", depth)
+	return fmt.Sprintf("[checkpoint | depth %d]\n", depth)
 }
 
 // recordToolFailure increments the session-cumulative failure tally for one tool
