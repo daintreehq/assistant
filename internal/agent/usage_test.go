@@ -292,6 +292,57 @@ func TestUsageEventCacheHitRatioNilWhenZeroPrompt(t *testing.T) {
 	}
 }
 
+// Both tiers reporting cached tokens contribute to the NUMERATOR (not just the
+// large tier): large=400 + small=200 over 1000+600 prompt → 600/1600=0.375. Guards
+// against a large-tier-only numerator bug that the single-cached-tier test can't
+// catch (there the numerator happens to equal the large tier's contribution).
+func TestUsageEventCacheHitRatioSumsCachedAcrossTiers(t *testing.T) {
+	large := pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200)
+	largeCached := 400
+	large.CachedTokens = &largeCached
+	small := pricedTier(domain.ModelSmall, "deepseek-v4-flash", 600, 100)
+	smallCached := 200
+	small.CachedTokens = &smallCached
+	ev := sendTiers(t, []models.TierUsage{large, small})
+	if ev.CacheHitRatio == nil {
+		t.Fatal("cacheHitRatio = nil want 0.375")
+	}
+	if *ev.CacheHitRatio != 0.375 {
+		t.Fatalf("cacheHitRatio = %v want 0.375 (600/1600, cross-tier numerator)", *ev.CacheHitRatio)
+	}
+}
+
+// The ratio is exposed RAW, never clamped to 1.0: a provider anomaly where cached
+// exceeds prompt (cached=1200 of 1000) surfaces as 1.2 so the bad data stays
+// visible as a diagnostic rather than being silently hidden.
+func TestUsageEventCacheHitRatioNotClampedAboveOne(t *testing.T) {
+	large := pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200)
+	cached := 1200
+	large.CachedTokens = &cached
+	ev := sendTiers(t, []models.TierUsage{large})
+	if ev.CacheHitRatio == nil {
+		t.Fatal("cacheHitRatio = nil want 1.2")
+	}
+	if *ev.CacheHitRatio <= 1.0 {
+		t.Fatalf("cacheHitRatio = %v want > 1.0 (raw, not clamped)", *ev.CacheHitRatio)
+	}
+	if d := *ev.CacheHitRatio - 1.2; d < -1e-9 || d > 1e-9 {
+		t.Fatalf("cacheHitRatio = %v want 1.2 (1200/1000)", *ev.CacheHitRatio)
+	}
+}
+
+// The PromptTokens>0 guard fires even when cached is POSITIVE (an anomalous but
+// possible report): a zero denominator yields nil, never a NaN/Inf ratio.
+func TestUsageEventCacheHitRatioNilWhenZeroPromptPositiveCached(t *testing.T) {
+	tier := pricedTier(domain.ModelLarge, "glm-5p2", 0, 0)
+	cached := 7
+	tier.CachedTokens = &cached
+	ev := sendTiers(t, []models.TierUsage{tier})
+	if ev.CacheHitRatio != nil {
+		t.Fatalf("cacheHitRatio = %v want nil (PromptTokens==0 guard, even with cached>0)", *ev.CacheHitRatio)
+	}
+}
+
 // A partial cost (some tier priced, some not) shows the KNOWN total rather than
 // collapsing to "no data" — a rough running estimate is more useful than nothing.
 func TestUsagePartialCostWhenOneTierUnpriced(t *testing.T) {
