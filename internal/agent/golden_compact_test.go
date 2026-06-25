@@ -10,9 +10,10 @@ package agent
 //     compaction unchanged, on BOTH the manual /compact and the in-turn auto paths;
 //  2. ParseDistilledFacts dedups, caps, and truncates in a single pass (the durable
 //     memory mined from a discarded transcript stays bounded and clean);
-//  3. live identifiers (term_*/run_*/watcher_*/wkf_*) present before compaction survive
-//     into the summarizer input (auto path) and into the persisted note (manual path),
-//     so a mid-run compaction never strands the references the orchestrator still needs;
+//  3. live identifiers (term_*/run_*/wch_*/wfr_*, matching domain.PrefixWatcher /
+//     domain.PrefixWorkflow) present before compaction survive into the summarizer input
+//     (auto path) and into the persisted note (manual path), so a mid-run compaction
+//     never strands the references the orchestrator still needs;
 //  4. a PURE tool-call assistant turn (no prose, only ToolCalls) contributes the tool
 //     name + argument JSON to the summarizer input, not a bare "[tool call]" placeholder
 //     — the only place the older history's load-bearing IDs (which live ONLY in the
@@ -35,6 +36,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // summaryInputCaptureRouter records the FULL message slice handed to the small model,
@@ -48,6 +50,7 @@ type summaryInputCaptureRouter struct {
 	mu      sync.Mutex
 	summary string
 	msgs    []models.ChatMessage
+	calls   int
 }
 
 func (r *summaryInputCaptureRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
@@ -56,6 +59,7 @@ func (r *summaryInputCaptureRouter) Stream(ctx context.Context, tier domain.Mode
 
 func (r *summaryInputCaptureRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
 	r.mu.Lock()
+	r.calls++
 	r.msgs = append([]models.ChatMessage(nil), opts.Messages...)
 	r.mu.Unlock()
 	return models.ChatResult{Content: r.summary}, nil
@@ -68,6 +72,17 @@ func (r *summaryInputCaptureRouter) captured() []models.ChatMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]models.ChatMessage(nil), r.msgs...)
+}
+
+// callCount is the number of Chat calls captured. The auto tests assert it is exactly 1
+// (only the summary call), making the "MemoryStore is nil ⇒ no racing distill Chat call"
+// assumption an explicit, self-verifying invariant rather than a silent comment: if a
+// second call ever sneaks in, captured() would hold the wrong input and the count guard
+// trips instead of an assertion passing for the wrong reason.
+func (r *summaryInputCaptureRouter) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 // snapshotControls copies the three control messages (a defensive copy so a later
@@ -93,7 +108,7 @@ func assertControlsUnchanged(t *testing.T, before []models.ChatMessage, s *Sessi
 	}
 }
 
-// goldenWorkingMessages drives both auto-path tests: two working messages clear the
+// goldenForceAutoCompact drives both auto-path tests: two working messages clear the
 // "no real history to summarize" guard (len(messages) <= ControlMessageCount+1), and a
 // real prompt figure over the soft threshold clears the size gate without allocating a
 // quarter-megabyte filler string just to trip the char estimate. Caller already holds
@@ -110,8 +125,15 @@ func goldenForceAutoCompact(s *Session, working ...models.ChatMessage) {
 // untouched, so the cached prompt prefix and the loaded skills stay stable across an
 // arbitrarily long, repeatedly-compacted run.
 func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
+	// Load a real skill first so messages[2] is a NON-trivial loaded-skills body, not the
+	// empty "no skills" default. Otherwise a regression that rebuilt the controls from
+	// fresh defaults would still match the snapshot (default == default) and pass — the
+	// loaded skill gives the byte-equality check real bite.
 	t.Run("manual", func(t *testing.T) {
 		s, _ := compactSession(t, plainRouter())
+		if err := s.SetSkills([]string{skills.IDSpawnAgentForEdits}); err != nil {
+			t.Fatalf("SetSkills: %v", err)
+		}
 		before := snapshotControls(s)
 		s.InjectNote("alpha")
 		s.InjectNote("beta")
@@ -128,7 +150,11 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 	})
 
 	t.Run("auto", func(t *testing.T) {
-		s, _ := compactSession(t, &summaryInputCaptureRouter{summary: "S"})
+		r := &summaryInputCaptureRouter{summary: "S"}
+		s, _ := compactSession(t, r)
+		if err := s.SetSkills([]string{skills.IDSpawnAgentForEdits}); err != nil {
+			t.Fatalf("SetSkills: %v", err)
+		}
 		before := snapshotControls(s)
 		goldenForceAutoCompact(s,
 			models.TextMessage("user", "alpha"),
@@ -136,6 +162,9 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 		)
 		s.maybeAutoCompact(context.Background(), "run_golden")
 		assertControlsUnchanged(t, before, s)
+		if r.callCount() != 1 {
+			t.Fatalf("summarizer Chat calls = %d, want exactly 1", r.callCount())
+		}
 		// The summary note must sit immediately after the controls — proves the auto path
 		// actually compacted rather than skipping the gate.
 		after := s.Messages()
@@ -215,8 +244,8 @@ func TestGoldenAutoCompactIDsSurviveInSummarizerInput(t *testing.T) {
 	const (
 		termID    = "term_abc123"
 		runID     = "run_def456"
-		watcherID = "watcher_ghi789"
-		wkfID     = "wkf_jkl012"
+		watcherID = "wch_ghi789" // domain.PrefixWatcher
+		wkfID     = "wfr_jkl012" // domain.PrefixWorkflow
 	)
 	r := &summaryInputCaptureRouter{summary: "S"}
 	s, _ := compactSession(t, r)
@@ -229,6 +258,9 @@ func TestGoldenAutoCompactIDsSurviveInSummarizerInput(t *testing.T) {
 	captured := r.captured()
 	if len(captured) == 0 {
 		t.Fatal("summarizer was never called (auto-compact gate not tripped)")
+	}
+	if r.callCount() != 1 {
+		t.Fatalf("summarizer Chat calls = %d, want exactly 1", r.callCount())
 	}
 	// captured[0] is the system instruction; captured[1:] is the flattened history. Scan
 	// only the history so a match proves the IDs flowed through the conversation, not the
@@ -245,15 +277,19 @@ func TestGoldenAutoCompactIDsSurviveInSummarizerInput(t *testing.T) {
 	}
 }
 
-// TestGoldenManualCompactIDsSurviveInNote pins invariant (3) for the manual /compact
-// path: the summary handed to Compact is stored verbatim in the persisted note, IDs
-// intact (compactLocked must not truncate or mangle it).
-func TestGoldenManualCompactIDsSurviveInNote(t *testing.T) {
+// TestGoldenManualCompactStoresNoteVerbatim pins the manual side of invariant (3) at the
+// storage layer: whatever summary the /compact command produces, compactLocked must
+// persist it verbatim — IDs intact, untruncated, unmangled. It deliberately guards ONLY
+// compactLocked, not the upstream transcript-building in internal/commands
+// (handlers_ui.go transcriptString), which is a separate code path with its own tests.
+// (That path currently emits a bare "[tool call]" for empty-content turns, so tool-arg
+// IDs in the manual flow are a known pre-existing gap outside this test's scope.)
+func TestGoldenManualCompactStoresNoteVerbatim(t *testing.T) {
 	const (
 		termID    = "term_xyz999"
 		runID     = "run_uvw888"
-		watcherID = "watcher_rst777"
-		wkfID     = "wkf_opq666"
+		watcherID = "wch_rst777" // domain.PrefixWatcher
+		wkfID     = "wfr_opq666" // domain.PrefixWorkflow
 	)
 	s, _ := compactSession(t, plainRouter())
 	s.InjectNote("history")
@@ -300,6 +336,9 @@ func TestGoldenAutoCompactPureToolCallExpandsNameArgs(t *testing.T) {
 	captured := r.captured()
 	if len(captured) == 0 {
 		t.Fatal("summarizer was never called (auto-compact gate not tripped)")
+	}
+	if r.callCount() != 1 {
+		t.Fatalf("summarizer Chat calls = %d, want exactly 1", r.callCount())
 	}
 	want := "[tool call " + toolName + " " + toolArgs + "]"
 	sawExpanded, sawBarePlaceholder := false, false
