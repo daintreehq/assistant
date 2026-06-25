@@ -448,7 +448,14 @@ func (s *Session) compactLocked(summary string) {
 // extra layer is gone — the per-call confirmation/tier gate in Dispatch is the one
 // authority on what may mutate, so a wake turn can relay between agents, send
 // terminal input, spawn, etc., exactly like a user turn.)
-type SendOptions struct{}
+type SendOptions struct {
+	// IsWake marks an autonomous watcher-wake turn (the input is a BuildWakePrompt blob,
+	// NOT typed by the user). The footer's goal anchor reads it to substitute the active
+	// workflow objective for the verbose wake blob (goalAnchorSection). It is a CHANNEL
+	// signal set by the wake caller — never inferred from the prompt text — so a user who
+	// happens to type the wake prefix still gets their own goal anchored.
+	IsWake bool
+}
 
 // Send mints a run id, runs one turn, and clears the run ref in finally. It is
 // single-flight: a concurrent call returns ErrTurnInProgress. The reply string is
@@ -562,9 +569,11 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	}
 
 	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
-	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for
-	//     it (see goalAnchorSection). Detected once here from the originating ask.
-	isWake := strings.HasPrefix(userInput, wakePromptPrefix)
+	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
+	//     (see goalAnchorSection). This is a CHANNEL signal from the wake caller (SendOptions),
+	//     not inferred from the prompt text — so a user who types the wake prefix still gets
+	//     their own goal anchored.
+	isWake := opts.IsWake
 
 	// 4. Push the user message.
 	s.pushMessage(models.TextMessage("user", userInput))

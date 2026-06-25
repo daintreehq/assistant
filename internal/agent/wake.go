@@ -14,10 +14,10 @@ import (
 // read-only narrowing, decides what may mutate. This is what makes autonomous
 // multi-agent orchestration (agent A finishes → wake → relay to agent B) possible.
 
-// wakePromptPrefix is the literal opener of every BuildWakePrompt output. The turn loop
-// matches it (HasPrefix) to detect an autonomous wake turn so the footer's goal anchor
-// substitutes the active-workflow objective for the verbose wake blob. Kept as a shared
-// const so the producer (BuildWakePrompt) and the detector (runTurn) can never drift.
+// wakePromptPrefix is the literal opener of every BuildWakePrompt output — the
+// model-facing "this was NOT typed by the user" framing. A wake turn is identified by the
+// SendOptions.IsWake CHANNEL signal, not by matching this prefix, so the const is only the
+// prompt opener (named once here rather than inlined in the parts slice below).
 const wakePromptPrefix = "[automatic wake-up]"
 
 // IsActionableWake reports whether a surfaced attention event should autonomously

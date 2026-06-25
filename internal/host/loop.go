@@ -162,7 +162,9 @@ func (h *Host) reactWake() {
 			}
 		}()
 		prompt := agent.BuildWakePrompt(events, already)
-		reply, err := h.app.Session().Send(h.runCtx, prompt, agent.SendOptions{})
+		// IsWake: autonomous watcher-wake turn (not user-typed) → the footer anchors on the
+		// active workflow objective instead of echoing the verbose wake blob.
+		reply, err := h.app.Session().Send(h.runCtx, prompt, agent.SendOptions{IsWake: true})
 		if err != nil {
 			h.report("wake-failed", fmt.Sprintf("wake send failed: %v", err))
 			h.turnMu.Lock()

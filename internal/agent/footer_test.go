@@ -635,7 +635,7 @@ func TestPinnedAndRelevantMemoriesSection_PinnedOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("section should render when pinned rows are present")
 	}
-	want := "# Pinned and relevant memories\n## Pinned\n- pinned fact"
+	want := "# Pinned and relevant memories\n## Pinned\n" + pinnedMemoriesFraming + "\n- pinned fact"
 	if body != want {
 		t.Errorf("body = %q, want %q", body, want)
 	}
@@ -651,7 +651,7 @@ func TestPinnedAndRelevantMemoriesSection_BothPresent(t *testing.T) {
 	if !ok {
 		t.Fatal("section should render")
 	}
-	want := "# Pinned and relevant memories\n## Pinned\n- the pin\n## Relevant (recalled for this turn)\n- the recall"
+	want := "# Pinned and relevant memories\n## Pinned\n" + pinnedMemoriesFraming + "\n- the pin\n## Relevant (recalled for this turn)\n- the recall"
 	if body != want {
 		t.Errorf("body = %q, want %q", body, want)
 	}
@@ -1155,5 +1155,109 @@ func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 	}
 	if called != 1 {
 		t.Errorf("session-ended provider called %d times, want exactly 1 (first turn only)", called)
+	}
+}
+
+// Session-level: the one-time session note rides EVERY round of the first turn (the
+// footer is rebuilt per round) — the multi-round complement to the first-turn-only test.
+func TestComposeTurnFooter_SessionNoteRidesEveryRoundOfFirstTurn(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0 → loop
+		{Content: "final"}, // round 1
+	}}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.SessionEndedWatchers = func() []string { return []string{"watch the deploy"} }
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.seen) < 2 {
+		t.Fatalf("want a 2-round first turn, got %d", len(r.seen))
+	}
+	for i, round := range r.seen[:2] {
+		last := round[len(round)-1]
+		if !strings.Contains(last.StringContent, "# Session note") {
+			t.Errorf("round %d of the first turn should carry the session note: %q", i, last.StringContent)
+		}
+	}
+}
+
+// Session-level (issue #263 core claim): message[1] (the runtime context) stays
+// BYTE-STABLE across mid-session worktree + pin changes — exactly the churn that used to
+// rewrite it and bust the prefix cache — while the UNCACHED footer reflects the new values.
+func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.T) {
+	r := &injectRouter{} // empty results → each Send is a single final round
+	wt := "feature/one"
+	pins := []domain.MemoryRecord{{Content: "pin A"}}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.ActiveWorktreeFunc = func() string { return wt }
+	deps.PinnedMemoryLister = &fakePinnedLister{rows: pins}
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	msg1Turn1 := s.Messages()[1].StringContent
+
+	// Mutate the volatile inputs (same backing array / captured var the fakes read), then
+	// run a second turn.
+	wt = "feature/two"
+	pins[0] = domain.MemoryRecord{Content: "pin B totally different"}
+	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	msg1Turn2 := s.Messages()[1].StringContent
+
+	if msg1Turn1 != msg1Turn2 {
+		t.Fatalf("message[1] must stay byte-stable across worktree/pin changes (issue #263):\nturn1: %q\nturn2: %q", msg1Turn1, msg1Turn2)
+	}
+	// The change DID land — in the footer (the last message of turn 2's only round).
+	footT2 := r.seen[1][len(r.seen[1])-1].StringContent
+	if !strings.Contains(footT2, "feature/two") || !strings.Contains(footT2, "pin B totally different") {
+		t.Fatalf("turn-2 footer should reflect the changed volatile state; got %q", footT2)
+	}
+}
+
+// Send-level: an autonomous wake turn (SendOptions.IsWake) anchors on the active workflow
+// objective and never echoes the verbose wake blob — the channel-driven path through runTurn.
+func TestSend_WakeOptionDrivesObjectiveAnchor(t *testing.T) {
+	r := &injectRouter{} // single final round
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
+		{NextActionJson: ptrOf(`{"label":"finish the migration"}`)},
+	}}
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), wakePromptPrefix+" a watcher fired", SendOptions{IsWake: true}); err != nil {
+		t.Fatal(err)
+	}
+	foot := r.seen[0][len(r.seen[0])-1].StringContent
+	if !strings.Contains(foot, "# Current objective") || !strings.Contains(foot, "finish the migration") {
+		t.Errorf("a wake Send should anchor on the workflow objective; got %q", foot)
+	}
+	if strings.Contains(foot, "# Current goal") {
+		t.Errorf("a wake Send must not emit the verbose goal anchor; got %q", foot)
+	}
+}
+
+// Send-level: a USER who happens to type the wake prefix — WITHOUT SendOptions.IsWake —
+// still gets their own goal anchored, never the workflow objective. This is the whole
+// point of channel-based (not content-based) wake detection (issue #263 review).
+func TestSend_PrefixWithoutWakeOptionKeepsGoalAnchor(t *testing.T) {
+	r := &injectRouter{}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
+		{NextActionJson: ptrOf(`{"label":"finish the migration"}`)},
+	}}
+	s := NewSession(deps)
+	input := wakePromptPrefix + " please summarize the logs"
+	if _, err := s.Send(context.Background(), input, SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	foot := r.seen[0][len(r.seen[0])-1].StringContent
+	if !strings.Contains(foot, "# Current goal") || !strings.Contains(foot, "please summarize the logs") {
+		t.Errorf("a user-typed prefix (no IsWake) should anchor on the user's goal; got %q", foot)
+	}
+	if strings.Contains(foot, "# Current objective") {
+		t.Errorf("without IsWake the objective substitution must not fire; got %q", foot)
 	}
 }
