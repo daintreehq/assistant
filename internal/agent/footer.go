@@ -22,13 +22,50 @@ const goalAnchorMaxRunes = 500
 // self-bounding function regardless of what it is handed).
 const relevantMemoriesMaxRows = 5
 
-// relevantMemoriesBlockMaxBytes bounds the bullet-list PAYLOAD of the `# Relevant
-// memories` block (the joined "- fact" lines), not the full rendered section — the
-// fixed-size header is appended outside the cap. Smaller than the pinned-memory
+// relevantMemoriesBlockMaxBytes bounds the bullet-list PAYLOAD of the recalled
+// (`## Relevant`) subblock (the joined "- fact" lines), not the full rendered section —
+// the fixed-size headers are appended outside the cap. Smaller than the pinned-memory
 // ceiling (16 KiB) because recalled rows are speculative BM25 hits rather than
 // curated pins — generous enough for a few distilled facts, bounded enough to keep
 // the footer tail lean.
 const relevantMemoriesBlockMaxBytes = 4096
+
+// pinnedMemoriesMaxRows caps how many pinned memories the footer's `## Pinned` subblock
+// renders (pinned-first order, so the most recently pinned win past the cap). It is also
+// the LIMIT handed to the per-round store read. Mirrors the old message[1] pinned block.
+const pinnedMemoriesMaxRows = 20
+
+// pinnedMemoriesBlockMaxBytes bounds the bullet-list PAYLOAD of the pinned (`## Pinned`)
+// subblock, mirroring the DAINTREE.md project-instructions ceiling (16 KiB) — generous,
+// since pins are short curated facts. Larger than the recalled cap because pins are
+// deliberate, durable context rather than speculative recall.
+const pinnedMemoriesBlockMaxBytes = 16384
+
+// footerMaxBytes is the global backstop on the WHOLE composed footer (all sections
+// joined). The per-section byte caps are the PRIMARY bound; this is a last-ditch ceiling
+// for the pathological case where several sections sit near their individual caps at
+// once. When the joined footer exceeds it, composeTurnFooter drops WHOLE sections from
+// the FRONT — the lowest-salience first, since footerSections renders the goal anchor
+// last (closest to where the model reads) — until it fits. Never a partial cut, so a
+// surviving section is always well-formed. Set comfortably above a normal footer (a goal
+// anchor, a few run rows, a handful of memories) so it never fires in routine use; it
+// exists only so an extreme pinned-memory hoard can't bloat every round's request tail.
+const footerMaxBytes = 12288
+
+// activeWorktreeMaxRunes bounds the worktree label copied into the `# Active worktree`
+// section, rune-safe so a multibyte label is never split mid-character.
+const activeWorktreeMaxRunes = 200
+
+// workflowObjectiveMaxRunes bounds the active-workflow objective label substituted into
+// the goal anchor on an autonomous wake turn (where the raw "goal" is the verbose
+// wake-up blob). Long enough for a descriptive next-action label, short enough to stay a
+// one-line re-anchor.
+const workflowObjectiveMaxRunes = 200
+
+// sessionEndedWatchersMaxTitles caps how many watcher titles the `# Session note` lists
+// inline; the remainder collapse to "+N more" so a session that left many watchers
+// running can't bloat the footer.
+const sessionEndedWatchersMaxTitles = 5
 
 // activeWorkflowRunsLimit caps how many non-terminal runs the footer renders (and is
 // the LIMIT handed to the store read). The footer is a re-anchoring glance at open
@@ -54,17 +91,24 @@ const workflowRunFieldMaxRunes = 40
 // file anticipated: a future section that needs another fact adds a field here,
 // touching neither the footerSection type nor any existing section body.
 //
-// Goal is the turn's originating ask (trimmed in composeTurnFooter). WorkflowRuns is
-// the already-fetched, already-bounded slice of non-terminal runs (the Session reads
-// it best-effort before composing). RelevantMemories is the BM25 recall snapshot
-// taken ONCE at turn start (nil when no recaller is wired or nothing matched).
-// Keeping the I/O in the Session and handing sections plain slices keeps every
-// section a PURE FORMATTER — unit-testable from a record literal, no store or fake
-// required.
+// Goal is the turn's originating ask (trimmed in composeTurnFooter). IsWake marks an
+// autonomous wake turn, where Goal is the verbose wake-up blob and the goal anchor
+// substitutes the active-workflow objective instead. WorkflowRuns is the already-fetched,
+// already-bounded slice of non-terminal runs (the Session reads it best-effort, per
+// round). RelevantMemories is the BM25 recall snapshot taken ONCE at turn start (nil when
+// no recaller is wired or nothing matched); PinnedMemories is the current pins, re-read
+// per round. ActiveWorktree is the current worktree label (per round). SessionEndedWatchers
+// carries the one-time session-note titles, passed only on the first turn. Keeping the
+// I/O in the Session and handing sections plain slices keeps every section a PURE
+// FORMATTER — unit-testable from a record literal, no store or fake required.
 type footerContext struct {
-	Goal             string
-	WorkflowRuns     []domain.WorkflowRunRecord
-	RelevantMemories []domain.MemoryRecord
+	Goal                 string
+	IsWake               bool
+	WorkflowRuns         []domain.WorkflowRunRecord
+	RelevantMemories     []domain.MemoryRecord
+	PinnedMemories       []domain.MemoryRecord
+	ActiveWorktree       string
+	SessionEndedWatchers []string
 }
 
 // footerSection renders one section of the turn footer from the turn's footerContext.
@@ -79,12 +123,21 @@ type footerContext struct {
 type footerSection func(ctx footerContext) (string, bool)
 
 // footerSections is the ordered registry of turn-footer sections. Composed in
-// declaration order into a single trailing system message. relevantMemoriesSection
-// comes FIRST: surface the supporting facts, then the open-work ledger, then close the
-// tail with the goal-discipline anchor (the last thing the model reads). Package-local
-// and mutable so tests can swap it (save/restore via t.Cleanup); production registers
-// statically here and never mutates it at runtime.
-var footerSections = []footerSection{relevantMemoriesSection, activeWorkflowRunsSection, goalAnchorSection}
+// declaration order into a single trailing system message, LOWEST salience first so the
+// goal-discipline anchor closes the tail (the last thing the model reads). The order is
+// also the global-budget DROP order (composeTurnFooter sheds from the front): the
+// one-time session note goes first, then the bulky-but-recoverable merged memories block
+// (the model can always memory.recall it back), then the orienting worktree + open-work
+// ledger, then the goal anchor — so under budget pressure the must-keep, stay-on-task
+// sections survive. Package-local and mutable so tests can swap it (save/restore via
+// t.Cleanup); production registers statically here and never mutates it at runtime.
+var footerSections = []footerSection{
+	sessionNoteSection,
+	pinnedAndRelevantMemoriesSection,
+	activeWorktreeSection,
+	activeWorkflowRunsSection,
+	goalAnchorSection,
+}
 
 // composeTurnFooter builds the UNCACHED tail of the model request: zero or one
 // system-role message appended AFTER the history snapshot in the Router.Stream
@@ -114,10 +167,37 @@ func composeTurnFooter(ctx footerContext) []models.ChatMessage {
 		}
 		parts = append(parts, body)
 	}
+	parts = trimFooterToBudget(parts)
 	if len(parts) == 0 {
 		return nil
 	}
 	return []models.ChatMessage{models.TextMessage("system", strings.Join(parts, "\n\n"))}
+}
+
+// trimFooterToBudget enforces footerMaxBytes on the joined footer by dropping WHOLE
+// sections from the FRONT (lowest salience — footerSections renders the goal anchor last)
+// until the "\n\n"-joined result fits. Whole-section dropping (never a partial cut) keeps
+// every surviving section well-formed; the goal anchor, rendered last, is the final
+// casualty and so is the most protected. A no-op in routine use: the per-section caps
+// keep a normal footer well under the ceiling. Returns the (possibly shortened) slice.
+func trimFooterToBudget(parts []string) []string {
+	for len(parts) > 1 && joinedFooterLen(parts) > footerMaxBytes {
+		parts = parts[1:]
+	}
+	return parts
+}
+
+// joinedFooterLen returns the byte length parts would occupy once joined with the "\n\n"
+// separator composeTurnFooter uses, without allocating the joined string.
+func joinedFooterLen(parts []string) int {
+	if len(parts) == 0 {
+		return 0
+	}
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	return total + 2*(len(parts)-1)
 }
 
 // goalAnchorSection emits the `# Current goal` anchor: the turn's originating ask
@@ -132,6 +212,20 @@ func composeTurnFooter(ctx footerContext) []models.ChatMessage {
 // footer and lose the turn's through-line). The known asymmetry is acceptable
 // because a recent user message outranks trailing system boilerplate.
 func goalAnchorSection(ctx footerContext) (string, bool) {
+	// Autonomous wake turn: the "goal" is the verbose [automatic wake-up] blob, which is
+	// already in history as the turn's user message — echoing it here is noise and drifts
+	// the model toward the wake event rather than its standing work. Re-anchor instead on
+	// the active workflow objective (the first open run's recommended-next-action label) so
+	// a long autonomous loop stays on its through-line. When no open run carries an
+	// objective, omit the anchor entirely rather than parrot the blob.
+	if ctx.IsWake {
+		objective := activeWorkflowObjective(ctx.WorkflowRuns)
+		if objective == "" {
+			return "", false
+		}
+		return "# Current objective\n" + objective +
+			"\n\nStay focused on this objective. Finish it before stopping, and report what you did, not what remains.", true
+	}
 	if ctx.Goal == "" {
 		return "", false
 	}
@@ -139,30 +233,83 @@ func goalAnchorSection(ctx footerContext) (string, bool) {
 		"\n\nStay focused on this goal. Finish it before stopping, and report what you did, not what remains.", true
 }
 
-// relevantMemoriesSection emits the `# Relevant memories` block: the top BM25 hits
-// recalled (once, at turn start) from the originating ask, rendered as "- fact"
-// lines so distilled or otherwise-unpinned memories resurface automatically without
-// the model having to call the recall tool. Omitted entirely when nothing was
-// recalled (no recaller wired, a blank ask, or no matches).
-//
-// Mirrors pinnedMemoriesBlock's rendering: embedded newlines are flattened so one
-// memory is exactly one list line (a raw "\n" would otherwise break the list or
-// inject a stray heading), and a row that would overflow the byte cap is SKIPPED
-// (continue, not break) so a single oversized fact can't suppress the shorter ones
-// after it. Bounded to relevantMemoriesMaxRows rows and relevantMemoriesBlockMaxBytes
-// total; returns ("", false) if every row was empty or skipped.
-func relevantMemoriesSection(ctx footerContext) (string, bool) {
-	rows := ctx.RelevantMemories
-	if len(rows) == 0 {
+// activeWorkflowObjective returns the recommended-next-action label of the first open
+// workflow run that carries one, "" when there are no runs or none has a parseable label.
+// It feeds the wake-turn goal anchor so the autonomous loop re-anchors on its own
+// objective instead of the wake blob.
+func activeWorkflowObjective(runs []domain.WorkflowRunRecord) string {
+	for i := range runs {
+		if label := nextActionLabel(runs[i].NextActionJson); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+// nextActionLabel partial-unmarshals a serialized domain.RecommendedAction and returns
+// just its (whitespace-collapsed, rune-capped) label, "" when the json is nil, malformed,
+// or label-less. Distinct from compactNextAction (which also appends the tool name): the
+// objective anchor wants only the human-readable label, not the tool handle.
+func nextActionLabel(nextActionJson *string) string {
+	if nextActionJson == nil || strings.TrimSpace(*nextActionJson) == "" {
+		return ""
+	}
+	var preview struct {
+		Label string `json:"label"`
+	}
+	if err := json.Unmarshal([]byte(*nextActionJson), &preview); err != nil {
+		return ""
+	}
+	label := strings.Join(strings.Fields(preview.Label), " ")
+	return sliceChars(label, workflowObjectiveMaxRunes)
+}
+
+// pinnedAndRelevantMemoriesSection emits the merged `# Pinned and relevant memories`
+// block: curated pins under `## Pinned`, then the turn's BM25 recall hits under
+// `## Relevant (recalled for this turn)`. The two are kept as DISTINCT subblocks on
+// purpose — pins are durable facts the operator or model deliberately pinned, recalled
+// rows are speculative per-turn matches, and surfacing the provenance lets the model
+// weight them differently. Each subblock is independently bounded and flattened by
+// renderMemoryBullets (pins to pinnedMemoriesMaxRows / pinnedMemoriesBlockMaxBytes,
+// recall to relevantMemoriesMaxRows / relevantMemoriesBlockMaxBytes). A subblock is
+// omitted when it has no content; the whole section is omitted (false) when both do —
+// so the common no-memory case adds nothing to the request. Replaces the split
+// message[1] pinned block + footer `# Relevant memories` section with one tail block,
+// so a pin no longer rewrites the cached runtime context.
+func pinnedAndRelevantMemoriesSection(ctx footerContext) (string, bool) {
+	pinned := renderMemoryBullets(ctx.PinnedMemories, pinnedMemoriesMaxRows, pinnedMemoriesBlockMaxBytes)
+	recalled := renderMemoryBullets(ctx.RelevantMemories, relevantMemoriesMaxRows, relevantMemoriesBlockMaxBytes)
+	if pinned == "" && recalled == "" {
 		return "", false
 	}
-	// Cap to the top-N highest-rank rows BEFORE the byte filter. Storage already
-	// returns exactly relevantMemoriesMaxRows hits, so there is no fallback buffer: in
-	// the (extreme) case where all N top rows individually exceed the byte cap, the
-	// block is suppressed rather than reaching for lower-ranked rows. Acceptable —
-	// distilled facts are short, and a suppressed speculative block is harmless.
-	if len(rows) > relevantMemoriesMaxRows {
-		rows = rows[:relevantMemoriesMaxRows]
+	var b strings.Builder
+	b.WriteString("# Pinned and relevant memories")
+	if pinned != "" {
+		b.WriteString("\n## Pinned\n")
+		b.WriteString(pinned)
+	}
+	if recalled != "" {
+		b.WriteString("\n## Relevant (recalled for this turn)\n")
+		b.WriteString(recalled)
+	}
+	return b.String(), true
+}
+
+// renderMemoryBullets renders up to maxRows memory records as flattened "- content"
+// lines joined by newlines, returning "" when nothing renders. Embedded newlines are
+// flattened so one memory is exactly one list line (a raw "\n" would otherwise break the
+// list or inject a stray heading); a row whose addition would overflow maxBytes is
+// SKIPPED (continue, not break) so a single oversized fact can't suppress the shorter
+// ones after it; blank content is dropped. Shared by the pinned and recalled subblocks so
+// both bound and flatten identically — the rows are capped to maxRows BEFORE the byte
+// filter, so in the extreme case where every top row exceeds the cap the subblock is
+// suppressed rather than reaching for lower-ranked rows.
+func renderMemoryBullets(rows []domain.MemoryRecord, maxRows, maxBytes int) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	if len(rows) > maxRows {
+		rows = rows[:maxRows]
 	}
 	var b strings.Builder
 	for _, m := range rows {
@@ -176,7 +323,7 @@ func relevantMemoriesSection(ctx footerContext) (string, bool) {
 		line := "- " + content
 		// +1 for the joining newline; skip a line that would overflow the cap (continue,
 		// not break, so a single oversized memory can't suppress the shorter ones after it).
-		if b.Len()+len(line)+1 > relevantMemoriesBlockMaxBytes {
+		if b.Len()+len(line)+1 > maxBytes {
 			continue
 		}
 		if b.Len() > 0 {
@@ -184,10 +331,74 @@ func relevantMemoriesSection(ctx footerContext) (string, bool) {
 		}
 		b.WriteString(line)
 	}
-	if b.Len() == 0 {
+	return b.String()
+}
+
+// activeWorktreeSection emits the `# Active worktree` line: the worktree label the
+// assistant is currently oriented to, re-read every round so a mid-turn switch surfaces
+// next round. It replaces the old message[1] "Active worktree:" line, so a worktree
+// switch no longer rewrites the cached runtime context. Omitted when unknown ("") — better
+// to say nothing than echo an empty/stale label; the model can read context.snapshot if
+// it needs the worktree. The label is flattened and rune-capped so a multi-line or
+// oversized value can't break the line.
+func activeWorktreeSection(ctx footerContext) (string, bool) {
+	label := flattenFooterLine(ctx.ActiveWorktree)
+	if label == "" {
 		return "", false
 	}
-	return "# Relevant memories\n" + b.String(), true
+	return "# Active worktree\n" + sliceChars(label, activeWorktreeMaxRunes), true
+}
+
+// sessionNoteSection emits the one-time `# Session note`: the titles of watchers a prior
+// session left running that this session's store-open had to cancel (watchers are
+// session-scoped and do NOT resume automatically). The Session passes the titles only on
+// the FIRST turn, then nil, so the offer to re-create them surfaces exactly once —
+// replacing the old message[1] one-time NOTE without any RefreshRuntimeContext consume.
+// Omitted (false) when there are none.
+func sessionNoteSection(ctx footerContext) (string, bool) {
+	note := sessionEndedWatchersNote(ctx.SessionEndedWatchers)
+	if note == "" {
+		return "", false
+	}
+	return "# Session note\n" + note, true
+}
+
+// sessionEndedWatchersNote renders the "the prior session ended and these watchers
+// stopped" line, or "" when there were none. The count reflects the true total; the
+// inline title list is capped at sessionEndedWatchersMaxTitles with a "+N more" tail.
+// Titles are flattened to a single line (a raw newline would inject a stray heading) and
+// quoted.
+func sessionEndedWatchersNote(titles []string) string {
+	if len(titles) == 0 {
+		return ""
+	}
+	n := len(titles)
+	shown := titles
+	suffix := ""
+	if n > sessionEndedWatchersMaxTitles {
+		shown = titles[:sessionEndedWatchersMaxTitles]
+		suffix = ", +" + strconv.Itoa(n-sessionEndedWatchersMaxTitles) + " more"
+	}
+	labels := make([]string, len(shown))
+	for i, t := range shown {
+		labels[i] = `"` + flattenFooterLine(t) + `"`
+	}
+	noun, verb := "watchers", "were"
+	if n == 1 {
+		noun, verb = "watcher", "was"
+	}
+	return strconv.Itoa(n) + " " + noun + " " + verb + " stopped because the previous session ended: " +
+		strings.Join(labels, ", ") + suffix +
+		". Watchers are session-scoped and do NOT resume automatically; offer to re-create them if still relevant."
+}
+
+// flattenFooterLine collapses CR/LF runs to single spaces so a multi-line value can't
+// break a single-line footer entry or inject a stray heading.
+func flattenFooterLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.TrimSpace(s)
 }
 
 // activeWorkflowRunsSection emits the `# Active workflow runs` block: one line per

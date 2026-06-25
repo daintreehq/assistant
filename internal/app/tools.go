@@ -79,16 +79,9 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	})...)
 	all = append(all, memory.Tools(memory.Deps{
 		Store: memoryStoreAdapter{s: a.Store},
-		// After the model pins/unpins/forgets a memory, refresh message[1] so the
-		// injected pinned-memory block reflects the change immediately (mirrors how the
-		// /memory slash command refreshes). a.Session is read lazily — it is set after
-		// the registry is built, but the tool only fires during a live turn, where it is
-		// always present.
-		OnChange: func() {
-			if a.Session != nil {
-				a.Session.RefreshRuntimeContext(a.PromptContext())
-			}
-		},
+		// No OnChange: pinned memories live in the uncached turn footer now (issue #263),
+		// re-read every round, so a model-driven pin/unpin/forget surfaces on the next round
+		// automatically — no RefreshRuntimeContext rewrite of message[1] is needed.
 	})...)
 	all = append(all, queuetools.Tools(queuetools.Deps{
 		Queue: queueToolAdapter{app: a},

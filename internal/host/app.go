@@ -34,11 +34,6 @@ type App interface {
 	// Session is the turn engine driven by prompt/wake.
 	Session() *agent.Session
 
-	// ConsumeSessionEndedNote clears the one-time "watchers stopped because the prior
-	// session ended" NOTE after the first interactive prompt turn, so it surfaces once
-	// rather than on every host turn. No-op when there was no such NOTE.
-	ConsumeSessionEndedNote()
-
 	// RiskOf looks up a tool's risk class for the danger hint (false if unknown).
 	RiskOf(toolName string) (domain.RiskClass, bool)
 

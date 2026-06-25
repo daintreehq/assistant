@@ -174,48 +174,40 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	}
 }
 
-// TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive asserts the one-time
-// session-ended-watchers NOTE: gated on the scheduler (dormant sessions never show
-// it), surfaced in message[1] once the scheduler is active, and stripped after the
-// first turn consumes it (the storage carryover itself is covered by reopen_test.go).
-func TestSessionEndedWatcherNoteSurfacesOnceWhenSchedulerActive(t *testing.T) {
+// TestSessionEndedWatchersForFooterSchedulerGate asserts the footer seam for the
+// one-time session-ended note (issue #263): gated OFF while dormant (no scheduler), and
+// OPEN once the scheduler is active — where it mirrors the store's open-time carryover.
+// The note never touches message[1] now; its once-per-session surfacing in the uncached
+// footer is covered by internal/agent/footer_test.go, and the storage carryover itself by
+// reopen_test.go.
+func TestSessionEndedWatchersForFooterSchedulerGate(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	// Stand in for a prior session having left a watcher running that the open-time
-	// sweep cancelled and carried forward.
-	a.sessionEndedWatchers = []string{"deploy watcher"}
-
-	// Dormant (no scheduler) → gated off, no NOTE in message[1].
-	if got := a.PromptContext().SessionEndedWatchers; got != nil {
-		t.Fatalf("note must be gated off before StartScheduler, got %v", got)
+	// Dormant (no scheduler) → gated off, regardless of any carryover.
+	if got := a.sessionEndedWatchersForFooter(); got != nil {
+		t.Fatalf("footer seam must be gated off before StartScheduler, got %v", got)
 	}
+	// The runtime context never carries the note anymore.
 	if msg := a.Session.Messages()[1].ContentToText(); strings.Contains(msg, "previous session ended") {
-		t.Fatalf("dormant runtime context must not carry the note:\n%s", msg)
+		t.Fatalf("message[1] must never carry the session-ended note:\n%s", msg)
 	}
 
-	// Scheduler active → NOTE appears in message[1].
+	// Scheduler active → the gate opens and the seam mirrors the store's carryover (empty
+	// for a fresh store, but no longer forced nil by the gate).
 	a.StartScheduler(context.Background(), nil)
-	if msg := a.Session.Messages()[1].ContentToText(); !strings.Contains(msg, "previous session ended") ||
-		!strings.Contains(msg, `"deploy watcher"`) {
-		t.Fatalf("active runtime context missing the session-ended note:\n%s", msg)
-	}
-
-	// First turn consumes it → stripped from message[1], and it stays gone.
-	a.ConsumeSessionEndedNote()
-	if got := a.PromptContext().SessionEndedWatchers; got != nil {
-		t.Fatalf("note must be consumed after the first turn, got %v", got)
-	}
-	if msg := a.Session.Messages()[1].ContentToText(); strings.Contains(msg, "previous session ended") {
-		t.Fatalf("consumed note must be stripped from message[1]:\n%s", msg)
+	got, want := a.sessionEndedWatchersForFooter(), a.Store.SessionEndedWatchers()
+	if len(got) != len(want) {
+		t.Fatalf("active footer seam must mirror the store carryover: got %v, want %v", got, want)
 	}
 }
 
 // TestStartupContextRosterSurfacesInRuntimeMessage asserts the cached configured-agents
-// roster and current worktree (populated by refreshStartupContext on connect) propagate
-// through PromptContext into message[1]. The cache is set directly here — the connect
-// fetch itself is exercised by the agenttaskx + parseCurrentWorktreeLabel unit tests;
-// this pins the wiring App cache → MainPromptContext → rendered runtime context.
+// roster (populated by refreshStartupContext on connect) propagates through PromptContext
+// into message[1]. The cache is set directly here — the connect fetch itself is exercised
+// by the agenttaskx unit tests; this pins the wiring App cache → MainPromptContext →
+// rendered runtime context. The worktree label no longer flows through message[1]: it
+// moved to the uncached footer (issue #263), reached via activeWorktreeForFooter.
 func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
@@ -232,8 +224,8 @@ func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
 	a.rosterMu.Unlock()
 
 	pc := a.PromptContext()
-	if len(pc.ConfiguredAgentIDs) != 2 || pc.ActiveWorktree != "feature/issue-230" {
-		t.Fatalf("PromptContext did not surface the cache: %+v", pc)
+	if len(pc.ConfiguredAgentIDs) != 2 {
+		t.Fatalf("PromptContext did not surface the roster: %+v", pc)
 	}
 
 	a.Session.RefreshRuntimeContext(pc)
@@ -241,8 +233,12 @@ func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
 	if !strings.Contains(msg, "Configured agents: claude, codex") {
 		t.Fatalf("runtime message missing configured-agents roster:\n%s", msg)
 	}
-	if !strings.Contains(msg, "Active worktree: feature/issue-230") {
-		t.Fatalf("runtime message missing active worktree:\n%s", msg)
+	// The worktree label is NOT in message[1]; it flows through the footer seam instead.
+	if strings.Contains(msg, "Active worktree:") {
+		t.Fatalf("worktree must not appear in message[1] (it moved to the footer):\n%s", msg)
+	}
+	if got := a.activeWorktreeForFooter(); got != "feature/issue-230" {
+		t.Fatalf("footer worktree seam = %q, want the cached label", got)
 	}
 }
 

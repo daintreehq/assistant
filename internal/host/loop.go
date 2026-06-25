@@ -85,9 +85,8 @@ func (h *Host) handlePrompt(text string) {
 		if _, err := h.app.Session().Send(ctx, text, agent.SendOptions{}); err != nil {
 			h.report("turn-failed", fmt.Sprintf("send failed: %v", err))
 		}
-		// After the first interactive prompt turn, drop the one-time session-ended
-		// watchers NOTE so it doesn't ride message[1] on every subsequent host turn.
-		h.app.ConsumeSessionEndedNote()
+		// The one-time session-ended-watchers note is owned by the Session now (it surfaces
+		// once in the uncached footer on the first turn), so the host no longer consumes it.
 	}()
 }
 

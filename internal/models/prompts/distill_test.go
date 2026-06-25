@@ -199,20 +199,13 @@ func TestParseDistilledEntriesFencedObjects(t *testing.T) {
 	}
 }
 
-func TestPinnedMemoriesBlockRendered(t *testing.T) {
-	out := BuildRuntimeContextMessage(MainPromptContext{PinnedMemories: "- deploy uses Fireworks"})
-	if !strings.Contains(out, "# Pinned memories") {
-		t.Fatalf("pinned header missing:\n%s", out)
-	}
-	if !strings.Contains(out, "- deploy uses Fireworks") {
-		t.Fatalf("pinned content missing:\n%s", out)
-	}
-}
-
-func TestPinnedMemoriesBlockOmittedWhenEmpty(t *testing.T) {
+// Pinned memories moved OUT of message[1] into the uncached footer (issue #263), so the
+// runtime context never renders a pinned block — that keeps the prefix cache stable when a
+// pin changes. (The footer's `## Pinned` rendering is tested in internal/agent/footer_test.go.)
+func TestPinnedMemoriesNeverInRuntimeContext(t *testing.T) {
 	out := BuildRuntimeContextMessage(MainPromptContext{})
 	if strings.Contains(out, "# Pinned memories") {
-		t.Fatalf("pinned block should be absent when empty:\n%s", out)
+		t.Fatalf("message[1] must not carry a pinned block — it moved to the footer:\n%s", out)
 	}
 	// Runtime header (message[1]) must always be present.
 	if !strings.Contains(out, "# Runtime context") {

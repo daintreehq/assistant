@@ -576,7 +576,7 @@ func TestComposeTurnFooter_BlankSendWithActiveRunsAppendsWorkflowOnly(t *testing
 	}
 }
 
-// ---- relevant-memories section ----
+// ---- pinned + relevant memories section ----
 
 // memRec builds a MemoryRecord carrying only Content — all the recall section reads.
 func memRec(content string) domain.MemoryRecord {
@@ -601,73 +601,102 @@ func (f *fakeMemoryRecaller) RecallMemories(query string, limit int) ([]domain.M
 	return f.rows, f.err
 }
 
-// No recalled rows (nil or empty) ⇒ the `# Relevant memories` section is omitted.
-func TestRelevantMemoriesSection_NilMemories(t *testing.T) {
-	if body, ok := relevantMemoriesSection(footerContext{Goal: "g"}); ok || body != "" {
-		t.Errorf("nil memories should omit the section; got (%q, %v)", body, ok)
+// No pinned and no recalled rows ⇒ the merged section is omitted entirely.
+func TestPinnedAndRelevantMemoriesSection_BothEmpty(t *testing.T) {
+	if body, ok := pinnedAndRelevantMemoriesSection(footerContext{Goal: "g"}); ok || body != "" {
+		t.Errorf("no memories should omit the section; got (%q, %v)", body, ok)
 	}
-	if body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{}}); ok || body != "" {
-		t.Errorf("empty memories should omit the section; got (%q, %v)", body, ok)
+	if body, ok := pinnedAndRelevantMemoriesSection(footerContext{
+		PinnedMemories: []domain.MemoryRecord{}, RelevantMemories: []domain.MemoryRecord{},
+	}); ok || body != "" {
+		t.Errorf("empty slices should omit the section; got (%q, %v)", body, ok)
 	}
 }
 
-// Recalled rows render under the `# Relevant memories` header as one "- fact" line each.
-func TestRelevantMemoriesSection_RendersRows(t *testing.T) {
-	body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
+// Recalled-only input renders just the `## Relevant` subblock under the merged header.
+func TestPinnedAndRelevantMemoriesSection_RecalledOnly(t *testing.T) {
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
 		memRec("fact one"), memRec("  fact two  "),
 	}})
 	if !ok {
-		t.Fatal("section should render when rows are present")
+		t.Fatal("section should render when recalled rows are present")
 	}
-	want := "# Relevant memories\n- fact one\n- fact two"
+	want := "# Pinned and relevant memories\n## Relevant (recalled for this turn)\n- fact one\n- fact two"
 	if body != want {
 		t.Errorf("body = %q, want %q", body, want)
 	}
 }
 
-// Embedded newlines (\n, \r\n, \r) in a memory are flattened to spaces so one memory
-// is exactly one list line — a raw newline must never split a fact or inject a heading.
-func TestRelevantMemoriesSection_FlattensNewlines(t *testing.T) {
-	body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
+// Pinned-only input renders just the `## Pinned` subblock under the merged header.
+func TestPinnedAndRelevantMemoriesSection_PinnedOnly(t *testing.T) {
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{PinnedMemories: []domain.MemoryRecord{
+		memRec("pinned fact"),
+	}})
+	if !ok {
+		t.Fatal("section should render when pinned rows are present")
+	}
+	want := "# Pinned and relevant memories\n## Pinned\n- pinned fact"
+	if body != want {
+		t.Errorf("body = %q, want %q", body, want)
+	}
+}
+
+// Both present ⇒ the `## Pinned` subblock (curated facts) comes FIRST, then `## Relevant`,
+// each under its own subhead so the model can weight curated vs speculative differently.
+func TestPinnedAndRelevantMemoriesSection_BothPresent(t *testing.T) {
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{
+		PinnedMemories:   []domain.MemoryRecord{memRec("the pin")},
+		RelevantMemories: []domain.MemoryRecord{memRec("the recall")},
+	})
+	if !ok {
+		t.Fatal("section should render")
+	}
+	want := "# Pinned and relevant memories\n## Pinned\n- the pin\n## Relevant (recalled for this turn)\n- the recall"
+	if body != want {
+		t.Errorf("body = %q, want %q", body, want)
+	}
+}
+
+// Embedded newlines (\n, \r\n, \r) in a memory are flattened to spaces so one memory is
+// exactly one list line — a raw newline must never split a fact or inject a heading.
+func TestPinnedAndRelevantMemoriesSection_FlattensNewlines(t *testing.T) {
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
 		memRec("line one\nline two\r\nline three\rline four"),
 	}})
 	if !ok {
 		t.Fatal("section should render")
 	}
-	want := "# Relevant memories\n- line one line two line three line four"
+	want := "# Pinned and relevant memories\n## Relevant (recalled for this turn)\n- line one line two line three line four"
 	if body != want {
 		t.Errorf("body = %q, want %q", body, want)
 	}
 }
 
-// Whitespace-only memories are skipped; if every row is blank the section is omitted,
-// and a blank row never suppresses a real fact after it.
-func TestRelevantMemoriesSection_SkipsBlankRows(t *testing.T) {
-	if body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
+// Whitespace-only memories are skipped; if every row in a subblock is blank that subblock
+// (and its subhead) is omitted, and a blank row never suppresses a real fact after it.
+func TestPinnedAndRelevantMemoriesSection_SkipsBlankRows(t *testing.T) {
+	if body, ok := pinnedAndRelevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
 		memRec("   "), memRec("\n\t"),
 	}}); ok || body != "" {
 		t.Errorf("all-blank rows should omit the section; got (%q, %v)", body, ok)
 	}
-	body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
 		memRec("  "), memRec("real fact"),
 	}})
-	if !ok || body != "# Relevant memories\n- real fact" {
+	if !ok || body != "# Pinned and relevant memories\n## Relevant (recalled for this turn)\n- real fact" {
 		t.Errorf("blank row should be skipped but real fact kept; got (%q, %v)", body, ok)
 	}
 }
 
-// At most relevantMemoriesMaxRows rows render even when more are recalled; the cap
-// keeps the FIRST rows (highest BM25 rank) and drops the overflow.
-func TestRelevantMemoriesSection_RowCap(t *testing.T) {
+// renderMemoryBullets keeps at most maxRows rows (the FIRST, highest-rank) and drops the
+// overflow — shared bound for both the pinned and recalled subblocks.
+func TestRenderMemoryBullets_RowCap(t *testing.T) {
 	var rows []domain.MemoryRecord
 	for i := 0; i < relevantMemoriesMaxRows+3; i++ {
 		rows = append(rows, memRec("fact "+strconv.Itoa(i)))
 	}
-	body, ok := relevantMemoriesSection(footerContext{RelevantMemories: rows})
-	if !ok {
-		t.Fatal("section should render")
-	}
-	if got := strings.Count(body, "\n- "); got != relevantMemoriesMaxRows {
+	body := renderMemoryBullets(rows, relevantMemoriesMaxRows, relevantMemoriesBlockMaxBytes)
+	if got := strings.Count(body, "- "); got != relevantMemoriesMaxRows {
 		t.Errorf("rendered %d rows, want the cap of %d", got, relevantMemoriesMaxRows)
 	}
 	if !strings.Contains(body, "- fact "+strconv.Itoa(relevantMemoriesMaxRows-1)) {
@@ -678,40 +707,51 @@ func TestRelevantMemoriesSection_RowCap(t *testing.T) {
 	}
 }
 
-// Known design boundary: when EVERY one of the top-N recalled rows individually
-// exceeds the byte cap, the block is suppressed (storage returns exactly N hits, so
-// there is no lower-ranked fallback buffer to reach for).
-func TestRelevantMemoriesSection_AllOversizedOmitsBlock(t *testing.T) {
+// renderMemoryBullets: when EVERY row exceeds the byte cap the result is empty — there is
+// no lower-ranked fallback (storage returns exactly the top-N).
+func TestRenderMemoryBullets_AllOversizedEmpty(t *testing.T) {
 	huge := strings.Repeat("y", relevantMemoriesBlockMaxBytes+1)
 	var rows []domain.MemoryRecord
 	for i := 0; i < relevantMemoriesMaxRows; i++ {
 		rows = append(rows, memRec(huge))
 	}
-	if body, ok := relevantMemoriesSection(footerContext{RelevantMemories: rows}); ok || body != "" {
-		t.Errorf("all-oversized rows should omit the section; got (%q, %v)", body, ok)
+	if body := renderMemoryBullets(rows, relevantMemoriesMaxRows, relevantMemoriesBlockMaxBytes); body != "" {
+		t.Errorf("all-oversized rows should render empty; got %d bytes", len(body))
 	}
 }
 
-// A memory that would overflow the byte cap is SKIPPED (continue, not break), so a
-// shorter row AFTER the oversized one still renders.
-func TestRelevantMemoriesSection_ByteCapSkipsOverflow(t *testing.T) {
+// renderMemoryBullets: an oversized row is SKIPPED (continue, not break), so a shorter
+// row AFTER the oversized one still renders, and the payload stays within the byte cap.
+func TestRenderMemoryBullets_ByteCapSkipsOverflow(t *testing.T) {
 	huge := strings.Repeat("x", relevantMemoriesBlockMaxBytes+100)
-	body, ok := relevantMemoriesSection(footerContext{RelevantMemories: []domain.MemoryRecord{
-		memRec("small before"),
-		memRec(huge),
-		memRec("small after"),
-	}})
-	if !ok {
-		t.Fatal("section should render the small rows")
-	}
+	body := renderMemoryBullets([]domain.MemoryRecord{
+		memRec("small before"), memRec(huge), memRec("small after"),
+	}, relevantMemoriesMaxRows, relevantMemoriesBlockMaxBytes)
 	if strings.Contains(body, huge) {
 		t.Error("an oversized memory must be skipped, not rendered")
 	}
 	if !strings.Contains(body, "- small before") || !strings.Contains(body, "- small after") {
 		t.Errorf("a row after the oversized one must still render; got %q", body)
 	}
-	if max := len("# Relevant memories\n") + relevantMemoriesBlockMaxBytes; len(body) > max {
-		t.Errorf("body is %d bytes, exceeds the cap of %d", len(body), max)
+	if len(body) > relevantMemoriesBlockMaxBytes {
+		t.Errorf("payload is %d bytes, exceeds the cap of %d", len(body), relevantMemoriesBlockMaxBytes)
+	}
+}
+
+// The pinned subblock uses the larger pinned byte cap, so a curated fact that would be
+// dropped by the (smaller) recalled cap still renders when pinned — proving the two
+// subblocks are bounded independently.
+func TestPinnedAndRelevantMemoriesSection_PinnedUsesLargerCap(t *testing.T) {
+	mid := strings.Repeat("p", relevantMemoriesBlockMaxBytes+200) // > recalled cap, < pinned cap
+	body, ok := pinnedAndRelevantMemoriesSection(footerContext{
+		PinnedMemories: []domain.MemoryRecord{memRec(mid)},
+	})
+	if !ok || !strings.Contains(body, mid) {
+		t.Errorf("a pin within the pinned cap should render; got ok=%v len=%d", ok, len(body))
+	}
+	// The same content as a recalled row would be dropped by the smaller recalled cap.
+	if got := renderMemoryBullets([]domain.MemoryRecord{memRec(mid)}, relevantMemoriesMaxRows, relevantMemoriesBlockMaxBytes); got != "" {
+		t.Errorf("content over the recalled cap should be dropped there; got %d bytes", len(got))
 	}
 }
 
@@ -745,7 +785,7 @@ func TestComposeTurnFooter_RecalledMemoriesInEveryRound(t *testing.T) {
 	}
 	for i, round := range r.seen[:2] {
 		last := round[len(round)-1]
-		if last.Role != "system" || !strings.Contains(last.StringContent, "# Relevant memories") {
+		if last.Role != "system" || !strings.Contains(last.StringContent, "# Pinned and relevant memories") {
 			t.Errorf("round %d footer missing the recalled-memories block: %+v", i, last)
 		}
 		if !strings.Contains(last.StringContent, "the deploy key lives in vault") {
@@ -753,14 +793,14 @@ func TestComposeTurnFooter_RecalledMemoriesInEveryRound(t *testing.T) {
 		}
 	}
 	for _, m := range s.Messages() {
-		if strings.Contains(m.StringContent, "# Relevant memories") {
+		if strings.Contains(m.StringContent, "# Pinned and relevant memories") {
 			t.Fatal("recalled-memories footer leaked into durable history; it must stay ephemeral")
 		}
 	}
 }
 
 // Session-level: a recall error is swallowed — the turn still runs and the footer
-// carries the goal anchor but NO `# Relevant memories` block.
+// carries the goal anchor but NO `# Pinned and relevant memories` block.
 func TestComposeTurnFooter_RecallErrorSwallowed(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
 	rec := &fakeMemoryRecaller{err: errors.New("fts boom")}
@@ -778,7 +818,7 @@ func TestComposeTurnFooter_RecallErrorSwallowed(t *testing.T) {
 	if !strings.Contains(last.StringContent, "# Current goal") {
 		t.Errorf("footer should still carry the goal anchor; got %q", last.StringContent)
 	}
-	if strings.Contains(last.StringContent, "# Relevant memories") {
+	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
 		t.Error("a recall error must omit the memories block")
 	}
 }
@@ -793,7 +833,7 @@ func TestComposeTurnFooter_NilRecallerOmitsMemories(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := r.seen[0][len(r.seen[0])-1]
-	if strings.Contains(last.StringContent, "# Relevant memories") {
+	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
 		t.Errorf("nil recaller must not append a memories block; got %q", last.StringContent)
 	}
 }
@@ -814,7 +854,7 @@ func TestComposeTurnFooter_BlankSendSkipsRecall(t *testing.T) {
 		t.Errorf("recaller called %d times on a blank send, want 0", rec.calls)
 	}
 	last := r.seen[0][len(r.seen[0])-1]
-	if strings.Contains(last.StringContent, "# Relevant memories") {
+	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
 		t.Errorf("a blank send must not append a memories block; got %q", last.StringContent)
 	}
 }
@@ -848,5 +888,272 @@ func TestComposeTurnFooter_RecallNotRepeatedOnInjection(t *testing.T) {
 	}
 	if len(rec.queries) > 0 && rec.queries[0] != "original ask" {
 		t.Errorf("recall seeded with %q, want the originating ask (never the injection)", rec.queries[0])
+	}
+}
+
+// ---- active worktree section ----
+
+// An empty worktree label omits the section; a known label renders the `# Active worktree`
+// line verbatim.
+func TestActiveWorktreeSection(t *testing.T) {
+	if body, ok := activeWorktreeSection(footerContext{}); ok || body != "" {
+		t.Errorf("empty worktree should omit the section; got (%q, %v)", body, ok)
+	}
+	body, ok := activeWorktreeSection(footerContext{ActiveWorktree: "feature/issue-263"})
+	if !ok || body != "# Active worktree\nfeature/issue-263" {
+		t.Errorf("body = %q, ok = %v", body, ok)
+	}
+}
+
+// A multi-line worktree label is flattened to one line so it can't inject a stray heading.
+func TestActiveWorktreeSection_FlattensMultiline(t *testing.T) {
+	body, ok := activeWorktreeSection(footerContext{ActiveWorktree: "feature/x\nrogue heading"})
+	if !ok || body != "# Active worktree\nfeature/x rogue heading" {
+		t.Errorf("multiline label not flattened; got (%q, %v)", body, ok)
+	}
+}
+
+// ---- session note section ----
+
+// No titles omit the section; one watcher renders a singular, quoted note.
+func TestSessionNoteSection(t *testing.T) {
+	if body, ok := sessionNoteSection(footerContext{}); ok || body != "" {
+		t.Errorf("no titles should omit the section; got (%q, %v)", body, ok)
+	}
+	body, ok := sessionNoteSection(footerContext{SessionEndedWatchers: []string{"watch deploy"}})
+	if !ok || !strings.HasPrefix(body, "# Session note\n") {
+		t.Fatalf("section should render with the header; got (%q, %v)", body, ok)
+	}
+	if !strings.Contains(body, "1 watcher was stopped") || !strings.Contains(body, `"watch deploy"`) {
+		t.Errorf("singular note missing; got %q", body)
+	}
+}
+
+// Many watchers render a plural note with the title list capped and a "+N more" tail.
+func TestSessionNoteSection_PluralAndCap(t *testing.T) {
+	var titles []string
+	for i := 0; i < sessionEndedWatchersMaxTitles+2; i++ {
+		titles = append(titles, "w"+strconv.Itoa(i))
+	}
+	body, ok := sessionNoteSection(footerContext{SessionEndedWatchers: titles})
+	if !ok {
+		t.Fatal("section should render")
+	}
+	if !strings.Contains(body, strconv.Itoa(len(titles))+" watchers were stopped") {
+		t.Errorf("plural count missing; got %q", body)
+	}
+	if !strings.Contains(body, "+2 more") {
+		t.Errorf("expected the '+2 more' tail; got %q", body)
+	}
+}
+
+// ---- goal-anchor wake fallback ----
+
+// On a wake turn the anchor substitutes the active-workflow objective (the first open
+// run's next-action label) and does NOT echo the verbose wake blob.
+func TestGoalAnchorSection_WakeUsesWorkflowObjective(t *testing.T) {
+	body, ok := goalAnchorSection(footerContext{
+		Goal:   wakePromptPrefix + " a watcher fired while you were idle",
+		IsWake: true,
+		WorkflowRuns: []domain.WorkflowRunRecord{
+			{NextActionJson: ptrOf(`{"label":"finish the migration","toolName":"agentTask.spawnForEdits"}`)},
+		},
+	})
+	if !ok {
+		t.Fatal("a wake turn with an open run should render the objective anchor")
+	}
+	if !strings.Contains(body, "# Current objective") || !strings.Contains(body, "finish the migration") {
+		t.Errorf("expected the objective anchor; got %q", body)
+	}
+	if strings.Contains(body, "# Current goal") || strings.Contains(body, "a watcher fired") {
+		t.Errorf("a wake turn must NOT echo the verbose wake blob; got %q", body)
+	}
+}
+
+// A wake turn with no open run (or a run whose next-action has no label) omits the anchor
+// entirely — the wake blob is already in history as the user message.
+func TestGoalAnchorSection_WakeWithoutObjectiveOmitted(t *testing.T) {
+	if body, ok := goalAnchorSection(footerContext{Goal: wakePromptPrefix + " x", IsWake: true}); ok || body != "" {
+		t.Errorf("a wake turn with no open run should omit the anchor; got (%q, %v)", body, ok)
+	}
+	if body, ok := goalAnchorSection(footerContext{
+		Goal: wakePromptPrefix + " x", IsWake: true,
+		WorkflowRuns: []domain.WorkflowRunRecord{{NextActionJson: ptrOf(`{"toolName":"x"}`)}},
+	}); ok || body != "" {
+		t.Errorf("a wake run with no objective label should omit the anchor; got (%q, %v)", body, ok)
+	}
+}
+
+// A normal (non-wake) turn renders the standard `# Current goal` anchor from the ask.
+func TestGoalAnchorSection_NonWakeUnchanged(t *testing.T) {
+	body, ok := goalAnchorSection(footerContext{Goal: "do the thing"})
+	if !ok || !strings.Contains(body, "# Current goal") || !strings.Contains(body, "do the thing") {
+		t.Errorf("a normal turn should render the goal anchor; got (%q, %v)", body, ok)
+	}
+}
+
+// ---- global footer budget ----
+
+// When the joined footer exceeds footerMaxBytes, whole sections are dropped from the
+// FRONT (lowest salience) until it fits; the last (highest-salience) section is kept.
+func TestComposeTurnFooter_GlobalBudgetDropsFrontSections(t *testing.T) {
+	big := strings.Repeat("a", 7000) // two of these alone exceed footerMaxBytes (12288)
+	withFooterSections(t,
+		func(footerContext) (string, bool) { return "FRONT-" + big, true },
+		func(footerContext) (string, bool) { return "MIDDLE-" + big, true },
+		func(footerContext) (string, bool) { return "TAIL-KEEP", true },
+	)
+	body := footerBody(t, "goal")
+	if strings.Contains(body, "FRONT-") {
+		t.Error("the front (lowest-salience) section should be dropped under the global budget")
+	}
+	if !strings.Contains(body, "TAIL-KEEP") {
+		t.Error("the highest-salience (last) section must be kept")
+	}
+	if len(body) > footerMaxBytes {
+		t.Errorf("trimmed footer is %d bytes, exceeds the budget of %d", len(body), footerMaxBytes)
+	}
+}
+
+// A single section larger than the budget is kept rather than producing an empty footer
+// (the trim never drops the final, highest-salience section).
+func TestComposeTurnFooter_GlobalBudgetKeepsLastSection(t *testing.T) {
+	withFooterSections(t, func(footerContext) (string, bool) {
+		return "ONLY-" + strings.Repeat("z", footerMaxBytes), true
+	})
+	body := footerBody(t, "goal")
+	if !strings.Contains(body, "ONLY-") {
+		t.Errorf("the sole section must be kept even when it alone exceeds the budget; got %d bytes", len(body))
+	}
+}
+
+// ---- session-level wiring of the new footer inputs ----
+
+// fakePinnedLister satisfies agent.PinnedMemoryLister: it counts calls (so a test can
+// assert the footer reads pins every ROUND, not once per turn) and returns canned rows.
+type fakePinnedLister struct {
+	rows  []domain.MemoryRecord
+	err   error
+	calls int
+	limit int
+}
+
+func (f *fakePinnedLister) ListPinnedMemories(limit int) ([]domain.MemoryRecord, error) {
+	f.calls++
+	f.limit = limit
+	return f.rows, f.err
+}
+
+// Session-level: pinned memories are re-read EVERY round (so a mid-turn pin surfaces next
+// round), appear under the merged section's `## Pinned` subhead, and never leak into
+// durable history.
+func TestComposeTurnFooter_PinnedMemoriesEveryRound(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0 → loop
+		{Content: "final"}, // round 1
+	}}
+	pinned := &fakePinnedLister{rows: []domain.MemoryRecord{{Content: "always use rtk proxy"}}}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.PinnedMemoryLister = pinned
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if pinned.calls < 2 {
+		t.Errorf("pinned lister called %d times, want once per round (>= 2)", pinned.calls)
+	}
+	if pinned.limit != pinnedMemoriesMaxRows {
+		t.Errorf("pinned limit = %d, want %d", pinned.limit, pinnedMemoriesMaxRows)
+	}
+	for i, round := range r.seen[:2] {
+		last := round[len(round)-1]
+		if !strings.Contains(last.StringContent, "# Pinned and relevant memories") || !strings.Contains(last.StringContent, "## Pinned") {
+			t.Errorf("round %d footer missing the pinned block: %q", i, last.StringContent)
+		}
+		if !strings.Contains(last.StringContent, "always use rtk proxy") {
+			t.Errorf("round %d footer missing the pinned fact", i)
+		}
+	}
+	for _, m := range s.Messages() {
+		if strings.Contains(m.StringContent, "# Pinned and relevant memories") {
+			t.Fatal("pinned footer leaked into durable history; it must stay ephemeral")
+		}
+	}
+}
+
+// Session-level: a pinned-lister error is swallowed — the turn still runs, the goal anchor
+// survives, and the pinned subblock is omitted.
+func TestComposeTurnFooter_PinnedListerErrorSwallowed(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
+	pinned := &fakePinnedLister{err: errors.New("db boom")}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.PinnedMemoryLister = pinned
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	last := r.seen[0][len(r.seen[0])-1]
+	if !strings.Contains(last.StringContent, "# Current goal") {
+		t.Errorf("footer should still carry the goal anchor; got %q", last.StringContent)
+	}
+	if strings.Contains(last.StringContent, "## Pinned") {
+		t.Error("a pinned-lister error must omit the pinned subblock")
+	}
+}
+
+// Session-level: the active-worktree provider is called EVERY round and its label appears
+// in the footer's `# Active worktree` section.
+func TestComposeTurnFooter_ActiveWorktreeEveryRound(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
+		{Content: "final"},
+	}}
+	calls := 0
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.ActiveWorktreeFunc = func() string { calls++; return "feature/issue-263" }
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Errorf("worktree func called %d times, want once per round (>= 2)", calls)
+	}
+	for i, round := range r.seen[:2] {
+		last := round[len(round)-1]
+		if !strings.Contains(last.StringContent, "# Active worktree\nfeature/issue-263") {
+			t.Errorf("round %d footer missing the worktree section: %q", i, last.StringContent)
+		}
+	}
+}
+
+// Session-level: the one-time session note surfaces on the FIRST turn only — the provider
+// is consulted exactly once and the note is gone from the second turn's footer.
+func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
+	r := &injectRouter{} // empty results → each Send is a single final round
+	called := 0
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.SessionEndedWatchers = func() []string { called++; return []string{"watch the deploy"} }
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.seen) < 2 {
+		t.Fatalf("want >= 2 rounds across two sends, got %d", len(r.seen))
+	}
+	turn1 := r.seen[0][len(r.seen[0])-1].StringContent
+	turn2 := r.seen[1][len(r.seen[1])-1].StringContent
+	if !strings.Contains(turn1, "# Session note") || !strings.Contains(turn1, "watch the deploy") {
+		t.Errorf("first-turn footer should carry the session note; got %q", turn1)
+	}
+	if strings.Contains(turn2, "# Session note") {
+		t.Errorf("second-turn footer must NOT repeat the session note; got %q", turn2)
+	}
+	if called != 1 {
+		t.Errorf("session-ended provider called %d times, want exactly 1 (first turn only)", called)
 	}
 }

@@ -14,6 +14,12 @@ import (
 // read-only narrowing, decides what may mutate. This is what makes autonomous
 // multi-agent orchestration (agent A finishes → wake → relay to agent B) possible.
 
+// wakePromptPrefix is the literal opener of every BuildWakePrompt output. The turn loop
+// matches it (HasPrefix) to detect an autonomous wake turn so the footer's goal anchor
+// substitutes the active-workflow objective for the verbose wake blob. Kept as a shared
+// const so the producer (BuildWakePrompt) and the detector (runTurn) can never drift.
+const wakePromptPrefix = "[automatic wake-up]"
+
 // IsActionableWake reports whether a surfaced attention event should autonomously
 // wake the model (run a turn) versus just appear in the inbox. Only a
 // terminal-watcher event carrying a real terminalId qualifies — model/user
@@ -85,7 +91,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 	}
 
 	parts := []string{
-		"[automatic wake-up] A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
+		wakePromptPrefix + " A background watcher surfaced new activity while you were idle — this was NOT typed by the user.",
 		guidance,
 	}
 	if anyNew && anyFollowUp {
