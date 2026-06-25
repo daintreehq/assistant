@@ -301,6 +301,69 @@ func (a *App) loadSkills(ids []string) []string {
 	return a.Session.LoadAdditionalSkills(ids)
 }
 
+// checkSkillStepConsistency is the issue #240 decision-correctness judge wired into
+// skill.step.advance: it asks the SMALL tier whether a recorded step advance looks
+// like a mistake (a bad jump, a regression, an impossible sequence, a premature
+// finish) and returns the {reason,confidence,matched} verdict — matched=true ⇒ the
+// advance is FLAGGED as likely-wrong. It mirrors judgeYesNo's shape but uses a DISTINCT
+// prompt: this judges state-transition correctness, not terminal completion, so it must
+// not share JudgeSystemPrompt. A model or decode failure returns the fallback verdict
+// AND the error, so the caller (observeStepAdvance) logs checkOk=false truthfully
+// rather than masking a failed check as a passing one.
+func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
+	fallback := domain.ModelJudgeAnswer{
+		Reason:     "Could not evaluate step consistency.",
+		Confidence: 0.3,
+		Matched:    false,
+	}
+	requestedNext := ""
+	if in.NextStep != nil {
+		requestedNext = itoa(*in.NextStep)
+	}
+	args := prompts.ConsistencyUserArgs{
+		SkillID:         in.SkillID,
+		CompletedStep:   in.CompletedStep,
+		StepStatus:      string(in.StepStatus),
+		RequestedNext:   requestedNext,
+		PrevCurrentStep: in.PrevCurrentStep,
+		NextCurrentStep: in.NextCurrentStep,
+		PrevRunStatus:   string(in.PrevRunStatus),
+		NextRunStatus:   string(in.NextRunStatus),
+		BeforeSteps:     marshalSteps(in.BeforeSteps),
+		AfterSteps:      marshalSteps(in.AfterSteps),
+		Notes:           in.Notes,
+	}
+	temp := 0.0
+	raw, err := a.Router.JSON(ctx, domain.ModelSmall, models.ChatOptions{
+		Messages: []models.ChatMessage{
+			models.TextMessage("system", prompts.ConsistencySystemPrompt),
+			models.TextMessage("user", prompts.BuildConsistencyUserPrompt(args)),
+		},
+		Temperature: &temp,
+	})
+	if err != nil {
+		return fallback, err
+	}
+	ans, err := models.DecodeModelJudgeAnswer(raw)
+	if err != nil {
+		return fallback, err
+	}
+	return ans, nil
+}
+
+// marshalSteps renders a SkillStepProgress[] as compact JSON for the consistency
+// prompt; an empty/nil slice or a marshal failure renders the empty array literal.
+func marshalSteps(steps []domain.SkillStepProgress) string {
+	if len(steps) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(steps)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
 // skillSourceAdapter maps *skills.SkillRegistry onto skill.SkillSource (the
 // read-only library skill.load reads).
 type skillSourceAdapter struct{ app *App }
