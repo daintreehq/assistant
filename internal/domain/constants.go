@@ -60,6 +60,22 @@ const (
 	// exceeds the hard threshold.
 	AutoCompactHardTruncationKeepMessages = 16
 
+	// AutoCompactVerbatimTailMessages is how many of the most-recent working messages the
+	// HEALTHY (model-summarized) auto-compact path keeps verbatim after the summary note,
+	// instead of collapsing to controls + summary only. A model summary captures the gist
+	// but rounds off the exact, load-bearing references a mid-task orchestrator still needs
+	// (terminal/run/watcher/workflow IDs, the branch it is on, an open grant); retaining the
+	// last few raw turns keeps those intact. Same recency rationale — and the same value —
+	// as AutoCompactHardTruncationKeepMessages.
+	AutoCompactVerbatimTailMessages = 16
+
+	// AutoCompactVerbatimTailTokenBudget caps the verbatim tail's size so the rebuilt
+	// history (controls + summary note + tail) lands comfortably back under
+	// AutoCompactTokenThreshold and does not immediately re-trip the gate. A tail over this
+	// is shed from the head (oldest first) until it fits. Set to ~1/3 of the soft threshold
+	// to leave ample headroom for the controls and the summary note.
+	AutoCompactVerbatimTailTokenBudget = 20_000
+
 	// LargeContextWindowTokens is the main (large) model's context window, used as the
 	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
 	// "% toward auto-compaction". The large tier is sized to a ~1M-token window; the gauge

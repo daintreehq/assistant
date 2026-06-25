@@ -1183,6 +1183,46 @@ func estimateMessagesTokens(msgs []models.ChatMessage) int {
 	return int(math.Ceil(float64(chars) / float64(domain.CharsPerToken)))
 }
 
+// keepValidTail selects the most-recent keepN messages from a working slice and returns
+// a copied, model-valid tail bounded by tokenBudget. It is the shared recency-tail logic
+// behind BOTH the healthy auto-compact path (which keeps a verbatim tail after the model
+// summary) and the lossy truncation fallback. Pure and lock-free — it only reads the
+// passed slice and returns a fresh copy, so a caller can size and clean a prospective tail
+// before committing it to s.messages. Steps:
+//   - cap to the last keepN messages;
+//   - copy, so the cleanup passes and the caller's re-append never alias the s.messages
+//     backing array the caller is about to overwrite;
+//   - drop orphaned tool results, then an incomplete trailing tool call, exactly as a
+//     resume would, so the tail is a valid history Fireworks won't reject;
+//   - shed from the head (oldest first), re-cleaning orphans after each drop, until the
+//     estimate is at or under tokenBudget — guaranteeing the bound even when a single
+//     retained message is itself larger than the budget.
+//
+// Returns an empty (non-nil-safe) slice when there is nothing to keep — empty input, a
+// non-positive keepN, a non-positive budget, or a tail shed away entirely.
+func keepValidTail(msgs []models.ChatMessage, keepN, tokenBudget int) []models.ChatMessage {
+	if len(msgs) == 0 || keepN <= 0 || tokenBudget <= 0 {
+		return nil
+	}
+	working := msgs
+	if len(working) > keepN {
+		working = working[len(working)-keepN:]
+	}
+	tail := make([]models.ChatMessage, len(working))
+	copy(tail, working)
+	// The drop counts are irrelevant here (this path sheds history without surfacing a
+	// corruption note); discard them. Order matters: orphan results first, then the
+	// incomplete trailing call — matching the resume cleanup order.
+	tail, _ = dropOrphanToolResults(tail)
+	tail, _ = dropOrphanToolCallTail(tail)
+	for len(tail) > 0 && estimateMessagesTokens(tail) >= tokenBudget {
+		tail = tail[1:]
+		tail, _ = dropOrphanToolResults(tail)
+		tail, _ = dropOrphanToolCallTail(tail)
+	}
+	return tail
+}
+
 // distillBackgroundTimeout bounds the detached post-compaction distill call so a
 // hung or slow small model can never pin the background goroutine indefinitely — the
 // work is best-effort and not load-bearing for the turn.
@@ -1225,7 +1265,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// turn would otherwise trip the vision tier gate and silently fail every
 	// auto-compact, growing history unbounded).
 	summaryMsgs := []models.ChatMessage{
-		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual."),
+		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual. Preserve verbatim every load-bearing identifier you see — terminal IDs (term_*), run IDs (run_*), watcher IDs (watcher_*), workflow IDs (wkf_*), branch names, and any active grant or approval token — so the orchestrator can still reference them after compaction."),
 	}
 	// Capture a flattened transcript from the SAME snapshot (still under the lock) so
 	// the distillation pass can mine the about-to-be-discarded history after the lock
@@ -1271,7 +1311,23 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// then distill durable facts off the critical path. compactLocked resets the
 	// failure streak so one transient outage never permanently disarms the soft path.
 	s.mu.Lock()
+	// Snapshot the most-recent working messages BEFORE compactLocked reslices history to
+	// controls + summary, then re-append them after — so the healthy path keeps a verbatim
+	// recent tail instead of collapsing to summary-only. The model summary rounds off the
+	// exact references a mid-task orchestrator still needs (terminal/run/watcher/workflow
+	// IDs, the active branch, an open grant); the raw tail keeps them intact. The snapshot
+	// is taken under this SAME post-summary lock, so any InjectNote that raced in during the
+	// (lock-free) model call is included. keepValidTail copies + orphan-cleans, so the
+	// re-appended tail never aliases the reslice and is a valid history Fireworks won't
+	// reject. compactLocked still zeroes lastPromptTokens — the tail is small (≤ the budget),
+	// so the post-compaction char estimate stays well under the gate and won't re-trip it.
+	tail := keepValidTail(s.messages[domain.ControlMessageCount:],
+		domain.AutoCompactVerbatimTailMessages, domain.AutoCompactVerbatimTailTokenBudget)
 	s.compactLocked(summary)
+	for _, m := range tail {
+		s.messages = append(s.messages, m)
+		s.persistMessageLocked(m)
+	}
 	s.mu.Unlock()
 	s.events.Info("Auto-compacted conversation")
 
@@ -1311,27 +1367,13 @@ func (s *Session) truncateLocked(keepN int) {
 	// stale over-ceiling figure.
 	s.compactFailures = 0
 	s.lastPromptTokens = 0
-	working := s.messages[domain.ControlMessageCount:]
-	if len(working) > keepN {
-		working = working[len(working)-keepN:]
-	}
-	// Copy before any reslice of s.messages so the cleanup passes (and the re-append
-	// below) never alias the backing array we are about to overwrite.
-	tail := make([]models.ChatMessage, len(working))
-	copy(tail, working)
-	// The drop counts are irrelevant on this lossy-truncation path (it intentionally
-	// sheds history without surfacing a corruption note); discard them.
-	tail, _ = dropOrphanToolResults(tail)
-	tail, _ = dropOrphanToolCallTail(tail)
-	// Shed from the head until under the hard ceiling, re-cleaning orphans after each
-	// drop so the tail stays a valid history. The controls are fixed, so only their
-	// contribution is constant; estimateMessagesTokens is summed fresh on the tail.
+	// Keep at most keepN recent messages, cleaned and shed back under the hard ceiling.
+	// The controls are fixed overhead, so the tail's own budget is the ceiling minus their
+	// contribution — keepValidTail then bounds the tail against that. keepValidTail copies
+	// before any reslice, so the re-append below never aliases the backing array we are
+	// about to overwrite.
 	controlTokens := estimateMessagesTokens(s.messages[:domain.ControlMessageCount])
-	for len(tail) > 0 && controlTokens+estimateMessagesTokens(tail) >= domain.AutoCompactHardTruncationThreshold {
-		tail = tail[1:]
-		tail, _ = dropOrphanToolResults(tail)
-		tail, _ = dropOrphanToolCallTail(tail)
-	}
+	tail := keepValidTail(s.messages[domain.ControlMessageCount:], keepN, domain.AutoCompactHardTruncationThreshold-controlTokens)
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
 	for _, m := range tail {

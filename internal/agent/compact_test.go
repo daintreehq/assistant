@@ -956,3 +956,302 @@ func TestTruncateLockedZerosLastPromptTokens(t *testing.T) {
 		t.Fatalf("truncateLocked must zero lastPromptTokens, got %d", got)
 	}
 }
+
+// --- verbatim recent tail on the healthy compaction path (issue #252) ---
+
+// TestKeepValidTailHelper unit-tests the shared recency-tail selector directly: the
+// non-positive guards, the keepN cap, the no-alias copy, orphan-result + incomplete-call
+// cleaning, the token-budget head-shed, and a valid tool pair surviving intact.
+func TestKeepValidTailHelper(t *testing.T) {
+	mk := models.TextMessage
+
+	// Non-positive guards return nil.
+	if got := keepValidTail(nil, 5, 1000); got != nil {
+		t.Fatalf("empty input should return nil, got %v", got)
+	}
+	if got := keepValidTail([]models.ChatMessage{mk("user", "a")}, 0, 1000); got != nil {
+		t.Fatalf("keepN=0 should return nil, got %v", got)
+	}
+	if got := keepValidTail([]models.ChatMessage{mk("user", "a")}, 5, 0); got != nil {
+		t.Fatalf("budget=0 should return nil, got %v", got)
+	}
+
+	// Caps to the last keepN.
+	in := []models.ChatMessage{mk("user", "a"), mk("user", "b"), mk("user", "c")}
+	got := keepValidTail(in, 2, 1000)
+	if len(got) != 2 || got[0].StringContent != "b" || got[1].StringContent != "c" {
+		t.Fatalf("cap to last 2 failed: %+v", got)
+	}
+	// The result is a copy — mutating it must not touch the input backing array.
+	got[0].StringContent = "MUTATED"
+	if in[1].StringContent != "b" {
+		t.Fatal("keepValidTail must copy — mutating the result changed the input")
+	}
+
+	// An orphan tool result (id never declared by a preceding assistant) is dropped.
+	orphan := []models.ChatMessage{
+		mk("user", "hi"),
+		{Role: "tool", ToolCallID: "call_x", StringContent: "orphan result"},
+	}
+	for _, m := range keepValidTail(orphan, 16, 1000) {
+		if m.Role == "tool" {
+			t.Fatalf("orphan tool result should be dropped: %+v", orphan)
+		}
+	}
+
+	// An incomplete trailing tool call (declared, never answered) is cut.
+	incomplete := []models.ChatMessage{
+		mk("user", "hi"),
+		{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_y", Type: "function",
+			Function: models.ToolCallFunction{Name: "f", Arguments: "{}"},
+		}}},
+	}
+	for _, m := range keepValidTail(incomplete, 16, 1000) {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("incomplete trailing tool call should be cut: %+v", incomplete)
+		}
+	}
+
+	// A single message larger than the budget sheds to empty.
+	big := []models.ChatMessage{mk("user", strings.Repeat("x", 8000))} // ~2000 tokens
+	if got := keepValidTail(big, 16, 1000); len(got) != 0 {
+		t.Fatalf("oversized lone message should shed to empty, got %d", len(got))
+	}
+
+	// A valid tool pair survives intact (the result keeps its declared parent).
+	pair := []models.ChatMessage{
+		{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_z", Type: "function",
+			Function: models.ToolCallFunction{Name: "f", Arguments: "{}"},
+		}}},
+		{Role: "tool", ToolCallID: "call_z", StringContent: "ok"},
+	}
+	if got := keepValidTail(pair, 16, 1000); len(got) != 2 {
+		t.Fatalf("valid tool pair should survive, got %d: %+v", len(got), got)
+	}
+}
+
+// TestAutoCompactKeepsVerbatimTail proves the healthy path now rebuilds to controls +
+// summary note + the most-recent working messages verbatim (an oversized old note is shed
+// by the tail budget), instead of collapsing to summary-only.
+func TestAutoCompactKeepsVerbatimTail(t *testing.T) {
+	r := &chatCountRouter{summary: "TAIL_SUMMARY"}
+	s, _ := compactSession(t, r)
+	// One big OLD note trips the soft threshold (shed by the tail budget); the recent
+	// small notes are the verbatim tail to keep.
+	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("RECENT_A")
+	s.InjectNote("RECENT_B")
+	s.InjectNote("RECENT_C")
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("expected one summary call, got %d", r.chatCalls)
+	}
+	msgs := s.Messages()
+	if len(msgs) != domain.ControlMessageCount+1+3 {
+		t.Fatalf("messages = %d, want %d (controls + summary + 3 tail)", len(msgs), domain.ControlMessageCount+1+3)
+	}
+	// Controls remain byte-stable.
+	if msgs[0].Role != "system" || !strings.Contains(msgs[1].StringContent, "# Runtime context") ||
+		!strings.Contains(msgs[2].StringContent, "# Loaded skills") {
+		t.Fatal("control messages must remain byte-stable")
+	}
+	// Summary note sits immediately after the controls.
+	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "compacted summary") ||
+		!strings.Contains(msgs[3].StringContent, "TAIL_SUMMARY") {
+		t.Fatalf("msg[3] = %q, want the compacted summary note", msgs[3].StringContent)
+	}
+	// The recent tail follows the summary, verbatim and in original order.
+	if !strings.Contains(msgs[4].StringContent, "RECENT_A") ||
+		!strings.Contains(msgs[5].StringContent, "RECENT_B") ||
+		!strings.Contains(msgs[6].StringContent, "RECENT_C") {
+		t.Fatalf("recent tail not preserved verbatim: %+v", msgs[4:])
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.StringContent, "OLD_BIG") {
+			t.Fatal("the oversized old note should have been shed from the tail")
+		}
+	}
+}
+
+// TestAutoCompactTailCleanedOrphans proves the verbatim tail is a VALID model history:
+// an orphan tool result is dropped while a complete tool pair survives, on the healthy
+// path (the oversized old note is shed by the budget).
+func TestAutoCompactTailCleanedOrphans(t *testing.T) {
+	r := &chatCountRouter{summary: "ORPHAN_SUMMARY"}
+	s, _ := compactSession(t, r)
+	s.mu.Lock()
+	s.messages = append(s.messages,
+		// A big OLD note to trip the soft threshold (shed by the tail budget).
+		models.TextMessage("user", "BIG_OLD"+strings.Repeat("x", 260_000)),
+		// A valid recent tool pair — must survive intact.
+		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_1", Type: "function",
+			Function: models.ToolCallFunction{Name: "terminal.list", Arguments: "{}"},
+		}}},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_1", StringContent: "VALID_RESULT"},
+		// An orphan tool result whose id was never declared — must be dropped.
+		models.ChatMessage{Role: "tool", ToolCallID: "call_orphan", StringContent: "ORPHAN_RESULT"},
+	)
+	s.mu.Unlock()
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("expected one summary call, got %d", r.chatCalls)
+	}
+	msgs := s.Messages()
+	for _, m := range msgs {
+		if strings.Contains(m.StringContent, "ORPHAN_RESULT") {
+			t.Fatal("orphan tool result must be dropped from the tail")
+		}
+		if strings.Contains(m.StringContent, "BIG_OLD") {
+			t.Fatal("the oversized old note should have been shed")
+		}
+	}
+	var sawCall, sawResult bool
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "call_1" {
+				sawCall = true
+			}
+		}
+		if m.Role == "tool" && m.ToolCallID == "call_1" && strings.Contains(m.StringContent, "VALID_RESULT") {
+			sawResult = true
+		}
+	}
+	if !sawCall || !sawResult {
+		t.Fatalf("valid tool pair should survive in the tail (call=%v result=%v): %+v", sawCall, sawResult, msgs)
+	}
+}
+
+// TestAutoCompactTailTokenBudgetCaps proves a tail larger than the budget is shed from the
+// head (oldest first) until it fits, even when it is within keepN.
+func TestAutoCompactTailTokenBudgetCaps(t *testing.T) {
+	r := &chatCountRouter{summary: "BUDGET_SUMMARY"}
+	s, _ := compactSession(t, r)
+	const noteChars = 8000 // ~2000 tokens each
+	const total = 40       // ~80k tokens total → trips the 60k soft threshold
+	for i := 0; i < total; i++ {
+		s.InjectNote(fmt.Sprintf("NOTE_%03d", i) + strings.Repeat("y", noteChars))
+	}
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("expected one summary call, got %d", r.chatCalls)
+	}
+	tail := s.Messages()[domain.ControlMessageCount+1:] // after controls + summary note
+	if len(tail) == 0 || len(tail) >= domain.AutoCompactVerbatimTailMessages {
+		t.Fatalf("tail should be shed below keepN by the budget, got %d", len(tail))
+	}
+	if est := estimateMessagesTokens(tail); est >= domain.AutoCompactVerbatimTailTokenBudget {
+		t.Fatalf("retained tail %d tokens exceeds budget %d", est, domain.AutoCompactVerbatimTailTokenBudget)
+	}
+	if !strings.Contains(tail[len(tail)-1].StringContent, fmt.Sprintf("NOTE_%03d", total-1)) {
+		t.Fatalf("most-recent note should survive, got %q", tail[len(tail)-1].StringContent)
+	}
+	for _, m := range tail {
+		if strings.Contains(m.StringContent, "NOTE_000") {
+			t.Fatal("oldest note should have been shed by the budget")
+		}
+	}
+}
+
+// TestCompactManualKeepsNoTail is the regression guard for the shared compactLocked: the
+// manual /compact path must still collapse to controls + summary only, NOT keep a verbatim
+// tail (which is healthy-auto-path-only behaviour).
+func TestCompactManualKeepsNoTail(t *testing.T) {
+	s, _ := compactSession(t, plainRouter())
+	// Recent small notes the AUTO path would keep as a verbatim tail.
+	s.InjectNote("MANUAL_RECENT_A")
+	s.InjectNote("MANUAL_RECENT_B")
+	if err := s.Compact("manual summary"); err != nil {
+		t.Fatal(err)
+	}
+	msgs := s.Messages()
+	if len(msgs) != domain.ControlMessageCount+1 {
+		t.Fatalf("manual compact must produce controls + summary only, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.StringContent, "MANUAL_RECENT_") {
+			t.Fatal("manual /compact must NOT keep a verbatim tail")
+		}
+	}
+}
+
+// TestAutoCompactRehydratesSummaryPlusTail proves the persisted layout (marker → summary
+// note → verbatim tail) rehydrates to exactly the summary note + tail, with the shed old
+// note gone.
+func TestAutoCompactRehydratesSummaryPlusTail(t *testing.T) {
+	r := &chatCountRouter{summary: "REHYDRATE_SUMMARY"}
+	s, store := compactSession(t, r)
+	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("TAIL_KEEP_A")
+	s.InjectNote("TAIL_KEEP_B")
+	s.maybeAutoCompact(context.Background(), "run_test")
+
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("expected a resume from the compaction marker")
+	}
+	if len(res.RestoredMessages) != 3 {
+		t.Fatalf("rehydrated %d working messages, want 3 (summary + 2 tail)", len(res.RestoredMessages))
+	}
+	if !strings.Contains(res.RestoredMessages[0].StringContent, "REHYDRATE_SUMMARY") {
+		t.Fatalf("first restored should be the summary note, got %q", res.RestoredMessages[0].StringContent)
+	}
+	if !strings.Contains(res.RestoredMessages[1].StringContent, "TAIL_KEEP_A") ||
+		!strings.Contains(res.RestoredMessages[2].StringContent, "TAIL_KEEP_B") {
+		t.Fatalf("verbatim tail not rehydrated: %+v", res.RestoredMessages)
+	}
+	for _, m := range res.RestoredMessages {
+		if strings.Contains(m.StringContent, "OLD_BIG") {
+			t.Fatal("shed old note must not rehydrate")
+		}
+	}
+}
+
+// promptCaptureRouter records the system message of each Chat (summary) call so a test can
+// assert the auto-summary prompt instructs the model to preserve load-bearing IDs.
+type promptCaptureRouter struct {
+	mu        sync.Mutex
+	systemMsg string
+	summary   string
+}
+
+func (r *promptCaptureRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	return models.ChatResult{Content: "ok"}, nil
+}
+func (r *promptCaptureRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	r.mu.Lock()
+	if len(opts.Messages) > 0 {
+		r.systemMsg = opts.Messages[0].StringContent
+	}
+	r.mu.Unlock()
+	return models.ChatResult{Content: r.summary}, nil
+}
+func (r *promptCaptureRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+func (r *promptCaptureRouter) FlushMeter() []models.TierUsage   { return nil }
+func (r *promptCaptureRouter) system() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.systemMsg
+}
+
+// TestAutoCompactSummaryPromptPreservesIDs proves the auto-summary system prompt tells the
+// model to keep every load-bearing identifier verbatim, so a mid-run compaction doesn't
+// strand the orchestrator's live references.
+func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
+	r := &promptCaptureRouter{summary: "S"}
+	s, _ := compactSession(t, r)
+	s.InjectNote("keep-small")
+	s.InjectNote("GIANT" + strings.Repeat("x", 260_000))
+	s.maybeAutoCompact(context.Background(), "run_test")
+
+	got := r.system()
+	for _, want := range []string{"term_*", "run_*", "watcher_*", "wkf_*", "branch", "grant"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary prompt missing %q: %q", want, got)
+		}
+	}
+}
