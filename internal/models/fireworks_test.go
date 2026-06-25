@@ -39,12 +39,14 @@ func TestChatNonStream(t *testing.T) {
 	}
 }
 
-// The small tier is forced to reasoning_effort:"none" so every flash call
-// (judge / summary / extraction / classification) runs thinking-free and fast; the
-// large tier defaults to "high" so flash orchestration gets real chain-of-thought
-// without paying max-effort thinking on every turn; an explicit caller value wins
-// on any tier.
-func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
+// The per-tier reasoning_effort default is model-aware. Every tier on flash (the
+// default for all three) runs reasoning_effort:"none" so each call — small-tier
+// judges/summaries/extraction AND the large-tier orchestration main thread — stays
+// thinking-free and fast (the loaded skills carry the playbooks, so a provider-side
+// <think> phase is pure latency). A GLM-family model on large/medium keeps "high"
+// because GLM-5.2 on Fireworks rejects "none" (its minimum effort is "high"). An
+// explicit caller value wins on any tier.
+func TestRouterTierReasoningDefaults(t *testing.T) {
 	var lastBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -53,30 +55,54 @@ func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}`)
 	}))
 	defer srv.Close()
-	r := NewRouter(RouterConfig{SmallModel: "small-m", LargeModel: "large-m", MediumModel: "med-m"}, newTestClient(srv.URL), nil)
+
+	// --- flash (non-GLM) tiers all default to "none" ---
+	flash := NewRouter(RouterConfig{SmallModel: "small-m", LargeModel: "large-m", MediumModel: "med-m"}, newTestClient(srv.URL), nil)
 
 	// small tier → reasoning_effort "none"
-	_, _ = r.JSON(context.Background(), domain.ModelSmall, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	_, _ = flash.JSON(context.Background(), domain.ModelSmall, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
 	if lastBody["reasoning_effort"] != "none" {
 		t.Fatalf("small tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
-	// large tier → defaults to "high"
-	_, _ = r.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "high" {
-		t.Fatalf("large tier: reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	// large tier on a non-GLM model → defaults to "none" (no <think> on routing turns)
+	_, _ = flash.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("large tier (flash): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
-	// medium tier (routes to the large model id) → also defaults to "high"
-	_, _ = r.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "high" {
-		t.Fatalf("medium tier: reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	// medium tier (routes to the large model id) on a non-GLM model → also "none"
+	_, _ = flash.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("medium tier (flash): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
-	// explicit caller value wins even on the small tier
-	_, _ = r.JSON(context.Background(), domain.ModelSmall, ChatOptions{ReasoningEffort: "low", Messages: []ChatMessage{TextMessage("user", "x")}})
+	// --- GLM-family large/medium keep "high" (GLM rejects "none") ---
+	glm := NewRouter(RouterConfig{
+		SmallModel:  "small-m",
+		LargeModel:  "accounts/fireworks/models/glm-5p2",
+		MediumModel: "accounts/fireworks/models/glm-5p2",
+	}, newTestClient(srv.URL), nil)
+
+	_, _ = glm.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "high" {
+		t.Fatalf("large tier (glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	}
+	_, _ = glm.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "high" {
+		t.Fatalf("medium tier (glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	}
+
+	// --- explicit caller value wins on any tier ---
+	// ...on the small tier
+	_, _ = flash.JSON(context.Background(), domain.ModelSmall, ChatOptions{ReasoningEffort: "low", Messages: []ChatMessage{TextMessage("user", "x")}})
 	if lastBody["reasoning_effort"] != "low" {
-		t.Fatalf("explicit effort: reasoning_effort = %v, want low", lastBody["reasoning_effort"])
+		t.Fatalf("explicit effort (small): reasoning_effort = %v, want low", lastBody["reasoning_effort"])
+	}
+	// ...and on the large tier (overriding the flash "none" default)
+	_, _ = flash.Chat(context.Background(), domain.ModelLarge, ChatOptions{ReasoningEffort: "max", Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "max" {
+		t.Fatalf("explicit effort (large): reasoning_effort = %v, want max", lastBody["reasoning_effort"])
 	}
 }
 

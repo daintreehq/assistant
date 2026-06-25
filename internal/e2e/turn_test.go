@@ -274,8 +274,10 @@ func countToolRoleMessages(msgs []map[string]any) int {
 // not a single relay. The fake Fireworks server is scripted and deterministic, so it
 // cannot test flash's reasoning *quality*; what it proves is the wiring that makes
 // flash a sound orchestration model: (1) every main-thread round is sent on the
-// flash model id, (2) the large tier pins reasoning_effort:"high" (real
-// chain-of-thought, not max-effort), and (3) a three-round chained-tool scenario —
+// flash model id, (2) the large tier defaults to reasoning_effort:"none" (flash is
+// the validated orchestration model and the loaded skills carry the playbooks, so
+// the main thread runs think-free — "high" was a glm-5p2 holdover that bought a
+// costly hidden <think> on every turn), and (3) a three-round chained-tool scenario —
 // list memories, then recall by query (a second lookup conceptually conditioned on
 // the first), then conclude — drives to completion with each tool result fed back
 // into the next round. That feedback chain is exactly the orchestration deduction
@@ -350,13 +352,13 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		t.Fatalf("model called %d times, want 3 (two chained tool rounds + final)", got)
 	}
 
-	// --- every main-thread round ran on flash at reasoning_effort "high" ---
+	// --- every main-thread round ran on flash at reasoning_effort "none" ---
 	for i := 0; i < 3; i++ {
 		if got := fake.requestField(i, "model"); got != flashModelID {
 			t.Errorf("round %d model = %v, want flash orchestration model %q", i+1, got, flashModelID)
 		}
-		if got := fake.requestField(i, "reasoning_effort"); got != "high" {
-			t.Errorf("round %d reasoning_effort = %v, want %q (large-tier orchestration default)", i+1, got, "high")
+		if got := fake.requestField(i, "reasoning_effort"); got != "none" {
+			t.Errorf("round %d reasoning_effort = %v, want %q (large-tier flash orchestration default)", i+1, got, "none")
 		}
 	}
 
