@@ -761,11 +761,16 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		}
 
 		// Session-cumulative per-tool failure tally (issue #251): a coarse "which tools
-		// keep failing" signal that accumulates across rounds, off the audit path. The
-		// increment lands BEFORE the event so FailureCount carries the up-to-date total;
-		// recordToolFailure takes s.mu itself (no lock held here). Ok results carry 0.
+		// keep failing" signal that accumulates across rounds, off the audit path. Counts
+		// EVERY failed result (bad-args and not-offered included — a tool the model keeps
+		// misusing is a real drift signal), EXCEPT a result produced while the turn is
+		// being cancelled: a user abort tearing down mid-tool is not a tool failure
+		// (mirrors maybeAutoCompact, which also refuses to count a cancel as an outage).
+		// The increment lands BEFORE the event so FailureCount carries the up-to-date
+		// total; recordToolFailure takes s.mu itself (no lock held here). Ok results and
+		// cancelled results carry 0.
 		failCount := 0
-		if !res.Ok {
+		if !res.Ok && ctx.Err() == nil {
 			failCount = s.recordToolFailure(internalName)
 		}
 

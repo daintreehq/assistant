@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
 // TestRecordToolFailureBucketsByName proves the session-cumulative tally accumulates
@@ -77,5 +81,103 @@ func TestCompactionNotePrefixEmbedsDepth(t *testing.T) {
 	}
 	if !strings.Contains(p, "depth 3") {
 		t.Fatalf("prefix %q does not embed the depth", p)
+	}
+}
+
+// --- end-to-end wiring (through Send) ---
+
+// obsRecordingSink captures the observability fields off the live event stream so the
+// wiring tests assert runToolBatch/emitUsage actually stamp them (not just that the
+// durable sink serializes a value it is handed).
+type obsRecordingSink struct {
+	NoopEventSink
+	failureCounts []int // ToolResultEvent.FailureCount per result, in order
+	usageDepths   []int // UsageEvent.CompactionDepth per round, in order
+}
+
+func (s *obsRecordingSink) ToolResult(ev ToolResultEvent) {
+	s.failureCounts = append(s.failureCounts, ev.FailureCount)
+}
+func (s *obsRecordingSink) Usage(ev UsageEvent) {
+	s.usageDepths = append(s.usageDepths, ev.CompactionDepth)
+}
+
+// TestToolFailureCountWiredThroughSend proves runToolBatch stamps the cumulative
+// per-tool failure count onto each failing ToolResultEvent AND feeds the session
+// tally. Two failing rounds with DIFFERENT args avoid the identical-call breaker.
+func TestToolFailureCountWiredThroughSend(t *testing.T) {
+	sink := &obsRecordingSink{}
+	tools := &fakeTools{result: domain.Fail("BOOM", "broke")}
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c1", "fs__read", `{"path":"a"}`)}},
+		{ToolCalls: []models.ToolCallRequest{toolCall("c2", "fs__read", `{"path":"b"}`)}},
+		{Content: "done"},
+	}}
+	deps := baseDeps(r, tools)
+	deps.Events = sink
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !equalInts(sink.failureCounts, []int{1, 2}) {
+		t.Fatalf("ToolResult FailureCounts = %v, want [1 2]", sink.failureCounts)
+	}
+	if got := s.ToolFailureCounts()["fs.read"]; got != 2 {
+		t.Fatalf("session fs.read tally = %d, want 2", got)
+	}
+}
+
+// cancelingFailTool cancels the turn ctx from inside dispatch (a user hitting Escape
+// while the tool ran) and returns a failing result — the exact shape that must NOT
+// inflate the failure tally.
+type cancelingFailTool struct {
+	cancel     context.CancelFunc
+	dispatched int
+}
+
+func (t *cancelingFailTool) OpenAITools([]string) ([]models.ChatTool, error) { return nil, nil }
+func (t *cancelingFailTool) ResolveWireName(w string) string {
+	return strings.ReplaceAll(w, "__", ".")
+}
+func (t *cancelingFailTool) Dispatch(ctx context.Context, name, args string, turn TurnContext) domain.ToolResult {
+	t.dispatched++
+	t.cancel()
+	return domain.Fail("BOOM", "broke")
+}
+
+// TestCancelledToolResultNotCounted proves a failed result produced while the turn is
+// being cancelled is excluded from the tally — a user abort is not a tool failure.
+func TestCancelledToolResultNotCounted(t *testing.T) {
+	tools := &cancelingFailTool{}
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c1", "fs__read", `{}`)}},
+		{Content: "done"},
+	}}
+	s := NewSession(baseDeps(r, tools))
+	ctx, cancel := context.WithCancel(context.Background())
+	tools.cancel = cancel
+	defer cancel()
+	if _, err := s.Send(ctx, "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if counts := s.ToolFailureCounts(); len(counts) != 0 {
+		t.Fatalf("a cancelled tool result must not be counted, got %v", counts)
+	}
+}
+
+// TestUsageEventCarriesSessionCompactionDepth proves emitUsage reads the live session
+// depth onto the per-round UsageEvent (the value is wired, not just serializable).
+func TestUsageEventCarriesSessionCompactionDepth(t *testing.T) {
+	sink := &obsRecordingSink{}
+	r := &fakeRouter{results: []models.ChatResult{{Content: "done"}}}
+	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.Events = sink
+	s := NewSession(deps)
+	s.Compact("prior work") // depth → 1
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(sink.usageDepths); n == 0 || sink.usageDepths[n-1] != 1 {
+		t.Fatalf("UsageEvent CompactionDepth = %v, want last = 1", sink.usageDepths)
 	}
 }
