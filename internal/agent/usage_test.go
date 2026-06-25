@@ -150,8 +150,11 @@ func TestUsageEventContextPressureAndCost(t *testing.T) {
 	if u.ContextThreshold != domain.AutoCompactTokenThreshold {
 		t.Fatalf("contextThreshold = %d want %d", u.ContextThreshold, domain.AutoCompactTokenThreshold)
 	}
-	if u.ContextTokens <= 0 {
-		t.Fatalf("contextTokens = %d want > 0", u.ContextTokens)
+	// ContextTokens now reports the REAL provider prompt_tokens (tool schemas
+	// included), not the tool-blind char estimate, so it equals the summed prompt
+	// tokens whenever the provider reported any.
+	if u.ContextTokens != 1000 {
+		t.Fatalf("contextTokens = %d want 1000 (real prompt_tokens)", u.ContextTokens)
 	}
 	// minimax-m3 is priced, so cost is a concrete positive number.
 	if u.CostUsd == nil || *u.CostUsd <= 0 {
@@ -249,5 +252,86 @@ func TestUsagePartialCostWhenOneTierUnpriced(t *testing.T) {
 	// Token counts still sum across BOTH tiers regardless of pricing.
 	if ev.PromptTokens != 1500 || ev.CompletionTokens != 300 {
 		t.Fatalf("tokens = %+v", ev)
+	}
+}
+
+// emitUsage stashes the summed provider prompt_tokens on the session so the NEXT
+// round's auto-compaction check can gate on the real context size (tool schemas
+// included) rather than the tool-blind char estimate.
+func TestEmitUsageStashesLastPromptTokens(t *testing.T) {
+	deps := baseDeps(&usageRouter{model: "minimax-m3", usage: &models.Usage{
+		PromptTokens: intp(1234), CompletionTokens: intp(50), TotalTokens: intp(1284),
+	}}, &fakeTools{})
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 1234 {
+		t.Fatalf("lastPromptTokens = %d want 1234 (the summed provider prompt_tokens)", got)
+	}
+}
+
+// The compaction gate tracks the MAIN-THREAD (large-tier) prompt_tokens only — the
+// small-tier background work (skill selection, watcher verdicts, and the auto-compact
+// summary call) must NOT inflate it, or the summary's pre-compaction prompt would
+// re-trip the trigger right after a compaction.
+func TestEmitUsageStashesLargeTierPromptTokensOnly(t *testing.T) {
+	deps := baseDeps(&tierRouter{tiers: []models.TierUsage{
+		pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200),
+		pricedTier(domain.ModelSmall, "deepseek-v4-flash", 500, 100),
+	}}, &fakeTools{})
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 1000 {
+		t.Fatalf("lastPromptTokens = %d want 1000 (large tier only; small-tier work must not inflate the gate)", got)
+	}
+}
+
+// A round with no usage (nil FlushMeter) must PRESERVE the last real figure rather than
+// regress the stash to 0 — a nil flush means no metered call this round, not that the
+// context shrank. The history only grows between resets, so the last figure stays a
+// valid lower bound until a fresh round reports a new one.
+func TestEmitUsageNilMeterPreservesExistingStash(t *testing.T) {
+	deps := baseDeps(&usageRouter{model: "minimax-m3", usage: nil}, &fakeTools{})
+	s := NewSession(deps)
+	s.mu.Lock()
+	s.lastPromptTokens = 5000
+	s.mu.Unlock()
+	s.emitUsage()
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 5000 {
+		t.Fatalf("lastPromptTokens = %d want 5000 (a no-usage round must not regress the stash)", got)
+	}
+}
+
+// When the meter reports no usage (nil FlushMeter), there is no real figure to stash:
+// lastPromptTokens stays 0 and ContextTokens falls back to the positive char estimate
+// so the footer never shows a misleading 0.
+func TestEmitUsageNoUsageLeavesStashZeroAndEstimatesContext(t *testing.T) {
+	deps := baseDeps(&usageRouter{model: "minimax-m3", usage: nil}, &fakeTools{})
+	sink := &usageCaptureSink{}
+	deps.Events = sink
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("lastPromptTokens = %d want 0 (no provider figure to stash)", got)
+	}
+	if len(sink.events) != 1 || sink.events[0].ContextTokens <= 0 {
+		t.Fatalf("contextTokens should fall back to a positive estimate, got %+v", sink.events)
 	}
 }
