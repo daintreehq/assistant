@@ -142,7 +142,12 @@ Your local tools wrap Daintree:
   CONCURRENTLY — NO model call, NO output read, so it is fast and light — and resolves
   when each has gone working→idle (or completed/exited), returning an allFinished flag
   and a perTerminal array whose status is one of "finished", "failed", "question"
-  (asking a question), or "working" (still going when the budget ran out). agentState
+  (asking a question), or "working" (still going when the budget ran out). It also
+  returns top-level stillWorking and askingQuestion arrays of terminal IDs: when the
+  budget runs out, re-await stillWorking directly (no need to scan perTerminal) and
+  route answers to the askingQuestion ids. maxAttempts defaults to 30 (≈60s) and caps
+  at 240 (≈480s) — leave it at the default unless the cohort has a known-slow agent that
+  needs a single round past 120s. agentState
   is an imperfect signal (an agent can briefly read idle mid-work), so a "finished" is
   a strong hint, not proof — read the tail yourself afterward and self-heal a misread
   (re-await/watch a terminal that still looks busy). It returns NO content:
@@ -388,8 +393,9 @@ the BACKGROUND mode and it fights your driving); you are the conductor:
    (or a bounded terminal.read for a short verbatim answer), and VERIFY as you read:
    awaitAll's "finished" is state-based and imperfect, so if a terminal reported done
    but its tail shows it is still working, self-heal — re-await or watch just that one
-   before relaying. If awaitAll reports an agent ASKING A QUESTION, answer it (step 3)
-   and await again; if it reports one FAILED, drop it and note it.
+   before relaying. If the budget ran out, re-await the top-level stillWorking ids
+   directly (not the whole cohort), and answer the askingQuestion ids (step 3) then
+   await again; if it reports one FAILED, drop it and note it.
 3. Relay with terminal.sendCommand: send each agent what it needs from the OTHERS
    (their facts, their drafts, their votes), then ask for its next step.
 4. Repeat the await→read→relay loop until the problem is solved, then synthesize and

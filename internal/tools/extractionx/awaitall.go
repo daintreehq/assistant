@@ -66,11 +66,13 @@ func (a *awaitArgs) Validate() error {
 	if a.PollIntervalMs != nil && (*a.PollIntervalMs < 0 || *a.PollIntervalMs > 60_000) {
 		return fmt.Errorf("pollIntervalMs must be between 0 and 60000")
 	}
-	// Capped TIGHTER than terminal.extract (max 60, not 120): awaitAll is an in-turn
-	// blocking call, so its worst case is 60 × 2s = 120s — already generous. The whole
-	// complaint that started this was a multi-minute hang.
-	if a.MaxAttempts != nil && (*a.MaxAttempts < 1 || *a.MaxAttempts > 60) {
-		return fmt.Errorf("maxAttempts must be between 1 and 60")
+	// Default stays small (30 ≈ 60s) — most cohorts settle fast and a tight budget keeps a
+	// stuck wait from hanging the turn. The ceiling is OPT-IN headroom: a known-slow agent
+	// can need a single round past 240s, which the old max of 60 (120s) could never cover,
+	// forcing a re-await churn. 240 × 2s = 480s gives one wait enough rope for the slow case
+	// without going unbounded. Still pure FSM — a higher cap is just more cheap getStatus ticks.
+	if a.MaxAttempts != nil && (*a.MaxAttempts < 1 || *a.MaxAttempts > 240) {
+		return fmt.Errorf("maxAttempts must be between 1 and 240")
 	}
 	return nil
 }
@@ -79,9 +81,9 @@ var awaitSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it." },
+    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it." },
     "pollIntervalMs": { "type": "number", "description": "Delay between poll rounds in ms (default 2000)." },
-    "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 60 ≈ 120s). Bounded so it cannot hang." }
+    "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default." }
   },
   "required": ["terminalIds"]
 }`)
@@ -91,7 +93,9 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 		Name: "terminal.awaitAll",
 		Description: "Wait (bounded) for a COHORT of agent terminals to all return to an idle prompt. Pure state-machine: it polls " +
 			"agentState only — NO model call, NO output read — so it is fast and light. Returns allFinished plus a perTerminal " +
-			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content. Use this " +
+			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content. It also " +
+			"returns top-level stillWorking and askingQuestion arrays of terminal IDs, so when the wait budget runs out you can " +
+			"re-await exactly the stillWorking stragglers (and route answers to askingQuestion) without scanning perTerminal. Use this " +
 			"ONCE for the whole cohort instead of one wait per agent. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
 			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
 			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
@@ -261,8 +265,16 @@ func awaitSettleFSM(agentState, waitingReason string, exitCode *int, seenWorking
 // buildAwaitResult folds the per-terminal outcomes into the tool envelope. allFinished
 // is true iff every terminal is DONE (finished or failed) — a question or a
 // timed-out-still-working terminal makes it false so the caller knows to act.
+//
+// It also surfaces the two actionable non-finished sets at the TOP LEVEL, as ID-only
+// arrays in input order: stillWorking (timed out at the cap) and askingQuestion (blocked
+// on the orchestrator). The caller re-awaits stillWorking directly and routes answers to
+// askingQuestion without re-scanning perTerminal. Both are non-nil empty slices when there
+// are none, so they always serialize as JSON [] (a caller iterating them never hits null).
 func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64) tools.ToolResult {
 	perTerminal := make([]map[string]any, 0, len(ids))
+	stillWorking := make([]string, 0, len(ids))
+	askingQuestion := make([]string, 0, len(ids))
 	var okCount, failCount, questionCount, workingCount int
 	allFinished := true
 
@@ -271,6 +283,7 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		if o == nil {
 			allFinished = false
 			workingCount++
+			stillWorking = append(stillWorking, id)
 			perTerminal = append(perTerminal, map[string]any{
 				"terminalId": id, "status": "working", "finished": false,
 				"reason": "still working when the wait budget ran out",
@@ -292,6 +305,7 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 			failCount++
 		case "question":
 			questionCount++
+			askingQuestion = append(askingQuestion, id)
 			allFinished = false
 		}
 	}
@@ -316,10 +330,12 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 	}
 
 	return tools.Ok(summary, map[string]any{
-		"allFinished": allFinished,
-		"perTerminal": perTerminal,
-		"attempts":    attempts,
-		"elapsedMs":   elapsedMs,
-		"terminalIds": ids,
+		"allFinished":    allFinished,
+		"perTerminal":    perTerminal,
+		"stillWorking":   stillWorking,
+		"askingQuestion": askingQuestion,
+		"attempts":       attempts,
+		"elapsedMs":      elapsedMs,
+		"terminalIds":    ids,
 	})
 }
