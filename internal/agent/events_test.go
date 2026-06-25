@@ -189,6 +189,32 @@ func TestRunEventSinkToolResultCarriesAuditID(t *testing.T) {
 	}
 }
 
+func TestRunEventSinkToolResultCarriesFailureCount(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.ToolResult(ToolResultEvent{ID: "c1", Name: "terminal.read", Result: domain.Fail("BOOM", "down"), FailureCount: 3})
+	var payload map[string]any
+	mustUnmarshal(t, *store.forRun("run_1")[0].Payload, &payload)
+	if got, _ := payload["failureCount"].(float64); got != 3 {
+		t.Fatalf("failureCount = %v want 3", payload["failureCount"])
+	}
+}
+
+func TestRunEventSinkUsageCarriesCompactionDepth(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.Usage(UsageEvent{ContextTokens: 100, CompactionDepth: 4})
+	var payload map[string]any
+	mustUnmarshal(t, *store.forRun("run_1")[0].Payload, &payload)
+	if got, _ := payload["compactionDepth"].(float64); got != 4 {
+		t.Fatalf("compactionDepth = %v want 4", payload["compactionDepth"])
+	}
+}
+
 func TestRunEventSinkCapsOversizedPayload(t *testing.T) {
 	store := &fakeRunEventStore{}
 	ref := &RunIDRef{}

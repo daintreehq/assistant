@@ -81,6 +81,25 @@ func TestCompactKeepsControlsPlusSummary(t *testing.T) {
 	}
 }
 
+// TestCompactNoteEmbedsDepthTag proves each compaction tags its persisted note with
+// the running depth, so a summary-of-summary chain is visible (issue #251): the first
+// note carries "depth 1", a second compaction "depth 2".
+func TestCompactNoteEmbedsDepthTag(t *testing.T) {
+	s, _ := compactSession(t, plainRouter())
+	s.InjectNote("history")
+	s.Compact("goals: X.")
+	first := s.Messages()[3]
+	if first.Role != "user" || !strings.Contains(first.StringContent, "depth 1") ||
+		!strings.Contains(first.StringContent, "compacted summary") {
+		t.Fatalf("first compaction note = %q, want a depth-1 compacted summary", first.StringContent)
+	}
+	s.Compact("goals: Y.")
+	second := s.Messages()[3]
+	if !strings.Contains(second.StringContent, "depth 2") {
+		t.Fatalf("second compaction note = %q, want depth 2", second.StringContent)
+	}
+}
+
 func TestClearKeepsControlsNoSummary(t *testing.T) {
 	s, _ := compactSession(t, plainRouter())
 	s.InjectNote("alpha")
