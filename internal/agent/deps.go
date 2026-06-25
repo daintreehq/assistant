@@ -106,6 +106,18 @@ type WorkflowRunLister interface {
 	ListNonTerminalWorkflowRuns(limit int) ([]domain.WorkflowRunRecord, error)
 }
 
+// MemoryRecaller is the per-turn BM25 recall seam (satisfied by an adapter over
+// *storage.Store). At the START of every turn the session runs ONE keyword recall
+// seeded by the user's originating ask and injects the top hits into the turn
+// footer's `# Relevant memories` section — so distilled, non-pinned facts resurface
+// automatically without the model having to call the recall tool. The narrow
+// (query, limit) signature deliberately keeps storage.MemoryRecallOptions out of the
+// agent package. Optional: a nil MemoryRecaller omits the section entirely (the
+// default in tests). All recall is best-effort — a failure must never break a turn.
+type MemoryRecaller interface {
+	RecallMemories(query string, limit int) ([]domain.MemoryRecord, error)
+}
+
 // ArtifactPersister is the durable-mirror seam for oversized tool-result overflow
 // payloads (satisfied by *storage.Store). When a serialized result overflows the
 // inline cap the session stashes the full envelope in its bounded in-memory
@@ -130,6 +142,9 @@ type SessionDeps struct {
 	Store         MessageStore
 	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
 	MemoryStore MemoryStore
+	// MemoryRecaller enables per-turn BM25 recall into the footer (optional; nil ⇒ the
+	// `# Relevant memories` section is omitted, the default in tests).
+	MemoryRecaller MemoryRecaller
 	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister

@@ -34,6 +34,17 @@ func (a memoryStoreAdapter) RecallMemories(_ context.Context, query string, opts
 	})
 }
 
+// memoryRecallerAdapter bridges the agent's narrow per-turn footer-recall seam
+// (agent.MemoryRecaller — a no-ctx (query, limit) signature) onto *storage.Store's
+// option-bearing RecallMemories. Kept beside memoryStoreAdapter so the memory
+// adapters live together; the footer-recall path is ctx-free and best-effort, and
+// the storage layer clamps the limit, so only the limit needs forwarding.
+type memoryRecallerAdapter struct{ s *storage.Store }
+
+func (a memoryRecallerAdapter) RecallMemories(query string, limit int) ([]domain.MemoryRecord, error) {
+	return a.s.RecallMemories(query, storage.MemoryRecallOptions{Limit: &limit})
+}
+
 func (a memoryStoreAdapter) ListMemories(_ context.Context, opts memory.ListOptions) ([]domain.MemoryRecord, error) {
 	return a.s.ListMemories(storage.MemoryListOptions{
 		Category:   strPtrOrNil(opts.Category),
@@ -276,6 +287,9 @@ var (
 	// *storage.Store directly satisfies the agent distill-on-compact seam (no adapter
 	// needed — its no-ctx, record-returning InsertMemory + MemoryExists match exactly).
 	_ agent.MemoryStore = (*storage.Store)(nil)
+	// The footer-recall seam needs a thin adapter — *storage.Store.RecallMemories takes
+	// MemoryRecallOptions, not the agent seam's narrow (query, limit).
+	_ agent.MemoryRecaller = memoryRecallerAdapter{}
 	// *storage.Store directly satisfies the agent artifact-persist seam (its no-ctx,
 	// record-returning InsertArtifact matches the interface exactly).
 	_ agent.ArtifactPersister = (*storage.Store)(nil)
