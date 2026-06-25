@@ -201,8 +201,8 @@ func TestAutoCompactsAboveThreshold(t *testing.T) {
 	r := &chatCountRouter{summary: `{"goal":"AUTO_SUMMARY"}`}
 	s, _ := compactSession(t, r)
 	s.InjectNote("keep-small")
-	// One huge note pushes the estimate past the 60k-token threshold (≈240k chars).
-	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+	// One huge note pushes the estimate past the soft token threshold.
+	s.InjectNote("GIANT_MARKER" + softTripFiller())
 	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -226,6 +226,81 @@ func TestAutoCompactsAboveThreshold(t *testing.T) {
 	}
 }
 
+// summaryCaptureRouter records the messages handed to the summarizer (Chat) so a test can
+// inspect the exact checkpoint request that would go on the wire.
+type summaryCaptureRouter struct {
+	summary  string
+	lastChat []models.ChatMessage
+}
+
+func (r *summaryCaptureRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	return models.ChatResult{Content: "ok"}, nil
+}
+func (r *summaryCaptureRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	r.lastChat = opts.Messages
+	return models.ChatResult{Content: r.summary}, nil
+}
+func (r *summaryCaptureRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
+func (r *summaryCaptureRouter) FlushMeter() []models.TierUsage   { return nil }
+
+// TestAutoCompactCheckpointPayloadHasNoBareToolRole is the regression guard for the
+// DeepSeek 400 "messages[N]: missing field `tool_call_id`" that failed EVERY auto-compact
+// once the discarded history held a tool result (i.e. almost always). The checkpoint
+// summary is a plain chat completion with no preceding assistant tool_calls to anchor a
+// role:"tool" message, so the flattened summary input must carry no bare tool-role message
+// — while still preserving the tool result's load-bearing IDs as text.
+func TestAutoCompactCheckpointPayloadHasNoBareToolRole(t *testing.T) {
+	r := &summaryCaptureRouter{summary: `{"goal":"OK"}`}
+	s, _ := compactSession(t, r)
+	s.mu.Lock()
+	s.messages = append(s.messages,
+		// An oversized old note trips the soft gate; a valid recent tool pair carries the ID.
+		models.TextMessage("user", "GIANT"+softTripFiller()),
+		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_1", Type: "function",
+			Function: models.ToolCallFunction{Name: "terminal.list", Arguments: `{"terminalId":"term_abc123"}`},
+		}}},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_1", StringContent: "tool output referencing term_abc123"},
+	)
+	s.mu.Unlock()
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+
+	if r.lastChat == nil {
+		t.Fatal("summarizer was never called — the history should have tripped the soft gate")
+	}
+	for i, m := range r.lastChat {
+		if m.Role == "tool" {
+			t.Fatalf("checkpoint message[%d] has role %q — DeepSeek rejects a tool message with no tool_call_id", i, m.Role)
+		}
+		// The summary input must be PLAIN TEXT: any structured tool metadata or multimodal
+		// parts would re-introduce a tool_calls/tool_call_id requirement (or a null-content
+		// turn) the small-model request can't satisfy. models.TextMessage builds a clean
+		// string-only message, so assert nothing leaked through.
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("checkpoint message[%d] carries %d structured tool_calls — must be folded to text", i, len(m.ToolCalls))
+		}
+		if m.ToolCallID != "" {
+			t.Fatalf("checkpoint message[%d] carries tool_call_id %q — must be plain text", i, m.ToolCallID)
+		}
+		if m.Parts != nil {
+			t.Fatalf("checkpoint message[%d] carries multimodal Parts — summary input must be flattened text", i)
+		}
+		if m.ContentNull {
+			t.Fatalf("checkpoint message[%d] has null content — summary input must be text", i)
+		}
+	}
+	var sawID bool
+	for _, m := range r.lastChat {
+		if strings.Contains(m.StringContent, "term_abc123") {
+			sawID = true
+		}
+	}
+	if !sawID {
+		t.Fatal("the tool result's terminal ID must survive into the checkpoint summary input")
+	}
+}
+
 // TestAutoCompactPreSweepAvoidsSummary proves the issue #257 lossless rung: when the
 // pre-sweep alone drops the history back under the soft threshold, maybeAutoCompact must
 // skip the small-model summary entirely (no Chat call) and leave the deduped refs behind.
@@ -233,11 +308,11 @@ func TestAutoCompactPreSweepAvoidsSummary(t *testing.T) {
 	r := &chatCountRouter{summary: "SHOULD_NOT_BE_CALLED"}
 	s, _ := compactSession(t, r)
 
-	// Three byte-identical oversized tool results: ~360k chars ≈ 90k tokens together
-	// (over the 60k gate), but a single retained copy (~30k tokens) plus the small
-	// controls sits comfortably under it. No model call is needed to reach a valid
-	// history, so the bare tool messages (no declaring assistant) are fine here.
-	big := strings.Repeat("z", 120_000)
+	// Three byte-identical oversized tool results: together they clear the soft gate, but
+	// a single retained copy (half the threshold) plus the small controls sits comfortably
+	// under it. No model call is needed to reach a valid history, so the bare tool messages
+	// (no declaring assistant) are fine here.
+	big := strings.Repeat("z", (domain.AutoCompactTokenThreshold/2)*domain.CharsPerToken)
 	s.messages = append(s.messages,
 		models.ChatMessage{Role: "tool", ToolCallID: "call_a", StringContent: big},
 		models.ChatMessage{Role: "tool", ToolCallID: "call_b", StringContent: big},
@@ -275,9 +350,9 @@ func TestAutoCompactPreSweepStillSummarizesWhenOverThreshold(t *testing.T) {
 	r := &chatCountRouter{summary: "STILL_SUMMARIZED"}
 	s, _ := compactSession(t, r)
 
-	// A single retained copy (~280k chars ≈ 70k tokens) already exceeds the 60k gate, so
-	// even after the two duplicates collapse to refs the summary must still run.
-	big := strings.Repeat("z", 280_000)
+	// A single retained copy is itself over the soft gate (threshold + margin), so even
+	// after the two duplicates collapse to refs the summary must still run.
+	big := strings.Repeat("z", (domain.AutoCompactTokenThreshold+50_000)*domain.CharsPerToken)
 	s.messages = append(s.messages,
 		models.ChatMessage{Role: "tool", ToolCallID: "call_a", StringContent: big},
 		models.ChatMessage{Role: "tool", ToolCallID: "call_b", StringContent: big},
@@ -487,7 +562,7 @@ func TestAutoCompactDistillsBeforeDiscard(t *testing.T) {
 	mem := &fakeMemoryStore{}
 	s.deps.MemoryStore = mem
 	s.InjectNote("keep-small")
-	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+	s.InjectNote("GIANT_MARKER" + softTripFiller())
 	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +597,7 @@ func TestAutoCompactProseReplyPreservesToolArgIDs(t *testing.T) {
 			Function: models.ToolCallFunction{Name: "terminal.read", Arguments: `{"terminalId":"term_77"}`},
 		}}},
 		models.ChatMessage{Role: "tool", ToolCallID: "call_x", StringContent: "output"},
-		models.TextMessage("user", "GIANT"+strings.Repeat("x", 260_000)), // trips the threshold
+		models.TextMessage("user", "GIANT"+softTripFiller()), // trips the threshold
 	)
 	s.mu.Unlock()
 
@@ -602,7 +677,7 @@ func TestAutoCompactDistillRunsOffCriticalPath(t *testing.T) {
 	mem := &fakeMemoryStore{}
 	s.deps.MemoryStore = mem
 	s.InjectNote("keep-small")
-	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+	s.InjectNote("GIANT_MARKER" + softTripFiller())
 
 	done := make(chan struct{})
 	go func() {
@@ -685,9 +760,16 @@ func (r *flakyRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-fl
 func (r *flakyRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // overHardThresholdNote is a single note large enough to exceed
-// AutoCompactHardTruncationThreshold (≈200k tokens ⇒ ≈800k chars).
+// AutoCompactHardTruncationThreshold (≈800k tokens ⇒ ≈3.2M chars).
 func overHardThresholdNote() string {
 	return strings.Repeat("x", domain.AutoCompactHardTruncationThreshold*domain.CharsPerToken+50_000)
+}
+
+// softTripFiller is an "x" run large enough that a single note containing it pushes the
+// char estimate past AutoCompactTokenThreshold (the SOFT auto-compact trigger). Sized off
+// the constant so the fixtures track the threshold instead of a stale literal.
+func softTripFiller() string {
+	return strings.Repeat("x", (domain.AutoCompactTokenThreshold+10_000)*domain.CharsPerToken)
 }
 
 // TestAutoCompactFallbackTruncatesAfterSustainedOutage proves history stays bounded
@@ -776,6 +858,59 @@ func TestAutoCompactFailureIgnoresUserCancel(t *testing.T) {
 	}
 	if got := len(s.Messages()); got != initialLen {
 		t.Fatalf("a cancelled compact must not mutate history, got %d messages (want %d)", got, initialLen)
+	}
+}
+
+// infoCountSink records Info() messages (all other events discarded) so a test can assert
+// how often a particular note is surfaced.
+type infoCountSink struct {
+	NoopEventSink
+	infos []string
+}
+
+func (s *infoCountSink) Info(m string) { s.infos = append(s.infos, m) }
+
+// TestAutoCompactSkipNoteEmittedOncePerStreak proves the flood guard: maybeAutoCompact runs
+// once per tool-iteration round, so a checkpoint that keeps failing must NOT repaint the
+// "checkpoint failed" note every round (which previously flooded the live footer). The note
+// surfaces once per failure streak; the counter still climbs so the truncation fallback is
+// unaffected.
+func TestAutoCompactSkipNoteEmittedOncePerStreak(t *testing.T) {
+	r := &errChatRouter{err: errors.New("provider down")}
+	reg, err := skills.BuiltinRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &infoCountSink{}
+	s := NewSession(SessionDeps{
+		Router:        r,
+		Tools:         &fakeTools{},
+		SkillSelector: fakeSelector{},
+		SkillCatalog:  reg,
+		Store:         &recordingStore{},
+		SessionID:     "ses_skipnote",
+		Events:        sink,
+	})
+	// Over the SOFT threshold but UNDER the hard ceiling, so consecutive failures climb the
+	// counter without ever truncating — exactly the path that used to re-emit every round.
+	s.InjectNote("keep-small")
+	s.InjectNote(strings.Repeat("x", (domain.AutoCompactTokenThreshold+20_000)*domain.CharsPerToken))
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		s.maybeAutoCompact(ctx, "run_test")
+	}
+	if s.compactFailures != 3 {
+		t.Fatalf("compactFailures = %d after three failures, want 3", s.compactFailures)
+	}
+	skips := 0
+	for _, m := range sink.infos {
+		if strings.Contains(m, "checkpoint failed") {
+			skips++
+		}
+	}
+	if skips != 1 {
+		t.Fatalf("skip note emitted %d times across three consecutive failures, want 1 (no per-round flood)", skips)
 	}
 }
 
@@ -970,8 +1105,8 @@ func TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens(t *testing.T) {
 	r := &chatCountRouter{summary: "ESTIMATE_SUMMARY"}
 	s, _ := compactSession(t, r)
 	s.InjectNote("keep-small")
-	// One huge note pushes the CHAR estimate past the soft threshold (≈240k chars).
-	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+	// One huge note pushes the CHAR estimate past the soft threshold.
+	s.InjectNote("GIANT_MARKER" + softTripFiller())
 
 	s.mu.Lock()
 	stash := s.lastPromptTokens
@@ -1184,7 +1319,7 @@ func TestAutoCompactKeepsVerbatimTail(t *testing.T) {
 	s, _ := compactSession(t, r)
 	// One big OLD note trips the soft threshold (shed by the tail budget); the recent
 	// small notes are the verbatim tail to keep.
-	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("OLD_BIG" + softTripFiller())
 	s.InjectNote("RECENT_A")
 	s.InjectNote("RECENT_B")
 	s.InjectNote("RECENT_C")
@@ -1229,7 +1364,7 @@ func TestAutoCompactTailCleanedOrphans(t *testing.T) {
 	s.mu.Lock()
 	s.messages = append(s.messages,
 		// A big OLD note to trip the soft threshold (shed by the tail budget).
-		models.TextMessage("user", "BIG_OLD"+strings.Repeat("x", 260_000)),
+		models.TextMessage("user", "BIG_OLD"+softTripFiller()),
 		// A valid recent tool pair — must survive intact.
 		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
 			ID: "call_1", Type: "function",
@@ -1276,7 +1411,9 @@ func TestAutoCompactTailTokenBudgetCaps(t *testing.T) {
 	r := &chatCountRouter{summary: "BUDGET_SUMMARY"}
 	s, _ := compactSession(t, r)
 	const noteChars = 8000 // ~2000 tokens each
-	const total = 40       // ~80k tokens total → trips the 60k soft threshold
+	// Enough small notes to clear the soft threshold by the char estimate (each note is
+	// noteChars/CharsPerToken tokens); +20 for margin past the gate.
+	const total = domain.AutoCompactTokenThreshold/(noteChars/domain.CharsPerToken) + 20
 	for i := 0; i < total; i++ {
 		s.InjectNote(fmt.Sprintf("NOTE_%03d", i) + strings.Repeat("y", noteChars))
 	}
@@ -1329,7 +1466,7 @@ func TestCompactManualKeepsNoTail(t *testing.T) {
 func TestAutoCompactRehydratesSummaryPlusTail(t *testing.T) {
 	r := &chatCountRouter{summary: `{"goal":"REHYDRATE_SUMMARY"}`}
 	s, store := compactSession(t, r)
-	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("OLD_BIG" + softTripFiller())
 	s.InjectNote("TAIL_KEEP_A")
 	s.InjectNote("TAIL_KEEP_B")
 	s.maybeAutoCompact(context.Background(), "run_test")
@@ -1390,7 +1527,7 @@ func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
 	r := &promptCaptureRouter{summary: "S"}
 	s, _ := compactSession(t, r)
 	s.InjectNote("keep-small")
-	s.InjectNote("GIANT" + strings.Repeat("x", 260_000))
+	s.InjectNote("GIANT" + softTripFiller())
 	s.maybeAutoCompact(context.Background(), "run_test")
 
 	got := r.system()
@@ -1439,7 +1576,7 @@ func TestAutoCompactTailExactSixteenMessages(t *testing.T) {
 	const keepN = domain.AutoCompactVerbatimTailMessages
 	// A big OLD note trips the soft threshold and is excluded by the keepN cut; the small
 	// recent notes fit the budget, so the tail is bounded only by keepN.
-	s.InjectNote("BIG_OLD" + strings.Repeat("x", 260_000))
+	s.InjectNote("BIG_OLD" + softTripFiller())
 	const total = 20
 	for i := 0; i < total; i++ {
 		s.InjectNote(fmt.Sprintf("NOTE_%03d", i))
@@ -1470,7 +1607,7 @@ func TestAutoCompactTailExactSixteenMessages(t *testing.T) {
 func TestAutoCompactDoesNotRetrip(t *testing.T) {
 	r := &chatCountRouter{summary: "NORETRIP_SUMMARY"}
 	s, _ := compactSession(t, r)
-	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("OLD_BIG" + softTripFiller())
 	s.InjectNote("RECENT_A")
 	s.InjectNote("RECENT_B")
 
@@ -1491,7 +1628,7 @@ func TestAutoCompactRehydratesToolTailExact(t *testing.T) {
 	s, store := compactSession(t, r)
 	s.mu.Lock()
 	s.messages = append(s.messages,
-		models.TextMessage("user", "BIG_OLD"+strings.Repeat("x", 260_000)), // shed by budget
+		models.TextMessage("user", "BIG_OLD"+softTripFiller()), // shed by budget
 		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
 			ID: "call_keep", Type: "function",
 			Function: models.ToolCallFunction{Name: "terminal.read", Arguments: `{"terminalId":"term_abc"}`},
