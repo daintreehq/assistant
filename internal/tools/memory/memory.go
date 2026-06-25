@@ -90,18 +90,31 @@ func Tools(deps Deps) []*tools.Tool {
 	}
 }
 
-// memoryView is the tool-boundary projection. pinned = pinnedAt != null.
+// memoryView is the tool-boundary projection. pinned = pinnedAt != null. kind
+// always shows (defaulting to semantic); expiresAt/runId surface only when set.
+// sessionId is internal provenance and deliberately omitted.
 func memoryView(r *domain.MemoryRecord) map[string]any {
+	kind := r.Kind
+	if kind == "" {
+		kind = domain.MemoryKindSemantic
+	}
 	view := map[string]any{
 		"id":        r.ID,
 		"content":   r.Content,
 		"source":    r.Source,
+		"kind":      kind,
 		"pinned":    r.PinnedAt != nil,
 		"createdAt": r.CreatedAt,
 		"updatedAt": r.UpdatedAt,
 	}
 	if r.Category != nil {
 		view["category"] = *r.Category
+	}
+	if r.ExpiresAt != nil {
+		view["expiresAt"] = *r.ExpiresAt
+	}
+	if r.RunID != nil {
+		view["runId"] = *r.RunID
 	}
 	return view
 }
@@ -229,16 +242,27 @@ type saveArgs struct {
 	Content  string `json:"content"`
 	Category string `json:"category,omitempty"`
 	Source   string `json:"source,omitempty"` // user | assistant (compact excluded)
+	Kind     string `json:"kind,omitempty"`   // semantic (default) | episodic
+	TtlMs    *int64 `json:"ttlMs,omitempty"`  // optional relative TTL in ms → expiresAt
 }
 
+// maxTtlMs bounds the relative TTL to ~100 years. Beyond this a ttlMs is nonsense
+// and would risk overflowing the absolute expiresAt (now + ttlMs); rejecting keeps
+// the epoch arithmetic in the handler safe.
+const maxTtlMs = int64(100*365*24*60*60) * 1000
+
 // Validate caps the saved content + category so a single memory can't bloat the
-// FTS index. (The required/min-length + source-enum checks stay in the handler.)
+// FTS index, and bounds ttlMs so the computed expiresAt can't overflow. (The
+// required/min-length + source/kind-enum checks stay in the handler.)
 func (a *saveArgs) Validate() error {
 	if overLimit(a.Content, maxContentRunes) {
 		return fmt.Errorf("content must be at most %d characters", maxContentRunes)
 	}
 	if overLimit(a.Category, maxCategoryRunes) {
 		return fmt.Errorf("category must be at most %d characters", maxCategoryRunes)
+	}
+	if a.TtlMs != nil && (*a.TtlMs < 1 || *a.TtlMs > maxTtlMs) {
+		return fmt.Errorf("ttlMs must be between 1 and %d", maxTtlMs)
 	}
 	return nil
 }
@@ -250,7 +274,9 @@ var saveSchema = json.RawMessage(`{
   "properties": {
     "content": { "type": "string", "minLength": 1 },
     "category": { "type": "string" },
-    "source": { "type": "string", "enum": ["user", "assistant"] }
+    "source": { "type": "string", "enum": ["user", "assistant"] },
+    "kind": { "type": "string", "enum": ["semantic", "episodic"] },
+    "ttlMs": { "type": "integer", "minimum": 1 }
   }
 }`)
 
@@ -261,7 +287,7 @@ func newSaveTool(deps Deps) *tools.Tool {
 		Risk:        domain.RiskLocal,
 		Schema:      saveSchema,
 		Decode:      tools.StrictDecoder(func() any { return &saveArgs{} }),
-		Handle: func(ctx context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a saveArgs
 			if err := tools.DecodeStrict(args, &a); err != nil {
 				return tools.Fail(codeInvalidArgs, "Invalid arguments for memory.save: "+err.Error())
@@ -279,16 +305,45 @@ func newSaveTool(deps Deps) *tools.Tool {
 			default:
 				return tools.Fail(codeInvalidArgs, "memory.save: source must be user|assistant")
 			}
+			// kind defaults to semantic; episodic rows get a sessionId stamped below.
+			kind := domain.MemoryKindSemantic
+			switch a.Kind {
+			case "", "semantic":
+				kind = domain.MemoryKindSemantic
+			case "episodic":
+				kind = domain.MemoryKindEpisodic
+			default:
+				return tools.Fail(codeInvalidArgs, "memory.save: kind must be semantic|episodic")
+			}
 			now := domain.NowMS()
 			rec := domain.MemoryRecord{
 				ID:        domain.NewID(domain.PrefixMemory),
 				Content:   a.Content,
 				Source:    source,
+				Kind:      kind,
 				CreatedAt: now,
 				UpdatedAt: now,
 			}
 			if a.Category != "" {
 				rec.Category = &a.Category
+			}
+			// Relative TTL → absolute deadline (Validate bounded ttlMs, so no overflow).
+			if a.TtlMs != nil {
+				exp := now + *a.TtlMs
+				rec.ExpiresAt = &exp
+			}
+			// Provenance + episodic namespacing are stamped from the live turn context,
+			// never caller-supplied: runId records which turn saved the fact; sessionId
+			// scopes an episodic row to this session. tctx may be nil in bare tests.
+			if tctx != nil {
+				if tctx.RunID != "" {
+					runID := tctx.RunID
+					rec.RunID = &runID
+				}
+				if kind == domain.MemoryKindEpisodic && tctx.SessionID != "" {
+					sessID := tctx.SessionID
+					rec.SessionID = &sessID
+				}
 			}
 			id := rec.ID
 			if deps.Store != nil {

@@ -131,6 +131,123 @@ func TestSaveDoesNotFireOnChange(t *testing.T) {
 	}
 }
 
+// save with ttlMs stamps an absolute expiresAt (now + ttlMs) and surfaces it in the view.
+func TestSaveStampsTTL(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "memory.save")
+	before := domain.NowMS()
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x","ttlMs":60000}`), &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	got := st.inserted[0].ExpiresAt
+	if got == nil {
+		t.Fatal("ttlMs should stamp a non-nil ExpiresAt")
+	}
+	if *got < before+60000 || *got > domain.NowMS()+60000 {
+		t.Fatalf("expiresAt %d outside [now+ttl] window", *got)
+	}
+	view := res.Result.(map[string]any)["memory"].(map[string]any)
+	if view["expiresAt"] != *got {
+		t.Fatalf("view expiresAt = %v, want %d", view["expiresAt"], *got)
+	}
+}
+
+// save stamps runId from the turn context (provenance) and, for episodic kind, the
+// sessionId — while semantic saves never carry a sessionId. sessionId stays internal
+// (absent from the view); runId surfaces.
+func TestSaveStampsProvenanceAndEpisodic(t *testing.T) {
+	tctx := &tools.ToolContext{RunID: "run_42", SessionID: "ses_7"}
+
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "memory.save")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x","kind":"episodic"}`), tctx)
+	if !res.Ok {
+		t.Fatalf("episodic save failed: %+v", res.Error)
+	}
+	rec := st.inserted[0]
+	if rec.Kind != domain.MemoryKindEpisodic {
+		t.Fatalf("kind = %q, want episodic", rec.Kind)
+	}
+	if rec.RunID == nil || *rec.RunID != "run_42" {
+		t.Fatalf("runId = %v, want run_42", rec.RunID)
+	}
+	if rec.SessionID == nil || *rec.SessionID != "ses_7" {
+		t.Fatalf("episodic sessionId = %v, want ses_7", rec.SessionID)
+	}
+	view := res.Result.(map[string]any)["memory"].(map[string]any)
+	if view["runId"] != "run_42" {
+		t.Fatalf("view runId = %v, want run_42", view["runId"])
+	}
+	if _, present := view["sessionId"]; present {
+		t.Fatalf("sessionId must stay internal, leaked into view")
+	}
+
+	// Semantic (default) save with the same context: runId stamped, sessionId NOT.
+	st2 := &memStore{}
+	tool2 := find(Tools(Deps{Store: st2}), "memory.save")
+	if res2 := tool2.Handle(context.Background(), json.RawMessage(`{"content":"y","kind":"semantic"}`), tctx); !res2.Ok {
+		t.Fatalf("semantic save failed: %+v", res2.Error)
+	}
+	rec2 := st2.inserted[0]
+	if rec2.Kind != domain.MemoryKindSemantic {
+		t.Fatalf("kind = %q, want semantic", rec2.Kind)
+	}
+	if rec2.RunID == nil || *rec2.RunID != "run_42" {
+		t.Fatalf("semantic runId = %v, want run_42", rec2.RunID)
+	}
+	if rec2.SessionID != nil {
+		t.Fatalf("semantic save must not carry a sessionId, got %v", rec2.SessionID)
+	}
+}
+
+// save rejects an out-of-enum kind with INVALID_ARGS (handler switch).
+func TestSaveRejectsUnknownKind(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "memory.save")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x","kind":"bogus"}`), &tools.ToolContext{})
+	if res.Ok || res.Error.Code != codeInvalidArgs {
+		t.Fatalf("expected INVALID_ARGS for unknown kind, got %+v", res)
+	}
+}
+
+// the Decode/Validate path bounds ttlMs to [1, maxTtlMs]; 0 and an absurd value reject.
+func TestSaveTTLBoundsViaDecode(t *testing.T) {
+	tool := find(Tools(Deps{Store: &memStore{}}), "memory.save")
+	for _, raw := range []string{
+		`{"content":"x","ttlMs":0}`,
+		`{"content":"x","ttlMs":9999999999999999}`,
+	} {
+		if _, err := tool.Decode(json.RawMessage(raw)); err == nil {
+			t.Fatalf("expected ttlMs out-of-bounds reject for %s", raw)
+		}
+	}
+	// A valid ttlMs decodes cleanly.
+	if _, err := tool.Decode(json.RawMessage(`{"content":"x","ttlMs":1000}`)); err != nil {
+		t.Fatalf("valid ttlMs should decode, got %v", err)
+	}
+}
+
+// the default (no kind) save always surfaces kind=semantic in the view.
+func TestSaveViewDefaultsKind(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "memory.save")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x"}`), &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("save failed: %+v", res.Error)
+	}
+	view := res.Result.(map[string]any)["memory"].(map[string]any)
+	if view["kind"] != domain.MemoryKindSemantic {
+		t.Fatalf("view kind = %v, want semantic", view["kind"])
+	}
+	if _, present := view["expiresAt"]; present {
+		t.Fatalf("expiresAt must be omitted when unset")
+	}
+	if _, present := view["runId"]; present {
+		t.Fatalf("runId must be omitted when no turn context")
+	}
+}
+
 // pin returns a view with pinned=true.
 func TestPinView(t *testing.T) {
 	tool := find(Tools(Deps{Store: &memStore{}}), "memory.pin")

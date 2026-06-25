@@ -216,6 +216,14 @@ CREATE TABLE IF NOT EXISTS memories (
   content   TEXT NOT NULL,
   category  TEXT,
   source    TEXT NOT NULL DEFAULT 'assistant',
+  -- TTL + provenance. expiresAt is an optional epoch-ms deadline (list/recall hide
+  -- rows past it; NULL = never). runId records which turn created the row. kind is
+  -- semantic (durable fact, default) vs episodic (session-scoped). sessionId
+  -- namespaces episodic rows; NULL for semantic.
+  expiresAt INTEGER,
+  runId     TEXT,
+  kind      TEXT NOT NULL DEFAULT 'semantic',
+  sessionId TEXT,
   pinnedAt  INTEGER,
   deletedAt INTEGER,
   createdAt INTEGER NOT NULL,
@@ -224,6 +232,10 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category, deletedAt);
 CREATE INDEX IF NOT EXISTS idx_memories_pinned   ON memories(pinnedAt)
   WHERE pinnedAt IS NOT NULL AND deletedAt IS NULL;
+-- Partial index on the TTL deadline so the list/recall expiry predicate doesn't
+-- full-scan once the store grows (only live, expiring rows are indexed).
+CREATE INDEX IF NOT EXISTS idx_memories_expires  ON memories(expiresAt)
+  WHERE expiresAt IS NOT NULL AND deletedAt IS NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content, content='memories', content_rowid='rowid');

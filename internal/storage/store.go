@@ -38,9 +38,10 @@ const (
 	// schemaUserVersion is the single baseline; dev hard-resets rather than chain.
 	// Bumped to 2 when the watchers table gained endedReason/endedAt; to 3 when watchers
 	// and agent_launches gained workflowRunId (durable workflow-ledger back-links); to 4
-	// when the artifacts table was added (durable tool-result overflow payloads) — a
-	// schema change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 4
+	// when the artifacts table was added (durable tool-result overflow payloads); to 5
+	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic) —
+	// a schema change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 5
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer

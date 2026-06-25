@@ -162,14 +162,26 @@ type WorkflowRunRecord struct {
 // MemoryRecord is one stored memory. forget is a soft-delete (stamp DeletedAt);
 // recall/list filter DeletedAt IS NULL. One DB == one project (no projectId).
 type MemoryRecord struct {
-	ID        string       `json:"id"` // mem_<uuid8>
-	Content   string       `json:"content"`
-	Category  *string      `json:"category,omitempty"`
-	Source    MemorySource `json:"source"`
-	PinnedAt  *int64       `json:"pinnedAt,omitempty"`
-	DeletedAt *int64       `json:"deletedAt,omitempty"`
-	CreatedAt int64        `json:"createdAt"`
-	UpdatedAt int64        `json:"updatedAt"`
+	ID       string       `json:"id"` // mem_<uuid8>
+	Content  string       `json:"content"`
+	Category *string      `json:"category,omitempty"`
+	Source   MemorySource `json:"source"`
+	// Kind discriminates semantic (default) vs episodic memories. Empty on a
+	// freshly-built record is treated as semantic by the storage layer (mirrors the
+	// SQLite DEFAULT 'semantic'); a scanned row always carries the concrete value.
+	Kind MemoryKind `json:"kind,omitempty"`
+	// ExpiresAt is an optional epoch-ms TTL. list/recall exclude rows whose
+	// ExpiresAt has passed; nil ⇒ never expires.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
+	// RunID records which turn created the memory (provenance); nil when unknown.
+	RunID *string `json:"runId,omitempty"`
+	// SessionID namespaces episodic rows to the session that produced them; nil for
+	// semantic memories.
+	SessionID *string `json:"sessionId,omitempty"`
+	PinnedAt  *int64  `json:"pinnedAt,omitempty"`
+	DeletedAt *int64  `json:"deletedAt,omitempty"`
+	CreatedAt int64   `json:"createdAt"`
+	UpdatedAt int64   `json:"updatedAt"`
 }
 
 // ArtifactRecord is one durable tool-result overflow payload. When a serialized

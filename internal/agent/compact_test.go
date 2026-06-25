@@ -257,7 +257,7 @@ func TestDistillCompactSavesNovelFacts(t *testing.T) {
 	s, _ := compactSession(t, r)
 	mem := &fakeMemoryStore{existing: map[string]bool{"fact B": true}}
 	s.deps.MemoryStore = mem
-	saved := s.distillCompact(context.Background(), "user: did X\nassistant: ok")
+	saved := s.distillCompact(context.Background(), "run_test", "user: did X\nassistant: ok")
 	if saved != 1 {
 		t.Fatalf("saved=%d want 1 (fact B already exists, only fact A is novel)", saved)
 	}
@@ -267,12 +267,19 @@ func TestDistillCompactSavesNovelFacts(t *testing.T) {
 	if mem.inserted[0].Source != domain.MemoryCompact {
 		t.Fatalf("source = %q, want compact", mem.inserted[0].Source)
 	}
+	// Distilled facts are semantic and carry the turn's runId as provenance.
+	if mem.inserted[0].Kind != domain.MemoryKindSemantic {
+		t.Fatalf("kind = %q, want semantic", mem.inserted[0].Kind)
+	}
+	if mem.inserted[0].RunID == nil || *mem.inserted[0].RunID != "run_test" {
+		t.Fatalf("runId = %v, want run_test", mem.inserted[0].RunID)
+	}
 }
 
 func TestDistillCompactNilStoreSkipsModelCall(t *testing.T) {
 	r := &jsonChatRouter{content: `["x"]`}
 	s, _ := compactSession(t, r) // no MemoryStore wired
-	if saved := s.distillCompact(context.Background(), "transcript"); saved != 0 {
+	if saved := s.distillCompact(context.Background(), "", "transcript"); saved != 0 {
 		t.Fatalf("nil MemoryStore should save nothing, got %d", saved)
 	}
 	if r.chatCalls != 0 {
@@ -285,7 +292,7 @@ func TestDistillCompactMalformedReply(t *testing.T) {
 	s, _ := compactSession(t, r)
 	mem := &fakeMemoryStore{}
 	s.deps.MemoryStore = mem
-	if saved := s.distillCompact(context.Background(), "transcript"); saved != 0 {
+	if saved := s.distillCompact(context.Background(), "", "transcript"); saved != 0 {
 		t.Fatalf("malformed reply should save nothing, got %d", saved)
 	}
 	if len(mem.inserted) != 0 {
@@ -297,7 +304,7 @@ func TestDistillCompactEmptyTranscriptSkips(t *testing.T) {
 	r := &jsonChatRouter{content: `["x"]`}
 	s, _ := compactSession(t, r)
 	s.deps.MemoryStore = &fakeMemoryStore{}
-	if saved := s.distillCompact(context.Background(), "   "); saved != 0 {
+	if saved := s.distillCompact(context.Background(), "", "   "); saved != 0 {
 		t.Fatalf("blank transcript should save nothing, got %d", saved)
 	}
 	if r.chatCalls != 0 {
@@ -536,13 +543,13 @@ func TestAutoCompactFallbackTruncatesAfterSustainedOutage(t *testing.T) {
 
 	// Failures below the threshold must NOT mutate history.
 	for i := 0; i < domain.AutoCompactFailureThreshold-1; i++ {
-		s.maybeAutoCompact(ctx)
+		s.maybeAutoCompact(ctx, "run_test")
 		if got := len(s.Messages()); got != initialLen {
 			t.Fatalf("failure %d truncated history too early: %d messages (want %d)", i+1, got, initialLen)
 		}
 	}
 	// The threshold'th failure crosses the line → lossy truncation.
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
 	if got := s.estimateTokens(); got >= domain.AutoCompactHardTruncationThreshold {
 		t.Fatalf("history still over hard ceiling after fallback: %d tokens", got)
 	}
@@ -569,12 +576,12 @@ func TestAutoCompactFailureCounterResetsOnSuccess(t *testing.T) {
 	s.InjectNote(strings.Repeat("x", (domain.AutoCompactTokenThreshold+20_000)*domain.CharsPerToken))
 	ctx := context.Background()
 
-	s.maybeAutoCompact(ctx)
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
+	s.maybeAutoCompact(ctx, "run_test")
 	if s.compactFailures != 2 {
 		t.Fatalf("compactFailures = %d after two outages, want 2", s.compactFailures)
 	}
-	s.maybeAutoCompact(ctx) // succeeds → compacts + resets
+	s.maybeAutoCompact(ctx, "run_test") // succeeds → compacts + resets
 	if s.compactFailures != 0 {
 		t.Fatalf("compactFailures = %d after a successful compaction, want 0 (reset)", s.compactFailures)
 	}
@@ -600,7 +607,7 @@ func TestAutoCompactFailureIgnoresUserCancel(t *testing.T) {
 	cancel()
 	initialLen := len(s.Messages())
 
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
 	if s.compactFailures != 0 {
 		t.Fatalf("a user cancel must not count as a compact failure, got %d", s.compactFailures)
 	}
@@ -699,7 +706,7 @@ func TestStartDistillSkippedWhileDraining(t *testing.T) {
 	s.deps.MemoryStore = &fakeMemoryStore{}
 
 	s.DrainBackgroundWork() // nothing in flight → returns immediately, sets draining
-	s.startDistill("user: did X\nassistant: ok")
+	s.startDistill("run_test", "user: did X\nassistant: ok")
 	s.DrainBackgroundWork() // joins anything that (incorrectly) spawned
 
 	if r.chatCalls != 0 {
@@ -717,8 +724,8 @@ func TestAutoCompactFailureCounterResetByManualCompact(t *testing.T) {
 	s.InjectNote(strings.Repeat("x", (domain.AutoCompactTokenThreshold+20_000)*domain.CharsPerToken))
 	ctx := context.Background()
 
-	s.maybeAutoCompact(ctx)
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
+	s.maybeAutoCompact(ctx, "run_test")
 	if s.compactFailures != 2 {
 		t.Fatalf("compactFailures = %d after two outages, want 2", s.compactFailures)
 	}
@@ -740,7 +747,7 @@ func TestAutoCompactSingleHugeMessageTruncates(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < domain.AutoCompactFailureThreshold; i++ {
-		s.maybeAutoCompact(ctx)
+		s.maybeAutoCompact(ctx, "run_test")
 	}
 	if got := s.estimateTokens(); got >= domain.AutoCompactHardTruncationThreshold {
 		t.Fatalf("a single over-ceiling message must still be truncated, got %d tokens", got)
