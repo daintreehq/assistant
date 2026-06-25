@@ -263,9 +263,10 @@ func TestCancelDuringPreTurnAwaitsPushesNoUserMessage(t *testing.T) {
 	deps.Events = sink
 	s := NewSession(deps)
 	// Grow history past the auto-compact token threshold (and beyond CONTROL+1) so
-	// the pre-turn summarizer actually runs and gives the abort a window to land.
-	s.InjectNote(strings.Repeat("A", 200_000))
-	s.InjectNote(strings.Repeat("B", 200_000))
+	// the pre-turn summarizer actually runs and gives the abort a window to land. Two
+	// notes (a lone one trips the "no real history" guard), together over the soft gate.
+	s.InjectNote(strings.Repeat("A", (domain.AutoCompactTokenThreshold/2+10_000)*domain.CharsPerToken))
+	s.InjectNote(strings.Repeat("B", (domain.AutoCompactTokenThreshold/2+10_000)*domain.CharsPerToken))
 
 	reply, err := s.Send(ctx, "hi", SendOptions{})
 	if err != nil {

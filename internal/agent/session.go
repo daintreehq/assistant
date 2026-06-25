@@ -1434,7 +1434,30 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 			}
 			text += "[tool call " + tc.Function.Name + " " + tc.Function.Arguments + "]"
 		}
-		summaryMsgs = append(summaryMsgs, models.TextMessage(m.Role, text))
+		// Re-label the role for the checkpoint request. The summary is a plain chat
+		// completion with NO preceding assistant tool_calls to anchor a tool-role
+		// message, so a role:"tool" entry is sent with an empty (omitted) tool_call_id
+		// and DeepSeek rejects the ENTIRE request — 400 "messages[N]: missing field
+		// `tool_call_id`" — which failed every auto-compact once the discarded history
+		// held any tool result (i.e. almost always). The content is already flattened to
+		// text above, so a tool result carries fine as a user turn with a marker; any role
+		// outside system/user/assistant collapses to user the same way. (Consecutive
+		// same-role turns are accepted here — the prior bug proved DeepSeek parsed the
+		// tool messages structurally and only objected to the missing id.)
+		role := m.Role
+		switch role {
+		case "system", "user", "assistant":
+		case "tool":
+			role = "user"
+			if text == "" {
+				text = "[tool result]"
+			} else {
+				text = "[tool result] " + text
+			}
+		default:
+			role = "user"
+		}
+		summaryMsgs = append(summaryMsgs, models.TextMessage(role, text))
 		if text == "" {
 			text = "[tool call]"
 		}
@@ -1455,11 +1478,18 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 			return
 		}
 		s.mu.Lock()
-		truncated := s.noteCompactFailureLocked()
+		truncated, failures := s.noteCompactFailureLocked()
 		s.mu.Unlock()
 		if truncated {
 			s.events.Info("Auto-compact fallback: truncated old history (checkpoint unavailable)")
-		} else {
+		} else if failures == 1 {
+			// maybeAutoCompact runs once per tool-iteration round, so a checkpoint that
+			// keeps failing (a real model outage at high context) would re-enter HERE every
+			// round and, without this gate, repaint the same skip note on every one —
+			// flooding the live footer while a turn is in flight. Surface it ONCE per failure
+			// streak (the 0→1 transition); a successful compaction resets the streak, so a
+			// later relapse is announced afresh, and the truncation branch above always
+			// announces its own (rarer, history-mutating) note.
 			s.events.Info("Auto-compact skipped: checkpoint failed")
 		}
 		return
@@ -1498,15 +1528,18 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 // ballooned past the hard ceiling, performs a no-model lossy head-truncation so a
 // small-model outage can't grow the conversation without bound. Resets the counter
 // after truncating (the bound has been re-established). Caller MUST hold s.mu.
-// Returns true iff it truncated.
-func (s *Session) noteCompactFailureLocked() (truncated bool) {
+// Returns (truncated, failures): truncated is true iff it head-truncated, and failures is
+// the post-increment consecutive-failure count so the caller can surface the skip note
+// only on the FIRST failure of a streak instead of every round. After a truncation the
+// streak has reset, so failures is reported as 0.
+func (s *Session) noteCompactFailureLocked() (truncated bool, failures int) {
 	s.compactFailures++
 	if s.compactFailures >= domain.AutoCompactFailureThreshold &&
 		s.estimateTokensLocked() >= domain.AutoCompactHardTruncationThreshold {
 		s.truncateLocked(domain.AutoCompactHardTruncationKeepMessages) // resets compactFailures
-		return true
+		return true, 0
 	}
-	return false
+	return false, s.compactFailures
 }
 
 // truncateLocked is the no-model lossy fallback for a sustained small-model outage:

@@ -29,14 +29,23 @@ var OneShotExitCode = struct {
 
 // Agent-loop magic constants.
 const (
-	RepeatFailureWarn         = 2
-	RepeatFailureAbort        = 3
-	ControlMessageCount       = 3
-	MaxToolResultChars        = 8000
-	TruncationPreviewChars    = 1500
-	TruncationSummaryChars    = 500
-	MaxStoredArtifacts        = 64
-	AutoCompactTokenThreshold = 60000
+	RepeatFailureWarn      = 2
+	RepeatFailureAbort     = 3
+	ControlMessageCount    = 3
+	MaxToolResultChars     = 8000
+	TruncationPreviewChars = 1500
+	TruncationSummaryChars = 500
+	MaxStoredArtifacts     = 64
+	// AutoCompactTokenThreshold is the SOFT trigger: once the (large-tier) context is
+	// estimated past this, a round runs the lossless pre-sweep and then a small-model
+	// checkpoint summary. Sized against the ~1M-token large window (LargeContextWindowTokens),
+	// NOT a fraction of it — DeepSeek prefix-caches the stable head (~99% cache hit on a long
+	// run), so a large-but-cached context is nearly free to carry and compacting at a small
+	// fraction of the window threw away detail for no real saving. Set high so most turns
+	// never compact; the lossless rungs (runPreSweep) carry the cheap wins, and this only
+	// fires when the conversation is genuinely large. Must stay BELOW
+	// AutoCompactHardTruncationThreshold (the emergency, model-free ceiling).
+	AutoCompactTokenThreshold = 500_000
 	CharsPerToken             = 4
 
 	// DistillTranscriptMaxRunes caps the transcript fed to the compaction-distillation
@@ -56,11 +65,11 @@ const (
 
 	// AutoCompactHardTruncationThreshold is the SECONDARY (hard) token ceiling that,
 	// combined with AutoCompactFailureThreshold consecutive summary failures, triggers
-	// a no-model lossy head-truncation. Set well above AutoCompactTokenThreshold (the
-	// soft, model-summarized threshold) yet far below LargeContextWindowTokens so the
-	// large-model turn still has ample headroom — the fallback bounds growth long
-	// before the context window is at risk.
-	AutoCompactHardTruncationThreshold = 200_000
+	// a no-model lossy head-truncation. Set above AutoCompactTokenThreshold (the soft,
+	// model-summarized threshold) yet below LargeContextWindowTokens so the large-model
+	// turn keeps headroom — the fallback only bounds growth when the soft, model-driven
+	// path has been DOWN for a sustained stretch, long before the 1M window is at risk.
+	AutoCompactHardTruncationThreshold = 800_000
 
 	// AutoCompactHardTruncationKeepMessages is how many of the most-recent working
 	// messages the lossy fallback retains (the oldest are dropped first). Recency is
@@ -81,14 +90,15 @@ const (
 	// AutoCompactVerbatimTailTokenBudget caps the verbatim tail's size so the rebuilt
 	// history (controls + summary note + tail) lands comfortably back under
 	// AutoCompactTokenThreshold and does not immediately re-trip the gate. A tail over this
-	// is shed from the head (oldest first) until it fits. Set to ~1/3 of the soft threshold
-	// to leave ample headroom for the controls and the summary note.
+	// is shed from the head (oldest first) until it fits. Kept well under the soft threshold
+	// so the controls and summary note still leave the rebuilt history with ample headroom.
 	AutoCompactVerbatimTailTokenBudget = 20_000
 
 	// LargeContextWindowTokens is the main (large) model's context window, used as the
 	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
 	// "% toward auto-compaction". The large tier is sized to a ~1M-token window; the gauge
-	// must reflect that (a small conversation reads ~1%, not 13% of the 60K compact threshold).
+	// must reflect that (a small conversation reads ~1% of the window, not a large fraction
+	// of the smaller compaction threshold).
 	LargeContextWindowTokens = 1_000_000
 
 	// MainPromptCacheKey is the DeepSeek prompt_cache_key. Plain, UNVERSIONED:
