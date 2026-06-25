@@ -171,6 +171,18 @@ func (f *fakeFireworks) callCount() int {
 	return f.calls
 }
 
+// requestField returns the value of a top-level body key (e.g. "model",
+// "reasoning_effort") on the Nth request (0-based), or nil when out of range or
+// absent — used to assert which model id and reasoning effort each round was sent on.
+func (f *fakeFireworks) requestField(n int, key string) any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n >= len(f.requests) {
+		return nil
+	}
+	return f.requests[n][key]
+}
+
 // containsToolMessage reports whether any message in the request is a tool-result
 // message (role:"tool") whose content mentions the given substring — used to assert
 // the dispatched tool's result was fed back into the next model round.

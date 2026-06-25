@@ -27,7 +27,7 @@ func isolatedHome(t *testing.T) string {
 		"DAINTREE_ASSISTANT_TIER", "DAINTREE_ASSISTANT_AUTO_APPROVE",
 		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR", "DAINTREE_ASSISTANT_DEBUG_LOG",
 		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "FIREWORKS_API_KEY", "FIREWORKS_BASE_URL",
-		"DAINTREE_LARGE_MODEL", "DAINTREE_SMALL_MODEL",
+		"DAINTREE_LARGE_MODEL", "DAINTREE_MEDIUM_MODEL", "DAINTREE_SMALL_MODEL",
 	} {
 		os.Unsetenv(k)
 	}
@@ -86,6 +86,24 @@ func TestLoadConfig_LargeModelDefault(t *testing.T) {
 	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
 	if cfg.LargeModel != DEFAULTS.LargeModel {
 		t.Errorf("largeModel = %q, want default %q", cfg.LargeModel, DEFAULTS.LargeModel)
+	}
+}
+
+// TestLoadConfig_AllTiersDefaultToFlash is the issue-238 guard: with a clean env and
+// no overrides, all three model tiers resolve to deepseek-v4-flash — the validated
+// orchestration model. If any default ever drifts back to a heavier model, this fails.
+func TestLoadConfig_AllTiersDefaultToFlash(t *testing.T) {
+	isolatedHome(t)
+	const flash = "accounts/fireworks/models/deepseek-v4-flash"
+	cfg := mustLoad(t, ConfigOverrides{})
+	for tier, got := range map[string]string{
+		"large":  cfg.LargeModel,
+		"medium": cfg.MediumModel,
+		"small":  cfg.SmallModel,
+	} {
+		if got != flash {
+			t.Errorf("%s tier = %q, want validated flash model %q", tier, got, flash)
+		}
 	}
 }
 

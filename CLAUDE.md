@@ -26,9 +26,12 @@ that writes/edits files.
 The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`)
 and on GitHub at <https://github.com/daintreehq/daintree>.
 
-Powered by **Fireworks AI** (OpenAI-compatible, plain `net/http`). Three model tiers:
-`large` (`glm-5p2`, main thread), `small` (`deepseek-v4-flash`, watchers/summaries/
-classification), `medium` (routes to large in v1).
+Powered by **Fireworks AI** (OpenAI-compatible, plain `net/http`). Three model tiers,
+all on `deepseek-v4-flash`: `large` (main thread/orchestration), `small`
+(watchers/summaries/classification), `medium` (routes to large in v1). Flash is the
+validated orchestration model — the loaded skills carry the playbooks, so a heavier
+model on the main thread earned nothing; override per-tier with
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`.
 
 ## Commands
 

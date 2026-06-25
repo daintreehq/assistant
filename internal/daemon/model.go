@@ -23,8 +23,8 @@ func classifyWithModel(ctx *CheckContext, rec domain.WatcherRecord, signals Watc
 	verdict, err := ctx.Model.Classify(ctx.Ctx, ClassifyInput{
 		// Classification ALWAYS runs on the cheap small tier. rec.ModelTier governs
 		// MAIN-THREAD routing only; a watcher stored as "medium" routes to the LARGE
-		// model (glm-5p2) in v1, so passing it through here would silently burn the
-		// expensive model on every classify call.
+		// model in v1, so passing it through here would route classification through
+		// the main-thread tier on every classify call.
 		Tier:          domain.ModelSmall,
 		Goal:          rec.Goal,
 		AgentState:    signals.AgentState,

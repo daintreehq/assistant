@@ -39,11 +39,11 @@ func TestChatNonStream(t *testing.T) {
 	}
 }
 
-// The small tier is forced to reasoning_effort:"none" so every DeepSeek-v4-flash call
+// The small tier is forced to reasoning_effort:"none" so every flash call
 // (judge / summary / extraction / classification) runs thinking-free and fast; the
-// large tier defaults to "high" (glm-5p2's provider default is "max", which we pin
-// down so orchestration doesn't pay max-effort thinking every turn); an explicit
-// caller value wins on any tier.
+// large tier defaults to "high" so flash orchestration gets real chain-of-thought
+// without paying max-effort thinking on every turn; an explicit caller value wins
+// on any tier.
 func TestRouterForcesSmallTierReasoningNone(t *testing.T) {
 	var lastBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

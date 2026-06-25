@@ -66,12 +66,12 @@ func (r *Router) ModelFor(tier domain.ModelTier) string {
 //   - small (deepseek-v4-flash) → "none": it only runs terse yes/no judges,
 //     summaries, extraction, and classification — a <think> phase there is pure
 //     latency/cost, and finish-detection in particular must stay fast.
-//   - large/medium (glm-5p2, orchestration) → "high": GLM 5.2 accepts only "high"
-//     and "max" (lower values collapse to "high"; there is no non-thinking mode),
-//     and its provider default is "max". We pin "high" instead — orchestration
-//     still reasons, but we don't pay max-effort thinking on every turn. Medium
-//     routes to the large model id in v1, so it gets the same default; otherwise a
-//     "medium" watcher would silently run hotter (max) than the main thread.
+//   - large/medium (deepseek-v4-flash, orchestration) → "high": flash is the
+//     validated orchestration model and the main thread benefits from real
+//     chain-of-thought for multi-step planning, but "max" is needless overhead on
+//     every turn. "high" is the deliberate middle. Medium routes to the large
+//     model id in v1, so it gets the same default; otherwise a "medium" watcher
+//     would silently run hotter than the main thread.
 func applyTierReasoning(tier domain.ModelTier, opts *ChatOptions) {
 	if opts.ReasoningEffort != "" {
 		return
