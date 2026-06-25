@@ -1544,22 +1544,28 @@ func (s *Session) distillCompact(ctx context.Context, runID, transcript string) 
 	if err != nil {
 		return 0
 	}
-	for _, fact := range prompts.ParseDistilledFacts(result.Content) {
-		exists, exErr := s.deps.MemoryStore.MemoryExists(fact)
+	for _, entry := range prompts.ParseDistilledEntries(result.Content) {
+		exists, exErr := s.deps.MemoryStore.MemoryExists(entry.Content)
 		if exErr != nil || exists {
 			continue
 		}
 		now := domain.NowMS()
-		// Distilled facts are durable (semantic); stamp the turn that produced them.
+		// Route each fact to its kind: semantic (a durable fact) vs episodic (an
+		// instructive trajectory trace). Stamp the turn that produced it as provenance;
+		// namespace episodic rows to this session (semantic facts carry no sessionId).
 		rec := domain.MemoryRecord{
-			Content:   fact,
+			Content:   entry.Content,
 			Source:    domain.MemoryCompact,
-			Kind:      domain.MemoryKindSemantic,
+			Kind:      entry.Kind,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		if runID != "" {
 			rec.RunID = &runID
+		}
+		if entry.Kind == domain.MemoryKindEpisodic && s.deps.SessionID != "" {
+			sid := s.deps.SessionID
+			rec.SessionID = &sid
 		}
 		if _, insErr := s.deps.MemoryStore.InsertMemory(rec); insErr == nil {
 			saved++

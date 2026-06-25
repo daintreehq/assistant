@@ -652,6 +652,134 @@ func TestWatcher_NoWorkflowLinkNoAdvance(t *testing.T) {
 	}
 }
 
+// A terminating supervisor with a MemoryWriter wired mirrors its short outcome into an
+// episodic memory: kind=episodic, source=watcher, runId=linked run, namespaced to the
+// session — off the SAME finalize path, with no extra model call.
+func TestWatcher_WritesEpisodicMemoryOnFinalize(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0), "recentOutput": "done",
+	})
+	rec := termWatcher("wch_mem", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_mem")
+	store.watchers = []domain.WatcherRecord{rec}
+
+	ctx := ctxFor(store, queue, mcp, &fakeModel{})
+	mw := &fakeMemoryWriter{}
+	ctx.MemoryWriter = mw
+	ctx.SessionID = "ses_live"
+
+	out := RunTerminalWatcherCheck(ctx, rec)
+	if !out.Stop {
+		t.Fatalf("exited should stop, got stop=%v", out.Stop)
+	}
+	recs := mw.records()
+	if len(recs) != 1 {
+		t.Fatalf("finalize must write exactly one episodic memory, got %d: %+v", len(recs), recs)
+	}
+	m := recs[0]
+	if m.Kind != domain.MemoryKindEpisodic {
+		t.Errorf("kind = %q, want episodic", m.Kind)
+	}
+	if m.Source != domain.MemoryWatcher {
+		t.Errorf("source = %q, want watcher", m.Source)
+	}
+	if m.RunID == nil || *m.RunID != "wfr_mem" {
+		t.Errorf("runId = %v, want the linked run wfr_mem", m.RunID)
+	}
+	if m.SessionID == nil || *m.SessionID != "ses_live" {
+		t.Errorf("sessionId = %v, want ses_live", m.SessionID)
+	}
+	if strings.TrimSpace(m.Content) == "" {
+		t.Error("episodic memory must carry the outcome summary, got empty")
+	}
+}
+
+// A timeout finalize writes an episodic memory whose content records WHY the run ended
+// (the raw classification summary is usually still "working", which reads as a
+// non-outcome) — the trajectory trace must lead with the timeout.
+func TestWatcher_TimeoutMemoryMentionsTimeout(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "working", "recentOutput": "still going",
+	})
+	rec := termWatcher("wch_tomem", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_tomem")
+	rec.StopAfterMs = ptrInt64(1) // created at 0; now >> 1 → timed out
+	store.watchers = []domain.WatcherRecord{rec}
+
+	ctx := ctxFor(store, queue, mcp, &fakeModel{})
+	mw := &fakeMemoryWriter{}
+	ctx.MemoryWriter = mw
+	ctx.SessionID = "ses_live"
+
+	out := RunTerminalWatcherCheck(ctx, rec)
+	if !out.Stop || out.StopReason != StopTimeout {
+		t.Fatalf("expected timeout stop, got stop=%v reason=%v", out.Stop, out.StopReason)
+	}
+	recs := mw.records()
+	if len(recs) != 1 {
+		t.Fatalf("timeout finalize must write one episodic memory, got %d: %+v", len(recs), recs)
+	}
+	if !strings.Contains(recs[0].Content, "timed out") {
+		t.Errorf("timeout memory must record the timeout, got %q", recs[0].Content)
+	}
+	if recs[0].Kind != domain.MemoryKindEpisodic || recs[0].Source != domain.MemoryWatcher {
+		t.Errorf("timeout memory = %+v, want episodic/watcher", recs[0])
+	}
+}
+
+// The corrupt-disable finalize path supplies no outcome digest — even with a
+// MemoryWriter wired it must NOT fabricate an episodic memory (mirrors the
+// no-fabricated-notesJson guarantee).
+func TestWatcher_CorruptDisableWritesNoEpisodicMemory(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	rec := domain.WatcherRecord{
+		ID: "wch_badmem", Kind: "terminal", Title: "Bad", Goal: "g",
+		TargetsJson: `not json`, CadenceMs: 3000, ModelTier: domain.ModelSmall,
+		Status: "active", WorkflowRunID: ptrStr("wfr_badmem"),
+	}
+	store.watchers = []domain.WatcherRecord{rec}
+
+	ctx := ctxFor(store, queue, newFakeMCP(), &fakeModel{})
+	mw := &fakeMemoryWriter{}
+	ctx.MemoryWriter = mw
+	ctx.SessionID = "ses_live"
+
+	_ = RunTerminalWatcherCheck(ctx, rec)
+	if recs := mw.records(); len(recs) != 0 {
+		t.Fatalf("corrupt-disable must not write an episodic memory, got %+v", recs)
+	}
+}
+
+// A finalize with no MemoryWriter wired (the default) must not panic and writes no
+// memory — the episodic mirror is strictly optional.
+func TestWatcher_NilMemoryWriterSkipsEpisodicWrite(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "exited", "exitCode": float64(0), "recentOutput": "done",
+	})
+	rec := termWatcher("wch_nomw", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_nomw")
+	store.watchers = []domain.WatcherRecord{rec}
+
+	// ctxFor leaves MemoryWriter nil — the finalize must still advance the ledger.
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+	if !out.Stop {
+		t.Fatalf("exited should stop")
+	}
+	if store.workflowPatch["wfr_nomw"] == nil {
+		t.Fatal("ledger must still advance even without a MemoryWriter")
+	}
+}
+
 // watcherDigestNote serializes a real outcome and returns nil when there is
 // nothing worth recording (no fabricated empty array).
 func TestWatcherDigestNote(t *testing.T) {

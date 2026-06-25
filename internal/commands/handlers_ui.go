@@ -708,22 +708,28 @@ func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (
 	if err != nil {
 		return 0
 	}
-	for _, fact := range prompts.ParseDistilledFacts(res.Content) {
-		exists, exErr := a.Store.MemoryExists(fact)
+	for _, entry := range prompts.ParseDistilledEntries(res.Content) {
+		exists, exErr := a.Store.MemoryExists(entry.Content)
 		if exErr != nil || exists {
 			continue
 		}
 		now := domain.NowMS()
-		// Manual /compact has no live turn runID to attribute; the distilled facts are
-		// durable semantic memories (Kind defaults to semantic in storage, named here
-		// for intent), saved without provenance.
-		if _, insErr := a.Store.InsertMemory(domain.MemoryRecord{
-			Content:   fact,
+		// Route each fact to its kind: semantic (a durable fact) vs episodic (an
+		// instructive trajectory trace). Manual /compact has no live turn runID to
+		// attribute, but episodic rows are still namespaced to the current session so
+		// they can be scoped/expired later; semantic facts carry no sessionId.
+		rec := domain.MemoryRecord{
+			Content:   entry.Content,
 			Source:    domain.MemoryCompact,
-			Kind:      domain.MemoryKindSemantic,
+			Kind:      entry.Kind,
 			CreatedAt: now,
 			UpdatedAt: now,
-		}); insErr == nil {
+		}
+		if entry.Kind == domain.MemoryKindEpisodic && a.SessionID != "" {
+			sid := a.SessionID
+			rec.SessionID = &sid
+		}
+		if _, insErr := a.Store.InsertMemory(rec); insErr == nil {
 			saved++
 		}
 	}

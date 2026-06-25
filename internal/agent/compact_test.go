@@ -359,6 +359,56 @@ func TestDistillCompactSavesNovelFacts(t *testing.T) {
 	}
 }
 
+// TestDistillCompactRoutesEpisodicAndSemantic proves a {fact,kind} distill reply routes
+// each fact to its kind: the semantic fact is stored as kind=semantic with NO sessionId,
+// while the episodic trace is kind=episodic, carries the turn's runId, AND is namespaced
+// to the session that produced it.
+func TestDistillCompactRoutesEpisodicAndSemantic(t *testing.T) {
+	r := &jsonChatRouter{content: `[{"fact":"deploy uses Fireworks","kind":"semantic"},{"fact":"tried glm-5p2, flash was enough","kind":"episodic"}]`}
+	s, _ := compactSession(t, r) // SessionID == "ses_compact"
+	mem := &fakeMemoryStore{}
+	s.deps.MemoryStore = mem
+	saved := s.distillCompact(context.Background(), "run_test", "user: did X\nassistant: ok")
+	if saved != 2 {
+		t.Fatalf("saved=%d want 2 (one semantic + one episodic)", saved)
+	}
+	var sem, epi *domain.MemoryRecord
+	for i := range mem.inserted {
+		switch mem.inserted[i].Kind {
+		case domain.MemoryKindSemantic:
+			sem = &mem.inserted[i]
+		case domain.MemoryKindEpisodic:
+			epi = &mem.inserted[i]
+		}
+	}
+	if sem == nil || epi == nil {
+		t.Fatalf("expected one semantic + one episodic insert, got %+v", mem.inserted)
+	}
+	// Semantic: durable, runId stamped, NO session namespacing.
+	if sem.Content != "deploy uses Fireworks" {
+		t.Fatalf("semantic content = %q", sem.Content)
+	}
+	if sem.SessionID != nil {
+		t.Fatalf("semantic memory must NOT carry a sessionId, got %v", *sem.SessionID)
+	}
+	if sem.RunID == nil || *sem.RunID != "run_test" {
+		t.Fatalf("semantic runId = %v, want run_test", sem.RunID)
+	}
+	// Episodic: trajectory trace, runId stamped, namespaced to this session.
+	if epi.Content != "tried glm-5p2, flash was enough" {
+		t.Fatalf("episodic content = %q", epi.Content)
+	}
+	if epi.SessionID == nil || *epi.SessionID != "ses_compact" {
+		t.Fatalf("episodic memory must carry the session id, got %v", epi.SessionID)
+	}
+	if epi.RunID == nil || *epi.RunID != "run_test" {
+		t.Fatalf("episodic runId = %v, want run_test", epi.RunID)
+	}
+	if epi.Source != domain.MemoryCompact {
+		t.Fatalf("episodic source = %q, want compact", epi.Source)
+	}
+}
+
 func TestDistillCompactNilStoreSkipsModelCall(t *testing.T) {
 	r := &jsonChatRouter{content: `["x"]`}
 	s, _ := compactSession(t, r) // no MemoryStore wired
