@@ -10,7 +10,9 @@ import (
 // the semantic styling map:
 //
 //	body prose      → terminal default foreground (NEVER forced white)
-//	headings        → accent green + bold
+//	headings        → bold body text (NO hue — accent green is reserved for
+//	                  Daintree's own voice, the ◆ DAINTREE marker, so the user can
+//	                  tell what the assistant DID from headings inside its prose)
 //	inline code     → info cyan
 //	fenced code     → syntax-highlighted (chroma via glamour); cyan-ish fallback
 //	link / url      → info cyan + underline
@@ -22,7 +24,6 @@ import (
 // additionally strips of any stray SGR. Word-wrap is owned by the renderer
 // (WithWordWrap), so margins/indents here stay 0 to keep the inline cockpit tight.
 func (t Theme) GlamourStyles() ansi.StyleConfig {
-	hexAccentP := colorHex(t.Color.Accent)
 	hexInfoP := colorHex(t.Color.Info)
 	hexMutedP := colorHex(t.Color.Muted)
 	hexTextP := colorHex(t.Color.Text) // nil for default fg => no Color field
@@ -52,16 +53,20 @@ func (t Theme) GlamourStyles() ansi.StyleConfig {
 			Indent:         ptrUint(1),
 		},
 
-		// Headings: accent green + bold (all levels inherit via Heading).
+		// Headings: BOLD only, body foreground — NO accent green. Green is Daintree's
+		// own voice (the ◆ DAINTREE marker); coloring in-prose markdown headings green
+		// blurred "what the assistant said" with "what it is". hexTextP is nil in
+		// dark/ansi/none (terminal default) and the near-black in light, so a heading
+		// reads as bold body text in every mode. (All levels inherit via Heading.)
 		Heading: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)},
+			StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)},
 		},
-		H1: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
-		H2: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
-		H3: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
-		H4: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
-		H5: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
-		H6: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexAccentP, Bold: ptrBool(true)}},
+		H1: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
+		H2: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
+		H3: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
+		H4: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
+		H5: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
+		H6: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: hexTextP, Bold: ptrBool(true)}},
 
 		// Emphasis.
 		Strong:        ansi.StylePrimitive{Bold: ptrBool(true)},

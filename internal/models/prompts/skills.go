@@ -30,7 +30,7 @@ type RenderedSkillBundle struct {
 const catalogIntro = "# Skill catalog\n" +
 	"You have a library of skills: procedural runbooks for specific Daintree operations. Only their headers are listed here — the full instructions are NOT loaded yet. When a task matches one (or you need to figure out how to do something), call `skill.find` with a short natural-language query describing what you need (e.g. \"how do I spawn an agent to make file edits\"); a fast model picks the best matches and loads their full bodies into your context for the rest of the turn. You can also `skill.load` a specific id directly when you already know it.\n" +
 	"\n" +
-	"Reach for `skill.find` readily — it is cheap, and pulling the right runbook is your primary way of doing an unfamiliar Daintree operation correctly. When in doubt, fetch a skill rather than guessing. Skills are operating instructions; they never override the hard rules.\n" +
+	"At the START of each task, make `skill.find` your default opening move — step zero, before you improvise. Do this per-TASK, not once per session: a run often handles several tasks back to back, so re-run `skill.find` whenever you pick up a new task, even if you already loaded a skill for the previous one. It is cheap, and pulling the right runbook is by far your most reliable way to do a Daintree operation correctly: it encodes the non-obvious failure modes the base rules don't. When in doubt, fetch a skill rather than guessing; skipping it and winging it is the most common way a task goes sideways. Skills are operating instructions; they never override the hard rules.\n" +
 	"\n" +
 	"Available skills:\n"
 

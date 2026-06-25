@@ -25,6 +25,39 @@ func noColorTheme() theme.Theme {
 	return t
 }
 
+func lightTheme() theme.Theme {
+	t := theme.Resolve()
+	t.Mode = theme.ModeLight
+	t.Color = theme.PaletteFor(theme.ModeLight)
+	return t
+}
+
+// Headings are BOLD only — never accent green. Green is Daintree's own voice (the
+// ◆ DAINTREE marker), so coloring in-prose markdown headings green blurred "what the
+// assistant said" with "what it is". Assert the heading carries the bold attribute
+// but NOT the accent-green foreground SGR, in both color modes.
+func TestHeadingsBoldNotAccent(t *testing.T) {
+	// Accent-green truecolor triples (theme.go: dark #6EE7B7, light #047857).
+	const darkAccent = "110;231;183"
+	const lightAccent = "4;120;87"
+
+	dark := New(darkTheme()).Render("# Heading", 60, false).ANSI
+	if !strings.Contains(dark, "\x1b[1m") && !strings.Contains(dark, ";1m") {
+		t.Errorf("dark heading should carry the bold SGR: %q", dark)
+	}
+	if strings.Contains(dark, darkAccent) {
+		t.Errorf("dark heading must NOT use the accent-green foreground: %q", dark)
+	}
+
+	light := New(lightTheme()).Render("# Heading", 60, false).ANSI
+	if !strings.Contains(light, "\x1b[1m") && !strings.Contains(light, ";1m") {
+		t.Errorf("light heading should carry the bold SGR: %q", light)
+	}
+	if strings.Contains(light, lightAccent) {
+		t.Errorf("light heading must NOT use the accent-green foreground: %q", light)
+	}
+}
+
 // TestListMarkersRendered locks the list-bullet fix: without an Item/Enumeration
 // BlockPrefix glamour renders list items as bare indentation (no "•"), which reads as
 // broken "mystery indentation" — a nested bullet list collapses to orphaned indents. We
@@ -114,7 +147,7 @@ func TestDarkColorsPresent(t *testing.T) {
 	r := New(darkTheme())
 	out := r.Render("# Heading", 60, false)
 	if ansi.Strip(out.ANSI) == out.ANSI {
-		t.Fatalf("dark render emitted no ANSI escapes (heading should be accent+bold): %q", out.ANSI)
+		t.Fatalf("dark render emitted no ANSI escapes (heading should be bold): %q", out.ANSI)
 	}
 }
 

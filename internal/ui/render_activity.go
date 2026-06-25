@@ -242,7 +242,7 @@ func activityGlyph(th theme.Theme, a Activity, spinnerFrame int) (string, string
 			return g.Skill, "success"
 		}
 		// The "success" tone is the accent green — but NOT bold (the bold-accent
-		// style is reserved for the ◆ DAINTREE marker / headings).
+		// style is reserved for the ◆ DAINTREE marker).
 		return g.Done, "success"
 	case ActFailed:
 		return g.Failed, "danger"

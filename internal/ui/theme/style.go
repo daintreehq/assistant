@@ -21,7 +21,7 @@ func fg(c color.Color) lipgloss.Style {
 	return s
 }
 
-// Accent — Daintree's own voice (bold accent green): the ◆ DAINTREE marker, headings.
+// Accent — Daintree's own voice (bold accent green): the ◆ DAINTREE marker.
 func (t Theme) Accent() lipgloss.Style { return fg(t.Color.Accent).Bold(true) }
 
 // Brand — the splash/masthead brand green (bold). Startup chrome only.

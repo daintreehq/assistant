@@ -14,22 +14,30 @@ import (
 // takes width + expanded + now and is pure given (cell, theme, md, width, ...) so
 // the scrollback queue can re-render frozen blocks fresh on resize.
 
-// renderUserMessage renders the "YOU" card: a dim+bold "YOU"
-// label on its OWN line, then the wrapped message body with one left accent bar
-// (▏, U+258F) per row. A system-origin turn (UserText == "") renders nothing.
+// renderUserMessage renders the "YOU" card: a quiet "YOU" label on its OWN line,
+// then the wrapped message body as a contiguous fill BLOCK that butts up against a
+// left accent bar (▏, U+258F), one bar+block per row. The fill (a near-background
+// tint from the theme's UserMessageSurface) is what makes the human's own words
+// read as a distinct surface rather than another bar'd list like the tool tree — a
+// lone bar read too much like one. A system-origin turn (UserText == "") renders
+// nothing.
 func renderUserMessage(th theme.Theme, text string, width int) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
 	g := th.Glyphs
-	// The bar carries the visual weight; the dim+bold "YOU" label is a quiet
-	// who-said-what anchor above it. The bar color comes from
-	// the theme's UserMessageSurface (a cool neutral gray, NOT accent green — green
-	// is reserved for Daintree's identity).
+	// Colors come from the theme's UserMessageSurface (a cool neutral gray, NOT accent
+	// green — green is reserved for Daintree's identity).
 	surface := th.UserMessageSurface()
 	barStyle := th.Muted()
 	if surface.Bar != nil {
 		barStyle = th.Dim().Foreground(surface.Bar)
+	}
+	// When there's a fill, the bar shares the fill background so the block reaches
+	// all the way to the accent line — the line becomes the block's left edge rather
+	// than a separate spine with an unfilled seam beside it.
+	if surface.Fill != nil {
+		barStyle = barStyle.Background(surface.Fill)
 	}
 	bar := barStyle.Render(g.Bar)
 	// Body text color: the surface text color, falling back to plain body fg.
@@ -37,22 +45,56 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	if surface.Text != nil {
 		textStyle = textStyle.Foreground(surface.Text)
 	}
-	var b strings.Builder
-	// Quiet anchor on its own line — dim so it never competes with the bar.
-	b.WriteString(th.Dim().Bold(true).Render("YOU"))
-	// Reserve the bar column (1) + the gap/padding (1) + a right breathing margin
-	// (inner = max(10, width-4)); one bar per wrapped row.
-	inner := width - 4
-	if inner < 10 {
-		inner = 10
+	// The "YOU" anchor is a notch LIGHTER than the body — the fill block below now
+	// carries the "this is yours" signal, so the label recedes (faint, NOT bold).
+	labelStyle := th.Dim()
+	if surface.Label != nil {
+		labelStyle = th.Body().Foreground(surface.Label)
 	}
+
+	var b strings.Builder
+	b.WriteString(labelStyle.Render("YOU"))
+
+	// Per-row budget: every rendered row must stay within `width` (the chrome width
+	// chromeW = columns - gutter - LeftPad). The card is LeftPad-indented at commit,
+	// and the gutter reserves the host autowrap column, so a row <= width can never
+	// wrap a frozen scrollback line. rowBudget = width-1 keeps one extra column spare.
+	// Deriving the geometry from rowBudget (NOT a fixed `inner >= 10` floor, which
+	// could push a sub-14-col row past width and wrap) makes every width safe.
+	rowBudget := width - 1
+	if rowBudget < 1 {
+		rowBudget = 1
+	}
+	// Uniform geometry in EVERY mode: reserve bar(1) + gap(1) + a 1-col right margin,
+	// so the text wrap width is identical whether or not a fill is drawn (the fill
+	// just paints that right margin; the fallback leaves it as spare). Keeping `inner`
+	// mode-independent makes the rendered row count stable across themes.
+	inner := rowBudget - 3
+	if inner < 1 {
+		inner = 1
+	}
+	// Fill needs room for the whole block (bar + gap + text + margin); below that, fall
+	// back to the plain bar.
+	useFill := surface.Fill != nil && rowBudget >= 5
+	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
 	// Wrap each explicit paragraph (hard \n breaks preserved, matching wrapText), one
-	// bar per visual row so the gutter stays aligned with whatever we show.
+	// bar + block per visual row so the gutter stays aligned with whatever we show.
 	for _, para := range strings.Split(text, "\n") {
 		wrapped := wrapCells(para, inner)
 		for _, line := range strings.Split(wrapped, "\n") {
 			b.WriteByte('\n')
-			b.WriteString(bar + " " + textStyle.Render(truncateCells(line, inner)))
+			if useFill {
+				// Fixed-width fill: a leading space is the gap after the bar; lipgloss
+				// pads the remainder of blockW with the background, producing a clean
+				// rectangle that meets the bar with no unfilled seam.
+				block := textStyle.Background(surface.Fill).Width(blockW).
+					Render(" " + truncateCells(line, inner))
+				b.WriteString(bar + block)
+			} else {
+				// No fill (ansi/none, or a terminal too narrow for a block): the bar
+				// alone carries the cue.
+				b.WriteString(bar + " " + textStyle.Render(truncateCells(line, inner)))
+			}
 		}
 	}
 	return b.String()

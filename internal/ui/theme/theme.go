@@ -96,7 +96,7 @@ func ResolveMode() Mode { return resolveMode(osLookup) }
 // means "terminal default" (Text) or "no color at all" (ModeNone). Consumers
 // build lipgloss styles from these; they never hardcode hexes elsewhere.
 type Palette struct {
-	// Accent is Daintree's own voice (the ◆ DAINTREE marker, headings).
+	// Accent is Daintree's own voice (the ◆ DAINTREE marker).
 	Accent color.Color
 	// Brand is the deeper splash/masthead green (used only at startup).
 	Brand color.Color
