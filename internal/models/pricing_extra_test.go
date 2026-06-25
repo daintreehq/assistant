@@ -8,7 +8,7 @@ import (
 func closeEnough(got, want, tol float64) bool { return math.Abs(got-want) <= tol }
 
 // estimateCostUsd prices the large model at its input/output rates, matches
-// versioned ids by prefix, strips a Fireworks account path, half-discounts cached
+// versioned ids by prefix, strips a DeepSeek account path, half-discounts cached
 // prompt tokens (clamped to the prompt total), and returns ok=false for unknowns.
 func TestEstimateCostUsdMatrix(t *testing.T) {
 	cases := []struct {
@@ -30,8 +30,8 @@ func TestEstimateCostUsdMatrix(t *testing.T) {
 			want: 0.56, tol: 1e-6, wantOK: true,
 		},
 		{
-			name:  "strips fireworks account path",
-			model: "accounts/fireworks/models/minimax-m3", prompt: 1_000_000, completion: 0,
+			name:  "strips deepseek account path",
+			model: "accounts/deepseek/models/minimax-m3", prompt: 1_000_000, completion: 0,
 			want: 0.3, tol: 1e-6, wantOK: true,
 		},
 		{
@@ -63,9 +63,9 @@ func TestEstimateCostUsdMatrix(t *testing.T) {
 	}
 }
 
-// BareModelID strips a Fireworks account path and leaves a bare id unchanged.
+// BareModelID strips a DeepSeek account path and leaves a bare id unchanged.
 func TestBareModelIDExtra(t *testing.T) {
-	if got := BareModelID("accounts/fireworks/models/minimax-m3"); got != "minimax-m3" {
+	if got := BareModelID("accounts/deepseek/models/minimax-m3"); got != "minimax-m3" {
 		t.Fatalf("bare = %q", got)
 	}
 	if got := BareModelID("deepseek-v4-flash"); got != "deepseek-v4-flash" {

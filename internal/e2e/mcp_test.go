@@ -25,12 +25,12 @@ func TestConnectsToFakeMCP(t *testing.T) {
 	key := "test-key"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{
-			StateDir:        &dir,
-			ProjectPath:     &dir,
-			Tier:            strPtr("operator"),
-			FireworksAPIKey: &key, // present but never called (no Send in this test)
-			McpURL:          &url,
-			McpToken:        &token,
+			StateDir:       &dir,
+			ProjectPath:    &dir,
+			Tier:           strPtr("operator"),
+			DeepSeekAPIKey: &key, // present but never called (no Send in this test)
+			McpURL:         &url,
+			McpToken:       &token,
 		},
 	})
 	if err != nil {

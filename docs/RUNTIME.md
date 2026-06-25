@@ -58,7 +58,7 @@ stable reply rather than a raw provider blob. The mapping lives in `classifyStre
 | What happened | Reply you see | Code | Notes |
 |---|---|---|---|
 | Provider rate-limit / quota exceeded (HTTP 429), after the retry budget is spent | `Model rate-limited: …` | `MODEL_RATE_LIMITED` | Raises a **model-health badge** in the cockpit. The provider's `Retry-After` is recorded internally but not shown today. |
-| No API key, or offline mode | `Model unavailable: …` | `FIREWORKS_UNAVAILABLE` | Set `FIREWORKS_API_KEY` (or clear `DAINTREE_ASSISTANT_OFFLINE`). |
+| No API key, or offline mode | `Model unavailable: …` | `DEEPSEEK_UNAVAILABLE` | Set `DEEPSEEK_API_KEY` (or clear `DAINTREE_ASSISTANT_OFFLINE`). |
 | You pressed Escape to cancel the turn | `Turn cancelled` | `CANCELLED` | A clean stop, not a failure — the loop treats it as such. |
 | Any other model/transport error | `Model error: …` | — | The underlying error text is appended. |
 

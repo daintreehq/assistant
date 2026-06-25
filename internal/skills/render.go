@@ -8,9 +8,9 @@ import (
 )
 
 // cacheKeyPrefix is the DEBUG/log bundle cache-key prefix. It is NOT
-// the live Fireworks prompt_cache_key (that constant is "daintree-main",
+// the live DeepSeek prompt_cache_key (that constant is "daintree-main",
 // unversioned, and lives in the agent loop). Keep these distinct — do not wire
-// this into the Fireworks request.
+// this into the DeepSeek request.
 const cacheKeyPrefix = "daintree-main-v1-skills-"
 
 // RenderedSkillBundle is the id-sorted, hashed set of loaded skills.

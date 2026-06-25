@@ -26,7 +26,7 @@ that writes/edits files.
 The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`)
 and on GitHub at <https://github.com/daintreehq/daintree>.
 
-Powered by **Fireworks AI** (OpenAI-compatible, plain `net/http`). Three model tiers,
+Powered by **DeepSeek AI** (OpenAI-compatible, plain `net/http`). Three model tiers,
 all on `deepseek-v4-flash`: `large` (main thread/orchestration), `small`
 (watchers/summaries/classification), `medium` (routes to large in v1). Flash is the
 validated orchestration model — the loaded skills carry the playbooks, so a heavier
@@ -49,7 +49,7 @@ make install                                                  # go install with 
 ./bin/daintree-assistant --classic           # classic line REPL (also used for non-TTY)
 ./bin/daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
-./bin/daintree-assistant doctor              # check MCP / Fireworks key / project / tier
+./bin/daintree-assistant doctor              # check MCP / DeepSeek key / project / tier
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
@@ -87,7 +87,7 @@ internal/
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
   storage/       Store (store.go) over modernc.org/sqlite — timers, watchers, events, audit,
                  conversation, grants, memory; cancels stale watchers on Open
-  models/        Router (router.go), FireworksClient (fireworks.go, net/http SSE), pricing.go,
+  models/        Router (router.go), DeepSeekClient (deepseek.go, net/http SSE), pricing.go,
                  prompts/ (BaseSystemPrompt, BuildRuntimeContextMessage, BuildLoadedSkillsMessage)
   mcp/           Daintree MCP client over the go-sdk (Streamable HTTP, SSE fallback)
   skills/        embedded runbooks: go:embed files/*.md → SkillRegistry; SelectSkills (small model)
@@ -106,7 +106,7 @@ internal/
   host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
   deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
-  e2e/           end-to-end tests only: built-binary, fake Fireworks/MCP, inline-contract, turn/race
+  e2e/           end-to-end tests only: built-binary, fake DeepSeek/MCP, inline-contract, turn/race
 ```
 
 **Data flow:** `app.App.Create()` builds every dependency once (Store, MCP, Queue,
@@ -136,7 +136,7 @@ publish to the **attention queue** instead of interrupting the main thread.
   actor; non-interactive actors (watcher/timer/workflow) need a scoped **automation grant**.
 - **Prompt-cache stability.** `prompts.BaseSystemPrompt` is the cached prefix — keep it
   byte-stable; dynamic facts live in later control messages (runtime context, loaded
-  skills). The Fireworks `prompt_cache_key` is a plain, unversioned constant
+  skills). The DeepSeek `prompt_cache_key` is a plain, unversioned constant
   (`domain.MainPromptCacheKey = "daintree-main"`); it only groups requests onto a cache
   node. Editing the prefix just misses on the changed tokens — never stale — so there's
   no version to bump.
@@ -264,11 +264,11 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 ## Key environment variables
 
-`FIREWORKS_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DEEPSEEK_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
-`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `FIREWORKS_BASE_URL`.
+`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `DEEPSEEK_BASE_URL`.
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project
@@ -277,5 +277,5 @@ subdir when a project id is set).
 ## More docs
 
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
-`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`, `docs/FIREWORKS.md`,
+`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`, `docs/DEEPSEEK.md`,
 `docs/SKILLS.md` (how to author assistant skills).

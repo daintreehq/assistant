@@ -207,10 +207,10 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 	// the hint row, and "?" for help already cover discoverability, so a banner would just be
 	// clutter under the masthead. We DO surface a genuine degraded state up front, though:
 	// a missing model key at boot rather than only failing on the first turn (clig.dev).
-	if a.Config.FireworksAPIKey == "" {
+	if a.Config.DeepSeekAPIKey == "" {
 		m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
 			ID: domain.NewID("note_"), Level: NoteError, Ts: domain.NowMS(),
-			Text: "FIREWORKS_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.",
+			Text: "DEEPSEEK_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.",
 		}})
 	}
 	return m

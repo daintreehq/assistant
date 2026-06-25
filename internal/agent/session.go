@@ -111,7 +111,7 @@ type Session struct {
 	// estimate). Large-tier ONLY, never the cross-tier aggregate: the aggregate folds in
 	// small-tier background work, including the auto-compact summary call that runs
 	// against the pre-compaction history, which would re-trip the trigger right after a
-	// compaction. 0 is the "no provider figure yet" sentinel (Fireworks never reports 0
+	// compaction. 0 is the "no provider figure yet" sentinel (DeepSeek never reports 0
 	// on a successful call), so the first check (and any during a small-model outage)
 	// uses the estimate alone. Zeroed on every history reset (compactLocked/clearLocked/
 	// truncateLocked) so a stale pre-reset figure can't re-trip the trigger on the
@@ -783,7 +783,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// the PREVIOUS call ran must stop the whole queue here, so no further tool
 		// executes after the user hit Escape. The current call AND every remaining
 		// one (calls[c:]) get a structurally-valid CANCELLED tool result, so each
-		// assistant tool_call still has a matching reply (or Fireworks 400s on
+		// assistant tool_call still has a matching reply (or DeepSeek 400s on
 		// replay).
 		if ctx.Err() != nil {
 			s.stubCancelledFrom(calls, c)
@@ -894,7 +894,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// Mid-batch cancel: a cancel that landed DURING this call's dispatch stops the
 		// queue now. This call already has its real result; stub every remaining
 		// undispatched call (calls[c+1:]) so the transcript stays well-formed (each
-		// assistant tool_call needs a matching tool result, or Fireworks 400s on
+		// assistant tool_call needs a matching tool result, or DeepSeek 400s on
 		// replay).
 		if ctx.Err() != nil {
 			s.stubCancelledFrom(calls, c+1)
@@ -963,7 +963,7 @@ func (s *Session) classifyStreamError(err error) string {
 		s.events.AssistantCancelled("")
 		return domain.CancelledReply
 	}
-	var unavailable *models.FireworksUnavailableError
+	var unavailable *models.DeepSeekUnavailableError
 	if errors.As(err, &unavailable) {
 		msg := "Model unavailable: " + err.Error()
 		s.events.Phase(domain.PhaseFailed)
@@ -1319,7 +1319,7 @@ func estimateMessagesTokens(msgs []models.ChatMessage) int {
 //   - copy, so the cleanup passes and the caller's re-append never alias the s.messages
 //     backing array the caller is about to overwrite;
 //   - drop orphaned tool results, then an incomplete trailing tool call, exactly as a
-//     resume would, so the tail is a valid history Fireworks won't reject;
+//     resume would, so the tail is a valid history DeepSeek won't reject;
 //   - shed from the head (oldest first), re-cleaning orphans after each drop, until the
 //     estimate is at or under tokenBudget — guaranteeing the bound even when a single
 //     retained message is itself larger than the budget.
@@ -1477,7 +1477,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// IDs, the active branch, an open grant); the raw tail keeps them intact. The snapshot
 	// is taken under this SAME post-summary lock, so any InjectNote that raced in during the
 	// (lock-free) model call is included. keepValidTail copies + orphan-cleans, so the
-	// re-appended tail never aliases the reslice and is a valid history Fireworks won't
+	// re-appended tail never aliases the reslice and is a valid history DeepSeek won't
 	// reject. compactLocked still zeroes lastPromptTokens — the tail is small (≤ the budget),
 	// so the post-compaction char estimate stays well under the gate and won't re-trip it.
 	tail := keepValidTail(s.messages[domain.ControlMessageCount:],
@@ -1515,7 +1515,7 @@ func (s *Session) noteCompactFailureLocked() (truncated bool) {
 // the estimate is back under the hard ceiling — guaranteeing the bound even when a
 // single retained message is itself enormous. Orphaned tool results and an incomplete
 // trailing tool call are cleaned exactly as a resume would, so the retained tail is a
-// valid model history Fireworks won't reject. A compaction marker is persisted (so a
+// valid model history DeepSeek won't reject. A compaction marker is persisted (so a
 // later resume rebuilds from the truncation boundary) followed by each retained
 // message at a fresh monotonic seq. Caller MUST hold s.mu.
 func (s *Session) truncateLocked(keepN int) {

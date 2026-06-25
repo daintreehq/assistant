@@ -91,7 +91,7 @@ const (
 	// must reflect that (a small conversation reads ~1%, not 13% of the 60K compact threshold).
 	LargeContextWindowTokens = 1_000_000
 
-	// MainPromptCacheKey is the Fireworks prompt_cache_key. Plain, UNVERSIONED:
+	// MainPromptCacheKey is the DeepSeek prompt_cache_key. Plain, UNVERSIONED:
 	// it only groups requests onto a cache node, never a version.
 	MainPromptCacheKey = "daintree-main"
 

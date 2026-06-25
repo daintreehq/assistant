@@ -1,4 +1,4 @@
-// Fireworks AI client (OpenAI-compatible), hand-rolled on stdlib net/http.
+// DeepSeek AI client (OpenAI-compatible), hand-rolled on stdlib net/http.
 //
 // Provides three call shapes:
 //   - Chat()       non-streaming completion (text + tool calls)
@@ -25,9 +25,9 @@ import (
 	"time"
 )
 
-// FireworksConfig is the subset of the resolved app config the client needs. A
+// DeepSeekConfig is the subset of the resolved app config the client needs. A
 // consumer-defined narrow view so the package compiles without importing config.
-type FireworksConfig struct {
+type DeepSeekConfig struct {
 	BaseURL string
 	APIKey  string
 	Offline bool
@@ -53,15 +53,19 @@ type ChatOptions struct {
 	ToolChoice  string // "auto" | "none" | "required" | "" (omit)
 	Temperature *float64
 	MaxTokens   *int
-	// PromptCacheKey caches a static system-prompt prefix on the Fireworks side.
+	// PromptCacheKey caches a static system-prompt prefix on the DeepSeek side.
 	// Sent ONLY on chat/chatStream (never on json) and only when non-empty.
 	PromptCacheKey string
-	// ReasoningEffort maps to the OpenAI-compatible `reasoning_effort` request field.
-	// "none" disables a reasoning model's <think> phase at the PROVIDER (not just the
-	// client-side ThinkFilter, which strips think AFTER the model already spent the
-	// tokens/latency generating it). The Router forces "none" for the small tier so
-	// every deepseek-v4-flash call (judge / summary / extraction / classification)
-	// stays fast and light. Empty ⇒ omitted (provider default).
+	// ReasoningEffort is the abstract think-control the Router sets per tier. It does
+	// NOT map 1:1 to a DeepSeek wire field, because DeepSeek splits the two concerns:
+	//   - the OFF switch is the `thinking` object — DeepSeek's reasoning_effort has NO
+	//     "none" variant (it accepts only high|low|medium|max|xhigh and 400s on "none").
+	//   - a real effort (high|low|…) passes straight through as `reasoning_effort`.
+	// So buildBody translates: "none" ⇒ thinking:{type:"disabled"} (think-free, what the
+	// Router forces for the small tier and for flash everywhere so every deepseek-v4-flash
+	// call — judge / summary / extraction / classification — stays fast and light); any
+	// other non-empty value ⇒ the `reasoning_effort` field verbatim; empty ⇒ omit both
+	// (provider default, which for a reasoning model is think-ON).
 	ReasoningEffort string
 }
 
@@ -74,27 +78,27 @@ type ChatResult struct {
 	Usage        *Usage
 }
 
-// FireworksClient speaks the OpenAI Chat Completions wire format to Fireworks.
-type FireworksClient struct {
-	cfg  FireworksConfig
+// DeepSeekClient speaks the OpenAI Chat Completions wire format to DeepSeek.
+type DeepSeekClient struct {
+	cfg  DeepSeekConfig
 	http *http.Client
 }
 
-// NewFireworksClient builds a client. The HTTP client has NO global timeout — each
+// NewDeepSeekClient builds a client. The HTTP client has NO global timeout — each
 // attempt derives its own context.WithTimeout so a long stream isn't capped by a
 // short request budget.
-func NewFireworksClient(cfg FireworksConfig) *FireworksClient {
-	return &FireworksClient{cfg: cfg, http: &http.Client{}}
+func NewDeepSeekClient(cfg DeepSeekConfig) *DeepSeekClient {
+	return &DeepSeekClient{cfg: cfg, http: &http.Client{}}
 }
 
 // guard runs at the top of every call: reject offline mode and a missing API key
 // before any wire work.
-func (c *FireworksClient) guard() error {
+func (c *DeepSeekClient) guard() error {
 	if c.cfg.Offline {
-		return &FireworksUnavailableError{Message: "offline mode"}
+		return &DeepSeekUnavailableError{Message: "offline mode"}
 	}
 	if c.cfg.APIKey == "" {
-		return &FireworksUnavailableError{Message: "FIREWORKS_API_KEY not set"}
+		return &DeepSeekUnavailableError{Message: "DEEPSEEK_API_KEY not set"}
 	}
 	return nil
 }
@@ -109,6 +113,7 @@ type chatRequestBody struct {
 	Temperature     float64         `json:"temperature"`
 	MaxTokens       *int            `json:"max_tokens,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Thinking        *thinkingParam  `json:"thinking,omitempty"`
 	PromptCacheKey  string          `json:"prompt_cache_key,omitempty"`
 	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
@@ -116,6 +121,14 @@ type chatRequestBody struct {
 }
 
 type responseFormat struct {
+	Type string `json:"type"`
+}
+
+// thinkingParam is DeepSeek's reasoning on/off switch: Type is "disabled" (skip the
+// <think> phase entirely, at the provider) or "enabled" (force it). Distinct from
+// reasoning_effort, which only tunes DEPTH and has no off setting. We only ever send
+// the disabled form, to express the Router's think-free ("none") intent.
+type thinkingParam struct {
 	Type string `json:"type"`
 }
 
@@ -127,7 +140,7 @@ type streamOptions struct {
 // per-attempt timeout, returning the response for the caller to read. The caller
 // MUST close the body. A non-2xx status returns an *apiError (with headers, for
 // Retry-After). A context cancellation surfaces as context.Canceled.
-func (c *FireworksClient) doRequest(ctx context.Context, body []byte, timeoutMs int) (*http.Response, error) {
+func (c *DeepSeekClient) doRequest(ctx context.Context, body []byte, timeoutMs int) (*http.Response, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	// NB: the caller owns body-close; we cannot cancel here or we'd kill the stream.
 	// For non-stream the caller cancels via the returned closer; for safety on the
@@ -182,16 +195,27 @@ func (b *ctxClosingBody) Close() error {
 // buildBody assembles the request payload for chat/stream/json. mode selects the
 // path-specific fields (default temperature, stream flags, response_format,
 // prompt_cache_key inclusion).
-func (c *FireworksClient) buildBody(opts ChatOptions, stream, jsonMode bool) ([]byte, error) {
+func (c *DeepSeekClient) buildBody(opts ChatOptions, stream, jsonMode bool) ([]byte, error) {
 	wm, err := toWireMessages(opts.Messages)
 	if err != nil {
 		return nil, err
 	}
 	body := chatRequestBody{
-		Model:           opts.Model,
-		Messages:        wm,
-		MaxTokens:       opts.MaxTokens,
-		ReasoningEffort: opts.ReasoningEffort,
+		Model:     opts.Model,
+		Messages:  wm,
+		MaxTokens: opts.MaxTokens,
+	}
+	// DeepSeek splits think-control across two fields (see ChatOptions.ReasoningEffort):
+	// "none" is not a valid reasoning_effort variant, so the Router's think-free intent
+	// is expressed via the `thinking` off switch instead. A real effort passes through;
+	// empty omits both (provider default).
+	switch opts.ReasoningEffort {
+	case "none":
+		body.Thinking = &thinkingParam{Type: "disabled"}
+	case "":
+		// omit both — provider default
+	default:
+		body.ReasoningEffort = opts.ReasoningEffort
 	}
 	if jsonMode {
 		// json path: NO tools/tool_choice, default temperature 0, response_format,
@@ -203,7 +227,7 @@ func (c *FireworksClient) buildBody(opts ChatOptions, stream, jsonMode bool) ([]
 		body.ResponseFormat = &responseFormat{Type: "json_object"}
 	} else {
 		// Normalize parameterless tools so a nil/empty Parameters never marshals to
-		// the wire `null` Fireworks rejects (→ empty-object schema instead).
+		// the wire `null` DeepSeek rejects (→ empty-object schema instead).
 		body.Tools = normalizeTools(opts.Tools)
 		body.ToolChoice = opts.ToolChoice
 		body.Temperature = 0.3
@@ -234,7 +258,7 @@ func normalizeAbort(ctx context.Context, err error) error {
 }
 
 // Chat runs a non-streaming completion with bounded retry + per-attempt timeout.
-func (c *FireworksClient) Chat(ctx context.Context, opts ChatOptions) (ChatResult, error) {
+func (c *DeepSeekClient) Chat(ctx context.Context, opts ChatOptions) (ChatResult, error) {
 	if err := c.guard(); err != nil {
 		return ChatResult{}, err
 	}
@@ -258,7 +282,7 @@ func (c *FireworksClient) Chat(ctx context.Context, opts ChatOptions) (ChatResul
 		return ChatResult{}, normalizeAbort(ctx, err)
 	}
 	if len(resp.Choices) == 0 {
-		return ChatResult{}, errors.New("fireworks: empty choices in response")
+		return ChatResult{}, errors.New("deepseek: empty choices in response")
 	}
 	choice := resp.Choices[0]
 	filter := &ThinkFilter{}
@@ -270,11 +294,24 @@ func (c *FireworksClient) Chat(ctx context.Context, opts ChatOptions) (ChatResul
 	filter.End()
 	return ChatResult{
 		Content:      strings.TrimSpace(filter.Visible()),
-		Reasoning:    strings.TrimSpace(filter.Reasoning()),
+		Reasoning:    pickReasoning(filter.Reasoning(), choice.Message.ReasoningContent),
 		ToolCalls:    normalizeToolCalls(choice.Message.ToolCalls),
 		FinishReason: finishOrStop(choice.FinishReason),
 		Usage:        resp.Usage.toUsage(),
 	}, nil
+}
+
+// pickReasoning resolves the reasoning text from the two channels DeepSeek can use:
+// the dedicated `reasoning_content` field (the native form) wins when present;
+// otherwise the inline-<think> text the ThinkFilter segregated from content is used
+// (the legacy form some OpenAI-compatible backends emit). Both trimmed.
+func pickReasoning(filtered string, reasoningContent *string) string {
+	if reasoningContent != nil {
+		if rc := strings.TrimSpace(*reasoningContent); rc != "" {
+			return rc
+		}
+	}
+	return strings.TrimSpace(filtered)
 }
 
 // JSON runs a strict json_object completion. The caller (the Router) strips think,
@@ -283,7 +320,7 @@ func (c *FireworksClient) Chat(ctx context.Context, opts ChatOptions) (ChatResul
 // Returns the cleaned JSON string AND the parsed token usage, so the Router can
 // meter json-path spend the same way it meters Chat/Stream (usage is nil when the
 // provider reported none).
-func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, *Usage, error) {
+func (c *DeepSeekClient) JSON(ctx context.Context, opts ChatOptions) (string, *Usage, error) {
 	if err := c.guard(); err != nil {
 		return "", nil, err
 	}
@@ -311,11 +348,11 @@ func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, *
 	// content in json_object mode would otherwise hand the caller a silent "{}" that
 	// validates to a misleading empty result. Let the caller see the failure.
 	if len(resp.Choices) == 0 {
-		return "", nil, errors.New("fireworks: empty choices in response")
+		return "", nil, errors.New("deepseek: empty choices in response")
 	}
 	content := resp.Choices[0].Message.Content
 	if content == nil || *content == "" {
-		return "", nil, errors.New("fireworks: empty content in json_object response")
+		return "", nil, errors.New("deepseek: empty content in json_object response")
 	}
 	cleaned := stripThink(*content)
 	return ExtractJson(cleaned), resp.Usage.toUsage(), nil
@@ -325,7 +362,7 @@ func (c *FireworksClient) JSON(ctx context.Context, opts ChatOptions) (string, *
 // newly-visible chunk. Retry is PRE-TOKEN ONLY: once any visible token has reached
 // the caller, a later failure propagates unchanged (retrying would duplicate output
 // into the immutable transcript).
-func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onToken func(string)) (ChatResult, error) {
+func (c *DeepSeekClient) ChatStream(ctx context.Context, opts ChatOptions, onToken func(string)) (ChatResult, error) {
 	if err := c.guard(); err != nil {
 		return ChatResult{}, err
 	}
@@ -344,6 +381,10 @@ func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onTo
 		// capErr records a per-tool-argument ceiling breach detected inside the SSE
 		// callback (which can't return an error); checked after parseSSE returns.
 		var capErr error
+		// reasoningBuf accumulates DeepSeek's streamed reasoning_content fragments
+		// (the native reasoning channel) — never emitted to onToken (it's not visible
+		// output), surfaced only on ChatResult.Reasoning.
+		var reasoningBuf strings.Builder
 
 		res, streamErr := func() (ChatResult, error) {
 			httpResp, herr := c.doRequest(ctx, body, ModelStreamTimeoutMs)
@@ -362,6 +403,9 @@ func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onTo
 					return
 				}
 				choice := chunk.Choices[0]
+				if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+					reasoningBuf.WriteString(*choice.Delta.ReasoningContent)
+				}
 				if choice.Delta.Content != nil && *choice.Delta.Content != "" {
 					visible := filter.Push(*choice.Delta.Content)
 					if visible != "" {
@@ -391,7 +435,7 @@ func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onTo
 						if tc.Function.Arguments != "" {
 							if len(cur.args)+len(tc.Function.Arguments) > maxToolArgBytes {
 								if capErr == nil {
-									capErr = errors.New("fireworks: tool-call arguments exceeded byte ceiling")
+									capErr = errors.New("deepseek: tool-call arguments exceeded byte ceiling")
 								}
 								continue
 							}
@@ -416,9 +460,10 @@ func (c *FireworksClient) ChatStream(ctx context.Context, opts ChatOptions, onTo
 					onToken(tail)
 				}
 			}
+			streamReasoning := reasoningBuf.String()
 			return ChatResult{
 				Content:      strings.TrimSpace(filter.Visible()),
-				Reasoning:    strings.TrimSpace(filter.Reasoning()),
+				Reasoning:    pickReasoning(filter.Reasoning(), &streamReasoning),
 				ToolCalls:    buildStreamToolCalls(toolAcc),
 				FinishReason: finishReason,
 				Usage:        usage,
@@ -494,7 +539,7 @@ func finishOrStop(fr *string) string {
 	return *fr
 }
 
-// parseSSE hand-parses a Fireworks SSE stream: lines starting `data: ` carry a
+// parseSSE hand-parses a DeepSeek SSE stream: lines starting `data: ` carry a
 // JSON chunk; `data: [DONE]` ends the stream. Tolerant of CRLF and of blank-line
 // event separators. The caller closes the body.
 //
@@ -533,7 +578,7 @@ func parseSSE(r io.Reader, onChunk func(*streamChunk)) error {
 		}
 		totalBytes += int64(len(payload))
 		if totalBytes > maxStreamTotalBytes {
-			return errors.New("fireworks: stream exceeded total byte ceiling")
+			return errors.New("deepseek: stream exceeded total byte ceiling")
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal(payload, &chunk); err != nil {
@@ -542,7 +587,7 @@ func parseSSE(r io.Reader, onChunk func(*streamChunk)) error {
 			// fabricating a complete result from a corrupted stream. Wrap
 			// io.ErrUnexpectedEOF so the retry classifier treats a corrupted/
 			// truncated payload as the transient read failure it is.
-			return fmt.Errorf("fireworks: malformed SSE data payload: %w (%v)", io.ErrUnexpectedEOF, err)
+			return fmt.Errorf("deepseek: malformed SSE data payload: %w (%v)", io.ErrUnexpectedEOF, err)
 		}
 		// A provider error delivered mid-stream (after HTTP 200) arrives as
 		// `data: {"error": {...}}` with no choices. Surface it as a real failure instead
@@ -584,7 +629,7 @@ func sseErrorToError(se *streamError) error {
 	if se.Code == "429" {
 		return &apiError{status: 429, body: msg}
 	}
-	return fmt.Errorf("fireworks: provider stream error: %s", msg)
+	return fmt.Errorf("deepseek: provider stream error: %s", msg)
 }
 
 const maxSSELineBytes = 8 * 1024 * 1024 // 8MB ceiling per SSE line

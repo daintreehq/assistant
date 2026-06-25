@@ -210,7 +210,7 @@ func TestJSONHappyPath(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Fix 4: a tool with nil/empty Parameters marshals to "parameters":{} on the
-// wire, never the null Fireworks rejects.
+// wire, never the null DeepSeek rejects.
 // ---------------------------------------------------------------------------
 
 func TestNilToolParametersMarshalsEmptyObject(t *testing.T) {
@@ -245,7 +245,7 @@ func TestNilToolParametersMarshalsEmptyObject(t *testing.T) {
 			t.Fatalf("tool %d: parameters key missing", i)
 		}
 		if params == nil {
-			t.Fatalf("tool %d: parameters is null (Fireworks rejects this)", i)
+			t.Fatalf("tool %d: parameters is null (DeepSeek rejects this)", i)
 		}
 		obj, ok := params.(map[string]any)
 		if !ok || len(obj) != 0 {

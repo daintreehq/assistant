@@ -1,5 +1,5 @@
-// Model router: maps the small/medium/large abstraction onto concrete Fireworks
-// model ids and the FireworksClient. The large model owns the main thread; the
+// Model router: maps the small/medium/large abstraction onto concrete DeepSeek
+// model ids and the DeepSeekClient. The large model owns the main thread; the
 // small model does cheap repeated work (watchers, summaries, classification). For
 // v1 the medium tier routes to the large model id (but stays a distinct contract).
 package models
@@ -28,23 +28,23 @@ type DebugLogger interface {
 	LogDebug(event string, fields map[string]any)
 }
 
-// Router maps tiers onto models and wraps FireworksClient with the image-tier gate
+// Router maps tiers onto models and wraps DeepSeekClient with the image-tier gate
 // and debug tracing. It also owns the session usage meter: every Chat/Stream/JSON
 // call records its token usage here so the cost footer reflects EVERY model call
 // in a turn, not just the large-thread stream (see usage.go).
 type Router struct {
-	FW     *FireworksClient
+	Client *DeepSeekClient
 	cfg    RouterConfig
 	log    DebugLogger
 	meter  *usageAccumulator
 	elider *logElider
 }
 
-// NewRouter builds a router. fw may be nil, in which case the caller is expected to
+// NewRouter builds a router. the client may be nil, in which case the caller is expected to
 // supply one via NewRouterWithClient; this constructor requires an explicit client
 // because the model-id config and the client's connection config are separate seams.
-func NewRouter(cfg RouterConfig, fw *FireworksClient, log DebugLogger) *Router {
-	return &Router{FW: fw, cfg: cfg, log: log, meter: newUsageAccumulator(), elider: newLogElider()}
+func NewRouter(cfg RouterConfig, client *DeepSeekClient, log DebugLogger) *Router {
+	return &Router{Client: client, cfg: cfg, log: log, meter: newUsageAccumulator(), elider: newLogElider()}
 }
 
 // ModelFor resolves a tier to its concrete model id. default falls through to large.
@@ -76,7 +76,7 @@ func (r *Router) ModelFor(tier domain.ModelTier) string {
 //     costly hidden <think> on every turn (≈23–38s vs ≈1s) even for a trivial
 //     single-tool routing call. A caller that genuinely wants reasoning on a
 //     specific call sets ReasoningEffort explicitly (it wins above).
-//   - large/medium on glm → "high": GLM-5.2 on Fireworks accepts only high|max
+//   - large/medium on glm → "high": GLM-5.2 on DeepSeek accepts only high|max
 //     (it coerces low/medium → high and rejects "none"), so a deployer who points
 //     a tier at glm via DAINTREE_{LARGE,MEDIUM}_MODEL must still get "high".
 //
@@ -138,7 +138,7 @@ func (r *Router) Chat(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	opts.Model = model
 	applyTierReasoning(tier, model, &opts)
 	r.logRequest("chat", tier, model, opts)
-	res, err := r.FW.Chat(ctx, opts)
+	res, err := r.Client.Chat(ctx, opts)
 	if err != nil {
 		return ChatResult{}, r.classifyErr("chat", tier, model, err)
 	}
@@ -156,7 +156,7 @@ func (r *Router) Stream(ctx context.Context, tier domain.ModelTier, opts ChatOpt
 	opts.Model = model
 	applyTierReasoning(tier, model, &opts)
 	r.logRequest("stream", tier, model, opts)
-	res, err := r.FW.ChatStream(ctx, opts, onToken)
+	res, err := r.Client.ChatStream(ctx, opts, onToken)
 	if err != nil {
 		return ChatResult{}, r.classifyErr("stream", tier, model, err)
 	}
@@ -176,7 +176,7 @@ func (r *Router) JSON(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	opts.Model = model
 	applyTierReasoning(tier, model, &opts)
 	r.logRequest("json", tier, model, opts)
-	out, usage, err := r.FW.JSON(ctx, opts)
+	out, usage, err := r.Client.JSON(ctx, opts)
 	if err != nil {
 		return "", r.classifyErr("json", tier, model, err)
 	}

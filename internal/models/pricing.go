@@ -2,11 +2,12 @@ package models
 
 import "strings"
 
-// Static, dependency-free pricing for the Fireworks models the router maps to,
-// used to turn per-turn token counts into a rough running session cost. Rates are
-// USD per million tokens from Fireworks serverless ~2026-06; they drift and are
-// intentionally approximate. An unknown model returns (0,false) so the UI can
-// distinguish "no rate" from a genuine $0.000.
+// Static, dependency-free pricing for the DeepSeek models the router maps to, used to
+// turn per-turn token counts into a rough running session cost. Rates are USD per
+// million tokens from DeepSeek's published rate card (~2026-06): inputPerM is the
+// cache-MISS input price, cachedPerM the cache-HIT input price, outputPerM the output
+// price. They drift, so treat them as approximate. An unknown model returns (0,false)
+// so the UI can distinguish "no rate" from a genuine $0.000.
 
 type modelRate struct {
 	inputPerM  float64
@@ -21,15 +22,15 @@ var rates = []struct {
 	rate   modelRate
 }{
 	{"glm-5p2", modelRate{inputPerM: 1.40, cachedPerM: 0.26, outputPerM: 4.40}},
-	{"deepseek-v4-flash", modelRate{inputPerM: 0.14, cachedPerM: 0.03, outputPerM: 0.28}},
-	{"deepseek-v4-pro", modelRate{inputPerM: 1.74, cachedPerM: 0.15, outputPerM: 3.48}},
-	{"deepseek-v4", modelRate{inputPerM: 0.14, cachedPerM: 0.03, outputPerM: 0.28}}, // Flash fallback
+	{"deepseek-v4-flash", modelRate{inputPerM: 0.14, cachedPerM: 0.0028, outputPerM: 0.28}},
+	{"deepseek-v4-pro", modelRate{inputPerM: 0.435, cachedPerM: 0.003625, outputPerM: 0.87}},
+	{"deepseek-v4", modelRate{inputPerM: 0.14, cachedPerM: 0.0028, outputPerM: 0.28}}, // Flash fallback
 	{"deepseek-v3", modelRate{inputPerM: 0.56, cachedPerM: 0.11, outputPerM: 1.68}},
 	{"minimax-m3", modelRate{inputPerM: 0.30, cachedPerM: 0.06, outputPerM: 1.20}},
 	{"minimax-m2", modelRate{inputPerM: 0.30, cachedPerM: 0.06, outputPerM: 1.20}},
 }
 
-// BareModelID strips any accounts/<x>/models/<id> Fireworks path: the substring
+// BareModelID strips any accounts/<x>/models/<id> DeepSeek path: the substring
 // after the last '/', else the id as-is.
 func BareModelID(model string) string {
 	if i := strings.LastIndex(model, "/"); i != -1 {

@@ -196,7 +196,7 @@ func recordToChatMessage(r domain.ConversationMessageRecord) (models.ChatMessage
 }
 
 // dropOrphanToolResults filters out role=="tool" messages whose tool_call_id was
-// never declared by a PRECEDING assistant tool_calls. Fireworks rejects an
+// never declared by a PRECEDING assistant tool_calls. DeepSeek rejects an
 // orphan tool result (its parent's toolCallsJson was malformed/lost). The pass is
 // strictly forward and declarations accumulate as we go, so a tool result is kept
 // only when an EARLIER assistant message already declared its id — a result that

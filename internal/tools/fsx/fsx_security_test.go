@@ -29,7 +29,7 @@ func buildSecurityFixture(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	write(".env", "FIREWORKS_API_KEY=fw_secret_value\n")
+	write(".env", "DEEPSEEK_API_KEY=sk-secret-value\n")
 	write("server.key", "-----BEGIN PRIVATE KEY-----\nsecret\n")
 	write("app.ts", "const apiKey = readEnv();\n")
 	if err := os.WriteFile(filepath.Join(root, "blob.bin"), []byte{0x00, 0x01, 0x02, 0x00, 0x42}, 0o644); err != nil {
@@ -130,7 +130,7 @@ func TestSearchNeverReturnsCredentialMarkers(t *testing.T) {
 // match inside .env never returns the .env file.
 func TestSearchSkipsDotEnvContents(t *testing.T) {
 	root := buildSecurityFixture(t)
-	res := callSearch(t, root, "FIREWORKS_API_KEY", "")
+	res := callSearch(t, root, "DEEPSEEK_API_KEY", "")
 	if !res.Ok {
 		t.Fatalf("search failed: %+v", res.Error)
 	}

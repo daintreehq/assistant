@@ -26,7 +26,7 @@ func isolatedHome(t *testing.T) string {
 		"DAINTREE_PROJECT_ID", "DAINTREE_WINDOW_ID", "DAINTREE_ASSISTANT_STATE_DIR",
 		"DAINTREE_ASSISTANT_TIER", "DAINTREE_ASSISTANT_AUTO_APPROVE",
 		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR", "DAINTREE_ASSISTANT_DEBUG_LOG",
-		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "FIREWORKS_API_KEY", "FIREWORKS_BASE_URL",
+		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
 		"DAINTREE_LARGE_MODEL", "DAINTREE_MEDIUM_MODEL", "DAINTREE_SMALL_MODEL",
 	} {
 		os.Unsetenv(k)
@@ -94,7 +94,7 @@ func TestLoadConfig_LargeModelDefault(t *testing.T) {
 // orchestration model. If any default ever drifts back to a heavier model, this fails.
 func TestLoadConfig_AllTiersDefaultToFlash(t *testing.T) {
 	isolatedHome(t)
-	const flash = "accounts/fireworks/models/deepseek-v4-flash"
+	const flash = "deepseek-v4-flash"
 	cfg := mustLoad(t, ConfigOverrides{})
 	for tier, got := range map[string]string{
 		"large":  cfg.LargeModel,
@@ -275,14 +275,14 @@ func TestLoadConfig_ProjectEnvCannotSupplyIdentity(t *testing.T) {
 }
 
 // TestLoadConfig_ProjectEnvCannotRedirectEndpoints is the exfiltration fix: a project .env
-// must NOT be able to set the Fireworks base URL, the MCP URL, or the MCP token — otherwise
+// must NOT be able to set the DeepSeek base URL, the MCP URL, or the MCP token — otherwise
 // a malicious bound repo could redirect where the trusted API key / token is sent. Even with
 // NO real-env value (the project .env is the only source), these stay at their safe defaults.
 func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 	isolatedHome(t)
 	projectDir := t.TempDir()
 	envBody := strings.Join([]string{
-		"FIREWORKS_BASE_URL=https://attacker.example/v1",
+		"DEEPSEEK_BASE_URL=https://attacker.example/v1",
 		"DAINTREE_MCP_URL=http://attacker.example/mcp",
 		"DAINTREE_MCP_TOKEN=stolen",
 	}, "\n") + "\n"
@@ -291,8 +291,8 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 	}
 	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
 
-	if cfg.FireworksBaseURL != DEFAULTS.FireworksBaseURL {
-		t.Errorf("project .env redirected FireworksBaseURL to %q (trusted-key exfiltration)", cfg.FireworksBaseURL)
+	if cfg.DeepSeekBaseURL != DEFAULTS.DeepSeekBaseURL {
+		t.Errorf("project .env redirected DeepSeekBaseURL to %q (trusted-key exfiltration)", cfg.DeepSeekBaseURL)
 	}
 	if cfg.McpURL != "" {
 		t.Errorf("project .env set McpURL to %q (must stay unset → degraded local mode)", cfg.McpURL)
@@ -306,14 +306,14 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 
 func TestDescribeConfig_RedactsSecrets(t *testing.T) {
 	stateDir := t.TempDir()
-	rawKey := "fw-secret-1234567890"
-	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), FireworksAPIKey: strptr(rawKey)})
+	rawKey := "sk-secret-1234567890"
+	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), DeepSeekAPIKey: strptr(rawKey)})
 	d := DescribeConfig(cfg)
-	if cfg.FireworksAPIKey != rawKey {
-		t.Errorf("loadConfig mangled the key: %q", cfg.FireworksAPIKey)
+	if cfg.DeepSeekAPIKey != rawKey {
+		t.Errorf("loadConfig mangled the key: %q", cfg.DeepSeekAPIKey)
 	}
-	if d["fireworksApiKey"] == rawKey || strings.Contains(d["fireworksApiKey"], rawKey) {
-		t.Errorf("fireworksApiKey not redacted: %q", d["fireworksApiKey"])
+	if d["deepseekApiKey"] == rawKey || strings.Contains(d["deepseekApiKey"], rawKey) {
+		t.Errorf("deepseekApiKey not redacted: %q", d["deepseekApiKey"])
 	}
 }
 

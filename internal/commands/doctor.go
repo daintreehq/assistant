@@ -53,9 +53,9 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 		return "MISSING"
 	}
 
-	// fireworks key.
-	push("fireworks key", cfg.FireworksAPIKey != "", presentOrMissing(cfg.FireworksAPIKey),
-		"set FIREWORKS_API_KEY in .env or the environment")
+	// deepseek key.
+	push("deepseek key", cfg.DeepSeekAPIKey != "", presentOrMissing(cfg.DeepSeekAPIKey),
+		"set DEEPSEEK_API_KEY in .env or the environment")
 	// models.
 	push("large model", cfg.LargeModel != "", cfg.LargeModel, "set DAINTREE_LARGE_MODEL")
 	push("small model", cfg.SmallModel != "", cfg.SmallModel, "set DAINTREE_SMALL_MODEL")

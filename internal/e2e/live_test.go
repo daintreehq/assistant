@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// TestLiveFireworksOneShot is the ONE test that proves a real model round-trip
+// TestLiveDeepSeekOneShot is the ONE test that proves a real model round-trip
 // actually works end-to-end: it builds the real binary, runs `--json "<prompt>"`
-// against the REAL Fireworks API (the default large model, no FIREWORKS_BASE_URL
+// against the REAL DeepSeek API (the default large model, no DEEPSEEK_BASE_URL
 // override), with NO Daintree MCP, and asserts the JSONL schema-v1 stream came
 // back well-formed with non-empty assistant content over the wire.
 //
@@ -25,7 +25,7 @@ import (
 //
 //  1. DAINTREE_E2E_LIVE=1 — explicit opt-in. Absent → skip. This is the master
 //     switch; without it the live test never touches the network.
-//  2. FIREWORKS_API_KEY present in the real env — no key, nothing to authenticate
+//  2. DEEPSEEK_API_KEY present in the real env — no key, nothing to authenticate
 //     with, so skip rather than emit a confusing auth error.
 //  3. -short mode — `go test -short` is the "fast, no-network" contract; honor it.
 //  4. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
@@ -36,20 +36,20 @@ import (
 // PIPE works — exit 0, pure JSONL, monotonic seq, a terminal success envelope, and
 // at least one chunk of non-empty assistant text — not that any specific tokens
 // came back.
-func TestLiveFireworksOneShot(t *testing.T) {
+func TestLiveDeepSeekOneShot(t *testing.T) {
 	// Guard 3: the fast/no-network contract.
 	if testing.Short() {
-		t.Skip("live Fireworks e2e skipped in -short mode")
+		t.Skip("live DeepSeek e2e skipped in -short mode")
 	}
 	// Guard 1: the master opt-in switch. Keep money/network off by default.
 	if os.Getenv("DAINTREE_E2E_LIVE") != "1" {
-		t.Skip("live Fireworks e2e is opt-in; run with DAINTREE_E2E_LIVE=1 and a FIREWORKS_API_KEY in the env " +
-			"(e.g. DAINTREE_E2E_LIVE=1 go test ./internal/e2e/ -run TestLiveFireworks -v -count=1)")
+		t.Skip("live DeepSeek e2e is opt-in; run with DAINTREE_E2E_LIVE=1 and a DEEPSEEK_API_KEY in the env " +
+			"(e.g. DAINTREE_E2E_LIVE=1 go test ./internal/e2e/ -run TestLiveDeepSeek -v -count=1)")
 	}
 	// Guard 2: no real key → nothing to call. Skip (not fail) so a misconfigured
 	// opt-in is obvious but non-fatal.
-	if strings.TrimSpace(os.Getenv("FIREWORKS_API_KEY")) == "" {
-		t.Skip("live Fireworks e2e requires FIREWORKS_API_KEY in the environment; none set")
+	if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
+		t.Skip("live DeepSeek e2e requires DEEPSEEK_API_KEY in the environment; none set")
 	}
 
 	// Guard 4 lives inside buildBinary(t): it t.Skip()s under -race.
@@ -65,9 +65,9 @@ func TestLiveFireworksOneShot(t *testing.T) {
 	// assert on the word "pong" — only that real content streamed back.
 	cmd := exec.CommandContext(ctx, bin, "--json", "Reply with exactly the word: pong, nothing else.")
 
-	// Inherit the real environment FIRST (this carries the real FIREWORKS_API_KEY),
+	// Inherit the real environment FIRST (this carries the real DEEPSEEK_API_KEY),
 	// then layer the test-isolation overrides. Crucially we do NOT set
-	// FIREWORKS_BASE_URL (so it hits the real default Fireworks endpoint) and do NOT
+	// DEEPSEEK_BASE_URL (so it hits the real default DeepSeek endpoint) and do NOT
 	// set DAINTREE_ASSISTANT_OFFLINE (offline mode would short-circuit the call).
 	cmd.Env = append(os.Environ(),
 		"DAINTREE_MCP_URL=",                         // no MCP → clean degraded local mode, no Daintree dependency
@@ -156,7 +156,7 @@ func TestLiveFireworksOneShot(t *testing.T) {
 	// Real content surfaces either as assistant:content lines (streamed prose) or as
 	// the authoritative `content` on assistant:end / the terminal result. We collect
 	// from all of them and assert the concatenation is non-empty — proof that bytes
-	// came back from Fireworks, WITHOUT pinning the exact (nondeterministic) text.
+	// came back from DeepSeek, WITHOUT pinning the exact (nondeterministic) text.
 	var assistantText strings.Builder
 	for _, l := range lines {
 		switch l.Type {

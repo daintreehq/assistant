@@ -9,7 +9,7 @@
 //   - BuildLoadedSkillsMessage       message[2] — bodies of skills loaded this task.
 //
 // The small-model sub-agent prompts (watcher/judge/summarizer/extractor) also live
-// here. Every byte is a contract: the base prefix is a Fireworks prompt-cache key,
+// here. Every byte is a contract: the base prefix is a DeepSeek prompt-cache key,
 // and the sub-agent prompts are what the small model is tuned against.
 package prompts
 

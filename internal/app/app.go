@@ -199,7 +199,7 @@ func Create(opts CreateOptions) (*App, error) {
 	a.Queue = queue.New(queueEventStore{s: store}, domain.NowMS)
 	a.Router = models.NewRouter(
 		models.RouterConfig{LargeModel: cfg.LargeModel, MediumModel: cfg.MediumModel, SmallModel: cfg.SmallModel},
-		models.NewFireworksClient(models.FireworksConfig{BaseURL: cfg.FireworksBaseURL, APIKey: cfg.FireworksAPIKey, Offline: cfg.Offline}),
+		models.NewDeepSeekClient(models.DeepSeekConfig{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Offline: cfg.Offline}),
 		debugLogAdapter{cfg: debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}},
 	)
 

@@ -92,13 +92,13 @@ func indexOf(log []string, s string) int {
 }
 
 // TestFullTurnAgainstFakes drives a complete agent turn end-to-end against the fake
-// Fireworks SSE server: round 1 streams prose + a memory.list tool call; round 2
+// DeepSeek SSE server: round 1 streams prose + a memory.list tool call; round 2
 // streams the final answer. It asserts the streamed event order, that the tool was
 // dispatched and its result fed back into round 2, that the conversation was
 // persisted, the run-event log written, and the RunPhase lifecycle reached a
 // terminal phase.
 func TestFullTurnAgainstFakes(t *testing.T) {
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		// Round 1: a little prose, then a tool call to the local read-only memory.list.
 		sseRound{
 			contentTokens: []string{"Let me ", "check."},
@@ -113,20 +113,20 @@ func TestFullTurnAgainstFakes(t *testing.T) {
 		},
 	)
 
-	// Point the model client at the fake via the FIREWORKS_BASE_URL env override
+	// Point the model client at the fake via the DEEPSEEK_BASE_URL env override
 	// (the config trusted-env boundary reads it). A non-empty API key clears the
 	// offline/missing-key guard.
-	t.Setenv("FIREWORKS_BASE_URL", fake.baseURL())
+	t.Setenv("DEEPSEEK_BASE_URL", fake.baseURL())
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
 
 	dir := t.TempDir()
 	key := "test-key"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{
-			StateDir:        &dir,
-			ProjectPath:     &dir,
-			Tier:            strPtr("operator"),
-			FireworksAPIKey: &key,
+			StateDir:       &dir,
+			ProjectPath:    &dir,
+			Tier:           strPtr("operator"),
+			DeepSeekAPIKey: &key,
 		},
 	})
 	if err != nil {
@@ -255,7 +255,7 @@ func TestFullTurnAgainstFakes(t *testing.T) {
 // flashModelID is the validated orchestration model id all tiers default to. The
 // wiring test below pins it so the large tier can never silently revert to a heavier
 // model: flash is the validated main-thread model (see config.DEFAULTS).
-const flashModelID = "accounts/fireworks/models/deepseek-v4-flash"
+const flashModelID = "deepseek-v4-flash"
 
 // countToolRoleMessages returns how many role:"tool" feedback messages a request
 // carried — i.e. how many prior tool results were folded back into that round.
@@ -271,7 +271,7 @@ func countToolRoleMessages(msgs []map[string]any) int {
 
 // TestOrchestratorFlashWiringAndMultiStep validates that the orchestrator (large
 // tier / main thread) runs on the flash model under a genuinely multi-step load —
-// not a single relay. The fake Fireworks server is scripted and deterministic, so it
+// not a single relay. The fake DeepSeek server is scripted and deterministic, so it
 // cannot test flash's reasoning *quality*; what it proves is the wiring that makes
 // flash a sound orchestration model: (1) every main-thread round is sent on the
 // flash model id, (2) the large tier defaults to reasoning_effort:"none" (flash is
@@ -290,7 +290,7 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 			config.DEFAULTS.LargeModel, flashModelID)
 	}
 
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		// Round 1: orchestrator opens the deduction — list what's in memory.
 		sseRound{
 			contentTokens: []string{"Step 1: ", "list memory."},
@@ -312,7 +312,7 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		},
 	)
 
-	t.Setenv("FIREWORKS_BASE_URL", fake.baseURL())
+	t.Setenv("DEEPSEEK_BASE_URL", fake.baseURL())
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
 	// Pin the model env to empty so this test proves the *default* wiring is flash
 	// regardless of the developer's shell — FirstString skips empty values and falls
@@ -325,10 +325,10 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 	key := "test-key"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{
-			StateDir:        &dir,
-			ProjectPath:     &dir,
-			Tier:            strPtr("operator"),
-			FireworksAPIKey: &key,
+			StateDir:       &dir,
+			ProjectPath:    &dir,
+			Tier:           strPtr("operator"),
+			DeepSeekAPIKey: &key,
 		},
 	})
 	if err != nil {
@@ -352,13 +352,19 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		t.Fatalf("model called %d times, want 3 (two chained tool rounds + final)", got)
 	}
 
-	// --- every main-thread round ran on flash at reasoning_effort "none" ---
+	// --- every main-thread round ran on flash, think-free ---
+	// On DeepSeek the think-free intent is thinking:{type:"disabled"} with no
+	// reasoning_effort (there is no "none" effort variant — it would 400).
 	for i := 0; i < 3; i++ {
 		if got := fake.requestField(i, "model"); got != flashModelID {
 			t.Errorf("round %d model = %v, want flash orchestration model %q", i+1, got, flashModelID)
 		}
-		if got := fake.requestField(i, "reasoning_effort"); got != "none" {
-			t.Errorf("round %d reasoning_effort = %v, want %q (large-tier flash orchestration default)", i+1, got, "none")
+		if got := fake.requestField(i, "reasoning_effort"); got != nil {
+			t.Errorf("round %d reasoning_effort = %v, want absent (think-free uses thinking:disabled)", i+1, got)
+		}
+		th, ok := fake.requestField(i, "thinking").(map[string]any)
+		if !ok || th["type"] != "disabled" {
+			t.Errorf("round %d thinking = %v, want {type:disabled} (large-tier flash think-free default)", i+1, fake.requestField(i, "thinking"))
 		}
 	}
 

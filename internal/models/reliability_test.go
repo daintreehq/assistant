@@ -92,7 +92,7 @@ func TestRetryModelCallStopsOnNonRetriable(t *testing.T) {
 
 func TestEstimateCostUsd(t *testing.T) {
 	// glm-5p2: input 1.40, cached 0.26, output 4.40 per M. 1000 prompt (200 cached), 500 output.
-	cost, ok := EstimateCostUsd("accounts/fireworks/models/glm-5p2", 1000, 500, 200)
+	cost, ok := EstimateCostUsd("accounts/deepseek/models/glm-5p2", 1000, 500, 200)
 	if !ok {
 		t.Fatal("expected a known rate")
 	}
@@ -108,7 +108,7 @@ func TestEstimateCostUsd(t *testing.T) {
 }
 
 func TestBareModelID(t *testing.T) {
-	if got := BareModelID("accounts/fireworks/models/glm-5p2"); got != "glm-5p2" {
+	if got := BareModelID("accounts/deepseek/models/glm-5p2"); got != "glm-5p2" {
 		t.Fatalf("bare = %q", got)
 	}
 	if got := BareModelID("deepseek-v4-flash"); got != "deepseek-v4-flash" {

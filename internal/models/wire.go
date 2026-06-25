@@ -46,10 +46,14 @@ func (u *rawUsage) toUsage() *Usage {
 	return out
 }
 
-// rawMessage is choice.message on the non-stream path.
+// rawMessage is choice.message on the non-stream path. ReasoningContent is DeepSeek's
+// dedicated reasoning channel: when a <think> phase runs, the chain-of-thought comes
+// back here (NOT inline in Content as <think>…</think>), so capturing it is how we
+// populate ChatResult.Reasoning for an explicit-effort call.
 type rawMessage struct {
-	Content   *string       `json:"content"`
-	ToolCalls []rawToolCall `json:"tool_calls"`
+	Content          *string       `json:"content"`
+	ReasoningContent *string       `json:"reasoning_content"`
+	ToolCalls        []rawToolCall `json:"tool_calls"`
 }
 
 // rawChoice is one completion choice (non-stream).
@@ -64,10 +68,13 @@ type chatResponse struct {
 	Usage   *rawUsage   `json:"usage"`
 }
 
-// rawDelta is choice.delta on the streaming path.
+// rawDelta is choice.delta on the streaming path. ReasoningContent streams DeepSeek's
+// reasoning channel in fragments (see rawMessage) — accumulated separately from the
+// visible content, never forwarded to onToken.
 type rawDelta struct {
-	Content   *string       `json:"content"`
-	ToolCalls []rawToolCall `json:"tool_calls"`
+	Content          *string       `json:"content"`
+	ReasoningContent *string       `json:"reasoning_content"`
+	ToolCalls        []rawToolCall `json:"tool_calls"`
 }
 
 // streamChoice is one choice in a streamed chunk.
