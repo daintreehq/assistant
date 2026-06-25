@@ -18,9 +18,10 @@ import (
 //  1. Keep completed content OUT of the footer: flush each IMMUTABLE block (a closed tool
 //     group, a finished prose step, a completed markdown PARAGRAPH of the live prose step)
 //     to scrollback the instant it can no longer change, so the footer never accumulates.
-//  2. Keep the in-flight remainder SHORT: prose commits PARAGRAPH BY PARAGRAPH and the
-//     still-growing final paragraph is WITHHELD from the footer entirely (render_turn.go),
-//     so the live View is only [open tool group / live status / composer] — never tall.
+//  2. Keep the in-flight remainder SHORT: prose COMMITS paragraph by paragraph, and the
+//     still-growing final paragraph is withheld from SCROLLBACK (render_turn.go) until it
+//     seals. It DOES render live in the footer (streamed token by token), but the footer is
+//     height-bounded by view.go's lastLines(budget) cap, so the live View is never tall.
 //
 // Two correctness rules make the flushed bytes match the seal's render exactly (no dup):
 //   - Live-ness rides ONLY the position of the last step (render_turn.go); an earlier prose
@@ -95,11 +96,12 @@ func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 	cw := m.contentW()
 
 	// The immutable step frontier. When every step before the last is finalized AND the last
-	// step is the live prose, EXTEND the range over it too: renderTurnSteps with liveLast=true
-	// renders only that step's COMPLETED paragraphs (its still-growing final paragraph is
-	// withheld), so its settled prefix flushes while only the live status stays in the footer.
-	// Rendering the whole prefix through one renderTurnSteps call (the same one the footer uses)
-	// keeps the flush a byte-exact PREFIX of the footer render — including blank-after-tool spacing.
+	// step is the live prose, EXTEND the range over it too: renderTurnSteps with
+	// withholdGrowingLast=true renders only that step's COMPLETED paragraphs (its still-growing
+	// final paragraph is withheld from the commit), so its settled prefix flushes while the
+	// growing paragraph stays live in the footer tail. This withheld render is a byte-exact
+	// PREFIX of the footer's full render (the footer renders the SAME completed paragraphs, then
+	// the growing one below it) — including blank-after-tool spacing.
 	k := finalizedStepCount(t)
 	last := len(t.Steps) - 1
 	if t.State == TurnActive && k == last && last >= 0 && t.Steps[last].Kind == StepProse {
@@ -111,9 +113,10 @@ func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 		parts = append(parts, pre)
 	}
 	if k > 0 {
-		// liveLast=true: the flush commits ONLY completed paragraphs; the still-growing one is
-		// withheld everywhere (render_turn.go renderProse) so scrollback never gets a
-		// half-paragraph that would later be re-committed as markdown.
+		// withholdGrowingLast=true: the flush commits ONLY completed paragraphs; the still-growing
+		// one is withheld from the COMMIT (render_turn.go renderProse) so scrollback never gets a
+		// half-paragraph that would later be re-committed as markdown. (It still renders live in
+		// the footer tail — see liveCellsView.)
 		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true); body != "" {
 			parts = append(parts, body)
 		}

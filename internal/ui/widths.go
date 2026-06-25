@@ -21,10 +21,11 @@ const (
 	LiveChromeMaxWidth = 56
 	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Completed
 	// blocks (whole paragraphs, closed tool groups) flush to native scrollback as they stream
-	// (flush.go) and the still-growing paragraph is WITHHELD (render_turn.go), so the live tail
-	// is only an open tool group + the one-line live status — never a streaming prose preview.
-	// This cap is a defensive backstop: it keeps the live View short so a flush/commit
-	// tea.Println can never dump a tall footer into scrollback (bubbletea#1613).
+	// (flush.go); what stays live is an open tool group + the still-growing prose paragraph
+	// (rendered token by token — render_turn.go) + the one-line live status. The growing
+	// paragraph is the one unbounded piece, so this cap (applied via lastLines in view.go) keeps
+	// the live View short — a flush/commit tea.Println can never dump a tall footer into
+	// scrollback (bubbletea#1613).
 	maxLiveRows = 8
 	// minCockpitRows is the height floor below which the footer collapses to a single
 	// "terminal too small" line (see footer()). Below it the fixed bottom band (composer +

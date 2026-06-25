@@ -135,9 +135,10 @@ func (m Model) footer() string {
 		// partial copy); (2) even below that, a tea.Println (a flush/commit) fired while the
 		// footer is tall makes Bubble Tea's insertAbove dump the whole footer into scrollback
 		// off a stale cell-buffer height (charmbracelet/bubbletea#1613). Completed blocks have
-		// already flushed to scrollback (flush.go) and the still-growing paragraph is withheld
-		// (render_turn.go), so the live tail is only an open tool group + the live status —
-		// capping it to maxLiveRows is a defensive backstop that keeps the View small.
+		// already flushed to scrollback (flush.go), so the live tail holds only the UN-flushed
+		// remainder: an open tool group, the still-growing prose paragraph (streamed live,
+		// render_turn.go), and the live status. The growing paragraph is the one unbounded piece,
+		// so capping the tail to maxLiveRows (lastLines, below) is what keeps the View small.
 		budget := m.rows - lineCount(bottom) - 2 // never exceed the terminal
 		if budget > maxLiveRows {
 			budget = maxLiveRows

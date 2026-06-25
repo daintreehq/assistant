@@ -242,12 +242,16 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	if pre := renderTurnPreamble(th, t, width, active, active || hasResponded(t)); pre != "" {
 		parts = append(parts, pre)
 	}
-	// liveLast = active: while the turn is active its genuine LAST prose step renders only its
-	// COMPLETED paragraphs — the still-growing final paragraph is WITHHELD (renderProse), so
-	// neither the footer nor the flush ever shows a half-paragraph. A sealed turn (active=false)
-	// renders every paragraph as full markdown.
+	// withholdGrowingLast=false: the footer (and the seal) render the LAST prose step in FULL —
+	// including its still-growing final paragraph, re-parsed as markdown every frame so prose
+	// streams smoothly token by token. That growing paragraph lives ONLY in the un-flushed
+	// footer tail: liveCellsView slices off FlushedRows, and the FLUSH (activeTurnFinalRows)
+	// passes withholdGrowingLast=true so only COMPLETED "\n\n"-terminated paragraphs ever commit
+	// to scrollback — a half-rendered paragraph is never frozen there. The footer height is
+	// bounded by view.go's lastLines(budget) cap, NOT by withholding, so showing the growing
+	// paragraph stays safe against bubbletea#1613.
 	hasBody := false
-	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
+	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, false); body != "" {
 		parts = append(parts, body)
 		hasBody = true
 	}
@@ -294,19 +298,22 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 
 // renderTurnSteps renders the ordered steps in the half-open range [from, to) of the
 // turn (to < 0 means "to the end"): prose as styled markdown, contiguous tool runs as
-// one branch tree, notes inline. liveLast governs whether the turn's genuine LAST prose
-// step (global index len(Steps)-1) is treated as LIVE — committed paragraph by paragraph
-// with its still-growing final paragraph WITHHELD entirely (renderProse). It applies ONLY
-// to that last step and ONLY when liveLast is set, so an earlier prose step that streamed
-// before a tool batch renders as FINAL markdown (its whole text), even though its sticky
-// Streaming flag is still true. The flush and the footer both pass liveLast=true so they
-// agree row-for-row on the withheld paragraph; the seal renders with liveLast=false so the
-// withheld paragraph commits once as full markdown.
+// one branch tree, notes inline. withholdGrowingLast governs ONLY the turn's genuine LAST
+// prose step (global index len(Steps)-1): when set, that step renders only its COMPLETED
+// paragraphs and the still-growing final paragraph is WITHHELD (renderProse). This is the
+// COMMIT-bound flush render — it must never freeze a half-rendered paragraph into scrollback.
+// When unset (the footer and the seal) the last step renders in FULL, so the live footer
+// reprocesses the growing paragraph as markdown each frame. It applies ONLY to that last
+// step, so an earlier prose step that streamed before a tool batch renders as FINAL markdown
+// regardless of its sticky Streaming flag. The flush's withheld (completed-only) render is a
+// row-exact PREFIX of the footer's full render — in CommonMark a completed paragraph is
+// independent of the paragraph that follows it — so the un-flushed remainder (the growing
+// paragraph) sits in the footer tail until it seals and is never double-committed.
 //
 // Tool grouping is computed over the sub-range; the incremental flush only ever passes a
 // range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
 // branch tree is never split across the flush frontier.
-func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, liveLast bool) string {
+func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, withholdGrowingLast bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
 		to = len(steps)
@@ -333,8 +340,8 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 		afterTool := g > 0 && steps[g-1].Kind == StepTool
 		switch step.Kind {
 		case StepProse:
-			live := liveLast && g == lastIdx
-			if rendered := renderProse(md, step, contentW, live); rendered != "" {
+			withhold := withholdGrowingLast && g == lastIdx
+			if rendered := renderProse(md, step, contentW, withhold); rendered != "" {
 				if afterTool {
 					b.WriteByte('\n')
 				}
@@ -391,38 +398,48 @@ func hasProse(t *TurnCell) bool {
 	return false
 }
 
-// renderProse renders one prose step. When NOT live (a sealed turn, or an earlier prose
-// step that a later tool batch has since closed) it renders the whole step as settled
-// markdown.
+// renderProse renders one prose step. When withholdGrowing is false (the live footer, a
+// sealed turn, or an earlier prose step a later tool batch has since closed) it renders the
+// WHOLE step as markdown. In the live footer that means the still-growing final paragraph is
+// reprocessed as markdown every frame, so prose streams smoothly token by token. This is the
+// ONLY place incomplete markdown is rendered — a half-typed code fence or bold span reflows
+// until it closes — but that churn is confined to the EPHEMERAL footer; nothing partial is
+// ever committed to scrollback.
 //
-// When live (the genuinely-streaming LAST step of an active turn) it commits PARAGRAPH BY
-// PARAGRAPH: only the text up to the last blank line ("\n\n") is settled, and that renders
-// as markdown (it flushes to scrollback — flush.go). The still-growing final paragraph is
-// WITHHELD entirely — it appears NOWHERE (not in the footer, not in scrollback) until it
-// completes, at which point it becomes a settled paragraph and renders as full markdown. So
-// prose surfaces one finished, fully-parsed markdown paragraph at a time rather than streaming
-// token by token: no live token caret, no max-height dim preview block that fills then
-// truncates, no raw→markdown reflow when a paragraph seals. The "⠋ Writing" live status
-// (renderLiveStatus) is the only motion between committed paragraphs.
+// When withholdGrowing is true (the COMMIT-bound flush path only) it settles PARAGRAPH BY
+// PARAGRAPH: only the text up to the last blank line ("\n\n") is rendered, and only that is
+// allowed to flush to scrollback. The still-growing final paragraph is held back so scrollback
+// never freezes a half-rendered paragraph. "\n\n" is the only safe boundary because CommonMark
+// joins single-newline lines into one reflowing paragraph; md.Render(settled-prefix) is a
+// byte-exact ROW prefix of the eventual full render, so the flush (completed paragraphs) and
+// the footer/seal (whole text) agree row-for-row on that prefix — the un-flushed remainder
+// (the growing paragraph) lives in the footer tail until it seals, then commits exactly once.
 //
-// `live` is decided by POSITION (is this the turn's last step), never by the step's sticky
-// Streaming flag, so a half-rendered paragraph can never be frozen mid-turn into scrollback.
-// "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
-// reflowing paragraph; md.Render(settled-prefix) is a byte-exact prefix of the eventual full
-// render, so the flush (which commits completed paragraphs) and the seal agree row-for-row.
-func renderProse(md *markdown.Renderer, step TurnStep, contentW int, live bool) string {
+// withholdGrowing is decided by POSITION + path (is this the turn's last step, in the flush
+// render), never by the step's sticky Streaming flag, so a half-rendered paragraph can never
+// be frozen mid-turn into scrollback.
+//
+// LIMITATION (shared with the pre-existing flush — this is NOT new to live footer streaming):
+// the byte-exact prefix relies on a completed paragraph rendering independently of later text.
+// That holds for normal prose, inline links [text](url), lists, and tables, but NOT for
+// document-global constructs like reference-style link DEFINITIONS ("[id]: url"), where a later
+// definition restyles an earlier paragraph. Such a paragraph can commit (to scrollback) before
+// its definition arrives and then render differently in the full footer/seal. LLM-streamed prose
+// uses inline links, so this is rare; a robust fix would render prose paragraph-locally (or hold
+// prose flush until reference definitions resolve) and is left as future work.
+func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGrowing bool) string {
 	if step.Text == "" {
 		return ""
 	}
-	if !live {
+	if !withholdGrowing {
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
-	// Live last step: render only the COMPLETED paragraphs (everything up to the final blank
-	// line). The still-growing paragraph after it is withheld until it seals — both the footer
-	// and the flush call this with the same `live`, so they agree on exactly what is held back.
+	// Flush path: render only the COMPLETED paragraphs (everything up to the final blank line).
+	// The still-growing paragraph after it stays live in the footer (rendered in full there),
+	// but must never enter the commit-bound prefix until it seals.
 	idx := strings.LastIndex(step.Text, "\n\n")
 	if idx < 0 {
-		return "" // no completed paragraph yet — the whole step is still growing, so withhold it
+		return "" // no completed paragraph yet — withhold the whole still-growing step from the flush
 	}
 	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
 }
