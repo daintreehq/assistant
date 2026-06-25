@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -472,8 +473,12 @@ func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) 
 // Best-effort and nil-safe: a missing recaller, a blank ask, or a query error all
 // yield nil (the footer simply omits the section). It NEVER returns an error — a
 // recall failure must never break a turn (side-channel reads can't break the loop).
+//
+// The blank-ask short-circuit is enforced here (not left to the storage layer's
+// escapeFTSQuery) so the contract holds for ANY recaller, and a whitespace-only send
+// never pays for an adapter→SQLite round-trip that can only return nothing.
 func (s *Session) recallMemories(userInput string) []domain.MemoryRecord {
-	if s.deps.MemoryRecaller == nil {
+	if s.deps.MemoryRecaller == nil || strings.TrimSpace(userInput) == "" {
 		return nil
 	}
 	rows, err := s.deps.MemoryRecaller.RecallMemories(userInput, relevantMemoriesMaxRows)
@@ -528,7 +533,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	//     automatically. Run HERE — after the cancel re-check, before the loop — so a
 	//     pre-loop cancel never pays for it AND the FTS5 query fires exactly once per
 	//     turn, not once per model round (composeTurnFooter runs every round). The rows
-	//     are cached and threaded through footerCtx below. A nil recaller, a blank ask,
+	//     are cached and threaded through footerContext below. A nil recaller, a blank ask,
 	//     or a query error all yield nil: a recall failure must never break the turn.
 	recalledMemories := s.recallMemories(userInput)
 
