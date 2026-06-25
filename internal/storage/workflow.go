@@ -110,6 +110,36 @@ func (s *Store) ListWorkflowRuns(status string) ([]domain.WorkflowRunRecord, err
 	return out, rows.Err()
 }
 
+// ListNonTerminalWorkflowRuns returns the open (pending|active|blocked) runs,
+// most-recently-updated first, capped at limit. It backs the read-only turn-footer
+// view, so it filters to non-terminal statuses IN SQL (one round trip, no Go-side
+// post-filter) and bounds the row count — the footer only needs the top handful of
+// open runs, never the whole history. A non-positive limit returns nil rather than
+// firing an unbounded query (a footer asking for ≤0 rows wants nothing).
+func (s *Store) ListNonTerminalWorkflowRuns(limit int) ([]domain.WorkflowRunRecord, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	// id DESC is a deterministic tiebreaker: rows sharing an updatedAt (sub-ms cluster
+	// writes) would otherwise pick a nondeterministic subset under LIMIT.
+	rows, err := s.db.Query("SELECT "+workflowCols+
+		" FROM workflow_runs WHERE status IN (?, ?, ?) ORDER BY updatedAt DESC, id DESC LIMIT ?",
+		string(domain.WorkflowPending), string(domain.WorkflowActive), string(domain.WorkflowBlocked), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list non-terminal workflow runs: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.WorkflowRunRecord
+	for rows.Next() {
+		w, err := scanWorkflowRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 var workflowUpdateCols = newColSet("issueNumber", "issueUrl", "issueTitle", "branch",
 	"worktreeId", "prNumber", "prUrl", "terminalIdsJson", "watcherIdsJson",
 	"queueEventIdsJson", "status", "nextActionJson", "notesJson", "completedAt")

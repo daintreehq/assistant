@@ -613,7 +613,10 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// s.messages: snapshotMessages returns a fresh make+copy slice (len==cap), so this
 		// append cannot alias back into the live history — the footer stays ephemeral.
 		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
-			Messages:       append(s.snapshotMessages(), composeTurnFooter(userInput)...),
+			Messages: append(s.snapshotMessages(), composeTurnFooter(footerContext{
+				Goal:         userInput,
+				WorkflowRuns: s.workflowRunsForFooter(),
+			})...),
 			Tools:          tools,
 			ToolChoice:     "auto",
 			PromptCacheKey: domain.MainPromptCacheKey,
@@ -1098,6 +1101,19 @@ func (s *Session) snapshotMessages() []models.ChatMessage {
 	out := make([]models.ChatMessage, len(s.messages))
 	copy(out, s.messages)
 	return out
+}
+
+// workflowRunsForFooter reads the open (non-terminal) ledger rows for this round's
+// turn footer, best-effort: a nil lister (the test/feature-off default) or any DB
+// error both yield nil, so the footer simply omits the workflow block rather than
+// failing the turn it rides on. Bounded by activeWorkflowRunsLimit so the per-round
+// read never fetches more rows than the footer can show.
+func (s *Session) workflowRunsForFooter() []domain.WorkflowRunRecord {
+	if s.deps.WorkflowRunLister == nil {
+		return nil
+	}
+	runs, _ := s.deps.WorkflowRunLister.ListNonTerminalWorkflowRuns(activeWorkflowRunsLimit)
+	return runs
 }
 
 // pushMessage appends to the live history and persists (best-effort), under the
