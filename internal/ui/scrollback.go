@@ -87,10 +87,14 @@ func (q *scrollbackQueue) liveStart(n int) int {
 //
 // Commit order: masthead first, then sealed transcript cells in index order
 // from the committed cursor forward. A cell is eligible only when isSealed.
+// maxRows bounds a single tea.Println's height (see Model.scrollbackChunkRows): a tall
+// sealed cell — e.g. a turn whose user message was a large paste, re-committed whole on a
+// resize redraw — is split so no insertAbove exceeds the viewport (#1613).
 func (q *scrollbackQueue) nextCommit(
 	cells []TranscriptCell,
 	sealedBlock func(i int) ScrollbackBlock,
 	headerBlock func() ScrollbackBlock,
+	maxRows int,
 ) tea.Cmd {
 	if q.inFlight {
 		return nil
@@ -100,7 +104,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := headerBlock()
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk)
+		return commitCmd(blk, maxRows)
 	}
 	// 2. Sealed transcript cells in index order from the cursor.
 	for i := q.liveStart(len(cells)); i < len(cells); i++ {
@@ -112,7 +116,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := sealedBlock(i)
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk)
+		return commitCmd(blk, maxRows)
 	}
 	return nil
 }
@@ -146,13 +150,15 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 // then emits a ScrollbackCommittedMsg ack carrying the block id. tea.Println prints
 // ABOVE the live program and persists across renders — exactly the native-scrollback
 // commit.
-func commitCmd(blk ScrollbackBlock) tea.Cmd {
+func commitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 	text := blk.Rendered
 	if text == "" {
 		text = blk.Plain
 	}
-	return tea.Sequence(
-		tea.Println(text),
-		func() tea.Msg { return ScrollbackCommittedMsg{ID: blk.ID, Gen: blk.Gen} },
-	)
+	// Split a tall block into viewport-sized prints (chunkPrintlns), THEN ack. The ack
+	// fires last so the one-in-flight discipline still holds: the queue head doesn't pop
+	// until every slice of this block is in scrollback.
+	cmds := chunkPrintlns(text, maxRows)
+	cmds = append(cmds, func() tea.Msg { return ScrollbackCommittedMsg{ID: blk.ID, Gen: blk.Gen} })
+	return tea.Sequence(cmds...)
 }

@@ -200,7 +200,89 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 		return nil
 	}
 	chunk := indentLines(strings.Join(final[start:target], "\n"), LeftPad)
-	return tea.Println(chunk)
+	// Commit in viewport-sized slices: a SINGLE tea.Println taller than the screen
+	// corrupts the inline render (see scrollbackChunkRows + splitRowChunks). A large
+	// PASTE makes the YOU card hundreds of rows, so this is the one place an immutable
+	// block can be arbitrarily tall in one shot.
+	return tea.Sequence(chunkPrintlns(chunk, m.scrollbackChunkRows())...)
+}
+
+// scrollbackChunkRows is the maximum display rows a single tea.Println may carry to native
+// scrollback at the current terminal height — the rows ABOVE the live footer. Bubble Tea
+// v2's insertAbove (cursed_renderer.go) scrolls the screen by the printed line count, then
+// moves the cursor UP by that count PLUS the live-footer height; when the printed block is
+// taller than the rows above the footer, that CursorUp CLAMPS at the top of the viewport and
+// the geometry desyncs — freezing a copy of the footer into scrollback with a gap of blank
+// rows (the charmbracelet/bubbletea#1613 failure class, triggered when a large paste makes
+// the YOU card hundreds of rows). Reserving the footer height — the live tail (capped at
+// maxLiveRows) plus the real bottom band — keeps every insertAbove within one screen. Floored
+// at 1 so a tiny terminal still makes progress (just many small prints).
+//
+// Residual (both far outside normal use, neither is the reported bug): if the live footer
+// fills the ENTIRE viewport — only when the terminal is exactly bottomBand+2 rows tall (~8
+// rows), so view.go's budget floors the tail to 1 and h == m.rows — NO insert fits and even a
+// 1-row print can clip by a row (a Bubble Tea insertAbove limitation, not closeable by chunk
+// size). And a commit fired in the single frame of an ops→home view toggle can momentarily see
+// the prior, taller footer; the maxLiveRows cap absorbs the common lag but not a shrinking
+// bottom band.
+func (m Model) scrollbackChunkRows() int {
+	var reserve int
+	switch m.view {
+	case viewOperations, viewHelp:
+		// These decks REPLACE the bottom band with a near-full-height scroll window
+		// (footer() clamps them to rows-2, plus an "Esc back" hint = up to rows-1 rows).
+		// A commit fired while one is open must print at most one row at a time.
+		reserve = m.rows - 1
+	default:
+		// home footer = bounded live tail (<= maxLiveRows) + the blank SEPARATOR row
+		// (footer() writes "\n\n" between the tail and the bottom band) + the bottom band.
+		// Use the maxLiveRows CAP (not the current tail) so the reserve also covers Bubble
+		// Tea's one-frame cellbuf-height lag (the prior footer can be a row or two taller).
+		reserve = maxLiveRows + 1 + lineCount(m.bottomBand(m.contentW()))
+	}
+	if r := m.rows - reserve; r >= 1 {
+		return r
+	}
+	return 1
+}
+
+// chunkPrintlns renders text as a SEQUENCE of tea.Println commands, each at most maxRows
+// display rows, so no single insertAbove exceeds the viewport (see scrollbackChunkRows).
+// One "\n"-line is one display row — committed rows are pre-wrapped to the content width and
+// LeftPad-indented to within the terminal width — so splitting on newlines bounds the
+// on-screen height exactly. (The codebase-wide invariant that a committed line fits the width
+// can only break on a sub-~12-column terminal, where renderUserMessage's inner>=10 floor
+// outruns the content width; at that size the cockpit is already unusable.)
+func chunkPrintlns(text string, maxRows int) []tea.Cmd {
+	chunks := splitRowChunks(text, maxRows)
+	cmds := make([]tea.Cmd, len(chunks))
+	for i, c := range chunks {
+		cmds[i] = tea.Println(c)
+	}
+	return cmds
+}
+
+// splitRowChunks splits text into substrings of at most maxRows "\n"-delimited lines,
+// preserving order and content: joining the result with "\n" reproduces text exactly. A pure
+// helper so the row-budget math is unit-testable without the tea runtime. Returns a single
+// chunk (the whole text) when it already fits, and never returns an empty slice.
+func splitRowChunks(text string, maxRows int) []string {
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= maxRows {
+		return []string{text}
+	}
+	chunks := make([]string, 0, (len(lines)+maxRows-1)/maxRows)
+	for i := 0; i < len(lines); i += maxRows {
+		end := i + maxRows
+		if end > len(lines) {
+			end = len(lines)
+		}
+		chunks = append(chunks, strings.Join(lines[i:end], "\n"))
+	}
+	return chunks
 }
 
 // resetFlushState forgets every per-turn "already printed to host scrollback" cursor.

@@ -43,10 +43,13 @@ type extractCore struct {
 
 // baseArgs is the shared decoded shape (before wait coercion). wait is captured as
 // raw JSON so the empty-object → settled coercion can run before strict decode.
+// Output shape (text vs JSON) is NOT a base field: it is fixed per tool —
+// terminal.extract is text, terminal.extract.json is structured — so the
+// json-needs-schema rule is enforced structurally by the tool the model picks,
+// never as a conditional runtime check (a model fills a required field far more
+// reliably than it remembers "if format=json then jsonSchema").
 type baseArgs struct {
 	TerminalIDs    []string        `json:"terminalIds"`
-	Format         string          `json:"format,omitempty"`
-	JSONSchema     string          `json:"jsonSchema,omitempty"`
 	Wait           json.RawMessage `json:"wait,omitempty"`
 	PollIntervalMs *int            `json:"pollIntervalMs,omitempty"`
 	MaxAttempts    *int            `json:"maxAttempts,omitempty"`
@@ -74,11 +77,6 @@ func (b *baseArgs) Validate() error {
 			return fmt.Errorf("terminalIds entries must be non-empty")
 		}
 	}
-	// format is a closed enum (Zod: enum(["text","json"])); an arbitrary value
-	// would be silently treated as text. Empty ⇒ default text (applied in resolveBase).
-	if b.Format != "" && b.Format != "text" && b.Format != "json" {
-		return fmt.Errorf("format must be one of text, json")
-	}
 	if b.PollIntervalMs != nil && (*b.PollIntervalMs < 0 || *b.PollIntervalMs > 60_000) {
 		return fmt.Errorf("pollIntervalMs must be between 0 and 60000")
 	}
@@ -94,11 +92,10 @@ func (b *baseArgs) Validate() error {
 	return nil
 }
 
-// resolvedBase carries the decoded base with defaults applied.
+// resolvedBase carries the decoded base with defaults applied. Output shape (text
+// vs JSON) is fixed by the calling tool, not carried here.
 type resolvedBase struct {
 	terminalIDs    []string
-	format         string
-	jsonSchema     string
 	wait           *domain.WatchCondition
 	isSettleWait   bool // wait was the coerced wait:{} settled default (see poll gate)
 	pollIntervalMs int
@@ -112,8 +109,6 @@ type resolvedBase struct {
 func resolveBase(b baseArgs) (resolvedBase, string) {
 	r := resolvedBase{
 		terminalIDs:    b.TerminalIDs,
-		format:         orDefault(b.Format, "text"),
-		jsonSchema:     b.JSONSchema,
 		pollIntervalMs: intOr(b.PollIntervalMs, 2000),
 		maxAttempts:    intOr(b.MaxAttempts, 30),
 		tailBytes:      intOr(b.TailBytes, 12_000),
@@ -153,12 +148,14 @@ func resolveBase(b baseArgs) (resolvedBase, string) {
 	return r, ""
 }
 
-func (r resolvedBase) core(instruction string) *extractCore {
+// core builds the extraction unit with the tool-chosen output shape: text tools
+// pass ("text", "") and the JSON tool passes ("json", schema).
+func (r resolvedBase) core(instruction, format, jsonSchema string) *extractCore {
 	return &extractCore{
 		terminalIDs: r.terminalIDs,
 		instruction: instruction,
-		format:      r.format,
-		jsonSchema:  r.jsonSchema,
+		format:      format,
+		jsonSchema:  jsonSchema,
 		maxTokens:   r.maxTokens,
 	}
 }
@@ -181,10 +178,11 @@ type extractArgs struct {
 	baseArgs
 }
 
-var sharedExtractProps = `
+// sharedBaseProps are the JSON-schema properties common to every extract tool. The
+// output-shape fields (format/jsonSchema) are NOT here — output shape is fixed per
+// tool (terminal.extract = text, terminal.extract.json = structured).
+var sharedBaseProps = `
     "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "Daintree terminal id(s) to read and extract from." },
-    "format": { "type": "string", "enum": ["text", "json"], "description": "Output shape: plain text, or structured JSON (needs jsonSchema)." },
-    "jsonSchema": { "type": "string", "description": "When format=json, a description/JSON-Schema of the value to extract." },
     "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent has genuinely FINISHED its turn: a bare 'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), so {} prefers a real working->waiting transition (or a stable idle past a short grace if one was never seen) and ALWAYS confirms with a small-model check on the tail before it resolves — it will not return on a momentary idle. completed/exited resolve immediately. {} is single-terminal (one agent's state); for a COHORT use terminal.awaitAll, then read with a no-wait extract over the same ids. Omit to read once." },
     "pollIntervalMs": { "type": "number", "description": "Delay between polls in wait mode, in ms (default 2000)." },
     "maxAttempts": { "type": "number", "description": "Hard cap on poll attempts (default 30, max 120)." },
@@ -195,7 +193,7 @@ var extractSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract. Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge)." },` + sharedExtractProps + `
+    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, the agent's answer to relay). Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge). Need several NAMED fields at once instead? Use terminal.extract.json." },` + sharedBaseProps + `
   },
   "required": ["terminalIds"]
 }`)
@@ -203,9 +201,10 @@ var extractSchema = json.RawMessage(`{
 func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
-		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content with the small " +
-			"model — as plain text or structured JSON. Optionally wait (poll) until a condition is met before extracting. Omit " +
-			"`instruction` to use it as a finished/condition gate (returns booleans, no extraction model call). Read-only; requires Daintree MCP.",
+		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content as plain TEXT with " +
+			"the small model — the default way to read what an agent said. Optionally wait (poll) until a condition is met before " +
+			"extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no extraction model call). For " +
+			"STRUCTURED output (several named fields) use terminal.extract.json instead. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: extractSchema,
 		Decode: tools.StrictDecoder(func() any { return &extractArgs{} }),
@@ -218,10 +217,6 @@ func newExtractTool(deps Deps) tools.Tool {
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
 				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract: "+errMsg)
-			}
-			// format==json with an instruction requires jsonSchema (superRefine).
-			if base.format == "json" && a.Instruction != "" && base.jsonSchema == "" {
-				return tools.Fail(domain.CodeValidation, "jsonSchema is required when format is 'json'.")
 			}
 			if rejected, ok := rejectModelJudge(base.wait); ok {
 				return rejected
@@ -252,30 +247,103 @@ func newExtractTool(deps Deps) tools.Tool {
 					tools.WithDetails(map[string]any{"attempts": poll.attempts, "finished": poll.finished}))
 			}
 
-			extracted, err := runExtract(ctx, deps, base.core(a.Instruction), poll.combinedTail)
+			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "text", ""), poll.combinedTail)
 			if err != nil {
 				return tools.Fail(codeExtract, "Extraction failed: "+err.Error())
 			}
-			var result any
-			var base0 string
-			if base.format == "json" {
-				result = extracted.json
-				base0 = "Extracted JSON result."
-			} else {
-				result = extracted.text
-				base0 = extracted.text
-				if base0 == "" {
-					base0 = "(empty result)"
-				}
+			base0 := extracted.text
+			if base0 == "" {
+				base0 = "(empty result)"
 			}
 			note := ""
 			if extracted.truncated {
 				note = fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", base.maxTokens)
 			}
 			return tools.Ok(note+base0, map[string]any{
-				"terminalIds": base.terminalIDs, "format": base.format, "attempts": poll.attempts,
+				"terminalIds": base.terminalIDs, "format": "text", "attempts": poll.attempts,
 				"elapsedMs": elapsedMs, "matched": poll.matched, "finished": poll.finished,
-				"truncated": extracted.truncated, "result": result,
+				"truncated": extracted.truncated, "result": extracted.text,
+			})
+		},
+	}
+}
+
+/* ---------------------------- terminal.extract.json ----------------------- */
+
+type extractJSONArgs struct {
+	Instruction string `json:"instruction"`
+	JSONSchema  string `json:"jsonSchema"`
+	baseArgs
+}
+
+// Validate enforces the json tool's required instruction + jsonSchema (both
+// structurally required so the model can't omit either) on top of the shared base
+// bounds. Shadows the promoted baseArgs.Validate, so it delegates explicitly.
+func (a *extractJSONArgs) Validate() error {
+	if err := a.baseArgs.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.Instruction) == "" {
+		return fmt.Errorf("instruction is required")
+	}
+	if strings.TrimSpace(a.JSONSchema) == "" {
+		return fmt.Errorf("jsonSchema is required")
+	}
+	return nil
+}
+
+var extractJSONSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "instruction": { "type": "string", "description": "What to extract as STRUCTURED JSON (e.g. each player's vote and reasoning)." },
+    "jsonSchema": { "type": "string", "description": "A JSON-Schema/description of the value to extract; the small model returns it under 'result'. Required — this is the whole point of the json tool. Example: \"{ \\\"votes\\\": [ { \\\"player\\\": \\\"string\\\", \\\"vote\\\": \\\"yes|no\\\" } ] }\"." },` + sharedBaseProps + `
+  },
+  "required": ["terminalIds", "instruction", "jsonSchema"]
+}`)
+
+func newExtractJSONTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.extract.json",
+		Description: "Read a bounded tail of one or more Daintree terminals and extract STRUCTURED JSON with the small model — use " +
+			"this only when you need several NAMED fields at once (e.g. tallying a cohort's votes into one object). Both `instruction` " +
+			"and `jsonSchema` are required. Optionally wait (poll) until a condition is met before extracting. For a single value or " +
+			"plain text to relay, use terminal.extract instead. Read-only; requires Daintree MCP.",
+		Risk:   domain.RiskRead,
+		Schema: extractJSONSchema,
+		Decode: tools.StrictDecoder(func() any { return &extractJSONArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a extractJSONArgs
+			_ = json.Unmarshal(raw, &a)
+			if !deps.Reader.Connected() {
+				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
+			}
+			base, errMsg := resolveBase(a.baseArgs)
+			if errMsg != "" {
+				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract.json: "+errMsg)
+			}
+			if rejected, ok := rejectModelJudge(base.wait); ok {
+				return rejected
+			}
+
+			startedAt := time.Now().UnixMilli()
+			poll := pollUntil(ctx, deps, base.poll())
+			elapsedMs := time.Now().UnixMilli() - startedAt
+
+			if base.wait != nil && !poll.matched {
+				return tools.Fail(codeWaitTimeout,
+					fmt.Sprintf("Wait condition not met after %d attempt(s) (%dms).", poll.attempts, elapsedMs),
+					tools.WithDetails(map[string]any{"attempts": poll.attempts, "finished": poll.finished}))
+			}
+
+			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "json", a.JSONSchema), poll.combinedTail)
+			if err != nil {
+				return tools.Fail(codeExtract, "Extraction failed: "+err.Error())
+			}
+			return tools.Ok("Extracted JSON result.", map[string]any{
+				"terminalIds": base.terminalIDs, "format": "json", "attempts": poll.attempts,
+				"elapsedMs": elapsedMs, "matched": poll.matched, "finished": poll.finished,
+				"truncated": extracted.truncated, "result": extracted.json,
 			})
 		},
 	}
@@ -310,7 +378,7 @@ var extractAsyncSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract from the output." },` + sharedExtractProps + `,
+    "instruction": { "type": "string", "description": "What to extract from the output, as plain text." },` + sharedBaseProps + `,
     "title": { "type": "string", "description": "Short label for the queue event the result is published under." },
     "verdictInstruction": { "type": "string", "description": "A pass/fail question evaluated against the extracted result; drives event severity." },
     "dedupeKey": { "type": "string", "description": "Events sharing this key collapse into one in the queue." },
@@ -322,8 +390,8 @@ var extractAsyncSchema = json.RawMessage(`{
 func newExtractAsyncTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract.async",
-		Description: "Fire-and-forget terminal extraction. Polls the terminal(s) until the wait condition is met, extracts with the " +
-			"small model, optionally judges the result against a pass/fail condition, and publishes the outcome to the attention " +
+		Description: "Fire-and-forget terminal extraction. Polls the terminal(s) until the wait condition is met, extracts text with " +
+			"the small model, optionally judges the result against a pass/fail condition, and publishes the outcome to the attention " +
 			"queue (instead of blocking the turn). The main thread drains the verdict when next idle. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskLocal,
 		Schema: extractAsyncSchema,
@@ -337,9 +405,6 @@ func newExtractAsyncTool(deps Deps) tools.Tool {
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
 				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract.async: "+errMsg)
-			}
-			if base.format == "json" && base.jsonSchema == "" {
-				return tools.Fail(domain.CodeValidation, "jsonSchema is required when format is 'json'.")
 			}
 			if rejected, ok := rejectModelJudge(base.wait); ok {
 				return rejected
@@ -433,7 +498,7 @@ func runAsyncExtraction(ctx context.Context, deps Deps, base resolvedBase, a ext
 		return
 	}
 
-	extracted, err := runExtract(ctx, deps, base.core(a.Instruction), poll.combinedTail)
+	extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "text", ""), poll.combinedTail)
 	if err != nil {
 		publish(domain.QueuePublishArgs{
 			Source: domain.SourceModelWorker, Severity: domain.SeverityError,
@@ -442,9 +507,6 @@ func runAsyncExtraction(ctx context.Context, deps Deps, base resolvedBase, a ext
 		return
 	}
 	resultText := extracted.text
-	if base.format == "json" {
-		resultText = serializeJSONResult(extracted.json)
-	}
 	truncatedSuffix := ""
 	if extracted.truncated {
 		truncatedSuffix = " ⚠ extractor hit its maxTokens cap — result is cut off; raise maxTokens or read raw via terminal.read."

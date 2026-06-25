@@ -253,6 +253,183 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	runtime.KeepAlive(ptm)
 }
 
+// TestPTYLargePasteScrollback is the regression for the large-paste scrollback corruption:
+// pasting a block taller than the viewport made the YOU card commit in a SINGLE tea.Println
+// taller than the screen, and Bubble Tea v2's insertAbove then clamped its CursorUp at the
+// top of the viewport — freezing a copy of the composer footer ("› [pasted N lines]") into
+// native scrollback above a gap of blank rows (bubbletea#1613 class). The fix splits every
+// scrollback commit into viewport-sized prints (flush.go chunkPrintlns). This proves it on a
+// real terminal: after the turn, the transient "[pasted …]" placeholder must NOT appear in
+// committed scrollback, and the pasted message must commit exactly once (not duplicated).
+func TestPTYLargePasteScrollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("PTY harness allocates a real pseudoterminal; skipped under -short")
+	}
+	bin := buildBinary(t) // auto-skips under -race
+
+	const (
+		pasteMarker = "PASTEMARKERZULU"
+		sentinel    = "PASTEDONESENTINEL"
+	)
+	// A paste FAR taller than the 40-row viewport so the YOU card, committed whole, would
+	// overflow a single insertAbove. Line 0 carries the marker; the rest are distinct filler.
+	const nPasteLines = 70
+	pasteLines := make([]string, nPasteLines)
+	pasteLines[0] = pasteMarker + " — heist briefing line zero."
+	for i := 1; i < nPasteLines; i++ {
+		pasteLines[i] = fmt.Sprintf("Pasted briefing rule line %02d of the score.", i)
+	}
+	pasteBody := strings.Join(pasteLines, "\n")
+
+	// One scripted round: the submit fires a single model request (no tool call), which
+	// streams a short reply ending in the sentinel.
+	fake := newFakeFireworks(t,
+		sseRound{
+			contentTokens: []string{"Got the briefing. ", "Wrapped up " + sentinel + " now.\n\n"},
+			usage:         &fakeUsage{prompt: 80, completion: 8, total: 88},
+		},
+	)
+
+	const startRows, startCols = 40, 100
+	cmd := exec.Command(bin)
+	env := make([]string, 0, len(os.Environ())+12)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
+		"FIREWORKS_BASE_URL="+fake.baseURL(),
+		"FIREWORKS_API_KEY=test-key",
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_TIER=operator",
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+		"TERM=xterm-256color",
+	)
+
+	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: startRows, Cols: startCols})
+	if err != nil {
+		t.Fatalf("start binary under pty: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
+
+	screen := newVTScreen(startRows, startCols)
+	var rawMu sync.Mutex
+	var raw bytes.Buffer
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := ptm.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				screen.Feed(chunk)
+				rawMu.Lock()
+				raw.Write(chunk)
+				rawMu.Unlock()
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	rawLen := func() int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return raw.Len()
+	}
+	rawCount := func(sub string) int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return bytes.Count(raw.Bytes(), []byte(sub))
+	}
+
+	// Phase 1: boot → steady state (composer glyph present).
+	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// Phase 2: bracketed paste of the tall block, then submit. The terminal wraps a paste in
+	// ESC[200~ … ESC[201~; the composer recognizes it and stashes a one-line placeholder.
+	if _, err := ptm.Write([]byte("\x1b[200~" + pasteBody + "\x1b[201~")); err != nil {
+		t.Fatalf("write bracketed paste: %v", err)
+	}
+	placeholder := fmt.Sprintf("[pasted %d lines]", nPasteLines)
+	if !waitFor(10*time.Second, func() bool { return strings.Contains(screen.Plain(), placeholder) }) {
+		t.Fatalf("composer never showed the large-paste placeholder %q:\n%s", placeholder, screen.Plain())
+	}
+	if _, err := ptm.Write([]byte("\r")); err != nil {
+		t.Fatalf("write submit: %v", err)
+	}
+	if !waitFor(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
+		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// Invariant 1: the transient placeholder must NEVER reach committed scrollback. After the
+	// turn the composer has cleared, so any surviving "[pasted …]" line is a FROZEN footer copy
+	// dumped by an over-tall insertAbove — the exact bug.
+	if got := screen.CountLineSubstr("[pasted "); got != 0 {
+		t.Errorf("the paste placeholder appears on %d committed line(s), want 0 — a frozen composer footer leaked into scrollback (#1613):\n%s", got, screen.Plain())
+	}
+	// Invariant 2: the pasted message commits exactly once — not dropped, not duplicated as a
+	// frozen partial.
+	if got := screen.CountLineSubstr(pasteMarker); got != 1 {
+		t.Errorf("pasted YOU-card marker %q appears on %d composed lines, want 1 (dropped or duplicated in scrollback):\n%s", pasteMarker, got, screen.Plain())
+	}
+
+	// Phase 3: settled resize → the redraw RE-COMMITS the whole transcript, including the tall
+	// sealed YOU-card turn, through the QUEUE commit path (scrollback.go commitCmd) rather than
+	// the active-turn flush path. Shrinking the terminal makes the 70-row card even more over
+	// the viewport, so this exercises the queue-path chunking — the resize-redraw vector that
+	// the active-turn PTY assertions above don't reach. The same two invariants must hold on
+	// the rebuilt scrollback.
+	preMasthead := rawCount(mastheadText)
+	const newRows, newCols = 20, 90
+	if err := pty.Setsize(ptm, &pty.Winsize{Rows: newRows, Cols: newCols}); err != nil {
+		t.Fatalf("resize pty: %v", err)
+	}
+	screen.Resize(newRows, newCols)
+	if !waitFor(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
+		t.Fatalf("resize did not re-commit the masthead (count=%d, want >= %d)", rawCount(mastheadText), preMasthead+1)
+	}
+	waitQuiet(rawLen, 400*time.Millisecond, 4*time.Second)
+	if got := screen.CountLineSubstr("[pasted "); got != 0 {
+		t.Errorf("after resize the paste placeholder appears on %d committed line(s), want 0 — the queue re-commit corrupted scrollback (#1613):\n%s", got, screen.Plain())
+	}
+	if got := screen.CountLineSubstr(pasteMarker); got != 1 {
+		t.Errorf("after resize the pasted marker %q appears on %d composed lines, want 1 (queue re-commit dropped/duplicated it):\n%s", pasteMarker, got, screen.Plain())
+	}
+
+	// Phase 4: clean shutdown.
+	if _, err := ptm.Write([]byte("/quit\r")); err != nil {
+		t.Logf("write /quit: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitErr
+		t.Errorf("cockpit did not exit within 10s after /quit")
+	}
+	_ = ptm.Close()
+	drainWG.Wait()
+	runtime.KeepAlive(ptm)
+}
+
 // waitFor polls cond every 50ms until it is true or the timeout elapses. Returns
 // the final value of cond so the caller can fail with context on a miss.
 func waitFor(timeout time.Duration, cond func() bool) bool {

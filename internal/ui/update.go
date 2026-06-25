@@ -499,7 +499,7 @@ func (m *Model) scheduleCommit() tea.Cmd {
 	if !m.commitArmed {
 		return nil
 	}
-	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock)
+	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock, m.scrollbackChunkRows())
 }
 
 // finishBootIfReady flips booting off ONCE all three boot gates are satisfied

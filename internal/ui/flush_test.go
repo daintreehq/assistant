@@ -217,6 +217,71 @@ func TestFlush_FooterHeightCapped(t *testing.T) {
 	}
 }
 
+// TestLiveStatus_BlankLineAboveIt proves the live "⠋ Writing" status renders with a blank
+// line above it so the thinking cue reads as a distinct status indicator instead of glued to
+// the last line of the response. The blank lives ONLY in the live tail — it must never reach
+// the flushed prefix (renderLiveStatus returns "" once the turn seals), so a flushed row is
+// never re-committed.
+func TestLiveStatus_BlankLineAboveIt(t *testing.T) {
+	// A completed paragraph ("HELLOLINE") keeps prose in the live render; the still-growing
+	// final paragraph ("GROWING") is withheld, so the live status sits right under that prose.
+	turn := &TurnCell{ID: "turn_x", State: TurnActive, Phase: domain.PhaseGenerating, StartedAt: 1, LastActivityAt: domain.NowMS(),
+		Steps: []TurnStep{proseStep("HELLOLINE completed paragraph.\n\nGROWING still typing", true)}}
+	m := armedModel(turn)
+
+	out := ansi.Strip(renderTurn(m.theme, m.md, turn, m.chromeW(), m.contentW(), m.expanded, 0, domain.NowMS()))
+	lines := strings.Split(out, "\n")
+	wi := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "Writing") {
+			wi = i
+			break
+		}
+	}
+	if wi < 0 {
+		t.Fatalf("live Writing status not rendered:\n%s", out)
+	}
+	if wi == 0 || strings.TrimSpace(lines[wi-1]) != "" {
+		t.Fatalf("the live status needs a blank line above it; prev line = %q:\n%s", lines[wi-1], out)
+	}
+	if !strings.Contains(out, "HELLOLINE") {
+		t.Fatalf("the completed paragraph must stay above the live status:\n%s", out)
+	}
+	// The blank+status are tail-only: the flushed prefix must NOT end in a blank row, or the
+	// flush↔seal reconciliation would re-commit it.
+	final := m.activeTurnFinalRows(turn)
+	if n := len(final); n > 0 && strings.TrimSpace(ansi.Strip(final[n-1])) == "" {
+		t.Fatalf("the flushed prefix must not gain a trailing blank from the live-status separator:\n%q", final)
+	}
+}
+
+// TestLiveStatus_GluedToMarkerWhenNoBody proves the blank separator is gated on a non-empty
+// body: during the silent "⠋ Analyzing request" gap (no rendered step yet), the status glues
+// to the "◆ DAINTREE" marker rather than leaving an empty hole between them.
+func TestLiveStatus_GluedToMarkerWhenNoBody(t *testing.T) {
+	turn := &TurnCell{ID: "turn_y", State: TurnActive, Phase: domain.PhaseAnalyzing, StartedAt: 1, LastActivityAt: domain.NowMS()}
+	m := armedModel(turn)
+
+	out := ansi.Strip(renderTurn(m.theme, m.md, turn, m.chromeW(), m.contentW(), m.expanded, 0, domain.NowMS()))
+	lines := strings.Split(out, "\n")
+	wi := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "Analyzing request") {
+			wi = i
+			break
+		}
+	}
+	if wi <= 0 {
+		t.Fatalf("the Analyzing status must render below the marker:\n%s", out)
+	}
+	if strings.TrimSpace(lines[wi-1]) == "" {
+		t.Fatalf("with no body the status must glue to the marker (no blank hole above):\n%s", out)
+	}
+	if !strings.Contains(lines[wi-1], "DAINTREE") {
+		t.Fatalf("the line above the bodyless status should be the ◆ DAINTREE marker:\n%s", out)
+	}
+}
+
 // TestFlush_ActiveToolNotFlushed proves an ACTIVE (mutating) tool row is never frozen: the
 // completed content before it flushes incrementally (so the footer doesn't accumulate), but
 // the open tool group stays live in the footer until it settles + closes.

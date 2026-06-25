@@ -1,14 +1,20 @@
-// Package extractionx is the on-demand terminal-extraction family
-// (terminal.extract — risk "read"; terminal.extract.async — risk "local"). Both
-// point the small model at one or more Daintree terminals, read a bounded tail,
-// and pull out caller-specified content as plain text or structured JSON. Raw
-// scrollback never enters the main agent's context; only the extracted result
-// does. terminal.extract is inline (reads once, or polls a `wait` condition then
-// extracts); terminal.extract.async runs the same poll+extract in the background
-// and publishes the outcome to the attention queue, OUTLIVING the turn (so it must
-// not carry the turn's cancellation). The poll loop reuses the watcher DSL
-// vocabulary; modelJudge conditions are intentionally unsupported here (they would
-// re-run the classifier every tick).
+// Package extractionx is the on-demand terminal-extraction family. Each tool points
+// the small model at one or more Daintree terminals, reads a bounded tail, and pulls
+// out caller-specified content — so raw scrollback never enters the main agent's
+// context, only the extracted result. Output shape is fixed PER TOOL (not a
+// conditional arg), so the model can't reach for JSON and forget its schema:
+//   - terminal.extract       — risk "read"; inline plain-TEXT extract (reads once, or
+//     polls a `wait` condition then extracts; omit
+//     `instruction` for a finished/condition gate).
+//   - terminal.extract.json  — risk "read"; inline STRUCTURED extract; `instruction`
+//     and `jsonSchema` are both required.
+//   - terminal.extract.async — risk "local"; runs the same poll+text-extract in the
+//     background and publishes the outcome to the attention
+//     queue, OUTLIVING the turn (so it must not carry the
+//     turn's cancellation).
+//
+// The poll loop reuses the watcher DSL vocabulary; modelJudge conditions are
+// intentionally unsupported here (they would re-run the classifier every tick).
 package extractionx
 
 import (
@@ -129,6 +135,7 @@ func (d Deps) baseContext() context.Context {
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{
 		newExtractTool(deps),
+		newExtractJSONTool(deps),
 		newExtractAsyncTool(deps),
 		newAwaitAllTool(deps),
 	}

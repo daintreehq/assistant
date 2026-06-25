@@ -70,19 +70,24 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 79 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 80 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
-// terminal.close wrapper, the terminal.awaitAll cohort finish-wait, and the five
-// scratch.* session-scratch tools); we assert that exact count so a silent family
-// add/drop is caught.
+// terminal.close wrapper, the terminal.awaitAll cohort finish-wait, the
+// terminal.extract.json structured-extract tool, and the five scratch.* session-scratch
+// tools); we assert that exact count so a silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 79 {
-		t.Errorf("registered tools = %d, want 79", got)
+	if got != 80 {
+		t.Errorf("registered tools = %d, want 80", got)
+	}
+	// The count bump from 79→80 is the structured-extract split; assert the new tool
+	// by name so the count guard can't be satisfied by some unrelated add/drop.
+	if !a.Registry.Has("terminal.extract.json") {
+		t.Error("terminal.extract.json (structured extract) not registered")
 	}
 	// AssertSafe ran inside Create (boot would have failed otherwise); re-run it to
 	// pin the invariant that the full wired set carries no file-edit tool.

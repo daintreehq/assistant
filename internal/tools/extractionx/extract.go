@@ -2,7 +2,6 @@ package extractionx
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -151,13 +150,4 @@ func rejectModelJudge(wait *domain.WatchCondition) (tools.ToolResult, bool) {
 			tools.Unrecoverable()), true
 	}
 	return tools.ToolResult{}, false
-}
-
-// serializeJSONResult mirrors JSON.stringify(value): a nil value becomes "null".
-func serializeJSONResult(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }

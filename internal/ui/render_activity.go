@@ -59,9 +59,11 @@ func presentToolVerb(name string) (label string, keys []string) {
 	case "terminal.read":
 		return "Read", []string{"terminalId"}
 	case "terminal.extract":
-		return "Extracted", []string{"terminalId"}
+		return "Extracted", []string{"terminalIds:ids"}
+	case "terminal.extract.json":
+		return "Extracted", []string{"terminalIds:ids"}
 	case "terminal.extract.async":
-		return "Extracting", []string{"terminalId"}
+		return "Extracting", []string{"terminalIds:ids"}
 	case "terminal.summarize":
 		return "Summarized", []string{"terminalId"}
 	case "queue.publish":

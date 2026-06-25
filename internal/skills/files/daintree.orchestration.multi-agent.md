@@ -25,6 +25,7 @@ requiredTools:
   - terminal.sendCommand
   - terminal.summarize
   - terminal.extract
+  - terminal.extract.json
   - terminal.awaitAll
   - terminal.read
   - terminal.focus
@@ -45,7 +46,8 @@ Procedure:
 
 3. Wait for the WHOLE cohort with ONE terminal.awaitAll({ terminalIds: [t1, t2, t3] }), then read their outputs together. awaitAll polls every agent's agentState CONCURRENTLY — no model call, no output read — and resolves when each has gone working→idle (or completed/exited). It is fast and light, but agentState is an IMPERFECT signal: an agent can momentarily read "waiting"/idle while still mid-work (parked before it starts, paused mid-task, or backgrounded). So awaitAll's "finished" is a strong hint, NOT proof.
    - Do NOT issue one terminal.extract wait:{} per agent — that is the SINGLE-agent path and the calls run one after another (three 60s timeouts in a row). One awaitAll for the cohort replaces all of them.
-   - VERIFY + SELF-HEAL after awaitAll reports finished: read every output together in ONE terminal.extract over all the terminalIds with NO wait (pull the fact/vote you need), or a bounded terminal.read for a short verbatim answer. As you read, sanity-check each — if a terminal reported "finished" but its last few lines show it is still working (a half-finished message, a live spinner, no real answer yet), do NOT relay it: re-await just that one, or set a watcher on it and poll, or send a visible agent to look closer. Heal the misread before you synthesize. For garbled multi-screen TUI use terminal.summarize. Don't re-summarize or re-extract an extract result (a model read of a model read).
+   - VERIFY + SELF-HEAL after awaitAll reports finished: read every output together in ONE terminal.extract over all the terminalIds with NO wait (pull the fact/vote you need as plain text), or a bounded terminal.read for a short verbatim answer. As you read, sanity-check each — if a terminal reported "finished" but its last few lines show it is still working (a half-finished message, a live spinner, no real answer yet), do NOT relay it: re-await just that one, or set a watcher on it and poll, or send a visible agent to look closer. Heal the misread before you synthesize. For garbled multi-screen TUI use terminal.summarize. Don't re-summarize or re-extract an extract result (a model read of a model read).
+   - Reading a vote/answer to RELAY or eyeball is a plain-text job — use terminal.extract (no schema, no "format" arg). Only when you want the whole cohort's votes as ONE structured object to tally programmatically, use terminal.extract.json with an `instruction` AND a `jsonSchema` (e.g. jsonSchema `{ "votes": [ { "player": "string", "vote": "yes|no" } ] }`). Don't reach for the json tool just to read one value.
    - Handle the non-finished cases awaitAll reports: an agent ASKING A QUESTION → answer it with sendCommand (step 4) and await again; an agent that FAILED (nonzero exit) → drop it from the cohort and note it in your synthesis, do NOT respawn in a loop; an agent STILL WORKING when the budget ran out → await again (or read the ones that did finish and proceed). Never relay a half-done or dead screen.
 
 4. Relay with terminal.sendCommand({ terminalId, command }). Send each agent ONLY what it needs from the OTHERS — their facts/drafts/votes — plus the one question for this round (e.g. "Here are the other two answers: A: … B: … Which is better and why?"). One sendCommand per agent, in parallel. Then collect again (step 3). Repeat the collect→relay loop for as many rounds as the task needs.

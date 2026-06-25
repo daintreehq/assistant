@@ -85,7 +85,7 @@ func TestResolveBaseWaitCoercion(t *testing.T) {
 		t.Fatalf("empty wait not coerced to settled: %+v", r.wait)
 	}
 	// Defaults applied.
-	if r.format != "text" || r.pollIntervalMs != 2000 || r.maxAttempts != 30 || r.tailBytes != 12_000 || r.maxTokens != 1024 {
+	if r.pollIntervalMs != 2000 || r.maxAttempts != 30 || r.tailBytes != 12_000 || r.maxTokens != 1024 {
 		t.Errorf("defaults wrong: %+v", r)
 	}
 	// A real condition decodes through.

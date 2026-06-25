@@ -130,11 +130,28 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	// COMPLETED paragraphs — the still-growing final paragraph is WITHHELD (renderProse), so
 	// neither the footer nor the flush ever shows a half-paragraph. A sealed turn (active=false)
 	// renders every paragraph as full markdown.
+	hasBody := false
 	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, active); body != "" {
 		parts = append(parts, body)
+		hasBody = true
 	}
 	if ls := renderLiveStatus(th, t, spinnerFrame, now); ls != "" {
-		parts = append(parts, ls)
+		// A blank line sets the live status apart from the response above it, so the
+		// "⠋ Writing · …" thinking cue reads as a distinct status indicator instead of
+		// glued to the last line of prose. The blank lives ONLY in the live tail: the
+		// status itself is dropped the instant the turn seals (renderLiveStatus returns
+		// "" for a non-active turn) and is never part of activeTurnFinalRows, so this
+		// extra row can't disturb the byte-exact flush↔seal prefix reconciliation.
+		//
+		// Gate the blank on a non-empty body: when the turn has produced no rendered step
+		// yet (e.g. the silent "⠋ Analyzing request" gap right after submit), there is only
+		// the bare "◆ DAINTREE" marker above, and a blank between the marker and the status
+		// reads as an empty hole — so glue the status to the marker until real content lands.
+		if hasBody {
+			parts = append(parts, "", ls)
+		} else {
+			parts = append(parts, ls)
+		}
 	}
 	return strings.Join(parts, "\n")
 }

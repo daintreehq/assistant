@@ -10,10 +10,12 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// Finding 1: terminal.extract / terminal.extract.async advertise required fields
-// and a closed format enum that strict decoding alone didn't enforce. Validate()
-// must reject an empty/oversized terminalIds list, an empty-string id, an
-// arbitrary format, and (async-only) a missing instruction — all as INVALID_ARGS.
+// Finding 1: the extract tools advertise required fields that strict decoding alone
+// didn't enforce. Validate() must reject an empty/oversized terminalIds list and an
+// empty-string id. Output shape is no longer a per-call arg — `format` is gone from
+// every extract tool, so it is now rejected as an UNKNOWN FIELD by strict decode
+// (the model picks terminal.extract for text or terminal.extract.json for structured
+// instead of toggling a format enum).
 func TestExtractRejectsRequiredAndEnumGaps(t *testing.T) {
 	tool := newExtractTool(Deps{})
 	for name, bad := range map[string]string{
@@ -22,15 +24,45 @@ func TestExtractRejectsRequiredAndEnumGaps(t *testing.T) {
 		"empty-string id":     `{"terminalIds":[""]}`,
 		"blank id":            `{"terminalIds":["  "]}`,
 		"too many ids":        `{"terminalIds":["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17"]}`,
-		"bad format":          `{"terminalIds":["t"],"format":"yaml"}`,
+		"format unknown now":  `{"terminalIds":["t"],"format":"json"}`,
+		"jsonSchema unknown":  `{"terminalIds":["t"],"jsonSchema":"{}"}`,
 	} {
 		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
 			t.Errorf("%s should be rejected: %s", name, bad)
 		}
 	}
 	// A valid gate-only call (no instruction) still decodes — extract allows it.
-	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t"],"format":"text"}`)); err != nil {
+	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t"]}`)); err != nil {
 		t.Errorf("valid extract args should decode: %v", err)
+	}
+	// And a plain text extract with an instruction.
+	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t"],"instruction":"the vote"}`)); err != nil {
+		t.Errorf("valid text extract args should decode: %v", err)
+	}
+}
+
+// terminal.extract.json structurally requires BOTH instruction and jsonSchema, so a
+// schema-less call can't even decode (the old runtime "jsonSchema is required when
+// format is 'json'" footgun is now impossible to reach).
+func TestExtractJSONRequiresInstructionAndSchema(t *testing.T) {
+	tool := newExtractJSONTool(Deps{})
+	for name, bad := range map[string]string{
+		"missing both":        `{"terminalIds":["t"]}`,
+		"missing schema":      `{"terminalIds":["t"],"instruction":"the votes"}`,
+		"blank schema":        `{"terminalIds":["t"],"instruction":"the votes","jsonSchema":"  "}`,
+		"missing instruction": `{"terminalIds":["t"],"jsonSchema":"{}"}`,
+		"blank instruction":   `{"terminalIds":["t"],"instruction":"  ","jsonSchema":"{}"}`,
+		"missing terminalIds": `{"instruction":"x","jsonSchema":"{}"}`,
+		// There is no `format` arg on the json tool either — the tool IS the shape, so a
+		// stray format key must be rejected as unknown, not silently tolerated.
+		"stray format key": `{"terminalIds":["t"],"instruction":"x","jsonSchema":"{}","format":"json"}`,
+	} {
+		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("json %s should be rejected: %s", name, bad)
+		}
+	}
+	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t"],"instruction":"each player's vote","jsonSchema":"{\"votes\":[]}"}`)); err != nil {
+		t.Errorf("valid json extract args should decode: %v", err)
 	}
 }
 
@@ -41,7 +73,7 @@ func TestExtractAsyncRequiresInstruction(t *testing.T) {
 		"empty instruction":   `{"terminalIds":["t"],"instruction":""}`,
 		"blank instruction":   `{"terminalIds":["t"],"instruction":"   "}`,
 		"missing terminalIds": `{"instruction":"x"}`,
-		"bad format":          `{"terminalIds":["t"],"instruction":"x","format":"csv"}`,
+		"format unknown now":  `{"terminalIds":["t"],"instruction":"x","format":"json"}`,
 	} {
 		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
 			t.Errorf("async %s should be rejected: %s", name, bad)
@@ -91,7 +123,6 @@ func TestRunAsyncExtractionCancelAndPublishFailure(t *testing.T) {
 	wait := settledWait()
 	base := resolvedBase{
 		terminalIDs:    []string{"t"},
-		format:         "text",
 		wait:           &wait,
 		pollIntervalMs: 10,
 		maxAttempts:    5,
@@ -123,7 +154,7 @@ func TestRunAsyncExtractionNilQueueSafe(t *testing.T) {
 	deps := Deps{Reader: stubReader{}, Queue: nil}
 	wait := settledWait()
 	base := resolvedBase{
-		terminalIDs: []string{"t"}, format: "text", wait: &wait,
+		terminalIDs: []string{"t"}, wait: &wait,
 		pollIntervalMs: 10, maxAttempts: 2, tailBytes: 100, maxTokens: 100,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
