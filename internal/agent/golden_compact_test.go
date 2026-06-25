@@ -20,9 +20,9 @@ package agent
 //     arguments) can reach the text-only summarizer.
 //
 // Scope note: issue #259 lists the structured-checkpoint object (#256) as something this
-// guard will eventually cover, but #256 is not yet merged (no checkpoint.go exists), so
-// these tests assert only the behavior that ships today. New assertions can be appended
-// here when the checkpoint lands.
+// guard covers. #256 has since landed (see checkpoint.go), so the auto path now renders
+// the "[checkpoint | depth N]" framing rather than the old prose summary, and invariant (1)
+// is pinned against that. The other invariants are format-agnostic and unchanged.
 
 import (
 	"context"
@@ -165,12 +165,14 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 		if r.callCount() != 1 {
 			t.Fatalf("summarizer Chat calls = %d, want exactly 1", r.callCount())
 		}
-		// The summary note must sit immediately after the controls — proves the auto path
-		// actually compacted rather than skipping the gate.
+		// The checkpoint note must sit immediately after the controls — proves the auto path
+		// actually compacted rather than skipping the gate. Since #256 (the structured
+		// checkpoint) landed, the auto path renders the "[checkpoint | depth N]" framing
+		// (compactionNotePrefix) instead of the old prose "compacted summary".
 		after := s.Messages()
 		if len(after) <= domain.ControlMessageCount ||
-			!strings.Contains(after[domain.ControlMessageCount].StringContent, "compacted summary") {
-			t.Fatalf("auto compact did not produce a summary note: %+v", after)
+			!strings.Contains(after[domain.ControlMessageCount].StringContent, "[checkpoint | depth") {
+			t.Fatalf("auto compact did not produce a checkpoint note: %+v", after)
 		}
 	})
 }
