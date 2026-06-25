@@ -770,6 +770,13 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 	// summary writes nothing and never disrupts finalize.
 	if ctx.MemoryWriter != nil && outcome != nil {
 		if summary := strings.TrimSpace(outcome.Summary); summary != "" {
+			// On a timeout the raw classification summary is usually still "working"
+			// ("Agent is still working.") — which reads as a non-outcome. Lead with the
+			// stop reason so the trajectory trace records WHY the run ended, mirroring the
+			// digest note. (No model call — same data the ledger already has.)
+			if watcherStatus == "timeout" {
+				summary = "timed out before finishing: " + summary
+			}
 			memRec := domain.MemoryRecord{
 				Content:   summary,
 				Source:    domain.MemoryWatcher,

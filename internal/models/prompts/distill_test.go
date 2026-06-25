@@ -142,6 +142,35 @@ func TestParseDistilledEntriesContentAlias(t *testing.T) {
 	}
 }
 
+// TestParseDistilledEntriesWhitespaceFactContentAlias proves a whitespace-only "fact"
+// falls back to the "content" alias (not just an exactly-empty fact) — so a padded
+// primary key doesn't shadow the real statement.
+func TestParseDistilledEntriesWhitespaceFactContentAlias(t *testing.T) {
+	got := ParseDistilledEntries(`[{"fact":"   ","content":"real content","kind":"episodic"}]`)
+	if len(got) != 1 || got[0].Content != "real content" || got[0].Kind != domain.MemoryKindEpisodic {
+		t.Fatalf("whitespace-fact should fall back to content alias: %+v", got)
+	}
+}
+
+// TestParseDistilledEntriesNonStringKindFallsBackNotDrops proves a non-string kind (a
+// stray number/bool) demotes the entry to semantic WITHOUT dropping its valid fact —
+// the lenient contract: partial model compliance never zeros usable content.
+func TestParseDistilledEntriesNonStringKindFallsBackNotDrops(t *testing.T) {
+	for _, raw := range []string{
+		`[{"fact":"valid","kind":1}]`,
+		`[{"fact":"valid","kind":true}]`,
+		`[{"fact":"valid","kind":null}]`,
+	} {
+		got := ParseDistilledEntries(raw)
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d entries, want 1 (fact preserved): %+v", raw, len(got), got)
+		}
+		if got[0].Content != "valid" || got[0].Kind != domain.MemoryKindSemantic {
+			t.Fatalf("%s: entry = %+v, want valid/semantic", raw, got[0])
+		}
+	}
+}
+
 // TestParseDistilledEntriesDropsBlankFactObjects proves an object with no usable fact
 // is dropped while siblings survive.
 func TestParseDistilledEntriesDropsBlankFactObjects(t *testing.T) {

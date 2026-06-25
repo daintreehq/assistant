@@ -38,11 +38,13 @@ type DistilledEntry struct {
 }
 
 // distilledObj is the per-entry object the distill model is asked to emit. content is
-// tolerated as an alias for fact (small models occasionally pick the other key).
+// tolerated as an alias for fact (small models occasionally pick the other key). Kind
+// is decoded as raw JSON so a non-string value (a stray number/bool) demotes to the
+// semantic default WITHOUT failing the whole object and dropping its valid fact.
 type distilledObj struct {
-	Fact    string `json:"fact"`
-	Content string `json:"content"`
-	Kind    string `json:"kind"`
+	Fact    string          `json:"fact"`
+	Content string          `json:"content"`
+	Kind    json.RawMessage `json:"kind"`
 }
 
 // ParseDistilledEntries parses the small model's distillation reply into a cleaned,
@@ -130,8 +132,10 @@ func decodeDistilledElem(el json.RawMessage) (fact string, kind domain.MemoryKin
 		if err := json.Unmarshal(el, &obj); err != nil {
 			return "", domain.MemoryKindSemantic
 		}
+		// Fall back to the "content" alias when "fact" is missing OR whitespace-only, so
+		// a padded primary key doesn't shadow the real statement in "content".
 		f := obj.Fact
-		if f == "" {
+		if strings.TrimSpace(f) == "" {
 			f = obj.Content
 		}
 		return f, normalizeMemoryKind(obj.Kind)
@@ -144,10 +148,13 @@ func decodeDistilledElem(el json.RawMessage) (fact string, kind domain.MemoryKin
 	return s, domain.MemoryKindSemantic
 }
 
-// normalizeMemoryKind maps the model's kind token onto a concrete MemoryKind. Only an
-// explicit "episodic" (case-insensitive) routes to episodic; anything else — blank,
-// "semantic", or a typo — is the safe semantic default.
-func normalizeMemoryKind(k string) domain.MemoryKind {
+// normalizeMemoryKind maps the model's raw kind value onto a concrete MemoryKind. Only
+// an explicit string "episodic" (case-insensitive) routes to episodic; anything else —
+// blank, "semantic", a typo, null, or a non-string (number/bool, which fails the string
+// decode) — is the safe semantic default.
+func normalizeMemoryKind(raw json.RawMessage) domain.MemoryKind {
+	var k string
+	_ = json.Unmarshal(raw, &k) // non-string ⇒ k stays "" ⇒ semantic
 	if strings.EqualFold(strings.TrimSpace(k), string(domain.MemoryKindEpisodic)) {
 		return domain.MemoryKindEpisodic
 	}

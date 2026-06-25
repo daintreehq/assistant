@@ -697,6 +697,42 @@ func TestWatcher_WritesEpisodicMemoryOnFinalize(t *testing.T) {
 	}
 }
 
+// A timeout finalize writes an episodic memory whose content records WHY the run ended
+// (the raw classification summary is usually still "working", which reads as a
+// non-outcome) — the trajectory trace must lead with the timeout.
+func TestWatcher_TimeoutMemoryMentionsTimeout(t *testing.T) {
+	store := newFakeStore()
+	queue := newFakeQueue()
+	mcp := newFakeMCP()
+	mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+		"terminalId": "t1", "agentState": "working", "recentOutput": "still going",
+	})
+	rec := termWatcher("wch_tomem", []string{"t1"})
+	rec.WorkflowRunID = ptrStr("wfr_tomem")
+	rec.StopAfterMs = ptrInt64(1) // created at 0; now >> 1 → timed out
+	store.watchers = []domain.WatcherRecord{rec}
+
+	ctx := ctxFor(store, queue, mcp, &fakeModel{})
+	mw := &fakeMemoryWriter{}
+	ctx.MemoryWriter = mw
+	ctx.SessionID = "ses_live"
+
+	out := RunTerminalWatcherCheck(ctx, rec)
+	if !out.Stop || out.StopReason != StopTimeout {
+		t.Fatalf("expected timeout stop, got stop=%v reason=%v", out.Stop, out.StopReason)
+	}
+	recs := mw.records()
+	if len(recs) != 1 {
+		t.Fatalf("timeout finalize must write one episodic memory, got %d: %+v", len(recs), recs)
+	}
+	if !strings.Contains(recs[0].Content, "timed out") {
+		t.Errorf("timeout memory must record the timeout, got %q", recs[0].Content)
+	}
+	if recs[0].Kind != domain.MemoryKindEpisodic || recs[0].Source != domain.MemoryWatcher {
+		t.Errorf("timeout memory = %+v, want episodic/watcher", recs[0])
+	}
+}
+
 // The corrupt-disable finalize path supplies no outcome digest — even with a
 // MemoryWriter wired it must NOT fabricate an episodic memory (mirrors the
 // no-fabricated-notesJson guarantee).
