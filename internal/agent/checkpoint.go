@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
-	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
@@ -59,18 +58,24 @@ func validateCheckpoint(cp *prompts.CompactionCheckpoint, transcript string) {
 	if len(ids) == 0 {
 		return
 	}
-	// Serialize once; an ID "present" anywhere in the object (any field) counts as kept.
-	blob, err := json.Marshal(cp)
-	if err != nil {
-		blob = nil
+	// Build the set of IDs the model already placed ANYWHERE in the object by re-scanning
+	// the serialized checkpoint with the SAME regex — NOT strings.Contains. A substring
+	// check would falsely judge a short ID "present" because it is a prefix of a longer one
+	// (term_1 is a substring of term_10), silently dropping the exact ID this pass exists to
+	// preserve. The regex's \b…\b boundaries tokenize term_1 and term_10 as distinct, so set
+	// membership is collision-safe.
+	present := make(map[string]struct{})
+	if blob, err := json.Marshal(cp); err == nil {
+		for _, id := range checkpointIDPattern.FindAllString(string(blob), -1) {
+			present[id] = struct{}{}
+		}
 	}
-	haystack := string(blob)
 	seen := make(map[string]struct{}, len(cp.PreservedIDs)+len(ids))
 	for _, existing := range cp.PreservedIDs {
 		seen[existing] = struct{}{}
 	}
 	for _, id := range ids {
-		if strings.Contains(haystack, id) {
+		if _, ok := present[id]; ok {
 			continue
 		}
 		if _, dup := seen[id]; dup {

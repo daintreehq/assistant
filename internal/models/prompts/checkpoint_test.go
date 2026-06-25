@@ -51,6 +51,13 @@ func TestParseCheckpointEmptyReturnsZero(t *testing.T) {
 	}
 }
 
+func TestParseCheckpointArrayTopLevelReturnsZero(t *testing.T) {
+	// A JSON array (or any non-object) can't unmarshal into the struct → zero value.
+	if cp := ParseCheckpoint(`[1,2,3]`); cp.Goal != "" || cp.PreservedIDs != nil {
+		t.Fatalf("a top-level array must parse to the zero value, got %+v", cp)
+	}
+}
+
 func TestParseCheckpointNormalizesLists(t *testing.T) {
 	raw := `{"goal":"  trimmed  ","decisions":[" keep "," keep ","","drop-blank-neighbour"]}`
 	cp := ParseCheckpoint(raw)

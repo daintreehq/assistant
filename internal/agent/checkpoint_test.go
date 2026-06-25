@@ -32,6 +32,32 @@ assistant: spawned wch_12345678 and grt_cafef00d and agt_00112233 and tmr_998877
 	}
 }
 
+// TestValidateCheckpointPrefixCollision is the regression guard for the substring bug:
+// a short ID (term_1) must NOT be judged "already present" merely because a longer ID
+// (term_10) the model captured contains it as a prefix. Daintree-MCP terminal IDs are
+// short and numeric, so term_1 vs term_10 is a real-world collision.
+func TestValidateCheckpointPrefixCollision(t *testing.T) {
+	transcript := "ran on term_1, then later on term_10"
+	cp := prompts.CompactionCheckpoint{ActiveTerminals: []string{"term_10 — running tests"}}
+	validateCheckpoint(&cp, transcript)
+	// term_10 is placed → not re-injected; term_1 is genuinely absent → must be preserved.
+	if len(cp.PreservedIDs) != 1 || cp.PreservedIDs[0] != "term_1" {
+		t.Fatalf("term_1 must be preserved despite term_10 being present, got %+v", cp.PreservedIDs)
+	}
+}
+
+// TestValidateCheckpointKeepsGrantInNamedField pins the P0 approvals/grants behaviour: a
+// grant token the model correctly placed in approvals_grants is recognized as preserved
+// (not duplicated into PreservedIDs).
+func TestValidateCheckpointKeepsGrantInNamedField(t *testing.T) {
+	transcript := `granted grt_cafef00d for git ops`
+	cp := prompts.CompactionCheckpoint{ApprovalsGrants: []string{"grt_cafef00d — git ops"}}
+	validateCheckpoint(&cp, transcript)
+	if len(cp.PreservedIDs) != 0 {
+		t.Fatalf("a grant placed in approvals_grants must not be re-injected, got %+v", cp.PreservedIDs)
+	}
+}
+
 // TestValidateCheckpointKeepsPlacedIDs proves an ID the model already placed in a named
 // field is NOT duplicated into PreservedIDs.
 func TestValidateCheckpointKeepsPlacedIDs(t *testing.T) {

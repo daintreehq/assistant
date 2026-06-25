@@ -458,6 +458,36 @@ func TestAutoCompactDistillsBeforeDiscard(t *testing.T) {
 	}
 }
 
+// TestAutoCompactProseReplyPreservesToolArgIDs is the end-to-end guard for the key
+// behaviour change: when the small model replies with PROSE (not JSON), the auto-compact
+// still compacts AND the rendered checkpoint note carries every ID that lived only in a
+// discarded tool call's arguments — mined from the transcript into preserved_ids.
+func TestAutoCompactProseReplyPreservesToolArgIDs(t *testing.T) {
+	r := &chatCountRouter{summary: "Here is a prose summary, not JSON."}
+	s, _ := compactSession(t, r)
+	s.mu.Lock()
+	s.messages = append(s.messages,
+		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_x", Type: "function",
+			Function: models.ToolCallFunction{Name: "terminal.read", Arguments: `{"terminalId":"term_77"}`},
+		}}},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_x", StringContent: "output"},
+		models.TextMessage("user", "GIANT"+strings.Repeat("x", 260_000)), // trips the threshold
+	)
+	s.mu.Unlock()
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("expected one checkpoint call, got %d", r.chatCalls)
+	}
+	// msgs[3] is the checkpoint note itself (after the 3 controls). Even though the reply
+	// was prose, the tool-arg ID must be mined into the note.
+	note := s.Messages()[domain.ControlMessageCount].StringContent
+	if !strings.Contains(note, "[checkpoint") || !strings.Contains(note, "term_77") {
+		t.Fatalf("checkpoint note must preserve the tool-arg ID, got %q", note)
+	}
+}
+
 func TestDoesNotAutoCompactSmallConversation(t *testing.T) {
 	r := &chatCountRouter{summary: "X"}
 	s, _ := compactSession(t, r)
