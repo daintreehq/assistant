@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
@@ -25,6 +27,10 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
+	// Trailing newlines are noise here: they would inflate the logical-line count (a
+	// paste ending in "\n" would collapse one line sooner than the same paste without
+	// it) and leave a stray blank fill row at the bottom of the card.
+	text = strings.TrimRight(text, "\n")
 	g := th.Glyphs
 	// Colors come from the theme's UserMessageSurface (a cool neutral gray, NOT accent
 	// green — green is reserved for Daintree's identity).
@@ -77,27 +83,95 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	// back to the plain bar.
 	useFill := surface.Fill != nil && rowBudget >= 5
 	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
-	// Wrap each explicit paragraph (hard \n breaks preserved, matching wrapText), one
-	// bar + block per visual row so the gutter stays aligned with whatever we show.
-	for _, para := range strings.Split(text, "\n") {
-		wrapped := wrapCells(para, inner)
-		for _, line := range strings.Split(wrapped, "\n") {
-			b.WriteByte('\n')
-			if useFill {
-				// Fixed-width fill: a leading space is the gap after the bar; lipgloss
-				// pads the remainder of blockW with the background, producing a clean
-				// rectangle that meets the bar with no unfilled seam.
-				block := textStyle.Background(surface.Fill).Width(blockW).
-					Render(" " + truncateCells(line, inner))
-				b.WriteString(bar + block)
-			} else {
-				// No fill (ansi/none, or a terminal too narrow for a block): the bar
-				// alone carries the cue.
-				b.WriteString(bar + " " + textStyle.Render(truncateCells(line, inner)))
-			}
+	// writeRow emits one body row: bar + (fill block | bar-only fallback). Factored
+	// out so the head, the tail, and the middle trim rule all share the exact same
+	// geometry — every row is bar + blockW == rowBudget cells, with the fill (or the
+	// lone bar) carrying the cue.
+	writeRow := func(content string, style lipgloss.Style) {
+		b.WriteByte('\n')
+		if useFill {
+			// Fixed-width fill: a leading space is the gap after the bar; lipgloss
+			// pads the remainder of blockW with the background, producing a clean
+			// rectangle that meets the bar with no unfilled seam.
+			block := style.Background(surface.Fill).Width(blockW).
+				Render(" " + truncateCells(content, inner))
+			b.WriteString(bar + block)
+		} else {
+			// No fill (ansi/none, or a terminal too narrow for a block): the bar
+			// alone carries the cue.
+			b.WriteString(bar + " " + style.Render(truncateCells(content, inner)))
+		}
+	}
+	// writeParagraph wraps one explicit paragraph (hard \n breaks preserved, matching
+	// wrapText) to inner, one bar + block per visual row so the gutter stays aligned.
+	writeParagraph := func(para string) {
+		for _, line := range strings.Split(wrapCells(para, inner), "\n") {
+			writeRow(line, textStyle)
+		}
+	}
+
+	// A very long paste is shown as head + a "N lines hidden" rule + tail instead of
+	// in full, so it can't bury the conversation in scrollback (the committed YOU card
+	// is otherwise as tall as the paste — see flush.go's chunked commit). Trimming is
+	// by LOGICAL line — what the human actually pasted — and the split deliberately
+	// favors the TAIL: a pasted log or stack trace usually carries its payoff at the
+	// bottom, while the head only has to be enough to recognize what was pasted. We
+	// collapse only when it hides at least 2 lines (len > head+tail+1) — replacing a
+	// single hidden line with a one-row rule would save nothing. The rule itself rides
+	// the same fill block (renderHiddenRule), so the card stays one contiguous surface.
+	lines := strings.Split(text, "\n")
+	if len(lines) > userMsgHeadLines+userMsgTailLines+1 {
+		for _, para := range lines[:userMsgHeadLines] {
+			writeParagraph(para)
+		}
+		// The rule recedes to chrome: the faint Label tone (the same quiet hue as the
+		// "YOU" anchor), or a plain dim attribute where the theme has no Label color.
+		ruleStyle := th.Dim()
+		if surface.Label != nil {
+			ruleStyle = th.Body().Foreground(surface.Label)
+		}
+		hidden := len(lines) - userMsgHeadLines - userMsgTailLines
+		writeRow(renderHiddenRule(g, hidden, inner), ruleStyle)
+		for _, para := range lines[len(lines)-userMsgTailLines:] {
+			writeParagraph(para)
+		}
+	} else {
+		for _, para := range lines {
+			writeParagraph(para)
 		}
 	}
 	return b.String()
+}
+
+// userMsgHeadLines / userMsgTailLines bound a long YOU-card paste: a message of more
+// than head+tail+1 LOGICAL lines is collapsed to its first head lines, a middle "N
+// lines hidden" rule, and its last tail lines. The tail is the larger share because a
+// pasted log/stack-trace's payoff is usually at the bottom.
+const (
+	userMsgHeadLines = 8
+	userMsgTailLines = 12
+)
+
+// renderHiddenRule builds the trim row's content: a horizontal rule exactly `width`
+// cells wide with a centered "N lines hidden" count, e.g. "──── 47 lines hidden ────".
+// The dashes are the theme's width-1 rule unit (g.Rule: ─, ASCII "-"), and an
+// ultra-narrow card collapses to just the (clipped) label. Width is exact so the
+// caller's fill block (Width(blockW)) pads it like any other body row.
+func renderHiddenRule(g theme.GlyphSet, hidden, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	label := fmt.Sprintf(" %d lines hidden ", hidden) // breathing space around the count
+	lw := cellWidth(label)
+	if lw >= width {
+		// Too narrow for any rule dashes — just the (clipped) label.
+		return truncateCells(label, width)
+	}
+	// g.Rule is width-1, so the dashes either side of the label sum to exactly the
+	// remaining cells (pad), keeping the row exactly `width` cells wide.
+	pad := width - lw
+	left := pad / 2
+	return strings.Repeat(g.Rule, left) + label + strings.Repeat(g.Rule, pad-left)
 }
 
 // renderMarker renders the "◆ DAINTREE" marker line, with a dim "· received" only
