@@ -1255,3 +1255,124 @@ func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestKeepValidTailLargeBatchSplitBoundary is the regression guard for the keepN cut
+// landing mid tool-batch: a single assistant round with keepN tool calls (1 assistant +
+// keepN results) must NOT collapse to an empty tail — the window start backs up over the
+// leading results to include the declaring assistant, keeping the whole valid round.
+func TestKeepValidTailLargeBatchSplitBoundary(t *testing.T) {
+	const keepN = 16
+	calls := make([]models.ToolCallRequest, keepN)
+	msgs := make([]models.ChatMessage, 0, keepN+1)
+	asst := models.ChatMessage{Role: "assistant"}
+	for i := 0; i < keepN; i++ {
+		id := fmt.Sprintf("call_%02d", i)
+		calls[i] = models.ToolCallRequest{ID: id, Type: "function", Function: models.ToolCallFunction{Name: "f", Arguments: "{}"}}
+	}
+	asst.ToolCalls = calls
+	msgs = append(msgs, asst)
+	for i := 0; i < keepN; i++ {
+		msgs = append(msgs, models.ChatMessage{Role: "tool", ToolCallID: fmt.Sprintf("call_%02d", i), StringContent: fmt.Sprintf("res_%02d", i)})
+	}
+	// len(msgs) == keepN+1 > keepN, so the naive cut would start at index 1 (a tool result)
+	// and orphan all results. The backup must pull the assistant (index 0) into the window.
+	got := keepValidTail(msgs, keepN, 1_000_000)
+	if len(got) != keepN+1 {
+		t.Fatalf("a single %d-call batch must survive whole, got %d of %d messages", keepN, len(got), keepN+1)
+	}
+	if got[0].Role != "assistant" || len(got[0].ToolCalls) != keepN {
+		t.Fatalf("declaring assistant should lead the tail, got %+v", got[0])
+	}
+}
+
+// TestAutoCompactTailExactSixteenMessages proves the verbatim tail is capped at exactly
+// keepN of the most-recent working messages (oldest beyond keepN dropped), independent of
+// the budget shed.
+func TestAutoCompactTailExactSixteenMessages(t *testing.T) {
+	r := &chatCountRouter{summary: "EXACT_SUMMARY"}
+	s, _ := compactSession(t, r)
+	const keepN = domain.AutoCompactVerbatimTailMessages
+	// A big OLD note trips the soft threshold and is excluded by the keepN cut; the small
+	// recent notes fit the budget, so the tail is bounded only by keepN.
+	s.InjectNote("BIG_OLD" + strings.Repeat("x", 260_000))
+	const total = 20
+	for i := 0; i < total; i++ {
+		s.InjectNote(fmt.Sprintf("NOTE_%03d", i))
+	}
+	s.maybeAutoCompact(context.Background(), "run_test")
+
+	tail := s.Messages()[domain.ControlMessageCount+1:] // after controls + summary note
+	if len(tail) != keepN {
+		t.Fatalf("tail = %d messages, want exactly keepN=%d", len(tail), keepN)
+	}
+	// Tail is the most-recent keepN notes (NOTE_004..NOTE_019), in order.
+	if !strings.Contains(tail[0].StringContent, fmt.Sprintf("NOTE_%03d", total-keepN)) {
+		t.Fatalf("first tail = %q, want NOTE_%03d", tail[0].StringContent, total-keepN)
+	}
+	if !strings.Contains(tail[keepN-1].StringContent, fmt.Sprintf("NOTE_%03d", total-1)) {
+		t.Fatalf("last tail = %q, want NOTE_%03d", tail[keepN-1].StringContent, total-1)
+	}
+	for _, m := range s.Messages() {
+		if strings.Contains(m.StringContent, "NOTE_003") || strings.Contains(m.StringContent, "BIG_OLD") {
+			t.Fatal("notes older than the keepN window must be gone")
+		}
+	}
+}
+
+// TestAutoCompactDoesNotRetrip proves the rebuilt history (controls + summary + tail) lands
+// back under the soft threshold and a second pre-turn check does NOT re-compact — the tail
+// budget plus the zeroed lastPromptTokens keep it from looping.
+func TestAutoCompactDoesNotRetrip(t *testing.T) {
+	r := &chatCountRouter{summary: "NORETRIP_SUMMARY"}
+	s, _ := compactSession(t, r)
+	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
+	s.InjectNote("RECENT_A")
+	s.InjectNote("RECENT_B")
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("first pass should compact once, got %d", r.chatCalls)
+	}
+	s.maybeAutoCompact(context.Background(), "run_test")
+	if r.chatCalls != 1 {
+		t.Fatalf("second pass must not re-compact the freshly-shrunk history, got %d", r.chatCalls)
+	}
+}
+
+// TestAutoCompactRehydratesToolTailExact proves a verbatim tool pair in the tail survives
+// the persist→rehydrate round-trip with its ToolCalls / ToolCallID intact (not just text).
+func TestAutoCompactRehydratesToolTailExact(t *testing.T) {
+	r := &chatCountRouter{summary: "TOOLTAIL_SUMMARY"}
+	s, store := compactSession(t, r)
+	s.mu.Lock()
+	s.messages = append(s.messages,
+		models.TextMessage("user", "BIG_OLD"+strings.Repeat("x", 260_000)), // shed by budget
+		models.ChatMessage{Role: "assistant", ToolCalls: []models.ToolCallRequest{{
+			ID: "call_keep", Type: "function",
+			Function: models.ToolCallFunction{Name: "terminal.read", Arguments: `{"terminalId":"term_abc"}`},
+		}}},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_keep", StringContent: "tail output"},
+	)
+	s.mu.Unlock()
+
+	s.maybeAutoCompact(context.Background(), "run_test")
+
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("expected a resume from the compaction marker")
+	}
+	var sawCall, sawResult bool
+	for _, m := range res.RestoredMessages {
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "call_keep" && strings.Contains(tc.Function.Arguments, "term_abc") {
+				sawCall = true
+			}
+		}
+		if m.Role == "tool" && m.ToolCallID == "call_keep" {
+			sawResult = true
+		}
+	}
+	if !sawCall || !sawResult {
+		t.Fatalf("rehydrated tail lost the tool pair (call=%v result=%v): %+v", sawCall, sawResult, res.RestoredMessages)
+	}
+}

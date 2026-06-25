@@ -1189,7 +1189,9 @@ func estimateMessagesTokens(msgs []models.ChatMessage) int {
 // summary) and the lossy truncation fallback. Pure and lock-free — it only reads the
 // passed slice and returns a fresh copy, so a caller can size and clean a prospective tail
 // before committing it to s.messages. Steps:
-//   - cap to the last keepN messages;
+//   - take the last keepN messages, then back the start up over any leading tool results
+//     so the keepN cut never lands mid tool-batch (which would orphan results whose
+//     declaring assistant sits just before the window);
 //   - copy, so the cleanup passes and the caller's re-append never alias the s.messages
 //     backing array the caller is about to overwrite;
 //   - drop orphaned tool results, then an incomplete trailing tool call, exactly as a
@@ -1206,7 +1208,17 @@ func keepValidTail(msgs []models.ChatMessage, keepN, tokenBudget int) []models.C
 	}
 	working := msgs
 	if len(working) > keepN {
-		working = working[len(working)-keepN:]
+		// The keepN cut can land mid tool-batch — the window's leading messages would be
+		// tool results whose declaring assistant sits just before the window, and the
+		// orphan pass below would silently shed them (the WHOLE tail for a single >keepN
+		// batch). Back the start up over any leading tool messages so their declaring
+		// assistant is included; the budget-shed still trims the whole group if it can't
+		// fit. Bounded by one tool-group (or index 0).
+		start := len(msgs) - keepN
+		for start > 0 && msgs[start].Role == "tool" {
+			start--
+		}
+		working = msgs[start:]
 	}
 	tail := make([]models.ChatMessage, len(working))
 	copy(tail, working)
@@ -1273,6 +1285,17 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	transcript := ""
 	for _, m := range s.messages[domain.ControlMessageCount:] {
 		text := m.ContentToText()
+		// Fold each tool call's name + argument JSON into the flattened text so the
+		// (text-only) summarizer can SEE load-bearing IDs that live ONLY in arguments —
+		// e.g. terminal.read {"terminalId":"term_x"} — never echoed in prose. Without
+		// this the ID-preservation instruction has nothing to act on for the older history
+		// being summarized away. (The verbatim tail already keeps recent tool calls intact.)
+		for _, tc := range m.ToolCalls {
+			if text != "" {
+				text += "\n"
+			}
+			text += "[tool call " + tc.Function.Name + " " + tc.Function.Arguments + "]"
+		}
 		summaryMsgs = append(summaryMsgs, models.TextMessage(m.Role, text))
 		if text == "" {
 			text = "[tool call]"
