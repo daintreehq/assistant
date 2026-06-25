@@ -27,7 +27,15 @@ func (m Model) View() tea.View {
 	//   MouseMode = MouseModeNone    → never capture the mouse (zero value).
 	//   DisableBracketedPasteMode    → false (bracketed paste ON).
 	// Setting nothing for AltScreen/MouseMode leaves them at the safe defaults.
-	v.SetContent(m.footer())
+	s := m.footer()
+	// Record the live View's rendered height for scrollbackChunkRows (bubbletea#1613 commit
+	// safety). This is the renderer's cell-buffer height as of THIS frame; a commit fired in the
+	// next Update uses exactly this height, so reserving it keeps a tea.Println safe even when the
+	// footer grew tall to hold a withheld block. footerRows is nil only in headless tests.
+	if m.footerRows != nil {
+		*m.footerRows = lineCount(s)
+	}
+	v.SetContent(s)
 	v.WindowTitle = m.windowTitle()
 	return v
 }
@@ -130,24 +138,17 @@ func (m Model) footer() string {
 	}
 
 	if live != "" {
-		// Hard-bound the live region so the footer is NEVER tall. Two reasons: (1) a View
-		// taller than the terminal scrolls its own top into native scrollback (a frozen
-		// partial copy); (2) even below that, a tea.Println (a flush/commit) fired while the
-		// footer is tall makes Bubble Tea's insertAbove dump the whole footer into scrollback
-		// off a stale cell-buffer height (charmbracelet/bubbletea#1613). Completed blocks have
-		// already flushed to scrollback (flush.go), so the live tail holds only the UN-flushed
-		// remainder: an open tool group, the still-MUTABLE tail of the growing prose paragraph
-		// (just the partial last line for a plain tail; a whole withheld paragraph for a markdown
-		// one — render_turn.go), and the live status. A withheld markdown paragraph is the one
-		// piece that can still grow tall, so capping the tail to maxLiveRows (lastLines, below)
-		// keeps the View small in that case.
-		budget := m.rows - lineCount(bottom) - 2 // never exceed the terminal
-		if budget > maxLiveRows {
-			budget = maxLiveRows
-		}
-		if budget < 1 {
-			budget = 1
-		}
+		// The live region fills the height AVAILABLE above the fixed bottom band. budget =
+		// rows - band - 2 keeps the whole footer at rows-1 (one short of the terminal), so a View
+		// taller than the terminal — which would scroll its own top into scrollback as a frozen
+		// copy — can never happen. There is NO artificial sub-cap: a WITHHELD block (a bullet list,
+		// which can't commit incrementally because glamour re-flows it) renders WHOLE here instead
+		// of being tail-truncated by lastLines, which is exactly the "few-row window that scrolls
+		// and flicks over at the end" churn. The other #1613 hazard — a tea.Println fired while the
+		// footer is tall — is handled by scrollbackChunkRows reserving the ACTUAL rendered footer
+		// height (m.footerRows, set in View), so the commit chunks to fit above the tall footer.
+		// A block taller than the whole terminal still tail-truncates (unavoidable in inline mode).
+		budget := liveBudgetFor(m.rows, lineCount(bottom))
 		// LeftPad the live region so a STREAMING turn sits at the same left inset as the
 		// committed transcript (sealedBlock indents too). Without this the prose jumped one
 		// column right the instant it sealed — the live footer was rendered flush-left while
@@ -266,6 +267,24 @@ func lineCount(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+// liveBudgetFor is the number of rows the live region may fill: the terminal height minus the
+// fixed bottom band (bottomRows) minus a 1-row separator, floored at 1. This is the SINGLE source of
+// the live-region height limit — there is no static cap, so a withheld block fills the available
+// height (and is never tail-truncated by lastLines until it would exceed the terminal). footer()
+// applies it; tests assert the un-committed tail fits it (fits = no churn).
+func liveBudgetFor(rows, bottomRows int) int {
+	if b := rows - bottomRows - 2; b >= 1 {
+		return b
+	}
+	return 1
+}
+
+// liveBudget computes liveBudgetFor for the current model (recomputing the bottom band). For tests
+// and callers without the band already in hand.
+func (m Model) liveBudget() int {
+	return liveBudgetFor(m.rows, lineCount(m.bottomBand(m.contentW())))
 }
 
 // lastLines keeps the last n lines of s (the tail), dropping the head. Used to bound the

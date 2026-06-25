@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
@@ -169,8 +171,68 @@ func TestStreaming_BulletListDoesNotChurn(t *testing.T) {
 	if worst <= 8 {
 		t.Fatalf("fixture too short: list reached only %d un-committed rows (need > 8 to exercise the raised cap)", worst)
 	}
-	// The cap must hold the whole withheld list, so the footer never truncates/churns its head.
-	if worst > maxLiveRows {
-		t.Errorf("un-committed footer tail peaked at %d rows (> maxLiveRows=%d) — the bullet list would hide/churn its head", worst, maxLiveRows)
+	// The footer's live budget must hold the whole withheld list, so it never tail-truncates/churns
+	// its head.
+	if worst > m.liveBudget() {
+		t.Errorf("un-committed footer tail peaked at %d rows (> liveBudget=%d) — the bullet list would hide/churn its head", worst, m.liveBudget())
+	}
+}
+
+// TestStreaming_TallListNotTruncated is the regression for the user's FINAL residual: a "really long"
+// bullet list (the real 7-item "Key architecture" list from session ses_34766218 reaches ~17 rows at
+// an 80-col pane — OVER the old static 16-row cap) had its head tail-truncated by lastLines and
+// scrolled off the live footer. The fix replaces the static cap with a dynamic budget
+// (liveBudgetFor = the height available above the bottom band), so a list up to the terminal height
+// renders WHOLE. This streams the full real answer and asserts that at the frame where the list is
+// tallest, the footer actually SHOWS the list's HEAD (the first item) — not just that the tail fits a
+// recomputed number. Under the old 16-row cap the head is truncated and this fails.
+func TestStreaming_TallListNotTruncated(t *testing.T) {
+	const (
+		archHead = "ARCHHEADGO" // marker in the FIRST Key-architecture item (top of the tall list)
+		archTail = "ARCHTAILTESTS"
+	)
+	full := "Here's the summary:\n\n" +
+		"## Daintree Assistant\n\n" +
+		"This is **Daintree's local operations officer** — a single native **Go** binary that acts as a command-line orchestration assistant for the Daintree platform. It lives at `/Users/x/assistant` on `main`.\n\n" +
+		"### What it does\n\n" +
+		"- **Orchestrates Daintree operations** — spawns and supervises visible agent terminals, manages worktrees, runs recipes, schedules timers\n" +
+		"- **Never edits files directly** — when file changes are needed it spawns a visible agent inside Daintree and supervises it\n" +
+		"- **Powered by DeepSeek AI** (`deepseek-v4-flash`) for all model tiers — orchestration, watchers, summaries, classification\n\n" +
+		"### Key architecture\n\n" +
+		"- **" + archHead + " 1.25.8+**, pure Go with no CGO — SQLite via `modernc.org/sqlite`, Bubble Tea v2 for the TUI cockpit\n" +
+		"- **Three run modes**: interactive cockpit (inline TUI, not full-screen), classic REPL, one-shot with optional JSONL\n" +
+		"- **Embedded host** (`host --stdio`) — a stdio NDJSON transport that Daintree drives the runtime through\n" +
+		"- **Foreground-only scheduler** — timers and watchers tick in-process only while the assistant is open\n" +
+		"- **Skill system** — procedural runbooks injected into context on demand via `skill.find`/`skill.load`\n" +
+		"- **Permission tiers**: supervisor (read-only) → operator (+spawn) → system (+git/destructive)\n" +
+		"- **~980+ " + archTail + "** across 44 packages, no network dependencies in tests\n\n" +
+		"### Current state\n\nSingle worktree (`main`), 3 terminals, no open inbox items."
+
+	turn := &TurnCell{ID: "turn_1", UserText: "Q", State: TurnActive, Phase: domain.PhaseGenerating, Steps: []TurnStep{proseStep("", true)}}
+	m := armedModel(turn)
+	m.footerRows = new(int) // armedModel/testModel don't allocate it; scrollbackChunkRows is nil-safe anyway
+	m.rows = 40             // budget ≈ 32 > the ~17-row list; the old static 16-cap would truncate it
+
+	worst, worstFooter := 0, ""
+	for i := 1; i <= len(full); i++ {
+		turn.Steps[0].Text = full[:i]
+		_ = m.flushActiveTurn()
+		if unc := len(m.activeTurnRows(turn)) - turn.FlushedRows; unc > worst {
+			worst = unc
+			worstFooter = ansi.Strip(m.footer())
+		}
+	}
+	t.Logf("tall list: worst un-committed tail = %d rows, liveBudget = %d", worst, m.liveBudget())
+	// Non-vacuity: the list must genuinely exceed the OLD static 16-row cap, or the dynamic budget
+	// isn't being exercised (this is what made the user's real answer still churn).
+	if worst <= maxLiveRows {
+		t.Fatalf("fixture too short: tall list only reached %d rows (need > maxLiveRows=%d to exercise the dynamic budget)", worst, maxLiveRows)
+	}
+	// THE assertion: at the tallest frame the footer SHOWS the list HEAD. Under the old static 16-row
+	// cap the head scrolled off (lastLines kept only the bottom 16 rows) — the user-visible churn.
+	// With the dynamic budget the whole list is shown, so the head is present.
+	if !strings.Contains(worstFooter, archHead) {
+		t.Errorf("the list HEAD %q is not visible in the footer at the tallest frame (%d rows, budget %d) — it was tail-truncated/churned off the top:\n%s",
+			archHead, worst, m.liveBudget(), worstFooter)
 	}
 }

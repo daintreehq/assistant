@@ -233,18 +233,24 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 // bottom band.
 func (m Model) scrollbackChunkRows() int {
 	var reserve int
-	switch m.view {
-	case viewOperations, viewHelp:
-		// These decks REPLACE the bottom band with a near-full-height scroll window
-		// (footer() clamps them to rows-2, plus an "Esc back" hint = up to rows-1 rows).
-		// A commit fired while one is open must print at most one row at a time.
-		reserve = m.rows - 1
-	default:
-		// home footer = bounded live tail (<= maxLiveRows) + the blank SEPARATOR row
-		// (footer() writes "\n\n" between the tail and the bottom band) + the bottom band.
-		// Use the maxLiveRows CAP (not the current tail) so the reserve also covers Bubble
-		// Tea's one-frame cellbuf-height lag (the prior footer can be a row or two taller).
-		reserve = maxLiveRows + 1 + lineCount(m.bottomBand(m.contentW()))
+	if m.footerRows != nil && *m.footerRows > 0 {
+		// The footer's ACTUAL last-rendered height (View writes it). It lags m's state by one
+		// frame — exactly the cell-buffer height insertAbove uses for a commit fired in the next
+		// Update — so reserving it (plus a 1-row safety margin) keeps every chunk's CursorUp at or
+		// below rows-1 even when the footer grew tall to hold a withheld block. This is what lets
+		// the live footer fill the screen (view.go) without #1613: prose keeps the footer short →
+		// large chunks; a tall withheld block → small chunks, but only while one is on screen.
+		reserve = *m.footerRows + 1
+	} else {
+		// Fallback before the first render (or in headless tests, which never call View): the
+		// former static bound. Ops/help decks replace the bottom band with a near-full-height
+		// scroll window, so a commit then must print one row at a time.
+		switch m.view {
+		case viewOperations, viewHelp:
+			reserve = m.rows - 1
+		default:
+			reserve = maxLiveRows + 1 + lineCount(m.bottomBand(m.contentW()))
+		}
 	}
 	if r := m.rows - reserve; r >= 1 {
 		return r

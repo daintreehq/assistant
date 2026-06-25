@@ -104,6 +104,13 @@ type Model struct {
 	queue       scrollbackQueue
 	masthead    mastheadParams
 	commitArmed bool // first scrollback commit deferred one render cycle (see scheduleCommit)
+	// footerRows is the live View's last-RENDERED height (line count), written by View() and read by
+	// scrollbackChunkRows(). It is a shared pointer so the write survives the Model's value-copy
+	// semantics. It lags m's state by exactly one frame — which is precisely the cell-buffer height
+	// Bubble Tea's insertAbove uses for a commit fired in the NEXT Update — so reserving it keeps a
+	// tea.Println safe even when the footer grew tall to hold a withheld block (bubbletea#1613). nil
+	// in headless tests (which never call View); scrollbackChunkRows falls back to the static bound.
+	footerRows *int
 
 	// work serialization.
 	inFlight   bool   // exactly one Session.Send outstanding
@@ -181,6 +188,7 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		md:                  markdown.New(th),
 		columns:             80, // provisional until the first WindowSizeMsg
 		rows:                24,
+		footerRows:          new(int),
 		embedded:            a.Config.WindowID != "",
 		view:                viewHome,
 		composer:            cmp,

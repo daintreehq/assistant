@@ -516,29 +516,52 @@ func TestRowHasOpenableDelimiter(t *testing.T) {
 	}
 }
 
-// TestFlush_FooterHeightCapped proves the live footer is never tall even while a huge in-progress
-// paragraph streams: the growing paragraph DOES render live in the footer, but lastLines(budget)
-// caps it to its last maxLiveRows rows — so a flush/commit tea.Println can't dump a tall footer
-// into scrollback (bubbletea#1613).
+// TestFlush_FooterHeightCapped proves the live footer NEVER exceeds the terminal height, even while a
+// block taller than the whole terminal streams. The live region now fills the height available above
+// the bottom band (no static maxLiveRows cap — a withheld list renders whole), so the bound is the
+// TERMINAL: a block taller than that is tail-truncated by lastLines (the end shows, the head is
+// dropped) and the footer stays <= rows-1. That terminal bound is what keeps a flush/commit
+// tea.Println safe (a View taller than the screen would scroll a frozen copy into scrollback —
+// bubbletea#1613); scrollbackChunkRows reserves the ACTUAL footer height for the rest.
 func TestFlush_FooterHeightCapped(t *testing.T) {
-	// HEAD_SENTINEL at the top, TAIL_SENTINEL at the bottom, ~400 words between → wraps to dozens
-	// of rows. The cap must show the TAIL and drop the HEAD.
+	// HEAD_SENTINEL at the top, TAIL_SENTINEL at the bottom, ~400 words between → wraps to far more
+	// rows than this SHORT terminal, so it must truncate to the tail.
 	huge := "HEAD_SENTINEL " + strings.Repeat("word ", 400) + "TAIL_SENTINEL"
 	m, _ := streamingProse(huge)
-	m.rows = 50 // a tall terminal — lastLines(budget) keeps the footer short regardless
+	m.rows = 20 // a SHORT terminal — the block is taller than the whole screen
 	m.inFlight = true
 	foot := ansi.Strip(m.footer())
 	n := strings.Count(foot, "\n") + 1
-	if n > maxLiveRows+10 {
-		t.Errorf("footer is %d rows; want <= %d (live cap %d + bottom band)", n, maxLiveRows+10, maxLiveRows)
+	if n > m.rows {
+		t.Errorf("footer is %d rows; must never exceed the terminal height %d (bubbletea#1613)", n, m.rows)
 	}
-	// The growing paragraph streams live, but lastLines caps it to the TAIL: the end shows, the
-	// head is dropped. (Remove the cap and this would show HEAD_SENTINEL and overflow the footer.)
+	// Taller than the terminal → lastLines keeps the TAIL (the streaming edge), drops the HEAD.
 	if !strings.Contains(foot, "TAIL_SENTINEL") {
-		t.Errorf("the growing paragraph's tail must stream live in the footer:\n%s", foot)
+		t.Errorf("the growing block's tail must stream live in the footer:\n%s", foot)
 	}
 	if strings.Contains(foot, "HEAD_SENTINEL") {
-		t.Errorf("the growing paragraph's head must be dropped by the height cap, not shown:\n%s", foot)
+		t.Errorf("a block taller than the terminal must drop its head, not overflow:\n%s", foot)
+	}
+}
+
+// TestFlush_TallBlockFillsAvailableHeight is the complement: a withheld block that FITS within the
+// terminal renders WHOLE (head included) — no static cap truncates it. This is the dynamic-budget fix
+// for the long-list churn; under the old maxLiveRows=16 cap the head would be dropped.
+func TestFlush_TallBlockFillsAvailableHeight(t *testing.T) {
+	// ~20 wrapped rows, comfortably taller than the old 16 cap but well within a 40-row terminal.
+	huge := "HEADWORD " + strings.Repeat("word ", 200) + "TAILWORD"
+	m, _ := streamingProse(huge)
+	m.rows = 40
+	m.inFlight = true
+	foot := ansi.Strip(m.footer())
+	if !strings.Contains(foot, "HEADWORD") {
+		t.Errorf("a block that fits the terminal must render WHOLE — its head (HEADWORD) must show, not be capped off:\n%s", foot)
+	}
+	if !strings.Contains(foot, "TAILWORD") {
+		t.Errorf("the block's tail (TAILWORD) must show:\n%s", foot)
+	}
+	if n := strings.Count(foot, "\n") + 1; n > m.rows {
+		t.Errorf("footer is %d rows; must never exceed the terminal height %d", n, m.rows)
 	}
 }
 
