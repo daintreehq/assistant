@@ -7,6 +7,7 @@ package models
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -62,17 +63,26 @@ func (r *Router) ModelFor(tier domain.ModelTier) string {
 
 // applyTierReasoning sets the per-tier default reasoning_effort when the caller
 // left ReasoningEffort unset. A caller that set an explicit effort always wins.
+// The default is model-aware (it inspects the resolved model id) because the right
+// effort depends on the concrete model wired to the tier, not the tier alone:
 //
-//   - small (deepseek-v4-flash) → "none": it only runs terse yes/no judges,
-//     summaries, extraction, and classification — a <think> phase there is pure
-//     latency/cost, and finish-detection in particular must stay fast.
-//   - large/medium (deepseek-v4-flash, orchestration) → "high": flash is the
-//     validated orchestration model and the main thread benefits from real
-//     chain-of-thought for multi-step planning, but "max" is needless overhead on
-//     every turn. "high" is the deliberate middle. Medium routes to the large
-//     model id in v1, so it gets the same default; otherwise a "medium" watcher
-//     would silently run hotter than the main thread.
-func applyTierReasoning(tier domain.ModelTier, opts *ChatOptions) {
+//   - small → "none": it only runs terse yes/no judges, summaries, extraction,
+//     and classification — a <think> phase there is pure latency/cost, and
+//     finish-detection in particular must stay fast.
+//   - large/medium on flash (the default) → "none": flash is the validated
+//     orchestration model and the loaded skills carry the playbooks, so the main
+//     thread does NOT need a provider-side <think> phase to plan. "high" here was
+//     a holdover from when these tiers ran glm-5p2 — on flash it just buys a
+//     costly hidden <think> on every turn (≈23–38s vs ≈1s) even for a trivial
+//     single-tool routing call. A caller that genuinely wants reasoning on a
+//     specific call sets ReasoningEffort explicitly (it wins above).
+//   - large/medium on glm → "high": GLM-5.2 on Fireworks accepts only high|max
+//     (it coerces low/medium → high and rejects "none"), so a deployer who points
+//     a tier at glm via DAINTREE_{LARGE,MEDIUM}_MODEL must still get "high".
+//
+// Medium routes to the large model id in v1, so it shares the large-tier logic;
+// otherwise a "medium" watcher would silently run hotter than the main thread.
+func applyTierReasoning(tier domain.ModelTier, model string, opts *ChatOptions) {
 	if opts.ReasoningEffort != "" {
 		return
 	}
@@ -80,7 +90,17 @@ func applyTierReasoning(tier domain.ModelTier, opts *ChatOptions) {
 	case domain.ModelSmall:
 		opts.ReasoningEffort = "none"
 	case domain.ModelLarge, domain.ModelMedium:
-		opts.ReasoningEffort = "high"
+		// GLM rejects "none" (min effort is "high"); everything else (flash) runs
+		// think-free by default. Prefix-match the bare id, mirroring rateFor.
+		if strings.HasPrefix(BareModelID(strings.ToLower(model)), "glm") {
+			opts.ReasoningEffort = "high"
+		} else {
+			opts.ReasoningEffort = "none"
+		}
+	default:
+		// An unknown tier falls through to the large model id (see ModelFor), so it
+		// gets the same flash default — never an omitted reasoning_effort.
+		opts.ReasoningEffort = "none"
 	}
 }
 
@@ -116,7 +136,7 @@ func (r *Router) Chat(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
-	applyTierReasoning(tier, &opts)
+	applyTierReasoning(tier, model, &opts)
 	r.logRequest("chat", tier, model, opts)
 	res, err := r.FW.Chat(ctx, opts)
 	if err != nil {
@@ -134,7 +154,7 @@ func (r *Router) Stream(ctx context.Context, tier domain.ModelTier, opts ChatOpt
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
-	applyTierReasoning(tier, &opts)
+	applyTierReasoning(tier, model, &opts)
 	r.logRequest("stream", tier, model, opts)
 	res, err := r.FW.ChatStream(ctx, opts, onToken)
 	if err != nil {
@@ -154,7 +174,7 @@ func (r *Router) JSON(ctx context.Context, tier domain.ModelTier, opts ChatOptio
 	}
 	model := r.ModelFor(tier)
 	opts.Model = model
-	applyTierReasoning(tier, &opts)
+	applyTierReasoning(tier, model, &opts)
 	r.logRequest("json", tier, model, opts)
 	out, usage, err := r.FW.JSON(ctx, opts)
 	if err != nil {
