@@ -66,6 +66,13 @@ func composeTurnFooter(goal string) []models.ChatMessage {
 // (truncated) plus a terse output-discipline line. Seeding the goal at the tail on
 // every round counteracts goal drift in long, many-round turns without rewriting
 // any cached early control message. Omitted entirely when the goal is blank.
+//
+// The anchor stays pinned to the ORIGINATING ask for the whole turn: a mid-turn
+// redirect (InjectPrompt → foldInInjections) lands as a fresh user message in
+// history, which the model weighs over this trailing system reminder — so the
+// anchor intentionally does NOT chase injections (it would otherwise thrash the
+// footer and lose the turn's through-line). The known asymmetry is acceptable
+// because a recent user message outranks trailing system boilerplate.
 func goalAnchorSection(goal string) (string, bool) {
 	if goal == "" {
 		return "", false

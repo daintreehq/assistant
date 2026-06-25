@@ -12,6 +12,9 @@ import (
 
 // withFooterSections swaps the package-local registry for the duration of one test
 // and restores it afterwards, so registry-shape tests never bleed into each other.
+// The swap is unsynchronized, so tests that call this MUST NOT use t.Parallel() —
+// footerSections is a process-global with no mutex (it is write-once at init in
+// production and never mutated at runtime).
 func withFooterSections(t *testing.T, sections ...footerSection) {
 	t.Helper()
 	prev := footerSections
@@ -194,5 +197,98 @@ func TestComposeTurnFooter_RebuiltEveryRound(t *testing.T) {
 		if last.Role != "system" || !strings.Contains(last.StringContent, "investigate the bug") {
 			t.Errorf("round %d does not end with the goal footer: %+v", i, last)
 		}
+	}
+}
+
+// Truncation keeps the PREFIX (first N runes), not an arbitrary slice or the suffix.
+func TestComposeTurnFooter_TruncationKeepsPrefix(t *testing.T) {
+	// 498 'a' + "XY" = exactly the first 500 runes; the trailing 'b's must be dropped.
+	goal := strings.Repeat("a", goalAnchorMaxRunes-2) + "XY" + strings.Repeat("b", 10)
+	body := footerBody(t, goal)
+	want := strings.Repeat("a", goalAnchorMaxRunes-2) + "XY"
+	if !strings.Contains(body, want) {
+		t.Errorf("body should contain the first %d runes ending in XY", goalAnchorMaxRunes)
+	}
+	if strings.Contains(body, "XYb") {
+		t.Error("truncation kept runes past the cap; it must keep the PREFIX, not the suffix")
+	}
+}
+
+// Session-level: two sequential turns each anchor their OWN originating ask — the
+// footer is never stale from a prior turn.
+func TestComposeTurnFooter_DistinctGoalsAcrossSends(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{{Content: "a"}, {Content: "b"}}}
+	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+
+	if _, err := s.Send(context.Background(), "goal-one", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "goal-two", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.seen) < 2 {
+		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
+	}
+	last0 := r.seen[0][len(r.seen[0])-1]
+	last1 := r.seen[1][len(r.seen[1])-1]
+	if !strings.Contains(last0.StringContent, "goal-one") {
+		t.Errorf("send 1 footer should carry goal-one; got %q", last0.StringContent)
+	}
+	if !strings.Contains(last1.StringContent, "goal-two") || strings.Contains(last1.StringContent, "goal-one") {
+		t.Errorf("send 2 footer should carry goal-two only; got %q", last1.StringContent)
+	}
+}
+
+// Session-level: a mid-turn redirect folds into history as a user message, but the
+// footer stays anchored to the ORIGINAL goal (it never chases the injection).
+func TestComposeTurnFooter_StableAcrossMidTurnInjection(t *testing.T) {
+	var s *Session
+	r := &injectRouter{
+		results: []models.ChatResult{
+			{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0: tool call → loop
+			{Content: "final"}, // round 1: final answer
+		},
+		onRound: func(round int) {
+			if round == 0 {
+				s.InjectPrompt("stop, explain only")
+			}
+		},
+	}
+	s = NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+
+	if _, err := s.Send(context.Background(), "original goal", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.seen) < 2 {
+		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
+	}
+	round1 := r.seen[1]
+	if !userTextSeen(round1, "stop, explain only") {
+		t.Error("round 1 should see the folded-in injection in history")
+	}
+	last := round1[len(round1)-1]
+	if last.Role != "system" || !strings.Contains(last.StringContent, "original goal") {
+		t.Errorf("footer should still carry the original goal; got %+v", last)
+	}
+	if strings.Contains(last.StringContent, "stop, explain only") {
+		t.Error("footer must not adopt the mid-turn injection as the goal")
+	}
+}
+
+// Session-level: a blank send appends NO tail system message — the request is
+// byte-identical to the pre-footer behaviour.
+func TestComposeTurnFooter_BlankSendAppendsNoFooter(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
+	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+
+	if _, err := s.Send(context.Background(), "   ", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.seen) == 0 {
+		t.Fatal("router observed no rounds")
+	}
+	last := r.seen[0][len(r.seen[0])-1]
+	if last.Role == "system" && strings.Contains(last.StringContent, "# Current goal") {
+		t.Errorf("blank goal must not append a goal footer; got %+v", last)
 	}
 }
