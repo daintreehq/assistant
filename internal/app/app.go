@@ -21,6 +21,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/skills"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
 )
 
 // AppHooks are the swappable UI/REPL callbacks. SetHooks merges partial updates
@@ -74,6 +75,13 @@ type App struct {
 
 	runRef    *agent.RunIDRef
 	scheduler *daemon.Scheduler
+
+	// scratchStore is the session-scoped, pure in-memory scratch workspace the
+	// scratch.* tools drive. Initialized once per App (== once per session) before
+	// the tool registry is built, and discarded with the App — nothing here persists
+	// or leaks across sessions. Held on App (not Session) because the tool builder
+	// runs before a.Session exists; the family captures this concrete store directly.
+	scratchStore *scratchx.Store
 
 	// baseCtx is the APP-SCOPED background context for detached work that outlives a
 	// single turn (e.g. terminal.extract.async) but must NOT outlive the App. It is
@@ -184,6 +192,9 @@ func Create(opts CreateOptions) (*App, error) {
 		baseCtx:     baseCtx,
 		baseCancel:  baseCancel,
 		InitialTier: cfg.Tier,
+		// A fresh, empty scratch workspace for this session. Built before the tool
+		// registry so the scratch.* family can capture the concrete store directly.
+		scratchStore: scratchx.NewStore(),
 		// Watchers a prior session left running were cancelled by store.Open's sweep;
 		// carry their titles so the first scheduler-active runtime context surfaces a
 		// one-time NOTE offering to re-create them.

@@ -15,6 +15,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools/mcpx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/memory"
 	queuetools "github.com/daintreehq/daintree-assistant/internal/tools/queue"
+	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/skill"
 	"github.com/daintreehq/daintree-assistant/internal/tools/timer"
 	"github.com/daintreehq/daintree-assistant/internal/tools/watcher"
@@ -63,6 +64,9 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, addr(fsx.Tools(fsx.Deps{}))...)
 	all = append(all, addr(mcpx.Tools(mcpx.Deps{
 		MCP: mcpxMCPAdapter{c: a.MCP},
+	}))...)
+	all = append(all, addr(scratchx.Tools(scratchx.Deps{
+		Store: a.scratchStore,
 	}))...)
 
 	// Families already returning []*tools.Tool — pass through.

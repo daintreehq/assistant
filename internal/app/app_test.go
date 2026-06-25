@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 )
 
@@ -69,23 +70,50 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 74 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 79 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
-// terminal.close wrapper, and the terminal.awaitAll cohort finish-wait); we assert
-// that exact count so a silent family add/drop is caught.
+// terminal.close wrapper, the terminal.awaitAll cohort finish-wait, and the five
+// scratch.* session-scratch tools); we assert that exact count so a silent family
+// add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 74 {
-		t.Errorf("registered tools = %d, want 74", got)
+	if got != 79 {
+		t.Errorf("registered tools = %d, want 79", got)
 	}
 	// AssertSafe ran inside Create (boot would have failed otherwise); re-run it to
 	// pin the invariant that the full wired set carries no file-edit tool.
 	if err := a.Registry.AssertSafe(); err != nil {
 		t.Errorf("AssertSafe over full set: %v", err)
+	}
+}
+
+// TestScratchToolsWired asserts the scratch.* session-scratch family is registered
+// by the real builder, and that none of its tools leaked into the always-offered
+// core set (scratch is optional workflow tooling, discovered on demand).
+func TestScratchToolsWired(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	scratchTools := []string{
+		"scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop",
+	}
+	for _, name := range scratchTools {
+		if !a.Registry.Has(name) {
+			t.Errorf("scratch tool %q not registered", name)
+		}
+	}
+	core := make(map[string]bool, len(agent.CoreToolNames()))
+	for _, n := range agent.CoreToolNames() {
+		core[n] = true
+	}
+	for _, name := range scratchTools {
+		if core[name] {
+			t.Errorf("scratch tool %q must not be a core tool", name)
+		}
 	}
 }
 
