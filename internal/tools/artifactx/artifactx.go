@@ -51,15 +51,26 @@ type readArgs struct {
 	Limit      *int   `json:"limit,omitempty"`
 }
 
-// Validate enforces `offset: int().min(0)` and `limit: int().min(1).max(MAX)`.
-// Without the limit floor a negative limit makes end = offset+limit < offset, and
-// runes[offset:end] panics with an invalid slice range.
+// Validate enforces `offset: int().min(0)` and a limit FLOOR of 1. Without the
+// floor a negative limit makes end = offset+limit < offset, and runes[offset:end]
+// panics with an invalid slice range. The CEILING is handled by clamping, not
+// rejection: limit is a page-size preference, not a hard contract, and the model
+// routinely sets it to the artifact's totalChars to "grab it all" — rejecting that
+// burns a whole tool round on a recoverable mistake. So an over-max limit is
+// normalized down to maxReadChars here (StrictDecoder's canonical re-marshal then
+// carries the clamped value to the handler); the handler clamps again as defense
+// in depth.
 func (a *readArgs) Validate() error {
 	if a.Offset != nil && *a.Offset < 0 {
 		return fmt.Errorf("offset must be >= 0")
 	}
-	if a.Limit != nil && (*a.Limit < 1 || *a.Limit > maxReadChars) {
-		return fmt.Errorf("limit must be between 1 and %d", maxReadChars)
+	if a.Limit != nil {
+		if *a.Limit < 1 {
+			return fmt.Errorf("limit must be >= 1")
+		}
+		if *a.Limit > maxReadChars {
+			*a.Limit = maxReadChars
+		}
 	}
 	return nil
 }
@@ -69,8 +80,8 @@ var readSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "artifactId": { "type": "string", "description": "The artifactId from a truncated tool result." },
-    "offset": { "type": "number", "description": "Character offset to start reading from (default 0)." },
-    "limit": { "type": "number", "description": "Max characters to return (default 3500, max 3500)." }
+    "offset": { "type": "number", "minimum": 0, "description": "Character offset where this page starts. Use 0 for the first page, then the nextOffset returned by the previous read." },
+    "limit": { "type": "number", "minimum": 1, "maximum": 3500, "description": "Optional page size in characters. Omit to use the default and maximum of 3500 per read. Do NOT set this to totalChars — one read returns at most 3500 chars regardless." }
   },
   "required": ["artifactId"]
 }`)
@@ -79,9 +90,10 @@ var readSchema = json.RawMessage(`{
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{{
 		Name: "artifact.read",
-		Description: "Read a slice of a large tool result that was stored as an artifact because it overflowed the inline size limit. " +
-			"Pass the artifactId from a truncated result, plus an optional character offset and limit, to page through the full output. " +
-			"Use the returned nextOffset/eof to continue.",
+		Description: "Read ONE page of a large tool result that was archived as an artifact because it overflowed the inline size limit. " +
+			"A page is at most 3500 characters — a single call NEVER returns the whole artifact. " +
+			"To read it: call with the artifactId and offset 0 (omit limit; it defaults to the 3500 max), then call again with offset set to the returned nextOffset, repeating until eof is true. " +
+			"Do NOT set limit to totalChars (or any value above 3500) to grab it all at once — that still returns just one 3500-char page; page with offset/nextOffset instead.",
 		Risk:   domain.RiskRead,
 		Schema: readSchema,
 		Decode: tools.StrictDecoder(func() any { return &readArgs{} }),

@@ -157,9 +157,16 @@ func SerializeToolResult(res domain.ToolResult, artifactStore *ArtifactStore) st
 
 	var note string
 	if artifactID != "" {
-		note = "Output truncated to a " + itoa(previewLen) + "-char preview of " + itoa(totalChars) +
-			" total. Call the artifact.read tool with artifactId \"" + artifactID +
-			"\" (and offset/limit) to page through the full result."
+		// Anchor the model on the CALL SHAPE (offset → nextOffset loop), not on the
+		// raw totalChars number: it tends to set limit=totalChars to "grab it all",
+		// which a single read can't do (max 3500 chars/page) and which wastes a round.
+		// Lead with the safe first call, then the loop; keep totalChars as a trailing
+		// progress hint only.
+		note = "Result too large to inline — only a " + itoa(previewLen) + "-char preview is shown above. " +
+			"The full result is archived as artifact \"" + artifactID + "\". Read it ONE page at a time: " +
+			"call artifact.read with {\"artifactId\":\"" + artifactID + "\",\"offset\":0} (omit limit; it defaults to the 3500-char max), " +
+			"then repeat with offset set to the nextOffset it returns until eof is true. " +
+			"Do NOT set limit to the total char count to grab it all — a read returns at most 3500 chars (" + itoa(totalChars) + " chars total)."
 	} else {
 		note = "Output truncated to a " + itoa(previewLen) + "-char preview of " + itoa(totalChars) +
 			" total; the full result is not retrievable in this context."

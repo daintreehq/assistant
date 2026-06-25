@@ -111,8 +111,9 @@ func collapseStubPreviews(work []models.ChatMessage) int {
 			continue // not an archived overflow stub, or already collapsed
 		}
 		stub.Result.Preview = ""
-		stub.Result.Note = "Full result archived; call the artifact.read tool with artifactId \"" +
-			stub.Result.ArtifactID + "\" to page through it."
+		stub.Result.Note = "Full result archived as artifact \"" + stub.Result.ArtifactID +
+			"\". Read it one page at a time: call artifact.read with {\"artifactId\":\"" + stub.Result.ArtifactID +
+			"\",\"offset\":0} (omit limit; it defaults to the 3500-char max), then repeat with offset set to the returned nextOffset until eof is true."
 		out, err := json.Marshal(stub)
 		if err != nil {
 			continue
