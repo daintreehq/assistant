@@ -41,10 +41,14 @@ const (
 	// the parsed screen marks the cockpit reaching steady state. Mirrors
 	// internal/ui composerPromptGlyph.
 	composerGlyph = "›"
-	// maxFooterRows bounds the live View height during a turn. Matches the headless
-	// flush_test.go convention (internal/ui maxLiveRows=8 + a 10-row bottom band);
-	// maxLiveRows is unexported, so the literal is duplicated with this note.
+	// maxFooterRows bounds the live View height for PROSE turns, which commit line by line so the
+	// footer stays small (observed peaks 8-10). Kept TIGHT so it remains a real #1613 regression
+	// signal — a line-committed paragraph must never balloon the footer.
 	maxFooterRows = 18
+	// maxListFooterRows bounds the live View height for a WITHHELD bullet list, which renders whole
+	// in the footer (it can't line-commit) up to the raised cap (internal/ui maxLiveRows=16) plus the
+	// ~10-row bottom band. maxLiveRows is unexported, so the literal is duplicated with this note.
+	maxListFooterRows = 26
 	// mastheadText is the distinctive masthead substring committed once per scrollback
 	// commit. Mirrors internal/ui render_chrome.go renderMasthead.
 	mastheadText = "Daintree Assistant"
@@ -594,6 +598,165 @@ func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
 	for _, m := range []string{earlyMarker, sentinel} {
 		if got := screen.CountLineSubstr(m); got != 1 {
 			t.Errorf("marker %q appears on %d composed lines, want 1 (duplicated/lost in scrollback):\n%s", m, got, screen.Plain())
+		}
+	}
+
+	// Phase 3: clean shutdown.
+	if _, err := ptm.Write([]byte("/quit\r")); err != nil {
+		t.Logf("write /quit: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitErr
+		t.Errorf("cockpit did not exit within 10s after /quit")
+	}
+	_ = ptm.Close()
+	drainWG.Wait()
+	runtime.KeepAlive(ptm)
+}
+
+// TestPTYStreamingBulletListNoChurn is the real-terminal #1613-SAFETY check for the bullet-list fix.
+// A streaming list can't commit line by line (glamour re-flows it as items arrive), so it is WITHHELD
+// until "\n\n" and rendered WHOLE into the live footer, which the fix sized the cap to hold. Raising
+// the cap means a TALLER live footer, so the risk is that the seal commit (the whole list via
+// tea.Println) corrupts scrollback (#1613). This streams a multi-row bullet list and asserts it
+// commits CLEANLY end to end: every list item lands in scrollback exactly once (no dup, no loss) and
+// the live View stayed within the raised list budget.
+//
+// NOTE: the streaming-footer churn itself (the list head scrolling off the capped footer) is detected
+// authoritatively by the headless TestStreaming_BulletListDoesNotChurn, which fails if maxLiveRows is
+// reverted. A real PTY can't reliably assert it: the minimal VT model (vtscreen_test.go) accumulates
+// grid+history, so a list line rendered early (when the list was short) lingers in the model after
+// the cap later truncates it from the live footer — a false positive. So this test deliberately
+// asserts only what a real terminal shows reliably: the committed scrollback after the turn.
+func TestPTYStreamingBulletListNoChurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("PTY harness allocates a real pseudoterminal and drives a slow streamed turn; skipped under -short")
+	}
+	bin := buildBinary(t) // auto-skips under -race
+
+	const (
+		firstItem = "FIRSTITEMZULU"
+		lastItem  = "LASTITEMOMEGA"
+		sentinel  = "SENTINELDELTA"
+	)
+	// A leading paragraph (line-commits) then a 6-item bullet list (withheld until "\n\n"), each item
+	// on its own line so the whole list is one block. >8 rendered rows so it would churn under the old
+	// cap; <= the raised cap so it renders whole. A blank line seals it, then SENTINEL.
+	tokens := []string{"Here is the project summary you asked for.\n\n", "**Key details:**\n"}
+	tokens = append(tokens,
+		"- "+firstItem+" the branch is main and it is currently stable\n",
+		"- the second detail line carries enough text to wrap once here\n",
+		"- a third detail line that also runs long enough to wrap around\n",
+		"- a fourth detail line continuing the list with more content here\n",
+		"- a fifth detail line keeping the list growing well past eight rows\n",
+		"- "+lastItem+" the final list item right before the list closes\n",
+	)
+	tokens = append(tokens, "\nThat is the full ", sentinel+" summary.\n\n")
+
+	fake := newFakeDeepSeek(t, sseRound{
+		contentTokens: tokens,
+		tokenDelay:    40 * time.Millisecond, // slow enough to observe the list mid-stream, pre-seal
+		usage:         &fakeUsage{prompt: 40, completion: 90, total: 130},
+	})
+
+	// Tall enough that the footer budget is the raised cap (not the terminal height): budget =
+	// rows - bottomBand - 2, so 30 rows leaves the cap (16) binding.
+	const startRows, startCols = 30, 72
+	cmd := exec.Command(bin)
+	env := make([]string, 0, len(os.Environ())+12)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_TIER=operator",
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+		"TERM=xterm-256color",
+	)
+
+	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: startRows, Cols: startCols})
+	if err != nil {
+		t.Fatalf("start binary under pty: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
+
+	screen := newVTScreen(startRows, startCols)
+	var rawMu sync.Mutex
+	var raw bytes.Buffer
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := ptm.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				screen.Feed(chunk)
+				rawMu.Lock()
+				raw.Write(chunk)
+				rawMu.Unlock()
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	rawLen := func() int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return raw.Len()
+	}
+
+	// Phase 1: boot → steady state.
+	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// Phase 2: stream the whole list turn to completion.
+	screen.ResetPeakFrameHeight()
+	if _, err := ptm.Write([]byte("summarize the project\r")); err != nil {
+		t.Fatalf("write prompt to pty: %v", err)
+	}
+	if !waitFor(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
+		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// #1613 safety: even rendering the whole withheld list, the live View stayed within the raised
+	// list budget — a non-trivial peak (> 0) also proves a commit was actually observed.
+	peak := screen.PeakFrameHeight()
+	t.Logf("bullet-list peak live-View height: %d rows (bound %d)", peak, maxListFooterRows)
+	if peak <= 0 {
+		t.Errorf("never observed a scrollback commit during the turn (peak frame height = %d) — vacuous", peak)
+	}
+	if peak > maxListFooterRows {
+		t.Errorf("live View peaked at %d rows, want <= %d — the withheld list overflowed the budget (#1613 class)", peak, maxListFooterRows)
+	}
+	// No dup / no loss: every list item (head, a middle item, and the tail) plus the sentinel lands
+	// in committed scrollback on exactly one composed line — the corruption signature of #1613 (a
+	// frozen partial) would duplicate or drop one.
+	for _, mk := range []string{firstItem, "fifth detail line", lastItem, sentinel} {
+		if got := screen.CountLineSubstr(mk); got != 1 {
+			t.Errorf("marker %q appears on %d composed lines, want 1 (duplicated/lost in scrollback):\n%s", mk, got, screen.Plain())
 		}
 	}
 

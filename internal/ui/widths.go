@@ -19,15 +19,23 @@ const (
 	LeftPad = 1
 	// LiveChromeMaxWidth caps the compact status rollup so it never wraps to 2 rows.
 	LiveChromeMaxWidth = 56
-	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Settled rows
-	// (whole paragraphs, closed tool groups, and the settled wrapped LINES of a plain growing
-	// paragraph) flush to native scrollback as they stream (flush.go); for plain prose what stays
-	// live is just an open tool group + the partial last line + the one-line live status. The one
-	// piece that can still grow tall is a withheld MARKDOWN paragraph (an open code fence / span —
-	// render_turn.go renderProse), so this cap (applied via lastLines in view.go) keeps the live
-	// View short — a flush/commit tea.Println can never dump a tall footer into scrollback
-	// (bubbletea#1613).
-	maxLiveRows = 8
+	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Most content settles
+	// into native scrollback as it streams (flush.go): whole paragraphs, closed tool groups, and the
+	// settled wrapped LINES of a growing prose paragraph (render_turn.go renderProse line-commit), so
+	// a streaming PARAGRAPH keeps the live tail to ~the partial last line + status. But a BLOCK that
+	// glamour re-flows as it grows — a bullet/ordered LIST (each new item shifts earlier items'
+	// indentation), a table, an open code fence — can't be committed line by line and is WITHHELD
+	// until it seals on "\n\n". Such a block must render WHOLE in the footer; if this cap truncated
+	// it (lastLines in view.go shows only the tail), its head would scroll off the top each token —
+	// the exact "5-line window scrolls then flicks over" churn. So the cap is sized to hold a typical
+	// withheld block intact (a few list items + a header). It is still BOUNDED — view.go's budget
+	// floors it to the terminal height, and scrollbackChunkRows reserves THIS many rows so a
+	// flush/commit tea.Println stays within the rows ABOVE the footer on any normally-sized terminal
+	// (the residual exact-fit case — a terminal so short the footer fills the whole viewport — is
+	// covered by view.go's tooSmall floor and the disarm-on-resize in onResize, NOT by this cap).
+	// A block taller than the cap still tail-truncates (rare); raising the cap trades footer height
+	// for fewer such cases.
+	maxLiveRows = 16
 	// minCockpitRows is the height floor below which the footer collapses to a single
 	// "terminal too small" line (see footer()). Below it the fixed bottom band (composer +
 	// optional status/approval) can't fit, so rendering it whole would make View() taller

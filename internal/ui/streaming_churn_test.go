@@ -21,7 +21,7 @@ import (
 // here) and this assertion would fail.
 func TestStreaming_MarkdownDoesNotChurn(t *testing.T) {
 	full := "Here is a **bold** lead-in, then a long stretch of prose that wraps across many rows so we can watch the footer while it streams: " +
-		strings.Repeat("alpha beta gamma delta ", 18) + "and a `code` span near the end to keep it on the markdown path."
+		strings.Repeat("alpha beta gamma delta ", 32) + "and a `code` span near the end to keep it on the markdown path."
 	turn := &TurnCell{ID: "turn_1", UserText: "Q", State: TurnActive, Phase: domain.PhaseGenerating, Steps: []TurnStep{proseStep("", true)}}
 	m := armedModel(turn)
 	m.rows = 24 // a realistic terminal height
@@ -66,4 +66,53 @@ func tailOf(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// TestStreaming_BulletListDoesNotChurn is the regression for the bullet-list churn (the case that
+// persisted after the paragraph fix — confirmed from a real session log). glamour re-flows a list as
+// items are added (each new item shifts earlier items' indentation), so a streaming list CAN'T
+// commit line by line and is WITHHELD until it seals on "\n\n". It must therefore render WHOLE in the
+// live footer; the footer cap (maxLiveRows) is sized to hold a typical list intact so its head never
+// scrolls off the top (the churn). This streams a markdown answer with a multi-row bullet list char
+// by char and asserts the un-committed tail (what the footer holds) never exceeds the cap — while
+// also confirming the list is genuinely tall enough to have churned under the old 8-row cap.
+func TestStreaming_BulletListDoesNotChurn(t *testing.T) {
+	full := "Here is the project summary you asked for:\n\n" +
+		"**Key details:**\n" +
+		"- **Branch:** `main` (the only worktree, currently stable)\n" +
+		"- **Last commit:** \"feat(ui): extend line-level prose commit to markdown spans\"\n" +
+		"- **Agents configured:** antigravity, claude, codex, copilot, cursor, gemini, goose, kiro, opencode\n" +
+		"- **Currently open:** one Claude agent (waiting) plus one plain terminal in the dock\n\n" +
+		"That covers the essentials."
+	turn := &TurnCell{ID: "turn_1", UserText: "Q", State: TurnActive, Phase: domain.PhaseGenerating, Steps: []TurnStep{proseStep("", true)}}
+	m := armedModel(turn)
+	m.rows = 40 // a roomy terminal so the cap (not the terminal height) is the binding bound
+
+	worst, maxFlushed := 0, 0
+	for i := 1; i <= len(full); i++ {
+		turn.Steps[0].Text = full[:i]
+		_ = m.flushActiveTurn()
+		if turn.FlushedRows > maxFlushed {
+			maxFlushed = turn.FlushedRows
+		}
+		uncommitted := len(m.activeTurnRows(turn)) - turn.FlushedRows
+		if uncommitted > worst {
+			worst = uncommitted
+		}
+	}
+	t.Logf("worst un-committed footer tail while streaming the list: %d rows (cap %d)", worst, maxLiveRows)
+	// Non-vacuity: the leading paragraph must actually line-flush (so the list is what's measured),
+	// and the list must exceed the OLD 8-row cap (so it WOULD have churned before — this is what
+	// fails if maxLiveRows is reverted to 8). The fixture is sized to land here with margin below 16,
+	// so the test isn't fragile to a one-row glamour shift.
+	if maxFlushed == 0 {
+		t.Fatal("nothing ever flushed — the leading paragraph did not line-commit, the measure is vacuous")
+	}
+	if worst <= 8 {
+		t.Fatalf("fixture too short: list reached only %d un-committed rows (need > 8 to exercise the raised cap)", worst)
+	}
+	// The cap must hold the whole withheld list, so the footer never truncates/churns its head.
+	if worst > maxLiveRows {
+		t.Errorf("un-committed footer tail peaked at %d rows (> maxLiveRows=%d) — the bullet list would hide/churn its head", worst, maxLiveRows)
+	}
 }

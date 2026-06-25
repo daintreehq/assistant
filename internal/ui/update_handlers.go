@@ -850,6 +850,15 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 		m.sizedOnce = true
 		return m, nil
 	}
+	// DISARM commits for the whole debounce window, not just at onRedraw. Bubble Tea has already
+	// recorded the new (possibly smaller) m.rows, but its cell buffer stays at the OLD footer height
+	// until the next render flush. A scrollback commit (an active-turn flush from a streaming token,
+	// or a queue commit) firing in this window would tea.Println against that STALE height and clamp
+	// insertAbove — freezing a partial footer into scrollback (#1613). The window matters more now
+	// that the live footer can be tall (maxLiveRows): a stale tall height + a shrink is the exact
+	// hazard. onRedraw re-arms one cycle after the new footer has flushed. (scheduleCommit is gated
+	// on commitArmed; flushActiveTurn checks it too.)
+	m.commitArmed = false
 	m.resizePending++
 	nonce := m.resizePending
 	return m, tea.Tick(resizeRedrawDelay, func(time.Time) tea.Msg { return RedrawMsg{Nonce: nonce} })
