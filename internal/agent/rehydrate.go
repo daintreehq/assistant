@@ -145,6 +145,22 @@ func ResumeCheckpoint(cp *domain.ContextCheckpointRecord, res RehydrateResult) (
 	return cp.CompactionDepth, true
 }
 
+// SelectResumeCheckpoint picks the first checkpoint (most-current first, as returned
+// by storage.LoadValidCheckpoints) that passes the ResumeCheckpoint semantic-validity
+// gate — so a semantically-stale 'latest' (one whose seq is ahead of the replayed
+// delta) falls back to the 'prev' slot exactly as a JSON-corrupt one does, completing
+// the issue's "fall back to the previous valid checkpoint" requirement across both
+// failure modes. Returns the chosen record, its compaction depth, and whether any was
+// accepted; (zero, 0, false) for an empty slice or when none pass.
+func SelectResumeCheckpoint(cps []domain.ContextCheckpointRecord, res RehydrateResult) (domain.ContextCheckpointRecord, int, bool) {
+	for _, cp := range cps {
+		if depth, ok := ResumeCheckpoint(&cp, res); ok {
+			return cp, depth, true
+		}
+	}
+	return domain.ContextCheckpointRecord{}, 0, false
+}
+
 // recordToChatMessage rebuilds a ChatMessage from a persisted row. Empty
 // content becomes a null content. Malformed tool-call JSON is dropped — one bad
 // row never aborts a resume — and the returned bool reports that drop so the

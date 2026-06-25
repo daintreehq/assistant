@@ -74,7 +74,13 @@ func ReconcileLedger(ctx context.Context, store ledgerReconcileStore, client led
 		if _, dup := seen[id]; dup {
 			return
 		}
-		if err := store.UpdateWorkflowRun(id, map[string]any{"status": string(domain.WorkflowCancelled)}); err != nil {
+		// Co-stamp completedAt alongside the terminal status, matching every other
+		// cancellation path (watcher daemon, workflow.update) so a reconcile-cancelled run
+		// has a valid completion timestamp rather than a NULL.
+		if err := store.UpdateWorkflowRun(id, map[string]any{
+			"status":      string(domain.WorkflowCancelled),
+			"completedAt": domain.NowMS(),
+		}); err != nil {
 			debuglog.LogDebug(dbg, "reconcile.cancel.error", map[string]any{"runId": id, "error": err.Error()})
 			return
 		}
@@ -134,10 +140,12 @@ func ReconcileLedger(ctx context.Context, store ledgerReconcileStore, client led
 }
 
 // readLiveTerminalIDs reads the live terminal inventory once, bounded by a cancel-based
-// deadline. Returns (ids, true) on a successful call (an empty set is a valid answer:
-// every terminal is genuinely gone) and (nil, false) on any transport error or error
-// result, so the caller skips reconciliation rather than mass-expiring runs from a bad
-// read.
+// deadline. Returns (ids, true) ONLY on a successful call that actually carried a
+// parseable terminals array (an empty array is a valid answer: every terminal is
+// genuinely gone). Returns (nil, false) on a transport error, an error result, OR a
+// "successful" response whose body has no parseable terminals array (e.g. a plaintext
+// "temporarily unavailable" or a schema-changed payload) — so a garbage-but-non-error
+// read can't be misread as "every terminal gone" and mass-cancel the ledger.
 func readLiveTerminalIDs(ctx context.Context, client ledgerReconcileMCP) (map[string]struct{}, bool) {
 	rctx, cancel := context.WithCancel(ctx)
 	timer := time.AfterFunc(reconcileReadTimeout, cancel)
@@ -147,15 +155,23 @@ func readLiveTerminalIDs(ctx context.Context, client ledgerReconcileMCP) (map[st
 	if err != nil || res.IsError {
 		return nil, false
 	}
-	return parseTerminalIDs(res.StructuredContent, res.Text), true
+	ids, sawArray := parseTerminalIDs(res.StructuredContent, res.Text)
+	if !sawArray {
+		return nil, false
+	}
+	return ids, true
 }
 
 // parseTerminalIDs extracts the live terminal ids from a terminal.list result,
 // unioning the structured payload and the JSON text body (Daintree returns results in
 // text) so a divergence between the two can't drop an id — mirroring the other Daintree
-// parsers. Each entry's id is "id" or, failing that, "terminalId". Never throws.
-func parseTerminalIDs(structured any, text string) map[string]struct{} {
+// parsers. Each entry's id is "id" or, failing that, "terminalId". The second return is
+// true iff a "terminals" array was actually present in either source (even if empty),
+// so the caller can distinguish a genuine empty inventory from an unparseable response.
+// Never throws.
+func parseTerminalIDs(structured any, text string) (map[string]struct{}, bool) {
 	out := map[string]struct{}{}
+	sawArray := false
 	collect := func(entries []any) {
 		for _, e := range entries {
 			m, ok := e.(map[string]any)
@@ -173,18 +189,23 @@ func parseTerminalIDs(structured any, text string) map[string]struct{} {
 	}
 	if sc, ok := structured.(map[string]any); ok {
 		if arr, ok := sc["terminals"].([]any); ok {
+			sawArray = true
 			collect(arr)
 		}
 	}
 	if strings.TrimSpace(text) != "" {
+		// *[]any (not []any): an absent "terminals" key leaves the pointer nil, while a
+		// present array — even an empty one — yields a non-nil pointer, so we can tell
+		// "present and empty" from "absent / not JSON".
 		var parsed struct {
-			Terminals []any `json:"terminals"`
+			Terminals *[]any `json:"terminals"`
 		}
-		if json.Unmarshal([]byte(text), &parsed) == nil {
-			collect(parsed.Terminals)
+		if json.Unmarshal([]byte(text), &parsed) == nil && parsed.Terminals != nil {
+			sawArray = true
+			collect(*parsed.Terminals)
 		}
 	}
-	return out
+	return out, sawArray
 }
 
 // parseIDList decodes a JSON string-array column (terminalIdsJson) into a slice,

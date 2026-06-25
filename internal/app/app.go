@@ -309,20 +309,22 @@ func Create(opts CreateOptions) (*App, error) {
 				)
 			}
 
-			// Durable compaction checkpoint resume (issue #260). LoadLatestCheckpoint
-			// falls back past a corrupt 'latest' payload to the 'prev' slot; ResumeCheckpoint
-			// is the semantic-validity gate (rejects a checkpoint whose seq is ahead of the
-			// delta we just replayed). The accepted compaction depth is recorded for
-			// observability — the session continues the depth chain once the compaction-time
-			// write path (issue #256, which owns session.go's compactLocked) feeds it back in.
-			if cp, found, cerr := store.LoadLatestCheckpoint(); cerr == nil && found {
-				depth, accepted := agent.ResumeCheckpoint(&cp, res)
+			// Durable compaction checkpoint resume (issue #260). LoadValidCheckpoints
+			// returns the parseable slots most-current first (a JSON-corrupt 'latest' is
+			// already dropped); SelectResumeCheckpoint then applies the semantic-validity
+			// gate and falls back to 'prev' when 'latest' is stale (seq ahead of the delta
+			// we just replayed). The accepted compaction depth is recorded for observability
+			// — the session continues the depth chain once the compaction-time write path
+			// (issue #256, which owns session.go's compactLocked) feeds it back in.
+			if cps, cerr := store.LoadValidCheckpoints(); cerr == nil && len(cps) > 0 {
+				cp, depth, accepted := agent.SelectResumeCheckpoint(cps, res)
 				debuglog.LogDebug(
 					debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
 					"session.checkpoint.resumed",
 					map[string]any{
 						"slot": cp.Slot, "accepted": accepted, "compactionDepth": depth,
-						"lastSeq": cp.LastSeq, "initialSeq": res.InitialSeq, "sessionId": sessionID,
+						"lastSeq": cp.LastSeq, "initialSeq": res.InitialSeq,
+						"candidates": len(cps), "sessionId": sessionID,
 					},
 				)
 			}

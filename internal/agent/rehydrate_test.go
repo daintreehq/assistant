@@ -47,6 +47,46 @@ func TestResumeCheckpointNegativeRejected(t *testing.T) {
 	}
 }
 
+func TestResumeCheckpointSeqBoundaryAccepted(t *testing.T) {
+	// LastSeq exactly one behind InitialSeq is the newest valid boundary (the >=
+	// comparison rejects only at/after InitialSeq).
+	cp := &domain.ContextCheckpointRecord{CompactionDepth: 7, LastSeq: 11}
+	if depth, ok := ResumeCheckpoint(cp, RehydrateResult{InitialSeq: 12}); !ok || depth != 7 {
+		t.Fatalf("boundary checkpoint want (7,true), got (%d,%v)", depth, ok)
+	}
+}
+
+func TestSelectResumeCheckpointEmpty(t *testing.T) {
+	if _, depth, ok := SelectResumeCheckpoint(nil, RehydrateResult{InitialSeq: 5}); ok || depth != 0 {
+		t.Fatalf("empty slice want (_,0,false), got (%d,%v)", depth, ok)
+	}
+}
+
+func TestSelectResumeCheckpointPicksLatestWhenValid(t *testing.T) {
+	cps := []domain.ContextCheckpointRecord{
+		{Slot: "latest", CompactionDepth: 5, LastSeq: 8},
+		{Slot: "prev", CompactionDepth: 4, LastSeq: 6},
+	}
+	cp, depth, ok := SelectResumeCheckpoint(cps, RehydrateResult{InitialSeq: 12})
+	if !ok || depth != 5 || cp.Slot != "latest" {
+		t.Fatalf("want latest/depth5, got slot=%s depth=%d ok=%v", cp.Slot, depth, ok)
+	}
+}
+
+func TestSelectResumeCheckpointFallsBackToPrevWhenLatestStale(t *testing.T) {
+	// 'latest' is semantically stale (seq ahead of the replayed delta) but JSON-valid,
+	// so SelectResumeCheckpoint must fall back to the valid 'prev' — the cross-failure-
+	// mode fallback the issue requires.
+	cps := []domain.ContextCheckpointRecord{
+		{Slot: "latest", CompactionDepth: 9, LastSeq: 99}, // ahead of InitialSeq=12 ⇒ rejected
+		{Slot: "prev", CompactionDepth: 4, LastSeq: 6},    // valid ⇒ chosen
+	}
+	cp, depth, ok := SelectResumeCheckpoint(cps, RehydrateResult{InitialSeq: 12})
+	if !ok || depth != 4 || cp.Slot != "prev" {
+		t.Fatalf("want fallback to prev/depth4, got slot=%s depth=%d ok=%v", cp.Slot, depth, ok)
+	}
+}
+
 func TestRehydrateDupSeqResumesEmptyAtMaxSeqPlusOne(t *testing.T) {
 	// A dup-seq tangle is a safe fresh start, but it must RESUME (ok=true) with an
 	// EMPTY working history and continue numbering at maxSeq+1 — NOT return "fresh"

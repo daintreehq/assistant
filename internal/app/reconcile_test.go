@@ -196,14 +196,78 @@ func TestReconcileLedgerKeepsLiveAgentLaunch(t *testing.T) {
 	}
 }
 
+// TestReconcileLedgerMixedTerminalsKeepsRun — a run binding both a dead and a live
+// terminal is still live (anyLive), so it is NOT cancelled.
+func TestReconcileLedgerMixedTerminalsKeepsRun(t *testing.T) {
+	s := reconcileTestStore(t)
+	run, err := s.InsertWorkflowRun(domain.WorkflowRunRecord{
+		Status: domain.WorkflowActive, TerminalIdsJson: strPtr(`["term_dead","term_live"]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpC := &fakeReconcileMCP{result: terminalListText("term_live")}
+	if n := ReconcileLedger(context.Background(), s, mcpC, debuglog.Config{}); n != 0 {
+		t.Fatalf("want 0 cancellations (one terminal still live), got %d", n)
+	}
+	if got := mustRunStatus(t, s, run.ID); got != domain.WorkflowActive {
+		t.Fatalf("partially-live run should stay active, got %s", got)
+	}
+}
+
+// TestReconcileLedgerMalformedListSkips — a successful (non-error) terminal.list whose
+// body has no parseable terminals array must NOT be read as "every terminal gone".
+func TestReconcileLedgerMalformedListSkips(t *testing.T) {
+	s := reconcileTestStore(t)
+	run, err := s.InsertWorkflowRun(domain.WorkflowRunRecord{
+		Status: domain.WorkflowActive, TerminalIdsJson: strPtr(`["term_gone"]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpC := &fakeReconcileMCP{result: mcp.CallResult{Text: "temporarily unavailable"}}
+	if n := ReconcileLedger(context.Background(), s, mcpC, debuglog.Config{}); n != 0 {
+		t.Fatalf("want 0 cancellations on an unparseable success, got %d", n)
+	}
+	if got := mustRunStatus(t, s, run.ID); got != domain.WorkflowActive {
+		t.Fatalf("run must stay active on an unparseable read, got %s", got)
+	}
+}
+
+// TestReconcileLedgerCancelStampsCompletedAt — a reconcile-cancelled run carries a
+// non-NULL completedAt, matching the other cancellation paths.
+func TestReconcileLedgerCancelStampsCompletedAt(t *testing.T) {
+	s := reconcileTestStore(t)
+	run, err := s.InsertWorkflowRun(domain.WorkflowRunRecord{
+		Status: domain.WorkflowActive, TerminalIdsJson: strPtr(`["term_gone"]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpC := &fakeReconcileMCP{result: terminalListText("term_live")}
+	if n := ReconcileLedger(context.Background(), s, mcpC, debuglog.Config{}); n != 1 {
+		t.Fatalf("want 1 cancellation, got %d", n)
+	}
+	got, err := s.GetWorkflowRun(run.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.CompletedAt == nil {
+		t.Fatal("reconcile-cancelled run must stamp completedAt, got nil")
+	}
+}
+
 // TestParseTerminalIDsUnionsSources — ids are collected from both the structured
-// payload and the text body, preferring "id" then "terminalId".
+// payload and the text body, preferring "id" then "terminalId"; sawArray is true.
 func TestParseTerminalIDsUnionsSources(t *testing.T) {
 	structured := map[string]any{"terminals": []any{
 		map[string]any{"id": "a"},
 		map[string]any{"terminalId": "b"},
 	}}
-	got := parseTerminalIDs(structured, `{"terminals":[{"id":"c"}]}`)
+	got, saw := parseTerminalIDs(structured, `{"terminals":[{"id":"c"}]}`)
+	if !saw {
+		t.Error("expected sawArray=true for a parseable result")
+	}
 	for _, want := range []string{"a", "b", "c"} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("missing id %q in %v", want, got)
@@ -211,5 +275,28 @@ func TestParseTerminalIDsUnionsSources(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("want 3 ids, got %d (%v)", len(got), got)
+	}
+}
+
+// TestParseTerminalIDsEmptyArrayIsSeen — an explicit empty terminals array is a valid
+// (seen) inventory: zero ids but sawArray=true.
+func TestParseTerminalIDsEmptyArrayIsSeen(t *testing.T) {
+	got, saw := parseTerminalIDs(nil, `{"terminals":[]}`)
+	if !saw {
+		t.Error("explicit empty terminals array should be seen (sawArray=true)")
+	}
+	if len(got) != 0 {
+		t.Errorf("want 0 ids, got %d", len(got))
+	}
+}
+
+// TestParseTerminalIDsUnparseableNotSeen — a non-JSON / missing-key body is NOT a seen
+// inventory, so the caller skips reconciliation.
+func TestParseTerminalIDsUnparseableNotSeen(t *testing.T) {
+	if _, saw := parseTerminalIDs(nil, "temporarily unavailable"); saw {
+		t.Error("plaintext body should not be seen as a terminals array")
+	}
+	if _, saw := parseTerminalIDs(nil, `{"other":[]}`); saw {
+		t.Error("JSON without a terminals key should not be seen as a terminals array")
 	}
 }

@@ -77,15 +77,17 @@ func (s *Store) UpsertContextCheckpoint(rec domain.ContextCheckpointRecord) erro
 	return tx.Commit()
 }
 
-// LoadLatestCheckpoint returns the most recent VALID checkpoint. It reads the
-// 'latest' slot first; if that row's PayloadJson is non-empty and not well-formed
-// JSON (corruption) it falls back to the 'prev' slot. Returns (rec, true, nil) on a
-// hit, (_, false, nil) when neither slot holds a valid checkpoint, and (_, false, err)
-// only on an unexpected DB error. "Corrupt" is a JSON parse failure ONLY: a row with
-// an EMPTY payload is still valid (an empty structured object is usable — it just
-// carries no extra detail), so it is returned rather than skipped. The returned
-// Slot field tells the caller which slot answered (useful for observability).
-func (s *Store) LoadLatestCheckpoint() (domain.ContextCheckpointRecord, bool, error) {
+// LoadValidCheckpoints returns the checkpoints whose payloads are well-formed (or
+// empty), MOST-CURRENT FIRST ('latest' then 'prev'). A slot whose PayloadJson is
+// non-empty and not valid JSON is treated as corrupt and omitted. "Corrupt" is a JSON
+// parse failure ONLY: an EMPTY payload is still valid (an empty structured object is
+// usable — it just carries no extra detail). The caller can apply a further
+// semantic-validity gate and fall back to the next entry, so BOTH JSON corruption and
+// a semantically-stale 'latest' resolve to the 'prev' fallback the issue calls for.
+// Returns (nil, nil) when neither slot holds a parseable checkpoint, and (_, err) only
+// on an unexpected DB error. Each record's Slot field identifies its source.
+func (s *Store) LoadValidCheckpoints() ([]domain.ContextCheckpointRecord, error) {
+	var out []domain.ContextCheckpointRecord
 	for _, slot := range []string{checkpointSlotLatest, checkpointSlotPrev} {
 		row := s.db.QueryRow("SELECT "+checkpointCols+" FROM context_checkpoints WHERE slot = ?", slot)
 		rec, err := scanCheckpoint(row)
@@ -93,13 +95,29 @@ func (s *Store) LoadLatestCheckpoint() (domain.ContextCheckpointRecord, bool, er
 			continue
 		}
 		if err != nil {
-			return domain.ContextCheckpointRecord{}, false, fmt.Errorf("load %s checkpoint: %w", slot, err)
+			return nil, fmt.Errorf("load %s checkpoint: %w", slot, err)
 		}
 		if rec.PayloadJson != "" && !json.Valid([]byte(rec.PayloadJson)) {
-			// Unparseable payload — treat as corrupt and try the fallback slot.
-			continue
+			continue // unparseable payload — treat as corrupt, skip to the fallback slot
 		}
-		return rec, true, nil
+		out = append(out, rec)
 	}
-	return domain.ContextCheckpointRecord{}, false, nil
+	return out, nil
+}
+
+// LoadLatestCheckpoint returns the most current VALID checkpoint — the parse-level
+// fallback only ('latest', or 'prev' when 'latest' is corrupt). Returns (rec, true,
+// nil) on a hit, (_, false, nil) when neither slot holds a parseable checkpoint, and
+// (_, false, err) only on an unexpected DB error. The resume path uses
+// LoadValidCheckpoints directly so it can also fall back past a semantically-stale
+// 'latest'; this convenience wrapper is the "just give me the current one" surface.
+func (s *Store) LoadLatestCheckpoint() (domain.ContextCheckpointRecord, bool, error) {
+	cps, err := s.LoadValidCheckpoints()
+	if err != nil {
+		return domain.ContextCheckpointRecord{}, false, err
+	}
+	if len(cps) == 0 {
+		return domain.ContextCheckpointRecord{}, false, nil
+	}
+	return cps[0], true, nil
 }
