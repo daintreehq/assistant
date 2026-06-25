@@ -55,6 +55,28 @@ func TestBuildConsistencyUserPromptFallbacks(t *testing.T) {
 	}
 }
 
+// The BEFORE block must come strictly before the AFTER block, with each step array
+// rendered in its own section — a swapped order would silently feed the judge the wrong
+// transition direction.
+func TestBuildConsistencyUserPromptSectionOrder(t *testing.T) {
+	out := BuildConsistencyUserPrompt(ConsistencyUserArgs{
+		SkillID: "s", CompletedStep: 1,
+		BeforeSteps: `[{"was":"before"}]`,
+		AfterSteps:  `[{"is":"after"}]`,
+	})
+	bi := strings.Index(out, "BEFORE")
+	ai := strings.Index(out, "AFTER")
+	if bi < 0 || ai < 0 || bi >= ai {
+		t.Fatalf("BEFORE must precede AFTER (before=%d after=%d)", bi, ai)
+	}
+	if i := strings.Index(out, `[{"was":"before"}]`); i < 0 || i >= ai {
+		t.Errorf("before-steps json must sit in the BEFORE section (idx=%d, after-hdr=%d)", i, ai)
+	}
+	if i := strings.Index(out, `[{"is":"after"}]`); i <= ai {
+		t.Errorf("after-steps json must sit in the AFTER section (idx=%d, after-hdr=%d)", i, ai)
+	}
+}
+
 // The consistency judge must be framed around skill-step transitions — NOT terminal
 // completion — so it cannot drift into the terminal-judge's domain.
 func TestConsistencySystemPromptDomain(t *testing.T) {

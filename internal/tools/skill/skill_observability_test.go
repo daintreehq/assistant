@@ -62,6 +62,20 @@ func (failInsertStore) UpdateSkillRunState(context.Context, domain.SkillRunState
 	return errors.New("db down")
 }
 
+// failUpdateStore returns an existing run (forcing the update branch) then fails the
+// update — the mirror of failInsertStore for the already-started-run path.
+type failUpdateStore struct{ rec *domain.SkillRunStateRecord }
+
+func (s failUpdateStore) GetSkillRunState(context.Context, string, string) (*domain.SkillRunStateRecord, error) {
+	return s.rec, nil
+}
+func (failUpdateStore) InsertSkillRunState(context.Context, domain.SkillRunStateRecord) (string, error) {
+	return "", errors.New("unexpected insert on existing run")
+}
+func (failUpdateStore) UpdateSkillRunState(context.Context, domain.SkillRunStateRecord) error {
+	return errors.New("db down")
+}
+
 // With debug logging OFF, neither the delta log nor the consistency judge run — the
 // feature is zero-cost in a normal session.
 func TestStepAdvanceNoObservabilityWhenDebugOff(t *testing.T) {
@@ -214,8 +228,88 @@ func TestStepAdvanceConsistencyPanicSafe(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("a panicking consistency check must not break the tool call, got %+v", res.Error)
 	}
-	if logs := readLogs(t, dir); !strings.Contains(logs, "skill.step.delta") {
+	logs := readLogs(t, dir)
+	if !strings.Contains(logs, "skill.step.delta") {
 		t.Errorf("delta should be logged before the panicking check\n---\n%s", logs)
+	}
+	// A crashed check must STILL surface a checkOk=false event so it is distinguishable
+	// from "no checker wired" — not be silently swallowed by the outer recover guard.
+	if !strings.Contains(logs, "skill.step.consistency") || !strings.Contains(logs, "checkOk=false") {
+		t.Errorf("a panicking check should surface a checkOk=false event\n---\n%s", logs)
+	}
+	if !strings.Contains(logs, "panic: boom") {
+		t.Errorf("the panic event should carry the panic value\n---\n%s", logs)
+	}
+}
+
+// The update branch (an already-started run) suppresses observability when the persist
+// fails, mirroring the insert-failure case — the advance did not occur.
+func TestStepAdvanceNoObservabilityOnUpdateFailure(t *testing.T) {
+	dir := t.TempDir()
+	called := false
+	seeded := &domain.SkillRunStateRecord{
+		ID: "rrs_x", SessionID: "sess1", SkillID: "s", CurrentStep: 2, StepsJson: "[]", Status: domain.SkillRunActive,
+	}
+	deps := Deps{
+		Store: failUpdateStore{rec: seeded},
+		CheckConsistency: func(context.Context, ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
+			called = true
+			return okAnswer(), nil
+		},
+	}
+	tool := find(Tools(deps), "skill.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
+	if res.Ok {
+		t.Fatal("expected failure when the update fails")
+	}
+	if called {
+		t.Fatal("consistency check must not run when the update did not persist")
+	}
+	if logs := readLogs(t, dir); logs != "" {
+		t.Fatalf("expected no observability log on update failure, got:\n%s", logs)
+	}
+}
+
+// On an already-started run the judge input must reflect the TRUE pre-advance state:
+// prev step/status from the existing record, before-steps a faithful pre-upsert clone
+// (NOT aliasing the mutated after-steps), after-steps the persisted result.
+func TestStepAdvanceConsistencyInputOnExistingRun(t *testing.T) {
+	dir := t.TempDir()
+	seeded := &domain.SkillRunStateRecord{
+		ID: "rrs_x", SessionID: "sess1", SkillID: "s", CurrentStep: 2,
+		StepsJson: `[{"index":2,"status":"done","ts":111}]`, Status: domain.SkillRunActive,
+	}
+	var got ConsistencyCheckInput
+	deps := Deps{
+		Store: &memStore{rec: seeded},
+		CheckConsistency: func(_ context.Context, in ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
+			got = in
+			return okAnswer(), nil
+		},
+	}
+	tool := find(Tools(deps), "skill.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
+	if !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if got.PrevCurrentStep != 2 {
+		t.Errorf("PrevCurrentStep = %d, want 2", got.PrevCurrentStep)
+	}
+	if got.PrevRunStatus != domain.SkillRunActive {
+		t.Errorf("PrevRunStatus = %q, want active", got.PrevRunStatus)
+	}
+	if got.NextCurrentStep != 4 {
+		t.Errorf("NextCurrentStep = %d, want 4", got.NextCurrentStep)
+	}
+	if len(got.BeforeSteps) != 1 || got.BeforeSteps[0].Index != 2 {
+		t.Errorf("BeforeSteps = %+v, want just step 2 (the pre-upsert snapshot)", got.BeforeSteps)
+	}
+	idx := map[int]bool{}
+	for _, s := range got.AfterSteps {
+		idx[s.Index] = true
+	}
+	if len(got.AfterSteps) != 2 || !idx[2] || !idx[3] {
+		t.Errorf("AfterSteps = %+v, want steps {2,3}", got.AfterSteps)
 	}
 }
 

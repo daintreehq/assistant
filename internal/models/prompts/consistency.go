@@ -23,7 +23,7 @@ A skill is a numbered runbook the orchestrator works through one step at a time.
 
 Judge ONLY the mechanics of THIS transition — not whether the overall work is high quality, and not whether the run as a whole is progressing well. Flag the advance as a likely mistake when, for example:
 - a completed step jumps far ahead while earlier steps were never done or skipped (an illegitimate jump),
-- the same step is re-completed, or the sequence moves backward, with no reason,
+- the sequence moves backward to an already-completed step for no recorded reason (a plain re-record of the most recent step — an idempotent retry — is NORMAL, not a mistake),
 - the recorded next step is impossible or contradicts the completed step,
 - the run is marked finished while the recorded progress is plainly incomplete.
 

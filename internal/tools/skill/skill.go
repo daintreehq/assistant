@@ -510,10 +510,36 @@ func observeStepAdvance(ctx context.Context, deps Deps, tctx *tools.ToolContext,
 		"after":           in.AfterSteps,
 	})
 
-	if deps.CheckConsistency == nil {
-		return
+	if deps.CheckConsistency != nil {
+		// NOTE: the judge runs SYNCHRONOUSLY here (after the DB write, before the tool
+		// returns). That is acceptable because the whole side-channel is debug-gated —
+		// a developer explicitly opted in — and it keeps the log ordering deterministic
+		// and the {input → verdict} pair testable. The trade-off: in a slow/hung small-
+		// tier environment it adds the model round-trip's latency to skill.step.advance
+		// (the delta line above has already been written, so logs are unaffected).
+		logConsistencyCheck(ctx, cfg, deps.CheckConsistency, in)
 	}
-	ans, err := deps.CheckConsistency(ctx, in)
+}
+
+// logConsistencyCheck runs the wired judge and records its verdict. It carries its OWN
+// recover so a PANICKING judge still surfaces a checkOk=false event — without this, a
+// crashed check would be swallowed by observeStepAdvance's outer guard and become
+// indistinguishable from "no checker wired" in the log. A model/decode error is logged
+// the same truthful way (checkOk=false + the error) so log archaeology can tell a model
+// that judged the advance fine apart from a check that never produced a verdict.
+func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(context.Context, ConsistencyCheckInput) (domain.ModelJudgeAnswer, error), in ConsistencyCheckInput) {
+	defer func() {
+		if r := recover(); r != nil {
+			debuglog.LogDebug(cfg, "skill.step.consistency", map[string]any{
+				"runId":         in.RunID,
+				"skillId":       in.SkillID,
+				"completedStep": in.CompletedStep,
+				"checkOk":       false,
+				"error":         fmt.Sprintf("panic: %v", r),
+			})
+		}
+	}()
+	ans, err := check(ctx, in)
 	if err != nil {
 		debuglog.LogDebug(cfg, "skill.step.consistency", map[string]any{
 			"runId":         in.RunID,
