@@ -411,40 +411,46 @@ func hasProse(t *TurnCell) bool {
 // row prefix that may flush to native scrollback — everything that can no longer change as
 // more tokens arrive. Two regimes, picked by the still-growing final paragraph's source text:
 //
-//   - PLAIN tail (proseTailIsPlain): the growing paragraph is settling LINE BY LINE. We render
-//     the WHOLE step (byte-identical to the footer's render — same md.Render call, same cache
-//     entry) and drop only its LAST visual row. Glamour word-wraps greedily, so appending text
-//     mutates ONLY the last visual row — every earlier wrapped row is closed and final. So the
-//     full render minus its last row is a byte-exact ROW prefix of the footer/seal render, and
-//     prose flows into scrollback a line at a time (the footer holds just the partial last line
+//   - COMMITTABLE tail (proseTailCommittable: no BLOCK-level construct): the growing paragraph is
+//     settling LINE BY LINE. We render the WHOLE step (byte-identical to the footer's render — same
+//     md.Render call, same cache entry), drop the still-mutable LAST visual row, then keep only the
+//     leading rows that hold NO openable inline delimiter (rowHasOpenableDelimiter). Glamour prints
+//     an UNCONSUMED emphasis/code delimiter literally, so a row with none is width-final — a CLOSED
+//     **bold**/`code` is pure styling and safe, while an OPEN span shows a literal ` / * / _ on its
+//     row and is held back until it closes. So the kept rows are a byte-exact ROW prefix of the
+//     footer/seal render, and prose flows into scrollback a line at a time (the footer holds just
+//     the open-span tail + partial last line + live status). THIS is what kills the churn: before,
+//     the whole growing paragraph was withheld and piled into the 8-row footer cap (view.go),
+//     scrolling its head off the top each token, then jumping in whole on seal. Now nothing
+//     accumulates — even for markdown-dense prose, because a CLOSED span no longer disqualifies the
+//     paragraph and an OPEN one only withholds its own (short) row.
 //
-//   - the live status) instead of a paragraph at a time. THIS is what kills the old churn:
-//     before, a paragraph taller than the 8-row footer cap (view.go) scrolled its head out of
-//     the capped window each token, then jumped in whole on seal. Now nothing accumulates.
-//
-//   - MARKDOWN-risky tail: a half-typed inline span (**bold**, `code`, [link]), a bare URL that
-//     GFM linkify will style, or a block that restyles earlier rows (setext heading, list)
-//     means an "earlier" row is NOT final until the construct closes. So we fall back to settling
-//     PARAGRAPH BY PARAGRAPH: render only the text up to the last blank line ("\n\n"); the growing
-//     paragraph stays live in the footer (rendered in full there) and commits only when it seals.
-//     "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
-//     reflowing paragraph. The growing paragraph can still churn inside the footer cap here, but
-//     that path is now reserved for the rare markdown-heavy tail rather than every plain paragraph.
+//   - WITHHELD tail: the tail holds a BLOCK-level / cross-row construct — a link / bare URL /
+//     entity / escape / table / strikethrough / heading, or a newline (setext, list, code fence,
+//     definition list). These can restyle EARLIER rows, so we fall back to settling PARAGRAPH BY
+//     PARAGRAPH: render only the text up to the last blank line ("\n\n"); the growing paragraph
+//     stays live in the footer and commits only when it seals.
 //
 // withholdGrowing is decided by POSITION + path (is this the turn's last step, in the flush
-// render), never by the step's sticky Streaming flag, so a half-rendered paragraph can never
-// be frozen mid-turn into scrollback. proseTailIsPlain examines ONLY the growing tail, so a
-// committed plain row holds no markdown character that later text could restyle.
+// render), never by the step's sticky Streaming flag, so a half-rendered paragraph can never be
+// frozen mid-turn into scrollback. The commit is sound against any future append — see
+// TestFuzz_CommittedRowsNeverChange.
 //
-// LIMITATION (shared with the pre-existing flush — this is NOT new to line-level streaming):
-// the byte-exact prefix relies on a settled row rendering independently of later text. The
-// proseTailIsPlain guard makes that hold for every INLINE construct (it rejects the tail the
-// instant a delimiter / link trigger appears, before that row could settle). The residual gap is
-// a RETROACTIVE block built by appending a newline below a plain line we already committed —
-// a setext "===" / "---" underline or a definition-list ": def" — which restyles the line above.
-// sealTail's row-count fallback absorbs this without dup/loss (the scrollback copy just keeps the
-// plain styling), and LLM prose uses ATX "#" headings and blank-line paragraphs, so it is
-// vanishingly rare.
+// LIMITATION: the byte-exact prefix relies on a committed row rendering independently of later
+// text. rowHasOpenableDelimiter guarantees that for code spans and well-formed emphasis. Two
+// residual gaps remain, both INHERENT to committing within an unsealed paragraph (they apply to the
+// pre-existing plain-prose line-commit too, not just this markdown extension) and both requiring
+// syntax LLM prose essentially never streams — it uses ATX "#" headings, blank-line paragraphs, and
+// well-formed spans:
+//
+//	(1) a RETROACTIVE block appended below an already-committed line — a setext "===" / "---"
+//	    underline or a definition-list ": def" — re-renders that line as a heading/term with a
+//	    different row structure. sealTail then can't strip the committed prefix exactly and its
+//	    row-count fallback may RE-EMIT a row (a visible duplicate, not just stale styling). Text is
+//	    preserved (no loss); the artifact is a rare duplicated line.
+//	(2) PATHOLOGICAL raw emphasis soup ("_a_b_c" mid-stream), where CommonMark re-pairs a consumed
+//	    span globally so a styled row later un-styles. flushActiveTurn's reflow guard then HOLDS
+//	    further commits; the artifact is one row of cosmetically-stale styling (no dup, no loss).
 func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGrowing bool) string {
 	if step.Text == "" {
 		return ""
@@ -458,13 +464,25 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGro
 	if idx >= 0 {
 		tail = step.Text[idx+2:]
 	}
-	if proseTailIsPlain(tail) {
-		// Line-level commit: render the FULL step (the exact bytes the footer shows) and drop
-		// the last visual row — the one row greedy word-wrap may still mutate. The result is a
-		// byte-exact row prefix of the footer render, so a committed line never re-renders.
+	if proseTailCommittable(tail) {
+		// Line-level commit: render the FULL step (the exact bytes the footer shows) and keep only
+		// the IMMUTABLE rows.
 		full := strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 		rows := strings.Split(full, "\n")
-		rows = rows[:len(rows)-1] // drop the still-mutable last visual row
+		if len(rows) > 0 {
+			rows = rows[:len(rows)-1] // drop the still-mutable last visual row (greedy wrap mutates it)
+		}
+		// STOP at the first row holding an OPENABLE inline delimiter. glamour prints an UNCONSUMED
+		// emphasis/code delimiter (`, *, or a boundary _) LITERALLY in its output; a future closer
+		// can pair with it and restyle + re-wrap that row. A CLOSED span renders as pure styling
+		// (no literal delimiter left), so its rows are width-final and safe. Truncating here makes
+		// the committed prefix sound against ANY future append — see TestFuzz_CommittedRowsNeverChange
+		// — while still committing all the plain text before an open span.
+		safe := 0
+		for safe < len(rows) && !rowHasOpenableDelimiter(stripAnsi(rows[safe])) {
+			safe++
+		}
+		rows = rows[:safe]
 		// Drop any trailing BLANK rows the last row left exposed — the paragraph separator that
 		// precedes the growing paragraph. It belongs with the still-live tail below it, and the
 		// flush↔seal reconciliation forbids the committed prefix ending in a blank (it would be
@@ -481,39 +499,32 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGro
 	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
 }
 
-// proseTailIsPlain reports whether the still-growing final paragraph `tail` (the raw markdown
-// source after the last "\n\n") is plain prose that glamour will only ever APPEND-WRAP — so its
-// settled wrapped rows can flush to scrollback line by line without any later token restyling an
-// already-committed row (see renderProse). It is deliberately conservative: a single false from a
-// borderline tail merely falls back to paragraph-level commit (correct, just less smooth), while a
-// wrong true would freeze a row that reflows. So we reject anything that could open an inline span,
-// a retroactive block, or a multi-line construct:
+// proseTailCommittable reports whether the still-growing final paragraph `tail` (the raw markdown
+// source after the last "\n\n") is free of BLOCK-level / document-global constructs that would force
+// withholding the whole paragraph. It does NOT judge inline spans — those are handled per-ROW in
+// renderProse via rowHasOpenableDelimiter, so a CLOSED **bold** / `code` in mid-paragraph no longer
+// disqualifies everything after it (the bug that made markdown-dense prose churn end to end).
+//
+// Conservative: any doubt → false → paragraph-level fallback (correct, just less smooth). We reject:
 //
 //   - empty tail — nothing to settle.
-//   - any inline/markdown-significant char: an unclosed **bold** / _em_ / `code` / [link] /
-//     <autolink> / entity (&) / escape (\) / table pipe (|) / strikethrough (~) restyles earlier
-//     bytes when it closes; "#" / ">" anywhere are cheapest to reject wholesale.
-//   - a GFM autolink trigger ("://", "www.", "@"): glamour enables GFM linkify, so a bare URL or
-//     email gets link styling — and because it styles the WHOLE token (an OSC-8 target can even
-//     embed the full URL on every wrapped row), extending it as it streams rewrites earlier rows.
-//     A partial URL stays on the still-live last row until a trigger appears, so rejecting on the
-//     trigger keeps any part of the link out of the committed prefix.
-//   - any newline or tab: a soft break can become a setext underline, a hard break, a definition
-//     list, or list/blockquote continuation; a tab is block indentation (indented code) — all
-//     re-wrap or re-style the lines above.
-//   - a leading block opener ("- ", "+ ", "N. ", "N) ", or a >=4-space indent = indented code):
-//     these render the whole tail as a list item / code block, not a paragraph.
-func proseTailIsPlain(tail string) bool {
+//   - a retroactive / width-changing / OSC-8 construct anywhere: "[" "]" "<" ">" (links/html emit
+//     OSC-8 and restyle), "&" (entity &amp;→& shrinks the line), "\\" (escape), "|" (table), "~"
+//     (strikethrough), "#" (heading). These can reach back across rows, so reject wholesale.
+//   - a GFM autolink trigger ("://", "www.", "@"): a bare URL/email is styled with an OSC-8 target
+//     embedded per wrapped row, so growing it rewrites earlier rows.
+//   - any newline or tab: a newline can form a setext underline, a hard break, a list, a code
+//     fence, or a definition list (all restyle/re-wrap earlier lines); a tab is block indentation.
+//   - a leading block opener ("- ", "+ ", "N. ", "N) ", or a >=4-space indent = indented code).
+func proseTailCommittable(tail string) bool {
 	if tail == "" {
 		return false
 	}
-	// Inline spans and retroactive blocks all announce themselves with one of these runes; a
-	// committed row containing none of them is pure text nothing downstream can restyle.
-	if strings.ContainsAny(tail, "*_`[]<>&\\|~#") {
+	// Retroactive / width-changing / OSC-8 / link constructs — can reach back across committed rows.
+	if strings.ContainsAny(tail, "[]<>&\\|~#") {
 		return false
 	}
-	// GFM linkify: a bare URL / email restyles its whole token as it grows, so reject the tail the
-	// moment a scheme ("://"), a "www." host, or an email "@" appears.
+	// GFM linkify: a bare URL / email restyles its whole token as it grows.
 	if strings.Contains(tail, "://") || strings.Contains(tail, "www.") || strings.Contains(tail, "@") {
 		return false
 	}
@@ -525,8 +536,8 @@ func proseTailIsPlain(tail string) bool {
 	if len(tail)-len(t) >= 4 {
 		return false // >=4-space indent → indented code block
 	}
-	if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "+ ") {
-		return false // bullet list item
+	if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "+ ") || strings.HasPrefix(t, "* ") {
+		return false // bullet list item (incl. "* " — a leading "*" + space is a bullet, not emphasis)
 	}
 	// Ordered-list opener: one or more digits then "." or ")" then a space.
 	d := 0
@@ -539,6 +550,41 @@ func proseTailIsPlain(tail string) bool {
 		}
 	}
 	return true
+}
+
+// rowHasOpenableDelimiter reports whether a RENDERED row (ansi-stripped) holds an inline delimiter
+// that a future closer could still pair with — making the row unsafe to commit. glamour prints an
+// UNCONSUMED emphasis/code delimiter literally, so any literal "*" or "`" is openable, and an "_" is
+// openable UNLESS it is strictly intraword (an ASCII word char on both sides, e.g. snake_case, which
+// CommonMark treats as plain text). A CLOSED span leaves NO literal delimiter (it became styling),
+// so a row with none is width-final. This is the soundness gate for the line-level commit
+// (renderProse).
+//
+// The intraword test is ASCII-only ON PURPOSE: at the byte level a non-ASCII neighbour is a UTF-8
+// lead/continuation byte that could be a LETTER or a PUNCTUATION mark (e.g. an em-dash "—"), and
+// CommonMark makes "_" after punctuation an opener. We can't tell which cheaply, so any non-ASCII
+// neighbour makes the "_" openable (conservative — withholds the row; never under-withholds).
+func rowHasOpenableDelimiter(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '*', '`':
+			return true
+		case '_':
+			leftWord := i > 0 && isAsciiWordByte(s[i-1])
+			rightWord := i+1 < len(s) && isAsciiWordByte(s[i+1])
+			if !(leftWord && rightWord) {
+				return true // not strictly intraword → could open emphasis
+			}
+		}
+	}
+	return false
+}
+
+// isAsciiWordByte reports whether b is an ASCII word character (letter, digit, or "_"). Non-ASCII
+// bytes are deliberately NOT word characters here — see rowHasOpenableDelimiter for why.
+func isAsciiWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') || b == '_'
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.

@@ -272,28 +272,56 @@ func TestFlush_PlainParagraphStreamsLineByLine(t *testing.T) {
 	}
 }
 
-// TestFlush_MarkdownTailFallsBackToParagraph proves a growing paragraph whose tail holds an OPEN
-// markdown construct (here an unclosed **bold** span) does NOT settle line by line — committing a
-// row the closing delimiter would later restyle would freeze stale bytes in scrollback. So the flush
-// falls back to paragraph-level: the completed paragraph still flushes, but the whole growing
-// markdown paragraph stays live in the footer until a "\n\n" seals it.
-func TestFlush_MarkdownTailFallsBackToParagraph(t *testing.T) {
-	// One completed paragraph + a short growing paragraph carrying an unclosed bold span.
-	m, turn := streamingProse("DONELINE a settled first paragraph here.\n\nLIVEMD a short **bold tail")
+// TestFlush_BlockRiskTailFallsBackToParagraph proves a growing paragraph whose tail holds a
+// BLOCK-level / cross-row construct (here a bare URL that GFM linkify will style with an OSC-8 target
+// embedded per wrapped row) does NOT settle line by line: proseTailCommittable rejects it, so only an
+// already-completed paragraph flushes and the whole growing paragraph stays live until it seals.
+func TestFlush_BlockRiskTailFallsBackToParagraph(t *testing.T) {
+	// One completed paragraph + a growing paragraph carrying a bare URL (a "://" autolink trigger).
+	m, turn := streamingProse("DONELINE a settled first paragraph here.\n\nLIVEURL see https://example.com/very/long/path/that/keeps/growing")
 	if cmd := m.flushActiveTurn(); cmd == nil {
 		t.Fatal("the completed first paragraph must flush")
+	}
+	if proseTailCommittable("LIVEURL see https://example.com/very/long/path/that/keeps/growing") {
+		t.Fatal("test premise broken: a bare-URL tail must be block-rejected")
 	}
 	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
 	if !strings.Contains(final, "DONELINE") {
 		t.Errorf("the completed paragraph must still flush:\n%s", final)
 	}
-	if strings.Contains(final, "LIVEMD") {
-		t.Errorf("a markdown-risky growing paragraph must be withheld from the flushable prefix:\n%s", final)
+	if strings.Contains(final, "LIVEURL") {
+		t.Errorf("a block-risky (bare-URL) growing paragraph must be withheld from the flushable prefix:\n%s", final)
 	}
-	// It still renders live in the footer so the user sees it form (just not committed yet).
-	foot := ansi.Strip(m.footer())
-	if !strings.Contains(foot, "LIVEMD") {
-		t.Errorf("the growing markdown paragraph must still render live in the footer:\n%s", foot)
+	if foot := ansi.Strip(m.footer()); !strings.Contains(foot, "LIVEURL") {
+		t.Errorf("the growing paragraph must still render live in the footer:\n%s", foot)
+	}
+}
+
+// TestFlush_OpenInlineSpanTruncatesAtItsRow proves the per-ROW gate: a long growing paragraph with a
+// settled plain prefix and then an OPEN **bold span commits the plain rows BEFORE the span but stops
+// at the row that holds the literal delimiter — the open span (which would restyle + re-wrap when it
+// closes) is withheld, and so is everything after it. This is the row-truncation path that lets
+// markdown-dense prose stream without churning, while never freezing a row a closer would change.
+func TestFlush_OpenInlineSpanTruncatesAtItsRow(t *testing.T) {
+	// A full row of plain prose (SETTLEDHEAD…), then an UNCLOSED **bold span whose literal "**bold"
+	// lands on the next visual row and keeps going. At width 80 the head wraps to its own row(s).
+	head := "SETTLEDHEAD plain words that comfortably fill the first wrapped visual row of prose here, "
+	m, turn := streamingProse(head + "**OPENBOLD bold that is still open and runs on without any closing delimiter yet")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("the settled plain head row must flush")
+	}
+	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
+	if !strings.Contains(final, "SETTLEDHEAD") {
+		t.Errorf("the settled plain head must commit (it has no openable delimiter):\n%s", final)
+	}
+	if strings.Contains(final, "OPENBOLD") {
+		t.Errorf("the open **bold span must be withheld (its row holds a literal delimiter):\n%s", final)
+	}
+	// Close the span: now the whole text is well-formed and OPENBOLD's row becomes committable.
+	turn.Steps[0].Text += " closed now**"
+	final2 := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
+	if !strings.Contains(final2, "OPENBOLD") {
+		t.Errorf("once the span closes, its (now width-final) row must become committable:\n%s", final2)
 	}
 }
 
@@ -356,9 +384,12 @@ func TestFlush_PlainTailBecomesMarkdownRiskyAfterLineFlush(t *testing.T) {
 	if flushedBefore == 0 || !strings.Contains(ansi.Strip(committedBefore), "KEEPONE") {
 		t.Fatalf("test setup: expected a settled head line committed, FlushedRows=%d:\n%s", flushedBefore, ansi.Strip(committedBefore))
 	}
-	// The tail gains a markdown trigger (an opening code span) — proseTailIsPlain flips false, so
-	// activeTurnFinalRows shrinks below FlushedRows.
-	turn.Steps[0].Text += " `code"
+	// The tail gains a BLOCK-risky construct (a bare URL) — proseTailCommittable flips false, so
+	// activeTurnFinalRows shrinks to the preamble, BELOW FlushedRows.
+	turn.Steps[0].Text += " see https://example.com/path"
+	if proseTailCommittable("KEEPONE plain prose that runs on long enough to wrap past a single visual row so the head settles into scrollback while the tail TAILONE keeps forming see https://example.com/path") {
+		t.Fatal("test premise broken: a bare-URL tail must be block-rejected")
+	}
 	if cmd := m.flushActiveTurn(); cmd != nil {
 		t.Errorf("flush must HOLD once the prefix shrinks below FlushedRows, not emit a command")
 	}
@@ -417,30 +448,70 @@ func TestFlush_LineFrontierStaysPrefix(t *testing.T) {
 	}
 }
 
-// TestProseTailIsPlain locks the conservative guard that decides whether a growing paragraph may
-// settle line by line: only plain single-line prose qualifies; anything that could open an inline
-// span, a retroactive block, or a multi-line construct must fall back to paragraph-level commit.
-func TestProseTailIsPlain(t *testing.T) {
-	plain := []string{
+// TestProseTailCommittable locks the BLOCK-level gate: a growing paragraph is eligible for
+// line-level commit unless it holds a construct that can reach back ACROSS rows (a link/url, an
+// entity/escape, a table/strikethrough/heading, a newline-formed block, or a leading list/indent).
+// Inline emphasis/code — open OR closed — is NOT judged here; it is handled per-row by
+// rowHasOpenableDelimiter (see TestRowHasOpenableDelimiter), so a mid-paragraph **bold** no longer
+// disqualifies the whole paragraph (the churn bug).
+func TestProseTailCommittable(t *testing.T) {
+	committable := []string{
 		"just some words", "a sentence, with punctuation! and more", "trailing partial wor",
 		"a price of 5 dollars and a ratio 3 to 1", "parens (like this) are fine",
+		// Inline spans (closed OR open) are block-safe — the row guard decides per-row.
+		"this has **bold** in the middle and more words after it",
+		"uses `terminal.getStatus` then keeps writing prose afterwards",
+		"this has **bold that is still open", "a half `code span", "an *italic still going",
+		// snake_case / intraword underscores are literal, not emphasis.
+		"the agent_id and terminal_state values are passed along",
+		// literal asterisks with surrounding spaces are not emphasis.
+		"compute 2 * 3 and then 4 * 5 for the totals",
 	}
-	for _, s := range plain {
-		if !proseTailIsPlain(s) {
-			t.Errorf("proseTailIsPlain(%q) = false, want true", s)
+	for _, s := range committable {
+		if !proseTailCommittable(s) {
+			t.Errorf("proseTailCommittable(%q) = false, want true", s)
 		}
 	}
-	risky := []string{
-		"", "has **bold", "has `code`", "see [link]", "an <autolink>", "a & entity",
-		"an escape \\here", "a | pipe", "strike ~tilde", "a # hash", "a > angle",
+	notCommittable := []string{
+		"",
+		// retroactive / width-changing / link / html constructs that reach across rows.
+		"see [link]", "an <autolink>", "a & entity", "an escape \\here", "a | pipe",
+		"strike ~tilde", "a # hash", "a > angle",
 		"line one\nline two", "tab\tindented", "\tindented code",
 		"- bullet item", "+ plus item", "1. ordered item", "1) ordered paren", "    indented code",
 		// GFM linkify triggers — glamour styles these and rewrites earlier rows as the link grows.
 		"visit https://example.com/long/path", "go to www.example.com", "ping me at name@host.com",
 	}
-	for _, s := range risky {
-		if proseTailIsPlain(s) {
-			t.Errorf("proseTailIsPlain(%q) = true, want false", s)
+	for _, s := range notCommittable {
+		if proseTailCommittable(s) {
+			t.Errorf("proseTailCommittable(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestRowHasOpenableDelimiter locks the per-row soundness gate: a RENDERED row (ansi-stripped) is
+// unsafe to commit iff it holds a literal delimiter a future closer could pair with — any "*" or
+// "`", or a NON-intraword "_". Intraword "_" (snake_case) is literal CommonMark text and is safe.
+func TestRowHasOpenableDelimiter(t *testing.T) {
+	safe := []string{
+		"plain rendered text with no delimiters", "snake_case_name stays literal", "agent_id value",
+		"trailing text after a styled span", "",
+	}
+	for _, s := range safe {
+		if rowHasOpenableDelimiter(s) {
+			t.Errorf("rowHasOpenableDelimiter(%q) = true, want false (safe to commit)", s)
+		}
+	}
+	unsafe := []string{
+		"a literal * asterisk", "an open `backtick", "a leading _underscore", "trailing underscore_",
+		"word _ spaced underscore", "**", "`",
+		// "_" adjacent to a multibyte char (em-dash) — byte-level word test must NOT treat the
+		// UTF-8 bytes as a word char, or an open emphasis "_" after punctuation slips through.
+		"after a dash—_emphasis starts",
+	}
+	for _, s := range unsafe {
+		if !rowHasOpenableDelimiter(s) {
+			t.Errorf("rowHasOpenableDelimiter(%q) = false, want true (unsafe — openable delimiter)", s)
 		}
 	}
 }

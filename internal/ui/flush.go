@@ -31,7 +31,7 @@ import (
 //   - A row of the live last step is committed only once IMMUTABLE: for a PLAIN growing
 //     paragraph that is every wrapped row but the still-mutable last one (greedy word-wrap
 //     closes earlier rows); for a MARKDOWN-risky one it is only the completed "\n\n"-terminated
-//     paragraphs (render_turn.go renderProse / proseTailIsPlain). Either way the committed rows
+//     paragraphs (render_turn.go renderProse / proseTailCommittable). Either way the committed rows
 //     render byte-identically to the prefix the seal will emit, and sealTail strips them exactly.
 //
 // LeftPad is applied at COMMIT (here) and at footer-assembly (view.go), never inside the

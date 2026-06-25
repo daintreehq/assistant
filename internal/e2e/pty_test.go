@@ -430,6 +430,191 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 	runtime.KeepAlive(ptm)
 }
 
+// TestPTYStreamingMarkdownNoChurn is the end-to-end regression for the cockpit-footer churn the
+// user reported: a long MARKDOWN paragraph streamed token by token used to be WITHHELD from
+// scrollback until it sealed on "\n\n", so it piled into the height-capped live footer — its early
+// rows scrolled off the top of the ~8-row window into nowhere and only landed in scrollback, all at
+// once, when the paragraph finished ("a 5-line window that scrolls, then flicks over").
+//
+// The signal that distinguishes fixed from broken on a REAL terminal: with the line-level commit,
+// early prose reaches native scrollback SECONDS before the paragraph seals; with withhold-until-seal
+// the early prose and the closing sentinel land in the SAME seal burst. So we stream ONE long
+// markdown paragraph slowly and assert EARLYMARKER appears in scrollback well before SENTINEL. (The
+// existing TestPTYCockpitRenderHarness can't catch this — it streams many SHORT "\n\n"-terminated
+// paragraphs, which committed fine even before the fix.) We also assert the high-frequency
+// line-commit cadence stays #1613-safe: the footer never grows tall, and nothing is duplicated.
+func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("PTY harness allocates a real pseudoterminal and drives a slow streamed turn; skipped under -short")
+	}
+	bin := buildBinary(t) // auto-skips under -race
+
+	const (
+		earlyMarker = "EARLYMARKERZULU"
+		sentinel    = "SENTINELOMEGA"
+	)
+	// ONE long markdown paragraph (no "\n\n" until the very end) streamed word by word, with
+	// **bold** and `code` spans so it travels the markdown commit path. On the short terminal below
+	// it wraps to MORE than a screen of rows, so its early lines must scroll off the top into native
+	// scrollback HISTORY — but only if they were committed line by line. The closing blank line seals
+	// it and a final paragraph carries SENTINEL.
+	tokens := []string{"The ", "**streaming** ", earlyMarker + " ", "report-line ", "opens ", "with ", "a ", "`code` ", "span ", "and "}
+	for i := 0; i < 100; i++ {
+		w := fmt.Sprintf("flowing-word-%03d ", i) // long words → few per row → many wrapped rows
+		if i%9 == 4 {
+			w = fmt.Sprintf("**emphasis-word-%03d** ", i)
+		} else if i%9 == 7 {
+			w = fmt.Sprintf("`code-word-%03d` ", i)
+		}
+		tokens = append(tokens, w)
+	}
+	tokens = append(tokens, "and it wraps on and on.\n\n", "All "+sentinel+" wrapped up.\n\n")
+
+	fake := newFakeDeepSeek(t, sseRound{
+		contentTokens: tokens,
+		tokenDelay:    15 * time.Millisecond, // ~1.7s stream so we can observe it mid-flight
+		usage:         &fakeUsage{prompt: 40, completion: 110, total: 150},
+	})
+
+	// A SHORT, narrow terminal so the long paragraph overflows the screen and its early committed
+	// lines scroll into scrollback HISTORY while the turn is still streaming.
+	const startRows, startCols = 24, 72
+	cmd := exec.Command(bin)
+	env := make([]string, 0, len(os.Environ())+12)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_TIER=operator",
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+		"TERM=xterm-256color",
+	)
+
+	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: startRows, Cols: startCols})
+	if err != nil {
+		t.Fatalf("start binary under pty: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
+
+	screen := newVTScreen(startRows, startCols)
+	var rawMu sync.Mutex
+	var raw bytes.Buffer
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := ptm.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				screen.Feed(chunk)
+				rawMu.Lock()
+				raw.Write(chunk)
+				rawMu.Unlock()
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	rawLen := func() int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return raw.Len()
+	}
+
+	// Phase 1: boot → steady state.
+	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// Phase 2: drive the slow streamed paragraph and TIME when each marker reaches the screen.
+	screen.ResetPeakFrameHeight()
+	if _, err := ptm.Write([]byte("write me a long report\r")); err != nil {
+		t.Fatalf("write prompt to pty: %v", err)
+	}
+	// Measure WHEN the early prose reaches committed scrollback HISTORY (not the live footer — see
+	// CountHistorySubstr) vs WHEN the paragraph seals (SENTINEL appears). With line-level commit the
+	// early prose scrolls into history seconds before the seal; with withhold-until-seal it never
+	// reaches history until the whole paragraph dumps in at the seal — so the two times collapse.
+	var earlyHistAt, sentinelAt time.Time
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if earlyHistAt.IsZero() && screen.CountHistorySubstr(earlyMarker) >= 1 {
+			earlyHistAt = time.Now()
+		}
+		if screen.CountLineSubstr(sentinel) >= 1 {
+			sentinelAt = time.Now()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sentinelAt.IsZero() {
+		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
+	}
+	if earlyHistAt.IsZero() {
+		t.Fatalf("early prose %q never reached committed scrollback history — it was withheld in the live footer (the churn bug):\n%s", earlyMarker, screen.Plain())
+	}
+	// THE churn assertion: early prose was COMMITTED to scrollback well before the paragraph sealed.
+	gap := sentinelAt.Sub(earlyHistAt)
+	t.Logf("EARLYMARKER reached committed scrollback %v before SENTINEL", gap)
+	// Threshold with wide margin: line-commit yields hundreds of ms (server-paced streaming);
+	// withhold-until-seal yields TENS OF MICROSECONDS (both land in the same seal burst). 300ms sits
+	// 4 orders of magnitude above the broken case, so it can't false-pass even on a slow worker.
+	if gap < 300*time.Millisecond {
+		t.Errorf("early prose reached committed scrollback only %v before the paragraph sealed — it was withheld and churned in the capped footer instead of committing line by line (want a multi-second gap)", gap)
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// #1613 safety under the high-frequency line-commit cadence: the footer never grew tall.
+	peak := screen.PeakFrameHeight()
+	t.Logf("streamed-paragraph peak live-View height: %d rows (bound %d)", peak, maxFooterRows)
+	if peak <= 0 {
+		t.Errorf("never observed a scrollback commit during the turn (peak frame height = %d) — vacuous", peak)
+	}
+	if peak > maxFooterRows {
+		t.Errorf("live View peaked at %d rows, want <= %d — the footer swallowed the stream (#1613 class)", peak, maxFooterRows)
+	}
+	// No duplication: the markers each land on exactly one composed line.
+	for _, m := range []string{earlyMarker, sentinel} {
+		if got := screen.CountLineSubstr(m); got != 1 {
+			t.Errorf("marker %q appears on %d composed lines, want 1 (duplicated/lost in scrollback):\n%s", m, got, screen.Plain())
+		}
+	}
+
+	// Phase 3: clean shutdown.
+	if _, err := ptm.Write([]byte("/quit\r")); err != nil {
+		t.Logf("write /quit: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitErr
+		t.Errorf("cockpit did not exit within 10s after /quit")
+	}
+	_ = ptm.Close()
+	drainWG.Wait()
+	runtime.KeepAlive(ptm)
+}
+
 // waitFor polls cond every 50ms until it is true or the timeout elapses. Returns
 // the final value of cond so the caller can fail with context on a miss.
 func waitFor(timeout time.Duration, cond func() bool) bool {

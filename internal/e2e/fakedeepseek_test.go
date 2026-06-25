@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // sseRound is one scripted streaming response from the fake DeepSeek server. The
@@ -23,6 +24,9 @@ import (
 type sseRound struct {
 	// contentTokens are streamed as individual delta.content chunks (in order).
 	contentTokens []string
+	// tokenDelay, when > 0, pauses between content tokens so a PTY test can observe the
+	// stream MID-FLIGHT (e.g. assert early prose reached scrollback before the paragraph seals).
+	tokenDelay time.Duration
 	// toolName/toolArgs, when toolName != "", append a single fragmented tool call
 	// (id + name in one chunk, args split across two) and a tool_calls finish.
 	toolName string
@@ -87,7 +91,10 @@ func (f *fakeDeepSeek) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for _, tok := range round.contentTokens {
+	for i, tok := range round.contentTokens {
+		if round.tokenDelay > 0 && i > 0 {
+			time.Sleep(round.tokenDelay)
+		}
 		chunk := map[string]any{
 			"choices": []any{map[string]any{"delta": map[string]any{"content": tok}}},
 		}

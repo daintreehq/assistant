@@ -334,6 +334,24 @@ func (s *vtScreen) CountLineSubstr(sub string) int {
 	return n
 }
 
+// CountHistorySubstr counts how many SCROLLBACK-HISTORY lines contain sub — lines that LineFeed
+// pushed off the top of the visible grid. The live footer never enters history, so a marker found
+// here is DEFINITIVELY committed scrollback, not transient footer content. This is the robust signal
+// for "did this prose actually stream into native scrollback" (vs being withheld in the capped
+// footer): with line-level commit, early prose lands in history while the turn streams; with
+// withhold-until-seal it never reaches history until the paragraph seals.
+func (s *vtScreen) CountHistorySubstr(sub string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, l := range s.history {
+		if strings.Contains(l, sub) {
+			n++
+		}
+	}
+	return n
+}
+
 // PeakFrameHeight returns the tallest live-View (footer) height observed at a commit
 // since the last reset — recovered from each insertAbove's CursorUp/InsertLine geometry.
 func (s *vtScreen) PeakFrameHeight() int {
