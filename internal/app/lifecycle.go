@@ -24,6 +24,9 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
 	a.refreshStartupContext(ctx, st.Connected)
+	// Boot-only: reconcile the durable ledger against the live terminal inventory on
+	// the first successful connect (idempotency-guarded inside).
+	a.maybeReconcileLedger(ctx, st.Connected)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
 }
@@ -34,6 +37,9 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
 	a.refreshStartupContext(ctx, st.Connected)
+	// If the initial connect never succeeded, the boot reconcile runs on this first
+	// successful (re)connect instead; the once-guard makes a later reconnect a no-op.
+	a.maybeReconcileLedger(ctx, st.Connected)
 	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
 }

@@ -39,9 +39,11 @@ const (
 	// Bumped to 2 when the watchers table gained endedReason/endedAt; to 3 when watchers
 	// and agent_launches gained workflowRunId (durable workflow-ledger back-links); to 4
 	// when the artifacts table was added (durable tool-result overflow payloads); to 5
-	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic) —
-	// a schema change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 5
+	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic);
+	// to 6 when the context_checkpoints table was added (durable compaction checkpoint
+	// reloaded on resume) — a schema change is a hard-reset (make db-reset), not a
+	// migration.
+	schemaUserVersion = 6
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer

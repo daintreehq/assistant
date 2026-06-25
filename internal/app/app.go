@@ -131,6 +131,12 @@ type App struct {
 	rosterMu             sync.RWMutex
 	cachedAgentIDs       []string
 	cachedActiveWorktree string
+
+	// reconcileLedgerOnce guards the boot ledger reconcile (ReconcileLedger) so it runs
+	// exactly once per process — on the first successful MCP connect. A mid-session
+	// /reconnect must NOT re-run it: it reads the LIVE terminal.list, so a re-run after
+	// the user ended a terminal in-session could wrongly expire a run still being worked.
+	reconcileLedgerOnce sync.Once
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
@@ -300,6 +306,24 @@ func Create(opts CreateOptions) (*App, error) {
 					debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
 					"session.rehydrate.dropped",
 					map[string]any{"count": droppedRows, "sessionId": sessionID},
+				)
+			}
+
+			// Durable compaction checkpoint resume (issue #260). LoadLatestCheckpoint
+			// falls back past a corrupt 'latest' payload to the 'prev' slot; ResumeCheckpoint
+			// is the semantic-validity gate (rejects a checkpoint whose seq is ahead of the
+			// delta we just replayed). The accepted compaction depth is recorded for
+			// observability — the session continues the depth chain once the compaction-time
+			// write path (issue #256, which owns session.go's compactLocked) feeds it back in.
+			if cp, found, cerr := store.LoadLatestCheckpoint(); cerr == nil && found {
+				depth, accepted := agent.ResumeCheckpoint(&cp, res)
+				debuglog.LogDebug(
+					debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
+					"session.checkpoint.resumed",
+					map[string]any{
+						"slot": cp.Slot, "accepted": accepted, "compactionDepth": depth,
+						"lastSeq": cp.LastSeq, "initialSeq": res.InitialSeq, "sessionId": sessionID,
+					},
 				)
 			}
 		}

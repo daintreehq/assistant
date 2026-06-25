@@ -113,6 +113,8 @@ func TestFreshSchemaShape(t *testing.T) {
 		"memories": {"id", "content", "category", "source", "pinnedAt", "deletedAt",
 			"createdAt", "updatedAt"},
 		"artifacts": {"id", "sessionId", "content", "totalChars", "totalBytes", "createdAt"},
+		"context_checkpoints": {"slot", "compactionDepth", "summaryText", "lastRunId",
+			"lastSeq", "payloadJson", "createdAt"},
 	}
 	for table, cols := range mustHaveCols {
 		got := colNames(t, s, table)

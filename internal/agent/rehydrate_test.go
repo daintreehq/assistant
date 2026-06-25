@@ -17,6 +17,36 @@ func TestRehydrateEmptyStartsFresh(t *testing.T) {
 	}
 }
 
+func TestResumeCheckpointNil(t *testing.T) {
+	if depth, ok := ResumeCheckpoint(nil, RehydrateResult{InitialSeq: 5}); ok || depth != 0 {
+		t.Fatalf("nil checkpoint want (0,false), got (%d,%v)", depth, ok)
+	}
+}
+
+func TestResumeCheckpointConsistent(t *testing.T) {
+	cp := &domain.ContextCheckpointRecord{CompactionDepth: 4, LastSeq: 9}
+	depth, ok := ResumeCheckpoint(cp, RehydrateResult{InitialSeq: 12})
+	if !ok || depth != 4 {
+		t.Fatalf("consistent checkpoint want (4,true), got (%d,%v)", depth, ok)
+	}
+}
+
+func TestResumeCheckpointAheadOfHistoryRejected(t *testing.T) {
+	// LastSeq >= InitialSeq ⇒ the checkpoint claims a seq the conversation never
+	// reached, so its depth is not trusted.
+	cp := &domain.ContextCheckpointRecord{CompactionDepth: 4, LastSeq: 12}
+	if depth, ok := ResumeCheckpoint(cp, RehydrateResult{InitialSeq: 12}); ok || depth != 0 {
+		t.Fatalf("ahead-of-history checkpoint want (0,false), got (%d,%v)", depth, ok)
+	}
+}
+
+func TestResumeCheckpointNegativeRejected(t *testing.T) {
+	cp := &domain.ContextCheckpointRecord{CompactionDepth: -1, LastSeq: 1}
+	if depth, ok := ResumeCheckpoint(cp, RehydrateResult{InitialSeq: 5}); ok || depth != 0 {
+		t.Fatalf("negative-depth checkpoint want (0,false), got (%d,%v)", depth, ok)
+	}
+}
+
 func TestRehydrateDupSeqResumesEmptyAtMaxSeqPlusOne(t *testing.T) {
 	// A dup-seq tangle is a safe fresh start, but it must RESUME (ok=true) with an
 	// EMPTY working history and continue numbering at maxSeq+1 — NOT return "fresh"

@@ -199,6 +199,29 @@ type ArtifactRecord struct {
 	CreatedAt  int64  `json:"createdAt"`
 }
 
+// ContextCheckpointRecord is the durable, structured compaction checkpoint. At each
+// compaction boundary the session persists the latest checkpoint here so a hard
+// restart can reload the compacted operational state instead of losing it to
+// working-history-only storage. Exactly two slots are kept — Slot "latest" and a
+// "prev" fallback rotated in on each upsert — so a corrupt latest (unparseable
+// PayloadJson) can fall back to the prior valid one. PayloadJson is the full
+// structured checkpoint object verbatim (opaque to the storage layer, so a richer
+// object can round-trip without a schema change); the promoted columns are the fields
+// the resume path reads directly. One DB == one project (no projectId, and no
+// sessionId — a stale checkpoint from a prior session is harmless: the conversation
+// rows are the authoritative transcript). LastSeq is the conversation seq at the
+// compaction boundary, so resume can validate the checkpoint against the replayed
+// delta.
+type ContextCheckpointRecord struct {
+	Slot            string `json:"slot"` // "latest" | "prev" (set by the storage layer)
+	CompactionDepth int    `json:"compactionDepth"`
+	SummaryText     string `json:"summaryText"`
+	LastRunID       string `json:"lastRunId,omitempty"`
+	LastSeq         int    `json:"lastSeq"`
+	PayloadJson     string `json:"payloadJson"`
+	CreatedAt       int64  `json:"createdAt"`
+}
+
 // SkillStepProgress is one step within a SkillRunStateRecord (1-based index).
 type SkillStepProgress struct {
 	Index  int             `json:"index"`

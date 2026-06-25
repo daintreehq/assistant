@@ -115,6 +115,36 @@ func RehydrateSession(rows []domain.ConversationMessageRecord) (RehydrateResult,
 	return RehydrateResult{RestoredMessages: msgs, InitialSeq: initialSeq, DroppedRows: dropped}, true
 }
 
+// ResumeCheckpoint reconciles a durable checkpoint (loaded from the store) against
+// the working history RehydrateSession just rebuilt, deciding the compaction depth a
+// resumed session should continue from. A persisted checkpoint records the compaction
+// depth and the conversation seq at the last compaction boundary; on resume the
+// session continues the chain from that depth so the depth tag on the next compaction
+// note keeps climbing across restarts rather than silently resetting to 0 (the
+// pre-checkpoint behaviour, noted in session.go's compactionDepth doc).
+//
+// It is a SEMANTIC validity gate layered on top of the storage-level parse check:
+// LoadLatestCheckpoint already fell back past an unparseable payload, so here we only
+// reject a checkpoint whose LastSeq sits at or beyond the resume's InitialSeq — that
+// describes a conversation this DB never reached, so it is stale/unrelated and its
+// depth is not trusted. Returns (depth, true) for a consistent checkpoint and
+// (0, false) for a nil or inconsistent one, so the caller can both apply the depth and
+// observe the rejection. nil-safe.
+func ResumeCheckpoint(cp *domain.ContextCheckpointRecord, res RehydrateResult) (int, bool) {
+	if cp == nil {
+		return 0, false
+	}
+	if cp.CompactionDepth < 0 || cp.LastSeq < 0 {
+		return 0, false
+	}
+	// The checkpoint must sit BEHIND the resume's next seq; one at/after it belongs to
+	// a different (or corrupt) conversation than the delta we just replayed.
+	if cp.LastSeq >= res.InitialSeq {
+		return 0, false
+	}
+	return cp.CompactionDepth, true
+}
+
 // recordToChatMessage rebuilds a ChatMessage from a persisted row. Empty
 // content becomes a null content. Malformed tool-call JSON is dropped — one bad
 // row never aborts a resume — and the returned bool reports that drop so the
