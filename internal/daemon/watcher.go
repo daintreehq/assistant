@@ -748,7 +748,14 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 	// summary, evidence) into notesJson so /workflows shows the worker digest durably,
 	// without re-reading the terminal on each lifecycle event. Only when there's a real
 	// note to record — never invent one for the digest-less disable path.
-	if note := watcherDigestNote(outcome); note != nil {
+	//
+	// This OVERWRITES notesJson rather than reading-then-appending: the digest is the
+	// sole writer of a supervised run's notes, which are empty until the supervisor
+	// terminates here (the spawn path sets no notes, and the model doesn't write notes
+	// to a still-running supervised run). Keeping it a single UpdateWorkflowRun patch is
+	// the issue's explicit shape. If a pre-termination notes writer is ever added, this
+	// must become a read-modify-write that preserves the existing entries.
+	if note := watcherDigestNote(outcome, watcherStatus); note != nil {
 		patch["notesJson"] = *note
 	}
 	_ = ctx.Store.UpdateWorkflowRun(*rec.WorkflowRunID, patch)
@@ -759,11 +766,18 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 // nil when there is no outcome or nothing worth recording (an empty/whitespace
 // summary with no classification), so the caller omits notesJson rather than
 // writing an empty array. Confidence rides alongside its classification only.
-func watcherDigestNote(outcome *CheckOutcome) *string {
+// watcherStatus records the stop reason: a timeout fails the run while the
+// headline classification is usually still "working", so the note leads with the
+// timeout — otherwise a /workflows reader sees a stale "still working" digest on a
+// failed row with no hint of WHY it ended.
+func watcherDigestNote(outcome *CheckOutcome, watcherStatus string) *string {
 	if outcome == nil {
 		return nil
 	}
 	var notes []string
+	if watcherStatus == "timeout" {
+		notes = append(notes, "watcher: timed out before the agent finished")
+	}
 	if c := string(outcome.Classification); c != "" {
 		notes = append(notes,
 			"classification: "+c,

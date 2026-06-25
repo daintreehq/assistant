@@ -572,10 +572,14 @@ func TestWatcher_TimeoutFailsLinkedWorkflow(t *testing.T) {
 	if store.workflowPatch["wfr_to"]["status"] != string(domain.WorkflowFailed) {
 		t.Errorf("timeout → failed, got %v", store.workflowPatch["wfr_to"]["status"])
 	}
-	// A timed-out supervisor still has a headline digest to persist.
+	// A timed-out supervisor still has a headline digest to persist, and it must
+	// lead with the timeout stop-reason (the headline class is usually "working").
 	notes := decodeNotesJSON(t, store.workflowPatch["wfr_to"])
 	if !notesHasPrefix(notes, "classification: ") || !notesHasPrefix(notes, "summary: ") {
 		t.Errorf("timeout digest must carry classification + summary, got %v", notes)
+	}
+	if !notesHasPrefix(notes, "watcher: timed out") {
+		t.Errorf("timeout digest must record the timeout stop-reason, got %v", notes)
 	}
 }
 
@@ -651,11 +655,11 @@ func TestWatcher_NoWorkflowLinkNoAdvance(t *testing.T) {
 // watcherDigestNote serializes a real outcome and returns nil when there is
 // nothing worth recording (no fabricated empty array).
 func TestWatcherDigestNote(t *testing.T) {
-	if got := watcherDigestNote(nil); got != nil {
+	if got := watcherDigestNote(nil, "condition_met"); got != nil {
 		t.Errorf("nil outcome → nil note, got %q", *got)
 	}
 	// An empty outcome (no classification, blank summary, no evidence) records nothing.
-	if got := watcherDigestNote(&CheckOutcome{Summary: "  "}); got != nil {
+	if got := watcherDigestNote(&CheckOutcome{Summary: "  "}, "condition_met"); got != nil {
 		t.Errorf("empty outcome → nil note, got %q", *got)
 	}
 	// A full outcome serializes classification, confidence, summary, and each
@@ -665,7 +669,7 @@ func TestWatcherDigestNote(t *testing.T) {
 		Confidence:     0.8,
 		Summary:        "Tests passed on a clean tree.",
 		Evidence:       []string{"exitCode=0", "  ", "git status clean"},
-	})
+	}, "condition_met")
 	if note == nil {
 		t.Fatal("a full outcome must produce a note")
 	}
@@ -682,5 +686,28 @@ func TestWatcherDigestNote(t *testing.T) {
 	}
 	if strings.Join(notes, "\n") != strings.Join(want, "\n") {
 		t.Errorf("digest mismatch:\n got %v\nwant %v", notes, want)
+	}
+
+	// Zero confidence still renders cleanly as "0%" (not a blank or NaN).
+	zero := watcherDigestNote(&CheckOutcome{Classification: domain.ClassUnknown}, "condition_met")
+	if zero == nil || !strings.Contains(*zero, `"confidence: 0%"`) {
+		t.Errorf("zero-confidence digest must render \"0%%\", got %v", zero)
+	}
+
+	// A timeout leads with the stop-reason so a failed row explains itself.
+	to := watcherDigestNote(&CheckOutcome{
+		Classification: domain.ClassStillWorking,
+		Confidence:     0.6,
+		Summary:        "Agent is still working.",
+	}, "timeout")
+	if to == nil {
+		t.Fatal("timeout outcome must produce a note")
+	}
+	var toNotes []string
+	if err := json.Unmarshal([]byte(*to), &toNotes); err != nil {
+		t.Fatalf("timeout note must be a JSON []string: %v", err)
+	}
+	if len(toNotes) == 0 || !strings.HasPrefix(toNotes[0], "watcher: timed out") {
+		t.Errorf("timeout note must lead with the stop-reason, got %v", toNotes)
 	}
 }
