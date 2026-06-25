@@ -73,11 +73,11 @@ func TestCompactionDepthCounts(t *testing.T) {
 }
 
 // TestCompactionNotePrefixEmbedsDepth proves the prefix tags the depth while keeping
-// the "compacted summary" substring other code/tests key on.
+// the "checkpoint" framing the rendered note and tests key on (issue #256).
 func TestCompactionNotePrefixEmbedsDepth(t *testing.T) {
 	p := compactionNotePrefix(3)
-	if !strings.Contains(p, "compacted summary") {
-		t.Fatalf("prefix %q lost the 'compacted summary' framing", p)
+	if !strings.Contains(p, "checkpoint") {
+		t.Fatalf("prefix %q lost the 'checkpoint' framing", p)
 	}
 	if !strings.Contains(p, "depth 3") {
 		t.Fatalf("prefix %q does not embed the depth", p)

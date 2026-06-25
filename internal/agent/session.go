@@ -394,9 +394,9 @@ func (s *Session) clearLocked() {
 }
 
 // Compact keeps the three controls and replaces the working history with one
-// "[compacted summary…]" user note, persisting a system marker then the note.
-// Returns ErrTurnInProgress when a turn is in flight (the interactive /compact
-// path) — the in-turn auto-compact uses compactLocked instead.
+// "[checkpoint…]" user note, persisting a system marker then the note. Returns
+// ErrTurnInProgress when a turn is in flight (the interactive /compact path) — the
+// in-turn auto-compact uses compactLocked instead.
 func (s *Session) Compact(summary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1340,9 +1340,10 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	}
 	// Flatten multimodal history to text (the small model is text-only; an image
 	// turn would otherwise trip the vision tier gate and silently fail every
-	// auto-compact, growing history unbounded).
+	// auto-compact, growing history unbounded). The system prompt asks for a STRUCTURED
+	// checkpoint object (issue #256), not a prose summary — see prompts.CheckpointSystemPrompt.
 	summaryMsgs := []models.ChatMessage{
-		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual. Preserve verbatim every load-bearing identifier you see — terminal IDs (term_*), run IDs (run_*), scratch store IDs (scr_*), watcher IDs (watcher_*), workflow IDs (wkf_*), branch names, and any active grant or approval token — so the orchestrator can still reference them after compaction."),
+		models.TextMessage("system", prompts.CheckpointSystemPrompt),
 	}
 	// Capture a flattened transcript from the SAME snapshot (still under the lock) so
 	// the distillation pass can mine the about-to-be-discarded history after the lock
@@ -1369,33 +1370,31 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	}
 	s.mu.Unlock()
 
-	result, err := s.deps.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{Messages: summaryMsgs})
-	summary := ""
-	if err == nil {
-		summary = trimSpace(result.Content)
-	}
-	if err != nil || summary == "" {
-		// A user cancel landing mid-summary is the turn tearing down, NOT a provider
-		// outage — don't count it toward the fallback and don't mutate history while
-		// the turn is aborting (issue #61: leave no orphan state).
+	// Ask the small model for a STRUCTURED checkpoint (issue #256). On a model ERROR
+	// (not a reply) fall back exactly as the old prose path did: a cancel is the turn
+	// tearing down (don't compact, don't count it — issue #61), a real outage counts
+	// toward the bounded-growth truncation fallback (issue #202). A successful REPLY
+	// always compacts — even if it isn't valid JSON, validateCheckpoint still mines every
+	// load-bearing ID from the transcript into PreservedIDs, so a sparse checkpoint that
+	// preserves IDs is strictly better than no compaction.
+	cp, err := buildCheckpoint(ctx, s.deps.Router, summaryMsgs, transcript)
+	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
 		s.mu.Lock()
 		truncated := s.noteCompactFailureLocked()
 		s.mu.Unlock()
-		switch {
-		case truncated:
-			s.events.Info("Auto-compact fallback: truncated old history (summary unavailable)")
-		case err != nil:
-			s.events.Info("Auto-compact skipped: summary failed")
-		default:
-			s.events.Info("Auto-compact skipped: empty summary")
+		if truncated {
+			s.events.Info("Auto-compact fallback: truncated old history (checkpoint unavailable)")
+		} else {
+			s.events.Info("Auto-compact skipped: checkpoint failed")
 		}
 		return
 	}
+	summary := renderCheckpoint(cp)
 
-	// Summary in hand: compact IMMEDIATELY so the large-model stream is unblocked,
+	// Checkpoint in hand: compact IMMEDIATELY so the large-model stream is unblocked,
 	// then distill durable facts off the critical path. compactLocked resets the
 	// failure streak so one transient outage never permanently disarms the soft path.
 	s.mu.Lock()

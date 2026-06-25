@@ -70,9 +70,9 @@ func TestCompactKeepsControlsPlusSummary(t *testing.T) {
 	if !strings.Contains(msgs[2].StringContent, "# Loaded skills") {
 		t.Fatal("msg[2] should be loaded skills")
 	}
-	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "compacted summary") ||
+	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "checkpoint") ||
 		!strings.Contains(msgs[3].StringContent, "goals: X") {
-		t.Fatalf("msg[3] = %+v want a compacted summary note", msgs[3])
+		t.Fatalf("msg[3] = %+v want a checkpoint note", msgs[3])
 	}
 	for _, m := range msgs {
 		if strings.Contains(m.StringContent, "first") {
@@ -90,8 +90,8 @@ func TestCompactNoteEmbedsDepthTag(t *testing.T) {
 	s.Compact("goals: X.")
 	first := s.Messages()[3]
 	if first.Role != "user" || !strings.Contains(first.StringContent, "depth 1") ||
-		!strings.Contains(first.StringContent, "compacted summary") {
-		t.Fatalf("first compaction note = %q, want a depth-1 compacted summary", first.StringContent)
+		!strings.Contains(first.StringContent, "checkpoint") {
+		t.Fatalf("first compaction note = %q, want a depth-1 checkpoint", first.StringContent)
 	}
 	s.Compact("goals: Y.")
 	second := s.Messages()[3]
@@ -110,8 +110,8 @@ func TestClearKeepsControlsNoSummary(t *testing.T) {
 		t.Fatalf("messages = %d want 3 (controls only, no summary)", len(msgs))
 	}
 	for _, m := range msgs {
-		if strings.Contains(m.StringContent, "alpha") || strings.Contains(m.StringContent, "compacted summary") {
-			t.Fatal("clear must drop turns and any summary note")
+		if strings.Contains(m.StringContent, "alpha") || strings.Contains(m.StringContent, "[checkpoint") {
+			t.Fatal("clear must drop turns and any checkpoint note")
 		}
 	}
 }
@@ -172,8 +172,8 @@ func TestClearDropsPriorCompactionSummary(t *testing.T) {
 		t.Fatalf("clear after compact should leave 3, got %d", len(msgs))
 	}
 	for _, m := range msgs {
-		if strings.Contains(m.StringContent, "compacted summary") || strings.Contains(m.StringContent, "goals: X") {
-			t.Fatal("clear must drop a prior compaction summary")
+		if strings.Contains(m.StringContent, "[checkpoint") || strings.Contains(m.StringContent, "goals: X") {
+			t.Fatal("clear must drop a prior compaction checkpoint")
 		}
 	}
 }
@@ -198,7 +198,7 @@ func (r *chatCountRouter) ModelFor(domain.ModelTier) string { return "minimax-m3
 func (r *chatCountRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestAutoCompactsAboveThreshold(t *testing.T) {
-	r := &chatCountRouter{summary: "AUTO_SUMMARY"}
+	r := &chatCountRouter{summary: `{"goal":"AUTO_SUMMARY"}`}
 	s, _ := compactSession(t, r)
 	s.InjectNote("keep-small")
 	// One huge note pushes the estimate past the 60k-token threshold (≈240k chars).
@@ -217,12 +217,12 @@ func TestAutoCompactsAboveThreshold(t *testing.T) {
 	}
 	var replaced bool
 	for _, m := range msgs {
-		if strings.Contains(m.StringContent, "compacted summary") && strings.Contains(m.StringContent, "AUTO_SUMMARY") {
+		if strings.Contains(m.StringContent, "checkpoint") && strings.Contains(m.StringContent, "AUTO_SUMMARY") {
 			replaced = true
 		}
 	}
 	if !replaced {
-		t.Fatal("history should be replaced with the compacted summary note")
+		t.Fatal("history should be replaced with the checkpoint note")
 	}
 }
 
@@ -432,7 +432,7 @@ func (r *seqChatRouter) calls() int {
 // critical path (a detached goroutine), so the test joins it via DrainBackgroundWork
 // before asserting — it still catches the distill pass being removed entirely.
 func TestAutoCompactDistillsBeforeDiscard(t *testing.T) {
-	r := &seqChatRouter{replies: []string{"AUTO_SUMMARY", `["distilled durable fact"]`}}
+	r := &seqChatRouter{replies: []string{`{"goal":"AUTO_SUMMARY"}`, `["distilled durable fact"]`}}
 	s, _ := compactSession(t, r)
 	mem := &fakeMemoryStore{}
 	s.deps.MemoryStore = mem
@@ -502,7 +502,7 @@ func (r *blockingDistillRouter) Chat(ctx context.Context, tier domain.ModelTier,
 	n := r.calls
 	r.mu.Unlock()
 	if n == 1 {
-		return models.ChatResult{Content: "AUTO_SUMMARY"}, nil
+		return models.ChatResult{Content: `{"goal":"AUTO_SUMMARY"}`}, nil
 	}
 	// Distill call: announce, then block until the test releases us.
 	r.started <- struct{}{}
@@ -650,7 +650,7 @@ func TestAutoCompactFallbackTruncatesAfterSustainedOutage(t *testing.T) {
 // permanently disarm the soft path: after two failures, a successful summary compacts
 // and resets the consecutive-failure counter to zero.
 func TestAutoCompactFailureCounterResetsOnSuccess(t *testing.T) {
-	r := &flakyRouter{failFirst: 2, summary: "RECOVERED_SUMMARY"}
+	r := &flakyRouter{failFirst: 2, summary: `{"goal":"RECOVERED_SUMMARY"}`}
 	s, _ := compactSession(t, r) // no MemoryStore ⇒ success path spawns no distill goroutine
 	// Two notes (a lone note trips the "no real history" guard). Over the SOFT
 	// threshold but under the hard ceiling, so failures climb the counter without
@@ -847,7 +847,7 @@ func TestAutoCompactSingleHugeMessageTruncates(t *testing.T) {
 // history (well under the soft threshold by chars) compacts once lastPromptTokens —
 // which counts the tool schemas the estimate is blind to — crosses the threshold.
 func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
-	r := &chatCountRouter{summary: "REAL_TOKEN_SUMMARY"}
+	r := &chatCountRouter{summary: `{"goal":"REAL_TOKEN_SUMMARY"}`}
 	s, _ := compactSession(t, r)
 	// Two small notes: char estimate stays far under the soft threshold, and len is
 	// above ControlMessageCount+1 so the "no real history" guard doesn't skip.
@@ -879,7 +879,7 @@ func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
 		}
 	}
 	if !replaced {
-		t.Fatal("history should be replaced with the compacted summary note")
+		t.Fatal("history should be replaced with the checkpoint note")
 	}
 }
 
@@ -1100,7 +1100,7 @@ func TestKeepValidTailHelper(t *testing.T) {
 // summary note + the most-recent working messages verbatim (an oversized old note is shed
 // by the tail budget), instead of collapsing to summary-only.
 func TestAutoCompactKeepsVerbatimTail(t *testing.T) {
-	r := &chatCountRouter{summary: "TAIL_SUMMARY"}
+	r := &chatCountRouter{summary: `{"goal":"TAIL_SUMMARY"}`}
 	s, _ := compactSession(t, r)
 	// One big OLD note trips the soft threshold (shed by the tail budget); the recent
 	// small notes are the verbatim tail to keep.
@@ -1122,10 +1122,10 @@ func TestAutoCompactKeepsVerbatimTail(t *testing.T) {
 		!strings.Contains(msgs[2].StringContent, "# Loaded skills") {
 		t.Fatal("control messages must remain byte-stable")
 	}
-	// Summary note sits immediately after the controls.
-	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "compacted summary") ||
+	// Checkpoint note sits immediately after the controls.
+	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "checkpoint") ||
 		!strings.Contains(msgs[3].StringContent, "TAIL_SUMMARY") {
-		t.Fatalf("msg[3] = %q, want the compacted summary note", msgs[3].StringContent)
+		t.Fatalf("msg[3] = %q, want the checkpoint note", msgs[3].StringContent)
 	}
 	// The recent tail follows the summary, verbatim and in original order.
 	if !strings.Contains(msgs[4].StringContent, "RECENT_A") ||
@@ -1247,7 +1247,7 @@ func TestCompactManualKeepsNoTail(t *testing.T) {
 // note → verbatim tail) rehydrates to exactly the summary note + tail, with the shed old
 // note gone.
 func TestAutoCompactRehydratesSummaryPlusTail(t *testing.T) {
-	r := &chatCountRouter{summary: "REHYDRATE_SUMMARY"}
+	r := &chatCountRouter{summary: `{"goal":"REHYDRATE_SUMMARY"}`}
 	s, store := compactSession(t, r)
 	s.InjectNote("OLD_BIG" + strings.Repeat("x", 260_000))
 	s.InjectNote("TAIL_KEEP_A")
@@ -1302,9 +1302,10 @@ func (r *promptCaptureRouter) system() string {
 	return r.systemMsg
 }
 
-// TestAutoCompactSummaryPromptPreservesIDs proves the auto-summary system prompt tells the
-// model to keep every load-bearing identifier verbatim, so a mid-run compaction doesn't
-// strand the orchestrator's live references.
+// TestAutoCompactSummaryPromptPreservesIDs proves the auto-compaction checkpoint system
+// prompt tells the model to keep every load-bearing identifier verbatim (using the
+// canonical domain prefixes — issue #256), so a mid-run compaction doesn't strand the
+// orchestrator's live references.
 func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
 	r := &promptCaptureRouter{summary: "S"}
 	s, _ := compactSession(t, r)
@@ -1313,9 +1314,9 @@ func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
 	s.maybeAutoCompact(context.Background(), "run_test")
 
 	got := r.system()
-	for _, want := range []string{"term_*", "run_*", "scr_*", "watcher_*", "wkf_*", "branch", "grant"} {
+	for _, want := range []string{"term_*", "wch_*", "wfr_*", "agt_*", "tmr_*", "grt_*", "branch", "grant"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("summary prompt missing %q: %q", want, got)
+			t.Fatalf("checkpoint prompt missing %q: %q", want, got)
 		}
 	}
 }
