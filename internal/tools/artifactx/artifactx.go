@@ -2,8 +2,10 @@
 // risk "read"). When a serialized tool result overflows the inline size limit the
 // agent loop stashes the full JSON envelope in the session's artifact store and
 // hands the model a compact stub carrying an artifactId; this tool pages back
-// through that full output by CHARACTER range. The store is in-memory and
-// session-scoped: a stale/replayed id fails gracefully rather than crashing.
+// through that full output by CHARACTER range. The store is an in-memory hot cache
+// backed by a durable SQLite table, so an id survives the cache's eviction and a
+// process restart; only a genuinely pruned/unknown id misses, and it fails
+// gracefully rather than crashing.
 package artifactx
 
 import (
@@ -15,10 +17,11 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// ArtifactStore is the slice of the session-scoped oversized-result store this
-// family reads. Get returns (value, true) when an id is live; (_, false) when it
-// was never stored or has been replaced. Nil store ⇒ unavailable (handled in the
-// handler via Deps.Store == nil). Replaces TS `ctx.artifactStore: Map<string,string>`.
+// ArtifactStore is the oversized-result store this family reads. Get returns
+// (value, true) when an id resolves — from the session's in-memory hot cache or, on
+// a cache miss, the durable artifacts table — and (_, false) when it was never
+// stored or has been pruned. Nil store ⇒ unavailable (handled in the handler via
+// Deps.Store == nil). Replaces TS `ctx.artifactStore: Map<string,string>`.
 type ArtifactStore interface {
 	Get(id string) (string, bool)
 }
@@ -100,7 +103,7 @@ func handle(deps Deps, raw json.RawMessage) tools.ToolResult {
 	full, found := deps.Store.Get(a.ArtifactID)
 	if !found {
 		return tools.Fail(codeArtifactNotFound,
-			fmt.Sprintf("No artifact found with id %q. Artifacts live only for the current session and may already have been replaced.", a.ArtifactID),
+			fmt.Sprintf("No artifact found with id %q. It was never stored or has been pruned by retention.", a.ArtifactID),
 			tools.Unrecoverable())
 	}
 

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -25,7 +26,7 @@ func TestSerializeTruncatesToValidJSONWithArtifact(t *testing.T) {
 	// Build a result whose serialization blows past the 8000-char cap.
 	big := strings.Repeat("x", domain.MaxToolResultChars*2)
 	res := domain.Ok("oversized", map[string]any{"blob": big})
-	store := NewArtifactStore()
+	store := NewArtifactStore("", nil)
 
 	s := SerializeToolResult(res, store)
 
@@ -89,7 +90,7 @@ func TestSerializeCapIsCharsNotBytes(t *testing.T) {
 	blob := strings.Repeat("の", runes)
 	res := domain.Ok("multibyte", map[string]any{"blob": blob})
 
-	s := SerializeToolResult(res, NewArtifactStore())
+	s := SerializeToolResult(res, NewArtifactStore("", nil))
 
 	// Byte length exceeds the cap (3x the runes); had the check used len(s) this
 	// would have wrongly truncated.
@@ -115,7 +116,7 @@ func TestSerializeTruncatesMultibyteOnRuneBoundary(t *testing.T) {
 	// JSON, and slice the preview on a rune boundary (never a split multibyte rune).
 	blob := strings.Repeat("世界", domain.MaxToolResultChars) // ~2*cap runes
 	res := domain.Ok("oversized multibyte", map[string]any{"blob": blob})
-	store := NewArtifactStore()
+	store := NewArtifactStore("", nil)
 
 	s := SerializeToolResult(res, store)
 
@@ -158,7 +159,7 @@ func TestSerializeTruncatesMultibyteOnRuneBoundary(t *testing.T) {
 }
 
 func TestArtifactStoreEvictsOldest(t *testing.T) {
-	store := NewArtifactStore()
+	store := NewArtifactStore("", nil)
 	first := store.set("first")
 	for i := 0; i < domain.MaxStoredArtifacts; i++ {
 		store.set("filler")
@@ -168,5 +169,82 @@ func TestArtifactStoreEvictsOldest(t *testing.T) {
 	}
 	if _, ok := store.Get(first); ok {
 		t.Fatal("oldest artifact should have been evicted")
+	}
+}
+
+// fakeArtifactPersister captures the durable-mirror writes so a test can assert the
+// session stamps the right id/sessionId/sizes. err, when set, simulates a DB-write
+// failure to prove set() swallows it (the hot-cache read must still work).
+type fakeArtifactPersister struct {
+	rows []domain.ArtifactRecord
+	err  error
+}
+
+func (f *fakeArtifactPersister) InsertArtifact(rec domain.ArtifactRecord) (domain.ArtifactRecord, error) {
+	f.rows = append(f.rows, rec)
+	if f.err != nil {
+		return domain.ArtifactRecord{}, f.err
+	}
+	return rec, nil
+}
+
+func TestSerializeMirrorsOverflowToPersister(t *testing.T) {
+	// A multibyte blob so totalChars != totalBytes proves both are mirrored verbatim.
+	blob := strings.Repeat("世界", domain.MaxToolResultChars)
+	res := domain.Ok("oversized", map[string]any{"blob": blob})
+	fake := &fakeArtifactPersister{}
+	store := NewArtifactStore("ses_mirror", fake)
+
+	s := SerializeToolResult(res, store)
+
+	var stub truncationStub
+	if err := json.Unmarshal([]byte(s), &stub); err != nil {
+		t.Fatalf("stub not valid JSON: %v", err)
+	}
+	if len(fake.rows) != 1 {
+		t.Fatalf("expected exactly one mirrored row, got %d", len(fake.rows))
+	}
+	row := fake.rows[0]
+	if row.ID != stub.Result.ArtifactID {
+		t.Fatalf("mirrored id %q != stub artifactId %q", row.ID, stub.Result.ArtifactID)
+	}
+	if row.SessionID != "ses_mirror" {
+		t.Fatalf("mirrored sessionId = %q want ses_mirror", row.SessionID)
+	}
+	full, ok := store.Get(stub.Result.ArtifactID)
+	if !ok {
+		t.Fatal("hot-cache read should hit")
+	}
+	if row.Content != full {
+		t.Fatal("mirrored content must equal the hot-cache payload verbatim")
+	}
+	if row.TotalChars != stub.Result.TotalChars || row.TotalBytes != stub.Result.TotalBytes {
+		t.Fatalf("mirrored sizes (%d chars, %d bytes) != stub (%d, %d)",
+			row.TotalChars, row.TotalBytes, stub.Result.TotalChars, stub.Result.TotalBytes)
+	}
+	if row.TotalBytes <= row.TotalChars {
+		t.Fatalf("multibyte: bytes %d should exceed chars %d", row.TotalBytes, row.TotalChars)
+	}
+}
+
+func TestSerializeSwallowsPersisterFailure(t *testing.T) {
+	// A failing persister must not break serialization: the stub is still produced and
+	// the hot-cache read still resolves (the DB is only the eviction/restart fallback).
+	big := strings.Repeat("x", domain.MaxToolResultChars*2)
+	res := domain.Ok("oversized", map[string]any{"blob": big})
+	fake := &fakeArtifactPersister{err: errors.New("db down")}
+	store := NewArtifactStore("ses_fail", fake)
+
+	s := SerializeToolResult(res, store)
+
+	var stub truncationStub
+	if err := json.Unmarshal([]byte(s), &stub); err != nil {
+		t.Fatalf("stub not valid JSON despite persister failure: %v", err)
+	}
+	if stub.Result.ArtifactID == "" {
+		t.Fatal("expected an artifactId even when the mirror write fails")
+	}
+	if _, ok := store.Get(stub.Result.ArtifactID); !ok {
+		t.Fatal("hot-cache read must still resolve after a swallowed persister failure")
 	}
 }

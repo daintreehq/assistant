@@ -95,6 +95,17 @@ type MemoryStore interface {
 	MemoryExists(content string) (bool, error)
 }
 
+// ArtifactPersister is the durable-mirror seam for oversized tool-result overflow
+// payloads (satisfied by *storage.Store). When a serialized result overflows the
+// inline cap the session stashes the full envelope in its bounded in-memory
+// ArtifactStore AND mirrors it here, so a later artifact.read resolves even after
+// the id is evicted from the 64-entry hot cache or the process restarts. Optional:
+// a nil persister keeps the store purely in-memory (the default in tests). All
+// writes are best-effort — a failure must never break the turn.
+type ArtifactPersister interface {
+	InsertArtifact(rec domain.ArtifactRecord) (domain.ArtifactRecord, error)
+}
+
 // SessionDeps is the AgentSession constructor input. restoredMessages != nil ⇒ a
 // resumed session: the three control messages are rebuilt fresh (so the cached
 // prefix stays byte-stable) but NOT re-persisted (they already exist in the DB);
@@ -107,9 +118,12 @@ type SessionDeps struct {
 	SkillCatalog  SkillCatalog
 	Store         MessageStore
 	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
-	MemoryStore   MemoryStore
-	PromptContext prompts.MainPromptContext
-	SessionID     string
+	MemoryStore MemoryStore
+	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
+	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
+	ArtifactPersister ArtifactPersister
+	PromptContext     prompts.MainPromptContext
+	SessionID         string
 
 	// Resume discriminator: non-nil (even empty) ⇒ resumed; nil ⇒ fresh.
 	RestoredMessages []models.ChatMessage

@@ -23,6 +23,10 @@ const (
 	PrefixMemory      = "mem_"
 	PrefixAgentLaunch = "agt_"
 	PrefixScratch     = "scr_"
+	// PrefixArtifact tags an oversized tool-result overflow payload. Longer than the
+	// others for historical continuity — the truncation stub + artifact.read have
+	// always surfaced this id as "artifact_<8hex>", so the literal shape is wire.
+	PrefixArtifact = "artifact_"
 )
 
 // NewID returns prefix followed by the first 8 hex chars of a fresh v4 UUID.

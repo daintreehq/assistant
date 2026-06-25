@@ -319,6 +319,7 @@ func Create(opts CreateOptions) (*App, error) {
 		SkillCatalog:         skillReg,
 		Store:                store,
 		MemoryStore:          store,
+		ArtifactPersister:    store,
 		PromptContext:        a.PromptContext(),
 		SessionID:            sessionID,
 		RestoredMessages:     restored,

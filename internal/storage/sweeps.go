@@ -177,6 +177,12 @@ func (s *Store) GCRetentionSweep(now int64) error {
 		now-durMS(r.SkillSelLogMaxAge), r.SkillSelLogKeepRows); err != nil {
 		return err
 	}
+	// Overflow artifacts age WITH the conversation that references them (same
+	// age+count policy), so a persisted truncation stub never outlives its payload.
+	if err := s.deleteByAgeAndCount("artifacts", "createdAt",
+		now-durMS(r.ArtifactsMaxAge), r.ArtifactsKeepRows); err != nil {
+		return err
+	}
 
 	// Terminal (resolved OR expired) events past the window. A row is terminal
 	// when EITHER stamp is set, but it is only swept once the LATER of the two

@@ -172,6 +172,21 @@ type MemoryRecord struct {
 	UpdatedAt int64        `json:"updatedAt"`
 }
 
+// ArtifactRecord is one durable tool-result overflow payload. When a serialized
+// tool result overflows the inline cap the session stashes the full JSON envelope
+// here so a later artifact.read survives the in-memory hot cache's eviction (>64)
+// and a process restart. Looked up by opaque id; sessionId is provenance +
+// retention scoping only (lookup is global — a rehydrated stub from a prior session
+// must still resolve). TotalChars/TotalBytes mirror the stub's reported sizes.
+type ArtifactRecord struct {
+	ID         string `json:"id"` // artifact_<uuid8>
+	SessionID  string `json:"sessionId"`
+	Content    string `json:"content"`
+	TotalChars int    `json:"totalChars"`
+	TotalBytes int    `json:"totalBytes"`
+	CreatedAt  int64  `json:"createdAt"`
+}
+
 // SkillStepProgress is one step within a SkillRunStateRecord (1-based index).
 type SkillStepProgress struct {
 	Index  int             `json:"index"`

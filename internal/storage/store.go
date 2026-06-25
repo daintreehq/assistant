@@ -37,9 +37,10 @@ const (
 	pruneChunk = 900
 	// schemaUserVersion is the single baseline; dev hard-resets rather than chain.
 	// Bumped to 2 when the watchers table gained endedReason/endedAt; to 3 when watchers
-	// and agent_launches gained workflowRunId (durable workflow-ledger back-links) — a
+	// and agent_launches gained workflowRunId (durable workflow-ledger back-links); to 4
+	// when the artifacts table was added (durable tool-result overflow payloads) — a
 	// schema change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 3
+	schemaUserVersion = 4
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
@@ -53,6 +54,8 @@ type Retention struct {
 	ConversationKeepRows int
 	SkillSelLogMaxAge    time.Duration
 	SkillSelLogKeepRows  int
+	ArtifactsMaxAge      time.Duration // hard-delete overflow artifacts past window
+	ArtifactsKeepRows    int
 	EventsTerminalAge    time.Duration // hard-delete resolved/expired events past window
 	MemoriesDeletedAge   time.Duration // hard-delete soft-deleted memories past undo window
 }
@@ -67,8 +70,13 @@ var DefaultRetention = Retention{
 	ConversationKeepRows: 1000,
 	SkillSelLogMaxAge:    time.Duration(30*dayMS) * time.Millisecond,
 	SkillSelLogKeepRows:  500,
-	EventsTerminalAge:    time.Duration(7*dayMS) * time.Millisecond,
-	MemoriesDeletedAge:   time.Duration(30*dayMS) * time.Millisecond,
+	// Artifacts age WITH the conversation that references them (90d / 1000 rows): a
+	// truncation stub persisted in the transcript must not outlive its payload, or
+	// artifact.read would 404 a stub the user can still scroll to.
+	ArtifactsMaxAge:    time.Duration(90*dayMS) * time.Millisecond,
+	ArtifactsKeepRows:  1000,
+	EventsTerminalAge:  time.Duration(7*dayMS) * time.Millisecond,
+	MemoriesDeletedAge: time.Duration(30*dayMS) * time.Millisecond,
 }
 
 // Options configures a Store. Both fields are test seams: pin the sweep clock and
