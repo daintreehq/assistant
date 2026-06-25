@@ -319,6 +319,7 @@ func Create(opts CreateOptions) (*App, error) {
 		SkillCatalog:         skillReg,
 		Store:                store,
 		MemoryStore:          store,
+		MemoryRecaller:       memoryRecallerAdapter{s: store},
 		ArtifactPersister:    store,
 		WorkflowRunLister:    store,
 		PromptContext:        a.PromptContext(),

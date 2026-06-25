@@ -15,6 +15,21 @@ import (
 // byte-bounded) so a multibyte ask is never split mid-character.
 const goalAnchorMaxRunes = 500
 
+// relevantMemoriesMaxRows caps how many recalled memories the footer renders. The
+// footer is already a sizeable trailing message, so a handful of the top BM25 hits
+// is enough to re-surface relevant facts without flooding the tail (the storage
+// layer clamps anything larger, but the section enforces it too so it stays a pure,
+// self-bounding function regardless of what it is handed).
+const relevantMemoriesMaxRows = 5
+
+// relevantMemoriesBlockMaxBytes bounds the bullet-list PAYLOAD of the `# Relevant
+// memories` block (the joined "- fact" lines), not the full rendered section — the
+// fixed-size header is appended outside the cap. Smaller than the pinned-memory
+// ceiling (16 KiB) because recalled rows are speculative BM25 hits rather than
+// curated pins — generous enough for a few distilled facts, bounded enough to keep
+// the footer tail lean.
+const relevantMemoriesBlockMaxBytes = 4096
+
 // activeWorkflowRunsLimit caps how many non-terminal runs the footer renders (and is
 // the LIMIT handed to the store read). The footer is a re-anchoring glance at open
 // work, not a full ledger dump — the newest handful of runs is enough; the model can
@@ -34,36 +49,42 @@ const workflowRunIDPreviewMax = 3
 const workflowRunFieldMaxRunes = 40
 
 // footerContext is the input every turn-footer section renders from. It carries the
-// turn's originating goal plus the snapshot of open work pre-fetched for this round.
-// Passing a struct (not a widening parameter list) is the broadening the seam comment
-// in this file anticipated: a future section that needs another fact adds a field
-// here, touching neither the footerSection type nor any existing section body.
+// turn's originating goal plus the per-turn facts a section may surface. Passing a
+// struct (not a widening parameter list) is the broadening the seam comment in this
+// file anticipated: a future section that needs another fact adds a field here,
+// touching neither the footerSection type nor any existing section body.
 //
-// WorkflowRuns is the already-fetched, already-bounded slice of non-terminal runs
-// (the Session reads it best-effort before composing). Keeping the I/O in the Session
-// and handing sections a plain slice keeps every section a PURE FORMATTER — unit-
-// testable from a record literal, no store or fake required.
+// Goal is the turn's originating ask (trimmed in composeTurnFooter). WorkflowRuns is
+// the already-fetched, already-bounded slice of non-terminal runs (the Session reads
+// it best-effort before composing). RelevantMemories is the BM25 recall snapshot
+// taken ONCE at turn start (nil when no recaller is wired or nothing matched).
+// Keeping the I/O in the Session and handing sections plain slices keeps every
+// section a PURE FORMATTER — unit-testable from a record literal, no store or fake
+// required.
 type footerContext struct {
-	Goal         string
-	WorkflowRuns []domain.WorkflowRunRecord
+	Goal             string
+	WorkflowRuns     []domain.WorkflowRunRecord
+	RelevantMemories []domain.MemoryRecord
 }
 
 // footerSection renders one section of the turn footer from the turn's footerContext.
-// It returns ("", false) to omit the section entirely (e.g. an empty goal, or no open
-// runs).
+// It returns ("", false) to omit the section entirely (e.g. an empty goal, no open
+// runs, or no recalled memories).
 //
-// This is the forward-compatibility seam: later waves (memory recall, …) register
-// additional sections in footerSections WITHOUT re-touching the Router.Stream call in
-// session.go. The input is a footerContext so a section that needs more than the goal
-// just reads another field — broaden footerContext here, in one file, when a section
-// actually needs it, rather than plumbing speculative context now.
+// This is the forward-compatibility seam: later waves register additional sections in
+// footerSections WITHOUT re-touching the Router.Stream call in session.go. The input
+// is a footerContext so a section that needs more than the goal just reads another
+// field — broaden footerContext here, in one file, when a section actually needs it,
+// rather than plumbing speculative context now.
 type footerSection func(ctx footerContext) (string, bool)
 
 // footerSections is the ordered registry of turn-footer sections. Composed in
-// declaration order into a single trailing system message. Package-local and
-// mutable so tests can swap it (save/restore via t.Cleanup); production registers
+// declaration order into a single trailing system message. relevantMemoriesSection
+// comes FIRST: surface the supporting facts, then the open-work ledger, then close the
+// tail with the goal-discipline anchor (the last thing the model reads). Package-local
+// and mutable so tests can swap it (save/restore via t.Cleanup); production registers
 // statically here and never mutates it at runtime.
-var footerSections = []footerSection{goalAnchorSection, activeWorkflowRunsSection}
+var footerSections = []footerSection{relevantMemoriesSection, activeWorkflowRunsSection, goalAnchorSection}
 
 // composeTurnFooter builds the UNCACHED tail of the model request: zero or one
 // system-role message appended AFTER the history snapshot in the Router.Stream
@@ -116,6 +137,57 @@ func goalAnchorSection(ctx footerContext) (string, bool) {
 	}
 	return "# Current goal\n" + sliceChars(ctx.Goal, goalAnchorMaxRunes) +
 		"\n\nStay focused on this goal. Finish it before stopping, and report what you did, not what remains.", true
+}
+
+// relevantMemoriesSection emits the `# Relevant memories` block: the top BM25 hits
+// recalled (once, at turn start) from the originating ask, rendered as "- fact"
+// lines so distilled or otherwise-unpinned memories resurface automatically without
+// the model having to call the recall tool. Omitted entirely when nothing was
+// recalled (no recaller wired, a blank ask, or no matches).
+//
+// Mirrors pinnedMemoriesBlock's rendering: embedded newlines are flattened so one
+// memory is exactly one list line (a raw "\n" would otherwise break the list or
+// inject a stray heading), and a row that would overflow the byte cap is SKIPPED
+// (continue, not break) so a single oversized fact can't suppress the shorter ones
+// after it. Bounded to relevantMemoriesMaxRows rows and relevantMemoriesBlockMaxBytes
+// total; returns ("", false) if every row was empty or skipped.
+func relevantMemoriesSection(ctx footerContext) (string, bool) {
+	rows := ctx.RelevantMemories
+	if len(rows) == 0 {
+		return "", false
+	}
+	// Cap to the top-N highest-rank rows BEFORE the byte filter. Storage already
+	// returns exactly relevantMemoriesMaxRows hits, so there is no fallback buffer: in
+	// the (extreme) case where all N top rows individually exceed the byte cap, the
+	// block is suppressed rather than reaching for lower-ranked rows. Acceptable —
+	// distilled facts are short, and a suppressed speculative block is harmless.
+	if len(rows) > relevantMemoriesMaxRows {
+		rows = rows[:relevantMemoriesMaxRows]
+	}
+	var b strings.Builder
+	for _, m := range rows {
+		content := strings.ReplaceAll(m.Content, "\r\n", " ")
+		content = strings.ReplaceAll(content, "\n", " ")
+		content = strings.ReplaceAll(content, "\r", " ")
+		content = strings.TrimSpace(content)
+		if content == "" {
+			continue
+		}
+		line := "- " + content
+		// +1 for the joining newline; skip a line that would overflow the cap (continue,
+		// not break, so a single oversized memory can't suppress the shorter ones after it).
+		if b.Len()+len(line)+1 > relevantMemoriesBlockMaxBytes {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	if b.Len() == 0 {
+		return "", false
+	}
+	return "# Relevant memories\n" + b.String(), true
 }
 
 // activeWorkflowRunsSection emits the `# Active workflow runs` block: one line per

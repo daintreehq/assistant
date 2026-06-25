@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -467,6 +468,26 @@ func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) 
 	return s.runTurn(ctx, runID, userInput, opts), nil
 }
 
+// recallMemories runs the per-turn BM25 recall seeded by the originating ask,
+// returning the rows to inject into the footer's `# Relevant memories` section.
+// Best-effort and nil-safe: a missing recaller, a blank ask, or a query error all
+// yield nil (the footer simply omits the section). It NEVER returns an error — a
+// recall failure must never break a turn (side-channel reads can't break the loop).
+//
+// The blank-ask short-circuit is enforced here (not left to the storage layer's
+// escapeFTSQuery) so the contract holds for ANY recaller, and a whitespace-only send
+// never pays for an adapter→SQLite round-trip that can only return nothing.
+func (s *Session) recallMemories(userInput string) []domain.MemoryRecord {
+	if s.deps.MemoryRecaller == nil || strings.TrimSpace(userInput) == "" {
+		return nil
+	}
+	rows, err := s.deps.MemoryRecaller.RecallMemories(userInput, relevantMemoriesMaxRows)
+	if err != nil {
+		return nil
+	}
+	return rows
+}
+
 // runTurn is the core loop (ordering is load-bearing).
 func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) string {
 	s.events.Phase(domain.PhaseReceived)
@@ -505,6 +526,16 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		s.events.AssistantCancelled("")
 		return domain.CancelledReply
 	}
+
+	// 3b. Recall relevant memories ONCE per turn (best-effort), seeded by the
+	//     originating ask. The top BM25 hits are injected into every round's footer
+	//     `# Relevant memories` section so distilled, non-pinned facts resurface
+	//     automatically. Run HERE — after the cancel re-check, before the loop — so a
+	//     pre-loop cancel never pays for it AND the FTS5 query fires exactly once per
+	//     turn, not once per model round (composeTurnFooter runs every round). The rows
+	//     are cached and threaded through footerContext below. A nil recaller, a blank ask,
+	//     or a query error all yield nil: a recall failure must never break the turn.
+	recalledMemories := s.recallMemories(userInput)
 
 	// 4. Push the user message.
 	s.pushMessage(models.TextMessage("user", userInput))
@@ -607,15 +638,20 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// (daemon) or InjectPrompt (user) must be able to append without racing this read.
 		//
 		// composeTurnFooter appends the UNCACHED turn footer (a `# Current goal` anchor
-		// seeded from userInput, the turn's originating ask) AFTER the snapshot. It is the
-		// TAIL of the request, never part of the cached prefix, so it is rebuilt fresh
-		// every round and can never invalidate the prefix cache. It is NEVER pushed into
-		// s.messages: snapshotMessages returns a fresh make+copy slice (len==cap), so this
-		// append cannot alias back into the live history — the footer stays ephemeral.
+		// seeded from userInput, the `# Active workflow runs` block re-read every round,
+		// plus a `# Relevant memories` block from the once-per-turn recall above) AFTER the
+		// snapshot. It is the TAIL of the request, never part of the cached prefix, so it is
+		// rebuilt fresh every round and can never invalidate the prefix cache. It is NEVER
+		// pushed into s.messages: snapshotMessages returns a fresh make+copy slice (len==cap),
+		// so this append cannot alias back into the live history — the footer stays ephemeral.
+		// recalledMemories is the SAME snapshot every round (recall ran once, before the loop),
+		// so the memory block never re-queries per round; workflowRunsForFooter, by contrast,
+		// IS re-read each round because the open-run ledger changes as the turn's tools run.
 		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
 			Messages: append(s.snapshotMessages(), composeTurnFooter(footerContext{
-				Goal:         userInput,
-				WorkflowRuns: s.workflowRunsForFooter(),
+				Goal:             userInput,
+				WorkflowRuns:     s.workflowRunsForFooter(),
+				RelevantMemories: recalledMemories,
 			})...),
 			Tools:          tools,
 			ToolChoice:     "auto",
