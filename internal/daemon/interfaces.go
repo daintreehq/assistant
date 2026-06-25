@@ -46,6 +46,16 @@ type Store interface {
 	UpdateWorkflowRun(id string, patch map[string]any) error
 }
 
+// MemoryWriter is the narrow memory-write seam the watcher finalize path uses to
+// persist a terminating supervised run's episodic outcome trace. It is declared
+// separately from Store (not folded in) so Store stays strictly about timer/watcher/
+// ledger persistence — the daemon writes a memory ONLY from advanceLinkedWorkflow, and
+// only an episodic outcome. The concrete *storage.Store satisfies it. Optional: a nil
+// MemoryWriter on CheckContext disables the episodic write (the default in tests).
+type MemoryWriter interface {
+	InsertMemory(domain.MemoryRecord) (domain.MemoryRecord, error)
+}
+
 // Queue is the attention-queue surface the daemon publishes to and reads from in
 // notify(). Publish dedupes by dedupeKey; Digest filters open events; MarkNotified
 // stamps notifiedAt.
@@ -157,6 +167,12 @@ type CheckContext struct {
 	MCP MCP
 	// Model is the small-model classifier/judge.
 	Model WatcherModel
+	// MemoryWriter persists a terminating supervised run's episodic outcome trace
+	// (optional; nil ⇒ the write is skipped). Best-effort — never breaks finalize.
+	MemoryWriter MemoryWriter
+	// SessionID namespaces watcher-written episodic memories to the session that
+	// created the watcher. Empty ⇒ the episodic row carries no sessionId tag.
+	SessionID string
 	// ProjectPath is the bound project working directory (forge.getPR default cwd).
 	ProjectPath string
 }

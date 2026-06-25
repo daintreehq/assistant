@@ -725,13 +725,14 @@ func unsubscribeAll(ctx *CheckContext, perTerminal map[string]TerminalState) {
 // --- small helpers -----------------------------------------------------------
 
 // advanceLinkedWorkflow maps a terminating supervisor's watcher status onto its
-// linked workflow ledger row, stamps completedAt, and — when an outcome digest is
-// supplied — persists it into notesJson in the SAME patch. No-op when the watcher
-// carries no WorkflowRunID (non-supervisor / manually-created watchers). Best-effort:
-// a ledger failure must never disrupt the watcher finalize. Status mapping:
-// condition_met (incl. a clean terminal exit) → done; timeout/error → failed.
-// outcome is nil at the disableWatcher call site (corrupt state ⇒ no real digest);
-// nil ⇒ no note is written, never a fabricated one.
+// linked workflow ledger row, stamps completedAt, persists the outcome digest into
+// notesJson in the SAME patch (when supplied), and mirrors the run's short outcome
+// summary into an episodic memory (when a MemoryWriter is wired). No-op when the
+// watcher carries no WorkflowRunID (non-supervisor / manually-created watchers).
+// Best-effort: a ledger or memory failure must never disrupt the watcher finalize.
+// Status mapping: condition_met (incl. a clean terminal exit) → done; timeout/error
+// → failed. outcome is nil at the disableWatcher call site (corrupt state ⇒ no real
+// digest); nil ⇒ no note and no episodic memory are written, never a fabricated one.
 func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherStatus string, now int64, outcome *CheckOutcome) {
 	if rec.WorkflowRunID == nil || *rec.WorkflowRunID == "" {
 		return
@@ -759,6 +760,31 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 		patch["notesJson"] = *note
 	}
 	_ = ctx.Store.UpdateWorkflowRun(*rec.WorkflowRunID, patch)
+
+	// Mirror the terminating run's short outcome into an EPISODIC memory so the
+	// trajectory ("an agent run produced Z") resurfaces in future recall — wired off
+	// the SAME finalize path and reusing the digest's existing summary, so there is NO
+	// extra model call. Stamp the linked run id as provenance and namespace the row to
+	// the session that created the watcher (when known). Best-effort and nil-guarded: a
+	// missing writer, the digest-less corrupt-disable path (outcome == nil), or a blank
+	// summary writes nothing and never disrupts finalize.
+	if ctx.MemoryWriter != nil && outcome != nil {
+		if summary := strings.TrimSpace(outcome.Summary); summary != "" {
+			memRec := domain.MemoryRecord{
+				Content:   summary,
+				Source:    domain.MemoryWatcher,
+				Kind:      domain.MemoryKindEpisodic,
+				RunID:     rec.WorkflowRunID,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			if ctx.SessionID != "" {
+				sid := ctx.SessionID
+				memRec.SessionID = &sid
+			}
+			_, _ = ctx.MemoryWriter.InsertMemory(memRec)
+		}
+	}
 }
 
 // watcherDigestNote serializes a terminating watcher's outcome into the workflow

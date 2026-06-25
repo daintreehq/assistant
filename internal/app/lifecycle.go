@@ -256,12 +256,14 @@ func (a *App) ClearInbox() (int, error) {
 // non-interactive actor reaches read-only MCP + the small-model classifier/judge.
 func (a *App) daemonCtxFor(ctx context.Context, actor domain.ToolActor, actorID string) *daemon.CheckContext {
 	return &daemon.CheckContext{
-		Ctx:         ctx,
-		Store:       a.Store,
-		Queue:       daemonQueueAdapter{q: a.Queue},
-		MCP:         daemonMcpAdapter{c: a.MCP},
-		Model:       watcherModelAdapter{router: a.Router},
-		ProjectPath: a.Config.ProjectPath,
+		Ctx:          ctx,
+		Store:        a.Store,
+		Queue:        daemonQueueAdapter{q: a.Queue},
+		MCP:          daemonMcpAdapter{c: a.MCP},
+		Model:        watcherModelAdapter{router: a.Router},
+		MemoryWriter: a.Store,
+		SessionID:    a.SessionID,
+		ProjectPath:  a.Config.ProjectPath,
 	}
 }
 

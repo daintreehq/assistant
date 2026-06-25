@@ -281,6 +281,10 @@ const (
 	MemoryUser      MemorySource = "user"
 	MemoryAssistant MemorySource = "assistant"
 	MemoryCompact   MemorySource = "compact"
+	// MemoryWatcher tags an episodic memory written from the watcher finalize path
+	// (a terminating supervised run's short outcome trace) — distinct from compact so
+	// watcher-originated trajectories can be told apart from distilled ones.
+	MemoryWatcher MemorySource = "watcher"
 )
 
 // MemoryKind discriminates a durable semantic fact (the default) from an

@@ -286,6 +286,32 @@ func (r *fakeRegistry) Dispatch(ctx context.Context, actor domain.ToolActor, act
 	return r.result, r.err
 }
 
+// fakeMemoryWriter captures episodic memories the watcher finalize path writes.
+type fakeMemoryWriter struct {
+	mu       sync.Mutex
+	inserted []domain.MemoryRecord
+	err      error
+}
+
+func (w *fakeMemoryWriter) InsertMemory(rec domain.MemoryRecord) (domain.MemoryRecord, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return domain.MemoryRecord{}, w.err
+	}
+	if rec.ID == "" {
+		rec.ID = "mem_fake"
+	}
+	w.inserted = append(w.inserted, rec)
+	return rec, nil
+}
+
+func (w *fakeMemoryWriter) records() []domain.MemoryRecord {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]domain.MemoryRecord(nil), w.inserted...)
+}
+
 func ctxFor(store Store, queue Queue, mcp MCP, model WatcherModel) *CheckContext {
 	return &CheckContext{Ctx: context.Background(), Store: store, Queue: queue, MCP: mcp, Model: model, ProjectPath: "/proj"}
 }
