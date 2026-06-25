@@ -97,6 +97,10 @@ func applyTierReasoning(tier domain.ModelTier, model string, opts *ChatOptions) 
 		} else {
 			opts.ReasoningEffort = "none"
 		}
+	default:
+		// An unknown tier falls through to the large model id (see ModelFor), so it
+		// gets the same flash default — never an omitted reasoning_effort.
+		opts.ReasoningEffort = "none"
 	}
 }
 

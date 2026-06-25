@@ -77,6 +77,20 @@ func TestRouterTierReasoningDefaults(t *testing.T) {
 		t.Fatalf("medium tier (flash): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
+	// Stream goes through the same applyTierReasoning seam as Chat/JSON — prove the
+	// model string is threaded there too, not just in Chat.
+	_, _ = flash.Stream(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}}, func(string) {})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("large tier (flash, Stream): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
+	}
+
+	// A bogus tier falls through ModelFor to the large model id, so it must get the
+	// same flash default and never an omitted reasoning_effort (the switch default).
+	_, _ = flash.Chat(context.Background(), domain.ModelTier("bogus"), ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("bogus tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
+	}
+
 	// --- GLM-family large/medium keep "high" (GLM rejects "none") ---
 	glm := NewRouter(RouterConfig{
 		SmallModel:  "small-m",
@@ -88,9 +102,25 @@ func TestRouterTierReasoningDefaults(t *testing.T) {
 	if lastBody["reasoning_effort"] != "high" {
 		t.Fatalf("large tier (glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
 	}
-	_, _ = glm.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	// medium via JSON exercises the third call site on the GLM path.
+	_, _ = glm.JSON(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
 	if lastBody["reasoning_effort"] != "high" {
-		t.Fatalf("medium tier (glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+		t.Fatalf("medium tier (glm, JSON): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	}
+
+	// Detection is case-insensitive (strings.ToLower) and matches the BARE id only,
+	// not the account path: a mixed-case GLM id still resolves "high"...
+	glmCase := NewRouter(RouterConfig{LargeModel: "accounts/fireworks/models/GLM-5P2"}, newTestClient(srv.URL), nil)
+	_, _ = glmCase.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "high" {
+		t.Fatalf("large tier (mixed-case glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
+	}
+	// ...while a flash id under a "glm"-named account stays "none" (guards against a
+	// regression to substring/Contains-style detection).
+	glmAcct := NewRouter(RouterConfig{LargeModel: "accounts/glm-team/models/deepseek-v4-flash"}, newTestClient(srv.URL), nil)
+	_, _ = glmAcct.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
+	if lastBody["reasoning_effort"] != "none" {
+		t.Fatalf("large tier (flash under glm-named account): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
 	}
 
 	// --- explicit caller value wins on any tier ---
