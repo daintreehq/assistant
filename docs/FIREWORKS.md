@@ -20,10 +20,11 @@ exposes `Chat`, `Stream(onToken)`, and `JSON`.
 
 ## Models
 
-| Tier  | Model id                                          | Use                                         |
-| ----- | ------------------------------------------------- | ------------------------------------------- |
-| large | `accounts/fireworks/models/deepseek-v4-flash`     | Main thread: reasoning, orchestration       |
-| small | `accounts/fireworks/models/deepseek-v4-flash`     | Watchers, summaries, classification, timers |
+| Tier   | Model id                                          | Use                                         |
+| ------ | ------------------------------------------------- | ------------------------------------------- |
+| large  | `accounts/fireworks/models/deepseek-v4-flash`     | Main thread: reasoning, orchestration       |
+| medium | `accounts/fireworks/models/deepseek-v4-flash`     | Routes to `large` in v1                      |
+| small  | `accounts/fireworks/models/deepseek-v4-flash`     | Watchers, summaries, classification, timers |
 
 All tiers default to `deepseek-v4-flash` — it is the validated orchestration model, and
 the loaded skills supply the playbooks that make it sufficient on the main thread.

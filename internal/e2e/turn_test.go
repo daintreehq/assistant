@@ -312,6 +312,12 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 
 	t.Setenv("FIREWORKS_BASE_URL", fake.baseURL())
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
+	// Pin the model env to empty so this test proves the *default* wiring is flash
+	// regardless of the developer's shell — FirstString skips empty values and falls
+	// through to DEFAULTS, so the per-round model-id assertions below stay meaningful.
+	t.Setenv("DAINTREE_LARGE_MODEL", "")
+	t.Setenv("DAINTREE_MEDIUM_MODEL", "")
+	t.Setenv("DAINTREE_SMALL_MODEL", "")
 
 	dir := t.TempDir()
 	key := "test-key"
@@ -359,6 +365,9 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		sink.calls[0].Name != "memory.list" || sink.calls[1].Name != "memory.recall" {
 		t.Fatalf("tool calls = %+v, want [memory.list, memory.recall] in order", sink.calls)
 	}
+	if len(sink.results) != 2 {
+		t.Fatalf("tool results = %+v, want 2 (one per dispatched tool)", sink.results)
+	}
 	for i, res := range sink.results {
 		if !res.Result.Ok {
 			t.Errorf("tool result %d (%s) not ok: %+v", i, res.Name, res.Result)
@@ -372,6 +381,12 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 	}
 	if got := countToolRoleMessages(fake.requestMessages(2)); got < 2 {
 		t.Errorf("round-3 request carried %d tool-role messages, want >= 2 (both results fed back)", got)
+	}
+	// Content check: round 3 must carry the round-2 recall result specifically, proving
+	// the second (dependent) lookup's output was integrated — not just the first echoed.
+	if !containsToolMessage(fake.requestMessages(2), sink.results[1].Result.Summary) {
+		t.Errorf("round-3 request did not fold back the memory.recall result %q: %v",
+			sink.results[1].Result.Summary, fake.requestMessages(2))
 	}
 }
 
