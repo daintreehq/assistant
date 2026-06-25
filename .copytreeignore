@@ -19,3 +19,27 @@ vendor/
 # Dependency checksums — 12 KiB of opaque hashes with zero semantic value for an
 # AI reading the project. go.mod (module path + the dep list) is kept; go.sum is not.
 go.sum
+
+# Build-time blank import anchor — explicitly carries no runtime effect; only
+# purpose is to prevent `go mod tidy` from removing deps before subsystems use them.
+internal/deps/deps.go
+
+# Splash animation data — 24KB of raw block-character (█) frame arrays. Pure data,
+# zero semantic value for reading the source or understanding the system.
+internal/ui/splash_frames.go
+
+# Boot/splash animation logic — runs once at startup, self-contained visual sugar
+# with no architectural bearing on the rest of the codebase.
+internal/ui/splash.go
+internal/ui/boot_splash.go
+
+# UI theming — colour, font, and glyph constants. Design decisions, not logic;
+# not where bugs or architectural choices live.
+internal/ui/theme/
+
+# Markdown renderer — thin wrapper around glamour; mechanical implementation detail
+# with no bearing on the agent loop, tools, or storage layers.
+internal/ui/markdown/
+
+# Runtime recipe config — user-generated/project-specific data, not source code.
+.daintree/
