@@ -1316,6 +1316,19 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	if s.lastPromptTokens > est {
 		est = s.lastPromptTokens
 	}
+	// Lossless pre-sweep (issue #257): before paying for a small-model summary, run a
+	// cheap deterministic pass that dedups byte-identical tool results and collapses
+	// already-archived overflow stubs to their artifact placeholder. Only re-estimate
+	// when it actually rewrote something — a no-op sweep leaves est untouched. The
+	// re-estimate is the honest char count of the swept history (NOT re-maxed with
+	// lastPromptTokens, which described the pre-sweep prompt with the now-removed
+	// previews/duplicates); the gate just below then skips the summary entirely when the
+	// sweep alone dropped the history back under the soft threshold.
+	if est > domain.AutoCompactTokenThreshold {
+		if n := runPreSweep(s.messages); n > 0 {
+			est = s.estimateTokensLocked()
+		}
+	}
 	// Skip when under the soft threshold, OR when there's no real history to
 	// summarize (≤1 working message) — UNLESS that lone message is itself over the
 	// hard ceiling, in which case the bounded-growth fallback must still get a chance
