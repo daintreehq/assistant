@@ -150,7 +150,7 @@ var footerSections = []footerSection{
 // composeTurnFooter builds the UNCACHED tail of the model request: zero or one
 // system-role message appended AFTER the history snapshot in the Router.Stream
 // call. Because it sits at the tail (never in the leading prefix), it is never
-// part of the Fireworks prefix cache and is rebuilt fresh every round — editing
+// part of the DeepSeek prefix cache and is rebuilt fresh every round — editing
 // turn-varying facts here can never invalidate the cached prefix. The result is
 // ephemeral: it is appended only onto the snapshot slice handed to Stream and is
 // NEVER pushed into s.messages, so durable history and token estimates are

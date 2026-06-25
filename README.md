@@ -8,14 +8,14 @@ them with cheap models, schedules timers, and keeps the human's main conversatio
 It is **not** a code editor. It never edits project files. When a change is needed it
 spawns a *visible* agent terminal inside Daintree and supervises it.
 
-Powered by **Fireworks AI** (OpenAI-compatible Chat Completions over `net/http`):
+Powered by **DeepSeek AI** (OpenAI-compatible Chat Completions over `net/http`):
 `deepseek-v4-flash` runs every tier — the main thread (orchestration) as well as
 watchers, summaries, and classification. Flash is the validated orchestration model;
 the loaded skills supply the playbooks, so a heavier main-thread model earned nothing.
 A `medium` tier exists in the routing abstraction and resolves to `large` in v1; any
 tier can be overridden with `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`.
 
-> This prototype ships with built-in system prompts and talks to Fireworks directly.
+> This prototype ships with built-in system prompts and talks to DeepSeek directly.
 > In the final product these are replaced by the hosted backend.
 
 ## Build & install
@@ -40,9 +40,9 @@ go install ./cmd/daintree-assistant                 # installs to $(go env GOPAT
 Then configure the API key and run:
 
 ```bash
-cp .env.example .env      # set FIREWORKS_API_KEY
+cp .env.example .env      # set DEEPSEEK_API_KEY
 ./bin/daintree-assistant            # interactive cockpit
-./bin/daintree-assistant doctor     # environment check (MCP / Fireworks key / project / tier)
+./bin/daintree-assistant doctor     # environment check (MCP / DeepSeek key / project / tier)
 ```
 
 `make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·
@@ -160,7 +160,7 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
   a spawned agent (`agentTask.spawnForEdits`).
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/FIREWORKS.md`](docs/FIREWORKS.md),
+[`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/DEEPSEEK.md`](docs/DEEPSEEK.md),
 [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md), [`docs/TOOLS.md`](docs/TOOLS.md)
 (adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (authoring skills), and
 [`docs/RUNTIME.md`](docs/RUNTIME.md) (auto-compaction + model error behavior).
@@ -182,7 +182,7 @@ mode they print to the console.
 
 Behavior is steered by **skills** — short procedural runbooks injected into the main
 model's context only when relevant, instead of fine-tuning. The base system prompt is
-split into three stable control messages to preserve Fireworks prompt caching:
+split into three stable control messages to preserve DeepSeek prompt caching:
 
 1. **base** (`prompts.BaseSystemPrompt`) — the cached prefix, almost never changes
 2. **runtime context** — tier, project, MCP status, model ids
@@ -225,12 +225,12 @@ A current snapshot; the registry (`internal/tools`) is the source of truth, and
 
 ## Environment variables
 
-`FIREWORKS_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DEEPSEEK_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` ·
 `DAINTREE_ASSISTANT_DEBUG_LOG` / `DAINTREE_ASSISTANT_LOG_DIR` ·
-`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `FIREWORKS_BASE_URL`.
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `DEEPSEEK_BASE_URL`.
 
 Resolution order: CLI overrides → real process env → project `.env` → the assistant's own
 `.env` → built-in defaults. State lives under `~/.daintree/assistant-cli/`.

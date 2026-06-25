@@ -127,7 +127,7 @@ type terminalCreateArgs struct {
 }
 
 // terminalCreateSchema embeds the hand-written WATCH_CONDITION schema. It uses
-// anyOf (Fireworks rejects oneOf), the combinators flatten to ONE level of
+// anyOf (DeepSeek rejects oneOf), the combinators flatten to ONE level of
 // atomic leaves (no $ref/deep recursion), and "not" is a property literally
 // named not (NOT the JSON-Schema not keyword).
 var terminalCreateSchema = json.RawMessage(`{

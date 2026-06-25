@@ -36,7 +36,7 @@ type RetryPolicy struct {
 	MaxDelayMs  int
 }
 
-// ModelRetryPolicy is the retry budget for Fireworks model calls: three retries,
+// ModelRetryPolicy is the retry budget for DeepSeek model calls: three retries,
 // ~0.5s→10s with jitter — enough to ride out a brief 5xx blip or a connection
 // reset without making a failing provider feel hung.
 var ModelRetryPolicy = RetryPolicy{MaxRetries: 3, BaseDelayMs: 500, MaxDelayMs: 10_000}
@@ -92,9 +92,9 @@ type apiError struct {
 
 func (e *apiError) Error() string {
 	if e.body != "" {
-		return "fireworks api error " + strconv.Itoa(e.status) + ": " + e.body
+		return "deepseek api error " + strconv.Itoa(e.status) + ": " + e.body
 	}
-	return "fireworks api error " + strconv.Itoa(e.status)
+	return "deepseek api error " + strconv.Itoa(e.status)
 }
 
 // isModelAbort reports whether an error is a user-initiated cancellation. In Go

@@ -162,8 +162,8 @@ func TestUsageEventContextPressureAndCost(t *testing.T) {
 	}
 }
 
-func TestUsageEventStripsFireworksAccountPath(t *testing.T) {
-	u := sendOnce(t, "accounts/fireworks/models/minimax-m3", &models.Usage{
+func TestUsageEventStripsDeepSeekAccountPath(t *testing.T) {
+	u := sendOnce(t, "accounts/deepseek/models/minimax-m3", &models.Usage{
 		PromptTokens: intp(100), CompletionTokens: intp(20), TotalTokens: intp(120),
 	})
 	if u.Model != "minimax-m3" {

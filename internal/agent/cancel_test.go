@@ -149,7 +149,7 @@ func TestCancelMidBatchStubsRemainingCalls(t *testing.T) {
 		t.Fatalf("stream rounds = %d, want 1", router.rounds)
 	}
 	// History integrity: BOTH tool_call ids must have a matching tool reply so the
-	// transcript replays cleanly (no dangling tool_calls / Fireworks 400).
+	// transcript replays cleanly (no dangling tool_calls / DeepSeek 400).
 	var toolReplies []string
 	var stubContent string
 	for _, m := range s.Messages() {

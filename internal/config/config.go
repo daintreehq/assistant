@@ -13,7 +13,7 @@
 // THREE trust tiers govern which sources a setting may come from:
 //   - trusted-only (trustedGet): tier/autoApprove/offline/stateDir/logDir — real env only;
 //     a bound project must never escalate the assistant.
-//   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (Fireworks base
+//   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (DeepSeek base
 //     URL, MCP URL + token) PLUS the Daintree-injected identity (project id, window id) and
 //     the debug-logging toggle — real env or the assistant's own .env, NEVER the project
 //     .env, so a malicious repo can't redirect where a trusted key/token is sent
@@ -43,16 +43,20 @@ import (
 // Override any tier with DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL when a particular
 // deployment wants a beefier model for judgment-heavy steps.
 var DEFAULTS = struct {
-	FireworksBaseURL string
-	LargeModel       string
-	MediumModel      string
-	SmallModel       string
-	DefaultMcpURL    string
+	DeepSeekBaseURL string
+	LargeModel      string
+	MediumModel     string
+	SmallModel      string
+	DefaultMcpURL   string
 }{
-	FireworksBaseURL: "https://api.fireworks.ai/inference/v1",
-	LargeModel:       "accounts/fireworks/models/deepseek-v4-flash",
-	MediumModel:      "accounts/fireworks/models/deepseek-v4-flash",
-	SmallModel:       "accounts/fireworks/models/deepseek-v4-flash",
+	// DeepSeek's OpenAI-compatible endpoint. The client appends /chat/completions.
+	DeepSeekBaseURL: "https://api.deepseek.com",
+	// Bare DeepSeek model ids — no "accounts/<vendor>/models/" path (that was the
+	// Fireworks routing prefix). deepseek-v4-flash is the validated orchestration
+	// model; the loaded skills carry the playbooks, so a heavier model earned nothing.
+	LargeModel:  "deepseek-v4-flash",
+	MediumModel: "deepseek-v4-flash",
+	SmallModel:  "deepseek-v4-flash",
 	// Declared but NOT applied as a default for mcpUrl; mcpUrl is left empty when
 	// unset → degraded local mode.
 	DefaultMcpURL: "http://127.0.0.1:45454/mcp",
@@ -72,11 +76,11 @@ type AppConfig struct {
 	DBPath      string
 	LogDir      string
 
-	FireworksAPIKey  string
-	FireworksBaseURL string
-	LargeModel       string
-	MediumModel      string
-	SmallModel       string
+	DeepSeekAPIKey  string
+	DeepSeekBaseURL string
+	LargeModel      string
+	MediumModel     string
+	SmallModel      string
 
 	McpURL    string
 	McpToken  string
@@ -92,7 +96,7 @@ type AppConfig struct {
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
-// pointers mean "not provided". Note: NO MediumModel, FireworksBaseURL override
+// pointers mean "not provided". Note: NO MediumModel, DeepSeekBaseURL override
 // (per the spec's ConfigOverrides field list).
 type ConfigOverrides struct {
 	ProjectPath         *string
@@ -101,7 +105,7 @@ type ConfigOverrides struct {
 	WindowID            *string
 	McpURL              *string
 	McpToken            *string
-	FireworksAPIKey     *string
+	DeepSeekAPIKey      *string
 	LargeModel          *string
 	SmallModel          *string
 	Tier                *string
@@ -173,7 +177,7 @@ func (e *env) mergedGet(key string) string {
 }
 
 // trustedOrOwnGet EXCLUDES the untrusted project .env (real env > own .env). It governs the
-// endpoint / secret-pairing vars (Fireworks base URL, MCP URL + token) so a malicious repo's
+// endpoint / secret-pairing vars (DeepSeek base URL, MCP URL + token) so a malicious repo's
 // .env can NEVER redirect where a TRUSTED API key / token is sent — a confused-deputy
 // exfiltration. A custom endpoint must be set in the real env or the assistant's own .env.
 func (e *env) trustedOrOwnGet(key string) string {
@@ -220,10 +224,10 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	cfg := AppConfig{ProjectPath: projectPath}
 
 	// --- merged-env-OK settings ---
-	cfg.FireworksAPIKey = FirstString(deref(overrides.FireworksAPIKey), e.mergedGet("FIREWORKS_API_KEY"))
-	// FIREWORKS_BASE_URL is trustedOrOwn (NOT mergedGet): the API key is a trusted secret,
+	cfg.DeepSeekAPIKey = FirstString(deref(overrides.DeepSeekAPIKey), e.mergedGet("DEEPSEEK_API_KEY"))
+	// DEEPSEEK_BASE_URL is trustedOrOwn (NOT mergedGet): the API key is a trusted secret,
 	// so a project .env must never redirect where it is sent (exfiltration).
-	cfg.FireworksBaseURL = FirstString(e.trustedOrOwnGet("FIREWORKS_BASE_URL"), DEFAULTS.FireworksBaseURL)
+	cfg.DeepSeekBaseURL = FirstString(e.trustedOrOwnGet("DEEPSEEK_BASE_URL"), DEFAULTS.DeepSeekBaseURL)
 	cfg.LargeModel = FirstString(deref(overrides.LargeModel), e.mergedGet("DAINTREE_LARGE_MODEL"), DEFAULTS.LargeModel)
 	cfg.MediumModel = FirstString(e.mergedGet("DAINTREE_MEDIUM_MODEL"), DEFAULTS.MediumModel)
 	cfg.SmallModel = FirstString(deref(overrides.SmallModel), e.mergedGet("DAINTREE_SMALL_MODEL"), DEFAULTS.SmallModel)
@@ -340,26 +344,26 @@ func derefOr(p *string, fallback string) string {
 }
 
 // DescribeConfig returns a secret-redacted view for /status.
-// fireworksApiKey and mcpToken are redacted; projectInstructions shown as
+// deepseekApiKey and mcpToken are redacted; projectInstructions shown as
 // a byte count; mcpUrl notes degraded mode when unset.
 func DescribeConfig(cfg AppConfig) map[string]string {
 	out := map[string]string{
-		"projectPath":      cfg.ProjectPath,
-		"stateDir":         cfg.StateDir,
-		"dbPath":           cfg.DBPath,
-		"logDir":           cfg.LogDir,
-		"fireworksApiKey":  redactSecret(cfg.FireworksAPIKey),
-		"fireworksBaseUrl": cfg.FireworksBaseURL,
-		"largeModel":       cfg.LargeModel,
-		"mediumModel":      cfg.MediumModel,
-		"smallModel":       cfg.SmallModel,
-		"mcpToken":         redactSecret(cfg.McpToken),
-		"projectId":        cfg.ProjectID,
-		"windowId":         placeholderUnset(cfg.WindowID),
-		"tier":             string(cfg.Tier),
-		"autoApprove":      strconv.FormatBool(cfg.AutoApprove),
-		"offline":          strconv.FormatBool(cfg.Offline),
-		"debugLog":         strconv.FormatBool(cfg.DebugLog),
+		"projectPath":     cfg.ProjectPath,
+		"stateDir":        cfg.StateDir,
+		"dbPath":          cfg.DBPath,
+		"logDir":          cfg.LogDir,
+		"deepseekApiKey":  redactSecret(cfg.DeepSeekAPIKey),
+		"deepseekBaseUrl": cfg.DeepSeekBaseURL,
+		"largeModel":      cfg.LargeModel,
+		"mediumModel":     cfg.MediumModel,
+		"smallModel":      cfg.SmallModel,
+		"mcpToken":        redactSecret(cfg.McpToken),
+		"projectId":       cfg.ProjectID,
+		"windowId":        placeholderUnset(cfg.WindowID),
+		"tier":            string(cfg.Tier),
+		"autoApprove":     strconv.FormatBool(cfg.AutoApprove),
+		"offline":         strconv.FormatBool(cfg.Offline),
+		"debugLog":        strconv.FormatBool(cfg.DebugLog),
 	}
 	if cfg.McpURL == "" {
 		out["mcpUrl"] = "(unset → degraded local mode)"

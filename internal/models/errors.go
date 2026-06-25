@@ -3,14 +3,14 @@ package models
 // Sentinel error types for the model layer. The `code` strings are a downstream
 // contract (callers switch on them), so they must stay stable.
 
-// FireworksUnavailableError is raised by guard() before any wire call when the
-// client can't talk to Fireworks (offline mode, or no API key).
-type FireworksUnavailableError struct{ Message string }
+// DeepSeekUnavailableError is raised by guard() before any wire call when the
+// client can't talk to DeepSeek (offline mode, or no API key).
+type DeepSeekUnavailableError struct{ Message string }
 
-func (e *FireworksUnavailableError) Error() string { return e.Message }
+func (e *DeepSeekUnavailableError) Error() string { return e.Message }
 
-// Code returns the stable error code ("FIREWORKS_UNAVAILABLE").
-func (e *FireworksUnavailableError) Code() string { return "FIREWORKS_UNAVAILABLE" }
+// Code returns the stable error code ("DEEPSEEK_UNAVAILABLE").
+func (e *DeepSeekUnavailableError) Code() string { return "DEEPSEEK_UNAVAILABLE" }
 
 // ImageInputNotSupportedError is raised when a request carries image content but
 // is routed to a tier whose model can't see images. Only the large tier is

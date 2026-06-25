@@ -91,15 +91,15 @@ func parseArgs(args []string) (cli.Options, route) {
 
 	fs.Usage = func() {
 		w := fs.Output()
-		fmt.Fprintf(w, "daintree-assistant %s — Daintree's local orchestration assistant (Fireworks-powered).\n\n", version)
+		fmt.Fprintf(w, "daintree-assistant %s — Daintree's local orchestration assistant (DeepSeek-powered).\n\n", version)
 		fmt.Fprintln(w, "Usage:")
 		fmt.Fprintln(w, "  daintree-assistant [flags] [prompt]   interactive cockpit, or one-shot when a prompt is given")
-		fmt.Fprintln(w, "  daintree-assistant doctor             environment check (MCP / Fireworks key / project / tier)")
+		fmt.Fprintln(w, "  daintree-assistant doctor             environment check (MCP / DeepSeek key / project / tier)")
 		fmt.Fprintln(w, "  daintree-assistant host --stdio       embedded host: stdio NDJSON transport")
 		fmt.Fprintln(w, "\nFlags:")
 		fs.PrintDefaults()
-		fmt.Fprintln(w, "\nWithout FIREWORKS_API_KEY, read-only slash commands still work: /tools, /skills, /doctor.")
-		fmt.Fprintln(w, "A project .env may set FIREWORKS_API_KEY and DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL;")
+		fmt.Fprintln(w, "\nWithout DEEPSEEK_API_KEY, read-only slash commands still work: /tools, /skills, /doctor.")
+		fmt.Fprintln(w, "A project .env may set DEEPSEEK_API_KEY and DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL;")
 		fmt.Fprintln(w, "the Daintree MCP URL/token come only from the real environment, never a project .env.")
 	}
 

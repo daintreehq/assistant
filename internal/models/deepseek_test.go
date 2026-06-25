@@ -13,8 +13,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-func newTestClient(srvURL string) *FireworksClient {
-	return NewFireworksClient(FireworksConfig{BaseURL: srvURL, APIKey: "test-key"})
+func newTestClient(srvURL string) *DeepSeekClient {
+	return NewDeepSeekClient(DeepSeekConfig{BaseURL: srvURL, APIKey: "test-key"})
 }
 
 func TestChatNonStream(t *testing.T) {
@@ -39,13 +39,15 @@ func TestChatNonStream(t *testing.T) {
 	}
 }
 
-// The per-tier reasoning_effort default is model-aware. Every tier on flash (the
-// default for all three) runs reasoning_effort:"none" so each call — small-tier
+// The per-tier think-control default is model-aware. Every tier on flash (the
+// default for all three) runs think-free so each call — small-tier
 // judges/summaries/extraction AND the large-tier orchestration main thread — stays
-// thinking-free and fast (the loaded skills carry the playbooks, so a provider-side
-// <think> phase is pure latency). A GLM-family model on large/medium keeps "high"
-// because GLM-5.2 on Fireworks rejects "none" (its minimum effort is "high"). An
-// explicit caller value wins on any tier.
+// fast (the loaded skills carry the playbooks, so a provider-side <think> phase is
+// pure latency). On DeepSeek "think-free" is NOT reasoning_effort:"none" (no such
+// variant — it 400s); it is the `thinking:{type:"disabled"}` off switch, and
+// reasoning_effort is omitted. A GLM-family model on large/medium keeps
+// reasoning_effort:"high" because GLM-5.2 rejects "none" (its minimum effort is
+// "high"). An explicit caller value wins on any tier.
 func TestRouterTierReasoningDefaults(t *testing.T) {
 	var lastBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,46 +58,49 @@ func TestRouterTierReasoningDefaults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// --- flash (non-GLM) tiers all default to "none" ---
+	// wantThinkFree asserts the wire shape of the Router's "none" intent: the `thinking`
+	// off switch present, and reasoning_effort omitted (DeepSeek has no "none" effort).
+	wantThinkFree := func(label string) {
+		t.Helper()
+		if lastBody["reasoning_effort"] != nil {
+			t.Fatalf("%s: reasoning_effort = %v, want absent (think-free uses thinking:disabled)", label, lastBody["reasoning_effort"])
+		}
+		th, ok := lastBody["thinking"].(map[string]any)
+		if !ok || th["type"] != "disabled" {
+			t.Fatalf("%s: thinking = %v, want {type:disabled}", label, lastBody["thinking"])
+		}
+	}
+
+	// --- flash (non-GLM) tiers all default to think-free ---
 	flash := NewRouter(RouterConfig{SmallModel: "small-m", LargeModel: "large-m", MediumModel: "med-m"}, newTestClient(srv.URL), nil)
 
-	// small tier → reasoning_effort "none"
+	// small tier → think-free
 	_, _ = flash.JSON(context.Background(), domain.ModelSmall, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("small tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("small tier")
 
-	// large tier on a non-GLM model → defaults to "none" (no <think> on routing turns)
+	// large tier on a non-GLM model → think-free (no <think> on routing turns)
 	_, _ = flash.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("large tier (flash): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("large tier (flash)")
 
-	// medium tier (routes to the large model id) on a non-GLM model → also "none"
+	// medium tier (routes to the large model id) on a non-GLM model → also think-free
 	_, _ = flash.Chat(context.Background(), domain.ModelMedium, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("medium tier (flash): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("medium tier (flash)")
 
 	// Stream goes through the same applyTierReasoning seam as Chat/JSON — prove the
 	// model string is threaded there too, not just in Chat.
 	_, _ = flash.Stream(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}}, func(string) {})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("large tier (flash, Stream): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("large tier (flash, Stream)")
 
 	// A bogus tier falls through ModelFor to the large model id, so it must get the
-	// same flash default and never an omitted reasoning_effort (the switch default).
+	// same flash default and never an omitted think-control (the switch default).
 	_, _ = flash.Chat(context.Background(), domain.ModelTier("bogus"), ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("bogus tier: reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("bogus tier")
 
 	// --- GLM-family large/medium keep "high" (GLM rejects "none") ---
 	glm := NewRouter(RouterConfig{
 		SmallModel:  "small-m",
-		LargeModel:  "accounts/fireworks/models/glm-5p2",
-		MediumModel: "accounts/fireworks/models/glm-5p2",
+		LargeModel:  "accounts/deepseek/models/glm-5p2",
+		MediumModel: "accounts/deepseek/models/glm-5p2",
 	}, newTestClient(srv.URL), nil)
 
 	_, _ = glm.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
@@ -110,18 +115,16 @@ func TestRouterTierReasoningDefaults(t *testing.T) {
 
 	// Detection is case-insensitive (strings.ToLower) and matches the BARE id only,
 	// not the account path: a mixed-case GLM id still resolves "high"...
-	glmCase := NewRouter(RouterConfig{LargeModel: "accounts/fireworks/models/GLM-5P2"}, newTestClient(srv.URL), nil)
+	glmCase := NewRouter(RouterConfig{LargeModel: "accounts/deepseek/models/GLM-5P2"}, newTestClient(srv.URL), nil)
 	_, _ = glmCase.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
 	if lastBody["reasoning_effort"] != "high" {
 		t.Fatalf("large tier (mixed-case glm): reasoning_effort = %v, want high", lastBody["reasoning_effort"])
 	}
-	// ...while a flash id under a "glm"-named account stays "none" (guards against a
+	// ...while a flash id under a "glm"-named account stays think-free (guards against a
 	// regression to substring/Contains-style detection).
 	glmAcct := NewRouter(RouterConfig{LargeModel: "accounts/glm-team/models/deepseek-v4-flash"}, newTestClient(srv.URL), nil)
 	_, _ = glmAcct.Chat(context.Background(), domain.ModelLarge, ChatOptions{Messages: []ChatMessage{TextMessage("user", "x")}})
-	if lastBody["reasoning_effort"] != "none" {
-		t.Fatalf("large tier (flash under glm-named account): reasoning_effort = %v, want none", lastBody["reasoning_effort"])
-	}
+	wantThinkFree("large tier (flash under glm-named account)")
 
 	// --- explicit caller value wins on any tier ---
 	// ...on the small tier
@@ -138,13 +141,13 @@ func TestRouterTierReasoningDefaults(t *testing.T) {
 
 // guard() rejects offline + missing key before any wire call.
 func TestGuard(t *testing.T) {
-	off := NewFireworksClient(FireworksConfig{BaseURL: "x", APIKey: "k", Offline: true})
+	off := NewDeepSeekClient(DeepSeekConfig{BaseURL: "x", APIKey: "k", Offline: true})
 	if _, err := off.Chat(context.Background(), ChatOptions{}); err == nil {
 		t.Fatal("offline must fail")
-	} else if _, ok := err.(*FireworksUnavailableError); !ok {
-		t.Fatalf("want FireworksUnavailableError, got %T", err)
+	} else if _, ok := err.(*DeepSeekUnavailableError); !ok {
+		t.Fatalf("want DeepSeekUnavailableError, got %T", err)
 	}
-	nokey := NewFireworksClient(FireworksConfig{BaseURL: "x"})
+	nokey := NewDeepSeekClient(DeepSeekConfig{BaseURL: "x"})
 	if _, err := nokey.Chat(context.Background(), ChatOptions{}); err == nil {
 		t.Fatal("missing key must fail")
 	}

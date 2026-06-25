@@ -44,7 +44,7 @@ var validTier = newEnumSet(TierSupervisor, TierOperator, TierSystem)
 // IsValid reports whether t is a known tier.
 func (t Tier) IsValid() bool { return validTier[t] }
 
-// ModelTier selects a Fireworks model size. medium routes to large in v1.
+// ModelTier selects a DeepSeek model size. medium routes to large in v1.
 type ModelTier string
 
 const (

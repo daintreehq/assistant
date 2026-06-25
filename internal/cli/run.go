@@ -151,8 +151,8 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// Preflight: without a model key the turn can only fail on the first model call,
 	// so surface that up front (matching the cockpit's boot note) and exit before a
 	// dead round-trip, pointing at `doctor` for a fuller setup check.
-	if a.Config.FireworksAPIKey == "" {
-		reportError(errors.New("FIREWORKS_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup."))
+	if a.Config.DeepSeekAPIKey == "" {
+		reportError(errors.New("DEEPSEEK_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup."))
 		_ = a.Shutdown()
 		if sink != nil {
 			return sink.Finish()
@@ -266,11 +266,11 @@ func RunDoctor(ctx context.Context, opts Options) int {
 
 	r.Line("Daintree Assistant — doctor")
 	fwk := "present"
-	if a.Config.FireworksAPIKey == "" {
-		fwk = "MISSING — set FIREWORKS_API_KEY"
+	if a.Config.DeepSeekAPIKey == "" {
+		fwk = "MISSING — set DEEPSEEK_API_KEY"
 		anyFail = true
 	}
-	r.Line("  fireworks key  : " + fwk)
+	r.Line("  deepseek key  : " + fwk)
 	mcpURL := a.Config.McpURL
 	if mcpURL == "" {
 		mcpURL = "(unset)"

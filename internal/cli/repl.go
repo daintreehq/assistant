@@ -77,8 +77,8 @@ func startRepl(ctx context.Context, a *app.App) int {
 	// Mirror the cockpit's boot note: a missing model key is a genuine degraded state
 	// worth surfacing up front rather than only failing on the first turn. Unlike
 	// one-shot, the REPL does NOT exit — read-only slash commands still work.
-	if a.Config.FireworksAPIKey == "" {
-		r.Warn("FIREWORKS_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.")
+	if a.Config.DeepSeekAPIKey == "" {
+		r.Warn("DEEPSEEK_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.")
 		r.Line(r.Gray("  Read-only slash commands still work: /tools, /skills, /doctor."))
 	}
 

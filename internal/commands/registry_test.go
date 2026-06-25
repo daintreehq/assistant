@@ -80,7 +80,7 @@ func TestParseAuditExportArgs(t *testing.T) {
 
 func TestFormatDoctorMarks(t *testing.T) {
 	out := FormatDoctor([]DoctorCheck{
-		{Label: "fireworks key", OK: true, Detail: "present"},
+		{Label: "deepseek key", OK: true, Detail: "present"},
 		{Label: "mcp url", OK: false, Detail: "(unset)", Fix: "set DAINTREE_MCP_URL"},
 	})
 	if want := "✓ "; out[:len(want)] != want {

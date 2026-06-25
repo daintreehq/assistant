@@ -34,7 +34,7 @@ import (
 // It is gated behind `//go:build pty` (run via `make test-pty`), skipped under
 // -short, and skips under -race via buildBinary (a separate non-instrumented
 // process adds no race coverage). It never touches the network — the binary talks
-// to an in-process fake Fireworks SSE server, the same seam binary_test.go uses.
+// to an in-process fake DeepSeek SSE server, the same seam binary_test.go uses.
 
 const (
 	// composerGlyph is the prompt glyph the live composer renders; its presence in
@@ -79,7 +79,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		round2 = append(round2, fmt.Sprintf("Filler %d of the second batch streamed and settled.\n\n", i))
 	}
 	round2 = append(round2, "Wrapped up "+sentinel+" now.\n\n")
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		sseRound{
 			contentTokens: round1,
 			toolName:      "memory__list",
@@ -108,8 +108,8 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"FIREWORKS_BASE_URL="+fake.baseURL(),
-		"FIREWORKS_API_KEY=test-key",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
@@ -283,7 +283,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 
 	// One scripted round: the submit fires a single model request (no tool call), which
 	// streams a short reply ending in the sentinel.
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		sseRound{
 			contentTokens: []string{"Got the briefing. ", "Wrapped up " + sentinel + " now.\n\n"},
 			usage:         &fakeUsage{prompt: 80, completion: 8, total: 88},
@@ -301,8 +301,8 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"FIREWORKS_BASE_URL="+fake.baseURL(),
-		"FIREWORKS_API_KEY=test-key",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

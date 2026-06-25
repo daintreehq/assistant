@@ -58,15 +58,15 @@ type jsonLine struct {
 }
 
 // TestBinaryJSONOneShot builds the binary and runs `--json "prompt"` pointed at the
-// fake Fireworks SSE server, asserting the JSONL schema-v1 envelope sequence
+// fake DeepSeek SSE server, asserting the JSONL schema-v1 envelope sequence
 // (assistant:start → content → tool:call → tool:result → assistant:end → result),
 // monotonic seq, exit code 0, and stdout purity (no ANSI / diagnostics — only the
-// JSONL lines). The base-URL override is FIREWORKS_BASE_URL (the config trusted-env
+// JSONL lines). The base-URL override is DEEPSEEK_BASE_URL (the config trusted-env
 // boundary), which is what makes a real-binary e2e feasible.
 func TestBinaryJSONOneShot(t *testing.T) {
 	bin := buildBinary(t)
 
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		sseRound{
 			contentTokens: []string{"Checking ", "memory."},
 			toolName:      "memory__list",
@@ -82,8 +82,8 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin, "--json", "what's in memory?")
 	cmd.Env = append(cmd.Environ(),
-		"FIREWORKS_BASE_URL="+fake.baseURL(),
-		"FIREWORKS_API_KEY=test-key",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

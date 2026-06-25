@@ -9,7 +9,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/safety"
 )
 
-// openAINameRe is the legal OpenAI/Fireworks function-name pattern. The model
+// openAINameRe is the legal OpenAI/DeepSeek function-name pattern. The model
 // only ever sees wire names; they must match this.
 var openAINameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 

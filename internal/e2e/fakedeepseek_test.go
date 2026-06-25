@@ -1,5 +1,5 @@
 // Package e2e drives the assistant end-to-end against in-process fakes: a fake
-// Fireworks SSE server (OpenAI-compatible /chat/completions) and a fake Daintree
+// DeepSeek SSE server (OpenAI-compatible /chat/completions) and a fake Daintree
 // MCP server (go-sdk Streamable HTTP over httptest). These exercise the full wiring
 // — app.Create → Session.Send → tool dispatch → result feedback → persistence — and
 // the binary-level --json one-shot, which no unit test covers (jsonout_test.go
@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-// sseRound is one scripted streaming response from the fake Fireworks server. The
+// sseRound is one scripted streaming response from the fake DeepSeek server. The
 // server replays one round per /chat/completions request, in order: the first
 // round typically streams a little prose then a tool call; the second streams the
 // final answer. Each round is rendered as an OpenAI-compatible SSE body.
@@ -35,10 +35,10 @@ type fakeUsage struct {
 	prompt, completion, total, cached int
 }
 
-// fakeFireworks is a scripted OpenAI-compatible /chat/completions SSE server. It
+// fakeDeepSeek is a scripted OpenAI-compatible /chat/completions SSE server. It
 // hands out one round per request from rounds[], and records every request body so
 // a test can assert what was sent (model, tool result feedback, prompt_cache_key).
-type fakeFireworks struct {
+type fakeDeepSeek struct {
 	srv      *httptest.Server
 	mu       sync.Mutex
 	calls    int
@@ -46,20 +46,20 @@ type fakeFireworks struct {
 	requests []map[string]any
 }
 
-// newFakeFireworks starts a fake server that replays the given rounds in order.
-func newFakeFireworks(t *testing.T, rounds ...sseRound) *fakeFireworks {
+// newFakeDeepSeek starts a fake server that replays the given rounds in order.
+func newFakeDeepSeek(t *testing.T, rounds ...sseRound) *fakeDeepSeek {
 	t.Helper()
-	f := &fakeFireworks{rounds: rounds}
+	f := &fakeDeepSeek{rounds: rounds}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
 	return f
 }
 
-// baseURL is the value to feed FIREWORKS_BASE_URL — the client appends
+// baseURL is the value to feed DEEPSEEK_BASE_URL — the client appends
 // /chat/completions, so the base must NOT include that suffix.
-func (f *fakeFireworks) baseURL() string { return f.srv.URL }
+func (f *fakeDeepSeek) baseURL() string { return f.srv.URL }
 
-func (f *fakeFireworks) handle(w http.ResponseWriter, r *http.Request) {
+func (f *fakeDeepSeek) handle(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var parsed map[string]any
 	_ = json.Unmarshal(body, &parsed)
@@ -148,7 +148,7 @@ func mustJSON(v any) string {
 
 // lastRequestMessages returns the messages array sent on the Nth request (0-based),
 // flattened to role/content for assertions about tool-result feedback.
-func (f *fakeFireworks) requestMessages(n int) []map[string]any {
+func (f *fakeDeepSeek) requestMessages(n int) []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if n >= len(f.requests) {
@@ -165,7 +165,7 @@ func (f *fakeFireworks) requestMessages(n int) []map[string]any {
 }
 
 // callCount returns how many /chat/completions requests the server has served.
-func (f *fakeFireworks) callCount() int {
+func (f *fakeDeepSeek) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
@@ -174,7 +174,7 @@ func (f *fakeFireworks) callCount() int {
 // requestField returns the value of a top-level body key (e.g. "model",
 // "reasoning_effort") on the Nth request (0-based), or nil when out of range or
 // absent — used to assert which model id and reasoning effort each round was sent on.
-func (f *fakeFireworks) requestField(n int, key string) any {
+func (f *fakeDeepSeek) requestField(n int, key string) any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if n >= len(f.requests) {

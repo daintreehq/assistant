@@ -19,7 +19,7 @@ internal/
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath
   storage/       Store (store.go) over modernc.org/sqlite — durable state
   models/
-    fireworks.go FireworksClient — net/http Chat Completions, SSE streaming, think-filter
+    deepseek.go DeepSeekClient — net/http Chat Completions, SSE streaming, think-filter
     router.go    Router — ModelFor(tier), Chat, Stream(onToken), JSON
     pricing.go   per-model cost estimation
     prompts/     base.go (BaseSystemPrompt), runtime context + loaded-skills builders

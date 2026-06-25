@@ -37,7 +37,7 @@ func assertNoForbiddenEscapes(t *testing.T, stream, output string) {
 }
 
 // TestBinaryRunNeverEmitsAltScreenOrMouse runs the real binary in the --json
-// one-shot path (driven against the fake Fireworks server so it completes a full
+// one-shot path (driven against the fake DeepSeek server so it completes a full
 // turn) and asserts NEITHER stdout NOR stderr ever contains an alt-screen switch or
 // a mouse-tracking enable. This is the binary-level analogue of the unit-level
 // inline guarantee; a true PTY harness driving the live Bubble Tea cockpit is
@@ -48,7 +48,7 @@ func assertNoForbiddenEscapes(t *testing.T, stream, output string) {
 func TestBinaryRunNeverEmitsAltScreenOrMouse(t *testing.T) {
 	bin := buildBinary(t)
 
-	fake := newFakeFireworks(t,
+	fake := newFakeDeepSeek(t,
 		sseRound{
 			contentTokens: []string{"Done."},
 			usage:         &fakeUsage{prompt: 30, completion: 2, total: 32, cached: 0},
@@ -58,8 +58,8 @@ func TestBinaryRunNeverEmitsAltScreenOrMouse(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin, "--json", "hello")
 	cmd.Env = append(cmd.Environ(),
-		"FIREWORKS_BASE_URL="+fake.baseURL(),
-		"FIREWORKS_API_KEY=test-key",
+		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

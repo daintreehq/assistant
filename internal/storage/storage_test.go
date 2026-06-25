@@ -20,7 +20,7 @@ func openTest(t *testing.T, now int64) *Store {
 
 func TestMemoryInsertRecallFTS(t *testing.T) {
 	s := openTest(t, 1000)
-	if _, err := s.InsertMemory(domain.MemoryRecord{Content: "the deploy pipeline uses Fireworks tokens"}); err != nil {
+	if _, err := s.InsertMemory(domain.MemoryRecord{Content: "the deploy pipeline uses DeepSeek tokens"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.InsertMemory(domain.MemoryRecord{Content: "watcher cadence floors at the scheduler tick"}); err != nil {
@@ -33,7 +33,7 @@ func TestMemoryInsertRecallFTS(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("want 1 hit, got %d", len(got))
 	}
-	if got[0].Content != "the deploy pipeline uses Fireworks tokens" {
+	if got[0].Content != "the deploy pipeline uses DeepSeek tokens" {
 		t.Fatalf("wrong memory: %q", got[0].Content)
 	}
 	// Implicit AND: a token in neither indexed doc set should yield no rows.

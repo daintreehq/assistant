@@ -942,7 +942,7 @@ func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
 		t.Fatalf("char estimate is under threshold; compaction should not fire yet, got %d calls", r.chatCalls)
 	}
 
-	// Stash a real prompt_tokens figure over the soft threshold (what Fireworks would
+	// Stash a real prompt_tokens figure over the soft threshold (what DeepSeek would
 	// report once the ~68 tool schemas are counted) and re-check.
 	s.mu.Lock()
 	s.lastPromptTokens = domain.AutoCompactTokenThreshold + 10_000

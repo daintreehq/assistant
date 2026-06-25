@@ -22,7 +22,7 @@ type ToolCallFunction struct {
 }
 
 // ChatContentPart is a single multimodal content part — either text or an image
-// URL. Only these two kinds are ever sent (Fireworks ignores `detail`, so it is
+// URL. Only these two kinds are ever sent (DeepSeek ignores `detail`, so it is
 // intentionally omitted from the image part). A zero PartType means "unused".
 type ChatContentPart struct {
 	// Type is "text" or "image_url".
@@ -143,7 +143,7 @@ type ChatToolFunc struct {
 }
 
 // emptySchema is the JSON-schema body sent for a tool that declares no parameters.
-// A nil/empty json.RawMessage marshals to `"parameters":null`, which Fireworks
+// A nil/empty json.RawMessage marshals to `"parameters":null`, which DeepSeek
 // rejects — an absent schema is "no arguments", i.e. an empty object.
 var emptySchema = json.RawMessage(`{}`)
 
@@ -177,7 +177,7 @@ func bytesTrimSpace(b json.RawMessage) []byte {
 	return bytes.TrimSpace(b)
 }
 
-// wireMessage is the reduced shape we actually send to Fireworks. Pointers /
+// wireMessage is the reduced shape we actually send to DeepSeek. Pointers /
 // omitempty honour the omit-when-undefined rule (never send null for an absent
 // optional field, except where null content is deliberately coalesced to "").
 type wireMessage struct {
@@ -193,7 +193,7 @@ type wireToolCall struct {
 	Function ToolCallFunction `json:"function"`
 }
 
-// toWireMessages reduces internal ChatMessages to exactly the fields Fireworks
+// toWireMessages reduces internal ChatMessages to exactly the fields DeepSeek
 // accepts (extra fields cause a 400 on replay). Per role:
 //   - tool: content is always flattened to text; the internal `name` is dropped.
 //   - assistant: content as-is (null→null literal), tool_calls only when present,
@@ -245,7 +245,7 @@ func toWireMessages(messages []ChatMessage) ([]wireMessage, error) {
 }
 
 // validToolArgs returns a tool call's arguments as a guaranteed-valid JSON OBJECT
-// string for the OUTGOING request. The provider (Fireworks) re-validates EVERY
+// string for the OUTGOING request. The provider (DeepSeek) re-validates EVERY
 // message in the replayed history and rejects the whole request with a 400 when any
 // assistant tool call's arguments are not a JSON object — so a single malformed-JSON
 // tool call the model emitted (already caught and rejected locally as
