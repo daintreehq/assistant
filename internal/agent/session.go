@@ -964,6 +964,17 @@ func (s *Session) emitUsage() {
 	}
 	if anyCached {
 		ev.CachedTokens = &cachedTotal
+		// Prompt-cache hit ratio (issue #262): cachedTotal/PromptTokens, both summed
+		// across EVERY tier so the ratio stays internally consistent (a large-only
+		// denominator would overstate it when a small-tier call also hit the cache).
+		// Cached tokens are a subset of prompt tokens in the OpenAI usage spec, so this
+		// is cached/prompt — never cached/(prompt-completion). Guard PromptTokens > 0 to
+		// avoid a divide-by-zero; a reported cached=0 stays a real 0.0 (cache confirmed
+		// empty), distinct from nil (no tier reported cache data at all).
+		if ev.PromptTokens > 0 {
+			r := float64(cachedTotal) / float64(ev.PromptTokens)
+			ev.CacheHitRatio = &r
+		}
 	}
 	if anyCost {
 		ev.CostUsd = &costTotal

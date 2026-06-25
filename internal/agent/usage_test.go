@@ -234,6 +234,64 @@ func TestUsageEventCachedSumWhenAnyTierReports(t *testing.T) {
 	}
 }
 
+// The cache-hit ratio is cachedTotal/PromptTokens with BOTH summed across every
+// tier (issue #262). Here large reports 400 cached of its own 1000 prompt while
+// small reports 600 prompt and no cache, so the ratio is 400/(1000+600)=0.25 —
+// proving the denominator is the cross-tier aggregate, not the large tier alone
+// (which would wrongly read 0.4).
+func TestUsageEventCacheHitRatioPresentWhenCachedReported(t *testing.T) {
+	large := pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200)
+	cached := 400
+	large.CachedTokens = &cached
+	small := pricedTier(domain.ModelSmall, "deepseek-v4-flash", 600, 100) // no cached report
+	ev := sendTiers(t, []models.TierUsage{large, small})
+	if ev.CacheHitRatio == nil {
+		t.Fatal("cacheHitRatio = nil want 0.25")
+	}
+	if *ev.CacheHitRatio != 0.25 {
+		t.Fatalf("cacheHitRatio = %v want 0.25 (400/1600, cross-tier denominator)", *ev.CacheHitRatio)
+	}
+}
+
+// With no tier reporting cached tokens the ratio is nil — "no data", never a
+// misleading 0.0 (which would read as "cache always missed").
+func TestUsageEventCacheHitRatioNilWhenNoCachedData(t *testing.T) {
+	ev := sendTiers(t, []models.TierUsage{
+		pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200),
+		pricedTier(domain.ModelSmall, "deepseek-v4-flash", 500, 100),
+	})
+	if ev.CacheHitRatio != nil {
+		t.Fatalf("cacheHitRatio = %v want nil (no cached data)", *ev.CacheHitRatio)
+	}
+}
+
+// A reported cached=0 is a real data point (provider confirmed zero cache hits), so
+// the ratio is a non-nil 0.0 — distinct from nil (no tier reported at all).
+func TestUsageEventCacheHitRatioZeroWhenCachedReportsZero(t *testing.T) {
+	large := pricedTier(domain.ModelLarge, "glm-5p2", 1000, 200)
+	zero := 0
+	large.CachedTokens = &zero
+	ev := sendTiers(t, []models.TierUsage{large})
+	if ev.CacheHitRatio == nil {
+		t.Fatal("cacheHitRatio = nil want 0.0 (provider reported zero cache hits)")
+	}
+	if *ev.CacheHitRatio != 0 {
+		t.Fatalf("cacheHitRatio = %v want 0", *ev.CacheHitRatio)
+	}
+}
+
+// Zero prompt tokens must not divide-by-zero: even with a cached report, a
+// PromptTokens==0 round yields a nil ratio (and a NaN/Inf would be a bug).
+func TestUsageEventCacheHitRatioNilWhenZeroPrompt(t *testing.T) {
+	tier := pricedTier(domain.ModelLarge, "glm-5p2", 0, 0)
+	cached := 0
+	tier.CachedTokens = &cached
+	ev := sendTiers(t, []models.TierUsage{tier})
+	if ev.CacheHitRatio != nil {
+		t.Fatalf("cacheHitRatio = %v want nil (PromptTokens==0 guard)", *ev.CacheHitRatio)
+	}
+}
+
 // A partial cost (some tier priced, some not) shows the KNOWN total rather than
 // collapsing to "no data" — a rough running estimate is more useful than nothing.
 func TestUsagePartialCostWhenOneTierUnpriced(t *testing.T) {

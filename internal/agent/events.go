@@ -67,6 +67,13 @@ type UsageEvent struct {
 	CompletionTokens int
 	TotalTokens      int
 	CachedTokens     *int
+	// CacheHitRatio is the prompt-cache efficiency signal (issue #262): the share of
+	// prompt tokens served from the provider's cache, cachedTotal/PromptTokens across
+	// ALL tiers — numerator and denominator both cross-tier so the ratio can't exceed
+	// 1.0 from a tier mismatch. nil whenever CachedTokens is nil (no tier reported) or
+	// PromptTokens is 0, so the UI shows "no data" rather than a misleading 0.0. NOT
+	// clamped: a provider anomaly (cached > prompt) stays visible as a diagnostic.
+	CacheHitRatio    *float64
 	ContextTokens    int
 	ContextThreshold int // auto-compact trigger point (NOT the gauge denominator)
 	ContextWindow    int // model context window — the CTX% gauge denominator
@@ -413,6 +420,9 @@ func (s *RunEventSink) Usage(ev UsageEvent) {
 	}
 	if ev.CachedTokens != nil {
 		payload["cachedTokens"] = *ev.CachedTokens
+	}
+	if ev.CacheHitRatio != nil {
+		payload["cacheHitRatio"] = *ev.CacheHitRatio
 	}
 	if ev.CostUsd != nil {
 		payload["costUsd"] = *ev.CostUsd

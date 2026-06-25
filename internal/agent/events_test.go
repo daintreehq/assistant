@@ -215,6 +215,35 @@ func TestRunEventSinkUsageCarriesCompactionDepth(t *testing.T) {
 	}
 }
 
+func TestRunEventSinkUsageCarriesHitRatio(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	ratio := 0.25
+	sink.Usage(UsageEvent{PromptTokens: 1600, CachedTokens: intp(400), CacheHitRatio: &ratio})
+	var payload map[string]any
+	mustUnmarshal(t, *store.forRun("run_1")[0].Payload, &payload)
+	if got, _ := payload["cacheHitRatio"].(float64); got != 0.25 {
+		t.Fatalf("cacheHitRatio = %v want 0.25", payload["cacheHitRatio"])
+	}
+}
+
+// The cacheHitRatio key is omitted entirely when no cache data was reported, so the
+// durable log doesn't carry a spurious 0 for rounds that never saw the cache.
+func TestRunEventSinkUsageOmitsHitRatioWhenNil(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.Usage(UsageEvent{PromptTokens: 1000})
+	var payload map[string]any
+	mustUnmarshal(t, *store.forRun("run_1")[0].Payload, &payload)
+	if _, ok := payload["cacheHitRatio"]; ok {
+		t.Fatalf("cacheHitRatio present (%v) want omitted", payload["cacheHitRatio"])
+	}
+}
+
 func TestRunEventSinkCapsOversizedPayload(t *testing.T) {
 	store := &fakeRunEventStore{}
 	ref := &RunIDRef{}
