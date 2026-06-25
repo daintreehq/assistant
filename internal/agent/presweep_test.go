@@ -90,12 +90,46 @@ func TestRunPreSweepDedupKeepsMostRecent(t *testing.T) {
 }
 
 func TestRunPreSweepDedupLeavesUniqueResults(t *testing.T) {
-	msgs := withControls(
-		toolMsg("call_1", "alpha"+strings.Repeat("x", 4000)),
-		toolMsg("call_2", "beta"+strings.Repeat("y", 4000)),
-	)
+	bodyA := "alpha" + strings.Repeat("x", 4000)
+	bodyB := "beta" + strings.Repeat("y", 4000)
+	msgs := withControls(toolMsg("call_1", bodyA), toolMsg("call_2", bodyB))
 	if n := runPreSweep(msgs); n != 0 {
 		t.Fatalf("modified = %d, want 0 (all bodies distinct)", n)
+	}
+	// A no-op count must mean a literal no-op: bodies AND ToolCallIDs untouched.
+	work := msgs[domain.ControlMessageCount:]
+	if work[0].StringContent != bodyA || work[1].StringContent != bodyB {
+		t.Fatal("distinct bodies must be left byte-for-byte unchanged")
+	}
+	if work[0].ToolCallID != "call_1" || work[1].ToolCallID != "call_2" {
+		t.Fatal("ToolCallIDs must be left unchanged")
+	}
+}
+
+// TestRunPreSweepDedupMultipleDistinctClasses proves the survivor map keys per distinct
+// body: two interleaved duplicate classes each keep their OWN most-recent survivor and
+// never cross-contaminate references.
+func TestRunPreSweepDedupMultipleDistinctClasses(t *testing.T) {
+	bodyA := "AAAA" + strings.Repeat("a", 4000)
+	bodyB := "BBBB" + strings.Repeat("b", 4000)
+	msgs := withControls(
+		toolMsg("a1", bodyA),
+		toolMsg("b1", bodyB),
+		toolMsg("a2", bodyA), // survivor of class A
+		toolMsg("b2", bodyB), // survivor of class B
+	)
+	if n := runPreSweep(msgs); n != 2 {
+		t.Fatalf("modified = %d, want 2 (one earlier copy per class)", n)
+	}
+	work := msgs[domain.ControlMessageCount:]
+	if work[0].StringContent != "[duplicate of a2]" {
+		t.Fatalf("class-A earlier copy = %q, want ref to a2", work[0].StringContent)
+	}
+	if work[1].StringContent != "[duplicate of b2]" {
+		t.Fatalf("class-B earlier copy = %q, want ref to b2", work[1].StringContent)
+	}
+	if work[2].StringContent != bodyA || work[3].StringContent != bodyB {
+		t.Fatal("each class must retain its own most-recent survivor verbatim")
 	}
 }
 
@@ -182,6 +216,52 @@ func TestRunPreSweepCollapsesStubPreview(t *testing.T) {
 	// Idempotent: re-running finds an empty Preview and leaves it alone.
 	if again := runPreSweep(msgs); again != 0 {
 		t.Fatalf("second sweep modified = %d, want 0 (idempotent)", again)
+	}
+}
+
+func TestRunPreSweepCollapsePreservesErrorFields(t *testing.T) {
+	// A failed-tool overflow stub carries ErrorCode + a Recoverable pointer alongside the
+	// artifact. Collapsing the preview must preserve every load-bearing field; only the
+	// preview (and its note) may change.
+	recoverable := true
+	stub := truncationStub{
+		Ok:      false,
+		Summary: "tool failed",
+		Result: truncationResult{
+			Truncated:   true,
+			ArtifactID:  "artifact_err",
+			ErrorCode:   "MCP_RATE_LIMITED",
+			Recoverable: &recoverable,
+			TotalChars:  42_000,
+			TotalBytes:  42_000,
+			Preview:     strings.Repeat("e", domain.TruncationPreviewChars),
+			Note:        "truncated",
+		},
+	}
+	raw, err := json.Marshal(stub)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msgs := withControls(toolMsg("call_1", string(raw)))
+
+	if n := runPreSweep(msgs); n != 1 {
+		t.Fatalf("modified = %d, want 1", n)
+	}
+	got := decodeStub(t, msgs[domain.ControlMessageCount].StringContent)
+	if got.Result.Preview != "" {
+		t.Fatalf("preview = %q, want empty", got.Result.Preview)
+	}
+	if got.Result.ErrorCode != "MCP_RATE_LIMITED" {
+		t.Fatalf("errorCode = %q, want preserved", got.Result.ErrorCode)
+	}
+	if got.Result.Recoverable == nil || *got.Result.Recoverable != true {
+		t.Fatalf("recoverable = %v, want preserved (true)", got.Result.Recoverable)
+	}
+	if got.Result.ArtifactID != "artifact_err" || got.Result.TotalChars != 42_000 {
+		t.Fatalf("artifactId/totals altered: %+v", got.Result)
+	}
+	if got.Ok || got.Summary != "tool failed" {
+		t.Fatalf("outer envelope altered: ok=%v summary=%q", got.Ok, got.Summary)
 	}
 }
 

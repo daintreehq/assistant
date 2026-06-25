@@ -267,6 +267,29 @@ func TestAutoCompactPreSweepAvoidsSummary(t *testing.T) {
 	}
 }
 
+// TestAutoCompactPreSweepStillSummarizesWhenOverThreshold proves the other branch of the
+// #257 rung: when the sweep shrinks history but a SINGLE retained copy is itself still
+// over the soft threshold, the summary rung must still fire (the sweep is a cheap first
+// pass, not a replacement for compaction).
+func TestAutoCompactPreSweepStillSummarizesWhenOverThreshold(t *testing.T) {
+	r := &chatCountRouter{summary: "STILL_SUMMARIZED"}
+	s, _ := compactSession(t, r)
+
+	// A single retained copy (~280k chars ≈ 70k tokens) already exceeds the 60k gate, so
+	// even after the two duplicates collapse to refs the summary must still run.
+	big := strings.Repeat("z", 280_000)
+	s.messages = append(s.messages,
+		models.ChatMessage{Role: "tool", ToolCallID: "call_a", StringContent: big},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_b", StringContent: big},
+	)
+
+	s.maybeAutoCompact(context.Background(), "run_presweep_over")
+
+	if r.chatCalls != 1 {
+		t.Fatalf("sweep left history over threshold; summary should fire once, got %d Chat calls", r.chatCalls)
+	}
+}
+
 // --- distill-on-compact ---
 
 // fakeMemoryStore satisfies the agent.MemoryStore seam: it records inserts and
