@@ -451,7 +451,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 	// 2. Auto-compact (best-effort).
 	s.events.Phase(domain.PhaseAnalyzing)
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, runID)
 
 	// 3. Re-check: a cancel landing in the auto-compact window must ALSO leave no
 	//    orphan turn (issue #61).
@@ -512,7 +512,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//       summarized away in the same round it is first folded in. Cancel-safe: a
 		//       cancel landing in the summary window leaves no orphan turn (issue #61).
 		if iter > 0 {
-			s.maybeAutoCompact(ctx)
+			s.maybeAutoCompact(ctx, runID)
 			if ctx.Err() != nil {
 				s.events.Phase(domain.PhaseCancelled)
 				s.events.AssistantCancelled("")
@@ -1092,7 +1092,7 @@ const distillBackgroundTimeout = 30 * time.Second
 // stream starts immediately instead of stalling on a second small-model round-trip.
 // Best-effort: a successful summary compacts; a SUSTAINED summary outage falls back to
 // a no-model lossy truncation so history can't grow unbounded (issue #202).
-func (s *Session) maybeAutoCompact(ctx context.Context) {
+func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// Build the summary input under the lock (read a stable snapshot), then run the
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
 	// it compacts via compactLocked (the public Compact would self-reject).
@@ -1161,7 +1161,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context) {
 	s.mu.Unlock()
 	s.events.Info("Auto-compacted conversation")
 
-	s.startDistill(transcript)
+	s.startDistill(runID, transcript)
 }
 
 // noteCompactFailureLocked records a failed/empty auto-compact summary and, once
@@ -1227,9 +1227,11 @@ func (s *Session) truncateLocked(keepN int) {
 // bgCtx (cancelled on App.Shutdown) with a bounded timeout, and is tracked by s.wg so
 // DrainBackgroundWork can join it before the Router/MemoryStore it touches tear down.
 // A nil MemoryStore makes distillCompact a no-op, so skip the goroutine entirely.
+// runID is captured by value into the detached goroutine and stamped as provenance
+// on each distilled memory (empty ⇒ left unstamped).
 // IMPORTANT: it must NOT emit events — the prod RunEventSink is single-goroutine
 // (turn-only) and unguarded, so an Info call from here would race the streaming turn.
-func (s *Session) startDistill(transcript string) {
+func (s *Session) startDistill(runID, transcript string) {
 	if s.deps.MemoryStore == nil {
 		return
 	}
@@ -1249,7 +1251,7 @@ func (s *Session) startDistill(transcript string) {
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
-		s.distillCompact(bg, transcript)
+		s.distillCompact(bg, runID, transcript)
 	}()
 }
 
@@ -1275,7 +1277,7 @@ const distillTranscriptMaxRunes = 8000
 // Best-effort by construction: a nil MemoryStore, an empty transcript, a model error,
 // an unparseable reply, or any panic yields 0 and never affects compaction. It MUST be
 // called with s.mu released (it makes a network call + DB writes).
-func (s *Session) distillCompact(ctx context.Context, transcript string) (saved int) {
+func (s *Session) distillCompact(ctx context.Context, runID, transcript string) (saved int) {
 	defer func() { _ = recover() }()
 	if s.deps.MemoryStore == nil {
 		return 0
@@ -1305,12 +1307,18 @@ func (s *Session) distillCompact(ctx context.Context, transcript string) (saved 
 			continue
 		}
 		now := domain.NowMS()
-		if _, insErr := s.deps.MemoryStore.InsertMemory(domain.MemoryRecord{
+		// Distilled facts are durable (semantic); stamp the turn that produced them.
+		rec := domain.MemoryRecord{
 			Content:   fact,
 			Source:    domain.MemoryCompact,
+			Kind:      domain.MemoryKindSemantic,
 			CreatedAt: now,
 			UpdatedAt: now,
-		}); insErr == nil {
+		}
+		if runID != "" {
+			rec.RunID = &runID
+		}
+		if _, insErr := s.deps.MemoryStore.InsertMemory(rec); insErr == nil {
 			saved++
 		}
 	}

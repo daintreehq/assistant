@@ -283,6 +283,16 @@ const (
 	MemoryCompact   MemorySource = "compact"
 )
 
+// MemoryKind discriminates a durable semantic fact (the default) from an
+// episodic memory scoped to a single session/run. Episodic rows carry a
+// SessionID for namespacing; semantic rows do not.
+type MemoryKind string
+
+const (
+	MemoryKindSemantic MemoryKind = "semantic"
+	MemoryKindEpisodic MemoryKind = "episodic"
+)
+
 // SkillRunStatus tracks a skill run.
 type SkillRunStatus string
 

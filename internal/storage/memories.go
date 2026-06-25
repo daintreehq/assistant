@@ -9,22 +9,38 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-const memoryCols = `id,content,category,source,pinnedAt,deletedAt,createdAt,updatedAt`
+// memoryCols drives every memory SELECT and the positional Scan in scanMemory —
+// the two MUST stay in lockstep (a column here without a matching Scan target
+// panics at query time). The TTL/provenance columns trail the original set.
+const memoryCols = `id,content,category,source,pinnedAt,deletedAt,createdAt,updatedAt,expiresAt,runId,kind,sessionId`
 
 func scanMemory(sc scanner) (domain.MemoryRecord, error) {
 	var m domain.MemoryRecord
-	var source string
-	var category sql.NullString
-	var pinnedAt, deletedAt sql.NullInt64
+	var source, kind string
+	var category, runID, sessionID sql.NullString
+	var pinnedAt, deletedAt, expiresAt sql.NullInt64
 	if err := sc.Scan(&m.ID, &m.Content, &category, &source, &pinnedAt, &deletedAt,
-		&m.CreatedAt, &m.UpdatedAt); err != nil {
+		&m.CreatedAt, &m.UpdatedAt, &expiresAt, &runID, &kind, &sessionID); err != nil {
 		return domain.MemoryRecord{}, err
 	}
 	m.Source = domain.MemorySource(source)
+	m.Kind = domain.MemoryKind(kind)
 	m.Category = strFromNull(category)
 	m.PinnedAt = i64FromNull(pinnedAt)
 	m.DeletedAt = i64FromNull(deletedAt)
+	m.ExpiresAt = i64FromNull(expiresAt)
+	m.RunID = strFromNull(runID)
+	m.SessionID = strFromNull(sessionID)
 	return m, nil
+}
+
+// kindOrDefault maps an empty kind to the semantic default (mirrors the SQLite
+// DEFAULT 'semantic'), so a caller that omits Kind still stores a valid value.
+func kindOrDefault(k domain.MemoryKind) string {
+	if k == "" {
+		return string(domain.MemoryKindSemantic)
+	}
+	return string(k)
 }
 
 // InsertMemory inserts a memory (id mem_, source 'assistant',
@@ -37,6 +53,9 @@ func (s *Store) InsertMemory(rec domain.MemoryRecord) (domain.MemoryRecord, erro
 	if rec.Source == "" {
 		rec.Source = domain.MemoryAssistant
 	}
+	if rec.Kind == "" {
+		rec.Kind = domain.MemoryKindSemantic
+	}
 	now := s.now()
 	if rec.CreatedAt == 0 {
 		rec.CreatedAt = now
@@ -45,10 +64,11 @@ func (s *Store) InsertMemory(rec domain.MemoryRecord) (domain.MemoryRecord, erro
 		rec.UpdatedAt = now
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO memories (id,content,category,source,pinnedAt,deletedAt,createdAt,updatedAt)
-		VALUES (?,?,?,?,?,?,?,?)`,
+		INSERT INTO memories (id,content,category,source,pinnedAt,deletedAt,createdAt,updatedAt,expiresAt,runId,kind,sessionId)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.ID, rec.Content, nullStr(rec.Category), string(rec.Source),
-		nullI64(rec.PinnedAt), nullI64(rec.DeletedAt), rec.CreatedAt, rec.UpdatedAt)
+		nullI64(rec.PinnedAt), nullI64(rec.DeletedAt), rec.CreatedAt, rec.UpdatedAt,
+		nullI64(rec.ExpiresAt), nullStr(rec.RunID), kindOrDefault(rec.Kind), nullStr(rec.SessionID))
 	if err != nil {
 		return domain.MemoryRecord{}, fmt.Errorf("insert memory: %w", err)
 	}
@@ -90,6 +110,10 @@ func (s *Store) ListMemories(opts MemoryListOptions) ([]domain.MemoryRecord, err
 	if !opts.IncludeDeleted {
 		conds = append(conds, "deletedAt IS NULL")
 	}
+	// Hide rows whose TTL has elapsed (NULL = never expires). Captured once so the
+	// boundary is exact and the predicate is testable with an injected clock.
+	conds = append(conds, "(expiresAt IS NULL OR expiresAt > ?)")
+	args = append(args, s.now())
 	if opts.Category != nil {
 		conds = append(conds, "category = ?")
 		args = append(args, *opts.Category)
@@ -128,6 +152,10 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 	}
 	conds := []string{"m.deletedAt IS NULL", "memories_fts MATCH ?"}
 	args := []any{match}
+	// Same TTL filter as ListMemories — an expired fact must not surface in recall
+	// either. Placeholder order: MATCH, then this now(), then any category arg.
+	conds = append(conds, "(m.expiresAt IS NULL OR m.expiresAt > ?)")
+	args = append(args, s.now())
 	if opts.Category != nil {
 		conds = append(conds, "m.category = ?")
 		args = append(args, *opts.Category)
@@ -146,17 +174,22 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 	return collectMemories(rows)
 }
 
-// MemoryExists reports whether a memory with EXACTLY this content has ever been stored
-// — INCLUDING soft-deleted rows. The distill-on-compact path uses it to skip re-saving
-// a fact it already holds: matching live rows avoids duplicates, and matching
-// soft-deleted rows means a memory the user explicitly forgot is not silently
-// resurrected by a later compaction. Deliberately an exact match (predictable and
-// cheap) rather than an FTS similarity threshold (which needs tuning and
-// false-positives on short facts).
+// MemoryExists reports whether a live-or-forgotten memory with EXACTLY this content
+// is on record. The distill-on-compact path uses it to skip re-saving a fact it
+// already holds: matching live rows avoids duplicates, and matching soft-deleted
+// rows means a memory the user explicitly forgot is not silently resurrected by a
+// later compaction. An EXPIRED-but-not-forgotten row, however, must NOT block: its
+// TTL has elapsed (it's hidden from list/recall), so re-saving the same content as
+// a durable fact is the desired outcome — hence the predicate blocks only when the
+// row is forgotten (deletedAt set) OR still live (NULL/unexpired TTL). Deliberately
+// an exact match (predictable and cheap) rather than an FTS similarity threshold.
 func (s *Store) MemoryExists(content string) (bool, error) {
 	var one int
 	err := s.db.QueryRow(
-		"SELECT 1 FROM memories WHERE content = ? LIMIT 1", content).Scan(&one)
+		`SELECT 1 FROM memories
+		  WHERE content = ?
+		    AND (deletedAt IS NOT NULL OR expiresAt IS NULL OR expiresAt > ?)
+		  LIMIT 1`, content, s.now()).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -186,16 +219,19 @@ func (s *Store) ForgetMemory(id string, now int64) (bool, error) {
 	return n > 0, nil
 }
 
-// PinMemory stamps pinnedAt+updatedAt WHERE not-deleted AND not-already-pinned
-// (idempotent guard avoids re-jumping the order). Returns the post-update memory
-// (or the existing one when the guard was a no-op).
+// PinMemory stamps pinnedAt+updatedAt WHERE not-deleted, not-already-pinned, AND
+// not-expired (idempotent guard avoids re-jumping the order; the expiry guard avoids
+// pinning a dead row that list/recall would hide anyway). Returns the post-update
+// memory (or the existing one when the guard was a no-op).
 func (s *Store) PinMemory(id string, now int64) (*domain.MemoryRecord, error) {
 	if now <= 0 {
 		now = s.now()
 	}
 	if _, err := s.db.Exec(
-		"UPDATE memories SET pinnedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL",
-		now, now, id); err != nil {
+		`UPDATE memories SET pinnedAt = ?, updatedAt = ?
+		  WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL
+		    AND (expiresAt IS NULL OR expiresAt > ?)`,
+		now, now, id, s.now()); err != nil {
 		return nil, fmt.Errorf("pin memory: %w", err)
 	}
 	return s.GetMemory(id, false)

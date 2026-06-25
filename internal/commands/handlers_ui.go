@@ -718,9 +718,13 @@ func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (
 			continue
 		}
 		now := domain.NowMS()
+		// Manual /compact has no live turn runID to attribute; the distilled facts are
+		// durable semantic memories (Kind defaults to semantic in storage, named here
+		// for intent), saved without provenance.
 		if _, insErr := a.Store.InsertMemory(domain.MemoryRecord{
 			Content:   fact,
 			Source:    domain.MemoryCompact,
+			Kind:      domain.MemoryKindSemantic,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}); insErr == nil {
