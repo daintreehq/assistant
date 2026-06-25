@@ -248,3 +248,26 @@ func TestSerializeSwallowsPersisterFailure(t *testing.T) {
 		t.Fatal("hot-cache read must still resolve after a swallowed persister failure")
 	}
 }
+
+func TestArtifactStoreConcurrentGetAndSet(t *testing.T) {
+	// Regression gate for the ArtifactStore mutex. set() runs on the turn goroutine
+	// (no session lock held — it's evaluated before pushMessage takes s.mu) while Get()
+	// is reachable from the daemon goroutine via a dispatched artifact.read. Without the
+	// lock `go test -race` flags this, and the runtime can fatal with "concurrent map
+	// read and map write". Drive both paths hard so the detector trips reliably.
+	store := NewArtifactStore("ses_race", nil)
+	id := store.set("seed")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			store.Get(id)
+			store.Len()
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		store.set("payload")
+	}
+	<-done
+}

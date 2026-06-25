@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"sync"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -14,6 +15,12 @@ import (
 // mirrors the payload to durable storage, so a read survives this id's eviction from
 // the cache or a process restart (the DB row is never evicted on cache eviction).
 type ArtifactStore struct {
+	// mu guards keys+data: set() runs on the turn goroutine (it's evaluated before
+	// pushMessage takes the session lock, so it holds NO session mutex), while Get()
+	// is reachable from the daemon goroutine — a timer/watcher can dispatch the
+	// read-risk artifact.read concurrently. Without this an overflow mid-turn racing a
+	// background read is a fatal "concurrent map read and map write" panic.
+	mu        sync.RWMutex
 	keys      []string          // insertion-ordered ids (for oldest-first eviction)
 	data      map[string]string // id → full serialized result (hot cache)
 	sessionID string            // provenance stamped on each durable mirror row
@@ -27,11 +34,17 @@ func NewArtifactStore(sessionID string, persister ArtifactPersister) *ArtifactSt
 	return &ArtifactStore{data: make(map[string]string), sessionID: sessionID, persister: persister}
 }
 
-// Len reports the number of stored artifacts.
-func (a *ArtifactStore) Len() int { return len(a.keys) }
+// Len reports the number of stored artifacts (hot-cache entries).
+func (a *ArtifactStore) Len() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.keys)
+}
 
-// Get returns the full serialized result for an id.
+// Get returns the full serialized result for an id from the hot cache.
 func (a *ArtifactStore) Get(id string) (string, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	v, ok := a.data[id]
 	return v, ok
 }
@@ -44,6 +57,7 @@ func (a *ArtifactStore) Get(id string) (string, bool) {
 // the process restarts. Note the DB row is intentionally NOT removed on cache
 // eviction; that is the whole point — the durable copy outlives the bounded cache.
 func (a *ArtifactStore) set(value string) string {
+	a.mu.Lock()
 	for len(a.keys) >= domain.MaxStoredArtifacts {
 		oldest := a.keys[0]
 		a.keys = a.keys[1:]
@@ -52,6 +66,13 @@ func (a *ArtifactStore) set(value string) string {
 	id := domain.NewID(domain.PrefixArtifact)
 	a.keys = append(a.keys, id)
 	a.data[id] = value
+	a.mu.Unlock()
+	// Mirror to durable storage AFTER releasing the lock: the write is best-effort and
+	// the SQLite single-writer connection could block, so holding the lock across it
+	// would stall a concurrent Get (e.g. a daemon-dispatched artifact.read). The
+	// hot-cache entry just stored already satisfies the in-session read; the DB is only
+	// the fallback for a later read after this id is evicted or the process restarts —
+	// the row is intentionally NOT removed on cache eviction.
 	if a.persister != nil {
 		_, _ = a.persister.InsertArtifact(domain.ArtifactRecord{
 			ID:         id,

@@ -136,3 +136,38 @@ func TestArtifactRetentionSweep(t *testing.T) {
 		t.Fatal("recent artifact must be retained")
 	}
 }
+
+// TestArtifactRetentionCountFloorAllOldRows — when ALL rows are past the age window,
+// the count floor (ArtifactsKeepRows) is the only protection: it keeps the N newest
+// by createdAt and prunes the rest. Proves deleteByAgeAndCount's ORDER BY createdAt
+// DESC LIMIT N path for this table.
+func TestArtifactRetentionCountFloorAllOldRows(t *testing.T) {
+	ret := baseRet()
+	ret.ArtifactsKeepRows = 2
+	s := gcStore(t, ret)
+
+	var ids []string
+	for i := 0; i < 4; i++ {
+		rec, _ := s.InsertArtifact(domain.ArtifactRecord{
+			SessionID: "ses", Content: "c", TotalChars: 1, TotalBytes: 1,
+			CreatedAt: gcOLD + int64(i),
+		})
+		ids = append(ids, rec.ID)
+	}
+
+	if err := s.GCRetentionSweep(gcNOW); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.GetArtifact(ids[0]); ok {
+		t.Fatal("oldest row should be pruned by the count floor")
+	}
+	if _, ok := s.GetArtifact(ids[1]); ok {
+		t.Fatal("second-oldest row should be pruned by the count floor")
+	}
+	if _, ok := s.GetArtifact(ids[2]); !ok {
+		t.Fatal("third row is within the count floor, must survive")
+	}
+	if _, ok := s.GetArtifact(ids[3]); !ok {
+		t.Fatal("newest row must survive")
+	}
+}
