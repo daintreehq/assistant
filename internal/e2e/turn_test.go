@@ -252,4 +252,127 @@ func TestFullTurnAgainstFakes(t *testing.T) {
 	}
 }
 
+// flashModelID is the validated orchestration model id all tiers default to. The
+// wiring test below pins it so the large tier can never silently revert to a heavier
+// model: flash is the validated main-thread model (see config.DEFAULTS).
+const flashModelID = "accounts/fireworks/models/deepseek-v4-flash"
+
+// countToolRoleMessages returns how many role:"tool" feedback messages a request
+// carried — i.e. how many prior tool results were folded back into that round.
+func countToolRoleMessages(msgs []map[string]any) int {
+	n := 0
+	for _, m := range msgs {
+		if role, _ := m["role"].(string); role == "tool" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestOrchestratorFlashWiringAndMultiStep validates that the orchestrator (large
+// tier / main thread) runs on the flash model under a genuinely multi-step load —
+// not a single relay. The fake Fireworks server is scripted and deterministic, so it
+// cannot test flash's reasoning *quality*; what it proves is the wiring that makes
+// flash a sound orchestration model: (1) every main-thread round is sent on the
+// flash model id, (2) the large tier pins reasoning_effort:"high" (real
+// chain-of-thought, not max-effort), and (3) a three-round chained-tool scenario —
+// list memories, then recall by query (a second lookup conceptually conditioned on
+// the first), then conclude — drives to completion with each tool result fed back
+// into the next round. That feedback chain is exactly the orchestration deduction
+// loop: the model must integrate prior tool output before its next move, not echo it.
+func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
+	// Guard the documentation claim at its source: the configured large-tier default
+	// IS flash. If this ever drifts, the issue-238 validation is no longer true.
+	if config.DEFAULTS.LargeModel != flashModelID {
+		t.Fatalf("config.DEFAULTS.LargeModel = %q, want the validated orchestration model %q",
+			config.DEFAULTS.LargeModel, flashModelID)
+	}
+
+	fake := newFakeFireworks(t,
+		// Round 1: orchestrator opens the deduction — list what's in memory.
+		sseRound{
+			contentTokens: []string{"Step 1: ", "list memory."},
+			toolName:      "memory__list",
+			toolArgs:      `{"limit":3}`,
+			usage:         &fakeUsage{prompt: 100, completion: 10, total: 110, cached: 0},
+		},
+		// Round 2: conditioned on round 1, a second dependent lookup — recall by query.
+		sseRound{
+			contentTokens: []string{"Step 2: ", "recall by query."},
+			toolName:      "memory__recall",
+			toolArgs:      `{"query":"test"}`,
+			usage:         &fakeUsage{prompt: 130, completion: 10, total: 140, cached: 40},
+		},
+		// Round 3: both results integrated, the orchestrator concludes.
+		sseRound{
+			contentTokens: []string{"Conclusion: ", "deduced."},
+			usage:         &fakeUsage{prompt: 160, completion: 8, total: 168, cached: 80},
+		},
+	)
+
+	t.Setenv("FIREWORKS_BASE_URL", fake.baseURL())
+	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
+
+	dir := t.TempDir()
+	key := "test-key"
+	a, err := app.Create(app.CreateOptions{
+		Overrides: config.ConfigOverrides{
+			StateDir:        &dir,
+			ProjectPath:     &dir,
+			Tier:            strPtr("operator"),
+			FireworksAPIKey: &key,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer a.Shutdown()
+
+	sink := &recordingSink{}
+	a.SetHooks(app.AppHooks{AgentEvents: sink})
+
+	reply, serr := a.Session.Send(context.Background(), "deduce what's worth remembering", agent.SendOptions{})
+	if serr != nil {
+		t.Fatalf("Send returned error: %v", serr)
+	}
+	if !strings.Contains(reply, "deduced") {
+		t.Errorf("final reply = %q, want it to contain the round-3 conclusion", reply)
+	}
+
+	// Three model rounds: two chained tool rounds + the final-answer round.
+	if got := fake.callCount(); got != 3 {
+		t.Fatalf("model called %d times, want 3 (two chained tool rounds + final)", got)
+	}
+
+	// --- every main-thread round ran on flash at reasoning_effort "high" ---
+	for i := 0; i < 3; i++ {
+		if got := fake.requestField(i, "model"); got != flashModelID {
+			t.Errorf("round %d model = %v, want flash orchestration model %q", i+1, got, flashModelID)
+		}
+		if got := fake.requestField(i, "reasoning_effort"); got != "high" {
+			t.Errorf("round %d reasoning_effort = %v, want %q (large-tier orchestration default)", i+1, got, "high")
+		}
+	}
+
+	// --- two distinct tools were dispatched in order, both settled ok ---
+	if len(sink.calls) != 2 ||
+		sink.calls[0].Name != "memory.list" || sink.calls[1].Name != "memory.recall" {
+		t.Fatalf("tool calls = %+v, want [memory.list, memory.recall] in order", sink.calls)
+	}
+	for i, res := range sink.results {
+		if !res.Result.Ok {
+			t.Errorf("tool result %d (%s) not ok: %+v", i, res.Name, res.Result)
+		}
+	}
+
+	// --- the deduction chain: each round folds back the PRIOR round's tool result ---
+	// Round 2 sees round-1's list result (1 tool message); round 3 sees both (>= 2).
+	if got := countToolRoleMessages(fake.requestMessages(1)); got < 1 {
+		t.Errorf("round-2 request carried %d tool-role messages, want >= 1 (round-1 result fed back)", got)
+	}
+	if got := countToolRoleMessages(fake.requestMessages(2)); got < 2 {
+		t.Errorf("round-3 request carried %d tool-role messages, want >= 2 (both results fed back)", got)
+	}
+}
+
 func strPtr(s string) *string { return &s }

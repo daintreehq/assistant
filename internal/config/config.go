@@ -35,8 +35,13 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// DEFAULTS holds the built-in default values. These are
-// the CODE defaults (glm-5p2 / deepseek-v4-flash), NOT the CLAUDE.md prose.
+// DEFAULTS holds the built-in default values (the CODE defaults, not the
+// CLAUDE.md prose). All three tiers run deepseek-v4-flash: it is the validated
+// orchestration model, not an experiment — flash carries the main thread well
+// because the loaded skills (procedural memory) supply the step-by-step
+// playbooks, so a heavier reasoning model on the large tier earned nothing.
+// Override any tier with DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL when a particular
+// deployment wants a beefier model for judgment-heavy steps.
 var DEFAULTS = struct {
 	FireworksBaseURL string
 	LargeModel       string
@@ -45,10 +50,9 @@ var DEFAULTS = struct {
 	DefaultMcpURL    string
 }{
 	FireworksBaseURL: "https://api.fireworks.ai/inference/v1",
-	// EXPERIMENT: all tiers on DeepSeek V4 Flash (was glm-5p2 for large/medium).
-	LargeModel:  "accounts/fireworks/models/deepseek-v4-flash",
-	MediumModel: "accounts/fireworks/models/deepseek-v4-flash",
-	SmallModel:  "accounts/fireworks/models/deepseek-v4-flash",
+	LargeModel:       "accounts/fireworks/models/deepseek-v4-flash",
+	MediumModel:      "accounts/fireworks/models/deepseek-v4-flash",
+	SmallModel:       "accounts/fireworks/models/deepseek-v4-flash",
 	// Declared but NOT applied as a default for mcpUrl; mcpUrl is left empty when
 	// unset → degraded local mode.
 	DefaultMcpURL: "http://127.0.0.1:45454/mcp",

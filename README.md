@@ -8,10 +8,12 @@ them with cheap models, schedules timers, and keeps the human's main conversatio
 It is **not** a code editor. It never edits project files. When a change is needed it
 spawns a *visible* agent terminal inside Daintree and supervises it.
 
-Powered by **Fireworks AI** (OpenAI-compatible Chat Completions over `net/http`): a
-large model (`glm-5p2`) runs the main thread; a small fast model (`deepseek-v4-flash`)
-does watchers, summaries, and classification. A `medium` tier exists in the routing
-abstraction and resolves to `large` in v1.
+Powered by **Fireworks AI** (OpenAI-compatible Chat Completions over `net/http`):
+`deepseek-v4-flash` runs every tier — the main thread (orchestration) as well as
+watchers, summaries, and classification. Flash is the validated orchestration model;
+the loaded skills supply the playbooks, so a heavier main-thread model earned nothing.
+A `medium` tier exists in the routing abstraction and resolves to `large` in v1; any
+tier can be overridden with `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`.
 
 > This prototype ships with built-in system prompts and talks to Fireworks directly.
 > In the final product these are replaced by the hosted backend.

@@ -22,10 +22,13 @@ exposes `Chat`, `Stream(onToken)`, and `JSON`.
 
 | Tier  | Model id                                          | Use                                         |
 | ----- | ------------------------------------------------- | ------------------------------------------- |
-| large | `accounts/fireworks/models/glm-5p2`               | Main thread: reasoning, orchestration       |
+| large | `accounts/fireworks/models/deepseek-v4-flash`     | Main thread: reasoning, orchestration       |
 | small | `accounts/fireworks/models/deepseek-v4-flash`     | Watchers, summaries, classification, timers |
 
-(There is a `medium` tier in the abstraction; for v1 it routes to `large`.)
+All tiers default to `deepseek-v4-flash` — it is the validated orchestration model, and
+the loaded skills supply the playbooks that make it sufficient on the main thread.
+Override any tier with `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`. (There is a `medium` tier
+in the abstraction; for v1 it routes to `large`.)
 
 ## Chat completions
 

@@ -62,8 +62,8 @@ const (
 
 	// LargeContextWindowTokens is the main (large) model's context window, used as the
 	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
-	// "% toward auto-compaction". glm-5p2 carries a ~1M-token window; the gauge must reflect
-	// that (a small conversation reads ~1%, not 13% of the 60K compact threshold).
+	// "% toward auto-compaction". The large tier is sized to a ~1M-token window; the gauge
+	// must reflect that (a small conversation reads ~1%, not 13% of the 60K compact threshold).
 	LargeContextWindowTokens = 1_000_000
 
 	// MainPromptCacheKey is the Fireworks prompt_cache_key. Plain, UNVERSIONED:
