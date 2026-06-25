@@ -39,6 +39,15 @@ const (
 	AutoCompactTokenThreshold = 60000
 	CharsPerToken             = 4
 
+	// DistillTranscriptMaxRunes caps the transcript fed to the compaction-distillation
+	// model (both the auto-compact path in agent.Session and the manual /compact path
+	// in the commands layer) — the small model needs only enough recent context to
+	// extract durable facts, not the full summary input. Shares the value 8000 with
+	// MaxToolResultChars by coincidence; the two are semantically distinct (that one
+	// caps a single tool result, this one caps the distillation model's input), so they
+	// stay separate constants.
+	DistillTranscriptMaxRunes = 8000
+
 	// AutoCompactFailureThreshold is the number of CONSECUTIVE small-model summary
 	// failures that must accumulate before the auto-compact fallback (lossy
 	// truncation) kicks in. A single transient 429/outage must not destroy history;
