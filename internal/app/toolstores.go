@@ -276,4 +276,7 @@ var (
 	// *storage.Store directly satisfies the agent distill-on-compact seam (no adapter
 	// needed — its no-ctx, record-returning InsertMemory + MemoryExists match exactly).
 	_ agent.MemoryStore = (*storage.Store)(nil)
+	// *storage.Store directly satisfies the agent artifact-persist seam (its no-ctx,
+	// record-returning InsertArtifact matches the interface exactly).
+	_ agent.ArtifactPersister = (*storage.Store)(nil)
 )

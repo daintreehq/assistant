@@ -112,6 +112,7 @@ func TestFreshSchemaShape(t *testing.T) {
 			"errorMessage", "createdAt", "updatedAt", "workflowRunId"},
 		"memories": {"id", "content", "category", "source", "pinnedAt", "deletedAt",
 			"createdAt", "updatedAt"},
+		"artifacts": {"id", "sessionId", "content", "totalChars", "totalBytes", "createdAt"},
 	}
 	for table, cols := range mustHaveCols {
 		got := colNames(t, s, table)
@@ -128,6 +129,7 @@ func TestFreshSchemaShape(t *testing.T) {
 		"workflow_runs":   {"idx_workflow_runs_status"},
 		"skill_run_state": {"idx_skill_run_state_key"},
 		"agent_launches":  {"idx_agent_launches_key"},
+		"artifacts":       {"idx_artifacts_session"},
 	}
 	for table, idxs := range mustHaveIdx {
 		got := indexNames(t, s, table)

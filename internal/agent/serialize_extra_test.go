@@ -72,7 +72,7 @@ func TestSerializeRepagedSliceDoesNotReOverflow(t *testing.T) {
 	// Escape-heavy content doubles under each JSON encode. Storing it, then re-paging
 	// a slice back through SerializeToolResult must stay valid + inline — not produce
 	// a second nested stub (escape amplification).
-	store := NewArtifactStore()
+	store := NewArtifactStore("", nil)
 	heavy := strings.Repeat("\\", 8000)
 	stub := SerializeToolResult(domain.Ok("heavy", heavy), store)
 	var first truncationStub

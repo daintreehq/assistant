@@ -170,7 +170,7 @@ func NewSession(deps SessionDeps) *Session {
 	s := &Session{
 		deps:             deps,
 		events:           deps.Events,
-		artifacts:        NewArtifactStore(),
+		artifacts:        NewArtifactStore(deps.SessionID, deps.ArtifactPersister),
 		runRef:           deps.RunRef,
 		bgCtx:            deps.BackgroundCtx,
 		pendingDropCount: deps.DroppedRehydrateRows,

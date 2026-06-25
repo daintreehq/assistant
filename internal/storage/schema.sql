@@ -242,3 +242,19 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
   INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
   INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
+
+-- 3.13 artifacts — durable tool-result overflow payloads. When a serialized tool
+-- result overflows the inline cap the session stashes the full JSON envelope here;
+-- the in-memory ArtifactStore is a bounded hot cache (64 entries) and THIS table is
+-- the fallback, so an artifact.read resolves even after the id was evicted from the
+-- cache or written by a prior (now-restarted) session. Looked up by opaque id;
+-- sessionId is provenance + the retention-sweep scope key.
+CREATE TABLE IF NOT EXISTS artifacts (
+  id         TEXT PRIMARY KEY,
+  sessionId  TEXT NOT NULL,
+  content    TEXT NOT NULL,
+  totalChars INTEGER NOT NULL,
+  totalBytes INTEGER NOT NULL,
+  createdAt  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(sessionId, createdAt);

@@ -274,22 +274,29 @@ func (a mcpwrapWorkflowStoreAdapter) UpdateWorkflowRun(_ context.Context, id str
 
 /* ----------------------------- Skill adapters ---------------------------- */
 
-// artifactStoreAdapter resolves the session's overflow store LAZILY. The tool
-// builder runs before a.Session is constructed (registry → AssertSafe precede the
-// session in Create), so capturing a.Session.Artifacts() at build time would deref
-// a nil session. Reading it per-call defers to the live session; an absent session
-// yields a miss (the handler then returns ARTIFACT_UNAVAILABLE/NOT_FOUND).
+// artifactStoreAdapter resolves an overflow artifact, hot cache first then the
+// durable table. It reads the session's in-memory store LAZILY: the tool builder
+// runs before a.Session is constructed (registry → AssertSafe precede the session in
+// Create), so capturing a.Session.Artifacts() at build time would deref a nil
+// session. On a cache miss — an id evicted from the bounded 64-entry store, or a
+// stub rehydrated from a prior (now-restarted) session — it falls back to the
+// artifacts table, so a persisted truncation stub stays readable across eviction and
+// restart. Only a genuinely unknown/pruned id reaches the handler as a miss
+// (ARTIFACT_NOT_FOUND).
 type artifactStoreAdapter struct{ app *App }
 
 func (a artifactStoreAdapter) Get(id string) (string, bool) {
-	if a.app.Session == nil {
-		return "", false
+	if a.app.Session != nil {
+		if store := a.app.Session.Artifacts(); store != nil {
+			if v, ok := store.Get(id); ok {
+				return v, true
+			}
+		}
 	}
-	store := a.app.Session.Artifacts()
-	if store == nil {
-		return "", false
+	if a.app.Store != nil {
+		return a.app.Store.GetArtifact(id)
 	}
-	return store.Get(id)
+	return "", false
 }
 
 // loadSkills / findSkills resolve the session lazily for the same reason the
