@@ -32,3 +32,6 @@ state.db
 
 # OS / editor
 .DS_Store
+
+# In-repo git worktrees (never track as submodules)
+/worktrees/
