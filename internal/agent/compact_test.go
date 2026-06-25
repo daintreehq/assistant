@@ -226,6 +226,47 @@ func TestAutoCompactsAboveThreshold(t *testing.T) {
 	}
 }
 
+// TestAutoCompactPreSweepAvoidsSummary proves the issue #257 lossless rung: when the
+// pre-sweep alone drops the history back under the soft threshold, maybeAutoCompact must
+// skip the small-model summary entirely (no Chat call) and leave the deduped refs behind.
+func TestAutoCompactPreSweepAvoidsSummary(t *testing.T) {
+	r := &chatCountRouter{summary: "SHOULD_NOT_BE_CALLED"}
+	s, _ := compactSession(t, r)
+
+	// Three byte-identical oversized tool results: ~360k chars ≈ 90k tokens together
+	// (over the 60k gate), but a single retained copy (~30k tokens) plus the small
+	// controls sits comfortably under it. No model call is needed to reach a valid
+	// history, so the bare tool messages (no declaring assistant) are fine here.
+	big := strings.Repeat("z", 120_000)
+	s.messages = append(s.messages,
+		models.ChatMessage{Role: "tool", ToolCallID: "call_a", StringContent: big},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_b", StringContent: big},
+		models.ChatMessage{Role: "tool", ToolCallID: "call_c", StringContent: big},
+	)
+
+	s.maybeAutoCompact(context.Background(), "run_presweep")
+
+	if r.chatCalls != 0 {
+		t.Fatalf("pre-sweep should have averted the summary, but Chat was called %d times", r.chatCalls)
+	}
+	refs := 0
+	var keptBig bool
+	for _, m := range s.Messages() {
+		switch {
+		case strings.HasPrefix(m.StringContent, "[duplicate of "):
+			refs++
+		case m.StringContent == big:
+			keptBig = true
+		}
+	}
+	if refs != 2 {
+		t.Fatalf("expected 2 duplicate refs after sweep, got %d", refs)
+	}
+	if !keptBig {
+		t.Fatal("the most-recent copy of the duplicated result must be retained verbatim")
+	}
+}
+
 // --- distill-on-compact ---
 
 // fakeMemoryStore satisfies the agent.MemoryStore seam: it records inserts and
