@@ -30,6 +30,7 @@ requiredTools:
   - terminal.summarize
   - terminal.extract
   - terminal.sendCommand
+  - queue.publish
   - queue.digest
   - queue.resolve
 ---
@@ -50,6 +51,16 @@ Procedure:
 7. After the call returns, report what actually happened: quote the real terminalId/watcherId from the result. If the launch errored or returned no terminalId, or the watcher reports the terminal exited, say so — do not claim a clean launch.
 8. Close the loop, per mode:
    - BACKGROUND — end your turn after the spawn; the watcher confirms completion and wakes you with a completed_* event. Once you've relayed the agent's result, clear that inbox item with `queue.resolve {"id": "<the inbox id>"}` so it stops counting as needing attention — a finished agent's watcher has already stopped ITSELF, so there is nothing to cancel, only the lingering inbox item to resolve. Never call `watcher.cancel` on an already-finished watch (it is refused as "already ended"). If instead you abandon a STILL-ACTIVE watch — you got what you needed early, or the task was dropped — cancel it with `watcher.cancel {"id": "<watcherId>"}` and say so plainly, noting you can re-attach later. Leave OPEN any item that still needs the user (an agent waiting on a question).
-   - IN-TURN — block on `terminal.awaitAll({ terminalIds: ["<the terminalId>"] })` (bounded; polls agentState only, no model call), then read the result with terminal.summarize (or terminal.extract for a specific field) and relay it in the same turn — and since awaitAll is state-based, if the tail shows the agent is still working, re-await/watch it rather than relaying a half-done screen. The result names the stragglers at the top level (`stillWorking` / `askingQuestion` id arrays): if the budget ran out re-await the `stillWorking` id directly (or, for a known-slow agent, raise `maxAttempts` — default 30 ≈ 60s, max 240 ≈ 480s); if it reports the agent in `askingQuestion`, answer it with terminal.sendCommand and await again; if it reports failed, say so. No watcher means no inbox item to resolve.
+   - IN-TURN — block on `terminal.awaitAll({ terminalIds: ["<the terminalId>"] })` (bounded; polls agentState only, no model call), then read the result with terminal.summarize (or terminal.extract for a specific field) and relay it in the same turn — and since awaitAll is state-based, if the tail shows the agent is still working, re-await/watch it rather than relaying a half-done screen. The result names the stragglers at the top level (`stillWorking` / `askingQuestion` id arrays): if the budget ran out, re-await the `stillWorking` id directly **at most twice** (three awaitAll calls total on the same terminal; raise `maxAttempts` — default 30 ≈ 60s, max 240 ≈ 480s — on a re-await for a known-slow agent rather than looping). After two re-awaits with no finish, the agent is HUNG — stop re-awaiting (never a fourth await), hand it off to the background, and END the turn: publish a blocked inbox item and attach a watcher so the human is woken when it eventually finishes.
+   ```
+   queue.publish({ "source": "model_worker", "severity": "blocked",
+     "title": "Agent hung — did not finish",
+     "summary": "Agent <terminalId> still working after 2 re-awaits; attached a watcher to notify on completion.",
+     "target": { "terminalId": "<terminalId>" }, "dedupeKey": "hung-<terminalId>" })
+   watcher.terminal.create({ "terminalIds": ["<terminalId>"], "title": "hung agent recovery",
+     "goal": "notify when the stuck agent finishes",
+     "stopWhen": { "all": [ { "stateIs": "waiting" }, { "modelJudge": "Has the agent finished its work and stopped, not just paused?" } ] } })
+   ```
+   If it reports the agent in `askingQuestion`, answer it with terminal.sendCommand and await again; if it reports failed, say so. On the happy path no watcher means no inbox item to resolve — the hung-agent escape is the one exception (it attaches a watcher and publishes an item, which you resolve once the agent finishes).
 Confirmation: spawning the agent mutates real state — confirm before launch per the active tier.
 Report back: the terminal id, the watcher id if you attached one (BACKGROUND), and either the relayed result (IN-TURN) or the expected next update (BACKGROUND).

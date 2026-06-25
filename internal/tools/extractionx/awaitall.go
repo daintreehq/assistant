@@ -81,7 +81,7 @@ var awaitSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it." },
+    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it. BOUND the re-await loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal). After that a still-working terminal is HUNG — escalate (publish a blocked inbox item with queue.publish and attach a watcher with watcher.terminal.create) and end the turn rather than awaiting it again." },
     "pollIntervalMs": { "type": "number", "description": "Delay between poll rounds in ms (default 2000)." },
     "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s — durations assume the default 2s pollIntervalMs). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default." }
   },
@@ -99,7 +99,7 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			"ONCE for the whole cohort instead of one wait per agent. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
 			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
 			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
-			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Read-only; requires Daintree MCP.",
+			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitArgs{} }),
