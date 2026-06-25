@@ -19,13 +19,14 @@ const (
 	LeftPad = 1
 	// LiveChromeMaxWidth caps the compact status rollup so it never wraps to 2 rows.
 	LiveChromeMaxWidth = 56
-	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Completed
-	// blocks (whole paragraphs, closed tool groups) flush to native scrollback as they stream
-	// (flush.go); what stays live is an open tool group + the still-growing prose paragraph
-	// (rendered token by token — render_turn.go) + the one-line live status. The growing
-	// paragraph is the one unbounded piece, so this cap (applied via lastLines in view.go) keeps
-	// the live View short — a flush/commit tea.Println can never dump a tall footer into
-	// scrollback (bubbletea#1613).
+	// maxLiveRows hard-caps the live in-flight tail shown above the composer. Settled rows
+	// (whole paragraphs, closed tool groups, and the settled wrapped LINES of a plain growing
+	// paragraph) flush to native scrollback as they stream (flush.go); for plain prose what stays
+	// live is just an open tool group + the partial last line + the one-line live status. The one
+	// piece that can still grow tall is a withheld MARKDOWN paragraph (an open code fence / span —
+	// render_turn.go renderProse), so this cap (applied via lastLines in view.go) keeps the live
+	// View short — a flush/commit tea.Println can never dump a tall footer into scrollback
+	// (bubbletea#1613).
 	maxLiveRows = 8
 	// minCockpitRows is the height floor below which the footer collapses to a single
 	// "terminal too small" line (see footer()). Below it the fixed bottom band (composer +

@@ -244,12 +244,13 @@ func renderTurn(th theme.Theme, md *markdown.Renderer, t *TurnCell, width, conte
 	}
 	// withholdGrowingLast=false: the footer (and the seal) render the LAST prose step in FULL —
 	// including its still-growing final paragraph, re-parsed as markdown every frame so prose
-	// streams smoothly token by token. That growing paragraph lives ONLY in the un-flushed
-	// footer tail: liveCellsView slices off FlushedRows, and the FLUSH (activeTurnFinalRows)
-	// passes withholdGrowingLast=true so only COMPLETED "\n\n"-terminated paragraphs ever commit
-	// to scrollback — a half-rendered paragraph is never frozen there. The footer height is
-	// bounded by view.go's lastLines(budget) cap, NOT by withholding, so showing the growing
-	// paragraph stays safe against bubbletea#1613.
+	// streams smoothly token by token. Only the still-MUTABLE tail of that paragraph lives in
+	// the un-flushed footer: liveCellsView slices off FlushedRows, and the FLUSH
+	// (activeTurnFinalRows) passes withholdGrowingLast=true so renderProse commits the settled
+	// row prefix — line by line for a plain tail, paragraph by paragraph for a markdown one — and
+	// never freezes a row that later reflows. With a plain tail the footer therefore holds only
+	// the partial last line + the live status; the lastLines(budget) cap in view.go is a height
+	// backstop (it still bounds a withheld markdown paragraph) against bubbletea#1613.
 	hasBody := false
 	if body := renderTurnSteps(th, md, t, 0, -1, width, contentW, expanded, spinnerFrame, now, false); body != "" {
 		parts = append(parts, body)
@@ -299,16 +300,16 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 // renderTurnSteps renders the ordered steps in the half-open range [from, to) of the
 // turn (to < 0 means "to the end"): prose as styled markdown, contiguous tool runs as
 // one branch tree, notes inline. withholdGrowingLast governs ONLY the turn's genuine LAST
-// prose step (global index len(Steps)-1): when set, that step renders only its COMPLETED
-// paragraphs and the still-growing final paragraph is WITHHELD (renderProse). This is the
-// COMMIT-bound flush render — it must never freeze a half-rendered paragraph into scrollback.
-// When unset (the footer and the seal) the last step renders in FULL, so the live footer
-// reprocesses the growing paragraph as markdown each frame. It applies ONLY to that last
-// step, so an earlier prose step that streamed before a tool batch renders as FINAL markdown
-// regardless of its sticky Streaming flag. The flush's withheld (completed-only) render is a
-// row-exact PREFIX of the footer's full render — in CommonMark a completed paragraph is
-// independent of the paragraph that follows it — so the un-flushed remainder (the growing
-// paragraph) sits in the footer tail until it seals and is never double-committed.
+// prose step (global index len(Steps)-1): when set, that step renders its IMMUTABLE row
+// prefix — all but the still-mutable tail of the growing paragraph (renderProse settles a
+// plain tail line by line, a markdown tail paragraph by paragraph). This is the COMMIT-bound
+// flush render — it must never freeze a row that later reflows. When unset (the footer and the
+// seal) the last step renders in FULL, so the live footer reprocesses the growing paragraph as
+// markdown each frame. It applies ONLY to that last step, so an earlier prose step that streamed
+// before a tool batch renders as FINAL markdown regardless of its sticky Streaming flag. The
+// flush's render is a row-exact PREFIX of the footer's full render — renderProse derives it from
+// the SAME md.Render call and trims only the mutable tail — so the un-flushed remainder sits in
+// the footer tail until it settles and is never double-committed.
 //
 // Tool grouping is computed over the sub-range; the incremental flush only ever passes a
 // range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
@@ -406,27 +407,44 @@ func hasProse(t *TurnCell) bool {
 // until it closes — but that churn is confined to the EPHEMERAL footer; nothing partial is
 // ever committed to scrollback.
 //
-// When withholdGrowing is true (the COMMIT-bound flush path only) it settles PARAGRAPH BY
-// PARAGRAPH: only the text up to the last blank line ("\n\n") is rendered, and only that is
-// allowed to flush to scrollback. The still-growing final paragraph is held back so scrollback
-// never freezes a half-rendered paragraph. "\n\n" is the only safe boundary because CommonMark
-// joins single-newline lines into one reflowing paragraph; md.Render(settled-prefix) is a
-// byte-exact ROW prefix of the eventual full render, so the flush (completed paragraphs) and
-// the footer/seal (whole text) agree row-for-row on that prefix — the un-flushed remainder
-// (the growing paragraph) lives in the footer tail until it seals, then commits exactly once.
+// When withholdGrowing is true (the COMMIT-bound flush path only) it returns the IMMUTABLE
+// row prefix that may flush to native scrollback — everything that can no longer change as
+// more tokens arrive. Two regimes, picked by the still-growing final paragraph's source text:
+//
+//   - PLAIN tail (proseTailIsPlain): the growing paragraph is settling LINE BY LINE. We render
+//     the WHOLE step (byte-identical to the footer's render — same md.Render call, same cache
+//     entry) and drop only its LAST visual row. Glamour word-wraps greedily, so appending text
+//     mutates ONLY the last visual row — every earlier wrapped row is closed and final. So the
+//     full render minus its last row is a byte-exact ROW prefix of the footer/seal render, and
+//     prose flows into scrollback a line at a time (the footer holds just the partial last line
+//
+//   - the live status) instead of a paragraph at a time. THIS is what kills the old churn:
+//     before, a paragraph taller than the 8-row footer cap (view.go) scrolled its head out of
+//     the capped window each token, then jumped in whole on seal. Now nothing accumulates.
+//
+//   - MARKDOWN-risky tail: a half-typed inline span (**bold**, `code`, [link]), a bare URL that
+//     GFM linkify will style, or a block that restyles earlier rows (setext heading, list)
+//     means an "earlier" row is NOT final until the construct closes. So we fall back to settling
+//     PARAGRAPH BY PARAGRAPH: render only the text up to the last blank line ("\n\n"); the growing
+//     paragraph stays live in the footer (rendered in full there) and commits only when it seals.
+//     "\n\n" is the only safe boundary because CommonMark joins single-newline lines into one
+//     reflowing paragraph. The growing paragraph can still churn inside the footer cap here, but
+//     that path is now reserved for the rare markdown-heavy tail rather than every plain paragraph.
 //
 // withholdGrowing is decided by POSITION + path (is this the turn's last step, in the flush
 // render), never by the step's sticky Streaming flag, so a half-rendered paragraph can never
-// be frozen mid-turn into scrollback.
+// be frozen mid-turn into scrollback. proseTailIsPlain examines ONLY the growing tail, so a
+// committed plain row holds no markdown character that later text could restyle.
 //
-// LIMITATION (shared with the pre-existing flush — this is NOT new to live footer streaming):
-// the byte-exact prefix relies on a completed paragraph rendering independently of later text.
-// That holds for normal prose, inline links [text](url), lists, and tables, but NOT for
-// document-global constructs like reference-style link DEFINITIONS ("[id]: url"), where a later
-// definition restyles an earlier paragraph. Such a paragraph can commit (to scrollback) before
-// its definition arrives and then render differently in the full footer/seal. LLM-streamed prose
-// uses inline links, so this is rare; a robust fix would render prose paragraph-locally (or hold
-// prose flush until reference definitions resolve) and is left as future work.
+// LIMITATION (shared with the pre-existing flush — this is NOT new to line-level streaming):
+// the byte-exact prefix relies on a settled row rendering independently of later text. The
+// proseTailIsPlain guard makes that hold for every INLINE construct (it rejects the tail the
+// instant a delimiter / link trigger appears, before that row could settle). The residual gap is
+// a RETROACTIVE block built by appending a newline below a plain line we already committed —
+// a setext "===" / "---" underline or a definition-list ": def" — which restyles the line above.
+// sealTail's row-count fallback absorbs this without dup/loss (the scrollback copy just keeps the
+// plain styling), and LLM prose uses ATX "#" headings and blank-line paragraphs, so it is
+// vanishingly rare.
 func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGrowing bool) string {
 	if step.Text == "" {
 		return ""
@@ -434,14 +452,93 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGro
 	if !withholdGrowing {
 		return strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
 	}
-	// Flush path: render only the COMPLETED paragraphs (everything up to the final blank line).
-	// The still-growing paragraph after it stays live in the footer (rendered in full there),
-	// but must never enter the commit-bound prefix until it seals.
+	// Flush path. The growing tail is the text after the last completed paragraph ("\n\n").
 	idx := strings.LastIndex(step.Text, "\n\n")
+	tail := step.Text
+	if idx >= 0 {
+		tail = step.Text[idx+2:]
+	}
+	if proseTailIsPlain(tail) {
+		// Line-level commit: render the FULL step (the exact bytes the footer shows) and drop
+		// the last visual row — the one row greedy word-wrap may still mutate. The result is a
+		// byte-exact row prefix of the footer render, so a committed line never re-renders.
+		full := strings.TrimRight(md.Render(step.Text, contentW, false).ANSI, "\n")
+		rows := strings.Split(full, "\n")
+		rows = rows[:len(rows)-1] // drop the still-mutable last visual row
+		// Drop any trailing BLANK rows the last row left exposed — the paragraph separator that
+		// precedes the growing paragraph. It belongs with the still-live tail below it, and the
+		// flush↔seal reconciliation forbids the committed prefix ending in a blank (it would be
+		// re-committed on seal). It re-settles naturally once the growing paragraph commits a row.
+		for len(rows) > 0 && strings.TrimSpace(stripAnsi(rows[len(rows)-1])) == "" {
+			rows = rows[:len(rows)-1]
+		}
+		return strings.Join(rows, "\n") // "" when only a single visual row has formed so far
+	}
+	// Markdown-risky tail: settle paragraph by paragraph — commit only the completed paragraphs.
 	if idx < 0 {
 		return "" // no completed paragraph yet — withhold the whole still-growing step from the flush
 	}
 	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
+}
+
+// proseTailIsPlain reports whether the still-growing final paragraph `tail` (the raw markdown
+// source after the last "\n\n") is plain prose that glamour will only ever APPEND-WRAP — so its
+// settled wrapped rows can flush to scrollback line by line without any later token restyling an
+// already-committed row (see renderProse). It is deliberately conservative: a single false from a
+// borderline tail merely falls back to paragraph-level commit (correct, just less smooth), while a
+// wrong true would freeze a row that reflows. So we reject anything that could open an inline span,
+// a retroactive block, or a multi-line construct:
+//
+//   - empty tail — nothing to settle.
+//   - any inline/markdown-significant char: an unclosed **bold** / _em_ / `code` / [link] /
+//     <autolink> / entity (&) / escape (\) / table pipe (|) / strikethrough (~) restyles earlier
+//     bytes when it closes; "#" / ">" anywhere are cheapest to reject wholesale.
+//   - a GFM autolink trigger ("://", "www.", "@"): glamour enables GFM linkify, so a bare URL or
+//     email gets link styling — and because it styles the WHOLE token (an OSC-8 target can even
+//     embed the full URL on every wrapped row), extending it as it streams rewrites earlier rows.
+//     A partial URL stays on the still-live last row until a trigger appears, so rejecting on the
+//     trigger keeps any part of the link out of the committed prefix.
+//   - any newline or tab: a soft break can become a setext underline, a hard break, a definition
+//     list, or list/blockquote continuation; a tab is block indentation (indented code) — all
+//     re-wrap or re-style the lines above.
+//   - a leading block opener ("- ", "+ ", "N. ", "N) ", or a >=4-space indent = indented code):
+//     these render the whole tail as a list item / code block, not a paragraph.
+func proseTailIsPlain(tail string) bool {
+	if tail == "" {
+		return false
+	}
+	// Inline spans and retroactive blocks all announce themselves with one of these runes; a
+	// committed row containing none of them is pure text nothing downstream can restyle.
+	if strings.ContainsAny(tail, "*_`[]<>&\\|~#") {
+		return false
+	}
+	// GFM linkify: a bare URL / email restyles its whole token as it grows, so reject the tail the
+	// moment a scheme ("://"), a "www." host, or an email "@" appears.
+	if strings.Contains(tail, "://") || strings.Contains(tail, "www.") || strings.Contains(tail, "@") {
+		return false
+	}
+	if strings.ContainsAny(tail, "\n\t") {
+		return false
+	}
+	// Leading block markers (the tail is a single line, so position 0 is the only line start).
+	t := strings.TrimLeft(tail, " ")
+	if len(tail)-len(t) >= 4 {
+		return false // >=4-space indent → indented code block
+	}
+	if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "+ ") {
+		return false // bullet list item
+	}
+	// Ordered-list opener: one or more digits then "." or ")" then a space.
+	d := 0
+	for d < len(t) && t[d] >= '0' && t[d] <= '9' {
+		d++
+	}
+	if d > 0 && d < len(t) && (t[d] == '.' || t[d] == ')') {
+		if d+1 < len(t) && t[d+1] == ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 // renderInlineNote renders a SystemNote attached to a turn.

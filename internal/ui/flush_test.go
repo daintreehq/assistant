@@ -9,13 +9,14 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// flush_test.go locks the INCREMENTAL ROW FLUSH (flush.go): the active turn's STABLE
-// completed-paragraph rows commit to native scrollback AS THEY STREAM (auto-scroll), while
-// the still-growing final paragraph renders LIVE in the footer (streamed token by token) but
-// is withheld from the COMMIT until it seals — only completed "\n\n"-terminated paragraphs
-// flush to scrollback. Flushed rows carry no caret and are byte-identical to the seal's
-// render, so nothing is duplicated; the growing paragraph lives only in the un-flushed footer
-// tail (liveCellsView slices off FlushedRows) and is height-bounded by lastLines(budget).
+// flush_test.go locks the INCREMENTAL ROW FLUSH (flush.go): the active turn's SETTLED rows
+// commit to native scrollback AS THEY STREAM (auto-scroll), while the still-mutable tail renders
+// LIVE in the footer (streamed token by token). A PLAIN growing paragraph settles line by line —
+// every wrapped row but the last flushes as it forms; a MARKDOWN-risky growing paragraph falls
+// back to paragraph-level commit (it flushes only on a completed "\n\n"). Flushed rows carry no
+// caret and are byte-identical to the seal's render, so nothing is duplicated; the un-flushed tail
+// lives only in the footer (liveCellsView slices off FlushedRows) and is height-bounded by
+// lastLines(budget).
 
 func armedModel(turn *TurnCell) Model {
 	m := testModel(80)
@@ -36,7 +37,7 @@ func toolStep(id, name, detail string, state ActivityState) TurnStep {
 
 func streamingProse(text string) (Model, *TurnCell) {
 	// Phase=Generating so the live "⠋ Writing" status renders alongside the growing paragraph,
-	// which streams live in the footer (only completed paragraphs are withheld from the commit).
+	// which streams live in the footer (its settled rows flush; only the still-mutable tail stays).
 	turn := &TurnCell{ID: "turn_1", UserText: "QUESTIONX", State: TurnActive, Phase: domain.PhaseGenerating, Steps: []TurnStep{proseStep(text, true)}}
 	return armedModel(turn), turn
 }
@@ -226,32 +227,221 @@ func TestFlush_RedrawResetsSealedFlushState(t *testing.T) {
 	}
 }
 
-// TestFlush_SingleParagraphHeld proves a lone in-progress paragraph (no completed line) is
-// NOT flushed to scrollback — it is withheld from the COMMIT until it seals — yet it DOES
-// render live in the footer (streamed token by token) alongside the "⠋ Writing" status. This
-// is the case that must never freeze a raw partial copy in scrollback, while still showing
-// the user the prose as it forms.
-func TestFlush_SingleParagraphHeld(t *testing.T) {
+// TestFlush_PlainParagraphStreamsLineByLine proves a lone in-progress PLAIN paragraph settles
+// into scrollback LINE BY LINE: every wrapped row except the still-mutable last one flushes as it
+// forms (greedy word-wrap can no longer change a closed row), so prose flows token by token into
+// native scrollback and the footer holds only the partial last line + the "⠋ Writing" status. The
+// committed head must never re-render in the footer, and the paragraph must appear exactly once
+// across the flushed prefix + the seal tail (no dup, no loss).
+func TestFlush_PlainParagraphStreamsLineByLine(t *testing.T) {
+	// A single plain paragraph (no "\n", no markdown) long enough to wrap to >=2 rows at width 80,
+	// so the head row settles while the GIRAFFEONE tail keeps growing.
 	m, turn := streamingProse("ZEBRAONE a single growing paragraph with no newline yet so it is all in progress GIRAFFEONE")
-	_ = m.flushActiveTurn() // flushes only the preamble (YOU + marker), not the prose
-	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
-	if strings.Contains(final, "ZEBRAONE") {
-		t.Errorf("an in-progress single paragraph must not be in the flushable prefix:\n%s", final)
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("expected the settled head line of the plain paragraph to flush")
 	}
-	// The footer MUST show the growing paragraph live, plus the live status.
+	// The settled head row commits; the still-mutable last row does not.
+	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
+	if !strings.Contains(final, "ZEBRAONE") {
+		t.Errorf("the settled head line must be in the flushable prefix:\n%s", final)
+	}
+	if strings.Contains(final, "GIRAFFEONE") {
+		t.Errorf("the still-growing last line must be withheld from the flushable prefix:\n%s", final)
+	}
+	// The footer shows the growing tail + status, and must NOT re-show the already-committed head.
 	foot := ansi.Strip(m.footer())
-	if !strings.Contains(foot, "ZEBRAONE") {
-		t.Errorf("a single growing paragraph must stream live in the footer:\n%s", foot)
+	if !strings.Contains(foot, "GIRAFFEONE") {
+		t.Errorf("the still-growing last line must stream live in the footer:\n%s", foot)
+	}
+	if strings.Contains(foot, "ZEBRAONE") {
+		t.Errorf("the committed head line must not re-appear in the footer (it lives in scrollback now):\n%s", foot)
 	}
 	if !strings.Contains(foot, "Writing") {
 		t.Errorf("the footer must show the live ⠋ Writing status while the paragraph forms:\n%s", foot)
 	}
-	// Seal: the paragraph commits exactly once.
+	// Seal: the paragraph appears exactly once across the flushed prefix + the seal tail.
+	committed := ansi.Strip(turn.flushedRowsText)
 	turn.sealProse()
 	turn.State = TurnComplete
-	blk := m.sealedBlock(0)
-	if n := strings.Count(ansi.Strip(blk.Rendered), "ZEBRAONE"); n != 1 {
-		t.Errorf("sealed paragraph appears %d times, want 1:\n%s", n, ansi.Strip(blk.Rendered))
+	committed += "\n" + ansi.Strip(m.sealedBlock(0).Rendered)
+	if n := strings.Count(committed, "ZEBRAONE"); n != 1 {
+		t.Errorf("head line appears %d times across flush+seal, want 1 (no dup/loss):\n%s", n, committed)
+	}
+	if n := strings.Count(committed, "GIRAFFEONE"); n != 1 {
+		t.Errorf("tail line appears %d times across flush+seal, want 1 (no dup/loss):\n%s", n, committed)
+	}
+}
+
+// TestFlush_MarkdownTailFallsBackToParagraph proves a growing paragraph whose tail holds an OPEN
+// markdown construct (here an unclosed **bold** span) does NOT settle line by line — committing a
+// row the closing delimiter would later restyle would freeze stale bytes in scrollback. So the flush
+// falls back to paragraph-level: the completed paragraph still flushes, but the whole growing
+// markdown paragraph stays live in the footer until a "\n\n" seals it.
+func TestFlush_MarkdownTailFallsBackToParagraph(t *testing.T) {
+	// One completed paragraph + a short growing paragraph carrying an unclosed bold span.
+	m, turn := streamingProse("DONELINE a settled first paragraph here.\n\nLIVEMD a short **bold tail")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("the completed first paragraph must flush")
+	}
+	final := ansi.Strip(strings.Join(m.activeTurnFinalRows(turn), "\n"))
+	if !strings.Contains(final, "DONELINE") {
+		t.Errorf("the completed paragraph must still flush:\n%s", final)
+	}
+	if strings.Contains(final, "LIVEMD") {
+		t.Errorf("a markdown-risky growing paragraph must be withheld from the flushable prefix:\n%s", final)
+	}
+	// It still renders live in the footer so the user sees it form (just not committed yet).
+	foot := ansi.Strip(m.footer())
+	if !strings.Contains(foot, "LIVEMD") {
+		t.Errorf("the growing markdown paragraph must still render live in the footer:\n%s", foot)
+	}
+}
+
+// TestFlush_PlainParagraphAfterCompletedFlushesLineByLine proves a PLAIN growing paragraph that
+// FOLLOWS an already-completed paragraph still settles line by line: the completed paragraph plus
+// the blank separator plus the settled head of the second paragraph all commit, the still-mutable
+// last line does not, the committed prefix is a byte-exact ROW PREFIX of the live footer render, and
+// it never ends in the blank separator row (which would re-commit on seal).
+func TestFlush_PlainParagraphAfterCompletedFlushesLineByLine(t *testing.T) {
+	m, turn := streamingProse("DONEPARA a completed first paragraph here.\n\nTAILPARA a second paragraph that streams on long enough to wrap past a single visual row so its head settles while LASTWORD keeps forming")
+	rows := m.activeTurnRows(turn) // the live footer render this frame (captured before the flush)
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("expected the completed paragraph and the settled head of the second to flush")
+	}
+	committed := ansi.Strip(turn.flushedRowsText)
+	if !strings.Contains(committed, "DONEPARA") {
+		t.Errorf("the completed first paragraph must be in the committed prefix:\n%s", committed)
+	}
+	if !strings.Contains(committed, "TAILPARA") {
+		t.Errorf("the settled head of the second paragraph must be in the committed prefix:\n%s", committed)
+	}
+	if strings.Contains(committed, "LASTWORD") {
+		t.Errorf("the still-mutable last line must NOT be committed:\n%s", committed)
+	}
+	// Byte-exact ROW PREFIX of the live footer render (no jump on seal).
+	if got := strings.Join(rows[:turn.FlushedRows], "\n"); got != turn.flushedRowsText {
+		t.Errorf("committed prefix diverged from the footer render:\ncommitted:\n%q\nfooter:\n%q", turn.flushedRowsText, got)
+	}
+	// Must not end in a blank separator row.
+	cr := strings.Split(turn.flushedRowsText, "\n")
+	if n := len(cr); n > 0 && strings.TrimSpace(ansi.Strip(cr[n-1])) == "" {
+		t.Errorf("the committed prefix must not end in a blank row:\n%q", turn.flushedRowsText)
+	}
+	// Seal reconciles EXACTLY at the byte level: flushed prefix + seal tail reconstructs the whole
+	// sealed turn, and the committed block is exactly the indented tail.
+	turn.sealProse()
+	turn.State = TurnComplete
+	sealedRows := m.activeTurnRows(turn)
+	tail := sealTail(sealedRows, turn.flushedRowsText)
+	if turn.flushedRowsText+"\n"+tail != strings.Join(sealedRows, "\n") {
+		t.Errorf("flushed prefix + seal tail does not reconstruct the sealed turn (dup/loss):\nprefix:\n%q\ntail:\n%q", turn.flushedRowsText, tail)
+	}
+	if blk := m.sealedBlock(0); blk.Rendered != indentLines(tail, LeftPad) {
+		t.Errorf("sealed block is not the indented seal tail:\ngot:\n%q\nwant:\n%q", blk.Rendered, indentLines(tail, LeftPad))
+	}
+}
+
+// TestFlush_PlainTailBecomesMarkdownRiskyAfterLineFlush proves the safe TRANSITION when a plain
+// paragraph that has already line-flushed rows then gains a markdown trigger: the flush frontier
+// must HOLD (never move backwards, never re-commit the already-flushed rows), the un-flushed tail
+// stays live, and seal still reconciles with no dup/loss. This is the prefix-shrink case the reflow
+// guard in flushActiveTurn (flush.go) protects.
+func TestFlush_PlainTailBecomesMarkdownRiskyAfterLineFlush(t *testing.T) {
+	m, turn := streamingProse("KEEPONE plain prose that runs on long enough to wrap past a single visual row so the head settles into scrollback while the tail TAILONE keeps forming")
+	if cmd := m.flushActiveTurn(); cmd == nil {
+		t.Fatal("the long plain paragraph must line-flush its settled head")
+	}
+	flushedBefore := turn.FlushedRows
+	committedBefore := turn.flushedRowsText
+	if flushedBefore == 0 || !strings.Contains(ansi.Strip(committedBefore), "KEEPONE") {
+		t.Fatalf("test setup: expected a settled head line committed, FlushedRows=%d:\n%s", flushedBefore, ansi.Strip(committedBefore))
+	}
+	// The tail gains a markdown trigger (an opening code span) — proseTailIsPlain flips false, so
+	// activeTurnFinalRows shrinks below FlushedRows.
+	turn.Steps[0].Text += " `code"
+	if cmd := m.flushActiveTurn(); cmd != nil {
+		t.Errorf("flush must HOLD once the prefix shrinks below FlushedRows, not emit a command")
+	}
+	if turn.FlushedRows != flushedBefore {
+		t.Errorf("flush frontier moved after the tail turned risky: %d -> %d", flushedBefore, turn.FlushedRows)
+	}
+	if turn.flushedRowsText != committedBefore {
+		t.Errorf("the committed prefix text changed after the tail turned risky (would re-commit)")
+	}
+	if foot := ansi.Strip(m.footer()); !strings.Contains(foot, "TAILONE") {
+		t.Errorf("the un-flushed tail must stay live in the footer:\n%s", foot)
+	}
+	// Seal: the head appears exactly once across the flushed prefix + the seal tail (no dup/loss).
+	turn.sealProse()
+	turn.State = TurnComplete
+	combined := ansi.Strip(committedBefore) + "\n" + ansi.Strip(m.sealedBlock(0).Rendered)
+	if n := strings.Count(combined, "KEEPONE"); n != 1 {
+		t.Errorf("head line appears %d times across flush+seal, want 1 (no dup/loss):\n%s", n, combined)
+	}
+}
+
+// TestFlush_LineFrontierStaysPrefix proves the line-level flush frontier is monotonic and always a
+// byte-exact ROW PREFIX of the live footer render as a plain paragraph grows token by token — so a
+// row shown in the footer is identical to the row later committed (no jump, no reflow) the instant
+// it settles. This is the core smoothness guarantee for streamed prose.
+func TestFlush_LineFrontierStaysPrefix(t *testing.T) {
+	m, turn := streamingProse("WORDONE")
+	// Each frame appends more of one plain paragraph, growing it from one row to several.
+	grow := []string{
+		"WORDONE filling out",
+		"WORDONE filling out the very first wrapped line of prose until it overflows the width",
+		"WORDONE filling out the very first wrapped line of prose until it overflows the width and then keeps going to a second wrapped line that also runs long",
+		"WORDONE filling out the very first wrapped line of prose until it overflows the width and then keeps going to a second wrapped line that also runs long before a third wrapped line begins here too",
+	}
+	prevFlushed := 0
+	for _, text := range grow {
+		turn.Steps[0].Text = text
+		rows := m.activeTurnRows(turn) // exactly what the footer renders this frame
+		_ = m.flushActiveTurn()
+		if turn.FlushedRows < prevFlushed {
+			t.Fatalf("flush frontier moved backwards: %d -> %d", prevFlushed, turn.FlushedRows)
+		}
+		prevFlushed = turn.FlushedRows
+		if turn.FlushedRows > len(rows) {
+			t.Fatalf("flushed %d rows but the footer render has only %d", turn.FlushedRows, len(rows))
+		}
+		// Every committed row is byte-identical to the same row in the live footer render.
+		if got := strings.Join(rows[:turn.FlushedRows], "\n"); got != turn.flushedRowsText {
+			t.Errorf("committed prefix diverged from the footer render at len=%d:\ncommitted:\n%q\nfooter:\n%q",
+				turn.FlushedRows, turn.flushedRowsText, got)
+		}
+	}
+	// By the last (multi-row) frame at least the first wrapped line must have settled into scrollback.
+	if !strings.Contains(ansi.Strip(turn.flushedRowsText), "WORDONE") {
+		t.Errorf("expected a settled prose line in the flushed prefix, got:\n%s", ansi.Strip(turn.flushedRowsText))
+	}
+}
+
+// TestProseTailIsPlain locks the conservative guard that decides whether a growing paragraph may
+// settle line by line: only plain single-line prose qualifies; anything that could open an inline
+// span, a retroactive block, or a multi-line construct must fall back to paragraph-level commit.
+func TestProseTailIsPlain(t *testing.T) {
+	plain := []string{
+		"just some words", "a sentence, with punctuation! and more", "trailing partial wor",
+		"a price of 5 dollars and a ratio 3 to 1", "parens (like this) are fine",
+	}
+	for _, s := range plain {
+		if !proseTailIsPlain(s) {
+			t.Errorf("proseTailIsPlain(%q) = false, want true", s)
+		}
+	}
+	risky := []string{
+		"", "has **bold", "has `code`", "see [link]", "an <autolink>", "a & entity",
+		"an escape \\here", "a | pipe", "strike ~tilde", "a # hash", "a > angle",
+		"line one\nline two", "tab\tindented", "\tindented code",
+		"- bullet item", "+ plus item", "1. ordered item", "1) ordered paren", "    indented code",
+		// GFM linkify triggers — glamour styles these and rewrites earlier rows as the link grows.
+		"visit https://example.com/long/path", "go to www.example.com", "ping me at name@host.com",
+	}
+	for _, s := range risky {
+		if proseTailIsPlain(s) {
+			t.Errorf("proseTailIsPlain(%q) = true, want false", s)
+		}
 	}
 }
 

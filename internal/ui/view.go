@@ -136,9 +136,11 @@ func (m Model) footer() string {
 		// footer is tall makes Bubble Tea's insertAbove dump the whole footer into scrollback
 		// off a stale cell-buffer height (charmbracelet/bubbletea#1613). Completed blocks have
 		// already flushed to scrollback (flush.go), so the live tail holds only the UN-flushed
-		// remainder: an open tool group, the still-growing prose paragraph (streamed live,
-		// render_turn.go), and the live status. The growing paragraph is the one unbounded piece,
-		// so capping the tail to maxLiveRows (lastLines, below) is what keeps the View small.
+		// remainder: an open tool group, the still-MUTABLE tail of the growing prose paragraph
+		// (just the partial last line for a plain tail; a whole withheld paragraph for a markdown
+		// one — render_turn.go), and the live status. A withheld markdown paragraph is the one
+		// piece that can still grow tall, so capping the tail to maxLiveRows (lastLines, below)
+		// keeps the View small in that case.
 		budget := m.rows - lineCount(bottom) - 2 // never exceed the terminal
 		if budget > maxLiveRows {
 			budget = maxLiveRows

@@ -16,20 +16,23 @@ import (
 // response "stop midway then re-show the function calls". The fix has two halves:
 //
 //  1. Keep completed content OUT of the footer: flush each IMMUTABLE block (a closed tool
-//     group, a finished prose step, a completed markdown PARAGRAPH of the live prose step)
-//     to scrollback the instant it can no longer change, so the footer never accumulates.
-//  2. Keep the in-flight remainder SHORT: prose COMMITS paragraph by paragraph, and the
-//     still-growing final paragraph is withheld from SCROLLBACK (render_turn.go) until it
-//     seals. It DOES render live in the footer (streamed token by token), but the footer is
-//     height-bounded by view.go's lastLines(budget) cap, so the live View is never tall.
+//     group, a finished prose step, a settled wrapped LINE of the live prose step) to
+//     scrollback the instant it can no longer change, so the footer never accumulates.
+//  2. Keep the in-flight remainder SHORT: a plain growing paragraph COMMITS line by line —
+//     all but its still-mutable last visual row flush as they settle (render_turn.go
+//     renderProse), so prose flows into scrollback token by token and the footer holds only the
+//     partial last line + the live status. (A markdown-risky tail falls back to paragraph-level
+//     commit and rides the view.go lastLines(budget) cap, which is also the height backstop so
+//     the live View is never tall.)
 //
 // Two correctness rules make the flushed bytes match the seal's render exactly (no dup):
 //   - Live-ness rides ONLY the position of the last step (render_turn.go); an earlier prose
 //     step renders as final markdown, so the flush never freezes a half-rendered paragraph.
-//   - A prose paragraph is committed only once COMPLETE (after a "\n\n"); CommonMark joins
-//     single-newline lines into one reflowing paragraph, so a blank line is the only safe
-//     commit boundary. Completed paragraphs render as settled markdown — byte-identical to
-//     the prefix the seal will emit — and sealTail strips them exactly.
+//   - A row of the live last step is committed only once IMMUTABLE: for a PLAIN growing
+//     paragraph that is every wrapped row but the still-mutable last one (greedy word-wrap
+//     closes earlier rows); for a MARKDOWN-risky one it is only the completed "\n\n"-terminated
+//     paragraphs (render_turn.go renderProse / proseTailIsPlain). Either way the committed rows
+//     render byte-identically to the prefix the seal will emit, and sealTail strips them exactly.
 //
 // LeftPad is applied at COMMIT (here) and at footer-assembly (view.go), never inside the
 // row builders, so a flushed row in scrollback lines up column-for-column with the live
@@ -88,20 +91,21 @@ func finalizedStepCount(t *TurnCell) int {
 // form (leading blank separator + body, UN-indented) that the flush commits. It is a
 // strict prefix of activeTurnRows: the head (YOU card + settled marker), then the finalized
 // steps [0:finalizedStepCount), then — when the immutable prefix reaches the live last
-// prose step — that step's COMPLETED paragraphs (its still-growing final paragraph and the
-// live status are dropped). Every row it returns is byte-identical to what the seal will
-// commit for that row, so a flushed row is never re-committed. Returns nil for an empty prefix.
+// prose step — that step's SETTLED rows (a plain growing paragraph contributes all but its
+// mutable last visual row; the live status is always dropped). Every row it returns is
+// byte-identical to what the seal will commit for that row, so a flushed row is never
+// re-committed. Returns nil for an empty prefix.
 func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 	w := m.chromeW()
 	cw := m.contentW()
 
 	// The immutable step frontier. When every step before the last is finalized AND the last
 	// step is the live prose, EXTEND the range over it too: renderTurnSteps with
-	// withholdGrowingLast=true renders only that step's COMPLETED paragraphs (its still-growing
-	// final paragraph is withheld from the commit), so its settled prefix flushes while the
-	// growing paragraph stays live in the footer tail. This withheld render is a byte-exact
-	// PREFIX of the footer's full render (the footer renders the SAME completed paragraphs, then
-	// the growing one below it) — including blank-after-tool spacing.
+	// withholdGrowingLast=true renders that step's SETTLED rows (renderProse drops only the
+	// growing paragraph's still-mutable tail — its last visual row for a plain tail, the whole
+	// paragraph for a markdown one), so the settled prefix flushes while only the mutable tail
+	// stays live in the footer. This render is a byte-exact PREFIX of the footer's full render
+	// (renderProse trims the SAME md.Render output) — including blank-after-tool spacing.
 	k := finalizedStepCount(t)
 	last := len(t.Steps) - 1
 	if t.State == TurnActive && k == last && last >= 0 && t.Steps[last].Kind == StepProse {
@@ -113,10 +117,9 @@ func (m *Model) activeTurnFinalRows(t *TurnCell) []string {
 		parts = append(parts, pre)
 	}
 	if k > 0 {
-		// withholdGrowingLast=true: the flush commits ONLY completed paragraphs; the still-growing
-		// one is withheld from the COMMIT (render_turn.go renderProse) so scrollback never gets a
-		// half-paragraph that would later be re-committed as markdown. (It still renders live in
-		// the footer tail — see liveCellsView.)
+		// withholdGrowingLast=true: the flush commits the growing paragraph's SETTLED rows only
+		// (render_turn.go renderProse drops its mutable tail), so scrollback never gets a row that
+		// later reflows. The mutable tail still renders live in the footer — see liveCellsView.
 		if body := renderTurnSteps(m.theme, m.md, t, 0, k, w, cw, m.expanded, m.spinnerFrame, domain.NowMS(), true); body != "" {
 			parts = append(parts, body)
 		}

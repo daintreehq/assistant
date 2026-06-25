@@ -15,10 +15,10 @@ func liveStatusLabel(p domain.RunPhase) string {
 	case domain.PhaseAnalyzing:
 		return "Analyzing request"
 	case domain.PhaseGenerating:
-		// Prose streams LIVE in the footer token by token, then commits PARAGRAPH BY PARAGRAPH
-		// (render_turn.go). The spinner carries the SILENT gaps — when the model is composing the
-		// next paragraph or thinking with no tokens flowing — so the footer never looks frozen
-		// between bursts of streamed prose.
+		// Prose streams LIVE in the footer token by token, then settles into scrollback line by
+		// line (paragraph by paragraph for a markdown tail — render_turn.go). The spinner carries
+		// the SILENT gaps — when the model is composing the next line or thinking with no tokens
+		// flowing — so the footer never looks frozen between bursts of streamed prose.
 		return "Writing"
 	case domain.PhaseIntegrating:
 		return "Integrating results"
