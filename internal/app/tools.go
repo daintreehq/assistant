@@ -94,10 +94,11 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Queue: queueToolAdapter{app: a},
 	})...)
 	all = append(all, skill.Tools(skill.Deps{
-		Store:      skillStoreAdapter{s: a.Store},
-		Source:     skillSourceAdapter{app: a},
-		LoadSkills: a.loadSkills,
-		FindSkills: a.skillFind,
+		Store:            skillStoreAdapter{s: a.Store},
+		Source:           skillSourceAdapter{app: a},
+		LoadSkills:       a.loadSkills,
+		FindSkills:       a.skillFind,
+		CheckConsistency: a.checkSkillStepConsistency,
 	})...)
 	all = append(all, timer.Tools(timer.Deps{
 		Store: timerStoreAdapter{s: a.Store},
