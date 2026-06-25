@@ -483,6 +483,35 @@ func TestWatcher_ExploreFinishJudgeCooldownSkipsModel(t *testing.T) {
 
 // --- linked workflow ledger advance (issue #206) ----------------------------
 
+// decodeNotesJSON extracts and unmarshals the notesJson entry from a workflow
+// patch. Fails the test when it is missing or not a JSON-encoded []string.
+func decodeNotesJSON(t *testing.T, patch map[string]any) []string {
+	t.Helper()
+	raw, ok := patch["notesJson"]
+	if !ok {
+		t.Fatal("patch is missing notesJson")
+	}
+	s, ok := raw.(string)
+	if !ok {
+		t.Fatalf("notesJson must be a JSON string, got %T", raw)
+	}
+	var notes []string
+	if err := json.Unmarshal([]byte(s), &notes); err != nil {
+		t.Fatalf("notesJson is not a JSON []string: %v (%q)", err, s)
+	}
+	return notes
+}
+
+// notesHasPrefix reports whether any digest note line starts with prefix.
+func notesHasPrefix(notes []string, prefix string) bool {
+	for _, n := range notes {
+		if strings.HasPrefix(n, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // A supervisor that reaches condition_met advances its linked workflow row to
 // done and stamps completedAt.
 func TestWatcher_AdvancesLinkedWorkflowOnConditionMet(t *testing.T) {
@@ -510,6 +539,17 @@ func TestWatcher_AdvancesLinkedWorkflowOnConditionMet(t *testing.T) {
 	if _, ok := p["completedAt"].(int64); !ok {
 		t.Errorf("advance must stamp completedAt, got %v", p["completedAt"])
 	}
+	// The terminating outcome digest is persisted into notesJson in the SAME patch.
+	notes := decodeNotesJSON(t, p)
+	if !notesHasPrefix(notes, "classification: "+string(domain.ClassTerminalExited)) {
+		t.Errorf("notesJson must carry the classification, got %v", notes)
+	}
+	if !notesHasPrefix(notes, "confidence: ") {
+		t.Errorf("notesJson must carry the confidence, got %v", notes)
+	}
+	if !notesHasPrefix(notes, "summary: ") {
+		t.Errorf("notesJson must carry the summary, got %v", notes)
+	}
 }
 
 // A supervisor that times out fails its linked workflow row.
@@ -532,6 +572,11 @@ func TestWatcher_TimeoutFailsLinkedWorkflow(t *testing.T) {
 	if store.workflowPatch["wfr_to"]["status"] != string(domain.WorkflowFailed) {
 		t.Errorf("timeout → failed, got %v", store.workflowPatch["wfr_to"]["status"])
 	}
+	// A timed-out supervisor still has a headline digest to persist.
+	notes := decodeNotesJSON(t, store.workflowPatch["wfr_to"])
+	if !notesHasPrefix(notes, "classification: ") || !notesHasPrefix(notes, "summary: ") {
+		t.Errorf("timeout digest must carry classification + summary, got %v", notes)
+	}
 }
 
 // A corrupt-state supervisor fails its linked workflow row.
@@ -548,6 +593,10 @@ func TestWatcher_CorruptDisablesFailsLinkedWorkflow(t *testing.T) {
 	_ = RunTerminalWatcherCheck(ctxFor(store, queue, newFakeMCP(), &fakeModel{}), rec)
 	if store.workflowPatch["wfr_bad"]["status"] != string(domain.WorkflowFailed) {
 		t.Errorf("corrupt watcher → linked workflow failed, got %v", store.workflowPatch["wfr_bad"]["status"])
+	}
+	// The disable path has no real digest — it must NOT fabricate a note.
+	if _, ok := store.workflowPatch["wfr_bad"]["notesJson"]; ok {
+		t.Errorf("corrupt-disable must not write notesJson, got %v", store.workflowPatch["wfr_bad"]["notesJson"])
 	}
 }
 
@@ -596,5 +645,42 @@ func TestWatcher_NoWorkflowLinkNoAdvance(t *testing.T) {
 	}
 	if len(store.workflowPatch) != 0 {
 		t.Fatalf("a watcher with no workflow link must not touch a ledger row, got %v", store.workflowPatch)
+	}
+}
+
+// watcherDigestNote serializes a real outcome and returns nil when there is
+// nothing worth recording (no fabricated empty array).
+func TestWatcherDigestNote(t *testing.T) {
+	if got := watcherDigestNote(nil); got != nil {
+		t.Errorf("nil outcome → nil note, got %q", *got)
+	}
+	// An empty outcome (no classification, blank summary, no evidence) records nothing.
+	if got := watcherDigestNote(&CheckOutcome{Summary: "  "}); got != nil {
+		t.Errorf("empty outcome → nil note, got %q", *got)
+	}
+	// A full outcome serializes classification, confidence, summary, and each
+	// non-blank evidence line as a JSON []string.
+	note := watcherDigestNote(&CheckOutcome{
+		Classification: domain.ClassTestsPassed,
+		Confidence:     0.8,
+		Summary:        "Tests passed on a clean tree.",
+		Evidence:       []string{"exitCode=0", "  ", "git status clean"},
+	})
+	if note == nil {
+		t.Fatal("a full outcome must produce a note")
+	}
+	var notes []string
+	if err := json.Unmarshal([]byte(*note), &notes); err != nil {
+		t.Fatalf("note must be a JSON []string: %v", err)
+	}
+	want := []string{
+		"classification: tests_passed",
+		"confidence: 80%",
+		"summary: Tests passed on a clean tree.",
+		"evidence: exitCode=0",
+		"evidence: git status clean",
+	}
+	if strings.Join(notes, "\n") != strings.Join(want, "\n") {
+		t.Errorf("digest mismatch:\n got %v\nwant %v", notes, want)
 	}
 }

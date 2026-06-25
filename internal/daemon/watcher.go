@@ -291,8 +291,9 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		// Advance the linked workflow ledger row as this supervisor terminates, so
 		// /workflows reflects the outcome. Best-effort: a ledger failure never
 		// disrupts the watcher finalize. condition_met (incl. a clean terminal
-		// exit) → done; timeout → failed.
-		advanceLinkedWorkflow(ctx, rec, status, now)
+		// exit) → done; timeout → failed. The aggregate headline carries the worker
+		// digest (classification/confidence/summary/evidence) — persist it too.
+		advanceLinkedWorkflow(ctx, rec, status, now, &headline)
 		// The watcher is done — release its resource subscriptions so the server
 		// stops pushing for terminals nothing is watching anymore.
 		unsubscribeAll(ctx, perTerminal)
@@ -659,7 +660,8 @@ func disableWatcher(ctx *CheckContext, rec domain.WatcherRecord, now int64, reas
 	_ = ctx.Store.UpdateWatcher(rec.ID, map[string]any{"status": "error", "lastCheckedAt": now})
 	_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
 	// A corrupt-state supervisor fails its linked workflow ledger row (best-effort).
-	advanceLinkedWorkflow(ctx, rec, "error", now)
+	// There is no real outcome digest here, so pass nil — no fabricated note.
+	advanceLinkedWorkflow(ctx, rec, "error", now, nil)
 	_ = ctx.Queue.Publish(domain.QueuePublishArgs{
 		Source:        domain.SourceTerminalWatcher,
 		Severity:      domain.SeverityError,
@@ -723,11 +725,14 @@ func unsubscribeAll(ctx *CheckContext, perTerminal map[string]TerminalState) {
 // --- small helpers -----------------------------------------------------------
 
 // advanceLinkedWorkflow maps a terminating supervisor's watcher status onto its
-// linked workflow ledger row and stamps completedAt. No-op when the watcher carries
-// no WorkflowRunID (non-supervisor / manually-created watchers). Best-effort: a
-// ledger failure must never disrupt the watcher finalize. Status mapping:
+// linked workflow ledger row, stamps completedAt, and — when an outcome digest is
+// supplied — persists it into notesJson in the SAME patch. No-op when the watcher
+// carries no WorkflowRunID (non-supervisor / manually-created watchers). Best-effort:
+// a ledger failure must never disrupt the watcher finalize. Status mapping:
 // condition_met (incl. a clean terminal exit) → done; timeout/error → failed.
-func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherStatus string, now int64) {
+// outcome is nil at the disableWatcher call site (corrupt state ⇒ no real digest);
+// nil ⇒ no note is written, never a fabricated one.
+func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherStatus string, now int64, outcome *CheckOutcome) {
 	if rec.WorkflowRunID == nil || *rec.WorkflowRunID == "" {
 		return
 	}
@@ -735,10 +740,52 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 	if watcherStatus == "timeout" || watcherStatus == "error" {
 		wfStatus = domain.WorkflowFailed
 	}
-	_ = ctx.Store.UpdateWorkflowRun(*rec.WorkflowRunID, map[string]any{
+	patch := map[string]any{
 		"status":      string(wfStatus),
 		"completedAt": now,
-	})
+	}
+	// Condense the terminating watcher's bounded outcome (classification, confidence,
+	// summary, evidence) into notesJson so /workflows shows the worker digest durably,
+	// without re-reading the terminal on each lifecycle event. Only when there's a real
+	// note to record — never invent one for the digest-less disable path.
+	if note := watcherDigestNote(outcome); note != nil {
+		patch["notesJson"] = *note
+	}
+	_ = ctx.Store.UpdateWorkflowRun(*rec.WorkflowRunID, patch)
+}
+
+// watcherDigestNote serializes a terminating watcher's outcome into the workflow
+// ledger's notesJson shape — a JSON-encoded []string, one entry per fact. Returns
+// nil when there is no outcome or nothing worth recording (an empty/whitespace
+// summary with no classification), so the caller omits notesJson rather than
+// writing an empty array. Confidence rides alongside its classification only.
+func watcherDigestNote(outcome *CheckOutcome) *string {
+	if outcome == nil {
+		return nil
+	}
+	var notes []string
+	if c := string(outcome.Classification); c != "" {
+		notes = append(notes,
+			"classification: "+c,
+			fmt.Sprintf("confidence: %.0f%%", outcome.Confidence*100))
+	}
+	if s := strings.TrimSpace(outcome.Summary); s != "" {
+		notes = append(notes, "summary: "+s)
+	}
+	for _, e := range outcome.Evidence {
+		if e = strings.TrimSpace(e); e != "" {
+			notes = append(notes, "evidence: "+e)
+		}
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(notes)
+	if err != nil {
+		return nil // best-effort: a non-serializable digest just skips the note
+	}
+	s := string(b)
+	return &s
 }
 
 // exploreSettledComplete reports whether an explore-mode agent now sitting at
