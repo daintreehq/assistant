@@ -2,6 +2,7 @@ package extractionx
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -264,5 +265,165 @@ func TestAwaitCohort_QuestionShortCircuits(t *testing.T) {
 	}
 	if router.judgeCalls != 0 {
 		t.Fatalf("a question is settled deterministically — never judged, got %d judge calls", router.judgeCalls)
+	}
+}
+
+// The result names the actionable non-finished sets at the TOP LEVEL: stillWorking (timed
+// out at the cap) and askingQuestion (blocked on the orchestrator), as ID-only arrays in
+// INPUT order — so the caller re-awaits the stragglers directly without scanning perTerminal.
+// Settled terminals (finished/failed) appear in neither set.
+func TestBuildAwaitResult_NamesStragglersAndQuestions(t *testing.T) {
+	ids := []string{"t1", "t2", "t3", "t4"}
+	outcomes := map[string]*awaitOutcome{
+		"t1": {status: "finished", finished: true},
+		"t2": nil, // timed out, still working at the cap
+		"t3": {status: "question", finished: false, reason: "asking a question"},
+		"t4": nil, // also timed out — proves multi-element ordering
+	}
+	res := buildAwaitResult(ids, outcomes, 5, 1234)
+	if !res.Ok {
+		t.Fatal("buildAwaitResult returned not-ok")
+	}
+	m := res.Result.(map[string]any)
+
+	if af, _ := m["allFinished"].(bool); af {
+		t.Fatal("a still-working + a question agent must make allFinished=false")
+	}
+	sw, _ := m["stillWorking"].([]string)
+	if len(sw) != 2 || sw[0] != "t2" || sw[1] != "t4" {
+		t.Fatalf("stillWorking should be exactly [t2 t4] in input order, got %v", sw)
+	}
+	aq, _ := m["askingQuestion"].([]string)
+	if len(aq) != 1 || aq[0] != "t3" {
+		t.Fatalf("askingQuestion should be exactly [t3], got %v", aq)
+	}
+	// A settled (finished or failed) terminal must never leak into a straggler set.
+	for _, id := range append(append([]string{}, sw...), aq...) {
+		if id == "t1" {
+			t.Fatal("a finished terminal must not appear in a straggler set")
+		}
+	}
+}
+
+// When every terminal settled, stillWorking and askingQuestion are present as non-nil EMPTY
+// slices so they serialize as JSON [] (never null) — a caller that iterates them
+// unconditionally for a re-await never trips over a null.
+func TestBuildAwaitResult_EmptyStragglerSetsSerializeAsArrays(t *testing.T) {
+	ids := []string{"t1", "t2"}
+	code := 2
+	outcomes := map[string]*awaitOutcome{
+		"t1": {status: "finished", finished: true},
+		"t2": {status: "failed", finished: true, exitCode: &code, reason: "exited with code 2"},
+	}
+	res := buildAwaitResult(ids, outcomes, 1, 10)
+	m := res.Result.(map[string]any)
+
+	sw, ok := m["stillWorking"].([]string)
+	if !ok || sw == nil {
+		t.Fatalf("stillWorking must be a non-nil []string, got %#v", m["stillWorking"])
+	}
+	aq, ok := m["askingQuestion"].([]string)
+	if !ok || aq == nil {
+		t.Fatalf("askingQuestion must be a non-nil []string, got %#v", m["askingQuestion"])
+	}
+	if len(sw) != 0 || len(aq) != 0 {
+		t.Fatalf("all settled → both straggler sets empty, got stillWorking=%v askingQuestion=%v", sw, aq)
+	}
+	// Marshal the whole result and assert the literal [] — catches a nil/null regression a
+	// type assertion alone would miss (the model relies on iterating these arrays).
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(b)
+	if !strings.Contains(js, `"stillWorking":[]`) {
+		t.Fatalf(`expected "stillWorking":[] in JSON, got %s`, js)
+	}
+	if !strings.Contains(js, `"askingQuestion":[]`) {
+		t.Fatalf(`expected "askingQuestion":[] in JSON, got %s`, js)
+	}
+}
+
+// End-to-end through the REAL poll loop: the existing awaitResult helper discards the new
+// top-level arrays, so assert them straight off buildAwaitResult fed by awaitCohort's output.
+// t1 finishes (working→waiting), t2 stays working to the cap → stillWorking names exactly t2.
+func TestAwaitCohort_TopLevelArraysFromRealPollLoop(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1"), "t2": ent("working", "", "stuck")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("working", "", "stuck")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("working", "", "stuck")},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1", "t2"}
+
+	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000, 6000))
+	res := buildAwaitResult(ids, out, attempts, 0)
+	m := res.Result.(map[string]any)
+
+	if af, _ := m["allFinished"].(bool); af {
+		t.Fatal("a still-working agent must make allFinished=false")
+	}
+	if sw, _ := m["stillWorking"].([]string); len(sw) != 1 || sw[0] != "t2" {
+		t.Fatalf("stillWorking should be exactly [t2] from the real loop, got %v", sw)
+	}
+	if aq, _ := m["askingQuestion"].([]string); len(aq) != 0 {
+		t.Fatalf("no question agent → askingQuestion should be empty, got %v", aq)
+	}
+	if reader.deepCalls != 0 {
+		t.Fatalf("pure-FSM awaitAll must make NO deep getOutput read, got %d", reader.deepCalls)
+	}
+}
+
+// A question on one terminal must NOT short-circuit a still-working peer: the cohort gate is
+// "all settled", so t2 keeps polling until it transitions even after t1 settles on a question.
+func TestAwaitCohort_QuestionDoesNotAbortUnsettledPeer(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("waiting", "question", "Which file?"), "t2": ent("working", "", "w2")},
+		{"t1": ent("waiting", "question", "Which file?"), "t2": ent("working", "", "w2b")},
+		{"t1": ent("waiting", "question", "Which file?"), "t2": ent("waiting", "", "done t2")},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1", "t2"}
+
+	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 5, 0, clockSeq(0, 2000, 4000, 6000))
+	if attempts != 3 {
+		t.Fatalf("t2 should keep polling past t1's question until it finishes on tick 3, got %d", attempts)
+	}
+	res := buildAwaitResult(ids, out, attempts, 0)
+	m := res.Result.(map[string]any)
+	if aq, _ := m["askingQuestion"].([]string); len(aq) != 1 || aq[0] != "t1" {
+		t.Fatalf("askingQuestion should be exactly [t1], got %v", aq)
+	}
+	if sw, _ := m["stillWorking"].([]string); len(sw) != 0 {
+		t.Fatalf("t2 finished before the cap → stillWorking should be empty, got %v", sw)
+	}
+	per := map[string]map[string]any{}
+	for _, e := range m["perTerminal"].([]map[string]any) {
+		per[e["terminalId"].(string)] = e
+	}
+	if per["t2"]["status"] != "finished" {
+		t.Fatalf("t2 should finish despite t1's question, got %v", per["t2"])
+	}
+}
+
+// maxAttempts is validated against the RAISED opt-in ceiling (240): a known-slow cohort can
+// pass up to 240, but 241+ and non-positive values are still rejected, and omitting it
+// (handler defaults to 30) stays valid.
+func TestAwaitArgsValidate_MaxAttemptsCeiling(t *testing.T) {
+	mk := func(n int) *awaitArgs {
+		return &awaitArgs{TerminalIDs: []string{"t1"}, MaxAttempts: &n}
+	}
+	for _, n := range []int{1, 30, 60, 120, 240} {
+		if err := mk(n).Validate(); err != nil {
+			t.Fatalf("maxAttempts=%d should be accepted, got %v", n, err)
+		}
+	}
+	for _, n := range []int{0, -1, 241, 1000} {
+		if err := mk(n).Validate(); err == nil {
+			t.Fatalf("maxAttempts=%d should be rejected", n)
+		}
+	}
+	if err := (&awaitArgs{TerminalIDs: []string{"t1"}}).Validate(); err != nil {
+		t.Fatalf("omitted maxAttempts should be valid (defaults to 30), got %v", err)
 	}
 }
