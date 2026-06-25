@@ -150,8 +150,11 @@ func TestUsageEventContextPressureAndCost(t *testing.T) {
 	if u.ContextThreshold != domain.AutoCompactTokenThreshold {
 		t.Fatalf("contextThreshold = %d want %d", u.ContextThreshold, domain.AutoCompactTokenThreshold)
 	}
-	if u.ContextTokens <= 0 {
-		t.Fatalf("contextTokens = %d want > 0", u.ContextTokens)
+	// ContextTokens now reports the REAL provider prompt_tokens (tool schemas
+	// included), not the tool-blind char estimate, so it equals the summed prompt
+	// tokens whenever the provider reported any.
+	if u.ContextTokens != 1000 {
+		t.Fatalf("contextTokens = %d want 1000 (real prompt_tokens)", u.ContextTokens)
 	}
 	// minimax-m3 is priced, so cost is a concrete positive number.
 	if u.CostUsd == nil || *u.CostUsd <= 0 {
@@ -249,5 +252,46 @@ func TestUsagePartialCostWhenOneTierUnpriced(t *testing.T) {
 	// Token counts still sum across BOTH tiers regardless of pricing.
 	if ev.PromptTokens != 1500 || ev.CompletionTokens != 300 {
 		t.Fatalf("tokens = %+v", ev)
+	}
+}
+
+// emitUsage stashes the summed provider prompt_tokens on the session so the NEXT
+// round's auto-compaction check can gate on the real context size (tool schemas
+// included) rather than the tool-blind char estimate.
+func TestEmitUsageStashesLastPromptTokens(t *testing.T) {
+	deps := baseDeps(&usageRouter{model: "minimax-m3", usage: &models.Usage{
+		PromptTokens: intp(1234), CompletionTokens: intp(50), TotalTokens: intp(1284),
+	}}, &fakeTools{})
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 1234 {
+		t.Fatalf("lastPromptTokens = %d want 1234 (the summed provider prompt_tokens)", got)
+	}
+}
+
+// When the meter reports no usage (nil FlushMeter), there is no real figure to stash:
+// lastPromptTokens stays 0 and ContextTokens falls back to the positive char estimate
+// so the footer never shows a misleading 0.
+func TestEmitUsageNoUsageLeavesStashZeroAndEstimatesContext(t *testing.T) {
+	deps := baseDeps(&usageRouter{model: "minimax-m3", usage: nil}, &fakeTools{})
+	sink := &usageCaptureSink{}
+	deps.Events = sink
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("lastPromptTokens = %d want 0 (no provider figure to stash)", got)
+	}
+	if len(sink.events) != 1 || sink.events[0].ContextTokens <= 0 {
+		t.Fatalf("contextTokens should fall back to a positive estimate, got %+v", sink.events)
 	}
 }

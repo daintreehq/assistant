@@ -756,3 +756,118 @@ func TestAutoCompactSingleHugeMessageTruncates(t *testing.T) {
 		t.Fatalf("summary attempted %d times, want %d (guard must not skip an over-ceiling lone message)", r.calls, domain.AutoCompactFailureThreshold)
 	}
 }
+
+// --- real-prompt-token gating (issue #246) ---
+
+// TestMaybeAutoCompactPrefersRealPromptTokens proves the gate fires on the REAL
+// provider-reported prompt_tokens even when the char estimate is tiny: a small
+// history (well under the soft threshold by chars) compacts once lastPromptTokens —
+// which counts the tool schemas the estimate is blind to — crosses the threshold.
+func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
+	r := &chatCountRouter{summary: "REAL_TOKEN_SUMMARY"}
+	s, _ := compactSession(t, r)
+	// Two small notes: char estimate stays far under the soft threshold, and len is
+	// above ControlMessageCount+1 so the "no real history" guard doesn't skip.
+	s.InjectNote("keep-small-a")
+	s.InjectNote("keep-small-b")
+	ctx := context.Background()
+
+	// With no real figure yet, the char estimate governs — far under threshold, so no
+	// compaction. This is the behaviour the issue is fixing: the estimate alone misses.
+	s.maybeAutoCompact(ctx)
+	if r.chatCalls != 0 {
+		t.Fatalf("char estimate is under threshold; compaction should not fire yet, got %d calls", r.chatCalls)
+	}
+
+	// Stash a real prompt_tokens figure over the soft threshold (what Fireworks would
+	// report once the ~68 tool schemas are counted) and re-check.
+	s.mu.Lock()
+	s.lastPromptTokens = domain.AutoCompactTokenThreshold + 10_000
+	s.mu.Unlock()
+
+	s.maybeAutoCompact(ctx)
+	if r.chatCalls != 1 {
+		t.Fatalf("real prompt_tokens over threshold should trigger compaction, got %d calls", r.chatCalls)
+	}
+	var replaced bool
+	for _, m := range s.Messages() {
+		if strings.Contains(m.StringContent, "REAL_TOKEN_SUMMARY") {
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatal("history should be replaced with the compacted summary note")
+	}
+}
+
+// TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens proves the char estimate is
+// still the gate before any provider figure has landed (lastPromptTokens == 0): a
+// history large by chars compacts even though no real token count exists yet.
+func TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens(t *testing.T) {
+	r := &chatCountRouter{summary: "ESTIMATE_SUMMARY"}
+	s, _ := compactSession(t, r)
+	s.InjectNote("keep-small")
+	// One huge note pushes the CHAR estimate past the soft threshold (≈240k chars).
+	s.InjectNote("GIANT_MARKER" + strings.Repeat("x", 260_000))
+
+	s.mu.Lock()
+	stash := s.lastPromptTokens
+	s.mu.Unlock()
+	if stash != 0 {
+		t.Fatalf("precondition: lastPromptTokens should be 0, got %d", stash)
+	}
+
+	s.maybeAutoCompact(context.Background())
+	if r.chatCalls != 1 {
+		t.Fatalf("char estimate over threshold should trigger compaction via fallback, got %d calls", r.chatCalls)
+	}
+}
+
+// TestCompactLockedZerosLastPromptTokens proves compaction clears the stashed real
+// figure — otherwise the pre-compaction ~60K+ value would make the next check see the
+// threshold exceeded and re-compact the freshly-shrunk history immediately.
+func TestCompactLockedZerosLastPromptTokens(t *testing.T) {
+	s, _ := compactSession(t, plainRouter())
+	s.InjectNote("history")
+	s.mu.Lock()
+	s.lastPromptTokens = domain.AutoCompactTokenThreshold + 5_000
+	s.compactLocked("summary")
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("compactLocked must zero lastPromptTokens, got %d", got)
+	}
+}
+
+// TestClearLockedZerosLastPromptTokens proves a clear drops the stashed real figure
+// along with the history it described.
+func TestClearLockedZerosLastPromptTokens(t *testing.T) {
+	s, _ := compactSession(t, plainRouter())
+	s.InjectNote("history")
+	s.mu.Lock()
+	s.lastPromptTokens = domain.AutoCompactTokenThreshold + 5_000
+	s.clearLocked()
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("clearLocked must zero lastPromptTokens, got %d", got)
+	}
+}
+
+// TestTruncateLockedZerosLastPromptTokens proves the lossy fallback drops the stashed
+// real figure so the next check measures the shrunk tail, not the stale over-ceiling
+// figure.
+func TestTruncateLockedZerosLastPromptTokens(t *testing.T) {
+	s, _ := compactSession(t, plainRouter())
+	for i := 0; i < 10; i++ {
+		s.InjectNote(fmt.Sprintf("note-%d", i))
+	}
+	s.mu.Lock()
+	s.lastPromptTokens = domain.AutoCompactHardTruncationThreshold + 5_000
+	s.truncateLocked(domain.AutoCompactHardTruncationKeepMessages)
+	got := s.lastPromptTokens
+	s.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("truncateLocked must zero lastPromptTokens, got %d", got)
+	}
+}

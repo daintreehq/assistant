@@ -103,6 +103,17 @@ type Session struct {
 	// permanently disable the soft, model-summarized path).
 	compactFailures int
 
+	// lastPromptTokens is the provider-reported prompt_tokens summed across tiers on
+	// the most recent round (guarded by s.mu, stashed in emitUsage). It is the REAL
+	// context size — it counts the ~68 tool schemas sent on every request, which the
+	// chars/4 estimate is blind to — so maybeAutoCompact gates on it in preference to
+	// estimateTokensLocked. 0 is the "no provider figure yet" sentinel (Fireworks
+	// never reports 0 on a successful call), so the very first compaction check (and
+	// any check during a small-model outage) falls back to the char estimate. Zeroed
+	// on every history reset (compactLocked/clearLocked/truncateLocked) so a stale
+	// pre-reset figure can't re-trip the trigger on the freshly-shrunk history.
+	lastPromptTokens int
+
 	// wg tracks detached background work (the post-compaction distill goroutine) so
 	// App.Shutdown and tests can DrainBackgroundWork() before the deps it touches
 	// (Router/MemoryStore) are torn down. sync.WaitGroup is goroutine-safe — no lock.
@@ -353,8 +364,11 @@ func (s *Session) clearLocked() {
 		s.messages = s.messages[:domain.ControlMessageCount]
 	}
 	// History is gone — the auto-compact failure streak is moot; don't let a stale
-	// count trip the lossy fallback on the next outage.
+	// count trip the lossy fallback on the next outage. The stashed real prompt_tokens
+	// described the now-discarded history, so zero it too: the next compaction check
+	// must fall back to the char estimate until a fresh round reports real usage.
 	s.compactFailures = 0
+	s.lastPromptTokens = 0
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
@@ -381,6 +395,12 @@ func (s *Session) compactLocked(summary string) {
 	// than only on the auto path. Prevents a stale count from a prior outage tripping
 	// the lossy fallback right after the user manually compacted.
 	s.compactFailures = 0
+	// The stashed real prompt_tokens measured the pre-compaction history (~60K+). After
+	// compaction the working history is a single short note, so leaving it set would make
+	// the very next maybeAutoCompact see the old over-threshold figure and compact again
+	// immediately — a tight, useless re-compaction loop. Zero it so the next check falls
+	// back to the char estimate until a fresh round reports the post-compaction usage.
+	s.lastPromptTokens = 0
 	s.messages = s.messages[:domain.ControlMessageCount]
 	s.persistMessageLocked(models.TextMessage("system", compactionMarker))
 	note := models.TextMessage("user", compactedNotePrefix+summary)
@@ -860,7 +880,6 @@ func (s *Session) assistantMessage(result models.ChatResult) models.ChatMessage 
 func (s *Session) emitUsage() {
 	tiers := s.deps.Router.FlushMeter()
 	ev := UsageEvent{
-		ContextTokens:    s.estimateTokens(),
 		ContextThreshold: domain.AutoCompactTokenThreshold,
 		ContextWindow:    domain.LargeContextWindowTokens,
 		Tier:             string(domain.ModelLarge),
@@ -892,6 +911,22 @@ func (s *Session) emitUsage() {
 	if anyCost {
 		ev.CostUsd = &costTotal
 	}
+	// Stash the real summed prompt_tokens for the next round's compaction gate and
+	// report it as ContextTokens — it's the true context size (tool schemas included),
+	// not the tool-blind char estimate. A nil/empty meter (no metered call this round)
+	// reports PromptTokens == 0; preserve the last known real figure rather than
+	// regressing the stash, and fall back to the char estimate for the displayed
+	// ContextTokens so the footer never shows a misleading 0. Done under s.mu (the
+	// lock guards lastPromptTokens against an off-turn slash command); s.events.Usage
+	// is called OUTSIDE the lock, as everywhere else in this file.
+	s.mu.Lock()
+	if ev.PromptTokens > 0 {
+		s.lastPromptTokens = ev.PromptTokens
+		ev.ContextTokens = ev.PromptTokens
+	} else {
+		ev.ContextTokens = s.estimateTokensLocked()
+	}
+	s.mu.Unlock()
 	s.events.Usage(ev)
 }
 
@@ -1097,7 +1132,14 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
 	// it compacts via compactLocked (the public Compact would self-reject).
 	s.mu.Lock()
-	est := s.estimateTokensLocked()
+	// Gate on the REAL provider-reported prompt_tokens from the prior round when we
+	// have one — it counts the tool schemas the chars/4 estimate ignores, so it's the
+	// honest context size. Fall back to the char estimate only before the first round's
+	// usage lands (lastPromptTokens == 0) or during a small-model outage that zeroed it.
+	est := s.lastPromptTokens
+	if est <= 0 {
+		est = s.estimateTokensLocked()
+	}
 	// Skip when under the soft threshold, OR when there's no real history to
 	// summarize (≤1 working message) — UNLESS that lone message is itself over the
 	// hard ceiling, in which case the bounded-growth fallback must still get a chance
@@ -1191,8 +1233,12 @@ func (s *Session) noteCompactFailureLocked() (truncated bool) {
 // message at a fresh monotonic seq. Caller MUST hold s.mu.
 func (s *Session) truncateLocked(keepN int) {
 	// The bound is being re-established by this truncation, so the failure streak that
-	// armed it resets here (the single reset point for the fallback path).
+	// armed it resets here (the single reset point for the fallback path). The stashed
+	// real prompt_tokens described the pre-truncation history; zero it so the next
+	// compaction check measures the shrunk tail (via the char estimate) rather than the
+	// stale over-ceiling figure.
 	s.compactFailures = 0
+	s.lastPromptTokens = 0
 	working := s.messages[domain.ControlMessageCount:]
 	if len(working) > keepN {
 		working = working[len(working)-keepN:]
