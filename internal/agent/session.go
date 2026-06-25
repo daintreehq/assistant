@@ -103,15 +103,18 @@ type Session struct {
 	// permanently disable the soft, model-summarized path).
 	compactFailures int
 
-	// lastPromptTokens is the provider-reported prompt_tokens summed across tiers on
-	// the most recent round (guarded by s.mu, stashed in emitUsage). It is the REAL
-	// context size — it counts the ~68 tool schemas sent on every request, which the
-	// chars/4 estimate is blind to — so maybeAutoCompact gates on it in preference to
-	// estimateTokensLocked. 0 is the "no provider figure yet" sentinel (Fireworks
-	// never reports 0 on a successful call), so the very first compaction check (and
-	// any check during a small-model outage) falls back to the char estimate. Zeroed
-	// on every history reset (compactLocked/clearLocked/truncateLocked) so a stale
-	// pre-reset figure can't re-trip the trigger on the freshly-shrunk history.
+	// lastPromptTokens is the provider-reported prompt_tokens for the LARGE (main-thread)
+	// tier on the most recent round (guarded by s.mu, stashed in emitUsage). It is the
+	// REAL context size — it counts the ~68 tool schemas sent on every request, which the
+	// chars/4 estimate is blind to — so maybeAutoCompact gates on it (max'd with the live
+	// estimate). Large-tier ONLY, never the cross-tier aggregate: the aggregate folds in
+	// small-tier background work, including the auto-compact summary call that runs
+	// against the pre-compaction history, which would re-trip the trigger right after a
+	// compaction. 0 is the "no provider figure yet" sentinel (Fireworks never reports 0
+	// on a successful call), so the first check (and any during a small-model outage)
+	// uses the estimate alone. Zeroed on every history reset (compactLocked/clearLocked/
+	// truncateLocked) so a stale pre-reset figure can't re-trip the trigger on the
+	// freshly-shrunk history.
 	lastPromptTokens int
 
 	// wg tracks detached background work (the post-compaction distill goroutine) so
@@ -891,11 +894,21 @@ func (s *Session) emitUsage() {
 		costTotal   float64
 		anyCached   bool
 		cachedTotal int
+		largePrompt int // the main-thread (large-tier) prompt_tokens only
 	)
 	for _, t := range tiers {
 		ev.PromptTokens += t.PromptTokens
 		ev.CompletionTokens += t.CompletionTokens
 		ev.TotalTokens += t.TotalTokens
+		// Track the LARGE tier's prompt_tokens separately: that's the main conversation
+		// the auto-compact gate cares about. The aggregate (ev.PromptTokens) also folds
+		// in small-tier background work (skill selection, watcher verdicts, and — the
+		// trap — the auto-compact SUMMARY call, which runs against the OLD pre-compaction
+		// history). Stashing the aggregate would re-inject that ~60K summary prompt right
+		// after a compaction and spuriously re-trigger on the freshly-shrunk history.
+		if t.Tier == string(domain.ModelLarge) {
+			largePrompt += t.PromptTokens
+		}
 		if t.CostUsd != nil {
 			anyCost = true
 			costTotal += *t.CostUsd
@@ -911,18 +924,18 @@ func (s *Session) emitUsage() {
 	if anyCost {
 		ev.CostUsd = &costTotal
 	}
-	// Stash the real summed prompt_tokens for the next round's compaction gate and
+	// Stash the real main-thread prompt_tokens for the next round's compaction gate and
 	// report it as ContextTokens — it's the true context size (tool schemas included),
-	// not the tool-blind char estimate. A nil/empty meter (no metered call this round)
-	// reports PromptTokens == 0; preserve the last known real figure rather than
-	// regressing the stash, and fall back to the char estimate for the displayed
-	// ContextTokens so the footer never shows a misleading 0. Done under s.mu (the
-	// lock guards lastPromptTokens against an off-turn slash command); s.events.Usage
-	// is called OUTSIDE the lock, as everywhere else in this file.
+	// not the tool-blind char estimate. A nil/empty meter (or a round with no large-tier
+	// call) reports 0; preserve the last known real figure rather than regressing the
+	// stash, and fall back to the char estimate for the displayed ContextTokens so the
+	// footer never shows a misleading 0. Done under s.mu (the lock guards lastPromptTokens
+	// against an off-turn slash command); s.events.Usage is called OUTSIDE the lock, as
+	// everywhere else in this file.
 	s.mu.Lock()
-	if ev.PromptTokens > 0 {
-		s.lastPromptTokens = ev.PromptTokens
-		ev.ContextTokens = ev.PromptTokens
+	if largePrompt > 0 {
+		s.lastPromptTokens = largePrompt
+		ev.ContextTokens = largePrompt
 	} else {
 		ev.ContextTokens = s.estimateTokensLocked()
 	}
@@ -1132,13 +1145,17 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// model call OUTSIDE the lock. Runs on the turn goroutine with inFlight set, so
 	// it compacts via compactLocked (the public Compact would self-reject).
 	s.mu.Lock()
-	// Gate on the REAL provider-reported prompt_tokens from the prior round when we
-	// have one — it counts the tool schemas the chars/4 estimate ignores, so it's the
-	// honest context size. Fall back to the char estimate only before the first round's
-	// usage lands (lastPromptTokens == 0) or during a small-model outage that zeroed it.
-	est := s.lastPromptTokens
-	if est <= 0 {
-		est = s.estimateTokensLocked()
+	// Gate on the LARGER of the real provider figure and the live char estimate. The
+	// real prompt_tokens from the prior round (lastPromptTokens) is the honest size — it
+	// counts the tool schemas the chars/4 estimate is blind to — but it was measured as
+	// of the last model call, so content appended SINCE (this round's tool results, a
+	// daemon InjectNote) is invisible to it. The char estimate measures the CURRENT
+	// history, so taking the max means a large mid-round injection still trips the gate
+	// while the real figure governs the steady state. Before the first round, or right
+	// after a reset zeroed it, lastPromptTokens is 0 and the estimate alone applies.
+	est := s.estimateTokensLocked()
+	if s.lastPromptTokens > est {
+		est = s.lastPromptTokens
 	}
 	// Skip when under the soft threshold, OR when there's no real history to
 	// summarize (≤1 working message) — UNLESS that lone message is itself over the

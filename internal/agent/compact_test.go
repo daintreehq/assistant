@@ -823,6 +823,72 @@ func TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens(t *testing.T) {
 	}
 }
 
+// reportingRouter streams a plain answer, reports a fixed LARGE-tier prompt_tokens via
+// FlushMeter, and returns a summary from Chat — so an end-to-end Send populates
+// lastPromptTokens from real usage and the NEXT Send can gate compaction on it even
+// when the char estimate is tiny.
+type reportingRouter struct {
+	largePromptTokens int
+	summary           string
+	chatCalls         int
+}
+
+func (r *reportingRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
+	if onToken != nil {
+		onToken("hi")
+	}
+	return models.ChatResult{Content: "hi"}, nil
+}
+func (r *reportingRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
+	r.chatCalls++
+	return models.ChatResult{Content: r.summary}, nil
+}
+func (r *reportingRouter) ModelFor(domain.ModelTier) string { return "glm-5p2" }
+func (r *reportingRouter) FlushMeter() []models.TierUsage {
+	return []models.TierUsage{{
+		Tier:         string(domain.ModelLarge),
+		Model:        "glm-5p2",
+		PromptTokens: r.largePromptTokens,
+		TotalTokens:  r.largePromptTokens,
+	}}
+}
+
+// TestSendStashedTokensGateNextRoundCompaction is the end-to-end proof: round 1's
+// emitUsage stashes the provider-reported prompt_tokens (over threshold), and round 2's
+// pre-turn auto-compact gates on that stashed figure — compacting BEFORE streaming even
+// though the char history is tiny. This closes the gap that the seeded-field unit tests
+// leave open (they don't flow through emitUsage → next-round maybeAutoCompact).
+func TestSendStashedTokensGateNextRoundCompaction(t *testing.T) {
+	r := &reportingRouter{largePromptTokens: domain.AutoCompactTokenThreshold + 10_000, summary: "GATED_SUMMARY"}
+	s, _ := compactSession(t, r)
+	ctx := context.Background()
+
+	// Round 1: tiny char history, but the provider reports a prompt over the threshold
+	// (tool schemas included). The pre-turn check saw lastPromptTokens == 0, so no
+	// compaction fires this round — but emitUsage stashes the real figure.
+	if _, err := s.Send(ctx, "hi", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if r.chatCalls != 0 {
+		t.Fatalf("first round must not compact (estimate tiny, no stash yet), got %d summary calls", r.chatCalls)
+	}
+	s.mu.Lock()
+	stashed := s.lastPromptTokens
+	s.mu.Unlock()
+	if stashed != domain.AutoCompactTokenThreshold+10_000 {
+		t.Fatalf("emitUsage should stash the real large-tier figure, got %d", stashed)
+	}
+
+	// Round 2: the pre-turn auto-compact reads the stashed real figure (> threshold) and
+	// compacts before streaming, even though the char estimate is still tiny.
+	if _, err := s.Send(ctx, "again", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if r.chatCalls != 1 {
+		t.Fatalf("second round should compact on the stashed real figure, got %d summary calls", r.chatCalls)
+	}
+}
+
 // TestCompactLockedZerosLastPromptTokens proves compaction clears the stashed real
 // figure — otherwise the pre-compaction ~60K+ value would make the next check see the
 // threshold exceeded and re-compact the freshly-shrunk history immediately.
