@@ -320,6 +320,7 @@ func Create(opts CreateOptions) (*App, error) {
 		Store:                store,
 		MemoryStore:          store,
 		ArtifactPersister:    store,
+		WorkflowRunLister:    store,
 		PromptContext:        a.PromptContext(),
 		SessionID:            sessionID,
 		RestoredMessages:     restored,

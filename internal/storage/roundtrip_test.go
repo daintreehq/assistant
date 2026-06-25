@@ -243,6 +243,60 @@ func TestWorkflowUpdateImmutableAndListFilter(t *testing.T) {
 	}
 }
 
+// ListNonTerminalWorkflowRuns filters to pending|active|blocked IN SQL, orders
+// updatedAt DESC, bounds by limit, and treats limit<=0 as "want nothing".
+func TestListNonTerminalWorkflowRuns(t *testing.T) {
+	s := openTest(t, 1)
+	// One row per status; updatedAt encodes the expected DESC order among the
+	// non-terminal three (blocked=300 > active=200 > pending=100).
+	mk := func(st domain.WorkflowRunStatus, updated int64) domain.WorkflowRunRecord {
+		r, _ := s.InsertWorkflowRun(domain.WorkflowRunRecord{Status: st, CreatedAt: updated, UpdatedAt: updated})
+		return r
+	}
+	pending := mk(domain.WorkflowPending, 100)
+	active := mk(domain.WorkflowActive, 200)
+	blocked := mk(domain.WorkflowBlocked, 300)
+	mk(domain.WorkflowDone, 400)      // terminal: must be excluded
+	mk(domain.WorkflowCancelled, 500) // terminal: must be excluded
+	mk(domain.WorkflowFailed, 600)    // terminal: must be excluded
+
+	got, err := s.ListNonTerminalWorkflowRuns(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 non-terminal rows, got %d (%+v)", len(got), got)
+	}
+	// updatedAt DESC: blocked, active, pending. Terminal rows never appear.
+	if got[0].ID != blocked.ID || got[1].ID != active.ID || got[2].ID != pending.ID {
+		t.Fatalf("updatedAt DESC order wrong: %s,%s,%s", got[0].ID, got[1].ID, got[2].ID)
+	}
+	for _, r := range got {
+		switch r.Status {
+		case domain.WorkflowPending, domain.WorkflowActive, domain.WorkflowBlocked:
+		default:
+			t.Fatalf("terminal status leaked into result: %s", r.Status)
+		}
+	}
+
+	// limit caps the row count, keeping the most-recently-updated.
+	capped, err := s.ListNonTerminalWorkflowRuns(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 2 || capped[0].ID != blocked.ID || capped[1].ID != active.ID {
+		t.Fatalf("limit=2 should yield the 2 newest non-terminal runs, got %+v", capped)
+	}
+
+	// limit<=0 is "want nothing" — no query, nil result, no error.
+	if rows, err := s.ListNonTerminalWorkflowRuns(0); err != nil || rows != nil {
+		t.Fatalf("limit=0 must return (nil,nil); got %v,%v", rows, err)
+	}
+	if rows, err := s.ListNonTerminalWorkflowRuns(-5); err != nil || rows != nil {
+		t.Fatalf("negative limit must return (nil,nil); got %v,%v", rows, err)
+	}
+}
+
 // ---- agent launches: defaults + findActive excludes terminal + most-recent ----
 
 func TestAgentLaunchDefaultsAndFindActive(t *testing.T) {

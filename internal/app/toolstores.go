@@ -279,4 +279,7 @@ var (
 	// *storage.Store directly satisfies the agent artifact-persist seam (its no-ctx,
 	// record-returning InsertArtifact matches the interface exactly).
 	_ agent.ArtifactPersister = (*storage.Store)(nil)
+	// *storage.Store directly satisfies the agent footer workflow-lister seam (its
+	// no-ctx ListNonTerminalWorkflowRuns matches the interface exactly).
+	_ agent.WorkflowRunLister = (*storage.Store)(nil)
 )

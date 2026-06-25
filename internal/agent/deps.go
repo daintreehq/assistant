@@ -95,6 +95,17 @@ type MemoryStore interface {
 	MemoryExists(content string) (bool, error)
 }
 
+// WorkflowRunLister is the read-only ledger seam for the turn footer: it returns
+// the open (non-terminal) workflow runs so the model gets a compact, always-current
+// view of its own active work and open branches, rebuilt every round at the uncached
+// tail. Optional: a nil lister omits the workflow block entirely (the default in
+// tests). The read is best-effort and synchronous (a sub-ms local SQLite query, not a
+// network call) so — like MemoryStore/ArtifactPersister — it carries NO context and
+// must never block or break the turn; the caller swallows any error to nil.
+type WorkflowRunLister interface {
+	ListNonTerminalWorkflowRuns(limit int) ([]domain.WorkflowRunRecord, error)
+}
+
 // ArtifactPersister is the durable-mirror seam for oversized tool-result overflow
 // payloads (satisfied by *storage.Store). When a serialized result overflows the
 // inline cap the session stashes the full envelope in its bounded in-memory
@@ -122,6 +133,9 @@ type SessionDeps struct {
 	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister
+	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
+	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
+	WorkflowRunLister WorkflowRunLister
 	PromptContext     prompts.MainPromptContext
 	SessionID         string
 
