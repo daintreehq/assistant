@@ -774,7 +774,7 @@ func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
 
 	// With no real figure yet, the char estimate governs — far under threshold, so no
 	// compaction. This is the behaviour the issue is fixing: the estimate alone misses.
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
 	if r.chatCalls != 0 {
 		t.Fatalf("char estimate is under threshold; compaction should not fire yet, got %d calls", r.chatCalls)
 	}
@@ -785,7 +785,7 @@ func TestMaybeAutoCompactPrefersRealPromptTokens(t *testing.T) {
 	s.lastPromptTokens = domain.AutoCompactTokenThreshold + 10_000
 	s.mu.Unlock()
 
-	s.maybeAutoCompact(ctx)
+	s.maybeAutoCompact(ctx, "run_test")
 	if r.chatCalls != 1 {
 		t.Fatalf("real prompt_tokens over threshold should trigger compaction, got %d calls", r.chatCalls)
 	}
@@ -817,7 +817,7 @@ func TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens(t *testing.T) {
 		t.Fatalf("precondition: lastPromptTokens should be 0, got %d", stash)
 	}
 
-	s.maybeAutoCompact(context.Background())
+	s.maybeAutoCompact(context.Background(), "run_test")
 	if r.chatCalls != 1 {
 		t.Fatalf("char estimate over threshold should trigger compaction via fallback, got %d calls", r.chatCalls)
 	}
