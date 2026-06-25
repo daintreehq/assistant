@@ -146,8 +146,8 @@ Your local tools wrap Daintree:
   returns top-level stillWorking and askingQuestion arrays of terminal IDs: when the
   budget runs out, re-await stillWorking directly (no need to scan perTerminal) and
   route answers to the askingQuestion ids. maxAttempts defaults to 30 (≈60s) and caps
-  at 240 (≈480s) — leave it at the default unless the cohort has a known-slow agent that
-  needs a single round past 120s. agentState
+  at 240 (≈480s) at the default 2s poll — leave it at the default unless the cohort has a
+  known-slow agent that needs a single round past 120s. agentState
   is an imperfect signal (an agent can briefly read idle mid-work), so a "finished" is
   a strong hint, not proof — read the tail yourself afterward and self-heal a misread
   (re-await/watch a terminal that still looks busy). It returns NO content:

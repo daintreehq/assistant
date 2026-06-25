@@ -83,7 +83,7 @@ var awaitSchema = json.RawMessage(`{
   "properties": {
     "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "All the agent terminals to wait on (1-16, no duplicates). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it." },
     "pollIntervalMs": { "type": "number", "description": "Delay between poll rounds in ms (default 2000)." },
-    "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default." }
+    "maxAttempts": { "type": "number", "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s — durations assume the default 2s pollIntervalMs). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default." }
   },
   "required": ["terminalIds"]
 }`)
