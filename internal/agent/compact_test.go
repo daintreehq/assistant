@@ -1249,7 +1249,7 @@ func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
 	s.maybeAutoCompact(context.Background(), "run_test")
 
 	got := r.system()
-	for _, want := range []string{"term_*", "run_*", "watcher_*", "wkf_*", "branch", "grant"} {
+	for _, want := range []string{"term_*", "run_*", "scr_*", "watcher_*", "wkf_*", "branch", "grant"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary prompt missing %q: %q", want, got)
 		}

@@ -1329,7 +1329,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// turn would otherwise trip the vision tier gate and silently fail every
 	// auto-compact, growing history unbounded).
 	summaryMsgs := []models.ChatMessage{
-		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual. Preserve verbatim every load-bearing identifier you see — terminal IDs (term_*), run IDs (run_*), watcher IDs (watcher_*), workflow IDs (wkf_*), branch names, and any active grant or approval token — so the orchestrator can still reference them after compaction."),
+		models.TextMessage("system", "Summarize the conversation below in 2-3 sentences: the current goals, key decisions made, and any pending work. Be concise and factual. Preserve verbatim every load-bearing identifier you see — terminal IDs (term_*), run IDs (run_*), scratch store IDs (scr_*), watcher IDs (watcher_*), workflow IDs (wkf_*), branch names, and any active grant or approval token — so the orchestrator can still reference them after compaction."),
 	}
 	// Capture a flattened transcript from the SAME snapshot (still under the lock) so
 	// the distillation pass can mine the about-to-be-discarded history after the lock
