@@ -70,17 +70,19 @@ func TestMemoryTTLHidesExpiredFromListAndRecall(t *testing.T) {
 
 	// Advance past the future row's deadline: it must now disappear too.
 	clock = 2000
-	list2, _ := s.ListMemories(MemoryListOptions{})
+	list2, err := s.ListMemories(MemoryListOptions{})
+	if err != nil {
+		t.Fatalf("list after clock advance: %v", err)
+	}
 	if got2 := memContents(list2); got2["ttlrow future"] {
 		t.Fatalf("future row should be hidden once clock reaches its expiresAt")
 	}
 }
 
-// TestMemoryTTLExpiredStillVisibleToGetAndExists confirms the filter is scoped to
-// list/recall only: GetMemory (id lookup) and MemoryExists (de-dup guard) still see
-// an expired row, so direct fetches work and a forgotten/expired fact still blocks
-// re-insertion during distillation.
-func TestMemoryTTLExpiredStillVisibleToGetAndExists(t *testing.T) {
+// TestMemoryTTLGetByIdIgnoresExpiry confirms the expiry filter is scoped to
+// list/recall: GetMemory (direct id lookup) still returns an expired non-deleted row,
+// so internal fetches (pin/unpin post-update reads) keep working.
+func TestMemoryTTLGetByIdIgnoresExpiry(t *testing.T) {
 	s := openTest(t, 5000)
 	s.now = func() int64 { return 5000 }
 
@@ -89,7 +91,6 @@ func TestMemoryTTLExpiredStillVisibleToGetAndExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-
 	got, err := s.GetMemory(rec.ID, false)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -100,13 +101,75 @@ func TestMemoryTTLExpiredStillVisibleToGetAndExists(t *testing.T) {
 	if got.ExpiresAt == nil || *got.ExpiresAt != past {
 		t.Fatalf("expiresAt did not round-trip: %v", got.ExpiresAt)
 	}
+}
 
-	exists, err := s.MemoryExists("expired but fetchable")
-	if err != nil {
-		t.Fatalf("exists: %v", err)
+// TestMemoryExistsExpiryAndForgetInvariants pins down the de-dup guard's two rules:
+// an EXPIRED-but-not-forgotten row must NOT block (its TTL elapsed, so re-distilling
+// the same content as a durable fact is desired), while a FORGOTTEN row must STILL
+// block (no silent resurrection of an explicitly-forgotten memory). A live unexpired
+// row blocks as before.
+func TestMemoryExistsExpiryAndForgetInvariants(t *testing.T) {
+	s := openTest(t, 5000)
+	clock := int64(5000)
+	s.now = func() int64 { return clock }
+	ptr := func(v int64) *int64 { return &v }
+
+	// Live unexpired row → blocks.
+	if _, err := s.InsertMemory(domain.MemoryRecord{Content: "live fact", ExpiresAt: ptr(9000)}); err != nil {
+		t.Fatalf("insert live: %v", err)
 	}
-	if !exists {
-		t.Fatal("MemoryExists must still count an expired row (no silent resurrection)")
+	if ok, _ := s.MemoryExists("live fact"); !ok {
+		t.Fatal("a live unexpired row must block re-insertion")
+	}
+
+	// Expired (not forgotten) row → must NOT block.
+	if _, err := s.InsertMemory(domain.MemoryRecord{Content: "expired fact", ExpiresAt: ptr(100)}); err != nil {
+		t.Fatalf("insert expired: %v", err)
+	}
+	if ok, _ := s.MemoryExists("expired fact"); ok {
+		t.Fatal("an expired non-deleted row must NOT block (re-distill is desired)")
+	}
+
+	// Forgotten row → must STILL block, even though it has no TTL.
+	forget, err := s.InsertMemory(domain.MemoryRecord{Content: "forgotten fact"})
+	if err != nil {
+		t.Fatalf("insert forgotten: %v", err)
+	}
+	if _, err := s.ForgetMemory(forget.ID, clock); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if ok, _ := s.MemoryExists("forgotten fact"); !ok {
+		t.Fatal("a forgotten row must still block (no silent resurrection)")
+	}
+}
+
+// TestMemoryTTLPinRefusesExpired confirms PinMemory will not pin an expired (dead)
+// row — pinning it would only mark a row that list/recall already hide. A live row
+// still pins.
+func TestMemoryTTLPinRefusesExpired(t *testing.T) {
+	s := openTest(t, 5000)
+	s.now = func() int64 { return 5000 }
+	ptr := func(v int64) *int64 { return &v }
+
+	expired, _ := s.InsertMemory(domain.MemoryRecord{Content: "expired pin target", ExpiresAt: ptr(100)})
+	got, err := s.PinMemory(expired.ID, 0)
+	if err != nil {
+		t.Fatalf("pin expired: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetMemory should still return the row by id")
+	}
+	if got.PinnedAt != nil {
+		t.Fatal("PinMemory must not pin an expired row")
+	}
+
+	live, _ := s.InsertMemory(domain.MemoryRecord{Content: "live pin target", ExpiresAt: ptr(9000)})
+	got2, err := s.PinMemory(live.ID, 0)
+	if err != nil {
+		t.Fatalf("pin live: %v", err)
+	}
+	if got2 == nil || got2.PinnedAt == nil {
+		t.Fatalf("PinMemory should pin a live unexpired row, got %+v", got2)
 	}
 }
 

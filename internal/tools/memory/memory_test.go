@@ -201,6 +201,27 @@ func TestSaveStampsProvenanceAndEpisodic(t *testing.T) {
 	}
 }
 
+// episodic save with no SessionID in the turn context leaves sessionId nil (kind and
+// session namespace are independent — a missing context is not an error).
+func TestSaveEpisodicWithoutSessionContext(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "memory.save")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"content":"x","kind":"episodic"}`), &tools.ToolContext{RunID: "run_1"})
+	if !res.Ok {
+		t.Fatalf("episodic save without session failed: %+v", res.Error)
+	}
+	rec := st.inserted[0]
+	if rec.Kind != domain.MemoryKindEpisodic {
+		t.Fatalf("kind = %q, want episodic", rec.Kind)
+	}
+	if rec.SessionID != nil {
+		t.Fatalf("sessionId must stay nil when context has none, got %v", rec.SessionID)
+	}
+	if rec.RunID == nil || *rec.RunID != "run_1" {
+		t.Fatalf("runId = %v, want run_1", rec.RunID)
+	}
+}
+
 // save rejects an out-of-enum kind with INVALID_ARGS (handler switch).
 func TestSaveRejectsUnknownKind(t *testing.T) {
 	st := &memStore{}

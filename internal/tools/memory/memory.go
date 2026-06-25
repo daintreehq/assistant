@@ -248,7 +248,8 @@ type saveArgs struct {
 
 // maxTtlMs bounds the relative TTL to ~100 years. Beyond this a ttlMs is nonsense
 // and would risk overflowing the absolute expiresAt (now + ttlMs); rejecting keeps
-// the epoch arithmetic in the handler safe.
+// the epoch arithmetic in the handler safe. KEEP the literal in saveSchema's
+// ttlMs "maximum" in sync with this value (100*365*24*60*60*1000 = 3153600000000).
 const maxTtlMs = int64(100*365*24*60*60) * 1000
 
 // Validate caps the saved content + category so a single memory can't bloat the
@@ -276,7 +277,7 @@ var saveSchema = json.RawMessage(`{
     "category": { "type": "string" },
     "source": { "type": "string", "enum": ["user", "assistant"] },
     "kind": { "type": "string", "enum": ["semantic", "episodic"] },
-    "ttlMs": { "type": "integer", "minimum": 1 }
+    "ttlMs": { "type": "integer", "minimum": 1, "maximum": 3153600000000 }
   }
 }`)
 

@@ -174,17 +174,22 @@ func (s *Store) RecallMemories(query string, opts MemoryRecallOptions) ([]domain
 	return collectMemories(rows)
 }
 
-// MemoryExists reports whether a memory with EXACTLY this content has ever been stored
-// — INCLUDING soft-deleted rows. The distill-on-compact path uses it to skip re-saving
-// a fact it already holds: matching live rows avoids duplicates, and matching
-// soft-deleted rows means a memory the user explicitly forgot is not silently
-// resurrected by a later compaction. Deliberately an exact match (predictable and
-// cheap) rather than an FTS similarity threshold (which needs tuning and
-// false-positives on short facts).
+// MemoryExists reports whether a live-or-forgotten memory with EXACTLY this content
+// is on record. The distill-on-compact path uses it to skip re-saving a fact it
+// already holds: matching live rows avoids duplicates, and matching soft-deleted
+// rows means a memory the user explicitly forgot is not silently resurrected by a
+// later compaction. An EXPIRED-but-not-forgotten row, however, must NOT block: its
+// TTL has elapsed (it's hidden from list/recall), so re-saving the same content as
+// a durable fact is the desired outcome — hence the predicate blocks only when the
+// row is forgotten (deletedAt set) OR still live (NULL/unexpired TTL). Deliberately
+// an exact match (predictable and cheap) rather than an FTS similarity threshold.
 func (s *Store) MemoryExists(content string) (bool, error) {
 	var one int
 	err := s.db.QueryRow(
-		"SELECT 1 FROM memories WHERE content = ? LIMIT 1", content).Scan(&one)
+		`SELECT 1 FROM memories
+		  WHERE content = ?
+		    AND (deletedAt IS NOT NULL OR expiresAt IS NULL OR expiresAt > ?)
+		  LIMIT 1`, content, s.now()).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -214,16 +219,19 @@ func (s *Store) ForgetMemory(id string, now int64) (bool, error) {
 	return n > 0, nil
 }
 
-// PinMemory stamps pinnedAt+updatedAt WHERE not-deleted AND not-already-pinned
-// (idempotent guard avoids re-jumping the order). Returns the post-update memory
-// (or the existing one when the guard was a no-op).
+// PinMemory stamps pinnedAt+updatedAt WHERE not-deleted, not-already-pinned, AND
+// not-expired (idempotent guard avoids re-jumping the order; the expiry guard avoids
+// pinning a dead row that list/recall would hide anyway). Returns the post-update
+// memory (or the existing one when the guard was a no-op).
 func (s *Store) PinMemory(id string, now int64) (*domain.MemoryRecord, error) {
 	if now <= 0 {
 		now = s.now()
 	}
 	if _, err := s.db.Exec(
-		"UPDATE memories SET pinnedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL",
-		now, now, id); err != nil {
+		`UPDATE memories SET pinnedAt = ?, updatedAt = ?
+		  WHERE id = ? AND deletedAt IS NULL AND pinnedAt IS NULL
+		    AND (expiresAt IS NULL OR expiresAt > ?)`,
+		now, now, id, s.now()); err != nil {
 		return nil, fmt.Errorf("pin memory: %w", err)
 	}
 	return s.GetMemory(id, false)
