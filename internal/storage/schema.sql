@@ -270,3 +270,23 @@ CREATE TABLE IF NOT EXISTS artifacts (
   createdAt  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(sessionId, createdAt);
+
+-- 3.14 context_checkpoints — durable structured compaction checkpoint, reloaded on
+-- resume. Exactly two rows: slot 'latest' (the current checkpoint) and slot 'prev'
+-- (the immediately-preceding one, rotated in on each upsert) so a corrupt 'latest'
+-- (unparseable payloadJson) falls back to the last valid checkpoint. payloadJson is
+-- the full structured checkpoint object verbatim (opaque here, so a richer object
+-- round-trips without a schema change); the promoted columns are what the resume path
+-- reads directly. lastSeq is the conversation seq at the compaction boundary (resume
+-- validates the checkpoint against the replayed delta). No projectId/sessionId: one
+-- DB is one project, and a stale checkpoint is harmless (the conversation rows are the
+-- authoritative transcript). The 2-row PK-keyed shape needs no index.
+CREATE TABLE IF NOT EXISTS context_checkpoints (
+  slot            TEXT PRIMARY KEY,   -- 'latest' | 'prev'
+  compactionDepth INTEGER NOT NULL,
+  summaryText     TEXT NOT NULL,
+  lastRunId       TEXT,
+  lastSeq         INTEGER NOT NULL,
+  payloadJson     TEXT NOT NULL,
+  createdAt       INTEGER NOT NULL
+);
