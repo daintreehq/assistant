@@ -583,8 +583,15 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// Read an immutable SNAPSHOT of the history under the lock, then stream with
 		// the lock RELEASED — the model call is long, and a concurrent InjectNote
 		// (daemon) or InjectPrompt (user) must be able to append without racing this read.
+		//
+		// composeTurnFooter appends the UNCACHED turn footer (a `# Current goal` anchor
+		// seeded from userInput, the turn's originating ask) AFTER the snapshot. It is the
+		// TAIL of the request, never part of the cached prefix, so it is rebuilt fresh
+		// every round and can never invalidate the prefix cache. It is NEVER pushed into
+		// s.messages: snapshotMessages returns a fresh make+copy slice (len==cap), so this
+		// append cannot alias back into the live history — the footer stays ephemeral.
 		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
-			Messages:       s.snapshotMessages(),
+			Messages:       append(s.snapshotMessages(), composeTurnFooter(userInput)...),
 			Tools:          tools,
 			ToolChoice:     "auto",
 			PromptCacheKey: domain.MainPromptCacheKey,
