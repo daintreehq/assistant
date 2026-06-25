@@ -120,8 +120,10 @@ func (s *Store) ListNonTerminalWorkflowRuns(limit int) ([]domain.WorkflowRunReco
 	if limit <= 0 {
 		return nil, nil
 	}
+	// id DESC is a deterministic tiebreaker: rows sharing an updatedAt (sub-ms cluster
+	// writes) would otherwise pick a nondeterministic subset under LIMIT.
 	rows, err := s.db.Query("SELECT "+workflowCols+
-		" FROM workflow_runs WHERE status IN (?, ?, ?) ORDER BY updatedAt DESC LIMIT ?",
+		" FROM workflow_runs WHERE status IN (?, ?, ?) ORDER BY updatedAt DESC, id DESC LIMIT ?",
 		string(domain.WorkflowPending), string(domain.WorkflowActive), string(domain.WorkflowBlocked), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list non-terminal workflow runs: %w", err)

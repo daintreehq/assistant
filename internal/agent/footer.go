@@ -201,7 +201,11 @@ func compactNextAction(nextActionJson *string) string {
 	if label == "" {
 		return "none"
 	}
-	if tool := strings.TrimSpace(preview.ToolName); tool != "" {
+	// Sanitize toolName the same way as label (collapse embedded whitespace, not just
+	// trim): a ledger blob originates from model-emitted tool args, so a toolName with
+	// an embedded newline must NOT be able to inject a second "- [..." line that the
+	// model would read as a real run row.
+	if tool := cleanWorkflowFieldStr(preview.ToolName); tool != "" {
 		return label + " (" + tool + ")"
 	}
 	return label
@@ -219,9 +223,13 @@ func compactIDList(idsJson *string) string {
 	if err := json.Unmarshal([]byte(*idsJson), &ids); err != nil {
 		return "none"
 	}
+	// Collapse each id's internal whitespace (not just trim): an id blob comes from
+	// model-emitted tool args, so an embedded newline must not break the one-line row
+	// or inject a fake "- [..." row. Blank entries are dropped so a stray "" never
+	// renders as an empty id.
 	cleaned := ids[:0]
 	for _, id := range ids {
-		if id = strings.TrimSpace(id); id != "" {
+		if id = strings.Join(strings.Fields(id), " "); id != "" {
 			cleaned = append(cleaned, id)
 		}
 	}
