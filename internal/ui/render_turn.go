@@ -496,7 +496,35 @@ func renderProse(md *markdown.Renderer, step TurnStep, contentW int, withholdGro
 	if idx < 0 {
 		return "" // no completed paragraph yet — withhold the whole still-growing step from the flush
 	}
-	return strings.TrimRight(md.Render(step.Text[:idx], contentW, false).ANSI, "\n")
+	return renderCompletedBlocks(md, step.Text[:idx], contentW)
+}
+
+// renderCompletedBlocks renders the COMPLETED-block prefix `text` (everything up to the last "\n\n")
+// for the commit, in a form that is STABLE under appending the blocks that follow. glamour renders
+// some blocks differently depending on whether ANOTHER block follows them — most importantly it pads
+// a trailing ATX heading ("### Title") to the full content width only when a block follows it, and
+// leaves it unpadded when it is the last block. So a heading committed while it is the last completed
+// block (unpadded) RE-RENDERS padded the instant the next block (e.g. a bullet list) seals — changing
+// an already-committed row, tripping flushActiveTurn's reflow guard, and FREEZING the flush for the
+// rest of the turn. Every block after it then piles into the height-capped footer and churns until
+// the final seal — the user-reported "title + blank line + bullet list" churn.
+//
+// The fix renders `text` with a trailing SENTINEL block appended, so every real block is in its
+// "followed by content" form (the same form the footer and the seal render it in, since live content
+// always follows). The sentinel's own row + its blank separator are then dropped. The result is a
+// byte-stable prefix: it no longer changes when the real next block arrives.
+func renderCompletedBlocks(md *markdown.Renderer, text string, contentW int) string {
+	full := strings.TrimRight(md.Render(text+"\n\nx", contentW, false).ANSI, "\n")
+	rows := strings.Split(full, "\n")
+	if len(rows) > 0 {
+		rows = rows[:len(rows)-1] // drop the sentinel "x" paragraph's row
+	}
+	// Drop the blank separator the sentinel sat below (and any other trailing blanks), so the
+	// committed prefix never ends in a blank (which the flush↔seal reconciliation forbids).
+	for len(rows) > 0 && strings.TrimSpace(stripAnsi(rows[len(rows)-1])) == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return strings.Join(rows, "\n")
 }
 
 // proseTailCommittable reports whether the still-growing final paragraph `tail` (the raw markdown

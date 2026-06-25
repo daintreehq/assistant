@@ -68,6 +68,64 @@ func tailOf(s string, n int) string {
 	return s[len(s)-n:]
 }
 
+// TestStreaming_HeadingThenListDoesNotChurn is the regression for the "title + blank line + bullet
+// list" churn (confirmed from session log ses_34766218 — a `## heading` / `### heading` answer with
+// bullet lists). THE BUG: glamour renders a trailing ATX heading UNPADDED when it is the last block
+// but PADDED to full width once a block follows it. So the heading committed (unpadded) when its
+// "\n\n" sealed, then RE-RENDERED padded the instant the following list sealed — changing an
+// already-committed row, tripping flushActiveTurn's reflow guard, and FREEZING the flush for the
+// REST of the turn. Every later section then piled into the capped footer and churned until the final
+// seal ("carries on … restores at the very end"). renderCompletedBlocks fixes it by committing each
+// block in its stable "followed-by-content" form. This streams the real multi-section answer and
+// asserts the un-committed tail never exceeds the cap — without the fix it reaches ~22 rows.
+func TestStreaming_HeadingThenListDoesNotChurn(t *testing.T) {
+	full := "Here's the summary:\n\n" +
+		"## Daintree Assistant\n\n" +
+		"This is **Daintree's local operations officer** — a single native **Go** binary for the Daintree platform.\n\n" +
+		"### What it does\n\n" +
+		"- **Orchestrates Daintree operations** — spawns and supervises visible agent terminals, manages worktrees\n" +
+		"- **Never edits files directly** — when changes are needed it spawns a visible agent inside Daintree\n" +
+		"- **Powered by DeepSeek AI** (`deepseek-v4-flash`) for all model tiers including watchers\n\n" +
+		"### Key architecture\n\n" +
+		"- **Go 1.25.8+**, pure Go with no CGO — SQLite via `modernc.org/sqlite`, Bubble Tea v2 for the cockpit\n" +
+		"- **Three run modes**: interactive cockpit, classic REPL, and one-shot\n" +
+		"- **Foreground-only scheduler** — timers and watchers tick in-process only while the assistant is open\n\n" +
+		"### Current state\n\n" +
+		"Single worktree (`main`), 3 terminals, no open inbox items."
+	turn := &TurnCell{ID: "turn_1", UserText: "Q", State: TurnActive, Phase: domain.PhaseGenerating, Steps: []TurnStep{proseStep("", true)}}
+	m := armedModel(turn)
+	m.rows = 40 // roomy: the cap, not the terminal height, is the binding bound
+
+	worst, maxFlushed, worstAt := 0, 0, ""
+	for i := 1; i <= len(full); i++ {
+		turn.Steps[0].Text = full[:i]
+		_ = m.flushActiveTurn()
+		if turn.FlushedRows > maxFlushed {
+			maxFlushed = turn.FlushedRows
+		}
+		if unc := len(m.activeTurnRows(turn)) - turn.FlushedRows; unc > worst {
+			worst, worstAt = unc, full[max0(i-30):i]
+		}
+	}
+	t.Logf("worst un-committed footer tail across the heading+list answer: %d rows (cap %d), at …%q", worst, maxLiveRows, worstAt)
+	// Non-vacuity: blocks must actually flush (so a stuck flush is what we'd catch).
+	if maxFlushed == 0 {
+		t.Fatal("nothing ever flushed — the trace is vacuous")
+	}
+	// The flush must keep advancing section by section; if the heading-reflow guard-trip froze it,
+	// the whole rest of the answer would pile up far past the cap (≈22 rows without the fix).
+	if worst > maxLiveRows {
+		t.Errorf("un-committed footer tail peaked at %d rows (> maxLiveRows=%d) — the flush froze on a heading-before-list and the rest of the answer churned", worst, maxLiveRows)
+	}
+}
+
+func max0(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 // TestStreaming_BulletListDoesNotChurn is the regression for the bullet-list churn (the case that
 // persisted after the paragraph fix — confirmed from a real session log). glamour re-flows a list as
 // items are added (each new item shifts earlier items' indentation), so a streaming list CAN'T
