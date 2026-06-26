@@ -1,6 +1,6 @@
 // Package storage is the durable SQLite store of the assistant: timers, watchers,
 // the attention-queue inbox (events), the tool-dispatch audit trail, per-run event
-// logs, the conversation transcript, skill-selection diagnostics, automation
+// logs, the conversation transcript, automation
 // grants, the workflow ledger, agent-launch sagas, skill run state, and
 // cross-session project memories (with an FTS5 recall index).
 //
@@ -41,9 +41,10 @@ const (
 	// when the artifacts table was added (durable tool-result overflow payloads); to 5
 	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic);
 	// to 6 when the context_checkpoints table was added (durable compaction checkpoint
-	// reloaded on resume) — a schema change is a hard-reset (make db-reset), not a
-	// migration.
-	schemaUserVersion = 6
+	// reloaded on resume); to 7 when the dead skill_selection_log table was DROPPED
+	// (skill selection is server-owned now — the CLI never logged selections) — a schema
+	// change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 7
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
@@ -55,8 +56,6 @@ type Retention struct {
 	RunEventsKeepRuns    int
 	ConversationMaxAge   time.Duration
 	ConversationKeepRows int
-	SkillSelLogMaxAge    time.Duration
-	SkillSelLogKeepRows  int
 	ArtifactsMaxAge      time.Duration // hard-delete overflow artifacts past window
 	ArtifactsKeepRows    int
 	EventsTerminalAge    time.Duration // hard-delete resolved/expired events past window
@@ -71,8 +70,6 @@ var DefaultRetention = Retention{
 	RunEventsKeepRuns:    500,
 	ConversationMaxAge:   time.Duration(90*dayMS) * time.Millisecond,
 	ConversationKeepRows: 1000,
-	SkillSelLogMaxAge:    time.Duration(30*dayMS) * time.Millisecond,
-	SkillSelLogKeepRows:  500,
 	// Artifacts age WITH the conversation that references them (90d / 1000 rows): a
 	// truncation stub persisted in the transcript must not outlive its payload, or
 	// artifact.read would 404 a stub the user can still scroll to.

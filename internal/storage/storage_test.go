@@ -500,7 +500,6 @@ func TestRetentionPrunesRunWithAuditPairing(t *testing.T) {
 		RunEventsMaxAge: time.Millisecond, RunEventsKeepRuns: 0,
 		AuditLogMaxAge: time.Millisecond, AuditLogKeepRows: 0,
 		ConversationMaxAge: time.Hour, ConversationKeepRows: 100,
-		SkillSelLogMaxAge: time.Hour, SkillSelLogKeepRows: 100,
 		EventsTerminalAge: time.Hour, MemoriesDeletedAge: time.Hour,
 	}
 	s, err := Open(":memory:", &Options{Now: func() int64 { return now }, Retention: &ret})

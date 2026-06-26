@@ -17,7 +17,6 @@ const (
 	PrefixRunEvent    = "rne_"
 	PrefixGrant       = "grt_"
 	PrefixMessage     = "msg_"
-	PrefixSkillSel    = "rsl_"
 	PrefixWorkflow    = "wfr_"
 	PrefixSkillRun    = "rrs_"
 	PrefixMemory      = "mem_"

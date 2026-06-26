@@ -11,8 +11,8 @@ import (
 
 // StreamCallbacks receives streamed events as they arrive. All are optional. The
 // final assembled message + usage are returned by the stream parser regardless;
-// these callbacks exist for live UI (token streaming, rendering the skill prelude
-// up front). They are invoked synchronously on the reader goroutine.
+// these callbacks exist for live UI (token streaming, surfacing the newly-loaded
+// skill titles up front). They are invoked synchronously on the reader goroutine.
 type StreamCallbacks struct {
 	// OnMeta fires once, before any content — carries the refreshed state token,
 	// the skills outcome, and version markers.

@@ -23,8 +23,8 @@ import (
 )
 
 // DefaultToolBuilder is the real ToolBuilder: it constructs every tool family's
-// Deps from the App's already-built providers (Store, MCP client, Router, Queue,
-// agent session, skills registry) — bridging each consumer interface through the
+// Deps from the App's already-built providers (Store, MCP client, backend client,
+// Queue, agent session) — bridging each consumer interface through the
 // adapters in toolfamilies.go / toolterminal.go — and aggregates all their tools
 // into the []*tools.Tool the registry consumes. Families that return []tools.Tool
 // (value slices) are normalized to []*tools.Tool by addr(); families that already

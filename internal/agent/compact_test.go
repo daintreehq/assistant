@@ -23,9 +23,6 @@ func (s *recordingStore) InsertMessage(rec domain.ConversationMessageRecord) (do
 	s.msgs = append(s.msgs, rec)
 	return rec, nil
 }
-func (s *recordingStore) InsertSkillSelection(rec domain.SkillSelectionLogRecord) (domain.SkillSelectionLogRecord, error) {
-	return rec, nil
-}
 
 // compactSession builds a session wired through the backend-from-router adapter + a
 // recording store. The Router's Chat call backs the checkpoint/distill backend tasks.

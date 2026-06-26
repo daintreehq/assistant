@@ -18,11 +18,12 @@ internal/
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath
   storage/       Store (store.go) over modernc.org/sqlite — durable state
-  models/
-    deepseek.go DeepSeekClient — net/http Chat Completions, SSE streaming, think-filter
-    router.go    Router — ModelFor(tier), Chat, Stream(onToken), JSON
-    pricing.go   per-model cost estimation
-    prompts/     base.go (BaseSystemPrompt), runtime context + loaded-skills builders
+  backend/       Daintree backend client — the CLI's model gateway. client.go (Respond/
+                 RunTask/Health), contracts.go (wire envelope), sse.go (named-event parser),
+                 tasks.go (server-owned utility tasks). See BACKEND.md
+  models/        VESTIGIAL: legacy Router + DeepSeekClient + pricing — no turn or task uses
+                 it. prompts/ now holds ONLY MainPromptContext (structured runtime facts;
+                 the prompt-text + loaded-skills builders were deleted, the backend owns them)
   mcp/           Daintree MCP client (go-sdk: Streamable HTTP, SSE fallback) + typed wrappers
   safety/        policy.go — Decide(risk, tier), AlwaysConfirm, no-file-edit guard
   tools/
@@ -41,7 +42,7 @@ internal/
     queue/       queue.publish / queue.digest / queue.resolve
     grant/       grant.create / grant.list / grant.revoke
     workflow/    workflow.create / get / list / update
-    skill/       skill.find / skill.load / skill.step.advance / skill.run.get
+    skill/       skill.run.get / skill.step.advance (stepwise run-tracking; selection is server-owned)
     auditx/      audit.export
     memory/      memory.recall / list / save / forget / pin / unpin
     artifactx/   artifact.read
@@ -50,7 +51,6 @@ internal/
   agent/         Session (session.go) main turn loop + EventSink (events.go)
   daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
   queue/         Queue — attention queue
-  skills/        embedded runbooks (go:embed files/*.md) + SkillRegistry + SelectSkills
   app/           App.Create — wires deps, ctx, session, scheduler; ToolContext factory
   commands/      slash-command catalog + handlers (cockpit & classic)
   cli/           Run(Options) entry, repl.go (classic), CockpitRunner seam, render/, jsonout/
@@ -62,24 +62,25 @@ internal/
 ## Wiring & data flow
 
 `app.App.Create(CreateOptions)` builds every dependency **once**, in order: config
-(`config.LoadConfig`), `storage.Store`, the MCP client, `queue.Queue`, `models.Router`,
-`tools.Registry` (populated then gated by `AssertSafe`), the embedded skill registry,
+(`config.LoadConfig`), `storage.Store`, the MCP client, `queue.Queue`, the `backend`
+client (the model gateway), `tools.Registry` (populated then gated by `AssertSafe`),
 and `agent.Session`. It exposes a `ToolContext` factory so each tool dispatch gets the
-config, MCP client, store, queue, router, project path, actor, confirm hook, and logger.
+config, MCP client, store, queue, backend, project path, actor, confirm hook, and logger.
 
 A turn runs through `agent.Session.Send()`:
 
 1. Phase `Received`; optional **auto-compact** of the conversation (threshold + behavior
    in [`RUNTIME.md`](RUNTIME.md)); push the user message.
-2. Build the per-turn allowed-tool set (read-only set, widened by any loaded skills'
-   `requiredTools`).
-3. Loop, up to `domain.MaxToolIterations` (12):
-   - Phase `Analyzing` / `Integrating`; `router.Stream("large", …)` with a token callback.
+2. Project the FULL tool registry into the request inventory (skills never narrow it).
+3. Loop:
+   - Phase `Analyzing` / `Integrating`; `Backend.RespondStream(req, …)` with a token
+     callback — sends the conversation + structured runtime/turn context + tool inventory
+     + the opaque state token. The first SSE `meta` event carries the refreshed state +
+     the server's `skills` block (selection + injection are server-owned).
    - Append the assistant message. **No tool calls** → phase `Complete`, return the answer.
    - Otherwise announce the whole tool batch (`ToolBatch`, all `queued`), then
-     `registry.Dispatch()` each in the safe sequence, promoting and resolving each, and
-     feed the results back as `tool` messages.
-4. Re-select skills (`FindSkills`, small model, ≤3) for the next turn.
+     `registry.Dispatch()` each in the safe sequence, promoting and resolving each, feed
+     the results back as `tool` messages, and re-`RespondStream` (replaying the state token).
 
 `Dispatch` = parse/validate args → tier gate (`safety.Decide`) → confirmation (interactive
 `main` actor) or scoped automation grant (watcher/timer/workflow actors) → run the handler
@@ -177,7 +178,7 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   grants that let non-interactive actors run mutating tools without an interactive confirm).
 - **workflow** — `workflow.create` / `get` / `list` / `update` (durable multi-step records
   advanced over turns).
-- **skill** — `skill.find` / `skill.load` / `skill.step.advance` / `skill.run.get`.
+- **skill** — `skill.run.get` / `skill.step.advance` (stepwise run-tracking; selection is server-owned).
 - **auditx** — `audit.export` (read; the audit log of every dispatched tool call).
 - **memory** — `memory.recall` / `list` / `save` / `forget` / `pin` / `unpin` (durable
   cross-session memory).
@@ -201,7 +202,7 @@ automation grant. read/local/ui never confirm.
 `storage.Store` is built on `modernc.org/sqlite` (pure Go, no CGO). State lives at
 `~/.daintree/assistant-cli/state.db` (a per-project subdir when a project id is set) and
 holds timers, watchers, events, audit, conversation, grants, and memory. The schema is a
-**single clean baseline** (`schemaUserVersion = 1`); pre-release, a schema change is a
+**single clean baseline** (`schemaUserVersion`, currently 7); pre-release, a schema change is a
 hard reset, not a migration chain. On open, the store cancels any stale (non-terminal)
 watchers so a new session never inherits a prior one's supervision.
 

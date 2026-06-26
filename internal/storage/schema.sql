@@ -123,19 +123,6 @@ CREATE TABLE IF NOT EXISTS conversation (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_session   ON conversation(sessionId, seq);
 CREATE INDEX IF NOT EXISTS idx_conv_createdat ON conversation(createdAt);
 
--- 3.7 skill_selection_log — selector diagnostics.
-CREATE TABLE IF NOT EXISTS skill_selection_log (
-  id                   TEXT PRIMARY KEY,
-  ts                   INTEGER NOT NULL,
-  sessionId            TEXT NOT NULL,
-  userInput            TEXT NOT NULL,
-  selectedSkillIdsJson TEXT NOT NULL,
-  confidence           REAL NOT NULL,
-  taskType             TEXT,
-  reason               TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_skill_sel_ts ON skill_selection_log(ts);
-
 -- 3.8 automation_grants — non-interactive actor authorization (union allowlist).
 CREATE TABLE IF NOT EXISTS automation_grants (
   id                     TEXT PRIMARY KEY,

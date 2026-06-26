@@ -34,7 +34,7 @@ var inboxSeverities = map[string]domain.Severity{
 }
 
 // HandleUICommand handles a slash line for the cockpit, returning structured data.
-// ctx carries cancellation for the model-backed commands (compact, skills find).
+// ctx carries cancellation for the model-backed commands (e.g. compact).
 func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResult {
 	cmd, arg, rest := parseCommand(line)
 	if cmd == "" {

@@ -143,7 +143,7 @@ func (s *Store) resetStaleAgentLaunches() error {
 // GCRetentionSweep enforces the retention policy. ORDER: prune
 // whole old runs FIRST (co-deletes their audit rows so audit's own count floor is
 // spent on retained rows, preserving the run_events↔audit_log pairing), then the
-// age+count sweep on audit_log/conversation/skill_selection_log, then hard-delete
+// age+count sweep on audit_log/conversation, then hard-delete
 // terminal events past the window, then hard-delete soft-deleted memories past the
 // undo window (the memories_ad trigger auto-evicts them from FTS — do NOT also
 // issue a manual FTS delete). No VACUUM (freed pages return to the freelist).
@@ -171,10 +171,6 @@ func (s *Store) GCRetentionSweep(now int64) error {
 	}
 	if err := s.deleteByAgeAndCount("conversation", "createdAt",
 		now-durMS(r.ConversationMaxAge), r.ConversationKeepRows); err != nil {
-		return err
-	}
-	if err := s.deleteByAgeAndCount("skill_selection_log", "ts",
-		now-durMS(r.SkillSelLogMaxAge), r.SkillSelLogKeepRows); err != nil {
 		return err
 	}
 	// Overflow artifacts age WITH the conversation that references them (same

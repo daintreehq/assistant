@@ -284,9 +284,11 @@ type StreamDone struct {
 // First-class skills block
 // --------------------------------------------------------------------------
 
-// SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces the
-// prelude (a synthetic skill-load exchange) BEFORE the assistant reply and may
-// show the active set; it must NOT replay any of this back as client history.
+// SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces ONLY the
+// NewlyLoaded titles (as an info note in emitSkillsMeta); Active, Prelude, and
+// Selector are decoded off the wire but not rendered. The Prelude (a synthetic
+// skill-load exchange the backend already injected into the UPSTREAM transcript) is
+// never replayed back as client history.
 type SkillsBlock struct {
 	Active      []SkillRef   `json:"active"`
 	NewlyLoaded []SkillRef   `json:"newly_loaded"`

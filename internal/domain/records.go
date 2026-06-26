@@ -126,18 +126,6 @@ type ConversationMessageRecord struct {
 	CreatedAt     int64   `json:"createdAt"`
 }
 
-// SkillSelectionLogRecord records a skill-selection decision.
-type SkillSelectionLogRecord struct {
-	ID                   string  `json:"id"` // rsl_<uuid8>
-	Ts                   int64   `json:"ts"`
-	SessionID            string  `json:"sessionId"`
-	UserInput            string  `json:"userInput"`
-	SelectedSkillIdsJson string  `json:"selectedSkillIdsJson"`
-	Confidence           float64 `json:"confidence"`
-	TaskType             *string `json:"taskType,omitempty"`
-	Reason               *string `json:"reason,omitempty"`
-}
-
 // WorkflowRunRecord tracks an end-to-end workflow run.
 type WorkflowRunRecord struct {
 	ID                string            `json:"id"` // wfr_<uuid8>

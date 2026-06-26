@@ -35,7 +35,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "models", Syntax: "/models", Palette: "model routing", Help: "model routing (large/medium/small tiers)"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
 	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "session tool approvals", Help: "list session tool approvals; clear resets them"},
-	{Name: "skills", Syntax: "/skills [sub]", Palette: "loaded · find · load · clear", Help: "loaded | find <query> | load <id…> | clear"},
+	{Name: "skills", Syntax: "/skills", Palette: "how skills work (backend-managed)", Help: "explain server-owned skill selection (no local catalog)"},
 	{Name: "memory", Syntax: "/memory [sub]", Palette: "list · pin · unpin · forget", Help: "list | pin <id> | unpin <id> | forget <id>"},
 	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
 	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},

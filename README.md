@@ -165,7 +165,7 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/DEEPSEEK.md`](docs/DEEPSEEK.md),
 [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md), [`docs/TOOLS.md`](docs/TOOLS.md)
-(adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (authoring skills), and
+(adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (server-owned skills), and
 [`docs/RUNTIME.md`](docs/RUNTIME.md) (auto-compaction + model error behavior).
 
 ## Commands (cockpit or classic REPL)
@@ -173,7 +173,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 ```
 /status  /inbox [sev]  /tools [query]  /timers  /watchers  /grants
 /workflows [status]  /launches  /audit [n]  /explain [runId]  /models
-/permissions [tier]  /approvals [clear]  /skills [loaded|find <query>|load <id…>|clear]
+/permissions [tier]  /approvals [clear]  /skills
 /memory [list|pin <id>|unpin <id>|forget <id>]  /compact  /clear  /doctor
 /reconnect  /help  /quit
 ```
@@ -183,20 +183,19 @@ mode they print to the console.
 
 ## Skill system
 
-Behavior is steered by **skills** — short procedural runbooks injected into the main
-model's context only when relevant, instead of fine-tuning. The base system prompt is
-split into three stable control messages to preserve DeepSeek prompt caching:
-
-1. **base** (`prompts.BaseSystemPrompt`) — the cached prefix, almost never changes
-2. **runtime context** — tier, project, MCP status, model ids
-3. **loaded skills** — the bodies of whatever skills are active
-
-Skills are pulled on demand: the model calls `skill.find` with a short query and the
-small model selects 0–3 skills from a metadata-only view of the library, validated and
-injected into the loaded-skills message. The model can also pull a known skill directly
-with `skill.load <id>`. Drive it manually with `/skills`. Skill bodies are **embedded**
-into the binary via `go:embed` from `internal/skills/files/*.md`. See
-[`docs/SKILLS.md`](docs/SKILLS.md).
+Behavior is steered by **skills** — short procedural runbooks — but selection and
+injection are **server-owned**. The Daintree backend's selector classifies the
+conversation, picks the relevant runbook(s) for the turn, injects their bodies (plus a
+synthetic `skill__load` exchange so the model observes the load) into the prompt *before*
+generation, and returns a `skills` block + an opaque signed `state` token in the first
+SSE `meta` event. The CLI is a thin runtime: it stores+replays the opaque state token
+(the entire client-side "keep skills loaded" mechanism — the backend is stateless and
+recovers the active set from the token, not from the message history), surfaces a newly
+loaded skill as an info note, and keeps two local run-tracking tools — `skill.run.get`
+and `skill.step.advance`. There is **no** local skill catalog and no
+`skill.find`/`skill.load`. Skills never narrow the toolset. Authoring lives in
+`../assistant-backend`. See [`docs/SKILLS.md`](docs/SKILLS.md) and
+[`docs/BACKEND.md`](docs/BACKEND.md).
 
 ## Tools the model can call
 
@@ -221,7 +220,7 @@ A current snapshot; the registry (`internal/tools`) is the source of truth, and
 | Forge             | `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR`         |
 | Agent tasks       | `agentTask.spawnForEdits` (no-file-edit escape hatch) `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
 | Grants            | `grant.create` `grant.list` `grant.revoke`                                 |
-| Skill runs        | `skill.find` `skill.load` `skill.run.get` `skill.step.advance`            |
+| Skill runs        | `skill.run.get` `skill.step.advance` (selection is server-owned)          |
 | Audit             | `audit.export`                                                             |
 | Memory            | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
 | Artifacts         | `artifact.read`                                                            |

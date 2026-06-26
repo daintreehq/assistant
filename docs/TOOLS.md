@@ -190,7 +190,7 @@ The registry is the source of truth (`internal/tools` + the wiring in
 | `queue` | `queue.publish` `queue.digest` `queue.resolve` |
 | `grant` | `grant.create` `grant.list` `grant.revoke` |
 | `workflow` | `workflow.create` `workflow.get` `workflow.list` `workflow.update` |
-| `skill` | `skill.find` `skill.load` `skill.run.get` `skill.step.advance` |
+| `skill` | `skill.run.get` `skill.step.advance` (stepwise run-tracking; selection is server-owned — see [`SKILLS.md`](SKILLS.md)) |
 | `auditx` | `audit.export` |
 | `memory` | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
 | `artifactx` | `artifact.read` |

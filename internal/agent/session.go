@@ -32,25 +32,20 @@ var coreToolNames = []string{
 	"terminal.read",
 	"terminal.extract",
 	// terminal.awaitAll is core: waiting for a spawned cohort to finish is a
-	// fundamental in-turn orchestration step, the base prompt names it as always
-	// available, and the multi-agent runbook (narrowed to core ∪ requiredTools) leans
-	// on it. Read-only, so no confirmation gate. Keeping it core means a skill that
-	// forgets to list it can still drive a clean cohort wait.
+	// fundamental in-turn orchestration step and the base prompt names it as always
+	// available. Read-only, so no confirmation gate. (The full registry is offered every
+	// turn now — "core" means asserted-to-exist at boot, not a per-turn projection key.)
 	"terminal.awaitAll",
 	// terminal.sendCommand is core: talking to a running agent (relaying between
-	// agents, answering a question it waits on) is a fundamental operation that must
-	// stay callable on EVERY turn — including a skill-narrowed one. Without it here,
-	// a loaded skill that omits it from requiredTools (e.g. spawn-visible-agent) would
-	// silently make relaying impossible, and the base prompt's "always available"
-	// claim would be false. The per-call confirmation/tier gate still governs it.
+	// agents, answering a question it waits on) is a fundamental operation the base
+	// prompt advertises as always available, so it must be asserted-to-exist at boot.
+	// The per-call confirmation/tier gate still governs it.
 	"terminal.sendCommand",
 	// terminal.close is core for the same reason: retiring an agent terminal you spawned
 	// is a fundamental cohort-lifecycle operation, and the base prompt tells the model it
-	// is "always here — don't tool.search for it". A loaded skill (e.g. the multi-agent
-	// orchestration runbook, whose closing step calls it) narrows tools to core ∪
-	// requiredTools, so without terminal.close here that very runbook would be told to
-	// close terminals with a tool it cannot call. The per-call confirm/tier gate still
-	// governs it. (terminal.kill — permanent delete — stays behind daintree.call.)
+	// is "always here — don't tool.search for it", so it must be asserted-to-exist at
+	// boot. The per-call confirm/tier gate still governs it. (terminal.kill — permanent
+	// delete — stays behind daintree.call.)
 	"terminal.close",
 	"skill.step.advance",
 	"skill.run.get",
@@ -71,14 +66,15 @@ func CoreToolNames() []string {
 var ErrTurnInProgress = errors.New("agent: a turn is already in progress")
 
 // Session is the turn engine (was AgentSession). It runs one user/autonomous turn
-// to completion, owns the live model history + the three fixed control messages,
-// on-demand skill loading (≤3), conversation persistence, and the event stream.
+// to completion, owns the live model history (user/assistant/tool only — no client
+// control prefix; skill selection is server-owned), conversation persistence, the
+// opaque backend state token, and the event stream.
 type Session struct {
 	deps SessionDeps
 
-	// mu guards ALL mutable session state below (messages, seq, activeSkills,
-	// skillBundle, inFlight) — the turn goroutine and concurrent UI slash commands
-	// (Clear/Compact/SetSkills, Messages, Artifacts) both touch it, so every access
+	// mu guards ALL mutable session state below (messages, seq, backendState,
+	// inFlight) — the turn goroutine and concurrent UI slash commands
+	// (Clear/Compact, Messages, Artifacts) both touch it, so every access
 	// is under this lock. Critical sections are kept SHORT: the streaming turn reads
 	// an immutable SNAPSHOT of messages under the lock and releases it before the
 	// (long) model stream — it never holds the lock across a network call.
@@ -155,12 +151,13 @@ type Session struct {
 	bgCtx context.Context
 
 	// toolProj memoizes the OpenAITools projection across the iterations of a turn
-	// AND across turns. The projection is pure work keyed by the offered
-	// toolset (allowedNames); it only changes when skill.find/
-	// skill.load mutates the active-skill set, which invalidates it in
-	// applySkillBundleLocked. Guarded by s.mu (read in resolveTurnTools, zeroed in
-	// applySkillBundleLocked) so the turn loop never races a /skills find slash
-	// command, which calls FindSkills off the turn goroutine.
+	// AND across turns. The projection is pure work keyed by the offered toolset
+	// (allowedNames). Since skills are server-owned and never narrow the local
+	// toolset (buildToolFilterLocked always returns nil — the FULL registry), the
+	// cache identity is permanently "unconstrained" and is built ONCE then reused
+	// for the whole process. Guarded by s.mu (read in resolveTurnTools) for
+	// call-site symmetry. The slices.Equal/unconstrained apparatus is retained as a
+	// cheap, correct general key even though only the nil branch is ever taken.
 	toolProj toolProjCache
 
 	// pendingDropCount carries RehydrateResult.DroppedRows from NewSession to the
@@ -1021,11 +1018,19 @@ func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
 	}
 	titles := make([]string, 0, len(sk.NewlyLoaded))
 	for _, ref := range sk.NewlyLoaded {
-		title := strings.TrimSpace(ref.Title)
-		if title == "" {
-			title = ref.ID
+		// Prefer the title; fall back to the id. A ref with NEITHER is malformed —
+		// skip it rather than surface a bare "Loaded skill: ".
+		label := strings.TrimSpace(ref.Title)
+		if label == "" {
+			label = strings.TrimSpace(ref.ID)
 		}
-		titles = append(titles, title)
+		if label == "" {
+			continue
+		}
+		titles = append(titles, label)
+	}
+	if len(titles) == 0 {
+		return
 	}
 	s.events.Info("Loaded skill: " + strings.Join(titles, ", "))
 }
@@ -1150,10 +1155,10 @@ func workflowRunStrings(runs []domain.WorkflowRunRecord) []string {
 
 // resolveTurnTools computes the per-iteration tool filter, its membership set, and
 // the projected specs under s.mu — a short, in-memory critical section released
-// before the (long) model stream. Holding the lock serializes this read against
-// applySkillBundleLocked's writes (activeSkills + the cached projection), which a
-// /skills find slash command can trigger off the turn goroutine. Returns nil
-// allowedNames/allowedSet for an unconstrained (full-registry) turn.
+// before the (long) model stream. The lock keeps this read consistent with any
+// concurrent UI slash command that touches session state. Returns nil
+// allowedNames/allowedSet for an unconstrained (full-registry) turn — which, with
+// server-owned skills, is ALWAYS the case (skills never narrow the toolset).
 func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.ChatTool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1162,7 +1167,7 @@ func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.Ch
 	// Preserve nil semantics: an unconstrained turn (nil) offers the FULL registry,
 	// and both the tool-not-offered refusal in runToolBatch and the dispatch gate key
 	// off allowedSet being nil ⇒ "all tools callable". Materialize the set only when
-	// the turn is actually narrowed (a skill is loaded).
+	// the turn is actually narrowed (never, with server-owned skills — kept for safety).
 	var allowedSet map[string]struct{}
 	if allowedNames != nil {
 		allowedSet = make(map[string]struct{}, len(allowedNames))
@@ -1195,12 +1200,11 @@ func (s *Session) buildToolFilterLocked() []string {
 // reusing the cached projection when the offered toolset is unchanged since the last
 // build. allowedNames==nil is the full (unconstrained) registry — a distinct cache
 // identity from any narrowed set, tracked via the unconstrained flag because
-// slices.Equal treats nil and []string{} as equal. The cache is invalidated only
-// when skill.find/skill.load rewrites the active set (applySkillBundleLocked), so
-// across a turn's iterations (and across turns) with a stable skill set this skips
-// re-projecting every tool spec and rebuilding the registry's wire-name maps.
-// Caller MUST hold s.mu (it reads/writes the toolProj cache, which a concurrent
-// skill mutation zeroes under the lock).
+// slices.Equal treats nil and []string{} as equal. With server-owned skills the
+// offered toolset is the full registry on EVERY turn, so in practice the cache is
+// populated once (the unconstrained branch) and reused for the process — this skips
+// re-projecting every tool spec and rebuilding the registry's wire-name maps each
+// round. Caller MUST hold s.mu (it reads/writes the toolProj cache).
 //
 // On a cache HIT the registry's wire-name alias maps are NOT rebuilt: the
 // OpenAITools call that populated the cache for THIS exact projection left them

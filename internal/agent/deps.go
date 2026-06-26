@@ -11,8 +11,8 @@ import (
 
 // Consumer-defined seams. The loop depends on these narrow interfaces, not the
 // concrete provider packages, so it compiles, tests, and stays decoupled. Each is
-// satisfied by the real provider (e.g. *models.Router, *tools.Registry,
-// *skills.SkillRegistry, *storage.Store) and trivially by a fake in tests.
+// satisfied by the real provider (e.g. *backend.Client, *tools.Registry,
+// *storage.Store) and trivially by a fake in tests.
 
 // Router is the model-access seam (satisfied by *models.Router). The loop only
 // streams the large model and chats the small model (auto-compact + skill
@@ -78,7 +78,6 @@ type AssistantBackend interface {
 // are best-effort — a DB failure must never break a live turn.
 type MessageStore interface {
 	InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error)
-	InsertSkillSelection(rec domain.SkillSelectionLogRecord) (domain.SkillSelectionLogRecord, error)
 }
 
 // MemoryStore is the distill-on-compact persistence seam (satisfied by

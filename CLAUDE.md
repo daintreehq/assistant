@@ -8,7 +8,7 @@ Guidance for working in this repository.
 > backward compatibility or version stable surfaces for their own sake — prefer
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
-> The SQLite schema is a single clean baseline (`schemaUserVersion = 1`) — on a
+> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 7) — on a
 > schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.
@@ -57,11 +57,11 @@ make install                                                  # go install with 
 ./bin/daintree-assistant --classic           # classic line REPL (also used for non-TTY)
 ./bin/daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
-./bin/daintree-assistant doctor              # check MCP / DeepSeek key / project / tier
+./bin/daintree-assistant doctor              # check backend health / MCP / project / tier
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
-go test ./...                # all tests (980+ across 44 packages), no network — fakes for MCP + models
+go test ./...                # all tests (1700+ across 45 packages), no network — fakes for MCP + backend
 go vet ./...                 # static checks
 make test-race               # go test -race ./...
 gofmt -l .                   # must print nothing (CI fails on unformatted files)
@@ -95,10 +95,13 @@ internal/
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
   storage/       Store (store.go) over modernc.org/sqlite — timers, watchers, events, audit,
                  conversation, grants, memory; cancels stale watchers on Open
-  models/        Router (router.go), DeepSeekClient (deepseek.go, net/http SSE), pricing.go,
-                 prompts/ (BaseSystemPrompt, BuildRuntimeContextMessage, BuildLoadedSkillsMessage)
+  backend/       Daintree backend client — the CLI's ONLY model gateway. client.go (Respond/
+                 RunTask/Health), contracts.go (strict wire envelope), sse.go (named-event
+                 meta/delta/done/error parser), tasks.go (server-owned utility tasks). See docs/BACKEND.md
+  models/        VESTIGIAL: legacy Router + DeepSeekClient + pricing, retained transitionally —
+                 no assistant turn or utility task uses it. prompts/ now holds ONLY MainPromptContext
+                 (the structured runtime facts the CLI collects); the prompt-TEXT builders were deleted
   mcp/           Daintree MCP client over the go-sdk (Streamable HTTP, SSE fallback)
-  skills/        embedded runbooks: go:embed files/*.md → SkillRegistry; SelectSkills (small model)
   queue/         Queue — attention queue (Publish / Digest / Resolve)
   safety/        policy.go — Decide(risk, tier), tier gating, AlwaysConfirm, no-file-edit guard
   tools/         Registry (registry.go) + Dispatch (dispatch.go) + AssertSafe; tool families in
@@ -118,14 +121,19 @@ internal/
 ```
 
 **Data flow:** `app.App.Create()` builds every dependency once (Store, MCP, Queue,
-Router, Registry, Skills, Session) and exposes a `ToolContext` factory. `agent.Session.Send()`
-runs a turn: optional auto-compact → push user message → `router.Stream("large", …)`
-with a token callback → on tool calls, announce the whole batch (`ToolBatch`) then
-`registry.Dispatch()` each in the safe sequence, feed results back (≤ `MaxToolIterations`
-= 12) → skill re-selection (`FindSkills`, small model, ≤3). `Dispatch` = validate args →
-tier gate (`safety.Decide`) → confirmation/grant → run handler → audit. The daemon
-`Scheduler` ticks every 3s, firing due timers and watcher checks. All sub-threads
-publish to the **attention queue** instead of interrupting the main thread.
+Backend client, Registry, Session) and exposes a `ToolContext` factory. `agent.Session.Send()`
+runs a turn: optional auto-compact → push user message → `Backend.RespondStream(req, …)`
+(sends the visible conversation + structured `request.runtime`/`request.turn` context + the
+local tool inventory + the opaque backend `state` token) with a token callback → the FIRST
+SSE `meta` event carries the refreshed state token + the server's `skills` block. **Skill
+selection is server-owned**: the backend's selector picks/injects runbook bodies and a
+synthetic `skill__load` exchange *before* it calls the upstream model, so the runbook is in
+hand for that same generation; the CLI just stores the state token and surfaces newly-loaded
+titles. On tool calls, announce the whole batch (`ToolBatch`) then `registry.Dispatch()` each
+in the safe sequence, feed results back and re-`RespondStream` (replaying the state token).
+`Dispatch` = validate args → tier gate (`safety.Decide`) → confirmation/grant → run handler →
+audit. The daemon `Scheduler` ticks every 3s, firing due timers and watcher checks. All
+sub-threads publish to the **attention queue** instead of interrupting the main thread.
 
 ## Invariants & conventions
 
@@ -142,12 +150,16 @@ publish to the **attention queue** instead of interrupting the main thread.
   (+terminal/project/external), `system` (+git/system). Mutating classes (`AlwaysConfirm`:
   terminal/project/external/git/system) need confirmation for the interactive `main`
   actor; non-interactive actors (watcher/timer/workflow) need a scoped **automation grant**.
-- **Prompt-cache stability.** `prompts.BaseSystemPrompt` is the cached prefix — keep it
-  byte-stable; dynamic facts live in later control messages (runtime context, loaded
-  skills). The DeepSeek `prompt_cache_key` is a plain, unversioned constant
-  (`domain.MainPromptCacheKey = "daintree-main"`); it only groups requests onto a cache
-  node. Editing the prefix just misses on the changed tokens — never stale — so there's
-  no version to bump.
+- **Prompt assembly + caching are the BACKEND's job now.** The CLI sends NO system/developer
+  prompt; the backend owns the base prompt, skill bodies, prompt assembly, and the DeepSeek
+  `prompt_cache_key`. The CLI's only contribution to cache stability is keeping the
+  conversation prefix stable: no client-side control prefix
+  (`domain.ControlMessageCount == 0`), only `user`/`assistant`/`tool` roles reach the wire,
+  and every volatile per-turn fact rides the **structured** `request.runtime` / `request.turn`
+  blocks (inert data the backend renders) rather than mutating an earlier message. See
+  `docs/BACKEND.md`. (The backend assembles most-stable-first — base prompt → integrations →
+  active skill bodies → conversation → synthetic skill-load → runtime/turn context LAST — so
+  skill bodies sit in the cached prefix.)
 - **Foreground-only daemon.** Watchers/timers tick only while the assistant is open
   (`daemon.Scheduler`, 3s tick, started on interactive paths). Timers persist in SQLite
   and resume next launch. Watchers are **session-scoped**: any left non-terminal are
@@ -253,12 +265,13 @@ How to read a log fast (it is structured text — grep it, don't eyeball megabyt
 
 The fix philosophy — **fix the guidance, not just the symptom.** When the model misuses
 a tool, the root cause is almost always ambiguous or misleading instruction, NOT a dumb
-model. The model can only act on what the base prompt (`internal/models/prompts/`), the
-skills (`internal/skills/files/*.md`), and the tool `Description`/`Schema` told it.
-So a model mistake is usually a *documentation* bug in one of those three surfaces — and
-the durable fix updates them in lockstep so the model can't repeat it. Prefer making the
-correct shape impossible to get wrong (show literal argument shapes, not prose
-abstractions) over adding lenient parsing.
+model. The model can only act on what the base prompt + skills (now **backend-owned**, in
+`../assistant-backend/src/daintree_assistant_server/prompts/` and `.../skills/files/*.md`)
+and the local tool `Description`/`Schema` told it. So a model mistake is usually a
+*documentation* bug in one of those surfaces — and the durable fix updates them in lockstep
+so the model can't repeat it. **A prompt/skill fix lands in the `../assistant-backend` repo;
+a tool-shape fix lands here.** Prefer making the correct shape impossible to get wrong (show
+literal argument shapes, not prose abstractions) over adding lenient parsing.
 
 Worked example (2026-06-23): the model called `agentTask.spawnForEdits` with a flattened
 key `"watcher<arg_key>create": true` and the strict decoder rejected it
@@ -272,11 +285,14 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 ## Key environment variables
 
-`DEEPSEEK_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DAINTREE_BACKEND_URL` (dev/test override of the hardcoded `http://127.0.0.1:8473`; the
+**backend** holds `DEEPSEEK_API_KEY`, not the CLI) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
-`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `DEEPSEEK_BASE_URL`.
+`DAINTREE_ASSISTANT_LOG_DIR`. (The old `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` /
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` knobs now configure the **backend** or feed the
+vestigial `internal/models` Router; the CLI no longer requires a model key to start.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project
@@ -284,6 +300,10 @@ subdir when a project id is set).
 
 ## More docs
 
+`docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
+story**), `docs/SKILLS.md` (how server-owned skills work + the local run-tracking tools),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
-`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`, `docs/DEEPSEEK.md`,
-`docs/SKILLS.md` (how to author assistant skills).
+`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`. **STALE — predates the backend migration,
+do not trust:** `docs/DEEPSEEK.md` (the direct DeepSeek client — the CLI no longer talks to
+DeepSeek; the backend does). Skill authoring + the model live in `../assistant-backend`
+(its `skills/files/*.md` + `docs/DAINTREE_API.md`).

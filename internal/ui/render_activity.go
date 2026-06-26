@@ -76,12 +76,6 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Listed recipes", nil
 	case "recipe.run":
 		return "Ran recipe", []string{"recipeId"}
-	case "skill.find":
-		// While active the detail is the NL query; on done it's the loaded skill's
-		// title (the tool's result summary, set in internal/tools/skill).
-		return "Loading skill", []string{"query"}
-	case "skill.load":
-		return "Loading skill", []string{"skillId"}
 	case "skill.step.advance":
 		return "Advanced step", []string{"skillId"}
 	case "skill.run.get":
@@ -200,23 +194,6 @@ func relativizePath(p string) string {
 	return p
 }
 
-// skillNoMatchSummary mirrors the skill.find tool's "no match" result summary
-// (internal/tools/skill/skill.go). A find that matched nothing settles with this
-// text and must NOT earn the ✦ skill glyph — nothing was loaded. Keep in sync.
-const skillNoMatchSummary = "No skill matched the query."
-
-// skillLoaded reports whether a settled row is a skill.find/skill.load that actually
-// injected a runbook (so it earns the ✦ "leveled-up" glyph). A no-match find keeps
-// the plain ✓ — the sparkle must mean a skill is now live.
-func skillLoaded(a Activity) bool {
-	switch a.Name {
-	case "skill.find", "skill.load":
-	default:
-		return false
-	}
-	return a.State == ActDone && a.Detail != "" && a.Detail != skillNoMatchSummary
-}
-
 // activityGlyph returns the state glyph (animated spinner frame for active rows)
 // and the lipgloss style for that row's tone.
 func activityGlyph(th theme.Theme, a Activity, spinnerFrame int) (string, string) {
@@ -235,12 +212,6 @@ func activityGlyph(th theme.Theme, a Activity, spinnerFrame int) (string, string
 		}
 		return frames[spinnerFrame%len(frames)], "plain"
 	case ActDone:
-		// A skill.find/skill.load that actually pulled a runbook gets the ✦ glyph
-		// instead of the plain ✓ — same accent-green tone, distinct shape — so loading
-		// a skill visibly reads as gaining an ability. A no-match find keeps ✓.
-		if skillLoaded(a) {
-			return g.Skill, "success"
-		}
 		// The "success" tone is the accent green — but NOT bold (the bold-accent
 		// style is reserved for the ◆ DAINTREE marker).
 		return g.Done, "success"
