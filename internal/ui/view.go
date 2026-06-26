@@ -369,10 +369,6 @@ func (m Model) composerView(w int) string {
 // statusView renders the compact ≤56-cell status rollup (renders "" when idle with
 // nothing to report).
 func (m Model) statusView(w int) string {
-	pct := -1
-	if m.hasUsage {
-		pct = m.contextPct
-	}
 	// Surface an agent in the compact strip ONLY when it NEEDS ATTENTION, and by a HUMAN
 	// label (its badge + title) — never the raw watcher id (e.g. "DONE wch_fa04bee6", which
 	// reads as meaningless noise). A done / quietly-working watcher lives in the operations
@@ -387,8 +383,6 @@ func (m Model) statusView(w int) string {
 		}
 	}
 	return renderStatusLine(m.theme, statusParams{
-		ContextPct:       pct,
-		HasUsage:         m.hasUsage,
 		Cost:             m.cost,
 		Model:            m.model,
 		AttentionN:       m.attentionN,

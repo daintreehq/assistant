@@ -229,6 +229,7 @@ const (
 	JsonlToolResult         JsonlEventType = "tool:result"
 	JsonlError              JsonlEventType = "error"
 	JsonlInfo               JsonlEventType = "info"
+	JsonlSkillLoaded        JsonlEventType = "skill:loaded" // server-side runbook load; payload {titles:[]}
 	JsonlResult             JsonlEventType = "result"
 )
 

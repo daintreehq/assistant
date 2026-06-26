@@ -273,26 +273,10 @@ func TestStatusLine_PrefersActiveAgentNoOrphanSep(t *testing.T) {
 	}
 }
 
-func TestStatusLine_NarrowDropsModelKeepsContext(t *testing.T) {
-	// A narrow active line drops the model id but keeps CTX pressure.
-	p := workingBadge()
-	p.HasUsage, p.ContextPct, p.Model = true, 42, "glm-5p2"
-	out := stripAnsi(renderStatusLine(darkTheme(), p, 50))
-	if !strings.Contains(out, "CTX 42%") {
-		t.Errorf("context pressure must survive the squeeze: %q", out)
-	}
-	if strings.Contains(out, "glm-5p2") {
-		t.Errorf("model id must be dropped on a narrow line: %q", out)
-	}
-}
-
-func TestStatusLine_IdleSurfacesCostModelContext(t *testing.T) {
+func TestStatusLine_IdleSurfacesCostAndModel(t *testing.T) {
 	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{
-		HasUsage: true, ContextPct: 42, Cost: 0.012, Model: "glm-5p2",
+		Cost: 0.012, Model: "glm-5p2",
 	}, 80))
-	if !strings.Contains(out, "CTX 42%") {
-		t.Errorf("CTX missing: %q", out)
-	}
 	if !strings.Contains(out, "$0.012") {
 		t.Errorf("cost missing on idle line: %q", out)
 	}
@@ -301,20 +285,13 @@ func TestStatusLine_IdleSurfacesCostModelContext(t *testing.T) {
 	}
 }
 
-func TestStatusLine_GaugeHiddenUntilUsage(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{HasUsage: false, ContextPct: 0}, 80))
-	if strings.Contains(out, "CTX") {
-		t.Errorf("CTX gauge must be hidden until usage arrives: %q", out)
-	}
-}
-
 func TestStatusLine_CostHiddenWhenUnknown(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{HasUsage: true, ContextPct: 42, Cost: 0}, 80))
-	if !strings.Contains(out, "CTX 42%") {
-		t.Errorf("CTX must show: %q", out)
-	}
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{Cost: 0, Model: "glm-5p2"}, 80))
 	if strings.Contains(out, "$") {
 		t.Errorf("cost must be hidden when unknown ($0): %q", out)
+	}
+	if !strings.Contains(out, "glm-5p2") {
+		t.Errorf("model must still show on the idle line: %q", out)
 	}
 }
 

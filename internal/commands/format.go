@@ -111,6 +111,12 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 			// so the per-run timeline doesn't carry a redundant line.
 		case "error":
 			lines = append(lines, "⚠ error: "+str(payload["message"]))
+		case "skill:loaded":
+			// A server-side skill load: surface the runbook name(s) so the replay shows
+			// when a skill entered the prompt (not a bare "· skill:loaded").
+			if titles := strList(payload["titles"]); len(titles) > 0 {
+				lines = append(lines, "✦ skill loaded: "+strings.Join(titles, ", "))
+			}
 		case "info":
 			lines = append(lines, "· "+str(payload["message"]))
 		default:
@@ -295,6 +301,22 @@ func str(v any) string {
 		return s
 	}
 	return ""
+}
+
+// strList coerces a JSON array payload into its non-empty string elements (a JSON
+// array decodes to []any). Non-string / blank entries are skipped.
+func strList(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s := strings.TrimSpace(str(e)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func numToInt(v any) int {

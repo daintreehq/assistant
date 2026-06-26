@@ -38,6 +38,8 @@ type pumpEvent struct {
 	phase domain.RunPhase
 	// tool batch
 	batch []agent.BatchedToolCall
+	// skill load (newly-loaded runbook titles for this round)
+	skills []string
 	// tool state
 	toolID    string
 	toolState agent.ToolState
@@ -75,6 +77,7 @@ const (
 	pumpEnd
 	pumpCancelled
 	pumpInterject // a mid-turn user message folded into the running turn
+	pumpSkill     // a server-side skill load folded into the running turn as a card
 	pumpPhase
 	pumpBatch
 	pumpToolState
@@ -226,6 +229,13 @@ func (p *eventPump) AssistantCancelled(content string) {
 // lands after the round it interrupted). The reducer renders it inline in the turn.
 func (p *eventPump) Interjection(text string) {
 	p.emit(pumpEvent{kind: pumpInterject, text: text})
+}
+
+// SkillLoaded forwards a server-side skill load (flushing buffered tokens first so the
+// card lands after any prose that streamed before this round's meta). The reducer folds
+// it into the running turn as an inline card.
+func (p *eventPump) SkillLoaded(titles []string) {
+	p.emit(pumpEvent{kind: pumpSkill, skills: titles})
 }
 
 func (p *eventPump) ToolBatch(calls []agent.BatchedToolCall) {

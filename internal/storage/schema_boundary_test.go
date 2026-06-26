@@ -2,12 +2,128 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
+
+// stampStaleDB writes a fresh sqlite file at path stamped with an OLDER baseline
+// user_version (non-zero, < schemaUserVersion) so a subsequent Open trips the
+// stale-schema branch. Returns the path for convenience.
+func stampStaleDB(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestStaleSchemaReturnsTypedError asserts the stale-schema failure is a typed
+// *SchemaStaleError carrying the on-disk and expected versions — so the composition
+// root can detect this exact case with errors.As and offer a graceful reset.
+func TestStaleSchemaReturnsTypedError(t *testing.T) {
+	path := stampStaleDB(t, filepath.Join(t.TempDir(), "state.db"))
+
+	_, err := Open(path, &Options{Now: func() int64 { return 1 }})
+	var stale *SchemaStaleError
+	if !errors.As(err, &stale) {
+		t.Fatalf("want *SchemaStaleError, got %T: %v", err, err)
+	}
+	if stale.Have != 1 || stale.Want != schemaUserVersion {
+		t.Fatalf("want Have=1 Want=%d, got Have=%d Want=%d", schemaUserVersion, stale.Have, stale.Want)
+	}
+	// The message stays actionable for the no-handler (script/host) path.
+	if !strings.Contains(stale.Error(), "make db-reset") {
+		t.Fatalf("typed error message must still point to 'make db-reset', got: %v", stale)
+	}
+}
+
+// TestStaleOldShapedSchemaDetectedBeforeDDL is the regression guard for the
+// detect-before-DDL ordering. A REAL old DB has tables at an older SHAPE, not just an
+// older user_version on an empty file. Here `memories` predates the expiresAt column
+// (added at v5); the current schema's `CREATE INDEX … ON memories(expiresAt)` would
+// fail with "no such column" if the DDL ran first — masking the stale baseline behind
+// an "exec schema" error and defeating the graceful reset (which keys on
+// errors.As(err, &SchemaStaleError)). Open must read user_version FIRST and return the
+// typed stale error before touching the DDL.
+func TestStaleOldShapedSchemaDetectedBeforeDDL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An old-shaped memories table: NO expiresAt/runId/kind/sessionId (the v5 additions).
+	if _, err := raw.Exec(`CREATE TABLE memories (
+		id TEXT PRIMARY KEY, content TEXT NOT NULL, category TEXT,
+		pinnedAt INTEGER, deletedAt INTEGER, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path, &Options{Now: func() int64 { return 1 }})
+	var stale *SchemaStaleError
+	if !errors.As(err, &stale) {
+		t.Fatalf("old-shaped stale DB must surface *SchemaStaleError (not a mid-DDL error), got %T: %v", err, err)
+	}
+	if stale.Have != 4 {
+		t.Fatalf("want Have=4, got %d", stale.Have)
+	}
+}
+
+// TestResetDBWipesAndRebuilds asserts ResetDB removes the DB AND its WAL/SHM sidecars,
+// is idempotent on a missing file, and that a fresh Open afterwards stamps the CURRENT
+// schema version — i.e. the recovery actually clears the stale baseline.
+func TestResetDBWipesAndRebuilds(t *testing.T) {
+	path := stampStaleDB(t, filepath.Join(t.TempDir(), "state.db"))
+	// Stand in WAL/SHM sidecars so we can prove ResetDB sweeps them too (a real WAL-mode
+	// DB leaves both alongside state.db).
+	sidecars := []string{path + "-wal", path + "-shm"}
+	for _, p := range sidecars {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := ResetDB(path); err != nil {
+		t.Fatalf("ResetDB: %v", err)
+	}
+	for _, p := range append([]string{path}, sidecars...) {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s should be gone after ResetDB, stat err = %v", p, err)
+		}
+	}
+	// Idempotent: a second reset on an already-missing file is a no-op, not an error.
+	if err := ResetDB(path); err != nil {
+		t.Fatalf("ResetDB (second, missing) must be a no-op, got: %v", err)
+	}
+
+	// Re-Open rebuilds the schema fresh and stamps the current version.
+	s := openFile(t, path, 1)
+	defer s.Close()
+	var version int
+	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaUserVersion {
+		t.Fatalf("after reset+reopen user_version want %d got %d", schemaUserVersion, version)
+	}
+}
 
 // TestStaleSchemaVersionFailsLoudly asserts that opening a DB initialized at an older
 // baseline (user_version < schemaUserVersion, non-zero) fails with an actionable

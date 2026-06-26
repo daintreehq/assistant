@@ -1009,9 +1009,9 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 }
 
 // emitSkillsMeta surfaces the backend's skill outcome (the newly-loaded runbooks)
-// as a visible info cue, so a server-side skill load still reads as a capability
-// event in the cockpit. Best-effort and informational only; the prelude is NEVER
-// replayed into client history.
+// as a dedicated SkillLoaded event, which the cockpit folds into the running turn as
+// an inline "Skill loaded" card. Best-effort and informational only; the prelude is
+// NEVER replayed into client history.
 func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
 	if len(sk.NewlyLoaded) == 0 {
 		return
@@ -1019,7 +1019,7 @@ func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
 	titles := make([]string, 0, len(sk.NewlyLoaded))
 	for _, ref := range sk.NewlyLoaded {
 		// Prefer the title; fall back to the id. A ref with NEITHER is malformed —
-		// skip it rather than surface a bare "Loaded skill: ".
+		// skip it rather than surface a bare card.
 		label := strings.TrimSpace(ref.Title)
 		if label == "" {
 			label = strings.TrimSpace(ref.ID)
@@ -1032,7 +1032,7 @@ func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
 	if len(titles) == 0 {
 		return
 	}
-	s.events.Info("Loaded skill: " + strings.Join(titles, ", "))
+	s.events.SkillLoaded(titles)
 }
 
 // emitBackendUsage emits the per-round UsageEvent from the backend's reported usage.

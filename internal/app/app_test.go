@@ -2,6 +2,10 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -10,6 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
 // newOfflineApp builds a fully-wired App against a temp-dir state DB in offline
@@ -103,6 +108,126 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	if err := a.Registry.AssertSafe(); err != nil {
 		t.Errorf("AssertSafe over full set: %v", err)
 	}
+}
+
+// stampStaleStateDB writes a state.db in dir stamped with an OLDER baseline
+// user_version so the next storage.Open trips the stale-schema branch. The driver is
+// registered transitively via the storage package's blank import of modernc.org/sqlite.
+func stampStaleStateDB(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "state.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCreateSchemaResetRecovery exercises the graceful recovery: a stale on-disk DB
+// plus an OnSchemaStale handler that authorises a reset lets Create wipe-and-rebuild
+// and boot a healthy App, while a declining handler aborts with the actionable error
+// and leaves the file untouched.
+func TestCreateSchemaResetRecovery(t *testing.T) {
+	t.Run("authorised reset rebuilds and boots", func(t *testing.T) {
+		dir := t.TempDir()
+		stampStaleStateDB(t, dir)
+		var sawHave, sawWant int
+		a, err := Create(CreateOptions{
+			Overrides: config.ConfigOverrides{
+				Offline: boolPtr(true), StateDir: &dir, ProjectPath: &dir, Tier: strPtr("operator"),
+			},
+			OnSchemaStale: func(have, want int) (bool, error) {
+				sawHave, sawWant = have, want
+				return true, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create after authorised reset: %v", err)
+		}
+		defer a.Shutdown()
+		if sawHave != 1 || sawWant == 0 {
+			t.Fatalf("handler saw Have=%d Want=%d, want Have=1 Want>0", sawHave, sawWant)
+		}
+		if a.Store == nil {
+			t.Fatal("Store nil after reset recovery")
+		}
+		// Prove the DB was actually REBUILT, not merely reopened: the stale baseline (1)
+		// must now be the current schema version.
+		var version int
+		if err := a.Store.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if version != sawWant {
+			t.Fatalf("after authorised reset user_version = %d, want current %d", version, sawWant)
+		}
+	})
+
+	t.Run("declined reset aborts with typed error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := stampStaleStateDB(t, dir)
+		_, err := Create(CreateOptions{
+			Overrides: config.ConfigOverrides{
+				Offline: boolPtr(true), StateDir: &dir, ProjectPath: &dir, Tier: strPtr("operator"),
+			},
+			OnSchemaStale: func(int, int) (bool, error) { return false, nil },
+		})
+		var stale *storage.SchemaStaleError
+		if !errors.As(err, &stale) {
+			t.Fatalf("want *storage.SchemaStaleError on decline, got %T: %v", err, err)
+		}
+		// Declining must NOT touch the file — it is still there, still stamped stale.
+		if _, serr := os.Stat(path); serr != nil {
+			t.Fatalf("declined reset must leave the DB file in place, stat err = %v", serr)
+		}
+	})
+
+	t.Run("handler error propagates verbatim", func(t *testing.T) {
+		dir := t.TempDir()
+		stampStaleStateDB(t, dir)
+		sentinel := errors.New("prompt aborted")
+		_, err := Create(CreateOptions{
+			Overrides: config.ConfigOverrides{
+				Offline: boolPtr(true), StateDir: &dir, ProjectPath: &dir, Tier: strPtr("operator"),
+			},
+			OnSchemaStale: func(int, int) (bool, error) { return false, sentinel },
+		})
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("handler error must propagate, got %v", err)
+		}
+	})
+
+	t.Run("non-stale open error bypasses the handler", func(t *testing.T) {
+		dir := t.TempDir()
+		// A directory where state.db should be makes storage.Open fail with a generic,
+		// NON-stale error. The handler must NOT be consulted (errors.As short-circuits)
+		// — we never prompt to wipe state for an unrelated failure.
+		if err := os.Mkdir(filepath.Join(dir, "state.db"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		_, err := Create(CreateOptions{
+			Overrides: config.ConfigOverrides{
+				Offline: boolPtr(true), StateDir: &dir, ProjectPath: &dir, Tier: strPtr("operator"),
+			},
+			OnSchemaStale: func(int, int) (bool, error) { called = true; return true, nil },
+		})
+		if err == nil {
+			t.Fatal("expected a non-stale open error, got nil")
+		}
+		if called {
+			t.Fatal("OnSchemaStale must NOT be consulted for a non-stale open error")
+		}
+		var stale *storage.SchemaStaleError
+		if errors.As(err, &stale) {
+			t.Fatalf("a directory-as-DB is not a stale-schema error, got %v", err)
+		}
+	})
 }
 
 // TestScratchToolsWired asserts the scratch.* session-scratch family is registered

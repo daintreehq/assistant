@@ -334,6 +334,7 @@ func (throwingSink) AssistantToken(string)       { panic("boom") }
 func (throwingSink) AssistantEnd(string, string) { panic("boom") }
 func (throwingSink) AssistantCancelled(string)   { panic("boom") }
 func (throwingSink) Interjection(string)         { panic("boom") }
+func (throwingSink) SkillLoaded([]string)        { panic("boom") }
 func (throwingSink) ToolBatch([]BatchedToolCall) { panic("boom") }
 func (throwingSink) ToolState(string, ToolState) { panic("boom") }
 func (throwingSink) ToolProgress(string, string) { panic("boom") }

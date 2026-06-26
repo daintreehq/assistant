@@ -103,8 +103,8 @@ clean:
 	rm -rf $(BIN_DIR)
 
 ## db-reset: hard-reset the assistant SQLite state dir (respects DAINTREE_ASSISTANT_STATE_DIR).
-# The schema is a single clean baseline (schemaUserVersion = 1), so a schema
-# change is handled by wiping and rebuilding rather than a migration chain.
+# The schema is a single clean baseline (one schemaUserVersion, not a chain), so a
+# schema change is handled by wiping and rebuilding rather than a migration chain.
 # Honours the state-dir override; falls back to ~/.daintree/assistant-cli. The
 # empty-string guard is a safety net so a misconfigured STATE_DIR never expands
 # into a bare `rm -rf`. Idempotent: rm -rf on a missing dir exits 0. Safe to run

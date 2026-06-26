@@ -31,6 +31,17 @@ func (t Theme) GlamourStyles() ansi.StyleConfig {
 	zeroMargin := uint(0)
 	zeroIndent := uint(0)
 
+	// Table separators: box-drawing when Unicode is on, ASCII otherwise. The
+	// renderer width-wraps tables (WithTableWrap) so a SIMPLE table (few columns,
+	// short cells — the base prompt enforces this) renders as an aligned grid that
+	// fits the narrow cockpit, instead of being flattened to a record list. We set
+	// the glyphs only (no Color) so cell text keeps its normal foreground and the
+	// separators read as plain dividers.
+	colSep, centerSep, rowSep := " │ ", "─┼─", "─"
+	if !t.Unicode {
+		colSep, centerSep, rowSep = " | ", "-+-", "-"
+	}
+
 	return ansi.StyleConfig{
 		// Document: no surrounding margin/indent — the cockpit owns insets.
 		Document: ansi.StyleBlock{
@@ -109,6 +120,15 @@ func (t Theme) GlamourStyles() ansi.StyleConfig {
 
 		// Horizontal rule: muted.
 		HorizontalRule: ansi.StylePrimitive{Color: hexMutedP, Faint: ptrBool(true)},
+
+		// Table: an aligned grid with simple separators. Width-wrapping is owned by
+		// the renderer (WithTableWrap); the base prompt keeps tables small enough to
+		// fit the inline cockpit, so a scoreboard reads as a real table.
+		Table: ansi.StyleTable{
+			ColumnSeparator: &colSep,
+			CenterSeparator: &centerSep,
+			RowSeparator:    &rowSep,
+		},
 	}
 }
 

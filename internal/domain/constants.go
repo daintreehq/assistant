@@ -101,11 +101,11 @@ const (
 	// so the controls and summary note still leave the rebuilt history with ample headroom.
 	AutoCompactVerbatimTailTokenBudget = 20_000
 
-	// LargeContextWindowTokens is the main (large) model's context window, used as the
-	// denominator for the cockpit's CTX% gauge — "% of the model's context in use", NOT
-	// "% toward auto-compaction". The large tier is sized to a ~1M-token window; the gauge
-	// must reflect that (a small conversation reads ~1% of the window, not a large fraction
-	// of the smaller compaction threshold).
+	// LargeContextWindowTokens is the main (large) model's context window. It is reported
+	// on each UsageEvent and persisted to the durable run-event log for /explain; it is NOT
+	// "% toward auto-compaction". (The cockpit previously rendered a live CTX% gauge off this
+	// denominator; that gauge was removed as noise — context is managed for the operator.)
+	// The large tier is sized to a ~1M-token window.
 	LargeContextWindowTokens = 1_000_000
 
 	// MainPromptCacheKey is the DeepSeek prompt_cache_key. Plain, UNVERSIONED:

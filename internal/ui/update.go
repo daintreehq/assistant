@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -277,6 +279,25 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 		if m.pendingInject > 0 {
 			m.pendingInject--
 		}
+	case pumpSkill:
+		// The backend loaded one or more skills for this round. Append an inline skill card
+		// per (trimmed, non-blank) title in chronological place; the round's response opens a
+		// fresh prose step after it. Seal live prose ONLY once we know a renderable card is
+		// being added, so a stray blank-title event can't force a spurious prose boundary.
+		if t != nil {
+			sealed := false
+			for _, title := range ev.skills {
+				title = strings.TrimSpace(title)
+				if title == "" {
+					continue
+				}
+				if !sealed {
+					t.sealProse()
+					sealed = true
+				}
+				t.Steps = append(t.Steps, TurnStep{Kind: StepSkill, Text: title})
+			}
+		}
 	case pumpBatch:
 		if t != nil {
 			for _, c := range ev.batch {
@@ -362,30 +383,12 @@ func toolFailSummary(r domain.ToolResult) string {
 	return "failed"
 }
 
-// applyUsage updates the CTX% / cost / model rollup from a usage event.
+// applyUsage updates the cost / model rollup from a usage event. (The CTX% gauge was
+// removed — context is managed for the operator, so the raw pressure number was noise.)
 func (m *Model) applyUsage(u agent.UsageEvent) {
-	m.hasUsage = true
 	// A successful round means the provider answered — clear any model-rate-limit
 	// health badge raised by a prior exhausted-429 turn.
 	m.modelRateLimited = false
-	// CTX% is "% of the model's context window in use" — divide by the window, NOT the
-	// (much smaller) auto-compact threshold, so a 1M-window model reads ~1% on a short
-	// conversation rather than a misleading 13%. Fall back to the threshold only if no
-	// window was reported (older events / tests). int64 avoids overflow on large token
-	// counts; clamp to [0,100] so an over-full context reads "100%", never above.
-	denom := u.ContextWindow
-	if denom <= 0 {
-		denom = u.ContextThreshold
-	}
-	if denom > 0 {
-		pct := int(int64(u.ContextTokens) * 100 / int64(denom))
-		if pct < 0 {
-			pct = 0
-		} else if pct > 100 {
-			pct = 100
-		}
-		m.contextPct = pct
-	}
 	if u.CostUsd != nil {
 		m.cost += *u.CostUsd
 	}

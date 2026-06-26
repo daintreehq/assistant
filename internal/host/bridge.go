@@ -141,6 +141,10 @@ func (b *Bridge) AssistantCancelled(string) { b.closeTurn(OutcomeCancelled) }
 // busy), so echoing it back would be redundant. Dropped, like Phase.
 func (b *Bridge) Interjection(string) {}
 
+// SkillLoaded has no host-protocol channel (the parent doesn't surface the assistant's
+// internal skill loads); dropped, like Interjection.
+func (b *Bridge) SkillLoaded([]string) {}
+
 // ToolBatch/ToolState/ToolProgress are live-footer-only in the loop; the host
 // protocol keys off the concrete tool:started/tool:settled events, so the
 // in-tool substep stream has no host channel and is dropped.

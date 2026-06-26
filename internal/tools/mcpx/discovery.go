@@ -234,7 +234,7 @@ var wrappedMCPTools = map[string]string{
 	"panel.focus":                  "terminal.focus",
 	"terminal.rename":              "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
 	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
-	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one confirmed call)`,
+	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one call; ONLY at the user's explicit request, never your own cleanup/recovery)`,
 	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",
 	"terminal.disarm":              "terminal.disarm (typed wrapper — pass terminalId)",
 	"terminal.disarmAll":           "terminal.disarmAll (typed wrapper — no args needed)",

@@ -15,7 +15,9 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -132,11 +134,7 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("exec schema: %w", err)
-	}
-	if err := s.migrate(); err != nil {
+	if err := s.applySchema(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -180,29 +178,82 @@ func (s *Store) applyPragmas() error {
 	return nil
 }
 
-// migrate keys off PRAGMA user_version. The schema's IF NOT EXISTS DDL builds a
+// applySchema keys off PRAGMA user_version. The schema's IF NOT EXISTS DDL builds a
 // fresh file's whole current shape, so there is no migration chain. Dev policy
-// hard-resets on a schema change rather than chaining — so a file initialized at an
-// OLDER baseline (its tables lack newly-added columns) is failed LOUDLY here with the
-// fix, instead of limping into a cryptic "no such column" from the very next
-// session-boundary statement.
-func (s *Store) migrate() error {
+// hard-resets on a schema change rather than chaining.
+//
+// CRUCIALLY, the version is read FIRST — before any DDL runs — so a file at an OLDER
+// baseline is rejected with a typed *SchemaStaleError BEFORE the current-shape DDL can
+// trip on the old table shape. (e.g. a pre-v5 `memories` table lacks `expiresAt`, so
+// `CREATE INDEX … ON memories(expiresAt)` in schema.sql would fail with a cryptic "no
+// such column" — masking the stale baseline and defeating the caller's graceful reset,
+// which keys on errors.As(err, &SchemaStaleError).) Order:
+//   - v in (0, schemaUserVersion): stale baseline → SchemaStaleError, NO DDL run.
+//   - v == 0: brand-new file → run the schema DDL (builds the whole shape), then stamp.
+//   - v >= schemaUserVersion: current (or newer, opened by older code) → run the
+//     idempotent IF NOT EXISTS DDL as a no-op safety net; leave the version untouched.
+func (s *Store) applySchema() error {
+	v, err := s.userVersion()
+	if err != nil {
+		return err
+	}
+	// A non-zero version below the current baseline is a stale file: reject it BEFORE the
+	// DDL so the loud, typed error (not a mid-DDL "no such column") reaches the caller.
+	if v != 0 && v < schemaUserVersion {
+		return &SchemaStaleError{Have: v, Want: schemaUserVersion}
+	}
+	if _, err := s.db.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("exec schema: %w", err)
+	}
+	// v == 0 is a brand-new file: the CREATE TABLE DDL just built the current shape, so
+	// stamp the version. PRAGMA user_version doesn't accept bound params.
+	if v == 0 {
+		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion)); err != nil {
+			return fmt.Errorf("set user_version: %w", err)
+		}
+	}
+	return nil
+}
+
+// userVersion reads PRAGMA user_version (0 for a brand-new file).
+func (s *Store) userVersion() (int, error) {
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		return fmt.Errorf("read user_version: %w", err)
+		return 0, fmt.Errorf("read user_version: %w", err)
 	}
-	if v >= schemaUserVersion {
-		// Current — or a newer DB opened by older code; leave forward-compat untouched.
-		return nil
-	}
-	// v == 0 is a brand-new file: the CREATE TABLE DDL just built the current shape,
-	// so we only stamp the version. Any v in (0, schemaUserVersion) is a stale baseline.
-	if v != 0 {
-		return fmt.Errorf("database schema is stale (version %d, current %d) — run 'make db-reset' to reset it (honours DAINTREE_ASSISTANT_STATE_DIR)", v, schemaUserVersion)
-	}
-	// PRAGMA user_version doesn't accept bound params.
-	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion)); err != nil {
-		return fmt.Errorf("set user_version: %w", err)
+	return v, nil
+}
+
+// SchemaStaleError reports that the on-disk DB was initialized at an OLDER schema
+// baseline than this build expects (Have < Want, both non-zero). Pre-release policy
+// hard-resets rather than chaining migrations, so the only recovery is a
+// wipe-and-rebuild (ResetDB). It is a TYPED error — not a bare string — so a caller
+// can detect this exact case with errors.As and offer to reset the DB (e.g. an
+// interactive y/N prompt) instead of dumping the raw "run make db-reset" message.
+type SchemaStaleError struct {
+	Have int // the user_version stamped on the file
+	Want int // schemaUserVersion this build builds
+}
+
+func (e *SchemaStaleError) Error() string {
+	// Keep the actionable dev message verbatim: this is what surfaces when no caller
+	// offers a graceful reset (scripts, the host, a non-TTY launch).
+	return fmt.Sprintf("database schema is stale (version %d, current %d) — run 'make db-reset' to reset it (honours DAINTREE_ASSISTANT_STATE_DIR)", e.Have, e.Want)
+}
+
+// ResetDB deletes the SQLite database at dbPath together with its WAL/SHM sidecar
+// files, so the next Open rebuilds the schema from scratch. This is the programmatic
+// twin of `make db-reset` for the one recovery the pre-release policy supports — a
+// stale schema baseline (see SchemaStaleError). It removes ONLY the three DB files,
+// never the enclosing state dir, so anything else living there survives. A missing
+// file is not an error (idempotent). The handle must be closed first — a failed Open
+// already closes it before returning the SchemaStaleError, so the typical caller can
+// reset and re-Open immediately.
+func ResetDB(dbPath string) error {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", p, err)
+		}
 	}
 	return nil
 }

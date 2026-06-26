@@ -175,8 +175,6 @@ func tierGloss(t domain.Tier) string {
 // of " id [· goal] [duration]". Passing a flat string would lose the tone color,
 // the leading state glyph, and the dim styling of the id — so we rebuild it here.
 type statusParams struct {
-	ContextPct  int // CTX %; <0 means "no usage yet" (hidden)
-	HasUsage    bool
 	Cost        float64
 	Model       string
 	AttentionN  int
@@ -241,19 +239,6 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 		segs = append(segs, badge+th.Dim().Render(dimTail))
 	} else if p.ActiveAgent != "" {
 		segs = append(segs, th.Info().Render(p.ActiveAgent))
-	}
-	// CTX% — required when usage has arrived; tinted by pressure (≥90 red, ≥75 amber).
-	if p.HasUsage && p.ContextPct >= 0 {
-		ctx := "CTX " + itoa(p.ContextPct) + "%"
-		switch {
-		case p.ContextPct >= 90:
-			ctx = th.Danger().Render(ctx)
-		case p.ContextPct >= 75:
-			ctx = th.Warning().Render(ctx)
-		default:
-			ctx = th.Dim().Render(ctx)
-		}
-		segs = append(segs, ctx)
 	}
 	// Cost + model are idle-only (no active agent).
 	if !active {

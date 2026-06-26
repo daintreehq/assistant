@@ -51,6 +51,7 @@ func (r *recordingSink) AssistantEnd(c, _ string) {
 }
 func (r *recordingSink) AssistantCancelled(string)         { r.log("assistant:cancelled") }
 func (r *recordingSink) Interjection(string)               { r.log("user:interjection") }
+func (r *recordingSink) SkillLoaded([]string)              { r.log("skill:loaded") }
 func (r *recordingSink) ToolBatch([]agent.BatchedToolCall) { r.log("tool:batch") }
 func (r *recordingSink) ToolState(string, agent.ToolState) {}
 func (r *recordingSink) ToolProgress(string, string)       {}

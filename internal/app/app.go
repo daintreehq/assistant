@@ -7,6 +7,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -56,6 +58,13 @@ type CreateOptions struct {
 	// separate wave; nil ⇒ DefaultToolBuilder (the always-safe core tools). The
 	// builder runs AFTER the registry exists but BEFORE AssertSafe.
 	BuildTools ToolBuilder
+	// OnSchemaStale, when non-nil, is consulted if the on-disk SQLite database was
+	// initialized at an OLDER schema baseline than this build (a storage.SchemaStaleError).
+	// It returns true to authorise a DESTRUCTIVE reset (wipe the DB files + rebuild the
+	// schema) or false to abort with the stale-schema error. Interactive callers wire a
+	// y/N terminal prompt here; non-interactive callers leave it nil, preserving the loud,
+	// actionable failure — a script/host path must never silently destroy local state.
+	OnSchemaStale func(have, want int) (bool, error)
 }
 
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
@@ -182,7 +191,29 @@ func Create(opts CreateOptions) (*App, error) {
 
 	store, err := storage.Open(cfg.DBPath, nil)
 	if err != nil {
-		return nil, err
+		// A stale on-disk schema is the one open failure with a clean, supported
+		// recovery (pre-release policy resets rather than migrates). If the caller
+		// supplied an OnSchemaStale handler — an interactive terminal that can ask the
+		// human — consult it; on a "yes" wipe the DB files and re-Open onto a fresh
+		// schema. Without a handler (scripts / host / non-TTY) the actionable error
+		// propagates untouched, so we never silently destroy local state.
+		var stale *storage.SchemaStaleError
+		if !errors.As(err, &stale) || opts.OnSchemaStale == nil {
+			return nil, err
+		}
+		reset, cbErr := opts.OnSchemaStale(stale.Have, stale.Want)
+		if cbErr != nil {
+			return nil, cbErr
+		}
+		if !reset {
+			return nil, err // declined → keep the actionable stale-schema error
+		}
+		if rerr := storage.ResetDB(cfg.DBPath); rerr != nil {
+			return nil, fmt.Errorf("reset database: %w", rerr)
+		}
+		if store, err = storage.Open(cfg.DBPath, nil); err != nil {
+			return nil, err
+		}
 	}
 
 	sessionID := opts.SessionID

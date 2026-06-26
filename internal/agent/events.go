@@ -75,8 +75,8 @@ type UsageEvent struct {
 	// clamped: a provider anomaly (cached > prompt) stays visible as a diagnostic.
 	CacheHitRatio    *float64
 	ContextTokens    int
-	ContextThreshold int // auto-compact trigger point (NOT the gauge denominator)
-	ContextWindow    int // model context window — the CTX% gauge denominator
+	ContextThreshold int // auto-compact trigger point
+	ContextWindow    int // model context window (persisted to the durable run-event log)
 	// CompactionDepth is how many times the session has compacted so far (issue #251).
 	// A drift signal: rising depth over a long run flags a summary-of-summary chain
 	// degrading detail. Session-scoped; resets to 0 on /clear.
@@ -112,6 +112,14 @@ type EventSink interface {
 	// Session.foldInInjections). The cockpit renders it inline in the running turn; the
 	// durable log records it so /explain replay shows the mid-turn steer.
 	Interjection(text string)
+
+	// SkillLoaded reports that the backend's selector loaded one or more runbooks for
+	// THIS round (the NewlyLoaded set from the stream's first meta event). The cockpit
+	// folds it into the running turn as an inline "Skill loaded" card in chronological
+	// place — a calm capability cue, not the human's words nor a system note; the durable
+	// log records it. titles are human-readable skill names (the id is the fallback when a
+	// ref has no title). Never emitted with an empty slice.
+	SkillLoaded(titles []string)
 
 	// ToolBatch announces every parsed tool call as queued BEFORE sequential
 	// dispatch begins. The loop then promotes each call.
@@ -154,6 +162,7 @@ func (NoopEventSink) AssistantToken(string)       {}
 func (NoopEventSink) AssistantEnd(string, string) {}
 func (NoopEventSink) AssistantCancelled(string)   {}
 func (NoopEventSink) Interjection(string)         {}
+func (NoopEventSink) SkillLoaded([]string)        {}
 func (NoopEventSink) ToolBatch([]BatchedToolCall) {}
 func (NoopEventSink) ToolState(string, ToolState) {}
 func (NoopEventSink) ToolProgress(string, string) {}
@@ -217,6 +226,11 @@ func (m *MultiSink) AssistantCancelled(content string) {
 func (m *MultiSink) Interjection(text string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.Interjection(text) })
+	}
+}
+func (m *MultiSink) SkillLoaded(titles []string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.SkillLoaded(titles) })
 	}
 }
 func (m *MultiSink) ToolBatch(calls []BatchedToolCall) {
@@ -366,6 +380,14 @@ func (s *RunEventSink) AssistantCancelled(content string) {
 func (s *RunEventSink) Interjection(text string) {
 	s.flushContent()
 	s.write("user:interjection", map[string]any{"text": text})
+}
+
+// SkillLoaded persists a server-side skill load as its own durable row so /explain
+// replay shows when a runbook entered the prompt. Flush buffered prose first so it
+// lands at the round boundary where the skill was selected.
+func (s *RunEventSink) SkillLoaded(titles []string) {
+	s.flushContent()
+	s.write("skill:loaded", map[string]any{"titles": titles})
 }
 
 // ToolBatch/ToolState are live-footer-only; the durable log keys off the concrete

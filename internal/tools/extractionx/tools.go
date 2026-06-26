@@ -193,7 +193,7 @@ var extractSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, the agent's answer to relay). Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge). Need several NAMED fields at once instead? Use terminal.extract.json." },` + sharedBaseProps + `
+    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, the agent's answer to relay). Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge). Need several NAMED fields at once, or one answer PER terminal across a cohort? Use terminal.extract.json — a plain-TEXT extract over multiple terminalIds MERGES them into ONE answer, it does not return one per agent." },` + sharedBaseProps + `
   },
   "required": ["terminalIds"]
 }`)
@@ -202,9 +202,12 @@ func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
 		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content as plain TEXT with " +
-			"the small model — the default way to read what an agent said. Optionally wait (poll) until a condition is met before " +
-			"extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no extraction model call). For " +
-			"STRUCTURED output (several named fields) use terminal.extract.json instead. Read-only; requires Daintree MCP.",
+			"the small model — the default way to read what an agent said. Over MULTIPLE terminalIds it MERGES every terminal's tail " +
+			"into ONE answer (it does NOT return one answer per terminal); to collect a DISTINCT answer per agent — each one's fact/vote/draft " +
+			"— use terminal.extract.json with an array schema keyed by terminalId, or extract a single id at a time. Optionally wait (poll) " +
+			"until a condition is met before extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
+			"extraction model call). For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
+			"Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: extractSchema,
 		Decode: tools.StrictDecoder(func() any { return &extractArgs{} }),
@@ -306,9 +309,11 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract.json",
 		Description: "Read a bounded tail of one or more Daintree terminals and extract STRUCTURED JSON with the small model — use " +
-			"this only when you need several NAMED fields at once (e.g. tallying a cohort's votes into one object). Both `instruction` " +
-			"and `jsonSchema` are required. Optionally wait (poll) until a condition is met before extracting. For a single value or " +
-			"plain text to relay, use terminal.extract instead. Read-only; requires Daintree MCP.",
+			"this when you need several NAMED fields at once, OR one entry PER terminal when reading a COHORT: the multi-terminal tail is " +
+			"labelled by terminalId, so an array schema keyed by terminalId attributes each agent's answer in ONE call (e.g. collecting " +
+			"every agent's fact, or tallying a cohort's votes into one object). Both `instruction` and `jsonSchema` are required. Optionally " +
+			"wait (poll) until a condition is met before extracting. For a single value or plain text to relay from ONE terminal, use " +
+			"terminal.extract instead. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: extractJSONSchema,
 		Decode: tools.StrictDecoder(func() any { return &extractJSONArgs{} }),

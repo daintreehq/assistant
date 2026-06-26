@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -55,6 +57,12 @@ func (s *consoleSink) AssistantCancelled(_ string) { s.r.Info("Turn cancelled");
 // Interjection prints a mid-turn user message as a distinct line so the console
 // transcript shows the steer the model received between tasks.
 func (s *consoleSink) Interjection(text string) { s.r.Info("you (mid-turn): " + text) }
+
+// SkillLoaded prints a one-line capability cue so the console transcript shows the
+// runbook the backend loaded for this turn.
+func (s *consoleSink) SkillLoaded(titles []string) {
+	s.r.Info("Skill loaded: " + strings.Join(titles, ", "))
+}
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints
 // concrete tool calls + results, not the per-call substep stream.

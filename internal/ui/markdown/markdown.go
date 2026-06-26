@@ -107,10 +107,12 @@ func (r *Renderer) render(clean string, width int) Rendered {
 		return Rendered{ANSI: "", Plain: ""}
 	}
 
-	// Rewrite tables to a width-agnostic record list (glamour grids shred narrow).
-	src := tablesToRecordLists(clean)
-
-	styled, err := r.glamourRender(src, width)
+	// Tables render natively as aligned grids: glamour width-wraps them
+	// (WithTableWrap) so a SIMPLE table fits the narrow cockpit, and the base
+	// prompt keeps the model to small tables. (We used to flatten every table to a
+	// record list because table-wrap was off and unwrapped grids shredded; with
+	// wrap on, a simple scoreboard reads as a real table.)
+	styled, err := r.glamourRender(clean, width)
 	if err != nil || strings.TrimSpace(ansi.Strip(styled)) == "" {
 		// Plain fallback: unknown lexer, render failure, or a render that produced
 		// no visible text. Word-wrap the sanitized source by cells so the fallback
@@ -134,7 +136,9 @@ func (r *Renderer) render(clean string, width int) Rendered {
 
 // glamourRender invokes glamour v2 with the theme's StyleConfig and cell-based
 // word wrap. WithStyles drives the semantic map; WithWordWrap hands wrapping to
-// glamour at the live width. TableWrap is disabled (we already converted tables).
+// glamour at the live width. TableWrap is ON so glamour wraps table cells to the
+// live width instead of letting a wide row shred past the right edge — the base
+// prompt keeps tables simple enough that a wrapped cell stays readable.
 func (r *Renderer) glamourRender(src string, width int) (string, error) {
 	r.trMu.Lock()
 	defer r.trMu.Unlock()
@@ -144,7 +148,7 @@ func (r *Renderer) glamourRender(src string, width int) (string, error) {
 		tr, err = glamour.NewTermRenderer(
 			glamour.WithStyles(r.theme.GlamourStyles()),
 			glamour.WithWordWrap(width),
-			glamour.WithTableWrap(false),
+			glamour.WithTableWrap(true),
 		)
 		if err != nil {
 			return "", err

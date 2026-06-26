@@ -122,7 +122,8 @@ type ToolResultMsg struct {
 	EndedAt int64
 }
 
-// UsageMsg — per-round token/cost/context accounting (drives CTX% + cost).
+// UsageMsg — per-round token/cost/context accounting (drives the cost + model rollup and
+// clears the model-rate-limited badge; context fields feed the durable run-event log).
 type UsageMsg struct{ Usage agent.UsageEvent }
 
 // LogMsg — an out-of-band informational/warning/error line (a NoteCell).

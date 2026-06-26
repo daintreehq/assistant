@@ -129,6 +129,15 @@ func (s *Sink) Interjection(text string) {
 	s.emit("user:interjection", map[string]any{"text": text})
 }
 
+// SkillLoaded emits a server-side skill load as its own JSONL line (flushing buffered
+// prose first so it lands at the round boundary where the skill was selected).
+func (s *Sink) SkillLoaded(titles []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushContent()
+	s.emit("skill:loaded", map[string]any{"titles": titles})
+}
+
 // ToolBatch / ToolState / ToolProgress are live-footer-only; not part of the JSONL stream.
 func (s *Sink) ToolBatch([]agent.BatchedToolCall) {}
 func (s *Sink) ToolState(string, agent.ToolState) {}

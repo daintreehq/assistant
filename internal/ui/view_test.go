@@ -137,8 +137,6 @@ func TestViewWidths_Degraded(t *testing.T) {
 	for _, w := range goldenWidths {
 		m := testModel(w)
 		m.degraded = true
-		m.hasUsage = true
-		m.contextPct = 42
 		v := m.View()
 		if !strings.Contains(ansi.Strip(v.Content), "Daintree MCP") {
 			t.Errorf("degraded@%d: status line missing the MCP-unavailable segment: %q", w, ansi.Strip(v.Content))

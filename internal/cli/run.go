@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -214,10 +216,18 @@ func RunInteractive(ctx context.Context, opts Options) int {
 	ttyOK := stdinIsTTY() && stdoutIsTTY()
 	wantsCockpit := !opts.Classic && ttyOK
 
-	overrides := buildOverrides(opts, render.Stdout())
-	a, err := app.Create(app.CreateOptions{Overrides: overrides})
+	r := render.Stdout()
+	overrides := buildOverrides(opts, r)
+	createOpts := app.CreateOptions{Overrides: overrides}
+	// Only an interactive terminal can answer the reset prompt; a piped/non-TTY launch
+	// keeps the loud, actionable stale-schema error rather than blocking on a stdin read
+	// or wiping local state with no human in the loop.
+	if ttyOK {
+		createOpts.OnSchemaStale = schemaResetPrompt(r)
+	}
+	a, err := app.Create(createOpts)
 	if err != nil {
-		render.Stdout().Error(err.Error())
+		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
 	}
 
@@ -316,3 +326,27 @@ func announceDebugLog(a *app.App) {
 
 func stdinIsTTY() bool  { return isatty.IsTerminal(os.Stdin.Fd()) }
 func stdoutIsTTY() bool { return isatty.IsTerminal(os.Stdout.Fd()) }
+
+// schemaResetPrompt returns the app.Create OnSchemaStale handler for the interactive
+// terminal: it explains, in plain language, that the local database is from an older
+// build and reads a single y/N from stdin. A "yes" authorises the wipe-and-rebuild;
+// any other answer — or EOF — declines, so app.Create aborts with the actionable
+// stale-schema error. Wired only when stdin/stdout are TTYs (see RunInteractive), and
+// runs BEFORE the cockpit/REPL takes over the terminal, so a one-shot cooked-mode read
+// is safe here.
+func schemaResetPrompt(r *render.Renderer) func(have, want int) (bool, error) {
+	return func(have, want int) (bool, error) {
+		r.Warn(fmt.Sprintf(
+			"Your local assistant database is from an older version (schema %d; this build needs %d).",
+			have, want))
+		r.Line("  Resetting clears local state — timers, saved memories, and conversation")
+		r.Line("  history — but never touches your code or Daintree.")
+		r.Out(r.Yellow("  Reset the database now? [y/N] "))
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return false, nil // EOF / read error → decline (the safe default)
+		}
+		a := strings.ToLower(strings.TrimSpace(line))
+		return a == "y" || a == "yes", nil
+	}
+}

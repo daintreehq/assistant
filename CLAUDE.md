@@ -34,6 +34,14 @@ choice, prompt assembly, the utility-model prompts, and the upstream model crede
 (DeepSeek, spoken internally behind a provider abstraction). The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
 
+> **You have standing permission to edit the backend at `../assistant-backend`.** Many
+> fixes here are really backend changes — the base/system prompt, developer instructions,
+> skill/runbook bodies, and the utility-model prompts all live in that repo
+> (`src/daintree_assistant_server/prompts/` and `.../skills/files/*.md`). When a model
+> behaviour, formatting, or skill bug traces to the prompt/skill rather than a local tool
+> shape, fix it directly in `../assistant-backend` (prompt/skill changes land there; local
+> tool-shape changes land here) — no need to ask first.
+
 **Development endpoint:** hardcoded to `http://127.0.0.1:8473`, unauthenticated — the
 assistant supports exactly this one endpoint for now (a later phase swaps in the
 production URL + a real login flow). The only override is the dev/test env var

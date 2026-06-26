@@ -140,8 +140,6 @@ type Model struct {
 	lastPreviewFetchedAt int64
 	previewFetchInFlight bool
 	previewCache         []daemon.TerminalPreview
-	hasUsage             bool
-	contextPct           int
 	cost                 float64
 	model                string
 	degraded             bool

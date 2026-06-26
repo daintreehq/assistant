@@ -334,16 +334,18 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 	for li := range sub {
 		step := sub[li]
 		g := from + li
-		// A blank line AFTER a tool group: separate the function-call ledger from the prose
-		// or note that follows it. The blank rides the FOLLOWING step (a leading blank) so it
-		// survives the flush boundary — when the tool group flushes alone, the blank flushes
-		// with the prose later, keeping spacing identical across streaming and seal.
-		afterTool := g > 0 && steps[g-1].Kind == StepTool
+		// A blank line AFTER a "block" step — a tool group OR a skill card — separates the
+		// function-call ledger / capability card from the prose or note that follows it. The
+		// blank rides the FOLLOWING step (a leading blank) so it survives the flush boundary:
+		// when the block flushes alone, the blank flushes with the prose later, keeping spacing
+		// identical across streaming and seal (a TRAILING blank would be stripped by the final
+		// TrimRight and lost).
+		afterBlock := g > 0 && (steps[g-1].Kind == StepTool || steps[g-1].Kind == StepSkill)
 		switch step.Kind {
 		case StepProse:
 			withhold := withholdGrowingLast && g == lastIdx
 			if rendered := renderProse(md, step, contentW, withhold); rendered != "" {
-				if afterTool {
+				if afterBlock {
 					b.WriteByte('\n')
 				}
 				b.WriteString(rendered)
@@ -355,13 +357,16 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 			// A contiguous run of tool steps renders as one branch tree; only the
 			// FIRST step of a group emits the whole group (so last-branch math works).
 			if gi < len(groups) && groups[gi].first == sub[li].Activity {
+				if afterBlock {
+					b.WriteByte('\n')
+				}
 				b.WriteString(renderToolGroup(th, groups[gi].acts, expanded, spinnerFrame, now, width))
 				b.WriteByte('\n')
 				gi++
 			}
 		case StepNote:
 			if step.Note != nil {
-				if afterTool {
+				if afterBlock {
 					b.WriteByte('\n')
 				}
 				b.WriteString(renderInlineNote(th, *step.Note, width))
@@ -369,7 +374,20 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 			}
 		case StepInterject:
 			if rendered := renderInterjection(th, step.Text, width); rendered != "" {
-				if afterTool {
+				if afterBlock {
+					b.WriteByte('\n')
+				}
+				b.WriteString(rendered)
+				b.WriteByte('\n')
+			}
+		case StepSkill:
+			if rendered := renderSkillCard(th, step.Text, width); rendered != "" {
+				// The card carries the SAME asymmetric spacing as the "YOU" message card it
+				// mirrors: a blank line BELOW (afterBlock on the next step) but NONE above, so
+				// it reads as linked to whatever precedes it (the ◆ DAINTREE marker, at the
+				// start of a turn) rather than floating in its own gap. The only leading blank
+				// is the block-separator one a tool group / preceding card needs (afterBlock).
+				if afterBlock {
 					b.WriteByte('\n')
 				}
 				b.WriteString(rendered)
@@ -663,6 +681,77 @@ func renderInterjection(th theme.Theme, text string, width int) string {
 			first = false
 			b.WriteString(prefix + textStyle.Render(truncateCells(line, inner)))
 		}
+	}
+	return b.String()
+}
+
+// renderSkillCard renders a server-side skill load as a compact inline card folded into
+// the running turn: a quiet "Skill loaded" anchor over the skill's FULL name, both riding
+// a pale blue/turquoise fill block that butts up against a left accent bar (▏ — the same
+// surface idiom the YOU card uses, so it reads as a distinct, calm capability cue rather
+// than the model's prose or a system note). The card is at least two rows (label + name);
+// a long name wraps to more rows, each carrying the fill. Like the YOU card, every row is
+// a fixed bar+block width so a committed card never wraps a frozen scrollback row on resize.
+// Text is fixed once folded in, so the row count is stable across streaming and seal.
+func renderSkillCard(th theme.Theme, title string, width int) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	g := th.Glyphs
+	surface := th.SkillLoadedSurface()
+	barStyle := th.Muted()
+	if surface.Bar != nil {
+		barStyle = th.Dim().Foreground(surface.Bar)
+	}
+	// With a fill, the bar shares the fill background so the block reaches the accent line.
+	if surface.Fill != nil {
+		barStyle = barStyle.Background(surface.Fill)
+	}
+	bar := barStyle.Render(g.Bar)
+
+	textStyle := th.Body()
+	if surface.Text != nil {
+		textStyle = textStyle.Foreground(surface.Text)
+	}
+	// "Skill loaded" anchor: the surface's quiet label hue, bold so it heads the card.
+	labelStyle := th.Dim().Bold(true)
+	if surface.Label != nil {
+		labelStyle = th.Body().Foreground(surface.Label).Bold(true)
+	}
+
+	// Identical per-row geometry to the YOU card (renderUserMessage), so the fill block
+	// stays within `width` and never wraps a frozen row: bar(1) + gap(1) + text + margin(1).
+	rowBudget := width - 1
+	if rowBudget < 1 {
+		rowBudget = 1
+	}
+	inner := rowBudget - 3
+	if inner < 1 {
+		inner = 1
+	}
+	useFill := surface.Fill != nil && rowBudget >= 5
+	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
+
+	var b strings.Builder
+	first := true
+	writeRow := func(content string, style lipgloss.Style) {
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		if useFill {
+			block := style.Background(surface.Fill).Width(blockW).
+				Render(" " + truncateCells(content, inner))
+			b.WriteString(bar + block)
+		} else {
+			b.WriteString(bar + " " + style.Render(truncateCells(content, inner)))
+		}
+	}
+	// Row 1: the "Skill loaded" anchor. Row 2+: the skill's full name, wrapped to width.
+	writeRow("Skill loaded", labelStyle)
+	for _, line := range strings.Split(wrapCells(title, inner), "\n") {
+		writeRow(line, textStyle)
 	}
 	return b.String()
 }

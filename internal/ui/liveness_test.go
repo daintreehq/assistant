@@ -135,7 +135,8 @@ func TestModelRateLimited_SetByPumpAndClearedByUsage(t *testing.T) {
 		t.Fatal("pumpModelRateLimited must raise the model-rate-limited badge")
 	}
 	// The next successful usage round means the model resumed — the badge clears.
-	m.applyPumpEvent(pumpEvent{kind: pumpUsage, usage: agent.UsageEvent{ContextWindow: 1000, ContextTokens: 10}})
+	// (applyUsage no longer reads the context fields; an empty UsageEvent suffices.)
+	m.applyPumpEvent(pumpEvent{kind: pumpUsage, usage: agent.UsageEvent{}})
 	if m.modelRateLimited {
 		t.Fatal("a successful Usage event must clear the model-rate-limited badge")
 	}
