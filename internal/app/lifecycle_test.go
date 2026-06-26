@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -63,16 +62,11 @@ func TestRefreshStartupContextNotConnectedClears(t *testing.T) {
 		t.Fatalf("not-connected refresh must clear the cache, got ids=%v wt=%q", gotIDs, gotWt)
 	}
 
-	// And it propagates: after RefreshRuntimeContext, message[1] drops the stale roster
-	// line. The worktree is no longer in message[1] (it moved to the footer, issue #263),
-	// so the cleared cache simply makes the footer seam report "" until the next connect.
-	a.Session.RefreshRuntimeContext(a.PromptContext())
-	msg := a.Session.Messages()[1].ContentToText()
-	if strings.Contains(msg, "Configured agents:") {
-		t.Fatalf("degraded message[1] must not carry a stale roster line:\n%s", msg)
-	}
-	if strings.Contains(msg, "Active worktree:") {
-		t.Fatalf("worktree must not appear in message[1] (it moved to the footer):\n%s", msg)
+	// And it propagates through the live PromptContext: the cleared cache drops the stale
+	// roster (now carried as structured backend.RuntimeContext data, no message[1] to
+	// rewrite) and makes the footer worktree seam report "" until the next connect.
+	if got := a.PromptContext().ConfiguredAgentIDs; len(got) != 0 {
+		t.Fatalf("degraded PromptContext must not carry a stale roster, got %v", got)
 	}
 	if got := a.activeWorktreeForFooter(); got != "" {
 		t.Fatalf("a cleared cache must make the footer worktree seam empty, got %q", got)

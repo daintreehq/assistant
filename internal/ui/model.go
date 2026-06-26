@@ -213,14 +213,9 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 
 	// No standalone welcome line: the composer placeholder ("Ask Daintree… · / for commands"),
 	// the hint row, and "?" for help already cover discoverability, so a banner would just be
-	// clutter under the masthead. We DO surface a genuine degraded state up front, though:
-	// a missing model key at boot rather than only failing on the first turn (clig.dev).
-	if a.Config.DeepSeekAPIKey == "" {
-		m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
-			ID: domain.NewID("note_"), Level: NoteError, Ts: domain.NowMS(),
-			Text: "DEEPSEEK_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup.",
-		}})
-	}
+	// clutter under the masthead. There is no model-key boot note anymore — the CLI holds no
+	// model credentials (the backend owns them); a turn surfaces a clear backend error if the
+	// backend is unreachable.
 	return m
 }
 

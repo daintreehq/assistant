@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
 // TestValidateCheckpointReinjectsMissingIDs is the issue's core guarantee: an ID present
@@ -16,7 +16,7 @@ import (
 func TestValidateCheckpointReinjectsMissingIDs(t *testing.T) {
 	transcript := `assistant: [tool call terminal.read {"terminalId":"term_a1b2"}]
 assistant: spawned wch_12345678 and grt_cafef00d and agt_00112233 and tmr_99887766 and wfr_deadbeef`
-	cp := prompts.CompactionCheckpoint{Goal: "do the thing"}
+	cp := backend.CheckpointOutput{Goal: "do the thing"}
 	validateCheckpoint(&cp, transcript)
 	for _, want := range []string{"term_a1b2", "wch_12345678", "grt_cafef00d", "agt_00112233", "tmr_99887766", "wfr_deadbeef"} {
 		found := false
@@ -38,7 +38,7 @@ assistant: spawned wch_12345678 and grt_cafef00d and agt_00112233 and tmr_998877
 // short and numeric, so term_1 vs term_10 is a real-world collision.
 func TestValidateCheckpointPrefixCollision(t *testing.T) {
 	transcript := "ran on term_1, then later on term_10"
-	cp := prompts.CompactionCheckpoint{ActiveTerminals: []string{"term_10 — running tests"}}
+	cp := backend.CheckpointOutput{ActiveTerminals: []string{"term_10 — running tests"}}
 	validateCheckpoint(&cp, transcript)
 	// term_10 is placed → not re-injected; term_1 is genuinely absent → must be preserved.
 	if len(cp.PreservedIDs) != 1 || cp.PreservedIDs[0] != "term_1" {
@@ -51,7 +51,7 @@ func TestValidateCheckpointPrefixCollision(t *testing.T) {
 // (not duplicated into PreservedIDs).
 func TestValidateCheckpointKeepsGrantInNamedField(t *testing.T) {
 	transcript := `granted grt_cafef00d for git ops`
-	cp := prompts.CompactionCheckpoint{ApprovalsGrants: []string{"grt_cafef00d — git ops"}}
+	cp := backend.CheckpointOutput{ApprovalsGrants: []string{"grt_cafef00d — git ops"}}
 	validateCheckpoint(&cp, transcript)
 	if len(cp.PreservedIDs) != 0 {
 		t.Fatalf("a grant placed in approvals_grants must not be re-injected, got %+v", cp.PreservedIDs)
@@ -62,7 +62,7 @@ func TestValidateCheckpointKeepsGrantInNamedField(t *testing.T) {
 // field is NOT duplicated into PreservedIDs.
 func TestValidateCheckpointKeepsPlacedIDs(t *testing.T) {
 	transcript := `assistant: [tool call terminal.read {"terminalId":"term_a1b2"}]`
-	cp := prompts.CompactionCheckpoint{ActiveTerminals: []string{"term_a1b2 — running tests"}}
+	cp := backend.CheckpointOutput{ActiveTerminals: []string{"term_a1b2 — running tests"}}
 	validateCheckpoint(&cp, transcript)
 	if len(cp.PreservedIDs) != 0 {
 		t.Fatalf("an already-placed ID must not be re-injected; PreservedIDs = %+v", cp.PreservedIDs)
@@ -72,7 +72,7 @@ func TestValidateCheckpointKeepsPlacedIDs(t *testing.T) {
 // TestValidateCheckpointNoIDsNoChange proves a transcript with no load-bearing IDs leaves
 // the checkpoint untouched.
 func TestValidateCheckpointNoIDsNoChange(t *testing.T) {
-	cp := prompts.CompactionCheckpoint{Goal: "g"}
+	cp := backend.CheckpointOutput{Goal: "g"}
 	validateCheckpoint(&cp, "user: hello\nassistant: nothing to see here")
 	if cp.PreservedIDs != nil {
 		t.Fatalf("no IDs in transcript should leave PreservedIDs nil, got %+v", cp.PreservedIDs)
@@ -82,25 +82,35 @@ func TestValidateCheckpointNoIDsNoChange(t *testing.T) {
 // TestValidateCheckpointDedupes proves a repeated ID is preserved exactly once.
 func TestValidateCheckpointDedupes(t *testing.T) {
 	transcript := "term_a1b2 ... term_a1b2 ... term_a1b2"
-	var cp prompts.CompactionCheckpoint
+	var cp backend.CheckpointOutput
 	validateCheckpoint(&cp, transcript)
 	if len(cp.PreservedIDs) != 1 || cp.PreservedIDs[0] != "term_a1b2" {
 		t.Fatalf("repeated ID should preserve once, got %+v", cp.PreservedIDs)
 	}
 }
 
-// TestRenderCheckpointEmptyIsBraces proves an empty checkpoint renders to a non-empty
-// "{}" — never the empty string, which the caller would treat as a failed compaction.
+// TestRenderCheckpointEmptyIsBraces proves an empty checkpoint renders to a non-empty,
+// valid JSON object — never the empty string, which the caller would treat as a failed
+// compaction. The typed backend.CheckpointOutput has no omitempty tags, so an empty
+// value marshals to an object with explicit null/"" fields rather than a bare "{}"; the
+// load-bearing contract is only "non-empty, parseable JSON the model can read back".
 func TestRenderCheckpointEmptyIsBraces(t *testing.T) {
-	if got := renderCheckpoint(prompts.CompactionCheckpoint{}); got != "{}" {
-		t.Fatalf("empty checkpoint render = %q, want {}", got)
+	got := renderCheckpoint(backend.CheckpointOutput{})
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("empty checkpoint render must never be the empty string")
+	}
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("empty checkpoint render must be valid JSON, got %q", got)
+	}
+	if first := strings.TrimSpace(got); first == "" || first[0] != '{' {
+		t.Fatalf("empty checkpoint render must be a JSON object, got %q", got)
 	}
 }
 
 // TestRenderCheckpointContainsFields proves the rendered JSON carries the populated fields
 // (so the model can read its own state back on rehydration).
 func TestRenderCheckpointContainsFields(t *testing.T) {
-	cp := prompts.CompactionCheckpoint{Goal: "ship", PreservedIDs: []string{"term_a1b2"}}
+	cp := backend.CheckpointOutput{Goal: "ship", PreservedIDs: []string{"term_a1b2"}}
 	got := renderCheckpoint(cp)
 	if !strings.Contains(got, "ship") || !strings.Contains(got, "term_a1b2") {
 		t.Fatalf("render dropped fields: %q", got)
@@ -114,7 +124,7 @@ func TestRenderCheckpointContainsFields(t *testing.T) {
 // checkpoint and no error.
 func TestBuildCheckpointParsesReply(t *testing.T) {
 	r := &jsonChatRouter{content: `{"goal":"ship it","next_actions":["open PR"]}`}
-	cp, err := buildCheckpoint(context.Background(), r, []models.ChatMessage{}, "transcript with no ids")
+	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "transcript with no ids")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +138,7 @@ func TestBuildCheckpointParsesReply(t *testing.T) {
 // fallback): the checkpoint is sparse but never loses a load-bearing identifier.
 func TestBuildCheckpointModelErrorExtractsIDs(t *testing.T) {
 	r := &errChatRouter{err: errors.New("model down")}
-	cp, err := buildCheckpoint(context.Background(), r, []models.ChatMessage{}, "using term_a1b2 now")
+	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "using term_a1b2 now")
 	if err == nil {
 		t.Fatal("a model error must be surfaced to the caller")
 	}
@@ -142,7 +152,7 @@ func TestBuildCheckpointModelErrorExtractsIDs(t *testing.T) {
 // degrades to a zero value and validateCheckpoint mines the IDs into PreservedIDs.
 func TestBuildCheckpointProseReplyExtractsIDs(t *testing.T) {
 	r := &jsonChatRouter{content: "Here is a prose summary; we used term_a1b2."}
-	cp, err := buildCheckpoint(context.Background(), r, []models.ChatMessage{}, "we used term_a1b2.")
+	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "we used term_a1b2.")
 	if err != nil {
 		t.Fatalf("a prose reply is not an error: %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
@@ -244,23 +243,7 @@ func TestReadOnlyAllowlistOnlyDocumentedReads(t *testing.T) {
 	}
 }
 
-// --- #6: drift-baseline parity between the two duplicated copies ---
-
-// TestDriftBaselineParityWithPrompts asserts internal/mcp's DocumentedMcpToolNames
-// matches internal/models/prompts.DocumentedMCPToolNames byte-for-byte and in order.
-// The two lists are hand-maintained copies in different packages; this test fails
-// loudly if they drift apart (the review noted the comments already disagreed on the
-// count: 55 vs 60). The test only READS the prompts list — it never edits that
-// package.
-func TestDriftBaselineParityWithPrompts(t *testing.T) {
-	a := DocumentedMcpToolNames
-	b := prompts.DocumentedMCPToolNames
-	if len(a) != len(b) {
-		t.Fatalf("baseline length mismatch: internal/mcp=%d prompts=%d", len(a), len(b))
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			t.Errorf("baseline[%d] mismatch: internal/mcp=%q prompts=%q", i, a[i], b[i])
-		}
-	}
-}
+// (TestDriftBaselineParityWithPrompts was removed: the duplicate documented-tools
+// baseline in internal/models/prompts was deleted with the rest of the server-owned
+// prompt machinery. internal/mcp keeps the single authoritative DocumentedMcpToolNames
+// for drift detection.)

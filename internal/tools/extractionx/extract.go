@@ -2,46 +2,13 @@ package extractionx
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
-
-// Extractor prompts. Byte-stable.
-const extractorSystemPrompt = `You extract specific information from terminal output for a developer's supervisor. You are a small, cheap sub-agent: you do NOT talk to the user and you cannot run tools. Read the provided terminal tail and return ONLY what the caller's instruction asks for — nothing else, no preamble, no commentary. The very FIRST characters you emit must be the extracted value itself — no narration, no restating the instruction.
-
-When asked for plain text, return the extracted value as terse text. When asked for json, return ONLY a single JSON object of the shape { "result": <value> } where <value> matches the caller's requested schema. Do not wrap the json in markdown fences and do not add fields the caller did not ask for.
-
-Never invent content that is not present in the terminal output. If the requested information is genuinely absent, return an empty/"null" result (for text, an empty string; for json, { "result": null }) rather than guessing.`
-
-const verdictSystemPrompt = `You judge whether an extracted result satisfies a caller's pass/fail condition. Return ONLY a JSON object { "pass": boolean, "reason": "<one short sentence>" }. Be strict and literal; do not invent facts beyond the provided result.`
-
-func buildExtractorUserPrompt(instruction, format, jsonSchema, tail string, terminalIDs []string) string {
-	header := fmt.Sprintf("Source terminal: %s", "unknown")
-	if len(terminalIDs) > 1 {
-		header = "Source terminals: " + strings.Join(terminalIDs, ", ")
-	} else if len(terminalIDs) == 1 {
-		header = "Source terminal: " + terminalIDs[0]
-	}
-	var shape string
-	if format == "json" {
-		schema := jsonSchema
-		if schema == "" {
-			schema = "(no schema provided — infer a reasonable JSON value)"
-		}
-		shape = fmt.Sprintf("\n\nReturn a JSON object { \"result\": <value> } where <value> conforms to this schema:\n\"\"\"\n%s\n\"\"\"", schema)
-	} else {
-		shape = "\n\nReturn the extracted value as plain text."
-	}
-	body := tail
-	if body == "" {
-		body = "(no output captured)"
-	}
-	return fmt.Sprintf("%s\nExtraction instruction: %s%s\n\nTerminal output (most recent, bounded):\n\"\"\"\n%s\n\"\"\"\n\nExtract now.",
-		header, instruction, shape, body)
-}
 
 // extractResult is the runExtract outcome.
 type extractResult struct {
@@ -50,49 +17,45 @@ type extractResult struct {
 	truncated bool
 }
 
-// runExtract runs the extraction model against the gathered tail. The JSON path
-// routes through router.JSON (the model emits {"result": <value>}); the text path
-// reports truncated=(finishReason=="length"). The JSON path can't report
-// extractor truncation today (a far smaller risk — JSON extracts pull small fields
-// and a length-truncated object usually fails to parse and is retried).
+// runExtract runs the server-owned extraction task against the gathered tail. The
+// backend owns the prompt and the token cap, so the CLI passes only structured
+// data: the JSON path forwards the (best-effort parsed) schema and carries the
+// returned `result` value; the text path carries the returned text + its truncated
+// flag. The JSON path can't report extractor truncation today (a far smaller risk —
+// JSON extracts pull small fields and a length-truncated object usually fails to
+// parse and is retried).
 func runExtract(ctx context.Context, deps Deps, a *extractCore, tail string) (extractResult, error) {
-	userPrompt := buildExtractorUserPrompt(a.instruction, a.format, a.jsonSchema, tail, a.terminalIDs)
-	messages := []ChatMessage{
-		{Role: "system", Content: extractorSystemPrompt},
-		{Role: "user", Content: userPrompt},
-	}
 	if a.format == "json" {
-		out, err := deps.Router.JSON(ctx, domain.ModelSmall, messages, a.maxTokens)
+		// The backend's terminal_extract_json.v1 task takes an optional JSON-schema
+		// object. Parse the caller's schema string best-effort: a malformed schema
+		// leaves it nil (the task infers a reasonable value) rather than failing.
+		var schema map[string]any
+		if strings.TrimSpace(a.jsonSchema) != "" {
+			_ = json.Unmarshal([]byte(a.jsonSchema), &schema)
+		}
+		out, err := deps.Router.ExtractJSON(ctx, a.instruction, a.terminalIDs, tail, schema)
 		if err != nil {
 			return extractResult{}, err
 		}
 		return extractResult{json: out, truncated: false}, nil
 	}
-	res, err := deps.Router.Chat(ctx, domain.ModelSmall, messages, a.maxTokens)
+	text, truncated, err := deps.Router.ExtractText(ctx, a.instruction, a.terminalIDs, tail)
 	if err != nil {
 		return extractResult{}, err
 	}
-	return extractResult{text: strings.TrimSpace(res.Content), truncated: res.FinishReason == "length"}, nil
+	return extractResult{text: strings.TrimSpace(text), truncated: truncated}, nil
 }
 
-// runVerdict judges an extracted result against a pass/fail condition.
+// runVerdict judges an extracted result against a pass/fail condition via the
+// server-owned extraction_verdict.v1 task (the CLI sends only the result + the
+// condition). Keeps the "" -> "(empty)" guard so an empty result is judged, not
+// blank.
 func runVerdict(ctx context.Context, deps Deps, verdictInstruction, resultText string) (bool, string, error) {
 	rt := resultText
 	if rt == "" {
 		rt = "(empty)"
 	}
-	out, err := deps.Router.JSON(ctx, domain.ModelSmall, []ChatMessage{
-		{Role: "system", Content: verdictSystemPrompt},
-		{Role: "user", Content: fmt.Sprintf("Pass/fail condition: %s\n\nExtracted result:\n\"\"\"\n%s\n\"\"\"\n\nReturn the json verdict now.", verdictInstruction, rt)},
-	}, 200)
-	if err != nil {
-		return false, "", err
-	}
-	// The router returns the parsed `result`; verdict callers parse {pass, reason}.
-	m, _ := out.(map[string]any)
-	pass, _ := m["pass"].(bool)
-	reason, _ := m["reason"].(string)
-	return pass, reason, nil
+	return deps.Router.Verdict(ctx, rt, verdictInstruction)
 }
 
 // confirmFinished asks the shared small-model judge whether the agent has genuinely

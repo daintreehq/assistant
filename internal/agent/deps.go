@@ -3,10 +3,10 @@ package agent
 import (
 	"context"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // Consumer-defined seams. The loop depends on these narrow interfaces, not the
@@ -62,19 +62,16 @@ type TurnContext struct {
 	Progress func(callID string, msg string)
 }
 
-// SkillSelector is the skill.find engine's selector seam (satisfied by a thin
-// adapter over skills.SelectSkills). Returns a validated SkillSelection or an
-// error (incl. cancellation) so findSkills can leave the loaded set unchanged.
-type SkillSelector interface {
-	Select(ctx context.Context, candidates []skills.SkillMetadata, query string) (skills.SkillSelection, error)
-}
-
-// SkillCatalog is the registry seam for skill metadata/bodies (satisfied by
-// *skills.SkillRegistry).
-type SkillCatalog interface {
-	MetadataForSelection() []skills.SkillMetadata
-	GetMany(ids []string) []skills.Skill
-	Has(id string) bool
+// AssistantBackend is the native Daintree backend seam (satisfied by
+// *backend.Client). The turn loop streams a respond round through RespondStream;
+// utility/compaction work runs server-owned tasks through RunTask. The CLI sends
+// only the visible conversation + structured context; the backend owns the system
+// prompt, skill selection, and model routing. A narrow interface (no generic
+// Chat/JSON) is deliberate: generic prompt calls are exactly what this migration
+// removed.
+type AssistantBackend interface {
+	RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error)
+	RunTask(ctx context.Context, req backend.TaskRequest) (backend.TaskResult, error)
 }
 
 // MessageStore is the persistence seam (satisfied by *storage.Store). All writes
@@ -143,17 +140,20 @@ type ArtifactPersister interface {
 	InsertArtifact(rec domain.ArtifactRecord) (domain.ArtifactRecord, error)
 }
 
-// SessionDeps is the AgentSession constructor input. restoredMessages != nil ⇒ a
-// resumed session: the three control messages are rebuilt fresh (so the cached
-// prefix stays byte-stable) but NOT re-persisted (they already exist in the DB);
-// seq continues from InitialSeq. A nil RestoredMessages is a fresh session
-// (controls persisted).
+// SessionDeps is the AgentSession constructor input. RestoredMessages != nil ⇒ a
+// resumed session: the restored visible history (user/assistant/tool only) is the
+// starting point and seq continues from InitialSeq. A nil RestoredMessages is a
+// fresh session, which starts with an empty visible history (the backend owns all
+// system text, so there is no client-side control prefix to persist).
 type SessionDeps struct {
-	Router        Router
-	Tools         ToolRunner
-	SkillSelector SkillSelector
-	SkillCatalog  SkillCatalog
-	Store         MessageStore
+	// Backend is the native Daintree backend (assistant turns + utility tasks).
+	Backend AssistantBackend
+	// Router is the legacy model seam, retained ONLY for the compaction/distill
+	// utility calls that have not yet moved to backend tasks; the main turn loop no
+	// longer uses it. Optional once those move (a nil Router disables them).
+	Router Router
+	Tools  ToolRunner
+	Store  MessageStore
 	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
 	MemoryStore MemoryStore
 	// MemoryRecaller enables per-turn BM25 recall into the footer (optional; nil ⇒ the
@@ -184,7 +184,17 @@ type SessionDeps struct {
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister
-	PromptContext     prompts.MainPromptContext
+	// PromptContext is the seed/fallback runtime context (used when PromptContextFunc is
+	// nil — the test default). The structured runtime block the backend receives each
+	// round is built from this.
+	PromptContext prompts.MainPromptContext
+	// PromptContextFunc, when set, is read EVERY round to build the per-request runtime
+	// context, so facts that populate after construction — a successful MCP connect, a
+	// /permissions tier change, a started scheduler — reach the backend on the next round.
+	// It replaces the old RefreshRuntimeContext push: the session now PULLS live context
+	// instead of holding a boot snapshot. nil ⇒ the static PromptContext value is used
+	// (tests). The app wires this to App.PromptContext.
+	PromptContextFunc func() prompts.MainPromptContext
 	SessionID         string
 
 	// Resume discriminator: non-nil (even empty) ⇒ resumed; nil ⇒ fresh.

@@ -29,9 +29,16 @@ var OneShotExitCode = struct {
 
 // Agent-loop magic constants.
 const (
-	RepeatFailureWarn      = 2
-	RepeatFailureAbort     = 3
-	ControlMessageCount    = 3
+	RepeatFailureWarn  = 2
+	RepeatFailureAbort = 3
+	// ControlMessageCount is 0: the CLI no longer holds any client-side control
+	// prefix. The backend owns the system prompt, developer instructions, and skill
+	// bodies; the CLI's visible conversation begins at index 0 with only
+	// user/assistant/tool messages. The constant is retained (rather than deleted) so
+	// the history-slicing call sites stay self-documenting — "everything after the
+	// control prefix" is now "everything", and the arithmetic ([:0], [0:], >= 0)
+	// degenerates cleanly.
+	ControlMessageCount    = 0
 	MaxToolResultChars     = 8000
 	TruncationPreviewChars = 1500
 	TruncationSummaryChars = 500

@@ -62,18 +62,6 @@ type TerminalReader interface {
 	ReadOutput(ctx context.Context, terminalID string, tailBytes int) OutputReadResult
 }
 
-// ChatMessage / ChatResult mirror the small-model chat surface.
-type ChatMessage struct {
-	Role    string
-	Content string
-}
-
-// ChatResult carries the content plus finishReason ("length" ⇒ token-cap truncation).
-type ChatResult struct {
-	Content      string
-	FinishReason string
-}
-
 // JudgeInput carries the terminal signals fed to the shared yes/no judge. It is a
 // LOCAL mirror of the daemon's judge input (extractionx must not import
 // internal/daemon) so the settle gate can ask the SAME finished-confirmation
@@ -89,16 +77,16 @@ type JudgeInput struct {
 	Tail          string
 }
 
-// Router is the slice of model access this family uses: Chat (text extraction +
-// verdict), JSON (structured extraction), and Judge (the shared yes/no terminal
-// judge). JSON returns the parsed `result` value (the model emits {"result":
-// <value>}); the caller serializes it. Judge reaches the IDENTICAL byte-stable
-// judge the watcher engine uses — always on the small tier, fail-soft (a model
-// error degrades to an unmatched, low-confidence answer) — so the extract settle
-// gate and the watcher agree on what "finished" means.
+// Router is the slice of model access this family uses, each method mapping to a server-owned
+// backend task (the CLI sends only structured data, never prompts):
+//   - ExtractText  → terminal_extract_text.v1
+//   - ExtractJSON  → terminal_extract_json.v1 (schema is an optional JSON-schema object)
+//   - Verdict      → extraction_verdict.v1
+//   - Judge        → terminal_judge.v1 (the shared yes/no terminal judge)
 type Router interface {
-	Chat(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (ChatResult, error)
-	JSON(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (any, error)
+	ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string) (text string, truncated bool, err error)
+	ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any) (result any, err error)
+	Verdict(ctx context.Context, result, condition string) (pass bool, reason string, err error)
 	Judge(ctx context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error)
 }
 

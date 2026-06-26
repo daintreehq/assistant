@@ -51,12 +51,12 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	}))...)
 	all = append(all, addr(contextx.Tools(contextx.Deps{
 		MCP:    contextMCPAdapter{c: a.MCP},
-		Router: contextRouterAdapter{router: a.Router},
+		Router: contextRouterAdapter{tasks: a.Backend},
 		Queue:  contextQueueAdapter{app: a},
 	}))...)
 	all = append(all, addr(extractionx.Tools(extractionx.Deps{
 		Reader:      terminalReaderAdapter{c: a.MCP},
-		Router:      extractionRouterAdapter{router: a.Router},
+		Router:      extractionRouterAdapter{tasks: a.Backend},
 		Queue:       a.Queue,
 		BaseContext: a.baseCtx,
 		DebugLog:    debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
@@ -88,9 +88,6 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	})...)
 	all = append(all, skill.Tools(skill.Deps{
 		Store:            skillStoreAdapter{s: a.Store},
-		Source:           skillSourceAdapter{app: a},
-		LoadSkills:       a.loadSkills,
-		FindSkills:       a.skillFind,
 		CheckConsistency: a.checkSkillStepConsistency,
 	})...)
 	all = append(all, timer.Tools(timer.Deps{

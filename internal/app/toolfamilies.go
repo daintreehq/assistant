@@ -4,10 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
@@ -91,102 +90,81 @@ func (m mcpxMCPAdapter) ListTools(ctx context.Context, force bool) ([]mcpx.MCPTo
 	return out, nil
 }
 
-/* ----------------------------- Router adapters --------------------------- */
+/* ----------------------------- Backend task adapters --------------------- */
 
-// contextRouterAdapter maps *models.Router onto contextx.Router (terminal.summarize
-// runs router.Chat("small", …)). maxTokens <= 0 means "no explicit cap".
-type contextRouterAdapter struct{ router *models.Router }
+// contextRouterAdapter maps the backend onto contextx.Router: terminal.summarize
+// runs the server-owned terminal_summarize.v1 task with the structured purpose+tail.
+type contextRouterAdapter struct{ tasks backend.TaskRunner }
 
-func (r contextRouterAdapter) Chat(ctx context.Context, tier domain.ModelTier, messages []contextx.ChatMessage, maxTokens int) (contextx.ChatResult, error) {
-	// maxTokens <= 0 means "no explicit output cap": leave max_tokens unset so the
-	// provider emits the WHOLE summary instead of truncating mid-sentence. The input
-	// tail is already bounded, so this can't run away (same pattern as the uncapped
-	// compaction summary). A positive value still caps the output.
-	var capPtr *int
-	if maxTokens > 0 {
-		capPtr = &maxTokens
-	}
-	res, err := r.router.Chat(ctx, tier, models.ChatOptions{Messages: toModelMessages(roleContents(messages)), MaxTokens: capPtr})
+func (r contextRouterAdapter) Summarize(ctx context.Context, purpose, tail string) (string, error) {
+	out, err := backend.RunTerminalSummarize(ctx, r.tasks, backend.TerminalSummarizeInput{Purpose: purpose, Tail: tail})
 	if err != nil {
-		return contextx.ChatResult{}, err
+		return "", err
 	}
-	return contextx.ChatResult{Content: res.Content, FinishReason: res.FinishReason}, nil
+	return out.Text, nil
 }
 
-// extractionRouterAdapter maps *models.Router onto extractionx.Router (Chat for
-// text extraction + JSON for structured extraction).
-type extractionRouterAdapter struct{ router *models.Router }
+// extractionRouterAdapter maps the backend onto extractionx.Router: text/json
+// extraction, the pass/fail verdict, and the shared yes/no terminal judge — each a
+// server-owned task (the CLI sends structured data only).
+type extractionRouterAdapter struct{ tasks backend.TaskRunner }
 
-func (r extractionRouterAdapter) Chat(ctx context.Context, tier domain.ModelTier, messages []extractionx.ChatMessage, maxTokens int) (extractionx.ChatResult, error) {
-	rc := make([]roleContent, 0, len(messages))
-	for _, m := range messages {
-		rc = append(rc, roleContent{role: m.Role, content: m.Content})
-	}
-	res, err := r.router.Chat(ctx, tier, models.ChatOptions{Messages: toModelMessages(rc), MaxTokens: &maxTokens})
+func (r extractionRouterAdapter) ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string) (string, bool, error) {
+	out, err := backend.RunTerminalExtractText(ctx, r.tasks, backend.TerminalExtractTextInput{
+		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail,
+	})
 	if err != nil {
-		return extractionx.ChatResult{}, err
+		return "", false, err
 	}
-	return extractionx.ChatResult{Content: res.Content, FinishReason: res.FinishReason}, nil
+	// The backend task does not report output truncation (its tail is already bounded).
+	return out.Text, false, nil
 }
 
-func (r extractionRouterAdapter) JSON(ctx context.Context, tier domain.ModelTier, messages []extractionx.ChatMessage, maxTokens int) (any, error) {
-	rc := make([]roleContent, 0, len(messages))
-	for _, m := range messages {
-		rc = append(rc, roleContent{role: m.Role, content: m.Content})
-	}
-	raw, err := r.router.JSON(ctx, tier, models.ChatOptions{Messages: toModelMessages(rc), MaxTokens: &maxTokens})
+func (r extractionRouterAdapter) ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any) (any, error) {
+	out, err := backend.RunTerminalExtractJSON(ctx, r.tasks, backend.TerminalExtractJSONInput{
+		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail,
+	}, schema)
 	if err != nil {
 		return nil, err
 	}
-	// The family emits {"result": <value>}; mirror that contract by returning the
-	// parsed result value (or the raw object when there's no result wrapper).
-	var wrapper map[string]any
-	if json.Unmarshal([]byte(raw), &wrapper) == nil {
-		if v, ok := wrapper["result"]; ok {
-			return v, nil
-		}
-		return wrapper, nil
+	var v any
+	if len(out.Result) > 0 {
+		_ = json.Unmarshal(out.Result, &v)
 	}
-	var any2 any
-	_ = json.Unmarshal([]byte(raw), &any2)
-	return any2, nil
+	return v, nil
+}
+
+func (r extractionRouterAdapter) Verdict(ctx context.Context, result, condition string) (bool, string, error) {
+	out, err := backend.RunExtractionVerdict(ctx, r.tasks, backend.ExtractionVerdictInput{Result: result, Condition: condition})
+	if err != nil {
+		return false, "", err
+	}
+	return out.Passed, out.Reason, nil
 }
 
 // Judge routes the extract settle gate's finished-confirmation through the SAME
-// shared yes/no judge the watcher uses (judgeYesNo) — NOT through JSON() above,
-// which unwraps {"result":<value>} and would strip the {reason,confidence,matched}
-// envelope. This guarantees the extract tool and the watcher ask the identical
-// question through the identical prompt at the identical (small) tier.
+// shared terminal_judge.v1 task the watcher uses, so the extract tool and the
+// watcher ask the identical question of the same server-owned judge.
 func (r extractionRouterAdapter) Judge(ctx context.Context, in extractionx.JudgeInput) (domain.ModelJudgeAnswer, error) {
-	return judgeYesNo(ctx, r.router, in.Tier, prompts.JudgeUserArgs{
-		Question:      in.Question,
-		Goal:          in.Goal,
+	return judgeTerminal(ctx, r.tasks, in.Goal, in.Question, backend.TerminalState{
 		AgentState:    in.AgentState,
 		RuntimeStatus: in.RuntimeStatus,
 		WaitingReason: in.WaitingReason,
 		LastOutputAt:  in.LastOutputAt,
-		Tail:          in.Tail,
+	}, in.Tail)
+}
+
+// judgeTerminal runs the shared yes/no terminal judge (terminal_judge.v1) and maps
+// the verdict onto the local domain shape. Used by both the watcher and the extract
+// settle gate so they agree on what "finished" means.
+func judgeTerminal(ctx context.Context, tasks backend.TaskRunner, goal, question string, state backend.TerminalState, tail string) (domain.ModelJudgeAnswer, error) {
+	out, err := backend.RunTerminalJudge(ctx, tasks, backend.TerminalJudgeInput{
+		Goal: goal, Question: question, TerminalState: state, Tail: tail,
 	})
-}
-
-// roleContent is the shared role/content pair the family ChatMessage slices map to
-// before becoming models.ChatMessage.
-type roleContent struct{ role, content string }
-
-func roleContents(in []contextx.ChatMessage) []roleContent {
-	out := make([]roleContent, 0, len(in))
-	for _, m := range in {
-		out = append(out, roleContent{role: m.Role, content: m.Content})
+	if err != nil {
+		return domain.ModelJudgeAnswer{}, err
 	}
-	return out
-}
-
-func toModelMessages(in []roleContent) []models.ChatMessage {
-	out := make([]models.ChatMessage, 0, len(in))
-	for _, m := range in {
-		out = append(out, models.TextMessage(m.role, m.content))
-	}
-	return out
+	return domain.ModelJudgeAnswer{Reason: out.Reason, Confidence: out.Confidence, Matched: out.Matched}, nil
 }
 
 /* ----------------------------- Queue adapters ---------------------------- */
@@ -299,24 +277,13 @@ func (a artifactStoreAdapter) Get(id string) (string, bool) {
 	return "", false
 }
 
-// loadSkills / findSkills resolve the session lazily for the same reason the
-// artifact store does — the builder runs before the session exists.
-func (a *App) loadSkills(ids []string) []string {
-	if a.Session == nil {
-		return nil
-	}
-	return a.Session.LoadAdditionalSkills(ids)
-}
-
-// checkSkillStepConsistency is the issue #240 decision-correctness judge wired into
-// skill.step.advance: it asks the SMALL tier whether a recorded step advance looks
-// like a mistake (a bad jump, a regression, an impossible sequence, a premature
-// finish) and returns the {reason,confidence,matched} verdict — matched=true ⇒ the
-// advance is FLAGGED as likely-wrong. It mirrors judgeYesNo's shape but uses a DISTINCT
-// prompt: this judges state-transition correctness, not terminal completion, so it must
-// not share JudgeSystemPrompt. A model or decode failure returns the fallback verdict
-// AND the error, so the caller (observeStepAdvance) logs checkOk=false truthfully
-// rather than masking a failed check as a passing one.
+// checkSkillStepConsistency is the decision-correctness judge wired into
+// skill.step.advance: it asks the backend's skill_step_consistency.v1 task whether a
+// recorded step advance looks like a mistake (a bad jump, a regression, an impossible
+// sequence, a premature finish) and returns the {reason,confidence,matched} verdict —
+// matched=true ⇒ the advance is FLAGGED as likely-wrong. A backend error returns the
+// fallback verdict AND the error, so the caller (observeStepAdvance) logs checkOk=false
+// truthfully rather than masking a failed check as a passing one.
 func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
 	fallback := domain.ModelJudgeAnswer{
 		Reason:     "Could not evaluate step consistency.",
@@ -327,76 +294,39 @@ func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.Consistenc
 	if in.NextStep != nil {
 		requestedNext = itoa(*in.NextStep)
 	}
-	args := prompts.ConsistencyUserArgs{
-		SkillID:         in.SkillID,
-		CompletedStep:   in.CompletedStep,
-		StepStatus:      string(in.StepStatus),
-		RequestedNext:   requestedNext,
-		PrevCurrentStep: in.PrevCurrentStep,
-		NextCurrentStep: in.NextCurrentStep,
-		PrevRunStatus:   string(in.PrevRunStatus),
-		NextRunStatus:   string(in.NextRunStatus),
-		BeforeSteps:     marshalSteps(in.BeforeSteps),
-		AfterSteps:      marshalSteps(in.AfterSteps),
-		Notes:           in.Notes,
-	}
-	temp := 0.0
-	raw, err := a.Router.JSON(ctx, domain.ModelSmall, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", prompts.ConsistencySystemPrompt),
-			models.TextMessage("user", prompts.BuildConsistencyUserPrompt(args)),
-		},
-		Temperature: &temp,
+	out, err := backend.RunSkillStepConsistency(ctx, a.Backend, backend.SkillStepConsistencyInput{
+		SkillID:           in.SkillID,
+		CompletedStep:     in.CompletedStep,
+		Status:            string(in.StepStatus),
+		RequestedNext:     requestedNext,
+		CurrentStepBefore: in.PrevCurrentStep,
+		CurrentStepAfter:  in.NextCurrentStep,
+		RunStatusBefore:   string(in.PrevRunStatus),
+		RunStatusAfter:    string(in.NextRunStatus),
+		Notes:             in.Notes,
+		ProgressBefore:    stepsToMaps(in.BeforeSteps),
+		ProgressAfter:     stepsToMaps(in.AfterSteps),
 	})
 	if err != nil {
 		return fallback, err
 	}
-	ans, err := models.DecodeModelJudgeAnswer(raw)
-	if err != nil {
-		return fallback, err
-	}
-	return ans, nil
+	return domain.ModelJudgeAnswer{Reason: out.Reason, Confidence: out.Confidence, Matched: out.Matched}, nil
 }
 
-// marshalSteps renders a SkillStepProgress[] as compact JSON for the consistency
-// prompt; an empty/nil slice or a marshal failure renders the empty array literal.
-func marshalSteps(steps []domain.SkillStepProgress) string {
-	if len(steps) == 0 {
-		return "[]"
+// stepsToMaps renders a SkillStepProgress[] as the []map[string]any the backend task
+// input carries (a JSON round-trip preserves the progress shape); a marshal failure
+// drops that step rather than failing the check.
+func stepsToMaps(steps []domain.SkillStepProgress) []map[string]any {
+	out := make([]map[string]any, 0, len(steps))
+	for _, s := range steps {
+		b, err := json.Marshal(s)
+		if err != nil {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) == nil {
+			out = append(out, m)
+		}
 	}
-	b, err := json.Marshal(steps)
-	if err != nil {
-		return "[]"
-	}
-	return string(b)
-}
-
-// skillSourceAdapter maps *skills.SkillRegistry onto skill.SkillSource (the
-// read-only library skill.load reads).
-type skillSourceAdapter struct{ app *App }
-
-func (a skillSourceAdapter) Get(id string) (*skill.SkillInfo, bool) {
-	sk, ok := a.app.Skills.Get(id)
-	if !ok {
-		return nil, false
-	}
-	return &skill.SkillInfo{ID: sk.ID, Title: sk.Title, Summary: sk.Summary}, true
-}
-
-// skillFindResultFrom maps the session's skills.SkillFindResult onto the family's
-// skill.SkillFindResult (structurally identical; declared separately so the family
-// stays storage/session-agnostic).
-func (a *App) skillFind(ctx context.Context, query string) (skill.SkillFindResult, error) {
-	if a.Session == nil {
-		return skill.SkillFindResult{OK: false, Matched: false, Reason: "session unavailable"}, nil
-	}
-	r := a.Session.FindSkills(ctx, query)
-	selected := make([]skill.SkillInfo, 0, len(r.Selected))
-	for _, s := range r.Selected {
-		selected = append(selected, skill.SkillInfo{ID: s.ID, Title: s.Title, Summary: s.Summary})
-	}
-	return skill.SkillFindResult{
-		OK: r.Ok, Matched: r.Matched, Selected: selected,
-		Reason: r.Reason, ActiveSkillIDs: r.ActiveSkillIDs,
-	}, nil
+	return out
 }

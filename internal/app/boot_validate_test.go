@@ -32,90 +32,10 @@ func coreToolStubs() []*tools.Tool {
 	return stubs
 }
 
-// Finding 5: App.Create must validate every loaded skill's requiredTools against
-// the live registry at boot, so a skill declaring a tool the registry lacks is
-// surfaced LOUDLY (debug log + the Log hook) instead of silently vanishing from
-// OpenAITools when that skill is loaded. Here we wire ONLY the core tools (so the
-// boot-time core-tool drift assertion passes), leaving the embedded skills'
-// non-core requiredTools all missing — the Log hook must receive the warning.
-func TestBootValidatesSkillRequiredTools(t *testing.T) {
-	var mu sync.Mutex
-	var logs []string
-	dir := t.TempDir()
-
-	a, err := Create(CreateOptions{
-		Overrides: config.ConfigOverrides{
-			Offline:     boolPtr(true),
-			StateDir:    &dir,
-			ProjectPath: &dir,
-			Tier:        strPtr("operator"),
-		},
-		Hooks: AppHooks{
-			Log: func(msg string) {
-				mu.Lock()
-				logs = append(logs, msg)
-				mu.Unlock()
-			},
-		},
-		// Register only the core tools — the assertion passes, but every embedded
-		// skill's NON-core requiredTools is still missing.
-		BuildTools: func(_ *App) ([]*tools.Tool, error) { return coreToolStubs(), nil },
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	t.Cleanup(func() { _ = a.Shutdown() })
-
-	mu.Lock()
-	defer mu.Unlock()
-	found := false
-	for _, m := range logs {
-		if strings.Contains(m, "requiredTools missing") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected a 'requiredTools missing' boot diagnostic; got logs: %v", logs)
-	}
-}
-
-// The happy path (the real full tool set) must NOT emit the diagnostic — every
-// embedded skill's requiredTools is satisfied by the registered families.
-func TestBootCleanWithFullToolSet(t *testing.T) {
-	var mu sync.Mutex
-	var logs []string
-	dir := t.TempDir()
-
-	a, err := Create(CreateOptions{
-		Overrides: config.ConfigOverrides{
-			Offline:     boolPtr(true),
-			StateDir:    &dir,
-			ProjectPath: &dir,
-			Tier:        strPtr("operator"),
-		},
-		Hooks: AppHooks{
-			Log: func(msg string) {
-				mu.Lock()
-				logs = append(logs, msg)
-				mu.Unlock()
-			},
-		},
-		// nil BuildTools ⇒ DefaultToolBuilder (the full wired set).
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	t.Cleanup(func() { _ = a.Shutdown() })
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, m := range logs {
-		if strings.Contains(m, "requiredTools missing") {
-			t.Fatalf("full tool set should satisfy every skill's requiredTools; unexpected: %q", m)
-		}
-	}
-}
+// Skill requiredTools validation was REMOVED: skills are server-owned (the backend's
+// selector picks and injects runbooks), so the CLI no longer loads a local skill
+// catalog to validate at boot. The two tests that exercised that validation
+// (TestBootValidatesSkillRequiredTools / TestBootCleanWithFullToolSet) were deleted.
 
 // Issue #213: agent.coreToolNames is hand-maintained and must stay in lockstep
 // with the registry. App.Create must HARD-FAIL boot if a core tool name is not
@@ -174,8 +94,9 @@ func TestCreatePropagatesRehydrateDropsToFirstTurn(t *testing.T) {
 	dir := t.TempDir()
 	const sid = "ses_drop_wire"
 
-	// Boot a fresh session so the three control rows (seq 0,1,2) are persisted, then
-	// append a corrupt assistant row (malformed tool-call JSON) at seq 3.
+	// Boot a fresh session (no client-side control prefix is persisted anymore), then
+	// append a corrupt assistant row (malformed tool-call JSON) at seq 3 — rehydration
+	// drops it regardless of the preceding seqs.
 	a1, err := Create(CreateOptions{
 		SessionID: sid,
 		Overrides: config.ConfigOverrides{
@@ -198,7 +119,10 @@ func TestCreatePropagatesRehydrateDropsToFirstTurn(t *testing.T) {
 		t.Fatalf("Shutdown (seed): %v", err)
 	}
 
-	// Re-create with the SAME session id: rehydration must count the corrupt row.
+	// Re-create with the SAME session id: rehydration must count the corrupt row. Inject a
+	// fake backend so the first turn runs without the real client (which targets the
+	// hardcoded dev endpoint); the rehydrate-drop info note is emitted before the model
+	// stream regardless of the reply.
 	a2, err := Create(CreateOptions{
 		SessionID: sid,
 		Overrides: config.ConfigOverrides{
@@ -207,6 +131,7 @@ func TestCreatePropagatesRehydrateDropsToFirstTurn(t *testing.T) {
 			ProjectPath: &dir,
 			Tier:        strPtr("operator"),
 		},
+		BackendOverride: &fakeBackend{},
 	})
 	if err != nil {
 		t.Fatalf("Create (resume): %v", err)
@@ -216,8 +141,8 @@ func TestCreatePropagatesRehydrateDropsToFirstTurn(t *testing.T) {
 	capture := &infoCapture{}
 	a2.SetHooks(AppHooks{AgentEvents: capture})
 
-	// The info note is emitted at the start of the first turn (before the offline
-	// model call fails), so the turn's reply is irrelevant here.
+	// The info note is emitted at the start of the first turn (before the model stream),
+	// so the turn's reply is irrelevant here.
 	if _, err := a2.Session.Send(context.Background(), "hello", agent.SendOptions{}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}

@@ -47,11 +47,14 @@ type safeRouter struct {
 	judgeCalls int
 }
 
-func (r *safeRouter) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (ChatResult, error) {
-	return ChatResult{}, nil
+func (r *safeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string) (string, bool, error) {
+	return "", false, nil
 }
-func (r *safeRouter) JSON(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (any, error) {
+func (r *safeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any) (any, error) {
 	return nil, nil
+}
+func (r *safeRouter) Verdict(_ context.Context, _ string, _ string) (bool, string, error) {
+	return false, "", nil
 }
 func (r *safeRouter) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error) {
 	r.mu.Lock()

@@ -27,10 +27,10 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, _ map[string]any) (MC
 	return f.results[name], nil
 }
 
-type fakeRouter struct{ res ChatResult }
+type fakeRouter struct{ summary string }
 
-func (f fakeRouter) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (ChatResult, error) {
-	return f.res, nil
+func (f fakeRouter) Summarize(_ context.Context, _ string, _ string) (string, error) {
+	return f.summary, nil
 }
 
 type fakeQueue struct{}
@@ -51,12 +51,15 @@ func TestSnapshotNeverThrowsWhenDisconnected(t *testing.T) {
 	}
 }
 
-func TestSummarizeTruncationWarning(t *testing.T) {
+// The backend now owns the summarizer prompt and any token cap, returning only the
+// summary string. The CLI relays that body verbatim and — having lost the
+// finishReason signal — always reports truncated=false.
+func TestSummarizeRelaysModelBody(t *testing.T) {
 	deps := Deps{
 		MCP: &fakeMCP{connected: true, results: map[string]MCPCallResult{
 			"terminal.getOutput": {Text: "some long output"},
 		}},
-		Router: fakeRouter{res: ChatResult{Content: "partial summary", FinishReason: "length"}},
+		Router: fakeRouter{summary: "the gist of it"},
 		Queue:  fakeQueue{},
 	}
 	tool := newSummarizeTool(deps)
@@ -65,9 +68,12 @@ func TestSummarizeTruncationWarning(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("summarize failed: %+v", res.Error)
 	}
+	if res.Summary != "the gist of it" {
+		t.Fatalf("summary should be the model body, got %q", res.Summary)
+	}
 	m := res.Result.(map[string]any)
-	if !m["truncated"].(bool) {
-		t.Error("length finishReason should set truncated=true")
+	if m["truncated"].(bool) {
+		t.Error("CLI no longer detects truncation; truncated must be false")
 	}
 }
 

@@ -11,10 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // coreToolNames are the essential tools asserted to be registered at boot
@@ -55,8 +54,6 @@ var coreToolNames = []string{
 	"terminal.close",
 	"skill.step.advance",
 	"skill.run.get",
-	"skill.find",
-	"skill.load",
 	"memory.recall",
 	"memory.list",
 	"artifact.read",
@@ -88,14 +85,22 @@ type Session struct {
 	mu       sync.Mutex
 	inFlight bool // a turn is running (single-flight guard + mutate-mid-turn gate)
 
-	messages     []models.ChatMessage // live model history (controls at 0,1,2)
-	seq          int                  // next DB seq to write (monotonic)
-	activeSkills []string             // loaded skill ids (≤3)
-	skillBundle  skills.RenderedSkillBundle
-	skillCatalog string // static menu, built once (immutable after NewSession)
-	events       EventSink
-	artifacts    *ArtifactStore
-	runRef       *RunIDRef
+	messages  []models.ChatMessage // live visible history (user/assistant/tool; begins at index 0)
+	seq       int                  // next DB seq to write (monotonic)
+	events    EventSink
+	artifacts *ArtifactStore
+	runRef    *RunIDRef
+
+	// backendState is the opaque, server-signed skill-state token returned in the
+	// stream's meta event. The CLI NEVER inspects, signs, or mutates it — it stores
+	// the latest token and replays it on the next /respond request (a missing token
+	// is valid for a new session, and just makes the backend re-run skill selection).
+	// Guarded by s.mu (the meta callback writes it; the next round reads it).
+	backendState string
+	// catalogRevision / promptVersion are the backend's last-reported version markers
+	// (informational; surfaced for diagnostics, never sent back). Guarded by s.mu.
+	catalogRevision string
+	promptVersion   string
 
 	// compactFailures counts CONSECUTIVE small-model auto-compact summary failures
 	// (guarded by s.mu). It arms the lossy-truncation fallback once it reaches
@@ -193,10 +198,11 @@ type toolProjCache struct {
 	tools         []models.ChatTool // the cached projection
 }
 
-// NewSession builds a Session: the skill catalog + the three control messages.
-// On resume (deps.RestoredMessages != nil) the controls are rebuilt fresh but NOT
-// re-persisted and the restored working history is appended; seq continues from
-// InitialSeq. On a fresh session the controls are persisted.
+// NewSession builds a Session. The CLI holds NO client-side control prefix — the
+// backend owns the system prompt, developer instructions, and skill bodies — so a
+// fresh session starts with an EMPTY visible history (index 0). On resume
+// (deps.RestoredMessages != nil) the restored working history (user/assistant/tool
+// only) is the starting history and seq continues from InitialSeq.
 func NewSession(deps SessionDeps) *Session {
 	if deps.Events == nil {
 		deps.Events = NoopEventSink{}
@@ -217,28 +223,14 @@ func NewSession(deps SessionDeps) *Session {
 	if s.bgCtx == nil {
 		s.bgCtx = context.Background()
 	}
-	// Static catalog (every available skill's headers), built once.
-	s.skillCatalog = prompts.BuildSkillCatalogMessage(toPromptMetadata(deps.SkillCatalog.MetadataForSelection()))
-	s.skillBundle = skills.RenderSkillBundle(nil)
-	s.activeSkills = s.skillBundle.IDs
 
-	resume := deps.RestoredMessages != nil
-
-	// Control messages at fixed indices.
-	control := []models.ChatMessage{
-		models.TextMessage("system", prompts.BaseSystemPrompt),
-		models.TextMessage("system", s.composeRuntimeContext()),
-		models.TextMessage("system", prompts.BuildLoadedSkillsMessage(toPromptBundle(s.skillBundle))),
-	}
-	s.messages = control
-
-	if resume {
-		s.messages = append(s.messages, deps.RestoredMessages...)
+	if deps.RestoredMessages != nil {
+		// Resume: the restored visible history is the starting point; seq continues.
+		s.messages = append([]models.ChatMessage(nil), deps.RestoredMessages...)
 		s.seq = deps.InitialSeq
-		if s.seq < domain.ControlMessageCount {
-			s.seq = domain.ControlMessageCount
+		if s.seq < 0 {
+			s.seq = 0
 		}
-		// Controls already exist in the DB — do NOT re-persist.
 		// On a dup-seq forced fresh start the working history is EMPTY and we resume
 		// at maxSeq+1; persist a clear breadcrumb at that collision-free seq so the
 		// durable log records the reset boundary and a later resume sees a clean,
@@ -247,35 +239,11 @@ func NewSession(deps SessionDeps) *Session {
 			s.persistMessage(models.TextMessage("system", domain.ClearMarker))
 		}
 	} else {
-		// Fresh session: persist the three control rows, seq from 0.
+		// Fresh session: empty visible history, seq from 0. No control rows.
+		s.messages = nil
 		s.seq = 0
-		for _, m := range control {
-			s.persistMessage(m)
-		}
 	}
 	return s
-}
-
-// composeRuntimeContext builds message[1]: the runtime context, then the catalog
-// appended (never interleaved) so message[2] stays the loaded-skills slot and the
-// "# Runtime context" header stays at the top of [1].
-func (s *Session) composeRuntimeContext() string {
-	runtime := prompts.BuildRuntimeContextMessage(s.deps.PromptContext)
-	if s.skillCatalog != "" {
-		return runtime + "\n\n" + s.skillCatalog
-	}
-	return runtime
-}
-
-// RefreshRuntimeContext rewrites ONLY message[1] (re-appending the catalog). The
-// cached prefix [0] is untouched; not re-persisted.
-func (s *Session) RefreshRuntimeContext(ctx prompts.MainPromptContext) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.deps.PromptContext = ctx
-	if len(s.messages) > 1 {
-		s.messages[1] = models.TextMessage("system", s.composeRuntimeContext())
-	}
 }
 
 // Messages returns a read-only copy of the live history (taken under the lock so a
@@ -285,15 +253,6 @@ func (s *Session) Messages() []models.ChatMessage {
 	defer s.mu.Unlock()
 	out := make([]models.ChatMessage, len(s.messages))
 	copy(out, s.messages)
-	return out
-}
-
-// ActiveSkillIDs returns a copy of the loaded skill ids (under the lock).
-func (s *Session) ActiveSkillIDs() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.activeSkills))
-	copy(out, s.activeSkills)
 	return out
 }
 
@@ -370,10 +329,9 @@ func (s *Session) foldInInjections() int {
 	return len(drained)
 }
 
-// Clear truncates the live history to the three controls and persists a CLEAR
-// breadcrumb. Loaded skills are left as-is. Returns ErrTurnInProgress when a turn
-// is in flight (a mid-turn clear would corrupt the streaming snapshot) — do NOT
-// mutate in that case.
+// Clear empties the visible history and persists a CLEAR breadcrumb. Returns
+// ErrTurnInProgress when a turn is in flight (a mid-turn clear would corrupt the
+// streaming snapshot) — do NOT mutate in that case.
 func (s *Session) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -401,10 +359,10 @@ func (s *Session) clearLocked() {
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
-// Compact keeps the three controls and replaces the working history with one
-// "[checkpoint…]" user note, persisting a system marker then the note. Returns
-// ErrTurnInProgress when a turn is in flight (the interactive /compact path) — the
-// in-turn auto-compact uses compactLocked instead.
+// Compact replaces the working history with one "[checkpoint…]" user note,
+// persisting a system marker then the note. Returns ErrTurnInProgress when a turn
+// is in flight (the interactive /compact path) — the in-turn auto-compact uses
+// compactLocked instead.
 func (s *Session) Compact(summary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -580,6 +538,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 	turn := TurnContext{RunID: runID}
 
+	// One backend turn_id spans the whole tool-call loop (every round shares it so the
+	// backend keeps the same skill state and does not re-run selection on a plain
+	// continuation round). instructionRevision bumps whenever a mid-turn injection is
+	// folded in — a fresh instruction the backend's selector should react to.
+	turnID := domain.NewID("turn_")
+	instructionRevision := 0
+
 	failureCounts := make(map[string]int)
 	stuckNudged := false
 
@@ -598,6 +563,9 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	iter := 0
 	resetForInjection := func() {
 		iter = 0
+		// A folded-in injection is a new active instruction: bump the revision so the
+		// backend's selector cadence reacts to it (the same turn_id continues).
+		instructionRevision++
 		failureCounts = make(map[string]int)
 		stuckNudged = false
 	}
@@ -634,21 +602,10 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			}
 		}
 
-		// 5/9. (Re)compute the tool projection at the START of every iteration. A
-		//      skill.find/skill.load run in the PREVIOUS round rewrites the active-skill
-		//      set (and message[2]) mid-turn, so a newly-loaded skill's requiredTools
-		//      must be offered on the very next model call of the SAME turn — and a turn
-		//      that began with a skill already loaded must not be narrowed to a stale
-		//      set. Recomputing every iteration is cheap (cache HIT when the skill set
-		//      is unchanged) and keeps a single code path. Only message[2]/tools change
-		//      here — the cached base prefix [0] stays byte-stable (prompt-cache invariant).
-		//
-		//      The filter + projection are computed under s.mu (released before the
-		//      stream). A /skills find slash command runs OFF the turn goroutine
-		//      (independent of single-flight) and can rewrite activeSkills + zero the
-		//      cached projection via applySkillBundleLocked, so this read side must be
-		//      synchronized with those writes. The cached projection is reused when the
-		//      offered toolset is unchanged (the common path — no skill mutation).
+		// 5/9. Project the full tool registry for this round. Skills no longer narrow
+		//      the toolset (the backend owns skill selection; the CLI always offers the
+		//      whole registry), so this is a stable projection — a cache HIT every round.
+		//      Computed under s.mu and released before the (long) stream.
 		allowedNames, allowedSet, tools, err := s.resolveTurnTools()
 		if err != nil {
 			// A failure is a WAKE_FAILURE_PREFIX — keep verbatim.
@@ -667,78 +624,96 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 		s.events.AssistantStart()
 
-		// 10d. Stream the large model. Separate <think> from visible text: the router
-		//      delivers visible tokens via onToken and the <think> body via
-		//      ChatResult.Reasoning (the ThinkFilter handles the split).
+		// 10d. Stream the backend. The CLI sends ONLY the visible conversation
+		//      (user/assistant/tool); the runtime + per-turn context travel as
+		//      STRUCTURED data (request.runtime / request.turn), not as a system/footer
+		//      message. The backend owns the system prompt, skill selection, and prompt
+		//      assembly, and streams named SSE events (meta / delta / done / error).
 		gotToken := false
-		// Read an immutable SNAPSHOT of the history under the lock, then stream with
-		// the lock RELEASED — the model call is long, and a concurrent InjectNote
-		// (daemon) or InjectPrompt (user) must be able to append without racing this read.
-		//
-		// composeTurnFooter appends the UNCACHED turn footer (the goal/objective anchor,
-		// the `# Active workflow runs` block, the merged `# Pinned and relevant memories`
-		// block, the `# Active worktree` line, and a one-time `# Session note`) AFTER the
-		// snapshot. It is the TAIL of the request, never part of the cached prefix, so it is
-		// rebuilt fresh every round and can never invalidate the prefix cache — which is the
-		// whole point of moving the worktree, pinned memories, and session-ended note OUT of
-		// message[1] (issue #263): those volatile facts now ride the tail, so a worktree
-		// switch or a pin no longer rewrites the cached runtime context. It is NEVER pushed
-		// into s.messages: snapshotMessages returns a fresh make+copy slice (len==cap), so
-		// this append cannot alias back into the live history — the footer stays ephemeral.
-		// Per-round vs per-turn reads: recalledMemories + sessionEndedWatchers + isWake are
-		// the SAME snapshot every round (computed once before the loop); workflowRunsForFooter,
-		// pinnedMemoriesForFooter, and activeWorktree are re-read EACH round because the open-run
-		// ledger, the pin set (a mid-turn memory.pin), and the worktree can all change as the
-		// turn's tools run.
-		result, serr := s.deps.Router.Stream(ctx, domain.ModelLarge, models.ChatOptions{
-			Messages: append(s.snapshotMessages(), composeTurnFooter(footerContext{
-				Goal:                 userInput,
-				IsWake:               isWake,
-				WorkflowRuns:         s.workflowRunsForFooter(),
-				RelevantMemories:     recalledMemories,
-				PinnedMemories:       s.pinnedMemoriesForFooter(),
-				ActiveWorktree:       s.activeWorktree(),
-				SessionEndedWatchers: sessionEndedWatchers,
-			})...),
-			Tools:          tools,
-			ToolChoice:     "auto",
-			PromptCacheKey: domain.MainPromptCacheKey,
-		}, func(tok string) {
-			if !gotToken {
-				gotToken = true
-				s.events.Phase(domain.PhaseGenerating)
-			}
-			s.events.AssistantToken(tok)
-		})
-		if serr != nil {
-			return s.classifyStreamError(serr)
+		// Read an immutable SNAPSHOT of the history under the lock, then stream with the
+		// lock RELEASED — the call is long, and a concurrent InjectNote (daemon) or
+		// InjectPrompt (user) must be able to append without racing this read.
+		bmsgs, cerr := toBackendMessages(s.snapshotMessages())
+		if cerr != nil {
+			msg := "Conversation could not be encoded for the backend: " + cerr.Error()
+			s.events.Phase(domain.PhaseFailed)
+			s.events.Error(msg)
+			return msg
+		}
+		btools, terr := toBackendTools(tools)
+		if terr != nil {
+			msg := "Tool inventory rejected before send: " + terr.Error()
+			s.events.Phase(domain.PhaseFailed)
+			s.events.Error(msg)
+			return msg
 		}
 
-		// 10e. Usage — computed BEFORE appending the assistant message so
-		//      contextTokens reflects the prompt actually sent.
-		s.emitUsage()
+		req := backend.RespondRequest{
+			Session: backend.RespondSession{
+				ID:                  s.deps.SessionID,
+				TurnID:              turnID,
+				InstructionRevision: instructionRevision,
+				Round:               iter,
+			},
+			State: s.backendStatePtr(),
+			Input: backend.RespondInput{
+				Messages:   bmsgs,
+				Tools:      btools,
+				ToolChoice: "auto",
+			},
+			Runtime:    s.buildRuntimeContext(),
+			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, sessionEndedWatchers),
+			Selection:  &backend.Selection{Policy: "new_instruction"},
+			Generation: &backend.Generation{ResponseFormat: "text"},
+		}
+
+		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
+			OnMeta: func(m backend.StreamMeta) { s.applyStreamMeta(m) },
+			OnContent: func(tok string) {
+				if !gotToken {
+					gotToken = true
+					s.events.Phase(domain.PhaseGenerating)
+				}
+				s.events.AssistantToken(tok)
+			},
+		})
+		if serr != nil {
+			// A cancel (ctx) always reads as a clean stop, not a model failure.
+			if ctx.Err() != nil {
+				s.events.Phase(domain.PhaseCancelled)
+				s.events.AssistantCancelled("")
+				return domain.CancelledReply
+			}
+			return s.classifyBackendError(serr)
+		}
+
+		calls := backendToolCalls(result.Message.ToolCalls)
+
+		// 10e. Usage — emitted BEFORE appending the assistant message so contextTokens
+		//      reflects the prompt actually sent (backend-reported prompt_tokens).
+		s.emitBackendUsage(result.Usage, result.Meta.Model)
 
 		// 10f. Append the assistant message (content null on a pure tool-call turn).
-		s.pushMessage(s.assistantMessage(result))
+		s.pushMessage(backendAssistantMessage(result.Message))
 
 		// 10g. No tool calls ⇒ the model thinks it's done. But if the user slipped a
 		//      message in during this round, DON'T seal — fold it in and loop so it is
 		//      answered (never strand an injection at the final-answer boundary). The
 		//      just-streamed content stays an unsealed intermediate round (exactly like
 		//      prose that precedes a tool batch), so no AssistantEnd fires yet.
-		if len(result.ToolCalls) == 0 {
+		if len(calls) == 0 {
 			if s.foldInInjections() > 0 {
 				resetForInjection()
 				continue
 			}
 			s.events.Phase(domain.PhaseComplete)
-			s.events.AssistantEnd(result.Content, result.Reasoning)
-			return result.Content
+			s.events.AssistantEnd(result.Message.Content, "")
+			return result.Message.Content
 		}
 
 		// 10h. Execute the batch. Announce ALL calls as queued BEFORE sequential
 		//      dispatch, then promote each queued→active→done/failed.
-		if reply, done := s.runToolBatch(ctx, result.ToolCalls, turn, allowedSet, failureCounts, &stuckNudged); done {
+		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, failureCounts, &stuckNudged); done {
 			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
 			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
 			// the model gets the new steer); otherwise the abort stands.
@@ -954,27 +929,20 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) {
 	}
 }
 
-// classifyStreamError maps a router stream error to its sentinel reply. The
-// prefixes are WAKE_FAILURE_PREFIXES — keep them byte-stable.
-func (s *Session) classifyStreamError(err error) string {
-	var cancelled *models.CancelledError
-	if errors.As(err, &cancelled) || errors.Is(err, context.Canceled) {
+// classifyBackendError maps a backend respond error to its sentinel reply. The
+// prefixes are WAKE_FAILURE_PREFIXES — keep them byte-stable. (Cancellation is
+// handled at the call site via ctx.Err() before this runs.)
+func (s *Session) classifyBackendError(err error) string {
+	if errors.Is(err, context.Canceled) {
 		s.events.Phase(domain.PhaseCancelled)
 		s.events.AssistantCancelled("")
 		return domain.CancelledReply
 	}
-	var unavailable *models.DeepSeekUnavailableError
-	if errors.As(err, &unavailable) {
-		msg := "Model unavailable: " + err.Error()
-		s.events.Phase(domain.PhaseFailed)
-		s.events.Error(msg)
-		return msg
-	}
-	var rateLimited *models.RateLimitedError
-	if errors.As(err, &rateLimited) {
-		// Retry budget exhausted on a 429: a friendly, byte-stable reply plus a health
+	var be *backend.Error
+	if errors.As(err, &be) && be.IsRateLimited() {
+		// Upstream/model rate limit: a friendly, byte-stable reply plus a health
 		// badge — not the raw provider blob. The badge clears on the next good Usage.
-		msg := "Model rate-limited: " + rateLimited.Error()
+		msg := "Model rate-limited: " + be.Error()
 		s.events.Phase(domain.PhaseFailed)
 		s.events.ModelRateLimited()
 		s.events.Error(msg)
@@ -986,102 +954,198 @@ func (s *Session) classifyStreamError(err error) string {
 	return msg
 }
 
-// assistantMessage builds the assistant message for a streamed result: content
-// null on a pure tool-call turn (no prose), else the visible content.
-func (s *Session) assistantMessage(result models.ChatResult) models.ChatMessage {
+// backendAssistantMessage builds the local assistant message for a backend result:
+// content null on a pure tool-call turn (no prose), else the visible content.
+func backendAssistantMessage(msg backend.RespondMessage) models.ChatMessage {
+	calls := backendToolCalls(msg.ToolCalls)
 	m := models.ChatMessage{Role: "assistant"}
-	if result.Content == "" && len(result.ToolCalls) > 0 {
+	if msg.Content == "" && len(calls) > 0 {
 		m.ContentNull = true
 	} else {
-		m.StringContent = result.Content
+		m.StringContent = msg.Content
 	}
-	if len(result.ToolCalls) > 0 {
-		m.ToolCalls = result.ToolCalls
+	if len(calls) > 0 {
+		m.ToolCalls = calls
 	}
 	return m
 }
 
-// emitUsage emits the per-round UsageEvent. It drains the Router-level meter
-// (FlushMeter) and sums EVERY model call made since the last round — the large
-// thread's stream plus the small-tier background work (skill selection, watcher
-// verdicts, extraction, summaries) that previously went unmetered — into one
-// aggregate. CachedTokens is nil unless some tier reported it; CostUsd sums the
-// known per-tier costs (a partial total beats showing nothing) and is nil only
-// when no tier had a known rate, so the UI shows "no data" not a misleading
-// $0.000. Tier/Model stay the large-tier display rollup for the footer label.
-func (s *Session) emitUsage() {
-	tiers := s.deps.Router.FlushMeter()
+// backendToolCalls converts backend tool calls to the local ToolCallRequest shape
+// the tool dispatcher consumes.
+func backendToolCalls(calls []backend.ToolCall) []models.ToolCallRequest {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]models.ToolCallRequest, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, models.ToolCallRequest{
+			ID:       c.ID,
+			Type:     "function",
+			Function: models.ToolCallFunction{Name: c.Function.Name, Arguments: c.Function.Arguments},
+		})
+	}
+	return out
+}
+
+// backendStatePtr returns the latest opaque backend state token to replay on the
+// next request, or nil for a fresh session (the backend then re-runs selection).
+func (s *Session) backendStatePtr() *string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backendState == "" {
+		return nil
+	}
+	st := s.backendState
+	return &st
+}
+
+// applyStreamMeta stores the refreshed state token + version markers from the
+// stream's meta event and surfaces the skill outcome to the UI. The CLI treats the
+// state token as opaque (store-and-replay only).
+func (s *Session) applyStreamMeta(m backend.StreamMeta) {
+	s.mu.Lock()
+	s.backendState = m.State
+	s.catalogRevision = m.CatalogRevision
+	s.promptVersion = m.PromptVersion
+	s.mu.Unlock()
+	s.emitSkillsMeta(m.Skills)
+}
+
+// emitSkillsMeta surfaces the backend's skill outcome (the newly-loaded runbooks)
+// as a visible info cue, so a server-side skill load still reads as a capability
+// event in the cockpit. Best-effort and informational only; the prelude is NEVER
+// replayed into client history.
+func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
+	if len(sk.NewlyLoaded) == 0 {
+		return
+	}
+	titles := make([]string, 0, len(sk.NewlyLoaded))
+	for _, ref := range sk.NewlyLoaded {
+		title := strings.TrimSpace(ref.Title)
+		if title == "" {
+			title = ref.ID
+		}
+		titles = append(titles, title)
+	}
+	s.events.Info("Loaded skill: " + strings.Join(titles, ", "))
+}
+
+// emitBackendUsage emits the per-round UsageEvent from the backend's reported usage.
+// The backend owns model routing, so this is a single-model figure (no per-tier
+// rollup). The backend-reported prompt_tokens IS the true context size, so it both
+// feeds ContextTokens and is stashed for the next round's auto-compact gate.
+func (s *Session) emitBackendUsage(u backend.Usage, model string) {
+	if strings.TrimSpace(model) == "" {
+		model = "daintree-assistant"
+	}
 	ev := UsageEvent{
 		ContextThreshold: domain.AutoCompactTokenThreshold,
 		ContextWindow:    domain.LargeContextWindowTokens,
 		CompactionDepth:  s.CompactionDepth(),
 		Tier:             string(domain.ModelLarge),
-		Model:            models.BareModelID(s.deps.Router.ModelFor(domain.ModelLarge)),
-		Tiers:            tiers,
+		Model:            model,
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
 	}
-	var (
-		anyCost     bool
-		costTotal   float64
-		anyCached   bool
-		cachedTotal int
-		largePrompt int // the main-thread (large-tier) prompt_tokens only
-	)
-	for _, t := range tiers {
-		ev.PromptTokens += t.PromptTokens
-		ev.CompletionTokens += t.CompletionTokens
-		ev.TotalTokens += t.TotalTokens
-		// Track the LARGE tier's prompt_tokens separately: that's the main conversation
-		// the auto-compact gate cares about. The aggregate (ev.PromptTokens) also folds
-		// in small-tier background work (skill selection, watcher verdicts, and — the
-		// trap — the auto-compact SUMMARY call, which runs against the OLD pre-compaction
-		// history). Stashing the aggregate would re-inject that ~60K summary prompt right
-		// after a compaction and spuriously re-trigger on the freshly-shrunk history.
-		if t.Tier == string(domain.ModelLarge) {
-			largePrompt += t.PromptTokens
-		}
-		if t.CostUsd != nil {
-			anyCost = true
-			costTotal += *t.CostUsd
-		}
-		if t.CachedTokens != nil {
-			anyCached = true
-			cachedTotal += *t.CachedTokens
-		}
-	}
-	if anyCached {
-		ev.CachedTokens = &cachedTotal
-		// Prompt-cache hit ratio (issue #262): cachedTotal/PromptTokens, both summed
-		// across EVERY tier so the ratio stays internally consistent (a large-only
-		// denominator would overstate it when a small-tier call also hit the cache).
-		// Cached tokens are a subset of prompt tokens in the OpenAI usage spec, so this
-		// is cached/prompt — never cached/(prompt-completion). Guard PromptTokens > 0 to
-		// avoid a divide-by-zero; a reported cached=0 stays a real 0.0 (cache confirmed
-		// empty), distinct from nil (no tier reported cache data at all).
-		if ev.PromptTokens > 0 {
-			r := float64(cachedTotal) / float64(ev.PromptTokens)
+	if u.CachedTokens > 0 {
+		ct := u.CachedTokens
+		ev.CachedTokens = &ct
+		if u.PromptTokens > 0 {
+			r := float64(u.CachedTokens) / float64(u.PromptTokens)
 			ev.CacheHitRatio = &r
 		}
 	}
-	if anyCost {
-		ev.CostUsd = &costTotal
-	}
-	// Stash the real main-thread prompt_tokens for the next round's compaction gate and
-	// report it as ContextTokens — it's the true context size (tool schemas included),
-	// not the tool-blind char estimate. A nil/empty meter (or a round with no large-tier
-	// call) reports 0; preserve the last known real figure rather than regressing the
-	// stash, and fall back to the char estimate for the displayed ContextTokens so the
-	// footer never shows a misleading 0. Done under s.mu (the lock guards lastPromptTokens
-	// against an off-turn slash command); s.events.Usage is called OUTSIDE the lock, as
-	// everywhere else in this file.
 	s.mu.Lock()
-	if largePrompt > 0 {
-		s.lastPromptTokens = largePrompt
-		ev.ContextTokens = largePrompt
+	if u.PromptTokens > 0 {
+		s.lastPromptTokens = u.PromptTokens
+		ev.ContextTokens = u.PromptTokens
 	} else {
 		ev.ContextTokens = s.estimateTokensLocked()
 	}
 	s.mu.Unlock()
 	s.events.Usage(ev)
+}
+
+// buildRuntimeContext maps the session's PromptContext to the backend's structured
+// runtime block — environment/project facts the backend renders as inert data
+// (NOT a system prompt). The context is pulled LIVE every round when a provider is
+// wired (PromptContextFunc), so a mid-session MCP connect / tier change / scheduler
+// start reaches the backend on the next request — the structured-data replacement for
+// the old RefreshRuntimeContext push. The worktree is read per round too.
+func (s *Session) buildRuntimeContext() *backend.RuntimeContext {
+	pc := s.deps.PromptContext
+	if s.deps.PromptContextFunc != nil {
+		pc = s.deps.PromptContextFunc()
+	}
+	rc := &backend.RuntimeContext{
+		PermissionTier:      string(pc.Tier),
+		ProjectPath:         pc.ProjectPath,
+		ProjectID:           pc.ProjectID,
+		ConfiguredAgentIDs:  pc.ConfiguredAgentIDs,
+		SchedulerActive:     pc.SchedulerActive,
+		ActiveWorktree:      s.activeWorktree(),
+		ProjectInstructions: pc.ProjectInstructions,
+	}
+	if pc.MCPConnected || strings.TrimSpace(pc.MCPStatusLine) != "" {
+		// When connected the backend builds its status line from transport + tool_count
+		// (Status is only consulted when NOT connected), so send all three.
+		rc.MCP = &backend.MCPInfo{
+			Connected: pc.MCPConnected,
+			Transport: pc.MCPTransport,
+			ToolCount: pc.MCPToolCount,
+			Status:    pc.MCPStatusLine,
+		}
+	}
+	return rc
+}
+
+// buildTurnContext maps the per-turn facts (formerly the prose turn footer) to the
+// backend's structured turn block. The backend renders the footer; the CLI sends
+// data. Per-round reads (workflow runs, pinned memories) mirror the old footer's
+// freshness; recalled memories + session-ended watchers are the per-turn snapshot.
+func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.MemoryRecord, sessionEndedWatchers []string) *backend.TurnContext {
+	tc := &backend.TurnContext{
+		Goal:                 strings.TrimSpace(goal),
+		IsWake:               isWake,
+		WorkflowRuns:         workflowRunStrings(s.workflowRunsForFooter()),
+		SessionEndedWatchers: sessionEndedWatchers,
+	}
+	pinned := memoryStrings(s.pinnedMemoriesForFooter())
+	relevant := memoryStrings(recalled)
+	if len(pinned) > 0 || len(relevant) > 0 {
+		tc.Memories = &backend.Memories{Pinned: pinned, Relevant: relevant}
+	}
+	return tc
+}
+
+// memoryStrings flattens memory records to single-line strings for the structured
+// turn block (the backend joins them). Blank rows are dropped.
+func memoryStrings(rows []domain.MemoryRecord) []string {
+	out := make([]string, 0, len(rows))
+	for _, m := range rows {
+		if c := flattenFooterLine(m.Content); c != "" {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// workflowRunStrings renders the open ledger rows to single-line strings for the
+// structured turn block, reusing the same compact one-line formatter the footer
+// used (minus the leading bullet, since the backend joins them with ", ").
+func workflowRunStrings(runs []domain.WorkflowRunRecord) []string {
+	out := make([]string, 0, len(runs))
+	for i := range runs {
+		out = append(out, strings.TrimPrefix(renderWorkflowRunRow(runs[i]), "- "))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // resolveTurnTools computes the per-iteration tool filter, its membership set, and
@@ -1410,54 +1474,27 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 		s.mu.Unlock()
 		return
 	}
-	// Flatten multimodal history to text (the small model is text-only; an image
-	// turn would otherwise trip the vision tier gate and silently fail every
-	// auto-compact, growing history unbounded). The system prompt asks for a STRUCTURED
-	// checkpoint object (issue #256), not a prose summary — see prompts.CheckpointSystemPrompt.
-	summaryMsgs := []models.ChatMessage{
-		models.TextMessage("system", prompts.CheckpointSystemPrompt),
-	}
-	// Capture a flattened transcript from the SAME snapshot (still under the lock) so
-	// the distillation pass can mine the about-to-be-discarded history after the lock
-	// is released for the model calls.
+	// Capture a flattened transcript of the about-to-be-discarded history (still under
+	// the lock). The backend's checkpoint.v1 task OWNS the prompt; the CLI sends only
+	// this transcript. Each tool call's name + argument JSON is folded into the text so
+	// load-bearing IDs that live ONLY in arguments — e.g. terminal.read
+	// {"terminalId":"term_x"} — survive into the checkpoint's ID-preservation pass.
 	transcript := ""
 	for _, m := range s.messages[domain.ControlMessageCount:] {
 		text := m.ContentToText()
-		// Fold each tool call's name + argument JSON into the flattened text so the
-		// (text-only) summarizer can SEE load-bearing IDs that live ONLY in arguments —
-		// e.g. terminal.read {"terminalId":"term_x"} — never echoed in prose. Without
-		// this the ID-preservation instruction has nothing to act on for the older history
-		// being summarized away. (The verbatim tail already keeps recent tool calls intact.)
 		for _, tc := range m.ToolCalls {
 			if text != "" {
 				text += "\n"
 			}
 			text += "[tool call " + tc.Function.Name + " " + tc.Function.Arguments + "]"
 		}
-		// Re-label the role for the checkpoint request. The summary is a plain chat
-		// completion with NO preceding assistant tool_calls to anchor a tool-role
-		// message, so a role:"tool" entry is sent with an empty (omitted) tool_call_id
-		// and DeepSeek rejects the ENTIRE request — 400 "messages[N]: missing field
-		// `tool_call_id`" — which failed every auto-compact once the discarded history
-		// held any tool result (i.e. almost always). The content is already flattened to
-		// text above, so a tool result carries fine as a user turn with a marker; any role
-		// outside system/user/assistant collapses to user the same way. (Consecutive
-		// same-role turns are accepted here — the prior bug proved DeepSeek parsed the
-		// tool messages structurally and only objected to the missing id.)
-		role := m.Role
-		switch role {
-		case "system", "user", "assistant":
-		case "tool":
-			role = "user"
+		if m.Role == "tool" {
 			if text == "" {
 				text = "[tool result]"
 			} else {
 				text = "[tool result] " + text
 			}
-		default:
-			role = "user"
 		}
-		summaryMsgs = append(summaryMsgs, models.TextMessage(role, text))
 		if text == "" {
 			text = "[tool call]"
 		}
@@ -1465,14 +1502,12 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	}
 	s.mu.Unlock()
 
-	// Ask the small model for a STRUCTURED checkpoint (issue #256). On a model ERROR
-	// (not a reply) fall back exactly as the old prose path did: a cancel is the turn
-	// tearing down (don't compact, don't count it — issue #61), a real outage counts
-	// toward the bounded-growth truncation fallback (issue #202). A successful REPLY
-	// always compacts — even if it isn't valid JSON, validateCheckpoint still mines every
-	// load-bearing ID from the transcript into PreservedIDs, so a sparse checkpoint that
-	// preserves IDs is strictly better than no compaction.
-	cp, err := buildCheckpoint(ctx, s.deps.Router, summaryMsgs, transcript)
+	// Run the backend's checkpoint.v1 task. On an ERROR (not a reply): a cancel is the
+	// turn tearing down (don't compact, don't count it — issue #61), a real outage
+	// counts toward the bounded-growth truncation fallback (issue #202). A successful
+	// result always compacts — even a sparse checkpoint, because validateCheckpoint still
+	// mines every load-bearing ID from the transcript into PreservedIDs.
+	cp, err := buildCheckpoint(ctx, s.deps.Backend, transcript)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -1620,14 +1655,14 @@ func (s *Session) DrainBackgroundWork() {
 	s.wg.Wait()
 }
 
-// distillCompact extracts durable facts from a soon-to-be-discarded transcript via a
-// single small-model call and saves the novel ones as source="compact" memories.
-// Best-effort by construction: a nil MemoryStore, an empty transcript, a model error,
-// an unparseable reply, or any panic yields 0 and never affects compaction. It MUST be
-// called with s.mu released (it makes a network call + DB writes).
+// distillCompact extracts durable facts from a soon-to-be-discarded transcript via
+// the backend's memory_distill.v1 task and saves the novel ones as source="compact"
+// memories. Best-effort by construction: a nil MemoryStore/Backend, an empty
+// transcript, a backend error, or any panic yields 0 and never affects compaction. It
+// MUST be called with s.mu released (it makes a network call + DB writes).
 func (s *Session) distillCompact(ctx context.Context, runID, transcript string) (saved int) {
 	defer func() { _ = recover() }()
-	if s.deps.MemoryStore == nil {
+	if s.deps.MemoryStore == nil || s.deps.Backend == nil {
 		return 0
 	}
 	// Keep the freshest TAIL — durable decisions are most likely near the end of the
@@ -1638,37 +1673,39 @@ func (s *Session) distillCompact(ctx context.Context, runID, transcript string) 
 	if trimSpace(transcript) == "" {
 		return 0
 	}
-	maxTok := 600
-	result, err := s.deps.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", prompts.DistillSystemPrompt),
-			models.TextMessage("user", transcript),
-		},
-		MaxTokens: &maxTok,
-	})
+	out, err := backend.RunMemoryDistill(ctx, s.deps.Backend, backend.MemoryDistillInput{Transcript: transcript})
 	if err != nil {
 		return 0
 	}
-	for _, entry := range prompts.ParseDistilledEntries(result.Content) {
-		exists, exErr := s.deps.MemoryStore.MemoryExists(entry.Content)
+	for _, fact := range out.Facts {
+		content := trimSpace(fact.Fact)
+		if content == "" {
+			continue
+		}
+		// Route each fact to its kind: semantic (a durable fact) vs episodic (an
+		// instructive trajectory trace). An unknown/blank kind defaults to semantic.
+		kind := domain.MemoryKindSemantic
+		if fact.Kind == string(domain.MemoryKindEpisodic) {
+			kind = domain.MemoryKindEpisodic
+		}
+		exists, exErr := s.deps.MemoryStore.MemoryExists(content)
 		if exErr != nil || exists {
 			continue
 		}
 		now := domain.NowMS()
-		// Route each fact to its kind: semantic (a durable fact) vs episodic (an
-		// instructive trajectory trace). Stamp the turn that produced it as provenance;
-		// namespace episodic rows to this session (semantic facts carry no sessionId).
+		// Stamp the turn that produced it as provenance; namespace episodic rows to this
+		// session (semantic facts carry no sessionId).
 		rec := domain.MemoryRecord{
-			Content:   entry.Content,
+			Content:   content,
 			Source:    domain.MemoryCompact,
-			Kind:      entry.Kind,
+			Kind:      kind,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		if runID != "" {
 			rec.RunID = &runID
 		}
-		if entry.Kind == domain.MemoryKindEpisodic && s.deps.SessionID != "" {
+		if kind == domain.MemoryKindEpisodic && s.deps.SessionID != "" {
 			sid := s.deps.SessionID
 			rec.SessionID = &sid
 		}
@@ -1683,132 +1720,6 @@ func (s *Session) distillCompact(ctx context.Context, runID, transcript string) 
 // can page back through oversized tool results stashed during the turn. The store
 // is created in NewSession and lives for the session.
 func (s *Session) Artifacts() *ArtifactStore { return s.artifacts }
-
-// FindSkills runs the skill.find engine. On a selector error/cancel it
-// leaves the loaded set unchanged. New ids merge FIRST so they survive the cap of
-// 3 (an explicit/new load evicts the lowest-priority prior skill).
-// FindSkills is invoked by the skill.find TOOL on the turn goroutine, so it does
-// NOT reject mid-turn — it merely takes the lock for its short mutation. The
-// selector call runs OUTSIDE the lock (it's a model call).
-func (s *Session) FindSkills(ctx context.Context, query string) skills.SkillFindResult {
-	selection, err := s.deps.SkillSelector.Select(ctx, s.deps.SkillCatalog.MetadataForSelection(), query)
-	if err != nil {
-		return skills.SkillFindResult{Ok: false, Matched: false, Query: query, Reason: "skill selector unavailable", ActiveSkillIDs: s.ActiveSkillIDs()}
-	}
-	if ctx.Err() != nil {
-		// Don't mutate the live skill set with an abandoned result.
-		return skills.SkillFindResult{Ok: false, Matched: false, Query: query, Reason: "cancelled", ActiveSkillIDs: s.ActiveSkillIDs()}
-	}
-	newlyKnown := s.resolveKnownIDs(selection.SkillIDs)
-
-	s.mu.Lock()
-	merged := s.resolveKnownIDs(append(append([]string{}, selection.SkillIDs...), s.activeSkills...))
-	s.applySkillBundleLocked(s.deps.SkillCatalog.GetMany(merged))
-	active := s.activeSkillIDsLocked()
-	s.mu.Unlock()
-
-	s.logSelection(query, selection, newlyKnown)
-
-	selected := make([]skills.SelectedSkill, 0, len(newlyKnown))
-	for _, sk := range s.deps.SkillCatalog.GetMany(newlyKnown) {
-		selected = append(selected, skills.SelectedSkill{ID: sk.ID, Title: sk.Title, Summary: sk.Summary})
-	}
-	return skills.SkillFindResult{
-		Ok: true, Matched: len(selected) > 0, Query: query,
-		Reason: selection.Reason, Confidence: selection.Confidence,
-		Selected: selected, ActiveSkillIDs: active,
-	}
-}
-
-// LoadAdditionalSkills is the skill.load TOOL path (turn goroutine): it merges new
-// ids FIRST (so an explicit load evicts the lowest-priority prior skill rather than
-// being dropped), applies under the lock, and returns the active set. It does NOT
-// reject mid-turn (the tool runs as part of the turn).
-func (s *Session) LoadAdditionalSkills(ids []string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	merged := s.resolveKnownIDs(append(append([]string{}, ids...), s.activeSkills...))
-	s.applySkillBundleLocked(s.deps.SkillCatalog.GetMany(merged))
-	return s.activeSkillIDsLocked()
-}
-
-// SetSkills replaces the loaded set with the resolved-known ids. It is a UI-command
-// path (e.g. /skills load|clear), so it returns ErrTurnInProgress when a turn is in
-// flight rather than racing the streaming snapshot.
-func (s *Session) SetSkills(ids []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inFlight {
-		return ErrTurnInProgress
-	}
-	s.applySkillBundleLocked(s.deps.SkillCatalog.GetMany(s.resolveKnownIDs(ids)))
-	return nil
-}
-
-// activeSkillIDsLocked returns a copy of the loaded ids; caller MUST hold s.mu.
-func (s *Session) activeSkillIDsLocked() []string {
-	out := make([]string, len(s.activeSkills))
-	copy(out, s.activeSkills)
-	return out
-}
-
-// resolveKnownIDs = unique(ids).filter(has).slice(0,3) — filter BEFORE the cap so
-// a hallucinated id can't evict a valid one.
-func (s *Session) resolveKnownIDs(ids []string) []string {
-	seen := make(map[string]struct{})
-	var out []string
-	for _, id := range ids {
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		if s.deps.SkillCatalog.Has(id) {
-			out = append(out, id)
-			if len(out) == 3 {
-				break
-			}
-		}
-	}
-	return out
-}
-
-// applySkillBundleLocked re-renders the bundle, updates active ids, and rewrites
-// message[2]. Caller MUST hold s.mu.
-func (s *Session) applySkillBundleLocked(sks []skills.Skill) {
-	s.skillBundle = skills.RenderSkillBundle(sks)
-	s.activeSkills = s.skillBundle.IDs
-	if len(s.messages) > 2 {
-		s.messages[2] = models.TextMessage("system", prompts.BuildLoadedSkillsMessage(toPromptBundle(s.skillBundle)))
-	}
-	// The active-skill set drives buildToolFilter, so the memoized projection is now
-	// stale — drop it so the next iteration rebuilds against the new toolset.
-	s.toolProj = toolProjCache{}
-}
-
-// logSelection best-effort records what the QUERY resolved (newlyKnown, NOT the
-// merged set), with userInput sliced to 1000 chars.
-func (s *Session) logSelection(userInput string, selection skills.SkillSelection, selectedIDs []string) {
-	defer func() { _ = recover() }()
-	if s.deps.Store == nil {
-		return
-	}
-	idsJSON, _ := json.Marshal(selectedIDs)
-	taskType := selection.TaskType
-	reason := selection.Reason
-	rec := domain.SkillSelectionLogRecord{
-		SessionID:            s.deps.SessionID,
-		UserInput:            sliceChars(userInput, 1000),
-		SelectedSkillIdsJson: string(idsJSON),
-		Confidence:           selection.Confidence,
-	}
-	if taskType != "" {
-		rec.TaskType = &taskType
-	}
-	if reason != "" {
-		rec.Reason = &reason
-	}
-	_, _ = s.deps.Store.InsertSkillSelection(rec)
-}
 
 // --- small helpers ---
 
@@ -1855,22 +1766,4 @@ func trimSpace(s string) string {
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
-}
-
-// toPromptMetadata / toPromptBundle adapt the skills package shapes to the prompts
-// package shapes (the prompt builders own their own slim view types).
-func toPromptMetadata(md []skills.SkillMetadata) []prompts.SkillMetadata {
-	out := make([]prompts.SkillMetadata, 0, len(md))
-	for _, m := range md {
-		out = append(out, prompts.SkillMetadata{ID: m.ID, Summary: m.Summary, WhenToUse: m.WhenToUse})
-	}
-	return out
-}
-
-func toPromptBundle(b skills.RenderedSkillBundle) prompts.RenderedSkillBundle {
-	items := make([]prompts.LoadedSkill, 0, len(b.Items))
-	for _, sk := range b.Items {
-		items = append(items, prompts.LoadedSkill{ID: sk.ID, Version: sk.Version, Title: sk.Title, Body: sk.Body})
-	}
-	return prompts.RenderedSkillBundle{Items: items}
 }

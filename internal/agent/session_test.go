@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // --- fakes ---
@@ -65,28 +68,251 @@ func (t *fakeTools) Dispatch(ctx context.Context, name, args string, turn TurnCo
 	return t.result
 }
 
-type fakeSelector struct{ sel skills.SkillSelection }
-
-func (s fakeSelector) Select(ctx context.Context, c []skills.SkillMetadata, q string) (skills.SkillSelection, error) {
-	return s.sel, nil
+// backendFromRouter adapts a legacy *Router fake to the AssistantBackend seam so the
+// existing Router-style fakes drive the new backend-based turn loop unchanged.
+// RespondStream delegates to Router.Stream; RunTask translates the checkpoint and
+// memory-distill utility tasks back onto Router.Chat (the small-model call the fakes
+// script). The agent loop no longer talks to a Router at all — this adapter is the
+// test-only bridge that keeps the per-fake scripting (Stream for the turn, Chat for the
+// compaction summary / distill reply) meaningful against the new seam.
+type backendFromRouter struct {
+	r Router
 }
 
-type fakeCatalog struct{}
+// toBackendToolCalls is the inverse of production's backendToolCalls: it lifts the
+// local ToolCallRequest shape the fakes emit into the backend wire shape the loop reads
+// off RespondResult.Message.
+func toBackendToolCalls(calls []models.ToolCallRequest) []backend.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]backend.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, backend.ToolCall{
+			ID:       c.ID,
+			Type:     "function",
+			Function: backend.FunctionCall{Name: c.Function.Name, Arguments: c.Function.Arguments},
+		})
+	}
+	return out
+}
 
-func (fakeCatalog) MetadataForSelection() []skills.SkillMetadata { return nil }
-func (fakeCatalog) GetMany([]string) []skills.Skill              { return nil }
-func (fakeCatalog) Has(string) bool                              { return false }
+// usageFromChat maps the Router's pointer-field usage to the backend's flat Usage so a
+// fake that reports usage on its ChatResult flows through emitBackendUsage.
+func usageFromChat(u *models.Usage) backend.Usage {
+	if u == nil {
+		return backend.Usage{}
+	}
+	return backend.Usage{
+		PromptTokens:     derefp(u.PromptTokens),
+		CompletionTokens: derefp(u.CompletionTokens),
+		TotalTokens:      derefp(u.TotalTokens),
+		CachedTokens:     derefp(u.CachedTokens),
+	}
+}
+
+// backendMessagesToModel is the inverse of production's toBackendMessages: it decodes the
+// backend wire conversation back into the local ChatMessage shape and forwards it to the
+// wrapped Router as opts.Messages — so a message-snapshot fake (injectRouter.seen) still
+// observes the exact per-round visible history the turn loop shipped, even though the loop
+// now talks to a backend and not a Router.
+func backendMessagesToModel(bms []backend.Message) []models.ChatMessage {
+	out := make([]models.ChatMessage, 0, len(bms))
+	for _, bm := range bms {
+		m := models.ChatMessage{Role: bm.Role, ToolCallID: bm.ToolCallID, Name: bm.Name}
+		switch {
+		case len(bm.Content) == 0:
+			// no content field
+		case string(bm.Content) == "null":
+			m.ContentNull = true
+		default:
+			var s string
+			if err := json.Unmarshal(bm.Content, &s); err == nil {
+				m.StringContent = s
+			} else {
+				// A multimodal parts array (rare in these tests) — keep the raw JSON so the
+				// snapshot is non-empty rather than dropping it.
+				m.StringContent = string(bm.Content)
+			}
+		}
+		for _, tc := range bm.ToolCalls {
+			m.ToolCalls = append(m.ToolCalls, models.ToolCallRequest{
+				ID: tc.ID, Type: tc.Type,
+				Function: models.ToolCallFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
+			})
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func (b backendFromRouter) RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	model := b.r.ModelFor(domain.ModelLarge)
+	if cb.OnMeta != nil {
+		cb.OnMeta(backend.StreamMeta{Model: model, State: "dst1.test"})
+	}
+	res, err := b.r.Stream(ctx, domain.ModelLarge,
+		models.ChatOptions{Messages: backendMessagesToModel(req.Input.Messages)}, cb.OnContent)
+	if err != nil {
+		// Map the old model-error vocabulary onto what the new turn loop expects: a
+		// CancelledError (or an actually-cancelled ctx) reads as a clean stop; a
+		// RateLimitedError becomes a 429 backend error; anything else passes through raw
+		// so classifyBackendError renders "Model error: <msg>".
+		var ce *models.CancelledError
+		if errors.As(err, &ce) || ctx.Err() != nil {
+			return backend.RespondResult{}, context.Canceled
+		}
+		var rl *models.RateLimitedError
+		if errors.As(err, &rl) {
+			return backend.RespondResult{}, &backend.Error{HTTPStatus: 429, Type: "rate_limit", Code: "upstream_rate_limited", Message: rl.Error()}
+		}
+		return backend.RespondResult{}, err
+	}
+	return backend.RespondResult{
+		Meta:         backend.StreamMeta{Model: model, State: "dst1.test"},
+		Message:      backend.RespondMessage{Content: res.Content, ToolCalls: toBackendToolCalls(res.ToolCalls)},
+		FinishReason: res.FinishReason,
+		Usage:        usageFromChat(res.Usage),
+	}, nil
+}
+
+// RunTask routes the two utility tasks the agent loop runs (checkpoint.v1 +
+// memory_distill.v1) back onto the Router's Chat call, so a fake scripting Chat to
+// return a summary / distill reply keeps working. The transcript travels in
+// req.Input["transcript"]; it is replayed as a single plain user message so a fake that
+// inspects the summarizer's opts.Messages sees the flattened, role-clean input.
+func (b backendFromRouter) RunTask(ctx context.Context, req backend.TaskRequest) (backend.TaskResult, error) {
+	transcript, _ := req.Input["transcript"].(string)
+	switch req.Task {
+	case backend.TaskCheckpoint:
+		res, err := b.r.Chat(ctx, domain.ModelSmall, models.ChatOptions{
+			Messages: []models.ChatMessage{models.TextMessage("user", transcript)},
+		})
+		if err != nil {
+			return backend.TaskResult{}, err
+		}
+		// A JSON-object reply is the structured checkpoint; a prose reply degrades to an
+		// empty object so validateCheckpoint still mines the transcript's IDs.
+		out := json.RawMessage("{}")
+		content := strings.TrimSpace(res.Content)
+		var probe map[string]json.RawMessage
+		if content != "" && json.Unmarshal([]byte(content), &probe) == nil {
+			out = json.RawMessage(content)
+		}
+		return backend.TaskResult{Task: backend.TaskCheckpoint, Output: out, Model: "daintree-assistant"}, nil
+	case backend.TaskMemoryDistill:
+		res, err := b.r.Chat(ctx, domain.ModelSmall, models.ChatOptions{
+			Messages: []models.ChatMessage{models.TextMessage("user", transcript)},
+		})
+		if err != nil {
+			return backend.TaskResult{}, err
+		}
+		out := backend.MemoryDistillOutput{Facts: parseDistillFacts(res.Content)}
+		raw, _ := json.Marshal(out)
+		return backend.TaskResult{Task: backend.TaskMemoryDistill, Output: raw, Model: "daintree-assistant"}, nil
+	default:
+		return backend.TaskResult{Task: req.Task, Output: json.RawMessage("{}"), Model: "daintree-assistant"}, nil
+	}
+}
+
+// parseDistillFacts decodes the legacy distill-reply shapes the fakes script — either a
+// bare string array (["fact A", "fact B"]) or an object array ([{"fact":...,"kind":...}])
+// — into the backend's typed fact list. A malformed reply yields nil (no facts saved).
+func parseDistillFacts(content string) []backend.DistilledFact {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	// Object array first: [{"fact":"x","kind":"semantic"}, ...].
+	var objs []struct {
+		Fact string `json:"fact"`
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(content), &objs); err == nil && len(objs) > 0 {
+		out := make([]backend.DistilledFact, 0, len(objs))
+		for _, o := range objs {
+			out = append(out, backend.DistilledFact{Fact: o.Fact, Kind: o.Kind})
+		}
+		return out
+	}
+	// Fall back to a bare string array: ["fact A", "fact B"].
+	var strs []string
+	if err := json.Unmarshal([]byte(content), &strs); err == nil {
+		out := make([]backend.DistilledFact, 0, len(strs))
+		for _, s := range strs {
+			out = append(out, backend.DistilledFact{Fact: s})
+		}
+		return out
+	}
+	return nil
+}
 
 func baseDeps(r Router, tr ToolRunner) SessionDeps {
 	return SessionDeps{
-		Router:        r,
-		Tools:         tr,
-		SkillSelector: fakeSelector{},
-		SkillCatalog:  fakeCatalog{},
-		Store:         nil, // best-effort persistence; nil exercises the nil-guard
-		SessionID:     "sess_test",
-		Events:        NoopEventSink{},
+		Backend:   backendFromRouter{r: r},
+		Router:    r, // vestigial; the loop no longer uses it
+		Tools:     tr,
+		Store:     nil, // best-effort persistence; nil exercises the nil-guard
+		SessionID: "sess_test",
+		Events:    NoopEventSink{},
 	}
+}
+
+// recordingBackend wraps backendFromRouter and records every RespondRequest the turn loop
+// sent. The per-turn footer (goal anchor, memories, worktree, open workflow runs, session
+// note) moved off the prose tail of the model request into STRUCTURED data (req.Turn /
+// req.Runtime) that the backend renders — so session-level footer tests assert on those
+// fields here, not on a system message in the conversation. It still inherits the message
+// forwarding of the embedded adapter, so a wrapped injectRouter.seen also observes the
+// per-round visible history.
+type recordingBackend struct {
+	backendFromRouter
+	mu   sync.Mutex
+	reqs []backend.RespondRequest
+}
+
+func (b *recordingBackend) RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	b.mu.Lock()
+	b.reqs = append(b.reqs, req)
+	b.mu.Unlock()
+	return b.backendFromRouter.RespondStream(ctx, req, cb)
+}
+
+// requests returns a copy of every recorded RespondRequest, in round order.
+func (b *recordingBackend) requests() []backend.RespondRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]backend.RespondRequest(nil), b.reqs...)
+}
+
+// turnAt returns the structured per-turn context the loop sent on round i (empty when the
+// round wasn't recorded or carried no turn block).
+func (b *recordingBackend) turnAt(i int) backend.TurnContext {
+	reqs := b.requests()
+	if i < 0 || i >= len(reqs) || reqs[i].Turn == nil {
+		return backend.TurnContext{}
+	}
+	return *reqs[i].Turn
+}
+
+// runtimeAt returns the structured runtime context the loop sent on round i (empty when
+// the round wasn't recorded or carried no runtime block).
+func (b *recordingBackend) runtimeAt(i int) backend.RuntimeContext {
+	reqs := b.requests()
+	if i < 0 || i >= len(reqs) || reqs[i].Runtime == nil {
+		return backend.RuntimeContext{}
+	}
+	return *reqs[i].Runtime
+}
+
+// recordingDeps builds session deps whose Backend is a recordingBackend over r, returning
+// both so a test can configure deps further before NewSession and then assert on the
+// recorded requests. The wrapped router still drives streaming/utility behavior.
+func recordingDeps(r Router, tr ToolRunner) (SessionDeps, *recordingBackend) {
+	be := &recordingBackend{backendFromRouter: backendFromRouter{r: r}}
+	deps := baseDeps(r, tr)
+	deps.Backend = be
+	return deps, be
 }
 
 // captureSink records think separation + tool-state promotions for assertions.
@@ -126,11 +352,13 @@ func toolCall(id, wireName, args string) models.ToolCallRequest {
 
 // --- tests ---
 
-func TestThinkSeparationOnFinalAnswer(t *testing.T) {
+func TestFinalAnswerSurfacedThroughAssistantEnd(t *testing.T) {
 	sink := &captureSink{}
-	// Final round: visible content + reasoning (the router already split <think>).
+	// Final round: visible content reaches AssistantEnd as the turn's reply. Reasoning is
+	// no longer separated by the session — the backend owns think handling, so the loop
+	// always passes an empty reasoning string to AssistantEnd.
 	r := &fakeRouter{
-		results: []models.ChatResult{{Content: "the visible answer", Reasoning: "the hidden plan"}},
+		results: []models.ChatResult{{Content: "the visible answer"}},
 	}
 	deps := baseDeps(r, &fakeTools{})
 	deps.Events = sink
@@ -143,8 +371,8 @@ func TestThinkSeparationOnFinalAnswer(t *testing.T) {
 	if reply != "the visible answer" {
 		t.Fatalf("reply = %q", reply)
 	}
-	if sink.endContent != "the visible answer" || sink.endReasoning != "the hidden plan" {
-		t.Fatalf("think not separated: content=%q reasoning=%q", sink.endContent, sink.endReasoning)
+	if sink.endContent != "the visible answer" {
+		t.Fatalf("final content not surfaced: content=%q", sink.endContent)
 	}
 }
 
@@ -174,43 +402,6 @@ func TestRepeatedFailureBreakerAborts(t *testing.T) {
 	// 3 identical failures abort: dispatched 3 times (one per round before abort).
 	if tools.dispatched != 3 {
 		t.Fatalf("dispatched %d times, want 3 (abort at 3rd identical failure)", tools.dispatched)
-	}
-}
-
-func TestLoadedSkillNeverLimitsCallableTools(t *testing.T) {
-	// A loaded skill must NEVER limit which tools the model can call: skills are
-	// guidance, not a capability gate. With a skill active, a call to a tool that is
-	// NOT in that skill's requiredTools (terminal.summarize) must still reach Dispatch
-	// and succeed — no TOOL_NOT_OFFERED refusal. The full registry is offered on every
-	// turn regardless of loaded skills.
-	tools := &fakeTools{result: domain.Ok("ok", nil)}
-	r := &fakeRouter{
-		results: []models.ChatResult{
-			{ToolCalls: []models.ToolCallRequest{toolCall("c1", "terminal__summarize", `{}`)}},
-			{Content: "done"},
-		},
-	}
-	s := skillSession(t, realRegistry(t), r, tools)
-	// Load a skill whose requiredTools does NOT include terminal.summarize.
-	s.mu.Lock()
-	s.activeSkills = []string{skills.IDSpawnAgentForEdits}
-	s.mu.Unlock()
-
-	reply, err := s.Send(context.Background(), "go", SendOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply != "done" {
-		t.Fatalf("reply = %q", reply)
-	}
-	if tools.dispatched != 1 {
-		t.Fatalf("a tool outside the skill's requiredTools must still dispatch; got %d dispatches", tools.dispatched)
-	}
-	// No TOOL_NOT_OFFERED refusal may appear — a skill never makes a tool uncallable.
-	for _, m := range s.Messages() {
-		if m.Role == "tool" && strings.Contains(m.StringContent, "TOOL_NOT_OFFERED") {
-			t.Fatal("a loaded skill must NOT refuse a tool with TOOL_NOT_OFFERED")
-		}
 	}
 }
 

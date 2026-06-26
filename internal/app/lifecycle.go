@@ -6,19 +6,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
 )
 
 // ConnectMcp connects the MCP transport, rolls up any tool drift to one log line,
-// and refreshes the session's runtime context.
+// and refreshes the startup context cache. The runtime context is sent fresh as
+// structured data on every backend round (built from PromptContext), so there is no
+// session message to rewrite here anymore.
 func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Connect(ctx)
 	a.logMcpCredentials(st)
@@ -27,7 +28,6 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	// Boot-only: reconcile the durable ledger against the live terminal inventory on
 	// the first successful connect (idempotency-guarded inside).
 	a.maybeReconcileLedger(ctx, st.Connected)
-	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
 }
 
@@ -40,7 +40,6 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	// If the initial connect never succeeded, the boot reconcile runs on this first
 	// successful (re)connect instead; the once-guard makes a later reconnect a no-op.
 	a.maybeReconcileLedger(ctx, st.Connected)
-	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return st
 }
 
@@ -230,7 +229,6 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 		OnAttention:     onAttention,
 	})
 	a.scheduler.Start(ctx)
-	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return a.scheduler
 }
 
@@ -260,7 +258,7 @@ func (a *App) daemonCtxFor(ctx context.Context, actor domain.ToolActor, actorID 
 		Store:        a.Store,
 		Queue:        daemonQueueAdapter{q: a.Queue},
 		MCP:          daemonMcpAdapter{c: a.MCP},
-		Model:        watcherModelAdapter{router: a.Router},
+		Model:        watcherModelAdapter{tasks: a.Backend},
 		MemoryWriter: a.Store,
 		SessionID:    a.SessionID,
 		ProjectPath:  a.Config.ProjectPath,
@@ -394,11 +392,10 @@ func (a daemonMcpAdapter) CallRead(ctx context.Context, name string, args map[st
 	return out, nil
 }
 
-// watcherModelAdapter satisfies daemon.WatcherModel using the small-model router +
-// the watcher/judge prompt builders. Both calls run at temperature 0 against the
-// watcher's tier. A model/decode failure degrades to the documented fallback
-// rather than propagating (the engine also treats a returned error defensively).
-type watcherModelAdapter struct{ router *models.Router }
+// watcherModelAdapter satisfies daemon.WatcherModel using the backend's server-owned
+// classify/judge tasks. A backend error degrades to the documented fallback rather
+// than propagating (the engine also treats a returned error defensively).
+type watcherModelAdapter struct{ tasks backend.TaskRunner }
 
 func (w watcherModelAdapter) Classify(ctx context.Context, in daemon.ClassifyInput) (domain.WatcherVerdict, error) {
 	fallback := domain.WatcherVerdict{
@@ -408,84 +405,54 @@ func (w watcherModelAdapter) Classify(ctx context.Context, in daemon.ClassifyInp
 		Evidence:          []string{},
 		RecommendedAction: domain.ActionNone,
 	}
-	user := prompts.BuildWatcherUserPrompt(prompts.WatcherUserArgs{
-		Goal:          in.Goal,
-		AgentState:    in.AgentState,
-		RuntimeStatus: in.RuntimeStatus,
-		LastOutputAt:  in.LastOutputAt,
-		Previous:      in.Previous,
-		Tail:          in.Tail,
+	out, err := backend.RunWatcherClassify(ctx, w.tasks, backend.WatcherClassifyInput{
+		Goal: in.Goal,
+		TerminalState: backend.TerminalState{
+			AgentState:    in.AgentState,
+			RuntimeStatus: in.RuntimeStatus,
+			LastOutputAt:  in.LastOutputAt,
+		},
+		PreviousClassification: in.Previous,
+		Tail:                   in.Tail,
 	})
-	raw, err := w.callJSON(ctx, in.Tier, prompts.WatcherSystemPrompt, user)
 	if err != nil {
 		return fallback, nil
 	}
-	v, err := models.DecodeWatcherVerdict(raw)
-	if err != nil {
-		return fallback, nil
+	evidence := out.Evidence
+	if evidence == nil {
+		evidence = []string{}
 	}
-	return v, nil
+	// Validate the classification against the known enum (the old DecodeWatcherVerdict
+	// did this) so an unexpected backend string can't flow into the watcher state machine
+	// as a bogus, non-terminal classification — default it to ClassUnknown.
+	classification := domain.WatcherClassification(out.Classification)
+	if !classification.IsValid() {
+		classification = domain.ClassUnknown
+	}
+	action := domain.RecommendedActionVerb(out.RecommendedAction)
+	if out.RecommendedAction == "" {
+		action = domain.ActionNone
+	}
+	return domain.WatcherVerdict{
+		Classification:    classification,
+		Confidence:        out.Confidence,
+		Summary:           out.Summary,
+		Evidence:          evidence,
+		RecommendedAction: action,
+	}, nil
 }
 
 func (w watcherModelAdapter) Judge(ctx context.Context, in daemon.JudgeInput) (domain.ModelJudgeAnswer, error) {
-	return judgeYesNo(ctx, w.router, in.Tier, prompts.JudgeUserArgs{
-		Question:      in.Question,
-		Goal:          in.Goal,
+	ans, err := judgeTerminal(ctx, w.tasks, in.Goal, in.Question, backend.TerminalState{
 		AgentState:    in.AgentState,
 		RuntimeStatus: in.RuntimeStatus,
 		WaitingReason: in.WaitingReason,
 		LastOutputAt:  in.LastOutputAt,
-		Tail:          in.Tail,
-	})
-}
-
-// judgeYesNo runs the shared byte-stable yes/no terminal judge at temperature 0 and
-// decodes the {reason,confidence,matched} answer. BOTH the watcher adapter
-// (watcherModelAdapter.Judge) and the extraction adapter (extractionRouterAdapter.Judge)
-// route through this ONE implementation, so the small model is always asked through
-// the identical JudgeSystemPrompt at the identical tier — the two consumers cannot
-// drift on prompt text, tier, or decode. A model or decode failure degrades to the
-// documented fallback (confidence 0.3, not matched) rather than propagating; the
-// callers also treat a returned error defensively.
-func judgeYesNo(ctx context.Context, router *models.Router, tier domain.ModelTier, args prompts.JudgeUserArgs) (domain.ModelJudgeAnswer, error) {
-	fallback := domain.ModelJudgeAnswer{
-		Reason:     "Could not evaluate the question.",
-		Confidence: 0.3,
-		Matched:    false,
-	}
-	temp := 0.0
-	raw, err := router.JSON(ctx, tier, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", prompts.JudgeSystemPrompt),
-			models.TextMessage("user", prompts.BuildJudgeUserPrompt(args)),
-		},
-		Temperature: &temp,
-	})
+	}, in.Tail)
 	if err != nil {
-		return fallback, nil
-	}
-	ans, err := models.DecodeModelJudgeAnswer(raw)
-	if err != nil {
-		return fallback, nil
+		return domain.ModelJudgeAnswer{Reason: "Could not evaluate the question.", Confidence: 0.3, Matched: false}, nil
 	}
 	return ans, nil
-}
-
-// callJSON runs one temperature-0 JSON request with a system+user prompt. These
-// run on daemon goroutines, off any user turn — their usage accumulates in the
-// SAME shared Router meter and is attributed to whichever turn's emitUsage drains
-// it next (an idle session with no following turn simply discards it). That
-// approximate per-turn attribution is the accepted trade-off for a running
-// session-cost estimate (see internal/models/usage.go).
-func (w watcherModelAdapter) callJSON(ctx context.Context, tier domain.ModelTier, system, user string) (string, error) {
-	temp := 0.0
-	return w.router.JSON(ctx, tier, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", system),
-			models.TextMessage("user", user),
-		},
-		Temperature: &temp,
-	})
 }
 
 // itoa is a tiny base-10 int formatter shared across the app package (avoids a

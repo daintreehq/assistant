@@ -34,7 +34,7 @@ import (
 // It is gated behind `//go:build pty` (run via `make test-pty`), skipped under
 // -short, and skips under -race via buildBinary (a separate non-instrumented
 // process adds no race coverage). It never touches the network — the binary talks
-// to an in-process fake DeepSeek SSE server, the same seam binary_test.go uses.
+// to an in-process fake Daintree backend SSE server, the same seam binary_test.go uses.
 
 const (
 	// composerGlyph is the prompt glyph the live composer renders; its presence in
@@ -83,7 +83,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		round2 = append(round2, fmt.Sprintf("Filler %d of the second batch streamed and settled.\n\n", i))
 	}
 	round2 = append(round2, "Wrapped up "+sentinel+" now.\n\n")
-	fake := newFakeDeepSeek(t,
+	fake := newFakeBackend(t,
 		sseRound{
 			contentTokens: round1,
 			toolName:      "memory__list",
@@ -112,7 +112,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
@@ -287,7 +287,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 
 	// One scripted round: the submit fires a single model request (no tool call), which
 	// streams a short reply ending in the sentinel.
-	fake := newFakeDeepSeek(t,
+	fake := newFakeBackend(t,
 		sseRound{
 			contentTokens: []string{"Got the briefing. ", "Wrapped up " + sentinel + " now.\n\n"},
 			usage:         &fakeUsage{prompt: 80, completion: 8, total: 88},
@@ -305,7 +305,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
@@ -474,7 +474,7 @@ func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
 	}
 	tokens = append(tokens, "and it wraps on and on.\n\n", "All "+sentinel+" wrapped up.\n\n")
 
-	fake := newFakeDeepSeek(t, sseRound{
+	fake := newFakeBackend(t, sseRound{
 		contentTokens: tokens,
 		tokenDelay:    15 * time.Millisecond, // ~1.7s stream so we can observe it mid-flight
 		usage:         &fakeUsage{prompt: 40, completion: 110, total: 150},
@@ -493,7 +493,7 @@ func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
@@ -658,7 +658,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 	)
 	tokens = append(tokens, "\nThat is the full ", sentinel+" summary.\n\n")
 
-	fake := newFakeDeepSeek(t, sseRound{
+	fake := newFakeBackend(t, sseRound{
 		contentTokens: tokens,
 		tokenDelay:    40 * time.Millisecond, // slow enough to observe the list mid-stream, pre-seal
 		usage:         &fakeUsage{prompt: 40, completion: 90, total: 130},
@@ -677,7 +677,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 	}
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
-		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",

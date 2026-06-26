@@ -6,28 +6,16 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
+// controlRows is retained as the prefix these rehydration fixtures historically prepended
+// to their working rows. In the new model the CLI holds NO client-side control prefix (the
+// backend owns the system prompt + skills), so a persisted conversation begins with
+// user/assistant/tool rows — there are no leading system control rows. The helper therefore
+// contributes nothing now; the fixtures that build on it exercise the same working-row +
+// marker logic with the working rows simply starting at their existing seq offsets.
 func controlRows() []domain.ConversationMessageRecord {
-	return []domain.ConversationMessageRecord{
-		msgRow(0, "system", "You are Daintree Assistant"),
-		msgRow(1, "system", "# Runtime context"),
-		msgRow(2, "system", "# Loaded skills"),
-	}
-}
-
-func TestRehydrateOnlyControlRowsEmptyHistory(t *testing.T) {
-	res, ok := RehydrateSession(controlRows())
-	if !ok {
-		t.Fatal("control-only session should resume (ok=true), not start fresh")
-	}
-	if len(res.RestoredMessages) != 0 {
-		t.Fatalf("restored %d want 0", len(res.RestoredMessages))
-	}
-	if res.InitialSeq != 3 {
-		t.Fatalf("initialSeq = %d want 3", res.InitialSeq)
-	}
+	return nil
 }
 
 func TestRehydrateKeepsOnlyLatestSummary(t *testing.T) {
@@ -226,19 +214,15 @@ func TestRehydrateLargeRowSetInitialSeq(t *testing.T) {
 // non-nil RestoredMessages (even empty) is the resume discriminator.
 func resumeDeps(t *testing.T, store *recordingStore, restore RehydrateResult) SessionDeps {
 	t.Helper()
-	reg, err := skills.BuiltinRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
 	restored := restore.RestoredMessages
 	if restored == nil {
 		restored = []models.ChatMessage{}
 	}
+	r := plainRouter()
 	return SessionDeps{
-		Router:           plainRouter(),
+		Backend:          backendFromRouter{r: r},
+		Router:           r,
 		Tools:            &fakeTools{},
-		SkillSelector:    fakeSelector{},
-		SkillCatalog:     reg,
 		Store:            store,
 		SessionID:        "ses_resume",
 		Events:           NoopEventSink{},
@@ -247,9 +231,9 @@ func resumeDeps(t *testing.T, store *recordingStore, restore RehydrateResult) Se
 	}
 }
 
-func TestResumeRebuildsControlsFreshNotRepersisted(t *testing.T) {
+func TestResumeRestoresWorkingHistoryNotRepersisted(t *testing.T) {
 	store := &recordingStore{}
-	// First run: write 3 controls + 2 notes into the recording store.
+	// First run: write 2 notes into the recording store (no control prefix anymore).
 	first := newOnStore(t, store)
 	first.InjectNote("one")
 	first.InjectNote("two")
@@ -263,16 +247,15 @@ func TestResumeRebuildsControlsFreshNotRepersisted(t *testing.T) {
 	resumed := NewSession(resumeDeps(t, store, restore))
 
 	msgs := resumed.Messages()
-	if len(msgs) != 5 {
-		t.Fatalf("resumed messages = %d want 5 (3 controls + 2 notes)", len(msgs))
+	// A resumed session restores exactly the working history — user/assistant/tool rows,
+	// no leading control prefix to rebuild.
+	if len(msgs) != 2 {
+		t.Fatalf("resumed messages = %d want 2 (the 2 notes)", len(msgs))
 	}
-	if !strings.Contains(msgs[1].StringContent, "# Runtime context") {
-		t.Fatal("controls should be rebuilt fresh")
+	if !strings.Contains(msgs[0].StringContent, "one") || !strings.Contains(msgs[1].StringContent, "two") {
+		t.Fatalf("restored notes wrong: %+v", msgs)
 	}
-	if !strings.Contains(msgs[3].StringContent, "one") || !strings.Contains(msgs[4].StringContent, "two") {
-		t.Fatalf("restored notes wrong: %+v", msgs[3:])
-	}
-	// Resume must NOT re-persist the 3 control rows.
+	// Resume must NOT re-persist the restored rows.
 	if len(store.msgs) != firstRowCount {
 		t.Fatalf("resume re-persisted rows: %d != %d", len(store.msgs), firstRowCount)
 	}
@@ -302,17 +285,13 @@ func TestResumeIsIdempotentNoDBGrowth(t *testing.T) {
 // newOnStore builds a fresh (non-resumed) session that persists to the given store.
 func newOnStore(t *testing.T, store *recordingStore) *Session {
 	t.Helper()
-	reg, err := skills.BuiltinRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := plainRouter()
 	return NewSession(SessionDeps{
-		Router:        plainRouter(),
-		Tools:         &fakeTools{},
-		SkillSelector: fakeSelector{},
-		SkillCatalog:  reg,
-		Store:         store,
-		SessionID:     "ses_resume",
-		Events:        NoopEventSink{},
+		Backend:   backendFromRouter{r: r},
+		Router:    r,
+		Tools:     &fakeTools{},
+		Store:     store,
+		SessionID: "ses_resume",
+		Events:    NoopEventSink{},
 	})
 }

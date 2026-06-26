@@ -10,10 +10,10 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // Exercises handleUiCommand + the disconnected /doctor probe. Builds an offline
@@ -38,6 +38,10 @@ func newOfflineApp(t *testing.T) *app.App {
 			ProjectPath: strPtr(dir),
 			Tier:        strPtr("operator"),
 		},
+		// Inject a scripted backend so backend-backed commands (/compact via
+		// RunCheckpoint + RunMemoryDistill) resolve deterministically and OFFLINE —
+		// the real client would otherwise reach for the hardcoded local endpoint.
+		BackendOverride: fakeBackend{},
 	})
 	if err != nil {
 		t.Fatalf("app.Create: %v", err)
@@ -393,22 +397,58 @@ func TestUIClearResetsSession(t *testing.T) {
 
 // --- #5: /clear is rejected (not desynced) while a turn is in flight ---
 
-// blockStreamRouter holds Stream until release is closed, keeping the session's
-// inFlight set so Session.Clear() returns ErrTurnInProgress.
-type blockStreamRouter struct{ release <-chan struct{} }
+// fakeBackend is a scripted Daintree backend for the commands tests. It satisfies the
+// full backend.Backend surface (so newOfflineApp can inject it via
+// app.CreateOptions.BackendOverride) and, by subset, agent.AssistantBackend (so a
+// hand-built Session can drive it). RespondStream optionally BLOCKS on `release`,
+// holding a turn in flight so the /clear-during-a-turn guard can be exercised; RunTask
+// returns scripted checkpoint/distill outputs so the /compact path resolves offline.
+type fakeBackend struct {
+	// release, when non-nil, makes RespondStream block until it is closed (or ctx is
+	// cancelled) — the in-flight-turn fixture that keeps Session.inFlight set so
+	// Session.Clear() returns ErrTurnInProgress. nil ⇒ RespondStream returns at once.
+	release <-chan struct{}
+}
 
-func (r blockStreamRouter) Stream(ctx context.Context, _ domain.ModelTier, _ models.ChatOptions, _ func(string)) (models.ChatResult, error) {
-	select {
-	case <-r.release:
-	case <-ctx.Done():
+func (f fakeBackend) RespondStream(ctx context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return backend.RespondResult{}, ctx.Err()
+		}
 	}
-	return models.ChatResult{Content: "done"}, nil
+	// Mirror the production backendconv flow: meta first (state token), then content.
+	if cb.OnMeta != nil {
+		cb.OnMeta(backend.StreamMeta{State: "s1"})
+	}
+	if cb.OnContent != nil {
+		cb.OnContent("done")
+	}
+	return backend.RespondResult{
+		Meta:    backend.StreamMeta{State: "s1"},
+		Message: backend.RespondMessage{Role: "assistant", Content: "done"},
+	}, nil
 }
-func (blockStreamRouter) Chat(context.Context, domain.ModelTier, models.ChatOptions) (models.ChatResult, error) {
-	return models.ChatResult{Content: "s"}, nil
+
+func (fakeBackend) RunTask(_ context.Context, req backend.TaskRequest) (backend.TaskResult, error) {
+	out := json.RawMessage(`{}`)
+	switch req.Task {
+	case backend.TaskCheckpoint:
+		out = json.RawMessage(`{"goal":"compacted"}`)
+	case backend.TaskMemoryDistill:
+		out = json.RawMessage(`{"facts":[]}`)
+	}
+	return backend.TaskResult{Task: req.Task, Output: out}, nil
 }
-func (blockStreamRouter) ModelFor(domain.ModelTier) string { return "m" }
-func (blockStreamRouter) FlushMeter() []models.TierUsage   { return nil }
+
+func (fakeBackend) Capabilities(context.Context) (backend.Capabilities, error) {
+	return backend.Capabilities{}, nil
+}
+func (fakeBackend) Version(context.Context) (backend.Version, error) { return backend.Version{}, nil }
+func (fakeBackend) Health(context.Context) error                     { return nil }
+func (fakeBackend) Ready(context.Context) error                      { return nil }
+func (fakeBackend) BaseURL() string                                  { return "http://fake-backend" }
 
 // noopRunner satisfies agent.ToolRunner with no tools (the turn never dispatches).
 type noopRunner struct{}
@@ -419,29 +459,14 @@ func (noopRunner) Dispatch(context.Context, string, string, agent.TurnContext) d
 	return domain.Ok("ok", nil)
 }
 
-// noopSelector / noopCatalog satisfy the skill seams with empty results.
-type noopSelector struct{}
-
-func (noopSelector) Select(context.Context, []skills.SkillMetadata, string) (skills.SkillSelection, error) {
-	return skills.SkillSelection{}, nil
-}
-
-type noopCatalog struct{}
-
-func (noopCatalog) MetadataForSelection() []skills.SkillMetadata { return nil }
-func (noopCatalog) GetMany([]string) []skills.Skill              { return nil }
-func (noopCatalog) Has(string) bool                              { return false }
-
 func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	a := newOfflineApp(t)
 	release := make(chan struct{})
 	// Swap in a session whose turn blocks (inFlight stays set) so /clear races a turn.
 	a.Session = agent.NewSession(agent.SessionDeps{
-		Router:        blockStreamRouter{release: release},
-		Tools:         noopRunner{},
-		SkillSelector: noopSelector{},
-		SkillCatalog:  noopCatalog{},
-		SessionID:     "sess_test",
+		Backend:   fakeBackend{release: release},
+		Tools:     noopRunner{},
+		SessionID: "sess_test",
 	})
 	a.Session.InjectNote("important history")
 	historyBefore := len(a.Session.Messages())
@@ -487,61 +512,20 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	}
 }
 
-// blockedSessionApp swaps in a session whose turn blocks (inFlight stays set),
-// runs the turn on a goroutine, and waits until it is actually in flight. Returns
-// the release func + a waiter; the caller closes/waits to settle the turn. Mirrors
-// the setup in TestUIClearRejectedDuringActiveTurn.
-func blockedSessionApp(t *testing.T) (*app.App, func()) {
-	t.Helper()
+// TestUISkillsInformational: skill selection is now SERVER-OWNED — there is no local
+// catalog to browse, find, or load, so /skills (with or without a subcommand) is a
+// static informational card. It must never fall through to unknown-command and must
+// point the user at the backend-managed selector.
+func TestUISkillsInformational(t *testing.T) {
 	a := newOfflineApp(t)
-	release := make(chan struct{})
-	a.Session = agent.NewSession(agent.SessionDeps{
-		Router:        blockStreamRouter{release: release},
-		Tools:         noopRunner{},
-		SkillSelector: noopSelector{},
-		SkillCatalog:  noopCatalog{},
-		SessionID:     "sess_test",
-	})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, _ = a.Session.Send(context.Background(), "go", agent.SendOptions{})
-	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for a.Session.Clear() == nil {
-		if time.Now().After(deadline) {
-			close(release)
-			wg.Wait()
-			t.Fatal("turn never became in-flight")
+	for _, line := range []string{"/skills", "/skills clear", "/skills load daintree.orchestration.basic"} {
+		r := ui(a, line)
+		if !r.Handled || r.Title != "Skills" {
+			t.Fatalf("%s not handled as the Skills card: %+v", line, r)
 		}
-		time.Sleep(time.Millisecond)
-	}
-	settle := func() { close(release); wg.Wait() }
-	return a, settle
-}
-
-// A turn-in-progress must REJECT (not silently succeed) the session-mutating slash
-// commands whose underlying Session.SetSkills returns ErrTurnInProgress: /skills
-// clear and /skills load. Previously each reported success regardless, desyncing
-// the UI from a session that never changed. (/compact shares the identical guard
-// but can't be exercised here: compactRun calls the model FIRST, which the offline
-// router fails before the in-flight Session.Compact check is reached.)
-func TestUISkillsRejectedDuringActiveTurn(t *testing.T) {
-	// /skills load needs a REAL skill id so the handler reaches SetSkills rather than
-	// short-circuiting on "no known skill ids".
-	for _, line := range []string{"/skills clear", "/skills load daintree.orchestration.basic"} {
-		t.Run(line, func(t *testing.T) {
-			a, settle := blockedSessionApp(t)
-			defer settle()
-			r := ui(a, line)
-			if !r.Handled {
-				t.Fatalf("%s not handled", line)
-			}
-			if !strings.Contains(strings.ToLower(r.Text), "in progress") {
-				t.Errorf("%s during a live turn must report the turn is in progress, got: %q", line, r.Text)
-			}
-		})
+		if !strings.Contains(r.Text, "Daintree backend") {
+			t.Errorf("%s should explain skills are backend-managed, got: %q", line, r.Text)
+		}
 	}
 }
 

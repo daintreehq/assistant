@@ -1,11 +1,10 @@
-// Package skill holds the skill runbook tools: skill.find, skill.load,
-// skill.run.get, skill.step.advance. Skills are runbooks the model pulls on
-// demand (skill.find → small-model selector → inject). The run-state tools track
-// stepwise progress keyed to the live session so a multi-step runbook can resume.
+// Package skill holds the local skill RUN-STATE tools: skill.run.get and
+// skill.step.advance. These track stepwise progress keyed to the live session so a
+// multi-step runbook can resume.
 //
-// The core ToolContext does not expose skillSource/loadSkills/findSkills, so this
-// family takes them through Deps (consumer-defined interfaces) rather than
-// reaching into ToolContext.
+// Skill SELECTION (skill.find / skill.load) is NOT here: it is server-owned. The
+// backend's selector picks and injects runbooks; the CLI only records progress
+// through the steps the backend prompt directs the model to advance.
 package skill
 
 import (
@@ -21,37 +20,9 @@ import (
 )
 
 const (
-	codeInvalidArgs       = "INVALID_ARGS"
-	codeNoSession         = "SKILL_RUN_NO_SESSION"
-	codeFindUnavailable   = "SKILL_FIND_UNAVAILABLE"
-	codeFindFailed        = "SKILL_FIND_FAILED"
-	codeSourceUnavailable = "SKILL_SOURCE_UNAVAILABLE"
-	codeNotFound          = "SKILL_NOT_FOUND"
-	codeLoadUnavailable   = "SKILL_LOAD_UNAVAILABLE"
+	codeInvalidArgs = "INVALID_ARGS"
+	codeNoSession   = "SKILL_RUN_NO_SESSION"
 )
-
-// SkillInfo is a read-only library view of a skill.
-type SkillInfo struct {
-	ID      string `json:"id"`
-	Title   string `json:"title"`
-	Summary string `json:"summary"`
-}
-
-// SkillFindResult is the NL→skills resolution. matched=false is a normal "no
-// match" (not an error); ok=false is a genuine failure.
-type SkillFindResult struct {
-	OK             bool        `json:"ok"`
-	Matched        bool        `json:"matched"`
-	Selected       []SkillInfo `json:"selected"`
-	Reason         string      `json:"reason,omitempty"`
-	ActiveSkillIDs []string    `json:"activeSkillIds"`
-}
-
-// SkillSource is the read-only skill library (skill.load reads it). nil ⇒
-// SKILL_SOURCE_UNAVAILABLE.
-type SkillSource interface {
-	Get(id string) (*SkillInfo, bool)
-}
 
 // SkillStore is the slice of storage the run-state tools touch. Natural key is
 // (sessionId, skillId).
@@ -64,15 +35,13 @@ type SkillStore interface {
 // Deps is the dependency set for the skill family. Any of these may be nil; the
 // corresponding tool then returns its specific "unavailable" code (so a stripped
 // test/non-main context fails gracefully rather than panicking).
+//
+// skill.find / skill.load are NOT part of this family anymore: skill selection is
+// server-owned (the backend's selector picks and injects runbooks), so the CLI only
+// keeps the local run-state tools (skill.run.get / skill.step.advance) the backend
+// prompt drives.
 type Deps struct {
 	Store SkillStore
-	// Source is the read-only skill library for skill.load.
-	Source SkillSource
-	// LoadSkills merges skill ids mid-turn (main actor only). Returns the new
-	// active skill id set. nil ⇒ SKILL_LOAD_UNAVAILABLE.
-	LoadSkills func(ids []string) []string
-	// FindSkills resolves NL → skills (main actor only). nil ⇒ SKILL_FIND_UNAVAILABLE.
-	FindSkills func(ctx context.Context, query string) (SkillFindResult, error)
 	// CheckConsistency optionally runs a small-tier judge over a skill.step.advance
 	// transition and returns its verdict — surfacing semantically-wrong Director
 	// decisions (a bad jump, a regression, a premature finish) that a clean ok=true
@@ -104,153 +73,12 @@ type ConsistencyCheckInput struct {
 	AfterSteps      []domain.SkillStepProgress
 }
 
-// Tools returns the skill tool family.
+// Tools returns the skill run-state tool family (skill.run.get / skill.step.advance).
+// Selection (skill.find / skill.load) is server-owned and intentionally absent.
 func Tools(deps Deps) []*tools.Tool {
 	return []*tools.Tool{
-		newFindTool(deps),
-		newLoadTool(deps),
 		newRunGetTool(deps),
 		newStepAdvanceTool(deps),
-	}
-}
-
-// --- skill.find ---
-
-type findArgs struct {
-	Query string `json:"query"`
-}
-
-var findSchema = json.RawMessage(`{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["query"],
-  "properties": { "query": { "type": "string", "minLength": 1 } }
-}`)
-
-func newFindTool(deps Deps) *tools.Tool {
-	return &tools.Tool{
-		Name:        "skill.find",
-		Description: "Find and inject the most relevant skill runbook(s) for a natural-language query.",
-		Risk:        domain.RiskRead,
-		Schema:      findSchema,
-		Decode:      tools.StrictDecoder(func() any { return &findArgs{} }),
-		Handle: func(ctx context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a findArgs
-			if err := tools.DecodeStrict(args, &a); err != nil {
-				return tools.Fail(codeInvalidArgs, "Invalid arguments for skill.find: "+err.Error())
-			}
-			query := strings.TrimSpace(a.Query)
-			if query == "" {
-				return tools.Fail(codeInvalidArgs, "skill.find: query is required")
-			}
-			if deps.FindSkills == nil {
-				return tools.Fail(codeFindUnavailable, "skill.find is not available in this context.", tools.Unrecoverable())
-			}
-			result, err := deps.FindSkills(ctx, query)
-			if err != nil {
-				return tools.Fail(codeFindFailed, "skill.find failed: "+err.Error())
-			}
-			if !result.OK {
-				reason := result.Reason
-				if reason == "" {
-					reason = "skill selection failed"
-				}
-				return tools.Fail(codeFindFailed, "skill.find failed: "+reason)
-			}
-			active := result.ActiveSkillIDs
-			if active == nil {
-				active = []string{}
-			}
-			if !result.Matched {
-				return tools.Ok("No skill matched the query.", map[string]any{
-					"query":          query,
-					"selected":       []any{},
-					"reason":         result.Reason,
-					"activeSkillIds": active,
-				})
-			}
-			return tools.Ok(loadedSkillsSummary(result.Selected), map[string]any{
-				"query":          query,
-				"selected":       result.Selected,
-				"reason":         result.Reason,
-				"activeSkillIds": active,
-			})
-		},
-	}
-}
-
-// loadedSkillsSummary renders the result gist for a successful skill.find: the
-// title(s) of the skill(s) just loaded, comma-joined. The cockpit shows this as the
-// "Loading skill" row's detail (internal/ui/render_activity.go), and the model reads
-// it as the tool-result summary — so it names what was actually pulled rather than a
-// bare count. Callers only reach here on a match, so the slice is non-empty.
-func loadedSkillsSummary(sel []SkillInfo) string {
-	titles := make([]string, 0, len(sel))
-	for _, s := range sel {
-		titles = append(titles, skillTitle(s.Title, s.ID))
-	}
-	return strings.Join(titles, ", ")
-}
-
-// skillTitle is the title, falling back to the id when a skill has no title (so a
-// row/summary is never blank).
-func skillTitle(title, id string) string {
-	if t := strings.TrimSpace(title); t != "" {
-		return t
-	}
-	return id
-}
-
-// --- skill.load ---
-
-type loadArgs struct {
-	SkillID string `json:"skillId"`
-}
-
-var loadSchema = json.RawMessage(`{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["skillId"],
-  "properties": { "skillId": { "type": "string", "minLength": 1 } }
-}`)
-
-func newLoadTool(deps Deps) *tools.Tool {
-	return &tools.Tool{
-		Name:        "skill.load",
-		Description: "Load a specific skill runbook by id into the active set.",
-		Risk:        domain.RiskRead,
-		Schema:      loadSchema,
-		Decode:      tools.StrictDecoder(func() any { return &loadArgs{} }),
-		Handle: func(_ context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a loadArgs
-			if err := tools.DecodeStrict(args, &a); err != nil {
-				return tools.Fail(codeInvalidArgs, "Invalid arguments for skill.load: "+err.Error())
-			}
-			id := strings.TrimSpace(a.SkillID)
-			if id == "" {
-				return tools.Fail(codeInvalidArgs, "skill.load: skillId is required")
-			}
-			if deps.Source == nil {
-				return tools.Fail(codeSourceUnavailable, "skill.load is not available in this context.", tools.Unrecoverable())
-			}
-			info, ok := deps.Source.Get(id)
-			if !ok || info == nil {
-				return tools.Fail(codeNotFound, "skill.load: no such skill: "+id)
-			}
-			if deps.LoadSkills == nil {
-				return tools.Fail(codeLoadUnavailable, "skill.load cannot inject skills in this context.", tools.Unrecoverable())
-			}
-			active := deps.LoadSkills([]string{id})
-			if active == nil {
-				active = []string{}
-			}
-			return tools.Ok(skillTitle(info.Title, info.ID), map[string]any{
-				"id":             info.ID,
-				"title":          info.Title,
-				"summary":        info.Summary,
-				"activeSkillIds": active,
-			})
-		},
 	}
 }
 

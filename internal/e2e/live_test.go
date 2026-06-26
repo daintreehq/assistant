@@ -5,73 +5,89 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
-// TestLiveDeepSeekOneShot is the ONE test that proves a real model round-trip
-// actually works end-to-end: it builds the real binary, runs `--json "<prompt>"`
-// against the REAL DeepSeek API (the default large model, no DEEPSEEK_BASE_URL
-// override), with NO Daintree MCP, and asserts the JSONL schema-v1 stream came
-// back well-formed with non-empty assistant content over the wire.
+// liveBackendURL is the local development backend the live test targets. The CLI's
+// hardcoded dev endpoint (backend.DefaultBaseURL) is this address; a developer runs the
+// backend here, and the live test reaches it WITHOUT a DAINTREE_BACKEND_URL override.
+const liveBackendURL = backend.DefaultBaseURL // http://127.0.0.1:8473
+
+// backendReachable probes the backend's liveness endpoint with a short deadline.
+// Returns false (skip the live test) when nothing is listening — so the suite passes
+// offline, on CI, and on a contributor's laptop where the backend isn't running.
+func backendReachable(url string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 500
+}
+
+// TestLiveBackendOneShot is the ONE test that proves a real end-to-end turn against the
+// live Daintree backend actually works: it builds the real binary, runs
+// `--json "<prompt>"` against the REAL backend on 127.0.0.1:8473 (no DAINTREE_BACKEND_URL
+// override → the hardcoded dev endpoint), with NO Daintree MCP, and asserts the JSONL
+// schema-v1 stream came back well-formed with non-empty assistant content over the wire.
 //
-// GATING (why it is so defensive): this test makes a billable network call to a
-// third party. It MUST NOT run on a normal `go test ./...` / CI / a contributor's
-// laptop and silently spend money or flake on a network hiccup. So it is opt-in
-// on FOUR independent guards, each of which skips (never fails) when not met:
+// GATING (so the suite passes offline). It is opt-in on independent guards, each of
+// which SKIPS (never fails) when not met:
 //
-//  1. DAINTREE_E2E_LIVE=1 — explicit opt-in. Absent → skip. This is the master
-//     switch; without it the live test never touches the network.
-//  2. DEEPSEEK_API_KEY present in the real env — no key, nothing to authenticate
-//     with, so skip rather than emit a confusing auth error.
-//  3. -short mode — `go test -short` is the "fast, no-network" contract; honor it.
-//  4. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
+//  1. -short mode — `go test -short` is the "fast, no-network" contract; honor it.
+//  2. backend reachability — if nothing answers /healthz on the dev endpoint, skip.
+//     This is what keeps the suite green offline / on CI / on a laptop with no backend.
+//  3. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
 //     process, so -race adds no coverage and only flakes under load.
 //
-// ASSERTIONS are STRUCTURAL, never on exact text. Model output is nondeterministic
-// (and the prompt asks for "pong", but models drift/embellish), so we prove the
-// PIPE works — exit 0, pure JSONL, monotonic seq, a terminal success envelope, and
-// at least one chunk of non-empty assistant text — not that any specific tokens
-// came back.
-func TestLiveDeepSeekOneShot(t *testing.T) {
-	// Guard 3: the fast/no-network contract.
+// ASSERTIONS are STRUCTURAL, never on exact text. Model output is nondeterministic, so we
+// prove the PIPE works — exit 0, pure JSONL, monotonic seq, a terminal success envelope,
+// and at least one chunk of non-empty assistant text — not that specific tokens came back.
+func TestLiveBackendOneShot(t *testing.T) {
+	// Guard 1: the fast/no-network contract.
 	if testing.Short() {
-		t.Skip("live DeepSeek e2e skipped in -short mode")
+		t.Skip("live backend e2e skipped in -short mode")
 	}
-	// Guard 1: the master opt-in switch. Keep money/network off by default.
-	if os.Getenv("DAINTREE_E2E_LIVE") != "1" {
-		t.Skip("live DeepSeek e2e is opt-in; run with DAINTREE_E2E_LIVE=1 and a DEEPSEEK_API_KEY in the env " +
-			"(e.g. DAINTREE_E2E_LIVE=1 go test ./internal/e2e/ -run TestLiveDeepSeek -v -count=1)")
-	}
-	// Guard 2: no real key → nothing to call. Skip (not fail) so a misconfigured
-	// opt-in is obvious but non-fatal.
-	if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
-		t.Skip("live DeepSeek e2e requires DEEPSEEK_API_KEY in the environment; none set")
+	// Guard 2: nothing is serving the dev backend → skip so the suite stays green offline.
+	if !backendReachable(liveBackendURL) {
+		t.Skipf("live backend e2e requires a Daintree backend reachable at %s; none responded to /healthz", liveBackendURL)
 	}
 
-	// Guard 4 lives inside buildBinary(t): it t.Skip()s under -race.
+	// Guard 3 lives inside buildBinary(t): it t.Skip()s under -race.
 	bin := buildBinary(t)
 
-	// Generous deadline so a hung socket fails CLEANLY (the process is killed and
-	// we report) rather than blocking the suite until the global test timeout.
+	// Generous deadline so a hung socket fails CLEANLY (the process is killed and we
+	// report) rather than blocking the suite until the global test timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// A tiny, cheap, tool-free prompt: a single short reply needs no project tool,
-	// so the turn is one model round-trip → minimal tokens, minimal cost. We do NOT
-	// assert on the word "pong" — only that real content streamed back.
+	// A tiny, cheap, tool-free prompt: a single short reply needs no project tool, so the
+	// turn is one backend round-trip. We do NOT assert on the word "pong" — only that real
+	// content streamed back.
 	cmd := exec.CommandContext(ctx, bin, "--json", "Reply with exactly the word: pong, nothing else.")
 
-	// Inherit the real environment FIRST (this carries the real DEEPSEEK_API_KEY),
-	// then layer the test-isolation overrides. Crucially we do NOT set
-	// DEEPSEEK_BASE_URL (so it hits the real default DeepSeek endpoint) and do NOT
-	// set DAINTREE_ASSISTANT_OFFLINE (offline mode would short-circuit the call).
+	// Inherit the real environment FIRST, then layer the test-isolation overrides.
+	// Crucially we do NOT set DAINTREE_BACKEND_URL (so it hits the real default dev
+	// endpoint) and do NOT set DAINTREE_ASSISTANT_OFFLINE (offline would short-circuit
+	// the call). DEEPSEEK_API_KEY is a placeholder only to clear the CLI's vestigial
+	// one-shot key gate (cli/run.go) — the backend, not the CLI, holds the real model key.
 	cmd.Env = append(os.Environ(),
-		"DAINTREE_MCP_URL=",                         // no MCP → clean degraded local mode, no Daintree dependency
-		"DAINTREE_MCP_TOKEN=",                       // …and no stale token
+		"DAINTREE_MCP_URL=",   // no MCP → clean degraded local mode, no Daintree dependency
+		"DAINTREE_MCP_TOKEN=", // …and no stale token
+		"DEEPSEEK_API_KEY=placeholder-cli-gate-only",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(), // isolate the SQLite state per run
 		"DAINTREE_ASSISTANT_TIER=supervisor",        // read-only tier: safest, no mutating tools
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",            // keep stdout pure / no log files
@@ -83,9 +99,9 @@ func TestLiveDeepSeekOneShot(t *testing.T) {
 	runErr := cmd.Run()
 
 	// If the context deadline fired, surface that explicitly — it's the most likely
-	// "live" failure (network/auth hang) and the generic exit-code path would hide it.
+	// "live" failure (network hang) and the generic exit-code path would hide it.
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("live request exceeded 90s deadline (network/auth hang?)\nstderr:\n%s", stderr.String())
+		t.Fatalf("live request exceeded 90s deadline (backend hang?)\nstderr:\n%s", stderr.String())
 	}
 
 	exitCode := 0
@@ -153,10 +169,10 @@ func TestLiveDeepSeekOneShot(t *testing.T) {
 	}
 
 	// --- the model actually produced text over the wire ---
-	// Real content surfaces either as assistant:content lines (streamed prose) or as
-	// the authoritative `content` on assistant:end / the terminal result. We collect
-	// from all of them and assert the concatenation is non-empty — proof that bytes
-	// came back from DeepSeek, WITHOUT pinning the exact (nondeterministic) text.
+	// Real content surfaces either as assistant:content lines (streamed prose) or as the
+	// authoritative `content` on assistant:end / the terminal result. Collect from all and
+	// assert the concatenation is non-empty — proof that bytes came back from the backend,
+	// WITHOUT pinning the exact (nondeterministic) text.
 	var assistantText strings.Builder
 	for _, l := range lines {
 		switch l.Type {
@@ -166,14 +182,13 @@ func TestLiveDeepSeekOneShot(t *testing.T) {
 			}
 		}
 	}
-	// Fall back to the terminal result's content if nothing was on the content/end
-	// lines (defensive: the envelope always carries the final content).
+	// Fall back to the terminal result's content if nothing was on the content/end lines.
 	if strings.TrimSpace(assistantText.String()) == "" {
 		if c, ok := last.raw["content"].(string); ok {
 			assistantText.WriteString(c)
 		}
 	}
 	if strings.TrimSpace(assistantText.String()) == "" {
-		t.Errorf("no non-empty assistant content in the live stream — the model produced nothing over the wire.\ntypes: %v\nstderr:\n%s", types, stderr.String())
+		t.Errorf("no non-empty assistant content in the live stream — the backend produced nothing over the wire.\ntypes: %v\nstderr:\n%s", types, stderr.String())
 	}
 }

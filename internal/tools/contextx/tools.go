@@ -10,13 +10,6 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// Summarizer prompts. Kept byte-stable.
-const summarizerSystemPrompt = `You summarize terminal output for a developer's supervisor view. Be terse and factual. Never dump raw logs. Focus on: what the process is doing, any errors, any question it is asking, test results, and changed files. Output 1-4 short sentences plus, if relevant, a short bullet list of errors/files. Do not speculate beyond the provided text. Begin directly with the summary — no preamble, no restating the task.`
-
-func buildSummarizerUserPrompt(purpose, tail string) string {
-	return fmt.Sprintf("Purpose of this summary: %s\n\nTerminal output:\n\"\"\"\n%s\n\"\"\"\n\nSummarize.", purpose, tail)
-}
-
 /* ----------------------------- context.snapshot --------------------------- */
 
 var snapshotSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
@@ -161,35 +154,24 @@ func newSummarizeTool(deps Deps) tools.Tool {
 				purpose = fmt.Sprintf("Summarize terminal %s for the supervisor.", a.TerminalID)
 			}
 
-			// No output cap (maxTokens 0): the input tail is already bounded, so the
-			// summarizer must be free to emit the WHOLE summary rather than get cut
-			// off mid-sentence at an arbitrary token count. The small model self-limits
-			// to the terse summary its system prompt asks for.
-			res, cerr := deps.Router.Chat(ctx, domain.ModelSmall, []ChatMessage{
-				{Role: "system", Content: summarizerSystemPrompt},
-				{Role: "user", Content: buildSummarizerUserPrompt(purpose, tail)},
-			}, 0)
+			// The backend now owns the summarizer prompt and any output cap; the CLI
+			// sends only the purpose + bounded tail and relays the returned summary. With
+			// the prompt server-side the CLI no longer sees a finishReason, so it can no
+			// longer detect a token-cap truncation — it reports truncated=false.
+			summaryText, cerr := deps.Router.Summarize(ctx, purpose, tail)
 			if cerr != nil {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while summarizing terminal.", tools.Unrecoverable())
 				}
 				return tools.Fail(codeSummarize, fmt.Sprintf("Failed to summarize terminal %s: %s", a.TerminalID, cerr.Error()))
 			}
-			// With no output cap, a "length" finishReason is now rare — it can only mean
-			// the small model hit its OWN provider output limit (not a cap we set). Keep
-			// detecting it defensively and flag the gist as partial when it happens.
-			truncated := res.FinishReason == "length"
-			body := strings.TrimSpace(res.Content)
+			body := strings.TrimSpace(summaryText)
 			if body == "" {
 				body = "(no summary produced)"
 			}
-			note := ""
-			if truncated {
-				note = "⚠ This summary may be cut off: the small model reached its own output limit. Relay this gist as-is; only if you genuinely need the exact literal text, fall back to a bounded terminal.read.\n\n"
-			}
-			summary := note + body
+			summary := body
 			return tools.Ok(summary, map[string]any{
-				"terminalId": a.TerminalID, "purpose": purpose, "truncated": truncated, "summary": summary,
+				"terminalId": a.TerminalID, "purpose": purpose, "truncated": false, "summary": summary,
 			})
 		},
 	}

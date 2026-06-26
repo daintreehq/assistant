@@ -7,26 +7,31 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// routeRouter records which model surface was used (Chat vs JSON) so we can assert
-// format routing. judgeFn scripts the settle-gate finished confirmation; judgeCalls
-// counts how often it was consulted (so a test can assert the judge was NOT called
-// on a non-settle path).
+// routeRouter records which extraction task was used (ExtractText vs ExtractJSON)
+// so we can assert format routing. textRes/textTruncated script the text task;
+// jsonRes scripts the json task. judgeFn scripts the settle-gate finished
+// confirmation; judgeCalls counts how often it was consulted (so a test can assert
+// the judge was NOT called on a non-settle path).
 type routeRouter struct {
-	chatCalled bool
-	jsonCalled bool
-	chatRes    ChatResult
-	jsonRes    any
-	judgeFn    func(JudgeInput) domain.ModelJudgeAnswer
-	judgeCalls int
+	textCalled    bool
+	jsonCalled    bool
+	textRes       string
+	textTruncated bool
+	jsonRes       any
+	judgeFn       func(JudgeInput) domain.ModelJudgeAnswer
+	judgeCalls    int
 }
 
-func (r *routeRouter) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (ChatResult, error) {
-	r.chatCalled = true
-	return r.chatRes, nil
+func (r *routeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string) (string, bool, error) {
+	r.textCalled = true
+	return r.textRes, r.textTruncated, nil
 }
-func (r *routeRouter) JSON(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (any, error) {
+func (r *routeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any) (any, error) {
 	r.jsonCalled = true
 	return r.jsonRes, nil
+}
+func (r *routeRouter) Verdict(_ context.Context, _ string, _ string) (bool, string, error) {
+	return false, "", nil
 }
 func (r *routeRouter) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error) {
 	r.judgeCalls++
@@ -36,45 +41,45 @@ func (r *routeRouter) Judge(_ context.Context, in JudgeInput) (domain.ModelJudge
 	return domain.ModelJudgeAnswer{}, nil
 }
 
-// format=text routes through router.Chat (never JSON) and reports text.
-func TestRunExtractTextViaChat(t *testing.T) {
-	r := &routeRouter{chatRes: ChatResult{Content: "  extracted  "}}
+// format=text routes through ExtractText (never ExtractJSON) and reports text.
+func TestRunExtractTextViaExtractText(t *testing.T) {
+	r := &routeRouter{textRes: "  extracted  "}
 	core := &extractCore{terminalIDs: []string{"t1"}, instruction: "get it", format: "text", maxTokens: 100}
 	res, err := runExtract(context.Background(), Deps{Router: r}, core, "tail")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.chatCalled || r.jsonCalled {
-		t.Fatalf("text must use Chat only: chat=%v json=%v", r.chatCalled, r.jsonCalled)
+	if !r.textCalled || r.jsonCalled {
+		t.Fatalf("text must use ExtractText only: text=%v json=%v", r.textCalled, r.jsonCalled)
 	}
 	if res.text != "extracted" {
 		t.Fatalf("text trimmed: %q", res.text)
 	}
 }
 
-// format=json routes through router.JSON (never Chat) and carries the parsed value.
-func TestRunExtractJSONViaJSON(t *testing.T) {
+// format=json routes through ExtractJSON (never ExtractText) and carries the parsed value.
+func TestRunExtractJSONViaExtractJSON(t *testing.T) {
 	r := &routeRouter{jsonRes: map[string]any{"k": "v"}}
 	core := &extractCore{terminalIDs: []string{"t1"}, instruction: "get it", format: "json", jsonSchema: "{}", maxTokens: 100}
 	res, err := runExtract(context.Background(), Deps{Router: r}, core, "tail")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.chatCalled || !r.jsonCalled {
-		t.Fatalf("json must use JSON only: chat=%v json=%v", r.chatCalled, r.jsonCalled)
+	if r.textCalled || !r.jsonCalled {
+		t.Fatalf("json must use ExtractJSON only: text=%v json=%v", r.textCalled, r.jsonCalled)
 	}
 	if m, _ := res.json.(map[string]any); m["k"] != "v" {
 		t.Fatalf("json value not carried: %v", res.json)
 	}
 }
 
-// text extraction flags truncation on a length finishReason.
+// text extraction propagates the backend's truncated flag.
 func TestRunExtractTextFlagsTruncation(t *testing.T) {
-	r := &routeRouter{chatRes: ChatResult{Content: "partial", FinishReason: "length"}}
+	r := &routeRouter{textRes: "partial", textTruncated: true}
 	core := &extractCore{terminalIDs: []string{"t1"}, instruction: "x", format: "text", maxTokens: 10}
 	res, _ := runExtract(context.Background(), Deps{Router: r}, core, "tail")
 	if !res.truncated {
-		t.Fatal("length finishReason should flag truncation")
+		t.Fatal("a truncated extract should flag truncation")
 	}
 }
 

@@ -36,11 +36,11 @@ func (slowStreamRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" 
 func (slowStreamRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestConcurrentTurnAndCommandsRace runs a turn while other goroutines call
-// Messages/Artifacts/InjectNote (read/append) and Clear/Compact/SetSkills (mutating
-// commands) concurrently. Under `go test -race` this must be clean: every access is
-// under the session lock, the streaming turn reads an immutable snapshot, and the
-// mutating commands return ErrTurnInProgress (they never mutate mid-turn) so the
-// in-flight turn's history is never corrupted.
+// Messages/Artifacts/InjectNote (read/append) and Clear/Compact (mutating commands)
+// concurrently. Under `go test -race` this must be clean: every access is under the
+// session lock, the streaming turn reads an immutable snapshot, and the mutating
+// commands return ErrTurnInProgress (they never mutate mid-turn) so the in-flight
+// turn's history is never corrupted.
 func TestConcurrentTurnAndCommandsRace(t *testing.T) {
 	deps := baseDeps(slowStreamRouter{hold: 60 * time.Millisecond}, &fakeTools{})
 	s := NewSession(deps)
@@ -86,7 +86,6 @@ func TestConcurrentTurnAndCommandsRace(t *testing.T) {
 					mu.Unlock()
 				}
 				_ = s.Compact("x")
-				_ = s.SetSkills(nil)
 			}
 		}()
 	}

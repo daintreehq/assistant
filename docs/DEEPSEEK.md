@@ -1,4 +1,12 @@
-# DeepSeek AI — integration notes
+# DeepSeek AI — integration notes (HISTORICAL)
+
+> **SUPERSEDED.** The CLI no longer talks to DeepSeek directly. It now talks to the
+> **Daintree Assistant backend** (`../assistant-backend`, `POST /v1/daintree/respond`
+> + `/v1/daintree/tasks`), and the *backend* owns the DeepSeek credentials, the system
+> prompt, prompt assembly, skill selection, and the utility-model prompts. See
+> [`BACKEND.md`](BACKEND.md). The `internal/models` DeepSeek client described below is
+> legacy code retained transitionally; the assistant turn loop and all utility tasks go
+> through `internal/backend` now. This file is kept for historical reference only.
 
 The Daintree Assistant talks to **DeepSeek AI**, which is **wire-compatible with the
 OpenAI Chat Completions API**. `internal/models/deepseek.go` (`DeepSeekClient`) speaks

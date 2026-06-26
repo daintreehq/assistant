@@ -3,7 +3,6 @@ package skill
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -148,79 +147,4 @@ func TestRunGetNullStateAndSessionIsolation(t *testing.T) {
 	if !other.Ok || other.Result.(map[string]any)["state"] != nil {
 		t.Fatalf("another session must see no checkpoint, got %+v", other)
 	}
-}
-
-// skill.load: known → label, unknown → recoverable SKILL_NOT_FOUND, unavailable
-// inject (watcher context) → SKILL_LOAD_UNAVAILABLE.
-func TestSkillLoadKnownUnknownAndUnavailable(t *testing.T) {
-	source := fakeSource{"r.known": {ID: "r.known", Title: "Known Skill", Summary: "exists"}}
-	loaded := []string{}
-	deps := Deps{Source: source, LoadSkills: func(ids []string) []string { loaded = append(loaded, ids...); return ids }}
-	load := find(Tools(deps), "skill.load")
-
-	known := load.Handle(context.Background(), json.RawMessage(`{"skillId":"r.known"}`), &tools.ToolContext{})
-	if !known.Ok {
-		t.Fatalf("known load failed: %+v", known.Error)
-	}
-	m := known.Result.(map[string]any)
-	if m["title"] != "Known Skill" || len(loaded) != 1 || loaded[0] != "r.known" {
-		t.Fatalf("known load wrong: %+v loaded=%v", m, loaded)
-	}
-
-	unknown := load.Handle(context.Background(), json.RawMessage(`{"skillId":"r.missing"}`), &tools.ToolContext{})
-	if unknown.Ok || unknown.Error.Code != codeNotFound || unknown.Error.Recoverable != true {
-		t.Fatalf("unknown should be recoverable SKILL_NOT_FOUND, got %+v", unknown)
-	}
-
-	// No LoadSkills callback (e.g. a watcher) → SKILL_LOAD_UNAVAILABLE.
-	noInject := find(Tools(Deps{Source: source}), "skill.load")
-	unav := noInject.Handle(context.Background(), json.RawMessage(`{"skillId":"r.known"}`), &tools.ToolContext{})
-	if unav.Ok || unav.Error.Code != codeLoadUnavailable {
-		t.Fatalf("expected SKILL_LOAD_UNAVAILABLE, got %+v", unav)
-	}
-}
-
-// skill.find: empty selection is ok; a selector error is recoverable; an absent
-// FindSkills callback is SKILL_FIND_UNAVAILABLE.
-func TestSkillFindEmptyOkAndSelectorError(t *testing.T) {
-	empty := Deps{FindSkills: func(context.Context, string) (SkillFindResult, error) {
-		return SkillFindResult{OK: true, Matched: false, ActiveSkillIDs: []string{}}, nil
-	}}
-	res := find(Tools(empty), "skill.find").Handle(context.Background(), json.RawMessage(`{"query":"x"}`), &tools.ToolContext{})
-	if !res.Ok {
-		t.Fatalf("empty selection should be ok, got %+v", res.Error)
-	}
-
-	failed := Deps{FindSkills: func(context.Context, string) (SkillFindResult, error) {
-		return SkillFindResult{OK: false, Reason: "selector unavailable"}, nil
-	}}
-	res = find(Tools(failed), "skill.find").Handle(context.Background(), json.RawMessage(`{"query":"x"}`), &tools.ToolContext{})
-	if res.Ok || res.Error.Code != codeFindFailed || !res.Error.Recoverable {
-		t.Fatalf("selector failure should be recoverable SKILL_FIND_FAILED, got %+v", res)
-	}
-
-	errored := Deps{FindSkills: func(context.Context, string) (SkillFindResult, error) {
-		return SkillFindResult{}, errors.New("boom")
-	}}
-	res = find(Tools(errored), "skill.find").Handle(context.Background(), json.RawMessage(`{"query":"x"}`), &tools.ToolContext{})
-	if res.Ok || res.Error.Code != codeFindFailed {
-		t.Fatalf("selector error should be SKILL_FIND_FAILED, got %+v", res)
-	}
-
-	unav := find(Tools(Deps{}), "skill.find").Handle(context.Background(), json.RawMessage(`{"query":"x"}`), &tools.ToolContext{})
-	if unav.Ok || unav.Error.Code != codeFindUnavailable {
-		t.Fatalf("absent FindSkills should be SKILL_FIND_UNAVAILABLE, got %+v", unav)
-	}
-}
-
-// fakeSource is a read-only skill library keyed by id.
-type fakeSource map[string]SkillInfo
-
-func (f fakeSource) Get(id string) (*SkillInfo, bool) {
-	info, ok := f[id]
-	if !ok {
-		return nil, false
-	}
-	cp := info
-	return &cp, true
 }

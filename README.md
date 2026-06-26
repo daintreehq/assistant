@@ -8,15 +8,18 @@ them with cheap models, schedules timers, and keeps the human's main conversatio
 It is **not** a code editor. It never edits project files. When a change is needed it
 spawns a *visible* agent terminal inside Daintree and supervises it.
 
-Powered by **DeepSeek AI** (OpenAI-compatible Chat Completions over `net/http`):
-`deepseek-v4-flash` runs every tier — the main thread (orchestration) as well as
-watchers, summaries, and classification. Flash is the validated orchestration model;
-the loaded skills supply the playbooks, so a heavier main-thread model earned nothing.
-A `medium` tier exists in the routing abstraction and resolves to `large` in v1; any
-tier can be overridden with `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`.
+Powered by the **Daintree Assistant backend** — a Daintree-native HTTP API (not
+OpenAI-compatible). The CLI is a thin local runtime: it sends only the visible
+conversation, structured runtime/turn context, and its tool inventory; the backend owns
+the system prompt, developer instructions, **skill/runbook selection**, model choice,
+prompt assembly, and the upstream model credentials (DeepSeek, spoken internally). The
+CLI executes the local tool calls the backend asks for and streams the reply. See
+[`docs/BACKEND.md`](docs/BACKEND.md).
 
-> This prototype ships with built-in system prompts and talks to DeepSeek directly.
-> In the final product these are replaced by the hosted backend.
+> **Development:** the backend endpoint is hardcoded to `http://127.0.0.1:8473` and runs
+> unauthenticated. Run it locally from `../assistant-backend`
+> (`python -m daintree_assistant_server`). The assistant supports exactly this one
+> endpoint for now; a later phase swaps in the production URL and a real login flow.
 
 ## Build & install
 
@@ -37,12 +40,12 @@ go build -o bin/daintree-assistant ./cmd/daintree-assistant
 go install ./cmd/daintree-assistant                 # installs to $(go env GOPATH)/bin
 ```
 
-Then configure the API key and run:
+Start the backend (`../assistant-backend`, on `127.0.0.1:8473`), then run:
 
 ```bash
-cp .env.example .env      # set DEEPSEEK_API_KEY
-./bin/daintree-assistant            # interactive cockpit
-./bin/daintree-assistant doctor     # environment check (MCP / DeepSeek key / project / tier)
+# The CLI needs no model key — the backend owns the model credentials. Just run it:
+./bin/daintree-assistant            # interactive cockpit (backend must be reachable)
+./bin/daintree-assistant doctor     # environment check (backend / MCP / project / tier)
 ```
 
 `make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·

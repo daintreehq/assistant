@@ -9,7 +9,6 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -37,8 +36,8 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 		ProjectID:           cfg.ProjectID,
 		MCPConnected:        st.Connected,
 		MCPStatusLine:       mcpStatusLine(st),
-		LargeModel:          cfg.LargeModel,
-		SmallModel:          cfg.SmallModel,
+		MCPTransport:        st.Transport,
+		MCPToolCount:        st.ToolCount,
 		ConfiguredAgentIDs:  agentIDs,
 		SchedulerActive:     schedulerActive,
 		ProjectInstructions: cfg.ProjectInstructions,
@@ -227,37 +226,6 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 		}
 	}
 	return t.app.Registry.Dispatch(ctx, name, json.RawMessage(argsJSON), tctx)
-}
-
-// --- skillSelectorAdapter: agent.SkillSelector over skills.SelectSkills ---
-
-type skillSelectorAdapter struct{ router *models.Router }
-
-func (s skillSelectorAdapter) Select(ctx context.Context, candidates []skills.SkillMetadata, query string) (skills.SkillSelection, error) {
-	return skills.SelectSkills(ctx, jsonRouterAdapter{router: s.router}, candidates, query)
-}
-
-// jsonRouterAdapter bridges skills.JSONRouter (req+out) onto models.Router.JSON
-// (ChatOptions → JSON string). It maps the selector messages into ChatOptions,
-// pins temperature/maxTokens, calls the small tier, and unmarshals into out.
-type jsonRouterAdapter struct{ router *models.Router }
-
-func (j jsonRouterAdapter) JSON(ctx context.Context, tier domain.ModelTier, req skills.JSONRequest, out any) error {
-	msgs := make([]models.ChatMessage, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		msgs = append(msgs, models.TextMessage(m.Role, m.Content))
-	}
-	temp := req.Temperature
-	maxTok := req.MaxTokens
-	raw, err := j.router.JSON(ctx, tier, models.ChatOptions{
-		Messages:    msgs,
-		Temperature: &temp,
-		MaxTokens:   &maxTok,
-	})
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal([]byte(raw), out)
 }
 
 // --- storeToolAdapter: tools.Store over *storage.Store ---

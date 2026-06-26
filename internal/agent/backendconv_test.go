@@ -1,0 +1,137 @@
+package agent
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/models"
+)
+
+func TestToBackendMessages_RejectsSystemAndDeveloper(t *testing.T) {
+	for _, role := range []string{"system", "developer"} {
+		_, err := toBackendMessages([]models.ChatMessage{models.TextMessage(role, "x")})
+		if err == nil {
+			t.Errorf("role %q: expected rejection, got nil", role)
+		}
+	}
+}
+
+func TestToBackendMessages_RolesAndContent(t *testing.T) {
+	msgs := []models.ChatMessage{
+		models.TextMessage("user", "hello"),
+		{Role: "assistant", ContentNull: true, ToolCalls: []models.ToolCallRequest{
+			{ID: "call_1", Type: "function", Function: models.ToolCallFunction{Name: "git__status", Arguments: ""}},
+		}},
+		{Role: "tool", ToolCallID: "call_1", StringContent: `{"ok":true}`},
+	}
+	out, err := toBackendMessages(msgs)
+	if err != nil {
+		t.Fatalf("toBackendMessages: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len = %d", len(out))
+	}
+	// user
+	if out[0].Role != "user" || string(out[0].Content) != `"hello"` {
+		t.Errorf("user msg = %+v", out[0])
+	}
+	// assistant tool-call turn: explicit null content + coerced empty args
+	if out[1].Role != "assistant" || string(out[1].Content) != "null" {
+		t.Errorf("assistant content = %q, want null", string(out[1].Content))
+	}
+	if len(out[1].ToolCalls) != 1 || out[1].ToolCalls[0].Function.Arguments != "{}" {
+		t.Errorf("assistant tool call = %+v", out[1].ToolCalls)
+	}
+	// tool result content is a JSON string
+	if out[2].Role != "tool" || out[2].ToolCallID != "call_1" {
+		t.Errorf("tool msg = %+v", out[2])
+	}
+	var s string
+	if err := json.Unmarshal(out[2].Content, &s); err != nil || !strings.Contains(s, `"ok":true`) {
+		t.Errorf("tool content = %q (err %v)", string(out[2].Content), err)
+	}
+}
+
+func TestToBackendMessages_Multimodal(t *testing.T) {
+	msgs := []models.ChatMessage{
+		{Role: "user", Parts: []models.ChatContentPart{
+			models.TextPart("look:"),
+			models.ImageDataPart("aGk=", "image/png"),
+		}},
+	}
+	out, err := toBackendMessages(msgs)
+	if err != nil {
+		t.Fatalf("toBackendMessages: %v", err)
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal(out[0].Content, &parts); err != nil {
+		t.Fatalf("content is not an array: %v (%s)", err, string(out[0].Content))
+	}
+	if len(parts) != 2 || parts[0]["type"] != "text" || parts[1]["type"] != "image_url" {
+		t.Errorf("parts = %+v", parts)
+	}
+}
+
+func TestCoerceToolArgs(t *testing.T) {
+	cases := map[string]string{
+		"":             "{}",
+		"   ":          "{}",
+		"not json":     "{}",
+		"null":         "{}",
+		"[1,2]":        "{}",
+		`{"a":1}`:      `{"a":1}`,
+		`{"path":"x"}`: `{"path":"x"}`,
+	}
+	for in, want := range cases {
+		if got := coerceToolArgs(in); got != want {
+			t.Errorf("coerceToolArgs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestValidateBackendTools(t *testing.T) {
+	bad := [][]backend.Tool{
+		{{Function: backend.FunctionDef{Name: "skill__find"}}},
+		{{Function: backend.FunctionDef{Name: "skill__load"}}},
+		{{Function: backend.FunctionDef{Name: "skill.find"}}},
+		{{Function: backend.FunctionDef{Name: "daintree_internal__x"}}},
+		{{Function: backend.FunctionDef{Name: "fs.read"}}}, // dotted name not wire-safe
+		{{Function: backend.FunctionDef{Name: ""}}},
+	}
+	for _, tools := range bad {
+		if err := validateBackendTools(tools); err == nil {
+			t.Errorf("expected rejection for %q", tools[0].Function.Name)
+		}
+	}
+	good := []backend.Tool{
+		{Function: backend.FunctionDef{Name: "fs__read"}},
+		{Function: backend.FunctionDef{Name: "git__status"}},
+		{Function: backend.FunctionDef{Name: "skill__step__advance"}},
+		{Function: backend.FunctionDef{Name: "terminal__run"}},
+	}
+	if err := validateBackendTools(good); err != nil {
+		t.Errorf("unexpected rejection: %v", err)
+	}
+}
+
+func TestToBackendTools_Conversion(t *testing.T) {
+	in := []models.ChatTool{
+		{Type: "function", Function: models.ChatToolFunc{
+			Name:        "fs__read",
+			Description: "read a file",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+		}},
+	}
+	out, err := toBackendTools(in)
+	if err != nil {
+		t.Fatalf("toBackendTools: %v", err)
+	}
+	if len(out) != 1 || out[0].Function.Name != "fs__read" || out[0].Type != "function" {
+		t.Errorf("converted = %+v", out)
+	}
+	if string(out[0].Function.Parameters) == "" {
+		t.Errorf("parameters dropped")
+	}
+}

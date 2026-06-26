@@ -16,6 +16,19 @@ import (
 // the JSON blobs) are pointers, so the footer tests need terse literal pointers.
 func ptrOf[T any](v T) *T { return &v }
 
+// anyContains reports whether any string in ss contains sub. The per-turn footer data now
+// travels as structured slices (req.Turn.Memories.*, req.Turn.WorkflowRuns,
+// req.Turn.SessionEndedWatchers); session-level tests assert a fact surfaced by scanning
+// those rendered rows rather than a single prose footer string.
+func anyContains(ss []string, sub string) bool {
+	for _, s := range ss {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // fakeWorkflowLister is the WorkflowRunLister seam under test: it returns a fixed set
 // of runs (or an error) and counts calls, so a session-level test can assert the
 // footer reads the ledger every round and degrades gracefully on a read error.
@@ -167,60 +180,57 @@ func TestComposeTurnFooter_AllSectionsSkippedEmitsNothing(t *testing.T) {
 	}
 }
 
-// Session-level: the footer is appended as the LAST message of the model request,
-// carries the goal, and NEVER leaks into durable history (it must stay ephemeral).
+// Session-level: the originating ask travels to the backend as STRUCTURED turn context
+// (req.Turn.Goal — the backend renders the prose footer), never as a system message in the
+// visible conversation, and never leaks into durable history.
 func TestComposeTurnFooter_AppendedToStreamTail(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s := NewSession(deps)
 
 	before := len(s.Messages())
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(r.seen) == 0 {
-		t.Fatal("router observed no rounds")
+	if len(be.requests()) == 0 {
+		t.Fatal("backend observed no rounds")
 	}
-	round := r.seen[0]
-	last := round[len(round)-1]
-	if last.Role != "system" || !strings.Contains(last.StringContent, "# Current goal") {
-		t.Fatalf("last message is not the goal footer: %+v", last)
-	}
-	if !strings.Contains(last.StringContent, "do the thing") {
-		t.Errorf("footer missing the goal text; got %q", last.StringContent)
+	if got := be.turnAt(0).Goal; got != "do the thing" {
+		t.Fatalf("request did not carry the goal as structured turn context; got %q", got)
 	}
 
-	// Ephemeral: durable history grows only by user + assistant (+2), and no stored
-	// message carries the goal anchor.
+	// Ephemeral: durable history grows only by user + assistant (+2), and the visible
+	// conversation carries only user/assistant/tool roles (no system footer message).
 	if after := len(s.Messages()); after-before != 2 {
-		t.Errorf("history grew by %d, want 2 (footer must not be persisted)", after-before)
+		t.Errorf("history grew by %d, want 2 (the footer is structured context, not history)", after-before)
 	}
 	for _, m := range s.Messages() {
-		if m.Role == "system" && strings.Contains(m.StringContent, "# Current goal") {
-			t.Fatal("goal footer leaked into durable history; it must stay ephemeral")
+		if m.Role == "system" {
+			t.Fatalf("a system message leaked into durable visible history: %+v", m)
 		}
 	}
 }
 
-// Session-level: the footer is rebuilt on EVERY round of a multi-round turn, always
-// seeded from the same originating ask (not a mid-turn injection).
+// Session-level: the structured goal is sent on EVERY round of a multi-round turn, always
+// the same originating ask (not a mid-turn injection).
 func TestComposeTurnFooter_RebuiltEveryRound(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0: tool call → loop
 		{Content: "final"}, // round 1: final answer
 	}}
-	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "investigate the bug", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.seen) < 2 {
-		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
+	if len(be.requests()) < 2 {
+		t.Fatalf("want >= 2 rounds, got %d", len(be.requests()))
 	}
-	for i, round := range r.seen[:2] {
-		last := round[len(round)-1]
-		if last.Role != "system" || !strings.Contains(last.StringContent, "investigate the bug") {
-			t.Errorf("round %d does not end with the goal footer: %+v", i, last)
+	for i := 0; i < 2; i++ {
+		if got := be.turnAt(i).Goal; got != "investigate the bug" {
+			t.Errorf("round %d goal = %q, want the originating ask", i, got)
 		}
 	}
 }
@@ -239,11 +249,12 @@ func TestComposeTurnFooter_TruncationKeepsPrefix(t *testing.T) {
 	}
 }
 
-// Session-level: two sequential turns each anchor their OWN originating ask — the
-// footer is never stale from a prior turn.
+// Session-level: two sequential turns each carry their OWN originating ask in the
+// structured turn context — never stale from a prior turn.
 func TestComposeTurnFooter_DistinctGoalsAcrossSends(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "a"}, {Content: "b"}}}
-	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "goal-one", SendOptions{}); err != nil {
 		t.Fatal(err)
@@ -251,21 +262,19 @@ func TestComposeTurnFooter_DistinctGoalsAcrossSends(t *testing.T) {
 	if _, err := s.Send(context.Background(), "goal-two", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.seen) < 2 {
-		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
+	if len(be.requests()) < 2 {
+		t.Fatalf("want >= 2 rounds, got %d", len(be.requests()))
 	}
-	last0 := r.seen[0][len(r.seen[0])-1]
-	last1 := r.seen[1][len(r.seen[1])-1]
-	if !strings.Contains(last0.StringContent, "goal-one") {
-		t.Errorf("send 1 footer should carry goal-one; got %q", last0.StringContent)
+	if got := be.turnAt(0).Goal; got != "goal-one" {
+		t.Errorf("send 1 goal = %q, want goal-one", got)
 	}
-	if !strings.Contains(last1.StringContent, "goal-two") || strings.Contains(last1.StringContent, "goal-one") {
-		t.Errorf("send 2 footer should carry goal-two only; got %q", last1.StringContent)
+	if got := be.turnAt(1).Goal; got != "goal-two" {
+		t.Errorf("send 2 goal = %q, want goal-two", got)
 	}
 }
 
 // Session-level: a mid-turn redirect folds into history as a user message, but the
-// footer stays anchored to the ORIGINAL goal (it never chases the injection).
+// structured goal stays anchored to the ORIGINAL ask (it never chases the injection).
 func TestComposeTurnFooter_StableAcrossMidTurnInjection(t *testing.T) {
 	var s *Session
 	r := &injectRouter{
@@ -279,7 +288,8 @@ func TestComposeTurnFooter_StableAcrossMidTurnInjection(t *testing.T) {
 			}
 		},
 	}
-	s = NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s = NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "original goal", SendOptions{}); err != nil {
 		t.Fatal(err)
@@ -287,34 +297,29 @@ func TestComposeTurnFooter_StableAcrossMidTurnInjection(t *testing.T) {
 	if len(r.seen) < 2 {
 		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
 	}
-	round1 := r.seen[1]
-	if !userTextSeen(round1, "stop, explain only") {
+	if !userTextSeen(r.seen[1], "stop, explain only") {
 		t.Error("round 1 should see the folded-in injection in history")
 	}
-	last := round1[len(round1)-1]
-	if last.Role != "system" || !strings.Contains(last.StringContent, "original goal") {
-		t.Errorf("footer should still carry the original goal; got %+v", last)
-	}
-	if strings.Contains(last.StringContent, "stop, explain only") {
-		t.Error("footer must not adopt the mid-turn injection as the goal")
+	if got := be.turnAt(1).Goal; got != "original goal" {
+		t.Errorf("round 1 goal = %q, want the original goal (never the injection)", got)
 	}
 }
 
-// Session-level: a blank send appends NO tail system message — the request is
-// byte-identical to the pre-footer behaviour.
+// Session-level: a blank send carries an EMPTY structured goal (the backend then renders
+// no goal anchor) — no goal data is fabricated from whitespace.
 func TestComposeTurnFooter_BlankSendAppendsNoFooter(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "   ", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.seen) == 0 {
-		t.Fatal("router observed no rounds")
+	if len(be.requests()) == 0 {
+		t.Fatal("backend observed no rounds")
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if last.Role == "system" && strings.Contains(last.StringContent, "# Current goal") {
-		t.Errorf("blank goal must not append a goal footer; got %+v", last)
+	if got := be.turnAt(0).Goal; got != "" {
+		t.Errorf("a blank send must carry an empty goal (trimmed), got %q", got)
 	}
 }
 
@@ -489,10 +494,10 @@ func TestComposeTurnFooter_BlankGoalWithActiveRunsEmitsWorkflowSection(t *testin
 
 // ---- active-workflow-runs section: session-level wiring ----
 
-// The footer reads the ledger and renders the open runs into the stream tail.
+// The footer reads the ledger and ships the open runs as structured rows.
 func TestComposeTurnFooter_WorkflowRunsAppearInStreamTail(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
 		{ID: "wfr_live", Status: domain.WorkflowActive, IssueNumber: ptrOf(42)},
 	}}
@@ -501,32 +506,29 @@ func TestComposeTurnFooter_WorkflowRunsAppearInStreamTail(t *testing.T) {
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if last.Role != "system" || !strings.Contains(last.StringContent, "# Active workflow runs") {
-		t.Fatalf("stream tail should carry the workflow section; got %+v", last)
-	}
-	if !strings.Contains(last.StringContent, "wfr_live") || !strings.Contains(last.StringContent, "#42") {
-		t.Errorf("workflow row missing id/issue; got %q", last.StringContent)
+	rows := strings.Join(be.turnAt(0).WorkflowRuns, "\n")
+	if !strings.Contains(rows, "wfr_live") || !strings.Contains(rows, "#42") {
+		t.Errorf("structured workflow rows missing id/issue; got %q", rows)
 	}
 }
 
-// A ledger read error is swallowed: the turn completes normally and the footer simply
-// omits the workflow section (the goal anchor still renders).
+// A ledger read error is swallowed: the turn completes normally and the request simply
+// carries no workflow rows (the goal still travels).
 func TestComposeTurnFooter_WorkflowRunsListerError_DoesNotFailSend(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.WorkflowRunLister = &fakeWorkflowLister{err: errors.New("db down")}
 	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "carry on", SendOptions{}); err != nil {
 		t.Fatalf("a ledger read error must not fail the send: %v", err)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if !strings.Contains(last.StringContent, "# Current goal") {
-		t.Errorf("goal anchor should still render; got %q", last.StringContent)
+	turn := be.turnAt(0)
+	if turn.Goal != "carry on" {
+		t.Errorf("goal should still travel; got %q", turn.Goal)
 	}
-	if strings.Contains(last.StringContent, "# Active workflow runs") {
-		t.Errorf("a failed read must omit the workflow section; got %q", last.StringContent)
+	if len(turn.WorkflowRuns) != 0 {
+		t.Errorf("a failed read must carry no workflow rows; got %v", turn.WorkflowRuns)
 	}
 }
 
@@ -537,7 +539,7 @@ func TestComposeTurnFooter_WorkflowRunsReadEveryRound(t *testing.T) {
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0 → loop
 		{Content: "final"}, // round 1
 	}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	lister := &fakeWorkflowLister{}
 	deps.WorkflowRunLister = lister
 	s := NewSession(deps)
@@ -545,20 +547,20 @@ func TestComposeTurnFooter_WorkflowRunsReadEveryRound(t *testing.T) {
 	if _, err := s.Send(context.Background(), "investigate", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if lister.calls != len(r.seen) {
-		t.Errorf("lister should be read once per round: calls=%d rounds=%d", lister.calls, len(r.seen))
+	if lister.calls != len(be.requests()) {
+		t.Errorf("lister should be read once per round: calls=%d rounds=%d", lister.calls, len(be.requests()))
 	}
 	if lister.limit != activeWorkflowRunsLimit {
 		t.Errorf("footer read should be bounded by activeWorkflowRunsLimit=%d, got %d", activeWorkflowRunsLimit, lister.limit)
 	}
 }
 
-// Session-level: a blank send with OPEN runs still appends the workflow section (the
-// goal anchor is omitted, but the workflow block depends only on the runs). Closes the
-// gap in TestComposeTurnFooter_BlankSendAppendsNoFooter, which has no lister wired.
+// Session-level: a blank send with OPEN runs still carries the workflow rows (the goal is
+// blank, but the workflow data depends only on the runs). Closes the gap in
+// TestComposeTurnFooter_BlankSendAppendsNoFooter, which has no lister wired.
 func TestComposeTurnFooter_BlankSendWithActiveRunsAppendsWorkflowOnly(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
 		{ID: "wfr_b", Status: domain.WorkflowActive},
 	}}
@@ -567,12 +569,12 @@ func TestComposeTurnFooter_BlankSendWithActiveRunsAppendsWorkflowOnly(t *testing
 	if _, err := s.Send(context.Background(), "   ", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if last.Role != "system" || !strings.Contains(last.StringContent, "# Active workflow runs") {
-		t.Fatalf("blank send with open runs should still append the workflow section; got %+v", last)
+	turn := be.turnAt(0)
+	if !anyContains(turn.WorkflowRuns, "wfr_b") {
+		t.Fatalf("blank send with open runs should still carry the workflow rows; got %v", turn.WorkflowRuns)
 	}
-	if strings.Contains(last.StringContent, "# Current goal") {
-		t.Errorf("blank goal must not emit the goal anchor; got %q", last.StringContent)
+	if turn.Goal != "" {
+		t.Errorf("a blank goal must travel empty; got %q", turn.Goal)
 	}
 }
 
@@ -764,7 +766,7 @@ func TestComposeTurnFooter_RecalledMemoriesInEveryRound(t *testing.T) {
 		{Content: "final"}, // round 1
 	}}
 	rec := &fakeMemoryRecaller{rows: []domain.MemoryRecord{{Content: "the deploy key lives in vault"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.MemoryRecaller = rec
 	s := NewSession(deps)
 
@@ -780,31 +782,28 @@ func TestComposeTurnFooter_RecalledMemoriesInEveryRound(t *testing.T) {
 	if len(rec.limits) > 0 && rec.limits[0] != relevantMemoriesMaxRows {
 		t.Errorf("recall limit = %d, want %d", rec.limits[0], relevantMemoriesMaxRows)
 	}
-	if len(r.seen) < 2 {
-		t.Fatalf("want >= 2 rounds, got %d", len(r.seen))
+	if len(be.requests()) < 2 {
+		t.Fatalf("want >= 2 rounds, got %d", len(be.requests()))
 	}
-	for i, round := range r.seen[:2] {
-		last := round[len(round)-1]
-		if last.Role != "system" || !strings.Contains(last.StringContent, "# Pinned and relevant memories") {
-			t.Errorf("round %d footer missing the recalled-memories block: %+v", i, last)
-		}
-		if !strings.Contains(last.StringContent, "the deploy key lives in vault") {
-			t.Errorf("round %d footer missing the recalled fact", i)
+	for i := 0; i < 2; i++ {
+		mem := be.turnAt(i).Memories
+		if mem == nil || !anyContains(mem.Relevant, "the deploy key lives in vault") {
+			t.Errorf("round %d structured turn missing the recalled fact: %+v", i, mem)
 		}
 	}
 	for _, m := range s.Messages() {
-		if strings.Contains(m.StringContent, "# Pinned and relevant memories") {
-			t.Fatal("recalled-memories footer leaked into durable history; it must stay ephemeral")
+		if strings.Contains(m.StringContent, "the deploy key lives in vault") {
+			t.Fatal("recalled memory leaked into durable history; it must stay structured-only")
 		}
 	}
 }
 
-// Session-level: a recall error is swallowed — the turn still runs and the footer
-// carries the goal anchor but NO `# Pinned and relevant memories` block.
+// Session-level: a recall error is swallowed — the turn still runs and the request
+// carries the goal but NO recalled memories.
 func TestComposeTurnFooter_RecallErrorSwallowed(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
 	rec := &fakeMemoryRecaller{err: errors.New("fts boom")}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.MemoryRecaller = rec
 	s := NewSession(deps)
 
@@ -814,36 +813,36 @@ func TestComposeTurnFooter_RecallErrorSwallowed(t *testing.T) {
 	if rec.calls != 1 {
 		t.Errorf("recaller called %d times, want 1", rec.calls)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if !strings.Contains(last.StringContent, "# Current goal") {
-		t.Errorf("footer should still carry the goal anchor; got %q", last.StringContent)
+	turn := be.turnAt(0)
+	if turn.Goal != "do the thing" {
+		t.Errorf("goal should still travel; got %q", turn.Goal)
 	}
-	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
-		t.Error("a recall error must omit the memories block")
+	if turn.Memories != nil && len(turn.Memories.Relevant) != 0 {
+		t.Errorf("a recall error must carry no relevant memories; got %v", turn.Memories.Relevant)
 	}
 }
 
-// Session-level: a nil MemoryRecaller (the test default) appends NO memories block —
+// Session-level: a nil MemoryRecaller (the test default) carries NO relevant memories —
 // the recall path is fully optional.
 func TestComposeTurnFooter_NilRecallerOmitsMemories(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
-	s := NewSession(baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)}))
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
-		t.Errorf("nil recaller must not append a memories block; got %q", last.StringContent)
+	if mem := be.turnAt(0).Memories; mem != nil && len(mem.Relevant) != 0 {
+		t.Errorf("nil recaller must carry no relevant memories; got %+v", mem)
 	}
 }
 
 // Session-level: a blank/whitespace-only send short-circuits recall entirely — the
-// recaller is NEVER called (no wasted query) and no memories block appears.
+// recaller is NEVER called (no wasted query) and no recalled memories travel.
 func TestComposeTurnFooter_BlankSendSkipsRecall(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
 	rec := &fakeMemoryRecaller{rows: []domain.MemoryRecord{{Content: "should not surface"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.MemoryRecaller = rec
 	s := NewSession(deps)
 
@@ -853,9 +852,8 @@ func TestComposeTurnFooter_BlankSendSkipsRecall(t *testing.T) {
 	if rec.calls != 0 {
 		t.Errorf("recaller called %d times on a blank send, want 0", rec.calls)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if strings.Contains(last.StringContent, "# Pinned and relevant memories") {
-		t.Errorf("a blank send must not append a memories block; got %q", last.StringContent)
+	if mem := be.turnAt(0).Memories; mem != nil && len(mem.Relevant) != 0 {
+		t.Errorf("a blank send must carry no relevant memories; got %+v", mem)
 	}
 }
 
@@ -1053,7 +1051,7 @@ func TestComposeTurnFooter_PinnedMemoriesEveryRound(t *testing.T) {
 		{Content: "final"}, // round 1
 	}}
 	pinned := &fakePinnedLister{rows: []domain.MemoryRecord{{Content: "always use rtk proxy"}}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.PinnedMemoryLister = pinned
 	s := NewSession(deps)
 
@@ -1066,51 +1064,48 @@ func TestComposeTurnFooter_PinnedMemoriesEveryRound(t *testing.T) {
 	if pinned.limit != pinnedMemoriesMaxRows {
 		t.Errorf("pinned limit = %d, want %d", pinned.limit, pinnedMemoriesMaxRows)
 	}
-	for i, round := range r.seen[:2] {
-		last := round[len(round)-1]
-		if !strings.Contains(last.StringContent, "# Pinned and relevant memories") || !strings.Contains(last.StringContent, "## Pinned") {
-			t.Errorf("round %d footer missing the pinned block: %q", i, last.StringContent)
-		}
-		if !strings.Contains(last.StringContent, "always use rtk proxy") {
-			t.Errorf("round %d footer missing the pinned fact", i)
+	for i := 0; i < 2; i++ {
+		mem := be.turnAt(i).Memories
+		if mem == nil || !anyContains(mem.Pinned, "always use rtk proxy") {
+			t.Errorf("round %d structured turn missing the pinned fact: %+v", i, mem)
 		}
 	}
 	for _, m := range s.Messages() {
-		if strings.Contains(m.StringContent, "# Pinned and relevant memories") {
-			t.Fatal("pinned footer leaked into durable history; it must stay ephemeral")
+		if strings.Contains(m.StringContent, "always use rtk proxy") {
+			t.Fatal("pinned memory leaked into durable history; it must stay structured-only")
 		}
 	}
 }
 
-// Session-level: a pinned-lister error is swallowed — the turn still runs, the goal anchor
-// survives, and the pinned subblock is omitted.
+// Session-level: a pinned-lister error is swallowed — the turn still runs, the goal
+// survives, and the pinned memories are omitted.
 func TestComposeTurnFooter_PinnedListerErrorSwallowed(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{{Content: "final"}}}
 	pinned := &fakePinnedLister{err: errors.New("db boom")}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.PinnedMemoryLister = pinned
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	last := r.seen[0][len(r.seen[0])-1]
-	if !strings.Contains(last.StringContent, "# Current goal") {
-		t.Errorf("footer should still carry the goal anchor; got %q", last.StringContent)
+	turn := be.turnAt(0)
+	if turn.Goal != "do the thing" {
+		t.Errorf("goal should still travel; got %q", turn.Goal)
 	}
-	if strings.Contains(last.StringContent, "## Pinned") {
-		t.Error("a pinned-lister error must omit the pinned subblock")
+	if turn.Memories != nil && len(turn.Memories.Pinned) != 0 {
+		t.Error("a pinned-lister error must carry no pinned memories")
 	}
 }
 
-// Session-level: the active-worktree provider is called EVERY round and its label appears
-// in the footer's `# Active worktree` section.
+// Session-level: the active-worktree provider is called EVERY round and its label travels
+// in the structured runtime context.
 func TestComposeTurnFooter_ActiveWorktreeEveryRound(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
 		{Content: "final"},
 	}}
 	calls := 0
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.ActiveWorktreeFunc = func() string { calls++; return "feature/issue-263" }
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
@@ -1119,20 +1114,19 @@ func TestComposeTurnFooter_ActiveWorktreeEveryRound(t *testing.T) {
 	if calls < 2 {
 		t.Errorf("worktree func called %d times, want once per round (>= 2)", calls)
 	}
-	for i, round := range r.seen[:2] {
-		last := round[len(round)-1]
-		if !strings.Contains(last.StringContent, "# Active worktree\nfeature/issue-263") {
-			t.Errorf("round %d footer missing the worktree section: %q", i, last.StringContent)
+	for i := 0; i < 2; i++ {
+		if got := be.runtimeAt(i).ActiveWorktree; got != "feature/issue-263" {
+			t.Errorf("round %d runtime worktree = %q, want feature/issue-263", i, got)
 		}
 	}
 }
 
 // Session-level: the one-time session note surfaces on the FIRST turn only — the provider
-// is consulted exactly once and the note is gone from the second turn's footer.
+// is consulted exactly once and the note is gone from the second turn's request.
 func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 	r := &injectRouter{} // empty results → each Send is a single final round
 	called := 0
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.SessionEndedWatchers = func() []string { called++; return []string{"watch the deploy"} }
 	s := NewSession(deps)
 
@@ -1142,16 +1136,14 @@ func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.seen) < 2 {
-		t.Fatalf("want >= 2 rounds across two sends, got %d", len(r.seen))
+	if len(be.requests()) < 2 {
+		t.Fatalf("want >= 2 rounds across two sends, got %d", len(be.requests()))
 	}
-	turn1 := r.seen[0][len(r.seen[0])-1].StringContent
-	turn2 := r.seen[1][len(r.seen[1])-1].StringContent
-	if !strings.Contains(turn1, "# Session note") || !strings.Contains(turn1, "watch the deploy") {
-		t.Errorf("first-turn footer should carry the session note; got %q", turn1)
+	if !anyContains(be.turnAt(0).SessionEndedWatchers, "watch the deploy") {
+		t.Errorf("first-turn request should carry the session note; got %v", be.turnAt(0).SessionEndedWatchers)
 	}
-	if strings.Contains(turn2, "# Session note") {
-		t.Errorf("second-turn footer must NOT repeat the session note; got %q", turn2)
+	if len(be.turnAt(1).SessionEndedWatchers) != 0 {
+		t.Errorf("second-turn request must NOT repeat the session note; got %v", be.turnAt(1).SessionEndedWatchers)
 	}
 	if called != 1 {
 		t.Errorf("session-ended provider called %d times, want exactly 1 (first turn only)", called)
@@ -1159,37 +1151,39 @@ func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 }
 
 // Session-level: the one-time session note rides EVERY round of the first turn (the
-// footer is rebuilt per round) — the multi-round complement to the first-turn-only test.
+// per-turn context is rebuilt per round) — the multi-round complement to the
+// first-turn-only test.
 func TestComposeTurnFooter_SessionNoteRidesEveryRoundOfFirstTurn(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}, // round 0 → loop
 		{Content: "final"}, // round 1
 	}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.SessionEndedWatchers = func() []string { return []string{"watch the deploy"} }
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.seen) < 2 {
-		t.Fatalf("want a 2-round first turn, got %d", len(r.seen))
+	if len(be.requests()) < 2 {
+		t.Fatalf("want a 2-round first turn, got %d", len(be.requests()))
 	}
-	for i, round := range r.seen[:2] {
-		last := round[len(round)-1]
-		if !strings.Contains(last.StringContent, "# Session note") {
-			t.Errorf("round %d of the first turn should carry the session note: %q", i, last.StringContent)
+	for i := 0; i < 2; i++ {
+		if !anyContains(be.turnAt(i).SessionEndedWatchers, "watch the deploy") {
+			t.Errorf("round %d of the first turn should carry the session note: %v", i, be.turnAt(i).SessionEndedWatchers)
 		}
 	}
 }
 
-// Session-level (issue #263 core claim): message[1] (the runtime context) stays
-// BYTE-STABLE across mid-session worktree + pin changes — exactly the churn that used to
-// rewrite it and bust the prefix cache — while the UNCACHED footer reflects the new values.
+// Session-level (issue #263 core claim): volatile state (the active worktree + pins)
+// travels as PER-TURN structured context, never baked into the cached conversation — so a
+// mid-session worktree/pin change is reflected on the next request without rewriting any
+// durable history. (The old message[1] runtime-context block is gone; the backend owns the
+// system prefix and the CLI ships these as data on every request.)
 func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.T) {
 	r := &injectRouter{} // empty results → each Send is a single final round
 	wt := "feature/one"
 	pins := []domain.MemoryRecord{{Content: "pin A"}}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.ActiveWorktreeFunc = func() string { return wt }
 	deps.PinnedMemoryLister = &fakePinnedLister{rows: pins}
 	s := NewSession(deps)
@@ -1197,7 +1191,6 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	msg1Turn1 := s.Messages()[1].StringContent
 
 	// Mutate the volatile inputs (same backing array / captured var the fakes read), then
 	// run a second turn.
@@ -1206,23 +1199,33 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	msg1Turn2 := s.Messages()[1].StringContent
 
-	if msg1Turn1 != msg1Turn2 {
-		t.Fatalf("message[1] must stay byte-stable across worktree/pin changes (issue #263):\nturn1: %q\nturn2: %q", msg1Turn1, msg1Turn2)
+	// The durable conversation never carried the volatile state, so nothing in history was
+	// rewritten by the change.
+	for _, m := range s.Messages() {
+		for _, vol := range []string{"feature/one", "feature/two", "pin A", "pin B totally different"} {
+			if strings.Contains(m.StringContent, vol) {
+				t.Fatalf("volatile state %q leaked into durable history: %+v", vol, m)
+			}
+		}
 	}
-	// The change DID land — in the footer (the last message of turn 2's only round).
-	footT2 := r.seen[1][len(r.seen[1])-1].StringContent
-	if !strings.Contains(footT2, "feature/two") || !strings.Contains(footT2, "pin B totally different") {
-		t.Fatalf("turn-2 footer should reflect the changed volatile state; got %q", footT2)
+	// The change DID land — in the second turn's structured request.
+	if got := be.runtimeAt(1).ActiveWorktree; got != "feature/two" {
+		t.Fatalf("turn-2 runtime should reflect the changed worktree; got %q", got)
+	}
+	mem := be.turnAt(1).Memories
+	if mem == nil || !anyContains(mem.Pinned, "pin B totally different") {
+		t.Fatalf("turn-2 turn context should reflect the changed pin; got %+v", mem)
 	}
 }
 
-// Send-level: an autonomous wake turn (SendOptions.IsWake) anchors on the active workflow
-// objective and never echoes the verbose wake blob — the channel-driven path through runTurn.
+// Send-level: an autonomous wake turn (SendOptions.IsWake) ships the IsWake flag plus the
+// open workflow runs as structured turn context — the backend substitutes the active
+// workflow objective for the verbose wake blob. The CLI's job is to channel the signal,
+// not render the anchor; this is the channel-driven path through runTurn.
 func TestSend_WakeOptionDrivesObjectiveAnchor(t *testing.T) {
 	r := &injectRouter{} // single final round
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
 		{NextActionJson: ptrOf(`{"label":"finish the migration"}`)},
 	}}
@@ -1230,21 +1233,22 @@ func TestSend_WakeOptionDrivesObjectiveAnchor(t *testing.T) {
 	if _, err := s.Send(context.Background(), wakePromptPrefix+" a watcher fired", SendOptions{IsWake: true}); err != nil {
 		t.Fatal(err)
 	}
-	foot := r.seen[0][len(r.seen[0])-1].StringContent
-	if !strings.Contains(foot, "# Current objective") || !strings.Contains(foot, "finish the migration") {
-		t.Errorf("a wake Send should anchor on the workflow objective; got %q", foot)
+	turn := be.turnAt(0)
+	if !turn.IsWake {
+		t.Error("a wake Send must mark the turn context IsWake")
 	}
-	if strings.Contains(foot, "# Current goal") {
-		t.Errorf("a wake Send must not emit the verbose goal anchor; got %q", foot)
+	if !anyContains(turn.WorkflowRuns, "finish the migration") {
+		t.Errorf("a wake Send should carry the open workflow runs (with the objective); got %v", turn.WorkflowRuns)
 	}
 }
 
 // Send-level: a USER who happens to type the wake prefix — WITHOUT SendOptions.IsWake —
-// still gets their own goal anchored, never the workflow objective. This is the whole
-// point of channel-based (not content-based) wake detection (issue #263 review).
+// still gets their own goal in the turn context (IsWake stays false), never the workflow
+// objective substitution. This is the whole point of channel-based (not content-based)
+// wake detection (issue #263 review).
 func TestSend_PrefixWithoutWakeOptionKeepsGoalAnchor(t *testing.T) {
 	r := &injectRouter{}
-	deps := baseDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.WorkflowRunLister = &fakeWorkflowLister{runs: []domain.WorkflowRunRecord{
 		{NextActionJson: ptrOf(`{"label":"finish the migration"}`)},
 	}}
@@ -1253,11 +1257,11 @@ func TestSend_PrefixWithoutWakeOptionKeepsGoalAnchor(t *testing.T) {
 	if _, err := s.Send(context.Background(), input, SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	foot := r.seen[0][len(r.seen[0])-1].StringContent
-	if !strings.Contains(foot, "# Current goal") || !strings.Contains(foot, "please summarize the logs") {
-		t.Errorf("a user-typed prefix (no IsWake) should anchor on the user's goal; got %q", foot)
+	turn := be.turnAt(0)
+	if turn.IsWake {
+		t.Error("without SendOptions.IsWake the turn must NOT be marked IsWake")
 	}
-	if strings.Contains(foot, "# Current objective") {
-		t.Errorf("without IsWake the objective substitution must not fire; got %q", foot)
+	if turn.Goal != input {
+		t.Errorf("a user-typed prefix (no IsWake) should anchor on the user's goal; got %q", turn.Goal)
 	}
 }

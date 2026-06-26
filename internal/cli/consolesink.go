@@ -15,13 +15,19 @@ type consoleSink struct {
 	r         *render.Renderer
 	tty       bool
 	lastPhase domain.RunPhase
+	failed    bool // an Error event fired this run (drives the one-shot exit code)
 }
 
 // NewConsoleSink builds a console sink over a renderer. It records whether stdout is a
-// TTY so the "silent work" phase cues stay off piped/one-shot output.
-func NewConsoleSink(r *render.Renderer) agent.EventSink {
+// TTY so the "silent work" phase cues stay off piped/one-shot output. Returns the
+// concrete type so the one-shot path can read Failed() for its exit code.
+func NewConsoleSink(r *render.Renderer) *consoleSink {
 	return &consoleSink{r: r, tty: stdoutIsTTY()}
 }
+
+// Failed reports whether a turn-level error was surfaced (Session.Send returns a
+// sentinel reply, not an error, so the one-shot uses this to exit non-zero).
+func (s *consoleSink) Failed() bool { return s.failed }
 
 // Phase surfaces the "silent work" gaps (analyze / integrate) as a dim status line so
 // the console doesn't sit mute through model latency — the gap between Enter and the
@@ -65,7 +71,7 @@ func (s *consoleSink) ToolResult(ev agent.ToolResultEvent) {
 	s.r.ToolResult(ev.Result.Ok, ev.Result.Summary)
 }
 
-func (s *consoleSink) Error(m string)         { s.r.Line(""); s.r.Error(m) }
+func (s *consoleSink) Error(m string)         { s.failed = true; s.r.Line(""); s.r.Error(m) }
 func (s *consoleSink) Warn(m string)          { s.r.Warn(m) }
 func (s *consoleSink) Info(m string)          { s.r.Info(m) }
 func (s *consoleSink) Usage(agent.UsageEvent) {}

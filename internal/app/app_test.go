@@ -9,6 +9,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
 // newOfflineApp builds a fully-wired App against a temp-dir state DB in offline
@@ -54,11 +55,11 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 	if a.Router == nil {
 		t.Error("Router is nil")
 	}
+	if a.Backend == nil {
+		t.Error("Backend is nil")
+	}
 	if a.Registry == nil {
 		t.Error("Registry is nil")
-	}
-	if a.Skills == nil {
-		t.Error("Skills is nil")
 	}
 	if a.Session == nil {
 		t.Error("Session is nil")
@@ -70,19 +71,27 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 81 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 79 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, and the five scratch.* session-scratch
-// tools); we assert that exact count so a silent family add/drop is caught.
+// tools). The local skill.find / skill.load tools are GONE — the backend now owns skill
+// selection (the migration off the client-side selector), dropping the prior 81 to 79;
+// skill.run.get / skill.step.advance remain. We assert that exact count so a silent
+// family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 81 {
-		t.Errorf("registered tools = %d, want 81", got)
+	if got != 79 {
+		t.Errorf("registered tools = %d, want 79", got)
+	}
+	// The local skill-selection tools were removed in the backend migration; assert
+	// their absence so a re-introduction (or a stale wiring) is caught here.
+	if a.Registry.Has("skill.find") || a.Registry.Has("skill.load") {
+		t.Error("skill.find/skill.load must NOT be registered (skill selection is backend-owned)")
 	}
 	// The count bump from 79→80 is the structured-extract split; assert the new tool
 	// by name so the count guard can't be satisfied by some unrelated add/drop.
@@ -122,27 +131,27 @@ func TestScratchToolsWired(t *testing.T) {
 	}
 }
 
-// TestCreateSeedsThreeControlMessages asserts the session boots with the three
-// fixed control messages (base prompt, runtime context, loaded skills) at indices
-// 0/1/2 — the cached-prefix layout the prompt contract depends on.
-func TestCreateSeedsThreeControlMessages(t *testing.T) {
+// TestCreateStartsWithEmptyVisibleHistory asserts a fresh session boots with NO
+// client-side control prefix: the backend owns the system prompt, developer
+// instructions, and skill bodies, so domain.ControlMessageCount == 0 and the first
+// turn appends the user message at index 0. (Replaces the old three-control-message
+// seed test — that cached client-side prefix was removed in the backend migration.)
+func TestCreateStartsWithEmptyVisibleHistory(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	msgs := a.Session.Messages()
-	if len(msgs) < 3 {
-		t.Fatalf("session messages = %d, want >= 3 control rows", len(msgs))
+	if domain.ControlMessageCount != 0 {
+		t.Fatalf("ControlMessageCount = %d, want 0 (no client-side control prefix)", domain.ControlMessageCount)
 	}
-	for i := 0; i < 3; i++ {
-		if msgs[i].Role != "system" {
-			t.Errorf("control[%d] role = %q, want system", i, msgs[i].Role)
-		}
+	if msgs := a.Session.Messages(); len(msgs) != 0 {
+		t.Errorf("fresh session visible history = %d messages, want 0:\n%+v", len(msgs), msgs)
 	}
 }
 
-// TestSchedulerContextDormantBeforeStart: before StartScheduler,
-// PromptContext().SchedulerActive is false and the runtime
-// context message (message[1]) carries the dormant note.
+// TestSchedulerContextDormantBeforeStart: before StartScheduler the App's live
+// PromptContext reports SchedulerActive == false. The runtime context now travels
+// as structured data (backend.RuntimeContext.SchedulerActive) built from this, NOT
+// as a prose message[1] note, so the assertion is on PromptContext directly.
 func TestSchedulerContextDormantBeforeStart(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
@@ -150,15 +159,11 @@ func TestSchedulerContextDormantBeforeStart(t *testing.T) {
 	if a.PromptContext().SchedulerActive {
 		t.Error("SchedulerActive = true before StartScheduler, want false")
 	}
-	runtimeMsg := a.Session.Messages()[1].ContentToText()
-	if !strings.Contains(runtimeMsg, "the scheduler is NOT running") {
-		t.Errorf("runtime message missing dormant note:\n%s", runtimeMsg)
-	}
 }
 
-// TestSchedulerContextActiveAfterStart: after StartScheduler,
-// SchedulerActive flips true and the dormant note is cleared
-// from the refreshed runtime context message.
+// TestSchedulerContextActiveAfterStart: after StartScheduler the App's live
+// PromptContext reports SchedulerActive == true (the structured runtime block is
+// rebuilt from PromptContext each round — there is no message[1] note to refresh).
 func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
@@ -167,10 +172,6 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 
 	if !a.PromptContext().SchedulerActive {
 		t.Error("SchedulerActive = false after StartScheduler, want true")
-	}
-	runtimeMsg := a.Session.Messages()[1].ContentToText()
-	if strings.Contains(runtimeMsg, "the scheduler is NOT running") {
-		t.Errorf("runtime message still carries dormant note after start:\n%s", runtimeMsg)
 	}
 }
 
@@ -188,9 +189,10 @@ func TestSessionEndedWatchersForFooterSchedulerGate(t *testing.T) {
 	if got := a.sessionEndedWatchersForFooter(); got != nil {
 		t.Fatalf("footer seam must be gated off before StartScheduler, got %v", got)
 	}
-	// The runtime context never carries the note anymore.
-	if msg := a.Session.Messages()[1].ContentToText(); strings.Contains(msg, "previous session ended") {
-		t.Fatalf("message[1] must never carry the session-ended note:\n%s", msg)
+	// The visible history never carries the note anymore — there is no message[1] runtime
+	// context, and the one-time note surfaces only through the uncached footer seam.
+	if msgs := a.Session.Messages(); len(msgs) != 0 {
+		t.Fatalf("session-ended note must never enter visible history, got %d messages:\n%+v", len(msgs), msgs)
 	}
 
 	// Scheduler active → the gate opens and the seam mirrors the store's carryover (empty
@@ -202,13 +204,14 @@ func TestSessionEndedWatchersForFooterSchedulerGate(t *testing.T) {
 	}
 }
 
-// TestStartupContextRosterSurfacesInRuntimeMessage asserts the cached configured-agents
-// roster (populated by refreshStartupContext on connect) propagates through PromptContext
-// into message[1]. The cache is set directly here — the connect fetch itself is exercised
-// by the agenttaskx unit tests; this pins the wiring App cache → MainPromptContext →
-// rendered runtime context. The worktree label no longer flows through message[1]: it
-// moved to the uncached footer (issue #263), reached via activeWorktreeForFooter.
-func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
+// TestStartupContextRosterSurfacesInPromptContext asserts the cached configured-agents
+// roster (populated by refreshStartupContext on connect) propagates through the App's
+// live PromptContext, which the session maps into the backend's structured runtime block
+// (backend.RuntimeContext.ConfiguredAgentIDs) — there is no message[1] runtime context to
+// rewrite anymore. The cache is set directly here — the connect fetch itself is exercised
+// by the agenttaskx unit tests; this pins the wiring App cache → MainPromptContext. The
+// worktree label flows through the uncached footer seam (issue #263), not PromptContext.
+func TestStartupContextRosterSurfacesInPromptContext(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
@@ -224,19 +227,10 @@ func TestStartupContextRosterSurfacesInRuntimeMessage(t *testing.T) {
 	a.rosterMu.Unlock()
 
 	pc := a.PromptContext()
-	if len(pc.ConfiguredAgentIDs) != 2 {
-		t.Fatalf("PromptContext did not surface the roster: %+v", pc)
+	if len(pc.ConfiguredAgentIDs) != 2 || pc.ConfiguredAgentIDs[0] != "claude" || pc.ConfiguredAgentIDs[1] != "codex" {
+		t.Fatalf("PromptContext did not surface the roster: %+v", pc.ConfiguredAgentIDs)
 	}
-
-	a.Session.RefreshRuntimeContext(pc)
-	msg := a.Session.Messages()[1].ContentToText()
-	if !strings.Contains(msg, "Configured agents: claude, codex") {
-		t.Fatalf("runtime message missing configured-agents roster:\n%s", msg)
-	}
-	// The worktree label is NOT in message[1]; it flows through the footer seam instead.
-	if strings.Contains(msg, "Active worktree:") {
-		t.Fatalf("worktree must not appear in message[1] (it moved to the footer):\n%s", msg)
-	}
+	// The worktree label is NOT in PromptContext; it flows through the footer seam instead.
 	if got := a.activeWorktreeForFooter(); got != "feature/issue-230" {
 		t.Fatalf("footer worktree seam = %q, want the cached label", got)
 	}

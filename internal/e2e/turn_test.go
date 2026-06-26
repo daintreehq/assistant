@@ -92,13 +92,13 @@ func indexOf(log []string, s string) int {
 }
 
 // TestFullTurnAgainstFakes drives a complete agent turn end-to-end against the fake
-// DeepSeek SSE server: round 1 streams prose + a memory.list tool call; round 2
+// Daintree backend SSE server: round 1 streams prose + a memory.list tool call; round 2
 // streams the final answer. It asserts the streamed event order, that the tool was
 // dispatched and its result fed back into round 2, that the conversation was
 // persisted, the run-event log written, and the RunPhase lifecycle reached a
 // terminal phase.
 func TestFullTurnAgainstFakes(t *testing.T) {
-	fake := newFakeDeepSeek(t,
+	fake := newFakeBackend(t,
 		// Round 1: a little prose, then a tool call to the local read-only memory.list.
 		sseRound{
 			contentTokens: []string{"Let me ", "check."},
@@ -113,10 +113,10 @@ func TestFullTurnAgainstFakes(t *testing.T) {
 		},
 	)
 
-	// Point the model client at the fake via the DEEPSEEK_BASE_URL env override
-	// (the config trusted-env boundary reads it). A non-empty API key clears the
-	// offline/missing-key guard.
-	t.Setenv("DEEPSEEK_BASE_URL", fake.baseURL())
+	// Point the backend client at the fake via the DAINTREE_BACKEND_URL env override
+	// (app.Create reads it directly as the dev/test endpoint hook). app.Create builds a
+	// real backend.Client to the fake, so this exercises the live SSE parse path too.
+	t.Setenv("DAINTREE_BACKEND_URL", fake.baseURL())
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
 
 	dir := t.TempDir()
@@ -269,28 +269,30 @@ func countToolRoleMessages(msgs []map[string]any) int {
 	return n
 }
 
-// TestOrchestratorFlashWiringAndMultiStep validates that the orchestrator (large
-// tier / main thread) runs on the flash model under a genuinely multi-step load —
-// not a single relay. The fake DeepSeek server is scripted and deterministic, so it
-// cannot test flash's reasoning *quality*; what it proves is the wiring that makes
-// flash a sound orchestration model: (1) every main-thread round is sent on the
-// flash model id, (2) the large tier defaults to reasoning_effort:"none" (flash is
-// the validated orchestration model and the loaded skills carry the playbooks, so
-// the main thread runs think-free — "high" was a glm-5p2 holdover that bought a
-// costly hidden <think> on every turn), and (3) a three-round chained-tool scenario —
-// list memories, then recall by query (a second lookup conceptually conditioned on
-// the first), then conclude — drives to completion with each tool result fed back
-// into the next round. That feedback chain is exactly the orchestration deduction
-// loop: the model must integrate prior tool output before its next move, not echo it.
-func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
-	// Guard the documentation claim at its source: the configured large-tier default
-	// IS flash. If this ever drifts, the issue-238 validation is no longer true.
+// TestOrchestratorMultiStep validates that the orchestrator (the main thread) drives a
+// genuinely multi-step load against the backend — not a single relay. The fake backend
+// is scripted and deterministic, so it cannot test reasoning *quality*; what it proves
+// is the wiring of the orchestration deduction loop: a three-round chained-tool scenario
+// — list memories, then recall by query (a second lookup conceptually conditioned on the
+// first), then conclude — drives to completion with each tool result fed back into the
+// next backend round. That feedback chain is exactly the orchestration loop: the model
+// must integrate prior tool output before its next move, not echo it.
+//
+// NOTE: the migration moved model routing and the think-on/off decision INTO the backend
+// — the CLI no longer chooses the model id or sets a `thinking`/`reasoning_effort` field
+// on the wire (the request carries only the visible conversation + structured context).
+// So the old per-round wire assertions on model id / reasoning_effort / thinking are gone
+// (they exercised removed client-side behavior). The config.DEFAULTS.LargeModel guard
+// survives as a cheap check that the legacy default is still the validated flash model.
+func TestOrchestratorMultiStep(t *testing.T) {
+	// Guard the legacy default at its source: the configured large-tier default IS flash
+	// (used now only by the transitional Router seam, never the turn loop).
 	if config.DEFAULTS.LargeModel != flashModelID {
 		t.Fatalf("config.DEFAULTS.LargeModel = %q, want the validated orchestration model %q",
 			config.DEFAULTS.LargeModel, flashModelID)
 	}
 
-	fake := newFakeDeepSeek(t,
+	fake := newFakeBackend(t,
 		// Round 1: orchestrator opens the deduction — list what's in memory.
 		sseRound{
 			contentTokens: []string{"Step 1: ", "list memory."},
@@ -312,14 +314,8 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		},
 	)
 
-	t.Setenv("DEEPSEEK_BASE_URL", fake.baseURL())
+	t.Setenv("DAINTREE_BACKEND_URL", fake.baseURL())
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
-	// Pin the model env to empty so this test proves the *default* wiring is flash
-	// regardless of the developer's shell — FirstString skips empty values and falls
-	// through to DEFAULTS, so the per-round model-id assertions below stay meaningful.
-	t.Setenv("DAINTREE_LARGE_MODEL", "")
-	t.Setenv("DAINTREE_MEDIUM_MODEL", "")
-	t.Setenv("DAINTREE_SMALL_MODEL", "")
 
 	dir := t.TempDir()
 	key := "test-key"
@@ -347,24 +343,17 @@ func TestOrchestratorFlashWiringAndMultiStep(t *testing.T) {
 		t.Errorf("final reply = %q, want it to contain the round-3 conclusion", reply)
 	}
 
-	// Three model rounds: two chained tool rounds + the final-answer round.
+	// Three backend rounds: two chained tool rounds + the final-answer round.
 	if got := fake.callCount(); got != 3 {
-		t.Fatalf("model called %d times, want 3 (two chained tool rounds + final)", got)
+		t.Fatalf("backend called %d times, want 3 (two chained tool rounds + final)", got)
 	}
 
-	// --- every main-thread round ran on flash, think-free ---
-	// On DeepSeek the think-free intent is thinking:{type:"disabled"} with no
-	// reasoning_effort (there is no "none" effort variant — it would 400).
+	// --- the local tool inventory reached the backend on every round ---
+	// The CLI ships its function-tool specs as input.tools; the backend never invents
+	// them. A non-empty inventory each round proves the projection was wired through.
 	for i := 0; i < 3; i++ {
-		if got := fake.requestField(i, "model"); got != flashModelID {
-			t.Errorf("round %d model = %v, want flash orchestration model %q", i+1, got, flashModelID)
-		}
-		if got := fake.requestField(i, "reasoning_effort"); got != nil {
-			t.Errorf("round %d reasoning_effort = %v, want absent (think-free uses thinking:disabled)", i+1, got)
-		}
-		th, ok := fake.requestField(i, "thinking").(map[string]any)
-		if !ok || th["type"] != "disabled" {
-			t.Errorf("round %d thinking = %v, want {type:disabled} (large-tier flash think-free default)", i+1, fake.requestField(i, "thinking"))
+		if got := fake.requestTools(i); len(got) == 0 {
+			t.Errorf("round %d carried no tools in the backend request (input.tools empty)", i+1)
 		}
 	}
 

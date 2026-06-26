@@ -7,10 +7,13 @@ package app
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
@@ -18,7 +21,6 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
@@ -46,6 +48,10 @@ type CreateOptions struct {
 	SessionID string
 	// MCPClientOverride injects a pre-connected low-level MCP client (tests).
 	MCPClientOverride mcp.LowLevelClient
+	// BackendOverride injects a fake Daintree backend (tests), bypassing the real
+	// HTTP client so unit tests need no live server. nil ⇒ the real client to the
+	// hardcoded dev endpoint.
+	BackendOverride backend.Backend
 	// BuildTools is the tool-registry builder seam. The full tool-family wiring is a
 	// separate wave; nil ⇒ DefaultToolBuilder (the always-safe core tools). The
 	// builder runs AFTER the registry exists but BEFORE AssertSafe.
@@ -62,13 +68,18 @@ type ToolBuilder func(a *App) ([]*tools.Tool, error)
 // except Config.Tier (mutated by /permissions), Hooks (merged by SetHooks), and
 // scheduler (set lazily by StartScheduler).
 type App struct {
-	Config   config.AppConfig
-	Store    *storage.Store
-	MCP      *mcp.Client
-	Queue    *queue.Queue
+	Config config.AppConfig
+	Store  *storage.Store
+	MCP    *mcp.Client
+	Queue  *queue.Queue
+	// Backend is the native Daintree backend — the assistant turn engine and the
+	// server-owned utility tasks. It replaces the direct model provider. Held as an
+	// interface so tests can inject a fake (CreateOptions.BackendOverride).
+	Backend backend.Backend
+	// Router is the legacy DeepSeek model router, retained transitionally only for the
+	// ToolContext.Router seam / diagnostics; no assistant turn or utility task uses it.
 	Router   *models.Router
 	Registry *tools.Registry
-	Skills   *skills.SkillRegistry
 
 	SessionID string
 	Session   *agent.Session
@@ -197,6 +208,32 @@ func Create(opts CreateOptions) (*App, error) {
 	// mcp → queue → router → registry → skills.
 	a.MCP = mcp.New(cfg, mcp.Options{ClientOverride: opts.MCPClientOverride})
 	a.Queue = queue.New(queueEventStore{s: store}, domain.NowMS)
+	// The native Daintree backend: the assistant turn engine + server-owned utility
+	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model
+	// credentials, prompt assembly, and skill selection.
+	//
+	// DEVELOPMENT-ONLY: the endpoint is HARDCODED to the single local backend
+	// (backend.DefaultBaseURL, http://127.0.0.1:8473) and there is no authentication.
+	// The assistant supports exactly this one endpoint for now; a later phase replaces
+	// the URL with the production endpoint and adds the real login flow. The only
+	// escape hatch is DAINTREE_BACKEND_URL, which exists for local dev + e2e tests (a
+	// fake backend server) — it is NOT a product config knob, and the default is always
+	// the hardcoded endpoint.
+	if opts.BackendOverride != nil {
+		a.Backend = opts.BackendOverride
+	} else {
+		baseURL := backend.DefaultBaseURL
+		if v := strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")); v != "" {
+			baseURL = v
+		}
+		a.Backend = backend.NewClient(backend.ClientConfig{
+			BaseURL: baseURL,
+			ClientInfo: backend.ClientInfo{
+				Name:     "daintree-cli",
+				Platform: runtime.GOOS,
+			},
+		})
+	}
 	a.Router = models.NewRouter(
 		models.RouterConfig{LargeModel: cfg.LargeModel, MediumModel: cfg.MediumModel, SmallModel: cfg.SmallModel},
 		models.NewDeepSeekClient(models.DeepSeekConfig{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Offline: cfg.Offline}),
@@ -237,42 +274,9 @@ func Create(opts CreateOptions) (*App, error) {
 		return nil, err
 	}
 
-	initial, err := skills.LoadSkills()
-	if err != nil {
-		baseCancel()
-		_ = store.Close()
-		return nil, err
-	}
-	skillReg, err := skills.NewRegistry(initial)
-	if err != nil {
-		baseCancel()
-		_ = store.Close()
-		return nil, err
-	}
-	a.Skills = skillReg
-
-	// Boot-time validation: every skill's declared requiredTools must name a tool that
-	// exists in the registry. requiredTools no longer narrows the toolset (skills never
-	// limit what the model can call — the full registry is offered every turn), but it
-	// is still a focus hint, and a skill that points the model at a NON-EXISTENT tool
-	// name is a documentation bug. Surface it LOUDLY (debug log + the Log hook when
-	// present). It is a wiring bug in a pre-release codebase, so we don't hard-fail
-	// boot, but it must never pass unnoticed.
-	if missing := skills.ValidateRequiredTools(a.Skills.All(), a.Registry); len(missing) > 0 {
-		pairs := make([]string, 0, len(missing))
-		for _, m := range missing {
-			pairs = append(pairs, m.SkillID+" → "+m.Tool)
-		}
-		warning := "skill requiredTools missing from the registry (the model will be starved of these): " + strings.Join(pairs, ", ")
-		debuglog.LogDebug(
-			debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
-			"skill.required_tools_missing",
-			map[string]any{"missing": pairs},
-		)
-		if a.hooks.Log != nil {
-			a.hooks.Log("⚠ " + warning)
-		}
-	}
+	// Skills are SERVER-OWNED: the backend's selector picks and injects runbooks. The
+	// CLI no longer loads a local skill catalog (no embedded skill files, no
+	// requiredTools validation) — see docs/BACKEND.md.
 
 	// Resume prior conversation if this session id has history.
 	var restored []models.ChatMessage
@@ -326,10 +330,9 @@ func Create(opts CreateOptions) (*App, error) {
 	)
 
 	a.Session = agent.NewSession(agent.SessionDeps{
+		Backend:            a.Backend,
 		Router:             a.Router,
 		Tools:              newToolRunner(a),
-		SkillSelector:      skillSelectorAdapter{router: a.Router},
-		SkillCatalog:       skillReg,
 		Store:              store,
 		MemoryStore:        store,
 		MemoryRecaller:     memoryRecallerAdapter{s: store},
@@ -342,6 +345,10 @@ func Create(opts CreateOptions) (*App, error) {
 		ArtifactPersister:    store,
 		WorkflowRunLister:    store,
 		PromptContext:        a.PromptContext(),
+		// Live runtime context: pulled every round so a post-construction MCP connect,
+		// /permissions tier change, or scheduler start reaches the backend (replaces the
+		// removed RefreshRuntimeContext push). a.PromptContext reads live MCP/scheduler state.
+		PromptContextFunc:    a.PromptContext,
 		SessionID:            sessionID,
 		RestoredMessages:     restored,
 		InitialSeq:           initialSeq,

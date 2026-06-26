@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
@@ -28,13 +27,13 @@ func (r *recordingMCP) CallTool(_ context.Context, name string, args map[string]
 	return r.result, r.err
 }
 
-// recordChat fails the test if Chat is ever called — terminal.read must never
+// recordChat fails the test if Summarize is ever called — terminal.read must never
 // consult the model.
 type recordChat struct{ called bool }
 
-func (c *recordChat) Chat(_ context.Context, _ domain.ModelTier, _ []ChatMessage, _ int) (ChatResult, error) {
+func (c *recordChat) Summarize(_ context.Context, _ string, _ string) (string, error) {
 	c.called = true
-	return ChatResult{Content: "should not happen"}, nil
+	return "should not happen", nil
 }
 
 func readResult(t *testing.T, res tools.ToolResult) map[string]any {
@@ -93,7 +92,7 @@ func TestReadSurfacesGetOutputError(t *testing.T) {
 func TestSummarizeNotFlaggedOnCleanFinish(t *testing.T) {
 	deps := Deps{
 		MCP:    &fakeMCP{connected: true, results: map[string]MCPCallResult{"terminal.getOutput": {Text: "output"}}},
-		Router: fakeRouter{res: ChatResult{Content: "a summary", FinishReason: "stop"}},
+		Router: fakeRouter{summary: "a summary"},
 		Queue:  fakeQueue{},
 	}
 	tool := newSummarizeTool(deps)

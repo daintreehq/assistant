@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
@@ -53,12 +55,32 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 		return "MISSING"
 	}
 
-	// deepseek key.
-	push("deepseek key", cfg.DeepSeekAPIKey != "", presentOrMissing(cfg.DeepSeekAPIKey),
-		"set DEEPSEEK_API_KEY in .env or the environment")
-	// models.
-	push("large model", cfg.LargeModel != "", cfg.LargeModel, "set DAINTREE_LARGE_MODEL")
-	push("small model", cfg.SmallModel != "", cfg.SmallModel, "set DAINTREE_SMALL_MODEL")
+	// backend — the CLI's model gateway (owns the model credentials + prompts + skills).
+	push("backend url", true, a.Backend.BaseURL(), "")
+	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
+	herr := a.Backend.Health(bctx)
+	bcancel()
+	push("backend health", herr == nil, errDetail(herr, "ok"),
+		"start the Daintree backend (../assistant-backend)")
+	rctx, rcancel := context.WithTimeout(ctx, doctorProbeTimeout)
+	rerr := a.Backend.Ready(rctx)
+	rcancel()
+	push("backend ready", rerr == nil, errDetail(rerr, "ready"),
+		"backend is up but not ready (config/secrets/catalog/provider)")
+	cctx, ccancel := context.WithTimeout(ctx, doctorProbeTimeout)
+	caps, cerr := a.Backend.Capabilities(cctx)
+	ccancel()
+	if cerr == nil {
+		protoOK := caps.Protocol.Min <= backend.ProtocolVersion && caps.Protocol.Max >= backend.ProtocolVersion
+		push("backend protocol", protoOK,
+			fmt.Sprintf("server v%d–%d, CLI v%d · %d tasks", caps.Protocol.Min, caps.Protocol.Max, backend.ProtocolVersion, len(caps.Tasks)),
+			"CLI/backend protocol mismatch — update the CLI or backend")
+	}
+	// forbidden tools must never be exposed to the backend (skill find/load are reserved).
+	exposed, forbidden := exposedAndForbiddenTools(a)
+	push("backend tools", len(forbidden) == 0, fmt.Sprintf("%d exposed", exposed),
+		"a reserved tool is exposed: "+joinNames(forbidden))
+
 	// mcp url / token.
 	push("mcp url", cfg.McpURL != "", orUnset(cfg.McpURL), "set DAINTREE_MCP_URL to Daintree's MCP endpoint")
 	push("mcp token", cfg.McpToken != "", presentOrMissing(cfg.McpToken), "set DAINTREE_MCP_TOKEN")
@@ -172,6 +194,32 @@ func orUnset(s string) string {
 		return "(unset)"
 	}
 	return s
+}
+
+// errDetail renders ok when err is nil, else the error message.
+func errDetail(err error, ok string) string {
+	if err == nil {
+		return ok
+	}
+	return err.Error()
+}
+
+// exposedAndForbiddenTools returns the count of tools the CLI would offer the backend
+// and any reserved names that must never be exposed (skill find/load, or the
+// daintree_internal prefix). The registry holds internal dotted names.
+func exposedAndForbiddenTools(a *app.App) (count int, forbidden []string) {
+	list := a.Registry.List()
+	count = len(list)
+	for _, t := range list {
+		switch t.Name {
+		case "skill.find", "skill.load":
+			forbidden = append(forbidden, t.Name)
+		}
+		if strings.HasPrefix(t.Name, "daintree_internal.") {
+			forbidden = append(forbidden, t.Name)
+		}
+	}
+	return count, forbidden
 }
 
 func joinNames(names []string) string {

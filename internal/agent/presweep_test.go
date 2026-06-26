@@ -165,19 +165,23 @@ func TestRunPreSweepIgnoresNonToolMessages(t *testing.T) {
 }
 
 func TestRunPreSweepSkipsControlMessages(t *testing.T) {
-	// Identical "tool" bodies living entirely WITHIN the control region (no working
-	// message after them) must be untouched — the guard returns before any pass.
-	big := strings.Repeat("c", 4000)
-	msgs := []models.ChatMessage{
-		models.TextMessage("system", "control"),
-		toolMsg("call_1", big),
-		toolMsg("call_2", big),
+	// With no working message after the control prefix there is nothing to sweep — the
+	// `len(msgs) <= ControlMessageCount` guard returns 0 before any pass. The backend now
+	// owns the system prefix (ControlMessageCount == 0), so a history of exactly the
+	// control prefix is empty; the guard is verified forward-compatibly against whatever
+	// ControlMessageCount is, plus the empty-slice case.
+	if n := runPreSweep(nil); n != 0 {
+		t.Fatalf("modified = %d, want 0 (empty history)", n)
 	}
-	if n := runPreSweep(msgs); n != 0 {
+	controlsOnly := withControls() // exactly ControlMessageCount control messages, none working
+	before := append([]models.ChatMessage(nil), controlsOnly...)
+	if n := runPreSweep(controlsOnly); n != 0 {
 		t.Fatalf("modified = %d, want 0 (control region is off-limits)", n)
 	}
-	if msgs[1].StringContent != big || msgs[2].StringContent != big {
-		t.Fatal("control-region messages must never be rewritten")
+	for i := range controlsOnly {
+		if controlsOnly[i].StringContent != before[i].StringContent {
+			t.Fatal("control-region messages must never be rewritten")
+		}
 	}
 }
 

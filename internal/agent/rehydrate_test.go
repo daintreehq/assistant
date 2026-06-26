@@ -117,13 +117,13 @@ func TestDirtyFreshStartSessionContinuesSeqPastDirtyRows(t *testing.T) {
 	// (and every later append) at seq >= maxSeq+1, so a new row NEVER collides with
 	// the dirty dup-seq rows. The clear marker proves a clean post-marker history.
 	store := &recordingStore{}
+	r := plainRouter()
 	deps := SessionDeps{
-		Router:        plainRouter(),
-		Tools:         &fakeTools{},
-		SkillSelector: fakeSelector{},
-		SkillCatalog:  fakeCatalog{},
-		Store:         store,
-		SessionID:     "ses_dirty",
+		Backend:   backendFromRouter{r: r},
+		Router:    r,
+		Tools:     &fakeTools{},
+		Store:     store,
+		SessionID: "ses_dirty",
 		// Resume EMPTY at maxSeq+1 = 8, flagged dirty so a clear breadcrumb persists.
 		RestoredMessages: []models.ChatMessage{},
 		InitialSeq:       8,
@@ -146,26 +146,6 @@ func TestDirtyFreshStartSessionContinuesSeqPastDirtyRows(t *testing.T) {
 	last := store.msgs[len(store.msgs)-1]
 	if last.Seq != 9 {
 		t.Fatalf("next append seq = %d want 9 (continues past the breadcrumb)", last.Seq)
-	}
-}
-
-func TestRehydrateDropsControlRows(t *testing.T) {
-	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
-		msgRow(3, "user", "hello"), msgRow(4, "assistant", "hi"),
-	}
-	res, ok := RehydrateSession(rows)
-	if !ok {
-		t.Fatal("expected resume")
-	}
-	if res.InitialSeq != 5 {
-		t.Fatalf("initialSeq=%d want 5", res.InitialSeq)
-	}
-	if len(res.RestoredMessages) != 2 {
-		t.Fatalf("restored %d msgs want 2 (controls dropped)", len(res.RestoredMessages))
-	}
-	if res.RestoredMessages[0].StringContent != "hello" {
-		t.Fatalf("first restored = %q want hello", res.RestoredMessages[0].StringContent)
 	}
 }
 
@@ -209,10 +189,9 @@ func TestRehydrateCompactMarkerKeepsAfter(t *testing.T) {
 func TestDropOrphanToolResults(t *testing.T) {
 	toolCalls := `[{"id":"call_1","type":"function","function":{"name":"fs.read","arguments":"{}"}}]`
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
-		{Seq: 3, Role: "assistant", Content: "", ToolCallsJson: &toolCalls},
-		{Seq: 4, Role: "tool", Content: "{}", ToolCallID: strp("call_1")},   // matched — kept
-		{Seq: 5, Role: "tool", Content: "{}", ToolCallID: strp("orphan_9")}, // orphan — dropped
+		{Seq: 0, Role: "assistant", Content: "", ToolCallsJson: &toolCalls},
+		{Seq: 1, Role: "tool", Content: "{}", ToolCallID: strp("call_1")},   // matched — kept
+		{Seq: 2, Role: "tool", Content: "{}", ToolCallID: strp("orphan_9")}, // orphan — dropped
 	}
 	res, ok := RehydrateSession(rows)
 	if !ok {
@@ -235,9 +214,8 @@ func TestDropOrphanToolResults(t *testing.T) {
 func TestDropOrphanToolCallTail(t *testing.T) {
 	toolCalls := `[{"id":"call_1","type":"function","function":{"name":"fs.read","arguments":"{}"}}]`
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
-		msgRow(3, "user", "hello"),
-		{Seq: 4, Role: "assistant", Content: "", ToolCallsJson: &toolCalls}, // unanswered tail
+		msgRow(0, "user", "hello"),
+		{Seq: 1, Role: "assistant", Content: "", ToolCallsJson: &toolCalls}, // unanswered tail
 	}
 	res, ok := RehydrateSession(rows)
 	if !ok {
@@ -269,15 +247,14 @@ func TestRehydrateDroppedRowsAccumulatesAllKinds(t *testing.T) {
 		`{"id":"call_b","type":"function","function":{"name":"fs.list","arguments":"{}"}}]`
 	bad := "{not json"
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
 		// (a) malformed tool-call JSON: text kept, calls dropped → +1 (this row survives).
-		{Seq: 3, Role: "assistant", Content: "kept", ToolCallsJson: strp(bad)},
+		{Seq: 0, Role: "assistant", Content: "kept", ToolCallsJson: strp(bad)},
 		// (b) orphan tool result — its id is never declared → +1 in the orphan pass.
-		{Seq: 4, Role: "tool", Content: "{}", ToolCallID: strp("ghost")},
+		{Seq: 1, Role: "tool", Content: "{}", ToolCallID: strp("ghost")},
 		// (c) incomplete trailing exchange — declares call_a + call_b, only call_a
 		//     answered. The tail cut removes the assistant row + the call_a result → +2.
-		{Seq: 5, Role: "assistant", Content: "", ToolCallsJson: strp(tail)},
-		{Seq: 6, Role: "tool", Content: "{}", ToolCallID: strp("call_a")},
+		{Seq: 2, Role: "assistant", Content: "", ToolCallsJson: strp(tail)},
+		{Seq: 3, Role: "tool", Content: "{}", ToolCallID: strp("call_a")},
 	}
 	res, ok := RehydrateSession(rows)
 	if !ok {

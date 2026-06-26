@@ -37,25 +37,11 @@ type MCPClient interface {
 	CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error)
 }
 
-// ChatMessage is one message in a small-model chat request.
-type ChatMessage struct {
-	Role    string
-	Content string
-}
-
-// ChatResult is the small-model chat reply this family needs: the content plus
-// the finishReason (a "length" reason flags a token-cap truncation).
-type ChatResult struct {
-	Content      string
-	FinishReason string
-}
-
-// Router is the slice of model access this family uses (terminal.summarize runs
-// router.chat("small", …)). Locally defined consumer interface — does NOT import
-// internal/models. maxTokens caps the model's output; maxTokens <= 0 means "no cap"
-// (the summarizer uses 0 so a bounded-tail summary is never truncated mid-sentence).
+// Router is the model access this family uses. Summarize maps to the backend's
+// terminal_summarize.v1 task (the backend owns the prompt); the CLI sends only the
+// purpose + terminal tail.
 type Router interface {
-	Chat(ctx context.Context, tier domain.ModelTier, messages []ChatMessage, maxTokens int) (ChatResult, error)
+	Summarize(ctx context.Context, purpose, tail string) (string, error)
 }
 
 // Queue is the slice of the attention queue context.snapshot reads (the open

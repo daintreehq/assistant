@@ -58,15 +58,15 @@ type jsonLine struct {
 }
 
 // TestBinaryJSONOneShot builds the binary and runs `--json "prompt"` pointed at the
-// fake DeepSeek SSE server, asserting the JSONL schema-v1 envelope sequence
+// fake Daintree backend SSE server, asserting the JSONL schema-v1 envelope sequence
 // (assistant:start → content → tool:call → tool:result → assistant:end → result),
 // monotonic seq, exit code 0, and stdout purity (no ANSI / diagnostics — only the
-// JSONL lines). The base-URL override is DEEPSEEK_BASE_URL (the config trusted-env
-// boundary), which is what makes a real-binary e2e feasible.
+// JSONL lines). The endpoint override is DAINTREE_BACKEND_URL (app.Create's dev/test
+// hook), which is what makes a real-binary e2e feasible against the native backend.
 func TestBinaryJSONOneShot(t *testing.T) {
 	bin := buildBinary(t)
 
-	fake := newFakeDeepSeek(t,
+	fake := newFakeBackend(t,
 		sseRound{
 			contentTokens: []string{"Checking ", "memory."},
 			toolName:      "memory__list",
@@ -82,7 +82,10 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin, "--json", "what's in memory?")
 	cmd.Env = append(cmd.Environ(),
-		"DEEPSEEK_BASE_URL="+fake.baseURL(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
+		// The one-shot CLI path still hard-requires a non-empty DEEPSEEK_API_KEY before it
+		// will start a turn (cli/run.go) even though the backend now owns model access — so
+		// a placeholder key clears that gate; the fake backend never uses it.
 		"DEEPSEEK_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
 		"DAINTREE_ASSISTANT_TIER=operator",

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
@@ -148,17 +149,9 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		}
 	}
 
-	// Preflight: without a model key the turn can only fail on the first model call,
-	// so surface that up front (matching the cockpit's boot note) and exit before a
-	// dead round-trip, pointing at `doctor` for a fuller setup check.
-	if a.Config.DeepSeekAPIKey == "" {
-		reportError(errors.New("DEEPSEEK_API_KEY is not set — I can't reach the model. Run `daintree-assistant doctor` to check your setup."))
-		_ = a.Shutdown()
-		if sink != nil {
-			return sink.Finish()
-		}
-		return domain.OneShotExitCode.Error
-	}
+	// No model-key preflight: the CLI no longer holds model credentials (the backend
+	// owns them). If the backend is unreachable the turn fails with a clear
+	// "could not reach assistant backend" error from the backend client.
 
 	confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
 		// One-shot is non-interactive → auto-decline.
@@ -178,7 +171,8 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		}
 	}
 
-	var events = NewConsoleSink(render.Stdout())
+	cs := NewConsoleSink(render.Stdout())
+	var events agent.EventSink = cs
 	if sink != nil {
 		events = sink
 	}
@@ -205,7 +199,11 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	if sink != nil {
 		return sink.Finish()
 	}
-	if runErr != nil {
+	// Session.Send returns turn FAILURES as sentinel replies (not an error — the error
+	// return is reserved for the single-flight guard), so a backend-down / model-error
+	// turn surfaces as an Error event, not runErr. Gate the exit code on both so a failed
+	// one-shot exits non-zero for scripts/CI (the JSON sink does the same via Finish()).
+	if runErr != nil || cs.Failed() {
 		return domain.OneShotExitCode.Error
 	}
 	return domain.OneShotExitCode.Success
@@ -259,18 +257,21 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	st := a.MCP.Status()
 
 	// Track whether any gating check failed so the exit code reflects health instead
-	// of always reporting success — scripts and CI gate on `doctor`'s exit code. A
-	// missing model key is the one hard failure here; a disconnected MCP is a valid
-	// degraded local mode, not a doctor failure.
+	// of always reporting success — scripts and CI gate on `doctor`'s exit code. An
+	// UNREACHABLE backend is the one hard failure here (it is the CLI's model gateway);
+	// a disconnected MCP is a valid degraded local mode, not a doctor failure.
 	anyFail := false
 
 	r.Line("Daintree Assistant — doctor")
-	fwk := "present"
-	if a.Config.DeepSeekAPIKey == "" {
-		fwk = "MISSING — set DEEPSEEK_API_KEY"
+	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
+	herr := a.Backend.Health(hctx)
+	hcancel()
+	backendLine := "ok"
+	if herr != nil {
+		backendLine = "UNREACHABLE — " + herr.Error()
 		anyFail = true
 	}
-	r.Line("  deepseek key  : " + fwk)
+	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)
 	mcpURL := a.Config.McpURL
 	if mcpURL == "" {
 		mcpURL = "(unset)"

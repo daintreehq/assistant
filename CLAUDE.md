@@ -26,12 +26,20 @@ that writes/edits files.
 The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`)
 and on GitHub at <https://github.com/daintreehq/daintree>.
 
-Powered by **DeepSeek AI** (OpenAI-compatible, plain `net/http`). Three model tiers,
-all on `deepseek-v4-flash`: `large` (main thread/orchestration), `small`
-(watchers/summaries/classification), `medium` (routes to large in v1). Flash is the
-validated orchestration model — the loaded skills carry the playbooks, so a heavier
-model on the main thread earned nothing; override per-tier with
-`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`.
+Powered by the **Daintree Assistant backend** (`../assistant-backend`), a Daintree-native
+HTTP API — **not** OpenAI-compatible. The CLI is a thin local runtime: it sends only the
+visible conversation + structured runtime/turn context + its tool inventory, and the
+backend owns the system prompt, developer instructions, **skill/runbook selection**, model
+choice, prompt assembly, the utility-model prompts, and the upstream model credentials
+(DeepSeek, spoken internally behind a provider abstraction). The CLI executes the local
+tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
+
+**Development endpoint:** hardcoded to `http://127.0.0.1:8473`, unauthenticated — the
+assistant supports exactly this one endpoint for now (a later phase swaps in the
+production URL + a real login flow). The only override is the dev/test env var
+`DAINTREE_BACKEND_URL`; there is no product config knob. Run `../assistant-backend`
+locally (`python -m daintree_assistant_server`). The legacy `internal/models` DeepSeek
+client/Router is retained transitionally but no assistant turn or utility task uses it.
 
 ## Commands
 

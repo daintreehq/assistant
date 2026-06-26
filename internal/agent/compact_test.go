@@ -11,7 +11,6 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // recordingStore captures persisted conversation rows so seq + marker writes can be
@@ -28,22 +27,18 @@ func (s *recordingStore) InsertSkillSelection(rec domain.SkillSelectionLogRecord
 	return rec, nil
 }
 
-// compactSession builds a session with the real registry + a recording store.
+// compactSession builds a session wired through the backend-from-router adapter + a
+// recording store. The Router's Chat call backs the checkpoint/distill backend tasks.
 func compactSession(t *testing.T, r Router) (*Session, *recordingStore) {
 	t.Helper()
 	store := &recordingStore{}
-	reg, err := skills.BuiltinRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
 	deps := SessionDeps{
-		Router:        r,
-		Tools:         &fakeTools{},
-		SkillSelector: fakeSelector{},
-		SkillCatalog:  reg,
-		Store:         store,
-		SessionID:     "ses_compact",
-		Events:        NoopEventSink{},
+		Backend:   backendFromRouter{r: r},
+		Router:    r,
+		Tools:     &fakeTools{},
+		Store:     store,
+		SessionID: "ses_compact",
+		Events:    NoopEventSink{},
 	}
 	return NewSession(deps), store
 }
@@ -53,26 +48,20 @@ func TestCompactKeepsControlsPlusSummary(t *testing.T) {
 	s.InjectNote("first")
 	s.InjectNote("second")
 	s.InjectNote("third")
-	if len(s.Messages()) <= 4 {
+	if len(s.Messages()) < 3 {
 		t.Fatal("expected accumulated history")
 	}
 	s.Compact("goals: X. open: none. next: Y.")
 	msgs := s.Messages()
-	if len(msgs) != 4 {
-		t.Fatalf("messages = %d want 4 (3 controls + 1 summary)", len(msgs))
+	// No client-side control prefix anymore (ControlMessageCount == 0): a manual compact
+	// collapses the visible history to a single checkpoint note at index 0.
+	if len(msgs) != domain.ControlMessageCount+1 {
+		t.Fatalf("messages = %d want %d (controls + 1 summary)", len(msgs), domain.ControlMessageCount+1)
 	}
-	if msgs[0].Role != "system" {
-		t.Fatalf("msg[0] role = %q", msgs[0].Role)
-	}
-	if !strings.Contains(msgs[1].StringContent, "# Runtime context") {
-		t.Fatal("msg[1] should be runtime context")
-	}
-	if !strings.Contains(msgs[2].StringContent, "# Loaded skills") {
-		t.Fatal("msg[2] should be loaded skills")
-	}
-	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "checkpoint") ||
-		!strings.Contains(msgs[3].StringContent, "goals: X") {
-		t.Fatalf("msg[3] = %+v want a checkpoint note", msgs[3])
+	note := msgs[domain.ControlMessageCount]
+	if note.Role != "user" || !strings.Contains(note.StringContent, "checkpoint") ||
+		!strings.Contains(note.StringContent, "goals: X") {
+		t.Fatalf("note = %+v want a checkpoint note", note)
 	}
 	for _, m := range msgs {
 		if strings.Contains(m.StringContent, "first") {
@@ -88,13 +77,13 @@ func TestCompactNoteEmbedsDepthTag(t *testing.T) {
 	s, _ := compactSession(t, plainRouter())
 	s.InjectNote("history")
 	s.Compact("goals: X.")
-	first := s.Messages()[3]
+	first := s.Messages()[domain.ControlMessageCount]
 	if first.Role != "user" || !strings.Contains(first.StringContent, "depth 1") ||
 		!strings.Contains(first.StringContent, "checkpoint") {
 		t.Fatalf("first compaction note = %q, want a depth-1 checkpoint", first.StringContent)
 	}
 	s.Compact("goals: Y.")
-	second := s.Messages()[3]
+	second := s.Messages()[domain.ControlMessageCount]
 	if !strings.Contains(second.StringContent, "depth 2") {
 		t.Fatalf("second compaction note = %q, want depth 2", second.StringContent)
 	}
@@ -106,8 +95,8 @@ func TestClearKeepsControlsNoSummary(t *testing.T) {
 	s.InjectNote("beta")
 	s.Clear()
 	msgs := s.Messages()
-	if len(msgs) != 3 {
-		t.Fatalf("messages = %d want 3 (controls only, no summary)", len(msgs))
+	if len(msgs) != domain.ControlMessageCount {
+		t.Fatalf("messages = %d want %d (no working history, no summary)", len(msgs), domain.ControlMessageCount)
 	}
 	for _, m := range msgs {
 		if strings.Contains(m.StringContent, "alpha") || strings.Contains(m.StringContent, "[checkpoint") {
@@ -154,8 +143,8 @@ func TestClearIsIdempotent(t *testing.T) {
 	s.InjectNote("once")
 	s.Clear()
 	s.Clear()
-	if len(s.Messages()) != 3 {
-		t.Fatalf("a second clear must keep exactly 3 control messages, got %d", len(s.Messages()))
+	if len(s.Messages()) != domain.ControlMessageCount {
+		t.Fatalf("a second clear must keep exactly %d control messages, got %d", domain.ControlMessageCount, len(s.Messages()))
 	}
 }
 
@@ -163,13 +152,13 @@ func TestClearDropsPriorCompactionSummary(t *testing.T) {
 	s, _ := compactSession(t, plainRouter())
 	s.InjectNote("pre")
 	s.Compact("goals: X. open: none. next: Y.")
-	if len(s.Messages()) != 4 {
-		t.Fatalf("compact should leave 4 messages, got %d", len(s.Messages()))
+	if len(s.Messages()) != domain.ControlMessageCount+1 {
+		t.Fatalf("compact should leave %d messages, got %d", domain.ControlMessageCount+1, len(s.Messages()))
 	}
 	s.Clear()
 	msgs := s.Messages()
-	if len(msgs) != 3 {
-		t.Fatalf("clear after compact should leave 3, got %d", len(msgs))
+	if len(msgs) != domain.ControlMessageCount {
+		t.Fatalf("clear after compact should leave %d, got %d", domain.ControlMessageCount, len(msgs))
 	}
 	for _, m := range msgs {
 		if strings.Contains(m.StringContent, "[checkpoint") || strings.Contains(m.StringContent, "goals: X") {
@@ -877,19 +866,14 @@ func (s *infoCountSink) Info(m string) { s.infos = append(s.infos, m) }
 // unaffected.
 func TestAutoCompactSkipNoteEmittedOncePerStreak(t *testing.T) {
 	r := &errChatRouter{err: errors.New("provider down")}
-	reg, err := skills.BuiltinRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
 	sink := &infoCountSink{}
 	s := NewSession(SessionDeps{
-		Router:        r,
-		Tools:         &fakeTools{},
-		SkillSelector: fakeSelector{},
-		SkillCatalog:  reg,
-		Store:         &recordingStore{},
-		SessionID:     "ses_skipnote",
-		Events:        sink,
+		Backend:   backendFromRouter{r: r},
+		Router:    r,
+		Tools:     &fakeTools{},
+		Store:     &recordingStore{},
+		SessionID: "ses_skipnote",
+		Events:    sink,
 	})
 	// Over the SOFT threshold but UNDER the hard ceiling, so consecutive failures climb the
 	// counter without ever truncating — exactly the path that used to re-emit every round.
@@ -1121,10 +1105,12 @@ func TestMaybeAutoCompactFallsBackToEstimateWhenNoRealTokens(t *testing.T) {
 	}
 }
 
-// reportingRouter streams a plain answer, reports a fixed LARGE-tier prompt_tokens via
-// FlushMeter, and returns a summary from Chat — so an end-to-end Send populates
-// lastPromptTokens from real usage and the NEXT Send can gate compaction on it even
-// when the char estimate is tiny.
+// reportingRouter streams a plain answer reporting a fixed prompt_tokens on its
+// ChatResult.Usage (the backend owns model routing now, so usage flows through the single
+// backend.Usage on the respond result, mapped from ChatResult.Usage by the test adapter —
+// there is no per-tier FlushMeter rollup anymore), and returns a summary from Chat — so an
+// end-to-end Send populates lastPromptTokens from real usage and the NEXT Send can gate
+// compaction on it even when the char estimate is tiny.
 type reportingRouter struct {
 	largePromptTokens int
 	summary           string
@@ -1135,21 +1121,17 @@ func (r *reportingRouter) Stream(ctx context.Context, tier domain.ModelTier, opt
 	if onToken != nil {
 		onToken("hi")
 	}
-	return models.ChatResult{Content: "hi"}, nil
+	return models.ChatResult{Content: "hi", Usage: &models.Usage{
+		PromptTokens: intp(r.largePromptTokens),
+		TotalTokens:  intp(r.largePromptTokens),
+	}}, nil
 }
 func (r *reportingRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
 	r.chatCalls++
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *reportingRouter) ModelFor(domain.ModelTier) string { return "glm-5p2" }
-func (r *reportingRouter) FlushMeter() []models.TierUsage {
-	return []models.TierUsage{{
-		Tier:         string(domain.ModelLarge),
-		Model:        "glm-5p2",
-		PromptTokens: r.largePromptTokens,
-		TotalTokens:  r.largePromptTokens,
-	}}
-}
+func (r *reportingRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestSendStashedTokensGateNextRoundCompaction is the end-to-end proof: round 1's
 // emitUsage stashes the provider-reported prompt_tokens (over threshold), and round 2's
@@ -1332,21 +1314,17 @@ func TestAutoCompactKeepsVerbatimTail(t *testing.T) {
 	if len(msgs) != domain.ControlMessageCount+1+3 {
 		t.Fatalf("messages = %d, want %d (controls + summary + 3 tail)", len(msgs), domain.ControlMessageCount+1+3)
 	}
-	// Controls remain byte-stable.
-	if msgs[0].Role != "system" || !strings.Contains(msgs[1].StringContent, "# Runtime context") ||
-		!strings.Contains(msgs[2].StringContent, "# Loaded skills") {
-		t.Fatal("control messages must remain byte-stable")
-	}
-	// Checkpoint note sits immediately after the controls.
-	if msgs[3].Role != "user" || !strings.Contains(msgs[3].StringContent, "checkpoint") ||
-		!strings.Contains(msgs[3].StringContent, "TAIL_SUMMARY") {
-		t.Fatalf("msg[3] = %q, want the checkpoint note", msgs[3].StringContent)
+	// Checkpoint note sits immediately after the (now-empty) control prefix.
+	note := domain.ControlMessageCount
+	if msgs[note].Role != "user" || !strings.Contains(msgs[note].StringContent, "checkpoint") ||
+		!strings.Contains(msgs[note].StringContent, "TAIL_SUMMARY") {
+		t.Fatalf("note = %q, want the checkpoint note", msgs[note].StringContent)
 	}
 	// The recent tail follows the summary, verbatim and in original order.
-	if !strings.Contains(msgs[4].StringContent, "RECENT_A") ||
-		!strings.Contains(msgs[5].StringContent, "RECENT_B") ||
-		!strings.Contains(msgs[6].StringContent, "RECENT_C") {
-		t.Fatalf("recent tail not preserved verbatim: %+v", msgs[4:])
+	if !strings.Contains(msgs[note+1].StringContent, "RECENT_A") ||
+		!strings.Contains(msgs[note+2].StringContent, "RECENT_B") ||
+		!strings.Contains(msgs[note+3].StringContent, "RECENT_C") {
+		t.Fatalf("recent tail not preserved verbatim: %+v", msgs[note+1:])
 	}
 	for _, m := range msgs {
 		if strings.Contains(m.StringContent, "OLD_BIG") {
@@ -1488,52 +1466,6 @@ func TestAutoCompactRehydratesSummaryPlusTail(t *testing.T) {
 	for _, m := range res.RestoredMessages {
 		if strings.Contains(m.StringContent, "OLD_BIG") {
 			t.Fatal("shed old note must not rehydrate")
-		}
-	}
-}
-
-// promptCaptureRouter records the system message of each Chat (summary) call so a test can
-// assert the auto-summary prompt instructs the model to preserve load-bearing IDs.
-type promptCaptureRouter struct {
-	mu        sync.Mutex
-	systemMsg string
-	summary   string
-}
-
-func (r *promptCaptureRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
-	return models.ChatResult{Content: "ok"}, nil
-}
-func (r *promptCaptureRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
-	r.mu.Lock()
-	if len(opts.Messages) > 0 {
-		r.systemMsg = opts.Messages[0].StringContent
-	}
-	r.mu.Unlock()
-	return models.ChatResult{Content: r.summary}, nil
-}
-func (r *promptCaptureRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *promptCaptureRouter) FlushMeter() []models.TierUsage   { return nil }
-func (r *promptCaptureRouter) system() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.systemMsg
-}
-
-// TestAutoCompactSummaryPromptPreservesIDs proves the auto-compaction checkpoint system
-// prompt tells the model to keep every load-bearing identifier verbatim (using the
-// canonical domain prefixes — issue #256), so a mid-run compaction doesn't strand the
-// orchestrator's live references.
-func TestAutoCompactSummaryPromptPreservesIDs(t *testing.T) {
-	r := &promptCaptureRouter{summary: "S"}
-	s, _ := compactSession(t, r)
-	s.InjectNote("keep-small")
-	s.InjectNote("GIANT" + softTripFiller())
-	s.maybeAutoCompact(context.Background(), "run_test")
-
-	got := r.system()
-	for _, want := range []string{"term_*", "wch_*", "wfr_*", "agt_*", "tmr_*", "grt_*", "branch", "grant"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("checkpoint prompt missing %q: %q", want, got)
 		}
 	}
 }

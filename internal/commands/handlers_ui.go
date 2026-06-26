@@ -2,15 +2,15 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
@@ -464,13 +464,11 @@ func explainText(a *app.App, arg string) string {
 }
 
 func modelsText(a *app.App) string {
-	d := a.Router.Describe()
-	order := []string{"large", "medium", "small"}
-	var lines []string
-	for _, k := range order {
-		lines = append(lines, padRight(k, 7)+": "+d[k])
-	}
-	return strings.Join(lines, "\n")
+	// Model routing is owned by the Daintree backend now; the CLI no longer selects a
+	// model tier. Surface the backend endpoint + its public model id.
+	return "Model routing is owned by the Daintree backend.\n" +
+		padRight("backend", 8) + ": " + a.Backend.BaseURL() + "\n" +
+		padRight("model", 8) + ": daintree-assistant"
 }
 
 func permissionsText(a *app.App, arg string) string {
@@ -485,7 +483,6 @@ func permissionsText(a *app.App, arg string) string {
 		return "Unknown tier '" + arg + "'. Use supervisor | operator | system."
 	}
 	a.SetTier(t)
-	a.Session.RefreshRuntimeContext(a.PromptContext())
 	return "Tier set to " + string(t) + "." + tierDivergenceNote(a)
 }
 
@@ -502,80 +499,15 @@ func tierDivergenceNote(a *app.App) string {
 		" to make it stick."
 }
 
-// skillsLoadCap is the per-load skill cap.
-const skillsLoadCap = 3
-
-func skillsText(ctx context.Context, a *app.App, rest []string) string {
-	sub := ""
-	if len(rest) > 0 {
-		sub = rest[0]
-	}
-	switch sub {
-	case "":
-		all := a.Skills.List()
-		var lines []string
-		for _, s := range all {
-			lines = append(lines, fmt.Sprintf("%s [%s] %s — %s", s.ID, string(s.Risk), s.Title, s.Summary))
-		}
-		lines = append(lines, "", "Usage: /skills loaded | find <query> | load <id…> | clear")
-		return strings.Join(lines, "\n")
-	case "loaded":
-		return describeLoaded(a)
-	case "clear":
-		if err := a.Session.SetSkills(nil); err != nil {
-			return "Can't clear skills while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
-		}
-		return "Cleared loaded skills."
-	case "load":
-		ids := rest[1:]
-		var known []string
-		for _, id := range ids {
-			if a.Skills.Has(id) {
-				known = append(known, id)
-			}
-		}
-		if len(known) == 0 {
-			return "No known skill ids in: " + strings.Join(ids, " ") + " — loaded set unchanged."
-		}
-		if len(known) > skillsLoadCap {
-			known = known[:skillsLoadCap]
-		}
-		if err := a.Session.SetSkills(known); err != nil {
-			return "Can't load skills while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
-		}
-		return describeLoaded(a)
-	case "find":
-		query := strings.Join(rest[1:], " ")
-		if strings.TrimSpace(query) == "" {
-			return "Usage: /skills find <query>"
-		}
-		res := a.Session.FindSkills(ctx, query)
-		if !res.Ok {
-			return "Skill selector unavailable: " + res.Reason
-		}
-		if res.Matched {
-			ids := make([]string, 0, len(res.Selected))
-			for _, s := range res.Selected {
-				ids = append(ids, s.ID)
-			}
-			return "Loaded: " + strings.Join(ids, ", ")
-		}
-		return "No skill matched."
-	default:
-		return "Usage: /skills loaded | find <query> | load <id…> | clear"
-	}
-}
-
-func describeLoaded(a *app.App) string {
-	ids := a.Session.ActiveSkillIDs()
-	if len(ids) == 0 {
-		return "No skills loaded."
-	}
-	var lines []string
-	for _, s := range a.Skills.GetMany(ids) {
-		lines = append(lines, fmt.Sprintf("%s — %s", s.ID, s.Title))
-	}
-	return strings.Join(lines, "\n")
+// skillsText powers /skills. Skill selection is now SERVER-OWNED: the Daintree
+// backend's selector picks and injects the right runbook(s) per turn, and surfaces
+// the active set in each response's skills metadata. There is no local skill
+// catalog to browse or load, so this command is informational only.
+func skillsText(_ context.Context, _ *app.App, _ []string) string {
+	return "Skills are managed by the Daintree backend.\n" +
+		"The backend's selector picks and injects the right runbook(s) automatically each turn — " +
+		"there is no local skill catalog to browse, find, or load. Newly-loaded skills are surfaced " +
+		"in the conversation as they are applied."
 }
 
 // memoryText powers /memory: bare/list shows the pinned-first memory store, and
@@ -661,24 +593,20 @@ func memoryText(a *app.App, rest []string) string {
 	}
 }
 
-// compactRun summarizes the conversation with the small model then compacts, after
-// distilling any durable facts from the transcript so they survive the discard.
+// compactRun checkpoints the conversation via the backend's checkpoint.v1 task then
+// compacts, after distilling any durable facts from the transcript so they survive
+// the discard.
 func compactRun(ctx context.Context, a *app.App) string {
 	full := transcriptString(a)
-	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", "Summarize this assistant session into a tight brief: goals, decisions, open watchers/timers, and next steps. Preserve verbatim every terminal ID, agent ID, workflow-run ID, watcher ID, branch name, and active grant or approval that appears in the transcript — they are the handles the operator needs to keep working after the history is discarded. <= 200 words."),
-			models.TextMessage("user", capTail(full, 12000)),
-		},
-		MaxTokens: intPtr(400),
-	})
+	cp, err := backend.RunCheckpoint(ctx, a.Backend, backend.CheckpointInput{Transcript: capTail(full, 12000)})
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
+	summary := renderCheckpointJSON(cp)
 	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
 	// discards it.
 	distillInput := capTail(full, domain.DistillTranscriptMaxRunes)
-	if err := a.Session.Compact(res.Content); err != nil {
+	if err := a.Session.Compact(summary); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
 	// Only AFTER the history is actually discarded do we persist the distilled facts —
@@ -692,44 +620,55 @@ func compactRun(ctx context.Context, a *app.App) string {
 	return msg
 }
 
+// renderCheckpointJSON pretty-prints a checkpoint object as the compaction note body.
+func renderCheckpointJSON(cp backend.CheckpointOutput) string {
+	b, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
-// it extracts durable facts from a soon-to-be-discarded transcript (one small-model
-// call) and saves the novel ones as source="compact" memories. It lives here (not in
-// the agent seam) because the command layer has direct *app.App access — no import
-// cycle. Best-effort: any failure yields 0 and never affects compaction.
+// it extracts durable facts from a soon-to-be-discarded transcript via the backend's
+// memory_distill.v1 task and saves the novel ones as source="compact" memories. It
+// lives here (not in the agent seam) because the command layer has direct *app.App
+// access — no import cycle. Best-effort: any failure yields 0 and never affects compaction.
 func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (saved int) {
 	defer func() { _ = recover() }()
-	if a.Store == nil || strings.TrimSpace(transcript) == "" {
+	if a.Store == nil || a.Backend == nil || strings.TrimSpace(transcript) == "" {
 		return 0
 	}
-	res, err := a.Router.Chat(ctx, domain.ModelSmall, models.ChatOptions{
-		Messages: []models.ChatMessage{
-			models.TextMessage("system", prompts.DistillSystemPrompt),
-			models.TextMessage("user", transcript),
-		},
-		MaxTokens: intPtr(600),
-	})
+	out, err := backend.RunMemoryDistill(ctx, a.Backend, backend.MemoryDistillInput{Transcript: transcript})
 	if err != nil {
 		return 0
 	}
-	for _, entry := range prompts.ParseDistilledEntries(res.Content) {
-		exists, exErr := a.Store.MemoryExists(entry.Content)
-		if exErr != nil || exists {
+	for _, fact := range out.Facts {
+		content := strings.TrimSpace(fact.Fact)
+		if content == "" {
 			continue
 		}
-		now := domain.NowMS()
 		// Route each fact to its kind: semantic (a durable fact) vs episodic (an
 		// instructive trajectory trace). Manual /compact has no live turn runID to
 		// attribute, but episodic rows are still namespaced to the current session so
 		// they can be scoped/expired later; semantic facts carry no sessionId.
+		kind := domain.MemoryKindSemantic
+		if fact.Kind == string(domain.MemoryKindEpisodic) {
+			kind = domain.MemoryKindEpisodic
+		}
+		exists, exErr := a.Store.MemoryExists(content)
+		if exErr != nil || exists {
+			continue
+		}
+		now := domain.NowMS()
 		rec := domain.MemoryRecord{
-			Content:   entry.Content,
+			Content:   content,
 			Source:    domain.MemoryCompact,
-			Kind:      entry.Kind,
+			Kind:      kind,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if entry.Kind == domain.MemoryKindEpisodic && a.SessionID != "" {
+		if kind == domain.MemoryKindEpisodic && a.SessionID != "" {
 			sid := a.SessionID
 			rec.SessionID = &sid
 		}

@@ -5,19 +5,17 @@ import (
 	"encoding/json"
 	"regexp"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
-// checkpoint.go is the agent-side orchestration for the structured compaction object
-// (issue #256). The prompt text, struct, and lenient parser live in internal/models/
-// prompts (mirroring distill.go); this file builds the checkpoint via the small model,
-// validates that no load-bearing identifier was dropped, and renders the note body. The
-// auto-compact path in session.go swaps its prose-summary Chat call for buildCheckpoint
-// and feeds the rendered body to compactLocked (which prepends the [checkpoint | depth N]
-// header). Best-effort throughout: a sparse checkpoint that still carries every ID is
-// strictly better than the old prose-of-prose, so this never blocks compaction.
+// checkpoint.go is the agent-side orchestration for the structured compaction object.
+// The prompt is now SERVER-OWNED: the CLI sends only the flattened transcript to the
+// backend's checkpoint.v1 task, which returns the structured CheckpointOutput. This
+// file still validates that no load-bearing identifier was dropped and renders the
+// note body. The auto-compact path in session.go calls buildCheckpoint and feeds the
+// rendered body to compactLocked (which prepends the [checkpoint | depth N] header).
+// Best-effort throughout: a sparse checkpoint that still carries every ID is strictly
+// better than the old prose-of-prose, so this never blocks compaction.
 
 // checkpointIDPattern matches the load-bearing identifiers a checkpoint must preserve:
 // terminal IDs (term_, assigned by the Daintree MCP — short alphanumeric, e.g. term_1
@@ -30,18 +28,13 @@ import (
 // is no such domain prefix, and run_ collides with provenance tokens like run_test.
 var checkpointIDPattern = regexp.MustCompile(`\b(?:term_|tmr_|wch_|wfr_|agt_|grt_)[0-9a-zA-Z]{1,32}\b`)
 
-// buildCheckpoint asks the small model for a structured checkpoint of the soon-to-be-
-// discarded history, parses it leniently, then runs the ID-preservation validation pass.
-// The caller (maybeAutoCompact) handles the model-down case (err != nil) separately —
-// here a non-nil error simply yields a zero-value checkpoint that still gets its IDs
-// mined from the transcript. summaryMsgs is the flattened, tool-call-synthesized history
-// the model reads; transcript is the same content as one string for the regex scan.
-func buildCheckpoint(ctx context.Context, router Router, summaryMsgs []models.ChatMessage, transcript string) (prompts.CompactionCheckpoint, error) {
-	var cp prompts.CompactionCheckpoint
-	result, err := router.Chat(ctx, domain.ModelSmall, models.ChatOptions{Messages: summaryMsgs})
-	if err == nil {
-		cp = prompts.ParseCheckpoint(result.Content)
-	}
+// buildCheckpoint runs the backend's checkpoint.v1 task over the soon-to-be-discarded
+// transcript, then runs the ID-preservation validation pass. The caller
+// (maybeAutoCompact) handles the backend-down case (err != nil) separately — here a
+// non-nil error simply yields a zero-value checkpoint that still gets its IDs mined
+// from the transcript. transcript is the flattened, tool-call-synthesized history.
+func buildCheckpoint(ctx context.Context, runner backend.TaskRunner, transcript string) (backend.CheckpointOutput, error) {
+	cp, err := backend.RunCheckpoint(ctx, runner, backend.CheckpointInput{Transcript: transcript})
 	validateCheckpoint(&cp, transcript)
 	return cp, err
 }
@@ -53,7 +46,7 @@ func buildCheckpoint(ctx context.Context, router Router, summaryMsgs []models.Ch
 // is over the full serialized checkpoint (not just PreservedIDs) so an ID the model
 // correctly placed in active_terminals/approvals_grants/etc. is not duplicated. Mutates
 // cp in place; de-dupes PreservedIDs at the end.
-func validateCheckpoint(cp *prompts.CompactionCheckpoint, transcript string) {
+func validateCheckpoint(cp *backend.CheckpointOutput, transcript string) {
 	ids := checkpointIDPattern.FindAllString(transcript, -1)
 	if len(ids) == 0 {
 		return
@@ -92,7 +85,7 @@ func validateCheckpoint(cp *prompts.CompactionCheckpoint, transcript string) {
 // rehydration and is deterministic given the struct's field order; the few extra tokens
 // are negligible against the discarded transcript. An empty checkpoint marshals to "{}"
 // (never ""), so the caller always has a non-empty note to compact with.
-func renderCheckpoint(cp prompts.CompactionCheckpoint) string {
+func renderCheckpoint(cp backend.CheckpointOutput) string {
 	blob, err := json.MarshalIndent(cp, "", "  ")
 	if err != nil {
 		// MarshalIndent of this plain struct can't realistically fail; guard so a render

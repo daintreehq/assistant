@@ -6,10 +6,10 @@ package agent
 // depends on — the ones whose silent regression would only surface as a confused
 // orchestrator many turns later:
 //
-//  1. the three control messages (base prompt, runtime context, loaded skills) survive
-//     compaction unchanged, on BOTH the manual /compact and the in-turn auto paths;
-//  2. ParseDistilledFacts dedups, caps, and truncates in a single pass (the durable
-//     memory mined from a discarded transcript stays bounded and clean);
+//  1. (removed) there is no longer a client-side control-message prefix to preserve —
+//     the backend owns the system prompt + skills, so compaction operates on a history
+//     that begins at index 0 with user/assistant/tool messages only;
+//  2. (removed) distillation dedup/cap/truncate is server-owned now (memory_distill.v1);
 //  3. live identifiers (term_*/run_*/wch_*/wfr_*, matching domain.PrefixWatcher /
 //     domain.PrefixWorkflow) present before compaction survive into the summarizer input
 //     (auto path) and into the persisted note (manual path), so a mid-run compaction
@@ -26,7 +26,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -35,8 +34,6 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/skills"
 )
 
 // summaryInputCaptureRouter records the FULL message slice handed to the small model,
@@ -131,9 +128,6 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 	// loaded skill gives the byte-equality check real bite.
 	t.Run("manual", func(t *testing.T) {
 		s, _ := compactSession(t, plainRouter())
-		if err := s.SetSkills([]string{skills.IDSpawnAgentForEdits}); err != nil {
-			t.Fatalf("SetSkills: %v", err)
-		}
 		before := snapshotControls(s)
 		s.InjectNote("alpha")
 		s.InjectNote("beta")
@@ -152,9 +146,6 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 	t.Run("auto", func(t *testing.T) {
 		r := &summaryInputCaptureRouter{summary: "S"}
 		s, _ := compactSession(t, r)
-		if err := s.SetSkills([]string{skills.IDSpawnAgentForEdits}); err != nil {
-			t.Fatalf("SetSkills: %v", err)
-		}
 		before := snapshotControls(s)
 		goldenForceAutoCompact(s,
 			models.TextMessage("user", "alpha"),
@@ -177,67 +168,9 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 	})
 }
 
-// TestGoldenParseDistilledFactsDedupCapTruncate pins invariant (2) end-to-end in one
-// ParseDistilledFacts call (distill_test.go covers each behavior in isolation; this is
-// the integration guard the issue asks for): a single noisy reply with a blank, a
-// case-insensitive duplicate, an over-long fact, and more uniques than the cap must
-// yield exactly MaxDistilledFacts clean, deduped, truncated entries.
-func TestGoldenParseDistilledFactsDedupCapTruncate(t *testing.T) {
-	const longPrefix = "L"
-	long := strings.Repeat(longPrefix, 500) // > maxDistilledFactRunes (200) ⇒ truncated
-
-	raw := []string{
-		"  Project pins Go 1.25  ", // leading/trailing space trimmed
-		long,                       // truncated to 200 runes
-		"project pins go 1.25",     // case-insensitive dup of #1 ⇒ dropped
-		"",                         // blank ⇒ dropped
-		"   ",                      // whitespace-only ⇒ dropped
-	}
-	// Pad past the cap so the count is forced down to MaxDistilledFacts.
-	for i := 0; i < prompts.MaxDistilledFacts+3; i++ {
-		raw = append(raw, fmt.Sprintf("unique fact %02d", i))
-	}
-	blob, err := json.Marshal(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got := prompts.ParseDistilledFacts(string(blob))
-
-	if len(got) != prompts.MaxDistilledFacts {
-		t.Fatalf("len = %d, want cap %d", len(got), prompts.MaxDistilledFacts)
-	}
-	// Dedup: the case-insensitive pair collapses to exactly one surviving entry.
-	dupCount := 0
-	for _, f := range got {
-		if strings.EqualFold(f, "project pins go 1.25") {
-			dupCount++
-		}
-	}
-	if dupCount != 1 {
-		t.Fatalf("case-insensitive duplicate not collapsed: count=%d in %v", dupCount, got)
-	}
-	// Truncation: the 500-rune fact is cut to maxDistilledFactRunes (200, unexported in
-	// prompts — pinned here as the literal the package documents).
-	sawLong := false
-	for _, f := range got {
-		if strings.HasPrefix(f, longPrefix) {
-			sawLong = true
-			if n := len([]rune(f)); n != 200 {
-				t.Fatalf("over-long fact = %d runes, want 200", n)
-			}
-		}
-	}
-	if !sawLong {
-		t.Fatal("truncated over-long fact missing from results")
-	}
-	// No blank/whitespace fact survived.
-	for _, f := range got {
-		if strings.TrimSpace(f) == "" {
-			t.Fatalf("blank fact survived parsing: %v", got)
-		}
-	}
-}
+// (TestGoldenParseDistilledFactsDedupCapTruncate was removed: distillation dedup/cap/
+// truncate is now server-owned — the backend's memory_distill.v1 task does it — so the
+// local prompts.ParseDistilledFacts it exercised no longer exists.)
 
 // TestGoldenAutoCompactIDsSurviveInSummarizerInput pins invariant (3) for the auto path:
 // load-bearing IDs sitting in the history reach the summarizer's conversation input, so
@@ -264,11 +197,11 @@ func TestGoldenAutoCompactIDsSurviveInSummarizerInput(t *testing.T) {
 	if r.callCount() != 1 {
 		t.Fatalf("summarizer Chat calls = %d, want exactly 1", r.callCount())
 	}
-	// captured[0] is the system instruction; captured[1:] is the flattened history. Scan
-	// only the history so a match proves the IDs flowed through the conversation, not the
-	// instruction's term_*/run_* pattern hints.
+	// The CLI now sends only the flattened transcript to the checkpoint task (no
+	// client-owned system instruction), so scan the whole captured input: a match proves
+	// the load-bearing IDs flowed through the discarded history into the summarizer input.
 	var body strings.Builder
-	for _, m := range captured[1:] {
+	for _, m := range captured {
 		body.WriteString(m.StringContent)
 		body.WriteByte('\n')
 	}

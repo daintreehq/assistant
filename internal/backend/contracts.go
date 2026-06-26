@@ -1,0 +1,432 @@
+// Package backend is the native Daintree Assistant backend client. It replaces
+// the direct DeepSeek/OpenAI model client for assistant turns and utility tasks.
+//
+// The CLI is a thin local runtime: it stores the visible conversation, exposes
+// and executes local function tools, and ships structured runtime/turn context.
+// The backend owns the system prompt, developer instructions, skill/runbook
+// selection, model choice, prompt assembly, and the utility-model prompts — and
+// it talks to DeepSeek/OpenAI internally. The wire contract here is
+// Daintree-native (NOT OpenAI-compatible) and strict: the request schema rejects
+// system/developer messages and unknown fields, so these structs deliberately
+// emit only the fields the backend accepts.
+//
+// Reference: ../assistant-backend/docs/DAINTREE_API.md and the pydantic models in
+// ../assistant-backend/src/daintree_assistant_server/contracts/.
+package backend
+
+import "encoding/json"
+
+// ProtocolVersion is the Daintree wire protocol the CLI speaks. The backend
+// advertises a supported range via /version and /v1/daintree/capabilities; a
+// mismatch yields HTTP 426.
+const ProtocolVersion = 1
+
+// DefaultBaseURL is the single, HARDCODED backend endpoint.
+//
+// DEVELOPMENT-ONLY: during development the assistant supports exactly this one
+// endpoint (the local backend on 127.0.0.1:8473) and there is no authentication. A
+// later phase will swap this constant for the production URL and add the real login
+// flow; until then the CLI does not expose any override (no env var, no config knob)
+// — it always talks to this address.
+const DefaultBaseURL = "http://127.0.0.1:8473"
+
+// --------------------------------------------------------------------------
+// Request: POST /v1/daintree/respond
+// --------------------------------------------------------------------------
+
+// RespondRequest is the single request body for the generation endpoint. The
+// backend validates it with extra="forbid" at the top level, so every field here
+// must be one the backend knows; optional sub-objects are pointers with omitempty
+// so an absent one is never sent as null.
+type RespondRequest struct {
+	ProtocolVersion int             `json:"protocol_version"`
+	Session         RespondSession  `json:"session"`
+	State           *string         `json:"state,omitempty"`
+	Input           RespondInput    `json:"input"`
+	Runtime         *RuntimeContext `json:"runtime,omitempty"`
+	Turn            *TurnContext    `json:"turn,omitempty"`
+	Selection       *Selection      `json:"selection,omitempty"`
+	Generation      *Generation     `json:"generation,omitempty"`
+	Client          *ClientInfo     `json:"client,omitempty"`
+}
+
+// RespondSession identifies the conversation and turn so the backend's skill
+// state and selector cadence have a stable key. All four fields are accepted;
+// instruction_revision/round default to 0 and are omitted when zero.
+type RespondSession struct {
+	ID                  string `json:"id"`
+	TurnID              string `json:"turn_id"`
+	InstructionRevision int    `json:"instruction_revision,omitempty"`
+	Round               int    `json:"round,omitempty"`
+}
+
+// RespondInput is the visible conversation plus the client's current tool
+// inventory. messages must be non-empty and carry only user/assistant/tool roles.
+type RespondInput struct {
+	Messages   []Message `json:"messages"`
+	Tools      []Tool    `json:"tools,omitempty"`
+	ToolChoice any       `json:"tool_choice,omitempty"` // "auto"|"none"|"required" | ToolChoiceNamed
+}
+
+// ToolChoiceNamed is the {"name": ...} flattened form of forcing a specific tool.
+type ToolChoiceNamed struct {
+	Name string `json:"name"`
+}
+
+// Generation carries only the generation params the backend supports — it
+// validates with extra="forbid", so any unknown key is rejected. Stream is a
+// plain bool (no omitempty) so the streaming intent is always explicit.
+type Generation struct {
+	Temperature    *float64 `json:"temperature,omitempty"`
+	MaxTokens      *int     `json:"max_tokens,omitempty"`
+	Stop           []string `json:"stop,omitempty"`
+	ResponseFormat string   `json:"response_format,omitempty"` // "text" | "json_object"
+	Stream         bool     `json:"stream"`
+}
+
+// Selection controls the backend's skill-selection cadence. policy
+// "new_instruction" (the default) re-runs selection on a new turn / interjection /
+// missing-state; "always" forces it every round.
+type Selection struct {
+	Policy string `json:"policy,omitempty"` // "new_instruction" | "always"
+	Force  bool   `json:"force,omitempty"`
+}
+
+// ClientInfo identifies the CLI build for the backend's telemetry.
+type ClientInfo struct {
+	Name     string `json:"name,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Platform string `json:"platform,omitempty"`
+}
+
+// --------------------------------------------------------------------------
+// Runtime + turn context (server-rendered as inert data, NOT system prompts)
+// --------------------------------------------------------------------------
+
+// RuntimeContext is the CLI-reported environment. The backend renders it as inert
+// data in the per-request (uncached) prompt tail. scheduler_active defaults to
+// true on the backend, so it is sent WITHOUT omitempty — an inactive scheduler
+// must be representable as an explicit false.
+type RuntimeContext struct {
+	PermissionTier      string      `json:"permission_tier,omitempty"`
+	ProjectPath         string      `json:"project_path,omitempty"`
+	ProjectID           string      `json:"project_id,omitempty"`
+	MCP                 *MCPInfo    `json:"mcp,omitempty"`
+	MCPServers          []MCPServer `json:"mcp_servers,omitempty"`
+	ConfiguredAgentIDs  []string    `json:"configured_agent_ids,omitempty"`
+	SchedulerActive     bool        `json:"scheduler_active"`
+	ActiveWorktree      string      `json:"active_worktree,omitempty"`
+	ProjectInstructions string      `json:"project_instructions,omitempty"`
+}
+
+// MCPInfo is a coarse connectivity summary for the primary MCP surface.
+type MCPInfo struct {
+	Connected bool   `json:"connected"`
+	Transport string `json:"transport,omitempty"`
+	ToolCount *int   `json:"tool_count,omitempty"`
+	Status    string `json:"status,omitempty"`
+}
+
+// MCPServer is one MCP server the CLI is connected to, as the CLI reports it. The
+// backend renders the name/description/instructions as inert, escape-neutralized
+// data so they cannot inject instructions.
+type MCPServer struct {
+	Name         string `json:"name"`
+	Transport    string `json:"transport,omitempty"`
+	Status       string `json:"status,omitempty"`
+	ToolCount    *int   `json:"tool_count,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+// TurnContext is the per-turn context the old footer message used to carry as
+// prose; the backend now takes it as structured data and renders the footer.
+type TurnContext struct {
+	Goal                 string    `json:"goal,omitempty"`
+	IsWake               bool      `json:"is_wake,omitempty"`
+	WorkflowRuns         []string  `json:"workflow_runs,omitempty"`
+	Memories             *Memories `json:"memories,omitempty"`
+	SessionEndedWatchers []string  `json:"session_ended_watchers,omitempty"`
+}
+
+// Memories splits recalled context into pinned (durable) and relevant (per-turn
+// BM25 recall) buckets.
+type Memories struct {
+	Pinned   []string `json:"pinned,omitempty"`
+	Relevant []string `json:"relevant,omitempty"`
+}
+
+// --------------------------------------------------------------------------
+// Messages, tool calls, tool defs (canonical OpenAI-ish shapes the backend reuses)
+// --------------------------------------------------------------------------
+
+// Message is one visible-conversation message. Content is raw JSON so it can be a
+// string, a multimodal parts array, or an explicit null (an assistant tool-call
+// turn) — exactly mirroring the local wire encoder. Roles are user/assistant/tool
+// ONLY; the converter rejects system/developer before a request is built.
+type Message struct {
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall is one function call the model emitted (or one replayed in history).
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // always "function"
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall is the name + raw-JSON-string arguments of a tool call.
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// Tool is a function tool definition offered to the backend. The backend bounds
+// the total tool bytes, schema depth, and property count, and rejects reserved
+// names (skill__find/skill__load/daintree_internal__*).
+type Tool struct {
+	Type     string      `json:"type"` // "function"
+	Function FunctionDef `json:"function"`
+}
+
+// FunctionDef is the name/description/JSON-schema parameters of a tool.
+type FunctionDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// --------------------------------------------------------------------------
+// Response: non-streaming body + the first-class skills block
+// --------------------------------------------------------------------------
+
+// RespondResponse is the non-streaming response body. (The CLI streams in normal
+// operation; this exists for completeness and tests.)
+type RespondResponse struct {
+	ProtocolVersion int            `json:"protocol_version"`
+	RequestID       string         `json:"request_id"`
+	Model           string         `json:"model"`
+	Message         RespondMessage `json:"message"`
+	FinishReason    string         `json:"finish_reason"`
+	Usage           Usage          `json:"usage"`
+	Skills          SkillsBlock    `json:"skills"`
+	State           string         `json:"state"`
+	CatalogRevision string         `json:"catalog_revision"`
+	PromptVersion   string         `json:"prompt_version"`
+	Warnings        []string       `json:"warnings"`
+}
+
+// RespondMessage is the assistant message in a non-streaming response.
+type RespondMessage struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls"`
+}
+
+// Usage is the token accounting the backend reports.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+}
+
+// --------------------------------------------------------------------------
+// Streaming event payloads (named SSE events: meta / delta / done / error)
+// --------------------------------------------------------------------------
+
+// StreamMeta is the FIRST streamed event — always before any token. It carries
+// the refreshed opaque state token (resend on the next request), the skills
+// outcome (active set + prelude to render before the reply), and version markers.
+type StreamMeta struct {
+	ProtocolVersion int         `json:"protocol_version"`
+	RequestID       string      `json:"request_id"`
+	Model           string      `json:"model"`
+	Skills          SkillsBlock `json:"skills"`
+	State           string      `json:"state"`
+	CatalogRevision string      `json:"catalog_revision"`
+	PromptVersion   string      `json:"prompt_version"`
+	Warnings        []string    `json:"warnings"`
+}
+
+// StreamDelta is one streamed chunk: visible content and/or OpenAI-style tool-call
+// delta fragments (accumulated by index in sse.go).
+type StreamDelta struct {
+	Content   string          `json:"content,omitempty"`
+	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// ToolCallDelta is one streamed tool-call fragment, passed through verbatim from
+// the upstream model. Fragments for the same call share an index; id/name arrive
+// once and argument text streams in pieces.
+type ToolCallDelta struct {
+	Index    *int   `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function"`
+}
+
+// StreamDone terminates a successful stream. usage is always present (the backend
+// dumps it without omit), with zeros when the upstream reported nothing.
+type StreamDone struct {
+	FinishReason string `json:"finish_reason"`
+	Usage        Usage  `json:"usage"`
+}
+
+// --------------------------------------------------------------------------
+// First-class skills block
+// --------------------------------------------------------------------------
+
+// SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces the
+// prelude (a synthetic skill-load exchange) BEFORE the assistant reply and may
+// show the active set; it must NOT replay any of this back as client history.
+type SkillsBlock struct {
+	Active      []SkillRef   `json:"active"`
+	NewlyLoaded []SkillRef   `json:"newly_loaded"`
+	Prelude     Prelude      `json:"prelude"`
+	Selector    SelectorMeta `json:"selector"`
+}
+
+// SkillRef identifies one active/loaded skill.
+type SkillRef struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	Title   string `json:"title"`
+}
+
+// Prelude is the synthetic skill-load tool exchange the client renders first.
+type Prelude struct {
+	ToolExecutions []PreludeExecution `json:"tool_executions"`
+}
+
+// PreludeExecution is one synthetic skill__load call + its result, with a
+// display name for the UI.
+type PreludeExecution struct {
+	Call        PreludeToolCall   `json:"call"`
+	Result      PreludeToolResult `json:"result"`
+	DisplayName string            `json:"display_name"`
+}
+
+// PreludeToolCall mirrors a ToolCall for the synthetic skill-load exchange.
+type PreludeToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// PreludeToolResult mirrors a tool-result message for the synthetic exchange.
+type PreludeToolResult struct {
+	Role       string `json:"role"`
+	ToolCallID string `json:"tool_call_id"`
+	Content    string `json:"content"`
+}
+
+// SelectorMeta is the skill selector's telemetry for the turn.
+type SelectorMeta struct {
+	Ran        bool     `json:"ran"`
+	Degraded   bool     `json:"degraded"`
+	TaskType   string   `json:"task_type,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Usage      *Usage   `json:"usage,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+}
+
+// --------------------------------------------------------------------------
+// Aggregated streaming result
+// --------------------------------------------------------------------------
+
+// RespondResult is the accumulated outcome of a streamed respond call: the meta
+// event, the assembled assistant message (content + tool calls), the finish
+// reason, and usage. The agent loop reads State/Skills off Meta and appends
+// Message to history.
+type RespondResult struct {
+	Meta         StreamMeta
+	Message      RespondMessage
+	FinishReason string
+	Usage        Usage
+}
+
+// HasToolCalls reports whether the assistant asked to run any tools.
+func (r RespondResult) HasToolCalls() bool { return len(r.Message.ToolCalls) > 0 }
+
+// --------------------------------------------------------------------------
+// Tasks: POST /v1/daintree/tasks
+// --------------------------------------------------------------------------
+
+// TaskRequest is the named utility-task envelope. Clients send task DATA only —
+// the backend owns the prompt, model, schema, and output mode. extra="forbid" on
+// the backend rejects any attempt to smuggle messages/system/developer here.
+type TaskRequest struct {
+	Task         string         `json:"task"`
+	RequestID    string         `json:"request_id,omitempty"`
+	Input        map[string]any `json:"input,omitempty"`
+	ResultSchema map[string]any `json:"result_schema,omitempty"` // only terminal_extract_json.v1
+}
+
+// TaskResult is the typed utility-task response. Output is raw JSON decoded by the
+// caller into the task-specific output struct.
+type TaskResult struct {
+	ID            string          `json:"id"`
+	Object        string          `json:"object"`
+	Task          string          `json:"task"`
+	Model         string          `json:"model"`
+	Output        json.RawMessage `json:"output"`
+	FinishReason  string          `json:"finish_reason"`
+	Usage         Usage           `json:"usage"`
+	PromptVersion string          `json:"prompt_version"`
+}
+
+// --------------------------------------------------------------------------
+// Capabilities / version
+// --------------------------------------------------------------------------
+
+// Capabilities is the GET /v1/daintree/capabilities body — protocol range,
+// limits, stream events, and available task ids.
+type Capabilities struct {
+	ServerVersion string           `json:"server_version"`
+	Protocol      ProtocolRange    `json:"protocol"`
+	Respond       RespondCapsBlock `json:"respond"`
+	Skills        struct {
+		CatalogRevision string `json:"catalog_revision"`
+		ManualResolve   bool   `json:"manual_resolve"`
+	} `json:"skills"`
+	Tasks  []string `json:"tasks"`
+	Limits struct {
+		RequestBytes int `json:"request_bytes"`
+		Tools        int `json:"tools"`
+	} `json:"limits"`
+}
+
+// ProtocolRange is the inclusive supported protocol-version range.
+type ProtocolRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// RespondCapsBlock is the respond-endpoint capability summary.
+type RespondCapsBlock struct {
+	Endpoint               string   `json:"endpoint"`
+	Model                  string   `json:"model"`
+	Streaming              bool     `json:"streaming"`
+	StreamEvents           []string `json:"stream_events"`
+	SystemMessagesAccepted bool     `json:"system_messages_accepted"`
+	MaxActiveSkills        int      `json:"max_active_skills"`
+	MetadataTransport      string   `json:"metadata_transport"`
+}
+
+// Version is the GET /version body.
+type Version struct {
+	ServerVersion string        `json:"server_version"`
+	BuildSHA      string        `json:"build_sha"`
+	Protocol      ProtocolRange `json:"protocol"`
+}
