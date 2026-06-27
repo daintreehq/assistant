@@ -100,6 +100,36 @@ func TestSplash_FrameLinesDoNotBleedIntoCanopyBeforeCanopyStarts(t *testing.T) {
 	}
 }
 
+func TestSplash_FrameLinesStaggerTrunksBeforeCanopy(t *testing.T) {
+	parts := splashFinalPartLines()
+
+	beforeSide := splashFrameLines(splashLeftBranchStartFrame - 1)
+	if !splashPartHasInk(beforeSide, parts, 'T') {
+		t.Fatal("center trunk should start before the side trunks")
+	}
+	for _, part := range []rune{'L', 'R', 'C'} {
+		if splashPartHasInk(beforeSide, parts, part) {
+			t.Fatalf("part %c appeared before the side-trunk phase", part)
+		}
+	}
+
+	overlap := splashFrameLines(splashRightBranchStartFrame)
+	if !splashPartHasInk(overlap, parts, 'L') || !splashPartHasInk(overlap, parts, 'R') {
+		t.Fatal("side trunks should begin while the center trunk is still drawing")
+	}
+	if splashPartRowHasInk(overlap, parts, 'T', 3) {
+		t.Fatal("center trunk should not be complete when side trunks begin")
+	}
+	if splashPartHasInk(overlap, parts, 'C') {
+		t.Fatal("canopy should not appear during the trunk overlap")
+	}
+
+	canopyStart := splashFrameLines(splashCanopyStartFrame)
+	if !splashPartHasInk(canopyStart, parts, 'C') {
+		t.Fatal("canopy should begin after the overlapping trunk reveal")
+	}
+}
+
 func TestSplash_FrameLinesKeepCanopyApexLate(t *testing.T) {
 	for frame := splashCanopyStartFrame; frame < splashCanopyEndFrame-1; frame++ {
 		line := []rune(splashFrameLines(frame)[0])
@@ -154,7 +184,7 @@ func TestSplash_FrameLinesRevealBranchSlicesAtFinalWidth(t *testing.T) {
 func TestSplash_FinalBranchStemsMatchTrunkWidth(t *testing.T) {
 	lines := splashFinalFrameLines()
 	parts := splashFinalPartLines()
-	for _, row := range []int{10, 11, 12} {
+	for _, row := range []int{9, 10, 11, 12} {
 		trunk := splashPartHorizontalCoverage(lines[row], parts[row], 'T')
 		left := splashPartHorizontalCoverage(lines[row], parts[row], 'L')
 		right := splashPartHorizontalCoverage(lines[row], parts[row], 'R')
@@ -178,16 +208,27 @@ func TestSplash_FinalBranchBottomEdgesAreSolid(t *testing.T) {
 	}
 }
 
-func TestSplash_FinalCanopyBasesAreFlat(t *testing.T) {
-	line := []rune(splashFinalFrameLines()[9])
-	for _, x := range []int{3, 4, 5, 6, 43, 44, 45, 46} {
-		if line[x] != '█' {
-			t.Fatalf("canopy base col %d = %q, want full block", x, line[x])
+func TestSplash_FinalCanopyStraightEdgesMatchTrunkWidth(t *testing.T) {
+	lines := splashFinalFrameLines()
+	parts := splashFinalPartLines()
+	stemWidth := splashPartHorizontalCoverage(lines[12], parts[12], 'T')
+	for _, row := range []int{7, 8, 9} {
+		line := []rune(lines[row])
+		left := splashHorizontalCoverage(line, 3, 7)
+		right := splashHorizontalCoverage(line, 43, 47)
+		if left != stemWidth || right != stemWidth {
+			t.Fatalf("row %d canopy edge widths: left %.1f right %.1f, want %.1f", row, left, right, stemWidth)
+		}
+		for _, x := range []int{3, 4, 5, 6, 43, 44, 45, 46} {
+			if line[x] != '█' {
+				t.Fatalf("row %d canopy edge col %d = %q, want full block", row, x, line[x])
+			}
 		}
 	}
+	line := []rune(lines[9])
 	for _, x := range []int{7, 42} {
 		if line[x] != ' ' {
-			t.Fatalf("canopy base col %d = %q, want flat edge with no cutoff pixel", x, line[x])
+			t.Fatalf("canopy base col %d = %q, want the single rounding pixel omitted", x, line[x])
 		}
 	}
 }
@@ -360,6 +401,25 @@ func splashInkBounds(lines []string) (minX, minY, maxX, maxY int, ok bool) {
 	return minX, minY, maxX, maxY, ok
 }
 
+func splashPartHasInk(lines, parts []string, part rune) bool {
+	for row := range lines {
+		if splashPartRowHasInk(lines, parts, part, row) {
+			return true
+		}
+	}
+	return false
+}
+
+func splashPartRowHasInk(lines, parts []string, part rune, row int) bool {
+	lineRunes := []rune(lines[row])
+	for x, p := range []rune(parts[row]) {
+		if p == part && splashIsInk(lineRunes[x]) {
+			return true
+		}
+	}
+	return false
+}
+
 func splashPartHorizontalCoverage(line, parts string, part rune) float64 {
 	lineRunes := []rune(line)
 	var width float64
@@ -367,6 +427,14 @@ func splashPartHorizontalCoverage(line, parts string, part rune) float64 {
 		if p == part {
 			width += splashGlyphHorizontalCoverage(lineRunes[x])
 		}
+	}
+	return width
+}
+
+func splashHorizontalCoverage(line []rune, start, end int) float64 {
+	var width float64
+	for x := start; x < end; x++ {
+		width += splashGlyphHorizontalCoverage(line[x])
 	}
 	return width
 }

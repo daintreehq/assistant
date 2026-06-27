@@ -27,9 +27,10 @@ func lipglossFg(_ theme.Theme, c color.Color, s string) string {
 // done immediately (a clipped logo looks broken).
 //
 // The rendered frames are driven by a 40-step procedural reveal over the terminal
-// raster in splash_frames.go: trunk first, then side branches, then the canopy arch.
-// More render frames than source mask frames keeps the reveal feeling smoother while
-// each displayed slice still lands at its final pixel width.
+// raster in splash_frames.go: the center trunk starts first, side branches overlap its
+// finish, then the canopy follows last. More render frames than source mask frames keeps
+// the reveal feeling smoother while each displayed slice still lands at its final pixel
+// width.
 //
 // INLINE SIZING: the cockpit renders into the terminal's
 // MAIN buffer, so the splash draws at its NATURAL height — two blank lines down for
@@ -52,17 +53,16 @@ const (
 	// 4 blank rows of bottom padding so the pixel silhouette matches the flatter
 	// brand mark instead of reading stretched vertically.
 	splashVisibleHeight = 14
-	// The canopy has its own arch progression instead of using the trunk/leg reveal
-	// mask; otherwise nearby branch pixels can light the top of the arch early and
-	// create noisy specks. Keep the canopy slightly delayed relative to the branches;
-	// this is the choreography that best matched the Daintree skeleton in terminal cells.
+	// Each mark part has its own bottom-up timeline. The side trunks begin before the
+	// center trunk is complete, and the canopy waits until the trunk has landed so the
+	// logo flows upward instead of appearing as trunk-then-canopy phases.
 	splashTrunkStartFrame       = 0
-	splashTrunkEndFrame         = 14
-	splashLeftBranchStartFrame  = 8
+	splashTrunkEndFrame         = 18
+	splashLeftBranchStartFrame  = 9
 	splashLeftBranchEndFrame    = 28
 	splashRightBranchStartFrame = 10
-	splashRightBranchEndFrame   = 30
-	splashCanopyStartFrame      = 16
+	splashRightBranchEndFrame   = 29
+	splashCanopyStartFrame      = 22
 	splashCanopyRightStartDelay = 1
 	splashCanopyEndFrame        = SplashFrames - 5
 	// splashFPS runs the 40-frame reveal in about 0.8s. lingerMs holds the
