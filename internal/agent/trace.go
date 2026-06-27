@@ -1,0 +1,341 @@
+package agent
+
+import (
+	"unicode/utf8"
+
+	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+)
+
+// This file owns the per-session diagnostic trace for the turn engine. The backend
+// migration moved the model call behind Backend.RespondStream, which left the debug
+// log blind exactly where it used to be richest: there is no more
+// model.request/model.response, so a log reader could not see what the backend was
+// shown or what it chose. These helpers restore that — turn.start/turn.end bracket a
+// turn, and backend.respond.{request,meta,done,error} narrate each round — while
+// keeping payloads BOUNDED (previews + hashes, never the full prompt every round, the
+// O(turns²) trap). All debuglog usage in the agent package is concentrated here; the
+// rest of the turn loop only calls these s.traceXxx methods.
+
+// safeTrace builds and emits one trace event under a single guard. It is a no-op when
+// no seam is wired (the test default, and every normal non-debug run — the app wires
+// the seam ONLY when debug logging is on), so the `build` closure — which may hash the
+// whole history or summarize large payloads — never runs with tracing off. It recovers
+// any panic from EITHER the field builder OR the seam, honouring the invariant that
+// this side channel can never break a live turn.
+func (s *Session) safeTrace(event string, build func() map[string]any) {
+	if s.deps.Trace == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.deps.Trace(event, build())
+}
+
+// turnStatus classifies a finished turn's reply into complete | cancelled | failed
+// for the turn.end event. Send never throws on a model-layer failure — it returns a
+// sentinel reply string — so the outcome is read back off that string. The cancel
+// check comes FIRST: IsWakeFailureReply also matches the "Turn cancelled" prefix, so
+// a cancelled turn would otherwise mis-classify as failed.
+func turnStatus(reply string) string {
+	switch {
+	case reply == domain.CancelledReply:
+		return "cancelled"
+	case IsWakeFailureReply(reply):
+		return "failed"
+	default:
+		return "complete"
+	}
+}
+
+// previewMax budgets (in runes) for the various trace previews.
+const (
+	tracePreviewMax       = 2000 // produced content
+	lastMessagePreviewMax = 480  // the newest request message
+	shortPreviewMax       = 240  // prompts, replies, tool args
+)
+
+// traceTurnStart records the start of a turn (one entry point per turn for a log
+// reader). historyLen is the visible-history size BEFORE this turn's user message is
+// pushed.
+func (s *Session) traceTurnStart(runID, turnID, prompt string, isWake bool, historyLen int) {
+	s.safeTrace("turn.start", func() map[string]any {
+		return map[string]any{
+			"runId":         runID,
+			"turnId":        turnID,
+			"sessionId":     s.deps.SessionID,
+			"isWake":        isWake,
+			"promptBytes":   len(prompt),
+			"promptPreview": debuglog.Preview(prompt, shortPreviewMax),
+			"historyLen":    historyLen,
+		}
+	})
+}
+
+// traceTurnEnd records the terminal outcome of a turn (status derived from the reply,
+// plus duration and the number of model rounds run).
+func (s *Session) traceTurnEnd(runID, turnID, reply string, durationMs int64, rounds int) {
+	s.safeTrace("turn.end", func() map[string]any {
+		return map[string]any{
+			"runId":        runID,
+			"turnId":       turnID,
+			"status":       turnStatus(reply),
+			"durationMs":   durationMs,
+			"rounds":       rounds,
+			"replyPreview": debuglog.Preview(reply, shortPreviewMax),
+		}
+	})
+}
+
+// traceBackendRequest records what the backend was shown this round: the message
+// count + role sequence, a hash of the whole serialized history (so an unchanged
+// prefix is recognisable round-to-round without re-printing it), a preview of ONLY
+// the newest message, the tool inventory (count + names + hash), and the structured
+// runtime/turn context — all bounded.
+func (s *Session) traceBackendRequest(runID, turnID string, round int, req backend.RespondRequest, msgs []backend.Message, tools []backend.Tool) {
+	s.safeTrace("backend.respond.request", func() map[string]any {
+		roles := make([]string, len(msgs))
+		for i, m := range msgs {
+			roles[i] = m.Role
+		}
+		toolNames := make([]string, len(tools))
+		for i, t := range tools {
+			toolNames[i] = t.Function.Name
+		}
+		input := map[string]any{
+			"messageCount": len(msgs),
+			"messageRoles": roles,
+			"messagesSha":  debuglog.SummarizeJSON(msgs, 0).SHA,
+			"toolCount":    len(tools),
+			"toolNames":    toolNames,
+			"toolsetSha":   debuglog.SummarizeJSON(toolNames, 0).SHA,
+			"toolChoice":   req.Input.ToolChoice,
+		}
+		if n := len(msgs); n > 0 {
+			last := msgs[n-1]
+			input["lastMessage"] = map[string]any{
+				"role":    last.Role,
+				"name":    last.Name,
+				"preview": debuglog.Preview(string(last.Content), lastMessagePreviewMax),
+			}
+		}
+
+		fields := map[string]any{
+			"runId":               runID,
+			"turnId":              turnID,
+			"round":               round,
+			"instructionRevision": req.Session.InstructionRevision,
+			"statePresent":        req.State != nil,
+			"input":               input,
+		}
+		if req.State != nil {
+			fields["stateBytes"] = len(*req.State)
+		}
+		if rc := req.Runtime; rc != nil {
+			runtime := map[string]any{
+				"permissionTier":  rc.PermissionTier,
+				"projectPath":     rc.ProjectPath,
+				"projectId":       rc.ProjectID,
+				"schedulerActive": rc.SchedulerActive,
+				"activeWorktree":  rc.ActiveWorktree,
+			}
+			if rc.MCP != nil {
+				mcp := map[string]any{"connected": rc.MCP.Connected, "transport": rc.MCP.Transport, "status": rc.MCP.Status}
+				if rc.MCP.ToolCount != nil {
+					mcp["toolCount"] = *rc.MCP.ToolCount
+				}
+				runtime["mcp"] = mcp
+			}
+			fields["runtime"] = runtime
+		}
+		if tc := req.Turn; tc != nil {
+			turn := map[string]any{
+				"goalPreview":      debuglog.Preview(tc.Goal, shortPreviewMax),
+				"isWake":           tc.IsWake,
+				"workflowRunCount": len(tc.WorkflowRuns),
+			}
+			if tc.Memories != nil {
+				turn["pinnedMemoryCount"] = len(tc.Memories.Pinned)
+				turn["relevantMemoryCount"] = len(tc.Memories.Relevant)
+			}
+			if len(tc.SessionEndedWatchers) > 0 {
+				turn["sessionEndedWatcherCount"] = len(tc.SessionEndedWatchers)
+			}
+			fields["turn"] = turn
+		}
+		return fields
+	})
+}
+
+// traceBackendMeta records the backend's own report (the SSE meta event): request id,
+// chosen model, prompt/catalog version markers, warnings, and the skill-selection
+// outcome (active vs newly-loaded runbooks + the selector verdict). This is the
+// surface that says where a fix belongs — wrong/no skill loaded points at the backend
+// selector, not a local tool.
+func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.StreamMeta) {
+	s.safeTrace("backend.respond.meta", func() map[string]any {
+		fields := map[string]any{
+			"runId":            runID,
+			"turnId":           turnID,
+			"round":            round,
+			"backendRequestId": m.RequestID,
+			"model":            m.Model,
+			"promptVersion":    m.PromptVersion,
+			"catalogRevision":  m.CatalogRevision,
+			"stateSha":         debuglog.Summarize(m.State, 0).SHA,
+		}
+		if len(m.Warnings) > 0 {
+			fields["warnings"] = m.Warnings
+		}
+		sel := m.Skills.Selector
+		selector := map[string]any{"ran": sel.Ran, "degraded": sel.Degraded}
+		if sel.TaskType != "" {
+			selector["taskType"] = sel.TaskType
+		}
+		if sel.Confidence != nil {
+			selector["confidence"] = *sel.Confidence
+		}
+		if sel.Reason != "" {
+			selector["reason"] = sel.Reason
+		}
+		fields["skills"] = map[string]any{
+			"active":      skillRefLabels(m.Skills.Active),
+			"newlyLoaded": skillRefLabels(m.Skills.NewlyLoaded),
+			"selector":    selector,
+		}
+		return fields
+	})
+}
+
+// traceBackendDone records a completed respond round: timing (round + first token),
+// produced content/reasoning sizes and a preview, the tool calls the model asked for
+// (id + name + bounded args + args hash), the finish reason, and usage. Per-token
+// deltas are deliberately NOT logged — only the aggregate.
+func (s *Session) traceBackendDone(runID, turnID string, round int, result backend.RespondResult, durationMs, firstTokenMs int64) {
+	s.safeTrace("backend.respond.done", func() map[string]any {
+		calls := make([]map[string]any, 0, len(result.Message.ToolCalls))
+		for _, tc := range result.Message.ToolCalls {
+			calls = append(calls, map[string]any{
+				"id":          tc.ID,
+				"name":        tc.Function.Name,
+				"argsPreview": debuglog.Preview(tc.Function.Arguments, shortPreviewMax),
+				"argsSha":     debuglog.Summarize(tc.Function.Arguments, 0).SHA,
+			})
+		}
+		fields := map[string]any{
+			"runId":          runID,
+			"turnId":         turnID,
+			"round":          round,
+			"durationMs":     durationMs,
+			"contentChars":   utf8.RuneCountInString(result.Message.Content),
+			"contentPreview": debuglog.Preview(result.Message.Content, tracePreviewMax),
+			"finishReason":   result.FinishReason,
+			"toolCallCount":  len(calls),
+			"usage": map[string]any{
+				"promptTokens":     result.Usage.PromptTokens,
+				"completionTokens": result.Usage.CompletionTokens,
+				"totalTokens":      result.Usage.TotalTokens,
+				"cachedTokens":     result.Usage.CachedTokens,
+			},
+		}
+		if firstTokenMs > 0 {
+			fields["firstTokenMs"] = firstTokenMs
+		}
+		if rc := result.Message.ReasoningContent; rc != "" {
+			fields["reasoningPresent"] = true
+			fields["reasoningChars"] = utf8.RuneCountInString(rc)
+		}
+		if len(calls) > 0 {
+			fields["toolCalls"] = calls
+		}
+		return fields
+	})
+}
+
+// traceBackendError records a terminal respond failure (a non-cancel error — cancel
+// is a clean stop, logged as turn.end status=cancelled).
+func (s *Session) traceBackendError(runID, turnID string, round int, durationMs int64, err error) {
+	if err == nil {
+		return
+	}
+	s.safeTrace("backend.respond.error", func() map[string]any {
+		return map[string]any{
+			"runId":      runID,
+			"turnId":     turnID,
+			"round":      round,
+			"durationMs": durationMs,
+			"error":      err.Error(),
+		}
+	})
+}
+
+// traceToolGap records a tool call rejected BEFORE it reached the registry's Dispatch
+// (bad JSON args, or a tool excluded from this turn's explicit allowlist). Those
+// rejections never produce a tool.call audit event, so without this they were the one
+// class of tool failure invisible in the trace.
+func (s *Session) traceToolGap(event, runID, toolCallID, name, rawArgs string) {
+	s.safeTrace(event, func() map[string]any {
+		fields := map[string]any{
+			"runId":      runID,
+			"toolCallId": toolCallID,
+			"tool":       name,
+		}
+		if rawArgs != "" {
+			fields["argsPreview"] = debuglog.Preview(rawArgs, shortPreviewMax)
+		}
+		return fields
+	})
+}
+
+// traceCancelledStub records that count tool calls were given a synthetic CANCELLED
+// result (the turn was cancelled before they ran) so the transcript stays well-formed.
+func (s *Session) traceCancelledStub(runID string, count int) {
+	if count <= 0 {
+		return
+	}
+	s.safeTrace("tool.cancelled_stub", func() map[string]any {
+		return map[string]any{"runId": runID, "count": count}
+	})
+}
+
+// traceToolRepeat records a circuit-breaker firing (warning or abort) with the
+// repeated call's signature, so a stuck loop is greppable in the trace.
+func (s *Session) traceToolRepeat(event, runID, name string, count int, errCode, signature string) {
+	s.safeTrace(event, func() map[string]any {
+		return map[string]any{
+			"runId":     runID,
+			"tool":      name,
+			"count":     count,
+			"errorCode": errCode,
+			"signature": signature,
+		}
+	})
+}
+
+// errCodeOf returns a tool result's error code, or "" when the result has none.
+func errCodeOf(res domain.ToolResult) string {
+	if res.Error != nil {
+		return res.Error.Code
+	}
+	return ""
+}
+
+// skillRefLabels renders skill refs to compact "title" (or id fallback) labels for
+// the meta event — never the full runbook body (server-owned, never in the trace).
+func skillRefLabels(refs []backend.SkillRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		label := r.Title
+		if label == "" {
+			label = r.ID
+		}
+		if label == "" {
+			continue
+		}
+		out = append(out, label)
+	}
+	return out
+}

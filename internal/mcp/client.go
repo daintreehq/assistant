@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -537,7 +538,7 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 // agent.launch, recipe.run, …) risks a double-apply on a transient transport blip,
 // so a non-read tool is forced single-shot even if a caller mistakenly set Retries>0.
 // This makes retry-safety a property of the tool, not caller discipline.
-func (c *Client) CallTool(ctx context.Context, name string, args map[string]any, opts CallOptions) (CallResult, error) {
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any, opts CallOptions) (result CallResult, err error) {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -550,8 +551,20 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		retries = 0
 	}
 
+	// Trace every MCP call ONCE, on exit, with the final outcome (named returns). This
+	// is the layer where so many tool failures actually originate (throttles, transport
+	// blips, degrade) but the model loop only ever saw the post-parse result — the
+	// "logging the MCP details" the trace is meant to capture. Bounded: success logs a
+	// preview + hash of the response, never the full body every poll.
+	start := time.Now()
+	attempts := 0
+	defer func() {
+		c.traceCall(name, retries, attempts, time.Since(start).Milliseconds(), result, err)
+	}()
+
 	var res rawResult
 	for attempt := 0; ; attempt++ {
+		attempts = attempt + 1
 		low, gen, err := c.ensure()
 		if err != nil {
 			return CallResult{}, err // UnavailableError: never retried, never degrades.
@@ -618,6 +631,53 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		StructuredContent: res.StructuredContent,
 		IsError:           res.IsError,
 	}, nil
+}
+
+// mcpTracePreviewMax bounds the preview of an MCP response body in the trace. Reads
+// (terminal.getStatus/getOutput) are polled frequently, so the full body is never
+// dumped — a preview + hash is enough to see what a tool actually received.
+const mcpTracePreviewMax = 1000
+
+// traceCall appends one bounded `mcp.call` event to the per-session debug log. The
+// MCP layer is where many tool failures truly originate (throttle RESULTS, transport
+// blips, degrade) while the model loop only ever saw the post-parse result; this
+// makes the underlying call visible. Gated on debug logging (the field-building has
+// cost), panic-guarded, and never throws — a logging fault must not affect a call.
+// Success logs a preview + hash of the payload; failure logs the normalized error.
+func (c *Client) traceCall(name string, retries, attempts int, durationMs int64, result CallResult, err error) {
+	dbg := debuglog.Config{DebugLog: c.cfg.DebugLog, LogDir: c.cfg.LogDir}
+	if !dbg.DebugLog {
+		return
+	}
+	defer func() { _ = recover() }()
+	kind := "mutation"
+	if isReadOnlyToolName(name) {
+		kind = "read"
+	}
+	// transportOk (not "ok") deliberately: this is transport/API success — NO Go error —
+	// which is NOT the same as the tool succeeding. A Daintree read can return a throttle
+	// or tool-level error as a RESULT (transportOk=true, isError=true). Naming it "ok"
+	// would clash with tool.call's "ok" (which DOES mean the tool succeeded) and make a
+	// failure-hunting grep miss tool-level MCP errors.
+	fields := map[string]any{
+		"mcpTool":     name,
+		"callKind":    kind,
+		"retries":     retries,
+		"attempts":    attempts,
+		"durationMs":  durationMs,
+		"transportOk": err == nil,
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+		debuglog.LogDebug(dbg, "mcp.call", fields)
+		return
+	}
+	fields["isError"] = result.IsError
+	fields["text"] = debuglog.Summarize(result.Text, mcpTracePreviewMax)
+	if result.StructuredContent != nil {
+		fields["structured"] = debuglog.SummarizeJSON(result.StructuredContent, mcpTracePreviewMax)
+	}
+	debuglog.LogDebug(dbg, "mcp.call", fields)
 }
 
 // Close swallows low-client errors and always sets connected=false. Idempotent:

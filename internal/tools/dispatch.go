@@ -223,17 +223,29 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 	durationMs := domain.NowMS() - started
 
 	// 1. Debug log — full-fidelity, UNTRUNCATED args+result. JSONL event "tool.call".
+	//    Correlation ids (toolCallId/runId/sessionId) + the risk class are stamped so a
+	//    failed call can be tied back to its model round and its safety decision without
+	//    cross-referencing the SQLite audit table — the gap that made tool failures hard
+	//    to place in the backend-era trace.
 	func() {
 		defer func() { _ = recover() }()
 		var errPayload any
 		if res.Error != nil {
 			errPayload = res.Error
 		}
+		risk := ""
+		if t := r.tools[name]; t != nil {
+			risk = string(t.Risk)
+		}
 		debuglog.LogDebug(
 			debuglog.Config{DebugLog: tctx.Config.DebugLog, LogDir: tctx.Config.LogDir},
 			"tool.call",
 			map[string]any{
 				"tool":       name,
+				"toolCallId": tctx.ToolCallID,
+				"runId":      tctx.RunID,
+				"sessionId":  tctx.SessionID,
+				"risk":       risk,
 				"actor":      string(tctx.Actor),
 				"actorId":    tctx.ActorID,
 				"outcome":    outcome,
