@@ -1,6 +1,9 @@
 package ui
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // The splash animation frames, maintained directly as Go.
 
@@ -17,14 +20,14 @@ import "strings"
 func splashFrameLines(idx int) []string {
 	finalFrame := splashFinalFrameLines()
 	finalParts := splashFinalPartLines()
-	partBounds := splashPartBounds(finalParts)
+	geometry := splashRevealGeometryFor(finalParts)
 	out := make([]string, SplashHeight)
 	for y := range out {
 		dst := []rune(splashBlankLine())
 		finalRunes := []rune(finalFrame[y])
 		partRunes := []rune(finalParts[y])
 		for x := 0; x < SplashWidth; x++ {
-			if splashPartRevealedAt(y, x, partRunes[x], idx, partBounds) && splashIsInk(finalRunes[x]) {
+			if splashPartRevealedAt(y, x, partRunes[x], idx, geometry) && splashIsInk(finalRunes[x]) {
 				dst[x] = finalRunes[x]
 			}
 		}
@@ -33,67 +36,167 @@ func splashFrameLines(idx int) []string {
 	return out
 }
 
-func splashPartRevealedAt(row, col int, part rune, frame int, partBounds map[rune]splashVerticalBounds) bool {
+func splashPartRevealedAt(row, col int, part rune, frame int, geometry splashRevealGeometry) bool {
 	switch part {
 	case 'C':
-		return splashCanopyRevealedAt(row, col, frame)
+		return splashCanopyRevealedAt(row, col, frame, geometry)
 	case 'L':
-		return splashStemRevealedAt('L', row, frame, splashLeftBranchStartFrame, splashLeftBranchEndFrame, partBounds)
+		return splashStemRevealedAt('L', row, col, frame, splashLeftBranchStartFrame, splashLeftBranchEndFrame, geometry)
 	case 'R':
-		return splashStemRevealedAt('R', row, frame, splashRightBranchStartFrame, splashRightBranchEndFrame, partBounds)
+		return splashStemRevealedAt('R', row, col, frame, splashRightBranchStartFrame, splashRightBranchEndFrame, geometry)
 	case 'T':
-		return splashStemRevealedAt('T', row, frame, splashTrunkStartFrame, splashTrunkEndFrame, partBounds)
+		return splashStemRevealedAt('T', row, col, frame, splashTrunkStartFrame, splashTrunkEndFrame, geometry)
 	default:
 		return false
 	}
 }
 
-func splashStemRevealedAt(part rune, row, frame, start, end int, partBounds map[rune]splashVerticalBounds) bool {
+func splashStemRevealedAt(part rune, row, col, frame, start, end int, geometry splashRevealGeometry) bool {
 	if frame < start {
 		return false
 	}
 	if frame >= end {
 		return true
 	}
-	bounds, ok := partBounds[part]
-	if !ok || row < bounds.minRow || row > bounds.maxRow {
+	path, ok := geometry.stems[part]
+	if !ok {
 		return false
 	}
-	progress := splashSmoothProgress(frame, start, end)
-	rowProgress := float64(bounds.maxRow-row) / float64(bounds.maxRow-bounds.minRow)
-	return rowProgress <= progress
+	progress := splashStemProgress(part, frame, start, end)
+	cellProgress, ok := path.cellProgress(row, col, splashStemRevealLead)
+	return ok && cellProgress <= progress
 }
 
-type splashVerticalBounds struct {
-	minRow int
-	maxRow int
+type splashRevealGeometry struct {
+	stems       map[rune]splashPathMetric
+	canopyLeft  splashPathMetric
+	canopyRight splashPathMetric
 }
 
-func splashPartBounds(lines []string) map[rune]splashVerticalBounds {
-	bounds := make(map[rune]splashVerticalBounds)
-	for y, line := range lines {
-		for _, r := range line {
-			if r == ' ' {
-				continue
-			}
-			b, ok := bounds[r]
-			if !ok {
-				bounds[r] = splashVerticalBounds{minRow: y, maxRow: y}
-				continue
-			}
-			if y < b.minRow {
-				b.minRow = y
-			}
-			if y > b.maxRow {
-				b.maxRow = y
-			}
-			bounds[r] = b
-		}
+type splashPathPoint struct {
+	row      int
+	centerX  float64
+	centerY  float64
+	distance float64
+	tangentX float64
+	tangentY float64
+}
+
+type splashPathMetric struct {
+	pointsByRow map[int]splashPathPoint
+	total       float64
+}
+
+const (
+	splashStemRevealLead   = 0.75
+	splashCanopyRevealLead = 0.75
+)
+
+func splashRevealGeometryFor(lines []string) splashRevealGeometry {
+	return splashRevealGeometry{
+		stems: map[rune]splashPathMetric{
+			'L': splashPathMetricFor(lines, func(part rune, _ int) bool { return part == 'L' }),
+			'R': splashPathMetricFor(lines, func(part rune, _ int) bool { return part == 'R' }),
+			'T': splashPathMetricFor(lines, func(part rune, _ int) bool { return part == 'T' }),
+		},
+		canopyLeft:  splashPathMetricFor(lines, func(part rune, col int) bool { return part == 'C' && col <= SplashWidth/2 }),
+		canopyRight: splashPathMetricFor(lines, func(part rune, col int) bool { return part == 'C' && col > SplashWidth/2 }),
 	}
-	return bounds
 }
 
-func splashSmoothProgress(frame, start, end int) float64 {
+func splashPathMetricFor(lines []string, include func(part rune, col int) bool) splashPathMetric {
+	points := make([]splashPathPoint, 0, SplashHeight)
+	for y, line := range lines {
+		var sumX float64
+		var cells int
+		for x, r := range []rune(line) {
+			if !include(r, x) {
+				continue
+			}
+			sumX += float64(x) + 0.5
+			cells++
+		}
+		if cells == 0 {
+			continue
+		}
+		points = append(points, splashPathPoint{
+			row:     y,
+			centerX: sumX / float64(cells),
+			centerY: float64(y) + 0.5,
+		})
+	}
+	for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
+		points[i], points[j] = points[j], points[i]
+	}
+	for i := 1; i < len(points); i++ {
+		points[i].distance = points[i-1].distance + splashDistance(
+			points[i].centerX-points[i-1].centerX,
+			points[i].centerY-points[i-1].centerY,
+		)
+	}
+	for i := range points {
+		var dx, dy float64
+		switch {
+		case len(points) == 1:
+			dx, dy = 0, -1
+		case i == len(points)-1:
+			dx = points[i].centerX - points[i-1].centerX
+			dy = points[i].centerY - points[i-1].centerY
+		default:
+			dx = points[i+1].centerX - points[i].centerX
+			dy = points[i+1].centerY - points[i].centerY
+		}
+		points[i].tangentX, points[i].tangentY = splashUnitVector(dx, dy)
+	}
+	if len(points) == 0 {
+		return splashPathMetric{pointsByRow: make(map[int]splashPathPoint)}
+	}
+	metric := splashPathMetric{pointsByRow: make(map[int]splashPathPoint), total: points[len(points)-1].distance}
+	for _, point := range points {
+		metric.pointsByRow[point.row] = point
+	}
+	return metric
+}
+
+func (m splashPathMetric) cellProgress(row, col int, revealLead float64) (float64, bool) {
+	point, ok := m.pointsByRow[row]
+	if !ok {
+		return 0, false
+	}
+	if m.total <= 0 {
+		return 0, true
+	}
+	cellX := float64(col) + 0.5
+	cellY := float64(row) + 0.5
+	distance := point.distance + (cellX-point.centerX)*point.tangentX + (cellY-point.centerY)*point.tangentY - revealLead
+	if distance < 0 {
+		distance = 0
+	} else if distance > m.total {
+		distance = m.total
+	}
+	return distance / m.total, true
+}
+
+func splashUnitVector(dx, dy float64) (float64, float64) {
+	d := splashDistance(dx, dy)
+	if d == 0 {
+		return 0, -1
+	}
+	return dx / d, dy / d
+}
+
+func splashDistance(dx, dy float64) float64 {
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+func splashStemProgress(part rune, frame, start, end int) float64 {
+	if part == 'L' || part == 'R' {
+		return splashEaseOutCubicProgress(frame, start, end)
+	}
+	return splashEaseOutProgress(frame, start, end)
+}
+
+func splashEaseOutProgress(frame, start, end int) float64 {
 	if end <= start || frame >= end {
 		return 1
 	}
@@ -101,16 +204,29 @@ func splashSmoothProgress(frame, start, end int) float64 {
 		return 0
 	}
 	t := float64(frame-start) / float64(end-start)
-	return t * t * (3 - 2*t)
+	return 1 - (1-t)*(1-t)
 }
 
-func splashCanopyRevealedAt(row, col, frame int) bool {
+func splashEaseOutCubicProgress(frame, start, end int) float64 {
+	if end <= start || frame >= end {
+		return 1
+	}
+	if frame <= start {
+		return 0
+	}
+	t := float64(frame-start) / float64(end-start)
+	return 1 - (1-t)*(1-t)*(1-t)
+}
+
+func splashCanopyRevealedAt(row, col, frame int, geometry splashRevealGeometry) bool {
 	if frame < splashCanopyStartFrame {
 		return false
 	}
 	start := splashCanopyStartFrame
-	if col >= SplashWidth/2 {
+	path := geometry.canopyLeft
+	if col > SplashWidth/2 {
 		start += splashCanopyRightStartDelay
+		path = geometry.canopyRight
 	}
 	if frame < start {
 		return false
@@ -119,36 +235,9 @@ func splashCanopyRevealedAt(row, col, frame int) bool {
 	if span <= 0 {
 		return true
 	}
-	t := float64(frame-start) / float64(span)
-	if t > 1 {
-		t = 1
-	}
-	return splashCanopyCellProgress(row, col) <= t
-}
-
-func splashCanopyCellProgress(row, col int) float64 {
-	x := col
-	if col >= SplashWidth/2 {
-		x = SplashWidth - 1 - col
-	}
-	const (
-		startX = 3.0
-		endX   = 23.0
-		startY = 9.0
-	)
-	alongX := (float64(x) - startX) / (endX - startX)
-	if alongX < 0 {
-		alongX = 0
-	} else if alongX > 1 {
-		alongX = 1
-	}
-	upY := (startY - float64(row)) / startY
-	if upY < 0 {
-		upY = 0
-	} else if upY > 1 {
-		upY = 1
-	}
-	return 0.68*alongX + 0.32*upY
+	t := splashEaseOutProgress(frame, start, splashCanopyEndFrame)
+	cellProgress, ok := path.cellProgress(row, col, splashCanopyRevealLead)
+	return ok && cellProgress <= t
 }
 
 func splashFinalFrameLines() []string {

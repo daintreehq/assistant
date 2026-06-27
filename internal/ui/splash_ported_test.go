@@ -130,13 +130,56 @@ func TestSplash_FrameLinesStaggerTrunksBeforeCanopy(t *testing.T) {
 	}
 }
 
-func TestSplash_FrameLinesKeepCanopyApexLate(t *testing.T) {
-	for frame := splashCanopyStartFrame; frame < splashCanopyEndFrame-1; frame++ {
-		line := []rune(splashFrameLines(frame)[0])
-		for x := 22; x <= 25; x++ {
-			if splashIsInk(line[x]) {
-				t.Fatalf("canopy apex leaked at frame %d col %d: %q", frame, x, string(line))
-			}
+func TestSplash_FrameLinesStemRevealStartsPromptly(t *testing.T) {
+	parts := splashFinalPartLines()
+	lines := splashFrameLines(splashTrunkStartFrame + 1)
+	if got := splashPartInkRows(lines, parts, 'T'); got < 2 {
+		t.Fatalf("center trunk reveal should show visible movement on the first tick, got %d ink rows", got)
+	}
+}
+
+func TestSplash_FrameLinesBranchesOverlapCanopyRelay(t *testing.T) {
+	parts := splashFinalPartLines()
+	beforeCanopy := splashFrameLines(splashCanopyStartFrame - 1)
+	if !splashPartHasInk(beforeCanopy, parts, 'L') || !splashPartHasInk(beforeCanopy, parts, 'R') {
+		t.Fatal("side branches should already be growing when the canopy relay starts")
+	}
+
+	relay := splashFrameLines(splashCanopyStartFrame + 9)
+	if !splashPartHasInk(relay, parts, 'C') {
+		t.Fatal("canopy should overlap the side-branch reveal")
+	}
+	for _, part := range []rune{'L', 'R'} {
+		if !splashPartRowHasInk(relay, parts, part, 6) {
+			t.Fatalf("side branch %c should keep travelling through its top curve during the canopy relay", part)
+		}
+	}
+}
+
+func TestSplash_FrameLinesCanopyApexArrivesBeforeFinalHold(t *testing.T) {
+	early := []rune(splashFrameLines(splashCanopyStartFrame + 3)[0])
+	for x := 22; x <= 25; x++ {
+		if splashIsInk(early[x]) {
+			t.Fatalf("canopy apex should not jump in immediately at col %d: %q", x, string(early))
+		}
+	}
+
+	late := []rune(splashFrameLines(splashCanopyEndFrame - 2)[0])
+	seenApex := false
+	for x := 22; x <= 25; x++ {
+		if splashIsInk(late[x]) {
+			seenApex = true
+			break
+		}
+	}
+	if !seenApex {
+		t.Fatalf("canopy apex should begin arriving before the final hold: %q", string(late))
+	}
+
+	complete := []rune(splashFrameLines(splashCanopyEndFrame)[0])
+	for x := 22; x <= 25; x++ {
+		if !splashIsInk(complete[x]) {
+			t.Fatalf("canopy apex should be complete at the final reveal frame col %d: %q", x, string(complete))
 		}
 	}
 }
@@ -150,33 +193,17 @@ func TestSplash_FrameLinesHoldCompletedLogo(t *testing.T) {
 	}
 }
 
-func TestSplash_FrameLinesRevealBranchSlicesAtFinalWidth(t *testing.T) {
+func TestSplash_FrameLinesRevealStraightStemSlicesAtFinalWidth(t *testing.T) {
 	finalLines := splashFinalFrameLines()
 	parts := splashFinalPartLines()
 	for frame := 0; frame < SplashFrames; frame++ {
 		lines := splashFrameLines(frame)
-		for y, line := range lines {
-			lineRunes := []rune(line)
-			finalRunes := []rune(finalLines[y])
-			partRunes := []rune(parts[y])
-			for _, part := range []rune{'L', 'R', 'T'} {
-				seen := false
-				for x, p := range partRunes {
-					if p == part && splashIsInk(lineRunes[x]) {
-						seen = true
-						break
-					}
-				}
-				if !seen {
-					continue
-				}
-				for x, p := range partRunes {
-					if p == part && splashIsInk(finalRunes[x]) && lineRunes[x] != finalRunes[x] {
-						t.Fatalf("frame %d row %d part %c widened late at col %d: got %q want %q",
-							frame, y, part, x, lineRunes[x], finalRunes[x])
-					}
-				}
-			}
+		for row := 3; row <= 13; row++ {
+			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'T', lines, finalLines, parts)
+		}
+		for _, row := range []int{10, 11, 12} {
+			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'L', lines, finalLines, parts)
+			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'R', lines, finalLines, parts)
 		}
 	}
 }
@@ -418,6 +445,39 @@ func splashPartRowHasInk(lines, parts []string, part rune, row int) bool {
 		}
 	}
 	return false
+}
+
+func splashPartInkRows(lines, parts []string, part rune) int {
+	rows := 0
+	for row := range lines {
+		if splashPartRowHasInk(lines, parts, part, row) {
+			rows++
+		}
+	}
+	return rows
+}
+
+func assertSplashRowRevealsAtFinalWidth(t *testing.T, frame, row int, part rune, lines, finalLines, parts []string) {
+	t.Helper()
+	lineRunes := []rune(lines[row])
+	finalRunes := []rune(finalLines[row])
+	partRunes := []rune(parts[row])
+	seen := false
+	for x, p := range partRunes {
+		if p == part && splashIsInk(lineRunes[x]) {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		return
+	}
+	for x, p := range partRunes {
+		if p == part && splashIsInk(finalRunes[x]) && lineRunes[x] != finalRunes[x] {
+			t.Fatalf("frame %d row %d part %c widened late at col %d: got %q want %q",
+				frame, row, part, x, lineRunes[x], finalRunes[x])
+		}
+	}
 }
 
 func splashPartHorizontalCoverage(line, parts string, part rune) float64 {

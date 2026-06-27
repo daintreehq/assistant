@@ -53,21 +53,21 @@ const (
 	// 4 blank rows of bottom padding so the pixel silhouette matches the flatter
 	// brand mark instead of reading stretched vertically.
 	splashVisibleHeight = 14
-	// Each mark part has its own bottom-up timeline. The side trunks begin before the
-	// center trunk is complete, and the canopy waits until the trunk has landed so the
-	// logo flows upward instead of appearing as trunk-then-canopy phases.
+	// These timings follow the original Daintree boot-logo ratios, compressed into
+	// this faster 40-frame terminal timeline: trunk first, side branches overlapping,
+	// then canopy halves starting early enough to grow through the rest of the draw.
 	splashTrunkStartFrame       = 0
-	splashTrunkEndFrame         = 18
-	splashLeftBranchStartFrame  = 9
-	splashLeftBranchEndFrame    = 28
-	splashRightBranchStartFrame = 10
-	splashRightBranchEndFrame   = 29
-	splashCanopyStartFrame      = 22
-	splashCanopyRightStartDelay = 1
+	splashTrunkEndFrame         = 17
+	splashLeftBranchStartFrame  = 5
+	splashLeftBranchEndFrame    = 34
+	splashRightBranchStartFrame = 8
+	splashRightBranchEndFrame   = 34
+	splashCanopyStartFrame      = 11
+	splashCanopyRightStartDelay = 3
 	splashCanopyEndFrame        = SplashFrames - 5
-	// splashFPS runs the 40-frame reveal in about 0.8s. lingerMs holds the
+	// splashFPS runs the 40-frame reveal in about 0.67s. lingerMs holds the
 	// completed logo before signalling done so it doesn't vanish the instant the draw lands.
-	splashFPS = 48
+	splashFPS = 60
 	lingerMs  = 420
 )
 
