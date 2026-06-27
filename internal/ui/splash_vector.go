@@ -16,6 +16,10 @@ const (
 	splashVectorRightEdge    = 823.1866
 	splashVectorTopY         = 269.738
 	splashVectorBottomY      = 743.1317
+
+	splashVectorEmptyCoverageThreshold    = 0.20
+	splashVectorFullCoverageThreshold     = 0.84
+	splashVectorQuadrantCoverageThreshold = 0.42
 )
 
 var (
@@ -130,32 +134,32 @@ func splashVectorParts() []splashVectorPart {
 		{
 			name: 'T',
 			kind: splashVectorPrefix,
-			fill: splashParseVectorPolygon(splashVectorTrunkPath),
-			mask: splashParseVectorStrokePath("M510 918C510 918 511 372 511 372"),
+			fill: splashParseVectorPolygon(splashVectorLowresTrunkPath),
+			mask: splashParseVectorStrokePath(splashVectorLowresTrunkMaskPath),
 		},
 		{
 			name: 'L',
 			kind: splashVectorPrefix,
-			fill: splashParseVectorPolygon(splashVectorLeftLegPath),
-			mask: splashParseVectorStrokePath("M395 693C395 666 430 522 304 492"),
+			fill: splashParseVectorPolygon(splashVectorLowresLeftLegPath),
+			mask: splashParseVectorStrokePath(splashVectorLowresLeftLegMaskPath),
 		},
 		{
 			name: 'R',
 			kind: splashVectorPrefix,
-			fill: splashParseVectorPolygon(splashVectorRightLegPath),
-			mask: splashParseVectorStrokePath("M631.464 693C631.464 666 596.464 522 722.464 492"),
+			fill: splashParseVectorPolygon(splashVectorLowresRightLegPath),
+			mask: splashParseVectorStrokePath(splashVectorLowresRightLegMaskPath),
 		},
 		{
 			name: 'C',
 			kind: splashVectorArchLeft,
-			fill: splashParseVectorPolygon(splashVectorArchPath),
-			mask: splashParseVectorStrokePath(splashVectorArchMaskPath),
+			fill: splashParseVectorPolygon(splashVectorLowresArchPath),
+			mask: splashParseVectorStrokePath(splashVectorLowresArchMaskPath),
 		},
 		{
 			name: 'C',
 			kind: splashVectorArchRight,
-			fill: splashParseVectorPolygon(splashVectorArchPath),
-			mask: splashParseVectorStrokePath(splashVectorArchMaskPath),
+			fill: splashParseVectorPolygon(splashVectorLowresArchPath),
+			mask: splashParseVectorStrokePath(splashVectorLowresArchMaskPath),
 		},
 	}
 }
@@ -245,28 +249,66 @@ func splashRasterizeVectorFrame(parts []splashVectorPart, samples []splashVector
 			rows[row][col] = splashCellFromCoverage(counts[row][col], quadCounts[row][col])
 		}
 	}
-	splashSnapVectorStraightRuns(rows)
+	splashHintLowresLogo(rows)
 	return rows
 }
 
-func splashSnapVectorStraightRuns(rows [][]splashCell) {
+func splashHintLowresLogo(rows [][]splashCell) {
 	// The source SVG edges are vector-true, but the terminal raster has a coarse,
 	// fixed 48x18 grid. Snap long straight runs to exact cell columns and full-cell
 	// bottoms so straight edges do not pick up one-cell anti-aliasing halos. Curves
 	// and angled branches still come directly from the supersampled SVG.
+	splashHintOuterArch(rows)
+	splashHintTrunk(rows)
+	splashHintInnerBranches(rows)
+	splashClearLowresNoise(rows)
+}
+
+func splashHintOuterArch(rows [][]splashCell) {
 	for _, row := range []int{7, 8} {
 		splashSnapVectorRun(rows, row, 3, 7, '█', 1, 7)
 		splashSnapVectorRun(rows, row, 43, 47, '█', 1, 42)
 	}
 	splashSnapVectorRun(rows, 9, 3, 7, '█', 1, 7)
 	splashSnapVectorRun(rows, 9, 43, 47, '█', 1, 42)
+}
 
-	for _, row := range []int{9, 10, 11} {
-		splashSnapVectorRun(rows, row, 15, 19, '█', 1, 14)
-		splashSnapVectorRun(rows, row, 31, 35, '█', 1, 35)
+func splashHintTrunk(rows [][]splashCell) {
+	for row := 4; row < splashVisibleHeight; row++ {
+		splashSnapVectorRun(rows, row, 23, 27, '█', 1, 22, 27)
 	}
-	splashSnapVectorRun(rows, 12, 15, 19, '█', 1, 14)
-	splashSnapVectorRun(rows, 12, 31, 35, '█', 1, 35)
+}
+
+func splashHintInnerBranches(rows [][]splashCell) {
+	for _, row := range []int{9, 10, 11} {
+		splashSnapVectorRun(rows, row, 15, 19, '█', 1, 14, 19)
+		splashSnapVectorRun(rows, row, 31, 35, '█', 1, 30, 35)
+	}
+	splashSnapVectorRun(rows, 12, 15, 19, '█', 1, 14, 19)
+	splashSnapVectorRun(rows, 12, 31, 35, '█', 1, 30, 35)
+}
+
+func splashClearLowresNoise(rows [][]splashCell) {
+	for _, hint := range []struct {
+		row  int
+		cols []int
+	}{
+		{7, []int{2, 7, 42, 47}},
+		{8, []int{2, 7, 42, 47}},
+		{9, []int{2, 7, 14, 19, 30, 35, 42, 47}},
+		{10, []int{14, 19, 22, 27, 30, 35}},
+		{11, []int{14, 19, 22, 27, 30, 35}},
+		{12, []int{14, 19, 22, 27, 30, 35}},
+	} {
+		if hint.row < 0 || hint.row >= len(rows) {
+			continue
+		}
+		for _, col := range hint.cols {
+			if col >= 0 && col < len(rows[hint.row]) {
+				rows[hint.row][col] = splashCell{}
+			}
+		}
+	}
 }
 
 func splashSnapVectorRun(rows [][]splashCell, row, start, end int, glyph rune, coverage float64, clearCols ...int) {
@@ -410,10 +452,10 @@ func splashCubicBezierDerivative(t, a1, a2 float64) float64 {
 func splashCellFromCoverage(count int, quadrants [4]int) splashCell {
 	const total = splashVectorSubX * splashVectorSubY
 	coverage := float64(count) / float64(total)
-	if coverage < 0.16 {
+	if coverage < splashVectorEmptyCoverageThreshold {
 		return splashCell{glyph: ' ', coverage: 0}
 	}
-	if coverage > 0.91 {
+	if coverage > splashVectorFullCoverageThreshold {
 		return splashCell{glyph: '█', coverage: 1}
 	}
 
@@ -424,7 +466,7 @@ func splashCellFromCoverage(count int, quadrants [4]int) splashCell {
 		if count > quadrants[maxQuadrant] {
 			maxQuadrant = i
 		}
-		if float64(count)/float64(quadrantTotal) >= 0.35 {
+		if float64(count)/float64(quadrantTotal) >= splashVectorQuadrantCoverageThreshold {
 			mask |= 1 << i
 		}
 	}
@@ -517,6 +559,12 @@ func splashFlattenSVGPath(d string) []splashPoint {
 				current = end
 				i += 6
 			}
+		case "L":
+			for i < len(tokens) && !splashIsSVGPathCommand(tokens[i]) {
+				current = splashPoint{x: splashParseFloat(tokens[i]), y: splashParseFloat(tokens[i+1])}
+				points = append(points, current)
+				i += 2
+			}
 		case "Z", "z":
 			if current != start {
 				points = append(points, start)
@@ -570,7 +618,7 @@ func splashSVGPathTokens(d string) []string {
 }
 
 func splashIsSVGPathCommand(token string) bool {
-	return len(token) == 1 && strings.IndexByte("MmCcZz", token[0]) >= 0
+	return len(token) == 1 && strings.IndexByte("MmLlCcZz", token[0]) >= 0
 }
 
 func splashParseFloat(s string) float64 {
@@ -656,6 +704,12 @@ func (p splashVectorStrokePath) pointAt(progress float64) splashPoint {
 	return p.points[len(p.points)-1]
 }
 
+const splashVectorTrunkMaskPath = "M510 918C510 918 511 372 511 372"
+
+const splashVectorLeftLegMaskPath = "M395 693C395 666 430 522 304 492"
+
+const splashVectorRightLegMaskPath = "M631.464 693C631.464 666 596.464 522 722.464 492"
+
 const splashVectorArchMaskPath = "M227 651C228 622 216.194 529.114 250.892 460.963C296 388 403 343 510 303C635 341 739 411 766 444C793 477 803 600 800 641"
 
 const splashVectorTrunkPath = "M537.5077 743.1317C537.5077 743.1317 486.5425 743.1317 486.5425 743.1317C484.4716 743.1317 482.7868 741.4469 482.7868 739.376C482.7868 739.376 482.7868 404.6624 482.7868 404.6624C482.7868 402.065 483.7345 399.5378 485.4895 397.6775C492.6499 390.0608 502.3024 386.27 511.99 386.27C521.6776 386.27 531.3652 390.0959 538.4905 397.7126C540.2455 399.608 541.1932 402.1352 541.1932 404.6975C541.1932 404.6975 541.1932 739.376 541.1932 739.376C541.1932 741.4469 539.5435 743.1317 537.4375 743.1317C537.4375 743.1317 537.5077 743.1317 537.5077 743.1317Z"
@@ -665,3 +719,19 @@ const splashVectorLeftLegPath = "M424.2751 592.9388C424.2751 592.9388 424.2751 6
 const splashVectorRightLegPath = "M599.74 592.9388C599.74 592.9388 599.74 688.3757 599.74 688.3757C599.74 690.4466 601.4248 692.1314 603.4957 692.1314C603.4957 692.1314 654.4609 692.1314 654.4609 692.1314C656.5318 692.1314 658.2166 690.4466 658.2166 688.3757C658.2166 688.3757 658.2166 593.009 658.2166 593.009C658.2166 572.3 669.2731 553.2056 687.2092 542.816C687.2092 542.816 707.6725 530.9873 707.6725 530.9873C709.9891 529.6535 711.709 527.4773 712.4461 524.915C713.1832 522.3527 713.8852 518.7374 713.8852 514.7711C713.8852 498.3443 702.6181 483.2513 685.8403 479.285C683.3131 478.6883 680.6455 479.1095 678.364 480.4082C678.364 480.4082 657.8656 492.2018 657.8656 492.2018C621.8881 512.981 599.74 551.3453 599.74 592.9037C599.74 592.9037 599.74 592.9388 599.74 592.9388Z"
 
 const splashVectorArchPath = "M823.1866 524.0726C823.1866 524.0726 823.1866 593.009 823.1866 593.009C823.1866 595.0799 821.5018 596.7647 819.4309 596.7647C819.4309 596.7647 768.4657 596.7647 768.4657 596.7647C766.3948 596.7647 764.71 595.0799 764.71 593.009C764.71 593.009 764.71 523.9673 764.71 523.9673C764.71 487.8494 745.4401 454.4342 714.1309 436.3928C714.1309 436.3928 562.5691 348.8885 562.5691 348.8885C531.2599 330.812 492.7201 330.812 461.4109 348.8885C461.4109 348.8885 309.8491 436.3928 309.8491 436.3928C278.5399 454.4693 259.27 487.8494 259.27 523.9673C259.27 523.9673 259.27 586.2698 259.27 586.2698C259.27 586.4804 259.27 586.7261 259.27 593.7812C259.27 595.8521 257.5852 597.5369 255.5143 597.5369C255.5143 597.5369 204.5491 597.5369 204.5491 597.5369C202.4782 597.5369 200.7934 595.8521 200.7934 593.7812C200.7934 593.7812 200.7934 524.0726 200.7934 524.0726C200.7934 466.9649 231.2602 414.2096 280.681 385.6733C280.681 385.6733 432.0673 298.2743 432.0673 298.2743C481.5232 269.738 542.4217 269.738 591.8776 298.2743C591.8776 298.2743 743.2288 385.6382 743.2288 385.6382C792.6847 414.1745 823.1515 466.9649 823.1515 524.0726C823.1515 524.0726 823.1866 524.0726 823.1866 524.0726Z"
+
+const splashVectorLowresTrunkMaskPath = splashVectorTrunkMaskPath
+
+const splashVectorLowresLeftLegMaskPath = splashVectorLeftLegMaskPath
+
+const splashVectorLowresRightLegMaskPath = splashVectorRightLegMaskPath
+
+const splashVectorLowresArchMaskPath = splashVectorArchMaskPath
+
+const splashVectorLowresTrunkPath = splashVectorTrunkPath
+
+const splashVectorLowresLeftLegPath = splashVectorLeftLegPath
+
+const splashVectorLowresRightLegPath = splashVectorRightLegPath
+
+const splashVectorLowresArchPath = splashVectorArchPath

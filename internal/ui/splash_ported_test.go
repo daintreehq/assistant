@@ -228,6 +228,8 @@ func TestSplash_FinalStraightStemRunsSnapToFourCells(t *testing.T) {
 		assertSplashRun(t, lines[row], 23, "████")
 		assertSplashRun(t, lines[row], 31, "████")
 		assertSplashRun(t, lines[row], 14, " ")
+		assertSplashRun(t, lines[row], 19, " ")
+		assertSplashRun(t, lines[row], 30, " ")
 		assertSplashRun(t, lines[row], 35, " ")
 	}
 
@@ -235,7 +237,26 @@ func TestSplash_FinalStraightStemRunsSnapToFourCells(t *testing.T) {
 	assertSplashRun(t, lines[12], 23, "████")
 	assertSplashRun(t, lines[12], 31, "████")
 	assertSplashRun(t, lines[12], 14, " ")
+	assertSplashRun(t, lines[12], 19, " ")
+	assertSplashRun(t, lines[12], 30, " ")
 	assertSplashRun(t, lines[12], 35, " ")
+}
+
+func TestSplash_FinalSilhouetteIsSymmetric(t *testing.T) {
+	lines := splashFinalFrameLines()
+	for row := 0; row < splashVisibleHeight; row++ {
+		line := []rune(lines[row])
+		for offset := 0; offset < SplashWidth/2; offset++ {
+			left := 24 - offset
+			right := 25 + offset
+			if left < 0 || right >= len(line) {
+				continue
+			}
+			if splashIsInk(line[left]) != splashIsInk(line[right]) {
+				t.Fatalf("row %d silhouette differs at mirrored cols %d/%d: %q", row, left, right, lines[row])
+			}
+		}
+	}
 }
 
 func TestSplash_FinalCanopyStraightEdgesMatchTrunkWidth(t *testing.T) {
