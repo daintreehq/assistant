@@ -90,7 +90,8 @@ func TestExtractAsyncRequiresInstruction(t *testing.T) {
 // never settles — letting us test that a cancelled context stops the poll loop.
 type stubReader struct{}
 
-func (stubReader) Connected() bool { return true }
+func (stubReader) Connected() bool                                  { return true }
+func (stubReader) ListTerminals(_ context.Context) ([]string, bool) { return nil, false }
 func (stubReader) ReadStatuses(_ context.Context, ids []string, _ bool) StatusReadResult {
 	byID := make(map[string]TerminalStatusEntry, len(ids))
 	empty := ""

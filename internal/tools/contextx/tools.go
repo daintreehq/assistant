@@ -138,6 +138,11 @@ func newSummarizeTool(deps Deps) tools.Tool {
 			if ctx.Err() != nil {
 				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
 			}
+			resolvedID, idFail := resolveTerminalID(ctx, deps.MCP, a.TerminalID)
+			if idFail != nil {
+				return *idFail
+			}
+			a.TerminalID = resolvedID
 			content, err := readTerminalTail(ctx, deps.MCP, a.TerminalID, 200)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -236,6 +241,11 @@ func newReadTool(deps Deps) tools.Tool {
 			if ctx.Err() != nil {
 				return tools.Fail(codeCancelled, "Turn cancelled while reading terminal output.", tools.Unrecoverable())
 			}
+			resolvedID, idFail := resolveTerminalID(ctx, deps.MCP, a.TerminalID)
+			if idFail != nil {
+				return *idFail
+			}
+			a.TerminalID = resolvedID
 			content, err := readTerminalTail(ctx, deps.MCP, a.TerminalID, maxLines)
 			if err != nil {
 				if ctx.Err() != nil {

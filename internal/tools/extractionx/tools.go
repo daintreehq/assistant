@@ -217,6 +217,14 @@ func newExtractTool(deps Deps) tools.Tool {
 			if !deps.Reader.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
+			// Canonicalize ids up front so a truncated/prefix id (the model abbreviates
+			// Daintree's full terminal-<uuid> ids) resolves, and an unknown id fails fast
+			// instead of feeding the extractor a "Terminal not found" tail.
+			resolvedIDs, idFail := resolveTerminalIDs(ctx, deps, a.TerminalIDs)
+			if idFail != nil {
+				return *idFail
+			}
+			a.TerminalIDs = resolvedIDs
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
 				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract: "+errMsg)
@@ -323,6 +331,14 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 			if !deps.Reader.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
+			// Canonicalize ids up front so a truncated/prefix id resolves and an unknown id
+			// fails fast (a wrong id otherwise feeds a "Terminal not found" tail into the
+			// structured extractor, producing a confident-but-garbage result).
+			resolvedIDs, idFail := resolveTerminalIDs(ctx, deps, a.TerminalIDs)
+			if idFail != nil {
+				return *idFail
+			}
+			a.TerminalIDs = resolvedIDs
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
 				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract.json: "+errMsg)
@@ -407,6 +423,14 @@ func newExtractAsyncTool(deps Deps) tools.Tool {
 			if !deps.Reader.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
+			// Canonicalize ids synchronously, before detaching the background extraction, so
+			// the goroutine works with full ids (a truncated/prefix id resolves; an unknown
+			// id fails fast in-turn instead of silently producing a bad async result).
+			resolvedIDs, idFail := resolveTerminalIDs(ctx, deps, a.TerminalIDs)
+			if idFail != nil {
+				return *idFail
+			}
+			a.TerminalIDs = resolvedIDs
 			base, errMsg := resolveBase(a.baseArgs)
 			if errMsg != "" {
 				return tools.Fail(domain.CodeValidation, "Invalid arguments for terminal.extract.async: "+errMsg)

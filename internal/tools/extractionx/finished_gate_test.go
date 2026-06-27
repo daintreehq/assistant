@@ -17,7 +17,8 @@ type seqReader struct {
 	call int
 }
 
-func (r *seqReader) Connected() bool { return true }
+func (r *seqReader) Connected() bool                                  { return true }
+func (r *seqReader) ListTerminals(_ context.Context) ([]string, bool) { return nil, false }
 func (r *seqReader) ReadStatuses(_ context.Context, _ []string, _ bool) StatusReadResult {
 	i := r.call
 	if i >= len(r.seq) {

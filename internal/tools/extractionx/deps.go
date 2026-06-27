@@ -55,9 +55,13 @@ type OutputReadResult struct {
 //   - ReadStatuses fetches agentState/recentOutput/exitCode for each id;
 //     includeOutput requests the inline recentOutput tail.
 //   - ReadOutput is the deep terminal.getOutput tail (capped to tailBytes chars).
+//   - ListTerminals enumerates the live roster (terminal.list) so a truncated/prefix id
+//     can be resolved to its canonical form; ok=false on an unreadable roster so callers
+//     FAIL OPEN (a discovery hiccup must never block a wait).
 //   - Connected gates the call (MCP_UNAVAILABLE when down).
 type TerminalReader interface {
 	Connected() bool
+	ListTerminals(ctx context.Context) (ids []string, ok bool)
 	ReadStatuses(ctx context.Context, terminalIDs []string, includeOutput bool) StatusReadResult
 	ReadOutput(ctx context.Context, terminalID string, tailBytes int) OutputReadResult
 }

@@ -92,7 +92,8 @@ type fakeReader struct {
 	deepFailed map[string]bool
 }
 
-func (r *fakeReader) Connected() bool { return true }
+func (r *fakeReader) Connected() bool                                  { return true }
+func (r *fakeReader) ListTerminals(_ context.Context) ([]string, bool) { return nil, false }
 func (r *fakeReader) ReadStatuses(_ context.Context, _ []string, _ bool) StatusReadResult {
 	return r.statuses
 }
