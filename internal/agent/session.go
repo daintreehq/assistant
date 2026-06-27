@@ -548,6 +548,20 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 	}
 
+	// 3e. Open-terminal inventory: fetch a fresh, metadata-only snapshot of the open
+	//     Daintree terminals ONCE per turn (best-effort, bounded) so the model always
+	//     sees the live roster as inert runtime data instead of tool-calling terminal.list
+	//     mid-turn to discover it. Run HERE — after the cancel re-check, before the loop —
+	//     for the same reason as recallMemories: a pre-loop cancel never pays for it, and
+	//     the MCP read fires exactly ONCE per turn, not once per model round
+	//     (buildRuntimeContext runs every round). The snapshot is cached and threaded
+	//     through every round's runtime block below. A nil fetcher, a disconnected MCP, or
+	//     a slow/failed read all yield nil — the inventory is simply omitted; never blocks.
+	var openTerminals []backend.OpenTerminal
+	if s.deps.OpenTerminalsFetcher != nil {
+		openTerminals = s.deps.OpenTerminalsFetcher(ctx)
+	}
+
 	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
 	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
 	//     (see goalAnchorSection). This is a CHANNEL signal from the wake caller (SendOptions),
@@ -683,7 +697,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				Tools:      btools,
 				ToolChoice: "auto",
 			},
-			Runtime:    s.buildRuntimeContext(),
+			Runtime:    s.buildRuntimeContext(openTerminals),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, sessionEndedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
@@ -1149,8 +1163,10 @@ func (s *Session) emitBackendUsage(u backend.Usage, model string) {
 // (NOT a system prompt). The context is pulled LIVE every round when a provider is
 // wired (PromptContextFunc), so a mid-session MCP connect / tier change / scheduler
 // start reaches the backend on the next request — the structured-data replacement for
-// the old RefreshRuntimeContext push. The worktree is read per round too.
-func (s *Session) buildRuntimeContext() *backend.RuntimeContext {
+// the old RefreshRuntimeContext push. The worktree is read per round too. The
+// openTerminals snapshot is fetched ONCE per turn (step 3e) and passed in unchanged each
+// round, so the inventory is consistent across the turn and the MCP read is not repeated.
+func (s *Session) buildRuntimeContext(openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
 	pc := s.deps.PromptContext
 	if s.deps.PromptContextFunc != nil {
 		pc = s.deps.PromptContextFunc()
@@ -1163,6 +1179,7 @@ func (s *Session) buildRuntimeContext() *backend.RuntimeContext {
 		SchedulerActive:     pc.SchedulerActive,
 		ActiveWorktree:      s.activeWorktree(),
 		ProjectInstructions: pc.ProjectInstructions,
+		OpenTerminals:       openTerminals,
 	}
 	if pc.MCPConnected || strings.TrimSpace(pc.MCPStatusLine) != "" {
 		// When connected the backend builds its status line from transport + tool_count

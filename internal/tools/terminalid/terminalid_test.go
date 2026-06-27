@@ -145,3 +145,44 @@ func TestParseListIDs_EmptyAndGarbage(t *testing.T) {
 		t.Fatalf("an empty terminals array should yield nil, got %v", got)
 	}
 }
+
+// ParseListEntries unions structuredContent and text, dedupes by id in first-seen order,
+// and carries the metadata fields (kind/worktreeId/title/agentId/agentState).
+func TestParseListEntries_StructuredAndText(t *testing.T) {
+	structured := map[string]any{"terminals": []any{
+		map[string]any{"id": "terminal-aaa", "kind": "agent", "worktreeId": "/wt/a", "title": "Build", "agentId": "claude", "agentState": "running"},
+		map[string]any{"terminalId": "terminal-bbb", "kind": "shell"}, // fallback id key
+	}}
+	text := `{"terminals":[{"id":"terminal-bbb","title":"dup ignored"},{"id":"terminal-ccc","title":"new"}]}`
+	got := ParseListEntries(structured, text)
+	want := []ListEntry{
+		{ID: "terminal-aaa", Kind: "agent", WorktreeID: "/wt/a", Title: "Build", AgentID: "claude", AgentState: "running"},
+		{ID: "terminal-bbb", Kind: "shell"},
+		{ID: "terminal-ccc", Title: "new"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("union+dedupe with metadata failed:\n want %+v\n got  %+v", want, got)
+	}
+}
+
+// A row without any id (neither id nor terminalId) is skipped, never emitted with a blank id.
+func TestParseListEntries_SkipsIdlessRows(t *testing.T) {
+	text := `{"terminals":[{"kind":"shell","title":"no id"},{"id":"terminal-ddd"}]}`
+	got := ParseListEntries(nil, text)
+	want := []ListEntry{{ID: "terminal-ddd"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("id-less rows must be skipped: want %+v, got %+v", want, got)
+	}
+}
+
+func TestParseListEntries_EmptyAndGarbage(t *testing.T) {
+	if got := ParseListEntries(nil, ""); got != nil {
+		t.Fatalf("empty inputs should yield nil, got %v", got)
+	}
+	if got := ParseListEntries(nil, "not json"); got != nil {
+		t.Fatalf("unparseable text should yield nil, got %v", got)
+	}
+	if got := ParseListEntries(map[string]any{"terminals": []any{}}, ""); got != nil {
+		t.Fatalf("an empty terminals array should yield nil, got %v", got)
+	}
+}

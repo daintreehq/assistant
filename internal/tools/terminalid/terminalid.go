@@ -161,3 +161,73 @@ func ParseListIDs(structured any, text string) []string {
 	}
 	return ids
 }
+
+// ListEntry is one terminal.list row with the metadata fields the open-terminal
+// inventory carries. It is the full-entry counterpart to ParseListIDs's id-only output —
+// the ID-only path stays fast and untouched while the inventory path reuses the same
+// union+dedup parse to keep one source of truth for terminal.list decoding.
+type ListEntry struct {
+	ID         string
+	Kind       string
+	WorktreeID string
+	Title      string
+	AgentID    string
+	AgentState string
+}
+
+// ParseListEntries extracts full terminal.list rows (id + metadata) the same way
+// ParseListIDs extracts ids: it UNIONS the structuredContent payload and the JSON text
+// body (Daintree returns results in the text block, so reading only one source can drop
+// rows) and dedupes by id in first-seen order. Each row's id is "id", or "terminalId"
+// when "id" is absent; a row with no id is skipped. Never throws; returns nil when
+// nothing parses (an empty/unreadable roster).
+func ParseListEntries(structured any, text string) []ListEntry {
+	var entries []ListEntry
+	seen := map[string]struct{}{}
+	collect := func(rows []any) {
+		for _, e := range rows {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := m["id"].(string)
+			if strings.TrimSpace(id) == "" {
+				id, _ = m["terminalId"].(string)
+			}
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			str := func(key string) string {
+				s, _ := m[key].(string)
+				return strings.TrimSpace(s)
+			}
+			entries = append(entries, ListEntry{
+				ID:         id,
+				Kind:       str("kind"),
+				WorktreeID: str("worktreeId"),
+				Title:      str("title"),
+				AgentID:    str("agentId"),
+				AgentState: str("agentState"),
+			})
+		}
+	}
+	if sc, ok := structured.(map[string]any); ok {
+		if arr, ok := sc["terminals"].([]any); ok {
+			collect(arr)
+		}
+	}
+	if strings.TrimSpace(text) != "" {
+		var parsed struct {
+			Terminals []any `json:"terminals"`
+		}
+		if json.Unmarshal([]byte(text), &parsed) == nil {
+			collect(parsed.Terminals)
+		}
+	}
+	return entries
+}

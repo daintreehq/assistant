@@ -400,6 +400,11 @@ func Create(opts CreateOptions) (*App, error) {
 		SessionEndedWatchers: a.sessionEndedWatchersForFooter,
 		ArtifactPersister:    store,
 		WorkflowRunLister:    store,
+		// Per-turn open-terminal inventory (issue #286): a fresh terminal.list +
+		// no-output terminal.getStatus snapshot attached to the runtime block so the model
+		// sees the live roster as inert data instead of discovering it mid-turn. Best-effort
+		// and bounded; reuses the same MCP read adapter as the extraction/id-resolution path.
+		OpenTerminalsFetcher: terminalReaderAdapter{c: a.MCP}.FetchOpenTerminals,
 		PromptContext:        a.PromptContext(),
 		// Live runtime context: pulled every round so a post-construction MCP connect,
 		// /permissions tier change, or scheduler start reaches the backend (replaces the

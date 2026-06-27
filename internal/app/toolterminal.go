@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/terminalid"
@@ -16,13 +17,27 @@ import (
 // reconcile read budget.
 var terminalListTimeout = 5 * time.Second
 
-// terminalReaderAdapter satisfies extractionx.TerminalReader over the concrete MCP
-// client. The daemon's identical read helpers (daemon/mcpreads.go) are unexported
-// and bound to *daemon.CheckContext, and the family forbids importing internal/daemon,
-// so this re-implements the same two reads (terminal.getStatus / terminal.getOutput)
-// with the same defensive parse: Daintree returns the payload in the text content
-// block (never structuredContent), so we read both and merge, text last.
-type terminalReaderAdapter struct{ c *mcp.Client }
+// openTerminalsTimeout bounds the best-effort per-turn open-terminal inventory read
+// (one terminal.list + one no-output terminal.getStatus, together) attached to the
+// runtime block. A var (not const) only so tests can shorten it. Independent of
+// terminalListTimeout so the two read budgets can be tuned separately.
+var openTerminalsTimeout = 5 * time.Second
+
+// mcpToolCaller is the minimal MCP surface the terminal read adapter needs: connection
+// state plus a single tool call. A narrow interface (satisfied by *mcp.Client) so the
+// adapter's read/merge logic is unit-testable with a scripted fake, with no live MCP.
+type mcpToolCaller interface {
+	IsConnected() bool
+	CallTool(ctx context.Context, name string, args map[string]any, opts mcp.CallOptions) (mcp.CallResult, error)
+}
+
+// terminalReaderAdapter satisfies extractionx.TerminalReader over the MCP client. The
+// daemon's identical read helpers (daemon/mcpreads.go) are unexported and bound to
+// *daemon.CheckContext, and the family forbids importing internal/daemon, so this
+// re-implements the same reads (terminal.getStatus / terminal.getOutput) with the same
+// defensive parse: Daintree returns the payload in the text content block (never
+// structuredContent), so we read both and merge, text last.
+type terminalReaderAdapter struct{ c mcpToolCaller }
 
 func (r terminalReaderAdapter) Connected() bool { return r.c.IsConnected() }
 
@@ -75,6 +90,75 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 		}
 	}
 	return extractionx.StatusReadResult{OK: true, ByID: byID}
+}
+
+// FetchOpenTerminals reads a fresh, metadata-only snapshot of the open Daintree
+// terminals for the per-turn runtime inventory: one terminal.list (full rows) followed
+// by one no-output terminal.getStatus to refresh the volatile agentState/waitingReason/
+// exitCode. It is best-effort and MUST NEVER block or break a turn — every failure path
+// (disconnected, list error, empty roster, status error) returns the best snapshot it
+// has (nil when there is nothing), never an error. The WHOLE two-call operation is
+// bounded by a CANCEL-based deadline (time.AfterFunc(cancel), NOT context.WithTimeout):
+// mcp.Client tears the connection down on a DeadlineExceeded, so a slow inventory read
+// must abort via Canceled to avoid degrading a working connection (the mcp-bestEffort
+// rule). getStatus is SKIPPED entirely when the roster is empty — no wasted call, and the
+// list fields alone already describe a terminal with no live agent.
+func (r terminalReaderAdapter) FetchOpenTerminals(ctx context.Context) []backend.OpenTerminal {
+	if !r.Connected() {
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(openTerminalsTimeout, cancel)
+	defer func() {
+		timer.Stop()
+		cancel()
+	}()
+
+	res, err := r.c.CallTool(cctx, "terminal.list", map[string]any{}, mcp.CallOptions{})
+	if err != nil || res.IsError {
+		return nil
+	}
+	entries := terminalid.ParseListEntries(res.StructuredContent, res.Text)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.ID)
+	}
+	// Refresh the volatile fields from one no-output getStatus, sharing the same
+	// cancel-bounded ctx so the whole inventory stays inside one read budget. A status
+	// failure (OK=false) leaves the list-derived fields intact — degrade, don't drop.
+	// ReadStatuses carries the standard read retries (ReadCallOptions): those fire ONLY on
+	// retriable transport/throttle errors and are still bounded by the cancel timer above,
+	// so reusing it keeps a single parse path without busting the metadata-only budget.
+	statuses := r.ReadStatuses(cctx, ids, false)
+
+	out := make([]backend.OpenTerminal, 0, len(entries))
+	for _, e := range entries {
+		ot := backend.OpenTerminal{
+			ID:         e.ID,
+			Kind:       e.Kind,
+			WorktreeID: e.WorktreeID,
+			Title:      e.Title,
+			AgentID:    e.AgentID,
+			AgentState: e.AgentState,
+		}
+		if statuses.OK {
+			if st, ok := statuses.ByID[e.ID]; ok {
+				if st.AgentState != "" {
+					ot.AgentState = st.AgentState // status carries the fresher transition
+				}
+				ot.WaitingReason = st.WaitingReason
+				ot.ExitCode = st.ExitCode
+			}
+		}
+		// Clamp each field to the backend's max_length so a verbose agent-authored title /
+		// waiting reason can never 422 the request and break the turn (best-effort).
+		out = append(out, ot.Clamp())
+	}
+	return out
 }
 
 func (r terminalReaderAdapter) ReadOutput(ctx context.Context, terminalID string, tailBytes int) extractionx.OutputReadResult {

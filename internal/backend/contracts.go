@@ -108,15 +108,78 @@ type ClientInfo struct {
 // true on the backend, so it is sent WITHOUT omitempty — an inactive scheduler
 // must be representable as an explicit false.
 type RuntimeContext struct {
-	PermissionTier      string      `json:"permission_tier,omitempty"`
-	ProjectPath         string      `json:"project_path,omitempty"`
-	ProjectID           string      `json:"project_id,omitempty"`
-	MCP                 *MCPInfo    `json:"mcp,omitempty"`
-	MCPServers          []MCPServer `json:"mcp_servers,omitempty"`
-	ConfiguredAgentIDs  []string    `json:"configured_agent_ids,omitempty"`
-	SchedulerActive     bool        `json:"scheduler_active"`
-	ActiveWorktree      string      `json:"active_worktree,omitempty"`
-	ProjectInstructions string      `json:"project_instructions,omitempty"`
+	PermissionTier      string         `json:"permission_tier,omitempty"`
+	ProjectPath         string         `json:"project_path,omitempty"`
+	ProjectID           string         `json:"project_id,omitempty"`
+	MCP                 *MCPInfo       `json:"mcp,omitempty"`
+	MCPServers          []MCPServer    `json:"mcp_servers,omitempty"`
+	ConfiguredAgentIDs  []string       `json:"configured_agent_ids,omitempty"`
+	SchedulerActive     bool           `json:"scheduler_active"`
+	ActiveWorktree      string         `json:"active_worktree,omitempty"`
+	ProjectInstructions string         `json:"project_instructions,omitempty"`
+	OpenTerminals       []OpenTerminal `json:"open_terminals,omitempty"`
+}
+
+// OpenTerminal is one live Daintree terminal in the per-turn inventory the CLI attaches
+// to the runtime block, so the model always sees the open-terminal roster as inert data
+// instead of tool-calling terminal.list mid-turn to discover it. Metadata only — never
+// terminal output. The list fields (id/kind/worktree/title/agent) come from a single
+// terminal.list; AgentState/WaitingReason/ExitCode are refreshed from one no-output
+// terminal.getStatus. ExitCode is a pointer because 0 is a meaningful clean exit that
+// must be distinguishable from "no exit code".
+type OpenTerminal struct {
+	ID            string `json:"id"`
+	Kind          string `json:"kind,omitempty"`
+	WorktreeID    string `json:"worktree_id,omitempty"`
+	Title         string `json:"title,omitempty"`
+	AgentID       string `json:"agent_id,omitempty"`
+	AgentState    string `json:"agent_state,omitempty"`
+	WaitingReason string `json:"waiting_reason,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+}
+
+// Per-field length limits (rune counts) for OpenTerminal. These MUST mirror the backend
+// OpenTerminal pydantic max_length constraints (contracts/extensions.py). The backend
+// VALIDATES the request before it sanitizes/caps for the prompt, so an over-limit field —
+// e.g. a verbose, agent-authored terminal title or a long waiting reason — would 422 the
+// WHOLE request and break the turn, defeating the best-effort inventory. The CLI (the only
+// client) clamps to these limits before sending so that can never happen.
+const (
+	openTerminalIDMax            = 256
+	openTerminalKindMax          = 64
+	openTerminalWorktreeIDMax    = 4096
+	openTerminalTitleMax         = 512
+	openTerminalAgentIDMax       = 256
+	openTerminalAgentStateMax    = 64
+	openTerminalWaitingReasonMax = 512
+)
+
+// clampRunes truncates s to at most max runes (Unicode code points), matching how pydantic
+// counts max_length, so the clamp is exact against the backend's validation.
+func clampRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// Clamp returns a copy with every string field truncated to its backend max_length, so a
+// long agent-controlled value can never trip the backend's pre-sanitization length
+// validation and 422 the request. ids are short terminal-<uuid> values far under the limit,
+// so clamping the id cannot collapse two distinct terminals in practice.
+func (t OpenTerminal) Clamp() OpenTerminal {
+	t.ID = clampRunes(t.ID, openTerminalIDMax)
+	t.Kind = clampRunes(t.Kind, openTerminalKindMax)
+	t.WorktreeID = clampRunes(t.WorktreeID, openTerminalWorktreeIDMax)
+	t.Title = clampRunes(t.Title, openTerminalTitleMax)
+	t.AgentID = clampRunes(t.AgentID, openTerminalAgentIDMax)
+	t.AgentState = clampRunes(t.AgentState, openTerminalAgentStateMax)
+	t.WaitingReason = clampRunes(t.WaitingReason, openTerminalWaitingReasonMax)
+	return t
 }
 
 // MCPInfo is a coarse connectivity summary for the primary MCP surface.
