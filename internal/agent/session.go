@@ -459,8 +459,21 @@ func (s *Session) recallMemories(userInput string) []domain.MemoryRecord {
 }
 
 // runTurn is the core loop (ordering is load-bearing).
-func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) string {
+func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) (reply string) {
 	s.events.Phase(domain.PhaseReceived)
+
+	// Bracket the whole turn in the debug trace: turn.start gives a log reader one
+	// entry point per turn and turn.end (a defer that classifies the named `reply`)
+	// records the outcome on EVERY exit path — cancel, failure, success — without
+	// threading a status through each return. turnID is generated HERE, not in the loop
+	// below, so the two bracket events and every backend round share one id.
+	turnStartMS := domain.NowMS()
+	turnID := domain.NewID("turn_")
+	var roundsRun int
+	s.traceTurnStart(runID, turnID, userInput, opts.IsWake, len(s.snapshotMessages()))
+	defer func() {
+		s.traceTurnEnd(runID, turnID, reply, domain.NowMS()-turnStartMS, roundsRun)
+	}()
 
 	// Persist the originating prompt as the run's FIRST durable row so /explain can
 	// label the run by what prompted it. Emitted before AssistantStart and before
@@ -537,9 +550,9 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 	// One backend turn_id spans the whole tool-call loop (every round shares it so the
 	// backend keeps the same skill state and does not re-run selection on a plain
-	// continuation round). instructionRevision bumps whenever a mid-turn injection is
-	// folded in — a fresh instruction the backend's selector should react to.
-	turnID := domain.NewID("turn_")
+	// continuation round); it is created at the top of runTurn so the turn.start/turn.end
+	// trace events carry it too. instructionRevision bumps whenever a mid-turn injection
+	// is folded in — a fresh instruction the backend's selector should react to.
 	instructionRevision := 0
 
 	failureCounts := make(map[string]int)
@@ -664,11 +677,23 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			Generation: &backend.Generation{ResponseFormat: "text"},
 		}
 
+		// One model round per RespondStream — counted for the turn.end summary and used
+		// to time first-token latency. roundStartMS is captured AFTER the trace request so
+		// it measures the stream itself.
+		roundsRun++
+		s.traceBackendRequest(runID, turnID, iter, req, bmsgs, btools)
+		roundStartMS := domain.NowMS()
+		var firstTokenMS int64
+
 		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
-			OnMeta: func(m backend.StreamMeta) { s.applyStreamMeta(m) },
+			OnMeta: func(m backend.StreamMeta) {
+				s.applyStreamMeta(m)
+				s.traceBackendMeta(runID, turnID, iter, m)
+			},
 			OnContent: func(tok string) {
 				if !gotToken {
 					gotToken = true
+					firstTokenMS = domain.NowMS()
 					s.events.Phase(domain.PhaseGenerating)
 				}
 				s.events.AssistantToken(tok)
@@ -681,8 +706,15 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				s.events.AssistantCancelled("")
 				return domain.CancelledReply
 			}
+			s.traceBackendError(runID, turnID, iter, domain.NowMS()-roundStartMS, serr)
 			return s.classifyBackendError(serr)
 		}
+
+		firstTokenLatency := int64(0)
+		if firstTokenMS > 0 {
+			firstTokenLatency = firstTokenMS - roundStartMS
+		}
+		s.traceBackendDone(runID, turnID, iter, result, domain.NowMS()-roundStartMS, firstTokenLatency)
 
 		calls := backendToolCalls(result.Message.ToolCalls)
 
@@ -743,6 +775,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 	type worst struct {
 		name  string
 		count int
+		sig   string
 		res   domain.ToolResult
 	}
 	var worstRepeat *worst
@@ -758,7 +791,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// assistant tool_call still has a matching reply (or DeepSeek 400s on
 		// replay).
 		if ctx.Err() != nil {
-			s.stubCancelledFrom(calls, c)
+			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
 			s.events.Phase(domain.PhaseCancelled)
 			s.events.AssistantCancelled("")
 			return domain.CancelledReply, true
@@ -788,6 +821,9 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		case parseFailed:
 			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
+			// This rejection never reaches the registry's Dispatch, so it produces no
+			// tool.call audit event — trace it here or it is invisible in the log.
+			s.traceToolGap("tool.args.invalid", turn.RunID, call.ID, internalName, call.Function.Arguments)
 		case allowedSet != nil && !setHas(allowedSet, internalName):
 			// Defensive only: allowedSet is now ALWAYS nil (skills never narrow the
 			// toolset — every turn offers the full registry; see buildToolFilterLocked),
@@ -799,6 +835,9 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 				internalName+" is not offered in this turn's tool spec.",
 				domain.Unrecoverable())
 			res.Summary = internalName + " is not offered in this turn's tool spec."
+			// Also short-circuits before Dispatch → trace it so the (dormant today) gate
+			// firing is never silent.
+			s.traceToolGap("tool.not_offered", turn.RunID, call.ID, internalName, "")
 		default:
 			argsJSON := call.Function.Arguments
 			if argsJSON == "" {
@@ -859,7 +898,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			failureCounts[sig]++
 			count := failureCounts[sig]
 			if worstRepeat == nil || count > worstRepeat.count {
-				worstRepeat = &worst{name: internalName, count: count, res: res}
+				worstRepeat = &worst{name: internalName, count: count, sig: sig, res: res}
 			}
 		}
 
@@ -869,7 +908,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// assistant tool_call needs a matching tool result, or DeepSeek 400s on
 		// replay).
 		if ctx.Err() != nil {
-			s.stubCancelledFrom(calls, c+1)
+			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c+1))
 			s.events.Phase(domain.PhaseCancelled)
 			s.events.AssistantCancelled("")
 			return domain.CancelledReply, true
@@ -885,6 +924,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		msg := "Stopped: called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
 			" times this turn with identical arguments, each failing the same way (" + detail +
 			"). Tell the user what's blocking and what you tried rather than repeating the call."
+		s.traceToolRepeat("tool.repeat.abort", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
 		s.events.Phase(domain.PhaseFailed)
 		s.events.Error(msg)
 		return msg, true
@@ -895,6 +935,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		if worstRepeat.res.Error != nil && worstRepeat.res.Error.Code != "" {
 			codeSuffix = " (" + worstRepeat.res.Error.Code + ")"
 		}
+		s.traceToolRepeat("tool.repeat.warning", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
 		nudge := "[system event]\nYou have called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
 			" times this turn with the same arguments and it failed the same way each time" + codeSuffix +
 			". Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again."
@@ -910,8 +951,10 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 
 // stubCancelledFrom pushes a structurally-valid CANCELLED tool result for every
 // call in calls[from:] (none of which executed), so each assistant tool_call keeps
-// a matching tool reply and the transcript replays cleanly.
-func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) {
+// a matching tool reply and the transcript replays cleanly. Returns the number of
+// calls stubbed (for the cancel trace at the call site).
+func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) int {
+	stubbed := 0
 	for r := from; r < len(calls); r++ {
 		pending := calls[r]
 		pendingName := s.resolveInternal(pending.Function.Name)
@@ -923,7 +966,9 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) {
 			Name:          pendingName,
 			StringContent: SerializeToolResult(stub, s.artifacts),
 		})
+		stubbed++
 	}
+	return stubbed
 }
 
 // classifyBackendError maps a backend respond error to its sentinel reply. The

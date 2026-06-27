@@ -371,6 +371,20 @@ func Create(opts CreateOptions) (*App, error) {
 		&eventProxy{app: a},
 	)
 
+	// The turn engine's diagnostic trace seam, routed to the per-session debug log.
+	// This restores the trace coverage the backend migration removed: turn.start/end
+	// and the backend.respond.* round narration (the successor to the legacy router's
+	// model.request/model.response). Wired ONLY when debug logging is on — a nil seam
+	// is a true no-op, so the per-round field maps/hashes/previews are never built when
+	// the feature is off (the trace must add zero cost to a normal run).
+	var traceFn func(event string, fields map[string]any)
+	if cfg.DebugLog {
+		traceCfg := debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}
+		traceFn = func(event string, fields map[string]any) {
+			debuglog.LogDebug(traceCfg, event, fields)
+		}
+	}
+
 	a.Session = agent.NewSession(agent.SessionDeps{
 		Backend:            a.Backend,
 		Router:             a.Router,
@@ -402,6 +416,8 @@ func Create(opts CreateOptions) (*App, error) {
 		// cancelled in Shutdown (via baseCancel) so it never touches a closed
 		// Router/Store; DrainBackgroundWork joins it there before they close.
 		BackgroundCtx: a.baseCtx,
+		// Diagnostic trace seam (nil unless debug logging is on — see traceFn above).
+		Trace: traceFn,
 	})
 
 	return a, nil

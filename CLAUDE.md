@@ -264,13 +264,29 @@ misused a tool, or got confused, and you fix the **system** so the same mistake 
 recur. Treat every "the assistant did X wrong" report as a log-archaeology task, then a
 prompt/schema/tool fix — not a one-off patch.
 
-How to read a log fast (it is structured text — grep it, don't eyeball megabytes):
-- `tool.call … ok=false` / `outcome=error` — every rejected or failed tool call, with
-  the offending `args:` block and the `error:` envelope (code + message) right under it.
-  This is the highest-signal entry point: it shows the EXACT arguments the model emitted.
-- `model.request` / `model.response` — the full prompt sent and the assistant's reply
-  (including `toolCalls` with raw `arguments` JSON). Use these to see what the model was
-  *told* vs. what it *did*.
+How to read a log fast (it is structured text — grep it, don't eyeball megabytes).
+Every turn-scoped line carries `runId`/`turnId`/`round` so you can grep one turn and
+reconstruct its timeline; see `docs/LOGGING.md` for the full event reference.
+- `turn.start` / `turn.end` — the per-turn bracket. `turn.end status=failed|cancelled`
+  is the fastest "which turn went wrong" filter (with `durationMs` + `rounds`).
+- `tool.call … ok=false` / `outcome=error` — every rejected or failed tool call that
+  reached dispatch, with the (post-decode) `args:` block and the `error:` envelope (code +
+  message). Highest-signal: it shows the arguments the handler received, now tagged with
+  `toolCallId`/`runId`/`risk`. (Rejections that never reach dispatch — bad-JSON args,
+  not-offered — log as `tool.args.invalid` / `tool.not_offered` and carry the model's RAW
+  args; a stuck loop logs `tool.repeat.warning` / `tool.repeat.abort`.)
+- `backend.respond.request` / `backend.respond.meta` / `backend.respond.done` /
+  `backend.respond.error` — the backend-era successor to `model.request`/`model.response`
+  (which no longer exist for the main loop — that path is `Backend.RespondStream`, not the
+  vestigial Router). `request` summarizes what the backend was SHOWN (message count +
+  role sequence + history hash + newest-message preview + tool inventory + runtime/turn
+  context — bounded, not the full prompt); `meta` is the backend's own report (model,
+  prompt/catalog version, and the skill-selection outcome — the surface that says whether
+  a fix belongs in the backend selector); `done` is what it PRODUCED (content preview,
+  tool calls, finish reason, usage).
+- `mcp.call` — every MCP tool call with `callKind`, `attempts`, `durationMs`, and a
+  bounded preview/hash of the result (or the normalized error). The layer where many
+  tool failures actually originate (throttle results, transport blips).
 - `watcher.created` / `spawn.launched` / `watcher.*` — the watcher/agent lifecycle.
 
 The fix philosophy — **fix the guidance, not just the symptom.** When the model misuses
