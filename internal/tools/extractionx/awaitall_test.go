@@ -21,9 +21,19 @@ type cohortReader struct {
 	// awaitAll must NEVER read output, so deepCalls should stay 0 in await tests.
 	deep      map[string]string
 	deepCalls int
+	// live is the canonical roster ListTerminals returns (drives the handler's id-resolution
+	// path). The direct awaitCohort tests bypass the handler, so they leave it nil.
+	live []string
+	// liveOK forces ListTerminals to report ok=true even with an EMPTY live slice, so a test
+	// can exercise the "roster readable but empty" fail-open path distinctly from an
+	// "unreadable roster" (ok=false). A non-empty live always reports ok=true.
+	liveOK bool
 }
 
 func (r *cohortReader) Connected() bool { return true }
+func (r *cohortReader) ListTerminals(_ context.Context) ([]string, bool) {
+	return r.live, r.liveOK || len(r.live) > 0
+}
 func (r *cohortReader) ReadStatuses(_ context.Context, _ []string, _ bool) StatusReadResult {
 	i := r.call
 	if i >= len(r.seq) {
@@ -446,5 +456,121 @@ func TestAwaitArgsValidate_MaxAttemptsCeiling(t *testing.T) {
 	}
 	if err := (&awaitArgs{TerminalIDs: []string{"t1"}}).Validate(); err != nil {
 		t.Fatalf("omitted maxAttempts should be valid (defaults to 30), got %v", err)
+	}
+}
+
+// The HANDLER canonicalizes a truncated/prefix id against the live roster before polling:
+// the model's "terminal-5284bfef" prefix resolves to the full id and the cohort settles —
+// instead of grinding to the cap reporting "still working" (the ses_f3fdeb08 bug).
+func TestAwaitAllTool_ResolvesTruncatedPrefix(t *testing.T) {
+	full := "terminal-5284bfef-3d11-424c-90cb-136f24046295"
+	reader := &cohortReader{
+		live: []string{full},
+		seq:  []map[string]TerminalStatusEntry{{full: ent("completed", "", "done")}},
+	}
+	tool := newAwaitAllTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["terminal-5284bfef"],"maxAttempts":2,"pollIntervalMs":0}`), nil)
+	if !res.Ok {
+		t.Fatalf("a resolvable prefix should succeed, got %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if af, _ := m["allFinished"].(bool); !af {
+		t.Fatalf("the prefix should resolve to %q and settle finished, got %+v", full, m)
+	}
+	// The result reports the CANONICAL id, not the truncated input.
+	per := m["perTerminal"].([]map[string]any)
+	if len(per) != 1 || per[0]["terminalId"] != full {
+		t.Fatalf("perTerminal should carry the canonical id %q, got %+v", full, per)
+	}
+}
+
+// An id that matches no live terminal fails LOUD and FAST (UNKNOWN_TERMINALS) instead of
+// polling the whole budget and reporting "still working".
+func TestAwaitAllTool_UnknownIDFailsFast(t *testing.T) {
+	full := "terminal-5284bfef-3d11-424c-90cb-136f24046295"
+	reader := &cohortReader{live: []string{full}} // roster live & non-empty, but no match
+	tool := newAwaitAllTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["terminal-deadbeef"],"maxAttempts":2,"pollIntervalMs":0}`), nil)
+	if res.Ok {
+		t.Fatalf("an unknown id must fail, got ok result %+v", res.Result)
+	}
+	if res.Error == nil || res.Error.Code != codeUnknownTerminals {
+		t.Fatalf("want %s, got %+v", codeUnknownTerminals, res.Error)
+	}
+	if !strings.Contains(res.Error.Message, full) {
+		t.Fatalf("the failure should name the live terminal id to steer the model, got %q", res.Error.Message)
+	}
+}
+
+// Fail OPEN on an UNREADABLE roster (ListTerminals ok=false): resolution must never turn a
+// transport hiccup into a hard failure — the ids pass through unchanged and the poll (with
+// its own empty-read guard) proceeds.
+func TestAwaitAllTool_FailsOpenOnUnreadableRoster(t *testing.T) {
+	reader := &cohortReader{ // live nil + liveOK false ⇒ ListTerminals ok=false ⇒ fail open
+		seq: []map[string]TerminalStatusEntry{{"t1": ent("completed", "", "done")}},
+	}
+	tool := newAwaitAllTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["t1"],"maxAttempts":2,"pollIntervalMs":0}`), nil)
+	if !res.Ok {
+		t.Fatalf("an unreadable roster must fail open and proceed, got %+v", res.Error)
+	}
+	if af, _ := res.Result.(map[string]any)["allFinished"].(bool); !af {
+		t.Fatalf("with resolution skipped, the original id should poll and settle, got %+v", res.Result)
+	}
+}
+
+// Fail OPEN on a READABLE-BUT-EMPTY roster (ListTerminals ok=true, zero terminals): also
+// the #108 transport-hiccup symptom, so resolution must pass ids through, NOT reject them.
+func TestAwaitAllTool_FailsOpenOnEmptyReadableRoster(t *testing.T) {
+	reader := &cohortReader{ // liveOK=true, live empty ⇒ ok=true with an empty roster
+		liveOK: true,
+		seq:    []map[string]TerminalStatusEntry{{"t1": ent("completed", "", "done")}},
+	}
+	tool := newAwaitAllTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["t1"],"maxAttempts":2,"pollIntervalMs":0}`), nil)
+	if !res.Ok {
+		t.Fatalf("an empty readable roster must fail open and proceed, got %+v", res.Error)
+	}
+	if af, _ := res.Result.(map[string]any)["allFinished"].(bool); !af {
+		t.Fatalf("with resolution skipped, the original id should poll and settle, got %+v", res.Result)
+	}
+}
+
+// The extract handlers canonicalize ids the same way: a truncated prefix resolves through
+// terminal.extract (read-once), and the result reports the canonical id.
+func TestExtractTool_ResolvesTruncatedPrefix(t *testing.T) {
+	full := "terminal-5284bfef-3d11-424c-90cb-136f24046295"
+	reader := &cohortReader{
+		live: []string{full},
+		seq:  []map[string]TerminalStatusEntry{{full: ent("waiting", "", "the answer")}},
+	}
+	tool := newExtractTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["terminal-5284bfef"],"instruction":"get it"}`), nil)
+	if !res.Ok {
+		t.Fatalf("a resolvable prefix should succeed, got %+v", res.Error)
+	}
+	ids, _ := res.Result.(map[string]any)["terminalIds"].([]string)
+	if len(ids) != 1 || ids[0] != full {
+		t.Fatalf("extract should use the canonical id %q, got %v", full, ids)
+	}
+}
+
+// terminal.extract.json fails fast on an unknown id (UNKNOWN_TERMINALS), same as awaitAll.
+func TestExtractJSONTool_UnknownIDFailsFast(t *testing.T) {
+	full := "terminal-5284bfef-3d11-424c-90cb-136f24046295"
+	reader := &cohortReader{live: []string{full}}
+	tool := newExtractJSONTool(Deps{Reader: reader, Router: &safeRouter{}})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["terminal-nope"],"instruction":"x","jsonSchema":"{\"type\":\"object\"}"}`), nil)
+	if res.Ok {
+		t.Fatalf("an unknown id must fail fast, got %+v", res.Result)
+	}
+	if res.Error == nil || res.Error.Code != codeUnknownTerminals {
+		t.Fatalf("want %s, got %+v", codeUnknownTerminals, res.Error)
 	}
 }

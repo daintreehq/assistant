@@ -109,6 +109,17 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			if !deps.Reader.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
 			}
+			// Canonicalize the ids against the live roster ONCE, up front. A truncated/prefix
+			// id (the model abbreviates Daintree's full terminal-<uuid> ids) would otherwise
+			// match nothing, so the cohort would never settle and the wait would grind to its
+			// cap reporting "still working" for agents that already finished. A definitively
+			// unknown id now fails loud-and-fast instead.
+			resolvedIDs, fail := resolveTerminalIDs(ctx, deps, a.TerminalIDs)
+			if fail != nil {
+				return *fail
+			}
+			a.TerminalIDs = resolvedIDs
+
 			pollIntervalMs := intOr(a.PollIntervalMs, 2000)
 			maxAttempts := intOr(a.MaxAttempts, 30)
 

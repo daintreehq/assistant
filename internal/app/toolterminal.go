@@ -4,10 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
+	"github.com/daintreehq/daintree-assistant/internal/tools/terminalid"
 )
+
+// terminalListTimeout bounds the best-effort terminal.list roster read used for id
+// resolution. A var (not const) only so tests can shorten it. Mirrors the boot
+// reconcile read budget.
+var terminalListTimeout = 5 * time.Second
 
 // terminalReaderAdapter satisfies extractionx.TerminalReader over the concrete MCP
 // client. The daemon's identical read helpers (daemon/mcpreads.go) are unexported
@@ -18,6 +25,25 @@ import (
 type terminalReaderAdapter struct{ c *mcp.Client }
 
 func (r terminalReaderAdapter) Connected() bool { return r.c.IsConnected() }
+
+// ListTerminals reads Daintree's live terminal inventory (terminal.list, no args) for
+// prefix→canonical id resolution. It is bounded by a CANCEL-based deadline, NOT
+// context.WithTimeout: mcp.Client tears the connection down on a DeadlineExceeded (only
+// a Canceled counts as an abort), and a best-effort roster read must never degrade a
+// working connection just because it was slow (see the mcp-bestEffort-reads rule + the
+// boot reconcile read). ok=false on a transport error / error result so the caller fails
+// open (skips resolution) rather than blocking a wait on a discovery hiccup.
+func (r terminalReaderAdapter) ListTerminals(ctx context.Context) ([]string, bool) {
+	cctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(terminalListTimeout, cancel)
+	res, err := r.c.CallTool(cctx, "terminal.list", map[string]any{}, mcp.CallOptions{})
+	timer.Stop()
+	cancel()
+	if err != nil || res.IsError {
+		return nil, false
+	}
+	return terminalid.ParseListIDs(res.StructuredContent, res.Text), true
+}
 
 func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []string, includeOutput bool) extractionx.StatusReadResult {
 	byID := make(map[string]extractionx.TerminalStatusEntry)
