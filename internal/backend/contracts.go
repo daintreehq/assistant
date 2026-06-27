@@ -108,15 +108,34 @@ type ClientInfo struct {
 // true on the backend, so it is sent WITHOUT omitempty — an inactive scheduler
 // must be representable as an explicit false.
 type RuntimeContext struct {
-	PermissionTier      string      `json:"permission_tier,omitempty"`
-	ProjectPath         string      `json:"project_path,omitempty"`
-	ProjectID           string      `json:"project_id,omitempty"`
-	MCP                 *MCPInfo    `json:"mcp,omitempty"`
-	MCPServers          []MCPServer `json:"mcp_servers,omitempty"`
-	ConfiguredAgentIDs  []string    `json:"configured_agent_ids,omitempty"`
-	SchedulerActive     bool        `json:"scheduler_active"`
-	ActiveWorktree      string      `json:"active_worktree,omitempty"`
-	ProjectInstructions string      `json:"project_instructions,omitempty"`
+	PermissionTier      string         `json:"permission_tier,omitempty"`
+	ProjectPath         string         `json:"project_path,omitempty"`
+	ProjectID           string         `json:"project_id,omitempty"`
+	MCP                 *MCPInfo       `json:"mcp,omitempty"`
+	MCPServers          []MCPServer    `json:"mcp_servers,omitempty"`
+	ConfiguredAgentIDs  []string       `json:"configured_agent_ids,omitempty"`
+	SchedulerActive     bool           `json:"scheduler_active"`
+	ActiveWorktree      string         `json:"active_worktree,omitempty"`
+	ProjectInstructions string         `json:"project_instructions,omitempty"`
+	OpenTerminals       []OpenTerminal `json:"open_terminals,omitempty"`
+}
+
+// OpenTerminal is one live Daintree terminal in the per-turn inventory the CLI attaches
+// to the runtime block, so the model always sees the open-terminal roster as inert data
+// instead of tool-calling terminal.list mid-turn to discover it. Metadata only — never
+// terminal output. The list fields (id/kind/worktree/title/agent) come from a single
+// terminal.list; AgentState/WaitingReason/ExitCode are refreshed from one no-output
+// terminal.getStatus. ExitCode is a pointer because 0 is a meaningful clean exit that
+// must be distinguishable from "no exit code".
+type OpenTerminal struct {
+	ID            string `json:"id"`
+	Kind          string `json:"kind,omitempty"`
+	WorktreeID    string `json:"worktree_id,omitempty"`
+	Title         string `json:"title,omitempty"`
+	AgentID       string `json:"agent_id,omitempty"`
+	AgentState    string `json:"agent_state,omitempty"`
+	WaitingReason string `json:"waiting_reason,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
 }
 
 // MCPInfo is a coarse connectivity summary for the primary MCP surface.

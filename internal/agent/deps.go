@@ -183,6 +183,15 @@ type SessionDeps struct {
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister
+	// OpenTerminalsFetcher returns a fresh, metadata-only snapshot of the open Daintree
+	// terminals for the runtime block's open-terminal inventory. Called ONCE per turn
+	// before the round loop (one terminal.list + one no-output terminal.getStatus) and
+	// threaded through every round's buildRuntimeContext, so the model always sees the
+	// live roster as inert data instead of tool-calling terminal.list to discover it.
+	// Best-effort and bounded: nil ⇒ the inventory is omitted (the default in tests); a
+	// slow/failed MCP read returns nil and never blocks the turn. The app wires this to
+	// terminalReaderAdapter.FetchOpenTerminals.
+	OpenTerminalsFetcher func(ctx context.Context) []backend.OpenTerminal
 	// PromptContext is the seed/fallback runtime context (used when PromptContextFunc is
 	// nil — the test default). The structured runtime block the backend receives each
 	// round is built from this.
