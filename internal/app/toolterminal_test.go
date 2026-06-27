@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,22 +12,28 @@ import (
 )
 
 // fakeTerminalMCP is a scripted mcpToolCaller for the FetchOpenTerminals tests: it returns
-// a per-tool-name result/error and records the call order so a test can assert which reads
-// fired (e.g. that terminal.getStatus is SKIPPED on an empty roster). When block is set,
-// CallTool waits on ctx.Done() and returns ctx.Err() — exercising the cancel-based deadline.
+// a per-tool-name result/error, records the call order AND the args each tool received, so a
+// test can assert which reads fired (e.g. getStatus SKIPPED on an empty roster) and with
+// what arguments. A tool named in blockTools waits on ctx.Done() and returns ctx.Err(),
+// exercising the cancel-based deadline for that specific leg of the two-call read.
 type fakeTerminalMCP struct {
-	connected bool
-	block     bool
-	results   map[string]mcp.CallResult
-	errs      map[string]error
-	calls     []string
+	connected  bool
+	blockTools map[string]bool
+	results    map[string]mcp.CallResult
+	errs       map[string]error
+	calls      []string
+	args       map[string]map[string]any
 }
 
 func (f *fakeTerminalMCP) IsConnected() bool { return f.connected }
 
-func (f *fakeTerminalMCP) CallTool(ctx context.Context, name string, _ map[string]any, _ mcp.CallOptions) (mcp.CallResult, error) {
+func (f *fakeTerminalMCP) CallTool(ctx context.Context, name string, args map[string]any, _ mcp.CallOptions) (mcp.CallResult, error) {
 	f.calls = append(f.calls, name)
-	if f.block {
+	if f.args == nil {
+		f.args = map[string]map[string]any{}
+	}
+	f.args[name] = args
+	if f.blockTools[name] {
 		<-ctx.Done()
 		return mcp.CallResult{}, ctx.Err()
 	}
@@ -189,7 +196,7 @@ func TestFetchOpenTerminals_HungListReturnsViaDeadline(t *testing.T) {
 	openTerminalsTimeout = 20 * time.Millisecond
 	defer func() { openTerminalsTimeout = prev }()
 
-	f := &fakeTerminalMCP{connected: true, block: true}
+	f := &fakeTerminalMCP{connected: true, blockTools: map[string]bool{"terminal.list": true}}
 	done := make(chan []backend.OpenTerminal, 1)
 	go func() {
 		done <- newFetchAdapter(f).FetchOpenTerminals(context.Background())
@@ -201,5 +208,83 @@ func TestFetchOpenTerminals_HungListReturnsViaDeadline(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("FetchOpenTerminals did not return within the cancel deadline — connection-degrading WithTimeout regression?")
+	}
+}
+
+// The second leg is also bounded: a hung terminal.getStatus (after a good list) returns the
+// list-derived fields within the cancel deadline rather than stranding the turn.
+func TestFetchOpenTerminals_HungStatusReturnsListFieldsViaDeadline(t *testing.T) {
+	prev := openTerminalsTimeout
+	openTerminalsTimeout = 20 * time.Millisecond
+	defer func() { openTerminalsTimeout = prev }()
+
+	f := &fakeTerminalMCP{
+		connected:  true,
+		blockTools: map[string]bool{"terminal.getStatus": true},
+		results: map[string]mcp.CallResult{
+			"terminal.list": terminalsResult(map[string]any{"id": "t1", "kind": "agent", "agentState": "running"}),
+		},
+	}
+	done := make(chan []backend.OpenTerminal, 1)
+	go func() {
+		done <- newFetchAdapter(f).FetchOpenTerminals(context.Background())
+	}()
+	select {
+	case got := <-done:
+		if len(got) != 1 || got[0].ID != "t1" || got[0].AgentState != "running" {
+			t.Fatalf("a hung status should still yield the list fields, got %+v", got)
+		}
+		if got[0].WaitingReason != "" || got[0].ExitCode != nil {
+			t.Fatalf("a hung status carries no volatile fields, got %+v", got[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FetchOpenTerminals did not return within the cancel deadline on a hung getStatus")
+	}
+}
+
+// terminal.getStatus must be called with exactly the listed ids and WITHOUT includeOutput
+// (metadata only) — a regression here would either miss terminals or pull output bytes.
+func TestFetchOpenTerminals_StatusArgsAreIdsNoOutput(t *testing.T) {
+	f := &fakeTerminalMCP{
+		connected: true,
+		results: map[string]mcp.CallResult{
+			"terminal.list": terminalsResult(
+				map[string]any{"id": "t1"},
+				map[string]any{"id": "t2"},
+			),
+			"terminal.getStatus": terminalsResult(),
+		},
+	}
+	newFetchAdapter(f).FetchOpenTerminals(context.Background())
+	got := f.args["terminal.getStatus"]
+	if got == nil {
+		t.Fatal("getStatus should have been called")
+	}
+	ids, _ := got["terminalIds"].([]string)
+	if len(ids) != 2 || ids[0] != "t1" || ids[1] != "t2" {
+		t.Fatalf("getStatus should receive the listed ids, got %v", got["terminalIds"])
+	}
+	if _, hasOutput := got["includeOutput"]; hasOutput {
+		t.Fatalf("getStatus must be metadata-only (no includeOutput), got %v", got)
+	}
+}
+
+// Regression for the Critical review finding: an over-limit, agent-authored title is clamped
+// to the backend's max_length so it can never 422 the request and break the turn.
+func TestFetchOpenTerminals_ClampsOverlongFields(t *testing.T) {
+	longTitle := strings.Repeat("x", 600) // backend title max_length is 512
+	f := &fakeTerminalMCP{
+		connected: true,
+		results: map[string]mcp.CallResult{
+			"terminal.list":      terminalsResult(map[string]any{"id": "t1", "title": longTitle}),
+			"terminal.getStatus": terminalsResult(),
+		},
+	}
+	got := newFetchAdapter(f).FetchOpenTerminals(context.Background())
+	if len(got) != 1 {
+		t.Fatalf("want 1 terminal, got %d", len(got))
+	}
+	if n := len([]rune(got[0].Title)); n != 512 {
+		t.Fatalf("title should be clamped to the backend max_length 512, got %d runes", n)
 	}
 }

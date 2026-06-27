@@ -138,6 +138,50 @@ type OpenTerminal struct {
 	ExitCode      *int   `json:"exit_code,omitempty"`
 }
 
+// Per-field length limits (rune counts) for OpenTerminal. These MUST mirror the backend
+// OpenTerminal pydantic max_length constraints (contracts/extensions.py). The backend
+// VALIDATES the request before it sanitizes/caps for the prompt, so an over-limit field —
+// e.g. a verbose, agent-authored terminal title or a long waiting reason — would 422 the
+// WHOLE request and break the turn, defeating the best-effort inventory. The CLI (the only
+// client) clamps to these limits before sending so that can never happen.
+const (
+	openTerminalIDMax            = 256
+	openTerminalKindMax          = 64
+	openTerminalWorktreeIDMax    = 4096
+	openTerminalTitleMax         = 512
+	openTerminalAgentIDMax       = 256
+	openTerminalAgentStateMax    = 64
+	openTerminalWaitingReasonMax = 512
+)
+
+// clampRunes truncates s to at most max runes (Unicode code points), matching how pydantic
+// counts max_length, so the clamp is exact against the backend's validation.
+func clampRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// Clamp returns a copy with every string field truncated to its backend max_length, so a
+// long agent-controlled value can never trip the backend's pre-sanitization length
+// validation and 422 the request. ids are short terminal-<uuid> values far under the limit,
+// so clamping the id cannot collapse two distinct terminals in practice.
+func (t OpenTerminal) Clamp() OpenTerminal {
+	t.ID = clampRunes(t.ID, openTerminalIDMax)
+	t.Kind = clampRunes(t.Kind, openTerminalKindMax)
+	t.WorktreeID = clampRunes(t.WorktreeID, openTerminalWorktreeIDMax)
+	t.Title = clampRunes(t.Title, openTerminalTitleMax)
+	t.AgentID = clampRunes(t.AgentID, openTerminalAgentIDMax)
+	t.AgentState = clampRunes(t.AgentState, openTerminalAgentStateMax)
+	t.WaitingReason = clampRunes(t.WaitingReason, openTerminalWaitingReasonMax)
+	return t
+}
+
 // MCPInfo is a coarse connectivity summary for the primary MCP surface.
 type MCPInfo struct {
 	Connected bool   `json:"connected"`

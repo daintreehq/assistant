@@ -39,6 +39,42 @@ func TestOpenTerminals_FetchedOncePerTurnRidesEveryRound(t *testing.T) {
 	}
 }
 
+// Across TWO turns the fetcher runs once PER TURN (twice total), and each turn's request
+// carries that turn's own snapshot — the per-turn freshness contract, not a one-shot cache.
+func TestOpenTerminals_RefetchedPerTurn(t *testing.T) {
+	r := &injectRouter{} // empty results ⇒ each Send is a single final round
+	calls := 0
+	snaps := [][]backend.OpenTerminal{
+		{{ID: "terminal-1", AgentState: "running"}},
+		{{ID: "terminal-2", AgentState: "exited"}},
+	}
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		s := snaps[calls]
+		calls++
+		return s
+	}
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("fetcher should run once per turn (2 turns ⇒ 2), got %d", calls)
+	}
+	if len(be.requests()) < 2 {
+		t.Fatalf("want at least 2 recorded requests, got %d", len(be.requests()))
+	}
+	if got := be.runtimeAt(0).OpenTerminals; len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Errorf("turn 1 should carry its own snapshot, got %+v", got)
+	}
+	if got := be.runtimeAt(1).OpenTerminals; len(got) != 1 || got[0].ID != "terminal-2" {
+		t.Errorf("turn 2 should carry the refreshed snapshot, got %+v", got)
+	}
+}
+
 // A nil fetcher (the default and the non-MCP path) simply omits the inventory: no panic,
 // the runtime block's OpenTerminals stays empty.
 func TestOpenTerminals_NilFetcherOmitsInventory(t *testing.T) {

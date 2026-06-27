@@ -130,6 +130,9 @@ func (r terminalReaderAdapter) FetchOpenTerminals(ctx context.Context) []backend
 	// Refresh the volatile fields from one no-output getStatus, sharing the same
 	// cancel-bounded ctx so the whole inventory stays inside one read budget. A status
 	// failure (OK=false) leaves the list-derived fields intact — degrade, don't drop.
+	// ReadStatuses carries the standard read retries (ReadCallOptions): those fire ONLY on
+	// retriable transport/throttle errors and are still bounded by the cancel timer above,
+	// so reusing it keeps a single parse path without busting the metadata-only budget.
 	statuses := r.ReadStatuses(cctx, ids, false)
 
 	out := make([]backend.OpenTerminal, 0, len(entries))
@@ -151,7 +154,9 @@ func (r terminalReaderAdapter) FetchOpenTerminals(ctx context.Context) []backend
 				ot.ExitCode = st.ExitCode
 			}
 		}
-		out = append(out, ot)
+		// Clamp each field to the backend's max_length so a verbose agent-authored title /
+		// waiting reason can never 422 the request and break the turn (best-effort).
+		out = append(out, ot.Clamp())
 	}
 	return out
 }
