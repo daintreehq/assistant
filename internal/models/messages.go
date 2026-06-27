@@ -88,6 +88,12 @@ type ChatMessage struct {
 	ToolCalls  []ToolCallRequest
 	ToolCallID string
 	Name       string // internal helper field — DROPPED on the wire
+
+	// ReasoningContent is an assistant turn's chain-of-thought (DeepSeek thinking
+	// mode). Captured from the backend response and replayed verbatim on later
+	// requests — DeepSeek 400s if an assistant tool-call turn's reasoning is dropped.
+	// Empty in the default (thinking-off) posture.
+	ReasoningContent string
 }
 
 // TextMessage is a convenience constructor for a plain string-content message.

@@ -44,9 +44,10 @@ const (
 	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic);
 	// to 6 when the context_checkpoints table was added (durable compaction checkpoint
 	// reloaded on resume); to 7 when the dead skill_selection_log table was DROPPED
-	// (skill selection is server-owned now — the CLI never logged selections) — a schema
-	// change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 7
+	// (skill selection is server-owned now — the CLI never logged selections); to 8 when
+	// conversation gained reasoningContent (persist DeepSeek thinking-mode chain-of-thought
+	// for verbatim replay) — a schema change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 8
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer

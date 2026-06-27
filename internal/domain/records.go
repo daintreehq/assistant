@@ -116,14 +116,18 @@ type AutomationGrantRecord struct {
 
 // ConversationMessageRecord is one persisted conversation message.
 type ConversationMessageRecord struct {
-	ID            string  `json:"id"` // msg_<uuid8>
-	SessionID     string  `json:"sessionId"`
-	Seq           int     `json:"seq"`
-	Role          string  `json:"role"` // system|user|assistant|tool
-	Content       string  `json:"content"`
-	ToolCallsJson *string `json:"toolCallsJson,omitempty"`
-	ToolCallID    *string `json:"toolCallId,omitempty"`
-	CreatedAt     int64   `json:"createdAt"`
+	ID        string `json:"id"` // msg_<uuid8>
+	SessionID string `json:"sessionId"`
+	Seq       int    `json:"seq"`
+	Role      string `json:"role"` // system|user|assistant|tool
+	Content   string `json:"content"`
+	// ReasoningContent persists an assistant turn's chain-of-thought so it survives
+	// resume and replays correctly (DeepSeek 400s on a tool-call turn missing it).
+	// Nil for non-assistant rows and for the default thinking-off posture.
+	ReasoningContent *string `json:"reasoningContent,omitempty"`
+	ToolCallsJson    *string `json:"toolCallsJson,omitempty"`
+	ToolCallID       *string `json:"toolCallId,omitempty"`
+	CreatedAt        int64   `json:"createdAt"`
 }
 
 // WorkflowRunRecord tracks an end-to-end workflow run.

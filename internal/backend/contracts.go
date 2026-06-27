@@ -165,11 +165,17 @@ type Memories struct {
 // turn) — exactly mirroring the local wire encoder. Roles are user/assistant/tool
 // ONLY; the converter rejects system/developer before a request is built.
 type Message struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	// ReasoningContent is the assistant turn's chain-of-thought, replayed verbatim.
+	// DeepSeek REQUIRES it on every subsequent request for any assistant turn that
+	// performed a tool call (omitting it 400s the whole request); it is optional and
+	// ignored for assistant turns without tool calls. omitempty so a non-thinking turn
+	// (the default posture) sends nothing and the wire is byte-identical to before.
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is one function call the model emitted (or one replayed in history).
@@ -221,10 +227,13 @@ type RespondResponse struct {
 }
 
 // RespondMessage is the assistant message in a non-streaming response.
+// ReasoningContent is present only when thinking is active (exclude_none on the
+// server), so a non-thinking response decodes identically to before.
 type RespondMessage struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls"`
 }
 
 // Usage is the token accounting the backend reports.
@@ -254,11 +263,21 @@ type StreamMeta struct {
 	Warnings        []string    `json:"warnings"`
 }
 
-// StreamDelta is one streamed chunk: visible content and/or OpenAI-style tool-call
-// delta fragments (accumulated by index in sse.go).
+// StreamDelta is one streamed chunk: visible content, chain-of-thought, and/or
+// OpenAI-style tool-call delta fragments (accumulated in sse.go). ReasoningContent
+// fragments stream before the first Content fragment (DeepSeek thinking mode) and
+// are concatenated the same way Content is; they only appear when thinking is active.
 type StreamDelta struct {
-	Content   string          `json:"content,omitempty"`
-	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+	Content          string          `json:"content,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// StreamStatus is the optional `status` event the backend emits once, the instant
+// chain-of-thought begins (phase "thinking"). It never appears when thinking is off.
+// Unknown future phase values are ignorable.
+type StreamStatus struct {
+	Phase string `json:"phase"`
 }
 
 // ToolCallDelta is one streamed tool-call fragment, passed through verbatim from

@@ -18,10 +18,10 @@ func (s *Store) InsertMessage(rec domain.ConversationMessageRecord) (domain.Conv
 		rec.CreatedAt = s.now()
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO conversation (id,sessionId,seq,role,content,toolCallsJson,toolCallId,createdAt)
-		VALUES (?,?,?,?,?,?,?,?)`,
+		INSERT INTO conversation (id,sessionId,seq,role,content,reasoningContent,toolCallsJson,toolCallId,createdAt)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
 		rec.ID, rec.SessionID, rec.Seq, rec.Role, rec.Content,
-		nullStr(rec.ToolCallsJson), nullStr(rec.ToolCallID), rec.CreatedAt)
+		nullStr(rec.ReasoningContent), nullStr(rec.ToolCallsJson), nullStr(rec.ToolCallID), rec.CreatedAt)
 	if err != nil {
 		return domain.ConversationMessageRecord{}, fmt.Errorf("insert message: %w", err)
 	}
@@ -31,7 +31,7 @@ func (s *Store) InsertMessage(rec domain.ConversationMessageRecord) (domain.Conv
 // ListMessages returns a session's messages in seq order.
 func (s *Store) ListMessages(sessionID string) ([]domain.ConversationMessageRecord, error) {
 	rows, err := s.db.Query(`
-		SELECT id,sessionId,seq,role,content,toolCallsJson,toolCallId,createdAt
+		SELECT id,sessionId,seq,role,content,reasoningContent,toolCallsJson,toolCallId,createdAt
 		  FROM conversation WHERE sessionId = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
@@ -40,11 +40,12 @@ func (s *Store) ListMessages(sessionID string) ([]domain.ConversationMessageReco
 	var out []domain.ConversationMessageRecord
 	for rows.Next() {
 		var m domain.ConversationMessageRecord
-		var toolCalls, toolCallID sql.NullString
+		var reasoning, toolCalls, toolCallID sql.NullString
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Seq, &m.Role, &m.Content,
-			&toolCalls, &toolCallID, &m.CreatedAt); err != nil {
+			&reasoning, &toolCalls, &toolCallID, &m.CreatedAt); err != nil {
 			return nil, err
 		}
+		m.ReasoningContent = strFromNull(reasoning)
 		m.ToolCallsJson = strFromNull(toolCalls)
 		m.ToolCallID = strFromNull(toolCallID)
 		out = append(out, m)

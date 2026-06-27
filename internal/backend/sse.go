@@ -19,6 +19,13 @@ type StreamCallbacks struct {
 	OnMeta func(StreamMeta)
 	// OnContent fires for each visible content fragment, in order.
 	OnContent func(string)
+	// OnReasoning fires for each chain-of-thought fragment (DeepSeek thinking mode),
+	// in order, before the first content fragment. Optional; the parser accumulates
+	// reasoning into the final message regardless. Empty stream when thinking is off.
+	OnReasoning func(string)
+	// OnStatus fires for each `status` event — once, with phase "thinking", the
+	// instant chain-of-thought begins. Optional; never fires when thinking is off.
+	OnStatus func(StreamStatus)
 	// OnToolCallDelta fires for each raw tool-call fragment (optional; the parser
 	// accumulates these internally regardless).
 	//
@@ -48,6 +55,7 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		eventName string
 		dataLines []string
 		content   strings.Builder
+		reasoning strings.Builder
 		acc       = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
 		metaSeen  bool
 		doneSeen  bool
@@ -74,10 +82,23 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			if cb.OnMeta != nil {
 				cb.OnMeta(m)
 			}
+		case "status":
+			// Optional thinking-phase marker (DeepSeek thinking mode). Decode for the
+			// UX hook; a malformed/unknown status is ignored, never an error.
+			var st StreamStatus
+			if json.Unmarshal([]byte(data), &st) == nil && cb.OnStatus != nil {
+				cb.OnStatus(st)
+			}
 		case "delta":
 			var d StreamDelta
 			if err := json.Unmarshal([]byte(data), &d); err != nil {
 				return decodeErr("delta", err)
+			}
+			if d.ReasoningContent != "" {
+				reasoning.WriteString(d.ReasoningContent)
+				if cb.OnReasoning != nil {
+					cb.OnReasoning(d.ReasoningContent)
+				}
 			}
 			if d.Content != "" {
 				content.WriteString(d.Content)
@@ -155,9 +176,10 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 
 finish:
 	result.Message = RespondMessage{
-		Role:      "assistant",
-		Content:   content.String(),
-		ToolCalls: acc.build(),
+		Role:             "assistant",
+		Content:          content.String(),
+		ReasoningContent: reasoning.String(),
+		ToolCalls:        acc.build(),
 	}
 
 	if !metaSeen {

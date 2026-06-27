@@ -69,6 +69,11 @@ func toBackendMessages(messages []models.ChatMessage) ([]backend.Message, error)
 				}
 				bm.Content = c
 			}
+			// Replay the chain-of-thought verbatim. DeepSeek REQUIRES it on every later
+			// request for an assistant turn that did a tool call (else 400); it is
+			// harmless (omitempty) on a turn that has none, so "always echo" is the
+			// simplest correct rule.
+			bm.ReasoningContent = m.ReasoningContent
 			if len(m.ToolCalls) > 0 {
 				bm.ToolCalls = make([]backend.ToolCall, 0, len(m.ToolCalls))
 				for _, t := range m.ToolCalls {

@@ -189,6 +189,11 @@ func recordToChatMessage(r domain.ConversationMessageRecord) (models.ChatMessage
 	if lostCalls && len(m.ToolCalls) == 0 && m.ContentNull {
 		m.ContentNull = false
 	}
+	if r.Role == "assistant" && r.ReasoningContent != nil {
+		// Restore the chain-of-thought so the replayed history keeps the reasoning
+		// DeepSeek requires for a tool-call turn.
+		m.ReasoningContent = *r.ReasoningContent
+	}
 	if r.Role == "tool" && r.ToolCallID != nil {
 		m.ToolCallID = *r.ToolCallID
 	}

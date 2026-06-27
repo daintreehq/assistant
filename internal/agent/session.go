@@ -976,6 +976,9 @@ func backendAssistantMessage(msg backend.RespondMessage) models.ChatMessage {
 	if len(calls) > 0 {
 		m.ToolCalls = calls
 	}
+	// Capture the chain-of-thought so it can be replayed (DeepSeek requires it on a
+	// tool-call turn's every later request). Empty when thinking is off.
+	m.ReasoningContent = msg.ReasoningContent
 	return m
 }
 
@@ -1346,13 +1349,21 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 		id := m.ToolCallID
 		toolCallID = &id
 	}
+	// Persist the chain-of-thought so a resumed session replays it verbatim (a
+	// tool-call turn missing it 400s once thinking is on). Empty when thinking is off.
+	var reasoning *string
+	if m.ReasoningContent != "" {
+		r := m.ReasoningContent
+		reasoning = &r
+	}
 	rec := domain.ConversationMessageRecord{
-		SessionID:     s.deps.SessionID,
-		Seq:           s.seq,
-		Role:          m.Role,
-		Content:       m.ContentToText(),
-		ToolCallsJson: toolCallsJSON,
-		ToolCallID:    toolCallID,
+		SessionID:        s.deps.SessionID,
+		Seq:              s.seq,
+		Role:             m.Role,
+		Content:          m.ContentToText(),
+		ReasoningContent: reasoning,
+		ToolCallsJson:    toolCallsJSON,
+		ToolCallID:       toolCallID,
 	}
 	s.seq++
 	_, _ = s.deps.Store.InsertMessage(rec)

@@ -9,6 +9,42 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
+// An assistant turn's reasoning_content (DeepSeek thinking mode) is captured from the
+// backend response and replayed verbatim on the wire — DeepSeek 400s if a tool-call
+// turn's reasoning is dropped. A turn without reasoning omits the field entirely so the
+// default thinking-off posture is byte-identical to before.
+func TestReasoningContent_CaptureAndReplay(t *testing.T) {
+	// Capture: a backend response message carries reasoning onto the local message.
+	got := backendAssistantMessage(backend.RespondMessage{
+		Content:          "the answer",
+		ReasoningContent: "step-by-step thinking",
+		ToolCalls:        []backend.ToolCall{{ID: "call_1", Type: "function", Function: backend.FunctionCall{Name: "git__status", Arguments: "{}"}}},
+	})
+	if got.ReasoningContent != "step-by-step thinking" {
+		t.Fatalf("capture: reasoning = %q, want %q", got.ReasoningContent, "step-by-step thinking")
+	}
+
+	// Replay: the assistant message echoes reasoning_content on the wire; a user message
+	// (and an assistant turn without reasoning) carry none.
+	out, err := toBackendMessages([]models.ChatMessage{
+		models.TextMessage("user", "hi"),
+		got,
+		{Role: "assistant", StringContent: "plain reply, no thinking"},
+	})
+	if err != nil {
+		t.Fatalf("toBackendMessages: %v", err)
+	}
+	if out[0].ReasoningContent != "" {
+		t.Errorf("user message must not carry reasoning, got %q", out[0].ReasoningContent)
+	}
+	if out[1].ReasoningContent != "step-by-step thinking" {
+		t.Errorf("assistant replay reasoning = %q, want %q", out[1].ReasoningContent, "step-by-step thinking")
+	}
+	if out[2].ReasoningContent != "" {
+		t.Errorf("a no-thinking assistant turn must omit reasoning, got %q", out[2].ReasoningContent)
+	}
+}
+
 func TestToBackendMessages_RejectsSystemAndDeveloper(t *testing.T) {
 	for _, role := range []string{"system", "developer"} {
 		_, err := toBackendMessages([]models.ChatMessage{models.TextMessage(role, "x")})

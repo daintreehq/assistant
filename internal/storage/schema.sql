@@ -107,16 +107,19 @@ CREATE TABLE IF NOT EXISTS run_events (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run ON run_events(runId, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_ts ON run_events(ts);
 
--- 3.6 conversation — session-fresh transcript.
+-- 3.6 conversation — session-fresh transcript. reasoningContent persists an
+-- assistant turn's DeepSeek chain-of-thought so it survives resume and replays
+-- correctly (the API 400s on a tool-call turn missing it); NULL when thinking is off.
 CREATE TABLE IF NOT EXISTS conversation (
-  id            TEXT PRIMARY KEY,
-  sessionId     TEXT NOT NULL,
-  seq           INTEGER NOT NULL,
-  role          TEXT NOT NULL,
-  content       TEXT NOT NULL,
-  toolCallsJson TEXT,
-  toolCallId    TEXT,
-  createdAt     INTEGER NOT NULL
+  id               TEXT PRIMARY KEY,
+  sessionId        TEXT NOT NULL,
+  seq              INTEGER NOT NULL,
+  role             TEXT NOT NULL,
+  content          TEXT NOT NULL,
+  reasoningContent TEXT,
+  toolCallsJson    TEXT,
+  toolCallId       TEXT,
+  createdAt        INTEGER NOT NULL
 );
 -- UNIQUE so a (sessionId, seq) collision is rejected at the storage layer, not
 -- merely caught on read by the rehydrator (mirrors run_events' idx_run_events_run).
