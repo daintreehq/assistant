@@ -16,10 +16,11 @@ import (
 func splashTheme() theme.Theme { return darkTheme() }
 
 func TestSplash_FrameDataShape(t *testing.T) {
-	// The frames have a fixed shape: exactly 20 frames, each 18 lines of 48 columns,
-	// using only U+2588 (█) and spaces. Any drift here means the art was edited by hand.
-	if len(splashFrames) != SplashFrames {
-		t.Fatalf("splashFrames length = %d, want %d", len(splashFrames), SplashFrames)
+	// The source masks have a fixed shape: exactly 20 frames, each 18 lines of 48
+	// columns, using only U+2588 (█) and spaces. The rendered splash timeline has more
+	// frames than this; these masks remain the historical coarse art reference.
+	if len(splashFrames) != splashSourceFrames {
+		t.Fatalf("splashFrames length = %d, want %d", len(splashFrames), splashSourceFrames)
 	}
 	for fi, frame := range splashFrames {
 		lines := strings.Split(frame, "\n")
@@ -36,6 +37,170 @@ func TestSplash_FrameDataShape(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSplash_RenderTimelineIsHigherFrameRateThanSourceMasks(t *testing.T) {
+	if SplashFrames <= splashSourceFrames {
+		t.Fatalf("SplashFrames = %d, want more than source masks %d", SplashFrames, splashSourceFrames)
+	}
+}
+
+func TestSplash_FrameLinesUseXtermCorrectedVisibleHeight(t *testing.T) {
+	lines := splashFrameLines(SplashFrames - 1)
+	if len(lines) != SplashHeight {
+		t.Fatalf("rendered frame has %d lines, want %d", len(lines), SplashHeight)
+	}
+	minX, minY, maxX, maxY, ok := splashInkBounds(lines)
+	if !ok {
+		t.Fatal("final rendered splash frame must carry ink")
+	}
+	if got := maxY - minY + 1; got != splashVisibleHeight {
+		t.Fatalf("final rendered splash visible height = %d, want %d", got, splashVisibleHeight)
+	}
+	if minY != 0 {
+		t.Fatalf("final rendered splash should start at row 0, got row %d", minY)
+	}
+	if got := maxX - minX + 1; got != 44 {
+		t.Fatalf("final rendered splash visible width = %d, want 44", got)
+	}
+	for i := splashVisibleHeight; i < SplashHeight; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			t.Fatalf("rendered splash row %d should be bottom padding, got %q", i, lines[i])
+		}
+	}
+}
+
+func TestSplash_FrameLinesUseSubcellGlyphs(t *testing.T) {
+	lines := splashFrameLines(SplashFrames - 1)
+	hasSubcell := false
+	for _, line := range lines {
+		for _, r := range line {
+			if r != ' ' && r != '█' {
+				hasSubcell = true
+			}
+		}
+	}
+	if !hasSubcell {
+		t.Fatal("final rendered splash should use subcell block glyphs for curved edges")
+	}
+}
+
+func TestSplash_FrameLinesDoNotBleedIntoCanopyBeforeCanopyStarts(t *testing.T) {
+	lines := splashFrameLines(splashCanopyStartFrame - 1)
+	parts := splashFinalPartLines()
+	for y, line := range lines {
+		lineRunes := []rune(line)
+		partRunes := []rune(parts[y])
+		for x, r := range lineRunes {
+			if partRunes[x] == 'C' && splashIsInk(r) {
+				t.Fatalf("canopy pixel revealed before canopy phase at row %d col %d: %q", y, x, line)
+			}
+		}
+	}
+}
+
+func TestSplash_FrameLinesKeepCanopyApexLate(t *testing.T) {
+	for frame := splashCanopyStartFrame; frame < splashCanopyEndFrame-1; frame++ {
+		line := []rune(splashFrameLines(frame)[0])
+		for x := 22; x <= 25; x++ {
+			if splashIsInk(line[x]) {
+				t.Fatalf("canopy apex leaked at frame %d col %d: %q", frame, x, string(line))
+			}
+		}
+	}
+}
+
+func TestSplash_FrameLinesHoldCompletedLogo(t *testing.T) {
+	want := strings.Join(splashFrameLines(splashCanopyEndFrame), "\n")
+	for frame := splashCanopyEndFrame + 1; frame < SplashFrames; frame++ {
+		if got := strings.Join(splashFrameLines(frame), "\n"); got != want {
+			t.Fatalf("frame %d changed after completed reveal", frame)
+		}
+	}
+}
+
+func TestSplash_FrameLinesRevealBranchSlicesAtFinalWidth(t *testing.T) {
+	finalLines := splashFinalFrameLines()
+	parts := splashFinalPartLines()
+	for frame := 0; frame < SplashFrames; frame++ {
+		lines := splashFrameLines(frame)
+		for y, line := range lines {
+			lineRunes := []rune(line)
+			finalRunes := []rune(finalLines[y])
+			partRunes := []rune(parts[y])
+			for _, part := range []rune{'L', 'R', 'T'} {
+				seen := false
+				for x, p := range partRunes {
+					if p == part && splashIsInk(lineRunes[x]) {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					continue
+				}
+				for x, p := range partRunes {
+					if p == part && splashIsInk(finalRunes[x]) && lineRunes[x] != finalRunes[x] {
+						t.Fatalf("frame %d row %d part %c widened late at col %d: got %q want %q",
+							frame, y, part, x, lineRunes[x], finalRunes[x])
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSplash_FinalBranchStemsMatchTrunkWidth(t *testing.T) {
+	lines := splashFinalFrameLines()
+	parts := splashFinalPartLines()
+	for _, row := range []int{10, 11, 12} {
+		trunk := splashPartHorizontalCoverage(lines[row], parts[row], 'T')
+		left := splashPartHorizontalCoverage(lines[row], parts[row], 'L')
+		right := splashPartHorizontalCoverage(lines[row], parts[row], 'R')
+		if trunk != 4 || left != trunk || right != trunk {
+			t.Fatalf("row %d stem widths: left %.1f trunk %.1f right %.1f, want all 4.0", row, left, trunk, right)
+		}
+	}
+}
+
+func TestSplash_FinalBranchBottomEdgesAreSolid(t *testing.T) {
+	line := []rune(splashFinalFrameLines()[12])
+	parts := []rune(splashFinalPartLines()[12])
+	for x, part := range parts {
+		if part != 'L' && part != 'R' {
+			continue
+		}
+		switch line[x] {
+		case '▀', '▝', '▘', '▗', '▖':
+			t.Fatalf("branch bottom col %d uses anti-aliased cap glyph %q", x, line[x])
+		}
+	}
+}
+
+func TestSplash_FinalCanopyBasesAreFlat(t *testing.T) {
+	line := []rune(splashFinalFrameLines()[9])
+	for _, x := range []int{3, 4, 5, 6, 43, 44, 45, 46} {
+		if line[x] != '█' {
+			t.Fatalf("canopy base col %d = %q, want full block", x, line[x])
+		}
+	}
+	for _, x := range []int{7, 42} {
+		if line[x] != ' ' {
+			t.Fatalf("canopy base col %d = %q, want flat edge with no cutoff pixel", x, line[x])
+		}
+	}
+}
+
+func TestSplash_FrameLinesKeepFirstFrameVisible(t *testing.T) {
+	lines := splashFrameLines(0)
+	_, minY, _, maxY, ok := splashInkBounds(lines)
+	if !ok {
+		t.Fatal("first rendered splash frame must still carry ink")
+	}
+	if maxY != splashVisibleHeight-1 || minY < splashVisibleHeight-2 {
+		t.Fatalf("first frame should stay anchored at corrected trunk base row %d, got rows %d..%d",
+			splashVisibleHeight-1, minY, maxY)
 	}
 }
 
@@ -167,5 +332,54 @@ func TestBootHandoffFramePrepaintsCockpitAndParksAtFooter(t *testing.T) {
 func TestBootHandoffFrameEmpty(t *testing.T) {
 	if got := renderBootHandoffFrame("", ""); got != "" {
 		t.Fatalf("empty boot handoff frame = %q, want empty", got)
+	}
+}
+
+func splashInkBounds(lines []string) (minX, minY, maxX, maxY int, ok bool) {
+	minX, minY = 1<<30, 1<<30
+	for y, line := range lines {
+		for x, r := range []rune(line) {
+			if !splashIsInk(r) {
+				continue
+			}
+			if x < minX {
+				minX = x
+			}
+			if x > maxX {
+				maxX = x
+			}
+			if y < minY {
+				minY = y
+			}
+			if y > maxY {
+				maxY = y
+			}
+			ok = true
+		}
+	}
+	return minX, minY, maxX, maxY, ok
+}
+
+func splashPartHorizontalCoverage(line, parts string, part rune) float64 {
+	lineRunes := []rune(line)
+	var width float64
+	for x, p := range []rune(parts) {
+		if p == part {
+			width += splashGlyphHorizontalCoverage(lineRunes[x])
+		}
+	}
+	return width
+}
+
+func splashGlyphHorizontalCoverage(r rune) float64 {
+	switch r {
+	case '█', '▀', '▄':
+		return 1
+	case '▌', '▐', '▘', '▝', '▖', '▗':
+		return 0.5
+	case '▛', '▜', '▙', '▟':
+		return 1
+	default:
+		return 0
 	}
 }

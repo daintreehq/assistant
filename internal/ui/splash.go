@@ -22,15 +22,14 @@ func lipglossFg(_ theme.Theme, c color.Color, s string) string {
 // splash.go is the boot splash overlay. It is a
 // transient overlay that dismisses on its OWN timer and NEVER gates input — the
 // composer is already interactive while the splash shows. It steps a frame index on a
-// ~28fps tick (one frame every 1000/28 ≈ 35.7ms), holds the finished logo for lingerMs,
-// then emits SplashDoneMsg ONCE. When the terminal is too narrow (columns <= SplashWidth)
-// it renders nothing and fires done immediately (a clipped logo looks broken).
+// high-FPS tick, holds the finished logo for lingerMs, then emits SplashDoneMsg ONCE.
+// When the terminal is too narrow (columns <= SplashWidth) it renders nothing and fires
+// done immediately (a clipped logo looks broken).
 //
-// The frames are the SPLASH_FRAMES in splash_frames.go, a pre-rendered 20-step
-// reveal — trunk grows up, then roots, then the canopy arch draws
-// on 45° diagonals to the centre peak. We do NOT re-derive the art at runtime; we just
-// step the index and tint each of the 18 rows with the green gradient (theme.SplashRowColor)
-// so the canopy reads lit and the trunk grounded.
+// The rendered frames are driven by a 40-step procedural reveal over the terminal
+// raster in splash_frames.go: trunk first, then side branches, then the canopy arch.
+// More render frames than source mask frames keeps the reveal feeling smoother while
+// each displayed slice still lands at its final pixel width.
 //
 // INLINE SIZING: the cockpit renders into the terminal's
 // MAIN buffer, so the splash draws at its NATURAL height — two blank lines down for
@@ -39,14 +38,36 @@ func lipglossFg(_ theme.Theme, c color.Color, s string) string {
 
 const (
 	// SplashWidth/Height are the splash mark's dimensions; SplashFrames is the
-	// animation length (len(splashFrames)).
+	// high-FPS render timeline length.
 	SplashWidth  = 48
 	SplashHeight = 18
-	SplashFrames = 20
-	// splashFPS sets the per-frame tick (28fps over 20 frames ≈ 0.7s draw); lingerMs holds
-	// the completed logo before signalling done (~0.42s) so it doesn't vanish the instant
-	// the draw lands. ~0.7s draw + ~0.42s hold ≈ 1.1s total.
-	splashFPS = 28
+	SplashFrames = 40
+	// splashSourceFrames is the historical coarse mask count retained in
+	// splashFrames. The renderer now uses the final raster + part map directly, so
+	// it can run at a higher frame rate without duplicating the old source masks.
+	splashSourceFrames = 20
+	// The source frame envelope stays 18 rows so the boot block keeps its historic
+	// terminal height, but xterm/WebGL cells are tall relative to their width. The
+	// Daintree SVG mark is therefore vertically resampled to 14 visible rows plus
+	// 4 blank rows of bottom padding so the pixel silhouette matches the flatter
+	// brand mark instead of reading stretched vertically.
+	splashVisibleHeight = 14
+	// The canopy has its own arch progression instead of using the trunk/leg reveal
+	// mask; otherwise nearby branch pixels can light the top of the arch early and
+	// create noisy specks. Keep the canopy slightly delayed relative to the branches;
+	// this is the choreography that best matched the Daintree skeleton in terminal cells.
+	splashTrunkStartFrame       = 0
+	splashTrunkEndFrame         = 14
+	splashLeftBranchStartFrame  = 8
+	splashLeftBranchEndFrame    = 28
+	splashRightBranchStartFrame = 10
+	splashRightBranchEndFrame   = 30
+	splashCanopyStartFrame      = 16
+	splashCanopyRightStartDelay = 1
+	splashCanopyEndFrame        = SplashFrames - 5
+	// splashFPS runs the 40-frame reveal in about 0.8s. lingerMs holds the
+	// completed logo before signalling done so it doesn't vanish the instant the draw lands.
+	splashFPS = 48
 	lingerMs  = 420
 )
 
@@ -63,8 +84,7 @@ func newSplash(columns int) splashModel {
 	return splashModel{tooSmall: columns <= SplashWidth}
 }
 
-// tick is the splash tick command (~28fps). The root re-arms it each SplashTickMsg
-// until done.
+// tick is the splash tick command. The root re-arms it each SplashTickMsg until done.
 func splashTickCmd() tea.Cmd {
 	return tea.Tick(time.Second/time.Duration(splashFPS), func(time.Time) tea.Msg { return SplashTickMsg{} })
 }
@@ -96,14 +116,15 @@ func (s *splashModel) advance() tea.Cmd {
 
 // view renders the current frame centered within columns-1 (one column shy of the edge
 // so the right edge never hits the autowrap column), after 2 blank top lines. The frame
-// is the verbatim pre-rendered art — every row already drawn for this step — and each of
-// its SplashHeight rows is tinted by the gradient (crown→base) for the depth cue.
+// starts from the pre-rendered art, then is xterm-aspect corrected to a 14-row visible
+// mark inside the 18-row frame envelope.
 //
 // rows is the terminal height: the splash is the WHOLE live View during boot, and the
 // Bubble Tea inline renderer can only repaint a View that fits the viewport — a block
 // taller than the terminal overflows and the cursor-up math drifts (the mark "offsets
 // and goes weird" as it grows). So when the terminal is too short for the 2 margin rows
-// + the 18-row mark we render nothing (the boot gates still settle on their timers).
+// + the 18-row frame envelope we render nothing (the boot gates still settle on their
+// timers).
 func (s splashModel) view(th theme.Theme, columns, rows int) string {
 	if s.tooSmall || s.done {
 		return ""
@@ -115,25 +136,19 @@ func (s splashModel) view(th theme.Theme, columns, rows int) string {
 	if avail < SplashWidth {
 		avail = SplashWidth
 	}
-	// Index the pre-rendered frames; clamp defensively to the last (complete) frame.
+	// Index the high-FPS render timeline; clamp defensively to the last complete frame.
 	idx := s.frame
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(splashFrames) {
-		idx = len(splashFrames) - 1
+	if idx >= SplashFrames {
+		idx = SplashFrames - 1
 	}
-	lines := strings.Split(splashFrames[idx], "\n")
+	lines := splashFrameLines(idx)
 	var b strings.Builder
 	b.WriteString("\n\n") // 2 blank lines of top breathing room (TSX marginTop={2})
 	for i, line := range lines {
-		// Tint per-row with the gradient over the full SplashHeight (t = i/(rows-1)),
-		// matching StartupSplash's rowColor(i, SPLASH_HEIGHT). Skipped in ModeNone — the
-		// color stays valid but body styling carries no hue there.
-		styled := line
-		if th.Mode.Colorize() {
-			styled = lipglossFg(th, theme.SplashRowColor(i, SplashHeight), line)
-		}
+		styled := splashStyledLine(th, i, line)
 		b.WriteString(centerLine(styled, line, avail))
 		b.WriteByte('\n')
 	}
@@ -141,7 +156,8 @@ func (s splashModel) view(th theme.Theme, columns, rows int) string {
 }
 
 // bootView renders the splash as the ENTIRE boot screen: a fixed block exactly rows-1
-// lines tall (the 18-row mark under a 2-row top margin, blank-filled to height). This
+// lines tall (the 18-row frame envelope under a 2-row top margin, blank-filled to
+// height). This
 // is the load-bearing fix for the inline-renderer drift: Bubble Tea's standard renderer
 // repaints the View by moving the cursor up by the PREVIOUS view's line count — if the
 // View is short and printed at the bottom, each ~28fps frame scrolls the terminal and
@@ -154,7 +170,7 @@ func (s splashModel) view(th theme.Theme, columns, rows int) string {
 // stays stable right up to the hand-off; a too-small/too-narrow terminal yields a
 // full-height blank block (still stable) instead of a clipped, broken mark.
 func (s splashModel) bootView(th theme.Theme, columns, rows int) string {
-	// The boot view is a CONSTANT-height block (2-row top margin + the 18-row mark) —
+	// The boot view is a CONSTANT-height block (2-row top margin + the 18-row frame) —
 	// NOT full-screen. A fixed height keeps the live region stable so the per-frame
 	// ClearScreen repaints cleanly, while staying small enough that the boot hand-off
 	// (masthead → scrollback, then the short footer) does not shove the masthead off
@@ -177,19 +193,56 @@ func (s splashModel) bootView(th theme.Theme, columns, rows int) string {
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(splashFrames) {
-		idx = len(splashFrames) - 1
+	if idx >= SplashFrames {
+		idx = SplashFrames - 1
 	}
 	lines := make([]string, 0, height)
 	lines = append(lines, "", "") // marginTop={2}
-	for i, line := range strings.Split(splashFrames[idx], "\n") {
-		styled := line
-		if th.Mode.Colorize() {
-			styled = lipglossFg(th, theme.SplashRowColor(i, SplashHeight), line)
-		}
+	for i, line := range splashFrameLines(idx) {
+		styled := splashStyledLine(th, i, line)
 		lines = append(lines, centerLine(styled, line, avail))
 	}
 	return strings.Join(lines, "\n") // exactly `height` lines
+}
+
+func splashStyledLine(th theme.Theme, row int, line string) string {
+	if !th.Mode.Colorize() {
+		return line
+	}
+	runes := []rune(line)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		coverage := splashGlyphCoverage(runes[i])
+		j := i + 1
+		for j < len(runes) && splashGlyphCoverage(runes[j]) == coverage {
+			j++
+		}
+		chunk := string(runes[i:j])
+		if coverage <= 0 {
+			b.WriteString(chunk)
+		} else {
+			b.WriteString(lipglossFg(th, theme.SplashCoverageColor(row, splashVisibleHeight, coverage), chunk))
+		}
+		i = j
+	}
+	return b.String()
+}
+
+func splashGlyphCoverage(r rune) float64 {
+	switch r {
+	case '█':
+		return 1.0
+	case '▛', '▜', '▙', '▟':
+		return 0.92
+	case '▀', '▄', '▌', '▐', '▚', '▞':
+		return 0.82
+	case '▘', '▝', '▖', '▗':
+		return 0.68
+	case ' ':
+		return 0
+	default:
+		return 0.82
+	}
 }
 
 // centerLine centers `styled` (whose visible width equals plain's) within w cells.

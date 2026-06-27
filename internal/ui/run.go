@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/terminal"
 )
 
@@ -26,19 +27,21 @@ func Run(ctx context.Context, a *app.App) error {
 	th := m.theme
 
 	// Seed the first cockpit frame with the real terminal size when available, then use
-	// the splash duration to connect MCP and fetch the authoritative project name. The
-	// hand-off frame is built at the end of the logo linger so it can include that name
-	// if it arrived in time; otherwise the stable placeholder remains.
+	// the splash duration to connect MCP, fetch the authoritative project name, and
+	// warm the Assistant backend. The hand-off frame is built at the end of the logo
+	// linger so it can include that name if it arrived in time; otherwise the stable
+	// placeholder remains.
 	if cols, rows, ok := terminalSize(os.Stdout); ok {
 		m.columns = cols
 		m.rows = rows
 	}
-	bootPrefetch := startBootMCPPrefetch(ctx, a)
+	bootPrefetch := startBootPrefetch(ctx, a)
 	defer bootPrefetch.stop()
 	handoffFrame := func() string {
 		if name := bootPrefetch.projectName(); name != "" {
 			m.masthead.ProjectName = name
 		}
+		bootPrefetch.backendHandshakeComplete()
 		bootPrefetch.stop()
 		m.syncComposer()
 		return m.bootHandoffFrame()
@@ -85,55 +88,111 @@ func Run(ctx context.Context, a *app.App) error {
 	return err
 }
 
-type bootMCPPrefetch struct {
-	done   <-chan bootMCPPrefetchResult
-	cancel context.CancelFunc
+type bootPrefetch struct {
+	projectNameDone <-chan string
+	backendDone     <-chan error
+	cancel          context.CancelFunc
 }
 
-type bootMCPPrefetchResult struct {
-	projectName string
-}
-
-func startBootMCPPrefetch(ctx context.Context, a *app.App) *bootMCPPrefetch {
+func startBootPrefetch(ctx context.Context, a *app.App) *bootPrefetch {
 	bootCtx, cancel := context.WithCancel(ctx)
-	ch := make(chan bootMCPPrefetchResult, 1)
+	projectNameDone := make(chan string, 1)
+	backendDone := make(chan error, 1)
 	go func() {
-		var res bootMCPPrefetchResult
-		if st := a.ConnectMcp(bootCtx); st.Connected {
-			for {
-				if name := a.MCP.FetchProjectName(bootCtx); name != "" {
-					res.projectName = name
-					break
-				}
-				select {
-				case <-bootCtx.Done():
-					ch <- res
-					return
-				case <-time.After(bootProjectNameRetryDelay):
-				}
+		projectNameDone <- bootFetchProjectName(bootCtx, a)
+	}()
+	go func() {
+		backendDone <- bootHandshakeBackend(ctx, a)
+	}()
+	return &bootPrefetch{
+		projectNameDone: projectNameDone,
+		backendDone:     backendDone,
+		cancel:          cancel,
+	}
+}
+
+func bootFetchProjectName(ctx context.Context, a *app.App) string {
+	if a == nil || a.MCP == nil {
+		return ""
+	}
+	if st := a.ConnectMcp(ctx); st.Connected {
+		for {
+			if name := a.MCP.FetchProjectName(ctx); name != "" {
+				return name
+			}
+			select {
+			case <-ctx.Done():
+				return ""
+			case <-time.After(bootProjectNameRetryDelay):
 			}
 		}
-		ch <- res
-	}()
-	return &bootMCPPrefetch{done: ch, cancel: cancel}
+	}
+	return ""
 }
 
-func (p *bootMCPPrefetch) projectName() string {
-	if p == nil || p.done == nil {
+func bootHandshakeBackend(ctx context.Context, a *app.App) error {
+	if a == nil || a.Backend == nil {
+		return nil
+	}
+	started := time.Now()
+	hctx, cancel := context.WithTimeout(ctx, bootBackendHandshakeTimeout)
+	defer cancel()
+	_, err := a.Backend.Capabilities(hctx)
+	logBootBackendHandshake(a, time.Since(started), err)
+	return err
+}
+
+func logBootBackendHandshake(a *app.App, dur time.Duration, err error) {
+	if a == nil {
+		return
+	}
+	fields := map[string]any{
+		"baseURL":    "",
+		"durationMs": dur.Milliseconds(),
+		"ok":         err == nil,
+	}
+	if a.Backend != nil {
+		fields["baseURL"] = a.Backend.BaseURL()
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	debuglog.LogDebug(
+		debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		"boot.backend_handshake",
+		fields,
+	)
+}
+
+func (p *bootPrefetch) projectName() string {
+	if p == nil || p.projectNameDone == nil {
 		return ""
 	}
 	select {
-	case res := <-p.done:
-		return res.projectName
+	case name := <-p.projectNameDone:
+		return name
 	default:
 		return ""
 	}
 }
 
-func (p *bootMCPPrefetch) stop() {
+func (p *bootPrefetch) backendHandshakeComplete() bool {
+	if p == nil || p.backendDone == nil {
+		return false
+	}
+	select {
+	case <-p.backendDone:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *bootPrefetch) stop() {
 	if p != nil && p.cancel != nil {
 		p.cancel()
 	}
 }
 
 const bootProjectNameRetryDelay = 150 * time.Millisecond
+const bootBackendHandshakeTimeout = 3 * time.Second

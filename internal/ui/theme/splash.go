@@ -7,10 +7,10 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Splash gradient palette. The boot mark is drawn in a per-row green gradient that
-// implies depth down the trunk: the canopy crown (top) is lighter, the base is the
-// brand green. The splash *animation* (frames, timing) is a separate component;
-// this file owns only the COLOR ramp so theme is the single source of brand green.
+// Splash palette. The boot mark uses the row ramp plus coverage-adjusted colors for
+// partial block glyphs, giving the pixel logo an anti-aliased edge. The splash
+// animation itself (frames, timing) is a separate component; this file owns only the
+// color choices so theme is the single source of brand green.
 //
 // Endpoints:
 //
@@ -29,6 +29,11 @@ var (
 	splashBase = rgb{0x36, 0xCE, 0x94}
 )
 
+// SplashColor returns the solid brand green used when a caller wants no row ramp.
+func SplashColor() color.Color {
+	return lipgloss.Color(splashBaseHex)
+}
+
 // SplashRowColor returns the gradient color for row `i` of a `rows`-tall mark.
 // It linearly interpolates each channel: t = i/(rows-1), channel = round(top +
 // (base-top)*t). Row 0 is the crown (top), the last row is the brand base. With
@@ -38,8 +43,37 @@ var (
 // caller may skip tinting, but SplashRowColor still returns a valid color so the
 // animation code stays branch-free — the renderer decides whether to apply it.
 func SplashRowColor(i, rows int) color.Color {
+	c := splashRowRGB(i, rows)
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
+}
+
+// SplashCoverageColor returns the splash row color adjusted for a partial-cell
+// glyph. Quarter/half blocks use this to act like terminal anti-aliasing: same
+// hue as the row gradient, but mixed toward the dark terminal ground so curved
+// edges read softer than full interior strokes.
+func SplashCoverageColor(i, rows int, coverage float64) color.Color {
+	if coverage >= 0.995 {
+		return SplashRowColor(i, rows)
+	}
+	if coverage < 0 {
+		coverage = 0
+	}
+	if coverage > 1 {
+		coverage = 1
+	}
+	base := splashRowRGB(i, rows)
+	ground := rgb{0x07, 0x10, 0x0D}
+	c := rgb{
+		r: lerp(ground.r, base.r, coverage),
+		g: lerp(ground.g, base.g, coverage),
+		b: lerp(ground.b, base.b, coverage),
+	}
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
+}
+
+func splashRowRGB(i, rows int) rgb {
 	if rows <= 1 {
-		return lipgloss.Color(splashTopHex)
+		return splashTop
 	}
 	if i < 0 {
 		i = 0
@@ -54,7 +88,7 @@ func SplashRowColor(i, rows int) color.Color {
 		g: lerp(splashTop.g, splashBase.g, t),
 		b: lerp(splashTop.b, splashBase.b, t),
 	}
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
+	return c
 }
 
 // lerp interpolates a single channel and rounds to the nearest integer, keeping

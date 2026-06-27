@@ -65,7 +65,7 @@ func playBootSplash(ctx context.Context, w io.Writer, th theme.Theme, handoffFra
 	}()
 
 	frameDelay := time.Second / time.Duration(splashFPS)
-	for i := range splashFrames {
+	for i := 0; i < SplashFrames; i++ {
 		_, _ = io.WriteString(w, renderSplashFrame(th, i, cols))
 		select {
 		case <-sigCtx.Done():
@@ -148,24 +148,22 @@ func toCRLF(s string) string {
 
 // renderSplashFrame builds one full frame: a synchronized-output update (so the per-
 // frame clear never flickers), the screen cleared + homed, then the mark centered
-// horizontally under a 2-row top margin with each row tinted by the green gradient.
+// horizontally under a 2-row top margin with each visible row tinted by the green
+// gradient.
 func renderSplashFrame(th theme.Theme, idx, cols int) string {
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(splashFrames) {
-		idx = len(splashFrames) - 1
+	if idx >= SplashFrames {
+		idx = SplashFrames - 1
 	}
 	avail := cols - 1 // one shy of the edge so the mark never hits the autowrap column
 	var b strings.Builder
 	b.WriteString("\x1b[?2026h") // begin synchronized update (no flicker)
 	b.WriteString("\x1b[2J\x1b[H")
 	b.WriteString("\r\n\r\n") // marginTop={2}
-	for i, line := range strings.Split(splashFrames[idx], "\n") {
-		styled := line
-		if th.Mode.Colorize() {
-			styled = lipglossFg(th, theme.SplashRowColor(i, SplashHeight), line)
-		}
+	for i, line := range splashFrameLines(idx) {
+		styled := splashStyledLine(th, i, line)
 		b.WriteString(centerLine(styled, line, avail))
 		b.WriteString("\r\n")
 	}
