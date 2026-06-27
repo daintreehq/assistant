@@ -27,6 +27,7 @@ type scriptMCP struct {
 	launchErr     error
 	listResult    MCPCallResult
 	agentSettings MCPCallResult // agentSettings.get response; zero value ⇒ fail-open roster
+	worktreeList  MCPCallResult // worktree.list response; zero value ⇒ fail-open roster
 	onLaunch      func()
 	calls         []recordedCall
 }
@@ -51,6 +52,8 @@ func (m *scriptMCP) CallTool(_ context.Context, name string, args map[string]any
 		return m.listResult, nil
 	case "agentSettings.get":
 		return m.agentSettings, nil
+	case "worktree.list":
+		return m.worktreeList, nil
 	}
 	return MCPCallResult{}, nil
 }
@@ -328,6 +331,11 @@ func TestSpawnAmbiguousWhenNoTerminalID(t *testing.T) {
 	res := runSpawn(deps, a)
 	if res.Ok || res.Error.Code != codeAgentLaunchAmbiguous || !res.Error.Recoverable {
 		t.Fatalf("expected recoverable AGENT_LAUNCH_AMBIGUOUS, got %+v", res)
+	}
+	// The message carries the circuit-breaker hint so a model that hits this for EVERY spawn
+	// stops retrying and reports the blocker instead of improvising shell-command workarounds.
+	if !strings.Contains(res.Error.Message, "stop retrying and report it") {
+		t.Fatalf("ambiguous message should carry the stop-and-report hint, got %q", res.Error.Message)
 	}
 	details := res.Error.Details.(map[string]any)
 	launchID := details["launchId"].(string)

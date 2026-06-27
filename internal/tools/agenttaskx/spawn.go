@@ -24,6 +24,7 @@ const (
 	codeNoTerminalID         = "NO_TERMINAL_ID"
 	codeLaunchNotFound       = "LAUNCH_NOT_FOUND"
 	codeUnknownAgent         = "UNKNOWN_AGENT"
+	codeUnknownWorktree      = "UNKNOWN_WORKTREE"
 )
 
 type spawnContext struct {
@@ -101,7 +102,7 @@ var spawnSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Omit to let Daintree choose." },
+    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Usually OMIT this: Daintree then runs the agent in the active worktree (the common case). To target a specific worktree, prefer its id — a PATH like \"/Users/you/Projects/app\". A branch name (e.g. \"main\") is accepted only as a fallback and is resolved to that worktree's id; a value that resolves to no worktree is rejected with the available list." },
     "agentId": { "type": "string", "description": "Agent to launch (default \"claude\")." },
     "mode": { "type": "string", "enum": ["edit", "explore"], "description": "Spawn intent (default \"edit\"). \"edit\" tells the agent to make code changes; \"explore\" tells it to investigate read-only and not touch any files." },
     "title": { "type": "string", "description": "Short title for the task and any watcher." },
@@ -158,11 +159,50 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 		mode = "edit"
 	}
 	a.Mode = mode
+	// Normalize the worktree FIRST: an explicit empty/whitespace string is treated like an
+	// omitted worktree (so it doesn't change the idempotency key, leak into the prompt, or
+	// get forwarded).
+	worktreeID := strings.TrimSpace(a.WorktreeID)
+	// Validate + NORMALIZE an explicitly-provided worktreeId against Daintree's real
+	// worktrees BEFORE it feeds the prompt, the idempotency key, and the launch args.
+	// Daintree keys worktrees by their id (a path) and silently returns a terminal-less
+	// success when the id doesn't resolve — the model passing the BRANCH name "main" instead
+	// of the worktree id is the canonical trap (daintreehq/daintree#10812), and it fails
+	// invisibly exactly like a bad agentId. Resolve maps a branch/path match to the
+	// canonical id (so "main" just works) or rejects a genuinely unknown value with the
+	// available list; an OMITTED worktree skips the read entirely and lets Daintree pick the
+	// active worktree (the recommended path). Fail OPEN when the list can't be read so a
+	// discovery hiccup never blocks a spawn. Done before the idempotent-retry lookup so the
+	// key is a function of the CANONICAL id — "main" and the resolved path dedupe to one
+	// launch, not two.
+	if worktreeID != "" {
+		resolved, ok, available, suggestion := resolveWorktreeID(ctx, deps.MCP, worktreeID)
+		if !ok {
+			msg := fmt.Sprintf("Unknown worktree %q — it matches no worktree's id, path, or branch.", worktreeID)
+			if suggestion != "" {
+				msg += fmt.Sprintf(" Did you mean %q?", suggestion)
+			}
+			msg += " Available worktrees (branch then id): " + formatWorktrees(available) +
+				". Usually OMIT worktreeId to run in the active worktree; otherwise pass a worktree id (a path) from this list."
+			return tools.Fail(codeUnknownWorktree, msg, tools.WithDetails(map[string]any{
+				"requestedWorktreeId": worktreeID, "availableWorktrees": worktreesDetail(available), "suggestion": suggestion,
+			}))
+		}
+		worktreeID = resolved
+	}
+	// Write the canonical (or trimmed-empty) worktree back onto the args so buildAgentPrompt
+	// embeds the RESOLVED id ("Work in worktree: <id>"), not the raw branch the caller typed.
+	// This keeps the agent's instructions, the idempotency key, and the forwarded launch args
+	// all consistent — and is why "main" and its resolved path dedupe to one launch.
+	a.WorktreeID = worktreeID
+	// The worktree resolution above can issue an MCP read (the first in this turn); if the
+	// turn was cancelled meanwhile, stop before any idempotent-hit return, saga write, or
+	// launch — mirroring the agentId-resolve cancellation check below.
+	if ctx.Err() != nil {
+		return tools.Fail(codeCancelled, "Turn cancelled before the agent was launched.", tools.Unrecoverable())
+	}
 	name := buildAgentLaunchName(a.Title, agentID)
 	prompt := buildAgentPrompt(a)
-	// Normalize the worktree once: an explicit empty string is treated like an
-	// omitted worktree (so it doesn't change the idempotency key or get forwarded).
-	worktreeID := strings.TrimSpace(a.WorktreeID)
 	// Key the saga over the EXACT args forwarded to agent.launch (agentId, name,
 	// prompt, worktreeId). Daintree rejects "same requestKey, different arguments", so
 	// the key MUST be a faithful function of those args — keying a hand-picked subset
@@ -328,7 +368,7 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 			"idempotencyKey": idempotencyKey, "reason": "no terminalId and no reconciling terminal",
 		})
 		return tools.Fail(codeAgentLaunchAmbiguous,
-			fmt.Sprintf("agent.launch for %q returned no terminalId, so it is unknown whether an agent started. Check Daintree's terminals before retrying.", a.Title),
+			fmt.Sprintf("agent.launch for %q returned no terminalId, so it is unknown whether an agent started. Check Daintree's terminals before retrying. If EVERY spawn returns this, stop retrying and report it — the spawn path itself is failing (a Daintree-side problem), which more attempts and shell-command workarounds will not fix.", a.Title),
 			tools.WithDetails(map[string]any{"launchId": record.ID}))
 	}
 

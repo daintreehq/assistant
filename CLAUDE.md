@@ -26,7 +26,9 @@ that writes/edits files.
 The **Daintree project itself** lives at `../daintree` (`~/Projects/Daintree/daintree`)
 and on GitHub at <https://github.com/daintreehq/daintree>.
 
-Powered by the **Daintree Assistant backend** (`../assistant-backend`), a Daintree-native
+Powered by the **Daintree Assistant backend** (`../assistant-backend`,
+`~/Projects/Daintree/assistant-backend`, on GitHub at
+<https://github.com/daintreehq/assistant-backend>), a Daintree-native
 HTTP API — **not** OpenAI-compatible. The CLI is a thin local runtime: it sends only the
 visible conversation + structured runtime/turn context + its tool inventory, and the
 backend owns the system prompt, developer instructions, **skill/runbook selection**, model
