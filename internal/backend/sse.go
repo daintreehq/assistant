@@ -21,6 +21,13 @@ type StreamCallbacks struct {
 	OnContent func(string)
 	// OnToolCallDelta fires for each raw tool-call fragment (optional; the parser
 	// accumulates these internally regardless).
+	//
+	// REPLAY CONTRACT: RespondStream retries transient failures that occur before any
+	// content streams, and a failed attempt may already have emitted tool-call
+	// fragments — so this callback can fire for fragments from an attempt that is then
+	// discarded and replayed. Treat the RETURNED RespondResult.Message.ToolCalls (built
+	// from the final attempt's own fresh accumulator) as authoritative; do NOT execute
+	// or accumulate tool calls off these raw fragments across the call.
 	OnToolCallDelta func(ToolCallDelta)
 }
 

@@ -257,11 +257,22 @@ func Create(opts CreateOptions) (*App, error) {
 		if v := strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")); v != "" {
 			baseURL = v
 		}
+		dbg := debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}
 		a.Backend = backend.NewClient(backend.ClientConfig{
 			BaseURL: baseURL,
 			ClientInfo: backend.ClientInfo{
 				Name:     "daintree-cli",
 				Platform: runtime.GOOS,
+			},
+			// Surface each transient-failure retry to the session log — otherwise a
+			// retried turn leaves no trace and a later log read dead-ends at the last
+			// successful tool call (the gap that hid the wild 502).
+			OnRetry: func(info backend.RetryInfo) {
+				debuglog.LogDebug(dbg, "backend.retry", map[string]any{
+					"attempt": info.Attempt,
+					"delayMs": info.Delay.Milliseconds(),
+					"error":   info.Err.Error(),
+				})
 			},
 		})
 	}
