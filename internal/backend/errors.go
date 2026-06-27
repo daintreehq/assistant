@@ -72,6 +72,12 @@ func (e *Error) IsRateLimited() bool {
 	return e.HTTPStatus == 429 || e.Type == "rate_limit" || e.Code == "upstream_rate_limited"
 }
 
+// IsConnect reports that the backend was unreachable — a connection-level failure
+// (dial refused/timeout), not an HTTP response. It is the most common local-dev
+// failure (the backend isn't running) and deserves a connectivity message, not a
+// "model error". Set at the only two construction sites in client.go.
+func (e *Error) IsConnect() bool { return e.Code == "connect" }
+
 // IsContract reports a 400 — a CLI contract bug (forbidden role, reserved tool,
 // invalid schema/name, unknown field). The message+param tell you what to fix.
 func (e *Error) IsContract() bool { return e.HTTPStatus == 400 }

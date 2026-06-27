@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 )
@@ -148,6 +149,31 @@ func TestEmitReportsModelErrorThroughSink(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatalf("expected an error event: %v", sink.log)
+	}
+}
+
+// TestEmitReportsBackendUnreachableAsConnectivity: a connection-level backend failure
+// (Code "connect") is relabeled as a connectivity problem with a /doctor next step —
+// NOT "Model error:" — and the reply is still a registered wake failure so a
+// timer/watcher wake that fails this way is treated as a non-result.
+func TestEmitReportsBackendUnreachableAsConnectivity(t *testing.T) {
+	sink := &orderSink{}
+	r := &errRouter{err: &backend.Error{Code: "connect", Message: "could not reach assistant backend: dial tcp 127.0.0.1:8473: connect: connection refused"}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+	out, err := s.Send(context.Background(), "hi", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(out, "Model error:") {
+		t.Fatalf("a connect failure must not read as a model error: %q", out)
+	}
+	if !strings.Contains(out, "/doctor") {
+		t.Fatalf("expected a /doctor next-step hint: %q", out)
+	}
+	if !IsWakeFailureReply(out) {
+		t.Fatalf("connectivity reply must be a registered wake failure: %q", out)
 	}
 }
 

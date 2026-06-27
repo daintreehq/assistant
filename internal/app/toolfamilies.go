@@ -53,7 +53,11 @@ func (m contextMCPAdapter) Status() contextx.MCPStatus {
 }
 
 func (m contextMCPAdapter) CallTool(ctx context.Context, name string, args map[string]any) (contextx.MCPCallResult, error) {
-	res, err := m.c.CallTool(ctx, name, args, mcp.CallOptions{})
+	// contextx is the read family (terminal.read/summarize/extract, actions.getContext):
+	// use the read-only retry budget so a transient throttle/blip is absorbed below the
+	// model (see mcp.ReadCallOptions). Mutations can't reach here, and CallTool force-
+	// disables retry for them regardless.
+	res, err := m.c.CallTool(ctx, name, args, mcp.ReadCallOptions())
 	if err != nil {
 		return contextx.MCPCallResult{}, err
 	}

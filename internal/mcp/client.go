@@ -568,6 +568,22 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		res, err = low.CallTool(callCtx, name, args)
 		cancel()
 		if err == nil {
+			// Transport-level success — but a Daintree READ can come back as a throttle
+			// RESULT (IsError=true + MCP_RATE_LIMITED + details.retryAfter) rather than a
+			// transport error, which CallTool would otherwise hand straight to the model
+			// as a failed read (costing a whole LLM round to re-decide). Absorb it here,
+			// below the model, exactly like a transient transport error. The read-only
+			// guard is already enforced: `retries` was forced to 0 for mutations above,
+			// so `attempt < retries` is false for a non-read tool — a mutation that comes
+			// back IsError is never retried (no double-apply).
+			if res.IsError && attempt < retries {
+				if delay, ok := throttleRetryAfter(res.Text); ok {
+					if sleepErr := abortableSleep(ctx, delay); sleepErr != nil {
+						return CallResult{}, sleepErr // aborted mid-backoff: propagate, no degrade.
+					}
+					continue
+				}
+			}
 			break
 		}
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -139,6 +140,69 @@ func isRetriableMcpError(err error) bool {
 		return true
 	}
 	return connErrorRe.MatchString(err.Error())
+}
+
+// ReadCallOptions is the canonical CallOptions for a READ-ONLY in-turn MCP call:
+// a bounded per-attempt timeout plus the read-only retry budget. It is the in-turn
+// analogue of the daemon's daemonReadCallOptions — both reads hit the same throttled
+// terminal.getStatus / terminal.getOutput, and a Retries>0 budget is what lets
+// CallTool absorb a transient transport blip OR a getOutput throttle (see
+// throttleRetryAfter) below the model, so neither surfaces as a failed read that
+// costs a whole LLM round to re-decide. CallTool force-disables retry for mutating
+// tools, so this is safe to hand to a generic read adapter.
+func ReadCallOptions() CallOptions {
+	return CallOptions{Timeout: mcpReadTimeout, Retries: mcpReadRetryPolicy.MaxRetries}
+}
+
+// throttleCodeMarker is Daintree's machine code for a per-tool read throttle. The
+// server returns it as a tool RESULT (IsError=true), NOT a transport error — e.g.
+//
+//	{"code":"MCP_RATE_LIMITED","message":"Rate limit exceeded for 'terminal.getOutput'. Retry after 1s.","retriable":true,"details":{"retryAfter":1}}
+//
+// so CallTool's err==nil break would hand it straight to the model as a failed read,
+// which then burns a whole LLM round improvising (observed thrash: "let me use
+// terminal.summarize instead", "let me read each terminal individually"). We match
+// the structural CODE, not the human phrase, so a terminal whose own scrollback
+// mentions "rate limit" can't be mistaken for a throttle — and IsError already gates
+// this to error results, never a successful read.
+const throttleCodeMarker = "MCP_RATE_LIMITED"
+
+// Throttle backoff knobs (vars, mirroring mcpReadRetryPolicy, so a test can shrink
+// them). maxThrottleRetryAfter caps an honoured retryAfter so a pathological server
+// value can't park a read for minutes; throttleBaseDelay is the fallback when the
+// result carries no parseable retryAfter (a reworded throttle still earns one polite
+// wait).
+var (
+	maxThrottleRetryAfter = 8 * time.Second
+	throttleBaseDelay     = 500 * time.Millisecond
+)
+
+// retryAfterRe pulls the integer SECONDS out of the server's `"retryAfter":1`
+// (details.retryAfter). Tolerant of surrounding JSON whitespace.
+var retryAfterRe = regexp.MustCompile(`"retryAfter"\s*:\s*(\d+)`)
+
+// throttleRetryAfter reports whether a SUCCESSFUL-but-IsError result text is a
+// Daintree read throttle, and how long to wait before retrying. The delay is the
+// server's details.retryAfter (seconds) clamped to (0, maxThrottleRetryAfter], or
+// throttleBaseDelay when no hint is present. Returns (0, false) for any non-throttle
+// result so the caller breaks and surfaces it normally.
+func throttleRetryAfter(text string) (time.Duration, bool) {
+	if !strings.Contains(text, throttleCodeMarker) {
+		return 0, false
+	}
+	delay := throttleBaseDelay
+	if m := retryAfterRe.FindStringSubmatch(text); m != nil {
+		// \d+ guarantees Atoi succeeds; the d>0 guard also catches an int64 overflow
+		// from an absurd value (which wraps negative) → fall through to the cap.
+		if secs, err := strconv.Atoi(m[1]); err == nil && secs > 0 {
+			if d := time.Duration(secs) * time.Second; d > 0 && d <= maxThrottleRetryAfter {
+				delay = d
+			} else {
+				delay = maxThrottleRetryAfter
+			}
+		}
+	}
+	return delay, true
 }
 
 // abortableSleep sleeps for d or returns early with ctx.Err() the moment ctx is

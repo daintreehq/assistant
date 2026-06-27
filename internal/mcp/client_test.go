@@ -19,7 +19,8 @@ type fakeLow struct {
 	listErr     error
 	listCalls   int
 	callResult  rawResult
-	callErrs    []error // popped per attempt; nil = success
+	callResults []rawResult // popped per attempt when set; else callResult
+	callErrs    []error     // popped per attempt; nil = success
 	callCalls   int
 	serverInfo  *ServerInfo
 	closeCalled bool
@@ -52,6 +53,11 @@ func (f *fakeLow) CallTool(ctx context.Context, name string, args map[string]any
 		if err := f.callErrs[idx]; err != nil {
 			return rawResult{}, err
 		}
+	}
+	// A per-attempt result sequence (for throttle-then-success cases) takes
+	// precedence; otherwise every successful attempt returns the same callResult.
+	if idx < len(f.callResults) {
+		return f.callResults[idx], nil
 	}
 	return f.callResult, nil
 }

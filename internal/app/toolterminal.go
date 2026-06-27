@@ -28,7 +28,7 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 	if includeOutput {
 		args["includeOutput"] = map[string]any{"lines": 50, "stripAnsi": true}
 	}
-	res, err := r.c.CallTool(ctx, "terminal.getStatus", args, mcp.CallOptions{})
+	res, err := r.c.CallTool(ctx, "terminal.getStatus", args, mcp.ReadCallOptions())
 	if err != nil || res.IsError {
 		return extractionx.StatusReadResult{OK: false, ByID: byID}
 	}
@@ -55,7 +55,7 @@ func (r terminalReaderAdapter) ReadOutput(ctx context.Context, terminalID string
 	res, err := r.c.CallTool(ctx, "terminal.getOutput", map[string]any{
 		"terminalId": terminalID,
 		"maxLines":   200,
-	}, mcp.CallOptions{})
+	}, mcp.ReadCallOptions())
 	if err != nil || res.IsError {
 		return extractionx.OutputReadResult{OK: false}
 	}

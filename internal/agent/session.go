@@ -945,6 +945,18 @@ func (s *Session) classifyBackendError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	if errors.As(err, &be) && be.IsConnect() {
+		// Backend unreachable — the most common local-dev failure. Name it as a
+		// connectivity problem with a next step instead of "Model error: dial tcp
+		// ...: connection refused" (a connectivity issue mislabeled as a model one,
+		// buried in dialer noise). /doctor probes exactly this. The prefix is a
+		// registered WAKE_FAILURE_PREFIX (see wake.go) so a wake that fails this way
+		// is still treated as a non-result.
+		msg := "Can't reach the Daintree assistant backend — is it running? Run /doctor to check."
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg
+	}
 	msg := "Model error: " + err.Error()
 	s.events.Phase(domain.PhaseFailed)
 	s.events.Error(msg)

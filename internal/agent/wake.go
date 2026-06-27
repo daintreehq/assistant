@@ -118,6 +118,7 @@ var wakeFailurePrefixes = []string{
 	"Model unavailable:",
 	"Model rate-limited:",
 	"Model error:",
+	"Can't reach the Daintree assistant backend", // backend unreachable (classifyBackendError)
 	"Tool projection failed:",
 	"Stopped: called ",
 	"Turn cancelled",
