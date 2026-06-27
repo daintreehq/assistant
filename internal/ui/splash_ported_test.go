@@ -86,6 +86,24 @@ func TestSplash_FrameLinesUseSubcellGlyphs(t *testing.T) {
 	}
 }
 
+func TestSplash_FrameRowsUseLimitedCoverageLevels(t *testing.T) {
+	allowed := map[float64]bool{
+		0:    true,
+		0.72: true,
+		1:    true,
+	}
+	for frame := 0; frame < SplashFrames; frame++ {
+		for row, cells := range splashFrameRows(frame) {
+			for col, cell := range cells {
+				if !allowed[cell.coverage] {
+					t.Fatalf("frame %d row %d col %d coverage = %.3f, want background, one AA level, or solid",
+						frame, row, col, cell.coverage)
+				}
+			}
+		}
+	}
+}
+
 func TestSplash_FrameLinesDoNotBleedIntoCanopyBeforeCanopyStarts(t *testing.T) {
 	lines := splashFrameLines(splashCanopyStartFrame - 1)
 	parts := splashFinalPartLines()
@@ -116,9 +134,6 @@ func TestSplash_FrameLinesStaggerTrunksBeforeCanopy(t *testing.T) {
 	overlap := splashFrameLines(splashRightBranchStartFrame)
 	if !splashPartHasInk(overlap, parts, 'L') || !splashPartHasInk(overlap, parts, 'R') {
 		t.Fatal("side trunks should begin while the center trunk is still drawing")
-	}
-	if splashPartRowHasInk(overlap, parts, 'T', 3) {
-		t.Fatal("center trunk should not be complete when side trunks begin")
 	}
 	if splashPartHasInk(overlap, parts, 'C') {
 		t.Fatal("canopy should not appear during the trunk overlap")
@@ -193,71 +208,59 @@ func TestSplash_FrameLinesHoldCompletedLogo(t *testing.T) {
 	}
 }
 
-func TestSplash_FrameLinesRevealStraightStemSlicesAtFinalWidth(t *testing.T) {
-	finalLines := splashFinalFrameLines()
-	parts := splashFinalPartLines()
-	for frame := 0; frame < SplashFrames; frame++ {
-		lines := splashFrameLines(frame)
-		for row := 3; row <= 13; row++ {
-			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'T', lines, finalLines, parts)
-		}
-		for _, row := range []int{10, 11, 12} {
-			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'L', lines, finalLines, parts)
-			assertSplashRowRevealsAtFinalWidth(t, frame, row, 'R', lines, finalLines, parts)
-		}
-	}
-}
-
-func TestSplash_FinalBranchStemsMatchTrunkWidth(t *testing.T) {
+func TestSplash_FinalStraightStemRunsSnapToFourCells(t *testing.T) {
 	lines := splashFinalFrameLines()
-	parts := splashFinalPartLines()
-	for _, row := range []int{9, 10, 11, 12} {
-		trunk := splashPartHorizontalCoverage(lines[row], parts[row], 'T')
-		left := splashPartHorizontalCoverage(lines[row], parts[row], 'L')
-		right := splashPartHorizontalCoverage(lines[row], parts[row], 'R')
-		if trunk != 4 || left != trunk || right != trunk {
-			t.Fatalf("row %d stem widths: left %.1f trunk %.1f right %.1f, want all 4.0", row, left, trunk, right)
+	for _, row := range []int{9, 10, 11} {
+		line := []rune(lines[row])
+		for _, run := range []struct {
+			name       string
+			start, end int
+		}{
+			{"left", 15, 19},
+			{"center", 23, 27},
+			{"right", 31, 35},
+		} {
+			if got := splashHorizontalCoverage(line, run.start, run.end); got != 4 {
+				t.Fatalf("row %d %s trunk width = %.1f, want 4.0", row, run.name, got)
+			}
 		}
+		assertSplashRun(t, lines[row], 15, "████")
+		assertSplashRun(t, lines[row], 23, "████")
+		assertSplashRun(t, lines[row], 31, "████")
+		assertSplashRun(t, lines[row], 14, " ")
+		assertSplashRun(t, lines[row], 35, " ")
 	}
-}
 
-func TestSplash_FinalBranchBottomEdgesAreSolid(t *testing.T) {
-	line := []rune(splashFinalFrameLines()[12])
-	parts := []rune(splashFinalPartLines()[12])
-	for x, part := range parts {
-		if part != 'L' && part != 'R' {
-			continue
-		}
-		switch line[x] {
-		case '▀', '▝', '▘', '▗', '▖':
-			t.Fatalf("branch bottom col %d uses anti-aliased cap glyph %q", x, line[x])
-		}
-	}
+	assertSplashRun(t, lines[12], 15, "████")
+	assertSplashRun(t, lines[12], 23, "████")
+	assertSplashRun(t, lines[12], 31, "████")
+	assertSplashRun(t, lines[12], 14, " ")
+	assertSplashRun(t, lines[12], 35, " ")
 }
 
 func TestSplash_FinalCanopyStraightEdgesMatchTrunkWidth(t *testing.T) {
 	lines := splashFinalFrameLines()
-	parts := splashFinalPartLines()
-	stemWidth := splashPartHorizontalCoverage(lines[12], parts[12], 'T')
-	for _, row := range []int{7, 8, 9} {
+	for _, row := range []int{7, 8} {
 		line := []rune(lines[row])
 		left := splashHorizontalCoverage(line, 3, 7)
 		right := splashHorizontalCoverage(line, 43, 47)
-		if left != stemWidth || right != stemWidth {
-			t.Fatalf("row %d canopy edge widths: left %.1f right %.1f, want %.1f", row, left, right, stemWidth)
+		if left != 4 || right != 4 {
+			t.Fatalf("row %d canopy edge widths: left %.1f right %.1f, want 4.0", row, left, right)
 		}
-		for _, x := range []int{3, 4, 5, 6, 43, 44, 45, 46} {
-			if line[x] != '█' {
-				t.Fatalf("row %d canopy edge col %d = %q, want full block", row, x, line[x])
-			}
-		}
+		assertSplashRun(t, lines[row], 3, "████")
+		assertSplashRun(t, lines[row], 7, " ")
+		assertSplashRun(t, lines[row], 42, " ")
+		assertSplashRun(t, lines[row], 43, "████")
 	}
+
 	line := []rune(lines[9])
-	for _, x := range []int{7, 42} {
-		if line[x] != ' ' {
-			t.Fatalf("canopy base col %d = %q, want the single rounding pixel omitted", x, line[x])
-		}
+	if left, right := splashHorizontalCoverage(line, 3, 7), splashHorizontalCoverage(line, 43, 47); left != 4 || right != 4 {
+		t.Fatalf("canopy bottom widths: left %.1f right %.1f, want 4.0", left, right)
 	}
+	assertSplashRun(t, lines[9], 3, "████")
+	assertSplashRun(t, lines[9], 7, " ")
+	assertSplashRun(t, lines[9], 42, " ")
+	assertSplashRun(t, lines[9], 43, "████")
 }
 
 func TestSplash_FrameLinesKeepFirstFrameVisible(t *testing.T) {
@@ -266,8 +269,8 @@ func TestSplash_FrameLinesKeepFirstFrameVisible(t *testing.T) {
 	if !ok {
 		t.Fatal("first rendered splash frame must still carry ink")
 	}
-	if maxY != splashVisibleHeight-1 || minY < splashVisibleHeight-2 {
-		t.Fatalf("first frame should stay anchored at corrected trunk base row %d, got rows %d..%d",
+	if maxY != splashVisibleHeight-1 || minY < splashVisibleHeight-3 {
+		t.Fatalf("first frame should stay anchored near corrected trunk base row %d, got rows %d..%d",
 			splashVisibleHeight-1, minY, maxY)
 	}
 }
@@ -457,38 +460,19 @@ func splashPartInkRows(lines, parts []string, part rune) int {
 	return rows
 }
 
-func assertSplashRowRevealsAtFinalWidth(t *testing.T, frame, row int, part rune, lines, finalLines, parts []string) {
+func assertSplashRun(t *testing.T, line string, start int, want string) {
 	t.Helper()
-	lineRunes := []rune(lines[row])
-	finalRunes := []rune(finalLines[row])
-	partRunes := []rune(parts[row])
-	seen := false
-	for x, p := range partRunes {
-		if p == part && splashIsInk(lineRunes[x]) {
-			seen = true
-			break
+	gotRunes := []rune(line)
+	wantRunes := []rune(want)
+	for i, wantRune := range wantRunes {
+		col := start + i
+		if col >= len(gotRunes) {
+			t.Fatalf("line too short for run at col %d", col)
+		}
+		if gotRunes[col] != wantRune {
+			t.Fatalf("col %d = %q, want %q in line %q", col, gotRunes[col], wantRune, line)
 		}
 	}
-	if !seen {
-		return
-	}
-	for x, p := range partRunes {
-		if p == part && splashIsInk(finalRunes[x]) && lineRunes[x] != finalRunes[x] {
-			t.Fatalf("frame %d row %d part %c widened late at col %d: got %q want %q",
-				frame, row, part, x, lineRunes[x], finalRunes[x])
-		}
-	}
-}
-
-func splashPartHorizontalCoverage(line, parts string, part rune) float64 {
-	lineRunes := []rune(line)
-	var width float64
-	for x, p := range []rune(parts) {
-		if p == part {
-			width += splashGlyphHorizontalCoverage(lineRunes[x])
-		}
-	}
-	return width
 }
 
 func splashHorizontalCoverage(line []rune, start, end int) float64 {

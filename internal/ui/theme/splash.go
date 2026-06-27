@@ -7,10 +7,11 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Splash palette. The boot mark uses the row ramp plus coverage-adjusted colors for
-// partial block glyphs, giving the pixel logo an anti-aliased edge. The splash
-// animation itself (frames, timing) is a separate component; this file owns only the
-// color choices so theme is the single source of brand green.
+// Splash palette. The boot mark uses a small ink palette: brand green for solid
+// pixels, one darker mix for anti-aliasing pixels, and the terminal background
+// for empty cells. The splash animation itself (frames, timing) is a separate
+// component; this file owns only the color choices so theme is the single source
+// of brand green.
 //
 // Endpoints:
 //
@@ -47,13 +48,12 @@ func SplashRowColor(i, rows int) color.Color {
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
 }
 
-// SplashCoverageColor returns the splash row color adjusted for a partial-cell
-// glyph. Quarter/half blocks use this to act like terminal anti-aliasing: same
-// hue as the row gradient, but mixed toward the dark terminal ground so curved
-// edges read softer than full interior strokes.
-func SplashCoverageColor(i, rows int, coverage float64) color.Color {
+// SplashCoverageColor returns one of the splash's fixed ink colors. Solid cells
+// use the darkest brand green; partial cells use one anti-aliasing tint so curved
+// edges stay consistent instead of producing a wide color ramp.
+func SplashCoverageColor(_, _ int, coverage float64) color.Color {
 	if coverage >= 0.995 {
-		return SplashRowColor(i, rows)
+		return SplashColor()
 	}
 	if coverage < 0 {
 		coverage = 0
@@ -61,12 +61,13 @@ func SplashCoverageColor(i, rows int, coverage float64) color.Color {
 	if coverage > 1 {
 		coverage = 1
 	}
-	base := splashRowRGB(i, rows)
+	const level = 0.72
+	base := splashBase
 	ground := rgb{0x07, 0x10, 0x0D}
 	c := rgb{
-		r: lerp(ground.r, base.r, coverage),
-		g: lerp(ground.g, base.g, coverage),
-		b: lerp(ground.b, base.b, coverage),
+		r: lerp(ground.r, base.r, level),
+		g: lerp(ground.g, base.g, level),
+		b: lerp(ground.b, base.b, level),
 	}
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", c.r, c.g, c.b))
 }

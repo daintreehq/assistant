@@ -26,11 +26,11 @@ func lipglossFg(_ theme.Theme, c color.Color, s string) string {
 // When the terminal is too narrow (columns <= SplashWidth) it renders nothing and fires
 // done immediately (a clipped logo looks broken).
 //
-// The rendered frames are driven by a 40-step procedural reveal over the terminal
-// raster in splash_frames.go: the center trunk starts first, side branches overlap its
-// finish, then the canopy follows last. More render frames than source mask frames keeps
-// the reveal feeling smoother while each displayed slice still lands at its final pixel
-// width.
+// The rendered frames are driven by a 40-step vector reveal in splash_vector.go:
+// original Daintree SVG fills are clipped by the animated mask strokes, supersampled
+// into terminal cells, and then snapped where the mark has long straight edges.
+// The center trunk starts first, side branches overlap its finish, then the canopy
+// follows last.
 //
 // INLINE SIZING: the cockpit renders into the terminal's
 // MAIN buffer, so the splash draws at its NATURAL height — two blank lines down for
@@ -44,8 +44,8 @@ const (
 	SplashHeight = 18
 	SplashFrames = 40
 	// splashSourceFrames is the historical coarse mask count retained in
-	// splashFrames. The renderer now uses the final raster + part map directly, so
-	// it can run at a higher frame rate without duplicating the old source masks.
+	// splashFrames. The renderer now uses vector-derived frames, so it can run at
+	// a higher frame rate without duplicating the old source masks.
 	splashSourceFrames = 20
 	// The source frame envelope stays 18 rows so the boot block keeps its historic
 	// terminal height, but xterm/WebGL cells are tall relative to their width. The
@@ -53,9 +53,9 @@ const (
 	// 4 blank rows of bottom padding so the pixel silhouette matches the flatter
 	// brand mark instead of reading stretched vertically.
 	splashVisibleHeight = 14
-	// These timings follow the original Daintree boot-logo ratios, compressed into
-	// this faster 40-frame terminal timeline: trunk first, side branches overlapping,
-	// then canopy halves starting early enough to grow through the rest of the draw.
+	// These timings follow the original Daintree boot-logo ratios on this 40-frame
+	// terminal timeline: trunk first, side branches overlapping, then canopy halves
+	// starting early enough to grow through the rest of the draw.
 	splashTrunkStartFrame       = 0
 	splashTrunkEndFrame         = 17
 	splashLeftBranchStartFrame  = 5
@@ -65,9 +65,9 @@ const (
 	splashCanopyStartFrame      = 11
 	splashCanopyRightStartDelay = 3
 	splashCanopyEndFrame        = SplashFrames - 5
-	// splashFPS runs the 40-frame reveal in about 0.67s. lingerMs holds the
+	// splashFPS runs the 40-frame reveal in about 1.0s. lingerMs holds the
 	// completed logo before signalling done so it doesn't vanish the instant the draw lands.
-	splashFPS = 60
+	splashFPS = 40
 	lingerMs  = 420
 )
 
@@ -144,11 +144,12 @@ func (s splashModel) view(th theme.Theme, columns, rows int) string {
 	if idx >= SplashFrames {
 		idx = SplashFrames - 1
 	}
-	lines := splashFrameLines(idx)
+	frameRows := splashFrameRows(idx)
 	var b strings.Builder
 	b.WriteString("\n\n") // 2 blank lines of top breathing room (TSX marginTop={2})
-	for i, line := range lines {
-		styled := splashStyledLine(th, i, line)
+	for i, cells := range frameRows {
+		line := splashCellsPlain(cells)
+		styled := splashStyledCells(th, i, cells)
 		b.WriteString(centerLine(styled, line, avail))
 		b.WriteByte('\n')
 	}
@@ -198,26 +199,26 @@ func (s splashModel) bootView(th theme.Theme, columns, rows int) string {
 	}
 	lines := make([]string, 0, height)
 	lines = append(lines, "", "") // marginTop={2}
-	for i, line := range splashFrameLines(idx) {
-		styled := splashStyledLine(th, i, line)
+	for i, cells := range splashFrameRows(idx) {
+		line := splashCellsPlain(cells)
+		styled := splashStyledCells(th, i, cells)
 		lines = append(lines, centerLine(styled, line, avail))
 	}
 	return strings.Join(lines, "\n") // exactly `height` lines
 }
 
-func splashStyledLine(th theme.Theme, row int, line string) string {
+func splashStyledCells(th theme.Theme, row int, cells []splashCell) string {
 	if !th.Mode.Colorize() {
-		return line
+		return splashCellsPlain(cells)
 	}
-	runes := []rune(line)
 	var b strings.Builder
-	for i := 0; i < len(runes); {
-		coverage := splashGlyphCoverage(runes[i])
+	for i := 0; i < len(cells); {
+		coverage := cells[i].coverage
 		j := i + 1
-		for j < len(runes) && splashGlyphCoverage(runes[j]) == coverage {
+		for j < len(cells) && cells[j].coverage == coverage {
 			j++
 		}
-		chunk := string(runes[i:j])
+		chunk := splashCellsPlain(cells[i:j])
 		if coverage <= 0 {
 			b.WriteString(chunk)
 		} else {
@@ -226,23 +227,6 @@ func splashStyledLine(th theme.Theme, row int, line string) string {
 		i = j
 	}
 	return b.String()
-}
-
-func splashGlyphCoverage(r rune) float64 {
-	switch r {
-	case '█':
-		return 1.0
-	case '▛', '▜', '▙', '▟':
-		return 0.92
-	case '▀', '▄', '▌', '▐', '▚', '▞':
-		return 0.82
-	case '▘', '▝', '▖', '▗':
-		return 0.68
-	case ' ':
-		return 0
-	default:
-		return 0.82
-	}
 }
 
 // centerLine centers `styled` (whose visible width equals plain's) within w cells.

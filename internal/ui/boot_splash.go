@@ -162,8 +162,9 @@ func renderSplashFrame(th theme.Theme, idx, cols int) string {
 	b.WriteString("\x1b[?2026h") // begin synchronized update (no flicker)
 	b.WriteString("\x1b[2J\x1b[H")
 	b.WriteString("\r\n\r\n") // marginTop={2}
-	for i, line := range splashFrameLines(idx) {
-		styled := splashStyledLine(th, i, line)
+	for i, cells := range splashFrameRows(idx) {
+		line := splashCellsPlain(cells)
+		styled := splashStyledCells(th, i, cells)
 		b.WriteString(centerLine(styled, line, avail))
 		b.WriteString("\r\n")
 	}

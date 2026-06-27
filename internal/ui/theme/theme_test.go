@@ -127,6 +127,25 @@ func TestSplashGradientEndpoints(t *testing.T) {
 	}
 }
 
+func TestSplashCoveragePaletteUsesOneAntiAliasColor(t *testing.T) {
+	const rows = 14
+	solidTop := SplashCoverageColor(0, rows, 1)
+	solidBase := SplashCoverageColor(rows-1, rows, 1)
+	aliasTop := SplashCoverageColor(0, rows, 0.25)
+	aliasBase := SplashCoverageColor(rows-1, rows, 0.72)
+	aliasStrong := SplashCoverageColor(rows/2, rows, 0.9)
+
+	if !sameColor(solidTop, SplashColor()) || !sameColor(solidBase, SplashColor()) {
+		t.Fatal("solid splash coverage should use the single brand base color")
+	}
+	if !sameColor(aliasTop, aliasBase) || !sameColor(aliasTop, aliasStrong) {
+		t.Fatal("anti-alias coverage should use one row-independent color")
+	}
+	if sameColor(aliasTop, solidTop) {
+		t.Fatal("anti-alias and solid colors should be distinct")
+	}
+}
+
 func TestResolveTheme(t *testing.T) {
 	th := resolveWith(fakeEnv(map[string]string{"DAINTREE_THEME": "ansi", "DAINTREE_ASCII": "1"}))
 	if th.Mode != ModeANSI {
