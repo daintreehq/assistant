@@ -163,6 +163,13 @@ type ToolContext struct {
 	ActiveToolNames []string
 	// DaemonActive reports whether the scheduler is running; nil ⇒ assume active.
 	DaemonActive func() bool
+	// InjectionsPending reports whether the human has typed a message that is
+	// buffered for the running turn but not yet folded in. A long-running in-turn
+	// wait (terminal.awaitAll) polls this to break early and hand control back so
+	// the message is acted on at the next iteration boundary — instead of trapping
+	// the user behind a multi-minute block. nil ⇒ no interactive injector (tests,
+	// non-interactive actors) ⇒ never interrupted.
+	InjectionsPending func() bool
 }
 
 // reportProgress safely emits a progress beat (no-op when the callback is unset).

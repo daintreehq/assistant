@@ -82,7 +82,7 @@ func entExit(code int, out string) TerminalStatusEntry {
 
 func awaitResult(t *testing.T, out map[string]*awaitOutcome, ids []string) (bool, map[string]map[string]any) {
 	t.Helper()
-	res := buildAwaitResult(ids, out, 0, 0)
+	res := buildAwaitResult(ids, out, 0, 0, false)
 	if !res.Ok {
 		t.Fatalf("buildAwaitResult returned not-ok")
 	}
@@ -109,7 +109,7 @@ func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 	deps := Deps{Reader: reader, Router: router}
 	ids := []string{"t1", "t2", "t3"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 10, 0,
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 10, 0,
 		clockSeq(0, 2000, 4000, 6000, 8000, 10000, 12000))
 
 	if attempts != 4 {
@@ -148,7 +148,7 @@ func TestAwaitCohort_PureFSM_NoModelNoDeepRead(t *testing.T) {
 	deps := Deps{Reader: reader, Router: router}
 	ids := []string{"t1"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 6, 0,
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 6, 0,
 		clockSeq(0, 2000, 4000, 6000, 8000, 10000, 12000))
 
 	if attempts != 2 {
@@ -179,7 +179,7 @@ func TestAwaitCohort_NeverWorkedWaitingHoldsForGrace(t *testing.T) {
 	ids := []string{"t1"}
 
 	// Clock stays well under FinishSettleGraceMS (20s) for the whole bounded budget.
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000))
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000))
 	if attempts != 3 {
 		t.Fatalf("a never-worked 'waiting' must hold until the cap (grace not elapsed), got %d attempts", attempts)
 	}
@@ -194,7 +194,7 @@ func TestAwaitCohort_NeverWorkedWaitingHoldsForGrace(t *testing.T) {
 	// But once the grace elapses, the same state settles as finished (fast agent we never
 	// caught mid-work).
 	reader2 := &cohortReader{seq: []map[string]TerminalStatusEntry{{"t1": ent("waiting", "", "$ ")}}}
-	out2, _ := awaitCohort(context.Background(), Deps{Reader: reader2, Router: &safeRouter{}}, ids, 0, 2, 0,
+	out2, _, _ := awaitCohort(context.Background(), Deps{Reader: reader2, Router: &safeRouter{}}, ids, 0, 2, 0,
 		clockSeq(0, domain.FinishSettleGraceMS+1))
 	_, per2 := awaitResult(t, out2, ids)
 	if per2["t1"]["status"] != "finished" {
@@ -213,7 +213,7 @@ func TestAwaitCohort_TimesOutStillWorking(t *testing.T) {
 	deps := Deps{Reader: reader, Router: &safeRouter{}}
 	ids := []string{"t1", "t2"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 4, 0,
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 4, 0,
 		clockSeq(0, 2000, 4000, 6000, 8000))
 	if attempts != 4 {
 		t.Fatalf("should run to the cap (4) waiting on the stuck agent, got %d", attempts)
@@ -239,7 +239,7 @@ func TestAwaitCohort_FailedExitNonzero(t *testing.T) {
 	deps := Deps{Reader: reader, Router: &safeRouter{}}
 	ids := []string{"t1", "t2"}
 
-	out, _ := awaitCohort(context.Background(), deps, ids, 0, 4, 0, clockSeq(0, 2000))
+	out, _, _ := awaitCohort(context.Background(), deps, ids, 0, 4, 0, clockSeq(0, 2000))
 	allFinished, per := awaitResult(t, out, ids)
 	if !allFinished {
 		t.Fatalf("a failed + a completed agent are both DONE → allFinished, got per=%+v", per)
@@ -265,7 +265,7 @@ func TestAwaitCohort_QuestionShortCircuits(t *testing.T) {
 	deps := Deps{Reader: reader, Router: router}
 	ids := []string{"t1", "t2"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 30, 0, clockSeq(0, 2000))
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 30, 0, clockSeq(0, 2000))
 	if attempts != 1 {
 		t.Fatalf("a question + a completed agent both settle on the first tick, got %d attempts", attempts)
 	}
@@ -293,7 +293,7 @@ func TestBuildAwaitResult_NamesStragglersAndQuestions(t *testing.T) {
 		"t3": {status: "question", finished: false, reason: "asking a question"},
 		"t4": nil, // also timed out — proves multi-element ordering
 	}
-	res := buildAwaitResult(ids, outcomes, 5, 1234)
+	res := buildAwaitResult(ids, outcomes, 5, 1234, false)
 	if !res.Ok {
 		t.Fatal("buildAwaitResult returned not-ok")
 	}
@@ -328,7 +328,7 @@ func TestBuildAwaitResult_EmptyStragglerSetsSerializeAsArrays(t *testing.T) {
 		"t1": {status: "finished", finished: true},
 		"t2": {status: "failed", finished: true, exitCode: &code, reason: "exited with code 2"},
 	}
-	res := buildAwaitResult(ids, outcomes, 1, 10)
+	res := buildAwaitResult(ids, outcomes, 1, 10, false)
 	m := res.Result.(map[string]any)
 
 	sw, ok := m["stillWorking"].([]string)
@@ -369,8 +369,8 @@ func TestAwaitCohort_TopLevelArraysFromRealPollLoop(t *testing.T) {
 	deps := Deps{Reader: reader, Router: &safeRouter{}}
 	ids := []string{"t1", "t2"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000, 6000))
-	res := buildAwaitResult(ids, out, attempts, 0)
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000, 6000))
+	res := buildAwaitResult(ids, out, attempts, 0, false)
 	m := res.Result.(map[string]any)
 
 	if af, _ := m["allFinished"].(bool); af {
@@ -398,11 +398,11 @@ func TestAwaitCohort_QuestionDoesNotAbortUnsettledPeer(t *testing.T) {
 	deps := Deps{Reader: reader, Router: &safeRouter{}}
 	ids := []string{"t1", "t2"}
 
-	out, attempts := awaitCohort(context.Background(), deps, ids, 0, 5, 0, clockSeq(0, 2000, 4000, 6000))
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 5, 0, clockSeq(0, 2000, 4000, 6000))
 	if attempts != 3 {
 		t.Fatalf("t2 should keep polling past t1's question until it finishes on tick 3, got %d", attempts)
 	}
-	res := buildAwaitResult(ids, out, attempts, 0)
+	res := buildAwaitResult(ids, out, attempts, 0, false)
 	m := res.Result.(map[string]any)
 	if aq, _ := m["askingQuestion"].([]string); len(aq) != 1 || aq[0] != "t1" {
 		t.Fatalf("askingQuestion should be exactly [t1], got %v", aq)
@@ -416,6 +416,77 @@ func TestAwaitCohort_QuestionDoesNotAbortUnsettledPeer(t *testing.T) {
 	}
 	if per["t2"]["status"] != "finished" {
 		t.Fatalf("t2 should finish despite t1's question, got %v", per["t2"])
+	}
+}
+
+// A message typed mid-wait breaks the cohort wait EARLY: the loop stops the instant it
+// sees a pending injection, hands back whatever has settled, and flags interruptedByUser
+// so the orchestrator reads the user's message (already folded into the turn) before
+// re-awaiting. This is what unblocks a multi-minute await the moment the human wants to
+// redirect — e.g. "that agent errored, re-spawn it" — instead of forcing them to wait or
+// hit Esc (which would nuke the whole turn).
+func TestAwaitCohort_InterruptedByPendingInjection(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1"), "t2": ent("working", "", "w2")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("working", "", "w2b")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("working", "", "w2c")},
+	}}
+	// Pending only from the SECOND check on: tick 1 settles nothing, tick 2 settles t1,
+	// and the injection check then breaks the wait with t2 still working — proving partial
+	// state survives the interrupt.
+	calls := 0
+	deps := Deps{
+		Reader:            reader,
+		Router:            &safeRouter{},
+		InjectionsPending: func() bool { calls++; return calls >= 2 },
+	}
+	ids := []string{"t1", "t2"}
+
+	out, attempts, interrupted := awaitCohort(context.Background(), deps, ids, 0, 30, 0,
+		clockSeq(0, 2000, 4000, 6000))
+	if !interrupted {
+		t.Fatal("a pending injection mid-wait must interrupt the cohort wait")
+	}
+	if attempts != 2 {
+		t.Fatalf("the wait should stop on tick 2 (when the injection appears), far short of the 30 cap, got %d", attempts)
+	}
+	res := buildAwaitResult(ids, out, attempts, 0, interrupted)
+	m := res.Result.(map[string]any)
+	if iu, _ := m["interruptedByUser"].(bool); !iu {
+		t.Fatalf("the result must carry interruptedByUser:true, got %+v", m)
+	}
+	if !strings.HasPrefix(res.Summary, "Paused — you sent a message.") {
+		t.Fatalf("the summary should LEAD with the pause cue, got %q", res.Summary)
+	}
+	// Partial state is preserved across the interrupt.
+	per := map[string]map[string]any{}
+	for _, e := range m["perTerminal"].([]map[string]any) {
+		per[e["terminalId"].(string)] = e
+	}
+	if per["t1"]["status"] != "finished" {
+		t.Fatalf("t1 settled before the interrupt → finished, got %v", per["t1"])
+	}
+	if per["t2"]["status"] != "working" {
+		t.Fatalf("t2 was still working at the interrupt → working, got %v", per["t2"])
+	}
+	if sw, _ := m["stillWorking"].([]string); len(sw) != 1 || sw[0] != "t2" {
+		t.Fatalf("stillWorking should name the unsettled t2 for a later re-await, got %v", sw)
+	}
+}
+
+// With NO injector wired (deps.InjectionsPending nil — tests, watcher/timer/workflow
+// actors), the wait can NEVER be interrupted: it behaves exactly as before and the FSM
+// runs to settle. This guards the gate so a non-interactive await is never cut short.
+func TestAwaitCohort_NoInjectorNeverInterrupts(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1")},
+		{"t1": ent("waiting", "", "done")},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}} // InjectionsPending nil
+	_, _, interrupted := awaitCohort(context.Background(), deps, []string{"t1"}, 0, 6, 0,
+		clockSeq(0, 2000, 4000))
+	if interrupted {
+		t.Fatal("with no injector wired the wait must never report interrupted")
 	}
 }
 

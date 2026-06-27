@@ -99,15 +99,22 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			"ONCE for the whole cohort instead of one wait per agent. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
 			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
 			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
-			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. Read-only; requires Daintree MCP.",
+			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. INTERRUPTIBLE: if the user sends a message while you are waiting, awaitAll returns EARLY with interruptedByUser:true plus whatever has settled so far — their message is already folded into the conversation, so READ IT and adapt (they may want to redirect, e.g. 'that agent errored, re-spawn it') before deciding whether to re-await the stillWorking agents. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitArgs{} }),
-		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+		Handle: func(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a awaitArgs
 			_ = json.Unmarshal(raw, &a)
 			if !deps.Reader.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected, so terminal output cannot be read. Use /reconnect to retry once Daintree is available.")
+			}
+			// Per-call copy so the interactive-injection hook (which depends on the
+			// live ToolContext) never mutates the startup-shared deps. nil tctx (tests)
+			// leaves the hook unset ⇒ the wait is never interrupted.
+			d := deps
+			if tctx != nil {
+				d.InjectionsPending = tctx.InjectionsPending
 			}
 			// Canonicalize the ids against the live roster ONCE, up front. A truncated/prefix
 			// id (the model abbreviates Daintree's full terminal-<uuid> ids) would otherwise
@@ -124,10 +131,10 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			maxAttempts := intOr(a.MaxAttempts, 30)
 
 			startedAt := time.Now().UnixMilli()
-			outcomes, attempts := awaitCohort(ctx, deps, a.TerminalIDs, pollIntervalMs, maxAttempts, startedAt, nil)
+			outcomes, attempts, interrupted := awaitCohort(ctx, d, a.TerminalIDs, pollIntervalMs, maxAttempts, startedAt, nil)
 			elapsedMs := time.Now().UnixMilli() - startedAt
 
-			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs)
+			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs, interrupted)
 		},
 	}
 }
@@ -152,7 +159,7 @@ type awaitTerminal struct {
 // (finished / failed / asking a question) or the attempt cap is hit. nowFn seams the
 // clock for tests (nil ⇒ time.Now). Each terminal settles INDEPENDENTLY from its
 // agentState alone — no tail read, no model call — so a tick is one cheap getStatus.
-func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, maxAttempts int, startedAt int64, nowFn func() int64) (map[string]*awaitOutcome, int) {
+func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, maxAttempts int, startedAt int64, nowFn func() int64) (map[string]*awaitOutcome, int, bool) {
 	nowMS := nowFn
 	if nowMS == nil {
 		nowMS = func() int64 { return time.Now().UnixMilli() }
@@ -163,6 +170,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	}
 
 	attempts := 0
+	interrupted := false
 	for attempts < maxAttempts {
 		if ctx.Err() != nil {
 			break
@@ -221,6 +229,16 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 		if settled {
 			break
 		}
+		// The human typed a message mid-wait. Stop here (don't burn the rest of the
+		// budget) and hand control back with whatever has settled so far — the turn
+		// loop folds their message in at the next boundary, so they can redirect (e.g.
+		// "that agent crashed, re-spawn it") instead of waiting out a multi-minute
+		// block. Checked AFTER the settle test so an all-finished tick still reports a
+		// clean finish rather than an interruption.
+		if deps.InjectionsPending != nil && deps.InjectionsPending() {
+			interrupted = true
+			break
+		}
 		if !isFinal && pollIntervalMs > 0 {
 			delay(ctx, pollIntervalMs)
 		}
@@ -230,7 +248,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	for _, id := range ids {
 		out[id] = term[id].outcome
 	}
-	return out, attempts
+	return out, attempts, interrupted
 }
 
 // awaitFSMVerdict is the pure-FSM settle decision for one terminal at one tick.
@@ -282,7 +300,7 @@ func awaitSettleFSM(agentState, waitingReason string, exitCode *int, seenWorking
 // on the orchestrator). The caller re-awaits stillWorking directly and routes answers to
 // askingQuestion without re-scanning perTerminal. Both are non-nil empty slices when there
 // are none, so they always serialize as JSON [] (a caller iterating them never hits null).
-func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64) tools.ToolResult {
+func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64, interrupted bool) tools.ToolResult {
 	perTerminal := make([]map[string]any, 0, len(ids))
 	stillWorking := make([]string, 0, len(ids))
 	askingQuestion := make([]string, 0, len(ids))
@@ -339,8 +357,13 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 	if len(parts) == 0 {
 		summary = fmt.Sprintf("No agents (of %d).", total)
 	}
+	// An interruption is the headline of the summary: the orchestrator must read the
+	// user's new message before doing anything else, so lead with it.
+	if interrupted {
+		summary = "Paused — you sent a message. " + summary
+	}
 
-	return tools.Ok(summary, map[string]any{
+	result := map[string]any{
 		"allFinished":    allFinished,
 		"perTerminal":    perTerminal,
 		"stillWorking":   stillWorking,
@@ -348,5 +371,14 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		"attempts":       attempts,
 		"elapsedMs":      elapsedMs,
 		"terminalIds":    ids,
-	})
+	}
+	if interrupted {
+		// The wait stopped early because the human typed — NOT because the budget ran
+		// out. The message is already folded into the conversation; the model should
+		// read it and adapt (it may redirect the whole plan) before deciding whether to
+		// re-await the stillWorking agents.
+		result["interruptedByUser"] = true
+		result["note"] = "You stopped early because the user sent a message (now folded into the conversation). Read it and adapt before re-awaiting — they may want to change course. The stillWorking agents are still running; re-await them only if their original work is still wanted."
+	}
+	return tools.Ok(summary, result)
 }

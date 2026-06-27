@@ -270,6 +270,18 @@ func (s *Session) InjectPrompt(text string) {
 	s.pendingInjections = append(s.pendingInjections, text)
 }
 
+// HasPendingInjections reports whether the human has typed a message that is
+// buffered but not yet folded into the running turn. A long-running IN-TURN tool
+// (terminal.awaitAll) polls this so it can break its wait early and hand control
+// back at the next iteration boundary — where foldInInjections delivers the
+// message — instead of stranding the user behind a multi-minute block. Safe to
+// call from any goroutine.
+func (s *Session) HasPendingInjections() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pendingInjections) > 0
+}
+
 // RetractPendingInjection removes and returns the most-recently buffered injection
 // that has NOT yet been folded in (LIFO — mirrors the cockpit's Esc-retract of a
 // typed follow-up). ok is false when nothing is buffered (already folded in, or none

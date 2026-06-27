@@ -134,6 +134,13 @@ func (a *App) buildContext(actor domain.ToolActor, actorID string) *tools.ToolCo
 		SessionID:    a.SessionID,
 		ActorID:      actorID,
 		DaemonActive: func() bool { return a.scheduler != nil },
+		// Only the interactive MAIN turn can be interrupted by a typed message — a
+		// watcher/timer/workflow await has no human folding messages into IT. Read
+		// a.Session LIVE (it is built after buildContext's closures are defined, and
+		// this runs per tool call, long after).
+		InjectionsPending: func() bool {
+			return actor == domain.ActorMain && a.Session != nil && a.Session.HasPendingInjections()
+		},
 	}
 }
 

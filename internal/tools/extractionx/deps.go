@@ -112,6 +112,11 @@ type Deps struct {
 	// DebugLog routes the async-extraction trace (publish failures/drops) to the
 	// global debug log. Zero value ⇒ disabled (a no-op).
 	DebugLog debuglog.Config
+	// InjectionsPending lets the IN-TURN cohort wait (terminal.awaitAll) notice that
+	// the human typed a message mid-wait and break early, handing control back so the
+	// message is acted on now instead of after the whole wait elapses. Set per-call
+	// from the ToolContext; nil ⇒ never interrupted (tests, non-interactive actors).
+	InjectionsPending func() bool
 }
 
 // baseContext returns the app-scoped background context, falling back to
