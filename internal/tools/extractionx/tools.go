@@ -300,7 +300,7 @@ var extractJSONSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "instruction": { "type": "string", "description": "What to extract as STRUCTURED JSON (e.g. each player's vote and reasoning)." },
-    "jsonSchema": { "type": "string", "description": "A JSON-Schema/description of the value to extract; the small model returns it under 'result'. Required — this is the whole point of the json tool. Example: \"{ \\\"votes\\\": [ { \\\"player\\\": \\\"string\\\", \\\"vote\\\": \\\"yes|no\\\" } ] }\"." },` + sharedBaseProps + `
+    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema object describing the value to extract (the same kind you put under a tool's \"parameters\") — NOT an example of the value. Use only standard JSON-Schema keywords: type, properties, required, items, enum, const. The small model returns the value under 'result'. For one entry PER terminal across a cohort, make the value an array of objects each carrying its own terminalId. Correct: {\"type\":\"object\",\"properties\":{\"answers\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"terminalId\":{\"type\":\"string\"},\"fact\":{\"type\":\"string\"}},\"required\":[\"terminalId\",\"fact\"]}}},\"required\":[\"answers\"]}. WRONG and REJECTED by the backend (a value shape, not a schema): {\"answers\":[{\"terminalId\":\"string\",\"fact\":\"string\"}]} or {\"agent\":\"string\",\"fact\":\"string\"}." },` + sharedBaseProps + `
   },
   "required": ["terminalIds", "instruction", "jsonSchema"]
 }`)
