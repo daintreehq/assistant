@@ -241,7 +241,8 @@ type Usage struct {
 
 // StreamMeta is the FIRST streamed event — always before any token. It carries
 // the refreshed opaque state token (resend on the next request), the skills
-// outcome (active set + prelude to render before the reply), and version markers.
+// outcome (active set + newly-loaded titles the client surfaces), and version
+// markers.
 type StreamMeta struct {
 	ProtocolVersion int         `json:"protocol_version"`
 	RequestID       string      `json:"request_id"`
@@ -286,9 +287,10 @@ type StreamDone struct {
 
 // SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces ONLY the
 // NewlyLoaded titles (as an info note in emitSkillsMeta); Active, Prelude, and
-// Selector are decoded off the wire but not rendered. The Prelude (a synthetic
-// skill-load exchange the backend already injected into the UPSTREAM transcript) is
-// never replayed back as client history.
+// Selector are decoded off the wire but not rendered. The backend no longer
+// injects anything into the upstream transcript — a newly-active skill reaches
+// the model as its body in a "# Loaded skills" system message (plain context),
+// so Prelude is now vestigial metadata the client neither replays nor renders.
 type SkillsBlock struct {
 	Active      []SkillRef   `json:"active"`
 	NewlyLoaded []SkillRef   `json:"newly_loaded"`
@@ -303,13 +305,15 @@ type SkillRef struct {
 	Title   string `json:"title"`
 }
 
-// Prelude is the synthetic skill-load tool exchange the client renders first.
+// Prelude is optional skill-load metadata the backend still emits. The client
+// decodes but does NOT render it (the "Skill loaded" card is built from
+// NewlyLoaded titles); it is vestigial pending a coordinated server-side drop.
 type Prelude struct {
 	ToolExecutions []PreludeExecution `json:"tool_executions"`
 }
 
-// PreludeExecution is one synthetic skill__load call + its result, with a
-// display name for the UI.
+// PreludeExecution is one skill-load call + its result, with a display name. Part
+// of the vestigial Prelude metadata — decoded but not rendered by the client.
 type PreludeExecution struct {
 	Call        PreludeToolCall   `json:"call"`
 	Result      PreludeToolResult `json:"result"`
