@@ -8,6 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools/artifactx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/auditx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/contextx"
+	"github.com/daintreehq/daintree-assistant/internal/tools/docsx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/fsx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/grant"
@@ -76,6 +77,11 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, mcpwrap.Tools(mcpwrap.Deps{
 		Store:         mcpwrapWatcherStoreAdapter{s: a.Store},
 		WorkflowStore: mcpwrapWorkflowStoreAdapter{s: a.Store},
+	})...)
+	// The docs family reaches the SECOND, public no-auth docs MCP (a.DocsMCP) — for
+	// answering "how do I use Daintree" help questions — not the primary control plane.
+	all = append(all, docsx.Tools(docsx.Deps{
+		MCP: docsMCPAdapter{c: a.DocsMCP},
 	})...)
 	all = append(all, memory.Tools(memory.Deps{
 		Store: memoryStoreAdapter{s: a.Store},

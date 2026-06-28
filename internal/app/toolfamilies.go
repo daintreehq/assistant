@@ -8,6 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/daintree-assistant/internal/tools"
 
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/auditx"
@@ -62,6 +63,25 @@ func (m contextMCPAdapter) CallTool(ctx context.Context, name string, args map[s
 		return contextx.MCPCallResult{}, err
 	}
 	return contextx.MCPCallResult{Text: res.Text, StructuredContent: res.StructuredContent, IsError: res.IsError}, nil
+}
+
+// docsMCPAdapter maps the docs *mcp.Client onto docsx.MCPClient (CallTool + Connected,
+// over tools.MCPCallResult). It targets a.DocsMCP — the SECOND, public no-auth docs MCP
+// — NOT the primary Daintree control-plane client, so the docs tools stay isolated.
+type docsMCPAdapter struct{ c *mcp.Client }
+
+func (m docsMCPAdapter) Connected() bool { return m.c.IsConnected() }
+
+func (m docsMCPAdapter) CallTool(ctx context.Context, name string, args map[string]any) (tools.MCPCallResult, error) {
+	// Docs tools are pure reads (search / get_page / get_related_pages), so use the
+	// read-retry options — a transient transport blip to the public docs server auto-
+	// retries instead of surfacing a one-shot failure to the model. (CallTool only honors
+	// retries for names on the read-only allowlist, which these three are.)
+	res, err := m.c.CallTool(ctx, name, args, mcp.ReadCallOptions())
+	if err != nil {
+		return tools.MCPCallResult{}, err
+	}
+	return tools.MCPCallResult{Text: res.Text, StructuredContent: res.StructuredContent, IsError: res.IsError}, nil
 }
 
 // mcpxMCPAdapter maps *mcp.Client onto mcpx.MCPClient (adds Status() + ListTools()).

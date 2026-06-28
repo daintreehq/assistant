@@ -82,10 +82,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MCPConnectedMsg:
 		m.degraded = false
-		// Surface the link as a TOP status note (green "● Connected to Daintree MCP"), not a
+		// Surface the link as a TOP status note (green "● Connected to Daintree MCPs"), not a
 		// permanent footer segment: the assistant exists to drive Daintree over MCP, so the
-		// connection is worth announcing ONCE, right under the masthead. (The footer only
-		// flags the link BY EXCEPTION when down.)
+		// connection is worth announcing ONCE, right under the masthead. The plural "MCPs"
+		// covers BOTH servers the assistant connects to — the Daintree control-plane MCP
+		// (this message) and the documentation MCP (connected in parallel during boot). (The
+		// footer only flags the link BY EXCEPTION when down.)
 		//
 		// But ONLY while the transcript is still just the masthead — before any turn has run.
 		// The boot connect is async (bootstrapCmd → MCPConnectedMsg) and the 8s bootCap can
@@ -97,7 +99,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// exception, so a live connection needs no late banner. (In the normal/idle case the
 		// transcript is still empty here, so the banner shows and commits under the masthead.)
 		if !m.transcriptHasWork() {
-			m.addNote(NoteSuccess, "Connected to Daintree MCP")
+			m.addNote(NoteSuccess, "Connected to Daintree MCPs")
 		}
 		return m.onMcpResolved()
 

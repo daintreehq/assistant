@@ -93,7 +93,7 @@ func TestBootBanner_CommitsAboveFirstTurn(t *testing.T) {
 	turnIdx := m.activeTurnIndex()
 	noteIdx := -1
 	for i, c := range m.transcript {
-		if c.Note != nil && c.Note.Text == "Connected to Daintree MCP" {
+		if c.Note != nil && c.Note.Text == "Connected to Daintree MCPs" {
 			noteIdx = i
 		}
 	}
@@ -136,7 +136,7 @@ func TestBootBanner_CommitsAboveFirstTurn(t *testing.T) {
 // hasConnectedNote reports whether the transcript carries the boot connect banner.
 func hasConnectedNote(m Model) bool {
 	for _, c := range m.transcript {
-		if c.Note != nil && c.Note.Text == "Connected to Daintree MCP" {
+		if c.Note != nil && c.Note.Text == "Connected to Daintree MCPs" {
 			return true
 		}
 	}

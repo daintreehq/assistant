@@ -76,32 +76,45 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 79 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 82 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
-// terminal.extract.json structured-extract tool, and the five scratch.* session-scratch
-// tools). The local skill.find / skill.load tools are GONE — the backend now owns skill
-// selection (the migration off the client-side selector), dropping the prior 81 to 79;
-// skill.run.get / skill.step.advance remain. We assert that exact count so a silent
-// family add/drop is caught.
+// terminal.extract.json structured-extract tool, the five scratch.* session-scratch
+// tools, and the three docs.* documentation-search tools). The local skill.find /
+// skill.load tools are GONE — the backend now owns skill selection (the migration off
+// the client-side selector); skill.run.get / skill.step.advance remain. We assert that
+// exact count so a silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 79 {
-		t.Errorf("registered tools = %d, want 79", got)
+	if got != 82 {
+		t.Errorf("registered tools = %d, want 82", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
 	if a.Registry.Has("skill.find") || a.Registry.Has("skill.load") {
 		t.Error("skill.find/skill.load must NOT be registered (skill selection is backend-owned)")
 	}
-	// The count bump from 79→80 is the structured-extract split; assert the new tool
-	// by name so the count guard can't be satisfied by some unrelated add/drop.
+	// The count bump from 79→82 is the docs-MCP family (documentation search). Assert
+	// the new tools by name so the count guard can't be satisfied by an unrelated add/drop.
 	if !a.Registry.Has("terminal.extract.json") {
 		t.Error("terminal.extract.json (structured extract) not registered")
+	}
+	for _, name := range []string{"docs.search", "docs.getPage", "docs.getRelatedPages"} {
+		if !a.Registry.Has(name) {
+			t.Errorf("%s (docs documentation family) not registered", name)
+		}
+	}
+	// The docs MCP is a SECOND, always-constructed transport (never nil), independent of
+	// the primary Daintree control-plane client.
+	if a.DocsMCP == nil {
+		t.Error("DocsMCP is nil — the docs MCP transport must always be constructed")
+	}
+	if a.DocsMCP == a.MCP {
+		t.Error("DocsMCP must be a distinct client from the primary Daintree MCP")
 	}
 	// AssertSafe ran inside Create (boot would have failed otherwise); re-run it to
 	// pin the invariant that the full wired set carries no file-edit tool.

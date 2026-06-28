@@ -229,11 +229,15 @@ func TestRetryGuardReadOnlyHonored(t *testing.T) {
 }
 
 // TestReadOnlyAllowlistOnlyDocumentedReads: every name on the read-only allowlist is
-// a real documented tool (guards against a typo'd allowlist entry that would never
-// match and silently disable retries).
+// a real documented tool on EITHER MCP server — the Daintree control plane or the docs
+// server (guards against a typo'd allowlist entry that would never match and silently
+// disable retries).
 func TestReadOnlyAllowlistOnlyDocumentedReads(t *testing.T) {
 	documented := map[string]struct{}{}
 	for _, n := range DocumentedMcpToolNames {
+		documented[n] = struct{}{}
+	}
+	for _, n := range DocsDocumentedToolNames {
 		documented[n] = struct{}{}
 	}
 	for n := range readOnlyToolNames {

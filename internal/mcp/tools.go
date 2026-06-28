@@ -102,6 +102,14 @@ var readOnlyToolNames = map[string]struct{}{
 	// prepBranchForReview is a pure readiness diagnostic (no commit/push/PR), so a
 	// transient transport blip is safe to auto-retry — it can never double-apply.
 	"workflow.prepBranchForReview": {},
+	// The docs MCP's three tools are pure documentation reads (no Daintree-side state),
+	// safe to auto-retry on a transient blip. These bare names can't collide with the
+	// Daintree control-plane tools (all dotted, e.g. terminal.getStatus), so listing them
+	// here is inert for the primary client and only classifies the docs client's reads
+	// correctly (read, not "mutation", in the trace + auto-retry eligible).
+	"search":            {},
+	"get_page":          {},
+	"get_related_pages": {},
 }
 
 // isReadOnlyToolName reports whether name is on the read-only auto-retry allowlist.
