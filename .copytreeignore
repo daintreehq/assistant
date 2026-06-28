@@ -28,6 +28,17 @@ internal/deps/deps.go
 # zero semantic value for reading the source or understanding the system.
 internal/ui/splash_frames.go
 
+# Splash animation vector data — 22KB of geometry constants + coverage-threshold
+# arrays that splash_frames.go (above) renders into the block-character frames.
+# Same "pure data, no architectural bearing" rationale as splash_frames.go; it was
+# simply missed when that rule was added.
+internal/ui/splash_vector.go
+
+# Splash logo source art — 14KB of raw SVG vector markup. Pure design assets, not
+# go:embed'd and not referenced by any code (the splash renders from the *.go vector/
+# frame data above, not these SVGs). Same "pure data" rationale as the splash family.
+internal/ui/assets/
+
 # Boot/splash animation logic — runs once at startup, self-contained visual sugar
 # with no architectural bearing on the rest of the codebase.
 internal/ui/splash.go
@@ -43,3 +54,8 @@ internal/ui/markdown/
 
 # Runtime recipe config — user-generated/project-specific data, not source code.
 .daintree/
+
+# Superseded doc — DEEPSEEK.md self-declares "SUPERSEDED: the CLI no longer talks to
+# DeepSeek directly" (the backend does now). Worse than dead weight: feeding it to an AI
+# actively misleads it about how the model gateway works. Excluded as stale, not for size.
+docs/DEEPSEEK.md
