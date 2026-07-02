@@ -95,7 +95,26 @@ other writes).
 > `forge.list*` / `forge.get*` reads instead.
 
 Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed by
-**agent** id), `agent.terminal`, `recipe.list`, `recipe.run`.
+**agent** id), `agent.terminal`, `agentSessionHistory.list`, `recipe.list`, `recipe.run`.
+
+> **Closed / resumable sessions.** `agentSessionHistory.list` (workbench tier,
+> `danger:safe`, reached via `daintree.call` — no typed wrapper) lists the closed agent
+> sessions the user can relaunch, read from Daintree's on-disk journal. Optional
+> `worktreeId` scopes it to one worktree (an empty string is **rejected** — omit it to
+> list every resumable session across all worktrees and projects). Returns `{ sessions:
+> [{ sessionId, agentId, worktreeId, title, projectId, savedAt (epoch ms, newest-first),
+> agentLaunchFlags?, agentModelId?, cwd?, branch? }] }`, capped/pruned by the journal's
+> retention policy, and it **never errors** — an empty/unreadable journal yields
+> `{ sessions: [] }`. It is a faithful record listing, **not** a summary of what each
+> session did. There is **no dedicated restore/reopen MCP tool** and **no way to read a
+> closed session's transcript** (a short-lived `agentSessionHistory.getSnapshot` was added
+> then removed Daintree-side — don't reach for it). Raw Daintree "restores" a session by
+> replaying a record's `agentId` / `cwd` / `worktreeId` / `agentLaunchFlags` /
+> `agentModelId` back into `agent.launch`. **CLI caveat:** the CLI blocks raw `agent.launch`
+> (see the daintree.call denylist), and its only spawn path — `agentTask.spawnForEdits` —
+> does **not** carry `agentLaunchFlags` / `agentModelId` / `cwd` and requires a fresh
+> `taskPrompt`, so from the CLI a "restore" is a *fresh* agent spawned in that worktree,
+> **not** a faithful resume of the original session.
 
 > `workflow.startWorkOnIssue` is a COMPLETE synchronous Daintree workflow: it creates the
 > worktree + branch, **spawns the work agent** (raw Daintree leaves it UNSUPERVISED),
