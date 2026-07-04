@@ -208,9 +208,13 @@ func newExtractTool(deps Deps) tools.Tool {
 			"until a condition is met before extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
 			"extraction model call). For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
 			"Read-only; requires Daintree MCP.",
-		Risk:   domain.RiskRead,
-		Schema: extractSchema,
-		Decode: tools.StrictDecoder(func() any { return &extractArgs{} }),
+		Risk: domain.RiskRead,
+		// Independent per-call snapshot read: a batch of extracts (one per agent) can run
+		// concurrently instead of one backend round-trip at a time. Safe because each call
+		// reads its own terminal tail and has no ordering dependency on its siblings.
+		Parallelizable: true,
+		Schema:         extractSchema,
+		Decode:         tools.StrictDecoder(func() any { return &extractArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a extractArgs
 			_ = json.Unmarshal(raw, &a)
@@ -322,9 +326,12 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 			"every agent's fact, or tallying a cohort's votes into one object). Both `instruction` and `jsonSchema` are required. Optionally " +
 			"wait (poll) until a condition is met before extracting. For a single value or plain text to relay from ONE terminal, use " +
 			"terminal.extract instead. Read-only; requires Daintree MCP.",
-		Risk:   domain.RiskRead,
-		Schema: extractJSONSchema,
-		Decode: tools.StrictDecoder(func() any { return &extractJSONArgs{} }),
+		Risk: domain.RiskRead,
+		// Independent per-call snapshot read — see terminal.extract: a cohort of these can
+		// run concurrently, no ordering dependency between calls.
+		Parallelizable: true,
+		Schema:         extractJSONSchema,
+		Decode:         tools.StrictDecoder(func() any { return &extractJSONArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a extractJSONArgs
 			_ = json.Unmarshal(raw, &a)

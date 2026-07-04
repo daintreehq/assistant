@@ -31,6 +31,14 @@ var OneShotExitCode = struct {
 const (
 	RepeatFailureWarn  = 2
 	RepeatFailureAbort = 3
+	// CoarseRepeatFailureAbort is the threshold for the COARSE failure breaker, which
+	// keys on tool name + error code only (NOT the exact args) and counts ONLY
+	// UNRECOVERABLE errors. It catches a futile loop the exact-args breaker misses — a
+	// model that keeps calling the same tool, getting the same unrecoverable error, but
+	// VARYING the arguments each time (e.g. paging a pruned artifact with offset 0, 3500,
+	// 7000…). Higher than RepeatFailureAbort because coarse matching is less precise, but
+	// still far below the dozens of repeats such a loop produces.
+	CoarseRepeatFailureAbort = 6
 	// ControlMessageCount is 0: the CLI no longer holds any client-side control
 	// prefix. The backend owns the system prompt, developer instructions, and skill
 	// bodies; the CLI's visible conversation begins at index 0 with only

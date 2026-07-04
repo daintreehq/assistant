@@ -117,6 +117,18 @@ type Tool struct {
 	// Handle is the implementation.
 	Handle Handler
 
+	// Parallelizable opts this tool INTO concurrent dispatch: when the model emits a
+	// batch containing a consecutive run of parallelizable calls, the turn loop runs
+	// them at once instead of one-at-a-time (see agent.runToolBatch). Default false —
+	// serial. Set true ONLY on tools that are read-only, free of observable side
+	// effects, and have NO ordering dependency on their batch siblings: a fresh,
+	// independent snapshot/summary read (e.g. terminal.extract). NEVER set it on a
+	// barrier/wait tool (terminal.awaitAll) or anything a later call in the same batch
+	// depends on — that would let the dependent call run before the barrier settled.
+	// The registry double-gates this on RiskRead (see the ParallelSafe adapter), so a
+	// mutating tool can't be parallelized even if this is set by mistake.
+	Parallelizable bool
+
 	// projectionParams is the canonical compact JSON the projection emits as the
 	// tool's `parameters`, computed ONCE from Schema at Register (the cold path) so
 	// OpenAITools never re-unmarshals the schema on the hot projection path (rebuilt

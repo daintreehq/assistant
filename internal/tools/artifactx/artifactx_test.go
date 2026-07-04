@@ -26,10 +26,13 @@ func TestArtifactUnavailableAndNotFound(t *testing.T) {
 	if res.Ok || res.Error.Code != codeArtifactUnavailable || res.Error.Recoverable {
 		t.Fatalf("want unrecoverable ARTIFACT_UNAVAILABLE, got %+v", res.Error)
 	}
-	// Missing id → ARTIFACT_NOT_FOUND.
+	// Missing id → ARTIFACT_NOT_FOUND, and it MUST be unrecoverable: the agent loop's
+	// coarse circuit breaker treats a paging-a-pruned-artifact loop as futile ONLY
+	// because this error is unrecoverable, so a change that made it recoverable would
+	// silently reopen that meltdown.
 	res = handle(Deps{Store: fakeStore{}}, json.RawMessage(`{"artifactId":"nope"}`))
-	if res.Ok || res.Error.Code != codeArtifactNotFound {
-		t.Fatalf("want ARTIFACT_NOT_FOUND, got %+v", res.Error)
+	if res.Ok || res.Error.Code != codeArtifactNotFound || res.Error.Recoverable {
+		t.Fatalf("want unrecoverable ARTIFACT_NOT_FOUND, got %+v", res.Error)
 	}
 }
 

@@ -581,8 +581,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	// is folded in — a fresh instruction the backend's selector should react to.
 	instructionRevision := 0
 
-	failureCounts := make(map[string]int)
-	stuckNudged := false
+	breaker := newTurnBreaker()
 
 	// The agentic loop. `iter` counts model rounds purely to drive the phase display
 	// (Analyzing on the first round, Integrating thereafter) — there is deliberately NO
@@ -602,8 +601,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// A folded-in injection is a new active instruction: bump the revision so the
 		// backend's selector cadence reacts to it (the same turn_id continues).
 		instructionRevision++
-		failureCounts = make(map[string]int)
-		stuckNudged = false
+		breaker = newTurnBreaker()
 	}
 	for {
 		// 10a. Cancel check at the top of each round. A cancel always wins over a
@@ -768,7 +766,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 		// 10h. Execute the batch. Announce ALL calls as queued BEFORE sequential
 		//      dispatch, then promote each queued→active→done/failed.
-		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, failureCounts, &stuckNudged); done {
+		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, breaker); done {
 			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
 			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
 			// the model gets the new steer); otherwise the abort stands.
@@ -783,11 +781,18 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	}
 }
 
-// runToolBatch dispatches a batch of tool calls sequentially after announcing the
-// whole batch as queued. Returns (reply, true) when the turn must end (cancel or
-// circuit-breaker abort), else ("", false) to continue the iteration loop.
+// runToolBatch dispatches a batch of tool calls after announcing the whole batch as
+// queued. Maximal consecutive runs of read-only calls (no confirmation, no side
+// effects, no ordering dependency) dispatch CONCURRENTLY — collapsing, say, several
+// terminal.extract summaries from N sequential backend round-trips into ~one — while
+// every other call runs serially in place, preserving the exact ordering and
+// side-effect sequencing that mutating/confirming tools need. All ordered
+// bookkeeping (failure tally, transcript push, circuit breaker) runs on this
+// goroutine in call order regardless of completion order. Returns (reply, true) when
+// the turn must end (cancel or circuit-breaker abort), else ("", false) to continue
+// the iteration loop.
 func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, turn TurnContext,
-	allowedSet map[string]struct{}, failureCounts map[string]int, stuckNudged *bool) (string, bool) {
+	allowedSet map[string]struct{}, breaker *turnBreaker) (string, bool) {
 
 	// Announce the whole batch as queued first.
 	batch := make([]BatchedToolCall, 0, len(calls))
@@ -798,24 +803,14 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 	s.events.Phase(domain.PhaseToolQueued)
 	s.events.ToolBatch(batch)
 
-	type worst struct {
-		name  string
-		count int
-		sig   string
-		res   domain.ToolResult
-	}
-	var worstRepeat *worst
+	var worst batchWorst
 
-	for c := 0; c < len(calls); c++ {
-		call := calls[c]
-		internalName := s.resolveInternal(call.Function.Name)
-
-		// Cancel BEFORE activating/dispatching this call: a cancel that landed while
-		// the PREVIOUS call ran must stop the whole queue here, so no further tool
-		// executes after the user hit Escape. The current call AND every remaining
-		// one (calls[c:]) get a structurally-valid CANCELLED tool result, so each
-		// assistant tool_call still has a matching reply (or DeepSeek 400s on
-		// replay).
+	for c := 0; c < len(calls); {
+		// Cancel BEFORE dispatching the next call/group: a cancel that landed while the
+		// PREVIOUS call ran must stop the whole queue here, so no further tool executes
+		// after the user hit Escape. The current call AND every remaining one (calls[c:])
+		// get a structurally-valid CANCELLED tool result, so each assistant tool_call
+		// still has a matching reply (or DeepSeek 400s on replay).
 		if ctx.Err() != nil {
 			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
 			s.events.Phase(domain.PhaseCancelled)
@@ -823,156 +818,398 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			return domain.CancelledReply, true
 		}
 
-		// Promote queued→active and drive the phase.
 		s.events.Phase(domain.PhaseToolRunning)
-		s.events.ToolState(call.ID, ToolStateActive)
 
-		startedAt := domain.NowMS()
-		var res domain.ToolResult
-
-		// Parse args (catch → INVALID_TOOL_ARGS_JSON, recoverable). The ToolCall
-		// event carries the raw args string on parse failure, else the raw string
-		// passed through to dispatch.
-		parseFailed := false
-		if call.Function.Arguments != "" {
-			var probe any
-			if json.Unmarshal([]byte(call.Function.Arguments), &probe) != nil {
-				parseFailed = true
-			}
+		// Greedily gather a maximal run of consecutive read-only calls to dispatch
+		// concurrently; a run of ≥2 goes parallel. A lone call — or any call that
+		// mutates, confirms, or isn't classified read-only — runs on the serial path,
+		// preserving today's exact ordering and side-effect sequencing.
+		e := c
+		for e < len(calls) && s.callParallelSafe(calls[e], allowedSet) {
+			e++
 		}
 
-		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
-
-		switch {
-		case parseFailed:
-			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
-			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
-			// This rejection never reaches the registry's Dispatch, so it produces no
-			// tool.call audit event — trace it here or it is invisible in the log.
-			s.traceToolGap("tool.args.invalid", turn.RunID, call.ID, internalName, call.Function.Arguments)
-		case allowedSet != nil && !setHas(allowedSet, internalName):
-			// Defensive only: allowedSet is now ALWAYS nil (skills never narrow the
-			// toolset — every turn offers the full registry; see buildToolFilterLocked),
-			// so this branch cannot fire from a loaded skill. It survives purely as a
-			// guard in case a future caller ever passes an explicit allow-list; it is NOT
-			// a skill capability gate, and a skill must never be the reason a tool is
-			// unavailable.
-			res = domain.Fail("TOOL_NOT_OFFERED",
-				internalName+" is not offered in this turn's tool spec.",
-				domain.Unrecoverable())
-			res.Summary = internalName + " is not offered in this turn's tool spec."
-			// Also short-circuits before Dispatch → trace it so the (dormant today) gate
-			// firing is never silent.
-			s.traceToolGap("tool.not_offered", turn.RunID, call.ID, internalName, "")
-		default:
-			argsJSON := call.Function.Arguments
-			if argsJSON == "" {
-				argsJSON = "{}"
-			}
-			// Per-call progress plumbing: stamp the active call id + a forwarder so an
-			// in-tool substep emits ToolProgress(callID, msg) on this turn's sink,
-			// tagged so the UI maps it to the right activity row.
-			callTurn := turn
-			callTurn.CallID = call.ID
-			callTurn.Progress = func(callID string, msg string) {
-				if msg == "" {
-					return
-				}
-				s.events.ToolProgress(callID, msg)
-			}
-			res = s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
-		}
-
-		// Session-cumulative per-tool failure tally (issue #251): a coarse "which tools
-		// keep failing" signal that accumulates across rounds, off the audit path. Counts
-		// EVERY failed result (bad-args and not-offered included — a tool the model keeps
-		// misusing is a real drift signal), EXCEPT a result produced while the turn is
-		// being cancelled: a user abort tearing down mid-tool is not a tool failure
-		// (mirrors maybeAutoCompact, which also refuses to count a cancel as an outage).
-		// The increment lands BEFORE the event so FailureCount carries the up-to-date
-		// total; recordToolFailure takes s.mu itself (no lock held here). Ok results and
-		// cancelled results carry 0.
-		failCount := 0
-		if !res.Ok && ctx.Err() == nil {
-			failCount = s.recordToolFailure(internalName)
-		}
-
-		s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: domain.NowMS(), FailureCount: failCount})
-		if res.Ok {
-			s.events.ToolState(call.ID, ToolStateDone)
+		if e-c >= 2 {
+			worst = s.runParallelGroup(ctx, calls, c, e, turn, allowedSet, breaker, worst)
+			c = e
 		} else {
-			s.events.ToolState(call.ID, ToolStateFailed)
+			call := calls[c]
+			internalName := s.resolveInternal(call.Function.Name)
+			startedAt := s.announceCall(call, internalName)
+			res := s.runDispatch(ctx, call, internalName, turn, allowedSet)
+			worst = s.recordCallResult(ctx, call, internalName, callResult{startedAt: startedAt, res: res}, breaker, worst)
+			c++
 		}
 
-		s.pushMessage(models.ChatMessage{
-			Role:          "tool",
-			ToolCallID:    call.ID,
-			Name:          internalName,
-			StringContent: SerializeToolResult(res, s.artifacts),
-		})
-
-		// Circuit-breaker bookkeeping: signature is the CANONICALIZED argument JSON
-		// (key order / whitespace normalized) + the error code, so a semantically
-		// identical call failing the SAME way increments the same counter even when
-		// the model re-emits it with reordered keys.
-		if !res.Ok {
-			errCode := ""
-			if res.Error != nil {
-				errCode = res.Error.Code
-			}
-			sig := failureSignature(internalName, call.Function.Arguments, errCode)
-			failureCounts[sig]++
-			count := failureCounts[sig]
-			if worstRepeat == nil || count > worstRepeat.count {
-				worstRepeat = &worst{name: internalName, count: count, sig: sig, res: res}
-			}
-		}
-
-		// Mid-batch cancel: a cancel that landed DURING this call's dispatch stops the
-		// queue now. This call already has its real result; stub every remaining
-		// undispatched call (calls[c+1:]) so the transcript stays well-formed (each
-		// assistant tool_call needs a matching tool result, or DeepSeek 400s on
+		// Mid-batch cancel: a cancel that landed DURING the just-run call/group stops the
+		// queue now. Everything dispatched already has its real result; stub every
+		// remaining undispatched call (calls[c:]) so the transcript stays well-formed
+		// (each assistant tool_call needs a matching tool result, or DeepSeek 400s on
 		// replay).
 		if ctx.Err() != nil {
-			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c+1))
+			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
 			s.events.Phase(domain.PhaseCancelled)
 			s.events.AssistantCancelled("")
 			return domain.CancelledReply, true
 		}
 	}
 
-	// After every call in the batch has a result, apply the circuit breaker.
-	if worstRepeat != nil && worstRepeat.count >= domain.RepeatFailureAbort {
-		detail := worstRepeat.res.Summary
-		if worstRepeat.res.Error != nil && worstRepeat.res.Error.Code != "" {
-			detail = trimSpace(worstRepeat.res.Error.Code + ": " + worstRepeat.res.Error.Message)
+	// After every call in the batch has a result, apply the circuit breakers.
+
+	// FINE breaker: the SAME call (tool + identical args) failing the SAME way.
+	if worst.fine != nil && worst.fine.count >= domain.RepeatFailureAbort {
+		detail := worst.fine.res.Summary
+		if worst.fine.res.Error != nil && worst.fine.res.Error.Code != "" {
+			detail = trimSpace(worst.fine.res.Error.Code + ": " + worst.fine.res.Error.Message)
 		}
-		msg := "Stopped: called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
+		msg := "Stopped: called " + worst.fine.name + " " + itoa(worst.fine.count) +
 			" times this turn with identical arguments, each failing the same way (" + detail +
 			"). Tell the user what's blocking and what you tried rather than repeating the call."
-		s.traceToolRepeat("tool.repeat.abort", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
+		s.traceToolRepeat("tool.repeat.abort", turn.RunID, worst.fine.name, worst.fine.count, errCodeOf(worst.fine.res), worst.fine.sig)
 		s.events.Phase(domain.PhaseFailed)
 		s.events.Error(msg)
 		return msg, true
 	}
-	if worstRepeat != nil && worstRepeat.count >= domain.RepeatFailureWarn && !*stuckNudged {
-		*stuckNudged = true
-		codeSuffix := ""
-		if worstRepeat.res.Error != nil && worstRepeat.res.Error.Code != "" {
-			codeSuffix = " (" + worstRepeat.res.Error.Code + ")"
+
+	// COARSE breaker: the same tool returning the same UNRECOVERABLE error repeatedly
+	// even with DIFFERENT arguments — a futile loop the fine breaker can't see because
+	// each varied-args call has a distinct fine signature (the model paging a pruned
+	// artifact by offset, retrying a not-found id with tweaks, etc.). Retrying an
+	// unrecoverable error can never succeed, so stop the turn rather than let it burn.
+	if worst.coarse != nil && worst.coarse.count >= domain.CoarseRepeatFailureAbort {
+		detail := worst.coarse.res.Summary
+		if worst.coarse.res.Error != nil && worst.coarse.res.Error.Code != "" {
+			detail = trimSpace(worst.coarse.res.Error.Code + ": " + worst.coarse.res.Error.Message)
 		}
-		s.traceToolRepeat("tool.repeat.warning", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
-		nudge := "[system event]\nYou have called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
+		msg := "Stopped: called " + worst.coarse.name + " " + itoa(worst.coarse.count) +
+			" times this turn, each failing with the same unrecoverable error (" + detail +
+			") despite different arguments. Retrying an unrecoverable error can't succeed — tell the user what's blocking and stop rather than varying the arguments."
+		s.traceToolRepeat("tool.repeat.abort.coarse", turn.RunID, worst.coarse.name, worst.coarse.count, errCodeOf(worst.coarse.res), worst.coarse.sig)
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg, true
+	}
+
+	if worst.fine != nil && worst.fine.count >= domain.RepeatFailureWarn && !breaker.nudged {
+		breaker.nudged = true
+		codeSuffix := ""
+		if worst.fine.res.Error != nil && worst.fine.res.Error.Code != "" {
+			codeSuffix = " (" + worst.fine.res.Error.Code + ")"
+		}
+		s.traceToolRepeat("tool.repeat.warning", turn.RunID, worst.fine.name, worst.fine.count, errCodeOf(worst.fine.res), worst.fine.sig)
+		nudge := "[system event]\nYou have called " + worst.fine.name + " " + itoa(worst.fine.count) +
 			" times this turn with the same arguments and it failed the same way each time" + codeSuffix +
 			". Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again."
 		s.pushMessage(models.TextMessage("user", nudge))
 		// Surface the stuck loop to the human too. The nudge above only steers the model;
 		// without this, a tool repeating the same failure stayed invisible in the footer
 		// until the turn either recovered or burned all the way to the abort threshold.
-		s.events.Warn(worstRepeat.name + " keeps failing the same way" + codeSuffix +
+		s.events.Warn(worst.fine.name + " keeps failing the same way" + codeSuffix +
 			" — nudging the assistant to change approach.")
 	}
 	return "", false
+}
+
+// maxParallelToolDispatch bounds how many parallel-safe calls in one batch dispatch
+// concurrently. Tools such as terminal.extract read the terminal tail over the
+// Daintree MCP (which throttles getOutput) and then call a backend utility model, so
+// an unbounded fan-out would burst the throttle; a small cap keeps the burst gentle
+// while still collapsing a typical multi-agent extract batch from N sequential
+// round-trips into roughly one.
+const maxParallelToolDispatch = 6
+
+// batchRepeat tracks the most-repeated failing call under one signature — the input
+// to a circuit breaker applied after the whole batch has run.
+type batchRepeat struct {
+	name  string
+	count int
+	sig   string
+	res   domain.ToolResult
+}
+
+// turnBreaker is the per-turn circuit-breaker state: two failure tallies that
+// accumulate across every round of a turn (reset only when a fresh user instruction is
+// folded in). fine keys on tool + ARGS + code, catching a call retried byte-identically
+// (aborts at RepeatFailureAbort). coarse keys on tool + code and counts ONLY
+// unrecoverable errors, catching a loop that VARIES args while failing the same futile
+// way — the artifact-paging loop the fine tally misses (aborts at
+// CoarseRepeatFailureAbort). nudged gates the one-shot "you're repeating" warning.
+type turnBreaker struct {
+	fine   map[string]int
+	coarse map[string]int
+	nudged bool
+}
+
+func newTurnBreaker() *turnBreaker {
+	return &turnBreaker{fine: map[string]int{}, coarse: map[string]int{}}
+}
+
+// batchWorst carries the worst (highest-count) repeat under each breaker signature seen
+// so far in a batch, threaded through recordCallResult in call order.
+type batchWorst struct {
+	fine   *batchRepeat
+	coarse *batchRepeat
+}
+
+// callResult pairs one call's start time (from announceCall) with its dispatch
+// outcome (from runDispatch), handed to the ordered bookkeeping step recordCallResult.
+type callResult struct {
+	startedAt int64
+	res       domain.ToolResult
+}
+
+// callParallelSafe reports whether one call may join a concurrent group: its args
+// parse (a bad-JSON call runs serially so its INVALID_TOOL_ARGS_JSON result keeps
+// today's ordering), it carries no `wait` barrier, it is offered, and the runner
+// classifies the tool as parallel-safe (Tool.Parallelizable + read-risk — an explicit
+// opt-in, NOT every read tool: barrier reads like terminal.awaitAll are deliberately
+// excluded). The runner exposes ParallelSafe only in production (the real registry
+// adapter); test fakes that don't keep the fully-serial path unless they opt in — so
+// existing serial-ordering tests are unaffected.
+func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[string]struct{}) bool {
+	// Parse-probe AND barrier-probe in one shot: a `wait` condition turns even an
+	// opted-in read (terminal.extract / .json) into a BARRIER — it polls until the
+	// terminal settles, and a later call in the batch may depend on that settle — so a
+	// wait-bearing call must run serially, exactly like terminal.awaitAll. Only a pure
+	// no-wait snapshot read parallelizes.
+	if call.Function.Arguments != "" {
+		var probe struct {
+			Wait json.RawMessage `json:"wait"`
+		}
+		if json.Unmarshal([]byte(call.Function.Arguments), &probe) != nil {
+			return false // not a JSON object (or invalid) → serial, keeps ordering
+		}
+		if len(probe.Wait) > 0 && string(probe.Wait) != "null" {
+			return false // barrier: has a wait condition
+		}
+	}
+	internalName := s.resolveInternal(call.Function.Name)
+	if allowedSet != nil && !setHas(allowedSet, internalName) {
+		return false
+	}
+	ps, ok := s.deps.Tools.(parallelSafeRunner)
+	return ok && ps.ParallelSafe(internalName)
+}
+
+// announceCall emits the per-call queued→active + ToolCall liveness events and
+// returns the call's start time. It MUST run on the turn goroutine, NEVER a worker:
+// the durable RunEventSink (wired into the live MultiSink) mutates unguarded seq /
+// contentBuffer state inside ToolCall, so concurrent emits would race and corrupt the
+// run-event log. For a parallel group the caller announces every member up front, in
+// order, before launching any dispatch.
+func (s *Session) announceCall(call models.ToolCallRequest, internalName string) int64 {
+	s.events.ToolState(call.ID, ToolStateActive)
+	startedAt := domain.NowMS()
+	// The ToolCall event carries the raw args string (parsed as JSON when valid, else
+	// the raw string), independent of whether the args later parse — so it is emitted
+	// here up front rather than after the parse probe in runDispatch.
+	s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
+	return startedAt
+}
+
+// runDispatch runs ONE announced tool call and returns its result: it parses the args
+// (bad JSON → INVALID_TOOL_ARGS_JSON, recoverable), enforces the (dormant) allow-list,
+// then dispatches. It emits NO liveness events (announceCall already did) and does NO
+// ordered bookkeeping (failure tally / transcript push / circuit-breaker fold all live
+// in recordCallResult), so it is safe to run on a worker goroutine as part of a
+// parallel group: its only side effects are the concurrency-safe traceToolGap
+// side-channel (only on the serial parse/not-offered branches, which never occur in a
+// parallel group) and the Dispatch itself (whose audit/log/MCP/backend deps already
+// tolerate concurrent callers — the daemon dispatches alongside the turn today, and
+// the ToolProgress it forwards is a no-op on the durable sink, mutex-guarded elsewhere).
+func (s *Session) runDispatch(ctx context.Context, call models.ToolCallRequest, internalName string, turn TurnContext, allowedSet map[string]struct{}) domain.ToolResult {
+	// Parse args (catch → INVALID_TOOL_ARGS_JSON, recoverable).
+	parseFailed := false
+	if call.Function.Arguments != "" {
+		var probe any
+		if json.Unmarshal([]byte(call.Function.Arguments), &probe) != nil {
+			parseFailed = true
+		}
+	}
+
+	switch {
+	case parseFailed:
+		res := domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
+		res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
+		// This rejection never reaches the registry's Dispatch, so it produces no
+		// tool.call audit event — trace it here or it is invisible in the log.
+		s.traceToolGap("tool.args.invalid", turn.RunID, call.ID, internalName, call.Function.Arguments)
+		return res
+	case allowedSet != nil && !setHas(allowedSet, internalName):
+		// Defensive only: allowedSet is now ALWAYS nil (skills never narrow the toolset —
+		// every turn offers the full registry; see buildToolFilterLocked), so this branch
+		// cannot fire from a loaded skill. It survives purely as a guard in case a future
+		// caller ever passes an explicit allow-list; it is NOT a skill capability gate, and
+		// a skill must never be the reason a tool is unavailable.
+		res := domain.Fail("TOOL_NOT_OFFERED",
+			internalName+" is not offered in this turn's tool spec.",
+			domain.Unrecoverable())
+		res.Summary = internalName + " is not offered in this turn's tool spec."
+		// Also short-circuits before Dispatch → trace it so the (dormant today) gate
+		// firing is never silent.
+		s.traceToolGap("tool.not_offered", turn.RunID, call.ID, internalName, "")
+		return res
+	default:
+		argsJSON := call.Function.Arguments
+		if argsJSON == "" {
+			argsJSON = "{}"
+		}
+		// Per-call progress plumbing: stamp the active call id + a forwarder so an in-tool
+		// substep emits ToolProgress(callID, msg) on this turn's sink, tagged so the UI maps
+		// it to the right activity row.
+		callTurn := turn
+		callTurn.CallID = call.ID
+		callTurn.Progress = func(callID string, msg string) {
+			if msg == "" {
+				return
+			}
+			s.events.ToolProgress(callID, msg)
+		}
+		return s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
+	}
+}
+
+// recordCallResult applies the ordered post-dispatch bookkeeping for one completed
+// call and MUST run on the turn goroutine in call order — it mutates the breaker
+// tallies, the transcript, and the worst-repeat accumulators. It records the
+// session-cumulative failure tally (which feeds the ToolResult event's FailureCount),
+// emits ToolResult + ToolState(done/failed), pushes the tool message onto the
+// transcript, and folds the call into BOTH circuit-breaker signatures. It does NOT
+// check cancellation — the caller does that at batch/group granularity. Returns the
+// (possibly updated) worst repeats.
+func (s *Session) recordCallResult(ctx context.Context, call models.ToolCallRequest, internalName string, out callResult, breaker *turnBreaker, worst batchWorst) batchWorst {
+	res := out.res
+
+	// Session-cumulative per-tool failure tally (issue #251): a coarse "which tools keep
+	// failing" signal that accumulates across rounds, off the audit path. Counts EVERY
+	// failed result (bad-args and not-offered included — a tool the model keeps misusing
+	// is a real drift signal), EXCEPT a result produced while the turn is being
+	// cancelled: a user abort tearing down mid-tool is not a tool failure (mirrors
+	// maybeAutoCompact, which also refuses to count a cancel as an outage). The increment
+	// lands BEFORE the event so FailureCount carries the up-to-date total;
+	// recordToolFailure takes s.mu itself (no lock held here). Ok results and cancelled
+	// results carry 0.
+	failCount := 0
+	if !res.Ok && ctx.Err() == nil {
+		failCount = s.recordToolFailure(internalName)
+	}
+
+	s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: domain.NowMS(), FailureCount: failCount})
+	if res.Ok {
+		s.events.ToolState(call.ID, ToolStateDone)
+	} else {
+		s.events.ToolState(call.ID, ToolStateFailed)
+	}
+
+	s.pushMessage(models.ChatMessage{
+		Role:          "tool",
+		ToolCallID:    call.ID,
+		Name:          internalName,
+		StringContent: SerializeToolResult(res, s.artifacts),
+	})
+
+	if !res.Ok {
+		errCode := ""
+		if res.Error != nil {
+			errCode = res.Error.Code
+		}
+
+		// FINE tally: signature is the CANONICALIZED argument JSON (key order / whitespace
+		// normalized) + the error code, so a semantically identical call failing the SAME
+		// way increments the same counter even when the model re-emits it with reordered
+		// keys. Catches a byte-identical retry loop fast (RepeatFailureAbort).
+		fineSig := failureSignature(internalName, call.Function.Arguments, errCode)
+		breaker.fine[fineSig]++
+		if fc := breaker.fine[fineSig]; worst.fine == nil || fc > worst.fine.count {
+			worst.fine = &batchRepeat{name: internalName, count: fc, sig: fineSig, res: res}
+		}
+
+		// COARSE tally: the PAGINATION-INSENSITIVE signature (tool + code + args with
+		// paging fields stripped), and ONLY for UNRECOVERABLE errors. This is the guard the
+		// fine tally misses — a loop that keeps hitting the same futile error while only
+		// advancing the page (the model re-reading a pruned artifact at offset 0, 3500,
+		// 7000…: same id + same ARTIFACT_NOT_FOUND, different offset → a distinct FINE
+		// signature every time, so the fine counter never trips). Stripping the paging
+		// fields collapses those to one signature, while genuinely different resources keep
+		// distinct signatures — so a batch legitimately probing several different missing
+		// ids does NOT false-trip. Retrying an unrecoverable error can never succeed, so a
+		// handful against the same resource means the model is stuck.
+		if res.Error != nil && !res.Error.Recoverable && errCode != "" {
+			coarseSig := coarseFailureSignature(internalName, call.Function.Arguments, errCode)
+			breaker.coarse[coarseSig]++
+			if cc := breaker.coarse[coarseSig]; worst.coarse == nil || cc > worst.coarse.count {
+				worst.coarse = &batchRepeat{name: internalName, count: cc, sig: coarseSig, res: res}
+			}
+		}
+	}
+	return worst
+}
+
+// runParallelGroup dispatches calls[from:to] — every one parallel-safe, offered, and
+// valid-args (guaranteed by callParallelSafe) — concurrently, then applies the ordered
+// bookkeeping in call order. Concurrency collapses N independent read round-trips (e.g.
+// several terminal.extract summaries, each a backend utility-model call) from N
+// sequential waits into ~one. The goroutine boundary is deliberately NARROW: workers
+// run ONLY runDispatch (the Dispatch call + its concurrency-tolerant deps). All event
+// emission stays on the turn goroutine — announceCall up front (the durable RunEventSink
+// mutates unguarded state, so ToolCall must never fire from a worker) and
+// recordCallResult after — so the transcript and circuit-breaker fold are deterministic
+// (call order) regardless of which dispatch finished first. Returns the updated worst
+// repeats.
+func (s *Session) runParallelGroup(ctx context.Context, calls []models.ToolCallRequest, from, to int, turn TurnContext, allowedSet map[string]struct{}, breaker *turnBreaker, worst batchWorst) batchWorst {
+	n := to - from
+	names := make([]string, n)
+	outs := make([]callResult, n)
+
+	// Announce every member up front, in order, on the turn goroutine — active spinners
+	// for the whole concurrent group appear at once, and the racy ToolCall emit never
+	// leaves this goroutine.
+	for i := 0; i < n; i++ {
+		names[i] = s.resolveInternal(calls[from+i].Function.Name)
+		outs[i].startedAt = s.announceCall(calls[from+i], names[i])
+	}
+
+	// Bound the fan-out with a counting semaphore so a huge batch can't open an
+	// unbounded number of concurrent MCP reads / backend calls at once.
+	sem := make(chan struct{}, maxParallelToolDispatch)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// A cancel that landed while earlier slots ran must stop the rest here: honor
+			// "no tool executes after Escape" even for group members still queued behind the
+			// semaphore. The skipped call gets a structurally-valid CANCELLED result so its
+			// assistant tool_call still gets a matching reply.
+			if ctx.Err() != nil {
+				outs[i].res = cancelledToolStub()
+				return
+			}
+			// Each goroutine writes ONLY its own slot — distinct indices, no race.
+			outs[i].res = s.runDispatch(ctx, calls[from+i], names[i], turn, allowedSet)
+		}(i)
+	}
+	wg.Wait()
+
+	// Apply the ordered bookkeeping on the turn goroutine, in call order, so the
+	// transcript and circuit-breaker fold stay deterministic regardless of which call
+	// finished first.
+	for i := 0; i < n; i++ {
+		worst = s.recordCallResult(ctx, calls[from+i], names[i], outs[i], breaker, worst)
+	}
+	return worst
+}
+
+// cancelledToolStub is the structurally-valid CANCELLED tool result for a group member
+// that never dispatched because the turn was cancelled mid-group — mirrors the stub
+// stubCancelledFrom pushes for undispatched calls, so every assistant tool_call keeps a
+// matching reply and the transcript replays cleanly.
+func cancelledToolStub() domain.ToolResult {
+	stub := domain.Fail("CANCELLED", "Turn cancelled.", domain.Unrecoverable())
+	stub.Summary = "Turn cancelled before this tool was executed."
+	return stub
 }
 
 // stubCancelledFrom pushes a structurally-valid CANCELLED tool result for every
@@ -984,13 +1221,11 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) in
 	for r := from; r < len(calls); r++ {
 		pending := calls[r]
 		pendingName := s.resolveInternal(pending.Function.Name)
-		stub := domain.Fail("CANCELLED", "Turn cancelled.", domain.Unrecoverable())
-		stub.Summary = "Turn cancelled before this tool was executed."
 		s.pushMessage(models.ChatMessage{
 			Role:          "tool",
 			ToolCallID:    pending.ID,
 			Name:          pendingName,
-			StringContent: SerializeToolResult(stub, s.artifacts),
+			StringContent: SerializeToolResult(cancelledToolStub(), s.artifacts),
 		})
 		stubbed++
 	}
@@ -1829,6 +2064,31 @@ func setHas(set map[string]struct{}, k string) bool { _, ok := set[k]; return ok
 func failureSignature(name, rawArgs, errCode string) string {
 	b, _ := json.Marshal([]string{name, canonicalJSON(rawArgs), errCode})
 	return string(b)
+}
+
+// coarsePaginationFields are the volatile paging/cursor arguments stripped when
+// building the coarse failure signature: re-reading the same failing resource while
+// only advancing one of these must collapse to a single signature.
+var coarsePaginationFields = []string{"offset", "limit", "length", "page", "cursor", "nextOffset", "startOffset"}
+
+// coarseFailureSignature is the pagination-insensitive failure signature for the coarse
+// circuit breaker: tool name + error code + the canonicalized args with paging fields
+// removed. It collapses an argument-varied futile loop (the model paging a pruned
+// artifact by offset) that the exact-args fine signature misses, WITHOUT the
+// false-positives a tool+code-only key would cause on a batch of distinct missing
+// resources. Non-object args fall through to the plain signature.
+func coarseFailureSignature(name, rawArgs, errCode string) string {
+	stripped := rawArgs
+	var m map[string]any
+	if json.Unmarshal([]byte(rawArgs), &m) == nil {
+		for _, k := range coarsePaginationFields {
+			delete(m, k)
+		}
+		if b, err := json.Marshal(m); err == nil {
+			stripped = string(b)
+		}
+	}
+	return failureSignature(name, stripped, errCode)
 }
 
 // canonicalJSON normalizes a JSON arguments string so two semantically-identical
