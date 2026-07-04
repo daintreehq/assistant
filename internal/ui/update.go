@@ -185,6 +185,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// One render cycle has passed since launch, so the short footer has flushed and
 		// the renderer's cell buffer is sized to it — safe to begin scrollback commits
 		// (the masthead lands first). See scheduleCommit.
+		//
+		// UNLESS a resize's debounced redraw is still pending: this arm tick is
+		// timer-ordered (Init's 60ms, or a prior redraw's sequence), and re-arming
+		// inside the disarm window would let a commit Println against pre-redraw
+		// geometry (#1613). Drop it — the pending redraw's own sequence carries
+		// the arm that matters.
+		if m.redrawPending {
+			return m, nil
+		}
 		m.commitArmed = true
 		return m.afterStateChange(nil)
 

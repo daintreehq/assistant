@@ -12,9 +12,11 @@ import (
 
 // --- Gap 1: manual redraw key (Ctrl+L) ---
 
-// TestCtrlLRedrawIsNonDestructive verifies Ctrl+L issues a repaint command without mutating
-// any state — crucially NOT wiping the transcript (native scrollback) the way /clear or a
-// resize-redraw does. It is a pure footer repaint, available in every view.
+// TestCtrlLRedrawIsNonDestructive verifies Ctrl+L preserves the transcript MODEL and the
+// active view/scroll state. Ctrl+L is now the full nuclear redraw (host wipe + re-commit,
+// same as a resize-redraw — see resize_test.go TestCtrlL_PerformsNuclearRedraw): the host
+// pixels are rebuilt, but everything the app owns re-commits from this untouched model, so
+// "non-destructive" here means no model/view state is lost, unlike /clear.
 func TestCtrlLRedrawIsNonDestructive(t *testing.T) {
 	m := testModel(80)
 	m.transcript = []TranscriptCell{{Note: &NoteCell{ID: "n1", Level: NoteInfo, Text: "keep me"}}}

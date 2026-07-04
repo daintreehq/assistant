@@ -36,17 +36,30 @@ import (
 // terminal is too small for the 48×18 mark. Ctrl-C / ctx cancellation aborts cleanly,
 // restoring the cursor and leaving a clean screen for BT.
 //
-// When the full animation completes, handoffFrame is called and written immediately under
-// synchronized output. That removes the visible blank interval between the host-owned
-// splash and Bubble Tea's first renderer tick. The return value reports whether that
-// hand-off frame was painted.
-func playBootSplash(ctx context.Context, w io.Writer, th theme.Theme, handoffFrame func() string) bool {
+// When the full animation completes, handoffFrame is called with the FRESHLY measured
+// terminal dimensions and written immediately under synchronized output. That removes
+// the visible blank interval between the host-owned splash and Bubble Tea's first
+// renderer tick. The return value reports whether that hand-off frame was painted, and
+// at which dimensions (0×0 when not painted).
+//
+// The terminal size is re-measured EVERY frame, not once: an embedded pane (the
+// Daintree sidebar) can be resized by its host mid-animation — layout hydration,
+// project switch-back reveal — and a frame rendered for the old width autowraps in
+// the new one, stranding mis-wrapped rows the inline renderer can never repaint.
+// Each frame is a full clear+repaint, so rendering against the current width makes
+// the animation self-healing; the hand-off frame gets the same treatment.
+func playBootSplash(
+	ctx context.Context,
+	w io.Writer,
+	th theme.Theme,
+	handoffFrame func(cols, rows int) string,
+) (painted bool, paintedCols, paintedRows int) {
 	if os.Getenv("DAINTREE_ASSISTANT_NO_SPLASH") != "" {
-		return false
+		return false, 0, 0
 	}
 	cols, rows, ok := terminalSize(w)
 	if !ok || cols <= SplashWidth || rows < SplashHeight+2 {
-		return false // too small / not a real terminal — skip rather than clip the mark
+		return false, 0, 0 // too small / not a real terminal — skip rather than clip the mark
 	}
 
 	// stdin is still cooked here (BT hasn't taken the terminal), so a Ctrl-C delivers
@@ -66,31 +79,66 @@ func playBootSplash(ctx context.Context, w io.Writer, th theme.Theme, handoffFra
 
 	frameDelay := time.Second / time.Duration(splashFPS)
 	for i := 0; i < SplashFrames; i++ {
+		// Fresh measurement each frame; on a transient measure failure keep the
+		// last known size (the fd was a terminal at entry). A pane shrunk below
+		// the mark mid-play aborts cleanly — clipping the mark reads as garbage,
+		// and the deferred cleanup leaves a clean slate for the cockpit.
+		if c, r, mok := terminalSize(w); mok {
+			cols, rows = c, r
+		}
+		if cols <= SplashWidth || rows < SplashHeight+2 {
+			return false, 0, 0
+		}
 		_, _ = io.WriteString(w, renderSplashFrame(th, i, cols))
 		select {
 		case <-sigCtx.Done():
-			return false
+			return false, 0, 0
 		case <-time.After(frameDelay):
 		}
 	}
 	// Hold the finished logo (the linger) before handing off to the cockpit.
 	select {
 	case <-sigCtx.Done():
-		return false
+		return false, 0, 0
 	case <-time.After(time.Duration(lingerMs) * time.Millisecond):
+	}
+	// Measure ONCE more right before the hand-off: the linger is the longest
+	// write-quiet window in the whole boot, so a host-side resize is most likely
+	// to have landed here. The hand-off frame must be laid out (wrapped, cursor
+	// parked) for the terminal as it IS, not as it was when the splash began.
+	if c, r, mok := terminalSize(w); mok {
+		cols, rows = c, r
 	}
 	frame := ""
 	if handoffFrame != nil {
-		frame = handoffFrame()
+		frame = handoffFrame(cols, rows)
 	}
 	if frame == "" {
-		return false
+		return false, 0, 0
+	}
+	// A frame taller than the terminal scrolls while printing, so the absolute
+	// ESC[row;1H cursor park lands on the wrong physical row and Bubble Tea
+	// adopts a wrong inline origin — and because the recorded hand-off dims
+	// then MATCH BT's first size probe, no recovery redraw ever fires. Skip the
+	// hand-off instead (the deferred cleanup leaves a clean slate); the
+	// no-hand-off boot path commits the masthead through the queue, which is
+	// height-safe by construction.
+	if handoffFrameRows(frame) > rows {
+		return false, 0, 0
 	}
 	if _, err := io.WriteString(w, frame); err != nil {
-		return false
+		return false, 0, 0
 	}
 	handoffPainted = true
-	return true
+	return true, cols, rows
+}
+
+// handoffFrameRows is the number of physical terminal rows the hand-off frame
+// occupies when printed. Frame content is pre-wrapped to the measured width
+// (bootHandoffFrame renders at the fresh cols), so CRLF count + 1 is the
+// physical row count; the trailing cursor-park/sync sequences add no rows.
+func handoffFrameRows(frame string) int {
+	return strings.Count(frame, "\r\n") + 1
 }
 
 // terminalSize returns the dimensions of a terminal-backed writer.

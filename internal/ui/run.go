@@ -37,12 +37,21 @@ func Run(ctx context.Context, a *app.App) error {
 	}
 	bootPrefetch := startBootPrefetch(ctx, a)
 	defer bootPrefetch.stop()
-	handoffFrame := func() string {
+	handoffFrame := func(cols, rows int) string {
 		if name := bootPrefetch.projectName(); name != "" {
 			m.masthead.ProjectName = name
 		}
 		bootPrefetch.backendHandshakeComplete()
 		bootPrefetch.stop()
+		// Lay the frame out for the terminal as it IS at hand-off time. The splash
+		// re-measures every frame (boot_splash.go) — a host resize mid-animation
+		// (embedded-pane layout hydration) would otherwise leave the masthead and
+		// footer wrapped for a width the terminal no longer has, autowrapping the
+		// pre-painted rows and parking Bubble Tea's inline origin on the wrong row.
+		if cols > 0 && rows > 0 {
+			m.columns = cols
+			m.rows = rows
+		}
 		m.syncComposer()
 		return m.bootHandoffFrame()
 	}
@@ -50,12 +59,17 @@ func Run(ctx context.Context, a *app.App) error {
 	// Play the boot animation OUTSIDE Bubble Tea, then start the program with a stable
 	// short footer (see boot_splash.go for why this — not a tall animated View() — is
 	// the correct pattern for an inline cockpit). No-op on non-TTY / tiny terminals.
-	if playBootSplash(ctx, os.Stdout, th, handoffFrame) {
+	if painted, paintedCols, paintedRows := playBootSplash(ctx, os.Stdout, th, handoffFrame); painted {
 		defer io.WriteString(os.Stdout, "\x1b[?25h") // defensive if BT exits before its first cursor restore
 		// The hand-off frame includes the masthead above the live footer. Treat it as
 		// already committed so the first scrollback commit does not duplicate it; later
 		// redraws still reset and recommit through the normal queue path.
 		m.queue.headerDone = true
+		// Record the dims the frame was painted at: onResize compares the FIRST
+		// WindowSizeMsg against these and fires the nuclear redraw on a mismatch
+		// (the terminal changed between the hand-off write and BT's size probe).
+		m.handoffCols = paintedCols
+		m.handoffRows = paintedRows
 	} else {
 		bootPrefetch.stop()
 		m.syncComposer()

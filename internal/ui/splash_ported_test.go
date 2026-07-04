@@ -516,3 +516,15 @@ func splashGlyphHorizontalCoverage(r rune) float64 {
 		return 0
 	}
 }
+
+// A hand-off frame taller than the terminal scrolls while printing, breaking
+// the absolute cursor park — playBootSplash must skip it (handoffFrameRows
+// gates the write). Rows = CRLF count + 1; trailing park/sync sequences after
+// the last CRLF occupy the final row, adding none.
+func TestHandoffFrameRows(t *testing.T) {
+	frame := renderBootHandoffFrame("line1\nline2\nline3", "footer1\nfooter2")
+	// 3 header rows + 2 footer rows joined by single CRLFs = 5 physical rows.
+	if got := handoffFrameRows(frame); got != 5 {
+		t.Fatalf("handoffFrameRows = %d, want 5", got)
+	}
+}

@@ -54,15 +54,21 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// overlay, never an input gate). Only Ctrl+C/Ctrl+D are special above; everything
 	// else falls through to the normal routing (which ends at the focused composer).
 
-	// Ctrl+L: manual redraw — a recovery key for when the live footer renders corrupted
-	// (a resize glitch, a stray control sequence, a race). Bare tea.ClearScreen resets
-	// Bubble Tea's internal cell buffer so the NEXT View() repaints every cell fresh.
-	// CRITICAL: it does NOT wipe native scrollback — unlike onRedraw (resize) which adds
-	// hostClearCmd() to also purge \x1b[3J. So this is a pure footer repaint that leaves
-	// the committed transcript untouched. Available in EVERY view (it is a recovery key),
-	// so it sits ahead of the approval gate.
+	// Ctrl+L: manual recovery — the full nuclear redraw (host screen + scrollback
+	// wipe, then masthead + whole transcript re-committed fresh at the current
+	// width). A bare tea.ClearScreen repaints only Bubble Tea's own footer region —
+	// it cannot remove corrupted rows that sit ABOVE the inline origin or that
+	// already scrolled into native scrollback (a boot hand-off painted at a stale
+	// width, a stray control sequence from the host). Trade-off, accepted: the
+	// ESC[3J wipe also destroys host scrollback the model can NOT reproduce —
+	// pre-launch shell history above the app. Everything the app itself printed
+	// (masthead, transcript, flushed turn rows) re-commits from the model. A
+	// recovery key that reliably heals beats one that preserves foreign
+	// scrollback but leaves the cockpit garbled.
+	// Available in EVERY view (it is a recovery key), so it sits ahead of the
+	// approval gate.
 	if isCtrl(k, 'l') {
-		return m, tea.ClearScreen
+		return m.nuclearRedraw()
 	}
 
 	// Approval sheet owns Y/N/V/Esc while up.
@@ -840,15 +846,27 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.columns = msg.Width
 	m.rows = msg.Height
-	// The FIRST size just establishes geometry (nothing is committed yet at boot, so there
-	// is nothing to redraw). Every LATER resize schedules a DEBOUNCED NUCLEAR REDRAW
-	// (onRedraw): wipe the host + re-commit the masthead and the whole transcript fresh at
-	// the new width, then repaint the sticky footer. Without it, Bubble Tea's in-place
-	// repaint strands stale footer-rule fragments across the screen on a resize. The 150ms
+	// The FIRST size normally just establishes geometry (nothing is committed yet at
+	// boot, so there is nothing to redraw) — UNLESS a boot hand-off frame was painted
+	// and this size disagrees with the dims it was painted at. Then the terminal was
+	// resized between the hand-off write and BT's startup size probe (an embedded
+	// host hydrating its layout mid-boot): the pre-painted masthead/footer are
+	// wrapped for a width the terminal no longer has, and the parked inline origin
+	// is wrong. That stale paint is real committed content, so it needs the same
+	// nuclear redraw a later resize gets — swallowing it strands a frozen, garbled
+	// copy of the cockpit above the live footer for the rest of the session.
+	// Every LATER resize schedules a DEBOUNCED NUCLEAR REDRAW (onRedraw): wipe the
+	// host + re-commit the masthead and the whole transcript fresh at the new width,
+	// then repaint the sticky footer. Without it, Bubble Tea's in-place repaint
+	// strands stale footer-rule fragments across the screen on a resize. The 150ms
 	// debounce coalesces a SIGWINCH drag-storm into a single redraw.
 	if !m.sizedOnce {
 		m.sizedOnce = true
-		return m, nil
+		handoffStale := m.handoffCols > 0 &&
+			(msg.Width != m.handoffCols || msg.Height != m.handoffRows)
+		if !handoffStale {
+			return m, nil
+		}
 	}
 	// DISARM commits for the whole debounce window, not just at onRedraw. Bubble Tea has already
 	// recorded the new (possibly smaller) m.rows, but its cell buffer stays at the OLD footer height
@@ -859,6 +877,7 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// hazard. onRedraw re-arms one cycle after the new footer has flushed. (scheduleCommit is gated
 	// on commitArmed; flushActiveTurn checks it too.)
 	m.commitArmed = false
+	m.redrawPending = true
 	m.resizePending++
 	nonce := m.resizePending
 	return m, tea.Tick(resizeRedrawDelay, func(time.Time) tea.Msg { return RedrawMsg{Nonce: nonce} })
@@ -875,6 +894,17 @@ func (m Model) onRedraw(msg RedrawMsg) (tea.Model, tea.Cmd) {
 	if msg.Nonce != m.resizePending {
 		return m, nil // a newer resize superseded this one
 	}
+	// The disarm window this redraw owns is over; the redraw's own sequence
+	// (commitArmCmd, after the wipe) re-arms commits one render cycle out.
+	m.redrawPending = false
+	return m.nuclearRedraw()
+}
+
+// nuclearRedraw wipes the host (screen + scrollback) and re-commits the masthead +
+// whole transcript fresh at the current width. Shared by onRedraw (debounced resize)
+// and Ctrl+L (manual recovery). The transcript model is left intact (separate from
+// /clear).
+func (m Model) nuclearRedraw() (tea.Model, tea.Cmd) {
 	m.redrawNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
 	m.resetFlushState()

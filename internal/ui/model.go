@@ -152,7 +152,21 @@ type Model struct {
 	redrawNonce   int
 	resizePending int  // latest debounce nonce
 	sizedOnce     bool // first WindowSizeMsg seen (its redraw is suppressed)
-	attentionN    int
+	// True from a resize's commit-disarm until its debounced RedrawMsg runs.
+	// CommitArmMsg must NOT re-arm commits inside this window: the arm tick
+	// from Init (or a prior redraw's sequence) is timer-ordered, not
+	// state-ordered, and re-arming mid-window lets a commit Println against
+	// the pre-redraw geometry (#1613) before the nuclear redraw wipes it.
+	redrawPending bool
+	// Dimensions the pre-program boot hand-off frame was PAINTED at (run.go), or
+	// 0×0 when no hand-off frame was painted (splash skipped / non-TTY). The
+	// first WindowSizeMsg is only swallowed when it MATCHES these dims — a host
+	// that resized the terminal during the splash (an embedded pane hydrating
+	// its layout) leaves the painted frame stale, and the mismatch must trigger
+	// the nuclear redraw that a plain first-size swallow would skip (onResize).
+	handoffCols int
+	handoffRows int
+	attentionN  int
 
 	// spinner frame (advanced on a periodic tick) for animated active rows. The tick only
 	// runs while a turn is in flight (spinnerRunning) — idle, it lapses so the process can
