@@ -365,6 +365,14 @@ func (s *Session) clearLocked() {
 	s.compactFailures = 0
 	s.lastPromptTokens = 0
 	s.compactionDepth = 0
+	// Drop the opaque backend skill-state token: /clear is a BRAND-NEW chat, so the
+	// server's stateful skill selector must re-decide from scratch. Left set, the next
+	// turn replays the pre-clear token and the backend treats the fresh chat as a
+	// continuation — it never re-injects the runbook the cleared conversation no longer
+	// carries, so the model starts a skill-shaped task (e.g. multi-agent orchestration)
+	// with no runbook and, thinking-off, does nothing. Nothing from before /clear may
+	// persist, and this token is the one piece that leaked.
+	s.backendState = ""
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
