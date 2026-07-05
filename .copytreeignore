@@ -1,12 +1,80 @@
-# copytree ignore — gitignore semantics, applied on top of .gitignore.
-# Keep the AI context compact by excluding what the Go toolchain generates or
-# what carries no semantic value for reading the source. Build output, the
-# binary, *.test/*.out, coverage, profiles, .env*, logs and state.db are already
-# handled by .gitignore, so they're not repeated here.
+# copytree ignore — gitignore syntax. Keep the AI context compact by excluding
+# what the Go toolchain generates or what carries no semantic value for reading
+# the source.
+#
+# IMPORTANT: cli/ is a git SUBMODULE (its own repo), and copytree does NOT read a
+# submodule's .gitignore — only the top repo's .gitignore and this .copytreeignore.
+# So everything cli/.gitignore would normally hide (the build output & binary,
+# *.test/*.out, coverage, profiles, logs, state.db, and — critically — real .env
+# secrets) is NOT filtered unless it is listed HERE. A 31 MB compiled binary under
+# bin/ leaked exactly this way. Do not assume .gitignore covers it; repeat it below.
+
+# --- Build output, test/profile artifacts, secrets (NOT covered by cli/.gitignore) ---
+# The compiled binary lives here (bin/daintree-assistant, ~31 MB) — the single
+# biggest thing that can bloat the export. dist/ is the packaged-build dir.
+bin/
+dist/
+daintree-assistant
+*.exe
+# Go test / profiling artifacts.
+*.test
+*.out
+*.prof
+*.cpu
+*.mem
+coverage/
+coverage.txt
+coverage.html
+# Logs & local runtime state.
+*.log
+logs/
+state.db
+*.local
+.tmp/
+# Secrets: drop any real env file, keep the committed example.
+.env
+.env.*
+!.env.example
+
+# --- CLI Go implementation: keep ONLY the tool/contract-defining packages ---
+# The vendored CLI is checked in so this repo can read the CLI's actual
+# tool/function definitions and the backend wire contracts (see the backend
+# CLAUDE.md). For an LLM export of the *backend* we want exactly those — not the
+# ~1.8 MB of cockpit/daemon/runtime Go with no bearing on the API. We KEEP three
+# packages and drop the rest by name:
+#   internal/backend/ — the Daintree backend wire contracts (client, SSE, tasks)
+#   internal/domain/  — pure vocabulary: RiskClass, Tier, ToolResult, records
+#   internal/tools/   — the tool families, where every tool's schema is declared
+#
+# NB: copytree does NOT support the gitignore whitelist idiom (`internal/*` then
+# `!internal/backend/`) — that negation drops ALL of internal/ instead of keeping
+# the three. So we enumerate the dropped packages explicitly. A new package
+# defaults to *included*, which is the safe direction — review the tree after
+# adding one. This list subsumes the old per-file exclusions (internal/ui splash
+# art / theme / markdown, internal/deps).
+internal/agent/
+internal/app/
+internal/cli/
+internal/commands/
+internal/config/
+internal/daemon/
+internal/debuglog/
+internal/deps/
+internal/e2e/
+internal/host/
+internal/mcp/
+internal/models/
+internal/ports/
+internal/projectinstructions/
+internal/queue/
+internal/safety/
+internal/storage/
+internal/terminal/
+internal/ui/
 
 # The test suite dominates the tree (~half of all .go files). The Go toolchain
 # names every test file `*_test.go`, so this single pattern catches all of them
-# wherever they live — no need for a defensive second rule like the TS config had.
+# wherever they live — including inside the kept packages above.
 *_test.go
 
 # Conventional Go test fixtures — data-only, irrelevant to reading the code.
@@ -19,38 +87,6 @@ vendor/
 # Dependency checksums — 12 KiB of opaque hashes with zero semantic value for an
 # AI reading the project. go.mod (module path + the dep list) is kept; go.sum is not.
 go.sum
-
-# Build-time blank import anchor — explicitly carries no runtime effect; only
-# purpose is to prevent `go mod tidy` from removing deps before subsystems use them.
-internal/deps/deps.go
-
-# Splash animation data — 24KB of raw block-character (█) frame arrays. Pure data,
-# zero semantic value for reading the source or understanding the system.
-internal/ui/splash_frames.go
-
-# Splash animation vector data — 22KB of geometry constants + coverage-threshold
-# arrays that splash_frames.go (above) renders into the block-character frames.
-# Same "pure data, no architectural bearing" rationale as splash_frames.go; it was
-# simply missed when that rule was added.
-internal/ui/splash_vector.go
-
-# Splash logo source art — 14KB of raw SVG vector markup. Pure design assets, not
-# go:embed'd and not referenced by any code (the splash renders from the *.go vector/
-# frame data above, not these SVGs). Same "pure data" rationale as the splash family.
-internal/ui/assets/
-
-# Boot/splash animation logic — runs once at startup, self-contained visual sugar
-# with no architectural bearing on the rest of the codebase.
-internal/ui/splash.go
-internal/ui/boot_splash.go
-
-# UI theming — colour, font, and glyph constants. Design decisions, not logic;
-# not where bugs or architectural choices live.
-internal/ui/theme/
-
-# Markdown renderer — thin wrapper around glamour; mechanical implementation detail
-# with no bearing on the agent loop, tools, or storage layers.
-internal/ui/markdown/
 
 # Runtime recipe config — user-generated/project-specific data, not source code.
 .daintree/
