@@ -187,6 +187,25 @@ type ApprovalResolvedMsg struct {
 	Approved bool
 }
 
+// --- multiple-choice question lifecycle ---
+
+// questionReply is the user's answer routed back to the blocked user.askMultipleChoice
+// dispatch goroutine. Index is the chosen 0-based option; cancelled marks an Esc /
+// Ctrl+C / shutdown that aborts the turn instead of answering.
+type questionReply struct {
+	index     int
+	cancelled bool
+}
+
+// QuestionRequestedMsg carries a multiple-choice request + the reply channel the
+// runtime goroutine blocks on. Update parks it as the pending question sheet (in place
+// of the composer) and drives phase awaiting_question. The runtime cannot proceed until
+// the user answers (or cancels), which routes a questionReply back through the channel.
+type QuestionRequestedMsg struct {
+	Request tools.AskChoiceRequest
+	Reply   chan questionReply
+}
+
 // --- scrollback commit ack ---
 
 // ScrollbackCommittedMsg is the ack Bubble Tea delivers after a persistent-print

@@ -13,6 +13,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -65,9 +66,47 @@ type ToolProgress struct {
 const (
 	ProgressValidating       = "validating"
 	ProgressAwaitingApproval = "awaiting_approval"
+	ProgressAwaitingQuestion = "awaiting_question"
 	ProgressRunning          = "running"
 	ProgressRetrying         = "retrying"
 )
+
+// ErrNoAskChoiceHook is returned by a main-actor ToolContext.AskChoice when the
+// runtime has no interactive question surface wired (one-shot, host --stdio, non-TTY).
+// The user.askMultipleChoice handler maps it to a QUESTION_UNAVAILABLE failure. A nil
+// ToolContext.AskChoice (a non-interactive watcher/timer/workflow actor) is distinct —
+// the handler reports QUESTION_NOT_INTERACTIVE for that case instead.
+var ErrNoAskChoiceHook = errors.New("tools: no interactive question surface available")
+
+// ChoiceOption is one labelled option in an AskChoiceRequest. The Label (A, B, C…) is
+// assigned by the CLI, never by the model, so the model supplies only Text and can't
+// collide with or misspell the letters.
+type ChoiceOption struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+// AskChoiceRequest is handed to ToolContext.AskChoice when the model needs a finite
+// user decision (user.askMultipleChoice). The interactive surface renders a selection
+// sheet in place of the composer and blocks the tool call until the user answers.
+type AskChoiceRequest struct {
+	// ToolCallID ties the sheet to its live footer row (informational).
+	ToolCallID string `json:"toolCallId,omitempty"`
+	// Question is the concise, human-facing prompt (no option labels baked in).
+	Question string `json:"question"`
+	// Options are the labelled choices, in order (2–26 entries).
+	Options []ChoiceOption `json:"options"`
+	// Default is the 0-based index of the option highlighted first.
+	Default int `json:"default"`
+}
+
+// AskChoiceAnswer is the user's selection returned by ToolContext.AskChoice. Index is
+// 0-based; Label/Text mirror the chosen ChoiceOption.
+type AskChoiceAnswer struct {
+	Label string `json:"label"`
+	Index int    `json:"index"`
+	Text  string `json:"text"`
+}
 
 // ConfirmRequest is handed to ToolContext.Confirm for a mutating action. The UI
 // approval sheet leads with Consequence (plain-English effect / reversibility /
@@ -142,6 +181,13 @@ type ToolContext struct {
 	// Confirm approves a mutating action. A returned error is treated as a
 	// DECLINE (never an approval).
 	Confirm func(ctx context.Context, req ConfirmRequest) (bool, error)
+	// AskChoice presents a multiple-choice question to the interactive user and BLOCKS
+	// until they answer, then returns the chosen option (user.askMultipleChoice). It is
+	// set ONLY for the interactive main actor; nil for non-interactive actors
+	// (watcher/timer/workflow), so a handler detects "cannot prompt" by a nil check. A
+	// returned error means the user cancelled or the runtime can't ask — context.Canceled
+	// (or ctx expiry) is a cancellation, ErrNoAskChoiceHook is a non-interactive runtime.
+	AskChoice func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error)
 	// Log emits an out-of-band line to the user.
 	Log func(msg string)
 

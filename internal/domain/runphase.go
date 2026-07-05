@@ -13,6 +13,7 @@ const (
 	PhaseToolQueued                       // tool batch announced, none running yet
 	PhaseToolRunning                      // a tool is executing
 	PhaseAwaitingApproval                 // confirmation sheet up
+	PhaseAwaitingQuestion                 // multiple-choice question sheet up, blocked on the user
 	PhaseIntegrating                      // tools done, model called again, no token yet
 	PhaseCancelling                       // Esc pressed, abort propagating
 	PhaseComplete
@@ -28,6 +29,7 @@ var phaseNames = map[RunPhase]string{
 	PhaseToolQueued:       "tool_queued",
 	PhaseToolRunning:      "tool_running",
 	PhaseAwaitingApproval: "awaiting_approval",
+	PhaseAwaitingQuestion: "awaiting_question",
 	PhaseIntegrating:      "integrating",
 	PhaseCancelling:       "cancelling",
 	PhaseComplete:         "complete",

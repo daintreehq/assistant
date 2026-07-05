@@ -117,6 +117,67 @@ func TestBuildConfirmFunc_TypedPromptText(t *testing.T) {
 	}
 }
 
+// The classic-REPL multiple-choice handler must accept a letter or 1-based number, take
+// the default on an empty line, re-prompt on an invalid entry, and — critically — CANCEL
+// on EOF (askLine ok=false) rather than silently answering with the default.
+func TestBuildAskChoiceFunc(t *testing.T) {
+	var buf bytes.Buffer
+	r := render.New(&buf)
+	req := tools.AskChoiceRequest{
+		Question: "Which env?",
+		Options: []tools.ChoiceOption{
+			{Label: "A", Text: "Local"}, {Label: "B", Text: "Staging"}, {Label: "C", Text: "Production"},
+		},
+		Default: 2,
+	}
+
+	t.Run("letter answers", func(t *testing.T) {
+		fn := buildAskChoiceFunc(r, func(string) (string, bool) { return "b", true })
+		ans, err := fn(context.Background(), req)
+		if err != nil || ans.Index != 1 || ans.Label != "B" {
+			t.Fatalf("b should answer option B (ans=%+v err=%v)", ans, err)
+		}
+	})
+	t.Run("number answers", func(t *testing.T) {
+		fn := buildAskChoiceFunc(r, func(string) (string, bool) { return "3", true })
+		ans, err := fn(context.Background(), req)
+		if err != nil || ans.Index != 2 {
+			t.Fatalf("3 should answer option C (ans=%+v err=%v)", ans, err)
+		}
+	})
+	t.Run("empty takes default", func(t *testing.T) {
+		fn := buildAskChoiceFunc(r, func(string) (string, bool) { return "", true })
+		ans, err := fn(context.Background(), req)
+		if err != nil || ans.Index != 2 {
+			t.Fatalf("empty should take the default (index 2), got %+v err=%v", ans, err)
+		}
+	})
+	t.Run("EOF cancels", func(t *testing.T) {
+		fn := buildAskChoiceFunc(r, func(string) (string, bool) { return "", false })
+		_, err := fn(context.Background(), req)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("EOF should cancel (context.Canceled), got %v", err)
+		}
+	})
+	t.Run("invalid then valid re-prompts", func(t *testing.T) {
+		calls := 0
+		fn := buildAskChoiceFunc(r, func(string) (string, bool) {
+			calls++
+			if calls == 1 {
+				return "z", true // out of range → re-prompt
+			}
+			return "a", true
+		})
+		ans, err := fn(context.Background(), req)
+		if err != nil || ans.Index != 0 {
+			t.Fatalf("should re-prompt then accept 'a' (ans=%+v err=%v)", ans, err)
+		}
+		if calls != 2 {
+			t.Fatalf("expected 2 prompts, got %d", calls)
+		}
+	})
+}
+
 func TestConsoleSinkPhase_TTYShowsSilentWork(t *testing.T) {
 	s, buf := newSink(true)
 

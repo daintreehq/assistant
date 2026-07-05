@@ -24,6 +24,8 @@ func liveStatusLabel(p domain.RunPhase) string {
 		return "Integrating results"
 	case domain.PhaseAwaitingApproval:
 		return "Waiting for approval"
+	case domain.PhaseAwaitingQuestion:
+		return "Waiting for your answer"
 	case domain.PhaseCancelling:
 		return "Cancelling"
 	default:
@@ -46,6 +48,8 @@ func runStageLabel(p domain.RunPhase) string {
 		return "Integrating results…"
 	case domain.PhaseAwaitingApproval:
 		return "Waiting for approval…"
+	case domain.PhaseAwaitingQuestion:
+		return "Waiting for your answer…"
 	case domain.PhaseToolRunning:
 		return "Inspecting project…"
 	case domain.PhaseCancelling:

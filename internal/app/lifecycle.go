@@ -351,6 +351,9 @@ func (a *App) SetHooks(h AppHooks) {
 	if h.Confirm != nil {
 		a.hooks.Confirm = h.Confirm
 	}
+	if h.AskChoice != nil {
+		a.hooks.AskChoice = h.AskChoice
+	}
 	if h.Log != nil {
 		a.hooks.Log = h.Log
 	}

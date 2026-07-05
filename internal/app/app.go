@@ -36,6 +36,11 @@ type AppHooks struct {
 	// Confirm approves a mutating action for the interactive main actor. A returned
 	// error is treated as a DECLINE.
 	Confirm func(ctx context.Context, req tools.ConfirmRequest) (bool, error)
+	// AskChoice presents a multiple-choice question to the interactive main actor and
+	// blocks until they answer (or the turn is cancelled). Wired only by interactive
+	// surfaces (cockpit, classic REPL); nil elsewhere (one-shot, host), so the tool
+	// reports that the runtime can't ask.
+	AskChoice func(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error)
 	// Log emits an out-of-band line to the user.
 	Log func(msg string)
 	// AgentEvents is the live UI/console/JSON sink the session proxies to.

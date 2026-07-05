@@ -44,6 +44,17 @@ type pendingConfirm struct {
 	confirmInput string
 }
 
+// pendingQuestion is the in-flight multiple-choice question (user.askMultipleChoice):
+// the request, the highlighted option, and the reply channel the tool goroutine blocks
+// on. It REPLACES the composer while up. shownAt debounces a typed-ahead answer so a
+// keystroke buffered before the sheet appeared can't pick an option the user never saw.
+type pendingQuestion struct {
+	req      tools.AskChoiceRequest
+	selected int
+	reply    chan questionReply
+	shownAt  int64
+}
+
 // Model is the root cockpit model.
 type Model struct {
 	ctx        context.Context
@@ -66,10 +77,11 @@ type Model struct {
 	// short terminal; rather than truncate (the old "resize taller" dead-end), they scroll.
 	// Kept SEPARATE so switching ^O↔? preserves each deck's position. Reset to 0 on entry
 	// to a deck and clamped to its content height in onKey (see clampWindow / deck routing).
-	opsScroll  int
-	helpScroll int
-	composer   composer.Model
-	pending    *pendingConfirm
+	opsScroll       int
+	helpScroll      int
+	composer        composer.Model
+	pending         *pendingConfirm
+	pendingQuestion *pendingQuestion
 
 	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
 	// approval sheet's A / F actions, consulted in onApprovalRequested). The value is a
@@ -249,10 +261,11 @@ func paletteCommands() []composer.Command {
 }
 
 // composerFocus reports whether the composer owns keys: home view AND no pending
-// approval sheet. Crucially NOT gated on busy — the composer
-// stays editable while a turn runs.
+// approval sheet AND no pending question sheet. Crucially NOT gated on busy — the
+// composer stays editable while a turn runs (a question/approval sheet is the exception:
+// it takes the keys until the user decides).
 func (m *Model) composerFocus() bool {
-	return m.view == viewHome && m.pending == nil
+	return m.view == viewHome && m.pending == nil && m.pendingQuestion == nil
 }
 
 // gutter / chrome / content width helpers measured from the current geometry.

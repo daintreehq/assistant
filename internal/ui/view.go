@@ -170,6 +170,12 @@ func (m Model) footer() string {
 // sheet when a confirmation is pending, else the status line (when it has content), then
 // the composer — the input always anchored last.
 func (m Model) bottomBand(w int) string {
+	// A pending multiple-choice question REPLACES the composer entirely: the sheet IS the
+	// input surface until the user answers or cancels. (An approval and a question can't
+	// both be pending — tool dispatch is sequential, so only one tool blocks at a time.)
+	if m.pendingQuestion != nil {
+		return indentLines(renderQuestion(m.theme, m.pendingQuestion, w), LeftPad)
+	}
 	var b strings.Builder
 	if m.pending != nil {
 		b.WriteString(indentLines(renderApproval(m.theme, m.pending, w), LeftPad))

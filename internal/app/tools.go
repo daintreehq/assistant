@@ -16,6 +16,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools/mcpwrap"
 	"github.com/daintreehq/daintree-assistant/internal/tools/mcpx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/memory"
+	"github.com/daintreehq/daintree-assistant/internal/tools/questionx"
 	queuetools "github.com/daintreehq/daintree-assistant/internal/tools/queue"
 	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/skill"
@@ -100,6 +101,10 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, queuetools.Tools(queuetools.Deps{
 		Queue: queueToolAdapter{app: a},
 	})...)
+	// user.askMultipleChoice reaches the user purely through ToolContext.AskChoice, so
+	// the family takes no deps. It is always registered (the interactive-only guard lives
+	// in the handler + buildContext) so the projected toolset stays stable across runs.
+	all = append(all, questionx.Tools(questionx.Deps{})...)
 	all = append(all, skill.Tools(skill.Deps{
 		Store:            skillStoreAdapter{s: a.Store},
 		CheckConsistency: a.checkSkillStepConsistency,

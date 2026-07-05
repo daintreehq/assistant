@@ -76,6 +76,11 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.onApprovalKey(k)
 	}
 
+	// Question sheet owns ↑/↓/Home/End, the option letters, Enter, and Esc while up.
+	if m.pendingQuestion != nil {
+		return m.onQuestionKey(k)
+	}
+
 	// Ctrl+O toggles the operations deck (clearing any active panel filter).
 	if isCtrl(k, 'o') {
 		if m.view == viewOperations {
@@ -193,6 +198,12 @@ func (m Model) onCtrlC() (tea.Model, tea.Cmd) {
 		default:
 		}
 		m.pending = nil
+	}
+	if m.pendingQuestion != nil {
+		// A Ctrl-C while a question is up cancels it (unblock the tool) and dismisses the
+		// sheet; the in-flight turn is aborted below.
+		m.replyQuestion(questionReply{cancelled: true})
+		m.pendingQuestion = nil
 	}
 	if m.inFlight {
 		// Mirror onCancel: set Cancelling… synchronously so the UI never looks frozen,
@@ -481,6 +492,12 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 		m.controller.cancelTurn()
 		m.inFlight = false
 	}
+	if m.pendingQuestion != nil {
+		// A racing /clear (submitted before the turn parked a question) must cancel the
+		// pending question and drop its sheet, not leave a ghost modal after the wipe.
+		m.replyQuestion(questionReply{cancelled: true})
+		m.pendingQuestion = nil
+	}
 	m.transcript = nil
 	m.activeTurn = ""
 	// Drop any message buffered mid-turn but not yet folded in — a reset wipes pending
@@ -728,6 +745,171 @@ func (m Model) resolveApproval(approved bool) (tea.Model, tea.Cmd) {
 
 func (m Model) onApprovalResolved(msg ApprovalResolvedMsg) (tea.Model, tea.Cmd) {
 	return m.resolveApproval(msg.Approved)
+}
+
+// --- multiple-choice question ---
+
+// onQuestionRequested parks a user.askMultipleChoice request as the pending question
+// sheet (which replaces the composer) and drives phase awaiting_question. The runtime
+// goroutine stays blocked until the user answers or cancels.
+func (m Model) onQuestionRequested(msg QuestionRequestedMsg) (tea.Model, tea.Cmd) {
+	// Defensive: only park a question when there is a LIVE, non-cancelling turn to receive
+	// the answer and no other modal is already up. A turn cancelled between the tool
+	// sending this message and Update processing it (e.g. Ctrl+C during generation) would
+	// otherwise strand a ghost sheet whose dispatch goroutine already returned via
+	// ctx.Done(); a second concurrent request would orphan the first reply channel. Reject
+	// with a cancel reply instead so the tool cleanly reports QUESTION_CANCELLED.
+	t := m.activeTurnCell()
+	if !m.inFlight || t == nil || t.Phase == domain.PhaseCancelling ||
+		m.pendingQuestion != nil || m.pending != nil {
+		select {
+		case msg.Reply <- questionReply{cancelled: true}:
+		default:
+		}
+		return m.afterStateChange(nil)
+	}
+	// A modal must be on the HOME view to render: footer() shows the ops/help deck in
+	// place of the bottom band, so a question parked while a deck is open would take keys
+	// invisibly. Force home + clear deck state so the sheet is always shown.
+	m.view = viewHome
+	m.activePanel = PanelNone
+	m.opsScroll, m.helpScroll = 0, 0
+
+	sel := msg.Request.Default
+	if sel < 0 || sel >= len(msg.Request.Options) {
+		sel = 0
+	}
+	m.pendingQuestion = &pendingQuestion{
+		req:      msg.Request,
+		selected: sel,
+		reply:    msg.Reply,
+		shownAt:  domain.NowMS(),
+	}
+	t.Phase = domain.PhaseAwaitingQuestion
+	t.PhaseStartedAt = domain.NowMS()
+	return m.afterStateChange(nil)
+}
+
+// onQuestionKey drives the question sheet: ↑/↓/Home/End move the highlight, Enter
+// answers the highlighted option, a bare option letter (A–Z / a–z) answers it directly,
+// and Esc cancels the whole turn (there is no "decline" for a required decision).
+func (m Model) onQuestionKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	if q == nil {
+		return m, nil
+	}
+	n := len(q.req.Options)
+	switch {
+	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
+		return m.cancelQuestion()
+	case k.Code == tea.KeyUp:
+		q.selected = clampChoice(q.selected-1, n)
+		return m.afterStateChange(nil)
+	case k.Code == tea.KeyDown:
+		q.selected = clampChoice(q.selected+1, n)
+		return m.afterStateChange(nil)
+	case k.Code == tea.KeyHome:
+		q.selected = 0
+		return m.afterStateChange(nil)
+	case k.Code == tea.KeyEnd:
+		q.selected = n - 1
+		return m.afterStateChange(nil)
+	case k.Code == tea.KeyEnter || k.Code == tea.KeyKpEnter:
+		return m.answerQuestion(q.selected)
+	}
+	// A bare option letter answers that option directly.
+	if idx, ok := letterIndex(k, n); ok {
+		return m.answerQuestion(idx)
+	}
+	// Any other key: acknowledge with the bell rather than swallowing it silently.
+	return m, bellCmd()
+}
+
+// answerQuestion resolves the question with the chosen option, guarded by the same
+// typed-ahead debounce as approvals: a letter/Enter landing within the debounce window
+// of the sheet appearing is ignored (rung back), so a keystroke buffered before the
+// question popped can't pick an option the user never saw. Arrow navigation is exempt.
+func (m Model) answerQuestion(idx int) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	if q == nil {
+		return m, nil
+	}
+	if idx < 0 || idx >= len(q.req.Options) {
+		return m, bellCmd()
+	}
+	if domain.NowMS()-q.shownAt < approveDebounceMs {
+		return m, bellCmd()
+	}
+	return m.resolveQuestion(questionReply{index: idx})
+}
+
+// cancelQuestion aborts the turn from the question sheet (Esc). It unblocks the tool
+// with a cancel reply, then cancels the in-flight turn — a required decision the user
+// declines to make ends the work, mirroring Esc-to-cancel elsewhere.
+func (m Model) cancelQuestion() (tea.Model, tea.Cmd) {
+	m.replyQuestion(questionReply{cancelled: true})
+	m.pendingQuestion = nil
+	return m.onCancel()
+}
+
+// resolveQuestion routes the answer to the blocked runtime goroutine, pops the sheet,
+// and refines the phase back to tool-running (the model resumes with the answer).
+func (m Model) resolveQuestion(r questionReply) (tea.Model, tea.Cmd) {
+	if m.pendingQuestion == nil {
+		return m, nil
+	}
+	m.replyQuestion(r)
+	m.pendingQuestion = nil
+	if t := m.activeTurnCell(); t != nil {
+		t.Phase = domain.PhaseToolRunning
+		t.PhaseStartedAt = domain.NowMS()
+	}
+	return m.afterStateChange(nil)
+}
+
+// replyQuestion sends the reply on the pending question's channel (non-blocking — the
+// channel is buffered 1 and a second send is a harmless no-op).
+func (m *Model) replyQuestion(r questionReply) {
+	if m.pendingQuestion == nil {
+		return
+	}
+	select {
+	case m.pendingQuestion.reply <- r:
+	default:
+	}
+}
+
+// clampChoice bounds an option index to [0, n-1] (no wrap). n is always >= 2 (the tool
+// rejects fewer than two options), so the result is a valid index.
+func clampChoice(v, n int) int {
+	if v < 0 {
+		return 0
+	}
+	if v >= n {
+		return n - 1
+	}
+	return v
+}
+
+// letterIndex maps a bare option-letter keypress (A–Z / a–z, no Ctrl/Alt) to its 0-based
+// option index, ok=false when the key isn't a letter or is out of range for n options.
+func letterIndex(k tea.KeyPressMsg, n int) (int, bool) {
+	if k.Mod&(tea.ModCtrl|tea.ModAlt) != 0 {
+		return 0, false
+	}
+	r := k.Code
+	switch {
+	case r >= 'a' && r <= 'z':
+		r -= 32 // fold to uppercase
+	case r >= 'A' && r <= 'Z':
+	default:
+		return 0, false
+	}
+	idx := int(r - 'A')
+	if idx < 0 || idx >= n {
+		return 0, false
+	}
+	return idx, true
 }
 
 // approveDebounceMs is the window after the approval sheet appears during which the
@@ -1053,6 +1235,11 @@ func (m Model) onShutdown() (tea.Model, tea.Cmd) {
 		default:
 		}
 		m.pending = nil
+	}
+	if m.pendingQuestion != nil {
+		// Cancel a pending question so its dispatch goroutine doesn't block on a dead modal.
+		m.replyQuestion(questionReply{cancelled: true})
+		m.pendingQuestion = nil
 	}
 	// Future confirms auto-decline so a dispatch can't block on a dead modal. Teardown
 	// must never panic, so guard the wiring (the headless harness has no app/controller).

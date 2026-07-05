@@ -35,10 +35,17 @@ func bellCmd() tea.Cmd {
 	}
 }
 
-// appAutoDecline rewires the App's confirm hook to auto-decline every future
-// request (shutdown: a dispatch must never block on a modal with no UI subscriber).
+// appAutoDecline rewires the App's confirm + question hooks to auto-reject every future
+// request (shutdown: a dispatch must never block on a modal with no UI subscriber). A
+// question can't be declined, so it returns context.Canceled — the tool maps that to a
+// QUESTION_CANCELLED failure.
 func appAutoDecline() app.AppHooks {
-	return app.AppHooks{Confirm: func(_ context.Context, _ tools.ConfirmRequest) (bool, error) { return false, nil }}
+	return app.AppHooks{
+		Confirm: func(_ context.Context, _ tools.ConfirmRequest) (bool, error) { return false, nil },
+		AskChoice: func(_ context.Context, _ tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+			return tools.AskChoiceAnswer{}, context.Canceled
+		},
+	}
 }
 
 // sendAttention forwards a scheduler attention burst through the pump as a

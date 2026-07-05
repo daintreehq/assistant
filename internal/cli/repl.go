@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -45,13 +46,27 @@ func startRepl(ctx context.Context, a *app.App) int {
 		}
 		return strings.TrimSpace(line)
 	}
+	// askLine is ask that DISTINGUISHES an EOF / closed-stdin read (ok=false) from an
+	// empty line (ok=true, ""), so the multiple-choice prompt can cancel on EOF instead
+	// of silently taking the default answer.
+	askLine := func(prompt string) (string, bool) {
+		r.Out(prompt)
+		line, err := reader.ReadString('\n')
+		trimmed := strings.TrimSpace(line)
+		if err != nil && trimmed == "" {
+			return "", false
+		}
+		return trimmed, true
+	}
 
 	confirm := buildConfirmFunc(r, ask)
+	askChoice := buildAskChoiceFunc(r, askLine)
 	logHook := func(m string) { r.Line(r.Gray("  · " + m)) }
 
 	a.SetHooks(app.AppHooks{
 		AgentEvents: NewConsoleSink(r),
 		Confirm:     confirm,
+		AskChoice:   askChoice,
 		Log:         logHook,
 	})
 
@@ -146,6 +161,72 @@ func buildConfirmFunc(r *render.Renderer, ask func(string) string) func(context.
 		a := strings.ToLower(strings.TrimSpace(answer))
 		return a == "y" || a == "yes", nil
 	}
+}
+
+// buildAskChoiceFunc builds the classic-REPL multiple-choice handler for
+// user.askMultipleChoice. It prints the question + labelled options and reads a single
+// option letter (A–Z, case-insensitive) or a 1-based number, re-prompting on an invalid
+// entry. An empty line takes the default option; an EOF / closed stdin (askLine ok=false)
+// CANCELS the question (context.Canceled → QUESTION_CANCELLED) rather than silently
+// answering with the default. Mirrors the cooked-mode limitation documented on
+// buildConfirmFunc: a Ctrl-C here only takes effect once control returns to the prompt loop.
+func buildAskChoiceFunc(r *render.Renderer, askLine func(string) (string, bool)) func(context.Context, tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+	return func(_ context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+		def := req.Default
+		if def < 0 || def >= len(req.Options) {
+			def = 0
+		}
+		r.Line("")
+		r.Line(r.Bold(req.Question))
+		for i, opt := range req.Options {
+			suffix := ""
+			if i == def {
+				suffix = r.Gray("  (default)")
+			}
+			r.Line("     " + r.Bold(opt.Label+".") + " " + opt.Text + suffix)
+		}
+		last := req.Options[len(req.Options)-1].Label
+		for {
+			answer, ok := askLine(r.Yellow("   choose [A-" + last + "] (Enter for default): "))
+			if !ok {
+				// EOF / closed stdin — cancel instead of silently taking the default.
+				return tools.AskChoiceAnswer{}, context.Canceled
+			}
+			if answer == "" {
+				opt := req.Options[def]
+				return tools.AskChoiceAnswer{Label: opt.Label, Index: def, Text: opt.Text}, nil
+			}
+			if idx, ok := replChoiceIndex(answer, len(req.Options)); ok {
+				opt := req.Options[idx]
+				return tools.AskChoiceAnswer{Label: opt.Label, Index: idx, Text: opt.Text}, nil
+			}
+			r.Warn("   Please enter a letter between A and " + last + " (or its number).")
+		}
+	}
+}
+
+// replChoiceIndex maps a typed answer to a 0-based option index: a single letter (A–Z /
+// a–z) or a 1-based number ("2" → index 1). ok=false when it isn't a valid choice.
+func replChoiceIndex(s string, n int) (int, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) == 1 {
+		c := s[0]
+		if c >= 'a' && c <= 'z' {
+			c -= 32
+		}
+		if c >= 'A' && c <= 'Z' {
+			if idx := int(c - 'A'); idx < n {
+				return idx, true
+			}
+			return 0, false
+		}
+	}
+	if num, err := strconv.Atoi(s); err == nil {
+		if idx := num - 1; idx >= 0 && idx < n {
+			return idx, true
+		}
+	}
+	return 0, false
 }
 
 // runReplTurn runs one user turn under a cancellable child context. A Ctrl-C (sigCh)

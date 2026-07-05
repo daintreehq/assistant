@@ -793,6 +793,24 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	}
 }
 
+// questionToolName is the one tool that must be invoked ALONE in a batch. It blocks the
+// turn on a human decision, so any sibling tool bundled with it would run its (possibly
+// side-effecting) work BEFORE the user has answered. When the model bundles it with
+// other calls, runToolBatch executes only the FIRST question and stubs the rest as
+// recoverable skips so the model re-plans using the answer.
+const questionToolName = "user.askMultipleChoice"
+
+// firstQuestionIndex returns the index of the first user.askMultipleChoice call in the
+// batch (internal name resolved), or -1 if the batch contains none.
+func (s *Session) firstQuestionIndex(calls []models.ToolCallRequest) int {
+	for i, call := range calls {
+		if s.resolveInternal(call.Function.Name) == questionToolName {
+			return i
+		}
+	}
+	return -1
+}
+
 // runToolBatch dispatches a batch of tool calls sequentially after announcing the
 // whole batch as queued. Two circuit breakers trip MID-batch (stopping + stubbing the
 // remaining calls the instant a runaway is detected, so one giant batch can't fully
@@ -811,11 +829,23 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 	s.events.Phase(domain.PhaseToolQueued)
 	s.events.ToolBatch(batch)
 
+	// A multiple-choice question must be asked ALONE: if the model bundled it with other
+	// tools, run only the FIRST question and skip every sibling, so no side-effecting tool
+	// executes before the user answers. -1 ⇒ no question in this batch (the common path).
+	questionIdx := s.firstQuestionIndex(calls)
+
 	var worstFine, worstCoarse *batchRepeat
 
 	for c := 0; c < len(calls); c++ {
 		call := calls[c]
 		internalName := s.resolveInternal(call.Function.Name)
+
+		// A sibling skipped because a question must be asked alone. Its stub is a
+		// SYNTHETIC failure (like a cancel/breaker stub), so it must NOT feed the failure
+		// tallies or circuit breakers — else N identical siblings before the question
+		// could trip RepeatFailureAbort and kill the turn before the question is even
+		// dispatched (or before the model re-plans after the answer).
+		questionSkip := questionIdx >= 0 && c != questionIdx
 
 		// Cancel BEFORE activating/dispatching this call: a cancel that landed while
 		// the PREVIOUS call ran must stop the whole queue here, so no further tool
@@ -851,6 +881,15 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
 
 		switch {
+		case questionSkip:
+			// A question is in this batch and this is NOT it: skip with a recoverable stub
+			// so the model asks the question by itself and re-plans using the answer,
+			// instead of acting on assumptions before the user has decided.
+			res = domain.Fail("QUESTION_BATCH_SKIPPED",
+				"Not executed: user.askMultipleChoice must be called by itself. Ask the question alone, then choose your next tool calls using the user's answer.")
+			res.Summary = "Skipped — a multiple-choice question must be asked by itself."
+			// Short-circuits before Dispatch, so trace it or the skip is invisible in the log.
+			s.traceToolGap("tool.question_batch_skipped", turn.RunID, call.ID, internalName, "")
 		case parseFailed:
 			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
@@ -900,7 +939,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// total; recordToolFailure takes s.mu itself (no lock held here). Ok results and
 		// cancelled results carry 0.
 		failCount := 0
-		if !res.Ok && ctx.Err() == nil {
+		if !res.Ok && ctx.Err() == nil && !questionSkip {
 			failCount = s.recordToolFailure(internalName)
 		}
 
@@ -922,8 +961,9 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// signature is the CANONICALIZED args + error code (a byte-identical retry, even
 		// with reordered keys). The COARSE signature strips pagination fields and counts
 		// ONLY unrecoverable errors — the args-varied futile loop the fine tally misses
-		// (the model paging a pruned artifact by offset).
-		if !res.Ok {
+		// (the model paging a pruned artifact by offset). A question-skip stub is synthetic,
+		// not a real tool failure, so it never feeds the breakers.
+		if !res.Ok && !questionSkip {
 			errCode := ""
 			if res.Error != nil {
 				errCode = res.Error.Code

@@ -61,6 +61,25 @@ func newController(a *app.App, pump *eventPump, send func(tea.Msg)) *controller 
 				return false, nil
 			}
 		},
+		// AskChoice blocks the dispatching goroutine the same way Confirm does: it pushes
+		// the request (with a fresh reply channel) to the UI and waits for the user's pick.
+		// The model routes the selection — or a cancel — back through the channel. A
+		// cancelled turn (ctx) unblocks it too, reported as context.Canceled so the tool
+		// returns QUESTION_CANCELLED rather than a spurious answer.
+		AskChoice: func(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+			reply := make(chan questionReply, 1)
+			send(QuestionRequestedMsg{Request: req, Reply: reply})
+			select {
+			case r := <-reply:
+				if r.cancelled || r.index < 0 || r.index >= len(req.Options) {
+					return tools.AskChoiceAnswer{}, context.Canceled
+				}
+				opt := req.Options[r.index]
+				return tools.AskChoiceAnswer{Label: opt.Label, Index: r.index, Text: opt.Text}, nil
+			case <-ctx.Done():
+				return tools.AskChoiceAnswer{}, ctx.Err()
+			}
+		},
 		// Out-of-band log lines become info NoteCells.
 		Log: func(msg string) { send(LogMsg{Level: NoteInfo, Text: msg}) },
 	})

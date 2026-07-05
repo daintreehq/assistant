@@ -81,19 +81,19 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
-// tools, the three docs.* documentation-search tools, and the four async-futures
-// tools — terminal.run.async / terminal.await.async / async.list / async.cancel).
-// The local skill.find / skill.load tools are GONE — the backend now owns skill
-// selection (the migration off the client-side selector); skill.run.get /
-// skill.step.advance remain. We assert that exact count so a silent family
-// add/drop is caught.
+// tools, the three docs.* documentation-search tools, the four async-futures
+// tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
+// the user.askMultipleChoice question tool). The local skill.find / skill.load tools are
+// GONE — the backend now owns skill selection (the migration off the client-side
+// selector); skill.run.get / skill.step.advance remain. We assert that exact count so a
+// silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 86 {
-		t.Errorf("registered tools = %d, want 86", got)
+	if got != 87 {
+		t.Errorf("registered tools = %d, want 87", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
@@ -116,6 +116,10 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 		if !a.Registry.Has(name) {
 			t.Errorf("%s (async-futures family) not registered", name)
 		}
+	}
+	// The 86→87 bump is user.askMultipleChoice (the multiple-choice question tool).
+	if !a.Registry.Has("user.askMultipleChoice") {
+		t.Error("user.askMultipleChoice (question tool) not registered")
 	}
 	// The docs MCP is a SECOND, always-constructed transport (never nil), independent of
 	// the primary Daintree control-plane client.

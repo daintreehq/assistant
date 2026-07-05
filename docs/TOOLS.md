@@ -163,6 +163,9 @@ filled by the caller (handlers degrade gracefully when an optional field is zero
 
 - **Always present:** `Config` (carries `Tier`, `AutoApprove`), `MCP`, `DB`, `Queue`,
   `Router`, `ProjectPath`, `Actor`, `Confirm`, `Log`.
+- **Interactive-only:** `AskChoice` (present for the `main` actor; nil for a
+  watcher/timer/workflow) — presents a multiple-choice question and blocks on the answer.
+  `user.askMultipleChoice` uses it; a nil check yields `QUESTION_NOT_INTERACTIVE`.
 - **Liveness:** `ToolCallID`, `ReportProgress` (emit substep beats — may be nil; guard it
   before calling, see the handler contract above).
 - **Per-turn / per-actor:** `SessionID`, `ActorID` (the `wch_…`/`tmr_…` — required for the
@@ -195,6 +198,7 @@ The registry is the source of truth (`internal/tools` + the wiring in
 | `memory` | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
 | `artifactx` | `artifact.read` |
 | `agenttaskx` | `agentTask.spawnForEdits` `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
+| `questionx` | `user.askMultipleChoice` (ask the human ONE multiple-choice question and block on the answer; `RiskUI`, interactive-only, must be called alone) |
 
 `mcpwrap` are typed wrappers over Daintree MCP actions. Forwarding many of these raw
 through `daintree.call` is refused with `USE_TYPED_WRAPPER` and redirected to the wrapper
