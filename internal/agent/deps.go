@@ -102,6 +102,16 @@ type WorkflowRunLister interface {
 	ListNonTerminalWorkflowRuns(limit int) ([]domain.WorkflowRunRecord, error)
 }
 
+// AsyncInvocationLister is the read-only async-futures seam for the turn
+// context: it returns the live (non-terminal) async invocations so the model
+// sees its own in-flight async operations every round as inert data — it can
+// reference them, cancel them, and (crucially) NOT re-issue them after a
+// compaction or a long gap. Optional: a nil lister omits the block (the default
+// in tests). Best-effort local read; never blocks or breaks the turn.
+type AsyncInvocationLister interface {
+	ListLiveAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
+}
+
 // MemoryRecaller is the per-turn BM25 recall seam (satisfied by an adapter over
 // *storage.Store). At the START of every turn the session runs ONE keyword recall
 // seeded by the user's originating ask and injects the top hits into the merged
@@ -183,6 +193,9 @@ type SessionDeps struct {
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister
+	// AsyncInvocationLister feeds the turn context's active-async-operations block,
+	// re-read every round like the workflow ledger (optional; nil ⇒ omitted).
+	AsyncInvocationLister AsyncInvocationLister
 	// OpenTerminalsFetcher returns a fresh, metadata-only snapshot of the open Daintree
 	// terminals for the runtime block's open-terminal inventory. Called ONCE per turn
 	// before the round loop (one terminal.list + one no-output terminal.getStatus) and

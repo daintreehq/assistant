@@ -8,6 +8,9 @@ type EventTarget struct {
 	WorktreeID    string `json:"worktreeId,omitempty"`
 	TerminalID    string `json:"terminalId,omitempty"`
 	WorkflowRunID string `json:"workflowRunId,omitempty"`
+	// AsyncInvocationID links a completion event back to its async_invocations
+	// ledger row (asy_…), so the wake reactor and async.list can cross-reference.
+	AsyncInvocationID string `json:"asyncInvocationId,omitempty"`
 }
 
 // RecommendedAction is a suggested follow-up tool call surfaced on a queue event.

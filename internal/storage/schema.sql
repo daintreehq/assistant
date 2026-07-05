@@ -280,3 +280,31 @@ CREATE TABLE IF NOT EXISTS context_checkpoints (
   payloadJson     TEXT NOT NULL,
   createdAt       INTEGER NOT NULL
 );
+
+-- 3.15 async_invocations — runtime-owned async tool futures (terminal.run.async /
+-- terminal.await.async). The tool call returns an immediate "accepted" handle;
+-- the async coordinator polls the watched terminals to completion and publishes
+-- the outcome to the attention queue (an autonomous wake). Session-scoped like
+-- watchers: cancelStaleAsyncInvocations abandons non-terminal rows on the next
+-- open. Purely ADDITIVE table — no user_version bump; the idempotent
+-- IF NOT EXISTS exec creates it on an existing baseline.
+CREATE TABLE IF NOT EXISTS async_invocations (
+  id              TEXT PRIMARY KEY,   -- asy_<8hex>
+  toolName        TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  groupId         TEXT NOT NULL,      -- sibling-coalescing key: the creating turn's run_… id (or the row id)
+  sessionId       TEXT NOT NULL,
+  terminalIdsJson TEXT NOT NULL,      -- JSON string[]
+  command         TEXT,               -- terminal.run.async only
+  status          TEXT NOT NULL DEFAULT 'starting',
+  outcomesJson    TEXT,               -- JSON map terminalId -> {status,exitCode?,reason?}
+  lastError       TEXT,
+  queueEventId    TEXT,
+  endedReason     TEXT,               -- 'session_ended' | 'user_cancelled' | 'session_cleared' | NULL
+  createdAt       INTEGER NOT NULL,
+  startedAt       INTEGER,
+  expiresAt       INTEGER NOT NULL,   -- hard deadline
+  finishedAt      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_async_invocations_live  ON async_invocations(status, createdAt);
+CREATE INDEX IF NOT EXISTS idx_async_invocations_group ON async_invocations(groupId, status);

@@ -77,6 +77,16 @@ it **produced**.
 |---|---|---|
 | `mcp.call` | every MCP tool call (once, on exit) | `mcpTool` `callKind` (read/mutation) `retries` `attempts` `durationMs` `transportOk`; `isError` + `text`/`structured` summary on success, `error` on failure (`transportOk` = no Go error; a tool-level failure still has `transportOk=true` + `isError=true`) |
 
+### Async futures (asyncwork.Coordinator)
+| event | when | key fields |
+|---|---|---|
+| `async.registered` | an async invocation entered the live poll set | `asyncId` `tool` `group` `terminals` `expiresAt` |
+| `async.settled` | every watched terminal settled (or the deadline hit) | `asyncId` `expired` `settleAt` `outcomes` |
+| `async.published` | ONE grouped completion event published to the queue | `group` `asyncIds` `eventId` `title` |
+| `async.publish_failed` | the queue publish failed (retried next tick) | `group` `asyncIds` `error` |
+| `async.claim_lost` | a settle/finalize write lost to a concurrent async.cancel | `asyncId` `stage` |
+| `async.read.backoff` | consecutive status-read failures triggered the 5s backoff | `consecutiveFailures` |
+
 ### Other (pre-existing)
 `session.start`, `mcp.credentials` (temporary debug aid), `backend.retry`,
 `watcher.*` / `spawn.*`, `skill.step.*`, `reconcile.*`, `session.checkpoint.resumed`.

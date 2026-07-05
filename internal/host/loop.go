@@ -180,10 +180,13 @@ func (h *Host) reactWake() {
 		h.wakeRetried = false
 		// Only record terminals as summarized on a REAL reply — Send returns a
 		// sentinel string on model failure (never throws), so a transient outage
-		// must not permanently downgrade later events to one-line acks.
+		// must not permanently downgrade later events to one-line acks. WATCHER
+		// events only (mirrors the cockpit): an async-tool completion carries a
+		// terminalId too, but must not poison the "got a full watcher summary" set
+		// — a later real watcher event for that terminal still earns the summary.
 		if !agent.IsWakeFailureReply(reply) {
 			for _, e := range events {
-				if e.Target != nil && e.Target.TerminalID != "" {
+				if e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != "" {
 					h.summarizedTerminals[e.Target.TerminalID] = struct{}{}
 				}
 			}

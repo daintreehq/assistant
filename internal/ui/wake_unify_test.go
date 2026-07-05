@@ -14,7 +14,13 @@ import (
 // so the same terminal isn't re-summarized across lifecycle bursts.
 
 func wakeEvent(terminalID, title string) domain.QueueEvent {
-	return domain.QueueEvent{Title: title, Target: &domain.EventTarget{TerminalID: terminalID}}
+	// Source matters since the async split: only WATCHER events feed the
+	// summarized-terminals memory (an async completion must not poison it).
+	return domain.QueueEvent{
+		Source: domain.SourceTerminalWatcher,
+		Title:  title,
+		Target: &domain.EventTarget{TerminalID: terminalID},
+	}
 }
 
 // A successful wake records its terminals as summarized; the NEXT burst's prompt
@@ -88,5 +94,24 @@ func TestWake_ModelFailureSentinelNotRecorded(t *testing.T) {
 		if cell.State != TurnFailed {
 			t.Fatalf("a model-failure wake (%q) should seal the turn as failed, got %v", sentinel, cell.State)
 		}
+	}
+}
+
+// An ASYNC completion wake must NOT mark its terminal as summarized: that set
+// means "got a full watcher summary", and poisoning it would downgrade a later
+// genuine watcher event (an agent waiting on a question) to a one-line ack.
+func TestWake_AsyncCompletionDoesNotRecordSummarized(t *testing.T) {
+	m := liveModel(80)
+	m.activeWake = []domain.QueueEvent{{
+		Source: domain.SourceAsyncTool,
+		Title:  "Async finished: npm test",
+		Target: &domain.EventTarget{TerminalID: "term_9", AsyncInvocationID: "asy_1"},
+	}}
+
+	next, _ := m.onWakeComplete(WakeCompleteMsg{Reply: "Tests passed; continuing.", Failed: false})
+	nm := next.(Model)
+
+	if _, ok := nm.summarizedTerminals["term_9"]; ok {
+		t.Fatal("an async completion must not poison the watcher summarized-terminals memory")
 	}
 }

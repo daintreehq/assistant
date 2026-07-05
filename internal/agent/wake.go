@@ -21,21 +21,52 @@ import (
 const wakePromptPrefix = "[automatic wake-up]"
 
 // IsActionableWake reports whether a surfaced attention event should autonomously
-// wake the model (run a turn) versus just appear in the inbox. Only a
-// terminal-watcher event carrying a real terminalId qualifies — model/user
-// queue events can't trigger an autonomous turn.
+// wake the model (run a turn) versus just appear in the inbox. Two sources
+// qualify: a terminal-watcher event carrying a real terminalId, and an
+// async-tool completion (the model started that work — its completion is
+// exactly when it should look and continue). Model/user queue events can't
+// trigger an autonomous turn.
 func IsActionableWake(e domain.QueueEvent) bool {
-	return e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != ""
+	switch e.Source {
+	case domain.SourceTerminalWatcher:
+		return e.Target != nil && e.Target.TerminalID != ""
+	case domain.SourceAsyncTool:
+		return true
+	default:
+		return false
+	}
 }
 
-// BuildWakePrompt builds the internal nudge fed to the model on a watcher wake. The
-// model's reaction is what surfaces, not this prompt. alreadySummarized carries
-// terminal ids already reported this session
-// (cross-burst memory): a terminal already in the set is downgraded to a one-line
-// ack so a lifecycle that surfaces several events (waiting_for_input then
-// terminal_exited) is summarized once, not two or three times. Reproduce
-// the templates verbatim — the "(already reported …)" text is model-facing.
+// BuildWakePrompt builds the internal nudge fed to the model on an autonomous
+// wake. The model's reaction is what surfaces, not this prompt. It partitions
+// the burst by source: async-tool completions get their own framing + guidance
+// (continue the task, read output only if needed, never re-run the operation),
+// everything else keeps the watcher framing. A watcher-only burst renders
+// byte-identically to the pre-async output — the templates are model-facing
+// contract text. alreadySummarized carries terminal ids already reported this
+// session (cross-burst memory) for the watcher branch's ack downgrade.
 func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]struct{}) string {
+	var async, watcher []domain.QueueEvent
+	for _, e := range events {
+		if e.Source == domain.SourceAsyncTool {
+			async = append(async, e)
+		} else {
+			watcher = append(watcher, e)
+		}
+	}
+	if len(async) == 0 {
+		return buildWatcherWakePrompt(watcher, alreadySummarized)
+	}
+	if len(watcher) == 0 {
+		return buildAsyncWakePrompt(async)
+	}
+	// Mixed burst: the watcher prompt leads (its guidance covers inbox hygiene),
+	// the async completions follow as their own clearly-framed section.
+	return buildWatcherWakePrompt(watcher, alreadySummarized) + "\n\n" + asyncWakeSection(async)
+}
+
+// buildWatcherWakePrompt is the original watcher wake prompt, verbatim.
+func buildWatcherWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]struct{}) string {
 	// Seed from the caller's cross-burst memory, then grow locally so a terminal
 	// appearing twice within THIS batch earns a full summary only on its first line.
 	seen := make(map[string]struct{}, len(alreadySummarized))
@@ -50,25 +81,7 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 		if e.Target != nil {
 			terminalID = e.Target.TerminalID
 		}
-		title := e.Title
-		if title == "" {
-			title = "event"
-		}
-		term := ""
-		if terminalID != "" {
-			term = " [terminal " + terminalID + "]"
-		}
-		base := "- " + title
-		if e.Summary != "" {
-			base += ": " + e.Summary
-		}
-		base += term
-		if e.ID != "" {
-			// Surface the inbox id so the reactor can resolve THIS exact item once it
-			// has reported a finished watch; without the id the model would have to
-			// queue.digest and match the event by hand.
-			base += " (inbox " + e.ID + ")"
-		}
+		base := wakeEventLine(e, "event")
 		if terminalID != "" {
 			if _, ok := seen[terminalID]; ok {
 				anyFollowUp = true
@@ -106,6 +119,61 @@ func BuildWakePrompt(events []domain.QueueEvent, alreadySummarized map[string]st
 	parts = append(parts, "", "New events:")
 	parts = append(parts, lines...)
 	return strings.Join(parts, "\n")
+}
+
+// buildAsyncWakePrompt frames an async-only burst: operations the MODEL started
+// (terminal.run.async / terminal.await.async) have completed, so the guidance is
+// "continue the task", not "report a watched terminal".
+func buildAsyncWakePrompt(events []domain.QueueEvent) string {
+	return wakePromptPrefix + " Asynchronous operation(s) you started earlier have finished — this was NOT typed by the user.\n" +
+		asyncWakeGuidance + "\n\n" + asyncWakeLines(events)
+}
+
+// asyncWakeSection renders the async completions as a section appended to a
+// mixed watcher+async burst.
+func asyncWakeSection(events []domain.QueueEvent) string {
+	return "Also: asynchronous operation(s) you started earlier have finished.\n" +
+		asyncWakeGuidance + "\n\n" + asyncWakeLines(events)
+}
+
+// asyncWakeGuidance is the model-facing async completion playbook. The outcome
+// facts are already ON each event line (per-terminal status + exit codes), so
+// the default action is to continue the task — output reads are for when the
+// CONTENT is needed, and re-running the operation is never right.
+const asyncWakeGuidance = "Each line below is one completion, with per-terminal outcomes inline. Pick up the task each operation was part of and continue it: report the outcome to the user concisely, and when you need the actual output, read it with terminal.summarize (default, clean gist) or terminal.extract (a specific field) — do NOT paste raw terminal output. If an outcome says a terminal is asking a question, answer it with terminal.sendCommand. Do NOT re-run the async operation, do NOT start a new wait on the same terminals, and do NOT call async.list to double-check — these events are authoritative. When you have handled a completion, resolve its inbox item with queue.resolve {\"id\":\"<the inbox id on that line>\"} so it stops counting as needing attention."
+
+// wakeEventLine renders ONE event as the shared "- Title: Summary
+// [terminal id] (inbox id)" line — the single formatter behind BOTH the watcher
+// and the async wake branches, so the model always reads one consistent event
+// format and guidance like "the inbox id on that line" can never drift out of
+// sync with only one of the two renderings. The inbox id is surfaced so the
+// reactor can resolve THIS exact item without a queue.digest hunt.
+func wakeEventLine(e domain.QueueEvent, fallbackTitle string) string {
+	title := e.Title
+	if title == "" {
+		title = fallbackTitle
+	}
+	base := "- " + title
+	if e.Summary != "" {
+		base += ": " + e.Summary
+	}
+	if e.Target != nil && e.Target.TerminalID != "" {
+		base += " [terminal " + e.Target.TerminalID + "]"
+	}
+	if e.ID != "" {
+		base += " (inbox " + e.ID + ")"
+	}
+	return base
+}
+
+// asyncWakeLines renders one shared-format line per completion event.
+func asyncWakeLines(events []domain.QueueEvent) string {
+	lines := make([]string, 0, len(events)+1)
+	lines = append(lines, "Completed operations:")
+	for _, e := range events {
+		lines = append(lines, wakeEventLine(e, "async operation"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // wakeFailurePrefixes: a Send reply is a "non-result" (a turn that failed before

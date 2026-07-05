@@ -6,6 +6,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/artifactx"
+	"github.com/daintreehq/daintree-assistant/internal/tools/asyncx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/auditx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/contextx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/docsx"
@@ -46,6 +47,13 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	}))...)
 	all = append(all, addr(artifactx.Tools(artifactx.Deps{
 		Store: artifactStoreAdapter{app: a},
+	}))...)
+	all = append(all, addr(asyncx.Tools(asyncx.Deps{
+		Reader:      terminalReaderAdapter{c: a.MCP},
+		Sender:      asyncCommandSenderAdapter{c: a.MCP},
+		Coordinator: a.asyncCoordinator,
+		Store:       a.Store,
+		SessionID:   a.SessionID,
 	}))...)
 	all = append(all, addr(auditx.Tools(auditx.Deps{
 		Store: auditStoreAdapter{s: a.Store},

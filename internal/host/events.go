@@ -120,7 +120,7 @@ func (e EvToolStarted) encode(sid string) ([]byte, error) {
 	return marshalEvent("tool:started", sid, f)
 }
 
-// EvToolSettled — tool:settled. errorCode + turnId optional.
+// EvToolSettled — tool:settled. errorCode + turnId + asyncId optional.
 type EvToolSettled struct {
 	ToolCallID string
 	ToolID     string
@@ -129,6 +129,11 @@ type EvToolSettled struct {
 	Severity   AuditSeverity
 	ErrorCode  string
 	TurnID     string
+	// AsyncID marks an ACCEPTED-but-still-running async operation (asy_…): the
+	// call settled but the work continues in the background, so a host must NOT
+	// render it as a finished success (the cockpit shows it as a distinct yellow
+	// pending state). Empty for every ordinary synchronous result.
+	AsyncID string
 }
 
 func (e EvToolSettled) encode(sid string) ([]byte, error) {
@@ -144,6 +149,9 @@ func (e EvToolSettled) encode(sid string) ([]byte, error) {
 	}
 	if e.TurnID != "" {
 		f["turnId"] = e.TurnID
+	}
+	if e.AsyncID != "" {
+		f["asyncId"] = e.AsyncID
 	}
 	return marshalEvent("tool:settled", sid, f)
 }

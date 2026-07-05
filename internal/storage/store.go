@@ -151,6 +151,13 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("reset stale agent launches: %w", err)
 	}
+	// Async futures are session-scoped like watchers: abandon every non-terminal
+	// invocation a prior session left behind (the foreground coordinator that owned
+	// them is gone; a new session must never silently resume them).
+	if err := s.cancelStaleAsyncInvocations(now); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// Fresh-start inbox: resolve EVERY open attention event from prior sessions so a
 	// new run begins with an empty inbox (the !N badge at 0) — supervision and its
 	// notifications never carry over. Best-effort; events published THIS session

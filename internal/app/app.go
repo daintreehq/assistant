@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/asyncwork"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/daemon"
@@ -104,6 +105,13 @@ type App struct {
 
 	runRef    *agent.RunIDRef
 	scheduler *daemon.Scheduler
+
+	// asyncCoordinator owns the runtime's async tool futures (terminal.run.async /
+	// terminal.await.async): the 1s poll loop, sibling coalescing, and the
+	// completion publish into the attention queue. Constructed always (the asyncx
+	// tools capture it); STARTED only alongside the scheduler on interactive
+	// paths, so a one-shot run cleanly rejects async work instead of stranding it.
+	asyncCoordinator *asyncwork.Coordinator
 
 	// scratchStore is the session-scoped, pure in-memory scratch workspace the
 	// scratch.* tools drive. Initialized once per App (== once per session) before
@@ -312,6 +320,26 @@ func Create(opts CreateOptions) (*App, error) {
 		debugLogAdapter{cfg: debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}},
 	)
 
+	// The async coordinator is built BEFORE the tool registry (the asyncx family
+	// captures it) and started later, alongside the scheduler (StartScheduler).
+	// Its Notify hook pushes a fresh completion to the scheduler's delivery path
+	// immediately; a.scheduler is set before the coordinator ever starts ticking,
+	// and NotifyNow serializes with the tick's own notify.
+	asyncTrace := func(event string, fields map[string]any) {
+		debuglog.LogDebug(debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}, event, fields)
+	}
+	a.asyncCoordinator = asyncwork.New(asyncwork.Deps{
+		Reader: asyncStatusReaderAdapter{r: terminalReaderAdapter{c: a.MCP}},
+		Queue:  a.Queue,
+		Store:  store,
+		Notify: func() {
+			if s := a.scheduler; s != nil {
+				s.NotifyNow()
+			}
+		},
+		Trace: asyncTrace,
+	})
+
 	a.Registry = tools.NewRegistry()
 	build := opts.BuildTools
 	if build == nil {
@@ -430,6 +458,9 @@ func Create(opts CreateOptions) (*App, error) {
 		SessionEndedWatchers: a.sessionEndedWatchersForFooter,
 		ArtifactPersister:    store,
 		WorkflowRunLister:    store,
+		// Live async futures for the turn context's async-operations block, re-read
+		// every round so the model sees (and never re-issues) its in-flight work.
+		AsyncInvocationLister: store,
 		// Per-turn open-terminal inventory (issue #286): a fresh terminal.list +
 		// no-output terminal.getStatus snapshot attached to the runtime block so the model
 		// sees the live roster as inert data instead of discovering it mid-turn. Best-effort

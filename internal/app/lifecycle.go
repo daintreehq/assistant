@@ -283,6 +283,12 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 		OnAttention:     onAttention,
 	})
 	a.scheduler.Start(ctx)
+	// The async coordinator shares the daemon's lifecycle: foreground-only, so
+	// async futures only run while the assistant is open. Started AFTER
+	// a.scheduler is set so the coordinator's Notify hook always sees it.
+	if a.asyncCoordinator != nil {
+		a.asyncCoordinator.Start(ctx)
+	}
 	return a.scheduler
 }
 
@@ -302,6 +308,24 @@ func (a *App) ClearWatchers() (int, error) {
 // the same on the next launch. Returns how many events were resolved. Best-effort.
 func (a *App) ClearInbox() (int, error) {
 	return a.Store.ResolveAllOpenEvents(domain.NowMS())
+}
+
+// ClearAsyncWork cancels every live async invocation for /clear's clean slate —
+// a cleared conversation must never be woken by a completion for work only the
+// old conversation understood. One bulk statement flips the DB rows (no partial
+// mixed state), and the coordinator's CancelAll drops EVERY tracked entry AND
+// bumps the clear generation — which also retracts the in-flight window where a
+// pass finalized a group just before the clear but hasn't published yet (the
+// pass re-checks the generation right before Queue.Publish). The watched
+// terminals keep running (Daintree owns them); the assistant just stops
+// following. Returns how many rows were cancelled. Best-effort: the error is
+// returned for logging only.
+func (a *App) ClearAsyncWork() (int, error) {
+	ids, err := a.Store.CancelLiveAsyncInvocations(domain.NowMS(), storage.ReasonSessionCleared)
+	if a.asyncCoordinator != nil {
+		a.asyncCoordinator.CancelAll()
+	}
+	return len(ids), err
 }
 
 // daemonCtxFor builds a per-actor daemon.CheckContext. The
@@ -343,6 +367,10 @@ func (a *App) Shutdown() error {
 	// MCP/Router/Store before we close them.
 	if a.baseCancel != nil {
 		a.baseCancel()
+	}
+	if a.asyncCoordinator != nil {
+		a.asyncCoordinator.Stop()
+		a.asyncCoordinator.Drain()
 	}
 	if a.scheduler != nil {
 		a.scheduler.Stop()

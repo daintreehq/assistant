@@ -343,10 +343,20 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 		if t != nil {
 			if a := t.findActivity(ev.result.ID); a != nil {
 				a.EndedAt = ev.result.EndedAt
-				if ev.result.Result.Ok {
+				switch {
+				case ev.result.Result.Ok && ev.result.Result.Async != nil:
+					// An accepted async handle: the CALL settled but the WORK runs on in
+					// the background — a distinct pending state (yellow), never a ✓ that
+					// would falsely read as "finished".
+					a.State = ActAsyncPending
+					a.Detail = ev.result.Result.Summary
+					if title := ev.result.Result.Async.Title; title != "" {
+						a.Detail = title + " — running asynchronously; completion arrives via the queue"
+					}
+				case ev.result.Result.Ok:
 					a.State = ActDone
 					a.Detail = ev.result.Result.Summary
-				} else {
+				default:
 					a.State = ActFailed
 					a.Outcome = toolFailSummary(ev.result.Result)
 				}

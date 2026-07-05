@@ -6,8 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/asyncwork"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/daintree-assistant/internal/tools/asyncx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/terminalid"
 )
@@ -171,6 +173,61 @@ func (r terminalReaderAdapter) ReadOutput(ctx context.Context, terminalID string
 	}
 	content := mcpStringField(res, "content")
 	return extractionx.OutputReadResult{OK: true, Value: tailString(content, tailBytes)}
+}
+
+// asyncStatusReaderAdapter maps the shared terminal read adapter onto the async
+// coordinator's StatusReader seam: the coordinator's tick is always a no-output
+// getStatus (pure FSM), so includeOutput is pinned false here. ListTerminals is
+// the rate-limited roster read the coordinator uses to CONFIRM a terminal is
+// gone before condemning it (absence in a batched getStatus is only a hint).
+type asyncStatusReaderAdapter struct{ r terminalReaderAdapter }
+
+func (a asyncStatusReaderAdapter) Connected() bool { return a.r.Connected() }
+
+func (a asyncStatusReaderAdapter) ListTerminals(ctx context.Context) ([]string, bool) {
+	return a.r.ListTerminals(ctx)
+}
+
+func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []string) asyncwork.StatusReadResult {
+	res := a.r.ReadStatuses(ctx, terminalIDs, false)
+	out := asyncwork.StatusReadResult{OK: res.OK, ByID: make(map[string]asyncwork.TerminalStatus, len(res.ByID))}
+	for id, e := range res.ByID {
+		out.ByID[id] = asyncwork.TerminalStatus{
+			AgentState:    e.AgentState,
+			WaitingReason: e.WaitingReason,
+			ExitCode:      e.ExitCode,
+		}
+	}
+	return out
+}
+
+// asyncCommandSenderAdapter performs terminal.run.async's one mutating side
+// effect: the Daintree terminal.sendCommand MCP call. Plain CallOptions — the
+// transport force-disables retry for mutations, so the send happens exactly
+// once. A tool-level error RESULT means the server saw and REJECTED the call
+// (the command did not run) and is wrapped as asyncx.SendRejectedError; a
+// transport error stays plain, because it is AMBIGUOUS — Daintree may have
+// accepted the command before the connection dropped — and the tool phrases
+// the two failures differently (a rejected send may be retried; an ambiguous
+// one must not be blindly re-sent).
+type asyncCommandSenderAdapter struct{ c *mcp.Client }
+
+func (s asyncCommandSenderAdapter) SendCommand(ctx context.Context, terminalID, command string) error {
+	res, err := s.c.CallTool(ctx, "terminal.sendCommand", map[string]any{
+		"terminalId": terminalID,
+		"command":    command,
+	}, mcp.CallOptions{})
+	if err != nil {
+		return err
+	}
+	if res.IsError {
+		msg := strings.TrimSpace(res.Text)
+		if msg == "" {
+			msg = "terminal.sendCommand returned an error result"
+		}
+		return asyncx.SendRejectedError{Msg: msg}
+	}
+	return nil
 }
 
 // --- shared MCP result parsing (mirror of daemon/mcpreads.go pure parsers) ---

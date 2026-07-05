@@ -1320,6 +1320,7 @@ func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.M
 		Goal:                 strings.TrimSpace(goal),
 		IsWake:               isWake,
 		WorkflowRuns:         workflowRunStrings(s.workflowRunsForFooter()),
+		AsyncOperations:      asyncInvocationStrings(s.asyncInvocationsForFooter()),
 		SessionEndedWatchers: sessionEndedWatchers,
 	}
 	pinned := memoryStrings(s.pinnedMemoriesForFooter())
@@ -1338,6 +1339,21 @@ func memoryStrings(rows []domain.MemoryRecord) []string {
 		if c := flattenFooterLine(m.Content); c != "" {
 			out = append(out, c)
 		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// asyncInvocationStrings renders the live async invocations to single-line
+// strings for the structured turn block (the backend renders the section). One
+// line carries everything the model needs to reference — id, tool, title,
+// watched terminals — so it can cancel or discuss the work without re-listing.
+func asyncInvocationStrings(rows []domain.AsyncInvocationRecord) []string {
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		out = append(out, renderAsyncInvocationRow(rows[i]))
 	}
 	if len(out) == 0 {
 		return nil
@@ -1471,6 +1487,21 @@ func (s *Session) workflowRunsForFooter() []domain.WorkflowRunRecord {
 	}
 	runs, _ := s.deps.WorkflowRunLister.ListNonTerminalWorkflowRuns(activeWorkflowRunsLimit)
 	return runs
+}
+
+// asyncInvocationsForFooter reads the live async invocations for this round's
+// turn context, best-effort: a nil lister or any DB error yields nil, so the
+// block is simply omitted rather than failing the turn. Re-read per round (like
+// workflowRunsForFooter) so a completion/cancel surfaces on the very next round.
+func (s *Session) asyncInvocationsForFooter() []domain.AsyncInvocationRecord {
+	if s.deps.AsyncInvocationLister == nil {
+		return nil
+	}
+	rows, _ := s.deps.AsyncInvocationLister.ListLiveAsyncInvocations()
+	if len(rows) > activeAsyncOperationsLimit {
+		rows = rows[:activeAsyncOperationsLimit]
+	}
+	return rows
 }
 
 // pinnedMemoriesForFooter reads the current pinned project memories for this round's

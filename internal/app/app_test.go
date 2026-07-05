@@ -76,22 +76,24 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 82 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 86 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
-// tools, and the three docs.* documentation-search tools). The local skill.find /
-// skill.load tools are GONE — the backend now owns skill selection (the migration off
-// the client-side selector); skill.run.get / skill.step.advance remain. We assert that
-// exact count so a silent family add/drop is caught.
+// tools, the three docs.* documentation-search tools, and the four async-futures
+// tools — terminal.run.async / terminal.await.async / async.list / async.cancel).
+// The local skill.find / skill.load tools are GONE — the backend now owns skill
+// selection (the migration off the client-side selector); skill.run.get /
+// skill.step.advance remain. We assert that exact count so a silent family
+// add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 82 {
-		t.Errorf("registered tools = %d, want 82", got)
+	if got != 86 {
+		t.Errorf("registered tools = %d, want 86", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
@@ -106,6 +108,13 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	for _, name := range []string{"docs.search", "docs.getPage", "docs.getRelatedPages"} {
 		if !a.Registry.Has(name) {
 			t.Errorf("%s (docs documentation family) not registered", name)
+		}
+	}
+	// The async-futures family (the 82→86 bump): assert by name so the count guard
+	// can't be satisfied by an unrelated add/drop.
+	for _, name := range []string{"terminal.run.async", "terminal.await.async", "async.list", "async.cancel"} {
+		if !a.Registry.Has(name) {
+			t.Errorf("%s (async-futures family) not registered", name)
 		}
 	}
 	// The docs MCP is a SECOND, always-constructed transport (never nil), independent of

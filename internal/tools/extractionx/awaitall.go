@@ -203,17 +203,17 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				t.seenWorking = true
 			}
 
-			v := awaitSettleFSM(agentState, waitingReason, exitCode, t.seenWorking, now-startedAt, domain.FinishSettleGraceMS)
-			if !v.settled {
+			v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, t.seenWorking, now-startedAt, domain.FinishSettleGraceMS)
+			if !v.Settled {
 				continue
 			}
-			o := &awaitOutcome{status: v.status, finished: v.finished, exitCode: exitCode}
-			switch v.status {
-			case "failed":
+			o := &awaitOutcome{status: v.Status, finished: v.Finished, exitCode: exitCode}
+			switch v.Status {
+			case domain.SettleStatusFailed:
 				if exitCode != nil {
 					o.reason = fmt.Sprintf("exited with code %d", *exitCode)
 				}
-			case "question":
+			case domain.SettleStatusQuestion:
 				o.reason = "asking a question"
 			}
 			t.outcome = o
@@ -251,45 +251,11 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	return out, attempts, interrupted
 }
 
-// awaitFSMVerdict is the pure-FSM settle decision for one terminal at one tick.
-type awaitFSMVerdict struct {
-	settled  bool
-	status   string // "finished" | "failed" | "question" — valid only when settled
-	finished bool
-}
-
-// awaitSettleFSM decides a terminal's await verdict from its FSM state ALONE — no tail,
-// no model call. completed/exited are hard terminal facts (exited is "failed" on a
-// nonzero code). A "waiting" agent is the only soft case: a question blocks on the
-// orchestrator (settled, NOT finished); any other "waiting" is finished IF we caught it
-// working first (a real working→idle transition) OR a stable idle outlasted the spawn
-// grace (a fast agent we never caught mid-work). A never-worked "waiting" before the
-// grace is a possible pre-start prompt — NOT settled, even on the final attempt: with
-// zero positive evidence the agent ever did anything, "still working" (allFinished=false,
-// which steers the caller to read the tail and self-heal) is more honest than a forced
-// "finished" that a tiny maxAttempts budget could otherwise fabricate. working/idle/
-// directing/unknown never settle either (reported via the caller's nil-outcome path).
-func awaitSettleFSM(agentState, waitingReason string, exitCode *int, seenWorking bool, msSinceSpawn, graceMS int64) awaitFSMVerdict {
-	switch agentState {
-	case string(domain.AgentCompleted):
-		return awaitFSMVerdict{settled: true, status: "finished", finished: true}
-	case string(domain.AgentExited):
-		if exitCode != nil && *exitCode != 0 {
-			return awaitFSMVerdict{settled: true, status: "failed", finished: true}
-		}
-		return awaitFSMVerdict{settled: true, status: "finished", finished: true}
-	case string(domain.AgentWaiting):
-		if waitingReason == "question" {
-			return awaitFSMVerdict{settled: true, status: "question", finished: false}
-		}
-		if seenWorking || msSinceSpawn >= graceMS {
-			return awaitFSMVerdict{settled: true, status: "finished", finished: true}
-		}
-		return awaitFSMVerdict{} // never-worked pre-start 'waiting' before grace — keep polling
-	default:
-		return awaitFSMVerdict{}
-	}
-}
+// The pure-FSM settle decision itself is domain.SettleAgentFSM — promoted to
+// domain so this in-turn cohort wait and the async coordinator (the out-of-turn
+// durable-futures poll) apply ONE settle policy and can never drift. Its
+// semantics (question ⇒ settled-not-finished; never-worked pre-start "waiting"
+// keeps polling even on the final attempt) are documented there.
 
 // buildAwaitResult folds the per-terminal outcomes into the tool envelope. allFinished
 // is true iff every terminal is DONE (finished or failed) — a question or a

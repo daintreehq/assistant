@@ -58,8 +58,8 @@ The Go client mirrors it in `internal/backend`:
   and a fresh conversation starts at index 0.
 - **Runtime + turn context are structured data**, not prose. The old system/footer
   messages became `request.runtime` (tier, project, MCP, agents, scheduler, worktree,
-  project instructions) and `request.turn` (goal, wake, workflow runs, memories,
-  session-ended watchers). The backend renders them.
+  project instructions) and `request.turn` (goal, wake, workflow runs, async operations,
+  memories, session-ended watchers). The backend renders them.
 - **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
   backend's selector picks and injects runbooks and returns a `skills` block (active set
   + a synthetic-load `prelude` the CLI surfaces). The CLI keeps only the local

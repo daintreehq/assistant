@@ -382,12 +382,16 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 	} else if !wakeFailed {
 		// Record the burst's terminals as summarized ONLY on a REAL reply (mirrors the
 		// host) — a failed wake must not permanently downgrade later lifecycle events
-		// to one-line acks. A successful retry path lands here too.
+		// to one-line acks. A successful retry path lands here too. WATCHER events
+		// only: the set means "this terminal got a full watcher summary", and an
+		// async-tool completion (which also carries a terminalId) must not poison it —
+		// a later genuine watcher event for that terminal (an agent waiting on a
+		// question) still deserves the full summary, not the ack downgrade.
 		if m.summarizedTerminals == nil {
 			m.summarizedTerminals = map[string]struct{}{}
 		}
 		for _, e := range burst {
-			if e.Target != nil && e.Target.TerminalID != "" {
+			if e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != "" {
 				m.summarizedTerminals[e.Target.TerminalID] = struct{}{}
 			}
 		}

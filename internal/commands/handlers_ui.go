@@ -90,13 +90,14 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		if err := a.Session.Clear(); err != nil {
 			return UICommandResult{Handled: true, Title: "Clear", Text: "Can't clear while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."}
 		}
-		// /clear is a full reset: tear down every live watcher AND resolve every open
-		// inbox event (same clean slate the next session boundary produces) so no
-		// prior supervision or attention item carries over. Best-effort — neither must
-		// block the conversation clear.
+		// /clear is a full reset: tear down every live watcher, cancel every live
+		// async operation, AND resolve every open inbox event (same clean slate the
+		// next session boundary produces) so no prior supervision, async future, or
+		// attention item carries over. Best-effort — none may block the clear.
 		_, _ = a.ClearWatchers()
+		_, _ = a.ClearAsyncWork()
 		_, _ = a.ClearInbox()
-		return UICommandResult{Handled: true, ClearTranscript: true, Title: "Clear", Text: "Conversation cleared — watchers and inbox cleared — starting fresh."}
+		return UICommandResult{Handled: true, ClearTranscript: true, Title: "Clear", Text: "Conversation cleared — watchers, async operations, and inbox cleared — starting fresh."}
 	case "doctor":
 		return UICommandResult{Handled: true, Title: "Doctor", Text: FormatDoctor(RunDoctor(ctx, a))}
 	case "reconnect":

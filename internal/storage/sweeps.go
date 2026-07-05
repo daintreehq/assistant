@@ -201,6 +201,15 @@ func (s *Store) GCRetentionSweep(now int64) error {
 		now-durMS(r.MemoriesDeletedAge)); err != nil {
 		return fmt.Errorf("sweep memories: %w", err)
 	}
+
+	// Terminal async invocations share the events window: the completion event
+	// they fed the queue is swept on the same horizon, so the ledger row (pure
+	// history once terminal) has no reader past it.
+	if _, err := s.db.Exec(
+		`DELETE FROM async_invocations WHERE finishedAt IS NOT NULL AND finishedAt < ?`,
+		evCutoff); err != nil {
+		return fmt.Errorf("sweep async invocations: %w", err)
+	}
 	return nil
 }
 

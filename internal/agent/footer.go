@@ -75,6 +75,11 @@ const workflowObjectiveMaxRunes = 200
 // running can't bloat the footer.
 const sessionEndedWatchersMaxTitles = 5
 
+// activeAsyncOperationsLimit caps how many live async invocations the turn
+// context lists per round. The runtime itself caps live invocations lower
+// (asyncx.maxLiveInvocations), so this is a formatting backstop, not a policy.
+const activeAsyncOperationsLimit = 16
+
 // activeWorkflowRunsLimit caps how many non-terminal runs the footer renders (and is
 // the LIMIT handed to the store read). The footer is a re-anchoring glance at open
 // work, not a full ledger dump — the newest handful of runs is enough; the model can
@@ -471,6 +476,30 @@ func renderWorkflowRunRow(r domain.WorkflowRunRecord) string {
 	b.WriteString(compactIDList(r.TerminalIdsJson))
 	b.WriteString("  watchers: ")
 	b.WriteString(compactIDList(r.WatcherIdsJson))
+	return b.String()
+}
+
+// renderAsyncInvocationRow formats one live async invocation as a single
+// turn-context line:
+//
+//	[running] asy_1a2b "npm test" (terminal.run.async)  terms: terminal-9f3a…
+//
+// Free-text fields are flattened/capped so a verbose title can't break the row;
+// the terminal list reuses the workflow row's compact "+N" preview. Nothing here
+// can panic on bad ledger data — the row rides every round of a live turn.
+func renderAsyncInvocationRow(r domain.AsyncInvocationRecord) string {
+	var b strings.Builder
+	b.WriteString("[")
+	b.WriteString(string(r.Status))
+	b.WriteString("] ")
+	b.WriteString(r.ID)
+	b.WriteString(" \"")
+	b.WriteString(cleanWorkflowFieldStr(r.Title))
+	b.WriteString("\" (")
+	b.WriteString(r.ToolName)
+	b.WriteString(")  terms: ")
+	ids := r.TerminalIdsJson
+	b.WriteString(compactIDList(&ids))
 	return b.String()
 }
 

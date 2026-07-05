@@ -18,6 +18,7 @@ type GlyphSet struct {
 	Active       string   // ◌ — activity active (spinner base; animated elsewhere)
 	Waiting      string   // ◷ — activity waiting (e.g. watcher)
 	Approval     string   // ◇ — waiting for approval
+	Async        string   // ● — accepted async work still running in the background
 	Done         string   // ✓ — activity complete
 	Failed       string   // × — activity failed
 	BranchMid    string   // ├─ — non-last tree branch
@@ -38,6 +39,7 @@ var unicodeGlyphs = GlyphSet{
 	Active:       "◌",
 	Waiting:      "◷",
 	Approval:     "◇",
+	Async:        "●",
 	Done:         "✓",
 	Failed:       "×",
 	BranchMid:    "├─",
@@ -55,11 +57,14 @@ var unicodeGlyphs = GlyphSet{
 // asciiGlyphs is the shape-parallel fallback. Each stand-in keeps row alignment:
 // the two-cell branches map to two-cell ASCII, the one-cell badges to one cell.
 var asciiGlyphs = GlyphSet{
-	Brand:        "#",
-	Queued:       "o",
-	Active:       "*",
-	Waiting:      "~",
-	Approval:     "?",
+	Brand:    "#",
+	Queued:   "o",
+	Active:   "*",
+	Waiting:  "~",
+	Approval: "?",
+	// "@" — distinct from the active spinner's "*" fallback, so the async
+	// pending state stays tellable from a running one in ASCII mode.
+	Async:        "@",
 	Done:         "+",
 	Failed:       "x",
 	BranchMid:    "|-",

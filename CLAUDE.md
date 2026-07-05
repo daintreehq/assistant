@@ -116,9 +116,12 @@ internal/
   safety/        policy.go — Decide(risk, tier), tier gating, AlwaysConfirm, no-file-edit guard
   tools/         Registry (registry.go) + Dispatch (dispatch.go) + AssertSafe; tool families in
                  fsx/ mcpx/ mcpwrap/ contextx/ extractionx/ timer/ watcher/ queue/ grant/
-                 workflow/ skill/ auditx/ memory/ artifactx/ agenttaskx/
-  agent/         Session (session.go) main turn loop + EventSink (events.go)
+                 workflow/ skill/ auditx/ memory/ artifactx/ agenttaskx/ asyncx/
+  agent/         Session (session.go) main turn loop + EventSink (events.go) + wake.go (autonomous wake)
   daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
+  asyncwork/     AsyncCoordinator — runtime owner of async tool futures (terminal.run.async /
+                 terminal.await.async): 1s pure-FSM polls, sibling coalescing, completion →
+                 attention queue → autonomous wake. Foreground-only, session-scoped like watchers
   app/           App.Create(CreateOptions) — wires every dependency once, exposes the ToolContext factory
   commands/      slash-command catalog + handlers (shared by cockpit & classic REPL)
   cli/           Run(Options) entry, classic REPL (repl.go), CockpitRunner seam, render/, jsonout/
@@ -175,6 +178,20 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   and resume next launch. Watchers are **session-scoped**: any left non-terminal are
   cancelled on the next `storage.Store` open — a new session never inherits a prior
   session's watchers. Never imply background supervision.
+- **Async tool futures are runtime-owned, queue-delivered.** `terminal.run.async` /
+  `terminal.await.async` return an IMMEDIATE "accepted" result carrying a typed
+  `ToolResult.Async` handle (`asy_…`); the `asyncwork.Coordinator` (1s tick, started
+  with the scheduler) then polls the terminals with the SAME pure-FSM settle policy as
+  `terminal.awaitAll` (`domain.SettleAgentFSM`, no model calls, no output reads),
+  coalesces same-turn siblings over a short settle grace, and publishes ONE
+  `SourceAsyncTool` attention event that autonomously wakes the model
+  (`agent.IsActionableWake` / `BuildWakePrompt`). A completion is NEVER delivered as a
+  late tool result for the original call — the transcript stays structurally valid.
+  Async invocations are session-scoped like watchers (abandoned on the next store
+  open, cancelled by `/clear`); every coordinator write goes through the
+  `ClaimLiveAsyncInvocation` guard so a concurrent `async.cancel` always wins cleanly.
+  The live ledger rides every round's `request.turn.async_operations` block so the
+  model can't forget or re-issue in-flight work.
 - **UI boundary.** Only `internal/ui` imports `charm.land/bubbletea/*` (+ bubbles /
   lipgloss / glamour). The runtime emits structured events via `agent.EventSink`,
   consumed by the cockpit's event pump or the console / JSONL sink. Tools never render;

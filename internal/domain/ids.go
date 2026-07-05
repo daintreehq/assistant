@@ -22,6 +22,7 @@ const (
 	PrefixMemory      = "mem_"
 	PrefixAgentLaunch = "agt_"
 	PrefixScratch     = "scr_"
+	PrefixAsync       = "asy_"
 	// PrefixArtifact tags an oversized tool-result overflow payload. Longer than the
 	// others for historical continuity — the truncation stub + artifact.read have
 	// always surfaced this id as "artifact_<8hex>", so the literal shape is wire.

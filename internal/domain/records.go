@@ -260,6 +260,45 @@ type AgentLaunchRecord struct {
 	WorkflowRunID *string `json:"workflowRunId,omitempty"`
 }
 
+// AsyncInvocationRecord is one runtime-owned async tool invocation: a durable
+// future the coordinator polls to completion after the tool call already
+// returned its immediate "accepted, running asynchronously" result. The model
+// gets the completion later through the attention queue (an autonomous wake),
+// NEVER as a late tool result for the original call. Session-scoped like
+// watchers: cancelStaleAsyncInvocations abandons non-terminal rows on the next
+// DB open — a new session never inherits a prior session's async work.
+type AsyncInvocationRecord struct {
+	ID       string `json:"id"`       // asy_<uuid8>
+	ToolName string `json:"toolName"` // terminal.run.async | terminal.await.async
+	Title    string `json:"title"`    // short human label ("npm test", "wait for cohort")
+	// GroupID groups invocations created in the same turn so completions landing
+	// within the settle grace coalesce into ONE wake event. It is the creating
+	// turn's run id VERBATIM (run_…, which doubles as provenance), or the
+	// invocation's own id when no run id was available (self-grouped).
+	GroupID         string `json:"groupId"`
+	SessionID       string `json:"sessionId"`
+	TerminalIdsJson string `json:"terminalIdsJson"` // JSON string[] — the watched terminals
+	// Command is the command terminal.run.async sent before watching; nil for the
+	// watch-only terminal.await.async.
+	Command *string     `json:"command,omitempty"`
+	Status  AsyncStatus `json:"status"`
+	// OutcomesJson is the per-terminal settle ledger (JSON map terminalId →
+	// {status, exitCode?, reason?}), written when the invocation settles/expires.
+	OutcomesJson *string `json:"outcomesJson,omitempty"`
+	LastError    *string `json:"lastError,omitempty"`
+	QueueEventID *string `json:"queueEventId,omitempty"`
+	// EndedReason distinguishes a session-boundary teardown ("session_ended") from
+	// a deliberate cancel ("user_cancelled") — mirrors WatcherRecord.EndedReason.
+	EndedReason *string `json:"endedReason,omitempty"`
+	CreatedAt   int64   `json:"createdAt"`
+	// StartedAt is when the side effect was confirmed and polling began.
+	StartedAt *int64 `json:"startedAt,omitempty"`
+	// ExpiresAt is the hard deadline: past it the invocation expires with whatever
+	// outcomes settled so far.
+	ExpiresAt  int64  `json:"expiresAt"`
+	FinishedAt *int64 `json:"finishedAt,omitempty"`
+}
+
 // QueueEvent is a live attention-queue event. updatedAt advances
 // on each dedupe bump; createdAt stays fixed (recency).
 type QueueEvent struct {

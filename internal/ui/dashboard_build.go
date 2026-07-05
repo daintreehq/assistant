@@ -56,6 +56,11 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 	if audit, err := a.Store.ListAudit(8); err == nil {
 		d.Audit = audit
 	}
+	// Live async futures: the yellow "running asynchronously" work the runtime is
+	// polling on the model's behalf.
+	if async, err := a.Store.ListLiveAsyncInvocations(); err == nil {
+		d.Async = async
+	}
 	// Inbox: actionable severities only (severityAtLeast=attention), capped.
 	atLeast := domain.SeverityAttention
 	maxItems := 30

@@ -167,6 +167,11 @@ func (s *Sink) ToolResult(ev agent.ToolResultEvent) {
 	if ev.Result.AuditID != "" {
 		payload["auditId"] = ev.Result.AuditID
 	}
+	// An accepted async handle: mark the line so a JSONL consumer can tell an
+	// "accepted, still running in the background" result from a finished one.
+	if ev.Result.Async != nil {
+		payload["async"] = ev.Result.Async
+	}
 	s.emit("tool:result", payload)
 }
 

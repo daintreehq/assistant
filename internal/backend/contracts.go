@@ -205,9 +205,13 @@ type MCPServer struct {
 // TurnContext is the per-turn context the old footer message used to carry as
 // prose; the backend now takes it as structured data and renders the footer.
 type TurnContext struct {
-	Goal                 string    `json:"goal,omitempty"`
-	IsWake               bool      `json:"is_wake,omitempty"`
-	WorkflowRuns         []string  `json:"workflow_runs,omitempty"`
+	Goal         string   `json:"goal,omitempty"`
+	IsWake       bool     `json:"is_wake,omitempty"`
+	WorkflowRuns []string `json:"workflow_runs,omitempty"`
+	// AsyncOperations are the live runtime-owned async invocations (one
+	// pre-formatted line each), re-read every round so the model always sees its
+	// own in-flight async work — and never re-issues it after a compaction.
+	AsyncOperations      []string  `json:"async_operations,omitempty"`
 	Memories             *Memories `json:"memories,omitempty"`
 	SessionEndedWatchers []string  `json:"session_ended_watchers,omitempty"`
 }

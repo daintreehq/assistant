@@ -56,7 +56,32 @@ const (
 	// without re-stamping them they would freeze into scrollback rendered as ◦ queued
 	// / ◌ active, falsely implying they will still run. See (*TurnCell).cancelPending.
 	ActCancelled
+	// ActAsyncPending marks a tool call that returned an ACCEPTED async handle
+	// (ToolResult.Async): the call itself is settled — this row never mutates
+	// again, so it is terminal for the flush/seal — but the underlying work keeps
+	// running in the background and its completion arrives later as a separate
+	// wake turn. Rendered as a yellow "running asynchronously" row.
+	ActAsyncPending
 )
+
+// settledForFlush reports whether a tool activity's state can no longer change
+// within THIS turn — the single predicate the incremental row flush uses to
+// decide a row is safe to freeze into immutable native scrollback. Defined
+// next to the ActivityState consts so a NEW state cannot be added without
+// deciding its flush semantics here (an inline set in flush.go silently
+// defaulted new states to "still mutating", which pins the footer). Done and
+// failed are settled results; async-pending never mutates in place (its
+// completion arrives as a separate wake turn); cancelled is terminal by
+// definition (today it is only synthesized at seal, where the flush already
+// commits everything, but the semantics hold if that ever changes).
+func (s ActivityState) settledForFlush() bool {
+	switch s {
+	case ActDone, ActFailed, ActAsyncPending, ActCancelled:
+		return true
+	default:
+		return false
+	}
+}
 
 // Activity is one branch in the turn's activity tree: a delegated unit of work.
 type Activity struct {

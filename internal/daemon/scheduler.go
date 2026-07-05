@@ -39,6 +39,12 @@ type Scheduler struct {
 	mu          sync.Mutex
 	onAttention func(events []domain.QueueEvent)
 
+	// notifyMu serializes notify() between the tick path and NotifyNow (the async
+	// coordinator's post-publish push). Two concurrent notify passes could both
+	// digest the same fresh event before either marks it notified, delivering one
+	// completion twice — the lock makes delivery exactly-once.
+	notifyMu sync.Mutex
+
 	// running guards against overlapping ticks; current is the in-flight tick
 	// goroutine's done channel that Drain awaits. A skipped tick must NOT replace
 	// current (else Drain returns before the real tick releases MCP/Store).
@@ -307,9 +313,18 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 	s.notify()
 }
 
+// NotifyNow delivers any fresh attention+ events immediately — the async
+// coordinator calls it right after publishing a completion so the wake fires
+// now instead of on the next tick. Safe concurrently with the tick's own
+// notify (notifyMu serializes delivery).
+func (s *Scheduler) NotifyNow() { s.notify() }
+
 // notify delivers newly-unnotified attention+ events exactly once, marking them
 // notified REGARDLESS of delivery success (else the same events re-fire forever).
 func (s *Scheduler) notify() {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+
 	s.mu.Lock()
 	cb := s.onAttention
 	s.mu.Unlock()

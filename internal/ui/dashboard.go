@@ -22,6 +22,9 @@ type Dashboard struct {
 	// cancelled/completed stays on the deck from its stored saga instead of vanishing.
 	Launches []domain.AgentLaunchRecord
 	Agents   []AgentRow // built rows (watchers ⟕ launches, each merged with its preview)
+	// Async is the live async-futures ledger (terminal.run.async /
+	// terminal.await.async invocations still being polled), oldest first.
+	Async []domain.AsyncInvocationRecord
 }
 
 // AgentRow is one supervised agent: one watcher merged with its watched terminal's

@@ -51,6 +51,12 @@ func renderOperations(th theme.Theme, d Dashboard, panel PanelKey, now int64, wi
 	if show(PanelWatchers) {
 		sections = append(sections, section("AGENTS", agentLines(th, d, width, false), panel == PanelWatchers))
 	}
+	// ASYNC — live async futures the runtime is polling (cap 4). Rides the
+	// watchers panel: to the human, async work and supervised agents are one
+	// "background things in flight" story.
+	if show(PanelWatchers) {
+		sections = append(sections, renderSection(th, "ASYNC", asyncLines(th, d, now, width)))
+	}
 	// SCHEDULED — upcoming timers (cap 4).
 	if show(PanelTimers) {
 		sections = append(sections, section("SCHEDULED", timerLines(th, d, width, false), panel == PanelTimers))
@@ -100,6 +106,16 @@ func renderSection(th theme.Theme, title string, lines []string) string {
 
 func nowLine(th theme.Theme, d Dashboard, now int64, width int) string {
 	if len(d.Agents) == 0 {
+		// No supervised agents, but live async work is still "something happening
+		// NOW" — a "Standing by" above a populated ASYNC section would contradict it.
+		if len(d.Async) > 0 {
+			r := d.Async[0]
+			line := th.Info().Render("ASYNC") + " " + th.Body().Render(asyncDeckTitle(r.Title))
+			if r.CreatedAt > 0 {
+				line += th.Muted().Render(" " + formatDuration(now-r.CreatedAt))
+			}
+			return truncateCells(line, width)
+		}
 		return th.Dim().Render("Standing by")
 	}
 	a := d.Agents[0]
@@ -108,6 +124,17 @@ func nowLine(th theme.Theme, d Dashboard, now int64, width int) string {
 		line += th.Muted().Render(" " + formatDuration(now-a.StartedAt))
 	}
 	return truncateCells(line, width)
+}
+
+// asyncDeckTitle flattens an async invocation title to one safe deck line: the
+// tool derives titles bounded and single-line, but a row written by an older
+// dev build (or any unexpected writer) must not break the deck layout.
+func asyncDeckTitle(title string) string {
+	t := strings.Join(strings.Fields(title), " ")
+	if t == "" {
+		return "async operation"
+	}
+	return t
 }
 
 func inboxLines(th theme.Theme, d Dashboard, width int, focused bool) []string {
@@ -159,6 +186,36 @@ func agentLines(th theme.Theme, d Dashboard, width int, focused bool) []string {
 			second += " · " + a.Preview
 		}
 		out = append(out, truncateCells(th.Dim().Render("  "+second), width))
+	}
+	if more > 0 {
+		out = append(out, th.Dim().Render("  +"+itoa(more)+" more"))
+	}
+	return out
+}
+
+// asyncLines renders the live async futures: a yellow dot, the title, the
+// asy_… id, and a live elapsed — mirroring the transcript's async-pending row
+// so the two surfaces read as one state.
+func asyncLines(th theme.Theme, d Dashboard, now int64, width int) []string {
+	if len(d.Async) == 0 {
+		return nil
+	}
+	const cap = 4
+	rows := d.Async
+	more := 0
+	if len(rows) > cap {
+		more = len(rows) - cap
+		rows = rows[:cap]
+	}
+	g := th.Glyphs
+	var out []string
+	for _, r := range rows {
+		line := styleFor(th, "warning", g.Async) + " " + th.Body().Render(asyncDeckTitle(r.Title))
+		if r.CreatedAt > 0 {
+			line += th.Muted().Render(" " + formatDuration(now-r.CreatedAt))
+		}
+		out = append(out, truncateCells(line, width))
+		out = append(out, truncateCells(th.Dim().Render("  "+r.ID+" · "+string(r.Status)), width))
 	}
 	if more > 0 {
 		out = append(out, th.Dim().Render("  +"+itoa(more)+" more"))

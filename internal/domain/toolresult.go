@@ -9,6 +9,19 @@ type ToolError struct {
 	Details     any    `json:"details,omitempty"`
 }
 
+// AsyncHandle marks a successful tool result as an ACCEPTED-BUT-STILL-RUNNING
+// asynchronous operation: the runtime owns the work from here and will deliver
+// the completion later through the attention queue (an autonomous wake), never
+// as a late result for this call. Typed (not sniffed out of Result) so the UI
+// can render the distinct async-pending state and the wire shape stays stable.
+type AsyncHandle struct {
+	ID          string   `json:"id"`       // asy_<uuid8>
+	ToolName    string   `json:"toolName"` // the async tool that accepted the work
+	Title       string   `json:"title,omitempty"`
+	GroupID     string   `json:"groupId,omitempty"`
+	TerminalIDs []string `json:"terminalIds,omitempty"`
+}
+
 // ToolResult is the uniform envelope every tool handler returns.
 //
 //	summary  one-line human/LLM-facing message
@@ -22,6 +35,9 @@ type ToolResult struct {
 	Result  any        `json:"result,omitempty"`
 	Error   *ToolError `json:"error,omitempty"`
 	AuditID string     `json:"auditId,omitempty"`
+	// Async is set ONLY by async tool handlers on the immediate "accepted" result
+	// (see AsyncHandle). nil on every synchronous tool result.
+	Async *AsyncHandle `json:"async,omitempty"`
 }
 
 // Ok builds a successful ToolResult. Pass nil for result when there is none.

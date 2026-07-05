@@ -133,13 +133,18 @@ const (
 	SourcePRWatcher       EventSource = "pr_watcher"
 	SourceWorkflow        EventSource = "workflow"
 	SourceModelWorker     EventSource = "model_worker"
-	SourceSystem          EventSource = "system"
-	SourceUser            EventSource = "user"
+	// SourceAsyncTool marks the completion (or expiry) of a runtime-owned async
+	// tool invocation (terminal.run.async / terminal.await.async). Actionable for
+	// the autonomous wake path: the model started the work, so its completion is
+	// exactly when the model should look and continue.
+	SourceAsyncTool EventSource = "async_tool"
+	SourceSystem    EventSource = "system"
+	SourceUser      EventSource = "user"
 )
 
 var validEventSource = newEnumSet(
 	SourceTimer, SourceTerminalWatcher, SourceWorktreeWatcher, SourcePRWatcher,
-	SourceWorkflow, SourceModelWorker, SourceSystem, SourceUser,
+	SourceWorkflow, SourceModelWorker, SourceAsyncTool, SourceSystem, SourceUser,
 )
 
 // IsValid reports whether s is a known event source.
@@ -297,6 +302,54 @@ const (
 	MemoryKindSemantic MemoryKind = "semantic"
 	MemoryKindEpisodic MemoryKind = "episodic"
 )
+
+// AsyncStatus tracks a runtime-owned async tool invocation (the durable-futures
+// ledger behind terminal.run.async / terminal.await.async). Session-scoped like
+// watchers: cancelStaleAsyncInvocations marks non-terminal rows abandoned on the
+// next DB open.
+//
+//	starting  — ledger row exists; the initial side effect (sendCommand) may not
+//	            have completed yet. A crash here is reconciled to abandoned.
+//	running   — the coordinator is polling the watched terminals.
+//	settling  — every terminal settled (or the deadline hit); the coordinator is
+//	            holding a short grace window to coalesce sibling completions from
+//	            the same turn into one wake.
+//	succeeded — all terminals finished cleanly (questions surface in outcomes).
+//	failed    — at least one terminal failed (nonzero exit) OR the initial side
+//	            effect failed.
+//	cancelled — async.cancel stopped tracking (the terminals keep running).
+//	expired   — the deadline passed with terminals still unsettled.
+//	abandoned — a session boundary (or unrecoverable runtime state) orphaned it.
+type AsyncStatus string
+
+const (
+	AsyncStarting  AsyncStatus = "starting"
+	AsyncRunning   AsyncStatus = "running"
+	AsyncSettling  AsyncStatus = "settling"
+	AsyncSucceeded AsyncStatus = "succeeded"
+	AsyncFailed    AsyncStatus = "failed"
+	AsyncCancelled AsyncStatus = "cancelled"
+	AsyncExpired   AsyncStatus = "expired"
+	AsyncAbandoned AsyncStatus = "abandoned"
+)
+
+var validAsyncStatus = newEnumSet(
+	AsyncStarting, AsyncRunning, AsyncSettling, AsyncSucceeded,
+	AsyncFailed, AsyncCancelled, AsyncExpired, AsyncAbandoned,
+)
+
+// IsValid reports whether s is a known async invocation status.
+func (s AsyncStatus) IsValid() bool { return validAsyncStatus[s] }
+
+// IsTerminal reports whether the invocation has reached a final state (no more
+// polling, no more transitions).
+func (s AsyncStatus) IsTerminal() bool {
+	switch s {
+	case AsyncSucceeded, AsyncFailed, AsyncCancelled, AsyncExpired, AsyncAbandoned:
+		return true
+	}
+	return false
+}
 
 // SkillRunStatus tracks a skill run.
 type SkillRunStatus string

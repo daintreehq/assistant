@@ -225,6 +225,11 @@ func activityGlyph(th theme.Theme, a Activity, spinnerFrame int) (string, string
 		// User-aborted: a muted bullet (inert, not the active spinner or the red ×
 		// failure). The "cancelled" / "not run" note carries the meaning.
 		return g.Bullet, "muted"
+	case ActAsyncPending:
+		// Accepted async work: the CALL settled, the WORK runs on — a steady yellow
+		// dot (warning tone), deliberately not the green ✓ (would read "finished")
+		// and not the spinner (nothing in THIS turn is still executing).
+		return g.Async, "warning"
 	default:
 		return g.Bullet, "muted"
 	}

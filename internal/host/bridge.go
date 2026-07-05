@@ -190,7 +190,7 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 		}
 	}
 	result, severity, errorCode := resultToAudit(ev.Result)
-	b.post(EvToolSettled{
+	settled := EvToolSettled{
 		ToolCallID: ev.ID,
 		ToolID:     ev.Name,
 		DurationMs: durationMs,
@@ -198,7 +198,14 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 		Severity:   severity,
 		ErrorCode:  errorCode,
 		TurnID:     turnID,
-	})
+	}
+	// An accepted async handle: surface it so the host can render "accepted,
+	// still running in the background" instead of a finished success (parity
+	// with the cockpit's yellow async-pending state).
+	if ev.Result.Ok && ev.Result.Async != nil {
+		settled.AsyncID = ev.Result.Async.ID
+	}
+	b.post(settled)
 }
 
 func (b *Bridge) Error(message string) {

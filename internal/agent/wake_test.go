@@ -279,3 +279,78 @@ func TestIsWakeFailureReplyRealReplyIsSuccess(t *testing.T) {
 		t.Fatal("an empty reply must not be a wake failure")
 	}
 }
+
+// --- async wake events ---
+
+func asyncWakeEvent(over func(*domain.QueueEvent)) domain.QueueEvent {
+	e := domain.QueueEvent{
+		ID:        "evt-async-1",
+		Source:    domain.SourceAsyncTool,
+		Severity:  domain.SeverityAttention,
+		Title:     "Async finished: npm test",
+		Summary:   `asy_1a2b "npm test": term-1: finished`,
+		Target:    &domain.EventTarget{TerminalID: "term-1", AsyncInvocationID: "asy_1a2b"},
+		CreatedAt: 1000,
+		Count:     1,
+	}
+	if over != nil {
+		over(&e)
+	}
+	return e
+}
+
+func TestIsActionableWakeAsyncSource(t *testing.T) {
+	if !IsActionableWake(asyncWakeEvent(nil)) {
+		t.Fatal("an async_tool completion must be actionable")
+	}
+	// Even without a terminal target (a grouped completion), async completions wake.
+	if !IsActionableWake(asyncWakeEvent(func(e *domain.QueueEvent) { e.Target = &domain.EventTarget{AsyncInvocationID: "asy_x"} })) {
+		t.Fatal("a grouped async completion (no terminal target) must still be actionable")
+	}
+}
+
+func TestBuildWakePromptAsyncOnlyBurst(t *testing.T) {
+	prompt := BuildWakePrompt([]domain.QueueEvent{asyncWakeEvent(nil)}, nil)
+	if !strings.HasPrefix(prompt, "[automatic wake-up]") {
+		t.Fatalf("missing wake prefix:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Asynchronous operation(s) you started") {
+		t.Fatalf("missing async framing:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "- Async finished: npm test: asy_1a2b \"npm test\": term-1: finished [terminal term-1] (inbox evt-async-1)") {
+		t.Fatalf("missing self-contained completion line:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Do NOT re-run the async operation") {
+		t.Fatalf("missing no-rerun guidance:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "queue.resolve") {
+		t.Fatalf("missing inbox hygiene guidance:\n%s", prompt)
+	}
+	// The watcher framing must NOT leak into an async-only burst.
+	if strings.Contains(prompt, "background watcher") {
+		t.Fatalf("watcher framing leaked into async-only burst:\n%s", prompt)
+	}
+}
+
+func TestBuildWakePromptMixedBurstKeepsWatcherBodyAndAppendsAsync(t *testing.T) {
+	events := []domain.QueueEvent{termWakeEvent("t1", nil), asyncWakeEvent(nil)}
+	prompt := BuildWakePrompt(events, nil)
+	if !strings.Contains(prompt, "A background watcher surfaced new activity") {
+		t.Fatalf("mixed burst lost the watcher framing:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "asynchronous operation(s) you started earlier have finished") {
+		t.Fatalf("mixed burst lost the async section:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "(inbox evt-async-1)") {
+		t.Fatalf("async completion line missing from mixed burst:\n%s", prompt)
+	}
+}
+
+func TestBuildWakePromptWatcherOnlyUnchangedByAsyncBranch(t *testing.T) {
+	// The watcher-only output is model-facing contract text: the async partition
+	// must be a pure pass-through when no async events are present.
+	events := []domain.QueueEvent{termWakeEvent("t1", nil)}
+	if got, want := BuildWakePrompt(events, nil), buildWatcherWakePrompt(events, nil); got != want {
+		t.Fatalf("watcher-only burst diverged from the watcher prompt:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}

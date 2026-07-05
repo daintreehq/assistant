@@ -67,7 +67,10 @@ func finalizedStepCount(t *TurnCell) int {
 			allTerminal := true
 			for j < n && t.Steps[j].Kind == StepTool {
 				a := t.Steps[j].Activity
-				if a == nil || (a.State != ActDone && a.State != ActFailed) {
+				// settledForFlush is the single source of truth for "this row can
+				// never change again" (defined next to the ActivityState consts so a
+				// new state must decide its flush semantics there).
+				if a == nil || !a.State.settledForFlush() {
 					allTerminal = false
 				}
 				j++
