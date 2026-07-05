@@ -260,10 +260,10 @@ func TestLargePasteShowsPlaceholder(t *testing.T) {
 	if out.Submit != nil {
 		t.Fatal("a paste must never submit")
 	}
-	// The visible buffer is a single-line placeholder (no '\n') so the composer
+	// The visible buffer is a single-line placeholder token (no '\n') so the composer
 	// stays one row and never trips the too-small fallback.
-	if got := m.Value(); got != "[pasted 8 lines]" {
-		t.Fatalf("placeholder buffer = %q, want %q", got, "[pasted 8 lines]")
+	if got := m.Value(); got != "[pasted 8 lines #1]" {
+		t.Fatalf("placeholder buffer = %q, want %q", got, "[pasted 8 lines #1]")
 	}
 	if strings.Contains(m.Value(), "\n") {
 		t.Fatalf("placeholder must contain no newline: %q", m.Value())
@@ -279,8 +279,8 @@ func TestLargePasteSingleLongLine(t *testing.T) {
 	m := newModel()
 	paste := strings.Repeat("a", 600) // one line, ≥ the 500-char threshold
 	m.Update(tea.PasteMsg{Content: paste})
-	if got := m.Value(); got != "[pasted 600 chars]" {
-		t.Fatalf("single-line placeholder = %q, want %q", got, "[pasted 600 chars]")
+	if got := m.Value(); got != "[pasted 600 chars #1]" {
+		t.Fatalf("single-line placeholder = %q, want %q", got, "[pasted 600 chars #1]")
 	}
 	sub := press(&m, tea.KeyEnter, 0)
 	if sub.Submit == nil || sub.Submit.Text != paste {
@@ -295,8 +295,8 @@ func TestSmallPasteBelowThresholdVerbatim(t *testing.T) {
 	if got := m.Value(); got != paste {
 		t.Fatalf("small paste should insert verbatim; got %q want %q", got, paste)
 	}
-	if m.pasteText != "" {
-		t.Fatalf("small paste must not stash; pasteText = %q", m.pasteText)
+	if len(m.pastes) != 0 {
+		t.Fatalf("small paste must not stash; pastes = %+v", m.pastes)
 	}
 }
 
@@ -307,25 +307,26 @@ func TestLargePasteEscClears(t *testing.T) {
 	if out.Cancel {
 		t.Fatal("Esc on a stashed paste should clear, not cancel")
 	}
-	if m.Value() != "" || m.pasteText != "" {
-		t.Fatalf("Esc should clear buffer and stash; buffer=%q pasteText=%q", m.Value(), m.pasteText)
+	if m.Value() != "" || len(m.pastes) != 0 {
+		t.Fatalf("Esc should clear buffer and stash; buffer=%q pastes=%+v", m.Value(), m.pastes)
 	}
 }
 
 func TestLargePasteEditDissolvesPlaceholder(t *testing.T) {
 	m := newModel()
 	m.Update(tea.PasteMsg{Content: nLinePaste(8)})
-	// Typing into the placeholder dissolves the stash: the buffer becomes ordinary
-	// editable text and the hidden paste is discarded (self-healing).
-	typeRunes(&m, "x")
-	if m.pasteText != "" {
-		t.Fatalf("editing should clear the stash; pasteText = %q", m.pasteText)
+	// Editing INTO the token breaks it apart, so it stops being a substring of the
+	// buffer and its stash self-heals away: the placeholder becomes ordinary literal
+	// text and the hidden paste is discarded.
+	press(&m, tea.KeyBackspace, 0) // deletes the trailing ']' of "[pasted 8 lines #1]"
+	if len(m.pastes) != 0 {
+		t.Fatalf("editing into the token should clear the stash; pastes = %+v", m.pastes)
 	}
-	if got := m.Value(); got != "[pasted 8 lines]x" {
-		t.Fatalf("edited buffer = %q, want %q", got, "[pasted 8 lines]x")
+	if got := m.Value(); got != "[pasted 8 lines #1" {
+		t.Fatalf("edited buffer = %q, want %q", got, "[pasted 8 lines #1")
 	}
 	sub := press(&m, tea.KeyEnter, 0)
-	if sub.Submit == nil || sub.Submit.Text != "[pasted 8 lines]x" {
+	if sub.Submit == nil || sub.Submit.Text != "[pasted 8 lines #1" {
 		t.Fatalf("submit should send the edited literal text; got %+v", sub.Submit)
 	}
 }
@@ -342,8 +343,8 @@ func TestLargePasteAcceptSubmitRecordsRealText(t *testing.T) {
 	if n := len(m.history); n == 0 || m.history[n-1] != paste {
 		t.Fatalf("history should record the real paste, not the placeholder; got %+v", m.history)
 	}
-	if m.pasteText != "" || m.Value() != "" {
-		t.Fatalf("AcceptSubmit should reset; buffer=%q pasteText=%q", m.Value(), m.pasteText)
+	if len(m.pastes) != 0 || m.Value() != "" {
+		t.Fatalf("AcceptSubmit should reset; buffer=%q pastes=%+v", m.Value(), m.pastes)
 	}
 }
 
@@ -356,7 +357,7 @@ func TestLargePasteHistoryRecallReStashes(t *testing.T) {
 	// ↑ recalls the large paste: it must re-stash behind the placeholder (not paste
 	// the full block back into the buffer) and still submit the real text.
 	press(&m, tea.KeyUp, 0)
-	if got := m.Value(); got != "[pasted 8 lines]" {
+	if got := m.Value(); got != "[pasted 8 lines #1]" {
 		t.Fatalf("history recall should re-stash; buffer = %q", got)
 	}
 	sub2 := press(&m, tea.KeyEnter, 0)
@@ -365,19 +366,19 @@ func TestLargePasteHistoryRecallReStashes(t *testing.T) {
 	}
 }
 
-func TestLargePasteReplacesPrefilledBuffer(t *testing.T) {
+func TestLargePasteCoexistsWithPrefilledBuffer(t *testing.T) {
 	m := newModel()
 	typeRunes(&m, "hi ")
 	paste := nLinePaste(8)
 	m.Update(tea.PasteMsg{Content: paste})
-	// A large paste REPLACES the buffer with its placeholder (documented behavior);
-	// the submitted text is the paste alone.
-	if got := m.Value(); got != "[pasted 8 lines]" {
-		t.Fatalf("large paste should replace the buffer; got %q", got)
+	// A large paste does NOT wipe what the user already typed: its placeholder token
+	// is inserted at the cursor, so typed text and the pasted block coexist.
+	if got := m.Value(); got != "hi [pasted 8 lines #1]" {
+		t.Fatalf("paste should coexist with typed text; got %q", got)
 	}
 	sub := press(&m, tea.KeyEnter, 0)
-	if sub.Submit == nil || sub.Submit.Text != paste {
-		t.Fatalf("submit should be the paste alone; got %+v", sub.Submit)
+	if sub.Submit == nil || sub.Submit.Text != "hi "+paste {
+		t.Fatalf("submit should carry typed text + the paste; got %+v", sub.Submit)
 	}
 }
 
@@ -387,11 +388,18 @@ func TestWhitespaceOnlyLargePasteInsertsVerbatim(t *testing.T) {
 	// "" on submit and silently swallow Enter); it inserts verbatim instead.
 	paste := strings.Repeat(" \n", 8) // 8 newlines, whitespace only
 	m.Update(tea.PasteMsg{Content: paste})
-	if m.pasteText != "" {
-		t.Fatalf("whitespace-only paste must not stash; pasteText = %q", m.pasteText)
+	if len(m.pastes) != 0 {
+		t.Fatalf("whitespace-only paste must not stash; pastes = %+v", m.pastes)
 	}
 	if strings.Contains(m.Value(), "pasted") {
 		t.Fatalf("whitespace-only paste must not show a placeholder; got %q", m.Value())
+	}
+	if got := m.Value(); got != normalizeNewlines(paste) {
+		t.Fatalf("whitespace paste should insert verbatim; got %q want %q", got, normalizeNewlines(paste))
+	}
+	// The whole point of the branch: a whitespace-only buffer must not swallow Enter.
+	if sub := press(&m, tea.KeyEnter, 0); sub.Submit != nil {
+		t.Fatalf("a whitespace-only buffer must not submit; got %+v", sub.Submit)
 	}
 }
 
@@ -412,7 +420,7 @@ func TestLargePasteThresholdBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel()
 			m.Update(tea.PasteMsg{Content: tc.paste})
-			gotStashed := m.pasteText != ""
+			gotStashed := len(m.pastes) > 0
 			if gotStashed != tc.stashed {
 				t.Fatalf("stashed = %v, want %v (buffer %q)", gotStashed, tc.stashed, m.Value())
 			}
@@ -422,31 +430,35 @@ func TestLargePasteThresholdBoundary(t *testing.T) {
 
 func TestLargePasteDoublePaste(t *testing.T) {
 	m := newModel()
-	m.Update(tea.PasteMsg{Content: nLinePaste(8)})
+	pasteA := nLinePaste(8)
 	pasteB := nLinePaste(12)
+	m.Update(tea.PasteMsg{Content: pasteA})
 	m.Update(tea.PasteMsg{Content: pasteB})
-	// The second large paste replaces the first stash entirely.
-	if got := m.Value(); got != "[pasted 12 lines]" {
-		t.Fatalf("second paste should replace the stash; got %q", got)
+	// Each large paste gets its OWN numbered placeholder; both coexist in the buffer
+	// (the second no longer clobbers the first).
+	if got := m.Value(); got != "[pasted 8 lines #1][pasted 12 lines #2]" {
+		t.Fatalf("both pastes should get their own placeholder; got %q", got)
+	}
+	if len(m.pastes) != 2 {
+		t.Fatalf("expected 2 stashes, got %d", len(m.pastes))
 	}
 	sub := press(&m, tea.KeyEnter, 0)
-	if sub.Submit == nil || sub.Submit.Text != pasteB {
-		t.Fatalf("submit should carry the second paste; got %+v", sub.Submit)
+	if sub.Submit == nil || sub.Submit.Text != pasteA+pasteB {
+		t.Fatalf("submit should carry BOTH pastes in order; got %+v", sub.Submit)
 	}
 }
 
-func TestTabCompletionClearsStalePaste(t *testing.T) {
+func TestKillLineClearsStash(t *testing.T) {
 	m := newModel()
-	// Simulate a stale stash, then a Tab completion: the completion must clear it so
-	// a later submit sends the command, not the paste.
-	m.pasteText = nLinePaste(8)
-	typeRunes(&m, "/cl")
-	press(&m, tea.KeyTab, 0)
-	if m.pasteText != "" {
-		t.Fatalf("Tab completion should clear the stash; pasteText = %q", m.pasteText)
+	m.Update(tea.PasteMsg{Content: nLinePaste(8)})
+	// A whole-line kill removes the token, so reconcile drops the now-orphaned stash;
+	// a later submit must not resurrect the paste.
+	pressChord(&m, 'u', tea.ModCtrl) // Ctrl-U kills the whole logical line
+	if len(m.pastes) != 0 {
+		t.Fatalf("killing the line should drop the stash; pastes = %+v", m.pastes)
 	}
-	if m.Value() != "/clear " {
-		t.Fatalf("Tab completion buffer = %q, want %q", m.Value(), "/clear ")
+	if m.Value() != "" {
+		t.Fatalf("buffer should be empty after the kill; got %q", m.Value())
 	}
 }
 
@@ -457,16 +469,212 @@ func TestSearchEscRestoresStash(t *testing.T) {
 	m.Update(tea.PasteMsg{Content: paste}) // stash active: buffer = placeholder
 	pressChord(&m, 'r', tea.ModCtrl)       // Ctrl-R: snapshot buffer + stash
 	typeRunes(&m, "hello")                 // matches the small entry → recall clears stash
-	if m.pasteText != "" {
-		t.Fatalf("matching a small entry should clear the stash; pasteText = %q", m.pasteText)
+	if len(m.pastes) != 0 {
+		t.Fatalf("matching a small entry should clear the stash; pastes = %+v", m.pastes)
 	}
 	press(&m, tea.KeyEscape, 0) // cancel: restore the pre-search buffer AND stash
-	if got := m.Value(); got != "[pasted 8 lines]" {
+	if got := m.Value(); got != "[pasted 8 lines #1]" {
 		t.Fatalf("Esc should restore the placeholder; got %q", got)
 	}
 	sub := press(&m, tea.KeyEnter, 0)
 	if sub.Submit == nil || sub.Submit.Text != paste {
 		t.Fatalf("restored stash should submit the real paste; got %+v", sub.Submit)
+	}
+}
+
+func TestPasteCoexistsWithTypedNewlines(t *testing.T) {
+	m := newModel()
+	// The reported bug: type a message, add line breaks, THEN paste a big block —
+	// the paste must not wipe the typed text. Shift+Enter inserts a newline.
+	typeRunes(&m, "please review")
+	press(&m, tea.KeyEnter, tea.ModShift)
+	typeRunes(&m, "this:")
+	paste := nLinePaste(20)
+	m.Update(tea.PasteMsg{Content: paste})
+	wantBuf := "please review\nthis:[pasted 20 lines #1]"
+	if got := m.Value(); got != wantBuf {
+		t.Fatalf("typed text (with newlines) must survive the paste; got %q want %q", got, wantBuf)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	want := "please review\nthis:" + paste
+	if sub.Submit == nil || sub.Submit.Text != want {
+		t.Fatalf("submit should carry typed text + the paste; got %+v", sub.Submit)
+	}
+}
+
+func TestPasteInsertsAtCursor(t *testing.T) {
+	m := newModel()
+	typeRunes(&m, "AB")
+	press(&m, tea.KeyLeft, 0) // cursor between A and B
+	paste := nLinePaste(8)
+	m.Update(tea.PasteMsg{Content: paste})
+	if got := m.Value(); got != "A[pasted 8 lines #1]B" {
+		t.Fatalf("paste should insert at the cursor; got %q", got)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	if sub.Submit == nil || sub.Submit.Text != "A"+paste+"B" {
+		t.Fatalf("submit should expand the paste in place; got %+v", sub.Submit)
+	}
+}
+
+func TestMultiplePastesInterleavedWithText(t *testing.T) {
+	m := newModel()
+	a := nLinePaste(8)            // "[pasted 8 lines #1]"
+	b := strings.Repeat("z", 600) // char-threshold paste → "[pasted 600 chars #2]"
+	m.Update(tea.PasteMsg{Content: a})
+	typeRunes(&m, " and ")
+	m.Update(tea.PasteMsg{Content: b})
+	wantBuf := "[pasted 8 lines #1] and [pasted 600 chars #2]"
+	if got := m.Value(); got != wantBuf {
+		t.Fatalf("two pastes with text between; got %q want %q", got, wantBuf)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	want := a + " and " + b
+	if sub.Submit == nil || sub.Submit.Text != want {
+		t.Fatalf("submit should expand both pastes in order; got %+v", sub.Submit)
+	}
+}
+
+func TestPasteAppendKeepsStash(t *testing.T) {
+	m := newModel()
+	paste := nLinePaste(8)
+	m.Update(tea.PasteMsg{Content: paste})
+	typeRunes(&m, "!") // typing AFTER the token leaves it intact — the stash survives
+	if len(m.pastes) != 1 {
+		t.Fatalf("appending after the token must keep the stash; pastes = %+v", m.pastes)
+	}
+	if got := m.Value(); got != "[pasted 8 lines #1]!" {
+		t.Fatalf("buffer = %q", got)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	if sub.Submit == nil || sub.Submit.Text != paste+"!" {
+		t.Fatalf("submit should be the paste then the typed char; got %+v", sub.Submit)
+	}
+}
+
+func TestEditingOneTokenKeepsOtherStash(t *testing.T) {
+	m := newModel()
+	a := nLinePaste(8)  // "[pasted 8 lines #1]"
+	b := nLinePaste(12) // "[pasted 12 lines #2]"
+	m.Update(tea.PasteMsg{Content: a})
+	m.Update(tea.PasteMsg{Content: b}) // cursor at end
+	// Backspace breaks the SECOND token only; the first stash must survive.
+	press(&m, tea.KeyBackspace, 0)
+	if len(m.pastes) != 1 || m.pastes[0].text != a {
+		t.Fatalf("only the damaged stash should drop; pastes = %+v", m.pastes)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	// #1 expands to a; the broken #2 token is now literal text (its ']' deleted).
+	want := a + "[pasted 12 lines #2"
+	if sub.Submit == nil || sub.Submit.Text != want {
+		t.Fatalf("submit should expand #1 and keep the broken #2 literal; got %+v", sub.Submit)
+	}
+}
+
+func TestHistoryDraftRoundTripPreservesMixedDraft(t *testing.T) {
+	m := newModel()
+	m.AcceptSubmit("older entry") // seed history so ↑ has something to recall
+	// A mixed draft: typed text + a large paste coexisting.
+	typeRunes(&m, "hi ")
+	paste := nLinePaste(8)
+	m.Update(tea.PasteMsg{Content: paste})
+	if got := m.Value(); got != "hi [pasted 8 lines #1]" {
+		t.Fatalf("precondition draft; got %q", got)
+	}
+	// ↑ recalls the history entry; ↓ steps back past the newest → restore the draft.
+	press(&m, tea.KeyUp, 0)
+	if m.Value() != "older entry" {
+		t.Fatalf("↑ should recall history; got %q", m.Value())
+	}
+	press(&m, tea.KeyDown, 0)
+	// The mixed draft must return EXACTLY — typed prefix + the inline token intact,
+	// not collapsed into a single re-stashed paste.
+	if got := m.Value(); got != "hi [pasted 8 lines #1]" {
+		t.Fatalf("↓ should restore the mixed draft verbatim; got %q", got)
+	}
+	if len(m.pastes) != 1 {
+		t.Fatalf("draft restore should keep the stash; pastes = %+v", m.pastes)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	if sub.Submit == nil || sub.Submit.Text != "hi "+paste {
+		t.Fatalf("restored draft should submit typed text + paste; got %+v", sub.Submit)
+	}
+}
+
+func TestThreePastesMiddleEditKeepsOthers(t *testing.T) {
+	m := newModel()
+	a := nLinePaste(6)
+	b := nLinePaste(8)
+	c := nLinePaste(10)
+	m.Update(tea.PasteMsg{Content: a}) // #1
+	m.Update(tea.PasteMsg{Content: b}) // #2
+	m.Update(tea.PasteMsg{Content: c}) // #3
+	// Damage the MIDDLE token by deleting its trailing ']' (cursor just past it).
+	tok2 := "[pasted 8 lines #2]"
+	idx := strings.Index(m.Value(), tok2)
+	if idx < 0 {
+		t.Fatalf("precondition: buffer %q missing %q", m.Value(), tok2)
+	}
+	m.cursor = idx + len([]rune(tok2)) // tokens are ASCII, so byte idx == rune idx here
+	press(&m, tea.KeyBackspace, 0)     // delete #2's ']'
+	if len(m.pastes) != 2 {
+		t.Fatalf("only the middle stash should drop; pastes = %+v", m.pastes)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	// #1 and #3 still expand; the broken #2 stays literal (its ']' gone).
+	want := a + "[pasted 8 lines #2" + c
+	if sub.Submit == nil || sub.Submit.Text != want {
+		t.Fatalf("submit should expand #1 and #3 and keep #2 literal; got %+v", sub.Submit)
+	}
+}
+
+func TestPasteBodyContainingAnotherTokenLiteralExpandsOnce(t *testing.T) {
+	m := newModel()
+	a := nLinePaste(8)                                            // → "[pasted 8 lines #1]"
+	b := "look: [pasted 8 lines #1] is a token\n" + nLinePaste(6) // body literally contains A's token
+	m.Update(tea.PasteMsg{Content: a})
+	m.Update(tea.PasteMsg{Content: b})
+	if got := m.Value(); got != "[pasted 8 lines #1][pasted 7 lines #2]" {
+		t.Fatalf("tokens; got %q", got)
+	}
+	sub := press(&m, tea.KeyEnter, 0)
+	// Expand scans the BUFFER (only tokens live there) and never re-scans emitted
+	// body text, so the "[pasted 8 lines #1]" literal inside b's body is NOT
+	// recursively expanded — each token expands exactly once.
+	if sub.Submit == nil || sub.Submit.Text != a+b {
+		t.Fatalf("submit should expand each token exactly once; got %+v", sub.Submit)
+	}
+}
+
+func TestBackspaceThroughWholeTokenDropsStash(t *testing.T) {
+	m := newModel()
+	m.Update(tea.PasteMsg{Content: nLinePaste(8)}) // "[pasted 8 lines #1]", cursor at end
+	for range []rune("[pasted 8 lines #1]") {
+		press(&m, tea.KeyBackspace, 0)
+	}
+	if m.Value() != "" {
+		t.Fatalf("buffer should be empty after deleting the token; got %q", m.Value())
+	}
+	if len(m.pastes) != 0 {
+		t.Fatalf("stash must be gone; pastes = %+v", m.pastes)
+	}
+	// The paste must not be resurrected: an empty buffer submits nothing.
+	if sub := press(&m, tea.KeyEnter, 0); sub.Submit != nil {
+		t.Fatalf("empty buffer should not submit; got %+v", sub.Submit)
+	}
+}
+
+func TestCtrlWPartialTokenDamageDropsStash(t *testing.T) {
+	m := newModel()
+	m.Update(tea.PasteMsg{Content: nLinePaste(8)}) // "[pasted 8 lines #1]", cursor at end
+	// Ctrl-W kills the previous whitespace-word. Tokens contain spaces, so this eats
+	// only the trailing "#1]" — breaking the token and dropping its stash.
+	pressChord(&m, 'w', tea.ModCtrl)
+	if len(m.pastes) != 0 {
+		t.Fatalf("word-kill into the token should drop the stash; pastes = %+v", m.pastes)
+	}
+	if got := m.Value(); got != "[pasted 8 lines " {
+		t.Fatalf("buffer after Ctrl-W; got %q", got)
 	}
 }
 
