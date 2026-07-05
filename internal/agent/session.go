@@ -582,6 +582,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	instructionRevision := 0
 
 	failureCounts := make(map[string]int)
+	coarseCounts := make(map[string]int)
 	stuckNudged := false
 
 	// The agentic loop. `iter` counts model rounds purely to drive the phase display
@@ -603,6 +604,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// backend's selector cadence reacts to it (the same turn_id continues).
 		instructionRevision++
 		failureCounts = make(map[string]int)
+		coarseCounts = make(map[string]int)
 		stuckNudged = false
 	}
 	for {
@@ -768,7 +770,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 		// 10h. Execute the batch. Announce ALL calls as queued BEFORE sequential
 		//      dispatch, then promote each queued→active→done/failed.
-		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, failureCounts, &stuckNudged); done {
+		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, failureCounts, coarseCounts, &stuckNudged); done {
 			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
 			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
 			// the model gets the new steer); otherwise the abort stands.
@@ -784,10 +786,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 }
 
 // runToolBatch dispatches a batch of tool calls sequentially after announcing the
-// whole batch as queued. Returns (reply, true) when the turn must end (cancel or
-// circuit-breaker abort), else ("", false) to continue the iteration loop.
+// whole batch as queued. Two circuit breakers trip MID-batch (stopping + stubbing the
+// remaining calls the instant a runaway is detected, so one giant batch can't fully
+// dispatch first): the FINE breaker on identical args, and the COARSE breaker on a
+// tool repeating the same UNRECOVERABLE error with varied args. Returns (reply, true)
+// when the turn must end (cancel or breaker abort), else ("", false) to continue.
 func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, turn TurnContext,
-	allowedSet map[string]struct{}, failureCounts map[string]int, stuckNudged *bool) (string, bool) {
+	allowedSet map[string]struct{}, failureCounts, coarseCounts map[string]int, stuckNudged *bool) (string, bool) {
 
 	// Announce the whole batch as queued first.
 	batch := make([]BatchedToolCall, 0, len(calls))
@@ -798,13 +803,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 	s.events.Phase(domain.PhaseToolQueued)
 	s.events.ToolBatch(batch)
 
-	type worst struct {
-		name  string
-		count int
-		sig   string
-		res   domain.ToolResult
-	}
-	var worstRepeat *worst
+	var worstFine, worstCoarse *batchRepeat
 
 	for c := 0; c < len(calls); c++ {
 		call := calls[c]
@@ -911,20 +910,27 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			StringContent: SerializeToolResult(res, s.artifacts),
 		})
 
-		// Circuit-breaker bookkeeping: signature is the CANONICALIZED argument JSON
-		// (key order / whitespace normalized) + the error code, so a semantically
-		// identical call failing the SAME way increments the same counter even when
-		// the model re-emits it with reordered keys.
+		// Circuit-breaker bookkeeping: fold this failure into BOTH tallies. The FINE
+		// signature is the CANONICALIZED args + error code (a byte-identical retry, even
+		// with reordered keys). The COARSE signature strips pagination fields and counts
+		// ONLY unrecoverable errors — the args-varied futile loop the fine tally misses
+		// (the model paging a pruned artifact by offset).
 		if !res.Ok {
 			errCode := ""
 			if res.Error != nil {
 				errCode = res.Error.Code
 			}
-			sig := failureSignature(internalName, call.Function.Arguments, errCode)
-			failureCounts[sig]++
-			count := failureCounts[sig]
-			if worstRepeat == nil || count > worstRepeat.count {
-				worstRepeat = &worst{name: internalName, count: count, sig: sig, res: res}
+			fineSig := failureSignature(internalName, call.Function.Arguments, errCode)
+			failureCounts[fineSig]++
+			if fc := failureCounts[fineSig]; worstFine == nil || fc > worstFine.count {
+				worstFine = &batchRepeat{name: internalName, count: fc, sig: fineSig, res: res}
+			}
+			if res.Error != nil && !res.Error.Recoverable && errCode != "" {
+				coarseSig := coarseFailureSignature(internalName, call.Function.Arguments, errCode)
+				coarseCounts[coarseSig]++
+				if cc := coarseCounts[coarseSig]; worstCoarse == nil || cc > worstCoarse.count {
+					worstCoarse = &batchRepeat{name: internalName, count: cc, sig: coarseSig, res: res}
+				}
 			}
 		}
 
@@ -939,40 +945,137 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			s.events.AssistantCancelled("")
 			return domain.CancelledReply, true
 		}
+
+		// MID-BATCH circuit breaker: abort the instant a runaway is detected, stubbing the
+		// undispatched remainder (calls[c+1:]) — so a single huge batch (the model dumping
+		// dozens of identical/futile calls in one round) can't fully dispatch before the
+		// guard fires. Fine (identical args) at RepeatFailureAbort; coarse (same tool +
+		// unrecoverable code, args varied) at CoarseRepeatFailureAbort.
+		if worstFine != nil && worstFine.count >= domain.RepeatFailureAbort {
+			msg := "Stopped: called " + worstFine.name + " " + itoa(worstFine.count) +
+				" times this turn with identical arguments, each failing the same way (" + repeatDetail(worstFine.res) +
+				"). Tell the user what's blocking and what you tried rather than repeating the call."
+			return s.abortForRepeat(turn, calls, c+1, "tool.repeat.abort", worstFine, msg), true
+		}
+		if worstCoarse != nil && worstCoarse.count >= domain.CoarseRepeatFailureAbort {
+			msg := "Stopped: called " + worstCoarse.name + " " + itoa(worstCoarse.count) +
+				" times this turn, each failing with the same unrecoverable error (" + repeatDetail(worstCoarse.res) +
+				") despite different arguments. Retrying an unrecoverable error can't succeed — tell the user what's blocking and stop rather than varying the arguments."
+			return s.abortForRepeat(turn, calls, c+1, "tool.repeat.abort.coarse", worstCoarse, msg), true
+		}
 	}
 
-	// After every call in the batch has a result, apply the circuit breaker.
-	if worstRepeat != nil && worstRepeat.count >= domain.RepeatFailureAbort {
-		detail := worstRepeat.res.Summary
-		if worstRepeat.res.Error != nil && worstRepeat.res.Error.Code != "" {
-			detail = trimSpace(worstRepeat.res.Error.Code + ": " + worstRepeat.res.Error.Message)
-		}
-		msg := "Stopped: called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
-			" times this turn with identical arguments, each failing the same way (" + detail +
-			"). Tell the user what's blocking and what you tried rather than repeating the call."
-		s.traceToolRepeat("tool.repeat.abort", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
-		s.events.Phase(domain.PhaseFailed)
-		s.events.Error(msg)
-		return msg, true
-	}
-	if worstRepeat != nil && worstRepeat.count >= domain.RepeatFailureWarn && !*stuckNudged {
+	// End-of-batch: the one-shot stuck-warning nudge (fine breaker, below the abort
+	// threshold — a batch that hit RepeatFailureWarn but not RepeatFailureAbort).
+	if worstFine != nil && worstFine.count >= domain.RepeatFailureWarn && !*stuckNudged {
 		*stuckNudged = true
 		codeSuffix := ""
-		if worstRepeat.res.Error != nil && worstRepeat.res.Error.Code != "" {
-			codeSuffix = " (" + worstRepeat.res.Error.Code + ")"
+		if worstFine.res.Error != nil && worstFine.res.Error.Code != "" {
+			codeSuffix = " (" + worstFine.res.Error.Code + ")"
 		}
-		s.traceToolRepeat("tool.repeat.warning", turn.RunID, worstRepeat.name, worstRepeat.count, errCodeOf(worstRepeat.res), worstRepeat.sig)
-		nudge := "[system event]\nYou have called " + worstRepeat.name + " " + itoa(worstRepeat.count) +
+		s.traceToolRepeat("tool.repeat.warning", turn.RunID, worstFine.name, worstFine.count, errCodeOf(worstFine.res), worstFine.sig)
+		nudge := "[system event]\nYou have called " + worstFine.name + " " + itoa(worstFine.count) +
 			" times this turn with the same arguments and it failed the same way each time" + codeSuffix +
 			". Repeating the exact same call will keep failing. Read the error, CHANGE the arguments (or use a different tool/approach), or stop and report what's blocking you — do not emit the same arguments again."
 		s.pushMessage(models.TextMessage("user", nudge))
 		// Surface the stuck loop to the human too. The nudge above only steers the model;
 		// without this, a tool repeating the same failure stayed invisible in the footer
 		// until the turn either recovered or burned all the way to the abort threshold.
-		s.events.Warn(worstRepeat.name + " keeps failing the same way" + codeSuffix +
+		s.events.Warn(worstFine.name + " keeps failing the same way" + codeSuffix +
 			" — nudging the assistant to change approach.")
 	}
 	return "", false
+}
+
+// batchRepeat tracks the most-repeated failing call under one breaker signature in a
+// batch — the input to the mid-batch circuit breakers.
+type batchRepeat struct {
+	name  string
+	count int
+	sig   string
+	res   domain.ToolResult
+}
+
+// clampRunes truncates s to at most max runes (Unicode code points, matching the
+// backend's character-based max_length), so an over-long field can't violate a backend
+// schema constraint.
+func clampRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// repeatDetail renders a failing result as "code: message" (or its summary) for a
+// breaker abort message.
+func repeatDetail(res domain.ToolResult) string {
+	if res.Error != nil && res.Error.Code != "" {
+		return trimSpace(res.Error.Code + ": " + res.Error.Message)
+	}
+	return res.Summary
+}
+
+// abortForRepeat ends a turn on a tripped circuit breaker: it stubs every remaining
+// undispatched call (calls[from:]) so each assistant tool_call keeps a matching reply,
+// traces the abort, drives the failed phase + error event, and returns the abort
+// message. Shared by the fine (identical-args) and coarse (unrecoverable, args-varied)
+// breakers.
+func (s *Session) abortForRepeat(turn TurnContext, calls []models.ToolCallRequest, from int, traceEvent string, wr *batchRepeat, msg string) string {
+	s.stubSkippedFrom(calls, from)
+	s.traceToolRepeat(traceEvent, turn.RunID, wr.name, wr.count, errCodeOf(wr.res), wr.sig)
+	s.events.Phase(domain.PhaseFailed)
+	s.events.Error(msg)
+	return msg
+}
+
+// stubSkippedFrom pushes a structurally-valid tool result for every call in calls[from:]
+// the circuit breaker skipped (never dispatched), so each assistant tool_call keeps a
+// matching reply and the transcript replays cleanly. Pushed directly (not through the
+// breaker fold), so a skip stub never feeds the tallies.
+func (s *Session) stubSkippedFrom(calls []models.ToolCallRequest, from int) {
+	for r := from; r < len(calls); r++ {
+		pending := calls[r]
+		pendingName := s.resolveInternal(pending.Function.Name)
+		stub := domain.Fail("SKIPPED_CIRCUIT_BREAKER",
+			"Not executed: the circuit breaker stopped the batch after a repeated failure.",
+			domain.Unrecoverable())
+		stub.Summary = "Skipped — circuit breaker stopped the batch."
+		s.pushMessage(models.ChatMessage{
+			Role:          "tool",
+			ToolCallID:    pending.ID,
+			Name:          pendingName,
+			StringContent: SerializeToolResult(stub, s.artifacts),
+		})
+	}
+}
+
+// coarsePaginationFields are the volatile paging/cursor args stripped when building the
+// coarse failure signature: re-reading the same failing resource while only advancing
+// one of these must collapse to a single signature.
+var coarsePaginationFields = []string{"offset", "limit", "length", "page", "cursor", "nextOffset", "startOffset"}
+
+// coarseFailureSignature is the pagination-insensitive failure signature for the coarse
+// circuit breaker: tool name + error code + the canonicalized args with paging fields
+// removed. It collapses an argument-varied futile loop (the model paging a pruned
+// artifact by offset) that the exact-args fine signature misses, WITHOUT the
+// false-positives a tool+code-only key would cause on distinct missing resources.
+// Non-object args fall through to the plain signature.
+func coarseFailureSignature(name, rawArgs, errCode string) string {
+	stripped := rawArgs
+	var m map[string]any
+	if json.Unmarshal([]byte(rawArgs), &m) == nil {
+		for _, k := range coarsePaginationFields {
+			delete(m, k)
+		}
+		if b, err := json.Marshal(m); err == nil {
+			stripped = string(b)
+		}
+	}
+	return failureSignature(name, stripped, errCode)
 }
 
 // stubCancelledFrom pushes a structurally-valid CANCELLED tool result for every
@@ -1188,7 +1291,13 @@ func (s *Session) buildRuntimeContext(openTerminals []backend.OpenTerminal) *bac
 			Connected: pc.MCPConnected,
 			Transport: pc.MCPTransport,
 			ToolCount: pc.MCPToolCount,
-			Status:    pc.MCPStatusLine,
+			// Clamp to the backend contract's 64-char limit (backend.MCPInfo.status /
+			// extensions.py max_length=64). A DISCONNECTED MCP renders a verbose
+			// "not connected — <long transport error>" line that can blow past 64 and, left
+			// unclamped, 400s the ENTIRE turn on a schema violation (the model never even
+			// runs) instead of degrading to a short status the model can report. Truncate so
+			// a flaky/expired MCP produces a graceful turn, not a cryptic hard failure.
+			Status: clampRunes(pc.MCPStatusLine, 64),
 		}
 	}
 	return rc
