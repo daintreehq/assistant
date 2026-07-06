@@ -42,13 +42,15 @@ func (m *Model) Update(msg tea.Msg) Outcome {
 		// through the per-key chord logic. A LARGE paste would grow the composer past
 		// the terminal height and collapse the bottom band to the one-line "terminal
 		// too small" fallback (internal/ui/view.go), so instead we stash the real text
-		// and show a one-line placeholder; the real text is substituted back on submit.
-		// A whitespace-only paste is never stashed: submitText() would trim it to ""
-		// and a stashed placeholder would then silently swallow Enter, stranding the
-		// user. Insert it verbatim instead (the pre-existing whitespace semantics).
+		// and INSERT a one-line placeholder token at the cursor; the real text is
+		// substituted back on submit. Inserting (rather than replacing the buffer) is
+		// what lets a paste coexist with whatever the user already typed and with other
+		// pastes — each gets its own token. A whitespace-only paste is never stashed:
+		// submitText() would trim it to "" and a stashed placeholder would then silently
+		// swallow Enter, stranding the user. Insert it verbatim instead (the pre-existing
+		// whitespace semantics).
 		if norm := normalizeNewlines(msg.Content); isLargePaste(norm) && strings.TrimSpace(norm) != "" {
 			m.stashLargePaste(norm)
-			m.paletteSel = 0
 		} else {
 			m.insert(msg.Content)
 		}
@@ -274,7 +276,8 @@ func (m *Model) handleSearchKey(k keyMsg) Outcome {
 	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
 		m.buffer = m.searchPrevBuf
 		m.cursor = clampInt(m.searchPrevCursor, 0, m.runeLen())
-		m.pasteText = m.searchPrevPaste // keep buffer/placeholder and stash in sync
+		m.pastes = clonePastes(m.searchPrevPastes) // keep buffer tokens and stashes in sync
+		m.pasteSeq = m.searchPrevSeq
 		m.endSearch()
 		return Outcome{}
 	case isEnter(k):

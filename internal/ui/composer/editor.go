@@ -234,17 +234,22 @@ func isLargePaste(s string) bool {
 	return pasteLineCount(s) >= largePasteLineThreshold || len([]rune(s)) >= largePasteCharThreshold
 }
 
-// largePastePlaceholder is the single-line stand-in shown in the buffer for a
-// stashed large paste (input must be normalized). It MUST contain no '\n' so the
-// composer renders as one row and never trips the too-small fallback. A multi-line
-// paste reports its line count; a single very long line reports its rune count
-// instead, so the summary reads "12 lines" or "640 chars" and never the
-// nonsensical "1 lines".
-func largePastePlaceholder(s string) string {
+// largePasteToken is the single-line inline stand-in embedded in the buffer for a
+// stashed large paste (input must be normalized). It MUST contain no '\n' so it
+// occupies exactly one row and the paste can never trip the too-small fallback. A
+// multi-line paste reports its line count; a single very long line reports its rune
+// count instead, so the summary reads "12 lines" or "640 chars" and never the
+// nonsensical "1 lines". The trailing " #<seq>]" makes every token unique — two
+// same-size pastes get distinct tokens — and, because it ends in ']', keeps no token
+// a prefix of another ("#1]" vs "#12]") so expand / reconcile match unambiguously.
+func largePasteToken(s string, seq int) string {
+	var summary string
 	if n := pasteLineCount(s); n > 1 {
-		return "[pasted " + itoa(n) + " lines]"
+		summary = itoa(n) + " lines"
+	} else {
+		summary = itoa(len([]rune(s))) + " chars"
 	}
-	return "[pasted " + itoa(len([]rune(s))) + " chars]"
+	return "[pasted " + summary + " #" + itoa(seq) + "]"
 }
 
 func clampInt(v, lo, hi int) int {
