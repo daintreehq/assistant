@@ -886,11 +886,25 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// re-encode. Truncated args are never repaired and executed: auto-closing
 		// the JSON would run a tool on half its intended input (e.g. spawn an agent
 		// with an amputated task prompt).
+		//
+		// The cap can also sever the stream BEFORE the first argument byte — the
+		// function name arrived, the args did not — which the accumulator materializes
+		// as an empty "{}" (build() defaults blank args), so it parses cleanly and
+		// would otherwise dispatch on empty input. argsEmpty catches that window: an
+		// effectively-empty FINAL call in a length round is treated as truncation too.
+		// This deliberately also flags a genuinely parameterless final call in a length
+		// round as truncated, but that is benign — re-issuing a no-arg call is harmless
+		// and the round WAS cut short, so there genuinely IS more to re-emit — and far
+		// better than running a required-args tool on {} (which Dispatch would reject
+		// anyway, handing the model a misleading "missing required field" instead of the
+		// truthful "your response was truncated").
 		var parseErr error
 		if call.Function.Arguments != "" {
 			var probe any
 			parseErr = json.Unmarshal([]byte(call.Function.Arguments), &probe)
 		}
+		trimmedArgs := strings.TrimSpace(call.Function.Arguments)
+		argsEmpty := trimmedArgs == "" || trimmedArgs == "{}"
 
 		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
 
@@ -904,9 +918,10 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res.Summary = "Skipped — a multiple-choice question must be asked by itself."
 			// Short-circuits before Dispatch, so trace it or the skip is invisible in the log.
 			s.traceToolGap("tool.question_batch_skipped", turn.RunID, call.ID, internalName, "")
-		case parseErr != nil && finishReason == backend.FinishReasonLength && c == len(calls)-1:
-			// Output-cap truncation: the stream was cut mid-args, so only the batch's
-			// final call can be affected (earlier siblings parsed and ran normally).
+		case (parseErr != nil || argsEmpty) && finishReason == backend.FinishReasonLength && c == len(calls)-1:
+			// Output-cap truncation: the stream was cut mid-args (parseErr) or before
+			// any argument byte at all (argsEmpty), so only the batch's FINAL call can be
+			// affected — earlier siblings parsed and ran normally.
 			res = domain.Fail("TOOL_ARGS_TRUNCATED",
 				"Your response hit its output-token limit and this call's arguments were cut off mid-generation; nothing ran with the partial arguments. Re-issue this call with complete arguments — and re-issue any calls you intended after it, which were dropped entirely. If you are batching several large calls, issue fewer per response.")
 			res.Summary = "Arguments truncated by the output-token limit for " + internalName + "; not executed."
