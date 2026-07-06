@@ -131,6 +131,11 @@ type Client struct {
 	// resourceUpdates is the buffered wake-signal channel the SDK handler forwards
 	// dirty resource URIs onto. Immutable after New (read by the daemon loop).
 	resourceUpdates chan string
+	// gov is the per-client request governor (see governor.go): a small in-flight
+	// cap plus paced starts, so no combination of uncoordinated callers (daemon
+	// ticks, async coordinator, in-turn polls, UI previews) can burst-hammer the
+	// server. Immutable after New.
+	gov *governor
 
 	mu             sync.Mutex
 	low            LowLevelClient // active low-level client (nil when disconnected)
@@ -185,6 +190,7 @@ func New(cfg config.AppConfig, opts Options) *Client {
 		driftBaseline:   driftBaseline,
 		transportKind:   transportNone,
 		resourceUpdates: make(chan string, resourceUpdateBuffer),
+		gov:             newGovernor(governorMaxConcurrent, governorMinInterval),
 		subs:            map[string]int{},
 	}
 	// Build the SDK client once, with the resource-updated handler wired in before
@@ -547,7 +553,20 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 		return nil, err
 	}
 
-	rawTools, err := low.ListTools(ctx)
+	// Same governor as CallTool: a tool-list is one more request on the same
+	// server, and connect/doctor probes must queue behind (not pile onto) an
+	// in-flight read burst. Same discipline too: re-snapshot the session after
+	// the queue wait, and release via defer so a panic can't leak the slot.
+	if gerr := c.gov.acquire(ctx); gerr != nil {
+		return nil, gerr
+	}
+	if l2, g2, err2 := c.ensure(); err2 == nil {
+		low, gen = l2, g2
+	}
+	rawTools, err := func() ([]rawTool, error) {
+		defer c.gov.release()
+		return low.ListTools(ctx)
+	}()
 	if err != nil {
 		// An abort (caller cancel) says nothing about connection health → don't
 		// degrade. UnavailableError already means disconnected → don't re-degrade.
@@ -605,8 +624,9 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 	// preview + hash of the response, never the full body every poll.
 	start := time.Now()
 	attempts := 0
+	var queuedMs int64
 	defer func() {
-		c.traceCall(name, retries, attempts, time.Since(start).Milliseconds(), result, err)
+		c.traceCall(name, retries, attempts, time.Since(start).Milliseconds(), queuedMs, result, err)
 	}()
 
 	var res rawResult
@@ -624,9 +644,36 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		if timeout <= 0 {
 			timeout = defaultCallTimeout
 		}
-		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		res, err = low.CallTool(callCtx, name, args)
-		cancel()
+		// Governor: wait for an in-flight slot + this call's paced start, held only
+		// for the ONE network attempt below — the retry/throttle backoff sleeps run
+		// with the slot released, so a waiting retry never pins capacity. An abort
+		// while queued propagates like an aborted call and never degrades (the
+		// transport was never touched). Note the queue wait sits OUTSIDE the
+		// per-attempt Timeout below (which measures wire time only); a caller that
+		// needs an end-to-end budget bounds ctx itself, which aborts the queue wait
+		// too.
+		queueStart := time.Now()
+		if gerr := c.gov.acquire(ctx); gerr != nil {
+			return CallResult{}, gerr
+		}
+		queuedMs += time.Since(queueStart).Milliseconds()
+		// Re-snapshot the session AFTER the queue wait: a Reconnect while this call
+		// sat queued replaced the low client, and calling the detached old one would
+		// burn the attempt on a guaranteed connection-closed failure. If ensure now
+		// fails (degraded while queued), keep the original snapshot — the call fails
+		// exactly as it would have, and markDegraded's generation guard keeps that
+		// stale failure from touching fresh state.
+		if l2, g2, err2 := c.ensure(); err2 == nil {
+			low, gen = l2, g2
+		}
+		res, err = func() (rawResult, error) {
+			// Deferred so an SDK panic can't leak the slot — a leaked slot is a
+			// permanent capacity loss for the whole process.
+			defer c.gov.release()
+			callCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return low.CallTool(callCtx, name, args)
+		}()
 		if err == nil {
 			// Transport-level success — but a Daintree READ can come back as a throttle
 			// RESULT (IsError=true + MCP_RATE_LIMITED + details.retryAfter) rather than a
@@ -691,7 +738,7 @@ const mcpTracePreviewMax = 1000
 // makes the underlying call visible. Gated on debug logging (the field-building has
 // cost), panic-guarded, and never throws — a logging fault must not affect a call.
 // Success logs a preview + hash of the payload; failure logs the normalized error.
-func (c *Client) traceCall(name string, retries, attempts int, durationMs int64, result CallResult, err error) {
+func (c *Client) traceCall(name string, retries, attempts int, durationMs, queuedMs int64, result CallResult, err error) {
 	dbg := debuglog.Config{DebugLog: c.cfg.DebugLog, LogDir: c.cfg.LogDir}
 	if !dbg.DebugLog {
 		return
@@ -713,6 +760,12 @@ func (c *Client) traceCall(name string, retries, attempts int, durationMs int64,
 		"attempts":    attempts,
 		"durationMs":  durationMs,
 		"transportOk": err == nil,
+	}
+	// Governor queueing (in-flight slot + pacing waits) — surfaced only when it
+	// actually delayed the call, so pressure shows up in log archaeology without
+	// adding noise to every unqueued poll.
+	if queuedMs > 0 {
+		fields["queuedMs"] = queuedMs
 	}
 	if err != nil {
 		fields["error"] = err.Error()

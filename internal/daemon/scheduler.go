@@ -257,43 +257,67 @@ func drainResourceUpdates(ch <-chan string) {
 // then notify — each item isolated so one failure can't starve the others or skip
 // notify(). Due timers and due watchers run as BOUNDED, INDEPENDENT jobs (each on
 // its own goroutine with a per-item deadline) so a slow timer/watcher/MCP-read/
-// model-judge can't block later items or delay notification delivery. notify()
-// runs only after every job settles, so attention is always delivered at the end
-// of the tick. The whole pass stays no-overlap (the guard is in Tick).
+// model-judge can't block later items or delay notification delivery. Job
+// EXECUTION is capped at tickJobConcurrency: an unbounded fan-out let ten due
+// watchers land ten simultaneous MCP read bursts on Daintree in the same instant
+// — the pool keeps the tick's aggregate pressure flat no matter how many items
+// come due together. notify() runs only after every job settles, so attention is
+// always delivered at the end of the tick. The whole pass stays no-overlap (the
+// guard is in Tick).
 func (s *Scheduler) runPass(ctx context.Context, now int64) {
 	timers, _ := s.deps.Store.DueTimers(now)
 	watchers, _ := s.deps.Store.DueWatchers(now)
 
+	sem := make(chan struct{}, tickJobConcurrency)
 	var wg sync.WaitGroup
-
-	for _, t := range timers {
+	// runJob runs one isolated, deadline-bounded item under the concurrency cap.
+	// The deadline starts when the job STARTS (inside the semaphore hold), so an
+	// item queued behind a slow batch never burns its budget while waiting.
+	runJob := func(job func(jctx context.Context)) {
 		wg.Add(1)
-		go func(rec domain.TimerRecord) {
+		go func() {
 			defer wg.Done()
-			// Isolate per-timer failures. fireTimer's inner handling covers payload
-			// execution; reschedule/publish run outside it, so a panic there would
-			// otherwise abort the job — but a recover here keeps it from taking down
-			// the pass. A per-item deadline bounds a slow call_safe_tool dispatch.
+			// Isolate per-item failures — including a panicking CtxFor, which sits
+			// outside the check itself — so one bad item can't abort the pass.
 			defer func() { _ = recover() }()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return // shutdown while queued: skip, the row stays due for the next owner
+			}
+			defer func() { <-sem }()
 			jctx, cancel := context.WithTimeout(ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
 			defer cancel()
-			s.fireTimer(jctx, rec, now)
-		}(t)
+			job(jctx)
+		}()
 	}
 
+	for _, t := range timers {
+		rec := t
+		runJob(func(jctx context.Context) {
+			// fireTimer's inner handling covers payload execution; reschedule/publish
+			// run outside it, so the runJob recover keeps a panic there from taking
+			// down the pass. The per-item deadline bounds a slow call_safe_tool dispatch.
+			s.fireTimer(jctx, rec, now)
+		})
+	}
+
+	// ONE tick-shared batched status read covering every due terminal watcher's
+	// targets, threaded into each check via CheckContext.PrefetchedStatuses — N
+	// due watchers cost one terminal.getStatus instead of N (the async
+	// coordinator's proven batch pattern, applied across watchers). Launched
+	// AFTER the timer jobs so a slow status read can never delay a due reminder
+	// (timers don't depend on it and run concurrently in the pool).
+	prefetched, prefetchedAt := s.prefetchWatcherStatuses(ctx, watchers)
+
 	for _, w := range watchers {
-		wg.Add(1)
-		go func(rec domain.WatcherRecord) {
-			defer wg.Done()
-			// Isolate per-watcher failures — including a panicking CtxFor, which sits
-			// outside the check itself — so one bad watcher can't abort the pass. A
-			// per-item deadline bounds a slow MCP read / model judge.
-			defer func() { _ = recover() }()
-			jctx, cancel := context.WithTimeout(ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
-			defer cancel()
+		rec := w
+		runJob(func(jctx context.Context) {
 			switch rec.Kind {
 			case "terminal":
 				cctx := s.deps.CtxFor(jctx, domain.ActorWatcher, rec.ID)
+				cctx.PrefetchedStatuses = prefetched
+				cctx.PrefetchedStatusesAt = prefetchedAt
 				RunTerminalWatcherCheck(cctx, rec)
 			case "pr_state":
 				cctx := s.deps.CtxFor(jctx, domain.ActorWatcher, rec.ID)
@@ -303,14 +327,86 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 				// forever (false supervision).
 				_ = s.deps.Store.UpdateWatcher(rec.ID, map[string]any{"status": "error", "lastCheckedAt": now})
 			}
-		}(w)
+		})
 	}
 
 	// ALWAYS reach notification delivery: wait for every job to settle, then notify
 	// once. A single slow/hung job is bounded by its per-item deadline, so this can
-	// at worst wait itemDeadlineMS — it never blocks indefinitely on one item.
+	// at worst wait a few deadline rounds under the pool — it never blocks
+	// indefinitely on one item.
 	wg.Wait()
 	s.notify()
+}
+
+// prefetchBudget bounds the tick-shared status prefetch. It is applied via a
+// CANCEL-based timer (time.AfterFunc(cancel)), NOT context.WithTimeout: the mcp
+// client degrades the connection on a DeadlineExceeded, and a best-effort
+// prefetch running long must abort as a plain Canceled (no degrade, no retry)
+// — the mcp-bestEffort-reads rule. Generous enough for the normal read-retry
+// budget; a server that can't answer a status read inside it is the struggling
+// case the failed-batch short-circuit exists for.
+const prefetchBudget = 30 * time.Second
+
+// prefetchWatcherStatuses performs the tick's ONE batched terminal.getStatus
+// across the union of every due terminal watcher's targets (inline output
+// included — the same read shape each watcher would issue individually), and
+// the wall-clock the snapshot was taken at (watchers reject a stale snapshot —
+// see CheckContext.PrefetchedStatusesAt). nil when there is nothing to read or
+// no way to read it (no terminal watchers, no CtxFor, MCP disconnected) — each
+// check then falls back to its own read. A FAILED read is returned non-nil
+// deliberately: the one prefetch already spent the full retry budget, and
+// handing the failure to every watcher (rather than letting each re-hammer the
+// server) is the pressure-relief this exists for. Panic-guarded and
+// cancel-bounded: the prefetch sits OUTSIDE the per-item isolation, so a fault
+// here must degrade to "no prefetch", never take down the pass.
+func (s *Scheduler) prefetchWatcherStatuses(ctx context.Context, watchers []domain.WatcherRecord) (batch *StatusBatch, readAt int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			batch = nil
+		}
+	}()
+	if s.deps.CtxFor == nil {
+		return nil, 0
+	}
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, w := range watchers {
+		if w.Kind != "terminal" {
+			continue
+		}
+		var targets []string
+		// Corrupt targets are skipped here; the watcher's own check disables the row.
+		if err := json.Unmarshal([]byte(w.TargetsJson), &targets); err != nil {
+			continue
+		}
+		for _, t := range targets {
+			if t == "" {
+				continue
+			}
+			if _, dup := seen[t]; dup {
+				continue
+			}
+			seen[t] = struct{}{}
+			ids = append(ids, t)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, 0
+	}
+	cctx := s.deps.CtxFor(ctx, domain.ActorWatcher, "status-prefetch")
+	if cctx == nil || cctx.MCP == nil || !cctx.MCP.Connected() {
+		return nil, 0
+	}
+	rctx := cctx.Ctx
+	if rctx == nil {
+		rctx = ctx
+	}
+	pctx, cancel := context.WithCancel(rctx)
+	timer := time.AfterFunc(prefetchBudget, cancel)
+	b := readStatusesWith(pctx, cctx.MCP, ids, true)
+	timer.Stop()
+	cancel()
+	return &b, domain.NowMS()
 }
 
 // NotifyNow delivers any fresh attention+ events immediately — the async
