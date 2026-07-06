@@ -79,6 +79,24 @@ const judgeConfidenceFloor = 0.6
 // it never truncates legitimate slow work; it only caps an indefinite hang.
 const itemDeadlineMS int64 = 120_000
 
+// PrefetchFreshnessMS is how long the tick-shared status prefetch stays usable
+// by a watcher check. A check that starts later than this after the snapshot
+// was read (queued behind slow pool items) re-reads for itself: its
+// time-derived signals (noOutputForMs silence windows, settle graces) are
+// computed against the check's own clock, so an old tail would inflate them
+// and could falsely settle or alert. 10s comfortably covers the normal pass
+// (jobs are sub-second) while rejecting the stalled-pool case.
+const PrefetchFreshnessMS int64 = 10_000
+
+// tickJobConcurrency caps how many timer/watcher jobs EXECUTE at once within a
+// pass. Every watcher check can fan out MCP reads (deep getOutput fallbacks, the
+// absence-confirming terminal.list) plus model judges, so an unbounded
+// goroutine-per-item launch turned "ten watchers due on the same tick" into ten
+// simultaneous read bursts against Daintree. Four keeps a pass brisk (the
+// per-item deadline still bounds stragglers) while flattening the aggregate
+// burst; the MCP client's global governor is the wire-level backstop beneath it.
+const tickJobConcurrency = 4
+
 // --- Terminal-preview constants (UI only) ------------------------------------
 
 // MaxTerminals caps the number of preview cards.

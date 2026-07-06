@@ -83,8 +83,9 @@ func TestForcedListToolsRealFailureDegrades(t *testing.T) {
 }
 
 // TestCallToolAbortMidBackoffNoSecondAttempt: a caller abort fired before a retriable
-// call still propagates cleanly without a second attempt and without degrading — the
-// abort short-circuits the retry path (isAborted gate) entirely.
+// call still propagates cleanly without touching the wire and without degrading — the
+// governor's deterministic abort fast-fail stops it before the first attempt, and the
+// abort gate (isAborted) would stop any retry regardless.
 func TestCallToolAbortMidBackoffNoSecondAttempt(t *testing.T) {
 	low := &fakeLow{callErrs: []error{&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}}}
 	c := newInjected(low)
@@ -96,9 +97,10 @@ func TestCallToolAbortMidBackoffNoSecondAttempt(t *testing.T) {
 	if _, err := c.CallTool(ctx, "x", nil, CallOptions{Retries: 3}); err == nil {
 		t.Fatal("expected an error")
 	}
-	// Even though Retries=3 and the error is retriable, the abort gate stops retries.
-	if low.callCalls != 1 {
-		t.Errorf("aborted retriable call must not retry: got %d attempts", low.callCalls)
+	// An already-aborted caller never reaches the low-level client at all (and in
+	// particular never retries) — the governor rejects it before attempt one.
+	if low.callCalls != 0 {
+		t.Errorf("aborted retriable call must not touch the wire: got %d attempts", low.callCalls)
 	}
 	if !c.IsConnected() {
 		t.Error("aborted retriable call must not degrade the connection")

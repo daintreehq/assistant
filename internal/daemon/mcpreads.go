@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 )
@@ -94,6 +95,14 @@ type StatusBatch struct {
 // getOutput. recentOutput may still be absent per entry — callers fall back to
 // readOutput.
 func readStatuses(ctx *CheckContext, terminalIDs []string, includeOutput bool) StatusBatch {
+	return readStatusesWith(ctx.Ctx, ctx.MCP, terminalIDs, includeOutput)
+}
+
+// readStatusesWith is the CheckContext-free core of readStatuses, shared with
+// callers that hold a bare MCP seam (the preview poller) — every consumer of
+// terminal.getStatus in this package MUST batch through here rather than issue
+// per-terminal calls (one wire call per cohort is the load contract).
+func readStatusesWith(ctx context.Context, mcp MCP, terminalIDs []string, includeOutput bool) StatusBatch {
 	byID := make(map[string]TerminalStatusEntry)
 	if len(terminalIDs) == 0 {
 		return StatusBatch{Ok: true, ByID: byID}
@@ -102,7 +111,7 @@ func readStatuses(ctx *CheckContext, terminalIDs []string, includeOutput bool) S
 	if includeOutput {
 		args["includeOutput"] = map[string]any{"lines": 50, "stripAnsi": true}
 	}
-	res, err := ctx.MCP.CallRead(ctx.Ctx, "terminal.getStatus", args)
+	res, err := mcp.CallRead(ctx, "terminal.getStatus", args)
 	if err != nil || res.IsError {
 		return StatusBatch{Ok: false, ByID: byID}
 	}

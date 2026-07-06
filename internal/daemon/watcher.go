@@ -63,11 +63,27 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	// initial getStatus read still discovers the agentId and is the fallback.
 	supportsSub := connected && ctx.MCP.SupportsSubscribe()
 
-	// One batched terminal.getStatus for ALL targets (with inline output).
+	// One batched terminal.getStatus for ALL targets (with inline output). When the
+	// scheduler prefetched a tick-shared snapshot (one wire call covering every due
+	// watcher), use it — but only while FRESH: this check's time-derived signals
+	// (silence windows, settle graces) are computed against `now`, so a snapshot
+	// from a stalled pool would inflate them; past the freshness bound the check
+	// reads for itself. A FAILED prefetch (Ok=false) is used as-is deliberately:
+	// the prefetch already spent the full read-retry budget, so N watchers each
+	// re-trying their own read against a struggling server is exactly the pile-on
+	// this avoids — sharedReadFailed below turns the whole check into a quiet
+	// re-arm (no per-terminal deep reads, no model calls).
 	statuses := StatusBatch{Ok: false, ByID: map[string]TerminalStatusEntry{}}
+	usedPrefetch := false
 	if connected {
-		statuses = readStatuses(ctx, targets, true)
+		if ctx.PrefetchedStatuses != nil && now-ctx.PrefetchedStatusesAt <= PrefetchFreshnessMS {
+			statuses = *ctx.PrefetchedStatuses
+			usedPrefetch = true
+		} else {
+			statuses = readStatuses(ctx, targets, true)
+		}
 	}
+	sharedReadFailed := usedPrefetch && !statuses.Ok
 
 	// Cross-check the inventory ONCE when any target is absent from getStatus.
 	// statuses.Ok already implies connected, so no separate gate (that would open a
@@ -105,6 +121,18 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			classification = domain.ClassNeedsLargeModel
 			summary = "Daintree MCP not connected; cannot read terminal."
 
+		case sharedReadFailed:
+			// The tick-shared status read failed after its full retry budget — the
+			// server is struggling, and every other due watcher is seeing the same
+			// outage. Re-arm quietly WITHOUT the per-terminal getOutput/model
+			// fan-out that resolvePresent would fall into on an empty entry (that
+			// pile-on is what the shared read exists to avoid). A per-watcher OWN
+			// read failure keeps the pre-existing resolvePresent path — output may
+			// still be readable when only this watcher's status read blipped.
+			classification = domain.ClassNoChange
+			confidence = 0.4
+			summary = "Terminal status could not be read this tick (shared status read failed); will re-check."
+
 		case statuses.Ok && !hasEntry:
 			classification, confidence, summary, evidence, signals, usedModel =
 				resolveAbsent(ctx, rec, &options, terminalID, prevState, list, now, perTerminal)
@@ -117,9 +145,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			}
 		}
 
-		// Judges, against THIS terminal's signals.
+		// Judges, against THIS terminal's signals. Skipped on a shared read failure:
+		// the signals are empty, so a judge answer would be noise bought with one
+		// model call per watcher during an outage.
 		judgeResults := map[string]domain.ModelJudgeAnswer{}
-		if len(judgeQuestions) > 0 && connected {
+		if len(judgeQuestions) > 0 && connected && !sharedReadFailed {
 			judgeResults = runModelJudges(ctx, judgeQuestions, rec, signals)
 		}
 		for _, q := range judgeQuestions {

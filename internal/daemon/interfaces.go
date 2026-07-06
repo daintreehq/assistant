@@ -175,4 +175,20 @@ type CheckContext struct {
 	SessionID string
 	// ProjectPath is the bound project working directory (forge.getPR default cwd).
 	ProjectPath string
+	// PrefetchedStatuses, when set, is the tick-shared batched terminal.getStatus
+	// snapshot (includeOutput=true) covering EVERY due terminal watcher's targets —
+	// the scheduler reads it ONCE per pass so N due watchers cost one wire call
+	// instead of N. A terminal watcher check uses it in place of its own read; nil
+	// (direct callers, tests, a disconnected prefetch) falls back to the
+	// per-watcher read. The snapshot may contain other watchers' terminals — a
+	// check only ever looks up its own targets, and absence semantics are
+	// identical to a per-watcher batched read.
+	PrefetchedStatuses *StatusBatch
+	// PrefetchedStatusesAt is the wall-clock ms the prefetched snapshot was read
+	// at. Watcher checks run through a capped pool, so a job queued behind slow
+	// items may start well after the prefetch — time-derived signals (silence
+	// windows, settle graces) computed from an old tail would be inflated. A check
+	// uses the snapshot only while it is fresh (PrefetchFreshnessMS) and falls
+	// back to its own read otherwise.
+	PrefetchedStatusesAt int64
 }
