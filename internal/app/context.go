@@ -260,6 +260,20 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 	return t.app.Registry.Dispatch(ctx, name, json.RawMessage(argsJSON), tctx)
 }
 
+// ParallelSafe reports whether the named tool may run concurrently with other calls
+// in the same batch. It is an EXPLICIT per-tool opt-in (Tool.Parallelizable), NOT a
+// blanket "read risk ⇒ concurrent" rule: some read-only tools are barriers with an
+// ordering dependency (terminal.awaitAll must settle BEFORE a following extract
+// reads), so only tools individually verified as independent snapshot reads (e.g.
+// terminal.extract / .json) set the flag. Double-gated on RiskRead as a safety net so
+// a mutating tool can never be parallelized even if it mistakenly sets the flag.
+// Unknown names ⇒ false (dispatch serially). Satisfies the agent's optional
+// parallelSafeRunner capability.
+func (t *toolRunner) ParallelSafe(name string) bool {
+	tool := t.app.Registry.Get(name)
+	return tool != nil && tool.Parallelizable && tool.Risk == domain.RiskRead
+}
+
 // --- storeToolAdapter: tools.Store over *storage.Store ---
 
 // storeToolAdapter adapts the concrete *storage.Store (no-ctx, record-returning

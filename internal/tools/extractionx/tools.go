@@ -143,7 +143,7 @@ func resolveBase(b baseArgs) (resolvedBase, string) {
 	// content waits (contains/regex) DO work across terminals (they match the
 	// combined tail), so this only gates the coerced settle default.
 	if r.isSettleWait && len(b.TerminalIDs) > 1 {
-		return resolvedBase{}, "wait: {} waits for ONE agent to finish and cannot span terminals. To wait for a whole cohort, call terminal.awaitAll with all the terminalIds (it polls them concurrently and confirms each); then read their output with one terminal.extract over the same ids (no wait)."
+		return resolvedBase{}, "wait: {} waits for ONE agent to finish and cannot span terminals. To wait for a whole cohort, call terminal.awaitAll with all the terminalIds (it polls them concurrently and confirms each); then read their output in the NEXT reply — one terminal.extract over the same ids for a single merged answer, or a batch of per-terminal no-wait extract calls in one reply (they dispatch in parallel) when each terminal needs its own question."
 	}
 	return r, ""
 }
@@ -204,13 +204,20 @@ func newExtractTool(deps Deps) tools.Tool {
 		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content as plain TEXT with " +
 			"the small model — the default way to read what an agent said. Over MULTIPLE terminalIds it MERGES every terminal's tail " +
 			"into ONE answer (it does NOT return one answer per terminal); to collect a DISTINCT answer per agent — each one's fact/vote/draft " +
-			"— use terminal.extract.json with an array schema keyed by terminalId, or extract a single id at a time. Optionally wait (poll) " +
-			"until a condition is met before extracting. Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
+			"— use terminal.extract.json with an array schema keyed by terminalId, or extract a single id at a time. PARALLEL: no-wait " +
+			"terminal.extract/.json calls batched in ONE reply run CONCURRENTLY — when you need several independent extractions (a different " +
+			"question per terminal, or one answer per agent), emit them ALL as one batch of calls instead of one per turn; the total wait is " +
+			"roughly the slowest single call. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a " +
+			"barrier and runs serially). Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
 			"extraction model call). For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
 			"Read-only; requires Daintree MCP.",
-		Risk:   domain.RiskRead,
-		Schema: extractSchema,
-		Decode: tools.StrictDecoder(func() any { return &extractArgs{} }),
+		Risk: domain.RiskRead,
+		// Independent per-call snapshot read: a batch of extracts (one per agent) can run
+		// concurrently instead of one backend round-trip at a time. Safe because each call
+		// reads its own terminal tail and has no ordering dependency on its siblings.
+		Parallelizable: true,
+		Schema:         extractSchema,
+		Decode:         tools.StrictDecoder(func() any { return &extractArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a extractArgs
 			_ = json.Unmarshal(raw, &a)
@@ -319,12 +326,18 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 		Description: "Read a bounded tail of one or more Daintree terminals and extract STRUCTURED JSON with the small model — use " +
 			"this when you need several NAMED fields at once, OR one entry PER terminal when reading a COHORT: the multi-terminal tail is " +
 			"labelled by terminalId, so an array schema keyed by terminalId attributes each agent's answer in ONE call (e.g. collecting " +
-			"every agent's fact, or tallying a cohort's votes into one object). Both `instruction` and `jsonSchema` are required. Optionally " +
-			"wait (poll) until a condition is met before extracting. For a single value or plain text to relay from ONE terminal, use " +
+			"every agent's fact, or tallying a cohort's votes into one object). Both `instruction` and `jsonSchema` are required. PARALLEL: " +
+			"no-wait terminal.extract/.json calls batched in ONE reply run CONCURRENTLY — for several INDEPENDENT extractions (a different " +
+			"question per terminal), emit them all as one batch of calls; use the single multi-id call above only when one question spans " +
+			"the whole cohort. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a barrier and runs " +
+			"serially). For a single value or plain text to relay from ONE terminal, use " +
 			"terminal.extract instead. Read-only; requires Daintree MCP.",
-		Risk:   domain.RiskRead,
-		Schema: extractJSONSchema,
-		Decode: tools.StrictDecoder(func() any { return &extractJSONArgs{} }),
+		Risk: domain.RiskRead,
+		// Independent per-call snapshot read — see terminal.extract: a cohort of these can
+		// run concurrently, no ordering dependency between calls.
+		Parallelizable: true,
+		Schema:         extractJSONSchema,
+		Decode:         tools.StrictDecoder(func() any { return &extractJSONArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a extractJSONArgs
 			_ = json.Unmarshal(raw, &a)
