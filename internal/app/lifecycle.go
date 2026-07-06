@@ -283,9 +283,10 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 		OnAttention:     onAttention,
 	})
 	a.scheduler.Start(ctx)
-	// The async coordinator shares the daemon's lifecycle: foreground-only, so
-	// async futures only run while the assistant is open. Started AFTER
-	// a.scheduler is set so the coordinator's Notify hook always sees it.
+	// The async coordinator shares the scheduler's lifecycle in THIS process
+	// (whichever owner is running — an open assistant or the supervisor daemon);
+	// its Start adopts the persisted live invocations. Started AFTER a.scheduler
+	// is set so the coordinator's Notify hook always sees it.
 	if a.asyncCoordinator != nil {
 		a.asyncCoordinator.Start(ctx)
 	}

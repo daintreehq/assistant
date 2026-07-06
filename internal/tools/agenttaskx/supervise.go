@@ -10,10 +10,11 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// foregroundOnlyNote is appended to a supervise summary: watchers tick only while
-// the assistant is open and never resume on the next launch. Stated explicitly so
-// the model never implies background supervision.
-const foregroundOnlyNote = " NOTE: supervision is foreground-only — the watcher ticks only while the assistant is open and does not resume on the next launch."
+// durableSupervisionNote is appended to a supervise summary: watchers are
+// project-scoped and keep running after the assistant closes (the background
+// supervisor adopts them). Stated explicitly so the model can promise
+// after-close results honestly.
+const durableSupervisionNote = " NOTE: supervision is durable — the watcher keeps checking after the assistant closes (the background supervisor adopts it) and pauses only if Daintree itself closes."
 
 type superviseArgs struct {
 	TerminalID         string `json:"terminalId"`
@@ -63,7 +64,7 @@ func newSuperviseTerminalTool(deps Deps) tools.Tool {
 			"supervisor watcher to a terminal that is running but unsupervised — e.g. an agent from a previous session, or a " +
 			"terminal that lost its watcher. Provide the terminalId; supply acceptanceCriteria when " +
 			"there is a concrete definition of done. This does NOT launch an agent and does NOT edit files.",
-		Consequence: "Attaches a session-scoped supervisor watcher to a running agent terminal (no new agent is launched).",
+		Consequence: "Attaches a durable, project-scoped supervisor watcher to a running agent terminal (no new agent is launched).",
 		Risk:        domain.RiskTerminal,
 		Schema:      superviseSchema,
 		Decode:      tools.StrictDecoder(func() any { return &superviseArgs{} }),
@@ -91,7 +92,7 @@ func superviseTerminal(deps Deps, a *superviseArgs) tools.ToolResult {
 			w := &existing[i]
 			if w.IsSupervisor != nil && *w.IsSupervisor && watcherTargets(w, terminalID) {
 				summary := fmt.Sprintf("Terminal %s is already supervised by watcher %s.%s",
-					terminalID, w.ID, foregroundOnlyNote)
+					terminalID, w.ID, durableSupervisionNote)
 				return tools.Ok(summary, map[string]any{
 					"watcherId": w.ID, "terminalId": terminalID, "deduped": true,
 				})
@@ -142,11 +143,11 @@ func superviseTerminal(deps Deps, a *superviseArgs) tools.ToolResult {
 		"worktreeId": strings.TrimSpace(a.WorktreeID), "cadenceMs": watcher.CadenceMs,
 	})
 
-	// Lifecycle note: foreground-only when the daemon is live, else flag that nothing
+	// Lifecycle note: durable when a scheduler is live, else flag that nothing
 	// will tick until the assistant runs interactively (mirrors spawnForEdits).
-	note := foregroundOnlyNote
+	note := durableSupervisionNote
 	if !deps.daemonActive() {
-		note = " NOTE: no scheduler is running in this session, so this watcher will not check until the assistant runs interactively."
+		note = " NOTE: no scheduler is running in this one-shot invocation, so this watcher will not check until the assistant (or its background supervisor) next runs."
 	}
 	summary := fmt.Sprintf("Adopted terminal %s into supervision (watcher %s).%s", terminalID, watcher.ID, note)
 	return tools.Ok(summary, map[string]any{"watcherId": watcher.ID, "terminalId": terminalID})

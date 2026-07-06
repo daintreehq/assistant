@@ -60,10 +60,10 @@ func TestTerminalCreateWatchConditionMatrix(t *testing.T) {
 
 // Lifecycle behaviour across scheduler running / stopped / absent. When the
 // daemon runs (or is absent → assume-active), creation succeeds with the
-// session-scoped foreground-only NOTE. When the daemon is stopped (one-shot /
-// --json mode), creation hard-fails with a non-retryable
-// WATCHER_REQUIRES_INTERACTIVE and inserts nothing. Watchers do NOT resume
-// across sessions (unlike timers).
+// project-scoped durability NOTE (watchers keep running after the assistant
+// closes — the background supervisor adopts them). When no supervision engine
+// runs at all (one-shot / --json mode), creation hard-fails with a
+// non-retryable WATCHER_REQUIRES_INTERACTIVE and inserts nothing.
 func TestTerminalCreateLifecycleNotice(t *testing.T) {
 	args := json.RawMessage(`{"terminalIds":["t1"],"title":"build","goal":"green"}`)
 
@@ -72,9 +72,9 @@ func TestTerminalCreateLifecycleNotice(t *testing.T) {
 	stOn := &memStore{}
 	running := find(Tools(Deps{Store: stOn}), "watcher.terminal.create").
 		Handle(context.Background(), args, ctxDaemon(&on))
-	if !running.Ok || !strings.Contains(running.Summary, "session-scoped") ||
-		!strings.Contains(running.Summary, "does not resume") ||
-		strings.Contains(running.Summary, "scheduler is NOT running") {
+	if !running.Ok || !strings.Contains(running.Summary, "project-scoped") ||
+		!strings.Contains(running.Summary, "KEEP RUNNING after the assistant closes") ||
+		strings.Contains(running.Summary, "no supervision engine") {
 		t.Fatalf("running note: %q", running.Summary)
 	}
 	if len(stOn.inserted) != 1 {
@@ -94,7 +94,7 @@ func TestTerminalCreateLifecycleNotice(t *testing.T) {
 
 	absent := find(Tools(Deps{Store: &memStore{}}), "watcher.terminal.create").
 		Handle(context.Background(), args, ctxDaemon(nil))
-	if !absent.Ok || !strings.Contains(absent.Summary, "session-scoped") {
+	if !absent.Ok || !strings.Contains(absent.Summary, "project-scoped") {
 		t.Fatalf("absent note: %q", absent.Summary)
 	}
 }

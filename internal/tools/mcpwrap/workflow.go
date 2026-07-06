@@ -13,9 +13,10 @@ import (
 // Defined locally so this package needs no shared-cadence import.
 const supervisorDefaultCadenceMs = 3000
 
-// foregroundOnlyNote is appended to a summary whenever a session-scoped watcher
-// is attached: watchers tick only while the assistant is open and never resume.
-const foregroundOnlyNote = " NOTE: supervision is foreground-only — the watcher ticks only while the assistant is open and does not resume on the next launch."
+// durableSupervisionNote is appended to a summary whenever a supervisor watcher
+// is attached: watchers are project-scoped and keep running after the assistant
+// closes (the background supervisor adopts them).
+const durableSupervisionNote = " NOTE: supervision is durable — the watcher keeps checking after the assistant closes (the background supervisor adopts it) and pauses only if Daintree itself closes."
 
 // workflowMcpArgs is the shared shape for the workflow MCP passthroughs: an
 // opaque arguments record (workflow setup fields are Daintree-defined), an
@@ -210,7 +211,7 @@ func attachSupervisorWatcher(ctx context.Context, deps Deps, tctx *tools.ToolCon
 	if workflowRunID != "" && deps.WorkflowStore != nil {
 		_ = deps.WorkflowStore.UpdateWorkflowRun(ctx, workflowRunID, map[string]any{"watcherIdsJson": jsonIDArray(watcher.ID)})
 	}
-	res.Summary += foregroundOnlyNote
+	res.Summary += durableSupervisionNote
 	return res
 }
 

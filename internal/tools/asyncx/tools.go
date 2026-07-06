@@ -55,12 +55,13 @@ func validateTimeout(p *int64) (int64, error) {
 	return *p, nil
 }
 
-// asyncPreflight runs the shared gates: a running coordinator (async work needs
-// the foreground poll loop), a connected MCP, and the live-invocation cap.
+// asyncPreflight runs the shared gates: a running coordinator (async work
+// needs a live poll loop to register with), a connected MCP, and the
+// live-invocation cap.
 func asyncPreflight(deps Deps, toolName string) *tools.ToolResult {
 	if deps.Coordinator == nil || !deps.Coordinator.Started() {
 		f := tools.Fail(codeAsyncUnavailable,
-			toolName+" needs the interactive assistant's background supervisor, which is not running in this session (one-shot runs cannot watch async work). Use the blocking terminal.awaitAll instead, or run interactively.",
+			toolName+" needs a running async supervisor, which this one-shot invocation does not have. Use the blocking terminal.awaitAll instead, or run interactively.",
 			tools.Unrecoverable())
 		return &f
 	}
@@ -136,7 +137,7 @@ func registerAndAccept(deps Deps, rec domain.AsyncInvocationRecord, terminalIDs 
 		"terminalIds": terminalIDs,
 		"title":       rec.Title,
 		"expiresAt":   rec.ExpiresAt,
-		"note":        "Asynchronous: the runtime is watching this while THIS assistant session stays open (async work is session-scoped and discarded when the assistant closes). Do NOT poll, await, or re-run it — the completion arrives through the attention queue and will wake you.",
+		"note":        "Asynchronous: the runtime is watching this and KEEPS watching after the assistant closes (async work is project-scoped; the background supervisor adopts it and integrates the completion). Do NOT poll, await, or re-run it — the completion arrives through the attention queue and will wake you, or greet the user on their next attach.",
 	})
 	res.Async = &domain.AsyncHandle{
 		ID:          rec.ID,
@@ -218,9 +219,10 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 			"tell the user what is running and END the turn (or move on to other work) — do NOT awaitAll/extract-wait the same terminal, do " +
 			"NOT poll async.list for it, and do NOT re-send the command. When the completion wake arrives, read the output then (terminal.summarize " +
 			"or terminal.extract) and continue the task. Finish detection tracks agent state, so it is built for agent terminals. " +
-			"SESSION-SCOPED: the watch runs only while THIS assistant session stays open and is discarded when it closes — never promise an " +
-			"overnight or after-close completion. Mutating (it runs a command), so it confirms like terminal.sendCommand.",
-		Consequence: "Runs a command in the named terminal (as if typed), then watches it while this assistant session stays open and notifies when it finishes. Effects depend on the command and may not be reversible.",
+			"PROJECT-SCOPED AND DURABLE: the watch keeps running after the assistant closes — the background supervisor adopts it and " +
+			"integrates the completion, so you MAY promise the user an after-close or overnight result (it pauses only if Daintree itself " +
+			"closes, and resumes on the next launch). Mutating (it runs a command), so it confirms like terminal.sendCommand.",
+		Consequence: "Runs a command in the named terminal (as if typed), then watches it — including after the assistant closes — and notifies when it finishes. Effects depend on the command and may not be reversible.",
 		Risk:        domain.RiskTerminal,
 		Schema:      runAsyncSchema,
 		Decode:      tools.StrictDecoder(func() any { return &runAsyncArgs{} }),
@@ -295,7 +297,7 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 			rec.Status = domain.AsyncRunning
 
 			return registerAndAccept(deps, rec, []string{terminalID}, fmt.Sprintf(
-				"Started asynchronously: %q is running in %s (async id %s). The completion will arrive through the attention queue while this session stays open — do not wait for it in this turn.",
+				"Started asynchronously: %q is running in %s (async id %s). The completion arrives through the attention queue — even after the assistant closes, the background supervisor keeps watching. Do not wait for it in this turn.",
 				title, terminalID, rec.ID), alreadySentNote)
 		},
 	}
@@ -354,8 +356,9 @@ func newAwaitAsyncTool(deps Deps) tools.Tool {
 			"agents keep working — right after spawning a cohort with agentTask.spawnForEdits, or after sending long work with " +
 			"terminal.sendCommand. AFTER calling it: report what is running and end the turn — do NOT also awaitAll/extract-wait the same " +
 			"terminals, and do NOT attach a watcher just for finish detection (watchers are for goal-based observation with classification). " +
-			"When the wake arrives, read outputs with terminal.summarize/terminal.extract and continue. SESSION-SCOPED: the watch runs only " +
-			"while THIS assistant session stays open and is discarded when it closes — never promise an overnight or after-close completion. " +
+			"When the wake arrives, read outputs with terminal.summarize/terminal.extract and continue. PROJECT-SCOPED AND DURABLE: the " +
+			"watch keeps running after the assistant closes — the background supervisor adopts it and integrates the completion, so you MAY " +
+			"promise the user an after-close or overnight result (it pauses only if Daintree itself closes, and resumes on the next launch). " +
 			"Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskLocal,
 		Schema: awaitAsyncSchema,
@@ -395,7 +398,7 @@ func newAwaitAsyncTool(deps Deps) tools.Tool {
 			}
 
 			return registerAndAccept(deps, rec, ids, fmt.Sprintf(
-				"Watching %d terminal(s) asynchronously as %q (async id %s). You will be woken through the attention queue when they settle (while this session stays open) — do not wait for them in this turn.",
+				"Watching %d terminal(s) asynchronously as %q (async id %s). You will be woken through the attention queue when they settle — even after the assistant closes, the background supervisor keeps watching. Do not wait for them in this turn.",
 				len(ids), title, rec.ID), "")
 		},
 	}

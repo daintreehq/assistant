@@ -26,8 +26,8 @@ func TestScheduleLifecycleNotice(t *testing.T) {
 	if !running.Ok {
 		t.Fatalf("running: %+v", running.Error)
 	}
-	if !strings.Contains(running.Summary, "resumes on the next launch") ||
-		strings.Contains(running.Summary, "scheduler is NOT running") {
+	if !strings.Contains(running.Summary, "keeps firing after the assistant closes") ||
+		strings.Contains(running.Summary, "no scheduler is running") {
 		t.Fatalf("running note: %q", running.Summary)
 	}
 
@@ -36,14 +36,14 @@ func TestScheduleLifecycleNotice(t *testing.T) {
 	if !stopped.Ok {
 		t.Fatalf("stopped: %+v", stopped.Error)
 	}
-	if !strings.Contains(stopped.Summary, "scheduler is NOT running") ||
-		!strings.Contains(stopped.Summary, "will not fire") {
+	if !strings.Contains(stopped.Summary, "no scheduler is running") ||
+		!strings.Contains(stopped.Summary, "fires once the assistant") {
 		t.Fatalf("stopped note: %q", stopped.Summary)
 	}
 
-	// daemonActive absent ⇒ assume active (resumes-on-next-launch wording).
+	// daemonActive absent ⇒ assume active (durable wording).
 	absent := tool.Handle(context.Background(), args, ctxDaemon(nil))
-	if !absent.Ok || !strings.Contains(absent.Summary, "resumes on the next launch") {
+	if !absent.Ok || !strings.Contains(absent.Summary, "keeps firing after the assistant closes") {
 		t.Fatalf("absent note: %q", absent.Summary)
 	}
 }

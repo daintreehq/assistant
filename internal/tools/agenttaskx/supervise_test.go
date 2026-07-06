@@ -46,8 +46,8 @@ func TestSuperviseTerminalHappyPath(t *testing.T) {
 	if m["terminalId"] != "term_7" || m["watcherId"] == nil || m["watcherId"] == "" {
 		t.Fatalf("result missing terminalId/watcherId: %+v", m)
 	}
-	if !strings.Contains(res.Summary, "foreground-only") {
-		t.Fatalf("summary must carry the foreground-only note, got %q", res.Summary)
+	if !strings.Contains(res.Summary, "supervision is durable") {
+		t.Fatalf("summary must carry the durable-supervision note, got %q", res.Summary)
 	}
 	// Adoption must NOT write an agent_launch saga.
 	if len(st.launches) != 0 {
