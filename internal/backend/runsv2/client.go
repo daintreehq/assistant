@@ -101,7 +101,7 @@ func (c *Client) Cancel(ctx context.Context, runID, reason string) error {
 	if reason != "" {
 		body["reason"] = reason
 	}
-	return c.doJSON(ctx, http.MethodPost, "/v2/runs/"+runID+"/cancel", body, &struct{}{})
+	return c.doJSON(ctx, http.MethodPost, "/v2/runs/"+runID+"/cancel", body, nil)
 }
 
 // ---- leases -------------------------------------------------------------------
@@ -183,7 +183,7 @@ func (c *Client) ScheduleWakeup(ctx context.Context, runID string, w WakeupCreat
 
 // CancelWakeup cancels a scheduled wake.
 func (c *Client) CancelWakeup(ctx context.Context, runID, wakeupID string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/v2/runs/"+runID+"/wakeups/"+wakeupID, nil, &struct{}{})
+	return c.doJSON(ctx, http.MethodDelete, "/v2/runs/"+runID+"/wakeups/"+wakeupID, nil, nil)
 }
 
 // ---- replay --------------------------------------------------------------------------
