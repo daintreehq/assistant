@@ -6,9 +6,16 @@
 //
 // Uses modernc.org/sqlite (pure Go, CGO-free) directly. The store is
 // single-writer (SetMaxOpenConns(1)) to preserve the no-interleave assumption the
-// "atomic" grant consume / event upsert / resolve rely on. Construction is a
-// session boundary: stale watchers cancelled, the dead spawn roster cleared,
-// retention swept.
+// "atomic" grant consume / event upsert / resolve rely on. Cross-PROCESS
+// exclusivity is NOT the store's job: the ipc owner lock guarantees at most one
+// process holds an open Store per project DB (see docs/SUPERVISOR.md).
+//
+// Construction is deliberately NON-destructive: watchers, async invocations,
+// and the attention inbox are PROJECT-scoped and survive process boundaries so
+// the supervisor daemon (or the next cockpit) can adopt them. The explicit
+// owner-boot reconciliation lives in BeginOwnership; the only wholesale
+// teardown left is /clear (CancelLiveWatchers / CancelLiveAsyncInvocations /
+// ResolveAllOpenEvents).
 package storage
 
 import (
@@ -46,8 +53,11 @@ const (
 	// reloaded on resume); to 7 when the dead skill_selection_log table was DROPPED
 	// (skill selection is server-owned now — the CLI never logged selections); to 8 when
 	// conversation gained reasoningContent (persist DeepSeek thinking-mode chain-of-thought
-	// for verbatim replay) — a schema change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 8
+	// for verbatim replay); to 9 when the runtime_state key/value table was added (the
+	// persistent-supervisor handoff surface: current session id + backend state token
+	// survive a process boundary) — a schema change is a hard-reset (make db-reset),
+	// not a migration.
+	schemaUserVersion = 9
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer
@@ -96,18 +106,13 @@ type Store struct {
 	db        *sql.DB
 	now       func() int64
 	retention Retention
-
-	// sessionEndedWatchers holds the titles of watchers cancelStaleWatchers cancelled
-	// on THIS Open because the prior session ended (nil when none). It is a one-shot
-	// carryover: the composition root reads it once to surface a single "these stopped
-	// when the last session ended" NOTE. Set only during Open; never mutated after.
-	sessionEndedWatchers []string
 }
 
 // Open opens (or creates) the SQLite file at dbPath, applies PRAGMAs, execs the
-// schema, then runs the session-boundary routines: cancel stale watchers, reset the
-// dead spawn roster, and a best-effort retention sweep. Pass ":memory:" for an
-// in-memory store in tests.
+// schema, and runs a best-effort retention sweep. It NEVER tears down live
+// supervision state — watchers, async invocations, and the inbox are
+// project-scoped and adopted by the next owner (see BeginOwnership). Pass
+// ":memory:" for an in-memory store in tests.
 func Open(dbPath string, opts *Options) (*Store, error) {
 	nowFn := domain.NowMS
 	ret := DefaultRetention
@@ -140,32 +145,11 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 		return nil, err
 	}
 
-	now := s.now()
-	endedTitles, err := s.cancelStaleWatchers(now)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("cancel stale watchers: %w", err)
-	}
-	s.sessionEndedWatchers = endedTitles
-	if err := s.resetStaleAgentLaunches(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("reset stale agent launches: %w", err)
-	}
-	// Async futures are session-scoped like watchers: abandon every non-terminal
-	// invocation a prior session left behind (the foreground coordinator that owned
-	// them is gone; a new session must never silently resume them).
-	if err := s.cancelStaleAsyncInvocations(now); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	// Fresh-start inbox: resolve EVERY open attention event from prior sessions so a
-	// new run begins with an empty inbox (the !N badge at 0) — supervision and its
-	// notifications never carry over. Best-effort; events published THIS session
-	// (after Open returns) are unaffected.
-	_, _ = s.ResolveAllOpenEvents(now)
 	// Best-effort housekeeping: a sweep failure must NEVER abort construction.
-	// Swallow the error here.
-	_ = s.GCRetentionSweep(now)
+	// Swallow the error here. (The old session-boundary teardown — cancel live
+	// watchers/async, wipe the inbox — is GONE from Open: supervision state is
+	// project-scoped now and adopted by the owner, not the act of opening the file.)
+	_ = s.GCRetentionSweep(s.now())
 
 	return s, nil
 }
@@ -272,17 +256,61 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB returns the raw handle (escape hatch, mainly for tests). Port of raw().
 func (s *Store) DB() *sql.DB { return s.db }
 
-// SessionEndedWatchers returns the titles of watchers that THIS Open cancelled
-// because the prior session ended (nil when none). Read once by the composition
-// root to surface a one-time NOTE; returns a defensive copy so the caller can't
-// mutate the store's slice.
-func (s *Store) SessionEndedWatchers() []string {
-	if len(s.sessionEndedWatchers) == 0 {
-		return nil
+// OwnershipSummary reports what BeginOwnership found waiting when this process
+// took over the project DB — the raw material for the "while you were away /
+// resumed supervision" surfaces.
+type OwnershipSummary struct {
+	// ResumedWatcherTitles are the live (active/created/paused) watchers adopted
+	// from a prior owner, oldest first.
+	ResumedWatcherTitles []string
+	// ResumedAsyncCount is how many non-terminal async invocations were adopted.
+	ResumedAsyncCount int
+	// UnpublishedAsyncCount is how many async invocations a prior owner finalized
+	// but died before publishing — the coordinator retries those publishes.
+	UnpublishedAsyncCount int
+	// OpenAttentionCount is the unresolved inbox carried over.
+	OpenAttentionCount int
+}
+
+// BeginOwnership is the owner-boot reconciliation, run ONCE by the process that
+// just acquired the project owner lock (cockpit, REPL, one-shot, or the
+// supervisor daemon). It replaces the old destructive Open-time sweep: instead
+// of cancelling live supervision it ADOPTS it — the only cleanup is the spawn
+// roster (in-flight launch sagas are dead with the process that ran them; a
+// confirmed launch with a bound terminal survives because Daintree owns that
+// terminal). Everything else is a read: the summary tells the caller what it
+// just inherited.
+func (s *Store) BeginOwnership(now int64) (OwnershipSummary, error) {
+	var sum OwnershipSummary
+	if err := s.resetStaleAgentLaunches(); err != nil {
+		return sum, err
 	}
-	out := make([]string, len(s.sessionEndedWatchers))
-	copy(out, s.sessionEndedWatchers)
-	return out
+	watchers, err := s.ListWatchers("")
+	if err != nil {
+		return sum, fmt.Errorf("ownership boot: list watchers: %w", err)
+	}
+	for _, w := range watchers {
+		switch w.Status {
+		case "active", "created", "paused":
+			sum.ResumedWatcherTitles = append(sum.ResumedWatcherTitles, w.Title)
+		}
+	}
+	live, err := s.ListLiveAsyncInvocations()
+	if err != nil {
+		return sum, fmt.Errorf("ownership boot: list live async: %w", err)
+	}
+	sum.ResumedAsyncCount = len(live)
+	unpub, err := s.ListUnpublishedAsyncInvocations()
+	if err != nil {
+		return sum, fmt.Errorf("ownership boot: list unpublished async: %w", err)
+	}
+	sum.UnpublishedAsyncCount = len(unpub)
+	open, err := s.ListEvents(domain.QueueDigestOptions{})
+	if err != nil {
+		return sum, fmt.Errorf("ownership boot: list open events: %w", err)
+	}
+	sum.OpenAttentionCount = len(open)
+	return sum, nil
 }
 
 // ---- ports.Store seam (the minimum the agent loop compiles against) ----

@@ -79,6 +79,9 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	}
 
 	outcomes := make([]CheckOutcome, 0, len(targets))
+	// Deferred per-terminal publishes: emitted only if the finalize claim wins
+	// (see the flush after ClaimDueWatcher).
+	var pendingPublishes []domain.QueuePublishArgs
 
 	// allQuietSubscribed gates the widened reconcile cadence: it stays true only if
 	// EVERY target is subscribed and currently quiet (waiting/idle). One working,
@@ -183,7 +186,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			allQuietSubscribed = false
 		}
 
-		// Publish.
+		// Collect the publish — flushed AFTER the finalize claim below. Claim-first
+		// ordering means a watcher cancelled mid-check never emits its event, and a
+		// crash between the claim and the publish loses nothing durable: the terminal
+		// state that produced the classification still holds, so the next owner's
+		// re-check regenerates the same event under the same stable dedupe key.
 		if outcome.ShouldPublish {
 			severity := outcome.Severity
 			// Supervisor promotion: surface a clean completion (normally "done").
@@ -194,7 +201,7 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			if len(targets) > 1 {
 				pubSummary = fmt.Sprintf("[%s] %s", terminalID, outcome.Summary)
 			}
-			_ = ctx.Queue.Publish(domain.QueuePublishArgs{
+			pendingPublishes = append(pendingPublishes, domain.QueuePublishArgs{
 				Source:             domain.SourceTerminalWatcher,
 				Severity:           severity,
 				Title:              fmt.Sprintf("%s: %s", rec.Title, humanize(outcome.Classification)),
@@ -278,6 +285,23 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	// re-arming (status back to 'active' with a new nextCheckAt) would resurrect a cancelled
 	// watcher and keep it supervising forever. A lost claim also means we leave the cancel's
 	// own grant revocation in place rather than racing it here.
+	// Publish ordering vs the finalize claim is asymmetric, by crash-recovery
+	// shape:
+	//   - STOP outcomes publish BEFORE the claim. The claim flips the row to a
+	//     terminal status that DueWatchers never re-selects, so a crash between
+	//     claim and publish would lose the completion alert FOREVER. Publishing
+	//     first is crash-safe: a crash after publish leaves the row active, the
+	//     next owner re-checks, re-derives the same event, and the stable
+	//     dedupe key absorbs the re-publish. The cost is the narrow cancel race
+	//     (a watcher cancelled mid-check may emit one final honest alert).
+	//   - Non-stop outcomes publish AFTER a won claim: the active row re-checks
+	//     on the next tick anyway (a crash loses nothing durable), so we keep
+	//     the stronger cancel guarantee — a cancelled watcher never wakes anyone.
+	if stop {
+		for _, args := range pendingPublishes {
+			_ = ctx.Queue.Publish(args)
+		}
+	}
 	claimed, _ := ctx.Store.ClaimDueWatcher(rec.ID, map[string]any{
 		"lastClassification": string(headline.Classification),
 		"lastEpistemicKind":  string(headline.EpistemicKind),
@@ -286,6 +310,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		"optionsJson":        string(optsJSON),
 		"status":             status,
 	})
+	if claimed && !stop {
+		for _, args := range pendingPublishes {
+			_ = ctx.Queue.Publish(args)
+		}
+	}
 	if claimed && stop {
 		_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
 		// Advance the linked workflow ledger row as this supervisor terminates, so

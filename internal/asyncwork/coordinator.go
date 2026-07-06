@@ -14,10 +14,14 @@
 //   - Completion NEVER lands as a late tool result for the original call — the
 //     queue event (and the autonomous wake it triggers) is the only delivery
 //     channel, so the model transcript stays structurally valid.
-//   - Foreground-only, session-scoped: the coordinator runs only while the
-//     assistant is open (started alongside the daemon scheduler), and the
-//     storage layer abandons any non-terminal invocation on the next DB open —
-//     a new session never inherits async work, exactly like watchers.
+//   - PROJECT-scoped, owner-supervised: async futures survive process
+//     boundaries. Whichever process owns the project DB (an open cockpit or
+//     the detached supervisor daemon) runs a coordinator, and Start ADOPTS the
+//     persisted live rows — rebuilding the poll state from the row itself —
+//     and retries any completion a prior owner finalized but died before
+//     publishing (a terminal row with a NULL queueEventId). The pure-FSM poll
+//     is idempotent, so re-adoption simply re-polls to settle; the stable
+//     group DedupeKey makes a publish retry idempotent at the queue.
 package asyncwork
 
 import (
@@ -50,8 +54,9 @@ const (
 
 	// Read-failure backoff: after readBackoffAfter consecutive failed status
 	// reads, only attempt a read every readBackoffEvery ticks (≈5s) until one
-	// succeeds — a downed MCP must not be hammered every second. Deadlines keep
-	// enforcing regardless, so a long outage still expires invocations on time.
+	// succeeds — a downed MCP must not be hammered every second. Deadlines do
+	// NOT enforce while reads are failing (see readsHealthy): expiring blind
+	// would abandon work that may have finished during the blackout.
 	readBackoffAfter = 5
 	readBackoffEvery = 5
 
@@ -97,11 +102,23 @@ type Queue interface {
 
 // Store is the async-invocation persistence seam. Every live-row write goes
 // through the claim so a concurrent async.cancel can never be overwritten (the
-// ClaimDueTimer / ClaimDueWatcher discipline); UpdateAsyncInvocation stamps
-// post-publish metadata on already-terminal rows.
+// ClaimDueTimer / ClaimDueWatcher discipline). StampAsyncQueueEvents back-links
+// a whole published group to its queue event in ONE statement — atomic, so a
+// crash can never leave a group HALF-stamped (a partial stamp would make the
+// adoption retry publish a subset under a different dedupe key = a duplicate).
 type Store interface {
 	ClaimLiveAsyncInvocation(id string, patch map[string]any) (bool, error)
 	UpdateAsyncInvocation(id string, patch map[string]any) error
+	StampAsyncQueueEvents(ids []string, eventID string) error
+}
+
+// AdoptLister enumerates persisted invocations at ownership boot: the live
+// rows to re-poll and the finalized-but-unpublished rows whose completion
+// event must be retried. Optional (nil ⇒ no adoption — unit tests and any
+// context without a durable store).
+type AdoptLister interface {
+	ListLiveAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
+	ListUnpublishedAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
 }
 
 // Deps wires the Coordinator.
@@ -109,6 +126,10 @@ type Deps struct {
 	Reader StatusReader
 	Queue  Queue
 	Store  Store
+	// AdoptLister enables ownership-boot adoption: Start re-tracks the persisted
+	// live invocations and queues publish retries for finalized-but-unpublished
+	// ones. nil ⇒ Start begins empty (tests / no durable store).
+	AdoptLister AdoptLister
 	// Notify pushes freshly-published attention events to the wake path
 	// immediately (the scheduler's NotifyNow) instead of waiting up to a full
 	// scheduler tick. nil ⇒ the next scheduler tick delivers (correct, slower).
@@ -130,10 +151,12 @@ type termState struct {
 	outcome     *domain.AsyncTerminalOutcome
 }
 
-// tracked is one live invocation's in-memory poll state. Session-scoped and
-// deliberately NOT persisted (a restart abandons the invocation anyway).
-// Mutated only by the single tick goroutine; the map holding it is guarded by
-// Coordinator.mu for Register/Deregister.
+// tracked is one live invocation's in-memory poll state. Not persisted as-is:
+// a new owner REBUILDS it from the row at adoption (terminal ids from
+// terminalIdsJson, settled outcomes from outcomesJson; the seenWorking latch
+// restarts false, which only makes the FSM more conservative). Mutated only by
+// the single tick goroutine; the map holding it is guarded by Coordinator.mu
+// for Register/Deregister.
 type tracked struct {
 	rec         domain.AsyncInvocationRecord
 	terminalIDs []string
@@ -149,6 +172,11 @@ type tracked struct {
 	// publish (never the claim, which would lose to its own prior write).
 	finalized   bool
 	finalStatus domain.AsyncStatus
+	// retryOnly marks an ADOPTED finalized-but-unpublished row. Retry entries
+	// publish as their OWN unit, never merged with live same-group siblings: the
+	// retried event must reproduce the ORIGINAL member set (same dedupe key) so
+	// a publish that DID land before the crash dedupes instead of duplicating.
+	retryOnly bool
 }
 
 // Coordinator owns every live async invocation. One pass per tick; no-overlap
@@ -213,6 +241,10 @@ func New(deps Deps) *Coordinator {
 }
 
 // Start begins ticking. Idempotent; the loop ends on Stop (context cancel).
+// Before the loop launches it ADOPTS the persisted invocations (when an
+// AdoptLister is wired): live rows re-enter the poll set and finalized-but-
+// unpublished rows queue an immediate publish retry — the ownership-boot half
+// of project-scoped async futures.
 func (c *Coordinator) Start(parent context.Context) {
 	c.stateMu.Lock()
 	if c.ticker != nil {
@@ -228,6 +260,8 @@ func (c *Coordinator) Start(parent context.Context) {
 	ticker := c.ticker
 	loopDone := c.loopDone
 	c.stateMu.Unlock()
+
+	c.adoptFromStore(c.now())
 
 	go func() {
 		defer close(loopDone)
@@ -336,6 +370,129 @@ func graceFor(toolName string) int64 {
 	return domain.FinishSettleGraceMS
 }
 
+// adoptFromStore is the ownership-boot half of project-scoped async futures:
+// re-track every persisted live invocation and queue a publish retry for every
+// finalized-but-unpublished one. Idempotent per row (keyed map insert). All
+// failures degrade to "that row stays un-adopted until the next owner" — a
+// boot must never fail because one row is unreadable.
+func (c *Coordinator) adoptFromStore(now int64) {
+	if c.deps.AdoptLister == nil {
+		return
+	}
+	live, err := c.deps.AdoptLister.ListLiveAsyncInvocations()
+	if err != nil {
+		c.trace("async.adopt_failed", map[string]any{"stage": "live", "error": err.Error()})
+		live = nil
+	}
+	adopted := 0
+	var orphanedStarts []string
+	for _, rec := range live {
+		// A run.async row still in 'starting' means the prior owner died BETWEEN
+		// persisting the intent and (confirming) the terminal send — the command
+		// may never have run. Supervising it as normal work could publish a clean
+		// "finished" for a command that never executed, so cancel it and surface
+		// an attention item asking for verification instead. (await.async rows in
+		// 'starting' are just a read-only watch that never registered — adopting
+		// those is safe and correct.)
+		if rec.Status == domain.AsyncStarting && rec.ToolName == "terminal.run.async" {
+			if ok, _ := c.deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
+				"status": string(domain.AsyncCancelled), "endedReason": "orphaned_startup", "finishedAt": now,
+			}); ok {
+				orphanedStarts = append(orphanedStarts, fmt.Sprintf("%s %q", rec.ID, rec.Title))
+			}
+			continue
+		}
+		entry := trackedFromRecord(rec, now, c.grace)
+		if entry == nil {
+			// Unparseable terminal list: the row can never settle by polling. Cancel
+			// it under the claim (excluded from the unpublished retry set) so it
+			// doesn't sit live forever.
+			_, _ = c.deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
+				"status": string(domain.AsyncCancelled), "endedReason": "corrupt_row", "finishedAt": now,
+			})
+			c.trace("async.adopt_corrupt", map[string]any{"asyncId": rec.ID})
+			continue
+		}
+		c.mu.Lock()
+		c.active[rec.ID] = entry
+		c.mu.Unlock()
+		adopted++
+	}
+	if len(orphanedStarts) > 0 {
+		// SourceAsyncTool so the wake filter fires: the model can read the
+		// terminal and tell the user whether the command actually ran.
+		_, _ = c.deps.Queue.Publish(context.Background(), domain.QueuePublishArgs{
+			Source:   domain.SourceAsyncTool,
+			Severity: domain.SeverityAttention,
+			Title:    "Async command may not have started",
+			Summary: "The previous assistant exited while starting: " + strings.Join(orphanedStarts, "; ") +
+				". The command may or may not have been sent — check the terminal before re-running it.",
+			DedupeKey: "async-orphaned:" + strings.Join(orphanedStarts, "+"),
+		})
+	}
+	retries := 0
+	if unpub, uerr := c.deps.AdoptLister.ListUnpublishedAsyncInvocations(); uerr != nil {
+		c.trace("async.adopt_failed", map[string]any{"stage": "unpublished", "error": uerr.Error()})
+	} else {
+		for _, rec := range unpub {
+			entry := trackedFromRecord(rec, now, c.grace)
+			if entry == nil {
+				continue // no terminals to summarize; nothing meaningful to publish
+			}
+			// The DB transition already committed under the prior owner; only the
+			// publish is owed. Marking finalized + due-now routes it through the
+			// existing publish-retry path; the stable group DedupeKey keeps a retry
+			// of an event that DID land (crash between publish and stamp) a dedupe
+			// hit instead of a duplicate wake. retryOnly keeps the retried member
+			// set byte-identical to the original publish — a live same-group
+			// sibling settling now must not widen it into a NEW dedupe key.
+			entry.finalized = true
+			entry.retryOnly = true
+			entry.finalStatus = rec.Status
+			entry.settleAt = now
+			c.mu.Lock()
+			c.active[rec.ID] = entry
+			c.mu.Unlock()
+			retries++
+		}
+	}
+	if adopted > 0 || retries > 0 {
+		c.trace("async.adopted", map[string]any{"live": adopted, "publishRetries": retries})
+		select {
+		case c.nudge <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// trackedFromRecord rebuilds an invocation's poll state from its persisted
+// row: watched terminals from terminalIdsJson, already-settled outcomes from
+// outcomesJson (never re-polled), and the coalescing deadline for rows a prior
+// owner already moved to settling. The seenWorking latch restarts false —
+// strictly more conservative (a waiting agent needs the grace to count as
+// finished). nil when the row has no parseable terminals.
+func trackedFromRecord(rec domain.AsyncInvocationRecord, now int64, grace int64) *tracked {
+	ids := parseJSONIDs(rec.TerminalIdsJson)
+	if len(ids) == 0 {
+		return nil
+	}
+	per := make(map[string]*termState, len(ids))
+	restored := parseOutcomes(rec.OutcomesJson)
+	for _, id := range ids {
+		st := &termState{}
+		if o, ok := restored[id]; ok {
+			oc := o
+			st.outcome = &oc
+		}
+		per[id] = st
+	}
+	entry := &tracked{rec: rec, terminalIDs: ids, perTerminal: per, graceMS: graceFor(rec.ToolName)}
+	if rec.Status == domain.AsyncSettling {
+		entry.settleAt = now + grace
+	}
+	return entry
+}
+
 // Deregister drops an invocation from the live poll set (async.cancel). The
 // caller owns the DB transition; the claim-guard on every coordinator write
 // makes the race benign in the other direction too.
@@ -430,8 +587,16 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 		return
 	}
 	// Deterministic order (map iteration is random): grouped publishes and tests
-	// both want stable composition.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].rec.CreatedAt < entries[j].rec.CreatedAt })
+	// both want stable composition. The ID tie-break matters for correctness,
+	// not just tidiness: the group dedupe key is the JOINED MEMBER IDS, so a
+	// crash-retry must reproduce the original ordering byte-for-byte even when
+	// members share a CreatedAt millisecond.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].rec.CreatedAt != entries[j].rec.CreatedAt {
+			return entries[i].rec.CreatedAt < entries[j].rec.CreatedAt
+		}
+		return entries[i].rec.ID < entries[j].rec.ID
+	})
 
 	var polling []*tracked
 	for _, t := range entries {
@@ -465,14 +630,19 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 		}
 	}
 
-	// Settle / expire transitions.
+	// Settle / expire transitions. The deadline is enforced ONLY while MCP is
+	// reachable: expiring blind would mark work "timed out" that may have
+	// finished cleanly while the credentials were down — the one outcome the
+	// persistent supervisor exists to prevent. While disconnected the invocation
+	// stays live (blocked, not abandoned); on reconnect the very next read either
+	// settles it honestly or the deadline fires with evidence behind it.
 	for _, t := range polling {
 		switch {
 		case t.allSettled():
 			c.enterSettling(t, now)
-		case now >= t.rec.ExpiresAt:
+		case now >= t.rec.ExpiresAt && c.deps.Reader.Connected() && c.readsHealthy():
 			// Deadline: unsettled terminals are recorded as still working and the
-			// invocation settles as expired — deterministic even with MCP down.
+			// invocation settles as expired.
 			for _, st := range t.perTerminal {
 				if st.outcome == nil {
 					st.outcome = &domain.AsyncTerminalOutcome{
@@ -546,6 +716,17 @@ func keys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// readsHealthy reports whether the LAST status read succeeded (readFailures
+// zero). The deadline may only expire an invocation when we can actually see
+// the terminals — Connected() alone can be true while every read fails, and
+// expiring blind would mark work "timed out" that may have finished during the
+// blackout (the exact abandonment the supervisor exists to prevent).
+func (c *Coordinator) readsHealthy() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readFailures == 0
 }
 
 // shouldRead applies the read-failure backoff (guarded by mu).
@@ -724,7 +905,13 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 			groupHasPolling[t.rec.GroupID] = true
 			continue
 		}
-		byGroup[t.rec.GroupID] = append(byGroup[t.rec.GroupID], t)
+		key := t.rec.GroupID
+		if t.retryOnly {
+			// Adopted publish-retries are their own publish unit (see retryOnly):
+			// a live sibling settling later must NOT widen the retried member set.
+			key = t.rec.GroupID + "\x00retry"
+		}
+		byGroup[key] = append(byGroup[key], t)
 	}
 	c.mu.Unlock()
 
@@ -738,7 +925,7 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 		// between two async starters in one batch) — publishing early would split
 		// the turn's completions into separate wakes.
 		selfGrouped := len(members) == 1 && members[0].rec.GroupID == members[0].rec.ID
-		due := selfGrouped && !groupHasPolling[group]
+		due := (selfGrouped && !groupHasPolling[group]) || members[0].retryOnly
 		for _, t := range members {
 			if now >= t.settleAt {
 				due = true
@@ -748,7 +935,12 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 		if !due {
 			continue
 		}
-		sort.Slice(members, func(i, j int) bool { return members[i].rec.CreatedAt < members[j].rec.CreatedAt })
+		sort.Slice(members, func(i, j int) bool {
+			if members[i].rec.CreatedAt != members[j].rec.CreatedAt {
+				return members[i].rec.CreatedAt < members[j].rec.CreatedAt
+			}
+			return members[i].rec.ID < members[j].rec.ID
+		})
 		if c.publishGroup(ctx, now, gen, group, members) {
 			published = true
 		}
@@ -841,12 +1033,15 @@ func (c *Coordinator) publishGroup(ctx context.Context, now int64, gen int64, gr
 		return false
 	}
 
-	// 3. Stamp the event back-link (plain update — the rows are terminal now)
-	//    and drop the members from the poll set.
+	// 3. Stamp the event back-link on the WHOLE group in one atomic statement
+	//    (the rows are terminal now), then drop the members from the poll set.
+	//    Atomicity matters for crash-safety: a half-stamped group would make the
+	//    next owner's adoption retry a SUBSET under a different dedupe key — a
+	//    duplicate wake. All-or-nothing keeps the retry byte-identical.
+	if uerr := c.deps.Store.StampAsyncQueueEvents(ids, ev.ID); uerr != nil {
+		c.trace("async.event_stamp_failed", map[string]any{"asyncIds": ids, "error": uerr.Error()})
+	}
 	for _, t := range final {
-		if uerr := c.deps.Store.UpdateAsyncInvocation(t.rec.ID, map[string]any{"queueEventId": ev.ID}); uerr != nil {
-			c.trace("async.event_stamp_failed", map[string]any{"asyncId": t.rec.ID, "error": uerr.Error()})
-		}
 		c.Deregister(t.rec.ID)
 	}
 	c.trace("async.published", map[string]any{

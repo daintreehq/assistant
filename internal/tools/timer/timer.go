@@ -1,7 +1,8 @@
 // Package timer holds the durable-timer tools: timer.schedule, timer.list,
-// timer.cancel. Timers persist in SQLite and resume on the next launch (unlike
-// session-scoped watchers). A schedule firing only happens while the assistant
-// is open (foreground-only daemon) — every creator appends a lifecycle NOTE.
+// timer.cancel. Timers persist in SQLite and fire whenever a supervision
+// engine is running — the open assistant OR the persistent supervisor daemon
+// after it closes (missed occurrences catch up on the next tick). Every
+// creator appends a lifecycle NOTE.
 package timer
 
 import (
@@ -53,13 +54,13 @@ func daemonActive(tctx *tools.ToolContext) bool {
 	return tctx.DaemonActive()
 }
 
-// lifecycleNote is the foreground-only NOTE appended to every schedule summary.
-// The text differs when the daemon is not running (timers won't fire until it is).
+// lifecycleNote is the durability NOTE appended to every schedule summary.
+// The text differs when no scheduler is running right now (one-shot mode).
 func lifecycleNote(active bool) string {
 	if active {
-		return " NOTE: timers fire only while the assistant is open; this one persists and resumes on the next launch."
+		return " NOTE: this timer persists and keeps firing after the assistant closes — the background supervisor owns the schedule; missed occurrences catch up on the next tick."
 	}
-	return " NOTE: the scheduler is NOT running, so this timer will not fire until the assistant is reopened (it persists)."
+	return " NOTE: no scheduler is running in this one-shot invocation; the timer persists and fires once the assistant (or its background supervisor) next runs."
 }
 
 // --- timer.schedule ---

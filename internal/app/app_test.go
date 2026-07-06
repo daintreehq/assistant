@@ -326,32 +326,32 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	}
 }
 
-// TestSessionEndedWatchersForFooterSchedulerGate asserts the footer seam for the
-// one-time session-ended note (issue #263): gated OFF while dormant (no scheduler), and
-// OPEN once the scheduler is active — where it mirrors the store's open-time carryover.
-// The note never touches message[1] now; its once-per-session surfacing in the uncached
-// footer is covered by internal/agent/footer_test.go, and the storage carryover itself by
-// reopen_test.go.
-func TestSessionEndedWatchersForFooterSchedulerGate(t *testing.T) {
+// TestResumedWatchersForFooterSchedulerGate asserts the footer seam for the one-time
+// resumed-watchers note: gated OFF while dormant (no scheduler — nothing is actually
+// being supervised), and OPEN once the scheduler is active — where it mirrors the
+// ownership-boot summary captured at Create. The note never touches message[1]; its
+// once-per-session surfacing in the uncached footer is covered by
+// internal/agent/footer_test.go, and the adoption itself by storage/reopen_test.go.
+func TestResumedWatchersForFooterSchedulerGate(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	// Dormant (no scheduler) → gated off, regardless of any carryover.
-	if got := a.sessionEndedWatchersForFooter(); got != nil {
+	// Dormant (no scheduler) → gated off, regardless of any adopted watchers.
+	if got := a.resumedWatchersForFooter(); got != nil {
 		t.Fatalf("footer seam must be gated off before StartScheduler, got %v", got)
 	}
 	// The visible history never carries the note anymore — there is no message[1] runtime
 	// context, and the one-time note surfaces only through the uncached footer seam.
 	if msgs := a.Session.Messages(); len(msgs) != 0 {
-		t.Fatalf("session-ended note must never enter visible history, got %d messages:\n%+v", len(msgs), msgs)
+		t.Fatalf("resumed-watchers note must never enter visible history, got %d messages:\n%+v", len(msgs), msgs)
 	}
 
-	// Scheduler active → the gate opens and the seam mirrors the store's carryover (empty
-	// for a fresh store, but no longer forced nil by the gate).
+	// Scheduler active → the gate opens and the seam mirrors the ownership summary
+	// (empty for a fresh store, but no longer forced nil by the gate).
 	a.StartScheduler(context.Background(), nil)
-	got, want := a.sessionEndedWatchersForFooter(), a.Store.SessionEndedWatchers()
+	got, want := a.resumedWatchersForFooter(), a.Ownership().ResumedWatcherTitles
 	if len(got) != len(want) {
-		t.Fatalf("active footer seam must mirror the store carryover: got %v, want %v", got, want)
+		t.Fatalf("active footer seam must mirror the ownership summary: got %v, want %v", got, want)
 	}
 }
 

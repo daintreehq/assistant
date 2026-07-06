@@ -257,8 +257,10 @@ func TestGrantRiskClassUnion(t *testing.T) {
 	}
 }
 
-func TestSessionBoundaryCancelsWatchersAndGrants(t *testing.T) {
-	// Seed a first session: an active watcher + its grant + an open watcher event.
+func TestCancelLiveWatchersRevokesGrantsAndResolvesEvents(t *testing.T) {
+	// Seed: an active watcher + its grant + an open watcher event. This is the
+	// /clear teardown (the only wholesale watcher sweep left now that watchers
+	// are project-scoped and adopted across process boundaries).
 	now := int64(2000)
 	s1, err := Open(":memory:", &Options{Now: func() int64 { return now }})
 	if err != nil {
@@ -286,24 +288,21 @@ func TestSessionBoundaryCancelsWatchersAndGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-open the SAME db handle path won't share :memory:, so test the routine in place:
-	// reach into the boundary routine on a fresh open by reusing the same connection.
-	// Simplest faithful check: invoke cancelStaleWatchers directly (session boundary).
-	endedTitles, err := s1.cancelStaleWatchers(now)
+	endedTitles, err := s1.CancelLiveWatchers(now, ReasonSessionCleared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// It returns the cancelled watcher's title for the one-time carryover NOTE.
+	// It returns the cancelled watcher's title for the caller's confirmation card.
 	if len(endedTitles) != 1 || endedTitles[0] != "w" {
-		t.Fatalf("cancelStaleWatchers titles want [w], got %v", endedTitles)
+		t.Fatalf("CancelLiveWatchers titles want [w], got %v", endedTitles)
 	}
 	gw, _ := s1.GetWatcher(w.ID)
 	if gw == nil || gw.Status != "cancelled" {
 		t.Fatalf("watcher should be cancelled, got %v", gw)
 	}
-	// And stamps the session-boundary reason + time (distinct from a user cancel).
-	if gw.EndedReason == nil || *gw.EndedReason != "session_ended" {
-		t.Fatalf("want endedReason session_ended, got %v", gw.EndedReason)
+	// And stamps the caller's reason + time (distinct from a user cancel).
+	if gw.EndedReason == nil || *gw.EndedReason != ReasonSessionCleared {
+		t.Fatalf("want endedReason %q, got %v", ReasonSessionCleared, gw.EndedReason)
 	}
 	if gw.EndedAt == nil || *gw.EndedAt != now {
 		t.Fatalf("want endedAt %d, got %v", now, gw.EndedAt)

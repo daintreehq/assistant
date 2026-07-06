@@ -70,10 +70,10 @@ const activeWorktreeMaxRunes = 200
 // one-line re-anchor.
 const workflowObjectiveMaxRunes = 200
 
-// sessionEndedWatchersMaxTitles caps how many watcher titles the `# Session note` lists
+// resumedWatchersMaxTitles caps how many watcher titles the `# Session note` lists
 // inline; the remainder collapse to "+N more" so a session that left many watchers
 // running can't bloat the footer.
-const sessionEndedWatchersMaxTitles = 5
+const resumedWatchersMaxTitles = 5
 
 // activeAsyncOperationsLimit caps how many live async invocations the turn
 // context lists per round. The runtime itself caps live invocations lower
@@ -110,18 +110,19 @@ const workflowRunFieldMaxRunes = 40
 // already-bounded slice of non-terminal runs (the Session reads it best-effort, per
 // round). RelevantMemories is the BM25 recall snapshot taken ONCE at turn start (nil when
 // no recaller is wired or nothing matched); PinnedMemories is the current pins, re-read
-// per round. ActiveWorktree is the current worktree label (per round). SessionEndedWatchers
-// carries the one-time session-note titles, passed only on the first turn. Keeping the
-// I/O in the Session and handing sections plain slices keeps every section a PURE
-// FORMATTER — unit-testable from a record literal, no store or fake required.
+// per round. ActiveWorktree is the current worktree label (per round). ResumedWatchers
+// carries the one-time session-note titles (live watchers adopted from a prior owner),
+// passed only on the first turn. Keeping the I/O in the Session and handing sections
+// plain slices keeps every section a PURE FORMATTER — unit-testable from a record
+// literal, no store or fake required.
 type footerContext struct {
-	Goal                 string
-	IsWake               bool
-	WorkflowRuns         []domain.WorkflowRunRecord
-	RelevantMemories     []domain.MemoryRecord
-	PinnedMemories       []domain.MemoryRecord
-	ActiveWorktree       string
-	SessionEndedWatchers []string
+	Goal             string
+	IsWake           bool
+	WorkflowRuns     []domain.WorkflowRunRecord
+	RelevantMemories []domain.MemoryRecord
+	PinnedMemories   []domain.MemoryRecord
+	ActiveWorktree   string
+	ResumedWatchers  []string
 }
 
 // footerSection renders one section of the turn footer from the turn's footerContext.
@@ -364,47 +365,46 @@ func activeWorktreeSection(ctx footerContext) (string, bool) {
 	return "# Active worktree\n" + sliceChars(label, activeWorktreeMaxRunes), true
 }
 
-// sessionNoteSection emits the one-time `# Session note`: the titles of watchers a prior
-// session left running that this session's store-open had to cancel (watchers are
-// session-scoped and do NOT resume automatically). The Session passes the titles only on
-// the FIRST turn, then nil, so the offer to re-create them surfaces exactly once —
-// replacing the old message[1] one-time NOTE without any RefreshRuntimeContext consume.
-// Omitted (false) when there are none.
+// sessionNoteSection emits the one-time `# Session note`: the titles of live watchers
+// this process ADOPTED from a prior owner at ownership boot (watchers are project-scoped
+// and keep running across assistant restarts and cockpit detach — the supervisor daemon
+// or the next owner resumes them). The Session passes the titles only on the FIRST turn,
+// then nil, so the heads-up surfaces exactly once. Omitted (false) when there are none.
 func sessionNoteSection(ctx footerContext) (string, bool) {
-	note := sessionEndedWatchersNote(ctx.SessionEndedWatchers)
+	note := resumedWatchersNote(ctx.ResumedWatchers)
 	if note == "" {
 		return "", false
 	}
 	return "# Session note\n" + note, true
 }
 
-// sessionEndedWatchersNote renders the "the prior session ended and these watchers
-// stopped" line, or "" when there were none. The count reflects the true total; the
-// inline title list is capped at sessionEndedWatchersMaxTitles with a "+N more" tail.
+// resumedWatchersNote renders the "these watchers from a previous session are still
+// running" line, or "" when there were none. The count reflects the true total; the
+// inline title list is capped at resumedWatchersMaxTitles with a "+N more" tail.
 // Titles are flattened to a single line (a raw newline would inject a stray heading) and
 // quoted.
-func sessionEndedWatchersNote(titles []string) string {
+func resumedWatchersNote(titles []string) string {
 	if len(titles) == 0 {
 		return ""
 	}
 	n := len(titles)
 	shown := titles
 	suffix := ""
-	if n > sessionEndedWatchersMaxTitles {
-		shown = titles[:sessionEndedWatchersMaxTitles]
-		suffix = ", +" + strconv.Itoa(n-sessionEndedWatchersMaxTitles) + " more"
+	if n > resumedWatchersMaxTitles {
+		shown = titles[:resumedWatchersMaxTitles]
+		suffix = ", +" + strconv.Itoa(n-resumedWatchersMaxTitles) + " more"
 	}
 	labels := make([]string, len(shown))
 	for i, t := range shown {
 		labels[i] = `"` + flattenFooterLine(t) + `"`
 	}
-	noun, verb := "watchers", "were"
+	noun, verb := "watchers", "are"
 	if n == 1 {
-		noun, verb = "watcher", "was"
+		noun, verb = "watcher", "is"
 	}
-	return strconv.Itoa(n) + " " + noun + " " + verb + " stopped because the previous session ended: " +
+	return strconv.Itoa(n) + " " + noun + " from a previous session " + verb + " still running and " + verb + " being supervised: " +
 		strings.Join(labels, ", ") + suffix +
-		". Watchers are session-scoped and do NOT resume automatically; offer to re-create them if still relevant."
+		". They resumed automatically (watchers are project-scoped); use watcher.list to inspect them or watcher.cancel if no longer relevant."
 }
 
 // flattenFooterLine collapses CR/LF runs to single spaces so a multi-line value can't

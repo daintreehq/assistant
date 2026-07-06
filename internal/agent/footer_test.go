@@ -18,7 +18,7 @@ func ptrOf[T any](v T) *T { return &v }
 
 // anyContains reports whether any string in ss contains sub. The per-turn footer data now
 // travels as structured slices (req.Turn.Memories.*, req.Turn.WorkflowRuns,
-// req.Turn.SessionEndedWatchers); session-level tests assert a fact surfaced by scanning
+// req.Turn.ResumedWatchers); session-level tests assert a fact surfaced by scanning
 // those rendered rows rather than a single prose footer string.
 func anyContains(ss []string, sub string) bool {
 	for _, s := range ss {
@@ -918,11 +918,11 @@ func TestSessionNoteSection(t *testing.T) {
 	if body, ok := sessionNoteSection(footerContext{}); ok || body != "" {
 		t.Errorf("no titles should omit the section; got (%q, %v)", body, ok)
 	}
-	body, ok := sessionNoteSection(footerContext{SessionEndedWatchers: []string{"watch deploy"}})
+	body, ok := sessionNoteSection(footerContext{ResumedWatchers: []string{"watch deploy"}})
 	if !ok || !strings.HasPrefix(body, "# Session note\n") {
 		t.Fatalf("section should render with the header; got (%q, %v)", body, ok)
 	}
-	if !strings.Contains(body, "1 watcher was stopped") || !strings.Contains(body, `"watch deploy"`) {
+	if !strings.Contains(body, "1 watcher from a previous session is still running") || !strings.Contains(body, `"watch deploy"`) {
 		t.Errorf("singular note missing; got %q", body)
 	}
 }
@@ -930,14 +930,14 @@ func TestSessionNoteSection(t *testing.T) {
 // Many watchers render a plural note with the title list capped and a "+N more" tail.
 func TestSessionNoteSection_PluralAndCap(t *testing.T) {
 	var titles []string
-	for i := 0; i < sessionEndedWatchersMaxTitles+2; i++ {
+	for i := 0; i < resumedWatchersMaxTitles+2; i++ {
 		titles = append(titles, "w"+strconv.Itoa(i))
 	}
-	body, ok := sessionNoteSection(footerContext{SessionEndedWatchers: titles})
+	body, ok := sessionNoteSection(footerContext{ResumedWatchers: titles})
 	if !ok {
 		t.Fatal("section should render")
 	}
-	if !strings.Contains(body, strconv.Itoa(len(titles))+" watchers were stopped") {
+	if !strings.Contains(body, strconv.Itoa(len(titles))+" watchers from a previous session are still running") {
 		t.Errorf("plural count missing; got %q", body)
 	}
 	if !strings.Contains(body, "+2 more") {
@@ -1127,7 +1127,7 @@ func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 	r := &injectRouter{} // empty results → each Send is a single final round
 	called := 0
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	deps.SessionEndedWatchers = func() []string { called++; return []string{"watch the deploy"} }
+	deps.ResumedWatchers = func() []string { called++; return []string{"watch the deploy"} }
 	s := NewSession(deps)
 
 	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
@@ -1139,14 +1139,14 @@ func TestComposeTurnFooter_SessionNoteFirstTurnOnly(t *testing.T) {
 	if len(be.requests()) < 2 {
 		t.Fatalf("want >= 2 rounds across two sends, got %d", len(be.requests()))
 	}
-	if !anyContains(be.turnAt(0).SessionEndedWatchers, "watch the deploy") {
-		t.Errorf("first-turn request should carry the session note; got %v", be.turnAt(0).SessionEndedWatchers)
+	if !anyContains(be.turnAt(0).ResumedWatchers, "watch the deploy") {
+		t.Errorf("first-turn request should carry the session note; got %v", be.turnAt(0).ResumedWatchers)
 	}
-	if len(be.turnAt(1).SessionEndedWatchers) != 0 {
-		t.Errorf("second-turn request must NOT repeat the session note; got %v", be.turnAt(1).SessionEndedWatchers)
+	if len(be.turnAt(1).ResumedWatchers) != 0 {
+		t.Errorf("second-turn request must NOT repeat the session note; got %v", be.turnAt(1).ResumedWatchers)
 	}
 	if called != 1 {
-		t.Errorf("session-ended provider called %d times, want exactly 1 (first turn only)", called)
+		t.Errorf("resumed-watchers provider called %d times, want exactly 1 (first turn only)", called)
 	}
 }
 
@@ -1159,7 +1159,7 @@ func TestComposeTurnFooter_SessionNoteRidesEveryRoundOfFirstTurn(t *testing.T) {
 		{Content: "final"}, // round 1
 	}}
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	deps.SessionEndedWatchers = func() []string { return []string{"watch the deploy"} }
+	deps.ResumedWatchers = func() []string { return []string{"watch the deploy"} }
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "first", SendOptions{}); err != nil {
 		t.Fatal(err)
@@ -1168,8 +1168,8 @@ func TestComposeTurnFooter_SessionNoteRidesEveryRoundOfFirstTurn(t *testing.T) {
 		t.Fatalf("want a 2-round first turn, got %d", len(be.requests()))
 	}
 	for i := 0; i < 2; i++ {
-		if !anyContains(be.turnAt(i).SessionEndedWatchers, "watch the deploy") {
-			t.Errorf("round %d of the first turn should carry the session note: %v", i, be.turnAt(i).SessionEndedWatchers)
+		if !anyContains(be.turnAt(i).ResumedWatchers, "watch the deploy") {
+			t.Errorf("round %d of the first turn should carry the session note: %v", i, be.turnAt(i).ResumedWatchers)
 		}
 	}
 }

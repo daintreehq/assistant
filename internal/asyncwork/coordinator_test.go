@@ -119,6 +119,17 @@ func (s *fakeStore) UpdateAsyncInvocation(id string, patch map[string]any) error
 	return nil
 }
 
+// StampAsyncQueueEvents mirrors the atomic group stamp as one per-row update
+// entry so eventStamps keeps counting the same way.
+func (s *fakeStore) StampAsyncQueueEvents(ids []string, eventID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		s.updates[id] = append(s.updates[id], map[string]any{"queueEventId": eventID})
+	}
+	return nil
+}
+
 func (s *fakeStore) lastStatus(id string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -685,5 +696,250 @@ func TestCoordinatorRegisterRequiresStarted(t *testing.T) {
 	h.c.stateMu.Unlock()
 	if err := h.c.Register(inv("asy_n", "", 1, 2), []string{"term-1"}); err == nil {
 		t.Fatal("Register accepted work while the coordinator was not started")
+	}
+}
+
+// ---- ownership-boot adoption ----
+
+// fakeAdoptLister feeds adoptFromStore canned persisted rows.
+type fakeAdoptLister struct {
+	live   []domain.AsyncInvocationRecord
+	unpub  []domain.AsyncInvocationRecord
+	errAll bool
+}
+
+func (l *fakeAdoptLister) ListLiveAsyncInvocations() ([]domain.AsyncInvocationRecord, error) {
+	if l.errAll {
+		return nil, errors.New("db closed")
+	}
+	return l.live, nil
+}
+
+func (l *fakeAdoptLister) ListUnpublishedAsyncInvocations() ([]domain.AsyncInvocationRecord, error) {
+	if l.errAll {
+		return nil, errors.New("db closed")
+	}
+	return l.unpub, nil
+}
+
+// A live row from a prior owner re-enters the poll set and completes through
+// the normal settle → publish path — the "async survives a process boundary"
+// core claim, at the unit level.
+func TestCoordinatorAdoptsLiveInvocationAndCompletes(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	rec := inv("asy_live", "run_prev", 1_000, 500_000)
+	h.c.deps.AdoptLister = &fakeAdoptLister{live: []domain.AsyncInvocationRecord{rec}}
+
+	h.c.adoptFromStore(50_000)
+	if got := h.c.ActiveCount(); got != 1 {
+		t.Fatalf("ActiveCount after adopt = %d, want 1", got)
+	}
+
+	// waiting + never-seen-working settles because msSinceSpawn (99s) is far past
+	// the 20s grace — the adopted latch restarting false is conservative, not
+	// blocking. Then the grace elapses and the group publishes.
+	h.c.Tick(context.Background(), 100_000)
+	h.c.Tick(context.Background(), 100_000+2_600)
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want 1 published completion for the adopted invocation, got %d", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_live" {
+		t.Errorf("dedupe key = %q, want async:asy_live", evs[0].args.DedupeKey)
+	}
+	if st := h.store.lastStatus("asy_live"); st != string(domain.AsyncSucceeded) {
+		t.Errorf("final status = %q, want succeeded", st)
+	}
+	if h.store.eventStamps("asy_live") != 1 {
+		t.Errorf("adopted invocation should be stamped with its queue event exactly once")
+	}
+}
+
+// A finalized-but-unpublished row (the prior owner crashed between the DB
+// transition and the queue publish) is retried publish-ONLY: no new claim, one
+// event with the original dedupe key, one stamp.
+func TestCoordinatorAdoptRetriesUnpublishedCompletion(t *testing.T) {
+	h := newHarness(nil)
+	outcomes := `{"term-1":{"status":"finished"}}`
+	rec := domain.AsyncInvocationRecord{
+		ID: "asy_lost", ToolName: "terminal.await.async", Title: "job asy_lost",
+		GroupID: "asy_lost", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncSucceeded, CreatedAt: 1_000, ExpiresAt: 500_000,
+		OutcomesJson: &outcomes,
+	}
+	h.c.deps.AdoptLister = &fakeAdoptLister{unpub: []domain.AsyncInvocationRecord{rec}}
+
+	h.c.adoptFromStore(50_000)
+	h.c.Tick(context.Background(), 50_000)
+
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want exactly 1 retried publish, got %d", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_lost" {
+		t.Errorf("dedupe key = %q, want async:asy_lost (byte-identical retry)", evs[0].args.DedupeKey)
+	}
+	if !strings.Contains(evs[0].args.Summary, "term-1: finished") {
+		t.Errorf("summary should carry the restored outcome, got %q", evs[0].args.Summary)
+	}
+	// The DB transition already committed under the prior owner: the retry must
+	// NOT re-claim (a claim would fail on the terminal row anyway).
+	h.store.mu.Lock()
+	claims := len(h.store.claims["asy_lost"])
+	h.store.mu.Unlock()
+	if claims != 0 {
+		t.Errorf("publish retry must not re-claim a terminal row, saw %d claims", claims)
+	}
+	if h.store.eventStamps("asy_lost") != 1 {
+		t.Errorf("retried publish should stamp the queue event exactly once")
+	}
+	if got := h.c.ActiveCount(); got != 0 {
+		t.Errorf("retried invocation should be deregistered after publish, ActiveCount = %d", got)
+	}
+}
+
+// A live row whose terminal list is unparseable can never settle by polling:
+// adoption cancels it under the claim instead of tracking it forever.
+func TestCoordinatorAdoptCancelsCorruptRow(t *testing.T) {
+	h := newHarness(nil)
+	rec := inv("asy_bad", "", 1_000, 500_000)
+	rec.TerminalIdsJson = `not json`
+	h.c.deps.AdoptLister = &fakeAdoptLister{live: []domain.AsyncInvocationRecord{rec}}
+
+	h.c.adoptFromStore(50_000)
+	if got := h.c.ActiveCount(); got != 0 {
+		t.Fatalf("corrupt row must not be tracked, ActiveCount = %d", got)
+	}
+	if st := h.store.lastStatus("asy_bad"); st != string(domain.AsyncCancelled) {
+		t.Errorf("corrupt row status = %q, want cancelled", st)
+	}
+}
+
+// An adopt-lister failure degrades to an empty boot — never a panic, never a
+// blocked Start.
+func TestCoordinatorAdoptListerFailureDegrades(t *testing.T) {
+	h := newHarness(nil)
+	h.c.deps.AdoptLister = &fakeAdoptLister{errAll: true}
+	h.c.adoptFromStore(50_000)
+	if got := h.c.ActiveCount(); got != 0 {
+		t.Fatalf("failed adoption must leave the poll set empty, got %d", got)
+	}
+}
+
+// A publish retry must reproduce the ORIGINAL member set even when a live
+// same-group sibling settles in the same pass — otherwise the retried event
+// carries a different dedupe key and a publish that DID land before the crash
+// duplicates instead of deduping.
+func TestCoordinatorAdoptRetryKeepsOriginalMemberSet(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	outcomes := `{"term-2":{"status":"finished"}}`
+	lost := domain.AsyncInvocationRecord{
+		ID: "asy_a", ToolName: "terminal.await.async", Title: "job a",
+		GroupID: "run_shared", SessionID: "ses_prev", TerminalIdsJson: `["term-2"]`,
+		Status: domain.AsyncSucceeded, CreatedAt: 500, ExpiresAt: 500_000,
+		OutcomesJson: &outcomes,
+	}
+	sibling := domain.AsyncInvocationRecord{
+		ID: "asy_b", ToolName: "terminal.await.async", Title: "job b",
+		GroupID: "run_shared", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncSettling, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	// The settling sibling needs restored outcomes to publish; give it one.
+	sibOutcomes := `{"term-1":{"status":"finished"}}`
+	sibling.OutcomesJson = &sibOutcomes
+	h.c.deps.AdoptLister = &fakeAdoptLister{
+		live:  []domain.AsyncInvocationRecord{sibling},
+		unpub: []domain.AsyncInvocationRecord{lost},
+	}
+
+	h.c.adoptFromStore(50_000)
+	// First tick: the retry entry is due immediately; the adopted settling
+	// sibling waits out its re-coalescing grace.
+	h.c.Tick(context.Background(), 50_000)
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want the retry published alone first, got %d events", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_a" {
+		t.Fatalf("retry dedupe key = %q, want the ORIGINAL member set async:asy_a", evs[0].args.DedupeKey)
+	}
+	// After the sibling's grace elapses it publishes as its own event.
+	h.c.Tick(context.Background(), 50_000+3_000)
+	evs = h.queue.all()
+	if len(evs) != 2 {
+		t.Fatalf("want the live sibling published separately, got %d events", len(evs))
+	}
+	if evs[1].args.DedupeKey != "async:asy_b" {
+		t.Fatalf("sibling dedupe key = %q, want async:asy_b", evs[1].args.DedupeKey)
+	}
+}
+
+// Equal CreatedAt members must publish under a deterministic id order — the
+// dedupe key is the joined ids, so a crash-retry has to reproduce it exactly.
+func TestCoordinatorGroupKeyDeterministicOnCreatedAtTie(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{
+			"term-1": {AgentState: "working"},
+			"term-2": {AgentState: "working"},
+		}),
+		frame(true, map[string]TerminalStatus{
+			"term-1": {AgentState: "waiting"},
+			"term-2": {AgentState: "waiting"},
+		}),
+	})
+	a := inv("asy_z", "run_tie", 1_000, 100_000) // deliberately registered first, sorts LAST by id
+	b := inv("asy_a", "run_tie", 1_000, 100_000)
+	b.TerminalIdsJson = `["term-2"]`
+	if err := h.c.Register(a, []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Register(b, []string{"term-2"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 2_000) // working
+	h.c.Tick(ctx, 3_000) // waiting → settle
+	h.c.Tick(ctx, 6_000) // grace passed → publish
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want one grouped event, got %d", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_a+asy_z" {
+		t.Fatalf("tie-broken dedupe key = %q, want async:asy_a+asy_z", evs[0].args.DedupeKey)
+	}
+}
+
+// A run.async row still 'starting' at adoption is AMBIGUOUS (the command may
+// never have been sent): it must be cancelled with an attention item, never
+// supervised as running work. An await.async 'starting' row is a plain watch
+// and adopts normally.
+func TestCoordinatorAdoptOrphanedStartingRunAsync(t *testing.T) {
+	h := newHarness(nil)
+	run := domain.AsyncInvocationRecord{
+		ID: "asy_run", ToolName: "terminal.run.async", Title: "maybe never ran",
+		GroupID: "asy_run", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncStarting, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	await := domain.AsyncInvocationRecord{
+		ID: "asy_await", ToolName: "terminal.await.async", Title: "plain watch",
+		GroupID: "asy_await", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncStarting, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	h.c.deps.AdoptLister = &fakeAdoptLister{live: []domain.AsyncInvocationRecord{run, await}}
+
+	h.c.adoptFromStore(50_000)
+	if got := h.c.ActiveCount(); got != 1 {
+		t.Fatalf("only the await watch should be adopted, ActiveCount = %d", got)
+	}
+	if st := h.store.lastStatus("asy_run"); st != string(domain.AsyncCancelled) {
+		t.Errorf("orphaned run.async status = %q, want cancelled", st)
+	}
+	evs := h.queue.all()
+	if len(evs) != 1 || !strings.Contains(evs[0].args.Title, "may not have started") {
+		t.Fatalf("want one orphaned-startup attention item, got %+v", evs)
 	}
 }

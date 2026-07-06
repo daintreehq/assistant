@@ -87,31 +87,29 @@ A turn runs through `agent.Session.Send()`:
 → write an audit row. Handlers return a `domain.ToolResult` via `Ok` / `Fail`; `Dispatch`
 recovers panics into a `Fail` so a tool can never crash the loop.
 
-The daemon `Scheduler` ticks every 3s (foreground only), firing due timers and watcher
-checks. Everything off the main thread publishes to the **attention queue** (a digest the
-main thread reads), never interrupting the conversation with raw logs.
+The `Scheduler` ticks every 3s in whichever process owns the project (an open assistant
+or the persistent supervisor daemon — see below), firing due timers and watcher checks.
+Everything off the main thread publishes to the **attention queue** (a digest the main
+thread reads), never interrupting the conversation with raw logs.
 
 ## Scheduler architecture decision
 
-The scheduler (`daemon/scheduler.go`) is **foreground-only**: it ticks in-process every 3s
-and runs only on interactive paths. Timers, watchers, and automatic reactions persist in
-SQLite and resume on the next launch, but **nothing ticks while the assistant is closed**.
-This is honest, current behavior (*option A*) and the prompt / tool surfaces say so rather
-than implying background supervision.
+The scheduler (`daemon/scheduler.go`) ticks in-process every 3s in the project's
+**owner process** — the open assistant while one is attached, and the **persistent
+supervisor daemon** (`internal/supervisor`, `daintree-assistant daemon`) the rest of the
+time. This is the built-out form of what this section used to call *option B* (a detached
+sidecar), with the concurrent-writer hazard it was gated on solved at the architecture
+level: an flock **owner lease** (`internal/ipc`) guarantees exactly one process opens a
+project's `state.db` at a time, and ownership hands over through attach/detach (or a
+crash — the kernel releases the flock). Watchers, timers, async futures, and the inbox
+are project-scoped and ADOPTED by each new owner rather than torn down; the daemon runs
+autonomous wake turns for completions that land while the user is away. Full design:
+[`SUPERVISOR.md`](SUPERVISOR.md).
 
-Two longer-term options were considered:
-
-- **Option B — detached sidecar.** A separate long-lived process owns the tick loop and
-  survives cockpit close. Viable, but only as an interim step and **gated on per-project DB
-  isolation**: without a per-project `state.db` plus WAL + busy timeout, a sidecar and an
-  open cockpit are concurrent writers that can double-fire.
-- **Option C — Daintree-owned watch-sets over MCP.** Daintree owns the lifecycle entirely
-  (watch-sets + completion callbacks over an SSE/HTTP MCP transport) and the assistant
-  becomes a pure conversation UI with no tick loop. No local concurrency problem, but
-  requires Daintree-side primitives that don't exist yet.
-
-**Decision:** keep option A now; target option C long-term. Option B remains a viable
-intermediate, only after per-project DB isolation.
+**Option C — Daintree-owned watch-sets over MCP** (Daintree owns the lifecycle entirely;
+the assistant becomes a pure conversation UI with no tick loop) remains the long-term
+target once Daintree grows those primitives; the supervisor's engine seams (`daemon.MCP`,
+`WatcherModel`, the queue) are the surfaces such a migration would swap.
 
 ## The tool contract
 

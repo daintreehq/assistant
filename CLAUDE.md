@@ -8,7 +8,7 @@ Guidance for working in this repository.
 > backward compatibility or version stable surfaces for their own sake — prefer
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
-> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 7) — on a
+> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 9) — on a
 > schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.
@@ -121,7 +121,12 @@ internal/
   daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
   asyncwork/     AsyncCoordinator — runtime owner of async tool futures (terminal.run.async /
                  terminal.await.async): 1s pure-FSM polls, sibling coalescing, completion →
-                 attention queue → autonomous wake. Foreground-only, session-scoped like watchers
+                 attention queue → autonomous wake. PROJECT-scoped: Start ADOPTS persisted live
+                 rows and retries unconfirmed publishes (exactly-once via the group dedupe key)
+  ipc/           flock ownership leases (owner.lock / daemon.lock), control-socket path
+                 derivation, NDJSON request/response protocol (status/attach/credentials/shutdown)
+  supervisor/    the persistent per-project daemon: lease contention loop, headless App spans,
+                 autonomous wake reactor, client-side AcquireOwnership/spawn. See docs/SUPERVISOR.md
   app/           App.Create(CreateOptions) — wires every dependency once, exposes the ToolContext factory
   commands/      slash-command catalog + handlers (shared by cockpit & classic REPL)
   cli/           Run(Options) entry, classic REPL (repl.go), CockpitRunner seam, render/, jsonout/
@@ -162,7 +167,10 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   project, external, git, system. Tiers: `supervisor` (read/local/ui), `operator`
   (+terminal/project/external), `system` (+git/system). Mutating classes (`AlwaysConfirm`:
   terminal/project/external/git/system) need confirmation for the interactive `main`
-  actor; non-interactive actors (watcher/timer/workflow) need a scoped **automation grant**.
+  actor; non-interactive actors (watcher/timer/workflow/**wake**) need a scoped
+  **automation grant** — the daemon's unattended wake turns dispatch as `ActorWake`
+  and consume grants keyed to the well-known actor id `wake` (else the call becomes a
+  blocked pending-approval inbox item).
 - **Prompt assembly + caching are the BACKEND's job now.** The CLI sends NO system/developer
   prompt; the backend owns the base prompt, skill bodies, prompt assembly, and the DeepSeek
   `prompt_cache_key`. The CLI's only contribution to cache stability is keeping the
@@ -173,11 +181,19 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   `docs/BACKEND.md`. (The backend assembles most-stable-first — base prompt → integrations →
   active skill bodies → conversation → synthetic skill-load → runtime/turn context LAST — so
   skill bodies sit in the cached prefix.)
-- **Foreground-only daemon.** Watchers/timers tick only while the assistant is open
-  (`daemon.Scheduler`, 3s tick, started on interactive paths). Timers persist in SQLite
-  and resume next launch. Watchers are **session-scoped**: any left non-terminal are
-  cancelled on the next `storage.Store` open — a new session never inherits a prior
-  session's watchers. Never imply background supervision.
+- **Single-owner, durable supervision (the persistent supervisor).** Exactly ONE
+  process at a time owns a project's `state.db` — an open assistant or the
+  `daintree-assistant daemon` — serialized by the flock owner lease (`internal/ipc`).
+  Watchers, async futures, timers, and the attention inbox are **project-scoped**:
+  `storage.Open` never tears them down; the owner-boot reconciliation is the explicit
+  `Store.BeginOwnership` (adopt-not-abandon), and `/clear` is the only wholesale
+  teardown. When the assistant closes, the daemon re-acquires the lease, adopts the
+  live rows, keeps the 3s scheduler + 1s coordinator ticking, and runs autonomous
+  wake turns that continue the SAME conversation (runtime_state session pointer +
+  persisted backend state token). Background supervision is REAL now — the honest
+  caveat is credentials: supervision pauses (blocked inbox item, never abandoned)
+  when Daintree closes or revokes the per-session MCP token, and resumes on the next
+  launch. See docs/SUPERVISOR.md.
 - **Async tool futures are runtime-owned, queue-delivered.** `terminal.run.async` /
   `terminal.await.async` return an IMMEDIATE "accepted" result carrying a typed
   `ToolResult.Async` handle (`asy_…`); the `asyncwork.Coordinator` (1s tick, started
@@ -187,9 +203,11 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   `SourceAsyncTool` attention event that autonomously wakes the model
   (`agent.IsActionableWake` / `BuildWakePrompt`). A completion is NEVER delivered as a
   late tool result for the original call — the transcript stays structurally valid.
-  Async invocations are session-scoped like watchers (abandoned on the next store
-  open, cancelled by `/clear`); every coordinator write goes through the
-  `ClaimLiveAsyncInvocation` guard so a concurrent `async.cancel` always wins cleanly.
+  Async invocations are project-scoped like watchers (adopted by the next owner's
+  coordinator at Start; cancelled only by `/clear`); every coordinator write goes
+  through the `ClaimLiveAsyncInvocation` guard so a concurrent `async.cancel` always
+  wins cleanly, and a finalized-but-unpublished row (NULL queueEventId) is retried
+  publish-only under the same dedupe key — exactly-once across crashes.
   The live ledger rides every round's `request.turn.async_operations` block so the
   model can't forget or re-issue in-flight work.
 - **UI boundary.** Only `internal/ui` imports `charm.land/bubbletea/*` (+ bubbles /
@@ -222,12 +240,14 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   deterministic signals (agent state, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
   on a read-only git-cleanliness check before any irreversible action is suggested.
-- **Fresh starts are fresh.** A new session's cockpit must start clean: no stale
-  attention queue items, no old failed turns visible, no leftover watcher status.
-  The masthead, status bar, and deck reflect only what happens in this session.
-  (Timers persist across runs and resume; conversation events persist in storage
-  but aren't surfaced in the UI unless explicitly requested. Only session-derived
-  UI surfaces must be blank on startup — stale deck rows or inbox items are bugs.)
+- **Fresh starts are honest, not amnesiac.** A new session's cockpit starts with a
+  clean transcript (no old failed turns), but PROJECT state deliberately carries
+  over: adopted watchers/async keep running, the attention inbox persists, and the
+  one-time "While you were away" notice (App.AttachSummaryLines, consumed on read)
+  summarizes what the supervisor did while detached. What must NOT appear is
+  anything stale-but-dead: rows for work that no longer exists self-correct on the
+  first check (watchers reconcile against the live terminal state), and the
+  detached-activity notice never repeats.
 - **Comment style:** dense, "why"-focused block comments on non-obvious logic. Match it.
   Tests use Go's `testing` package; UI tests render through Bubble Tea's `View()` and
   assert on the string (no native renderer needed). `:memory:` SQLite and fakes for
@@ -344,9 +364,13 @@ subdir when a project id is set).
 ## More docs
 
 `docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
-story**), `docs/SKILLS.md` (how server-owned skills work + the local run-tracking tools),
+story**), `docs/SUPERVISOR.md` (the persistent supervisor daemon: leases, adoption,
+autonomous wake turns, credential lifecycle), `docs/SKILLS.md` (how server-owned skills
+work + the local run-tracking tools),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
-`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`. **STALE — predates the backend migration,
+`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
+`docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI).
+**STALE — predates the backend migration,
 do not trust:** `docs/DEEPSEEK.md` (the direct DeepSeek client — the CLI no longer talks to
 DeepSeek; the backend does). Skill authoring + the model live in `../assistant-backend`
 (its `skills/files/*.md` + `docs/DAINTREE_API.md`).

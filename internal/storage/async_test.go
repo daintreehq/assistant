@@ -93,41 +93,47 @@ func TestClaimLiveAsyncInvocationGuardsTerminalRows(t *testing.T) {
 	}
 }
 
-func TestCancelStaleAsyncInvocationsOnOpen(t *testing.T) {
+func TestListUnpublishedAsyncInvocations(t *testing.T) {
 	s := openAsyncTest(t, 1_000)
-	live, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
-		ToolName: "terminal.run.async", Title: "left running", SessionID: "ses_1",
+	// Live row: still polling, never in the unpublished set.
+	if _, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
+		ToolName: "terminal.run.async", Title: "still polling", SessionID: "ses_1",
 		TerminalIdsJson: `["term-1"]`, Status: domain.AsyncRunning, ExpiresAt: 100_000,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	done, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
-		ToolName: "terminal.run.async", Title: "already done", SessionID: "ses_1",
+	// The crash window: finalized succeeded but no queueEventId — the publish
+	// never landed. Adoption must surface it for a retry.
+	lost, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
+		ToolName: "terminal.run.async", Title: "publish lost", SessionID: "ses_1",
 		TerminalIdsJson: `["term-2"]`, Status: domain.AsyncSucceeded, ExpiresAt: 100_000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The session boundary: every non-terminal row is abandoned; terminal rows
-	// stay untouched (history).
-	if err := s.cancelStaleAsyncInvocations(5_000); err != nil {
+	// Confirmed publish: terminal AND stamped — never retried.
+	evID := "evt_1"
+	if _, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
+		ToolName: "terminal.run.async", Title: "published", SessionID: "ses_1",
+		TerminalIdsJson: `["term-3"]`, Status: domain.AsyncFailed, ExpiresAt: 100_000,
+		QueueEventID: &evID,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	gotLive, _ := s.GetAsyncInvocation(live.ID)
-	if gotLive.Status != domain.AsyncAbandoned {
-		t.Errorf("live row after boundary = %q, want abandoned", gotLive.Status)
+	// Cancelled endings never publish, so they are never "unpublished".
+	if _, err := s.InsertAsyncInvocation(domain.AsyncInvocationRecord{
+		ToolName: "terminal.run.async", Title: "cancelled", SessionID: "ses_1",
+		TerminalIdsJson: `["term-4"]`, Status: domain.AsyncCancelled, ExpiresAt: 100_000,
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if gotLive.EndedReason == nil || *gotLive.EndedReason != "session_ended" {
-		t.Errorf("endedReason = %v, want session_ended", gotLive.EndedReason)
+
+	unpub, err := s.ListUnpublishedAsyncInvocations()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if gotLive.FinishedAt == nil || *gotLive.FinishedAt != 5_000 {
-		t.Errorf("finishedAt = %v, want 5000", gotLive.FinishedAt)
-	}
-	gotDone, _ := s.GetAsyncInvocation(done.ID)
-	if gotDone.Status != domain.AsyncSucceeded {
-		t.Errorf("terminal row must be untouched, got %q", gotDone.Status)
+	if len(unpub) != 1 || unpub[0].ID != lost.ID {
+		t.Fatalf("unpublished = %+v, want exactly the finalized-but-unstamped row %s", unpub, lost.ID)
 	}
 }
 

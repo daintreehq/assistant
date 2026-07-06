@@ -132,6 +132,19 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	}
 
 	overrides := buildOverrides(opts, stderrR)
+	// One-shot takes the owner lease briefly (never spawning a daemon — a script
+	// probe must not litter the machine with supervisors). A held lease means a
+	// live assistant owns the project: fail loudly instead of double-opening.
+	own, err := acquireOwnership(ctx, overrides, false, 10*time.Second,
+		func(m string) { fmt.Fprintln(os.Stderr, m) })
+	if err != nil {
+		reportError(err)
+		if sink != nil {
+			return sink.Finish()
+		}
+		return domain.OneShotExitCode.Error
+	}
+	defer own.Release()
 	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
 		reportError(err)
@@ -218,6 +231,18 @@ func RunInteractive(ctx context.Context, opts Options) int {
 
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
+	// Interactive launch: ensure the project's supervisor daemon exists, attach
+	// (it yields ownership + receives our fresh MCP credentials), and take the
+	// owner lease. Closing this assistant later hands supervision straight back
+	// — the daemon keeps watchers/async/timers running and integrates results
+	// with autonomous wake turns until the next attach.
+	own, err := acquireOwnership(ctx, overrides, true, 60*time.Second,
+		func(m string) { r.Line(r.Gray(m)) })
+	if err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
+	defer own.Release()
 	createOpts := app.CreateOptions{Overrides: overrides}
 	// Only an interactive terminal can answer the reset prompt; a piped/non-TTY launch
 	// keeps the loud, actionable stale-schema error rather than blocking on a stdin read
@@ -230,6 +255,9 @@ func RunInteractive(ctx context.Context, opts Options) int {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
 	}
+	// This conversation is now the project's current session — the one the
+	// daemon's detached wake turns continue after we exit.
+	a.AdoptAsCurrentSession()
 
 	if wantsCockpit {
 		// Cockpit: open the debug log (header badge shows it, print nothing).
@@ -258,6 +286,14 @@ func RunInteractive(ctx context.Context, opts Options) int {
 func RunDoctor(ctx context.Context, opts Options) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
+	// Doctor opens the DB, so it needs the lease too (briefly, never spawning).
+	own, err := acquireOwnership(ctx, overrides, false, 10*time.Second,
+		func(m string) { r.Line(r.Gray(m)) })
+	if err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
+	defer own.Release()
 	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
 		r.Error(err.Error())

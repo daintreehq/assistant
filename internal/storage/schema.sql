@@ -20,8 +20,10 @@ CREATE TABLE IF NOT EXISTS timers (
   lastFiredAt   INTEGER
 );
 
--- 3.2 watchers — session-scoped supervisors. NB: insert path supplies 'active';
--- the column DEFAULT is aligned to 'active' here (clean schema, no confusion).
+-- 3.2 watchers — project-scoped supervisors: rows survive process boundaries
+-- and are adopted by the next owner (cockpit or supervisor daemon); /clear is
+-- the only wholesale teardown. NB: insert path supplies 'active'; the column
+-- DEFAULT is aligned to 'active' here (clean schema, no confusion).
 CREATE TABLE IF NOT EXISTS watchers (
   id                 TEXT PRIMARY KEY,
   kind               TEXT NOT NULL,
@@ -42,11 +44,11 @@ CREATE TABLE IF NOT EXISTS watchers (
   lastCheckedAt      INTEGER,
   nextCheckAt        INTEGER NOT NULL,
   createdAt          INTEGER NOT NULL,
-  -- WHY a watcher reached a terminal 'cancelled' status, so a session-boundary
-  -- teardown ('session_ended', stamped by cancelStaleWatchers on the next open) is
-  -- distinguishable from a deliberate user cancel ('user_cancelled', stamped by
-  -- watcher.cancel). NULL on active rows and on natural terminal states
-  -- (condition_met/timeout/error). endedAt is the epoch-ms of that cancel.
+  -- WHY a watcher reached a terminal 'cancelled' status, so a /clear teardown
+  -- ('session_cleared', stamped by CancelLiveWatchers) is distinguishable from a
+  -- deliberate user cancel ('user_cancelled', stamped by watcher.cancel). NULL on
+  -- active rows and on natural terminal states (condition_met/timeout/error).
+  -- endedAt is the epoch-ms of that cancel.
   endedReason        TEXT,
   endedAt            INTEGER,
   -- Back-link to the durable workflow_runs ledger row a supervisor watcher drives.
@@ -284,10 +286,11 @@ CREATE TABLE IF NOT EXISTS context_checkpoints (
 -- 3.15 async_invocations — runtime-owned async tool futures (terminal.run.async /
 -- terminal.await.async). The tool call returns an immediate "accepted" handle;
 -- the async coordinator polls the watched terminals to completion and publishes
--- the outcome to the attention queue (an autonomous wake). Session-scoped like
--- watchers: cancelStaleAsyncInvocations abandons non-terminal rows on the next
--- open. Purely ADDITIVE table — no user_version bump; the idempotent
--- IF NOT EXISTS exec creates it on an existing baseline.
+-- the outcome to the attention queue (an autonomous wake). PROJECT-scoped: a
+-- non-terminal row survives process boundaries and is adopted by the next
+-- owner's coordinator (cockpit or supervisor daemon); a terminal row with a
+-- NULL queueEventId is an unconfirmed publish the adopter retries (the stable
+-- group DedupeKey makes the retry idempotent at the queue).
 CREATE TABLE IF NOT EXISTS async_invocations (
   id              TEXT PRIMARY KEY,   -- asy_<8hex>
   toolName        TEXT NOT NULL,
@@ -300,7 +303,7 @@ CREATE TABLE IF NOT EXISTS async_invocations (
   outcomesJson    TEXT,               -- JSON map terminalId -> {status,exitCode?,reason?}
   lastError       TEXT,
   queueEventId    TEXT,
-  endedReason     TEXT,               -- 'session_ended' | 'user_cancelled' | 'session_cleared' | NULL
+  endedReason     TEXT,               -- 'user_cancelled' | 'session_cleared' | 'register_failed' | NULL
   createdAt       INTEGER NOT NULL,
   startedAt       INTEGER,
   expiresAt       INTEGER NOT NULL,   -- hard deadline
@@ -308,3 +311,15 @@ CREATE TABLE IF NOT EXISTS async_invocations (
 );
 CREATE INDEX IF NOT EXISTS idx_async_invocations_live  ON async_invocations(status, createdAt);
 CREATE INDEX IF NOT EXISTS idx_async_invocations_group ON async_invocations(groupId, status);
+
+-- 3.16 runtime_state — tiny durable key/value pairs the runtime must hand across
+-- process boundaries for the persistent supervisor: the current conversation's
+-- session id (so a detached daemon continues the SAME transcript) and the
+-- per-session backend state token (opaque, server-signed; replaying it keeps
+-- the backend's skill-selection cadence stable across a handover). NOT a config
+-- store — config resolution stays in internal/config.
+CREATE TABLE IF NOT EXISTS runtime_state (
+  key       TEXT PRIMARY KEY,
+  value     TEXT NOT NULL,
+  updatedAt INTEGER NOT NULL
+);

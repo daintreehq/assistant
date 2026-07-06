@@ -164,7 +164,9 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/DEEPSEEK.md`](docs/DEEPSEEK.md),
-[`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md), [`docs/TOOLS.md`](docs/TOOLS.md)
+[`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md) (Daintree's MCP protocol),
+[`docs/DAINTREE_HOST.md`](docs/DAINTREE_HOST.md) (how Daintree embeds this CLI),
+[`docs/TOOLS.md`](docs/TOOLS.md)
 (adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (server-owned skills), and
 [`docs/RUNTIME.md`](docs/RUNTIME.md) (auto-compaction + model error behavior).
 

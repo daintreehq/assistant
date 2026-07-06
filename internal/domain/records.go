@@ -21,8 +21,10 @@ type TimerRecord struct {
 	LastFiredAt   *int64  `json:"lastFiredAt,omitempty"`
 }
 
-// WatcherRecord supervises a terminal or PR. Session-scoped (cancelled on DB
-// open if non-terminal). Unknown kind fails closed to "error".
+// WatcherRecord supervises a terminal or PR. Project-scoped: a non-terminal row
+// survives process boundaries and is adopted by the next owner (cockpit or
+// supervisor daemon) at ownership boot; /clear is the only wholesale teardown.
+// Unknown kind fails closed to "error".
 type WatcherRecord struct {
 	ID                 string         `json:"id"`
 	Kind               string         `json:"kind"` // terminal | pr_state
@@ -43,11 +45,10 @@ type WatcherRecord struct {
 	LastCheckedAt      *int64         `json:"lastCheckedAt,omitempty"`
 	NextCheckAt        int64          `json:"nextCheckAt"` // required
 	CreatedAt          int64          `json:"createdAt"`
-	// EndedReason distinguishes a session-boundary teardown ("session_ended", set by
-	// cancelStaleWatchers on the next open) from a deliberate user cancel
-	// ("user_cancelled", set by watcher.cancel). nil on active rows and on natural
-	// terminal states (condition_met/timeout/error). EndedAt is when that cancel
-	// happened.
+	// EndedReason distinguishes a /clear teardown ("session_cleared", set by
+	// CancelLiveWatchers) from a deliberate user cancel ("user_cancelled", set by
+	// watcher.cancel). nil on active rows and on natural terminal states
+	// (condition_met/timeout/error). EndedAt is when that cancel happened.
 	EndedReason *string `json:"endedReason,omitempty"`
 	EndedAt     *int64  `json:"endedAt,omitempty"`
 	// WorkflowRunID back-links a supervisor watcher to the durable workflow ledger
@@ -264,9 +265,9 @@ type AgentLaunchRecord struct {
 // future the coordinator polls to completion after the tool call already
 // returned its immediate "accepted, running asynchronously" result. The model
 // gets the completion later through the attention queue (an autonomous wake),
-// NEVER as a late tool result for the original call. Session-scoped like
-// watchers: cancelStaleAsyncInvocations abandons non-terminal rows on the next
-// DB open — a new session never inherits a prior session's async work.
+// NEVER as a late tool result for the original call. Project-scoped like
+// watchers: a non-terminal row survives process boundaries and is adopted by
+// the next owner's coordinator at Start; /clear cancels it.
 type AsyncInvocationRecord struct {
 	ID       string `json:"id"`       // asy_<uuid8>
 	ToolName string `json:"toolName"` // terminal.run.async | terminal.await.async
@@ -287,8 +288,8 @@ type AsyncInvocationRecord struct {
 	OutcomesJson *string `json:"outcomesJson,omitempty"`
 	LastError    *string `json:"lastError,omitempty"`
 	QueueEventID *string `json:"queueEventId,omitempty"`
-	// EndedReason distinguishes a session-boundary teardown ("session_ended") from
-	// a deliberate cancel ("user_cancelled") — mirrors WatcherRecord.EndedReason.
+	// EndedReason distinguishes a /clear teardown ("session_cleared") from a
+	// deliberate cancel ("user_cancelled") — mirrors WatcherRecord.EndedReason.
 	EndedReason *string `json:"endedReason,omitempty"`
 	CreatedAt   int64   `json:"createdAt"`
 	// StartedAt is when the side effect was confirmed and polling began.

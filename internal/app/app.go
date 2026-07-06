@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -74,6 +75,17 @@ type CreateOptions struct {
 	// y/N terminal prompt here; non-interactive callers leave it nil, preserving the loud,
 	// actionable failure — a script/host path must never silently destroy local state.
 	OnSchemaStale func(have, want int) (bool, error)
+	// DispatchActor overrides the actor identity the Session's tool dispatches run
+	// under. Zero ⇒ ActorMain (every interactive path). The supervisor daemon sets
+	// ActorWake so its unattended wake turns take dispatch's grant-or-blocked
+	// branch (the actor id is then domain.WakeActorID).
+	DispatchActor domain.ToolActor
+	// ResumeCurrentSession (with an empty SessionID) resumes the project's
+	// durable current-session pointer (runtime_state) instead of minting a fresh
+	// session — the supervisor daemon's continuity mechanism: its autonomous
+	// wake turns continue the SAME conversation the last cockpit ran. A missing
+	// pointer still mints fresh. Ignored when SessionID is set explicitly.
+	ResumeCurrentSession bool
 }
 
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
@@ -124,6 +136,20 @@ type App struct {
 	// or leaks across sessions. Held on App (not Session) because the tool builder
 	// runs before a.Session exists; the family captures this concrete store directly.
 	scratchStore *scratchx.Store
+
+	// ownership is the owner-boot reconciliation summary (what this process adopted
+	// when it took the project DB over): resumed watchers/async, unpublished
+	// completions, carried-over inbox. Immutable after Create; feeds the one-time
+	// resumed-watchers session note and the attach-time UI surfaces.
+	ownership storage.OwnershipSummary
+
+	// dispatchActor / dispatchActorID are the actor identity the Session's tool
+	// dispatches run under — ActorMain/"" for every interactive process, and
+	// ActorWake/WakeActorID in the headless supervisor daemon so mutating tools
+	// route through the grant-or-blocked branch instead of a confirm prompt no
+	// human is present to answer. Immutable after Create.
+	dispatchActor   domain.ToolActor
+	dispatchActorID string
 
 	// baseCtx is the APP-SCOPED background context for detached work that outlives a
 	// single turn (e.g. terminal.extract.async) but must NOT outlive the App. It is
@@ -243,21 +269,56 @@ func Create(opts CreateOptions) (*App, error) {
 		}
 	}
 
+	// Owner-boot reconciliation. The caller (cli/daemon runtime) holds the project
+	// owner lock before Create, so this process is the DB's only owner: adopt the
+	// live supervision a prior owner left behind (watchers keep running, async
+	// futures keep polling, the inbox carries over) and clear only the dead spawn
+	// sagas. The summary feeds the one-time resumed-watchers session note.
+	ownership, err := store.BeginOwnership(domain.NowMS())
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("ownership boot: %w", err)
+	}
+
 	sessionID := opts.SessionID
+	resumedSession := opts.SessionID != ""
+	if sessionID == "" && opts.ResumeCurrentSession {
+		// The supervisor daemon continues the project's current conversation: read
+		// the durable pointer the last interactive owner wrote. Best-effort — a
+		// missing/unreadable pointer just mints fresh below.
+		if v, err := store.GetRuntimeState(storage.RuntimeKeyCurrentSession); err == nil && v != "" {
+			sessionID = v
+			resumedSession = true
+		}
+	}
 	if sessionID == "" {
 		sessionID = domain.NewID("ses_")
 	}
 
+	// Non-main dispatch actors carry the well-known wake actor id (grants are
+	// keyed to it); the interactive default stays main/"".
+	dispatchActor := opts.DispatchActor
+	if dispatchActor == "" {
+		dispatchActor = domain.ActorMain
+	}
+	dispatchActorID := ""
+	if dispatchActor == domain.ActorWake {
+		dispatchActorID = domain.WakeActorID
+	}
+
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	a := &App{
-		Config:      cfg,
-		Store:       store,
-		SessionID:   sessionID,
-		runRef:      &agent.RunIDRef{},
-		hooks:       opts.Hooks,
-		baseCtx:     baseCtx,
-		baseCancel:  baseCancel,
-		InitialTier: cfg.Tier,
+		Config:          cfg,
+		Store:           store,
+		SessionID:       sessionID,
+		runRef:          &agent.RunIDRef{},
+		hooks:           opts.Hooks,
+		baseCtx:         baseCtx,
+		baseCancel:      baseCancel,
+		InitialTier:     cfg.Tier,
+		ownership:       ownership,
+		dispatchActor:   dispatchActor,
+		dispatchActorID: dispatchActorID,
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
@@ -337,6 +398,10 @@ func Create(opts CreateOptions) (*App, error) {
 		Reader: asyncStatusReaderAdapter{r: terminalReaderAdapter{c: a.MCP}},
 		Queue:  a.Queue,
 		Store:  store,
+		// Ownership-boot adoption: when the coordinator starts it re-tracks the
+		// persisted live invocations a prior owner (cockpit or supervisor daemon)
+		// left polling, and retries any finalized-but-unpublished completion.
+		AdoptLister: store,
 		Notify: func() {
 			if s := a.scheduler; s != nil {
 				s.NotifyNow()
@@ -457,12 +522,18 @@ func Create(opts CreateOptions) (*App, error) {
 		MemoryRecaller:     memoryRecallerAdapter{s: store},
 		PinnedMemoryLister: pinnedMemoryListerAdapter{s: store},
 		// The footer's volatile-state seams (issue #263): the worktree label and the
-		// one-time session-ended note. Both are bound App methods so the wiring is testable
-		// directly; see activeWorktreeForFooter / sessionEndedWatchersForFooter.
-		ActiveWorktreeFunc:   a.activeWorktreeForFooter,
-		SessionEndedWatchers: a.sessionEndedWatchersForFooter,
-		ArtifactPersister:    store,
-		WorkflowRunLister:    store,
+		// one-time resumed-watchers note. Both are bound App methods so the wiring is
+		// testable directly; see activeWorktreeForFooter / resumedWatchersForFooter.
+		ActiveWorktreeFunc: a.activeWorktreeForFooter,
+		ResumedWatchers:    a.resumedWatchersForFooter,
+		ArtifactPersister:  store,
+		WorkflowRunLister:  store,
+		// Durable mirror + seed for the opaque backend state token, so a session
+		// handed over between processes (cockpit ↔ supervisor daemon) keeps the
+		// backend's skill-selection cadence. Seeded only on a genuine resume: a
+		// fresh session id has no persisted token.
+		BackendStateStore:   store,
+		InitialBackendState: loadPersistedBackendState(store, sessionID, resumedSession),
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
@@ -492,6 +563,116 @@ func Create(opts CreateOptions) (*App, error) {
 	})
 
 	return a, nil
+}
+
+// loadPersistedBackendState loads the durable backend state token for a RESUMED
+// session (resumed == the caller passed an explicit session id, i.e. it intends
+// to continue an existing transcript). A fresh session id never has a token, so
+// the read is skipped — and a stale token from an unrelated prior session can
+// never leak into a new conversation. Best-effort: any read failure just means
+// the backend re-runs skill selection.
+func loadPersistedBackendState(store *storage.Store, sessionID string, resumed bool) string {
+	if !resumed {
+		return ""
+	}
+	token, err := store.GetSessionBackendState(sessionID)
+	if err != nil {
+		return ""
+	}
+	return token
+}
+
+// Ownership returns the owner-boot reconciliation summary captured at Create.
+func (a *App) Ownership() storage.OwnershipSummary { return a.ownership }
+
+// turnActor returns the actor identity the Session's tool dispatches run under
+// (immutable after Create — see CreateOptions.DispatchActor).
+func (a *App) turnActor() (domain.ToolActor, string) {
+	return a.dispatchActor, a.dispatchActorID
+}
+
+// AdoptAsCurrentSession durably marks this App's session as the project's
+// current conversation — the one a detached supervisor daemon continues with
+// autonomous wake turns. Interactive paths (cockpit, classic REPL, host) call
+// it once after Create; one-shot and doctor runs deliberately do NOT, so a
+// script probe never hijacks the conversation the daemon is supervising.
+func (a *App) AdoptAsCurrentSession() {
+	// Best-effort: continuity is a convenience, never worth failing boot over.
+	_ = a.Store.PutRuntimeState(storage.RuntimeKeyCurrentSession, a.SessionID)
+}
+
+// DetachedActivity is what the supervisor daemon accomplished while no
+// assistant was attached, persisted in runtime_state and consumed by the next
+// attach for the "while you were away" notice.
+type DetachedActivity struct {
+	WakeTurns        int    `json:"wakeTurns"`
+	LastWakeAtMs     int64  `json:"lastWakeAtMs"`
+	LastReplyPreview string `json:"lastReplyPreview"`
+}
+
+// detachedReplyPreviewMax bounds the stored reply preview (a notice line, not
+// a transcript).
+const detachedReplyPreviewMax = 300
+
+// RecordDetachedWake accumulates one successful autonomous wake turn into the
+// durable detached-activity record (the supervisor daemon calls this after
+// each wake). Best-effort — never disturbs the wake path.
+func (a *App) RecordDetachedWake(reply string) {
+	act := DetachedActivity{}
+	if raw, err := a.Store.GetRuntimeState(storage.RuntimeKeyDetachedActivity); err == nil && raw != "" {
+		_ = json.Unmarshal([]byte(raw), &act)
+	}
+	act.WakeTurns++
+	act.LastWakeAtMs = domain.NowMS()
+	preview := strings.TrimSpace(reply)
+	if idx := strings.IndexByte(preview, '\n'); idx >= 0 {
+		preview = preview[:idx]
+	}
+	if len(preview) > detachedReplyPreviewMax {
+		preview = preview[:detachedReplyPreviewMax] + "…"
+	}
+	act.LastReplyPreview = preview
+	if b, err := json.Marshal(act); err == nil {
+		_ = a.Store.PutRuntimeState(storage.RuntimeKeyDetachedActivity, string(b))
+	}
+}
+
+// AttachSummaryLines composes the one-time "while you were away" notice for an
+// attaching assistant: the daemon's detached wake activity (consumed — read
+// then cleared, so it prints at most once) plus what this process adopted at
+// ownership boot. Empty when there is nothing worth saying.
+func (a *App) AttachSummaryLines() []string {
+	var lines []string
+	if raw, err := a.Store.GetRuntimeState(storage.RuntimeKeyDetachedActivity); err == nil && raw != "" {
+		var act DetachedActivity
+		if json.Unmarshal([]byte(raw), &act) == nil && act.WakeTurns > 0 {
+			plural := "s"
+			if act.WakeTurns == 1 {
+				plural = ""
+			}
+			line := fmt.Sprintf("While you were away: the supervisor handled %d event%s", act.WakeTurns, plural)
+			if act.LastReplyPreview != "" {
+				line += " — " + act.LastReplyPreview
+			}
+			lines = append(lines, line)
+		}
+		_ = a.Store.DeleteRuntimeState(storage.RuntimeKeyDetachedActivity)
+	}
+	own := a.ownership
+	if n := len(own.ResumedWatcherTitles); n > 0 || own.ResumedAsyncCount > 0 {
+		parts := []string{}
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%d watcher(s)", n))
+		}
+		if own.ResumedAsyncCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d async operation(s)", own.ResumedAsyncCount))
+		}
+		lines = append(lines, "Resumed supervision of "+strings.Join(parts, " and ")+" from the previous session.")
+	}
+	if own.OpenAttentionCount > 0 {
+		lines = append(lines, fmt.Sprintf("%d attention item(s) carried over — see /inbox.", own.OpenAttentionCount))
+	}
+	return lines
 }
 
 // debugLogAdapter routes the router's debug trace through the global debug log.

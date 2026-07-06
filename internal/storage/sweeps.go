@@ -5,25 +5,13 @@ import (
 	"strings"
 )
 
-// reasonSessionEnded is the endedReason cancelStaleWatchers stamps when it tears a
-// non-terminal watcher down at a session boundary — distinct from the
-// 'user_cancelled' the watcher.cancel tool stamps. Kept in sync with
-// internal/tools/watcher/watcher.go.
-const reasonSessionEnded = "session_ended"
-
 // ReasonSessionCleared is the endedReason stamped when /clear tears every live
-// watcher down mid-session for a completely clean slate — distinct from
-// reasonSessionEnded (session boundary) and 'user_cancelled' (a single
-// watcher.cancel) so the UI/audit can tell the three apart.
+// watcher down mid-session for a completely clean slate — distinct from the
+// 'user_cancelled' a single watcher.cancel stamps, so the UI/audit can tell the
+// two apart. (The old 'session_ended' open-time sweep is gone: watchers are
+// project-scoped now and survive process boundaries until /clear or a natural
+// terminal state.)
 const ReasonSessionCleared = "session_cleared"
-
-// cancelStaleWatchers runs on DB open (session boundary): it cancels every live
-// watcher stamping reasonSessionEnded. A new session never inherits a prior
-// session's watchers. Returns the titles cancelled so the caller can surface a
-// one-time "these stopped because the prior session ended" NOTE (nil when none).
-func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
-	return s.CancelLiveWatchers(now, reasonSessionEnded)
-}
 
 // CancelLiveWatchers tears down EVERY live (active/created/paused) watcher in ONE
 // transaction. KEEP EXACT ORDER:
@@ -37,8 +25,8 @@ func (s *Store) cancelStaleWatchers(now int64) ([]string, error) {
 // Order matters: revoke BEFORE the flip so no grant is ever live for a watcher we
 // just cancelled. Terminal-status watchers (condition_met/timeout/cancelled/error)
 // are left for the UI history. Scoped to the 3 watcher sources so timer/system/
-// user events persist. Shared by the session-boundary sweep (reasonSessionEnded)
-// and /clear (ReasonSessionCleared). Returns the cancelled watchers' titles (nil
+// user events persist. The one remaining caller is /clear (ReasonSessionCleared) —
+// the explicit wholesale teardown. Returns the cancelled watchers' titles (nil
 // when none).
 func (s *Store) CancelLiveWatchers(now int64, reason string) ([]string, error) {
 	const liveStatuses = "('active','created','paused')"

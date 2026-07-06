@@ -158,8 +158,8 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 				turn["pinnedMemoryCount"] = len(tc.Memories.Pinned)
 				turn["relevantMemoryCount"] = len(tc.Memories.Relevant)
 			}
-			if len(tc.SessionEndedWatchers) > 0 {
-				turn["sessionEndedWatcherCount"] = len(tc.SessionEndedWatchers)
+			if len(tc.ResumedWatchers) > 0 {
+				turn["resumedWatcherCount"] = len(tc.ResumedWatchers)
 			}
 			fields["turn"] = turn
 		}

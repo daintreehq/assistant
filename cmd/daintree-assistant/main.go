@@ -31,8 +31,10 @@ func main() {
 	opts, route := parseArgs(os.Args[1:])
 
 	// Stamp the build version into the cockpit masthead before any UI is constructed
-	// (UIVersion is a package var read at model-init time, so set it up front).
+	// (UIVersion is a package var read at model-init time, so set it up front), and
+	// into the cli layer for daemon descriptors/status.
 	ui.UIVersion = version
+	cli.SetVersion(version)
 
 	// Cancel the run context on SIGINT/SIGTERM for the cooked-mode paths (one-shot,
 	// classic REPL, host). The cockpit runs the terminal in raw mode, so Ctrl-C never
@@ -51,21 +53,30 @@ func main() {
 		code = cli.RunDoctor(ctx, opts)
 	case routeHost:
 		code = cli.RunHost(ctx, opts)
+	case routeDaemon:
+		code = cli.RunDaemon(ctx, opts)
+	case routeDaemonStop:
+		code = cli.RunDaemonStop(ctx, opts)
+	case routeStatus:
+		code = cli.RunStatus(ctx, opts)
 	default:
 		code = cli.Run(ctx, opts)
 	}
 	os.Exit(code)
 }
 
-// route is the top-level dispatch decided purely from argv: a leading `doctor` or
-// `host` subcommand wins; everything else falls through to cli.Run, which itself
-// splits one-shot (a prompt arg) from interactive.
+// route is the top-level dispatch decided purely from argv: a leading `doctor`,
+// `host`, `daemon`, or `status` subcommand wins; everything else falls through
+// to cli.Run, which itself splits one-shot (a prompt arg) from interactive.
 type route int
 
 const (
 	routeDefault route = iota
 	routeDoctor
 	routeHost
+	routeDaemon
+	routeDaemonStop
+	routeStatus
 )
 
 // parseArgs parses the CLI surface into cli.Options + a route: the flags, the
@@ -96,6 +107,8 @@ func parseArgs(args []string) (cli.Options, route) {
 		fmt.Fprintln(w, "  daintree-assistant [flags] [prompt]   interactive cockpit, or one-shot when a prompt is given")
 		fmt.Fprintln(w, "  daintree-assistant doctor             environment check (MCP / DeepSeek key / project / tier)")
 		fmt.Fprintln(w, "  daintree-assistant host --stdio       embedded host: stdio NDJSON transport")
+		fmt.Fprintln(w, "  daintree-assistant daemon [stop]      run (or stop) the persistent project supervisor")
+		fmt.Fprintln(w, "  daintree-assistant status             show the project supervisor's health and live work")
 		fmt.Fprintln(w, "\nFlags:")
 		fs.PrintDefaults()
 		fmt.Fprintln(w, "\nWithout DEEPSEEK_API_KEY, read-only slash commands still work: /tools, /skills, /doctor.")
@@ -139,9 +152,9 @@ func parseArgs(args []string) (cli.Options, route) {
 		Inline:   *inline, // accepted and ignored (deprecated)
 	}
 
-	// A leading `doctor`/`host` positional is a subcommand; anything else is the
-	// one-shot prompt. `host` implies the stdio transport (the only one), so the
-	// bare `--stdio` flag is just an accepted alias and need not be set.
+	// A leading `doctor`/`host`/`daemon`/`status` positional is a subcommand;
+	// anything else is the one-shot prompt. `host` implies the stdio transport
+	// (the only one), so the bare `--stdio` flag is just an accepted alias.
 	if len(positionals) > 0 {
 		switch positionals[0] {
 		case "doctor":
@@ -149,6 +162,13 @@ func parseArgs(args []string) (cli.Options, route) {
 		case "host":
 			_ = *stdio // accepted for `host --stdio`; host.Run always uses stdio
 			return opts, routeHost
+		case "daemon":
+			if len(positionals) > 1 && positionals[1] == "stop" {
+				return opts, routeDaemonStop
+			}
+			return opts, routeDaemon
+		case "status":
+			return opts, routeStatus
 		}
 		// Join remaining tokens so an unquoted multi-word prompt still works; a single
 		// quoted arg passes through unchanged.

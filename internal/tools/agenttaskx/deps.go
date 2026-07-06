@@ -57,7 +57,7 @@ type Store interface {
 }
 
 // Deps wires the agentTask family. DaemonActive reports whether the scheduler is
-// running (nil ⇒ assume active) — drives the foreground-only lifecycle NOTE.
+// running (nil ⇒ assume active) — drives the lifecycle NOTE wording.
 type Deps struct {
 	MCP          MCPClient
 	DB           Store

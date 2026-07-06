@@ -1,11 +1,11 @@
 // Package watcher holds the terminal/PR watcher tools: watcher.terminal.create,
-// watcher.watchPR, watcher.list, watcher.cancel. Watchers are session-scoped —
-// they supervise terminals that live only for the session and never resume on a
-// new launch (unlike durable timers). Because they only tick while the
-// foreground scheduler is running, both creators hard-fail (non-retryable
-// WATCHER_REQUIRES_INTERACTIVE) when the daemon is inactive (one-shot / --json
-// mode) instead of inserting a row that the next Store.Open would orphan; a
-// successful create appends a foreground-only lifecycle NOTE.
+// watcher.watchPR, watcher.list, watcher.cancel. Watchers are PROJECT-scoped
+// and durable: they keep running after the assistant closes — the persistent
+// supervisor daemon adopts them, keeps checking, and integrates results with
+// autonomous wake turns until the next attach (see docs/SUPERVISOR.md). The
+// creators still hard-fail (non-retryable WATCHER_REQUIRES_INTERACTIVE) when
+// no supervision engine is running at all (one-shot / --json mode with the
+// daemon disabled) instead of inserting a row nothing will check.
 package watcher
 
 import (
@@ -48,8 +48,8 @@ type Store interface {
 }
 
 // reasonUserCancelled is the endedReason stamped when a user cancels a watcher via
-// the watcher.cancel tool (vs. 'session_ended' stamped by the session-boundary
-// sweep). Kept in sync with internal/storage/sweeps.go.
+// the watcher.cancel tool (vs. 'session_cleared' stamped by the /clear teardown).
+// Kept in sync with internal/storage/sweeps.go.
 const reasonUserCancelled = "user_cancelled"
 
 // isTerminalStatus reports whether a watcher has already reached an end state, so
@@ -87,27 +87,29 @@ func daemonActive(tctx *tools.ToolContext) bool {
 	return tctx.DaemonActive()
 }
 
-// lifecycleNote is the session-scoped foreground-only NOTE. Watchers do NOT
-// resume on a new launch (distinct from timers). Creators hard-fail before
-// reaching this note when the daemon is inactive (see requireDaemon), so the
-// "scheduler not running" case never appears on a successful create.
+// lifecycleNote is the project-scoped durability NOTE appended to a successful
+// create. Watchers survive the assistant closing: the persistent supervisor
+// daemon adopts them and keeps checking. The one honest caveat is credentials —
+// supervision pauses (blocked, never abandoned) if Daintree/its MCP becomes
+// unreachable, and resumes when the assistant is next opened.
 func lifecycleNote() string {
-	return " NOTE: watchers are session-scoped and foreground-only — this one stops when the assistant closes and does not resume."
+	return " NOTE: watchers are project-scoped and KEEP RUNNING after the assistant closes — the background supervisor" +
+		" continues checking and will integrate the outcome (you may promise the user results after they close this window)." +
+		" Supervision pauses only if Daintree itself closes or its credentials expire, and resumes on the next launch."
 }
 
-// requireDaemon returns a non-retryable failure when the foreground scheduler is
-// not running (one-shot / --json mode). Watchers are session-scoped and only
-// tick while the assistant is open, so creating one without a live daemon would
-// insert a row that the next Store.Open immediately cancels — an orphan. We
-// short-circuit before any insert. A nil DaemonActive means the caller did not
-// wire the field, so we assume active (daemonActive handles that). Returns nil
-// when the daemon is active and creation may proceed.
+// requireDaemon returns a non-retryable failure when NO supervision engine is
+// running — a one-shot / --json invocation with the background supervisor
+// disabled. Creating a watcher there would insert a row nothing checks until
+// some later interactive launch. We short-circuit before any insert. A nil
+// DaemonActive means the caller did not wire the field, so we assume active
+// (daemonActive handles that). Returns nil when creation may proceed.
 func requireDaemon(tctx *tools.ToolContext, tool string) *tools.ToolResult {
 	if daemonActive(tctx) {
 		return nil
 	}
 	res := tools.Fail(codeWatcherRequiresInteractive,
-		tool+": watchers are foreground-only and require an interactive session — they do not run in one-shot or --json mode. Open the assistant cockpit to create a watcher.",
+		tool+": no supervision engine is running in this one-shot invocation, so the watcher would never be checked. Run the assistant interactively to create it.",
 		tools.Unrecoverable())
 	return &res
 }
@@ -189,10 +191,9 @@ func newTerminalCreateTool(deps Deps) *tools.Tool {
 				nextCheck = now + *a.StartAfterMs
 			}
 
-			// Hard-fail before any insert when the daemon is not running:
-			// watchers only tick in the foreground, so persisting one here would
-			// orphan a row that the next Store.Open cancels. Args are validated
-			// above, so INVALID_ARGS still beats this gate.
+			// Hard-fail before any insert when no supervision engine is running
+			// (one-shot with the supervisor disabled): the row would sit unchecked.
+			// Args are validated above, so INVALID_ARGS still beats this gate.
 			if fail := requireDaemon(tctx, "watcher.terminal.create"); fail != nil {
 				return *fail
 			}
@@ -304,9 +305,8 @@ func newWatchPRTool(deps Deps) *tools.Tool {
 				nextCheck = now + *a.StartAfterMs
 			}
 
-			// Hard-fail before any insert when the daemon is not running (see
-			// watcher.terminal.create): a PR watcher created without a live
-			// foreground scheduler would orphan a row cancelled on next open.
+			// Hard-fail before any insert when no supervision engine is running
+			// (see watcher.terminal.create): the row would sit unchecked.
 			if fail := requireDaemon(tctx, "watcher.watchPR"); fail != nil {
 				return *fail
 			}
@@ -414,8 +414,8 @@ func newCancelTool(deps Deps) *tools.Tool {
 			}
 			// Refuse to re-cancel an already-terminal watcher: it has run its course
 			// (condition_met/timeout/error) or already ended (cancelled — including a
-			// 'session_ended' session-boundary teardown). Overwriting would clobber its
-			// endedReason and destroy the very distinction this records.
+			// /clear teardown). Overwriting would clobber its endedReason and destroy
+			// the very distinction this records.
 			if isTerminalStatus(existing.Status) {
 				return tools.Fail(codeWatcherNotFound,
 					"watcher.cancel: watcher "+a.ID+" already ended ("+existing.Status+")", tools.Unrecoverable())
