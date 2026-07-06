@@ -45,6 +45,17 @@ type ToolRunner interface {
 	Dispatch(ctx context.Context, name string, argsJSON string, turn TurnContext) domain.ToolResult
 }
 
+// parallelSafeRunner is an OPTIONAL capability a ToolRunner may expose so the batch
+// loop can dispatch read-only calls concurrently instead of one-at-a-time. A tool is
+// parallel-safe when it takes no confirmation, mutates nothing, and has no ordering
+// dependency on its siblings (read-risk tools) — a batch of those (e.g. several
+// terminal.extract summaries, each a backend utility-model round-trip) can run at
+// once. The production registry adapter implements this; test fakes that don't
+// simply keep the fully-serial path, so serial-ordering tests are unaffected.
+type parallelSafeRunner interface {
+	ParallelSafe(name string) bool
+}
+
 // TurnContext carries the per-turn fields the ToolRunner stamps onto each call's
 // ToolContext (runId, allowed-tool projection). The signal is the dispatch ctx.
 //

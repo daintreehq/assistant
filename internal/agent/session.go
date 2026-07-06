@@ -821,11 +821,17 @@ func (s *Session) firstQuestionIndex(calls []models.ToolCallRequest) int {
 	return -1
 }
 
-// runToolBatch dispatches a batch of tool calls sequentially after announcing the
-// whole batch as queued. Two circuit breakers trip MID-batch (stopping + stubbing the
-// remaining calls the instant a runaway is detected, so one giant batch can't fully
-// dispatch first): the FINE breaker on identical args, and the COARSE breaker on a
-// tool repeating the same UNRECOVERABLE error with varied args. Returns (reply, true)
+// runToolBatch dispatches a batch of tool calls after announcing the whole batch as
+// queued. Maximal consecutive runs of parallel-safe calls (no-wait snapshot reads
+// that opted in via Tool.Parallelizable — terminal.extract/.json) dispatch
+// CONCURRENTLY, collapsing N extraction round-trips into roughly the slowest one,
+// with each member's settled result streamed live as it completes; every other call
+// runs serially in place, preserving exact ordering and side-effect sequencing. Two
+// circuit breakers trip MID-batch (stopping + stubbing the remaining calls the
+// instant a runaway is detected, so one giant batch can't fully dispatch first): the
+// FINE breaker on identical args, and the COARSE breaker on a tool repeating the same
+// UNRECOVERABLE error with varied args. A parallel group folds its tallies in call
+// order and applies the same guards at the group boundary. Returns (reply, true)
 // when the turn must end (cancel or breaker abort), else ("", false) to continue.
 func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, finishReason string, turn TurnContext,
 	allowedSet map[string]struct{}, failureCounts, coarseCounts map[string]int, stuckNudged *bool) (string, bool) {
@@ -846,7 +852,48 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 
 	var worstFine, worstCoarse *batchRepeat
 
-	for c := 0; c < len(calls); c++ {
+	for c := 0; c < len(calls); {
+		// Cancel BEFORE activating/dispatching the next call or group: a cancel that
+		// landed while the PREVIOUS call ran must stop the whole queue here, so no
+		// further tool executes after the user hit Escape. The current call AND every
+		// remaining one (calls[c:]) get a structurally-valid CANCELLED tool result, so
+		// each assistant tool_call still has a matching reply (or DeepSeek 400s on
+		// replay).
+		if ctx.Err() != nil {
+			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
+			s.events.Phase(domain.PhaseCancelled)
+			s.events.AssistantCancelled("")
+			return domain.CancelledReply, true
+		}
+
+		// Gather a maximal run of consecutive parallel-safe calls (no-wait snapshot
+		// reads that opted in via Tool.Parallelizable) and dispatch a run of ≥2
+		// CONCURRENTLY — each member's result streams live as it settles. Everything
+		// else runs on the serial path below, preserving today's exact ordering and
+		// side-effect sequencing. A batch carrying a multiple-choice question stays
+		// fully serial: every non-question sibling is skipped synthetically, so there
+		// is nothing to overlap.
+		if questionIdx < 0 {
+			if e := s.parallelRunEnd(calls, c, allowedSet); e-c >= 2 {
+				s.runParallelGroup(ctx, calls, c, e, turn, failureCounts, coarseCounts, &worstFine, &worstCoarse)
+				c = e
+				// Apply the serial path's per-call mid-batch guards at the group
+				// boundary: a cancel that landed during the group stops the queue now
+				// (every member already carries its real result), and a breaker that
+				// tripped inside the group aborts before any further dispatch.
+				if ctx.Err() != nil {
+					s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
+					s.events.Phase(domain.PhaseCancelled)
+					s.events.AssistantCancelled("")
+					return domain.CancelledReply, true
+				}
+				if reply, done := s.checkBreakerAbort(turn, calls, c, worstFine, worstCoarse); done {
+					return reply, true
+				}
+				continue
+			}
+		}
+
 		call := calls[c]
 		internalName := s.resolveInternal(call.Function.Name)
 
@@ -856,19 +903,6 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// could trip RepeatFailureAbort and kill the turn before the question is even
 		// dispatched (or before the model re-plans after the answer).
 		questionSkip := questionIdx >= 0 && c != questionIdx
-
-		// Cancel BEFORE activating/dispatching this call: a cancel that landed while
-		// the PREVIOUS call ran must stop the whole queue here, so no further tool
-		// executes after the user hit Escape. The current call AND every remaining
-		// one (calls[c:]) get a structurally-valid CANCELLED tool result, so each
-		// assistant tool_call still has a matching reply (or DeepSeek 400s on
-		// replay).
-		if ctx.Err() != nil {
-			s.traceCancelledStub(turn.RunID, s.stubCancelledFrom(calls, c))
-			s.events.Phase(domain.PhaseCancelled)
-			s.events.AssistantCancelled("")
-			return domain.CancelledReply, true
-		}
 
 		// Promote queued→active and drive the phase.
 		s.events.Phase(domain.PhaseToolRunning)
@@ -950,44 +984,10 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			// firing is never silent.
 			s.traceToolGap("tool.not_offered", turn.RunID, call.ID, internalName, "")
 		default:
-			argsJSON := call.Function.Arguments
-			if argsJSON == "" {
-				argsJSON = "{}"
-			}
-			// Per-call progress plumbing: stamp the active call id + a forwarder so an
-			// in-tool substep emits ToolProgress(callID, msg) on this turn's sink,
-			// tagged so the UI maps it to the right activity row.
-			callTurn := turn
-			callTurn.CallID = call.ID
-			callTurn.Progress = func(callID string, msg string) {
-				if msg == "" {
-					return
-				}
-				s.events.ToolProgress(callID, msg)
-			}
-			res = s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
+			res = s.dispatchCall(ctx, call, internalName, turn)
 		}
 
-		// Session-cumulative per-tool failure tally (issue #251): a coarse "which tools
-		// keep failing" signal that accumulates across rounds, off the audit path. Counts
-		// EVERY failed result (bad-args and not-offered included — a tool the model keeps
-		// misusing is a real drift signal), EXCEPT a result produced while the turn is
-		// being cancelled: a user abort tearing down mid-tool is not a tool failure
-		// (mirrors maybeAutoCompact, which also refuses to count a cancel as an outage).
-		// The increment lands BEFORE the event so FailureCount carries the up-to-date
-		// total; recordToolFailure takes s.mu itself (no lock held here). Ok results and
-		// cancelled results carry 0.
-		failCount := 0
-		if !res.Ok && ctx.Err() == nil && !questionSkip {
-			failCount = s.recordToolFailure(internalName)
-		}
-
-		s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: domain.NowMS(), FailureCount: failCount})
-		if res.Ok {
-			s.events.ToolState(call.ID, ToolStateDone)
-		} else {
-			s.events.ToolState(call.ID, ToolStateFailed)
-		}
+		s.emitToolSettled(ctx, call, internalName, res, domain.NowMS(), questionSkip)
 
 		s.pushMessage(models.ChatMessage{
 			Role:          "tool",
@@ -996,29 +996,11 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			StringContent: SerializeToolResult(res, s.artifacts),
 		})
 
-		// Circuit-breaker bookkeeping: fold this failure into BOTH tallies. The FINE
-		// signature is the CANONICALIZED args + error code (a byte-identical retry, even
-		// with reordered keys). The COARSE signature strips pagination fields and counts
-		// ONLY unrecoverable errors — the args-varied futile loop the fine tally misses
-		// (the model paging a pruned artifact by offset). A question-skip stub is synthetic,
-		// not a real tool failure, so it never feeds the breakers.
-		if !res.Ok && !questionSkip {
-			errCode := ""
-			if res.Error != nil {
-				errCode = res.Error.Code
-			}
-			fineSig := failureSignature(internalName, call.Function.Arguments, errCode)
-			failureCounts[fineSig]++
-			if fc := failureCounts[fineSig]; worstFine == nil || fc > worstFine.count {
-				worstFine = &batchRepeat{name: internalName, count: fc, sig: fineSig, res: res}
-			}
-			if res.Error != nil && !res.Error.Recoverable && errCode != "" {
-				coarseSig := coarseFailureSignature(internalName, call.Function.Arguments, errCode)
-				coarseCounts[coarseSig]++
-				if cc := coarseCounts[coarseSig]; worstCoarse == nil || cc > worstCoarse.count {
-					worstCoarse = &batchRepeat{name: internalName, count: cc, sig: coarseSig, res: res}
-				}
-			}
+		// Circuit-breaker bookkeeping: fold this failure into BOTH tallies (see
+		// foldBreakerTallies). A question-skip stub is synthetic, not a real tool
+		// failure, so it never feeds the breakers.
+		if !questionSkip {
+			foldBreakerTallies(internalName, call.Function.Arguments, res, failureCounts, coarseCounts, &worstFine, &worstCoarse)
 		}
 
 		// Mid-batch cancel: a cancel that landed DURING this call's dispatch stops the
@@ -1038,18 +1020,11 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		// dozens of identical/futile calls in one round) can't fully dispatch before the
 		// guard fires. Fine (identical args) at RepeatFailureAbort; coarse (same tool +
 		// unrecoverable code, args varied) at CoarseRepeatFailureAbort.
-		if worstFine != nil && worstFine.count >= domain.RepeatFailureAbort {
-			msg := "Stopped: called " + worstFine.name + " " + itoa(worstFine.count) +
-				" times this turn with identical arguments, each failing the same way (" + repeatDetail(worstFine.res) +
-				"). Tell the user what's blocking and what you tried rather than repeating the call."
-			return s.abortForRepeat(turn, calls, c+1, "tool.repeat.abort", worstFine, msg), true
+		if reply, done := s.checkBreakerAbort(turn, calls, c+1, worstFine, worstCoarse); done {
+			return reply, true
 		}
-		if worstCoarse != nil && worstCoarse.count >= domain.CoarseRepeatFailureAbort {
-			msg := "Stopped: called " + worstCoarse.name + " " + itoa(worstCoarse.count) +
-				" times this turn, each failing with the same unrecoverable error (" + repeatDetail(worstCoarse.res) +
-				") despite different arguments. Retrying an unrecoverable error can't succeed — tell the user what's blocking and stop rather than varying the arguments."
-			return s.abortForRepeat(turn, calls, c+1, "tool.repeat.abort.coarse", worstCoarse, msg), true
-		}
+
+		c++
 	}
 
 	// End-of-batch: the one-shot stuck-warning nudge (fine breaker, below the abort
@@ -1081,6 +1056,235 @@ type batchRepeat struct {
 	count int
 	sig   string
 	res   domain.ToolResult
+}
+
+// maxParallelToolDispatch bounds how many parallel-safe calls in one batch dispatch
+// concurrently. Sized above the MCP request governor's in-flight cap (4) because an
+// extraction's wall-clock is dominated by its backend small-model call, not its MCP
+// reads — six extraction model calls genuinely overlap while their short MCP reads
+// take turns in the governor queue. Deliberately small: the goal is collapsing a
+// handful of per-agent reads into one wait, not a thundering herd.
+const maxParallelToolDispatch = 6
+
+// dispatchCall runs one call through the registry with its per-call progress
+// plumbing (an in-tool substep emits ToolProgress(callID, msg) tagged so the UI maps
+// it to the right activity row). Safe OFF the turn goroutine: Dispatch's
+// side-channels (audit DB, debug log) are goroutine-safe, and ToolProgress feeds the
+// mutex-guarded UI pump while the durable run-event sink no-ops it. Everything else
+// (ToolCall/ToolResult/ToolState, transcript, breaker folds) must stay on the turn
+// goroutine.
+func (s *Session) dispatchCall(ctx context.Context, call models.ToolCallRequest, internalName string, turn TurnContext) domain.ToolResult {
+	argsJSON := call.Function.Arguments
+	if argsJSON == "" {
+		argsJSON = "{}"
+	}
+	callTurn := turn
+	callTurn.CallID = call.ID
+	callTurn.Progress = func(callID string, msg string) {
+		if msg == "" {
+			return
+		}
+		s.events.ToolProgress(callID, msg)
+	}
+	return s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
+}
+
+// emitToolSettled applies the session-cumulative per-tool failure tally (issue #251 —
+// a coarse "which tools keep failing" signal that accumulates across rounds, off the
+// audit path) and emits the settled ToolResult + ToolState events for one call. The
+// tally counts EVERY failed result (bad-args and not-offered included — a tool the
+// model keeps misusing is a real drift signal), EXCEPT a result produced while the
+// turn is being cancelled (a user abort tearing down mid-tool is not a tool failure)
+// and EXCEPT a synthetic stub that never dispatched (a question-batch skip). MUST run
+// on the turn goroutine — the durable run-event sink is not goroutine-safe.
+func (s *Session) emitToolSettled(ctx context.Context, call models.ToolCallRequest, internalName string, res domain.ToolResult, endedAt int64, synthetic bool) {
+	failCount := 0
+	if !res.Ok && ctx.Err() == nil && !synthetic {
+		failCount = s.recordToolFailure(internalName)
+	}
+	s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: endedAt, FailureCount: failCount})
+	if res.Ok {
+		s.events.ToolState(call.ID, ToolStateDone)
+	} else {
+		s.events.ToolState(call.ID, ToolStateFailed)
+	}
+}
+
+// foldBreakerTallies folds one failed result into both circuit-breaker tallies. The
+// FINE signature is the CANONICALIZED args + error code (a byte-identical retry, even
+// with reordered keys). The COARSE signature strips pagination fields and counts ONLY
+// unrecoverable errors — the args-varied futile loop the fine tally misses (the model
+// paging a pruned artifact by offset). Ok results are a no-op. Not goroutine-safe
+// (mutates the shared maps): call it from the turn goroutine only, in call order, so
+// the breaker outcome is deterministic.
+func foldBreakerTallies(internalName, rawArgs string, res domain.ToolResult,
+	failureCounts, coarseCounts map[string]int, worstFine, worstCoarse **batchRepeat) {
+
+	if res.Ok {
+		return
+	}
+	errCode := ""
+	if res.Error != nil {
+		errCode = res.Error.Code
+	}
+	fineSig := failureSignature(internalName, rawArgs, errCode)
+	failureCounts[fineSig]++
+	if fc := failureCounts[fineSig]; *worstFine == nil || fc > (*worstFine).count {
+		*worstFine = &batchRepeat{name: internalName, count: fc, sig: fineSig, res: res}
+	}
+	if res.Error != nil && !res.Error.Recoverable && errCode != "" {
+		coarseSig := coarseFailureSignature(internalName, rawArgs, errCode)
+		coarseCounts[coarseSig]++
+		if cc := coarseCounts[coarseSig]; *worstCoarse == nil || cc > (*worstCoarse).count {
+			*worstCoarse = &batchRepeat{name: internalName, count: cc, sig: coarseSig, res: res}
+		}
+	}
+}
+
+// checkBreakerAbort applies the two mid-batch circuit-breaker thresholds and, on a
+// trip, aborts the turn (stubbing calls[from:], the not-yet-dispatched remainder).
+// Shared by the serial per-call check and the parallel-group boundary check so the
+// two paths can never drift.
+func (s *Session) checkBreakerAbort(turn TurnContext, calls []models.ToolCallRequest, from int, worstFine, worstCoarse *batchRepeat) (string, bool) {
+	if worstFine != nil && worstFine.count >= domain.RepeatFailureAbort {
+		msg := "Stopped: called " + worstFine.name + " " + itoa(worstFine.count) +
+			" times this turn with identical arguments, each failing the same way (" + repeatDetail(worstFine.res) +
+			"). Tell the user what's blocking and what you tried rather than repeating the call."
+		return s.abortForRepeat(turn, calls, from, "tool.repeat.abort", worstFine, msg), true
+	}
+	if worstCoarse != nil && worstCoarse.count >= domain.CoarseRepeatFailureAbort {
+		msg := "Stopped: called " + worstCoarse.name + " " + itoa(worstCoarse.count) +
+			" times this turn, each failing with the same unrecoverable error (" + repeatDetail(worstCoarse.res) +
+			") despite different arguments. Retrying an unrecoverable error can't succeed — tell the user what's blocking and stop rather than varying the arguments."
+		return s.abortForRepeat(turn, calls, from, "tool.repeat.abort.coarse", worstCoarse, msg), true
+	}
+	return "", false
+}
+
+// parallelRunEnd returns the end (exclusive) of the maximal run of parallel-safe
+// calls starting at c — the candidate concurrent group.
+func (s *Session) parallelRunEnd(calls []models.ToolCallRequest, c int, allowedSet map[string]struct{}) int {
+	e := c
+	for e < len(calls) && s.callParallelSafe(calls[e], allowedSet) {
+		e++
+	}
+	return e
+}
+
+// callParallelSafe reports whether one call may join a concurrent group: its
+// arguments parse to a real object (empty/degenerate args stay serial so the
+// truncation/invalid-args paths keep today's exact ordering and never race a
+// sibling), it carries no `wait` barrier, it survives the (dormant) allow-list gate,
+// and the runner classifies the tool as parallel-safe (Tool.Parallelizable + read
+// risk — an explicit per-tool opt-in, NOT every read tool: barrier reads like
+// terminal.awaitAll are deliberately excluded). A `wait` condition turns even an
+// opted-in extract into a BARRIER — it polls until a terminal settles, and a later
+// call in the batch may depend on that settle — so a wait-bearing call runs
+// serially. Only the production registry adapter implements parallelSafeRunner; a
+// test fake that doesn't keeps the fully-serial path, so serial-ordering tests are
+// unaffected.
+func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[string]struct{}) bool {
+	trimmed := strings.TrimSpace(call.Function.Arguments)
+	if trimmed == "" || trimmed == "{}" {
+		return false
+	}
+	var probe struct {
+		Wait json.RawMessage `json:"wait"`
+	}
+	if json.Unmarshal([]byte(call.Function.Arguments), &probe) != nil {
+		return false
+	}
+	if len(probe.Wait) > 0 && strings.TrimSpace(string(probe.Wait)) != "null" {
+		return false
+	}
+	internalName := s.resolveInternal(call.Function.Name)
+	if allowedSet != nil && !setHas(allowedSet, internalName) {
+		return false
+	}
+	runner, ok := s.deps.Tools.(parallelSafeRunner)
+	return ok && runner.ParallelSafe(internalName)
+}
+
+// runParallelGroup dispatches calls[from:to) CONCURRENTLY (bounded by
+// maxParallelToolDispatch) and streams each member's settled result the moment it
+// completes — the cockpit shows every member live: all spinners appear together, then
+// each row flips to done with its OWN true duration while siblings keep running,
+// instead of the whole group settling at once with the slowest call's wall-clock.
+//
+// Threading contract: workers run ONLY dispatchCall (audit/debuglog are
+// goroutine-safe; in-tool ToolProgress feeds the mutex-guarded pump and is no-op'd by
+// the durable sink). EVERY other emission — ToolCall/ToolResult/ToolState events,
+// transcript pushes, breaker folds — happens on this (the turn) goroutine: the
+// durable RunEventSink and the message/artifact state are not goroutine-safe. Result
+// events are emitted in COMPLETION order (that is the point — live settles, keyed by
+// call ID so the UI maps each to its row); transcript pushes and breaker folds then
+// run in CALL order, so the conversation the backend replays and the breaker outcome
+// are deterministic regardless of completion order.
+func (s *Session) runParallelGroup(ctx context.Context, calls []models.ToolCallRequest, from, to int, turn TurnContext,
+	failureCounts, coarseCounts map[string]int, worstFine, worstCoarse **batchRepeat) {
+
+	n := to - from
+
+	// Announce every member up front, in call order: all spinners appear together. A
+	// member queued behind the semaphore is "active" from the user's point of view —
+	// its duration honestly includes the queue wait.
+	s.events.Phase(domain.PhaseToolRunning)
+	names := make([]string, n)
+	for i := 0; i < n; i++ {
+		call := calls[from+i]
+		names[i] = s.resolveInternal(call.Function.Name)
+		s.events.ToolState(call.ID, ToolStateActive)
+		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: names[i], Args: call.Function.Arguments, StartedAt: domain.NowMS()})
+	}
+
+	type completion struct {
+		idx     int
+		res     domain.ToolResult
+		endedAt int64
+	}
+	// Buffered to n so a worker can never block on send; the loop below always
+	// drains exactly n, so no goroutine or channel outlives this call.
+	done := make(chan completion, n)
+	sem := make(chan struct{}, maxParallelToolDispatch)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			call := calls[from+i]
+			// A cancel that landed while earlier slots ran must stop the rest here:
+			// honor "no tool executes after Escape" even for members still queued
+			// behind the semaphore. The skipped call gets a structurally-valid
+			// CANCELLED result so its assistant tool_call still has a matching reply.
+			if ctx.Err() != nil {
+				done <- completion{i, cancelledToolStub(), domain.NowMS()}
+				return
+			}
+			// Each worker writes only its own send — results meet the turn goroutine
+			// exclusively through the channel. endedAt is captured HERE, at dispatch
+			// return, so the row's duration is this call's own (not the group's max).
+			done <- completion{i, s.dispatchCall(ctx, call, names[i], turn), domain.NowMS()}
+		}(i)
+	}
+
+	// Drain ALL n completions, emitting each settled result the moment it arrives.
+	outs := make([]completion, n)
+	for k := 0; k < n; k++ {
+		out := <-done
+		outs[out.idx] = out
+		s.emitToolSettled(ctx, calls[from+out.idx], names[out.idx], out.res, out.endedAt, false)
+	}
+
+	// Fold transcript + breaker bookkeeping in CALL order.
+	for i := 0; i < n; i++ {
+		call := calls[from+i]
+		s.pushMessage(models.ChatMessage{
+			Role:          "tool",
+			ToolCallID:    call.ID,
+			Name:          names[i],
+			StringContent: SerializeToolResult(outs[i].res, s.artifacts),
+		})
+		foldBreakerTallies(names[i], call.Function.Arguments, outs[i].res, failureCounts, coarseCounts, worstFine, worstCoarse)
+	}
 }
 
 // clampRunes truncates s to at most max runes (Unicode code points, matching the
@@ -1165,6 +1369,16 @@ func coarseFailureSignature(name, rawArgs, errCode string) string {
 	return failureSignature(name, stripped, errCode)
 }
 
+// cancelledToolStub is the structurally-valid result for a call that never executed
+// because the turn was cancelled — used both for the undispatched remainder of a
+// batch and for a parallel-group member still queued behind the semaphore when the
+// cancel landed.
+func cancelledToolStub() domain.ToolResult {
+	stub := domain.Fail("CANCELLED", "Turn cancelled.", domain.Unrecoverable())
+	stub.Summary = "Turn cancelled before this tool was executed."
+	return stub
+}
+
 // stubCancelledFrom pushes a structurally-valid CANCELLED tool result for every
 // call in calls[from:] (none of which executed), so each assistant tool_call keeps
 // a matching tool reply and the transcript replays cleanly. Returns the number of
@@ -1174,13 +1388,11 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) in
 	for r := from; r < len(calls); r++ {
 		pending := calls[r]
 		pendingName := s.resolveInternal(pending.Function.Name)
-		stub := domain.Fail("CANCELLED", "Turn cancelled.", domain.Unrecoverable())
-		stub.Summary = "Turn cancelled before this tool was executed."
 		s.pushMessage(models.ChatMessage{
 			Role:          "tool",
 			ToolCallID:    pending.ID,
 			Name:          pendingName,
-			StringContent: SerializeToolResult(stub, s.artifacts),
+			StringContent: SerializeToolResult(cancelledToolStub(), s.artifacts),
 		})
 		stubbed++
 	}
