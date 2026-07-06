@@ -297,6 +297,10 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 		}
 	}()
 
+	// 3. Dispatch observer (workflow-intelligence evidence capture) — the third
+	//    best-effort side-channel; panic-guarded inside, never breaks the call.
+	r.notifyObserver(ctx, name, args, tctx, outcome, res, durationMs)
+
 	return res
 }
 

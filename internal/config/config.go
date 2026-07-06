@@ -93,27 +93,34 @@ type AppConfig struct {
 
 	ProjectInstructions string
 	DebugLog            bool
+
+	// WorkflowIntelligence gates the client-owned workflow execution-graph layer
+	// (graph tools, dispatch observer, turn-context digests, backend workflow
+	// tasks). Rollout flag: the backend must carry the matching TurnContext
+	// contract before this is on, so it defaults off.
+	WorkflowIntelligence bool
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
 // pointers mean "not provided". Note: NO MediumModel, DeepSeekBaseURL override
 // (per the spec's ConfigOverrides field list).
 type ConfigOverrides struct {
-	ProjectPath         *string
-	StateDir            *string
-	ProjectID           *string
-	WindowID            *string
-	McpURL              *string
-	McpToken            *string
-	DeepSeekAPIKey      *string
-	LargeModel          *string
-	SmallModel          *string
-	Tier                *string
-	AutoApprove         *bool
-	Offline             *bool
-	DebugLog            *bool
-	LogDir              *string
-	ProjectInstructions *string
+	ProjectPath          *string
+	StateDir             *string
+	ProjectID            *string
+	WindowID             *string
+	McpURL               *string
+	McpToken             *string
+	DeepSeekAPIKey       *string
+	LargeModel           *string
+	SmallModel           *string
+	Tier                 *string
+	AutoApprove          *bool
+	Offline              *bool
+	DebugLog             *bool
+	LogDir               *string
+	ProjectInstructions  *string
+	WorkflowIntelligence *bool
 }
 
 // FirstString returns the first argument that is non-empty after TrimSpace,
@@ -244,6 +251,11 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	cfg.ProjectID = FirstString(deref(overrides.ProjectID), e.trustedOrOwnGet("DAINTREE_PROJECT_ID"))
 	cfg.WindowID = FirstString(deref(overrides.WindowID), e.trustedOrOwnGet("DAINTREE_WINDOW_ID"))
 	cfg.DebugLog = resolveBool(overrides.DebugLog, e.trustedOrOwnGet("DAINTREE_ASSISTANT_DEBUG_LOG"))
+	// The workflow-intelligence rollout flag is trustedOrOwn like DebugLog: a
+	// bound project's .env must not be able to flip a feature that changes what
+	// the backend is sent (workflow_state would 422 on a backend without the
+	// matching contract).
+	cfg.WorkflowIntelligence = resolveBool(overrides.WorkflowIntelligence, e.trustedOrOwnGet("DAINTREE_WORKFLOW_INTELLIGENCE"))
 
 	// --- trusted-only settings (NEVER from a loaded .env) ---
 	cfg.Tier = resolveTier(overrides.Tier, e.trustedGet("DAINTREE_ASSISTANT_TIER"))
@@ -348,22 +360,23 @@ func derefOr(p *string, fallback string) string {
 // a byte count; mcpUrl notes degraded mode when unset.
 func DescribeConfig(cfg AppConfig) map[string]string {
 	out := map[string]string{
-		"projectPath":     cfg.ProjectPath,
-		"stateDir":        cfg.StateDir,
-		"dbPath":          cfg.DBPath,
-		"logDir":          cfg.LogDir,
-		"deepseekApiKey":  redactSecret(cfg.DeepSeekAPIKey),
-		"deepseekBaseUrl": cfg.DeepSeekBaseURL,
-		"largeModel":      cfg.LargeModel,
-		"mediumModel":     cfg.MediumModel,
-		"smallModel":      cfg.SmallModel,
-		"mcpToken":        redactSecret(cfg.McpToken),
-		"projectId":       cfg.ProjectID,
-		"windowId":        placeholderUnset(cfg.WindowID),
-		"tier":            string(cfg.Tier),
-		"autoApprove":     strconv.FormatBool(cfg.AutoApprove),
-		"offline":         strconv.FormatBool(cfg.Offline),
-		"debugLog":        strconv.FormatBool(cfg.DebugLog),
+		"projectPath":          cfg.ProjectPath,
+		"stateDir":             cfg.StateDir,
+		"dbPath":               cfg.DBPath,
+		"logDir":               cfg.LogDir,
+		"deepseekApiKey":       redactSecret(cfg.DeepSeekAPIKey),
+		"deepseekBaseUrl":      cfg.DeepSeekBaseURL,
+		"largeModel":           cfg.LargeModel,
+		"mediumModel":          cfg.MediumModel,
+		"smallModel":           cfg.SmallModel,
+		"mcpToken":             redactSecret(cfg.McpToken),
+		"projectId":            cfg.ProjectID,
+		"windowId":             placeholderUnset(cfg.WindowID),
+		"tier":                 string(cfg.Tier),
+		"autoApprove":          strconv.FormatBool(cfg.AutoApprove),
+		"offline":              strconv.FormatBool(cfg.Offline),
+		"debugLog":             strconv.FormatBool(cfg.DebugLog),
+		"workflowIntelligence": strconv.FormatBool(cfg.WorkflowIntelligence),
 	}
 	if cfg.McpURL == "" {
 		out["mcpUrl"] = "(unset → degraded local mode)"

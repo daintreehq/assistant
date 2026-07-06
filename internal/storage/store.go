@@ -55,9 +55,11 @@ const (
 	// conversation gained reasoningContent (persist DeepSeek thinking-mode chain-of-thought
 	// for verbatim replay); to 9 when the runtime_state key/value table was added (the
 	// persistent-supervisor handoff surface: current session id + backend state token
-	// survive a process boundary) — a schema change is a hard-reset (make db-reset),
+	// survive a process boundary); to 10 when the workflow-intelligence graph layer
+	// landed (workflow_graphs + workflow_events + workflow_resource_links +
+	// workflow_reconcile_runs) — a schema change is a hard-reset (make db-reset),
 	// not a migration.
-	schemaUserVersion = 9
+	schemaUserVersion = 10
 )
 
 // Retention bounds the append-only tables. Each plain log table keeps the newer

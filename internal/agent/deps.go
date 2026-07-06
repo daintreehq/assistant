@@ -112,6 +112,19 @@ type AsyncInvocationLister interface {
 	ListLiveAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
 }
 
+// WorkflowDigestLister is the read-only workflow-intelligence seam for the
+// turn context (satisfied by *workflowgraph.Service): it renders the open
+// execution graphs as bounded, prompt-ready digests, re-read every round like
+// the async ledger, so the model always sees what it already planned/did/is
+// waiting on and never redoes completed work after a compaction or wake.
+// Optional: nil (the default, and always when DAINTREE_WORKFLOW_INTELLIGENCE
+// is off) omits the workflow_state block entirely — the wire stays
+// byte-identical to before the feature. Best-effort local read; never blocks
+// or breaks the turn.
+type WorkflowDigestLister interface {
+	WorkflowDigests(limit int) []backend.WorkflowDigest
+}
+
 // MemoryRecaller is the per-turn BM25 recall seam (satisfied by an adapter over
 // *storage.Store). At the START of every turn the session runs ONE keyword recall
 // seeded by the user's originating ask and injects the top hits into the merged
@@ -213,6 +226,10 @@ type SessionDeps struct {
 	// AsyncInvocationLister feeds the turn context's active-async-operations block,
 	// re-read every round like the workflow ledger (optional; nil ⇒ omitted).
 	AsyncInvocationLister AsyncInvocationLister
+	// WorkflowDigestLister feeds the turn context's workflow_state block with the
+	// open execution-graph digests, re-read every round (optional; nil ⇒ omitted —
+	// the default, and always when workflow intelligence is disabled).
+	WorkflowDigestLister WorkflowDigestLister
 	// OpenTerminalsFetcher returns a fresh, metadata-only snapshot of the open Daintree
 	// terminals for the runtime block's open-terminal inventory. Called ONCE per turn
 	// before the round loop (one terminal.list + one no-output terminal.getStatus) and

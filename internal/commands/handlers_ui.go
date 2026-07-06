@@ -12,6 +12,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
 )
 
 // UICommandResult is the structured return of the cockpit slash handler.
@@ -61,6 +62,9 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 		return UICommandResult{Handled: true, Title: "Grants", Text: grantsText(a)}
 	case "workflows":
 		return UICommandResult{Handled: true, Title: "Workflows", Text: workflowsText(a, arg)}
+	case "workflow":
+		title, text := workflowGraphCommand(ctx, a, rest)
+		return UICommandResult{Handled: true, Title: title, Text: text}
 	case "launches":
 		return UICommandResult{Handled: true, Title: "Launches", Text: launchesText(a)}
 	case "audit":
@@ -312,6 +316,19 @@ const workflowsDisplayCap = 20
 // status filter (pending|active|blocked|done|cancelled|failed). Newest-first, capped
 // at workflowsDisplayCap.
 func workflowsText(a *app.App, arg string) string {
+	// Workflow-intelligence graphs lead the card when the feature is on: they are
+	// the richer, plan-shaped view of open work; the flat ledger runs follow.
+	var graphHeader []string
+	if svc := a.WorkflowGraphs(); svc != nil {
+		if graphs, err := svc.List(workflowgraph.OpenStatuses, 5); err == nil && len(graphs) > 0 {
+			graphHeader = append(graphHeader, "Workflow graphs (/workflow <id> for detail):")
+			for _, g := range graphs {
+				graphHeader = append(graphHeader, workflowGraphSummaryLines(g)...)
+			}
+			graphHeader = append(graphHeader, "", "Workflow runs (ledger):")
+		}
+	}
+
 	// Normalize case so "/workflows Active" matches the stored lowercase status (a
 	// literal SQL WHERE) instead of silently returning "(none)".
 	status := strings.ToLower(strings.TrimSpace(arg))
@@ -321,12 +338,18 @@ func workflowsText(a *app.App, arg string) string {
 	case "all":
 		status = ""
 	}
+	withHeader := func(body string) string {
+		if len(graphHeader) == 0 {
+			return body
+		}
+		return strings.Join(append(graphHeader, body), "\n")
+	}
 	runs, err := a.Store.ListWorkflowRuns(status)
 	if err != nil {
-		return "Failed to list workflows: " + err.Error()
+		return withHeader("Failed to list workflows: " + err.Error())
 	}
 	if len(runs) == 0 {
-		return "(none)"
+		return withHeader("(none)")
 	}
 	more := 0
 	if len(runs) > workflowsDisplayCap {
@@ -341,7 +364,7 @@ func workflowsText(a *app.App, arg string) string {
 	if more > 0 {
 		rows = append(rows, fmt.Sprintf("(+%d more)", more))
 	}
-	return strings.Join(rows, "\n")
+	return withHeader(strings.Join(rows, "\n"))
 }
 
 // workflowRef appends the most identifying human-readable context for a run — issue

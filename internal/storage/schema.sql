@@ -312,6 +312,80 @@ CREATE TABLE IF NOT EXISTS async_invocations (
 CREATE INDEX IF NOT EXISTS idx_async_invocations_live  ON async_invocations(status, createdAt);
 CREATE INDEX IF NOT EXISTS idx_async_invocations_group ON async_invocations(groupId, status);
 
+-- 3.17 workflow_graphs — the workflow-intelligence execution-graph layer
+-- (client-owned durable DAGs; distinct from the flat workflow_runs ledger).
+-- The typed graph is an opaque JSON snapshot (serialized by
+-- internal/workflowgraph); status/goal are promoted for cheap list reads.
+-- revision is the optimistic-concurrency counter: every snapshot write names
+-- the revision it read and bumps it by one, so a stale backend patch can never
+-- silently clobber newer local state. Project-scoped like watchers: rows
+-- survive process boundaries; the next owner adopts them.
+CREATE TABLE IF NOT EXISTS workflow_graphs (
+  id            TEXT PRIMARY KEY,   -- wfg_<8hex>
+  status        TEXT NOT NULL,
+  goal          TEXT NOT NULL,
+  schemaVersion INTEGER NOT NULL,
+  revision      INTEGER NOT NULL,
+  snapshotJson  TEXT NOT NULL,
+  createdAt     INTEGER NOT NULL,
+  updatedAt     INTEGER NOT NULL,
+  completedAt   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_graphs_status ON workflow_graphs(status, updatedAt);
+
+-- 3.18 workflow_events — append-only projection log per graph (plan created,
+-- patch applied, evidence recorded, node transitioned, async settled). The
+-- snapshot's in-graph evidence ring is bounded; THIS table is the full history
+-- and the reconcile task's recent-events feed.
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id          TEXT PRIMARY KEY,     -- wge_<8hex>
+  workflowId  TEXT NOT NULL,
+  revision    INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  nodeId      TEXT,
+  summary     TEXT NOT NULL,
+  payloadJson TEXT NOT NULL,
+  payloadHash TEXT NOT NULL,
+  createdAt   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_wf ON workflow_events(workflowId, createdAt);
+
+-- 3.19 workflow_resource_links — the REVERSE index from an external resource
+-- (terminal, watcher, async handle, worktree, branch, PR, …) back to the graph
+-- (and optionally node) that owns it. An async completion or queue event
+-- carrying only its own id maps to the right node through this table, which is
+-- exactly what makes a wake turn continue the ORIGINAL workflow instead of
+-- treating the event as an isolated notification.
+CREATE TABLE IF NOT EXISTS workflow_resource_links (
+  workflowId   TEXT NOT NULL,
+  resourceType TEXT NOT NULL,
+  resourceRef  TEXT NOT NULL,
+  nodeId       TEXT,
+  label        TEXT,
+  status       TEXT,
+  metadataJson TEXT NOT NULL DEFAULT '{}',
+  createdAt    INTEGER NOT NULL,
+  updatedAt    INTEGER NOT NULL,
+  PRIMARY KEY (workflowId, resourceType, resourceRef)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_resource_ref ON workflow_resource_links(resourceType, resourceRef);
+
+-- 3.20 workflow_reconcile_runs — forensic record of each backend reconcile
+-- call: the revision it read, whether/where its patch landed, and bounded
+-- input/output hashes for debug-log correlation.
+CREATE TABLE IF NOT EXISTS workflow_reconcile_runs (
+  id              TEXT PRIMARY KEY, -- wrc_<8hex>
+  workflowId      TEXT NOT NULL,
+  baseRevision    INTEGER NOT NULL,
+  appliedRevision INTEGER,
+  status          TEXT NOT NULL,
+  inputHash       TEXT NOT NULL,
+  outputHash      TEXT,
+  warning         TEXT,
+  createdAt       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_reconcile_wf ON workflow_reconcile_runs(workflowId, createdAt);
+
 -- 3.16 runtime_state — tiny durable key/value pairs the runtime must hand across
 -- process boundaries for the persistent supervisor: the current conversation's
 -- session id (so a detached daemon continues the SAME transcript) and the

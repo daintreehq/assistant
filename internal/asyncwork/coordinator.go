@@ -121,11 +121,24 @@ type AdoptLister interface {
 	ListUnpublishedAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
 }
 
+// WorkflowSink routes a settled async invocation back to the
+// workflow-intelligence graph layer (evidence + node transition on the graph
+// that spawned it). Optional; nil ⇒ no-op. Implementations must be fast local
+// writes — the coordinator calls them synchronously on the tick goroutine,
+// panic-guarded, AFTER the completion event published (so a sink failure can
+// never lose a wake).
+type WorkflowSink interface {
+	NoteAsyncSettled(asyncID, finalStatus, summary, queueEventID string)
+}
+
 // Deps wires the Coordinator.
 type Deps struct {
 	Reader StatusReader
 	Queue  Queue
 	Store  Store
+	// WorkflowSink links settled invocations to the workflow graph layer
+	// (nil ⇒ disabled).
+	WorkflowSink WorkflowSink
 	// AdoptLister enables ownership-boot adoption: Start re-tracks the persisted
 	// live invocations and queues publish retries for finalized-but-unpublished
 	// ones. nil ⇒ Start begins empty (tests / no durable store).
@@ -1044,6 +1057,20 @@ func (c *Coordinator) publishGroup(ctx context.Context, now int64, gen int64, gr
 	for _, t := range final {
 		c.Deregister(t.rec.ID)
 	}
+
+	// 4. Workflow-graph back-link (best-effort, AFTER the publish so a sink
+	//    failure can never lose the wake). One call per member: each invocation
+	//    may belong to a different graph node.
+	if c.deps.WorkflowSink != nil {
+		func() {
+			defer func() { _ = recover() }()
+			for _, t := range final {
+				line, _, _ := summarizeInvocation(t)
+				c.deps.WorkflowSink.NoteAsyncSettled(t.rec.ID, string(t.finalStatus), line, ev.ID)
+			}
+		}()
+	}
+
 	c.trace("async.published", map[string]any{
 		"group": group, "asyncIds": ids, "eventId": ev.ID, "title": title,
 	})

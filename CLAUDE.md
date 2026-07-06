@@ -8,7 +8,7 @@ Guidance for working in this repository.
 > backward compatibility or version stable surfaces for their own sake — prefer
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
-> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 9) — on a
+> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 10) — on a
 > schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.
@@ -123,6 +123,11 @@ internal/
                  terminal.await.async): 1s pure-FSM polls, sibling coalescing, completion →
                  attention queue → autonomous wake. PROJECT-scoped: Start ADOPTS persisted live
                  rows and retries unconfirmed publishes (exactly-once via the group dedupe key)
+  workflowgraph/ the workflow-intelligence layer (gated on DAINTREE_WORKFLOW_INTELLIGENCE=1):
+                 typed durable execution graphs (DAG of nodes/edges/resources/blockers/evidence)
+                 with local validation, patch application under optimistic revisions, prompt
+                 digests, the dispatch observer, and adapters for the backend's stateless
+                 workflow_plan/reconcile/resume_digest tasks. See docs/WORKFLOW_INTELLIGENCE.md
   ipc/           flock ownership leases (owner.lock / daemon.lock), control-socket path
                  derivation, NDJSON request/response protocol (status/attach/credentials/shutdown)
   supervisor/    the persistent per-project daemon: lease contention loop, headless App spans,
@@ -353,7 +358,10 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
-`DAINTREE_ASSISTANT_LOG_DIR`. (The old `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` /
+`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the
+workflow execution-graph layer, off by default — needs a backend carrying the matching
+`workflow_state` turn-context contract + workflow tasks; see docs/WORKFLOW_INTELLIGENCE.md).
+(The old `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` /
 `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` knobs now configure the **backend** or feed the
 vestigial `internal/models` Router; the CLI no longer requires a model key to start.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
@@ -366,7 +374,9 @@ subdir when a project id is set).
 `docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
 story**), `docs/SUPERVISOR.md` (the persistent supervisor daemon: leases, adoption,
 autonomous wake turns, credential lifecycle), `docs/SKILLS.md` (how server-owned skills
-work + the local run-tracking tools),
+work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
+workflow execution-graph layer: graph model, tools, observer, async linking, and the
+backend contract it expects),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI).

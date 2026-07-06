@@ -48,19 +48,28 @@ type Store interface {
 	UpdateWorkflowRun(ctx context.Context, rec domain.WorkflowRunRecord) error
 }
 
-// Deps is the dependency set for the workflow family.
+// Deps is the dependency set for the workflow family. Graph is the
+// workflow-intelligence service; nil (the default when
+// DAINTREE_WORKFLOW_INTELLIGENCE is off) registers only the flat ledger tools,
+// keeping the projected toolset byte-identical to before the feature.
 type Deps struct {
 	Store Store
+	Graph GraphService
 }
 
-// Tools returns the workflow ledger tool family.
+// Tools returns the workflow tool family: the flat ledger tools always, plus
+// the execution-graph tools when the graph service is wired.
 func Tools(deps Deps) []*tools.Tool {
-	return []*tools.Tool{
+	out := []*tools.Tool{
 		newCreateTool(deps),
 		newGetTool(deps),
 		newListTool(deps),
 		newUpdateTool(deps),
 	}
+	if deps.Graph != nil {
+		out = append(out, graphTools(deps.Graph)...)
+	}
+	return out
 }
 
 // mutableFields are the create/update fields (everything but the id). Pointers
