@@ -14,7 +14,7 @@ import (
 // TestRegistryExactOrderedSet pins the canonical command order (issue #50).
 func TestRegistryExactOrderedSet(t *testing.T) {
 	want := []string{
-		"status", "inbox", "tools", "timers", "watchers", "grants", "workflows", "launches",
+		"status", "inbox", "tools", "timers", "watchers", "grants", "workflows", "workflow", "launches",
 		"audit", "explain", "models", "permissions", "approvals", "skills", "memory", "compact",
 		"clear", "doctor", "reconnect", "help", "quit",
 	}

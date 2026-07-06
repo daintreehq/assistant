@@ -28,6 +28,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
+	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
 )
 
 // AppHooks are the swappable UI/REPL callbacks. SetHooks merges partial updates
@@ -129,6 +130,11 @@ type App struct {
 	// tools capture it); STARTED only alongside the scheduler on interactive
 	// paths, so a one-shot run cleanly rejects async work instead of stranding it.
 	asyncCoordinator *asyncwork.Coordinator
+
+	// workflowService is the workflow-intelligence graph layer (nil unless
+	// DAINTREE_WORKFLOW_INTELLIGENCE=1). See workflowintel.go for the four seams
+	// it feeds (graph tools, dispatch observer, async sink, turn digests).
+	workflowService *workflowgraph.Service
 
 	// scratchStore is the session-scoped, pure in-memory scratch workspace the
 	// scratch.* tools drive. Initialized once per App (== once per session) before
@@ -394,10 +400,27 @@ func Create(opts CreateOptions) (*App, error) {
 	asyncTrace := func(event string, fields map[string]any) {
 		debuglog.LogDebug(debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}, event, fields)
 	}
+
+	// Workflow-intelligence service (nil when the flag is off). Built BEFORE the
+	// coordinator so async completions can route back to graph nodes, and before
+	// the registry so the tool builder can capture it; its registry-dependent
+	// closures deref a.Registry lazily (see workflowintel.go).
+	a.workflowService, err = a.buildWorkflowService()
+	if err != nil {
+		baseCancel()
+		_ = store.Close()
+		return nil, err
+	}
+	var workflowSink asyncwork.WorkflowSink
+	if a.workflowService != nil {
+		workflowSink = a.workflowService
+	}
+
 	a.asyncCoordinator = asyncwork.New(asyncwork.Deps{
-		Reader: asyncStatusReaderAdapter{r: terminalReaderAdapter{c: a.MCP}},
-		Queue:  a.Queue,
-		Store:  store,
+		Reader:       asyncStatusReaderAdapter{r: terminalReaderAdapter{c: a.MCP}},
+		Queue:        a.Queue,
+		Store:        store,
+		WorkflowSink: workflowSink,
 		// Ownership-boot adoption: when the coordinator starts it re-tracks the
 		// persisted live invocations a prior owner (cockpit or supervisor daemon)
 		// left polling, and retries any finalized-but-unpublished completion.
@@ -442,6 +465,14 @@ func Create(opts CreateOptions) (*App, error) {
 		baseCancel()
 		_ = store.Close()
 		return nil, err
+	}
+
+	// Workflow-intelligence dispatch observer: project completed tool calls into
+	// graph evidence/resource links. Installed AFTER the registry is fully built
+	// and asserted; a pure after-the-fact side-channel (panic-guarded in the
+	// registry) that can never alter dispatch behaviour.
+	if a.workflowService != nil {
+		a.Registry.SetDispatchObserver(workflowObserverAdapter{svc: a.workflowService})
 	}
 
 	// Skills are SERVER-OWNED: the backend's selector picks and injects runbooks. The
@@ -537,6 +568,10 @@ func Create(opts CreateOptions) (*App, error) {
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
+		// Open workflow-graph digests for the turn context's workflow_state block
+		// (nil unless DAINTREE_WORKFLOW_INTELLIGENCE=1 — the wire then stays
+		// byte-identical to the pre-feature request).
+		WorkflowDigestLister: a.workflowDigestLister(),
 		// Per-turn open-terminal inventory (issue #286): a fresh terminal.list +
 		// no-output terminal.getStatus snapshot attached to the runtime block so the model
 		// sees the live roster as inert data instead of discovering it mid-turn. Best-effort

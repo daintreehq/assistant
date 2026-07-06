@@ -1378,6 +1378,7 @@ func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.M
 		WorkflowRuns:    workflowRunStrings(s.workflowRunsForFooter()),
 		AsyncOperations: asyncInvocationStrings(s.asyncInvocationsForFooter()),
 		ResumedWatchers: resumedWatchers,
+		WorkflowState:   s.workflowDigestsForTurn(),
 	}
 	pinned := memoryStrings(s.pinnedMemoriesForFooter())
 	relevant := memoryStrings(recalled)
@@ -1558,6 +1559,19 @@ func (s *Session) asyncInvocationsForFooter() []domain.AsyncInvocationRecord {
 		rows = rows[:activeAsyncOperationsLimit]
 	}
 	return rows
+}
+
+// workflowDigestsForTurn reads the open workflow-graph digests for this round's
+// turn context, best-effort: a nil lister (the default, and always when
+// DAINTREE_WORKFLOW_INTELLIGENCE is off) or any read failure yields nil, so the
+// workflow_state block is simply omitted — the wire stays byte-identical to the
+// pre-feature request and a backend without the matching contract never sees
+// the field. The lister itself clamps and caps to the wire contract.
+func (s *Session) workflowDigestsForTurn() []backend.WorkflowDigest {
+	if s.deps.WorkflowDigestLister == nil {
+		return nil
+	}
+	return s.deps.WorkflowDigestLister.WorkflowDigests(backend.MaxWorkflowDigests)
 }
 
 // pinnedMemoriesForFooter reads the current pinned project memories for this round's

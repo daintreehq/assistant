@@ -6,6 +6,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/daemon"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
 )
 
 // dashboard_build.go builds an operations snapshot off the loop (called from a
@@ -61,6 +62,12 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 	if async, err := a.Store.ListLiveAsyncInvocations(); err == nil {
 		d.Async = async
 	}
+	// Open workflow-intelligence graphs (nil service ⇒ feature off ⇒ no section).
+	if svc := a.WorkflowGraphs(); svc != nil {
+		if graphs, err := svc.List(workflowgraph.OpenStatuses, 4); err == nil {
+			d.WorkflowGraphs = buildWorkflowGraphRows(graphs)
+		}
+	}
 	// Inbox: actionable severities only (severityAtLeast=attention), capped.
 	atLeast := domain.SeverityAttention
 	maxItems := 30
@@ -80,6 +87,29 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 
 	d.Agents = BuildAgentRows(watchers, previews, d.Launches)
 	return dashboardBuildResult{Dashboard: d, Previews: previews, FetchedAt: fetchedAt}
+}
+
+// buildWorkflowGraphRows reduces decoded graphs to the deck's row view. Pure
+// (no store access) so it stays unit-testable from graph literals.
+func buildWorkflowGraphRows(graphs []*workflowgraph.Graph) []WorkflowGraphRow {
+	out := make([]WorkflowGraphRow, 0, len(graphs))
+	for _, g := range graphs {
+		row := WorkflowGraphRow{
+			ID:       g.ID,
+			Goal:     g.Goal,
+			Status:   string(g.Status),
+			Progress: itoa(g.DoneNodeCount()) + "/" + itoa(len(g.Nodes)) + " done",
+			Blocked:  g.Status == workflowgraph.StatusBlocked || len(g.OpenBlockers()) > 0,
+		}
+		if cur := g.CurrentNode(); cur != nil {
+			row.Progress += " · current: " + cur.Title
+		}
+		if g.NextAction != nil {
+			row.Next = g.NextAction.Label
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // resolvePreviews returns the terminal previews in effect this build and the fetch

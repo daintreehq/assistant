@@ -47,6 +47,13 @@ func renderOperations(th theme.Theme, d Dashboard, panel PanelKey, now int64, wi
 	if show(PanelInbox) {
 		sections = append(sections, section("NEEDS ATTENTION", inboxLines(th, d, width, false), panel == PanelInbox))
 	}
+	// WORKFLOWS — open workflow-intelligence execution graphs (cap 3). Rides the
+	// watchers panel: a tracked workflow and its supervised agents are one
+	// "work in flight" story to the human. Vanishes entirely when the feature is
+	// off (no rows) — the deck is byte-identical to before.
+	if show(PanelWatchers) {
+		sections = append(sections, renderSection(th, "WORKFLOWS", workflowGraphLines(th, d, width)))
+	}
 	// AGENTS — every supervised agent (cap 6).
 	if show(PanelWatchers) {
 		sections = append(sections, section("AGENTS", agentLines(th, d, width, false), panel == PanelWatchers))
@@ -216,6 +223,40 @@ func asyncLines(th theme.Theme, d Dashboard, now int64, width int) []string {
 		}
 		out = append(out, truncateCells(line, width))
 		out = append(out, truncateCells(th.Dim().Render("  "+r.ID+" · "+string(r.Status)), width))
+	}
+	if more > 0 {
+		out = append(out, th.Dim().Render("  +"+itoa(more)+" more"))
+	}
+	return out
+}
+
+// workflowGraphLines renders the open execution graphs: a status marker, the
+// goal, then a dim second line with progress and the recommended next action —
+// the living-plan view, not a raw tool log.
+func workflowGraphLines(th theme.Theme, d Dashboard, width int) []string {
+	if len(d.WorkflowGraphs) == 0 {
+		return nil
+	}
+	const cap = 3
+	rows := d.WorkflowGraphs
+	more := 0
+	if len(rows) > cap {
+		more = len(rows) - cap
+		rows = rows[:cap]
+	}
+	var out []string
+	for _, w := range rows {
+		tone, marker := "accent", "●"
+		if w.Blocked {
+			tone, marker = "warning", "⚠"
+		}
+		goal := strings.Join(strings.Fields(w.Goal), " ")
+		out = append(out, truncateCells(styleFor(th, tone, marker)+" "+th.Body().Render(goal)+th.Muted().Render("  "+w.Status), width))
+		second := w.ID + " · " + w.Progress
+		if w.Next != "" {
+			second += " · next: " + strings.Join(strings.Fields(w.Next), " ")
+		}
+		out = append(out, truncateCells(th.Dim().Render("  "+second), width))
 	}
 	if more > 0 {
 		out = append(out, th.Dim().Render("  +"+itoa(more)+" more"))

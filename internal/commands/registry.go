@@ -29,6 +29,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "watchers", Syntax: "/watchers", Palette: "supervised agents", Help: "active watchers"},
 	{Name: "grants", Syntax: "/grants", Palette: "live automation grants", Help: "live automation grants (actor, uses, expiry)"},
 	{Name: "workflows", Syntax: "/workflows [status]", Palette: "workflow runs", Help: "workflow runs (default active; status or 'all')"},
+	{Name: "workflow", Syntax: "/workflow [id|sub]", Palette: "workflow graph detail", Help: "graph detail; resume | reconcile <id> | cancel <id>"},
 	{Name: "launches", Syntax: "/launches", Palette: "recent agent launches", Help: "recent agent-spawn sagas (newest first)"},
 	{Name: "audit", Syntax: "/audit [n]", Palette: "recent tool calls · export", Help: "recent calls (def 15); export <json|csv>"},
 	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},

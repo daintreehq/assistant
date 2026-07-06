@@ -25,6 +25,22 @@ type Dashboard struct {
 	// Async is the live async-futures ledger (terminal.run.async /
 	// terminal.await.async invocations still being polled), oldest first.
 	Async []domain.AsyncInvocationRecord
+	// WorkflowGraphs are the open workflow-intelligence execution graphs
+	// (empty unless DAINTREE_WORKFLOW_INTELLIGENCE=1), newest first — the
+	// living-plan view the WORKFLOWS deck section renders.
+	WorkflowGraphs []WorkflowGraphRow
+}
+
+// WorkflowGraphRow is one open execution graph reduced to the deck's
+// two-line view. Built off the loop from the decoded snapshot; the deck only
+// formats strings (the UI is never a second source of truth).
+type WorkflowGraphRow struct {
+	ID       string
+	Goal     string
+	Status   string
+	Progress string // "3/5 done · current: Run tests"
+	Next     string // next-action label ("" when none)
+	Blocked  bool   // status blocked OR open blockers present
 }
 
 // AgentRow is one supervised agent: one watcher merged with its watched terminal's

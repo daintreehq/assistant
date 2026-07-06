@@ -23,6 +23,12 @@ const (
 	PrefixAgentLaunch = "agt_"
 	PrefixScratch     = "scr_"
 	PrefixAsync       = "asy_"
+	// Workflow-intelligence graph layer (distinct from the flat wfr_ ledger).
+	PrefixWorkflowGraph      = "wfg_"
+	PrefixWorkflowNode       = "wfn_"
+	PrefixWorkflowGraphEvent = "wge_"
+	PrefixWorkflowResource   = "wrs_"
+	PrefixReconcileRun       = "wrc_"
 	// PrefixArtifact tags an oversized tool-result overflow payload. Longer than the
 	// others for historical continuity — the truncation stub + artifact.read have
 	// always surfaced this id as "artifact_<8hex>", so the literal shape is wire.

@@ -152,6 +152,77 @@ type WorkflowRunRecord struct {
 	CompletedAt       *int64            `json:"completedAt,omitempty"`
 }
 
+// WorkflowGraphRecord is the durable row of one workflow-intelligence execution
+// graph (the DAG layer, distinct from the flat wfr_ workflow_runs ledger). The
+// graph itself is stored as an opaque JSON snapshot (SnapshotJson, serialized by
+// internal/workflowgraph) so the typed model can evolve without a schema change;
+// the promoted columns (status/goal/revision) exist for cheap list/filter reads.
+// Revision is the optimistic-concurrency counter: every snapshot write must name
+// the revision it read, and a mismatch is a typed conflict — never a silent
+// last-writer-wins over a backend-computed patch.
+type WorkflowGraphRecord struct {
+	ID            string `json:"id"` // wfg_<uuid8>
+	Status        string `json:"status"`
+	Goal          string `json:"goal"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Revision      int64  `json:"revision"`
+	SnapshotJson  string `json:"snapshotJson"`
+	CreatedAt     int64  `json:"createdAt"`
+	UpdatedAt     int64  `json:"updatedAt"`
+	CompletedAt   *int64 `json:"completedAt,omitempty"`
+}
+
+// WorkflowGraphEventRecord is one append-only projection event over a workflow
+// graph: plan created, patch applied, evidence recorded, resource linked, node
+// transitioned, async settled. Revision is the graph revision AFTER the event's
+// write (0 for events that did not bump the snapshot). PayloadHash is a stable
+// content hash for dedupe/inspection when the payload is archived elsewhere.
+type WorkflowGraphEventRecord struct {
+	ID          string  `json:"id"` // wge_<uuid8>
+	WorkflowID  string  `json:"workflowId"`
+	Revision    int64   `json:"revision"`
+	Kind        string  `json:"kind"`
+	NodeID      *string `json:"nodeId,omitempty"`
+	Summary     string  `json:"summary"`
+	PayloadJson string  `json:"payloadJson"`
+	PayloadHash string  `json:"payloadHash"`
+	CreatedAt   int64   `json:"createdAt"`
+}
+
+// WorkflowResourceLinkRecord indexes one external resource (terminal, watcher,
+// async handle, worktree, branch, PR, …) against a workflow graph (and
+// optionally one node). It is the REVERSE index the snapshot alone can't serve
+// cheaply: an async completion or queue event carrying only its own id maps
+// back to the owning graph/node through this table. Natural key
+// (workflowId, resourceType, resourceRef) — re-linking updates in place.
+type WorkflowResourceLinkRecord struct {
+	WorkflowID   string  `json:"workflowId"`
+	ResourceType string  `json:"resourceType"` // terminal|agent|worktree|branch|pr|issue|watcher|timer|async|queue_event|artifact|memory|grant
+	ResourceRef  string  `json:"resourceRef"`
+	NodeID       *string `json:"nodeId,omitempty"`
+	Label        *string `json:"label,omitempty"`
+	Status       *string `json:"status,omitempty"`
+	MetadataJson string  `json:"metadataJson"`
+	CreatedAt    int64   `json:"createdAt"`
+	UpdatedAt    int64   `json:"updatedAt"`
+}
+
+// WorkflowReconcileRunRecord is the forensic row of one backend reconcile call:
+// what revision it read, whether/where its patch landed, and bounded hashes of
+// the input/output for log correlation. Status: started|applied|rejected|
+// conflict|failed|preview.
+type WorkflowReconcileRunRecord struct {
+	ID              string  `json:"id"` // wrc_<uuid8>
+	WorkflowID      string  `json:"workflowId"`
+	BaseRevision    int64   `json:"baseRevision"`
+	AppliedRevision *int64  `json:"appliedRevision,omitempty"`
+	Status          string  `json:"status"`
+	InputHash       string  `json:"inputHash"`
+	OutputHash      *string `json:"outputHash,omitempty"`
+	Warning         *string `json:"warning,omitempty"`
+	CreatedAt       int64   `json:"createdAt"`
+}
+
 // MemoryRecord is one stored memory. forget is a soft-delete (stamp DeletedAt);
 // recall/list filter DeletedAt IS NULL. One DB == one project (no projectId).
 type MemoryRecord struct {

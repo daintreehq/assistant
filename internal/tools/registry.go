@@ -28,6 +28,9 @@ type Registry struct {
 	order          []string // registration order — the deterministic projection order
 	wireToInternal map[string]string
 	internalToWire map[string]string
+	// observer, when set, receives every completed dispatch (observer.go). A
+	// pure after-the-fact side-channel — never consulted before/while a tool runs.
+	observer DispatchObserver
 }
 
 // NewRegistry returns an empty registry.

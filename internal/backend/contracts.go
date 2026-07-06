@@ -218,6 +218,101 @@ type TurnContext struct {
 	// surfaced once, on the first turn. Replaces the pre-supervisor
 	// session_ended_watchers field; the backend contract renames in lockstep.
 	ResumedWatchers []string `json:"resumed_watchers,omitempty"`
+	// WorkflowState carries compact digests of the ACTIVE client-owned workflow
+	// graphs (the workflow-intelligence layer), re-read every round like the
+	// async ledger, so the model always sees what it already planned, did, and
+	// is waiting on — and never redoes completed work after a compaction or
+	// wake. Populated ONLY when workflow intelligence is enabled
+	// (DAINTREE_WORKFLOW_INTELLIGENCE=1): the backend validates TurnContext with
+	// extra="forbid", so a backend without the matching contract must never see
+	// the field (omitempty keeps the wire byte-identical when the feature is off).
+	WorkflowState []WorkflowDigest `json:"workflow_state,omitempty"`
+}
+
+// WorkflowDigest is one bounded, prompt-ready summary of a workflow graph.
+// Field names/limits MUST mirror the backend's WorkflowDigest pydantic model
+// (contracts/extensions.py): the backend validates BEFORE it sanitizes, so an
+// over-limit field would 422 the whole turn — the CLI clamps first (Clamp).
+type WorkflowDigest struct {
+	ID          string   `json:"id"`
+	Goal        string   `json:"goal"`
+	Status      string   `json:"status"`
+	Progress    string   `json:"progress,omitempty"`
+	ActiveNodes []string `json:"active_nodes,omitempty"`
+	Resources   []string `json:"resources,omitempty"`
+	Blockers    []string `json:"blockers,omitempty"`
+	NextAction  string   `json:"next_action,omitempty"`
+	LastEvent   string   `json:"last_event,omitempty"`
+}
+
+// Per-field rune limits for WorkflowDigest (mirror the backend max_length
+// constraints) plus the digest-list caps the rollout contract fixes.
+const (
+	workflowDigestIDMax   = 128
+	workflowDigestGoalMax = 512
+	workflowDigestStatMax = 64
+	workflowDigestLineMax = 512
+
+	// MaxWorkflowDigests caps how many workflow digests ride one turn context.
+	MaxWorkflowDigests = 5
+	// MaxWorkflowStateBytes caps the serialized workflow_state block; whole
+	// trailing digests are dropped (never a partial cut) until it fits.
+	MaxWorkflowStateBytes = 16384
+)
+
+// Clamp returns a copy with every string bounded to its backend max_length so
+// a verbose graph field can never 422 the turn.
+func (d WorkflowDigest) Clamp() WorkflowDigest {
+	d.ID = clampRunes(d.ID, workflowDigestIDMax)
+	d.Goal = clampRunes(d.Goal, workflowDigestGoalMax)
+	d.Status = clampRunes(d.Status, workflowDigestStatMax)
+	d.Progress = clampRunes(d.Progress, workflowDigestLineMax)
+	d.NextAction = clampRunes(d.NextAction, workflowDigestLineMax)
+	d.LastEvent = clampRunes(d.LastEvent, workflowDigestLineMax)
+	d.ActiveNodes = clampLines(d.ActiveNodes, workflowDigestLineMax)
+	d.Resources = clampLines(d.Resources, workflowDigestLineMax)
+	d.Blockers = clampLines(d.Blockers, workflowDigestLineMax)
+	return d
+}
+
+// clampLines rune-bounds every entry of a string list (nil-safe, in a copy).
+func clampLines(in []string, max int) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = clampRunes(s, max)
+	}
+	return out
+}
+
+// CapWorkflowDigests enforces the digest-list contract: clamp every digest,
+// keep at most MaxWorkflowDigests, then drop WHOLE trailing digests until the
+// serialized block fits MaxWorkflowStateBytes. Order is the caller's ranking
+// (most relevant first), so the tail is always the casualty.
+func CapWorkflowDigests(in []WorkflowDigest) []WorkflowDigest {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]WorkflowDigest, 0, len(in))
+	for _, d := range in {
+		out = append(out, d.Clamp())
+		if len(out) == MaxWorkflowDigests {
+			break
+		}
+	}
+	for len(out) > 0 {
+		b, err := json.Marshal(out)
+		if err == nil && len(b) <= MaxWorkflowStateBytes {
+			break
+		}
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Memories splits recalled context into pinned (durable) and relevant (per-turn
