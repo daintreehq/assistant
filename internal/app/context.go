@@ -64,19 +64,20 @@ func (a *App) activeWorktreeForFooter() string {
 	return a.cachedActiveWorktree
 }
 
-// sessionEndedWatchersForFooter returns the carried-over titles of watchers a prior
-// session left running (the store recorded them at open-time), but ONLY while the
-// scheduler is active — the interactive path where the offer to re-create them is
-// meaningful. The footer's one-time `# Session note` reads it once, on the first turn, via
-// SessionDeps.SessionEndedWatchers. a.scheduler is nil until StartScheduler runs, which
-// precedes the first interactive turn — so an interactive run returns the titles and a
-// one-shot/non-interactive run (no scheduler) returns nil. Reads a.scheduler the same
-// lock-free way PromptContext/buildContext do (StartScheduler happens-before turn one).
-func (a *App) sessionEndedWatchersForFooter() []string {
+// resumedWatchersForFooter returns the titles of live watchers this process adopted
+// from a prior owner at ownership boot, but ONLY while the scheduler is active — the
+// paths where those watchers are actually being supervised again. The footer's
+// one-time `# Session note` reads it once, on the first turn, via
+// SessionDeps.ResumedWatchers. a.scheduler is nil until StartScheduler runs, which
+// precedes the first interactive turn — so an interactive/daemon run returns the
+// titles and a one-shot run (no scheduler, nothing resumed) returns nil. Reads
+// a.scheduler the same lock-free way PromptContext/buildContext do (StartScheduler
+// happens-before turn one).
+func (a *App) resumedWatchersForFooter() []string {
 	if a.scheduler == nil {
 		return nil
 	}
-	return a.Store.SessionEndedWatchers()
+	return a.ownership.ResumedWatcherTitles
 }
 
 // mcpStatusLine renders the connected/not-connected one-liner.

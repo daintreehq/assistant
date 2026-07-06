@@ -167,13 +167,13 @@ type Session struct {
 	// zeroed. Single-flight Send serializes turns, so no lock guards it.
 	pendingDropCount int
 
-	// sessionEndedNoteShown gates the one-time `# Session note` footer block (watchers a
-	// prior session left running that store-open cancelled). Set true on the FIRST turn
-	// after the titles are read into that turn's footer, so the note surfaces during the
+	// resumedNoteShown gates the one-time `# Session note` footer block (live watchers
+	// adopted from a prior owner at ownership boot). Set true on the FIRST turn after
+	// the titles are read into that turn's footer, so the note surfaces during the
 	// first turn (every round of it) and never again — the footer equivalent of the old
 	// message[1] consume, minus the RefreshRuntimeContext. Mirrors pendingDropCount:
 	// single-flight Send serializes turns, so no lock guards it.
-	sessionEndedNoteShown bool
+	resumedNoteShown bool
 
 	// pendingInjections buffers messages the human typed WHILE a turn was in flight
 	// (InjectPrompt), guarded by s.mu. The turn folds them into the live history at
@@ -214,6 +214,10 @@ func NewSession(deps SessionDeps) *Session {
 		runRef:           deps.RunRef,
 		bgCtx:            deps.BackgroundCtx,
 		pendingDropCount: deps.DroppedRehydrateRows,
+		// A resumed session replays the persisted opaque token so the backend's
+		// skill selector continues where the previous owner left off ("" ⇒ fresh,
+		// the backend just re-runs selection).
+		backendState: deps.InitialBackendState,
 	}
 	// Detached distill work parents off the app-scoped context; fall back to
 	// Background when unwired (tests) so the goroutine still has a valid parent.
@@ -371,8 +375,12 @@ func (s *Session) clearLocked() {
 	// continuation — it never re-injects the runbook the cleared conversation no longer
 	// carries, so the model starts a skill-shaped task (e.g. multi-agent orchestration)
 	// with no runbook and, thinking-off, does nothing. Nothing from before /clear may
-	// persist, and this token is the one piece that leaked.
+	// persist, and this token is the one piece that leaked. Clear the durable mirror
+	// too, or a post-/clear handover would resurrect the dropped token.
 	s.backendState = ""
+	if s.deps.BackendStateStore != nil {
+		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, "")
+	}
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
@@ -540,19 +548,19 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	//     or a query error all yield nil: a recall failure must never break the turn.
 	recalledMemories := s.recallMemories(userInput)
 
-	// 3c. Session-ended-watchers note: surface the one-time carryover (watchers a prior
-	//     session left running that store.Open cancelled) on the FIRST turn only, then
-	//     never again this session — the footer equivalent of the old message[1] consume.
-	//     Read ONCE here, gated by the shown flag, into a turn-local so the note rides
-	//     EVERY round of this turn (the footer is rebuilt per round) and no later turn. The
-	//     provider is scheduler-gated at the app seam (nil on non-interactive paths where
-	//     re-creating watchers is moot). Set the flag even when the provider yields nothing,
-	//     so a no-watcher first turn doesn't re-probe every later turn — harmless either way.
-	var sessionEndedWatchers []string
-	if !s.sessionEndedNoteShown {
-		s.sessionEndedNoteShown = true
-		if s.deps.SessionEndedWatchers != nil {
-			sessionEndedWatchers = s.deps.SessionEndedWatchers()
+	// 3c. Resumed-watchers note: surface the one-time heads-up (live watchers adopted
+	//     from a prior owner at ownership boot) on the FIRST turn only, then never again
+	//     this session — the footer equivalent of the old message[1] consume. Read ONCE
+	//     here, gated by the shown flag, into a turn-local so the note rides EVERY round
+	//     of this turn (the footer is rebuilt per round) and no later turn. The provider
+	//     is scheduler-gated at the app seam (nil on non-interactive paths where the
+	//     supervision engines aren't running). Set the flag even when the provider yields
+	//     nothing, so a no-watcher first turn doesn't re-probe every later turn.
+	var resumedWatchers []string
+	if !s.resumedNoteShown {
+		s.resumedNoteShown = true
+		if s.deps.ResumedWatchers != nil {
+			resumedWatchers = s.deps.ResumedWatchers()
 		}
 	}
 
@@ -708,7 +716,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				ToolChoice: "auto",
 			},
 			Runtime:    s.buildRuntimeContext(openTerminals),
-			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, sessionEndedWatchers),
+			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
 		}
@@ -1235,13 +1243,21 @@ func (s *Session) backendStatePtr() *string {
 
 // applyStreamMeta stores the refreshed state token + version markers from the
 // stream's meta event and surfaces the skill outcome to the UI. The CLI treats the
-// state token as opaque (store-and-replay only).
+// state token as opaque (store-and-replay only). The token is also mirrored to
+// durable storage (best-effort) so a DIFFERENT process — the supervisor daemon
+// picking this session up after a detach, or the next cockpit after the daemon —
+// replays the same token instead of forcing the backend to re-run skill selection
+// from scratch mid-conversation.
 func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	s.mu.Lock()
 	s.backendState = m.State
 	s.catalogRevision = m.CatalogRevision
 	s.promptVersion = m.PromptVersion
 	s.mu.Unlock()
+	if s.deps.BackendStateStore != nil {
+		// Side-channel: a persistence failure must never break the live stream.
+		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, m.State)
+	}
 	s.emitSkillsMeta(m.Skills)
 }
 
@@ -1354,14 +1370,14 @@ func (s *Session) buildRuntimeContext(openTerminals []backend.OpenTerminal) *bac
 // buildTurnContext maps the per-turn facts (formerly the prose turn footer) to the
 // backend's structured turn block. The backend renders the footer; the CLI sends
 // data. Per-round reads (workflow runs, pinned memories) mirror the old footer's
-// freshness; recalled memories + session-ended watchers are the per-turn snapshot.
-func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.MemoryRecord, sessionEndedWatchers []string) *backend.TurnContext {
+// freshness; recalled memories + resumed watchers are the per-turn snapshot.
+func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.MemoryRecord, resumedWatchers []string) *backend.TurnContext {
 	tc := &backend.TurnContext{
-		Goal:                 strings.TrimSpace(goal),
-		IsWake:               isWake,
-		WorkflowRuns:         workflowRunStrings(s.workflowRunsForFooter()),
-		AsyncOperations:      asyncInvocationStrings(s.asyncInvocationsForFooter()),
-		SessionEndedWatchers: sessionEndedWatchers,
+		Goal:            strings.TrimSpace(goal),
+		IsWake:          isWake,
+		WorkflowRuns:    workflowRunStrings(s.workflowRunsForFooter()),
+		AsyncOperations: asyncInvocationStrings(s.asyncInvocationsForFooter()),
+		ResumedWatchers: resumedWatchers,
 	}
 	pinned := memoryStrings(s.pinnedMemoriesForFooter())
 	relevant := memoryStrings(recalled)

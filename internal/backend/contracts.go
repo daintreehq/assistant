@@ -211,9 +211,13 @@ type TurnContext struct {
 	// AsyncOperations are the live runtime-owned async invocations (one
 	// pre-formatted line each), re-read every round so the model always sees its
 	// own in-flight async work — and never re-issues it after a compaction.
-	AsyncOperations      []string  `json:"async_operations,omitempty"`
-	Memories             *Memories `json:"memories,omitempty"`
-	SessionEndedWatchers []string  `json:"session_ended_watchers,omitempty"`
+	AsyncOperations []string  `json:"async_operations,omitempty"`
+	Memories        *Memories `json:"memories,omitempty"`
+	// ResumedWatchers are the titles of live watchers adopted from a prior owner
+	// at ownership boot (project-scoped supervision resumed automatically) —
+	// surfaced once, on the first turn. Replaces the pre-supervisor
+	// session_ended_watchers field; the backend contract renames in lockstep.
+	ResumedWatchers []string `json:"resumed_watchers,omitempty"`
 }
 
 // Memories splits recalled context into pinned (durable) and relevant (per-turn

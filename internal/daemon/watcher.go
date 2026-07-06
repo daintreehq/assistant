@@ -79,6 +79,9 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	}
 
 	outcomes := make([]CheckOutcome, 0, len(targets))
+	// Deferred per-terminal publishes: emitted only if the finalize claim wins
+	// (see the flush after ClaimDueWatcher).
+	var pendingPublishes []domain.QueuePublishArgs
 
 	// allQuietSubscribed gates the widened reconcile cadence: it stays true only if
 	// EVERY target is subscribed and currently quiet (waiting/idle). One working,
@@ -183,7 +186,11 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			allQuietSubscribed = false
 		}
 
-		// Publish.
+		// Collect the publish — flushed AFTER the finalize claim below. Claim-first
+		// ordering means a watcher cancelled mid-check never emits its event, and a
+		// crash between the claim and the publish loses nothing durable: the terminal
+		// state that produced the classification still holds, so the next owner's
+		// re-check regenerates the same event under the same stable dedupe key.
 		if outcome.ShouldPublish {
 			severity := outcome.Severity
 			// Supervisor promotion: surface a clean completion (normally "done").
@@ -194,7 +201,7 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			if len(targets) > 1 {
 				pubSummary = fmt.Sprintf("[%s] %s", terminalID, outcome.Summary)
 			}
-			_ = ctx.Queue.Publish(domain.QueuePublishArgs{
+			pendingPublishes = append(pendingPublishes, domain.QueuePublishArgs{
 				Source:             domain.SourceTerminalWatcher,
 				Severity:           severity,
 				Title:              fmt.Sprintf("%s: %s", rec.Title, humanize(outcome.Classification)),
@@ -286,6 +293,15 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		"optionsJson":        string(optsJSON),
 		"status":             status,
 	})
+	// Flush the deferred publishes only on a WON claim: a lost claim means a
+	// concurrent cancel finalized this watcher mid-check, and a cancelled
+	// watcher must never wake anyone. Publish-after-claim also removes the old
+	// crash window where an event landed for a check that never finalized.
+	if claimed {
+		for _, args := range pendingPublishes {
+			_ = ctx.Queue.Publish(args)
+		}
+	}
 	if claimed && stop {
 		_, _ = ctx.Store.RevokeGrantsByActor(rec.ID, now)
 		// Advance the linked workflow ledger row as this supervisor terminates, so

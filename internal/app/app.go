@@ -125,6 +125,12 @@ type App struct {
 	// runs before a.Session exists; the family captures this concrete store directly.
 	scratchStore *scratchx.Store
 
+	// ownership is the owner-boot reconciliation summary (what this process adopted
+	// when it took the project DB over): resumed watchers/async, unpublished
+	// completions, carried-over inbox. Immutable after Create; feeds the one-time
+	// resumed-watchers session note and the attach-time UI surfaces.
+	ownership storage.OwnershipSummary
+
 	// baseCtx is the APP-SCOPED background context for detached work that outlives a
 	// single turn (e.g. terminal.extract.async) but must NOT outlive the App. It is
 	// cancelled in Shutdown so a closing assistant tears down its background jobs
@@ -243,6 +249,17 @@ func Create(opts CreateOptions) (*App, error) {
 		}
 	}
 
+	// Owner-boot reconciliation. The caller (cli/daemon runtime) holds the project
+	// owner lock before Create, so this process is the DB's only owner: adopt the
+	// live supervision a prior owner left behind (watchers keep running, async
+	// futures keep polling, the inbox carries over) and clear only the dead spawn
+	// sagas. The summary feeds the one-time resumed-watchers session note.
+	ownership, err := store.BeginOwnership(domain.NowMS())
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("ownership boot: %w", err)
+	}
+
 	sessionID := opts.SessionID
 	if sessionID == "" {
 		sessionID = domain.NewID("ses_")
@@ -258,6 +275,7 @@ func Create(opts CreateOptions) (*App, error) {
 		baseCtx:     baseCtx,
 		baseCancel:  baseCancel,
 		InitialTier: cfg.Tier,
+		ownership:   ownership,
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
@@ -337,6 +355,10 @@ func Create(opts CreateOptions) (*App, error) {
 		Reader: asyncStatusReaderAdapter{r: terminalReaderAdapter{c: a.MCP}},
 		Queue:  a.Queue,
 		Store:  store,
+		// Ownership-boot adoption: when the coordinator starts it re-tracks the
+		// persisted live invocations a prior owner (cockpit or supervisor daemon)
+		// left polling, and retries any finalized-but-unpublished completion.
+		AdoptLister: store,
 		Notify: func() {
 			if s := a.scheduler; s != nil {
 				s.NotifyNow()
@@ -457,12 +479,18 @@ func Create(opts CreateOptions) (*App, error) {
 		MemoryRecaller:     memoryRecallerAdapter{s: store},
 		PinnedMemoryLister: pinnedMemoryListerAdapter{s: store},
 		// The footer's volatile-state seams (issue #263): the worktree label and the
-		// one-time session-ended note. Both are bound App methods so the wiring is testable
-		// directly; see activeWorktreeForFooter / sessionEndedWatchersForFooter.
-		ActiveWorktreeFunc:   a.activeWorktreeForFooter,
-		SessionEndedWatchers: a.sessionEndedWatchersForFooter,
-		ArtifactPersister:    store,
-		WorkflowRunLister:    store,
+		// one-time resumed-watchers note. Both are bound App methods so the wiring is
+		// testable directly; see activeWorktreeForFooter / resumedWatchersForFooter.
+		ActiveWorktreeFunc: a.activeWorktreeForFooter,
+		ResumedWatchers:    a.resumedWatchersForFooter,
+		ArtifactPersister:  store,
+		WorkflowRunLister:  store,
+		// Durable mirror + seed for the opaque backend state token, so a session
+		// handed over between processes (cockpit ↔ supervisor daemon) keeps the
+		// backend's skill-selection cadence. Seeded only on a genuine resume: a
+		// fresh session id has no persisted token.
+		BackendStateStore:   store,
+		InitialBackendState: loadPersistedBackendState(store, sessionID, opts.SessionID != ""),
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
@@ -492,6 +520,36 @@ func Create(opts CreateOptions) (*App, error) {
 	})
 
 	return a, nil
+}
+
+// loadPersistedBackendState loads the durable backend state token for a RESUMED
+// session (resumed == the caller passed an explicit session id, i.e. it intends
+// to continue an existing transcript). A fresh session id never has a token, so
+// the read is skipped — and a stale token from an unrelated prior session can
+// never leak into a new conversation. Best-effort: any read failure just means
+// the backend re-runs skill selection.
+func loadPersistedBackendState(store *storage.Store, sessionID string, resumed bool) string {
+	if !resumed {
+		return ""
+	}
+	token, err := store.GetSessionBackendState(sessionID)
+	if err != nil {
+		return ""
+	}
+	return token
+}
+
+// Ownership returns the owner-boot reconciliation summary captured at Create.
+func (a *App) Ownership() storage.OwnershipSummary { return a.ownership }
+
+// AdoptAsCurrentSession durably marks this App's session as the project's
+// current conversation — the one a detached supervisor daemon continues with
+// autonomous wake turns. Interactive paths (cockpit, classic REPL, host) call
+// it once after Create; one-shot and doctor runs deliberately do NOT, so a
+// script probe never hijacks the conversation the daemon is supervising.
+func (a *App) AdoptAsCurrentSession() {
+	// Best-effort: continuity is a convenience, never worth failing boot over.
+	_ = a.Store.PutRuntimeState(storage.RuntimeKeyCurrentSession, a.SessionID)
 }
 
 // debugLogAdapter routes the router's debug trace through the global debug log.

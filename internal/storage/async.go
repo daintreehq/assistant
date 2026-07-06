@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -156,22 +157,40 @@ func (s *Store) ClaimLiveAsyncInvocation(id string, patch map[string]any) (bool,
 	return n > 0, err
 }
 
-// cancelStaleAsyncInvocations runs on DB open (session boundary): every
-// non-terminal invocation from a prior session is abandoned. Async work is
-// session-scoped exactly like watchers — the conversation that started it is
-// over, the inbox it would complete into was just wiped (ResolveAllOpenEvents),
-// and the foreground-only coordinator that owned it is gone — so a new session
-// never inherits (or silently resumes) a prior session's async futures.
-func (s *Store) cancelStaleAsyncInvocations(now int64) error {
-	_, err := s.db.Exec(`
-		UPDATE async_invocations
-		   SET status = 'abandoned', endedReason = ?, finishedAt = ?
-		 WHERE status IN `+asyncLiveStatuses,
-		reasonSessionEnded, now)
+// StampAsyncQueueEvents back-links a published group's rows to their queue
+// event in ONE statement. Atomicity is the point: the coordinator publishes a
+// group event, then stamps — a crash between the two leaves the WHOLE group
+// unstamped, so the next owner's adoption retries the publish with the same
+// member set (same dedupe key ⇒ a queue-level dedupe hit, never a duplicate
+// wake). A per-row stamp loop could crash half-done and split the set.
+func (s *Store) StampAsyncQueueEvents(ids []string, eventID string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, eventID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.Exec(
+		"UPDATE async_invocations SET queueEventId = ? WHERE id IN ("+placeholders[:len(placeholders)-1]+")",
+		args...)
 	if err != nil {
-		return fmt.Errorf("cancel stale async invocations: %w", err)
+		return fmt.Errorf("stamp async queue events: %w", err)
 	}
 	return nil
+}
+
+// ListUnpublishedAsyncInvocations returns invocations a prior owner finalized
+// (succeeded/failed/expired) but never confirmed a queue publish for
+// (queueEventId IS NULL) — the crash window between "row terminal" and "event
+// in the inbox". The adopting coordinator retries exactly these publishes; the
+// stable per-group DedupeKey makes a retry idempotent at the queue. Cancelled
+// and abandoned rows are deliberately excluded: those endings never publish.
+func (s *Store) ListUnpublishedAsyncInvocations() ([]domain.AsyncInvocationRecord, error) {
+	return queryAsyncInvocations(s.db,
+		"SELECT "+asyncCols+" FROM async_invocations WHERE status IN ('succeeded','failed','expired') AND queueEventId IS NULL ORDER BY createdAt")
 }
 
 // CancelLiveAsyncInvocations cancels EVERY live invocation in ONE statement

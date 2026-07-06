@@ -7,13 +7,13 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
-// TestReopenCancelsNonTerminalWatchersAndRevokesGrants exercises the full session
-// boundary on a SECOND Open of the same file: non-terminal watchers (active /
-// created / paused) flip to cancelled and their grants are revoked, while
-// terminal-state watchers and their grants survive, and a same-actorId timer
-// grant is untouched (scope-by-actorType). The sweep cancels non-terminal
-// watchers from a prior session and revokes their grants on reopen.
-func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
+// TestReopenAdoptsNonTerminalWatchers — supervision is PROJECT-scoped: a second
+// Open of the same file leaves non-terminal watchers (active/created/paused)
+// exactly as the prior owner left them, keeps their automation grants live, and
+// BeginOwnership reports their titles as resumed. Terminal-state watchers stay
+// terminal. A due watcher fires on the new owner's first tick (DueWatchers
+// still returns it).
+func TestReopenAdoptsNonTerminalWatchers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(2000)
 	nonTerminal := []string{"active", "created", "paused"}
@@ -35,42 +35,27 @@ func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
 	for _, s := range terminal {
 		mkWatcher("wch_"+s, s)
 	}
-	// A live grant for each stale watcher — all must be revoked.
+	// A live grant for each live watcher — all must SURVIVE the reopen (the
+	// watcher keeps running, so its authority must too).
 	for _, s := range nonTerminal {
 		first.InsertGrant(domain.AutomationGrantRecord{
 			ID: "grt_" + s, ActorID: "wch_" + s, ActorType: domain.GrantActorWatcher,
 			AllowedRiskClassesJson: strPtr(`["terminal"]`), ExpiresAt: 9999999999999, MaxUses: 5,
 		})
 	}
-	// A grant for a terminal-state watcher — survives (not swept).
-	first.InsertGrant(domain.AutomationGrantRecord{
-		ID: "grt_terminal_state", ActorID: "wch_condition_met", ActorType: domain.GrantActorWatcher,
-		AllowedRiskClassesJson: strPtr(`["terminal"]`), ExpiresAt: 9999999999999, MaxUses: 5,
-	})
-	// A TIMER grant sharing wch_active's actorId — must NOT be revoked (actorType scope).
-	first.InsertGrant(domain.AutomationGrantRecord{
-		ID: "grt_timer", ActorID: "wch_active", ActorType: domain.GrantActorTimer,
-		AllowedRiskClassesJson: strPtr(`["terminal"]`), ExpiresAt: 9999999999999, MaxUses: 5,
-	})
 	first.InsertTimer(domain.TimerRecord{ID: "tmr_keep", Title: "keep", FireAt: 9999999999999, PayloadType: "enqueue", PayloadJson: "{}"})
 	_ = first.Close()
 
-	// Reopen: construction runs cancelStaleWatchers.
 	s := openFile(t, path, now)
 	defer s.Close()
 
 	for _, st := range nonTerminal {
 		w, _ := s.GetWatcher("wch_" + st)
-		if w == nil || w.Status != "cancelled" {
-			t.Fatalf("wch_%s want cancelled, got %v", st, w)
+		if w == nil || w.Status != st {
+			t.Fatalf("wch_%s should be ADOPTED untouched, got %v", st, w)
 		}
-		// The sweep stamps WHY (session_ended) + WHEN, so the row is distinguishable
-		// from a deliberate user cancel.
-		if w.EndedReason == nil || *w.EndedReason != "session_ended" {
-			t.Fatalf("wch_%s want endedReason session_ended, got %v", st, w.EndedReason)
-		}
-		if w.EndedAt == nil || *w.EndedAt != now {
-			t.Fatalf("wch_%s want endedAt %d, got %v", st, now, w.EndedAt)
+		if w.EndedReason != nil {
+			t.Fatalf("adopted wch_%s must keep nil endedReason, got %q", st, *w.EndedReason)
 		}
 	}
 	for _, st := range terminal {
@@ -78,49 +63,45 @@ func TestReopenCancelsNonTerminalWatchersAndRevokesGrants(t *testing.T) {
 		if w == nil || w.Status != st {
 			t.Fatalf("wch_%s should be untouched, got %v", st, w)
 		}
-		// A pre-existing terminal row is NOT re-stamped — including a 'cancelled' row
-		// that carried no reason, which stays reasonless (the sweep only touches
-		// non-terminal rows).
-		if w.EndedReason != nil {
-			t.Fatalf("terminal wch_%s should keep nil endedReason, got %q", st, *w.EndedReason)
+	}
+
+	// Ownership boot reports the adopted live watchers so the first turn can
+	// surface the one-time resumed-supervision note.
+	sum, err := s.BeginOwnership(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.ResumedWatcherTitles) != len(nonTerminal) {
+		t.Fatalf("ResumedWatcherTitles want %d, got %v", len(nonTerminal), sum.ResumedWatcherTitles)
+	}
+	wantTitles := map[string]bool{"w wch_active": true, "w wch_created": true, "w wch_paused": true}
+	for _, ti := range sum.ResumedWatcherTitles {
+		if !wantTitles[ti] {
+			t.Fatalf("unexpected resumed title %q", ti)
 		}
 	}
 
-	// The sweep carries the cancelled titles forward so the composition root can surface
-	// a one-time NOTE. Exactly the three non-terminal watchers' titles, no terminal ones.
-	ended := s.SessionEndedWatchers()
-	if len(ended) != len(nonTerminal) {
-		t.Fatalf("SessionEndedWatchers want %d titles, got %v", len(nonTerminal), ended)
+	// The 'active' watcher with nextCheckAt=0 is due immediately for the new
+	// owner's scheduler — that is what "resumes automatically" means.
+	dw, _ := s.DueWatchers(now)
+	if len(dw) != 1 || dw[0].ID != "wch_active" {
+		t.Fatalf("want the adopted active watcher due, got %v", dw)
 	}
-	wantTitles := map[string]bool{"w wch_active": true, "w wch_created": true, "w wch_paused": true}
-	for _, ti := range ended {
-		if !wantTitles[ti] {
-			t.Fatalf("unexpected session-ended title %q", ti)
-		}
-	}
-	if dw, _ := s.DueWatchers(now); len(dw) != 0 {
-		t.Fatalf("no watcher should be due after sweep, got %d", len(dw))
-	}
+	// Grants survive with their watchers.
 	for _, st := range nonTerminal {
 		g, _ := s.GetGrant("grt_" + st)
-		if g == nil || g.RevokedAt == nil {
-			t.Fatalf("grt_%s should be revoked", st)
+		if g == nil || g.RevokedAt != nil {
+			t.Fatalf("grt_%s must survive adoption unrevoked", st)
 		}
-	}
-	if g, _ := s.GetGrant("grt_terminal_state"); g == nil || g.RevokedAt != nil {
-		t.Fatalf("terminal-state grant must survive")
-	}
-	if g, _ := s.GetGrant("grt_timer"); g == nil || g.RevokedAt != nil {
-		t.Fatalf("timer grant (same actorId) must survive")
 	}
 	if tm, _ := s.GetTimer("tmr_keep"); tm == nil || tm.Status != "scheduled" {
 		t.Fatalf("persistent timer must survive untouched")
 	}
 }
 
-// TestReopenCancelsPRStateWatcher — a pr_state watcher is session-scoped like a
-// terminal one; the kind-agnostic sweep cancels it and revokes its grant.
-func TestReopenCancelsPRStateWatcher(t *testing.T) {
+// TestReopenAdoptsPRStateWatcher — a pr_state watcher is project-scoped like a
+// terminal one: adopted on reopen with its grant intact.
+func TestReopenAdoptsPRStateWatcher(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(2000)
 	first := openFile(t, path, now)
@@ -137,29 +118,28 @@ func TestReopenCancelsPRStateWatcher(t *testing.T) {
 
 	s := openFile(t, path, now)
 	defer s.Close()
-	if w, _ := s.GetWatcher("wch_pr"); w == nil || w.Status != "cancelled" {
-		t.Fatalf("pr_state watcher should be cancelled, got %v", w)
-	} else if w.EndedReason == nil || *w.EndedReason != "session_ended" {
-		t.Fatalf("pr_state watcher want endedReason session_ended, got %v", w.EndedReason)
+	if w, _ := s.GetWatcher("wch_pr"); w == nil || w.Status != "active" {
+		t.Fatalf("pr_state watcher should be adopted active, got %v", w)
 	}
-	if ended := s.SessionEndedWatchers(); len(ended) != 1 || ended[0] != "PR #5" {
-		t.Fatalf("SessionEndedWatchers want [PR #5], got %v", ended)
+	sum, err := s.BeginOwnership(now)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if g, _ := s.GetGrant("grt_pr"); g == nil || g.RevokedAt == nil {
-		t.Fatalf("pr watcher grant should be revoked")
+	if len(sum.ResumedWatcherTitles) != 1 || sum.ResumedWatcherTitles[0] != "PR #5" {
+		t.Fatalf("ResumedWatcherTitles want [PR #5], got %v", sum.ResumedWatcherTitles)
 	}
-	if dw, _ := s.DueWatchers(now); len(dw) != 0 {
-		t.Fatalf("no due watcher expected")
+	if g, _ := s.GetGrant("grt_pr"); g == nil || g.RevokedAt != nil {
+		t.Fatalf("pr watcher grant should survive adoption")
+	}
+	if dw, _ := s.DueWatchers(now); len(dw) != 1 {
+		t.Fatalf("adopted pr watcher should be due, got %d", len(dw))
 	}
 }
 
-// TestReopenResolvesWatcherInboxEvents — open watcher-sourced events (terminal /
-// TestReopenResolvesAllInboxEvents — a fresh launch starts with a COMPLETELY empty
-// inbox: every open event from a prior session (watcher, worktree, pr, timer, AND
-// system) is resolved on reopen so nothing resurfaces (the !N badge starts at 0).
-// An ALREADY-resolved event keeps its original resolvedAt (the `resolvedAt IS NULL`
-// guard never re-stamps).
-func TestReopenResolvesAllInboxEvents(t *testing.T) {
+// TestReopenKeepsInboxOpen — the attention inbox is project-scoped: open events
+// survive a reopen un-resolved (the next owner surfaces them), and an
+// already-resolved event keeps its original stamp.
+func TestReopenKeepsInboxOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(5000)
 	first := openFile(t, path, now)
@@ -174,11 +154,8 @@ func TestReopenResolvesAllInboxEvents(t *testing.T) {
 		return e
 	}
 	pub(domain.SourceTerminalWatcher, domain.SeverityAttention, "term exited", "watcher:wch_old:term_1")
-	pub(domain.SourceWorktreeWatcher, domain.SeverityAttention, "worktree gone", "")
-	pub(domain.SourcePRWatcher, domain.SeverityAttention, "PR #7 merged", "pr_watcher:wch_old:state_change")
+	pub(domain.SourceAsyncTool, domain.SeverityAttention, "async done", "async:asy_1")
 	pub(domain.SourceTimer, domain.SeverityInfo, "timer fired", "")
-	pub(domain.SourceSystem, domain.SeverityInfo, "system note", "")
-	// An already-resolved event: its resolvedAt must survive untouched.
 	resolved := pub(domain.SourceTerminalWatcher, domain.SeverityDone, "earlier alert", "earlier")
 	if _, err := first.ResolveEvent(resolved.ID); err != nil {
 		t.Fatal(err)
@@ -187,41 +164,60 @@ func TestReopenResolvesAllInboxEvents(t *testing.T) {
 	origResolvedAt := got.ResolvedAt
 	_ = first.Close()
 
-	now2 := int64(6000)
-	s := openFile(t, path, now2)
+	s := openFile(t, path, int64(6000))
 	defer s.Close()
 
-	// Fresh start: NO open events of ANY source survive the reopen.
-	if open, _ := s.ListEvents(domain.QueueDigestOptions{}); len(open) != 0 {
-		t.Fatalf("a fresh launch must have an empty inbox, got %d open event(s): %v", len(open), open)
+	open, _ := s.ListEvents(domain.QueueDigestOptions{})
+	if len(open) != 3 {
+		t.Fatalf("the inbox must carry over: want 3 open events, got %d: %v", len(open), open)
 	}
+	re, _ := s.GetEvent(resolved.ID)
+	if re == nil || re.ResolvedAt == nil || origResolvedAt == nil || *re.ResolvedAt != *origResolvedAt {
+		t.Fatalf("already-resolved event must keep original resolvedAt %v, got %v", origResolvedAt, re)
+	}
+	sum, err := s.BeginOwnership(6000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.OpenAttentionCount != 3 {
+		t.Fatalf("OpenAttentionCount want 3, got %d", sum.OpenAttentionCount)
+	}
+}
 
-	// All five freshly-published events are resolved (not deleted) — still visible
-	// with IncludeResolved and stamped — EXCEPT the already-resolved one keeps its
-	// original stamp.
-	all, _ := s.ListEvents(domain.QueueDigestOptions{IncludeResolved: true})
-	sweptCount := 0
-	for _, e := range all {
-		if e.Title == "earlier alert" {
-			if e.ResolvedAt == nil || origResolvedAt == nil || *e.ResolvedAt != *origResolvedAt {
-				t.Fatalf("already-resolved event must keep original resolvedAt %v, got %v", origResolvedAt, e.ResolvedAt)
-			}
-			continue
-		}
-		sweptCount++
-		if e.ResolvedAt == nil || *e.ResolvedAt != now2 {
-			t.Fatalf("swept event %q must be stamped resolved at %d, got %v", e.Title, now2, e.ResolvedAt)
-		}
+// TestReopenAdoptsLiveAsyncInvocations — async futures are project-scoped: a
+// live invocation survives the reopen for the next owner's coordinator to
+// re-poll, and BeginOwnership counts it.
+func TestReopenAdoptsLiveAsyncInvocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := openFile(t, path, 1000)
+	live, err := first.InsertAsyncInvocation(domain.AsyncInvocationRecord{
+		ToolName: "terminal.run.async", Title: "left running", SessionID: "ses_1",
+		TerminalIdsJson: `["term-1"]`, Status: domain.AsyncRunning, ExpiresAt: 100_000,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if sweptCount != 5 {
-		t.Fatalf("want 5 swept events (all sources), got %d", sweptCount)
+	_ = first.Close()
+
+	s := openFile(t, path, 2000)
+	defer s.Close()
+	got, _ := s.GetAsyncInvocation(live.ID)
+	if got == nil || got.Status != domain.AsyncRunning {
+		t.Fatalf("live async row must survive reopen untouched, got %v", got)
+	}
+	sum, err := s.BeginOwnership(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.ResumedAsyncCount != 1 {
+		t.Fatalf("ResumedAsyncCount want 1, got %d", sum.ResumedAsyncCount)
 	}
 }
 
 // TestCancelLiveWatchersClearsMidSession — the /clear path. CancelLiveWatchers tears
 // down EVERY live watcher mid-session (no reopen) stamping ReasonSessionCleared,
 // revokes its grant, and resolves its open watcher event — a clean slate while the
-// session stays open. Mirrors the session-boundary sweep but with the clear reason.
+// session stays open. /clear is now the ONLY wholesale watcher teardown.
 func TestCancelLiveWatchersClearsMidSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	now := int64(7000)
@@ -310,12 +306,13 @@ func TestResolveAllOpenEvents(t *testing.T) {
 	}
 }
 
-// TestReopenResetsStaleAgentLaunches — the session-open reset CLEARS the dead spawn
-// roster across a real reopen: a prior session's in-flight/ambiguous/failed (and
-// confirmed-without-terminal) sagas are DELETED, so a stale "× FAILED" never greets the
-// user and a fresh idempotencyKey isn't blocked. The one survivor is a confirmed saga
-// that bound a terminal — kept so a still-running orphan agent can be re-adopted.
-func TestReopenResetsStaleAgentLaunches(t *testing.T) {
+// TestBeginOwnershipResetsStaleAgentLaunches — ownership boot CLEARS the dead
+// spawn roster: a prior owner's in-flight/ambiguous/failed (and
+// confirmed-without-terminal) sagas are DELETED, so a stale "× FAILED" never
+// greets the user and a fresh idempotencyKey isn't blocked. The one survivor is
+// a confirmed saga that bound a terminal — kept so a still-running orphan agent
+// can be re-adopted.
+func TestBeginOwnershipResetsStaleAgentLaunches(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := openFile(t, path, 1000)
 	inflight, _ := first.InsertAgentLaunch(domain.AgentLaunchRecord{
@@ -331,13 +328,65 @@ func TestReopenResetsStaleAgentLaunches(t *testing.T) {
 
 	s := openFile(t, path, 2000)
 	defer s.Close()
+	// A bare reopen leaves the roster alone; the reset is an OWNERSHIP action.
+	if got, _ := s.GetAgentLaunch(inflight.ID); got == nil {
+		t.Fatalf("bare reopen must not delete sagas")
+	}
+	if _, err := s.BeginOwnership(2000); err != nil {
+		t.Fatal(err)
+	}
 	if a, _ := s.FindActiveAgentLaunch("stale"); a != nil {
 		t.Fatalf("cleared saga must not be active")
 	}
 	if got, _ := s.GetAgentLaunch(inflight.ID); got != nil {
-		t.Fatalf("stale saga should be deleted on reopen, got %v", got)
+		t.Fatalf("stale saga should be deleted at ownership boot, got %v", got)
 	}
 	if cg, _ := s.GetAgentLaunch(kept.ID); cg == nil || cg.Stage != domain.LaunchConfirmed {
 		t.Fatalf("confirmed-with-terminal saga must survive, got %v", cg)
+	}
+}
+
+// TestRuntimeStateRoundTrip — the cross-process handoff KV: put/get/delete, the
+// empty-value-deletes contract, and the session-scoped backend-state helpers.
+func TestRuntimeStateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s := openFile(t, path, 1000)
+
+	if v, _ := s.GetRuntimeState(RuntimeKeyCurrentSession); v != "" {
+		t.Fatalf("fresh DB should have no current session, got %q", v)
+	}
+	if err := s.PutRuntimeState(RuntimeKeyCurrentSession, "ses_abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutSessionBackendState("ses_abc", "tok_1"); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite refreshes.
+	if err := s.PutSessionBackendState("ses_abc", "tok_2"); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	// The values survive a reopen — that is their whole purpose.
+	s2 := openFile(t, path, 2000)
+	defer s2.Close()
+	if v, _ := s2.GetRuntimeState(RuntimeKeyCurrentSession); v != "ses_abc" {
+		t.Fatalf("current session = %q, want ses_abc", v)
+	}
+	if tok, _ := s2.GetSessionBackendState("ses_abc"); tok != "tok_2" {
+		t.Fatalf("backend state = %q, want tok_2", tok)
+	}
+	// Empty value deletes (the /clear contract).
+	if err := s2.PutSessionBackendState("ses_abc", ""); err != nil {
+		t.Fatal(err)
+	}
+	if tok, _ := s2.GetSessionBackendState("ses_abc"); tok != "" {
+		t.Fatalf("cleared backend state should be empty, got %q", tok)
+	}
+	if err := s2.DeleteRuntimeState(RuntimeKeyCurrentSession); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s2.GetRuntimeState(RuntimeKeyCurrentSession); v != "" {
+		t.Fatalf("deleted key should read empty, got %q", v)
 	}
 }

@@ -149,6 +149,17 @@ type ArtifactPersister interface {
 	InsertArtifact(rec domain.ArtifactRecord) (domain.ArtifactRecord, error)
 }
 
+// BackendStateStore is the durable mirror for the opaque backend state token
+// (satisfied by *storage.Store). The token is server-signed skill-selection
+// state, refreshed on every stream meta event; mirroring it lets a DIFFERENT
+// process (the supervisor daemon after a cockpit detach, or vice versa) resume
+// the session with the backend's selector cadence intact instead of forcing a
+// from-scratch re-selection. Optional: nil keeps the token memory-only (the
+// default in tests). All writes are best-effort — never break a stream.
+type BackendStateStore interface {
+	PutSessionBackendState(sessionID, token string) error
+}
+
 // SessionDeps is the AgentSession constructor input. RestoredMessages != nil ⇒ a
 // resumed session: the restored visible history (user/assistant/tool only) is the
 // starting point and seq continues from InitialSeq. A nil RestoredMessages is a
@@ -178,18 +189,24 @@ type SessionDeps struct {
 	// message[1] "Active worktree:" line so a worktree switch no longer rewrites the
 	// cached runtime context. Must not block — it reads a cached label, not MCP.
 	ActiveWorktreeFunc func() string
-	// SessionEndedWatchers returns the titles of watchers a prior session left running
-	// that this session's store-open had to cancel (watchers are session-scoped). The
-	// footer surfaces them as a one-time `# Session note` on the FIRST turn only, then
-	// never again — replacing the old message[1] one-time NOTE without a
-	// RefreshRuntimeContext consume. A provider func (not a slice) so the app seam can
-	// scheduler-gate it dynamically: it returns nil on non-interactive paths where
-	// re-creating watchers is moot, even though the slice is known at construction.
+	// ResumedWatchers returns the titles of live watchers this process ADOPTED from a
+	// prior owner at ownership boot (watchers are project-scoped and keep running
+	// across restarts/detach). The footer surfaces them as a one-time `# Session note`
+	// on the FIRST turn only, then never again. A provider func (not a slice) so the
+	// app seam can scheduler-gate it dynamically: it returns nil on non-interactive
+	// paths where the note is moot, even though the slice is known at construction.
 	// Optional; nil ⇒ the note never appears (the default in tests).
-	SessionEndedWatchers func() []string
+	ResumedWatchers func() []string
 	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister
+	// BackendStateStore mirrors the opaque backend state token to durable storage on
+	// every stream meta so a cross-process session handover (cockpit ↔ supervisor
+	// daemon) replays it (optional; nil ⇒ memory-only, the default in tests).
+	BackendStateStore BackendStateStore
+	// InitialBackendState seeds the opaque token on construction — the persisted
+	// value from the previous owner of this session ("" for a fresh session).
+	InitialBackendState string
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister
