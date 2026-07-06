@@ -235,8 +235,15 @@ func (t *toolRunner) ResolveWireName(wireName string) string {
 
 // Dispatch builds the per-call ToolContext from the turn and runs the call. It
 // NEVER returns an error — every failure is a domain.ToolResult.
+//
+// The actor is the App's configured turn actor: ActorMain ("") for every
+// interactive process, ActorWake/WakeActorID for the headless supervisor daemon
+// — where the human is away, so dispatch's non-interactive branch (grant or
+// blocked-denial) must gate mutations instead of a confirm prompt nobody can
+// answer.
 func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn agent.TurnContext) domain.ToolResult {
-	tctx := t.app.buildContext(domain.ActorMain, "")
+	actor, actorID := t.app.turnActor()
+	tctx := t.app.buildContext(actor, actorID)
 	tctx.RunID = turn.RunID
 	tctx.ActiveToolNames = turn.ActiveToolNames
 	// Liveness: forward the registry's in-tool progress beats out to the session's

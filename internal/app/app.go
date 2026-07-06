@@ -74,6 +74,17 @@ type CreateOptions struct {
 	// y/N terminal prompt here; non-interactive callers leave it nil, preserving the loud,
 	// actionable failure — a script/host path must never silently destroy local state.
 	OnSchemaStale func(have, want int) (bool, error)
+	// DispatchActor overrides the actor identity the Session's tool dispatches run
+	// under. Zero ⇒ ActorMain (every interactive path). The supervisor daemon sets
+	// ActorWake so its unattended wake turns take dispatch's grant-or-blocked
+	// branch (the actor id is then domain.WakeActorID).
+	DispatchActor domain.ToolActor
+	// ResumeCurrentSession (with an empty SessionID) resumes the project's
+	// durable current-session pointer (runtime_state) instead of minting a fresh
+	// session — the supervisor daemon's continuity mechanism: its autonomous
+	// wake turns continue the SAME conversation the last cockpit ran. A missing
+	// pointer still mints fresh. Ignored when SessionID is set explicitly.
+	ResumeCurrentSession bool
 }
 
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
@@ -130,6 +141,14 @@ type App struct {
 	// completions, carried-over inbox. Immutable after Create; feeds the one-time
 	// resumed-watchers session note and the attach-time UI surfaces.
 	ownership storage.OwnershipSummary
+
+	// dispatchActor / dispatchActorID are the actor identity the Session's tool
+	// dispatches run under — ActorMain/"" for every interactive process, and
+	// ActorWake/WakeActorID in the headless supervisor daemon so mutating tools
+	// route through the grant-or-blocked branch instead of a confirm prompt no
+	// human is present to answer. Immutable after Create.
+	dispatchActor   domain.ToolActor
+	dispatchActorID string
 
 	// baseCtx is the APP-SCOPED background context for detached work that outlives a
 	// single turn (e.g. terminal.extract.async) but must NOT outlive the App. It is
@@ -261,21 +280,44 @@ func Create(opts CreateOptions) (*App, error) {
 	}
 
 	sessionID := opts.SessionID
+	resumedSession := opts.SessionID != ""
+	if sessionID == "" && opts.ResumeCurrentSession {
+		// The supervisor daemon continues the project's current conversation: read
+		// the durable pointer the last interactive owner wrote. Best-effort — a
+		// missing/unreadable pointer just mints fresh below.
+		if v, err := store.GetRuntimeState(storage.RuntimeKeyCurrentSession); err == nil && v != "" {
+			sessionID = v
+			resumedSession = true
+		}
+	}
 	if sessionID == "" {
 		sessionID = domain.NewID("ses_")
 	}
 
+	// Non-main dispatch actors carry the well-known wake actor id (grants are
+	// keyed to it); the interactive default stays main/"".
+	dispatchActor := opts.DispatchActor
+	if dispatchActor == "" {
+		dispatchActor = domain.ActorMain
+	}
+	dispatchActorID := ""
+	if dispatchActor == domain.ActorWake {
+		dispatchActorID = domain.WakeActorID
+	}
+
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	a := &App{
-		Config:      cfg,
-		Store:       store,
-		SessionID:   sessionID,
-		runRef:      &agent.RunIDRef{},
-		hooks:       opts.Hooks,
-		baseCtx:     baseCtx,
-		baseCancel:  baseCancel,
-		InitialTier: cfg.Tier,
-		ownership:   ownership,
+		Config:          cfg,
+		Store:           store,
+		SessionID:       sessionID,
+		runRef:          &agent.RunIDRef{},
+		hooks:           opts.Hooks,
+		baseCtx:         baseCtx,
+		baseCancel:      baseCancel,
+		InitialTier:     cfg.Tier,
+		ownership:       ownership,
+		dispatchActor:   dispatchActor,
+		dispatchActorID: dispatchActorID,
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
@@ -490,7 +532,7 @@ func Create(opts CreateOptions) (*App, error) {
 		// backend's skill-selection cadence. Seeded only on a genuine resume: a
 		// fresh session id has no persisted token.
 		BackendStateStore:   store,
-		InitialBackendState: loadPersistedBackendState(store, sessionID, opts.SessionID != ""),
+		InitialBackendState: loadPersistedBackendState(store, sessionID, resumedSession),
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
@@ -541,6 +583,12 @@ func loadPersistedBackendState(store *storage.Store, sessionID string, resumed b
 
 // Ownership returns the owner-boot reconciliation summary captured at Create.
 func (a *App) Ownership() storage.OwnershipSummary { return a.ownership }
+
+// turnActor returns the actor identity the Session's tool dispatches run under
+// (immutable after Create — see CreateOptions.DispatchActor).
+func (a *App) turnActor() (domain.ToolActor, string) {
+	return a.dispatchActor, a.dispatchActorID
+}
 
 // AdoptAsCurrentSession durably marks this App's session as the project's
 // current conversation — the one a detached supervisor daemon continues with

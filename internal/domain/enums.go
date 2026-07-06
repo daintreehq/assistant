@@ -258,6 +258,11 @@ type AutomationGrantActorType string
 const (
 	GrantActorWatcher AutomationGrantActorType = "watcher"
 	GrantActorTimer   AutomationGrantActorType = "timer"
+	// GrantActorWake authorizes the supervisor daemon's autonomous wake turns.
+	// Wake grants are keyed to the well-known WakeActorID (one shared unattended
+	// authority per project, not per-wake), so "let the assistant push the branch
+	// while I'm away" is ONE grant the user can mint, inspect, and revoke.
+	GrantActorWake AutomationGrantActorType = "wake"
 )
 
 // AutomationGrantSource records where a grant was minted (only local today).
@@ -391,7 +396,18 @@ const (
 	ActorTimer    ToolActor = "timer"
 	ActorWorkflow ToolActor = "workflow"
 	ActorSystem   ToolActor = "system"
+	// ActorWake is the supervisor daemon's autonomous wake turn: a full-capability
+	// turn with NO human present. It is deliberately non-interactive so dispatch
+	// takes the grant-or-blocked branch — read/local/ui tools run freely, mutating
+	// tools need a scoped automation grant (actor id WakeActorID) or become a
+	// pending-approval inbox item for the next attach.
+	ActorWake ToolActor = "wake"
 )
+
+// WakeActorID is the well-known grant actor id every daemon wake turn
+// dispatches under (see GrantActorWake — one shared unattended authority per
+// project rather than one per wake event).
+const WakeActorID = "wake"
 
 // newEnumSet builds a membership set for a comparable enum value type.
 func newEnumSet[T comparable](vals ...T) map[T]bool {

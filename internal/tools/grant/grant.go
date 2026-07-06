@@ -67,7 +67,7 @@ func Tools(deps Deps) []*tools.Tool {
 
 type createArgs struct {
 	ActorID            string   `json:"actorId"`
-	ActorType          string   `json:"actorType"` // watcher | timer
+	ActorType          string   `json:"actorType"` // watcher | timer | wake
 	AllowedRiskClasses []string `json:"allowedRiskClasses,omitempty"`
 	AllowedToolNames   []string `json:"allowedToolNames,omitempty"`
 	TTLMs              int64    `json:"ttlMs"`
@@ -80,7 +80,7 @@ var createSchema = json.RawMessage(`{
   "required": ["actorId", "actorType", "ttlMs", "maxUses"],
   "properties": {
     "actorId": { "type": "string", "minLength": 1 },
-    "actorType": { "type": "string", "enum": ["watcher", "timer"] },
+    "actorType": { "type": "string", "enum": ["watcher", "timer", "wake"] },
     "allowedRiskClasses": { "type": "array", "items": { "type": "string", "enum": ["read","local","ui","terminal","project","git","external","system"] } },
     "allowedToolNames": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "ttlMs": { "type": "integer", "minimum": 1 },
@@ -91,7 +91,7 @@ var createSchema = json.RawMessage(`{
 func newCreateTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "grant.create",
-		Description: "Pre-authorize a watcher/timer to run confirm-required tools unattended, bounded by TTL, use-count and a tool/risk allowlist.",
+		Description: "Pre-authorize unattended confirm-required tool use, bounded by TTL, use-count and a tool/risk allowlist. actorType watcher/timer authorizes that one watcher/timer (actorId = its wch_/tmr_ id); actorType \"wake\" with actorId \"wake\" authorizes the supervisor daemon's autonomous wake turns while the user is away (create it when the user asks for unattended work that must MUTATE — e.g. sending terminal commands overnight).",
 		Risk:        domain.RiskLocal,
 		Schema:      createSchema,
 		Decode:      tools.StrictDecoder(func() any { return &createArgs{} }),
@@ -108,8 +108,15 @@ func newCreateTool(deps Deps) *tools.Tool {
 			if strings.TrimSpace(a.ActorID) == "" {
 				return tools.Fail(codeInvalidArgs, "grant.create: actorId is required")
 			}
-			if a.ActorType != "watcher" && a.ActorType != "timer" {
-				return tools.Fail(codeInvalidArgs, "grant.create: actorType must be watcher|timer")
+			if a.ActorType != "watcher" && a.ActorType != "timer" && a.ActorType != "wake" {
+				return tools.Fail(codeInvalidArgs, "grant.create: actorType must be watcher|timer|wake")
+			}
+			// Wake grants authorize the supervisor daemon's unattended wake turns;
+			// they are keyed to ONE well-known actor id so the user can list and
+			// revoke the project's unattended authority as a single grant.
+			if a.ActorType == "wake" && a.ActorID != domain.WakeActorID {
+				return tools.Fail(codeInvalidArgs,
+					`grant.create: a wake grant's actorId must be the literal "wake" (the shared unattended-turn authority)`)
 			}
 			if a.TTLMs <= 0 || a.TTLMs > maxGrantTTLMs {
 				return tools.Fail(codeInvalidArgs, fmt.Sprintf("grant.create: ttlMs must be 1..%d", maxGrantTTLMs))

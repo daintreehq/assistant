@@ -346,7 +346,9 @@ subdir when a project id is set).
 `docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
 story**), `docs/SKILLS.md` (how server-owned skills work + the local run-tracking tools),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
-`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md`. **STALE — predates the backend migration,
+`docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
+`docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI).
+**STALE — predates the backend migration,
 do not trust:** `docs/DEEPSEEK.md` (the direct DeepSeek client — the CLI no longer talks to
 DeepSeek; the backend does). Skill authoring + the model live in `../assistant-backend`
 (its `skills/files/*.md` + `docs/DAINTREE_API.md`).

@@ -39,7 +39,14 @@ func SocketPathFor(stateDir string) (string, error) {
 		abs = stateDir
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(root, "d"+hex.EncodeToString(sum[:])[:12]+".sock"), nil
+	path := filepath.Join(root, "d"+hex.EncodeToString(sum[:])[:12]+".sock")
+	// darwin caps sun_path at 104 bytes; an over-long path fails bind/connect
+	// with a cryptic EINVAL. Only reachable via the env override (the default
+	// root is short by construction) — fail with the actionable message instead.
+	if len(path) > 100 {
+		return "", fmt.Errorf("socket path %q exceeds the unix socket path limit — point %s at a shorter directory", path, SocketDirEnv)
+	}
+	return path, nil
 }
 
 // DaemonDescriptorName is the discovery/debug descriptor the daemon writes

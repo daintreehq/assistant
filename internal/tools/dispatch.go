@@ -319,11 +319,11 @@ const (
 // The event is SeverityBlocked (not Info) so it crosses the attention notify
 // filter and reaches the wake queue with the ⛔ blocked rendering — a blocked
 // autonomous action genuinely needs a human to unblock it. When the actor is a
-// watcher/timer with a known ActorID, it also carries a RecommendedAction that
-// pre-fills grant.create with the exact scope to authorize this one tool, so the
-// human can approve in a single step instead of hand-assembling a grant. The
-// action is gated on actor == watcher|timer because grant.create's actorType
-// only accepts those two — any other actor would produce an invalid suggestion.
+// watcher/timer/wake with a known ActorID, it also carries a RecommendedAction
+// that pre-fills grant.create with the exact scope to authorize this one tool, so
+// the human can approve in a single step instead of hand-assembling a grant. The
+// action is gated on grant.create's actorType enum (watcher|timer|wake) — any
+// other actor would produce an invalid suggestion.
 func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolContext, summary string) {
 	defer func() { _ = recover() }()
 	if tctx.Queue == nil {
@@ -335,18 +335,18 @@ func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolCon
 	}
 	var actions []domain.RecommendedAction
 	// Only recommend grant.create when a grant could actually authorize this tool:
-	// the actor must be a grantable type (watcher/timer — grant.create's actorType
-	// enum) with a known ActorID, and the tool must not be ungrantable (e.g.
-	// daintree.call). Recommending a grant that grant.create would reject is worse
-	// than no recommendation — it's a one-click "unblock" that silently fails.
-	if tctx.ActorID != "" && (tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer) &&
-		!domain.IsUngrantableTool(name) {
+	// the actor must be a grantable type (watcher/timer/wake — grant.create's
+	// actorType enum) with a known ActorID, and the tool must not be ungrantable
+	// (e.g. daintree.call). Recommending a grant that grant.create would reject is
+	// worse than no recommendation — a one-click "unblock" that silently fails.
+	grantable := tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer || tctx.Actor == domain.ActorWake
+	if tctx.ActorID != "" && grantable && !domain.IsUngrantableTool(name) {
 		actions = []domain.RecommendedAction{{
 			Label:    fmt.Sprintf("Authorize %s %s to run %s", tctx.Actor, tctx.ActorID, name),
 			ToolName: "grant.create",
 			Args: map[string]any{
 				"actorId":          tctx.ActorID,
-				"actorType":        string(tctx.Actor), // "watcher" | "timer"
+				"actorType":        string(tctx.Actor), // "watcher" | "timer" | "wake"
 				"allowedToolNames": []string{name},
 				"ttlMs":            defaultGrantTTLMs,
 				"maxUses":          defaultGrantMaxUses,

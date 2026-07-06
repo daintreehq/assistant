@@ -216,7 +216,13 @@ func TestDialNoDaemon(t *testing.T) {
 }
 
 func TestSocketPathForIsShortAndStable(t *testing.T) {
-	dir := t.TempDir()
+	// t.TempDir() paths can exceed the sun_path budget SocketPathFor enforces;
+	// use a short system temp dir like real callers must.
+	dir, err := os.MkdirTemp("", "dt-sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	t.Setenv(SocketDirEnv, dir)
 	a, err := SocketPathFor("/some/deep/state/dir")
 	if err != nil {

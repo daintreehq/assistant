@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/host"
+	"github.com/daintreehq/daintree-assistant/internal/supervisor"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
@@ -31,14 +33,26 @@ func RunHost(ctx context.Context, opts Options) int {
 			pi := params.ProjectInstructions
 			overrides.ProjectInstructions = &pi
 		}
+		// The embedded host owns the project like any interactive assistant: take
+		// the lease (spawning/attaching to the supervisor daemon) before opening
+		// the DB. The Ownership handle is deliberately held for the PROCESS
+		// lifetime — host teardown os.Exits, and both the flock and the attach
+		// connection release on process death, which is exactly the handover the
+		// daemon listens for.
+		own, err := acquireOwnership(fctx, overrides, true, 60*time.Second, nil)
+		if err != nil {
+			return nil, err
+		}
 		a, err := app.Create(app.CreateOptions{
 			Overrides: overrides,
 			SessionID: params.SessionID, // appSessionId: resume id when resuming
 		})
 		if err != nil {
+			own.Release()
 			return nil, err
 		}
-		return &hostAppAdapter{app: a, ctx: fctx}, nil
+		a.AdoptAsCurrentSession()
+		return &hostAppAdapter{app: a, ctx: fctx, own: own}, nil
 	}
 	return host.Run(ctx, factory)
 }
@@ -49,6 +63,7 @@ func RunHost(ctx context.Context, opts Options) int {
 type hostAppAdapter struct {
 	app *app.App
 	ctx context.Context
+	own *supervisor.Ownership
 }
 
 func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
@@ -97,7 +112,13 @@ func (h *hostAppAdapter) RiskOf(toolName string) (domain.RiskClass, bool) {
 
 func (h *hostAppAdapter) Config() config.AppConfig { return h.app.Config }
 
-func (h *hostAppAdapter) Shutdown(context.Context) error { return h.app.Shutdown() }
+func (h *hostAppAdapter) Shutdown(context.Context) error {
+	err := h.app.Shutdown()
+	// Store closed → hand the lease back so the daemon resumes before our
+	// process even exits (teardown os.Exits shortly after anyway).
+	h.own.Release()
+	return err
+}
 
 // errMCP is a tiny error wrapper for an MCP-status error string (avoids importing
 // errors solely for one New).
