@@ -536,6 +536,12 @@ type SelectorMeta struct {
 // Aggregated streaming result
 // --------------------------------------------------------------------------
 
+// FinishReasonLength is the provider finish reason for a generation cut off by
+// the output-token cap. The agent loop uses it to diagnose a parse-failed final
+// tool call as truncation (re-issue the amputated work) rather than a JSON
+// syntax slip (re-encode the same call).
+const FinishReasonLength = "length"
+
 // RespondResult is the accumulated outcome of a streamed respond call: the meta
 // event, the assembled assistant message (content + tool calls), the finish
 // reason, and usage. The agent loop reads State/Skills off Meta and appends

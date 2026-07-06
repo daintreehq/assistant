@@ -785,8 +785,10 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 
 		// 10h. Execute the batch. Announce ALL calls as queued BEFORE sequential
-		//      dispatch, then promote each queued→active→done/failed.
-		if reply, done := s.runToolBatch(ctx, calls, turn, allowedSet, failureCounts, coarseCounts, &stuckNudged); done {
+		//      dispatch, then promote each queued→active→done/failed. The round's
+		//      finish reason rides along so a parse-failed final call can be diagnosed
+		//      as output-cap truncation rather than a model syntax slip.
+		if reply, done := s.runToolBatch(ctx, calls, result.FinishReason, turn, allowedSet, failureCounts, coarseCounts, &stuckNudged); done {
 			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
 			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
 			// the model gets the new steer); otherwise the abort stands.
@@ -825,7 +827,7 @@ func (s *Session) firstQuestionIndex(calls []models.ToolCallRequest) int {
 // dispatch first): the FINE breaker on identical args, and the COARSE breaker on a
 // tool repeating the same UNRECOVERABLE error with varied args. Returns (reply, true)
 // when the turn must end (cancel or breaker abort), else ("", false) to continue.
-func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, turn TurnContext,
+func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallRequest, finishReason string, turn TurnContext,
 	allowedSet map[string]struct{}, failureCounts, coarseCounts map[string]int, stuckNudged *bool) (string, bool) {
 
 	// Announce the whole batch as queued first.
@@ -875,15 +877,19 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		startedAt := domain.NowMS()
 		var res domain.ToolResult
 
-		// Parse args (catch → INVALID_TOOL_ARGS_JSON, recoverable). The ToolCall
-		// event carries the raw args string on parse failure, else the raw string
-		// passed through to dispatch.
-		parseFailed := false
+		// Parse args (catch → recoverable failure, never dispatched). Two distinct
+		// failure shapes with different correct recoveries, so they get different
+		// error results: a round that hit its output-token cap (finish_reason
+		// "length") is amputated mid-args on its FINAL call — the model must
+		// re-issue that call AND anything it meant to emit after it — while any
+		// other parse failure is a genuine encoding slip the model should just
+		// re-encode. Truncated args are never repaired and executed: auto-closing
+		// the JSON would run a tool on half its intended input (e.g. spawn an agent
+		// with an amputated task prompt).
+		var parseErr error
 		if call.Function.Arguments != "" {
 			var probe any
-			if json.Unmarshal([]byte(call.Function.Arguments), &probe) != nil {
-				parseFailed = true
-			}
+			parseErr = json.Unmarshal([]byte(call.Function.Arguments), &probe)
 		}
 
 		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
@@ -898,8 +904,18 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			res.Summary = "Skipped — a multiple-choice question must be asked by itself."
 			// Short-circuits before Dispatch, so trace it or the skip is invisible in the log.
 			s.traceToolGap("tool.question_batch_skipped", turn.RunID, call.ID, internalName, "")
-		case parseFailed:
-			res = domain.Fail("INVALID_TOOL_ARGS_JSON", "Arguments were not valid JSON.")
+		case parseErr != nil && finishReason == backend.FinishReasonLength && c == len(calls)-1:
+			// Output-cap truncation: the stream was cut mid-args, so only the batch's
+			// final call can be affected (earlier siblings parsed and ran normally).
+			res = domain.Fail("TOOL_ARGS_TRUNCATED",
+				"Your response hit its output-token limit and this call's arguments were cut off mid-generation; nothing ran with the partial arguments. Re-issue this call with complete arguments — and re-issue any calls you intended after it, which were dropped entirely. If you are batching several large calls, issue fewer per response.")
+			res.Summary = "Arguments truncated by the output-token limit for " + internalName + "; not executed."
+			// Never reaches Dispatch → no tool.call audit event; trace it here or the
+			// truncation is invisible in the log.
+			s.traceToolGap("tool.args.truncated", turn.RunID, call.ID, internalName, call.Function.Arguments)
+		case parseErr != nil:
+			res = domain.Fail("INVALID_TOOL_ARGS_JSON",
+				"Arguments were not valid JSON ("+parseErr.Error()+"). Re-issue this call with corrected JSON arguments.")
 			res.Summary = "Invalid JSON arguments for " + internalName + "; not executed."
 			// This rejection never reaches the registry's Dispatch, so it produces no
 			// tool.call audit event — trace it here or it is invisible in the log.
