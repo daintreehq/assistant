@@ -86,6 +86,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) })
 
 	printBanner(r, a, st.Connected, st.Transport)
+	// One-time "while you were away" notice (consumed on read): the supervisor
+	// daemon's detached activity + what this attach adopted.
+	for _, line := range a.AttachSummaryLines() {
+		r.Line(r.Gray("· " + line))
+	}
 	if !st.Connected {
 		r.Warn("Running in degraded local mode — Daintree MCP not connected. Use /reconnect once Daintree is up.")
 	}

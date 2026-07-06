@@ -86,6 +86,8 @@ func (r *Runtime) reactWake(ctx context.Context) {
 			}
 		}
 		r.mu.Unlock()
+		// Durable "while you were away" record for the next attach.
+		a.RecordDetachedWake(reply)
 		r.logf("daemon: wake turn completed (" + firstLine(reply) + ")")
 	}()
 

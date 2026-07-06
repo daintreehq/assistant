@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -598,6 +599,80 @@ func (a *App) turnActor() (domain.ToolActor, string) {
 func (a *App) AdoptAsCurrentSession() {
 	// Best-effort: continuity is a convenience, never worth failing boot over.
 	_ = a.Store.PutRuntimeState(storage.RuntimeKeyCurrentSession, a.SessionID)
+}
+
+// DetachedActivity is what the supervisor daemon accomplished while no
+// assistant was attached, persisted in runtime_state and consumed by the next
+// attach for the "while you were away" notice.
+type DetachedActivity struct {
+	WakeTurns        int    `json:"wakeTurns"`
+	LastWakeAtMs     int64  `json:"lastWakeAtMs"`
+	LastReplyPreview string `json:"lastReplyPreview"`
+}
+
+// detachedReplyPreviewMax bounds the stored reply preview (a notice line, not
+// a transcript).
+const detachedReplyPreviewMax = 300
+
+// RecordDetachedWake accumulates one successful autonomous wake turn into the
+// durable detached-activity record (the supervisor daemon calls this after
+// each wake). Best-effort — never disturbs the wake path.
+func (a *App) RecordDetachedWake(reply string) {
+	act := DetachedActivity{}
+	if raw, err := a.Store.GetRuntimeState(storage.RuntimeKeyDetachedActivity); err == nil && raw != "" {
+		_ = json.Unmarshal([]byte(raw), &act)
+	}
+	act.WakeTurns++
+	act.LastWakeAtMs = domain.NowMS()
+	preview := strings.TrimSpace(reply)
+	if idx := strings.IndexByte(preview, '\n'); idx >= 0 {
+		preview = preview[:idx]
+	}
+	if len(preview) > detachedReplyPreviewMax {
+		preview = preview[:detachedReplyPreviewMax] + "…"
+	}
+	act.LastReplyPreview = preview
+	if b, err := json.Marshal(act); err == nil {
+		_ = a.Store.PutRuntimeState(storage.RuntimeKeyDetachedActivity, string(b))
+	}
+}
+
+// AttachSummaryLines composes the one-time "while you were away" notice for an
+// attaching assistant: the daemon's detached wake activity (consumed — read
+// then cleared, so it prints at most once) plus what this process adopted at
+// ownership boot. Empty when there is nothing worth saying.
+func (a *App) AttachSummaryLines() []string {
+	var lines []string
+	if raw, err := a.Store.GetRuntimeState(storage.RuntimeKeyDetachedActivity); err == nil && raw != "" {
+		var act DetachedActivity
+		if json.Unmarshal([]byte(raw), &act) == nil && act.WakeTurns > 0 {
+			plural := "s"
+			if act.WakeTurns == 1 {
+				plural = ""
+			}
+			line := fmt.Sprintf("While you were away: the supervisor handled %d event%s", act.WakeTurns, plural)
+			if act.LastReplyPreview != "" {
+				line += " — " + act.LastReplyPreview
+			}
+			lines = append(lines, line)
+		}
+		_ = a.Store.DeleteRuntimeState(storage.RuntimeKeyDetachedActivity)
+	}
+	own := a.ownership
+	if n := len(own.ResumedWatcherTitles); n > 0 || own.ResumedAsyncCount > 0 {
+		parts := []string{}
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%d watcher(s)", n))
+		}
+		if own.ResumedAsyncCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d async operation(s)", own.ResumedAsyncCount))
+		}
+		lines = append(lines, "Resumed supervision of "+strings.Join(parts, " and ")+" from the previous session.")
+	}
+	if own.OpenAttentionCount > 0 {
+		lines = append(lines, fmt.Sprintf("%d attention item(s) carried over — see /inbox.", own.OpenAttentionCount))
+	}
+	return lines
 }
 
 // debugLogAdapter routes the router's debug trace through the global debug log.

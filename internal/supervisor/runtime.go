@@ -33,6 +33,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/ipc"
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
 // Timing defaults. Test seams override via Options.
@@ -68,6 +69,25 @@ type Options struct {
 	IdleExit time.Duration
 	// Log receives human-readable daemon lifecycle lines (stdout by default).
 	Log func(string)
+	// Fast compresses every internal cadence (monitor tick, MCP-blocked
+	// threshold, reconnect budget) to sub-second values. TEST-ONLY — enabled by
+	// the DAINTREE_ASSISTANT_DAEMON_FAST env var so subprocess e2e tests can
+	// exercise outage/blocked/idle behavior without minute-scale sleeps.
+	Fast bool
+}
+
+// tuning is the resolved cadence set (see Options.Fast).
+type tuning struct {
+	monitorEvery      time.Duration
+	mcpBlockedAfter   time.Duration
+	mcpReconnectEvery time.Duration
+}
+
+func (o Options) tuning() tuning {
+	if o.Fast {
+		return tuning{monitorEvery: 200 * time.Millisecond, mcpBlockedAfter: 500 * time.Millisecond, mcpReconnectEvery: time.Second}
+	}
+	return tuning{monitorEvery: monitorEvery, mcpBlockedAfter: mcpBlockedAfter, mcpReconnectEvery: mcpReconnectEvery}
 }
 
 // superviseReason says why one supervision span ended.
@@ -84,6 +104,7 @@ const (
 type Runtime struct {
 	opts      Options
 	cfg       config.AppConfig
+	tun       tuning
 	ownerLock *ipc.FileLock
 	startedAt int64
 
@@ -109,6 +130,12 @@ type Runtime struct {
 	mcpDownSince   time.Time
 	lastReconnect  time.Time
 	idleSince      time.Time
+	// credsRevoked latches when the MCP status shows an auth/binding-terminal
+	// failure: the per-session bearer is dead (Daintree revoked it on window
+	// close / displacement / re-provision) and reconnecting with it would trip
+	// the host's abuse policy (docs/DAINTREE_HOST.md §4). No reconnects happen
+	// while latched; a fresh credentials push clears it (and rebuilds the span).
+	credsRevoked bool
 
 	resumeCh chan struct{} // signaled when an attach connection closes
 	stopCh   chan struct{}
@@ -132,6 +159,7 @@ func Run(ctx context.Context, opts Options) int {
 	r := &Runtime{
 		opts:       opts,
 		cfg:        cfg,
+		tun:        opts.tuning(),
 		startedAt:  domain.NowMS(),
 		state:      ipc.StateStarting,
 		resumeCh:   make(chan struct{}, 1),
@@ -335,7 +363,7 @@ func (r *Runtime) supervise(parent context.Context) superviseReason {
 	// inside coordinator.Start. Attention events route into the wake reactor.
 	a.StartScheduler(sctx, func(events []domain.QueueEvent) { r.onAttention(sctx, events) })
 
-	ticker := time.NewTicker(monitorEvery)
+	ticker := time.NewTicker(r.tun.monitorEvery)
 	defer ticker.Stop()
 	for {
 		select {
@@ -382,6 +410,13 @@ func (r *Runtime) onAttention(ctx context.Context, events []domain.QueueEvent) {
 // and resolves it the moment the link is back. This is the "blocked, never
 // silently abandoned" contract — the engines themselves already freeze safely
 // (watchers keep re-arming, async deadlines pause while disconnected).
+//
+// Credential revocation is TERMINAL, not an outage (docs/DAINTREE_HOST.md):
+// Daintree rotates the per-session bearer on every re-provision and revokes it
+// on window close/eviction/displacement, and repeated auth failures trip the
+// host's abuse policy. On an auth/binding-terminal status the daemon stops
+// reconnecting entirely and waits for the fresh credentials the next assistant
+// launch pushes over the control socket.
 func (r *Runtime) monitorMcp(ctx context.Context, a *app.App) {
 	if a.Config.McpURL == "" {
 		return // MCP genuinely unconfigured — degraded local mode, nothing to watch
@@ -391,6 +426,7 @@ func (r *Runtime) monitorMcp(ctx context.Context, a *app.App) {
 	if st.Connected {
 		r.mu.Lock()
 		r.mcpDownSince = time.Time{}
+		r.credsRevoked = false
 		blocked := r.blockedEventID
 		r.blockedEventID = ""
 		r.mu.Unlock()
@@ -400,12 +436,17 @@ func (r *Runtime) monitorMcp(ctx context.Context, a *app.App) {
 		}
 		return
 	}
+	revoked := mcp.IsCredentialTerminalStatus(st.Error)
 	r.mu.Lock()
 	if r.mcpDownSince.IsZero() {
 		r.mcpDownSince = now
 	}
+	if revoked && !r.credsRevoked {
+		r.credsRevoked = true
+		r.logf("daemon: MCP credentials revoked — reconnects paused until a new assistant launch pushes fresh ones")
+	}
 	downFor := now.Sub(r.mcpDownSince)
-	shouldReconnect := now.Sub(r.lastReconnect) >= mcpReconnectEvery
+	shouldReconnect := !r.credsRevoked && now.Sub(r.lastReconnect) >= r.tun.mcpReconnectEvery
 	if shouldReconnect {
 		r.lastReconnect = now
 	}
@@ -417,19 +458,26 @@ func (r *Runtime) monitorMcp(ctx context.Context, a *app.App) {
 			return // next tick clears the blocked state
 		}
 	}
-	if downFor < mcpBlockedAfter || alreadyBlocked {
+	if downFor < r.tun.mcpBlockedAfter || alreadyBlocked {
 		return
 	}
 	if !r.hasLiveWork(a) {
 		return // nothing supervised is starved; stay quiet
 	}
+	summary := "The supervisor daemon cannot reach the Daintree MCP (Daintree closed or unreachable). " +
+		"Watchers and async futures are paused — nothing is abandoned — and supervision resumes " +
+		"automatically when the connection returns."
+	if revoked {
+		summary = "This session's Daintree MCP credentials were revoked (the assistant window closed or a new " +
+			"session displaced it). Watchers and async futures are paused — nothing is abandoned — and " +
+			"supervision resumes automatically the next time the assistant is opened in Daintree (a fresh " +
+			"launch pushes new credentials to the supervisor)."
+	}
 	ev, err := a.Queue.Publish(ctx, domain.QueuePublishArgs{
-		Source:   domain.SourceSystem,
-		Severity: domain.SeverityBlocked,
-		Title:    "Supervision blocked: Daintree MCP unavailable",
-		Summary: "The supervisor daemon cannot reach the Daintree MCP (token expired or Daintree closed). " +
-			"Watchers and async futures are paused — nothing is abandoned — and supervision resumes " +
-			"automatically when the connection returns (reopen Daintree/the assistant to refresh credentials).",
+		Source:    domain.SourceSystem,
+		Severity:  domain.SeverityBlocked,
+		Title:     "Supervision blocked: Daintree MCP unavailable",
+		Summary:   summary,
 		DedupeKey: "supervisor:mcp_unavailable",
 	})
 	if err == nil {
@@ -503,7 +551,13 @@ func (r *Runtime) HandleRequest(ctx context.Context, req ipc.Request, conn *ipc.
 		if err := json.Unmarshal(req.Payload, &c); err != nil {
 			return errResponse("malformed credentials payload")
 		}
-		r.storeCreds(c)
+		if r.storeCreds(c) {
+			// Fresh credentials while a span runs on the OLD (likely revoked)
+			// token: rebuild the span. The runLoop re-acquires immediately and
+			// the new App connects with the new token — the displaced-cockpit
+			// race (docs/DAINTREE_HOST.md one-backend rule) heals here.
+			r.interruptSupervision()
+		}
 		return ipc.Response{OK: true}
 
 	case ipc.ReqAttach:
@@ -635,22 +689,34 @@ func (r *Runtime) statusReply() ipc.StatusReply {
 	return rep
 }
 
-func (r *Runtime) storeCreds(c ipc.Credentials) {
+// storeCreds records a credentials push; the return value reports whether a
+// supervision span is running on now-stale values (caller decides to rebuild).
+func (r *Runtime) storeCreds(c ipc.Credentials) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.applyCredsLocked(c)
+	changed := r.applyCredsLocked(c)
+	return changed && r.app != nil
 }
 
-func (r *Runtime) applyCredsLocked(c ipc.Credentials) {
-	if c.McpURL != "" {
+func (r *Runtime) applyCredsLocked(c ipc.Credentials) (changed bool) {
+	if c.McpURL != "" && c.McpURL != r.creds.McpURL {
 		r.creds.McpURL = c.McpURL
+		changed = true
 	}
-	if c.McpToken != "" {
+	if c.McpToken != "" && c.McpToken != r.creds.McpToken {
 		r.creds.McpToken = c.McpToken
+		changed = true
 	}
-	if c.BackendURL != "" {
+	if c.BackendURL != "" && c.BackendURL != r.creds.BackendURL {
 		r.creds.BackendURL = c.BackendURL
+		changed = true
 	}
+	if changed {
+		// New credentials supersede a revocation latch — the next span connects
+		// with them.
+		r.credsRevoked = false
+	}
+	return changed
 }
 
 func (r *Runtime) attached() bool {

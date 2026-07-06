@@ -17,6 +17,12 @@ const (
 	// runtimeKeyBackendStatePrefix namespaces the per-session opaque backend
 	// state token (server-signed skill-selection state).
 	runtimeKeyBackendStatePrefix = "backend_state:"
+	// RuntimeKeyDetachedActivity accumulates what the supervisor daemon did while
+	// no assistant was attached (wake-turn count + last reply preview, JSON).
+	// Written by the daemon after each successful wake turn; consumed (read +
+	// deleted) by the next attaching assistant for its "while you were away"
+	// notice.
+	RuntimeKeyDetachedActivity = "detached_activity"
 )
 
 // PutRuntimeState upserts one key. Empty value deletes the key — callers treat

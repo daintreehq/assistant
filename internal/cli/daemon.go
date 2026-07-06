@@ -56,11 +56,22 @@ func SetVersion(v string) { buildVersion = v }
 func RunDaemon(ctx context.Context, opts Options) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
-	return supervisor.Run(ctx, supervisor.Options{
+	sOpts := supervisor.Options{
 		Overrides: overrides,
 		Version:   buildVersion,
 		Log:       func(s string) { r.Line(s) },
-	})
+	}
+	// TEST-ONLY knobs: compressed cadences + a short idle-exit window let the
+	// subprocess e2e suite exercise outage/blocked/idle behavior in seconds.
+	if v := os.Getenv("DAINTREE_ASSISTANT_DAEMON_FAST"); v == "1" || v == "true" {
+		sOpts.Fast = true
+	}
+	if v := os.Getenv("DAINTREE_ASSISTANT_DAEMON_IDLE_EXIT_MS"); v != "" {
+		if ms, err := time.ParseDuration(v + "ms"); err == nil && ms != 0 {
+			sOpts.IdleExit = ms
+		}
+	}
+	return supervisor.Run(ctx, sOpts)
 }
 
 // RunDaemonStop asks the project's daemon to exit.

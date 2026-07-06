@@ -1188,6 +1188,12 @@ func (m Model) bootstrapCmd() tea.Cmd {
 		a.StartScheduler(ctx, func(events []domain.QueueEvent) {
 			pump.sendAttention(events)
 		})
+		// One-time "while you were away" notice: what the supervisor daemon did
+		// while detached + what this attach adopted. Consumed on read, so it
+		// renders exactly once, as ordinary note lines in the scrollback.
+		for _, line := range a.AttachSummaryLines() {
+			pump.Info(line)
+		}
 		if !st.Connected {
 			reason := st.Error
 			if reason == "" {

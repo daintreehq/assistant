@@ -1,6 +1,30 @@
 package mcp
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
+
+// IsCredentialTerminalStatus reports whether a connection status/error string
+// marks this session's MCP credentials as PERMANENTLY dead: the per-session
+// bearer was revoked (401/unauthorized — Daintree rotates it on every
+// re-provision and revokes on window close/eviction/displacement) or the
+// server declared the binding gone (SESSION_BINDING_GONE / BINDING_STALE).
+// docs/DAINTREE_HOST.md: repeated auth failures trip Daintree's abuse policy,
+// so a caller seeing this must STOP reconnecting with the same token and wait
+// for fresh credentials (the next assistant launch pushes them). String-level
+// because connect failures surface only through Status().Error text.
+func IsCredentialTerminalStatus(errText string) bool {
+	if errText == "" {
+		return false
+	}
+	if isBindingTerminal(errText) {
+		return true
+	}
+	low := strings.ToLower(errText)
+	return strings.Contains(low, "401") || strings.Contains(low, "unauthorized") ||
+		strings.Contains(low, "unauthenticated") || strings.Contains(low, "403")
+}
 
 // isUnavailable reports whether err is (or wraps) an UnavailableError. Callers use
 // it to decide NOT to degrade the connection (it already means disconnected).
