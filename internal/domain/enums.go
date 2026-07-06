@@ -309,9 +309,9 @@ const (
 )
 
 // AsyncStatus tracks a runtime-owned async tool invocation (the durable-futures
-// ledger behind terminal.run.async / terminal.await.async). Session-scoped like
-// watchers: cancelStaleAsyncInvocations marks non-terminal rows abandoned on the
-// next DB open.
+// ledger behind terminal.run.async / terminal.await.async). Project-scoped like
+// watchers: non-terminal rows survive process boundaries and are adopted by the
+// next owner's coordinator; /clear cancels them.
 //
 //	starting  — ledger row exists; the initial side effect (sendCommand) may not
 //	            have completed yet. A crash here is reconciled to abandoned.

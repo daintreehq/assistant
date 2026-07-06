@@ -112,7 +112,12 @@ func RunStatus(ctx context.Context, opts Options) int {
 	if err != nil {
 		if errors.Is(err, ipc.ErrNoDaemon) {
 			r.Line("  daemon         : not running")
-			if pid := ipc.ReadLockHolderPid(ownerLockPath(cfg)); pid > 0 {
+			// The stamped pid alone is stale after a clean release (the lock FILE
+			// stays on disk); only a failing probe proves a live owner.
+			probe := ipc.NewFileLock(ownerLockPath(cfg))
+			if got, _ := probe.TryAcquire(); got {
+				probe.Release()
+			} else if pid := ipc.ReadLockHolderPid(ownerLockPath(cfg)); pid > 0 {
 				r.Line(fmt.Sprintf("  owner          : pid %d (an attached assistant)", pid))
 			}
 			return domain.OneShotExitCode.Success

@@ -24,6 +24,10 @@ type Client struct {
 	reader *bufio.Scanner
 	mu     sync.Mutex
 	nextID atomic.Uint64
+	// broken latches after any read failure: bufio.Scanner does not resume
+	// cleanly after an I/O timeout mid-line, so a timed-out Call poisons the
+	// stream — every later Call must fail fast and the caller reconnect.
+	broken bool
 }
 
 // Dial connects to the control socket. A missing socket file or a
@@ -60,6 +64,9 @@ func isNoDaemonDialError(err error) bool {
 func (c *Client) Call(ctx context.Context, typ string, payload any, out any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.broken {
+		return fmt.Errorf("ipc: connection is broken after an earlier read failure — reconnect")
+	}
 	id := fmt.Sprintf("r%d", c.nextID.Add(1))
 	req := Request{V: ProtocolVersion, ID: id, Type: typ}
 	if payload != nil {
@@ -100,6 +107,7 @@ func (c *Client) Call(ctx context.Context, typ string, payload any, out any) err
 		}
 		return nil
 	}
+	c.broken = true
 	if err := c.reader.Err(); err != nil {
 		return fmt.Errorf("ipc: read %s reply: %w", typ, err)
 	}

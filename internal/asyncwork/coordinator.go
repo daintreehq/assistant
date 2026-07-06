@@ -54,8 +54,9 @@ const (
 
 	// Read-failure backoff: after readBackoffAfter consecutive failed status
 	// reads, only attempt a read every readBackoffEvery ticks (≈5s) until one
-	// succeeds — a downed MCP must not be hammered every second. Deadlines keep
-	// enforcing regardless, so a long outage still expires invocations on time.
+	// succeeds — a downed MCP must not be hammered every second. Deadlines do
+	// NOT enforce while reads are failing (see readsHealthy): expiring blind
+	// would abandon work that may have finished during the blackout.
 	readBackoffAfter = 5
 	readBackoffEvery = 5
 
@@ -171,6 +172,11 @@ type tracked struct {
 	// publish (never the claim, which would lose to its own prior write).
 	finalized   bool
 	finalStatus domain.AsyncStatus
+	// retryOnly marks an ADOPTED finalized-but-unpublished row. Retry entries
+	// publish as their OWN unit, never merged with live same-group siblings: the
+	// retried event must reproduce the ORIGINAL member set (same dedupe key) so
+	// a publish that DID land before the crash dedupes instead of duplicating.
+	retryOnly bool
 }
 
 // Coordinator owns every live async invocation. One pass per tick; no-overlap
@@ -379,7 +385,23 @@ func (c *Coordinator) adoptFromStore(now int64) {
 		live = nil
 	}
 	adopted := 0
+	var orphanedStarts []string
 	for _, rec := range live {
+		// A run.async row still in 'starting' means the prior owner died BETWEEN
+		// persisting the intent and (confirming) the terminal send — the command
+		// may never have run. Supervising it as normal work could publish a clean
+		// "finished" for a command that never executed, so cancel it and surface
+		// an attention item asking for verification instead. (await.async rows in
+		// 'starting' are just a read-only watch that never registered — adopting
+		// those is safe and correct.)
+		if rec.Status == domain.AsyncStarting && rec.ToolName == "terminal.run.async" {
+			if ok, _ := c.deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
+				"status": string(domain.AsyncCancelled), "endedReason": "orphaned_startup", "finishedAt": now,
+			}); ok {
+				orphanedStarts = append(orphanedStarts, fmt.Sprintf("%s %q", rec.ID, rec.Title))
+			}
+			continue
+		}
 		entry := trackedFromRecord(rec, now, c.grace)
 		if entry == nil {
 			// Unparseable terminal list: the row can never settle by polling. Cancel
@@ -396,6 +418,18 @@ func (c *Coordinator) adoptFromStore(now int64) {
 		c.mu.Unlock()
 		adopted++
 	}
+	if len(orphanedStarts) > 0 {
+		// SourceAsyncTool so the wake filter fires: the model can read the
+		// terminal and tell the user whether the command actually ran.
+		_, _ = c.deps.Queue.Publish(context.Background(), domain.QueuePublishArgs{
+			Source:   domain.SourceAsyncTool,
+			Severity: domain.SeverityAttention,
+			Title:    "Async command may not have started",
+			Summary: "The previous assistant exited while starting: " + strings.Join(orphanedStarts, "; ") +
+				". The command may or may not have been sent — check the terminal before re-running it.",
+			DedupeKey: "async-orphaned:" + strings.Join(orphanedStarts, "+"),
+		})
+	}
 	retries := 0
 	if unpub, uerr := c.deps.AdoptLister.ListUnpublishedAsyncInvocations(); uerr != nil {
 		c.trace("async.adopt_failed", map[string]any{"stage": "unpublished", "error": uerr.Error()})
@@ -409,8 +443,11 @@ func (c *Coordinator) adoptFromStore(now int64) {
 			// publish is owed. Marking finalized + due-now routes it through the
 			// existing publish-retry path; the stable group DedupeKey keeps a retry
 			// of an event that DID land (crash between publish and stamp) a dedupe
-			// hit instead of a duplicate wake.
+			// hit instead of a duplicate wake. retryOnly keeps the retried member
+			// set byte-identical to the original publish — a live same-group
+			// sibling settling now must not widen it into a NEW dedupe key.
 			entry.finalized = true
+			entry.retryOnly = true
 			entry.finalStatus = rec.Status
 			entry.settleAt = now
 			c.mu.Lock()
@@ -550,8 +587,16 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 		return
 	}
 	// Deterministic order (map iteration is random): grouped publishes and tests
-	// both want stable composition.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].rec.CreatedAt < entries[j].rec.CreatedAt })
+	// both want stable composition. The ID tie-break matters for correctness,
+	// not just tidiness: the group dedupe key is the JOINED MEMBER IDS, so a
+	// crash-retry must reproduce the original ordering byte-for-byte even when
+	// members share a CreatedAt millisecond.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].rec.CreatedAt != entries[j].rec.CreatedAt {
+			return entries[i].rec.CreatedAt < entries[j].rec.CreatedAt
+		}
+		return entries[i].rec.ID < entries[j].rec.ID
+	})
 
 	var polling []*tracked
 	for _, t := range entries {
@@ -595,7 +640,7 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 		switch {
 		case t.allSettled():
 			c.enterSettling(t, now)
-		case now >= t.rec.ExpiresAt && c.deps.Reader.Connected():
+		case now >= t.rec.ExpiresAt && c.deps.Reader.Connected() && c.readsHealthy():
 			// Deadline: unsettled terminals are recorded as still working and the
 			// invocation settles as expired.
 			for _, st := range t.perTerminal {
@@ -671,6 +716,17 @@ func keys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// readsHealthy reports whether the LAST status read succeeded (readFailures
+// zero). The deadline may only expire an invocation when we can actually see
+// the terminals — Connected() alone can be true while every read fails, and
+// expiring blind would mark work "timed out" that may have finished during the
+// blackout (the exact abandonment the supervisor exists to prevent).
+func (c *Coordinator) readsHealthy() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readFailures == 0
 }
 
 // shouldRead applies the read-failure backoff (guarded by mu).
@@ -849,7 +905,13 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 			groupHasPolling[t.rec.GroupID] = true
 			continue
 		}
-		byGroup[t.rec.GroupID] = append(byGroup[t.rec.GroupID], t)
+		key := t.rec.GroupID
+		if t.retryOnly {
+			// Adopted publish-retries are their own publish unit (see retryOnly):
+			// a live sibling settling later must NOT widen the retried member set.
+			key = t.rec.GroupID + "\x00retry"
+		}
+		byGroup[key] = append(byGroup[key], t)
 	}
 	c.mu.Unlock()
 
@@ -863,7 +925,7 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 		// between two async starters in one batch) — publishing early would split
 		// the turn's completions into separate wakes.
 		selfGrouped := len(members) == 1 && members[0].rec.GroupID == members[0].rec.ID
-		due := selfGrouped && !groupHasPolling[group]
+		due := (selfGrouped && !groupHasPolling[group]) || members[0].retryOnly
 		for _, t := range members {
 			if now >= t.settleAt {
 				due = true
@@ -873,7 +935,12 @@ func (c *Coordinator) publishDueGroups(ctx context.Context, now int64) bool {
 		if !due {
 			continue
 		}
-		sort.Slice(members, func(i, j int) bool { return members[i].rec.CreatedAt < members[j].rec.CreatedAt })
+		sort.Slice(members, func(i, j int) bool {
+			if members[i].rec.CreatedAt != members[j].rec.CreatedAt {
+				return members[i].rec.CreatedAt < members[j].rec.CreatedAt
+			}
+			return members[i].rec.ID < members[j].rec.ID
+		})
 		if c.publishGroup(ctx, now, gen, group, members) {
 			published = true
 		}

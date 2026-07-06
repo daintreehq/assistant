@@ -285,6 +285,23 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 	// re-arming (status back to 'active' with a new nextCheckAt) would resurrect a cancelled
 	// watcher and keep it supervising forever. A lost claim also means we leave the cancel's
 	// own grant revocation in place rather than racing it here.
+	// Publish ordering vs the finalize claim is asymmetric, by crash-recovery
+	// shape:
+	//   - STOP outcomes publish BEFORE the claim. The claim flips the row to a
+	//     terminal status that DueWatchers never re-selects, so a crash between
+	//     claim and publish would lose the completion alert FOREVER. Publishing
+	//     first is crash-safe: a crash after publish leaves the row active, the
+	//     next owner re-checks, re-derives the same event, and the stable
+	//     dedupe key absorbs the re-publish. The cost is the narrow cancel race
+	//     (a watcher cancelled mid-check may emit one final honest alert).
+	//   - Non-stop outcomes publish AFTER a won claim: the active row re-checks
+	//     on the next tick anyway (a crash loses nothing durable), so we keep
+	//     the stronger cancel guarantee — a cancelled watcher never wakes anyone.
+	if stop {
+		for _, args := range pendingPublishes {
+			_ = ctx.Queue.Publish(args)
+		}
+	}
 	claimed, _ := ctx.Store.ClaimDueWatcher(rec.ID, map[string]any{
 		"lastClassification": string(headline.Classification),
 		"lastEpistemicKind":  string(headline.EpistemicKind),
@@ -293,11 +310,7 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		"optionsJson":        string(optsJSON),
 		"status":             status,
 	})
-	// Flush the deferred publishes only on a WON claim: a lost claim means a
-	// concurrent cancel finalized this watcher mid-check, and a cancelled
-	// watcher must never wake anyone. Publish-after-claim also removes the old
-	// crash window where an event landed for a check that never finalized.
-	if claimed {
+	if claimed && !stop {
 		for _, args := range pendingPublishes {
 			_ = ctx.Queue.Publish(args)
 		}

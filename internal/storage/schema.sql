@@ -20,8 +20,10 @@ CREATE TABLE IF NOT EXISTS timers (
   lastFiredAt   INTEGER
 );
 
--- 3.2 watchers — session-scoped supervisors. NB: insert path supplies 'active';
--- the column DEFAULT is aligned to 'active' here (clean schema, no confusion).
+-- 3.2 watchers — project-scoped supervisors: rows survive process boundaries
+-- and are adopted by the next owner (cockpit or supervisor daemon); /clear is
+-- the only wholesale teardown. NB: insert path supplies 'active'; the column
+-- DEFAULT is aligned to 'active' here (clean schema, no confusion).
 CREATE TABLE IF NOT EXISTS watchers (
   id                 TEXT PRIMARY KEY,
   kind               TEXT NOT NULL,
@@ -42,11 +44,11 @@ CREATE TABLE IF NOT EXISTS watchers (
   lastCheckedAt      INTEGER,
   nextCheckAt        INTEGER NOT NULL,
   createdAt          INTEGER NOT NULL,
-  -- WHY a watcher reached a terminal 'cancelled' status, so a session-boundary
-  -- teardown ('session_ended', stamped by cancelStaleWatchers on the next open) is
-  -- distinguishable from a deliberate user cancel ('user_cancelled', stamped by
-  -- watcher.cancel). NULL on active rows and on natural terminal states
-  -- (condition_met/timeout/error). endedAt is the epoch-ms of that cancel.
+  -- WHY a watcher reached a terminal 'cancelled' status, so a /clear teardown
+  -- ('session_cleared', stamped by CancelLiveWatchers) is distinguishable from a
+  -- deliberate user cancel ('user_cancelled', stamped by watcher.cancel). NULL on
+  -- active rows and on natural terminal states (condition_met/timeout/error).
+  -- endedAt is the epoch-ms of that cancel.
   endedReason        TEXT,
   endedAt            INTEGER,
   -- Back-link to the durable workflow_runs ledger row a supervisor watcher drives.

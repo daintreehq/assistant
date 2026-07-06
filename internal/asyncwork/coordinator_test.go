@@ -827,3 +827,119 @@ func TestCoordinatorAdoptListerFailureDegrades(t *testing.T) {
 		t.Fatalf("failed adoption must leave the poll set empty, got %d", got)
 	}
 }
+
+// A publish retry must reproduce the ORIGINAL member set even when a live
+// same-group sibling settles in the same pass — otherwise the retried event
+// carries a different dedupe key and a publish that DID land before the crash
+// duplicates instead of deduping.
+func TestCoordinatorAdoptRetryKeepsOriginalMemberSet(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	outcomes := `{"term-2":{"status":"finished"}}`
+	lost := domain.AsyncInvocationRecord{
+		ID: "asy_a", ToolName: "terminal.await.async", Title: "job a",
+		GroupID: "run_shared", SessionID: "ses_prev", TerminalIdsJson: `["term-2"]`,
+		Status: domain.AsyncSucceeded, CreatedAt: 500, ExpiresAt: 500_000,
+		OutcomesJson: &outcomes,
+	}
+	sibling := domain.AsyncInvocationRecord{
+		ID: "asy_b", ToolName: "terminal.await.async", Title: "job b",
+		GroupID: "run_shared", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncSettling, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	// The settling sibling needs restored outcomes to publish; give it one.
+	sibOutcomes := `{"term-1":{"status":"finished"}}`
+	sibling.OutcomesJson = &sibOutcomes
+	h.c.deps.AdoptLister = &fakeAdoptLister{
+		live:  []domain.AsyncInvocationRecord{sibling},
+		unpub: []domain.AsyncInvocationRecord{lost},
+	}
+
+	h.c.adoptFromStore(50_000)
+	// First tick: the retry entry is due immediately; the adopted settling
+	// sibling waits out its re-coalescing grace.
+	h.c.Tick(context.Background(), 50_000)
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want the retry published alone first, got %d events", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_a" {
+		t.Fatalf("retry dedupe key = %q, want the ORIGINAL member set async:asy_a", evs[0].args.DedupeKey)
+	}
+	// After the sibling's grace elapses it publishes as its own event.
+	h.c.Tick(context.Background(), 50_000+3_000)
+	evs = h.queue.all()
+	if len(evs) != 2 {
+		t.Fatalf("want the live sibling published separately, got %d events", len(evs))
+	}
+	if evs[1].args.DedupeKey != "async:asy_b" {
+		t.Fatalf("sibling dedupe key = %q, want async:asy_b", evs[1].args.DedupeKey)
+	}
+}
+
+// Equal CreatedAt members must publish under a deterministic id order — the
+// dedupe key is the joined ids, so a crash-retry has to reproduce it exactly.
+func TestCoordinatorGroupKeyDeterministicOnCreatedAtTie(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{
+			"term-1": {AgentState: "working"},
+			"term-2": {AgentState: "working"},
+		}),
+		frame(true, map[string]TerminalStatus{
+			"term-1": {AgentState: "waiting"},
+			"term-2": {AgentState: "waiting"},
+		}),
+	})
+	a := inv("asy_z", "run_tie", 1_000, 100_000) // deliberately registered first, sorts LAST by id
+	b := inv("asy_a", "run_tie", 1_000, 100_000)
+	b.TerminalIdsJson = `["term-2"]`
+	if err := h.c.Register(a, []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Register(b, []string{"term-2"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 2_000) // working
+	h.c.Tick(ctx, 3_000) // waiting → settle
+	h.c.Tick(ctx, 6_000) // grace passed → publish
+	evs := h.queue.all()
+	if len(evs) != 1 {
+		t.Fatalf("want one grouped event, got %d", len(evs))
+	}
+	if evs[0].args.DedupeKey != "async:asy_a+asy_z" {
+		t.Fatalf("tie-broken dedupe key = %q, want async:asy_a+asy_z", evs[0].args.DedupeKey)
+	}
+}
+
+// A run.async row still 'starting' at adoption is AMBIGUOUS (the command may
+// never have been sent): it must be cancelled with an attention item, never
+// supervised as running work. An await.async 'starting' row is a plain watch
+// and adopts normally.
+func TestCoordinatorAdoptOrphanedStartingRunAsync(t *testing.T) {
+	h := newHarness(nil)
+	run := domain.AsyncInvocationRecord{
+		ID: "asy_run", ToolName: "terminal.run.async", Title: "maybe never ran",
+		GroupID: "asy_run", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncStarting, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	await := domain.AsyncInvocationRecord{
+		ID: "asy_await", ToolName: "terminal.await.async", Title: "plain watch",
+		GroupID: "asy_await", SessionID: "ses_prev", TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncStarting, CreatedAt: 1_000, ExpiresAt: 500_000,
+	}
+	h.c.deps.AdoptLister = &fakeAdoptLister{live: []domain.AsyncInvocationRecord{run, await}}
+
+	h.c.adoptFromStore(50_000)
+	if got := h.c.ActiveCount(); got != 1 {
+		t.Fatalf("only the await watch should be adopted, ActiveCount = %d", got)
+	}
+	if st := h.store.lastStatus("asy_run"); st != string(domain.AsyncCancelled) {
+		t.Errorf("orphaned run.async status = %q, want cancelled", st)
+	}
+	evs := h.queue.all()
+	if len(evs) != 1 || !strings.Contains(evs[0].args.Title, "may not have started") {
+		t.Fatalf("want one orphaned-startup attention item, got %+v", evs)
+	}
+}

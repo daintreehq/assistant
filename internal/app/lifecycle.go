@@ -295,9 +295,10 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 
 // ClearWatchers tears down ALL live watchers in this session — revokes their
 // grants, cancels them, and resolves their open attention events — for a completely
-// clean slate. Used by /clear; it mirrors what the session-boundary sweep does on
-// the next launch (the two situations that wipe supervision). The actual Daintree
-// terminals keep running; the assistant simply stops supervising them. Returns how
+// clean slate. Used by /clear, which is now the ONLY wholesale watcher teardown
+// (watchers are project-scoped and otherwise survive process boundaries). The
+// actual Daintree terminals keep running; the assistant simply stops supervising
+// them. Returns how
 // many watchers were cancelled. Best-effort: the error is returned for logging only.
 func (a *App) ClearWatchers() (int, error) {
 	titles, err := a.Store.CancelLiveWatchers(domain.NowMS(), storage.ReasonSessionCleared)

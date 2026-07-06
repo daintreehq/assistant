@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -28,9 +29,12 @@ const (
 
 // FileLock is a held (or not-yet-held) flock on a named file. The *os.File
 // must stay referenced while the lock is held — a GC'd file closes its fd and
-// silently releases the lease.
+// silently releases the lease. Safe for concurrent use: the daemon's run loop
+// acquires/releases while its attach handler reads Held() on a connection
+// goroutine.
 type FileLock struct {
 	path string
+	mu   sync.Mutex
 	f    *os.File
 }
 
@@ -45,6 +49,8 @@ func (l *FileLock) Path() string { return l.path }
 // purely diagnostic (the flock is the authority; the pid is for `status` and
 // humans poking at the state dir).
 func (l *FileLock) TryAcquire() (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.f != nil {
 		return true, nil // already held by this handle
 	}
@@ -88,12 +94,18 @@ func (l *FileLock) Acquire(ctx context.Context, retryEvery time.Duration) error 
 }
 
 // Held reports whether this handle currently holds the lock.
-func (l *FileLock) Held() bool { return l.f != nil }
+func (l *FileLock) Held() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.f != nil
+}
 
 // Release drops the lock and closes the file. Idempotent. The lock FILE is
 // deliberately left on disk — unlinking a lock file that another process may
 // be about to open reintroduces the classic stale-lock race.
 func (l *FileLock) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.f == nil {
 		return
 	}
