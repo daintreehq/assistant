@@ -124,10 +124,18 @@ func newSummarizeTool(deps Deps) tools.Tool {
 		Name: "terminal.summarize",
 		Description: "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. This is the DEFAULT way to " +
 			"relay what an agent said: a coding agent's raw scrollback is garbled, repainted TUI output, so summarizing it gives clean prose " +
-			"and keeps it out of your context. Prefer this over terminal.read unless the user needs the exact literal text. Read-only; requires Daintree MCP.",
-		Risk:   domain.RiskRead,
-		Schema: summarizeSchema,
-		Decode: tools.StrictDecoder(func() any { return &summarizeArgs{} }),
+			"and keeps it out of your context. Prefer this over terminal.read unless the user needs the exact literal text. PARALLEL: " +
+			"summarize/extract calls batched in ONE reply run CONCURRENTLY — to relay a whole cohort, emit one summarize per terminal as one " +
+			"batch of calls, not one per turn; the total wait is roughly the slowest single call. Read-only; requires Daintree MCP.",
+		Risk: domain.RiskRead,
+		// Independent per-call snapshot read + small-model call, the same cost profile
+		// as terminal.extract (seconds each): a cohort relay (one summarize per agent)
+		// runs concurrently instead of stacking N backend round-trips. Safe because each
+		// call reads its own terminal tail and has no ordering dependency on siblings —
+		// and it has no wait/barrier mode at all.
+		Parallelizable: true,
+		Schema:         summarizeSchema,
+		Decode:         tools.StrictDecoder(func() any { return &summarizeArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a summarizeArgs
 			_ = json.Unmarshal(raw, &a)
