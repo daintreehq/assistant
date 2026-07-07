@@ -381,22 +381,36 @@ func (a *App) Shutdown() error {
 		a.scheduler.Stop()
 		a.scheduler.Drain()
 	}
+	debuglog.BootTrace("shutdown.engines.stopped")
 	// Join the session's detached distill goroutine BEFORE closing the Router/Store it
 	// writes to. baseCancel above already cancelled its context, so this returns fast.
 	if a.Session != nil {
 		a.Session.DrainBackgroundWork()
 	}
+	debuglog.BootTrace("shutdown.session.drained")
+	// Network teardown is DETACHED: both MCP closes are pure connection teardown with
+	// zero store coupling, and by this point nothing uses either client (baseCancel +
+	// the drains above joined every consumer). Blocking on them held the measured
+	// ~250ms (worst-case 2s) docs-server round trip inside BOTH the one-shot exit AND
+	// the daemon's attach handover — the lease release sat behind a public-internet
+	// close. Only the store close below must stay synchronous (the next owner may
+	// open the DB the instant the caller releases the flock). The goroutines are
+	// self-terminating; a wedged endpoint leaks one goroutine bounded by process
+	// exit / TCP teardown, the same abandonment policy closeMCPWithTimeout already
+	// accepted.
 	if a.MCP != nil {
-		_ = a.MCP.Close()
+		go func(c *mcp.Client) { _ = c.Close() }(a.MCP)
 	}
 	if a.DocsMCP != nil {
-		// Join any in-flight docs (re)connect first — baseCancel above already aborted it,
-		// so this returns fast — so a late applyConnected can't install a session AFTER
-		// Close and leak it. Then bound the close: the docs server is public and anonymous
-		// (un-timed http.Client), so a wedged endpoint must not hang process exit.
-		a.docsConnectWG.Wait()
-		closeMCPWithTimeout(a.DocsMCP, docsCloseTimeout)
+		// Join any in-flight docs (re)connect BEFORE closing — baseCancel above already
+		// aborted it, so the join is fast — preserving the "never install a session
+		// after Close" ordering, just off the caller's critical path.
+		go func(c *mcp.Client) {
+			a.docsConnectWG.Wait()
+			closeMCPWithTimeout(c, docsCloseTimeout)
+		}(a.DocsMCP)
 	}
+	debuglog.BootTrace("shutdown.mcp.detached")
 	if a.Store != nil {
 		return a.Store.Close()
 	}

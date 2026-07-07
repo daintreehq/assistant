@@ -132,6 +132,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	}
 
 	overrides := buildOverrides(opts, stderrR)
+	debuglog.BootTrace("oneshot.overrides.loaded")
 	// One-shot takes the owner lease briefly (never spawning a daemon — a script
 	// probe must not litter the machine with supervisors). A held lease means a
 	// live assistant owns the project: fail loudly instead of double-opening.
@@ -145,6 +146,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		return domain.OneShotExitCode.Error
 	}
 	defer own.Release()
+	debuglog.BootTrace("oneshot.ownership.acquired")
 	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
 		reportError(err)
@@ -193,9 +195,12 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	}
 	a.SetHooks(app.AppHooks{AgentEvents: events, Confirm: confirm, Log: logHook})
 
+	debuglog.BootTrace("oneshot.app.created")
 	runErr := func() error {
 		a.ConnectMcp(ctx)
+		debuglog.BootTrace("oneshot.mcp.connect.done")
 		_, err := a.Session.Send(ctx, opts.Prompt, agent.SendOptions{})
+		debuglog.BootTrace("oneshot.send.done")
 		return err
 	}()
 	if runErr != nil {
@@ -211,6 +216,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		}
 	}
 
+	debuglog.BootTrace("oneshot.shutdown.done")
 	if sink != nil {
 		return sink.Finish()
 	}
@@ -231,6 +237,7 @@ func RunInteractive(ctx context.Context, opts Options) int {
 
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
+	debuglog.BootTrace("boot.overrides.loaded")
 	// Interactive launch: ensure the project's supervisor daemon exists, attach
 	// (it yields ownership + receives our fresh MCP credentials), and take the
 	// owner lease. Closing this assistant later hands supervision straight back
@@ -243,6 +250,7 @@ func RunInteractive(ctx context.Context, opts Options) int {
 		return domain.OneShotExitCode.Error
 	}
 	defer own.Release()
+	debuglog.BootTrace("boot.ownership.acquired")
 	createOpts := app.CreateOptions{Overrides: overrides}
 	// Only an interactive terminal can answer the reset prompt; a piped/non-TTY launch
 	// keeps the loud, actionable stale-schema error rather than blocking on a stdin read
@@ -255,6 +263,7 @@ func RunInteractive(ctx context.Context, opts Options) int {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
 	}
+	debuglog.BootTrace("boot.app.created")
 	// This conversation is now the project's current session — the one the
 	// daemon's detached wake turns continue after we exit.
 	a.AdoptAsCurrentSession()

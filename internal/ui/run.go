@@ -35,9 +35,11 @@ func Run(ctx context.Context, a *app.App) error {
 		m.columns = cols
 		m.rows = rows
 	}
+	debuglog.BootTrace("boot.splash.start")
 	bootPrefetch := startBootPrefetch(ctx, a)
 	defer bootPrefetch.stop()
 	handoffFrame := func(cols, rows int) string {
+		debuglog.BootTrace("boot.splash.handoff")
 		if name := bootPrefetch.projectName(); name != "" {
 			m.masthead.ProjectName = name
 		}
@@ -95,6 +97,7 @@ func Run(ctx context.Context, a *app.App) error {
 		tea.WithOutput(os.Stdout),
 	)
 
+	debuglog.BootTrace("boot.program.start")
 	_, err := prog.Run()
 
 	// Restore a clean window title on exit (Bubble Tea has released the terminal).
@@ -130,8 +133,10 @@ func bootFetchProjectName(ctx context.Context, a *app.App) string {
 		return ""
 	}
 	if st := a.ConnectMcp(ctx); st.Connected {
+		debuglog.BootTrace("boot.mcp.connected")
 		for {
 			if name := a.MCP.FetchProjectName(ctx); name != "" {
+				debuglog.BootTrace("boot.projectname.done")
 				return name
 			}
 			select {
@@ -153,6 +158,7 @@ func bootHandshakeBackend(ctx context.Context, a *app.App) error {
 	defer cancel()
 	_, err := a.Backend.Capabilities(hctx)
 	logBootBackendHandshake(a, time.Since(started), err)
+	debuglog.BootTrace("boot.backend.handshake")
 	return err
 }
 

@@ -77,7 +77,16 @@ func playBootSplash(
 		_, _ = io.WriteString(w, "\x1b[?25h\x1b[2J\x1b[3J\x1b[H") // restore cursor + clean slate for BT
 	}()
 
+	// Frames are paced against ABSOLUTE deadlines from a single start instant, not a
+	// fixed post-write delay: a per-frame `time.After(frameDelay)` stacks the render/
+	// write/measure time ON TOP of the delay, so the "1s + linger" animation drifted
+	// ~6% long on a fast terminal and arbitrarily longer on a slow one. Anchoring each
+	// frame at start+i·frameDelay (and the linger at the same origin) keeps the total
+	// splash — the boot's loading budget — at its designed duration regardless of
+	// terminal write speed; when a write overruns its slot the next frame just paints
+	// immediately (the reveal catches up instead of stretching).
 	frameDelay := time.Second / time.Duration(splashFPS)
+	start := time.Now()
 	for i := 0; i < SplashFrames; i++ {
 		// Fresh measurement each frame; on a transient measure failure keep the
 		// last known size (the fd was a terminal at entry). A pane shrunk below
@@ -90,17 +99,28 @@ func playBootSplash(
 			return false, 0, 0
 		}
 		_, _ = io.WriteString(w, renderSplashFrame(th, i, cols))
+		if wait := time.Until(start.Add(time.Duration(i+1) * frameDelay)); wait > 0 {
+			select {
+			case <-sigCtx.Done():
+				return false, 0, 0
+			case <-time.After(wait):
+			}
+		} else if sigCtx.Err() != nil {
+			return false, 0, 0 // behind schedule: still honor an abort between frames
+		}
+	}
+	// Hold the finished logo (the linger) before handing off to the cockpit; the hold
+	// ends at the same absolute origin (start + draw + linger) so the whole splash
+	// keeps its designed duration.
+	lingerUntil := start.Add(time.Duration(SplashFrames)*frameDelay + time.Duration(lingerMs)*time.Millisecond)
+	if wait := time.Until(lingerUntil); wait > 0 {
 		select {
 		case <-sigCtx.Done():
 			return false, 0, 0
-		case <-time.After(frameDelay):
+		case <-time.After(wait):
 		}
-	}
-	// Hold the finished logo (the linger) before handing off to the cockpit.
-	select {
-	case <-sigCtx.Done():
-		return false, 0, 0
-	case <-time.After(time.Duration(lingerMs) * time.Millisecond):
+	} else if sigCtx.Err() != nil {
+		return false, 0, 0 // behind schedule: still honor an abort before the handoff
 	}
 	// Measure ONCE more right before the hand-off: the linger is the longest
 	// write-quiet window in the whole boot, so a host-side resize is most likely
