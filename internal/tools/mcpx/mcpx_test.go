@@ -470,3 +470,70 @@ func TestCopyTreeInjectSummary(t *testing.T) {
 		t.Errorf("tool-error inject must not claim delivery: %+v", r4)
 	}
 }
+
+// recordObserver captures MarkCommandSent calls (the settle-memory invalidation
+// hook the send wrappers feed).
+type recordObserver struct {
+	marked []string
+}
+
+func (r *recordObserver) MarkCommandSent(terminalID string, _ int64) {
+	r.marked = append(r.marked, terminalID)
+}
+
+// Every ATTEMPTED send/inject marks the terminal in the settle memory
+// (invalidating cross-call "seen working" evidence) — including failed calls: an
+// ambiguous transport failure may still have delivered the input, so the mark
+// cannot wait for a confirmed success. Only a local validation reject (nothing
+// ever sent) skips the mark.
+func TestSendWrappersMarkCommandSentOnAttempt(t *testing.T) {
+	obs := &recordObserver{}
+	mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+	tool := newTerminalSendCommandTool(Deps{MCP: mcp, Observer: obs})
+	decoded, _ := tool.Decode(json.RawMessage(`{"terminalId":"t7","command":"ls"}`))
+	if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("send should succeed: %+v", res.Error)
+	}
+	if len(obs.marked) != 1 || obs.marked[0] != "t7" {
+		t.Fatalf("successful send must mark the terminal, got %v", obs.marked)
+	}
+
+	inject := newCopyTreeInjectTool(Deps{MCP: mcp, Observer: obs})
+	d2, _ := inject.Decode(json.RawMessage(`{"terminalId":"t8"}`))
+	if res := inject.Handle(context.Background(), d2, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("inject should succeed: %+v", res.Error)
+	}
+	if len(obs.marked) != 2 || obs.marked[1] != "t8" {
+		t.Fatalf("successful inject must mark the terminal, got %v", obs.marked)
+	}
+
+	// A failed call still marks (the delivery is ambiguous from here).
+	obs2 := &recordObserver{}
+	failMCP := &fakeMCP{connected: true, result: MCPCallResult{IsError: true, Text: "no such terminal"}}
+	tool2 := newTerminalSendCommandTool(Deps{MCP: failMCP, Observer: obs2})
+	d3, _ := tool2.Decode(json.RawMessage(`{"terminalId":"t9","command":"ls"}`))
+	if res := tool2.Handle(context.Background(), d3, &tools.ToolContext{}); res.Ok {
+		t.Fatal("tool-error send should fail")
+	}
+	if len(obs2.marked) != 1 || obs2.marked[0] != "t9" {
+		t.Fatalf("an attempted-but-failed send must still mark the terminal, got %v", obs2.marked)
+	}
+
+	// A local validation reject sends nothing → no mark.
+	obs3 := &recordObserver{}
+	tool3 := newTerminalSendCommandTool(Deps{MCP: mcp, Observer: obs3})
+	d4, _ := tool3.Decode(json.RawMessage(`{"terminalId":"t9","command":"   "}`))
+	if res := tool3.Handle(context.Background(), d4, &tools.ToolContext{}); res.Ok {
+		t.Fatal("blank command should be rejected")
+	}
+	if len(obs3.marked) != 0 {
+		t.Fatalf("a locally rejected send must not mark, got %v", obs3.marked)
+	}
+
+	// nil Observer is safe (unwired tests / stripped builds).
+	tool4 := newTerminalSendCommandTool(Deps{MCP: mcp})
+	d5, _ := tool4.Decode(json.RawMessage(`{"terminalId":"t7","command":"ls"}`))
+	if res := tool4.Handle(context.Background(), d5, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("nil observer send should succeed: %+v", res.Error)
+	}
+}

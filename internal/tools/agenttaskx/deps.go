@@ -63,6 +63,12 @@ type Deps struct {
 	DB           Store
 	Config       config.AppConfig
 	DaemonActive func() bool
+	// SessionStartedAt (epoch ms) anchors agentTask.list's default "session" scope:
+	// launches created at-or-after it are this session's (only the lease holder can
+	// insert launches, so process boot time is an exact session boundary). 0 disables
+	// the filter (scope "session" then lists all rows), so unwired tests keep the old
+	// behaviour.
+	SessionStartedAt int64
 }
 
 // daemonActive resolves the nil-safe DaemonActive (absent ⇒ assume active).

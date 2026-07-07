@@ -28,6 +28,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
+	"github.com/daintreehq/daintree-assistant/internal/tools/terminalobs"
 	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
 )
 
@@ -142,6 +143,15 @@ type App struct {
 	// or leaks across sessions. Held on App (not Session) because the tool builder
 	// runs before a.Session exists; the family captures this concrete store directly.
 	scratchStore *scratchx.Store
+
+	// terminalObs is the session-scoped settle memory (internal/tools/terminalobs):
+	// the send wrappers (terminal.sendCommand / copyTree.injectToTerminal /
+	// terminal.run.async) WRITE input-injection marks, the in-turn waits
+	// (terminal.awaitAll / terminal.extract wait:{}) WRITE working observations and
+	// READ the seenWorking seed — so a re-await of a since-finished agent settles on
+	// its first poll instead of burning the 20s settle grace re-collecting evidence
+	// a previous wait already had. In-memory, discarded with the App.
+	terminalObs *terminalobs.Memory
 
 	// ownership is the owner-boot reconciliation summary (what this process adopted
 	// when it took the project DB over): resumed watchers/async, unpublished
@@ -328,6 +338,7 @@ func Create(opts CreateOptions) (*App, error) {
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
+		terminalObs:  terminalobs.NewMemory(),
 	}
 
 	// mcp → docs-mcp → queue → router → registry → skills.

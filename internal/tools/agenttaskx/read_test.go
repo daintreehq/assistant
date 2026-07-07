@@ -242,3 +242,70 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// The default "session" scope hides launches created before this session booted
+// (stale cross-session rows carry colliding titles + dead terminal ids), while
+// naming the hidden remainder so a history question isn't answered with a silent
+// "none". scope:"all" restores the full window.
+func TestListToolSessionScopeFiltersOldLaunches(t *testing.T) {
+	st := newSagaStore()
+	_, _ = st.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "old", AgentID: "codex", Mode: "explore", Title: "fact: Codex",
+		Name: "n", CreatedAt: 100,
+	})
+	fresh, _ := st.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "new", AgentID: "codex", Mode: "explore", Title: "Fact: Codex",
+		Name: "n", CreatedAt: 900,
+	})
+
+	tool := newListTool(Deps{DB: st, SessionStartedAt: 500})
+	res := tool.Handle(context.Background(), json.RawMessage(`{}`), nil)
+	if !res.Ok {
+		t.Fatalf("list should succeed, got %+v", res.Error)
+	}
+	payload := res.Result.(map[string]any)
+	views := payload["launches"].([]launchView)
+	if len(views) != 1 || views[0].ID != fresh.ID {
+		t.Fatalf("session scope should keep only the fresh launch, got %+v", views)
+	}
+	if payload["scope"] != "session" {
+		t.Fatalf("result should echo the effective scope, got %v", payload["scope"])
+	}
+	if !strings.Contains(res.Summary, "this session") || !strings.Contains(res.Summary, `scope:"all"`) {
+		t.Fatalf("summary must scope the count and name the hidden remainder, got %q", res.Summary)
+	}
+
+	// scope:"all" restores the cross-session window.
+	resAll := tool.Handle(context.Background(), json.RawMessage(`{"scope":"all"}`), nil)
+	if got := len(resAll.Result.(map[string]any)["launches"].([]launchView)); got != 2 {
+		t.Fatalf("scope all should list both launches, got %d", got)
+	}
+}
+
+// SessionStartedAt=0 (unwired) disables the filter so tests / stripped builds
+// keep the old behaviour, and an invalid scope fails at the Decode gate.
+func TestListToolScopeFallbacksAndValidation(t *testing.T) {
+	st := newSagaStore()
+	_, _ = st.InsertAgentLaunch(domain.AgentLaunchRecord{
+		IdempotencyKey: "old", AgentID: "c", Mode: "edit", Title: "t", Name: "n", CreatedAt: 100,
+	})
+	res := callList(st) // Deps.SessionStartedAt zero
+	if got := len(res.Result.(map[string]any)["launches"].([]launchView)); got != 1 {
+		t.Fatalf("an unwired SessionStartedAt must not hide rows, got %d", got)
+	}
+	if (&listArgs{Scope: "bogus"}).Validate() == nil {
+		t.Fatal("an unknown scope must be rejected by Validate")
+	}
+	if (&listArgs{}).Validate() != nil || (&listArgs{Scope: "all"}).Validate() != nil {
+		t.Fatal("blank and \"all\" scopes must validate")
+	}
+	// The rejection must fire through the real Decode gate (strict decoding +
+	// Validator), not only when Validate is called by hand.
+	tool := newListTool(Deps{DB: st})
+	if _, err := tool.Decode(json.RawMessage(`{"scope":"bogus"}`)); err == nil {
+		t.Fatal("Decode must reject an unknown scope")
+	}
+	if _, err := tool.Decode(json.RawMessage(`{"scope":"all"}`)); err != nil {
+		t.Fatalf("Decode must accept scope all: %v", err)
+	}
+}

@@ -98,18 +98,27 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 			// Latch the settle gate the first time this agent is seen working — a
 			// "waiting" that follows working is a real settle; a "waiting" before it has
 			// ever worked is the pre-start prompt (or a backgrounded window) and must NOT
-			// end the poll.
+			// end the poll. Live observations also feed the session's cross-call memory
+			// so a LATER wait on this terminal starts pre-latched.
 			if agentState == string(domain.AgentWorking) {
 				out.seenWorking = true
+				if deps.Observations != nil {
+					deps.Observations.MarkWorking(id, now)
+				}
 			}
 			// Also latch when the tail ADVANCES from a prior baseline: output moving
 			// proves the agent did work even if no poll caught the live "working" instant
 			// (a fast agent that ran between two reads). This closes the round-2 race
 			// where a relayed agent went working→waiting before the poll started, so a
 			// bare seenWorking latch alone would never fire and the wait would stall to
-			// timeout. (prev!=nil so the first read's baseline never counts as "advanced".)
+			// timeout. (prev!=nil so the first read's baseline never counts as "advanced";
+			// a SEEDED baseline — outHash "" from the cross-call memory — is synthetic,
+			// so its first "advance" is not fresh work evidence and is not marked.)
 			if prev != nil && out.outHash != prev.outHash && strings.TrimSpace(tail) != "" {
 				out.seenWorking = true
+				if prev.outHash != "" && deps.Observations != nil {
+					deps.Observations.MarkWorking(id, now)
+				}
 			}
 			states[id] = &out
 			if ms < int64(minMsSinceOutput) {
@@ -229,6 +238,19 @@ type pollArgs struct {
 // genuinely finished. completed/exited are authoritative and accepted immediately.
 func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 	states := make(map[string]*terminalState)
+	// Settle waits seed the seenWorking gate from the session's cross-call memory:
+	// an agent this process already watched work (since the last input injection)
+	// passes the FinishPreFilter gate immediately, so a re-poll of a since-finished
+	// agent reaches the finished judge in one quiet window instead of stalling out
+	// the full spawn grace. Only the settle path reads the gate, so other waits
+	// are left unseeded.
+	if args.isSettleWait && deps.Observations != nil {
+		for _, id := range args.terminalIDs {
+			if deps.Observations.SeenWorkingSinceLastCommand(id) {
+				states[id] = &terminalState{seenWorking: true}
+			}
+		}
+	}
 	attempts := 0
 	var read *readResult
 	nowMS := args.nowFn

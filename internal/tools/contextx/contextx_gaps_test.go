@@ -88,7 +88,7 @@ func TestReadSurfacesGetOutputError(t *testing.T) {
 	}
 }
 
-// terminal.summarize does NOT flag truncation on a clean finishReason.
+// terminal.summarize relays the model body verbatim as the call summary.
 func TestSummarizeNotFlaggedOnCleanFinish(t *testing.T) {
 	deps := Deps{
 		MCP:    &fakeMCP{connected: true, results: map[string]MCPCallResult{"terminal.getOutput": {Text: "output"}}},
@@ -99,8 +99,8 @@ func TestSummarizeNotFlaggedOnCleanFinish(t *testing.T) {
 	decoded, _ := tool.Decode(json.RawMessage(`{"terminalId":"t1"}`))
 	res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})
 	m := readResult(t, res)
-	if m["truncated"].(bool) {
-		t.Fatal("clean finishReason should not flag truncation")
+	if m["summary"] != "a summary" {
+		t.Fatalf("result summary should be the body verbatim, got %v", m["summary"])
 	}
 	if res.Summary != "a summary" {
 		t.Fatalf("summary should be the body verbatim, got %q", res.Summary)

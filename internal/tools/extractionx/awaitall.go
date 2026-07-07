@@ -188,7 +188,16 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	}
 	term := make(map[string]*awaitTerminal, len(ids))
 	for _, id := range ids {
-		term[id] = &awaitTerminal{}
+		// Seed the settle gate from the session's cross-call observation memory: an
+		// agent this process already watched work (since the last input injection)
+		// starts pre-latched, so a RE-await of a since-finished straggler settles on
+		// its first poll instead of waiting out the full spawn grace (20s) for
+		// evidence a previous await already collected.
+		seen := false
+		if deps.Observations != nil {
+			seen = deps.Observations.SeenWorkingSinceLastCommand(id)
+		}
+		term[id] = &awaitTerminal{seenWorking: seen}
 	}
 
 	attempts := 0
@@ -223,6 +232,9 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			}
 			if agentState == string(domain.AgentWorking) {
 				t.seenWorking = true
+				if deps.Observations != nil {
+					deps.Observations.MarkWorking(id, now)
+				}
 			}
 
 			v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, t.seenWorking, now-startedAt, domain.FinishSettleGraceMS)

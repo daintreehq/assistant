@@ -108,13 +108,20 @@ func (a *summarizeArgs) Validate() error {
 	return nil
 }
 
+// summarizeDefaultTailBytes caps the tail fed to the summarizer when the caller
+// does not pass tailBytes — the same 12k default as the terminal.extract family.
+// The 200-line read alone is unbounded in WIDTH (a wide, repainted TUI frame can
+// run far past 100KB), and an over-long noisy tail is exactly what made the
+// summarizer lose the answer sitting at the end (ses_49ca848d).
+const summarizeDefaultTailBytes = 12_000
+
 var summarizeSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "terminalId": { "type": "string", "description": "Daintree terminal id to summarize." },
     "purpose": { "type": "string", "description": "What this summary is for (focuses the model)." },
-    "tailBytes": { "type": "number", "description": "Max characters of terminal tail to summarize." }
+    "tailBytes": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 12000, "description": "Max characters of terminal tail to summarize (default 12000)." }
   },
   "required": ["terminalId"]
 }`)
@@ -158,20 +165,21 @@ func newSummarizeTool(deps Deps) tools.Tool {
 				}
 				return tools.Fail(codeTerminalOutput, fmt.Sprintf("Could not read output for terminal %s: %s", a.TerminalID, err.Error()))
 			}
-			tail := content
+			tailLimit := summarizeDefaultTailBytes
 			if a.TailBytes != nil {
-				tail = lastRunes(tail, *a.TailBytes)
+				tailLimit = *a.TailBytes
 			}
+			tail := lastRunes(content, tailLimit)
 			purpose := a.Purpose
 			if purpose == "" {
 				purpose = fmt.Sprintf("Summarize terminal %s for the supervisor.", a.TerminalID)
 			}
 
-			// The backend now owns the summarizer prompt and any output cap; the CLI
-			// sends only the purpose + bounded tail and relays the returned summary. With
-			// the prompt server-side the CLI no longer sees a finishReason, so it can no
-			// longer detect a token-cap truncation — it reports truncated=false.
-			summaryText, cerr := deps.Router.Summarize(ctx, purpose, tail)
+			// The backend owns the summarizer prompt and any output cap; the CLI sends
+			// the purpose + bounded tail, prefixed with a small provenance header (whose
+			// terminal this is + chronological order — see summarizeHeader), and relays
+			// the returned summary.
+			summaryText, cerr := deps.Router.Summarize(ctx, purpose, summarizeHeader(ctx, deps.MCP, a.TerminalID)+tail)
 			if cerr != nil {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while summarizing terminal.", tools.Unrecoverable())
@@ -183,8 +191,13 @@ func newSummarizeTool(deps Deps) tools.Tool {
 				body = "(no summary produced)"
 			}
 			summary := body
+			// Result carries ONLY what the model can't already know: the canonical id
+			// (it may have called with a prefix) and the summary. The old purpose echo
+			// and the hardcoded truncated=false (the CLI can no longer detect a
+			// token-cap truncation — the backend owns the summarizer) were pure noise
+			// repeated into the context on every call.
 			return tools.Ok(summary, map[string]any{
-				"terminalId": a.TerminalID, "purpose": purpose, "truncated": false, "summary": summary,
+				"terminalId": a.TerminalID, "summary": summary,
 			})
 		},
 	}
@@ -220,8 +233,8 @@ var readSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "terminalId": { "type": "string", "description": "Daintree terminal id to read." },
-    "maxLines": { "type": "number", "description": "Max trailing lines of scrollback to return (1–1000, default 200)." },
-    "tailBytes": { "type": "number", "description": "Further cap the returned text to the last N characters." }
+    "maxLines": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 200, "description": "Max trailing lines of scrollback to return." },
+    "tailBytes": { "type": "integer", "minimum": 1, "maximum": 100000, "description": "Further cap the returned text to the last N characters." }
   },
   "required": ["terminalId"]
 }`)

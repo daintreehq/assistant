@@ -33,6 +33,19 @@ func (f fakeRouter) Summarize(_ context.Context, _ string, _ string) (string, er
 	return f.summary, nil
 }
 
+// capturingRouter records what the CLI actually sends to the backend summarize
+// task, so tests can assert on the provenance header + tail cap.
+type capturingRouter struct {
+	summary string
+	purpose string
+	tail    string
+}
+
+func (c *capturingRouter) Summarize(_ context.Context, purpose, tail string) (string, error) {
+	c.purpose, c.tail = purpose, tail
+	return c.summary, nil
+}
+
 type fakeQueue struct{}
 
 func (fakeQueue) Digest(_ domain.QueueDigestOptions) []domain.QueueEvent { return nil }
@@ -52,8 +65,9 @@ func TestSnapshotNeverThrowsWhenDisconnected(t *testing.T) {
 }
 
 // The backend now owns the summarizer prompt and any token cap, returning only the
-// summary string. The CLI relays that body verbatim and — having lost the
-// finishReason signal — always reports truncated=false.
+// summary string. The CLI relays that body verbatim, and the result carries ONLY
+// the canonical id + summary — the old purpose echo and the hardcoded
+// truncated=false were noise repeated into the model's context on every call.
 func TestSummarizeRelaysModelBody(t *testing.T) {
 	deps := Deps{
 		MCP: &fakeMCP{connected: true, results: map[string]MCPCallResult{
@@ -72,8 +86,85 @@ func TestSummarizeRelaysModelBody(t *testing.T) {
 		t.Fatalf("summary should be the model body, got %q", res.Summary)
 	}
 	m := res.Result.(map[string]any)
-	if m["truncated"].(bool) {
-		t.Error("CLI no longer detects truncation; truncated must be false")
+	if m["summary"] != "the gist of it" || m["terminalId"] != "t1" {
+		t.Fatalf("result should carry terminalId + summary, got %v", m)
+	}
+	if _, ok := m["truncated"]; ok {
+		t.Error("the dead truncated=false echo should be gone from the result")
+	}
+	if _, ok := m["purpose"]; ok {
+		t.Error("the purpose echo should be gone from the result")
+	}
+}
+
+// The tail sent to the summarizer is prefixed with a provenance header naming the
+// owning agent/title (from terminal.list) and the chronological order — the
+// ses_49ca848d misattribution guard. Identity lookup is best-effort: with no
+// roster row the header still states the ordering.
+func TestSummarizeSendsProvenanceHeader(t *testing.T) {
+	full := "terminal-5284bfef-3d11-424c-90cb-136f24046295"
+	router := &capturingRouter{summary: "s"}
+	deps := Deps{
+		MCP: &fakeMCP{connected: true, results: map[string]MCPCallResult{
+			"terminal.list":      {Text: `{"terminals":[{"id":"` + full + `","title":"Antigravity: Fact","agentId":"antigravity"}]}`},
+			"terminal.getOutput": {StructuredContent: map[string]any{"content": "the scrollback"}},
+		}},
+		Router: router,
+		Queue:  fakeQueue{},
+	}
+	tool := newSummarizeTool(deps)
+	decoded, _ := tool.Decode(json.RawMessage(`{"terminalId":"` + full + `"}`))
+	if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("summarize failed: %+v", res.Error)
+	}
+	for _, want := range []string{`agent "antigravity"`, `"Antigravity: Fact"`, "NEWEST output is at the END"} {
+		if !strings.Contains(router.tail, want) {
+			t.Errorf("summarizer input missing %q: %q", want, router.tail)
+		}
+	}
+	if !strings.HasSuffix(router.tail, "the scrollback") {
+		t.Errorf("the tail itself must follow the header verbatim: %q", router.tail)
+	}
+
+	// Unreadable roster: the header degrades to the ordering note alone.
+	router2 := &capturingRouter{summary: "s"}
+	deps.MCP = &fakeMCP{connected: true, results: map[string]MCPCallResult{
+		"terminal.getOutput": {StructuredContent: map[string]any{"content": "tail2"}},
+	}}
+	deps.Router = router2
+	tool2 := newSummarizeTool(deps)
+	decoded2, _ := tool2.Decode(json.RawMessage(`{"terminalId":"` + full + `"}`))
+	if res := tool2.Handle(context.Background(), decoded2, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("summarize failed: %+v", res.Error)
+	}
+	if !strings.Contains(router2.tail, "NEWEST output is at the END") || strings.Contains(router2.tail, "belongs to agent") {
+		t.Errorf("identity-less header should still state the ordering: %q", router2.tail)
+	}
+}
+
+// Without tailBytes the summarizer input is capped to the default 12k chars —
+// the same bound as the extract family — so a wide repainted TUI frame can't
+// drown the answer sitting at the end.
+func TestSummarizeDefaultTailCap(t *testing.T) {
+	content := "START" + strings.Repeat("a", 12_500) + "END"
+	router := &capturingRouter{summary: "s"}
+	deps := Deps{
+		MCP: &fakeMCP{connected: true, results: map[string]MCPCallResult{
+			"terminal.getOutput": {StructuredContent: map[string]any{"content": content}},
+		}},
+		Router: router,
+		Queue:  fakeQueue{},
+	}
+	tool := newSummarizeTool(deps)
+	decoded, _ := tool.Decode(json.RawMessage(`{"terminalId":"terminal-5284bfef-3d11-424c-90cb-136f24046295"}`))
+	if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("summarize failed: %+v", res.Error)
+	}
+	if strings.Contains(router.tail, "START") {
+		t.Error("the default cap must keep the tail END, dropping the oldest output")
+	}
+	if !strings.HasSuffix(router.tail, "END") {
+		t.Errorf("the newest output must survive the cap: %q", router.tail[len(router.tail)-40:])
 	}
 }
 

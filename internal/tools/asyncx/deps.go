@@ -49,6 +49,14 @@ type SendRejectedError struct{ Msg string }
 
 func (e SendRejectedError) Error() string { return e.Msg }
 
+// CommandObserver receives a mark when terminal.run.async injects its command
+// (mirrors mcpx.CommandObserver): it feeds the session's cross-call settle
+// memory so an in-turn wait never settles on working evidence that predates the
+// newly injected command. nil disables recording.
+type CommandObserver interface {
+	MarkCommandSent(terminalID string, at int64)
+}
+
 // Coordinator is the runtime owner of registered invocations.
 type Coordinator interface {
 	Started() bool
@@ -73,6 +81,9 @@ type Deps struct {
 	Coordinator Coordinator
 	Store       Store
 	SessionID   string
+	// Observer records the run.async input injection into the shared settle
+	// memory (see CommandObserver). nil ⇒ no recording.
+	Observer CommandObserver
 	// Now seams the clock; nil ⇒ domain.NowMS.
 	Now func() int64
 }

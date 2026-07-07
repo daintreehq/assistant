@@ -121,20 +121,67 @@ func newStatusTool(deps Deps) tools.Tool {
 
 // --- agentTask.list ---
 
+type listArgs struct {
+	Scope string `json:"scope,omitempty"`
+}
+
+// Validate pins scope to the two supported values ("" defaults to "session") so a
+// typo'd scope fails as INVALID_ARGS instead of silently listing the wrong window.
+func (a *listArgs) Validate() error {
+	switch a.Scope {
+	case "", "session", "all":
+		return nil
+	}
+	return fmt.Errorf(`scope must be "session" or "all"`)
+}
+
+var listSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scope": { "type": "string", "enum": ["session", "all"], "default": "session", "description": "\"session\" (default) lists only launches made by THIS session — the right window for checking whether a batch of spawns landed. \"all\" includes earlier sessions' launches (newest first, up to 20) for history questions." }
+  },
+  "required": []
+}`)
+
 func newListTool(deps Deps) tools.Tool {
-	schema, _ := json.Marshal(tools.NoArgs)
 	return tools.Tool{
 		Name: "agentTask.list",
-		Description: "List the most recent spawn sagas (newest first, up to 20) with their stage, bound terminal/watcher, " +
-			"and any error. Use it to see what agentTask.spawnForEdits launches happened and where they stand. Read-only. " +
-			"Rows can span sessions, but any launch still in a non-terminal stage belongs to THIS session — a prior session's " +
-			"in-flight sagas are swept to 'failed' when the DB opens, so a live-looking stage is always current.",
+		Description: "List recent spawn sagas (newest first) with their stage, bound terminal/watcher, and any error. Use it to see " +
+			"what agentTask.spawnForEdits launches happened and where they stand. By default it lists ONLY this session's launches — " +
+			"the usual 'did my spawns land?' check — so stale terminal ids from earlier sessions (whose titles can collide with " +
+			"today's) never mix into the answer; pass scope:\"all\" when the user asks about older history. Read-only. Any launch " +
+			"still in a non-terminal stage belongs to THIS session — a prior session's in-flight sagas are swept to 'failed' when " +
+			"the DB opens, so a live-looking stage is always current.",
 		Risk:   domain.RiskRead,
-		Schema: schema,
-		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+		Schema: listSchema,
+		Decode: tools.StrictDecoder(func() any { return &listArgs{} }),
+		Handle: func(_ context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a listArgs
+			_ = json.Unmarshal(raw, &a)
+			scope := a.Scope
+			if scope == "" {
+				scope = "session"
+			}
 			rows, err := deps.DB.ListAgentLaunches(listDefaultLimit)
 			if err != nil {
 				return tools.Fail(domain.CodeInternal, "agentTask.list: "+err.Error())
+			}
+			// The launch record carries no session id (deliberately — no schema churn),
+			// but only the process holding the DB lease can insert launches, so
+			// "created at-or-after this process booted" IS "this session's launches".
+			// SessionStartedAt==0 (unwired) disables the filter rather than hiding rows.
+			older := 0
+			if scope == "session" && deps.SessionStartedAt > 0 {
+				kept := rows[:0]
+				for _, r := range rows {
+					if r.CreatedAt >= deps.SessionStartedAt {
+						kept = append(kept, r)
+					} else {
+						older++
+					}
+				}
+				rows = kept
 			}
 			// Normalize nil → [] so the result is always an array, never null.
 			views := make([]launchView, 0, len(rows))
@@ -145,9 +192,18 @@ func newListTool(deps Deps) tools.Tool {
 			if len(views) == 1 {
 				plural = ""
 			}
-			return tools.Ok(
-				fmt.Sprintf("%d spawn launch%s.", len(views), plural),
-				map[string]any{"launches": views})
+			summary := fmt.Sprintf("%d spawn launch%s.", len(views), plural)
+			if scope == "session" && deps.SessionStartedAt > 0 {
+				summary = fmt.Sprintf("%d spawn launch%s this session.", len(views), plural)
+				if older > 0 {
+					// Name the hidden remainder explicitly (a model told "0 launches" with
+					// older rows silently dropped would honestly answer a history question
+					// with "none") — but no count: the filter only saw the newest-20
+					// window, so an exact number would understate.
+					summary += ` Older launches exist — pass scope:"all" to include them.`
+				}
+			}
+			return tools.Ok(summary, map[string]any{"launches": views, "scope": scope})
 		},
 	}
 }

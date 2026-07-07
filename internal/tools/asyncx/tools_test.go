@@ -353,3 +353,40 @@ func TestAsyncListAndCancel(t *testing.T) {
 		t.Errorf("unknown id = %+v", cres3)
 	}
 }
+
+// asyncObserver captures MarkCommandSent calls (the settle-memory invalidation
+// hook run.async feeds around its one mutating send).
+type asyncObserver struct{ marked []string }
+
+func (o *asyncObserver) MarkCommandSent(terminalID string, _ int64) {
+	o.marked = append(o.marked, terminalID)
+}
+
+// Every ATTEMPTED run.async send marks the terminal (invalidating cross-call
+// "seen working" settle evidence) — including a transport failure, which is
+// AMBIGUOUS: the command may already be running, so stale evidence must not
+// stand on the strength of the error alone.
+func TestRunAsyncMarksCommandSentOnAttempt(t *testing.T) {
+	deps, _, _, _, _ := testDeps()
+	obs := &asyncObserver{}
+	deps.Observer = obs
+	tool := toolByName(t, deps, "terminal.run.async")
+	if res := handle(t, tool, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("run.async failed: %+v", res)
+	}
+	if len(obs.marked) != 1 || obs.marked[0] != "terminal-aaaa1111" {
+		t.Fatalf("successful send must mark the terminal, got %v", obs.marked)
+	}
+
+	deps2, _, sender2, _, _ := testDeps()
+	obs2 := &asyncObserver{}
+	deps2.Observer = obs2
+	sender2.err = context.DeadlineExceeded
+	tool2 := toolByName(t, deps2, "terminal.run.async")
+	if res := handle(t, tool2, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{}); res.Ok {
+		t.Fatal("send failure must fail the call")
+	}
+	if len(obs2.marked) != 1 || obs2.marked[0] != "terminal-aaaa1111" {
+		t.Fatalf("an ambiguous failed send must still mark the terminal, got %v", obs2.marked)
+	}
+}

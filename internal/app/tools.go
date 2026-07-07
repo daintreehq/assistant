@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 
 	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
@@ -45,6 +46,9 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		DB:           a.Store,
 		Config:       a.Config,
 		DaemonActive: func() bool { return a.scheduler != nil },
+		// The builder runs once during App.Create, before any turn can spawn — so
+		// "now" is an exact lower bound for this session's launches.
+		SessionStartedAt: domain.NowMS(),
 	}))...)
 	all = append(all, addr(artifactx.Tools(artifactx.Deps{
 		Store: artifactStoreAdapter{app: a},
@@ -55,6 +59,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Coordinator: a.asyncCoordinator,
 		Store:       a.Store,
 		SessionID:   a.SessionID,
+		Observer:    a.terminalObs,
 	}))...)
 	all = append(all, addr(auditx.Tools(auditx.Deps{
 		Store: auditStoreAdapter{s: a.Store},
@@ -65,16 +70,18 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Queue:  contextQueueAdapter{app: a},
 	}))...)
 	all = append(all, addr(extractionx.Tools(extractionx.Deps{
-		Reader:      terminalReaderAdapter{c: a.MCP},
-		Router:      extractionRouterAdapter{tasks: a.Backend},
-		Queue:       a.Queue,
-		BaseContext: a.baseCtx,
-		DebugLog:    debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-		Supervisors: supervisorRetireAdapter{app: a},
+		Reader:       terminalReaderAdapter{c: a.MCP},
+		Router:       extractionRouterAdapter{tasks: a.Backend},
+		Queue:        a.Queue,
+		BaseContext:  a.baseCtx,
+		DebugLog:     debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		Supervisors:  supervisorRetireAdapter{app: a},
+		Observations: a.terminalObs,
 	}))...)
 	all = append(all, addr(fsx.Tools(fsx.Deps{}))...)
 	all = append(all, addr(mcpx.Tools(mcpx.Deps{
-		MCP: mcpxMCPAdapter{c: a.MCP},
+		MCP:      mcpxMCPAdapter{c: a.MCP},
+		Observer: a.terminalObs,
 	}))...)
 	all = append(all, addr(scratchx.Tools(scratchx.Deps{
 		Store: a.scratchStore,

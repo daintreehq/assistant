@@ -99,6 +99,22 @@ type Queue interface {
 	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)
 }
 
+// Observations is the session-scoped, cross-call settle memory (see
+// internal/tools/terminalobs) this family READS to seed the working→waiting
+// settle gate and WRITES its live working observations into. Without it every
+// wait starts from zero evidence, so a RE-await of an agent that finished
+// between two waits cannot settle before the full FinishSettleGraceMS (20s) —
+// even when a previous await in the same session watched that agent work.
+// SeenWorkingSinceLastCommand is the only trustworthy read: raw "was it ever
+// working" would settle a wait on evidence that predates a newly injected
+// command (the pre-start false positive the grace exists to prevent), so the
+// send wrappers invalidate the latch on every input injection. nil disables
+// both directions (tests / stripped tool sets keep the per-call behaviour).
+type Observations interface {
+	MarkWorking(terminalID string, at int64)
+	SeenWorkingSinceLastCommand(terminalID string) bool
+}
+
 // SupervisorRetirer retires the spawn-attached supervisor watcher(s) of a terminal
 // whose completion the main turn just consumed DIRECTLY — an in-turn settle
 // (terminal.awaitAll, or a terminal.extract wait that resolved). Once the model
@@ -135,6 +151,9 @@ type Deps struct {
 	// Supervisors retires a settled terminal's supervisor watcher(s) once an in-turn
 	// wait consumed the completion (see SupervisorRetirer). nil ⇒ no retirement.
 	Supervisors SupervisorRetirer
+	// Observations is the cross-call settle memory (see the interface above). nil ⇒
+	// every wait latches seenWorking per call only, as before.
+	Observations Observations
 }
 
 // baseContext returns the app-scoped background context, falling back to

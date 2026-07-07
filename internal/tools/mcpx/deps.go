@@ -53,10 +53,24 @@ type MCPCallResult struct {
 	IsError           bool   `json:"isError"`
 }
 
+// CommandObserver receives a mark whenever a wrapper injects input into a
+// terminal (terminal.sendCommand, copyTree.injectToTerminal). It feeds the
+// session's cross-call settle memory (internal/tools/terminalobs): the in-turn
+// waits seed their working→waiting gate from earlier working observations, and
+// an input injection must INVALIDATE that evidence — the new input may start a
+// new task the old observations say nothing about. Consumer-defined so this
+// package compiles in isolation; nil disables recording.
+type CommandObserver interface {
+	MarkCommandSent(terminalID string, at int64)
+}
+
 // Deps wires the MCP family. ActiveToolNames is read off ToolContext per-turn for
 // the `callable` discovery flag, so it is not duplicated here.
 type Deps struct {
 	MCP MCPClient
+	// Observer records input injections into the shared settle memory. nil ⇒ no
+	// recording (tests / stripped tool sets).
+	Observer CommandObserver
 }
 
 // Tools returns the MCP family (discovery + passthrough + the wrappers in this

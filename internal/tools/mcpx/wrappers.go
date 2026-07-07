@@ -201,6 +201,11 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 			if a.Options != nil {
 				m["options"] = a.Options
 			}
+			// Attempted input injection invalidates cross-call settle evidence BEFORE
+			// the call, same as terminal.sendCommand (see there for why).
+			if deps.Observer != nil {
+				deps.Observer.MarkCommandSent(strings.TrimSpace(a.TerminalID), domain.NowMS())
+			}
 			return copyTreeInjectPassthrough(ctx, deps.MCP, a.TerminalID, m)
 		},
 	}
@@ -239,6 +244,17 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 			// blank command never types a bare newline into the terminal.
 			if strings.TrimSpace(a.TerminalID) == "" || strings.TrimSpace(a.Command) == "" {
 				return tools.Fail(domain.CodeValidation, "terminal.sendCommand: terminalId and command must be non-empty.")
+			}
+			// Invalidate the terminal's cross-call "seen working" settle evidence
+			// BEFORE the send: an ambiguous transport failure may still have delivered
+			// the input (the command may start a new task), so waiting for a confirmed
+			// success would leave stale evidence standing exactly when it matters. A
+			// definitively rejected send injects nothing — the spurious invalidation
+			// only routes the next wait to the safe slow path. Keyed by the id as
+			// given: Daintree matches ids exactly, so an id it accepts is the same
+			// canonical id the waits resolve to.
+			if deps.Observer != nil {
+				deps.Observer.MarkCommandSent(strings.TrimSpace(a.TerminalID), domain.NowMS())
 			}
 			return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command,
 				map[string]any{"terminalId": a.TerminalID, "command": a.Command})

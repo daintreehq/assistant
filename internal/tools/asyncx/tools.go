@@ -257,6 +257,15 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 				return tools.Fail(domain.CodeInternal, "Failed to register the async operation: "+err.Error())
 			}
 
+			// Invalidate the terminal's cross-call "seen working" settle evidence
+			// BEFORE the send: a transport failure is AMBIGUOUS (the command may
+			// already be running), so the mark cannot wait for a confirmed success —
+			// stale evidence would let an in-turn wait settle "finished" on the
+			// pre-send prompt. A definitively rejected send injects nothing; the
+			// spurious invalidation only routes the next wait to the safe slow path.
+			if deps.Observer != nil {
+				deps.Observer.MarkCommandSent(terminalID, deps.now())
+			}
 			// The ONE mutating side effect — persisted-intent-first (the row above),
 			// performed exactly once, never retried. A failure finalizes the row so
 			// the ledger never shows a live future whose command never ran. The

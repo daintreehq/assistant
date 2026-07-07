@@ -182,6 +182,37 @@ func outputBodyError(content, errField any) string {
 	return msg
 }
 
+// summarizeHeader builds the one-line provenance header prepended to the tail fed
+// to the summarizer. Raw scrollback carries no hint of WHOSE terminal it is, and a
+// transcript that quotes other agents (a relayed round-robin) reads ambiguously:
+// in ses_49ca848d the summarizer attributed the bottom-most reply to an agent
+// NAMED IN the transcript instead of the terminal's own agent and reported the
+// requested answer "not present" — one wasted backend round-trip and nearly a
+// wrong final answer. Naming the owning agent/title and stating the chronological
+// order pins both down. Best-effort: the roster read degrades to identity-less
+// (the ordering note is always true of a getOutput tail), and the header is data
+// inside the tail — the summarizer PROMPT stays backend-owned.
+func summarizeHeader(ctx context.Context, mcp MCPClient, terminalID string) string {
+	who := ""
+	if res, ok := tryCall(ctx, mcp, "terminal.list", map[string]any{}); ok {
+		for _, e := range terminalid.ParseListEntries(res.StructuredContent, res.Text) {
+			if e.ID != terminalID {
+				continue
+			}
+			switch {
+			case e.AgentID != "" && e.Title != "":
+				who = fmt.Sprintf(" This terminal belongs to agent %q (title: %q) — the agent replying in it is %q, even where the transcript quotes other agents.", e.AgentID, e.Title, e.AgentID)
+			case e.AgentID != "":
+				who = fmt.Sprintf(" This terminal belongs to agent %q — the agent replying in it is %q, even where the transcript quotes other agents.", e.AgentID, e.AgentID)
+			case e.Title != "":
+				who = fmt.Sprintf(" This terminal is titled %q.", e.Title)
+			}
+			break
+		}
+	}
+	return "[Transcript context: chronological terminal scrollback — the NEWEST output is at the END." + who + "]\n\n"
+}
+
 // resolveTerminalID canonicalizes one caller-supplied terminal id against the live roster
 // (terminal.list) so a truncated/prefix id — the model abbreviates Daintree's full
 // terminal-<uuid> ids — still resolves, and an unknown id fails fast with the live list.
