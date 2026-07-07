@@ -45,6 +45,35 @@ func TestActivityRow_StaticGlyphOnNonLiveActiveRow(t *testing.T) {
 	}
 }
 
+func TestActivityRow_InProgressVerbWhileLive(t *testing.T) {
+	// The in-progress verb form ("Waiting") appears on exactly the NON-settled
+	// states; every settled state uses the past-tense "Waited" — a live row must
+	// not read as finished, and a finished one must not read as still running.
+	th := darkTheme()
+	cases := []struct {
+		state ActivityState
+		want  string
+	}{
+		{ActQueued, "Waiting"},
+		{ActActive, "Waiting"},
+		{ActWaiting, "Waiting"},
+		{ActDone, "Waited"},
+		{ActFailed, "Waited"},
+		{ActCancelled, "Waited"},
+		{ActAsyncPending, "Waited"},
+	}
+	for _, c := range cases {
+		a := Activity{ID: "w", Name: "terminal.awaitAll", State: c.state, StartedAt: 0}
+		if c.want == "Waited" {
+			a.EndedAt = 5
+		}
+		row := stripAnsi(renderActivityRow(th, a, true, false, 0, 5, 72))
+		if !strings.Contains(row, c.want) {
+			t.Errorf("state %d: row %q, want verb %q", c.state, row, c.want)
+		}
+	}
+}
+
 func TestActivityRow_SquareLastBranchNotArc(t *testing.T) {
 	th := darkTheme()
 	// The last-branch glyph is the square └─, never the rounded arc ╰.

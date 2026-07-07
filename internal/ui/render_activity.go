@@ -206,6 +206,27 @@ func presentToolVerb(name string) (label string, keys []string) {
 	}
 }
 
+// presentToolActiveVerb returns the in-progress form of a tool's verb ("Waiting",
+// not "Waited"), used while the row has NOT settled (queued, running, or
+// approval-pending) — the past tense on a non-settled row reads as already
+// finished. Only the tools that visibly block for many seconds need an entry;
+// everything else settles fast enough that the settled label never reads wrong,
+// so "" means "keep it".
+func presentToolActiveVerb(name string) string {
+	switch name {
+	case "terminal.awaitAll":
+		return "Waiting"
+	case "terminal.extract", "terminal.extract.json":
+		return "Extracting"
+	case "terminal.summarize", "context.summarize":
+		return "Summarizing"
+	case "agentTask.spawnForEdits":
+		return "Delegating"
+	default:
+		return ""
+	}
+}
+
 // presentToolTarget derives the verb's target/object from the raw args JSON (the
 // `detail` half of a tool presentation, truncated to 48 cells). Returns "" when the
 // tool is unknown or has no resolvable target.
@@ -372,8 +393,16 @@ func renderActivityRow(th theme.Theme, a Activity, last, expanded bool, spinnerF
 	glyph, tone := activityGlyph(th, a, spinnerFrame)
 
 	// The verb label is rendered RAW (not padded) — the alignment padding goes
-	// BEFORE the detail instead.
+	// BEFORE the detail instead. A row that hasn't settled (queued / running /
+	// approval-pending) prefers the verb's in-progress form when one exists; the
+	// past tense is the settled form.
 	label := presentTool(a.Name)
+	switch a.State {
+	case ActQueued, ActActive, ActWaiting:
+		if live := presentToolActiveVerb(a.Name); live != "" {
+			label = live
+		}
+	}
 
 	// Default detail (`a.detail ?? (done ? a.summary)`): the row's
 	// own Detail when set (the controller stores the target there, and the result
