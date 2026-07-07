@@ -567,7 +567,7 @@ type TaskRequest struct {
 	Task         string         `json:"task"`
 	RequestID    string         `json:"request_id,omitempty"`
 	Input        map[string]any `json:"input,omitempty"`
-	ResultSchema map[string]any `json:"result_schema,omitempty"` // only terminal_extract_json.v1
+	ResultSchema map[string]any `json:"result_schema,omitempty"` // only terminal_extract_json
 }
 
 // TaskResult is the typed utility-task response. Output is raw JSON decoded by the

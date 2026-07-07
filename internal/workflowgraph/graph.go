@@ -2,7 +2,7 @@
 // typed, durable, patchable execution graph (DAG) per user goal. The assistant
 // project is the single source of truth for plans, progress, resource links,
 // blockers, and next actions; the backend contributes STATELESS intelligence
-// tasks (workflow_plan.v1 / workflow_reconcile.v1 / workflow_resume_digest.v1)
+// tasks (workflow_plan / workflow_reconcile / workflow_resume_digest)
 // whose outputs are validated locally before anything is committed.
 //
 // Hard boundaries (mirrors the safety invariants in CLAUDE.md):

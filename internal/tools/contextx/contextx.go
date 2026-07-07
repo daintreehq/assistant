@@ -41,7 +41,7 @@ type MCPClient interface {
 }
 
 // Router is the model access this family uses. Summarize maps to the backend's
-// terminal_summarize.v1 task (the backend owns the prompt); the CLI sends only the
+// terminal_summarize task (the backend owns the prompt); the CLI sends only the
 // purpose + terminal tail.
 type Router interface {
 	Summarize(ctx context.Context, purpose, tail string) (string, error)

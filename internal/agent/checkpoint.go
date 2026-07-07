@@ -10,7 +10,7 @@ import (
 
 // checkpoint.go is the agent-side orchestration for the structured compaction object.
 // The prompt is now SERVER-OWNED: the CLI sends only the flattened transcript to the
-// backend's checkpoint.v1 task, which returns the structured CheckpointOutput. This
+// backend's checkpoint task, which returns the structured CheckpointOutput. This
 // file still validates that no load-bearing identifier was dropped and renders the
 // note body. The auto-compact path in session.go calls buildCheckpoint and feeds the
 // rendered body to compactLocked (which prepends the [checkpoint | depth N] header).
@@ -28,7 +28,7 @@ import (
 // is no such domain prefix, and run_ collides with provenance tokens like run_test.
 var checkpointIDPattern = regexp.MustCompile(`\b(?:term_|tmr_|wch_|wfr_|agt_|grt_)[0-9a-zA-Z]{1,32}\b`)
 
-// buildCheckpoint runs the backend's checkpoint.v1 task over the soon-to-be-discarded
+// buildCheckpoint runs the backend's checkpoint task over the soon-to-be-discarded
 // transcript, then runs the ID-preservation validation pass. The caller
 // (maybeAutoCompact) handles the backend-down case (err != nil) separately — here a
 // non-nil error simply yields a zero-value checkpoint that still gets its IDs mined

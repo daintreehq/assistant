@@ -9,7 +9,7 @@ package agent
 //  1. (removed) there is no longer a client-side control-message prefix to preserve —
 //     the backend owns the system prompt + skills, so compaction operates on a history
 //     that begins at index 0 with user/assistant/tool messages only;
-//  2. (removed) distillation dedup/cap/truncate is server-owned now (memory_distill.v1);
+//  2. (removed) distillation dedup/cap/truncate is server-owned now (memory_distill);
 //  3. live identifiers (term_*/run_*/wch_*/wfr_*, matching domain.PrefixWatcher /
 //     domain.PrefixWorkflow) present before compaction survive into the summarizer input
 //     (auto path) and into the persisted note (manual path), so a mid-run compaction
@@ -169,7 +169,7 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 }
 
 // (TestGoldenParseDistilledFactsDedupCapTruncate was removed: distillation dedup/cap/
-// truncate is now server-owned — the backend's memory_distill.v1 task does it — so the
+// truncate is now server-owned — the backend's memory_distill task does it — so the
 // local prompts.ParseDistilledFacts it exercised no longer exists.)
 
 // TestGoldenAutoCompactIDsSurviveInSummarizerInput pins invariant (3) for the auto path:

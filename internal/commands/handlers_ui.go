@@ -617,7 +617,7 @@ func memoryText(a *app.App, rest []string) string {
 	}
 }
 
-// compactRun checkpoints the conversation via the backend's checkpoint.v1 task then
+// compactRun checkpoints the conversation via the backend's checkpoint task then
 // compacts, after distilling any durable facts from the transcript so they survive
 // the discard.
 func compactRun(ctx context.Context, a *app.App) string {
@@ -655,7 +655,7 @@ func renderCheckpointJSON(cp backend.CheckpointOutput) string {
 
 // distillFromTranscript is the manual /compact counterpart of Session.distillCompact:
 // it extracts durable facts from a soon-to-be-discarded transcript via the backend's
-// memory_distill.v1 task and saves the novel ones as source="compact" memories. It
+// memory_distill task and saves the novel ones as source="compact" memories. It
 // lives here (not in the agent seam) because the command layer has direct *app.App
 // access — no import cycle. Best-effort: any failure yields 0 and never affects compaction.
 func distillFromTranscript(ctx context.Context, a *app.App, transcript string) (saved int) {

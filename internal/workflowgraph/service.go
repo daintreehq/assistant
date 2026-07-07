@@ -380,7 +380,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 
 	out, err := backend.RunWorkflowPlan(ctx, s.deps.Tasks, input)
 	if err != nil {
-		return PlanResult{}, fmt.Errorf("workflow_plan.v1: %w", err)
+		return PlanResult{}, fmt.Errorf("workflow_plan: %w", err)
 	}
 
 	source := req.Source
@@ -536,7 +536,7 @@ func (s *Service) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcil
 	out, err := backend.RunWorkflowReconcile(ctx, s.deps.Tasks, input)
 	if err != nil {
 		finishRun("failed", nil, "", err.Error())
-		return ReconcileResult{}, fmt.Errorf("workflow_reconcile.v1: %w", err)
+		return ReconcileResult{}, fmt.Errorf("workflow_reconcile: %w", err)
 	}
 	outJSON, _ := json.Marshal(out)
 	outputHash := hashPayload(string(outJSON))
@@ -693,7 +693,7 @@ func (s *Service) ResumeDigest(ctx context.Context, userMessage string) (backend
 	}
 	out, err := backend.RunWorkflowResumeDigest(ctx, s.deps.Tasks, input)
 	if err != nil {
-		return backend.WorkflowResumeDigestOutput{}, fmt.Errorf("workflow_resume_digest.v1: %w", err)
+		return backend.WorkflowResumeDigestOutput{}, fmt.Errorf("workflow_resume_digest: %w", err)
 	}
 	return out, nil
 }

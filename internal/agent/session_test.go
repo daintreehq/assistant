@@ -176,8 +176,8 @@ func (b backendFromRouter) RespondStream(ctx context.Context, req backend.Respon
 	}, nil
 }
 
-// RunTask routes the two utility tasks the agent loop runs (checkpoint.v1 +
-// memory_distill.v1) back onto the Router's Chat call, so a fake scripting Chat to
+// RunTask routes the two utility tasks the agent loop runs (checkpoint +
+// memory_distill) back onto the Router's Chat call, so a fake scripting Chat to
 // return a summary / distill reply keeps working. The transcript travels in
 // req.Input["transcript"]; it is replayed as a single plain user message so a fake that
 // inspects the summarizer's opts.Messages sees the flattened, role-clean input.

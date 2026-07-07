@@ -177,7 +177,7 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 
 // handleTasks serves a daintree.task.result JSON body for any utility task. The CLI
 // sends task DATA only; the backend owns the prompt/model/schema. The fake returns a
-// minimal valid output per known task id (checkpoint.v1 / memory_distill.v1) and an
+// minimal valid output per known task id (checkpoint / memory_distill) and an
 // empty object otherwise.
 func (f *fakeBackend) handleTasks(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
@@ -191,9 +191,9 @@ func (f *fakeBackend) handleTasks(w http.ResponseWriter, r *http.Request) {
 
 	var output any
 	switch task {
-	case "checkpoint.v1":
+	case "checkpoint":
 		output = map[string]any{"goal": "test goal", "next_actions": []string{"continue"}}
-	case "memory_distill.v1":
+	case "memory_distill":
 		output = map[string]any{"facts": []any{}}
 	default:
 		output = map[string]any{}
@@ -227,9 +227,9 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 		},
 		"skills": map[string]any{"catalog_revision": "sha256:test", "manual_resolve": false},
 		"tasks": []string{
-			"checkpoint.v1", "memory_distill.v1", "watcher_classify.v1", "terminal_judge.v1",
-			"terminal_summarize.v1", "terminal_extract_text.v1", "terminal_extract_json.v1",
-			"extraction_verdict.v1", "skill_step_consistency.v1",
+			"checkpoint", "memory_distill", "watcher_classify", "terminal_judge",
+			"terminal_summarize", "terminal_extract_text", "terminal_extract_json",
+			"extraction_verdict", "skill_step_consistency",
 		},
 		"limits": map[string]any{"request_bytes": 1 << 20, "tools": 256},
 	})

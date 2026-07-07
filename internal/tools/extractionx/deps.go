@@ -83,10 +83,10 @@ type JudgeInput struct {
 
 // Router is the slice of model access this family uses, each method mapping to a server-owned
 // backend task (the CLI sends only structured data, never prompts):
-//   - ExtractText  → terminal_extract_text.v1
-//   - ExtractJSON  → terminal_extract_json.v1 (schema is an optional JSON-schema object)
-//   - Verdict      → extraction_verdict.v1
-//   - Judge        → terminal_judge.v1 (the shared yes/no terminal judge)
+//   - ExtractText  → terminal_extract_text
+//   - ExtractJSON  → terminal_extract_json (schema is an optional JSON-schema object)
+//   - Verdict      → extraction_verdict
+//   - Judge        → terminal_judge (the shared yes/no terminal judge)
 type Router interface {
 	ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string) (text string, truncated bool, err error)
 	ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any) (result any, err error)

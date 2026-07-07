@@ -13,7 +13,7 @@ import (
 // not validate structure — every converted graph/patch still flows through
 // Validate/ApplyPatch before storage (backend output is untrusted).
 
-// GraphFromPlan builds a fresh graph from a workflow_plan.v1 output. Returned
+// GraphFromPlan builds a fresh graph from a workflow_plan output. Returned
 // warnings surface non-fatal repairs (e.g. a next action dropped because its
 // tool doesn't exist locally); the error covers unrecoverable plans only —
 // structural problems are left for Validate to reject with precision.
@@ -77,7 +77,7 @@ func GraphFromPlan(out backend.WorkflowPlanOutput, goal string, source Source, h
 	return g, warnings, nil
 }
 
-// PatchFromWire converts a workflow_reconcile.v1 patch (plus its top-level
+// PatchFromWire converts a workflow_reconcile patch (plus its top-level
 // next action) into the local Patch shape, clamped. Warnings report non-fatal
 // repairs; structural validity is ApplyPatch's job.
 func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseRevision int64, hasTool func(string) bool, now int64) (*Patch, []string) {

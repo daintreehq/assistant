@@ -26,7 +26,7 @@ type extractResult struct {
 // parse and is retried).
 func runExtract(ctx context.Context, deps Deps, a *extractCore, tail string) (extractResult, error) {
 	if a.format == "json" {
-		// The backend's terminal_extract_json.v1 task takes an optional JSON-schema
+		// The backend's terminal_extract_json task takes an optional JSON-schema
 		// object. Parse the caller's schema string best-effort: a malformed schema
 		// leaves it nil (the task infers a reasonable value) rather than failing.
 		var schema map[string]any
@@ -47,7 +47,7 @@ func runExtract(ctx context.Context, deps Deps, a *extractCore, tail string) (ex
 }
 
 // runVerdict judges an extracted result against a pass/fail condition via the
-// server-owned extraction_verdict.v1 task (the CLI sends only the result + the
+// server-owned extraction_verdict task (the CLI sends only the result + the
 // condition). Keeps the "" -> "(empty)" guard so an empty result is judged, not
 // blank.
 func runVerdict(ctx context.Context, deps Deps, verdictInstruction, resultText string) (bool, string, error) {

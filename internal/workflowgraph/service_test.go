@@ -231,7 +231,7 @@ func TestServicePlanStoresValidatedGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tasks.lastTask != backend.TaskWorkflowPlan {
-		t.Fatalf("want workflow_plan.v1, got %s", tasks.lastTask)
+		t.Fatalf("want workflow_plan, got %s", tasks.lastTask)
 	}
 	g := res.Graph
 	if len(g.Nodes) != 4 || g.Status != StatusActive {

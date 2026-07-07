@@ -73,7 +73,7 @@ digests).
 Seven flag-gated tools extend the `workflow.*` family (the flat
 create/get/list/update ledger tools are untouched):
 
-- `workflow.plan` (local) — backend `workflow_plan.v1` → validated, stored
+- `workflow.plan` (local) — backend `workflow_plan` → validated, stored
   graph. Planning over a LIVE graph is refused without `forceReplan` (which
   cancels the old graph as superseded).
 - `workflow.getGraph` (read) — compact (default) or full view.
@@ -81,7 +81,7 @@ create/get/list/update ledger tools are untouched):
   stored next action.
 - `workflow.attachResource` / `workflow.recordEvidence` (local) — manual
   linking/evidence (most linking is automatic, below).
-- `workflow.reconcile` (local) — backend `workflow_reconcile.v1` over the
+- `workflow.reconcile` (local) — backend `workflow_reconcile` over the
   current snapshot + recent events; the returned patch is validated on a copy
   and applied under the read revision. `apply:false` previews. It PATCHES,
   never re-plans.
@@ -124,7 +124,7 @@ flag is on (nil `SessionDeps.WorkflowDigestLister` ⇒ field omitted).
 
 - `/workflows` prepends the open graphs above the flat ledger runs.
 - `/workflow` lists graphs; `/workflow <wfg_id>` shows the plan view (glyphs
-  ✓ → ○ ⚠ ×); `/workflow resume [msg]` runs `workflow_resume_digest.v1`;
+  ✓ → ○ ⚠ ×); `/workflow resume [msg]` runs `workflow_resume_digest`;
   `/workflow reconcile <id>` reconciles manually; `/workflow cancel <id>`
   cancels locally.
 - The cockpit operations deck gains a WORKFLOWS section (cap 3, two lines per
@@ -140,8 +140,8 @@ graph tools are read/local risk (pinned by test).
 
 ## Backend contract (what this client expects)
 
-- Tasks `workflow_plan.v1`, `workflow_reconcile.v1`,
-  `workflow_resume_digest.v1` at `/v1/daintree/tasks` with the pydantic
+- Tasks `workflow_plan`, `workflow_reconcile`,
+  `workflow_resume_digest` at `/v1/daintree/tasks` with the pydantic
   input/output models from the DWIL spec (snake_case; see
   `internal/backend/workflowtasks.go` for the exact wire shapes the CLI
   sends/decodes).

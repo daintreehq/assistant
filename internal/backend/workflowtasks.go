@@ -10,9 +10,9 @@ import (
 // runtime, by Capabilities.Tasks — a backend without these tasks rejects them
 // and the caller degrades gracefully.
 const (
-	TaskWorkflowPlan         = "workflow_plan.v1"
-	TaskWorkflowReconcile    = "workflow_reconcile.v1"
-	TaskWorkflowResumeDigest = "workflow_resume_digest.v1"
+	TaskWorkflowPlan         = "workflow_plan"
+	TaskWorkflowReconcile    = "workflow_reconcile"
+	TaskWorkflowResumeDigest = "workflow_resume_digest"
 )
 
 // Input size caps (mirror the backend pydantic max_length constraints; clamped
@@ -207,7 +207,7 @@ type WorkflowResumeDigestOutput struct {
 	AssistantContextLines    []string             `json:"assistant_context_lines,omitempty"`
 }
 
-// RunWorkflowPlan runs workflow_plan.v1.
+// RunWorkflowPlan runs workflow_plan.
 func RunWorkflowPlan(ctx context.Context, r TaskRunner, in WorkflowPlanInput) (WorkflowPlanOutput, error) {
 	in.Goal = clampHeadRunes(in.Goal, maxWorkflowGoalRunes)
 	in.Scope = clampHeadRunes(in.Scope, maxWorkflowScopeRunes)
@@ -216,7 +216,7 @@ func RunWorkflowPlan(ctx context.Context, r TaskRunner, in WorkflowPlanInput) (W
 	return out, err
 }
 
-// RunWorkflowReconcile runs workflow_reconcile.v1.
+// RunWorkflowReconcile runs workflow_reconcile.
 func RunWorkflowReconcile(ctx context.Context, r TaskRunner, in WorkflowReconcileInput) (WorkflowReconcileOutput, error) {
 	in.LatestUserMessage = clampHeadRunes(in.LatestUserMessage, maxWorkflowMessageRunes)
 	var out WorkflowReconcileOutput
@@ -224,7 +224,7 @@ func RunWorkflowReconcile(ctx context.Context, r TaskRunner, in WorkflowReconcil
 	return out, err
 }
 
-// RunWorkflowResumeDigest runs workflow_resume_digest.v1.
+// RunWorkflowResumeDigest runs workflow_resume_digest.
 func RunWorkflowResumeDigest(ctx context.Context, r TaskRunner, in WorkflowResumeDigestInput) (WorkflowResumeDigestOutput, error) {
 	in.UserMessage = clampHeadRunes(in.UserMessage, maxWorkflowMessageRunes)
 	var out WorkflowResumeDigestOutput

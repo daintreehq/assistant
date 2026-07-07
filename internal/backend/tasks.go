@@ -10,15 +10,15 @@ import (
 // than string literals at call sites. (Confirm availability against
 // Capabilities.Tasks at startup.)
 const (
-	TaskCheckpoint           = "checkpoint.v1"
-	TaskMemoryDistill        = "memory_distill.v1"
-	TaskWatcherClassify      = "watcher_classify.v1"
-	TaskTerminalJudge        = "terminal_judge.v1"
-	TaskTerminalSummarize    = "terminal_summarize.v1"
-	TaskTerminalExtractText  = "terminal_extract_text.v1"
-	TaskTerminalExtractJSON  = "terminal_extract_json.v1"
-	TaskExtractionVerdict    = "extraction_verdict.v1"
-	TaskSkillStepConsistency = "skill_step_consistency.v1"
+	TaskCheckpoint           = "checkpoint"
+	TaskMemoryDistill        = "memory_distill"
+	TaskWatcherClassify      = "watcher_classify"
+	TaskTerminalJudge        = "terminal_judge"
+	TaskTerminalSummarize    = "terminal_summarize"
+	TaskTerminalExtractText  = "terminal_extract_text"
+	TaskTerminalExtractJSON  = "terminal_extract_json"
+	TaskExtractionVerdict    = "extraction_verdict"
+	TaskSkillStepConsistency = "skill_step_consistency"
 )
 
 // TaskRunner is the narrow seam the typed task helpers depend on (satisfied by
@@ -179,9 +179,9 @@ type ExtractionVerdictOutput struct {
 // the task — a clamped input is strictly better than a hard failure. A small margin
 // keeps us clear of any off-by-one / byte-vs-rune nuance at the boundary.
 const (
-	maxTaskTranscriptRunes = 399_000 // checkpoint.v1 / memory_distill.v1 transcript
+	maxTaskTranscriptRunes = 399_000 // checkpoint / memory_distill transcript
 	maxTaskTailRunes       = 119_000 // watcher/judge/summarize/extract tail
-	maxTaskResultRunes     = 119_000 // extraction_verdict.v1 result
+	maxTaskResultRunes     = 119_000 // extraction_verdict result
 )
 
 // clampTailRunes keeps the most-recent maxRunes (the tail) of s — recency matters most

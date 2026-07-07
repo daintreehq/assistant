@@ -68,10 +68,10 @@ The Go client mirrors it in `internal/backend`:
   the CLI never inspects, signs, or mutates it. A missing token is valid for a new session.
 - **One `turn_id` per user request** across the whole tool-call loop; `round` increments
   per continuation; `instruction_revision` bumps when a mid-turn injection is folded in.
-- **Utility work is server-owned tasks** (`/v1/daintree/tasks`): `checkpoint.v1`,
-  `memory_distill.v1`, `watcher_classify.v1`, `terminal_judge.v1`, `terminal_summarize.v1`,
-  `terminal_extract_text.v1`, `terminal_extract_json.v1`, `extraction_verdict.v1`,
-  `skill_step_consistency.v1`. The CLI sends task *data* only — never prompts.
+- **Utility work is server-owned tasks** (`/v1/daintree/tasks`): `checkpoint`,
+  `memory_distill`, `watcher_classify`, `terminal_judge`, `terminal_summarize`,
+  `terminal_extract_text`, `terminal_extract_json`, `extraction_verdict`,
+  `skill_step_consistency`. The CLI sends task *data* only — never prompts.
 
 ## When changing protocol behavior
 

@@ -304,7 +304,7 @@ func TestRunTask(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &gotReq)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"checkpoint.v1","model":"m","output":{"goal":"ship it","next_actions":["merge"]},"finish_reason":"stop","usage":{"total_tokens":5},"prompt_version":"checkpoint.v1"}`)
+		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"checkpoint","model":"m","output":{"goal":"ship it","next_actions":["merge"]},"finish_reason":"stop","usage":{"total_tokens":5},"prompt_version":"checkpoint"}`)
 	}))
 	t.Cleanup(srv.Close)
 	c := NewClient(ClientConfig{BaseURL: srv.URL})
@@ -316,7 +316,7 @@ func TestRunTask(t *testing.T) {
 	if out.Goal != "ship it" || len(out.NextActions) != 1 || out.NextActions[0] != "merge" {
 		t.Errorf("checkpoint output = %+v", out)
 	}
-	if gotReq.Task != "checkpoint.v1" {
+	if gotReq.Task != "checkpoint" {
 		t.Errorf("task = %q", gotReq.Task)
 	}
 	if _, ok := gotReq.Input["transcript"]; !ok {
@@ -339,7 +339,7 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 		case "/readyz":
 			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","skills":4}`)
 		case "/v1/daintree/capabilities":
-			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":1,"max":1},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_skills":3},"tasks":["checkpoint.v1","memory_distill.v1"],"limits":{"request_bytes":8388608,"tools":128}}`)
+			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":1,"max":1},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_skills":3},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
 		default:
 			http.NotFound(w, r)
 		}

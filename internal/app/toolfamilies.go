@@ -119,7 +119,7 @@ func (m mcpxMCPAdapter) ListTools(ctx context.Context, force bool) ([]mcpx.MCPTo
 /* ----------------------------- Backend task adapters --------------------- */
 
 // contextRouterAdapter maps the backend onto contextx.Router: terminal.summarize
-// runs the server-owned terminal_summarize.v1 task with the structured purpose+tail.
+// runs the server-owned terminal_summarize task with the structured purpose+tail.
 type contextRouterAdapter struct{ tasks backend.TaskRunner }
 
 func (r contextRouterAdapter) Summarize(ctx context.Context, purpose, tail string) (string, error) {
@@ -169,7 +169,7 @@ func (r extractionRouterAdapter) Verdict(ctx context.Context, result, condition 
 }
 
 // Judge routes the extract settle gate's finished-confirmation through the SAME
-// shared terminal_judge.v1 task the watcher uses, so the extract tool and the
+// shared terminal_judge task the watcher uses, so the extract tool and the
 // watcher ask the identical question of the same server-owned judge.
 func (r extractionRouterAdapter) Judge(ctx context.Context, in extractionx.JudgeInput) (domain.ModelJudgeAnswer, error) {
 	return judgeTerminal(ctx, r.tasks, in.Goal, in.Question, backend.TerminalState{
@@ -180,7 +180,7 @@ func (r extractionRouterAdapter) Judge(ctx context.Context, in extractionx.Judge
 	}, in.Tail)
 }
 
-// judgeTerminal runs the shared yes/no terminal judge (terminal_judge.v1) and maps
+// judgeTerminal runs the shared yes/no terminal judge (terminal_judge) and maps
 // the verdict onto the local domain shape. Used by both the watcher and the extract
 // settle gate so they agree on what "finished" means.
 func judgeTerminal(ctx context.Context, tasks backend.TaskRunner, goal, question string, state backend.TerminalState, tail string) (domain.ModelJudgeAnswer, error) {
@@ -370,7 +370,7 @@ func (a artifactStoreAdapter) Get(id string) (string, bool) {
 }
 
 // checkSkillStepConsistency is the decision-correctness judge wired into
-// skill.step.advance: it asks the backend's skill_step_consistency.v1 task whether a
+// skill.step.advance: it asks the backend's skill_step_consistency task whether a
 // recorded step advance looks like a mistake (a bad jump, a regression, an impossible
 // sequence, a premature finish) and returns the {reason,confidence,matched} verdict —
 // matched=true ⇒ the advance is FLAGGED as likely-wrong. A backend error returns the

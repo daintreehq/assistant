@@ -2063,7 +2063,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 		return
 	}
 	// Capture a flattened transcript of the about-to-be-discarded history (still under
-	// the lock). The backend's checkpoint.v1 task OWNS the prompt; the CLI sends only
+	// the lock). The backend's checkpoint task OWNS the prompt; the CLI sends only
 	// this transcript. Each tool call's name + argument JSON is folded into the text so
 	// load-bearing IDs that live ONLY in arguments — e.g. terminal.read
 	// {"terminalId":"term_x"} — survive into the checkpoint's ID-preservation pass.
@@ -2090,7 +2090,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	}
 	s.mu.Unlock()
 
-	// Run the backend's checkpoint.v1 task. On an ERROR (not a reply): a cancel is the
+	// Run the backend's checkpoint task. On an ERROR (not a reply): a cancel is the
 	// turn tearing down (don't compact, don't count it — issue #61), a real outage
 	// counts toward the bounded-growth truncation fallback (issue #202). A successful
 	// result always compacts — even a sparse checkpoint, because validateCheckpoint still
@@ -2317,7 +2317,7 @@ func (s *Session) DrainBackgroundWork() {
 }
 
 // distillCompact extracts durable facts from a soon-to-be-discarded transcript via
-// the backend's memory_distill.v1 task and saves the novel ones as source="compact"
+// the backend's memory_distill task and saves the novel ones as source="compact"
 // memories. Best-effort by construction: a nil MemoryStore/Backend, an empty
 // transcript, a backend error, or any panic yields 0 and never affects compaction. It
 // MUST be called with s.mu released (it makes a network call + DB writes).
