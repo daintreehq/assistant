@@ -99,6 +99,21 @@ type Queue interface {
 	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)
 }
 
+// SupervisorRetirer retires the spawn-attached supervisor watcher(s) of a terminal
+// whose completion the main turn just consumed DIRECTLY — an in-turn settle
+// (terminal.awaitAll, or a terminal.extract wait that resolved). Once the model
+// holds the completion in-hand, a watcher whose whole job was "announce when this
+// agent is done" is redundant: left alive it re-announces minutes later as a stale
+// attention event the model must then resolve by hand. settledStatus is the
+// in-turn verdict (domain.SettleStatusFinished | SettleStatusFailed) so the
+// implementation can advance the linked workflow ledger honestly. Returns the
+// number of watchers retired. Implementations are BEST-EFFORT and must swallow
+// their own errors (retirement is supervision bookkeeping — it must never break
+// the wait tool that triggered it); nil disables retirement (tests).
+type SupervisorRetirer interface {
+	RetireForTerminal(ctx context.Context, terminalID, settledStatus string) int
+}
+
 // Deps wires the extraction family.
 type Deps struct {
 	Reader TerminalReader
@@ -117,6 +132,9 @@ type Deps struct {
 	// message is acted on now instead of after the whole wait elapses. Set per-call
 	// from the ToolContext; nil ⇒ never interrupted (tests, non-interactive actors).
 	InjectionsPending func() bool
+	// Supervisors retires a settled terminal's supervisor watcher(s) once an in-turn
+	// wait consumed the completion (see SupervisorRetirer). nil ⇒ no retirement.
+	Supervisors SupervisorRetirer
 }
 
 // baseContext returns the app-scoped background context, falling back to

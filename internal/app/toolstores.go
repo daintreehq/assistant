@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -184,15 +185,22 @@ func (a watcherStoreAdapter) GetWatcher(_ context.Context, id string) (*domain.W
 	return a.s.GetWatcher(id)
 }
 
-// CancelWatcher flips the watcher to 'cancelled' and stamps the reason + cancel time
-// (the storage update allowlist carries endedReason/endedAt), so a user cancel is
-// distinguishable from the session-boundary sweep's 'session_ended'.
+// CancelWatcher flips the watcher to 'cancelled' and stamps the reason + cancel time,
+// so a user cancel is distinguishable from the session-boundary sweep's
+// 'session_ended'. The flip is guarded on the live statuses (CancelLiveWatcher):
+// the tool's pre-read terminal check is advisory, and a cancel that loses the race
+// to a natural finalize or an in-turn consumption must NOT clobber that end state —
+// the error return also stops the tool from closing the linked workflow run as
+// cancelled over an already-done one.
 func (a watcherStoreAdapter) CancelWatcher(_ context.Context, id, reason string) error {
-	return a.s.UpdateWatcher(id, map[string]any{
-		"status":      "cancelled",
-		"endedReason": reason,
-		"endedAt":     domain.NowMS(),
-	})
+	flipped, err := a.s.CancelLiveWatcher(id, reason, domain.NowMS())
+	if err != nil {
+		return err
+	}
+	if !flipped {
+		return fmt.Errorf("watcher %s already ended (a concurrent finalize won)", id)
+	}
+	return nil
 }
 
 func (a watcherStoreAdapter) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {

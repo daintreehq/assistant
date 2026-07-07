@@ -37,6 +37,14 @@ type Store interface {
 	// returns true iff a row matched. A false return means it was cancelled concurrently — the
 	// daemon must not re-arm it (which would resurrect a cancelled watcher).
 	ClaimDueWatcher(id string, patch map[string]any) (bool, error)
+	// GetWatcher returns a watcher by id ((nil, nil) when absent). The daemon reads
+	// it on a LOST stop claim to learn WHY the row ended mid-check (endedReason):
+	// an in-turn consumption must also mop up the event the check just published.
+	GetWatcher(id string) (*domain.WatcherRecord, error)
+	// ResolveOpenEventsByDedupeKey resolves the still-open event(s) carrying the
+	// dedupe key — the lost-claim mop-up above (a consumed watcher's pre-claim stop
+	// publish is a stale duplicate of a completion the conversation already holds).
+	ResolveOpenEventsByDedupeKey(key string) (int, error)
 	// RevokeGrantsByActor revokes all live automation grants for an actor id
 	// (called on every timer/watcher terminal state). Returns rows changed.
 	RevokeGrantsByActor(actorID string, now int64) (int, error)

@@ -96,7 +96,9 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content. It also " +
 			"returns top-level stillWorking and askingQuestion arrays of terminal IDs, so when the wait budget runs out you can " +
 			"re-await exactly the stillWorking stragglers (and route answers to askingQuestion) without scanning perTerminal. Use this " +
-			"ONCE for the whole cohort instead of one wait per agent. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
+			"ONCE for the whole cohort instead of one wait per agent. Terminals that settle finished/failed automatically RETIRE their " +
+			"spawn-attached supervising watcher (watchersRetired in the result) — the completion is in your hands now, so do NOT " +
+			"watcher.cancel them yourself and do NOT expect a later completion notification for those agents. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
 			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
 			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
 			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. INTERRUPTIBLE: if the user sends a message while you are waiting, awaitAll returns EARLY with interruptedByUser:true plus whatever has settled so far — their message is already folded into the conversation, so READ IT and adapt (they may want to redirect, e.g. 'that agent errored, re-spawn it') before deciding whether to re-await the stillWorking agents. Read-only; requires Daintree MCP.",
@@ -134,7 +136,27 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			outcomes, attempts, interrupted := awaitCohort(ctx, d, a.TerminalIDs, pollIntervalMs, maxAttempts, startedAt, nil)
 			elapsedMs := time.Now().UnixMilli() - startedAt
 
-			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs, interrupted)
+			// The turn just consumed these completions directly, so the spawn-attached
+			// supervisor watchers on the DONE terminals are redundant — retire them now,
+			// before they re-announce an already-reported completion as a stale attention
+			// event. Only finished/failed retire: a question or a still-working straggler
+			// leaves its watcher in place (background supervision may still be needed).
+			// Deliberate trade-off: a SOFT settle (working→waiting) retires too, even
+			// though "waiting" can rarely be a false finish. Those soft settles ARE the
+			// clutter case this exists for, and the tool's own guidance already routes
+			// the false positive to safety — peek the tail, and if the agent still looks
+			// busy re-await it or attach a fresh watcher. Keeping the watcher instead
+			// would re-announce EVERY true completion to guard the rare uncertain one.
+			retired := 0
+			if d.Supervisors != nil {
+				for _, id := range a.TerminalIDs {
+					if o := outcomes[id]; o != nil && (o.status == domain.SettleStatusFinished || o.status == domain.SettleStatusFailed) {
+						retired += d.Supervisors.RetireForTerminal(ctx, id, o.status)
+					}
+				}
+			}
+
+			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs, interrupted, retired)
 		},
 	}
 }
@@ -266,7 +288,10 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 // on the orchestrator). The caller re-awaits stillWorking directly and routes answers to
 // askingQuestion without re-scanning perTerminal. Both are non-nil empty slices when there
 // are none, so they always serialize as JSON [] (a caller iterating them never hits null).
-func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64, interrupted bool) tools.ToolResult {
+// retiredSupervisors (>0) is surfaced as watchersRetired so the model knows those
+// terminals' spawn-attached watchers are already gone — no watcher.cancel needed, and no
+// later completion notification is coming for them.
+func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64, interrupted bool, retiredSupervisors int) tools.ToolResult {
 	perTerminal := make([]map[string]any, 0, len(ids))
 	stillWorking := make([]string, 0, len(ids))
 	askingQuestion := make([]string, 0, len(ids))
@@ -341,6 +366,12 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		"attempts":       attempts,
 		"elapsedMs":      elapsedMs,
 		"terminalIds":    ids,
+	}
+	if retiredSupervisors > 0 {
+		// The settled terminals' supervising watchers were retired automatically (their
+		// completion is now in-hand). Told explicitly so the model neither cancels them
+		// by hand nor waits for a completion notification that will never come.
+		result["watchersRetired"] = retiredSupervisors
 	}
 	if interrupted {
 		// The wait stopped early because the human typed — NOT because the budget ran

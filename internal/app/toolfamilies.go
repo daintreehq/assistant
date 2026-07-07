@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
@@ -211,6 +213,72 @@ func (q contextQueueAdapter) Format(events []domain.QueueEvent) string {
 }
 
 /* ----------------------------- Store adapters ---------------------------- */
+
+// supervisorRetireAdapter implements extractionx.SupervisorRetirer over the
+// concrete store: when an in-turn wait (terminal.awaitAll / a settled
+// terminal.extract wait) consumes an agent terminal's completion, its
+// spawn-attached supervisor watcher is retired so it can't re-announce that
+// completion later as a stale attention event. The retirement mirrors the
+// watcher.cancel tool's side-effect set — flip the row (done in storage, claim-
+// guarded), revoke the watcher's grants, advance the linked workflow ledger —
+// plus resolving the watcher's own open inbox event (the near-miss race where it
+// published seconds before the in-turn settle). Like watcher.cancel, it does NOT
+// unsubscribe the watcher's resource subscriptions (a dangling push nudges only
+// ACTIVE watchers — a no-op once retired). No episodic-memory mirror either,
+// deliberately: that mirror exists because BACKGROUND outcomes never pass through
+// the main conversation, but a consumed completion is already in-context and the
+// normal distiller covers it. Best-effort throughout: every error is debug-logged
+// and swallowed — supervision bookkeeping must never break the wait tool.
+type supervisorRetireAdapter struct{ app *App }
+
+func (r supervisorRetireAdapter) RetireForTerminal(_ context.Context, terminalID, settledStatus string) int {
+	logCfg := debuglog.Config{DebugLog: r.app.Config.DebugLog, LogDir: r.app.Config.LogDir}
+	recs, err := r.app.Store.ConsumeSupervisorWatchersForTerminal(terminalID)
+	if err != nil {
+		// Log but DO NOT return: the store flips rows one by one, so an error can
+		// arrive with earlier records already retired — those still need their
+		// grants revoked and ledgers closed below, or they end half-finalized.
+		debuglog.LogDebug(logCfg, "watcher.consume_failed", map[string]any{
+			"terminalId": terminalID, "flippedBeforeError": len(recs), "error": err.Error(),
+		})
+	}
+	now := domain.NowMS()
+	for _, rec := range recs {
+		_, _ = r.app.Store.RevokeGrantsByActor(rec.ID, now)
+		resolved, _ := r.app.Store.ResolveOpenEventsByDedupeKey(
+			fmt.Sprintf("watcher:%s:%s", rec.ID, terminalID))
+		if rec.WorkflowRunID != nil && *rec.WorkflowRunID != "" {
+			wfStatus := domain.WorkflowDone
+			if settledStatus == domain.SettleStatusFailed {
+				wfStatus = domain.WorkflowFailed
+			}
+			// Same notesJson shape as the daemon's watcherDigestNote ([]string), so
+			// /workflows reads a consumed run the way it reads a supervised one.
+			note, _ := json.Marshal([]string{
+				"watcher: retired — completion consumed in-turn (" + settledStatus + ")",
+			})
+			_ = r.app.Store.UpdateWorkflowRun(*rec.WorkflowRunID, map[string]any{
+				"status":      string(wfStatus),
+				"completedAt": now,
+				"notesJson":   string(note),
+			})
+		}
+		debuglog.LogDebug(logCfg, "watcher.consumed_in_turn", map[string]any{
+			"watcherId": rec.ID, "terminalId": terminalID, "settledStatus": settledStatus,
+			"title": rec.Title, "resolvedOpenEvents": resolved,
+			"workflowRunId": strOrEmpty(rec.WorkflowRunID),
+		})
+	}
+	return len(recs)
+}
+
+// strOrEmpty flattens an optional string for a debug-log field.
+func strOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
 
 // auditStoreAdapter maps *storage.Store onto auditx.AuditStore, translating the
 // family's locally-declared AuditFilters to the field-identical storage shape.

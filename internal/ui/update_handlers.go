@@ -1006,16 +1006,33 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 	// items resolve — DashboardSnapshotMsg). onAttention no longer OWNS the count.
 	m.pendingWake = append(m.pendingWake, msg.Events...)
 	m.attentionN += len(msg.Events)
-	// Echo each fresh event into the transcript as a committed note — the durable,
+	// Echo the fresh batch into the transcript as ONE committed note — the durable,
 	// scroll-back-able ledger line #175 asks for, glanceable where the operator is already
-	// looking instead of only a BEL + badge bump. We emit one note per event with NO
-	// UI-side dedupe: the scheduler delivers each event once per MATERIAL change (notify()
-	// pulls Digest{NotifiedIsNull} then MarkNotified, and the queue re-arms NotifiedAt only
-	// on a real severity/title/summary change — daemon/scheduler.go, queue.go). So a repeat
-	// is always a genuine escalation worth a fresh line, never spam. Appended BEFORE
-	// drainPending so any wake turn seals AFTER these notes (true chronological order).
-	for _, e := range msg.Events {
+	// looking instead of only a BEL + badge bump. A single event keeps its full line; a
+	// multi-event batch COALESCES to a count + the most-severe event's title + an /inbox
+	// pointer, because per-event lines turn a routine burst (a cohort of watchers settling
+	// together) into a wall of near-identical notes that buries the conversation — the
+	// operator needs "5 things happened, worst was X", not five spaced-out lines whose
+	// detail already lives in /inbox and in the wake turn's own summary. There is still NO
+	// UI-side dedupe across batches: the scheduler delivers each event once per MATERIAL
+	// change (notify() pulls Digest{NotifiedIsNull} then MarkNotified, and the queue
+	// re-arms NotifiedAt only on a real severity/title/summary change — daemon/
+	// scheduler.go, queue.go). So a repeat is always a genuine escalation worth a fresh
+	// line, never spam. Appended BEFORE drainPending so any wake turn seals AFTER this
+	// note (true chronological order).
+	if len(msg.Events) == 1 {
+		e := msg.Events[0]
 		m.addSeverityNote(severityToNoteLevel(e.Severity), e.Severity, attentionNoteText(e))
+	} else {
+		headline := msg.Events[0]
+		for _, e := range msg.Events[1:] {
+			if domain.RankOf(e.Severity) > domain.RankOf(headline.Severity) {
+				headline = e
+			}
+		}
+		text := fmt.Sprintf("%d updates — %s · +%d more (/inbox)",
+			len(msg.Events), headline.Title, len(msg.Events)-1)
+		m.addSeverityNote(severityToNoteLevel(headline.Severity), headline.Severity, text)
 	}
 	// Ring the BEL once per fresh batch (on the event, not a count increment).
 	cmd := bellCmd()

@@ -187,6 +187,11 @@ type pollResult struct {
 	attempts     int
 	combinedTail string
 	finished     bool
+	// exitCode is the final read's single-terminal exit code (nil for multi-terminal
+	// polls, where readSignals leaves the aggregate blank, and while the process is
+	// alive). Carried so a consumed completion can be classified failed on a nonzero
+	// exit instead of blindly reported finished (retireConsumedSupervisors).
+	exitCode *int
 }
 
 // The settle-wait timing knobs (spawn grace, judge cooldown, quiet threshold,
@@ -292,7 +297,8 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 			return fin
 		}()
 		if matched {
-			return pollResult{matched: true, attempts: attempts, combinedTail: r.combinedTail, finished: r.finished}
+			return pollResult{matched: true, attempts: attempts, combinedTail: r.combinedTail,
+				finished: r.finished, exitCode: r.signals.ExitCode}
 		}
 
 		if attempts < args.maxAttempts && args.pollIntervalMs > 0 {
@@ -304,6 +310,7 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 	if read != nil {
 		res.combinedTail = read.combinedTail
 		res.finished = read.finished
+		res.exitCode = read.signals.ExitCode
 	}
 	return res
 }

@@ -70,6 +70,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Queue:       a.Queue,
 		BaseContext: a.baseCtx,
 		DebugLog:    debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		Supervisors: supervisorRetireAdapter{app: a},
 	}))...)
 	all = append(all, addr(fsx.Tools(fsx.Deps{}))...)
 	all = append(all, addr(mcpx.Tools(mcpx.Deps{

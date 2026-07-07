@@ -17,6 +17,7 @@ type fakeStore struct {
 	watchPatches  map[string]map[string]any
 	workflowPatch map[string]map[string]any
 	revoked       map[string]int
+	resolvedKeys  map[string]int
 	dueTimerErr   error
 	dueWatcherErr error
 }
@@ -155,6 +156,28 @@ func (f *fakeStore) RevokeGrantsByActor(actorID string, now int64) (int, error) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked[actorID]++
+	return 1, nil
+}
+
+func (f *fakeStore) GetWatcher(id string) (*domain.WatcherRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.watchers {
+		if f.watchers[i].ID == id {
+			w := f.watchers[i]
+			return &w, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) ResolveOpenEventsByDedupeKey(key string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resolvedKeys == nil {
+		f.resolvedKeys = map[string]int{}
+	}
+	f.resolvedKeys[key]++
 	return 1, nil
 }
 
