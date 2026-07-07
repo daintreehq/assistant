@@ -20,6 +20,29 @@ func darkTheme() theme.Theme {
 	return t
 }
 
+// asciiTheme is darkTheme with the unicode glyph set swapped for the ASCII fallbacks
+// (DAINTREE_ASCII / non-UTF locale), so tests can prove signature glyphs degrade to
+// their width-safe stand-ins instead of emitting mojibake.
+func asciiTheme(t *testing.T) theme.Theme {
+	t.Setenv("DAINTREE_ASCII", "1")
+	th := theme.Resolve()
+	th.Mode = theme.ModeDark
+	th.Color = theme.PaletteFor(theme.ModeDark)
+	return th
+}
+
+// TestStatusLine_HealthBadgeAsciiSafe proves the by-exception health badges emit the
+// ASCII alert glyph ("!") rather than a raw unicode triangle when unicode is off.
+func TestStatusLine_HealthBadgeAsciiSafe(t *testing.T) {
+	out := renderStatusLine(asciiTheme(t), statusParams{Degraded: true, ModelRateLimited: true}, 56)
+	if strings.Contains(out, "▲") {
+		t.Errorf("health badge must not emit a unicode triangle in ascii mode: %q", out)
+	}
+	if !strings.Contains(out, "! Daintree MCP unavailable") {
+		t.Errorf("degraded badge should use the ascii alert glyph: %q", out)
+	}
+}
+
 // --- Header / masthead ---
 
 func TestMasthead_WordmarkVersionAndProject(t *testing.T) {

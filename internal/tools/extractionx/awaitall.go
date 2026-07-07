@@ -319,9 +319,13 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 	if workingCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d still working", workingCount))
 	}
-	summary := fmt.Sprintf("%s (of %d agent(s)).", strings.Join(parts, ", "), total)
+	agentWord := "agents"
+	if total == 1 {
+		agentWord = "agent"
+	}
+	summary := fmt.Sprintf("%s (of %d %s).", strings.Join(parts, ", "), total, agentWord)
 	if len(parts) == 0 {
-		summary = fmt.Sprintf("No agents (of %d).", total)
+		summary = fmt.Sprintf("No agents (of %d %s).", total, agentWord)
 	}
 	// An interruption is the headline of the summary: the orchestrator must read the
 	// user's new message before doing anything else, so lead with it.

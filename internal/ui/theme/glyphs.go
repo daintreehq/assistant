@@ -26,6 +26,7 @@ type GlyphSet struct {
 	Continuation string   // │  — note/continuation prefix
 	Bullet       string   // ·  — inline separator / info bullet
 	Attention    string   // »  — attention marker (note spine + inbox badge); ASCII "!"
+	Alert        string   // ▲  — by-exception health alert (MCP down / rate-limited); ASCII "!"
 	Caret        string   // ▌ — streaming caret
 	Bar          string   // ▏ — user-message accent bar (U+258F)
 	Rule         string   // ─ — horizontal rule unit
@@ -47,6 +48,7 @@ var unicodeGlyphs = GlyphSet{
 	Continuation: "│ ",
 	Bullet:       "·",
 	Attention:    "»",
+	Alert:        "▲",
 	Caret:        "▌",
 	Bar:          "▏",
 	Rule:         "─",
@@ -72,6 +74,7 @@ var asciiGlyphs = GlyphSet{
 	Continuation: "| ",
 	Bullet:       "-",
 	Attention:    "!",
+	Alert:        "!",
 	Caret:        "|",
 	Bar:          "|",
 	Rule:         "-",

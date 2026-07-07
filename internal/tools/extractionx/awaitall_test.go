@@ -318,6 +318,28 @@ func TestBuildAwaitResult_NamesStragglersAndQuestions(t *testing.T) {
 	}
 }
 
+// TestBuildAwaitResult_SummaryPluralizesAgents pins the human-readable summary count:
+// it reads "of N agents" for a cohort and "of 1 agent" for a single terminal, never the
+// clumsy "agent(s)" placeholder.
+func TestBuildAwaitResult_SummaryPluralizesAgents(t *testing.T) {
+	many := buildAwaitResult(
+		[]string{"t1", "t2", "t3"},
+		map[string]*awaitOutcome{
+			"t1": {status: "finished", finished: true},
+			"t2": {status: "finished", finished: true},
+			"t3": {status: "finished", finished: true},
+		}, 1, 10, false)
+	if got := many.Summary; !strings.Contains(got, "of 3 agents") || strings.Contains(got, "agent(s)") {
+		t.Errorf("cohort summary = %q, want it to read \"of 3 agents\" and drop \"agent(s)\"", got)
+	}
+	one := buildAwaitResult(
+		[]string{"t1"},
+		map[string]*awaitOutcome{"t1": {status: "finished", finished: true}}, 1, 10, false)
+	if got := one.Summary; !strings.Contains(got, "of 1 agent)") || strings.Contains(got, "agents") {
+		t.Errorf("single-agent summary = %q, want singular \"of 1 agent)\"", got)
+	}
+}
+
 // When every terminal settled, stillWorking and askingQuestion are present as non-nil EMPTY
 // slices so they serialize as JSON [] (never null) — a caller that iterates them
 // unconditionally for a re-await never trips over a null.

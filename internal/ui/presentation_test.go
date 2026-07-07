@@ -20,10 +20,46 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		"fs.list":                 "Listed",
 		// The scheduling verb is keyed on the real tool name.
 		"timer.schedule": "Scheduled",
+		// High-frequency orchestration tools that used to fall through to their raw
+		// dotted name in the activity tree (the scratch store + await/send family).
+		"terminal.awaitAll":    "Waited",
+		"terminal.sendCommand": "Ran",
+		"scratch.create":       "Scratch",
+		"scratch.set":          "Scratch",
+		"scratch.get":          "Scratch",
+		"memory.recall":        "Recalled",
+		"artifact.read":        "Read artifact",
 	}
 	for name, want := range cases {
 		if got := presentTool(name); got != want {
 			t.Errorf("presentTool(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestPresentTool_NoRawDottedNames guards against the presentation gap that motivated
+// the verb-map expansion: a first-party tool that renders its raw dotted name (e.g.
+// "scratch.create") next to nicely-verbed neighbours ("Delegated"). Every canonical
+// local tool name should resolve to a human label — never a string still carrying a
+// dot from its namespace.
+func TestPresentTool_NoRawDottedNames(t *testing.T) {
+	names := []string{
+		"scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop",
+		"terminal.awaitAll", "terminal.sendCommand", "terminal.rename", "terminal.close",
+		"terminal.arm", "terminal.disarm", "terminal.disarmAll",
+		"terminal.run.async", "terminal.await.async", "async.list", "async.cancel",
+		"memory.recall", "memory.list", "memory.save", "memory.forget", "memory.pin", "memory.unpin",
+		"artifact.read", "copyTree.generate", "copyTree.injectToTerminal",
+		"docs.search", "docs.getPage", "docs.getRelatedPages",
+		"forge.getPR", "watcher.watchPR", "audit.export",
+		"agentTask.status", "agentTask.list", "agentTask.superviseTerminal",
+		"user.askMultipleChoice",
+		"workflow.plan", "workflow.reconcile", "workflow.create", "workflow.list",
+	}
+	for _, n := range names {
+		got := presentTool(n)
+		if got == n || contains(got, ".") {
+			t.Errorf("presentTool(%q) = %q — still a raw dotted name; add a human verb", n, got)
 		}
 	}
 }

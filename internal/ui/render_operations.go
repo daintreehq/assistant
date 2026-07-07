@@ -126,7 +126,10 @@ func nowLine(th theme.Theme, d Dashboard, now int64, width int) string {
 		return th.Dim().Render("Standing by")
 	}
 	a := d.Agents[0]
-	line := th.Info().Render(a.Badge) + " " + th.Body().Render(firstNonEmpty(a.Title, a.Goal))
+	// Tone the badge by urgency (red needs-input/failed, amber blocked/review, else
+	// cyan), matching the compact footer strip — the same "NEEDS INPUT" reads red in
+	// both surfaces instead of flat cyan in the deck and red in the footer.
+	line := styleFor(th, badgeTone(a.Badge), a.Badge) + " " + th.Body().Render(firstNonEmpty(a.Title, a.Goal))
 	if a.StartedAt > 0 {
 		line += th.Muted().Render(" " + formatDuration(now-a.StartedAt))
 	}
@@ -183,7 +186,9 @@ func agentLines(th theme.Theme, d Dashboard, width int, focused bool) []string {
 	}
 	var out []string
 	for _, a := range rows {
-		out = append(out, truncateCells(th.Info().Render(a.Badge)+" "+th.Body().Render(firstNonEmpty(a.Title, a.Goal)), width))
+		// Badge toned by urgency (see nowLine) so the deck's most-urgent agents read
+		// red/amber, consistent with the footer strip rather than a flat cyan list.
+		out = append(out, truncateCells(styleFor(th, badgeTone(a.Badge), a.Badge)+" "+th.Body().Render(firstNonEmpty(a.Title, a.Goal)), width))
 		tag := epistemicTag(a.EpistemicKind)
 		second := tag + a.ID
 		if a.AgentState != "" {
@@ -244,11 +249,17 @@ func workflowGraphLines(th theme.Theme, d Dashboard, width int) []string {
 		more = len(rows) - cap
 		rows = rows[:cap]
 	}
+	g := th.Glyphs
 	var out []string
 	for _, w := range rows {
-		tone, marker := "accent", "●"
+		// Healthy uses the shared filled dot; blocked keeps the ⚠ warning sign, both
+		// with ASCII fallbacks so a non-unicode terminal doesn't render mojibake.
+		tone, marker := "accent", g.Async
 		if w.Blocked {
 			tone, marker = "warning", "⚠"
+			if !th.Unicode {
+				marker = g.Alert
+			}
 		}
 		goal := strings.Join(strings.Fields(w.Goal), " ")
 		out = append(out, truncateCells(styleFor(th, tone, marker)+" "+th.Body().Render(goal)+th.Muted().Render("  "+w.Status), width))
