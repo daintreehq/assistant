@@ -49,13 +49,15 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 
 	for _, id := range terminalIDs {
 		entry, present := statuses.ByID[id]
-		// A terminal is "gone" only when the read returned OTHER terminals but not
-		// this one (the namespace is confirmed live, so the omission is a real exit).
-		// A TOTAL miss is the #108 symptom, NOT a clean exit.
-		absent := statuses.OK && !present && len(statuses.ByID) > 0
+		// A terminal is "gone" when the read returned OTHER terminals but not this one
+		// (the namespace is confirmed live, so the omission is a real exit; a TOTAL
+		// miss is the #108 symptom, NOT a clean exit) — or when Daintree marked the
+		// entry NotFound per-entry (its shape for a dropped id; the batch never omits
+		// unknown ids, so absence alone would never fire for a closed terminal).
+		absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound))
 		agentState := ""
 		waitingReason := ""
-		if present {
+		if present && !entry.NotFound {
 			agentState = entry.AgentState
 			waitingReason = entry.WaitingReason
 		}

@@ -133,6 +133,27 @@ func TestReadSignalsAllExitedGating(t *testing.T) {
 	}
 }
 
+// A per-entry "terminal not found" (Daintree's shape for a dropped id — the batch
+// never omits it) must read as exited, with no deep-read fallback for the dead id:
+// treating it as a present-but-blank entry would poll forever.
+func TestReadSignalsNotFoundEntryIsGone(t *testing.T) {
+	reader := &fakeReader{statuses: StatusReadResult{OK: true, ByID: map[string]TerminalStatusEntry{
+		"a": {NotFound: true},
+		"b": {AgentState: "exited", RecentOutput: strp("done b")},
+	}}}
+	r := readSignals(context.Background(), Deps{Reader: reader}, []string{"a", "b"}, 12000,
+		map[string]*terminalState{}, 1000)
+	if r.signals.RuntimeStatus != "exited" || !r.finished {
+		t.Fatalf("a dropped terminal plus an exited one should aggregate exited+finished, got %q finished=%v",
+			r.signals.RuntimeStatus, r.finished)
+	}
+	for _, id := range reader.deepReads {
+		if id == "a" {
+			t.Fatalf("a gone terminal must not be deep-read, reads=%v", reader.deepReads)
+		}
+	}
+}
+
 // The inline recentOutput is used when it already covers the requested window;
 // a deep ReadOutput is the fallback when it does not.
 func TestReadSignalsInlineVsDeepFallback(t *testing.T) {

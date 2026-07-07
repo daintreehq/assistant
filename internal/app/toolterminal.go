@@ -84,11 +84,18 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 		if id == "" {
 			continue
 		}
+		agentState := mcpString(e["agentState"])
 		byID[id] = extractionx.TerminalStatusEntry{
-			AgentState:    mcpString(e["agentState"]),
+			AgentState:    agentState,
 			WaitingReason: mcpString(e["waitingReason"]),
 			RecentOutput:  mcpStringPtr(e["recentOutput"]),
 			ExitCode:      mcpIntPtr(e["exitCode"]),
+			// Daintree returns an UNKNOWN id as a present entry with a per-entry
+			// error and a null agentState (never omits it, never aborts the batch).
+			// The error field alone is not proof — the includeOutput path can stamp
+			// an output-IPC failure onto entries whose status fields are intact —
+			// so "gone" requires the error AND the absent agentState together.
+			NotFound: mcpString(e["error"]) != "" && agentState == "",
 		}
 	}
 	return extractionx.StatusReadResult{OK: true, ByID: byID}
@@ -192,6 +199,14 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 	res := a.r.ReadStatuses(ctx, terminalIDs, false)
 	out := asyncwork.StatusReadResult{OK: res.OK, ByID: make(map[string]asyncwork.TerminalStatus, len(res.ByID))}
 	for id, e := range res.ByID {
+		// A per-entry "Terminal not found" is Daintree's shape for a dropped id —
+		// the batch never omits it. Map it to ABSENCE here so the coordinator's
+		// roster-confirmed gone path (confirmGone) settles it; passing it through
+		// with an empty agentState would poll forever and strand every sibling in
+		// the invocation behind the one dead terminal.
+		if e.NotFound {
+			continue
+		}
 		out.ByID[id] = asyncwork.TerminalStatus{
 			AgentState:    e.AgentState,
 			WaitingReason: e.WaitingReason,

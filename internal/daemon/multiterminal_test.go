@@ -155,8 +155,10 @@ func TestWatcher_StopsOnlyWhenEveryTerminalTerminal(t *testing.T) {
 func TestWatcher_PreviouslySeenClosedAlerts(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	// getStatus empty, list empty → the previously-seen terminal is gone.
-	mcp := newProgMCP(map[string]termCfg{})
+	// OMITTED from getStatus (the defensive shape — real Daintree returns a
+	// not-found entry instead, pinned by TestWatcher_NotFoundEntryTakesAbsentLadder),
+	// list empty → the previously-seen terminal is gone.
+	mcp := newProgMCP(map[string]termCfg{"term-x": {omitFromStatus: true}})
 	mcp.list = []map[string]any{}
 	rec := watcherWith("wch_gone", []string{"term-x"},
 		withOptions(watcherOptions{PerTerminal: map[string]TerminalState{"term-x": {Seen: true}}}))
@@ -171,10 +173,56 @@ func TestWatcher_PreviouslySeenClosedAlerts(t *testing.T) {
 	}
 }
 
+// A dropped terminal comes back from getStatus as a PRESENT entry carrying a
+// per-entry "Terminal not found" error with a null agentState — real Daintree
+// never omits an unknown id from the batch. The watcher must route that shape
+// through the absent ladder (list cross-check → exited) instead of feeding
+// resolvePresent an empty agentState and supervising a dead terminal forever;
+// and within the spawn grace it must NOT latch Seen (a just-spawned terminal
+// answers "not found" until the panel registers).
+func TestWatcher_NotFoundEntryTakesAbsentLadder(t *testing.T) {
+	t.Run("previously seen → exited + stop", func(t *testing.T) {
+		store := newFakeStore()
+		queue := newFakeQueue()
+		// term-x is not in perTerminal ⇒ the fake returns the not-found entry shape.
+		mcp := newProgMCP(map[string]termCfg{})
+		mcp.list = []map[string]any{}
+		rec := watcherWith("wch_nf", []string{"term-x"},
+			withOptions(watcherOptions{PerTerminal: map[string]TerminalState{"term-x": {Seen: true}}}))
+		store.watchers = []domain.WatcherRecord{rec}
+
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+		if out.Classification != domain.ClassTerminalExited || !out.Stop {
+			t.Fatalf("a not-found entry for a previously-seen terminal must exit+stop, got %s stop=%v", out.Classification, out.Stop)
+		}
+	})
+	t.Run("never seen, within grace → keeps waiting without latching Seen", func(t *testing.T) {
+		store := newFakeStore()
+		queue := newFakeQueue()
+		mcp := newProgMCP(map[string]termCfg{})
+		mcp.list = []map[string]any{}
+		rec := watcherWith("wch_nf2", []string{"term-x"}) // fresh: within WatcherSpawnGraceMS
+		store.watchers = []domain.WatcherRecord{rec}
+
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+		if out.Classification != domain.ClassNoChange || out.Stop {
+			t.Fatalf("a not-found entry within the spawn grace must keep waiting, got %s stop=%v", out.Classification, out.Stop)
+		}
+		var saved watcherOptions
+		if raw, ok := store.watchPatches["wch_nf2"]["optionsJson"].(string); ok {
+			_ = json.Unmarshal([]byte(raw), &saved)
+		}
+		if st, ok := saved.PerTerminal["term-x"]; ok && st.Seen {
+			t.Fatal("a not-found entry must not latch Seen — that would defeat the spawn grace on the next tick")
+		}
+	})
+}
+
 func TestWatcher_NeverSeenAbsentPastGraceExits(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	mcp := newProgMCP(map[string]termCfg{})
+	// The OMISSION shape (see TestWatcher_PreviouslySeenClosedAlerts).
+	mcp := newProgMCP(map[string]termCfg{"term-x": {omitFromStatus: true}})
 	mcp.list = []map[string]any{}
 	rec := aged(watcherWith("wch_late", []string{"term-x"}))
 	store.watchers = []domain.WatcherRecord{rec}
@@ -188,7 +236,8 @@ func TestWatcher_NeverSeenAbsentPastGraceExits(t *testing.T) {
 func TestWatcher_ListAliveStaysAlive(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	mcp := newProgMCP(map[string]termCfg{})
+	// The OMISSION shape (see TestWatcher_PreviouslySeenClosedAlerts).
+	mcp := newProgMCP(map[string]termCfg{"term-x": {omitFromStatus: true}})
 	mcp.list = []map[string]any{{"id": "term-x", "agentState": "waiting", "waitingReason": "question"}}
 	rec := aged(watcherWith("wch_alive", []string{"term-x"}))
 	store.watchers = []domain.WatcherRecord{rec}
@@ -466,7 +515,8 @@ func TestWatcher_ListedOmittedModelCompletionGatedByGit(t *testing.T) {
 func TestWatcher_ExitedOnlyWhenListAlsoExited(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	mcp := newProgMCP(map[string]termCfg{})
+	// The OMISSION shape (see TestWatcher_PreviouslySeenClosedAlerts).
+	mcp := newProgMCP(map[string]termCfg{"term-x": {omitFromStatus: true}})
 	mcp.list = []map[string]any{{"id": "term-x", "agentState": "exited", "exitCode": float64(1)}}
 	rec := watcherWith("wch_ex", []string{"term-x"})
 	store.watchers = []domain.WatcherRecord{rec}
@@ -515,8 +565,11 @@ func TestWatcher_ListUnreadableStaysAlive(t *testing.T) {
 func TestWatcher_MixedBatchOneStatusOneList(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()
-	// term-a present in getStatus; term-b omitted but alive in list.
-	mcp := newProgMCP(map[string]termCfg{"term-a": {agentState: "waiting", recentOutput: strptr("")}})
+	// term-a present in getStatus; term-b omitted (the defensive shape) but alive in list.
+	mcp := newProgMCP(map[string]termCfg{
+		"term-a": {agentState: "waiting", recentOutput: strptr("")},
+		"term-b": {omitFromStatus: true},
+	})
 	mcp.list = []map[string]any{
 		{"id": "term-a", "agentState": "waiting"},
 		{"id": "term-b", "agentState": "waiting"},

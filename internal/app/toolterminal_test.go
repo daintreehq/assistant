@@ -269,6 +269,61 @@ func TestFetchOpenTerminals_StatusArgsAreIdsNoOutput(t *testing.T) {
 	}
 }
 
+// Daintree returns an UNKNOWN terminal id as a PRESENT getStatus entry with a
+// per-entry error and a null agentState (never omits it, never aborts the batch).
+// The parse must mark that shape NotFound — and must NOT mark an entry whose
+// status fields are intact but which carries an output-IPC error (the
+// includeOutput failure path), which is a live terminal.
+func TestReadStatuses_MarksNotFoundEntries(t *testing.T) {
+	f := &fakeTerminalMCP{
+		connected: true,
+		results: map[string]mcp.CallResult{
+			"terminal.getStatus": terminalsResult(
+				map[string]any{"terminalId": "t-dead", "agentId": nil, "agentState": nil, "error": "Terminal not found"},
+				map[string]any{"terminalId": "t-live", "agentState": "working", "error": "Failed to fetch terminal output"},
+			),
+		},
+	}
+	// includeOutput=true: the output-IPC failure stamp only exists on that path,
+	// so this is the shape the t-live false-positive guard actually defends.
+	res := newFetchAdapter(f).ReadStatuses(context.Background(), []string{"t-dead", "t-live"}, true)
+	if !res.OK {
+		t.Fatalf("a per-entry error must not fail the batch, got %+v", res)
+	}
+	if e := res.ByID["t-dead"]; !e.NotFound {
+		t.Fatalf("t-dead should be marked NotFound, got %+v", e)
+	}
+	if e := res.ByID["t-live"]; e.NotFound || e.AgentState != "working" {
+		t.Fatalf("t-live has intact status fields and must NOT be NotFound, got %+v", e)
+	}
+}
+
+// The async coordinator's adapter must map a NotFound entry to ABSENCE (omit it)
+// so the coordinator's roster-confirmed gone path settles the terminal — passing
+// it through with an empty agentState would strand the invocation (and every
+// sibling watched with it) forever.
+func TestAsyncReadStatuses_OmitsNotFoundEntries(t *testing.T) {
+	f := &fakeTerminalMCP{
+		connected: true,
+		results: map[string]mcp.CallResult{
+			"terminal.getStatus": terminalsResult(
+				map[string]any{"terminalId": "t-dead", "agentState": nil, "error": "Terminal not found"},
+				map[string]any{"terminalId": "t-live", "agentState": "waiting", "waitingReason": "prompt"},
+			),
+		},
+	}
+	res := asyncStatusReaderAdapter{r: newFetchAdapter(f)}.ReadStatuses(context.Background(), []string{"t-dead", "t-live"})
+	if !res.OK {
+		t.Fatalf("the read should be OK, got %+v", res)
+	}
+	if _, present := res.ByID["t-dead"]; present {
+		t.Fatalf("a NotFound entry must be omitted so the coordinator's confirmGone path fires, got %+v", res.ByID)
+	}
+	if e, present := res.ByID["t-live"]; !present || e.AgentState != "waiting" {
+		t.Fatalf("the live sibling must pass through, got %+v", res.ByID)
+	}
+}
+
 // Regression for the Critical review finding: an over-limit, agent-authored title is clamped
 // to the backend's max_length so it can never 422 the request and break the turn.
 func TestFetchOpenTerminals_ClampsOverlongFields(t *testing.T) {

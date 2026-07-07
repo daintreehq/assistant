@@ -132,7 +132,16 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 		var terminals []map[string]any
 		for _, id := range ids {
 			cfg, ok := m.perTerminal[id]
-			if !ok || cfg.omitFromStatus {
+			if !ok {
+				// Mirror real Daintree: an unknown id is NEVER omitted from the batch —
+				// it returns a present entry with a per-entry error and null agentState.
+				// (omitFromStatus below still models the defensive omission shape.)
+				terminals = append(terminals, map[string]any{
+					"terminalId": id, "agentId": nil, "agentState": nil, "error": "Terminal not found",
+				})
+				continue
+			}
+			if cfg.omitFromStatus {
 				continue // omitted ⇒ absent from getStatus (still readable via getOutput)
 			}
 			e := map[string]any{"terminalId": id}

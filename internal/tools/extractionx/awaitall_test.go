@@ -132,6 +132,67 @@ func TestAwaitCohort_AllFinishStaggered(t *testing.T) {
 	}
 }
 
+// A terminal closed MID-WAIT comes back from Daintree as a PRESENT entry marked
+// "terminal not found" (the batch never omits an unknown id), so the cohort wait
+// must settle it as gone instead of stranding every live sibling behind it until
+// the attempt cap — the exact failure when the user closes one agent of five
+// while an await is running.
+func TestAwaitCohort_DroppedTerminalSettlesAsGone(t *testing.T) {
+	gone := TerminalStatusEntry{NotFound: true}
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1"), "t2": ent("working", "", "w2")},
+		{"t1": gone, "t2": ent("working", "", "w2b")},
+		{"t1": gone, "t2": ent("waiting", "", "done t2")},
+	}}
+	router := &safeRouter{}
+	deps := Deps{Reader: reader, Router: router}
+	ids := []string{"t1", "t2"}
+
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 10, 0,
+		clockSeq(0, 2000, 4000, 6000, 8000))
+
+	if attempts != 3 {
+		t.Fatalf("wait should resolve on attempt 3 (t1 gone on 2, t2 finished on 3), got %d", attempts)
+	}
+	allFinished, per := awaitResult(t, out, ids)
+	if !allFinished {
+		t.Fatalf("the dropped terminal must settle, not strand the cohort: per=%+v", per)
+	}
+	if per["t1"]["status"] != "finished" || per["t1"]["reason"] != "terminal is gone (closed or exited)" {
+		t.Fatalf("t1 should settle as gone with the explicit reason, got %v", per["t1"])
+	}
+	if per["t2"]["status"] != "finished" {
+		t.Fatalf("t2 should finish normally, got %v", per["t2"])
+	}
+	if router.judgeCalls != 0 || reader.deepCalls != 0 {
+		t.Fatalf("the gone settle must stay pure-FSM (judges=%d deepReads=%d)", router.judgeCalls, reader.deepCalls)
+	}
+}
+
+// EVERY terminal dropped: not-found entries are PRESENT in the response, so the
+// "total miss is a transport hiccup" guard must not apply — the whole cohort
+// settles as gone on the first poll instead of grinding to the attempt cap.
+func TestAwaitCohort_AllDroppedSettles(t *testing.T) {
+	gone := TerminalStatusEntry{NotFound: true}
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": gone, "t2": gone},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1", "t2"}
+
+	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 10, 0, clockSeq(0, 2000))
+
+	if attempts != 1 {
+		t.Fatalf("an all-dropped cohort should settle on the first poll, got %d attempts", attempts)
+	}
+	_, per := awaitResult(t, out, ids)
+	for _, id := range ids {
+		if per[id]["status"] != "finished" || per[id]["reason"] != "terminal is gone (closed or exited)" {
+			t.Fatalf("%s should settle as gone, got %v", id, per[id])
+		}
+	}
+}
+
 // Pure-FSM guarantee: awaitAll settles on agentState ALONE — it never reads terminal
 // output and never calls the model, regardless of what recentOutput holds (a blank,
 // bottom-padded Codex viewport included). This is what removes the read burst that

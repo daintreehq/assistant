@@ -72,6 +72,17 @@ type TerminalStatusEntry struct {
 	LastTransitionAt *int64
 }
 
+// NotFound reports Daintree's per-entry "terminal not found" shape: an unknown
+// id never aborts (or is omitted from) the batched terminal.getStatus — it comes
+// back as a present entry carrying a per-entry error with a null agentState.
+// The error alone is not proof of absence (the includeOutput path stamps an
+// output-IPC failure onto entries whose status fields are intact), so gone
+// requires the error AND the absent agentState together. Callers must route a
+// NotFound entry through the same path as an id missing from the batch.
+func (e TerminalStatusEntry) NotFound() bool {
+	return e.Error != "" && e.AgentState == ""
+}
+
 // agentStateResourceURI builds the subscribable resource URI for an agent's FSM
 // state. Empty agentId → empty URI (caller must not subscribe). Kept in one place
 // so the subscribe, re-subscribe, and unsubscribe paths form the URI identically.

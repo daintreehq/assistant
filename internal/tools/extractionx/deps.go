@@ -32,6 +32,13 @@ type TerminalStatusEntry struct {
 	WaitingReason string  // "question" | "prompt" | "" (meaningful only while waiting)
 	RecentOutput  *string // nil when absent; "" is a valid "no output yet"
 	ExitCode      *int
+	// NotFound marks Daintree's per-entry "Terminal not found" shape: an unknown
+	// id does NOT abort the batched terminal.getStatus and is NOT omitted from the
+	// response — it comes back as a present entry with a per-entry error and a null
+	// agentState. Waits must treat such an entry as GONE (closed/removed), exactly
+	// like a roster-confirmed absence; matching on the empty AgentState alone would
+	// instead poll forever (the FSM never settles on "") and strand the cohort.
+	NotFound bool
 }
 
 // StatusReadResult is the outcome of one readStatuses across the target terminals.

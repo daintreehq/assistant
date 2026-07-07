@@ -127,3 +127,18 @@ func TestReadOutput_TextBodyAndSilentDistinction(t *testing.T) {
 		}
 	})
 }
+
+// NotFound is the discriminator for Daintree's per-entry "terminal not found"
+// shape: the error AND the absent agentState together. An output-IPC error
+// stamped onto an entry whose status fields are intact is a LIVE terminal.
+func TestTerminalStatusEntry_NotFound(t *testing.T) {
+	if !(TerminalStatusEntry{Error: "Terminal not found"}).NotFound() {
+		t.Error("error + empty agentState must read as not found")
+	}
+	if (TerminalStatusEntry{Error: "Failed to fetch terminal output", AgentState: "working"}).NotFound() {
+		t.Error("an output-IPC error with intact status fields is a live terminal")
+	}
+	if (TerminalStatusEntry{AgentState: ""}).NotFound() {
+		t.Error("an empty agentState alone (non-agent terminal) is not proof of absence")
+	}
+}

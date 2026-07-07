@@ -219,12 +219,17 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				continue // already settled — never re-poll
 			}
 			entry, present := statuses.ByID[id]
-			// A terminal is "gone" only when OTHER terminals came back but not this one
-			// (the namespace is confirmed live). A TOTAL miss is a transport hiccup, not exit.
-			absent := statuses.OK && !present && len(statuses.ByID) > 0
+			// A terminal is "gone" when OTHER terminals came back but not this one (the
+			// namespace is confirmed live; a TOTAL miss is a transport hiccup, not exit) —
+			// OR when Daintree said so per-entry (a dropped id comes back as a PRESENT
+			// entry marked NotFound, never as an omission). The ids were roster-resolved
+			// when the wait started, so a mid-wait NotFound is a genuine close — without
+			// this the FSM never settles on the entry's empty agentState and the one dead
+			// terminal strands the whole cohort until the attempt cap.
+			absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound))
 			agentState, waitingReason := "", ""
 			var exitCode *int
-			if present {
+			if present && !entry.NotFound {
 				agentState, waitingReason, exitCode = entry.AgentState, entry.WaitingReason, entry.ExitCode
 			}
 			if absent {
@@ -242,12 +247,14 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				continue
 			}
 			o := &awaitOutcome{status: v.Status, finished: v.Finished, exitCode: exitCode}
-			switch v.Status {
-			case domain.SettleStatusFailed:
-				if exitCode != nil {
-					o.reason = fmt.Sprintf("exited with code %d", *exitCode)
-				}
-			case domain.SettleStatusQuestion:
+			switch {
+			case absent:
+				// Same wording as the async coordinator's gone outcome — the model must
+				// see the terminal vanished (closed/removed) rather than a clean finish.
+				o.reason = "terminal is gone (closed or exited)"
+			case v.Status == domain.SettleStatusFailed && exitCode != nil:
+				o.reason = fmt.Sprintf("exited with code %d", *exitCode)
+			case v.Status == domain.SettleStatusQuestion:
 				o.reason = "asking a question"
 			}
 			t.outcome = o

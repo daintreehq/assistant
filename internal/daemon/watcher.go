@@ -133,7 +133,12 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 			confidence = 0.4
 			summary = "Terminal status could not be read this tick (shared status read failed); will re-check."
 
-		case statuses.Ok && !hasEntry:
+		case statuses.Ok && (!hasEntry || entry.NotFound()):
+			// A per-entry "terminal not found" (NotFound) is the same fact as an
+			// omitted id — the terminal no longer resolves — so both take the absent
+			// ladder: terminal.list cross-check, spawn grace, then a real exit.
+			// Classifying it as present would feed resolvePresent an empty
+			// agentState and supervise a dead terminal forever.
 			classification, confidence, summary, evidence, signals, usedModel =
 				resolveAbsent(ctx, rec, &options, terminalID, prevState, list, now, perTerminal)
 
@@ -182,7 +187,10 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		if prevState != nil {
 			seen = prevState.Seen
 		}
-		seen = seen || hasEntry || (list != nil && listHas(list, terminalID))
+		// A NotFound entry must not latch Seen: for a just-spawned terminal Daintree
+		// answers "terminal not found" until the panel registers, and latching would
+		// defeat resolveAbsent's spawn grace (the next tick would condemn it exited).
+		seen = seen || (hasEntry && !entry.NotFound()) || (list != nil && listHas(list, terminalID))
 		base.Prev = string(outcome.Classification)
 		base.Seen = seen
 		// Latch SeenWorking the first time this terminal's agent is observed working
@@ -958,9 +966,14 @@ func parseCondition(raw *string) (*domain.WatchCondition, error) {
 	return &c, nil
 }
 
+// anyAbsent reports whether any target is effectively missing from the batched
+// getStatus: either omitted outright or returned as Daintree's per-entry
+// "terminal not found" shape (NotFound) — both mean the id no longer resolves
+// and the authoritative terminal.list cross-check must run.
 func anyAbsent(targets []string, byID map[string]TerminalStatusEntry) bool {
 	for _, t := range targets {
-		if _, ok := byID[t]; !ok {
+		entry, ok := byID[t]
+		if !ok || entry.NotFound() {
 			return true
 		}
 	}
