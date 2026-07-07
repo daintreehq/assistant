@@ -66,12 +66,69 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Extracting", []string{"terminalIds:ids"}
 	case "terminal.summarize":
 		return "Summarized", []string{"terminalId"}
+	case "terminal.awaitAll":
+		return "Waited", []string{"terminalIds:ids"}
+	case "terminal.sendCommand":
+		return "Ran", []string{"command"}
+	case "terminal.rename":
+		return "Renamed", []string{"name", "terminalId"}
+	case "terminal.close":
+		// "Ended" avoids stuttering against the result summary "Closed N terminal(s): …".
+		return "Ended", []string{"terminalId", "terminalIds:ids"}
+	case "terminal.arm":
+		return "Armed", []string{"terminalId"}
+	case "terminal.disarm":
+		return "Disarmed", []string{"terminalId"}
+	case "terminal.disarmAll":
+		return "Disarmed all", nil
+	case "terminal.run.async":
+		return "Running", []string{"command", "prompt"}
+	case "terminal.await.async":
+		return "Awaiting", []string{"terminalIds:ids"}
+	case "async.list":
+		return "Listed async", nil
+	case "async.cancel":
+		// "Dropped" avoids echoing the summary "Stopped monitoring async operation …".
+		return "Dropped async", []string{"asyncId"}
+	// The scratch store's calls all read as one grouped "Scratch" column; the
+	// specific create/set/get/… verb rides the result summary in the detail slot, so
+	// a category label groups the run without stuttering against that summary.
+	case "scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop":
+		return "Scratch", nil
 	case "queue.publish":
 		return "Raised", []string{"title"}
 	case "queue.digest":
 		return "Read inbox", nil
 	case "queue.resolve":
 		return "Resolved", []string{"id"}
+	case "memory.recall":
+		return "Recalled", []string{"query"}
+	case "memory.list":
+		return "Listed memories", nil
+	case "memory.save":
+		// "Remembered" pairs with recall's "Recalled" and avoids stuttering against the
+		// summary "Saved memory mem_…"; the active-row target previews the saved content.
+		return "Remembered", []string{"content", "category"}
+	case "memory.forget":
+		return "Forgot memory", []string{"id"}
+	case "memory.pin":
+		return "Pinned memory", []string{"id"}
+	case "memory.unpin":
+		return "Unpinned memory", []string{"id"}
+	case "artifact.read":
+		return "Read artifact", []string{"artifactId", "id"}
+	case "copyTree.generate":
+		return "Generated tree", []string{"worktreeId"}
+	case "copyTree.generateAndCopyFile":
+		return "Copied tree", []string{"worktreeId"}
+	case "copyTree.injectToTerminal":
+		return "Injected tree", []string{"terminalId"}
+	case "docs.search":
+		return "Searched docs", []string{"query"}
+	case "docs.getPage":
+		return "Read doc", []string{"path", "url"}
+	case "docs.getRelatedPages":
+		return "Related docs", []string{"path", "url"}
 	case "recipe.list":
 		return "Listed recipes", nil
 	case "recipe.run":
@@ -88,10 +145,39 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Listed issues", nil
 	case "forge.listPRs":
 		return "Listed PRs", nil
+	case "forge.getPR":
+		return "Read PR", []string{"prNumber", "number"}
+	case "watcher.watchPR":
+		return "Watching PR", []string{"prNumber", "number"}
 	case "workflow.startWorkOnIssue":
 		return "Started work", []string{"issueNumber", "title"}
 	case "workflow.prepBranchForReview":
 		return "Prepping branch", []string{"branch", "worktreeId"}
+	// Workflow-graph tools (flag-gated). Labels are chosen NOT to echo each tool's
+	// self-describing result summary, and the target keys use the real arg names
+	// (workflowId / nodeId), not the graphId/id the schemas never had.
+	case "workflow.plan":
+		return "Mapped", []string{"goal"}
+	case "workflow.getGraph":
+		return "Inspected", []string{"id"}
+	case "workflow.next":
+		return "Computed next", []string{"id"}
+	case "workflow.attachResource":
+		return "Attached", []string{"nodeId", "workflowId"}
+	case "workflow.recordEvidence":
+		return "Logged evidence", []string{"nodeId", "workflowId"}
+	case "workflow.reconcile":
+		return "Synced", []string{"workflowId"}
+	case "workflow.cancel":
+		return "Stopped workflow", []string{"nodeId", "workflowId"}
+	case "workflow.create":
+		return "Logged workflow", []string{"issueTitle", "branch"}
+	case "workflow.get":
+		return "Read workflow log", []string{"id"}
+	case "workflow.list":
+		return "Listed workflows", nil
+	case "workflow.update":
+		return "Revised workflow", []string{"id"}
 	case "grant.create":
 		return "Granted automation", nil
 	case "grant.list":
@@ -104,6 +190,17 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Listed tools", nil
 	case "daintree.call":
 		return "Called", []string{"toolName", "name"}
+	case "agentTask.status":
+		return "Checked spawn", []string{"launchId", "id"}
+	case "agentTask.list":
+		return "Listed spawns", nil
+	case "agentTask.superviseTerminal":
+		return "Supervising", []string{"terminalId"}
+	case "audit.export":
+		// Noun-phrase label avoids stuttering against "Exported N audit row(s) as …".
+		return "Audit export", nil
+	case "user.askMultipleChoice":
+		return "Asked", []string{"question"}
 	default:
 		return "", nil
 	}
@@ -252,7 +349,11 @@ func styleFor(th theme.Theme, tone, s string) string {
 		return th.Warning().Render(s)
 	case "muted":
 		return th.Muted().Render(s)
-	case "info":
+	case "active", "info":
+		// "active" (a working agent) and "info" both read as the informational cyan —
+		// the same pairing toneGlyphFor already makes. Without the "active" arm the
+		// badge system's default tone fell through to plain body text (an un-toned
+		// WORKING badge in the ops deck and the footer strip).
 		return th.Info().Render(s)
 	default:
 		return th.Body().Render(s)

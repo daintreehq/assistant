@@ -213,13 +213,13 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	// always-visible footer stays quiet while connected; it speaks only when the link is DOWN
 	// (a persistent condition the operator must see), never a steady-state healthy badge.
 	if p.Degraded {
-		segs = append(segs, th.Warning().Render("▲ Daintree MCP unavailable"))
+		segs = append(segs, th.Warning().Render(g.Alert+" Daintree MCP unavailable"))
 	}
 
 	// Model health — surfaced BY EXCEPTION, same as the MCP link: a provider 429 that
 	// outlasted the retry budget raises this badge; it clears on the next good round.
 	if p.ModelRateLimited {
-		segs = append(segs, th.Warning().Render("▲ Model rate-limited"))
+		segs = append(segs, th.Warning().Render(g.Alert+" Model rate-limited"))
 	}
 
 	// Active-agent badge: a tone-tinted "<glyph> LABEL" run (color + glyph from the

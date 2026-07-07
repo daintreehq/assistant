@@ -39,6 +39,23 @@ func TestOps_WorkflowsSectionVanishesWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestOps_WorkflowBlockedMarkerAsciiSafe proves the blocked-workflow marker degrades to
+// the ASCII alert glyph instead of a raw unicode ⚠ when unicode is off.
+func TestOps_WorkflowBlockedMarkerAsciiSafe(t *testing.T) {
+	d := opsDash(func(d *Dashboard) {
+		d.WorkflowGraphs = []WorkflowGraphRow{
+			{ID: "wfg_1", Goal: "Prepare PR", Status: "blocked", Progress: "1/4 done", Blocked: true},
+		}
+	})
+	out := stripAnsi(renderOperations(asciiTheme(t), d, PanelNone, 0, 72))
+	if strings.Contains(out, "⚠") || strings.Contains(out, "●") {
+		t.Errorf("workflow markers must not emit unicode glyphs in ascii mode: %q", out)
+	}
+	if !strings.Contains(out, "!") {
+		t.Errorf("blocked workflow should use the ascii alert glyph: %q", out)
+	}
+}
+
 func TestOps_WorkflowRowsTruncateAtNarrowWidth(t *testing.T) {
 	long := strings.Repeat("supercalifragilistic goal text ", 10)
 	d := opsDash(func(d *Dashboard) {

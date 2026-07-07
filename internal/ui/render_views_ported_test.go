@@ -258,6 +258,36 @@ func TestOps_AgentRowEpistemicProvenance(t *testing.T) {
 	}
 }
 
+// TestOps_AgentBadgeTonedByUrgency proves the deck's agent badge is toned by urgency
+// (a needs-input agent renders red, not flat cyan) so the deck agrees with the compact
+// footer strip. Asserted on the STYLED output: the badge span must be the danger-toned
+// render, and must NOT be the plain info-cyan render it used to be.
+func TestOps_AgentBadgeTonedByUrgency(t *testing.T) {
+	th := darkTheme()
+	d := opsDash(func(d *Dashboard) {
+		d.Watchers = []domain.WatcherRecord{watcherRec("wch_1", string(domain.ClassWaitingForInput), nil)}
+		d.Agents = BuildAgentRows(d.Watchers, nil, nil)
+	})
+	out := renderOperations(th, d, PanelNone, 0, 72)
+	if !strings.Contains(out, styleFor(th, "danger", "NEEDS INPUT")) {
+		t.Errorf("needs-input agent badge must be danger-toned in the deck: %q", out)
+	}
+	if strings.Contains(out, th.Info().Render("NEEDS INPUT")) {
+		t.Errorf("needs-input badge must not render flat info-cyan: %q", out)
+	}
+
+	// A normal working agent keeps the informational cyan — the "active" tone must not
+	// fall through styleFor to plain body text (the regression Codex caught).
+	working := opsDash(func(d *Dashboard) {
+		d.Watchers = []domain.WatcherRecord{watcherRec("wch_2", string(domain.ClassStillWorking), nil)}
+		d.Agents = BuildAgentRows(d.Watchers, nil, nil)
+	})
+	wout := renderOperations(th, working, PanelNone, 0, 72)
+	if !strings.Contains(wout, th.Info().Render("WORKING")) {
+		t.Errorf("working agent badge must render cyan (active tone), not plain body: %q", wout)
+	}
+}
+
 func TestOps_AttentionEventEpistemicProvenance(t *testing.T) {
 	d := opsDash(func(d *Dashboard) {
 		d.Inbox = []domain.QueueEvent{{
