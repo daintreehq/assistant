@@ -182,6 +182,29 @@ type Session struct {
 	// shows a pending cue while buffered and an inline step once folded in; the
 	// daemon's InjectNote uses the same iteration-boundary mechanism for its own notes.
 	pendingInjections []string
+
+	// rosterMu guards the cached open-terminal roster below. A DEDICATED mutex, not
+	// s.mu: the detached refresher writes the cache while a turn holds s.mu across a long
+	// stream snapshot, so coupling the two would make the refresher block on the turn (or
+	// vice versa). The critical sections here are tiny (a slice header swap / shallow copy).
+	rosterMu sync.Mutex
+
+	// roster is the most recent open-terminal snapshot, served to every round's runtime
+	// block WITHOUT blocking the turn. It is refreshed on a detached goroutine
+	// (refreshRosterAsync) kicked at each turn's top, so a turn never waits on the
+	// terminal.list + getStatus MCP round-trip that used to gate its first model round
+	// (up to 5s on a slow MCP, every turn). Cross-turn: a COMPLETED refresh warms the
+	// cache for subsequent turns; within a turn, a refresh that lands mid-turn is picked
+	// up by the next round (buildRuntimeContext reads it fresh each round). Guarded by
+	// rosterMu. Nil until the first refresh completes — a fresh session serves no roster
+	// until then (across however many fast single-round turns elapse before the detached
+	// fetch returns), which is harmless: the roster is a convenience and the model can
+	// still tool-call terminal.list, exactly as before this inventory existed.
+	roster []backend.OpenTerminal
+
+	// rosterRefreshing dedupes concurrent refreshers so a slow fetch spanning two turns
+	// cannot stack a second one behind it. Guarded by rosterMu.
+	rosterRefreshing bool
 }
 
 // toolProjCache holds the last OpenAITools projection plus the key that produced
@@ -564,19 +587,19 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 	}
 
-	// 3e. Open-terminal inventory: fetch a fresh, metadata-only snapshot of the open
-	//     Daintree terminals ONCE per turn (best-effort, bounded) so the model always
-	//     sees the live roster as inert runtime data instead of tool-calling terminal.list
-	//     mid-turn to discover it. Run HERE — after the cancel re-check, before the loop —
-	//     for the same reason as recallMemories: a pre-loop cancel never pays for it, and
-	//     the MCP read fires exactly ONCE per turn, not once per model round
-	//     (buildRuntimeContext runs every round). The snapshot is cached and threaded
-	//     through every round's runtime block below. A nil fetcher, a disconnected MCP, or
-	//     a slow/failed read all yield nil — the inventory is simply omitted; never blocks.
-	var openTerminals []backend.OpenTerminal
-	if s.deps.OpenTerminalsFetcher != nil {
-		openTerminals = s.deps.OpenTerminalsFetcher(ctx)
-	}
+	// 3e. Open-terminal inventory: the model sees the live roster as inert runtime data
+	//     instead of tool-calling terminal.list mid-turn to discover it. This used to be a
+	//     SYNCHRONOUS terminal.list + getStatus MCP round-trip run here, gating the first
+	//     model round of EVERY MCP-connected turn on up to 5s of network latency. It is now
+	//     served from a cross-turn cache and refreshed on a DETACHED goroutine, so the turn
+	//     never blocks on it: kick the refresh now (no-op if one is already in flight), and
+	//     each round below reads the freshest cached snapshot (buildRuntimeContext runs per
+	//     round, so a refresh that lands mid-turn is picked up on the next round). The one
+	//     cost is that a brand-new session serves no roster until its first detached refresh
+	//     completes (usually within the first turn, longer if the MCP read is slow) —
+	//     harmless: the roster is a convenience, and the model can still tool-call
+	//     terminal.list to discover it.
+	s.refreshRosterAsync()
 
 	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
 	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
@@ -715,7 +738,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				Tools:      btools,
 				ToolChoice: "auto",
 			},
-			Runtime:    s.buildRuntimeContext(openTerminals),
+			Runtime:    s.buildRuntimeContext(s.currentRoster()),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
@@ -1211,9 +1234,11 @@ func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[s
 // each row flips to done with its OWN true duration while siblings keep running,
 // instead of the whole group settling at once with the slowest call's wall-clock.
 //
-// Threading contract: workers run ONLY dispatchCall (audit/debuglog are
-// goroutine-safe; in-tool ToolProgress feeds the mutex-guarded pump and is no-op'd by
-// the durable sink). EVERY other emission — ToolCall/ToolResult/ToolState events,
+// Threading contract: workers run ONLY dispatchCall (audit/debuglog are goroutine-safe;
+// in-tool ToolProgress feeds the mutex-guarded pump and is no-op'd by the durable sink;
+// the registry's DispatchObserver.ObserveDispatch also fires on the worker path and MUST
+// be goroutine-safe — the workflow-intelligence service guards its state with a mutex).
+// EVERY other emission — ToolCall/ToolResult/ToolState events,
 // transcript pushes, breaker folds — happens on this (the turn) goroutine: the
 // durable RunEventSink and the message/artifact state are not goroutine-safe. Result
 // events are emitted in COMPLETION order (that is the point — live settles, keyed by
@@ -1574,8 +1599,9 @@ func (s *Session) emitBackendUsage(u backend.Usage, model string) {
 // wired (PromptContextFunc), so a mid-session MCP connect / tier change / scheduler
 // start reaches the backend on the next request — the structured-data replacement for
 // the old RefreshRuntimeContext push. The worktree is read per round too. The
-// openTerminals snapshot is fetched ONCE per turn (step 3e) and passed in unchanged each
-// round, so the inventory is consistent across the turn and the MCP read is not repeated.
+// openTerminals snapshot is read from the cross-turn cache (currentRoster) fresh EACH
+// round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn is
+// reflected on the next round without ever blocking the turn on an MCP read.
 func (s *Session) buildRuntimeContext(openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
 	pc := s.deps.PromptContext
 	if s.deps.PromptContextFunc != nil {
@@ -2169,6 +2195,79 @@ func (s *Session) truncateLocked(keepN int) {
 		s.messages = append(s.messages, m)
 		s.persistMessageLocked(m)
 	}
+}
+
+// currentRoster returns the cached open-terminal snapshot under rosterMu — a shallow
+// copy so a caller can hold it past the lock while a concurrent refresh swaps the field.
+// nil when no refresh has completed yet (a fresh session's cold start).
+func (s *Session) currentRoster() []backend.OpenTerminal {
+	s.rosterMu.Lock()
+	defer s.rosterMu.Unlock()
+	if len(s.roster) == 0 {
+		return nil
+	}
+	return append([]backend.OpenTerminal(nil), s.roster...)
+}
+
+// refreshRosterAsync starts a detached, best-effort refresh of the cached open-terminal
+// roster unless one is already running (deduped via rosterRefreshing), so the turn loop
+// NEVER blocks on the terminal.list + getStatus MCP round-trip. The result replaces the
+// cache the moment it lands, so the next round's runtime block (rebuilt every round)
+// picks it up; the turn itself streams immediately against whatever snapshot the last
+// refresh left. Tracked by s.wg + the draining gate exactly like startDistill so
+// App.Shutdown joins it before the MCP client it touches is closed. It parents off bgCtx
+// (NOT the turn ctx) so a short or cancelled turn's refresh still completes and warms the
+// cache for the next turn; the fetcher self-bounds via its own cancel timer, and bgCtx
+// must be passed WITHOUT a deadline (mcp.Client tears the connection down on a
+// DeadlineExceeded — only a plain cancel is a safe best-effort abort).
+func (s *Session) refreshRosterAsync() {
+	if s.deps.OpenTerminalsFetcher == nil {
+		return
+	}
+	// Dedupe: at most one refresher in flight. A slow fetch spanning two turns must not
+	// stack a second — the next turn simply reuses the in-flight one and reads the cache.
+	s.rosterMu.Lock()
+	if s.rosterRefreshing {
+		s.rosterMu.Unlock()
+		return
+	}
+	s.rosterRefreshing = true
+	s.rosterMu.Unlock()
+
+	// Clear the in-flight flag on EVERY exit path (draining bail-out included) so a
+	// refusal here can never wedge the dedupe flag true and starve all later refreshes.
+	clearInFlight := func() {
+		s.rosterMu.Lock()
+		s.rosterRefreshing = false
+		s.rosterMu.Unlock()
+	}
+
+	// Register under s.mu, and ONLY when not draining — the same wg.Add/draining ordering
+	// startDistill uses so wg.Add never races DrainBackgroundWork's Wait at counter zero
+	// (the turn ctx isn't derived from bgCtx, so this can be reached mid-Shutdown).
+	s.mu.Lock()
+	if s.draining {
+		s.mu.Unlock()
+		clearInFlight()
+		return
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.wg.Done()
+		defer clearInFlight()
+		fresh := s.deps.OpenTerminalsFetcher(s.bgCtx)
+		// Replace unconditionally (nil included): the fetcher returns nil both for a
+		// transient failure AND for a genuinely-empty roster (all terminals closed), and
+		// the model must not keep seeing terminals that are gone. This mirrors the old
+		// synchronous behaviour (each turn showed exactly its own fetch result); a
+		// transient blip simply blanks the roster for a round and self-heals on the next
+		// refresh — a false negative the model recovers from, never a stale false positive.
+		s.rosterMu.Lock()
+		s.roster = fresh
+		s.rosterMu.Unlock()
+	}()
 }
 
 // startDistill mines durable facts from the just-discarded transcript on a DETACHED

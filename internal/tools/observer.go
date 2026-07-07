@@ -26,8 +26,11 @@ type DispatchObservation struct {
 // DispatchObserver receives every completed dispatch (including fast-fails).
 // Implementations MUST be fast and side-channel-safe: the registry calls them
 // synchronously on the dispatch path, panic-guarded and best-effort, exactly
-// like the audit sinks. The workflow-intelligence layer uses this to project
-// tool outcomes into graph evidence and resource links.
+// like the audit sinks. They MUST also be goroutine-safe: a batch of parallel-safe
+// tool calls dispatches concurrently (agent.runParallelGroup), so ObserveDispatch can
+// be invoked from several goroutines at once. The workflow-intelligence layer uses this
+// to project tool outcomes into graph evidence and resource links, and guards its state
+// with a mutex accordingly.
 type DispatchObserver interface {
 	ObserveDispatch(ctx context.Context, obs DispatchObservation)
 }

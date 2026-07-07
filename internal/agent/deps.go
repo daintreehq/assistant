@@ -242,12 +242,15 @@ type SessionDeps struct {
 	// the default, and always when workflow intelligence is disabled).
 	WorkflowDigestLister WorkflowDigestLister
 	// OpenTerminalsFetcher returns a fresh, metadata-only snapshot of the open Daintree
-	// terminals for the runtime block's open-terminal inventory. Called ONCE per turn
-	// before the round loop (one terminal.list + one no-output terminal.getStatus) and
-	// threaded through every round's buildRuntimeContext, so the model always sees the
-	// live roster as inert data instead of tool-calling terminal.list to discover it.
-	// Best-effort and bounded: nil ⇒ the inventory is omitted (the default in tests); a
-	// slow/failed MCP read returns nil and never blocks the turn. The app wires this to
+	// terminals (one terminal.list + one no-output terminal.getStatus) for the runtime
+	// block's open-terminal inventory, so the model sees the live roster as inert data
+	// instead of tool-calling terminal.list to discover it. It is invoked on a DETACHED
+	// goroutine (refreshRosterAsync), NOT on the turn's critical path: the turn serves the
+	// last cached snapshot and never blocks on this read. It is therefore given the
+	// app-scoped background context (bgCtx), which must NOT carry a deadline — mcp.Client
+	// tears the connection down on a DeadlineExceeded, so the fetcher self-bounds with its
+	// own cancel timer instead. Best-effort: nil ⇒ the inventory is omitted (the default in
+	// tests); a slow/failed MCP read returns nil. The app wires this to
 	// terminalReaderAdapter.FetchOpenTerminals.
 	OpenTerminalsFetcher func(ctx context.Context) []backend.OpenTerminal
 	// PromptContext is the seed/fallback runtime context (used when PromptContextFunc is

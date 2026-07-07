@@ -32,8 +32,14 @@ func forgeRead(name, desc string) *tools.Tool {
 		Name:        name,
 		Description: desc,
 		Risk:        domain.RiskRead,
-		Schema:      forgeArgumentsSchema,
-		Decode:      tools.StrictDecoder(func() any { return &forgeArgumentsArgs{} }),
+		// Every forgeRead tool is an independent, bounded MCP snapshot read (list/get over
+		// the forge / worktree / git surface) with no ordering dependency on its batch
+		// siblings, so a batch of them overlaps its round-trips up to the MCP governor's
+		// in-flight cap instead of serializing. Safe like terminal.extract; double-gated on
+		// RiskRead by the runner.
+		Parallelizable: true,
+		Schema:         forgeArgumentsSchema,
+		Decode:         tools.StrictDecoder(func() any { return &forgeArgumentsArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeArgumentsArgs
 			if res, ok := strictDecode(args, name, &a); !ok {
@@ -79,11 +85,15 @@ var forgeGetPRSchema = json.RawMessage(`{
 
 func newForgeGetPRTool() *tools.Tool {
 	return &tools.Tool{
-		Name:        "forge.getPR",
-		Description: "Get a single forge (GitHub) pull request by number.",
-		Risk:        domain.RiskRead,
-		Schema:      forgeGetPRSchema,
-		Decode:      tools.StrictDecoder(func() any { return &forgeGetPRArgs{} }),
+		Name: "forge.getPR",
+		Description: "Get a single forge (GitHub) pull request by number. " +
+			"PARALLEL: forge.getPR calls batched in ONE reply run concurrently — to check several PRs, emit one call each in one batch.",
+		Risk: domain.RiskRead,
+		// Independent per-PR read over the forge MCP, no ordering dependency on siblings:
+		// checking several PRs at once overlaps their round-trips. See terminal.extract.
+		Parallelizable: true,
+		Schema:         forgeGetPRSchema,
+		Decode:         tools.StrictDecoder(func() any { return &forgeGetPRArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeGetPRArgs
 			if res, ok := strictDecode(args, "forge.getPR", &a); !ok {
