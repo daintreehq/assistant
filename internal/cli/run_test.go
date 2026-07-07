@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
@@ -67,5 +71,26 @@ func TestRunDoctor_BackendReachableReturnsSuccess(t *testing.T) {
 	opts := doctorOpts(t)
 	if code := RunDoctor(context.Background(), opts); code != domain.OneShotExitCode.Success {
 		t.Fatalf("doctor with a healthy backend (MCP disconnected) must exit Success(%d), got %d", domain.OneShotExitCode.Success, code)
+	}
+}
+
+// The interactive stale-schema handler AUTHORISES the reset without reading stdin: a
+// stale on-disk DB in this pre-release, single-baseline product has one sensible
+// recovery, so the launch is never blocked on a y/N whose answer is always "yes". It
+// must still leave an honest trace (the two schema numbers) that local state was cleared.
+func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
+	var buf bytes.Buffer
+	reset, err := schemaAutoReset(render.New(&buf))(8, 10)
+	if err != nil {
+		t.Fatalf("schemaAutoReset must not error, got %v", err)
+	}
+	if !reset {
+		t.Fatal("schemaAutoReset must authorise the reset (return true)")
+	}
+	out := buf.String()
+	for _, want := range []string{strconv.Itoa(8), strconv.Itoa(10)} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("reset notice must mention schema %s; got %q", want, out)
+		}
 	}
 }

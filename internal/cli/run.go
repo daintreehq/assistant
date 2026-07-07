@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -252,11 +250,14 @@ func RunInteractive(ctx context.Context, opts Options) int {
 	defer own.Release()
 	debuglog.BootTrace("boot.ownership.acquired")
 	createOpts := app.CreateOptions{Overrides: overrides}
-	// Only an interactive terminal can answer the reset prompt; a piped/non-TTY launch
-	// keeps the loud, actionable stale-schema error rather than blocking on a stdin read
-	// or wiping local state with no human in the loop.
+	// A stale on-disk schema has exactly one sensible recovery for this pre-release,
+	// single-baseline DB: hard-reset it. On an interactive terminal (Daintree's xterm)
+	// take that automatically instead of prompting — the answer is always "yes" here, so
+	// the y/N only added friction to every fresh-folder launch. A piped/non-TTY launch
+	// still keeps the loud, actionable error: we never silently wipe local state in an
+	// automated context.
 	if ttyOK {
-		createOpts.OnSchemaStale = schemaResetPrompt(r)
+		createOpts.OnSchemaStale = schemaAutoReset(r)
 	}
 	a, err := app.Create(createOpts)
 	if err != nil {
@@ -372,26 +373,20 @@ func announceDebugLog(a *app.App) {
 func stdinIsTTY() bool  { return isatty.IsTerminal(os.Stdin.Fd()) }
 func stdoutIsTTY() bool { return isatty.IsTerminal(os.Stdout.Fd()) }
 
-// schemaResetPrompt returns the app.Create OnSchemaStale handler for the interactive
-// terminal: it explains, in plain language, that the local database is from an older
-// build and reads a single y/N from stdin. A "yes" authorises the wipe-and-rebuild;
-// any other answer — or EOF — declines, so app.Create aborts with the actionable
-// stale-schema error. Wired only when stdin/stdout are TTYs (see RunInteractive), and
-// runs BEFORE the cockpit/REPL takes over the terminal, so a one-shot cooked-mode read
-// is safe here.
-func schemaResetPrompt(r *render.Renderer) func(have, want int) (bool, error) {
+// schemaAutoReset returns the app.Create OnSchemaStale handler for the interactive
+// terminal. Given what the Daintree Assistant is — a local operations officer whose
+// SQLite state is a single clean pre-release baseline that we hard-reset (never migrate)
+// on a schema bump — a stale on-disk DB has exactly one sensible recovery, so we take it
+// automatically rather than block every fresh-folder launch on a y/N whose answer is
+// always "yes". It prints one concise notice (local state was cleared; code + Daintree
+// untouched) and authorises the wipe-and-rebuild. Wired only when stdin/stdout are TTYs
+// (see RunInteractive), so a piped/non-TTY launch still keeps the loud, actionable
+// stale-schema error rather than silently destroying local state in an automated context.
+func schemaAutoReset(r *render.Renderer) func(have, want int) (bool, error) {
 	return func(have, want int) (bool, error) {
-		r.Warn(fmt.Sprintf(
-			"Your local assistant database is from an older version (schema %d; this build needs %d).",
-			have, want))
-		r.Line("  Resetting clears local state — timers, saved memories, and conversation")
-		r.Line("  history — but never touches your code or Daintree.")
-		r.Out(r.Yellow("  Reset the database now? [y/N] "))
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			return false, nil // EOF / read error → decline (the safe default)
-		}
-		a := strings.ToLower(strings.TrimSpace(line))
-		return a == "y" || a == "yes", nil
+		r.Line(r.Gray(fmt.Sprintf(
+			"Local assistant database was from an older version (schema %d → %d) — resetting local state; your code and Daintree are untouched.",
+			have, want)))
+		return true, nil
 	}
 }
