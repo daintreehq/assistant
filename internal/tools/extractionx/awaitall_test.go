@@ -82,7 +82,7 @@ func entExit(code int, out string) TerminalStatusEntry {
 
 func awaitResult(t *testing.T, out map[string]*awaitOutcome, ids []string) (bool, map[string]map[string]any) {
 	t.Helper()
-	res := buildAwaitResult(ids, out, 0, 0, false)
+	res := buildAwaitResult(ids, out, 0, 0, false, 0)
 	if !res.Ok {
 		t.Fatalf("buildAwaitResult returned not-ok")
 	}
@@ -293,7 +293,7 @@ func TestBuildAwaitResult_NamesStragglersAndQuestions(t *testing.T) {
 		"t3": {status: "question", finished: false, reason: "asking a question"},
 		"t4": nil, // also timed out — proves multi-element ordering
 	}
-	res := buildAwaitResult(ids, outcomes, 5, 1234, false)
+	res := buildAwaitResult(ids, outcomes, 5, 1234, false, 0)
 	if !res.Ok {
 		t.Fatal("buildAwaitResult returned not-ok")
 	}
@@ -328,13 +328,13 @@ func TestBuildAwaitResult_SummaryPluralizesAgents(t *testing.T) {
 			"t1": {status: "finished", finished: true},
 			"t2": {status: "finished", finished: true},
 			"t3": {status: "finished", finished: true},
-		}, 1, 10, false)
+		}, 1, 10, false, 0)
 	if got := many.Summary; !strings.Contains(got, "of 3 agents") || strings.Contains(got, "agent(s)") {
 		t.Errorf("cohort summary = %q, want it to read \"of 3 agents\" and drop \"agent(s)\"", got)
 	}
 	one := buildAwaitResult(
 		[]string{"t1"},
-		map[string]*awaitOutcome{"t1": {status: "finished", finished: true}}, 1, 10, false)
+		map[string]*awaitOutcome{"t1": {status: "finished", finished: true}}, 1, 10, false, 0)
 	if got := one.Summary; !strings.Contains(got, "of 1 agent)") || strings.Contains(got, "agents") {
 		t.Errorf("single-agent summary = %q, want singular \"of 1 agent)\"", got)
 	}
@@ -350,7 +350,7 @@ func TestBuildAwaitResult_EmptyStragglerSetsSerializeAsArrays(t *testing.T) {
 		"t1": {status: "finished", finished: true},
 		"t2": {status: "failed", finished: true, exitCode: &code, reason: "exited with code 2"},
 	}
-	res := buildAwaitResult(ids, outcomes, 1, 10, false)
+	res := buildAwaitResult(ids, outcomes, 1, 10, false, 0)
 	m := res.Result.(map[string]any)
 
 	sw, ok := m["stillWorking"].([]string)
@@ -392,7 +392,7 @@ func TestAwaitCohort_TopLevelArraysFromRealPollLoop(t *testing.T) {
 	ids := []string{"t1", "t2"}
 
 	out, attempts, _ := awaitCohort(context.Background(), deps, ids, 0, 3, 0, clockSeq(0, 2000, 4000, 6000))
-	res := buildAwaitResult(ids, out, attempts, 0, false)
+	res := buildAwaitResult(ids, out, attempts, 0, false, 0)
 	m := res.Result.(map[string]any)
 
 	if af, _ := m["allFinished"].(bool); af {
@@ -424,7 +424,7 @@ func TestAwaitCohort_QuestionDoesNotAbortUnsettledPeer(t *testing.T) {
 	if attempts != 3 {
 		t.Fatalf("t2 should keep polling past t1's question until it finishes on tick 3, got %d", attempts)
 	}
-	res := buildAwaitResult(ids, out, attempts, 0, false)
+	res := buildAwaitResult(ids, out, attempts, 0, false, 0)
 	m := res.Result.(map[string]any)
 	if aq, _ := m["askingQuestion"].([]string); len(aq) != 1 || aq[0] != "t1" {
 		t.Fatalf("askingQuestion should be exactly [t1], got %v", aq)
@@ -472,7 +472,7 @@ func TestAwaitCohort_InterruptedByPendingInjection(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("the wait should stop on tick 2 (when the injection appears), far short of the 30 cap, got %d", attempts)
 	}
-	res := buildAwaitResult(ids, out, attempts, 0, interrupted)
+	res := buildAwaitResult(ids, out, attempts, 0, interrupted, 0)
 	m := res.Result.(map[string]any)
 	if iu, _ := m["interruptedByUser"].(bool); !iu {
 		t.Fatalf("the result must carry interruptedByUser:true, got %+v", m)

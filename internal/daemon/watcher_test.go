@@ -134,6 +134,59 @@ func TestWatcher_ExitedIsUrgentAndStops(t *testing.T) {
 	}
 }
 
+// A STOP publish that then LOSES its finalize claim to an in-turn consumption
+// (the main turn settled the same terminal via awaitAll/extract and retired the
+// watcher mid-check) must mop up after itself: the pre-claim publish already went
+// out (crash-safety ordering), so the check resolves the just-published event by
+// its dedupe key — otherwise the inbox holds a stale duplicate of a completion the
+// conversation already contains. A USER cancel losing the same race keeps the
+// event (one final honest alert is that path's documented contract).
+func TestWatcher_LostStopClaimToConsumptionResolvesOwnEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		endedReason string
+		wantResolve bool
+	}{
+		{"consumed_in_turn resolves the event", domain.WatcherEndedConsumedInTurn, true},
+		{"user_cancelled keeps the event", "user_cancelled", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			queue := newFakeQueue()
+			mcp := newFakeMCP()
+			mcp.results["terminal.getStatus"] = statusResult(map[string]any{
+				"terminalId": "t1", "agentState": "exited", "exitCode": float64(1), "recentOutput": "boom",
+			})
+			rec := termWatcher("wch_c", []string{"t1"})
+			// The persisted row was flipped mid-check: the fake's ClaimDueWatcher
+			// (status != active) fails the claim, and GetWatcher serves the ender.
+			flipped := rec
+			flipped.Status = "condition_met"
+			reason := tc.endedReason
+			flipped.EndedReason = &reason
+			store.watchers = []domain.WatcherRecord{flipped}
+
+			out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &fakeModel{}), rec)
+			if !out.Stop {
+				t.Fatalf("exited must still classify as a stop, got %+v", out)
+			}
+			// The pre-claim publish still happened (crash-safety ordering is unchanged)…
+			if len(queue.published) != 1 {
+				t.Fatalf("the stop publish precedes the claim, got %d publishes", len(queue.published))
+			}
+			// …and the consumption mop-up resolves exactly that event's dedupe key.
+			key := queue.published[0].DedupeKey
+			if got := store.resolvedKeys[key]; (got == 1) != tc.wantResolve {
+				t.Fatalf("resolvedKeys[%s]=%d, wantResolve=%v", key, got, tc.wantResolve)
+			}
+			// A lost claim never runs the finalize side effects (the ender owned them).
+			if store.revoked["wch_c"] != 0 {
+				t.Error("a lost claim must not revoke grants — the consuming side already did")
+			}
+		})
+	}
+}
+
 func TestWatcher_SpawnGraceNoFalseExit(t *testing.T) {
 	store := newFakeStore()
 	queue := newFakeQueue()

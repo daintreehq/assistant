@@ -75,43 +75,101 @@ func noteLevels(m Model) []NoteLevel {
 	return out
 }
 
-// TestAttention_EmitsTranscriptNotePerEvent is the #175 contract: a fresh attention batch
-// drops one glanceable, /inbox-styled note into the transcript per event — "<glyph> <Title>
-// — [term/wt <id>]" — with the spine toned by severity. The events are delivered exactly
-// once by the scheduler, so one batch ⇒ exactly len(Events) notes (no dedupe in the UI).
-func TestAttention_EmitsTranscriptNotePerEvent(t *testing.T) {
+// TestAttention_SingleEventEmitsFullNote is the surviving half of the #175 contract: a
+// SINGLE fresh attention event still drops its full glanceable, /inbox-styled note into
+// the transcript — "<Title> — [term/wt <id>]" — with the spine toned by severity. (The
+// precise glyph renders on the spine via renderNoteCell, not baked into the text.)
+func TestAttention_SingleEventEmitsFullNote(t *testing.T) {
 	m := liveModel(80)
-	m.inFlight = true // busy → no drain; just the badge/BEL bookkeeping + the notes
+	m.inFlight = true // busy → no drain; just the badge/BEL bookkeeping + the note
 	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
 		{Title: "needs input", Severity: domain.SeverityUrgent, Target: &domain.EventTarget{TerminalID: "term_8"}},
-		{Title: "Deploy finished", Severity: domain.SeverityDone, Target: &domain.EventTarget{WorktreeID: "wt_3"}},
-		{Title: "watcher armed", Severity: domain.SeverityAttention},
+	}})
+	nm := next.(Model)
+	notes := noteTexts(nm)
+	if len(notes) != 1 || notes[0] != "needs input — [term term_8]" {
+		t.Fatalf("a single event keeps its full note line, got %v", notes)
+	}
+	if lv := noteLevels(nm)[0]; lv != NoteError {
+		t.Errorf("urgent spine = %d, want NoteError", lv)
+	}
+}
+
+// TestAttention_MultiEventBatchCoalescesToOneNote is the anti-clutter contract: a batch
+// of N>1 events (a cohort of watchers settling together) commits ONE compact note —
+// "<N> updates — <most-severe title> · +<N-1> more (/inbox)" — toned by the batch's max
+// severity, instead of N spaced-out near-identical lines that bury the conversation.
+// The full detail stays in /inbox (and in the wake turn's own summary); the wake queue
+// and badge still carry every event.
+func TestAttention_MultiEventBatchCoalescesToOneNote(t *testing.T) {
+	m := liveModel(80)
+	m.inFlight = true
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "watch A: completed success", Severity: domain.SeverityAttention, Target: &domain.EventTarget{TerminalID: "term_1"}},
+		{Title: "needs input", Severity: domain.SeverityUrgent, Target: &domain.EventTarget{TerminalID: "term_8"}},
+		{Title: "watch B: completed success", Severity: domain.SeverityAttention},
 	}})
 	nm := next.(Model)
 
 	notes := noteTexts(nm)
-	// The precise glyph now renders on the spine (renderNoteCell), not baked into the
-	// note text — so the text is glyph-free (this is the de-dup that removed "! !").
-	want := []string{
-		"needs input — [term term_8]",
-		"Deploy finished — [wt wt_3]",
-		"watcher armed",
+	if len(notes) != 1 {
+		t.Fatalf("a multi-event batch must coalesce to ONE note, got %d: %v", len(notes), notes)
 	}
-	if len(notes) != len(want) {
-		t.Fatalf("expected one transcript note per event, got %d: %v", len(notes), notes)
+	if want := "3 updates — needs input · +2 more (/inbox)"; notes[0] != want {
+		t.Errorf("coalesced note = %q, want %q", notes[0], want)
 	}
-	for i, w := range want {
-		if notes[i] != w {
-			t.Errorf("note[%d] = %q, want %q", i, notes[i], w)
+	// The spine tone tracks the MOST SEVERE event in the batch (urgent → NoteError).
+	if lv := noteLevels(nm)[0]; lv != NoteError {
+		t.Errorf("coalesced spine = %d, want NoteError (max severity)", lv)
+	}
+	// Coalescing is display-only: every event still feeds the wake queue and badge.
+	if len(nm.pendingWake) != 3 || nm.attentionN != 3 {
+		t.Errorf("wake queue/badge must carry all events: wake=%d badge=%d", len(nm.pendingWake), nm.attentionN)
+	}
+}
+
+// TestAttention_CoalescedNoteSeverityTieKeepsFirst: with the batch's max severity tied,
+// the FIRST event of that severity is the headline (strict > comparison — no reordering).
+func TestAttention_CoalescedNoteSeverityTieKeepsFirst(t *testing.T) {
+	m := liveModel(80)
+	m.inFlight = true
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "watch A: completed success", Severity: domain.SeverityAttention},
+		{Title: "watch B: completed success", Severity: domain.SeverityAttention},
+	}})
+	notes := noteTexts(next.(Model))
+	if len(notes) != 1 || notes[0] != "2 updates — watch A: completed success · +1 more (/inbox)" {
+		t.Fatalf("a severity tie must headline the FIRST event, got %v", notes)
+	}
+}
+
+// TestAttention_IdleMultiEventCoalescedNoteBeforeWakeTurn: the coalesced note obeys the
+// same chronological contract as the single-event note — committed BEFORE the wake
+// TurnCell the idle drain fires, with the whole burst carried into that wake.
+func TestAttention_IdleMultiEventCoalescedNoteBeforeWakeTurn(t *testing.T) {
+	m := liveModel(80) // idle: inFlight defaults to false
+	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
+		{Title: "watch A: completed success", Severity: domain.SeverityAttention},
+		{Title: "watch B: completed success", Severity: domain.SeverityAttention},
+	}})
+	nm := next.(Model)
+	if len(nm.transcript) < 2 || nm.transcript[0].Note == nil {
+		t.Fatalf("idle multi-event path must append the coalesced note first, got %+v", nm.transcript)
+	}
+	if got := nm.transcript[0].Note.Text; got != "2 updates — watch A: completed success · +1 more (/inbox)" {
+		t.Errorf("coalesced note = %q", got)
+	}
+	foundTurnAfterNote := false
+	for _, c := range nm.transcript[1:] {
+		if c.Turn != nil {
+			foundTurnAfterNote = true
 		}
 	}
-	// The spine tone tracks severity: urgent → NoteError, done → NoteSuccess, attention → NoteWarn.
-	levels := noteLevels(nm)
-	wantLevels := []NoteLevel{NoteError, NoteSuccess, NoteWarn}
-	for i, w := range wantLevels {
-		if levels[i] != w {
-			t.Errorf("note[%d] level = %d, want %d", i, levels[i], w)
-		}
+	if !foundTurnAfterNote {
+		t.Error("the wake TurnCell must follow the coalesced note")
+	}
+	if len(nm.activeWake) != 2 {
+		t.Errorf("the wake burst must carry BOTH events, got %d", len(nm.activeWake))
 	}
 }
 
@@ -175,13 +233,17 @@ func TestAttention_EmptyBatchEmitsNoNote(t *testing.T) {
 	}
 }
 
-// TestAttention_NoteCoalesceCount: a coalesced event (Count > 1) carries the "×N" suffix,
-// matching the /inbox digest; Count of 0 or 1 shows nothing.
+// TestAttention_NoteCoalesceCount: a queue-coalesced event (Count > 1) carries the "×N"
+// suffix on its single-event note, matching the /inbox digest; Count of 0 or 1 shows
+// nothing. (Delivered as two single-event batches — a multi-event batch coalesces to
+// one summary line and drops the per-event suffixes.)
 func TestAttention_NoteCoalesceCount(t *testing.T) {
 	m := liveModel(80)
 	m.inFlight = true
 	next, _ := m.onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
 		{Title: "flapping", Severity: domain.SeverityAttention, Target: &domain.EventTarget{TerminalID: "term_5"}, Count: 3},
+	}})
+	next, _ = next.(Model).onAttention(AttentionBatchMsg{Events: []domain.QueueEvent{
 		{Title: "single", Severity: domain.SeverityInfo, Count: 1},
 	}})
 	notes := noteTexts(next.(Model))

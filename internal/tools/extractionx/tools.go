@@ -171,6 +171,39 @@ func (r resolvedBase) poll() pollArgs {
 	}
 }
 
+// retireConsumedSupervisors retires the spawn-attached supervisor watcher(s) of
+// terminals whose completion an extract WAIT just observed, so they don't
+// re-announce an already-consumed completion later as a stale attention event
+// (terminal.awaitAll does the same per settled terminal). Consumption requires a
+// wait that genuinely observed the agent settle: the coerced wait:{} finish gate
+// (FSM + small-model confirmation), or any wait that ended with every target
+// exited. A read-once extract, an unmatched wait, or an explicit contains/regex
+// match on a still-running agent is NOT completion — those watchers stay. A
+// single-terminal poll that saw a nonzero exit reports the consumption as failed
+// so the linked workflow ledger closes honestly (multi-terminal polls have no
+// per-terminal exit aggregate — they report finished; the model relays the real
+// outcome in prose either way). Returns the number retired (0 when no retirer is
+// wired). Callers with an extraction step invoke this only AFTER the extraction
+// succeeded — a matched wait whose extraction then failed has NOT delivered the
+// completion to the model, and the watcher must stay for the retry.
+func retireConsumedSupervisors(ctx context.Context, deps Deps, base resolvedBase, poll pollResult) int {
+	if deps.Supervisors == nil || base.wait == nil || !poll.matched {
+		return 0
+	}
+	if !base.isSettleWait && !poll.finished {
+		return 0
+	}
+	settled := domain.SettleStatusFinished
+	if poll.finished && poll.exitCode != nil && *poll.exitCode != 0 {
+		settled = domain.SettleStatusFailed
+	}
+	n := 0
+	for _, id := range base.terminalIDs {
+		n += deps.Supervisors.RetireForTerminal(ctx, id, settled)
+	}
+	return n
+}
+
 /* ------------------------------ terminal.extract -------------------------- */
 
 type extractArgs struct {
@@ -209,7 +242,9 @@ func newExtractTool(deps Deps) tools.Tool {
 			"question per terminal, or one answer per agent), emit them ALL as one batch of calls instead of one per turn; the total wait is " +
 			"roughly the slowest single call. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a " +
 			"barrier and runs serially). Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
-			"extraction model call). For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
+			"extraction model call). A wait that observes the agent FINISH also auto-retires that terminal's spawn-attached supervising " +
+			"watcher (watchersRetired in the result) — the completion is in your hands, so no completion notification will follow. " +
+			"For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
 			"Read-only; requires Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read: a batch of extracts (one per agent) can run
@@ -247,17 +282,23 @@ func newExtractTool(deps Deps) tools.Tool {
 			// Gate-only mode: no instruction ⇒ no EXTRACTION model call, just report
 			// booleans. (A wait:{} settle may still have invoked the cheap finished judge
 			// inside pollUntil above — that is the small-model confirmation, not extraction.)
+			// The booleans themselves hand the model the completion, so a settled gate
+			// retires the terminals' supervisor watchers right here.
 			if a.Instruction == "" {
 				met := "not met"
 				if poll.matched {
 					met = "met"
 				}
+				result := map[string]any{
+					"finished": poll.finished, "matched": poll.matched, "attempts": poll.attempts,
+					"elapsedMs": elapsedMs, "terminalIds": base.terminalIDs,
+				}
+				if retired := retireConsumedSupervisors(ctx, deps, base, poll); retired > 0 {
+					result["watchersRetired"] = retired
+				}
 				return tools.Ok(
 					fmt.Sprintf("finished=%v, condition %s (%d attempt(s)).", poll.finished, met, poll.attempts),
-					map[string]any{
-						"finished": poll.finished, "matched": poll.matched, "attempts": poll.attempts,
-						"elapsedMs": elapsedMs, "terminalIds": base.terminalIDs,
-					})
+					result)
 			}
 			if base.wait != nil && !poll.matched {
 				return tools.Fail(codeWaitTimeout,
@@ -267,8 +308,12 @@ func newExtractTool(deps Deps) tools.Tool {
 
 			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "text", ""), poll.combinedTail)
 			if err != nil {
+				// No retirement on this path: the wait matched but the content never
+				// reached the model — the watcher must survive for the retry.
 				return tools.Fail(codeExtract, "Extraction failed: "+err.Error())
 			}
+			// Only now — settle observed AND content delivered — is the completion consumed.
+			retired := retireConsumedSupervisors(ctx, deps, base, poll)
 			base0 := extracted.text
 			if base0 == "" {
 				base0 = "(empty result)"
@@ -277,11 +322,15 @@ func newExtractTool(deps Deps) tools.Tool {
 			if extracted.truncated {
 				note = fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", base.maxTokens)
 			}
-			return tools.Ok(note+base0, map[string]any{
+			result := map[string]any{
 				"terminalIds": base.terminalIDs, "format": "text", "attempts": poll.attempts,
 				"elapsedMs": elapsedMs, "matched": poll.matched, "finished": poll.finished,
 				"truncated": extracted.truncated, "result": extracted.text,
-			})
+			}
+			if retired > 0 {
+				result["watchersRetired"] = retired
+			}
+			return tools.Ok(note+base0, result)
 		},
 	}
 }
@@ -330,7 +379,8 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 			"no-wait terminal.extract/.json calls batched in ONE reply run CONCURRENTLY — for several INDEPENDENT extractions (a different " +
 			"question per terminal), emit them all as one batch of calls; use the single multi-id call above only when one question spans " +
 			"the whole cohort. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a barrier and runs " +
-			"serially). For a single value or plain text to relay from ONE terminal, use " +
+			"serially); a wait that observes the agent FINISH also auto-retires that terminal's spawn-attached supervising watcher " +
+			"(watchersRetired in the result) — no completion notification will follow. For a single value or plain text to relay from ONE terminal, use " +
 			"terminal.extract instead. Read-only; requires Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read — see terminal.extract: a cohort of these can
@@ -372,13 +422,21 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 
 			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "json", a.JSONSchema), poll.combinedTail)
 			if err != nil {
+				// No retirement on this path: the wait matched but the content never
+				// reached the model — the watcher must survive for the retry.
 				return tools.Fail(codeExtract, "Extraction failed: "+err.Error())
 			}
-			return tools.Ok("Extracted JSON result.", map[string]any{
+			// Only now — settle observed AND content delivered — is the completion consumed.
+			retired := retireConsumedSupervisors(ctx, deps, base, poll)
+			result := map[string]any{
 				"terminalIds": base.terminalIDs, "format": "json", "attempts": poll.attempts,
 				"elapsedMs": elapsedMs, "matched": poll.matched, "finished": poll.finished,
 				"truncated": extracted.truncated, "result": extracted.json,
-			})
+			}
+			if retired > 0 {
+				result["watchersRetired"] = retired
+			}
+			return tools.Ok("Extracted JSON result.", result)
 		},
 	}
 }

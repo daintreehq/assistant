@@ -340,6 +340,24 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		"optionsJson":        string(optsJSON),
 		"status":             status,
 	})
+	if !claimed && stop {
+		// The stop publish above went out BEFORE the claim (crash-safety ordering),
+		// and the claim then failed — something ended this watcher mid-check. When
+		// that something was an IN-TURN CONSUMPTION (the main turn settled the same
+		// terminal via terminal.awaitAll / an extract wait and retired the watcher),
+		// the event this check just emitted re-announces a completion the
+		// conversation already contains — exactly the stale notification consumption
+		// exists to prevent — so resolve it here, the same way the consuming side
+		// resolved any earlier publish. A user cancel deliberately keeps the event
+		// (one final honest alert is that path's documented contract), and a /clear
+		// resolves every watcher event wholesale anyway.
+		if fresh, err := ctx.Store.GetWatcher(rec.ID); err == nil && fresh != nil &&
+			fresh.EndedReason != nil && *fresh.EndedReason == domain.WatcherEndedConsumedInTurn {
+			for _, args := range pendingPublishes {
+				_, _ = ctx.Store.ResolveOpenEventsByDedupeKey(args.DedupeKey)
+			}
+		}
+	}
 	if claimed && !stop {
 		for _, args := range pendingPublishes {
 			_ = ctx.Queue.Publish(args)

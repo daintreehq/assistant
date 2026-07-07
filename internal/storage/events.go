@@ -236,6 +236,29 @@ func (s *Store) MarkNotified(ids []string, ts int64) error {
 	return nil
 }
 
+// ResolveOpenEventsByDedupeKey resolves every still-open event carrying dedupeKey
+// (in practice at most one — UpsertEvent coalesces onto the newest open row per
+// key). Used when a supervisor watcher is retired because the main turn consumed
+// its terminal's completion directly: if the watcher had already published (the
+// narrow race where its check beat the in-turn settle), that inbox item is now a
+// stale duplicate of what the conversation already contains, so it is resolved
+// the same way the model would resolve it by hand. Returns the count resolved.
+func (s *Store) ResolveOpenEventsByDedupeKey(key string) (int, error) {
+	if key == "" {
+		return 0, nil // never mass-resolve keyless events
+	}
+	res, err := s.db.Exec("UPDATE events SET resolvedAt = ? WHERE dedupeKey = ? AND resolvedAt IS NULL",
+		s.now(), key)
+	if err != nil {
+		return 0, fmt.Errorf("resolve events by dedupe key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("resolve events by dedupe key rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // ResolveEvent stamps resolvedAt WHERE resolvedAt IS NULL; reports whether a row
 // changed (an already-resolved event returns false).
 func (s *Store) ResolveEvent(id string) (bool, error) {

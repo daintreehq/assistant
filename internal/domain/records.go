@@ -21,6 +21,14 @@ type TimerRecord struct {
 	LastFiredAt   *int64  `json:"lastFiredAt,omitempty"`
 }
 
+// WatcherEndedConsumedInTurn is the WatcherRecord.EndedReason stamped when the
+// main turn directly observed a supervised terminal's completion (terminal.awaitAll
+// or a settled terminal.extract wait) and retired the now-redundant supervisor
+// watcher. Declared in domain (not storage) because the daemon also matches on it:
+// a stop publish that loses its finalize claim to a consumed row must resolve the
+// event it just emitted (daemon/watcher.go).
+const WatcherEndedConsumedInTurn = "consumed_in_turn"
+
 // WatcherRecord supervises a terminal or PR. Project-scoped: a non-terminal row
 // survives process boundaries and is adopted by the next owner (cockpit or
 // supervisor daemon) at ownership boot; /clear is the only wholesale teardown.
@@ -46,9 +54,13 @@ type WatcherRecord struct {
 	NextCheckAt        int64          `json:"nextCheckAt"` // required
 	CreatedAt          int64          `json:"createdAt"`
 	// EndedReason distinguishes a /clear teardown ("session_cleared", set by
-	// CancelLiveWatchers) from a deliberate user cancel ("user_cancelled", set by
-	// watcher.cancel). nil on active rows and on natural terminal states
-	// (condition_met/timeout/error). EndedAt is when that cancel happened.
+	// CancelLiveWatchers), a deliberate user cancel ("user_cancelled", set by
+	// watcher.cancel), and an in-turn consumption retirement ("consumed_in_turn",
+	// set when the main turn directly observed the supervised completion via
+	// terminal.awaitAll / a settled terminal.extract wait — that one lands with
+	// status condition_met, since the supervised outcome WAS reached). nil on
+	// active rows and on the daemon's own natural terminal states
+	// (condition_met/timeout/error). EndedAt is when that end happened.
 	EndedReason *string `json:"endedReason,omitempty"`
 	EndedAt     *int64  `json:"endedAt,omitempty"`
 	// WorkflowRunID back-links a supervisor watcher to the durable workflow ledger

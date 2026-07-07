@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -281,6 +282,22 @@ func (s *Store) UpdateWatcher(id string, patch map[string]any) error {
 	return s.applyUpdate("watchers", watcherUpdateCols, id, patch)
 }
 
+// CancelLiveWatcher flips a watcher to 'cancelled' (stamping endedReason/endedAt)
+// ONLY while it is still live (active/created/paused); reports whether a row
+// flipped. The guard is the authoritative gate behind watcher.cancel's advisory
+// pre-read: a cancel racing a natural finalize or an in-turn consumption loses
+// cleanly instead of clobbering the row's original end state (and its caller then
+// knows NOT to close the linked workflow run as cancelled over a done one).
+func (s *Store) CancelLiveWatcher(id, reason string, now int64) (bool, error) {
+	if now <= 0 {
+		now = s.now()
+	}
+	n, err := s.applyUpdateGuarded("watchers", watcherUpdateCols, id, map[string]any{
+		"status": "cancelled", "endedReason": reason, "endedAt": now,
+	}, " AND status IN ('active','created','paused')")
+	return n > 0, err
+}
+
 // ClaimDueWatcher atomically applies the daemon's per-check finalize patch ONLY while the
 // watcher is still 'active'. Returns true iff a row matched. A false return means the main
 // turn cancelled it during the check — the daemon must then NOT write it back (re-arming a
@@ -288,4 +305,63 @@ func (s *Store) UpdateWatcher(id string, patch map[string]any) error {
 func (s *Store) ClaimDueWatcher(id string, patch map[string]any) (bool, error) {
 	n, err := s.applyUpdateGuarded("watchers", watcherUpdateCols, id, patch, " AND status = 'active'")
 	return n > 0, err
+}
+
+// ReasonConsumedInTurn is the endedReason stamped when the main turn directly
+// observed a supervised terminal's completion (terminal.awaitAll, or a settled
+// terminal.extract wait) and retired the now-redundant supervisor watcher. The
+// watcher's whole job — "tell the model when this agent is done" — was fulfilled
+// in-hand, so letting it run on would only re-announce a completion the
+// conversation already contains (the "stale notification" the model then has to
+// resolve by hand). Distinct from 'user_cancelled'/'session_cleared' so the UI
+// and audit can tell a natural retirement from a teardown. The canonical value
+// lives in domain — the daemon matches on it in its lost-claim cleanup.
+const ReasonConsumedInTurn = domain.WatcherEndedConsumedInTurn
+
+// ConsumeSupervisorWatchersForTerminal retires every live SINGLE-target supervisor
+// watcher aimed at terminalID: status → 'condition_met' (the supervised completion
+// WAS observed — just by the main turn instead of the daemon), endedReason
+// 'consumed_in_turn', endedAt stamped. Returns the flipped records so the caller
+// can finish the retirement side effects (grant revocation, ledger advance, open
+// inbox-event resolution) exactly like the watcher.cancel tool does.
+//
+// Deliberately narrow: only isSupervisor rows (a user-created monitor may have its
+// own goal beyond "is it done" and is never touched), and only single-target rows
+// (one terminal settling says nothing about a multi-target watcher's other
+// targets). Each flip is claim-guarded on the live statuses, so a concurrent
+// daemon finalize or user cancel wins cleanly and the row is not double-ended;
+// like watcher.cancel, a check already past its stop decision may still emit one
+// final honest event (stop outcomes publish before the claim).
+func (s *Store) ConsumeSupervisorWatchersForTerminal(terminalID string) ([]domain.WatcherRecord, error) {
+	live, err := queryWatchers(s.db,
+		"SELECT "+watcherCols+" FROM watchers WHERE status IN ('active','created','paused') AND isSupervisor = 1 ORDER BY createdAt")
+	if err != nil {
+		return nil, fmt.Errorf("consume supervisor watchers: %w", err)
+	}
+	now := s.now()
+	var out []domain.WatcherRecord
+	for _, rec := range live {
+		var targets []string
+		if json.Unmarshal([]byte(rec.TargetsJson), &targets) != nil ||
+			len(targets) != 1 || targets[0] != terminalID {
+			continue
+		}
+		res, err := s.db.Exec(
+			`UPDATE watchers SET status = 'condition_met', endedReason = ?, endedAt = ?
+			  WHERE id = ? AND status IN ('active','created','paused')`,
+			ReasonConsumedInTurn, now, rec.ID)
+		if err != nil {
+			return out, fmt.Errorf("consume supervisor watcher %s: %w", rec.ID, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue // lost the claim to a concurrent finalize/cancel — leave it be
+		}
+		rec.Status = "condition_met"
+		reason := ReasonConsumedInTurn
+		rec.EndedReason = &reason
+		endedAt := now
+		rec.EndedAt = &endedAt
+		out = append(out, rec)
+	}
+	return out, nil
 }
