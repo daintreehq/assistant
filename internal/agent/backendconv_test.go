@@ -135,6 +135,8 @@ func TestValidateBackendTools(t *testing.T) {
 		{{Function: backend.FunctionDef{Name: "daintree_internal__x"}}},
 		{{Function: backend.FunctionDef{Name: "fs.read"}}}, // dotted name not wire-safe
 		{{Function: backend.FunctionDef{Name: ""}}},
+		// Over the backend's 8192-char description max_length (it 422s, never truncates).
+		{{Function: backend.FunctionDef{Name: "fs__read", Description: strings.Repeat("x", 8193)}}},
 	}
 	for _, tools := range bad {
 		if err := validateBackendTools(tools); err == nil {

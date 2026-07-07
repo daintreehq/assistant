@@ -82,6 +82,28 @@ func TestTerminalCreateRejectsMultiKeyCondition(t *testing.T) {
 	}
 }
 
+// An explicit non-positive stopAfterMs must be rejected on BOTH create paths —
+// it would beat the storage-side 24h default and time the watcher out
+// immediately, matching the schema's minimum:1.
+func TestCreateRejectsNonPositiveStopAfter(t *testing.T) {
+	ts := Tools(Deps{Store: &memStore{}})
+	cases := []struct {
+		tool string
+		args string
+	}{
+		{"watcher.terminal.create", `{"terminalIds":["t1"],"title":"x","goal":"g","stopAfterMs":0}`},
+		{"watcher.terminal.create", `{"terminalIds":["t1"],"title":"x","goal":"g","stopAfterMs":-1}`},
+		{"watcher.watchPR", `{"prNumber":7,"stopAfterMs":0}`},
+		{"watcher.watchPR", `{"prNumber":7,"stopAfterMs":-1}`},
+	}
+	for _, c := range cases {
+		res := find(ts, c.tool).Handle(context.Background(), json.RawMessage(c.args), &tools.ToolContext{})
+		if res.Ok || res.Error.Code != codeInvalidArgs {
+			t.Errorf("%s: expected INVALID_ARGS for %s, got %+v", c.tool, c.args, res)
+		}
+	}
+}
+
 // A valid create persists a non-supervisor terminal watcher and honours the
 // default monitor cadence + startAfterMs offset.
 func TestTerminalCreateDefaults(t *testing.T) {

@@ -128,24 +128,49 @@ type terminalCreateArgs struct {
 	ModelTier    string                 `json:"modelTier,omitempty"` // small | medium
 }
 
-// terminalCreateSchema embeds the hand-written WATCH_CONDITION schema. It uses
-// anyOf (DeepSeek rejects oneOf), the combinators flatten to ONE level of
-// atomic leaves (no $ref/deep recursion), and "not" is a property literally
-// named not (NOT the JSON-Schema not keyword).
+// watchConditionSchema renders the hand-written WATCH_CONDITION subschema with a
+// role-specific lead description (stopWhen vs alertWhen). The union's exactly-one-
+// key rule (domain.WatchCondition.Validate) is machine-encoded as minProperties/
+// maxProperties 1 + an enumerated property set (no $ref/deep recursion — nested
+// combinator members are described as the same one-key shape in prose); "not" is a
+// PROPERTY literally named not, NOT the JSON-Schema not keyword. Unlike the
+// extract tools' wait (which rejects modelJudge), watchers support modelJudge, so
+// it is enumerated here. Keep in lockstep with the domain validator.
+func watchConditionSchema(role string) string {
+	return `{
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "additionalProperties": false,
+      "description": "` + role + ` A WatchCondition object with EXACTLY ONE of the keys below.",
+      "properties": {
+        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. A bare stateIs:'waiting' fires too early for 'agent finished' (pre-start, paused, and backgrounded agents also read waiting) — pair it with a modelJudge under all:[...], or rely on the default supervisor's confirmed completion." },
+        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
+        "contains": { "type": "string", "minLength": 1, "description": "Fires when the terminal tail contains this literal substring (non-empty)." },
+        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile)." },
+        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "Fires once no NEW output has appeared for this many ms." },
+        "modelJudge": { "type": "string", "minLength": 1, "description": "A yes/no question answered against the terminal tail on each check. Costs one model call per check at the watcher's modelTier (deduped across stopWhen/alertWhen) — prefer the free deterministic leaves when they can express the condition." },
+        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "AND — every nested condition (each the same one-key WatchCondition shape) must hold." },
+        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "OR — at least one nested condition (same one-key shape) holds." },
+        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "Negates ONE nested condition (same one-key shape)." }
+      }
+    }`
+}
+
 var terminalCreateSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "required": ["terminalIds", "title", "goal"],
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 256 },
-    "title": { "type": "string" },
-    "goal": { "type": "string" },
-    "cadenceMs": { "type": "integer", "minimum": 1 },
+    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 256, "description": "Terminals to watch — full terminal-<uuid> ids exactly as listed." },
+    "title": { "type": "string", "description": "Short human label for the watcher (shown in watcher.list and attention events)." },
+    "goal": { "type": "string", "description": "What the watcher is observing for, in plain language — guides its per-check classification." },
+    "cadenceMs": { "type": "integer", "minimum": 1, "default": 120000, "description": "How often the watcher checks, in ms." },
     "startAfterMs": { "type": "integer", "minimum": 0 },
     "stopAfterMs": { "type": "integer", "minimum": 1, "description": "Lifetime ceiling in ms; defaults to 86400000 (24 h) when omitted — a watcher never runs forever." },
-    "stopWhen": { "$comment": "WATCH_CONDITION", "type": "object" },
-    "alertWhen": { "$comment": "WATCH_CONDITION", "type": "object" },
-    "modelTier": { "type": "string", "enum": ["small", "medium"] }
+    "stopWhen": ` + watchConditionSchema("Condition that ENDS the watcher (status condition_met).") + `,
+    "alertWhen": ` + watchConditionSchema("Condition that publishes an attention alert (the watcher keeps running).") + `,
+    "modelTier": { "type": "string", "enum": ["small", "medium"], "default": "small", "description": "Model used for per-check classification and modelJudge questions." }
   }
 }`)
 
@@ -189,6 +214,11 @@ func newTerminalCreateTool(deps Deps) *tools.Tool {
 					return tools.Fail(codeInvalidArgs, "watcher.terminal.create: startAfterMs must be >= 0")
 				}
 				nextCheck = now + *a.StartAfterMs
+			}
+			// Enforce the schema's minimum:1 — an explicit non-positive lifetime would
+			// beat the storage default and time the watcher out immediately.
+			if a.StopAfterMs != nil && *a.StopAfterMs < 1 {
+				return tools.Fail(codeInvalidArgs, "watcher.terminal.create: stopAfterMs must be a positive integer (omit it for the 24h default)")
 			}
 
 			// Hard-fail before any insert when no supervision engine is running
@@ -303,6 +333,10 @@ func newWatchPRTool(deps Deps) *tools.Tool {
 					return tools.Fail(codeInvalidArgs, "watcher.watchPR: startAfterMs must be >= 0")
 				}
 				nextCheck = now + *a.StartAfterMs
+			}
+			// Enforce the schema's minimum:1 (see watcher.terminal.create).
+			if a.StopAfterMs != nil && *a.StopAfterMs < 1 {
+				return tools.Fail(codeInvalidArgs, "watcher.watchPR: stopAfterMs must be a positive integer (omit it for the 24h default)")
 			}
 
 			// Hard-fail before any insert when no supervision engine is running

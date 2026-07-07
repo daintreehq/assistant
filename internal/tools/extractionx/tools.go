@@ -214,13 +214,38 @@ type extractArgs struct {
 // sharedBaseProps are the JSON-schema properties common to every extract tool. The
 // output-shape fields (format/jsonSchema) are NOT here — output shape is fixed per
 // tool (terminal.extract = text, terminal.extract.json = structured).
+//
+// The constraint keywords (enum/minimum/maximum/minItems/maxItems/default/
+// maxProperties) are REAL JSON Schema, not decoration: the backend forwards tool
+// parameters to the upstream model verbatim, so every bound the handler enforces
+// (baseArgs.Validate) is also machine-visible at call-construction time. Keep the
+// two in lockstep — a bound stated only in prose is a bound the model will
+// eventually cross. The wait object enumerates the WatchCondition union explicitly
+// ({} stays valid: zero properties, the coerced settled default); modelJudge is
+// deliberately ABSENT from its properties because extraction rejects it
+// (rejectModelJudge) — the schema should make it ungenerable, not just documented.
 var sharedBaseProps = `
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "Daintree terminal id(s) to read and extract from." },
-    "wait": { "type": "object", "description": "Poll until this WatchCondition is met before extracting. Exactly ONE key: stateIs, runtimeStatusIs, contains, regex, noOutputForMs, or all/any/not. modelJudge unsupported. Pass {} to wait until the agent has genuinely FINISHED its turn: a bare 'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), so {} prefers a real working->waiting transition (or a stable idle past a short grace if one was never seen) and ALWAYS confirms with a small-model check on the tail before it resolves — it will not return on a momentary idle. completed/exited resolve immediately. {} is single-terminal (one agent's state); for a COHORT use terminal.awaitAll, then read with a no-wait extract over the same ids. Omit to read once." },
-    "pollIntervalMs": { "type": "number", "description": "Delay between polls in wait mode, in ms (default 2000)." },
-    "maxAttempts": { "type": "number", "description": "Hard cap on poll attempts (default 30, max 120)." },
-    "tailBytes": { "type": "number", "description": "Max characters of each terminal's tail fed to the model." },
-    "maxTokens": { "type": "number", "description": "Max tokens the extraction model may produce (default 1024, max 2000). For a verbatim/full-reproduction instruction prefer terminal.read." }`
+    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "description": "Daintree terminal id(s) to read and extract from — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids)." },
+    "wait": {
+      "type": "object",
+      "maxProperties": 1,
+      "additionalProperties": false,
+      "description": "Poll until this condition is met before extracting; omit to read once. A WatchCondition object with EXACTLY ONE of the keys below — or the empty object {} to wait until the agent has genuinely FINISHED its turn. Prefer {} for 'wait for the agent to finish': a bare stateIs:'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), while {} prefers a real working->waiting transition (or a stable idle past a short grace) and ALWAYS confirms with a small-model check on the tail before it resolves; completed/exited resolve immediately. {} is single-terminal (one agent's state) — for a COHORT use terminal.awaitAll, then read with a no-wait extract over the same ids. modelJudge is NOT supported here (watcher-only).",
+      "properties": {
+        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. Do NOT use stateIs:'waiting' to mean finished — pass {} instead (it confirms a real finish)." },
+        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
+        "contains": { "type": "string", "minLength": 1, "description": "Fires when the terminal tail contains this literal substring (non-empty). Matches the COMBINED tail across multiple terminalIds." },
+        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile)." },
+        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "Fires once no NEW output has appeared for this many ms." },
+        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "AND — every nested condition (each the same one-key WatchCondition shape; modelJudge is not supported anywhere in the tree) must hold." },
+        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "OR — at least one nested condition (same one-key shape; no modelJudge anywhere) holds." },
+        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "Negates ONE nested condition (same one-key shape; no modelJudge anywhere). This is a property named not, NOT the JSON-Schema keyword." }
+      }
+    },
+    "pollIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 2000, "description": "Delay between polls in wait mode, in ms." },
+    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30, "description": "Hard cap on poll attempts in wait mode." },
+    "tailBytes": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 12000, "description": "Max characters of each terminal's tail fed to the model." },
+    "maxTokens": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 1024, "description": "Max tokens the extraction model may produce. For a verbatim/full-reproduction instruction prefer terminal.read (raw scrollback, no model, no cap)." }`
 
 var extractSchema = json.RawMessage(`{
   "type": "object",
@@ -364,7 +389,7 @@ var extractJSONSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "instruction": { "type": "string", "description": "What to extract as STRUCTURED JSON (e.g. each player's vote and reasoning)." },
-    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema object describing the value to extract (the same kind you put under a tool's \"parameters\") — NOT an example of the value. Use only standard JSON-Schema keywords: type, properties, required, items, enum, const. The small model returns the value under 'result'. For one entry PER terminal across a cohort, make the value an array of objects each carrying its own terminalId. Correct: {\"type\":\"object\",\"properties\":{\"answers\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"terminalId\":{\"type\":\"string\"},\"fact\":{\"type\":\"string\"}},\"required\":[\"terminalId\",\"fact\"]}}},\"required\":[\"answers\"]}. WRONG and REJECTED by the backend (a value shape, not a schema): {\"answers\":[{\"terminalId\":\"string\",\"fact\":\"string\"}]} or {\"agent\":\"string\",\"fact\":\"string\"}. There is NO output-size knob here — do NOT add keys like maxTokens or optional; to make a field optional simply leave it out of \"required\" (keep the prompt focused to keep the result small)." },` + sharedBaseProps + `
+    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema object describing the value to extract (the same kind you put under a tool's \"parameters\") — NOT an example of the value. ONLY these keywords are accepted: type, properties, required, items, enum, const, additionalProperties, anyOf, oneOf, allOf, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, minItems, maxItems, uniqueItems. Any OTHER key is REJECTED — in particular no description, title, default, format, examples, $ref, or $schema anywhere in it; put explanation in the instruction argument instead, and there is NO output-size knob (no maxTokens; to make a field optional just leave it out of \"required\"). The small model returns the value under 'result'. For one entry PER terminal across a cohort, make the value an array of objects each carrying its own terminalId. Correct: {\"type\":\"object\",\"properties\":{\"answers\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"terminalId\":{\"type\":\"string\"},\"fact\":{\"type\":\"string\"}},\"required\":[\"terminalId\",\"fact\"]}}},\"required\":[\"answers\"]}. WRONG and REJECTED (a value example, not a schema): {\"answers\":[{\"terminalId\":\"string\",\"fact\":\"string\"}]}." },` + sharedBaseProps + `
   },
   "required": ["terminalIds", "instruction", "jsonSchema"]
 }`)
@@ -463,6 +488,11 @@ func (a *extractAsyncArgs) Validate() error {
 	if strings.TrimSpace(a.Instruction) == "" {
 		return fmt.Errorf("instruction is required")
 	}
+	// Match the schema's minimum:1 — storage treats ttlMs <= 0 as "no expiry",
+	// which is the OMITTED semantics; an explicit non-positive value is a mistake.
+	if a.TTLMs != nil && *a.TTLMs < 1 {
+		return fmt.Errorf("ttlMs must be a positive integer (omit it for no expiry)")
+	}
 	return nil
 }
 
@@ -474,7 +504,7 @@ var extractAsyncSchema = json.RawMessage(`{
     "title": { "type": "string", "description": "Short label for the queue event the result is published under." },
     "verdictInstruction": { "type": "string", "description": "A pass/fail question evaluated against the extracted result; drives event severity." },
     "dedupeKey": { "type": "string", "description": "Events sharing this key collapse into one in the queue." },
-    "ttlMs": { "type": "number", "description": "Time-to-live for the published event, in ms." }
+    "ttlMs": { "type": "integer", "minimum": 1, "description": "Time-to-live for the published event, in ms (omit for no expiry)." }
   },
   "required": ["terminalIds", "instruction"]
 }`)

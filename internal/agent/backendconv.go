@@ -30,6 +30,13 @@ var reservedBackendTools = map[string]struct{}{
 // rejects.
 const reservedBackendToolPrefix = "daintree_internal__"
 
+// backendToolDescriptionMaxRunes mirrors the backend's FunctionDef description
+// max_length (pydantic counts characters, i.e. runes). The backend REJECTS an
+// over-limit description with a 422 — it never truncates — which would sink every
+// turn until the tool is fixed. Checked locally so an overgrown description fails
+// loudly at the first request with the offending tool named.
+const backendToolDescriptionMaxRunes = 8192
+
 // toBackendMessages converts the local conversation to the backend wire shape and
 // rejects any non-conversational role up front. The backend validator forbids
 // system/developer messages; catching them here turns a would-be 400 into an
@@ -167,6 +174,10 @@ func validateBackendTools(tools []backend.Tool) error {
 		}
 		if !backendToolNameRE.MatchString(name) {
 			return fmt.Errorf("invalid backend tool name: %q (must match %s)", name, backendToolNameRE.String())
+		}
+		if n := len([]rune(t.Function.Description)); n > backendToolDescriptionMaxRunes {
+			return fmt.Errorf("tool %s description is %d chars, over the backend's %d limit (the backend rejects, never truncates — shorten the Description)",
+				name, n, backendToolDescriptionMaxRunes)
 		}
 	}
 	return nil

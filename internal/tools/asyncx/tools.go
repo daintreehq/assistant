@@ -200,10 +200,10 @@ var runAsyncSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalId": { "type": "string", "description": "The ONE terminal to send the command to (full terminal-<uuid> id)." },
+    "terminalId": { "type": "string", "minLength": 1, "description": "The ONE terminal to send the command to (full terminal-<uuid> id)." },
     "command": { "type": "string", "description": "Command line to type into the terminal and run (for an agent terminal, this is the prompt/reply you are sending it)." },
     "title": { "type": "string", "description": "Short human label for this operation (shown in the pending state, the completion event, and async.list). Defaults to the command text." },
-    "timeoutMs": { "type": "number", "description": "Deadline in ms (default 1800000 = 30m, min 10000, max 7200000 = 2h). Past it you are woken with whatever settled." }
+    "timeoutMs": { "type": "integer", "minimum": 10000, "maximum": 7200000, "default": 1800000, "description": "Deadline in ms (default 30m, max 2h). Past it you are woken with whatever settled." }
   },
   "required": ["terminalId", "command"]
 }`)
@@ -338,9 +338,9 @@ var awaitAsyncSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string" }, "description": "The agent terminals to watch (1-16, full ids, no duplicates). ONE call covers the whole cohort — never one call per agent." },
+    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "The agent terminals to watch — full terminal-<uuid> ids exactly as listed. ONE call covers the whole cohort — never one call per agent." },
     "title": { "type": "string", "description": "Short human label for this wait (shown in the completion event and async.list)." },
-    "timeoutMs": { "type": "number", "description": "Deadline in ms (default 1800000 = 30m, min 10000, max 7200000 = 2h). Past it you are woken with whatever settled." }
+    "timeoutMs": { "type": "integer", "minimum": 10000, "maximum": 7200000, "default": 1800000, "description": "Deadline in ms (default 30m, max 2h). Past it you are woken with whatever settled." }
   },
   "required": ["terminalIds"]
 }`)
