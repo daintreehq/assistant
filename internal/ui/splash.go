@@ -65,10 +65,17 @@ const (
 	splashCanopyStartFrame      = 11
 	splashCanopyRightStartDelay = 3
 	splashCanopyEndFrame        = SplashFrames - 5
-	// splashFPS runs the 40-frame reveal in about 1.0s. lingerMs holds the
-	// completed logo before signalling done so it doesn't vanish the instant the draw lands.
-	splashFPS = 40
-	lingerMs  = 420
+	// splashFPS runs the 40-frame reveal in about 0.5s — quick enough that boot
+	// feels instant, long enough that the mark visibly grows in. The full splash
+	// (reveal + linger, ~740ms) is also the boot's loading budget: every measured
+	// background load (MCP connect ~160ms, backend handshake, project name) lands
+	// by ~250ms even on a cold local stack, so the animation still comfortably
+	// covers boot; frames render in ~0.1ms so the 12.5ms frame slot is generous,
+	// and the deadline pacing in playBootSplash absorbs slow-terminal overruns
+	// without stretching the total. lingerMs holds the completed logo before
+	// signalling done so it doesn't vanish the instant the draw lands.
+	splashFPS = 80
+	lingerMs  = 240
 )
 
 // splashModel holds the overlay's frame index + running flag. It is mutated only in
