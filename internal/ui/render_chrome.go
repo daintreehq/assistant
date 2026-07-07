@@ -176,7 +176,6 @@ func tierGloss(t domain.Tier) string {
 // the leading state glyph, and the dim styling of the id — so we rebuild it here.
 type statusParams struct {
 	Cost        float64
-	Model       string
 	AttentionN  int
 	TopSeverity domain.Severity
 	Degraded    bool
@@ -240,14 +239,11 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	} else if p.ActiveAgent != "" {
 		segs = append(segs, th.Info().Render(p.ActiveAgent))
 	}
-	// Cost + model are idle-only (no active agent).
-	if !active {
-		if p.Cost > 0 {
-			segs = append(segs, th.Dim().Render(formatCost(p.Cost)))
-		}
-		if p.Model != "" && width >= 62 {
-			segs = append(segs, th.Dim().Render(p.Model))
-		}
+	// Cost is idle-only (no active agent). The model name is deliberately NOT shown:
+	// the backend masks routing behind the constant public alias ("daintree-assistant"),
+	// so echoing it here was a meaningless watermark, not information.
+	if !active && p.Cost > 0 {
+		segs = append(segs, th.Dim().Render(formatCost(p.Cost)))
 	}
 	if p.AttentionN > 0 {
 		tone := severityTone(p.TopSeverity)

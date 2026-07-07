@@ -407,17 +407,16 @@ func toolFailSummary(r domain.ToolResult) string {
 	return "failed"
 }
 
-// applyUsage updates the cost / model rollup from a usage event. (The CTX% gauge was
-// removed — context is managed for the operator, so the raw pressure number was noise.)
+// applyUsage updates the cost rollup from a usage event. (The CTX% gauge was
+// removed — context is managed for the operator, so the raw pressure number was noise.
+// The model name is not tracked either: the backend reports only its constant public
+// alias, so there is nothing informative to display.)
 func (m *Model) applyUsage(u agent.UsageEvent) {
 	// A successful round means the provider answered — clear any model-rate-limit
 	// health badge raised by a prior exhausted-429 turn.
 	m.modelRateLimited = false
 	if u.CostUsd != nil {
 		m.cost += *u.CostUsd
-	}
-	if u.Model != "" {
-		m.model = u.Model
 	}
 }
 

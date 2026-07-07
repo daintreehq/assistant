@@ -296,25 +296,19 @@ func TestStatusLine_PrefersActiveAgentNoOrphanSep(t *testing.T) {
 	}
 }
 
-func TestStatusLine_IdleSurfacesCostAndModel(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{
-		Cost: 0.012, Model: "glm-5p2",
-	}, 80))
+func TestStatusLine_IdleSurfacesCost(t *testing.T) {
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{Cost: 0.012}, 80))
 	if !strings.Contains(out, "$0.012") {
 		t.Errorf("cost missing on idle line: %q", out)
-	}
-	if !strings.Contains(out, "glm-5p2") {
-		t.Errorf("model missing on wide idle line: %q", out)
 	}
 }
 
 func TestStatusLine_CostHiddenWhenUnknown(t *testing.T) {
-	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{Cost: 0, Model: "glm-5p2"}, 80))
+	// AttentionN keeps the line non-empty so the assertion exercises the cost gate,
+	// not the everything-empty short-circuit.
+	out := stripAnsi(renderStatusLine(darkTheme(), statusParams{Cost: 0, AttentionN: 1}, 80))
 	if strings.Contains(out, "$") {
 		t.Errorf("cost must be hidden when unknown ($0): %q", out)
-	}
-	if !strings.Contains(out, "glm-5p2") {
-		t.Errorf("model must still show on the idle line: %q", out)
 	}
 }
 

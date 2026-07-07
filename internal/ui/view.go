@@ -390,7 +390,6 @@ func (m Model) statusView(w int) string {
 	}
 	return renderStatusLine(m.theme, statusParams{
 		Cost:             m.cost,
-		Model:            m.model,
 		AttentionN:       m.attentionN,
 		TopSeverity:      m.dashboard.topSeverity(),
 		Degraded:         m.degraded,

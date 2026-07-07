@@ -153,7 +153,6 @@ type Model struct {
 	previewFetchInFlight bool
 	previewCache         []daemon.TerminalPreview
 	cost                 float64
-	model                string
 	degraded             bool
 	// modelRateLimited latches a provider 429 (retry budget exhausted) as a footer
 	// health badge; cleared on the next successful Usage event (the model resumed).
