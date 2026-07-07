@@ -73,10 +73,15 @@ func newSearchTool(deps Deps) *tools.Tool {
 			"(\"how do I…\", \"what is…\", \"how do I configure…\"). Returns ranked doc sections, each with a " +
 			"title, content, and a page PATH (e.g. /docs/worktrees). This is the FIRST tool to reach for when " +
 			"the user asks how to use Daintree — prefer it over guessing. Cite the pages you use as full URLs " +
-			"by prepending https://daintree.org to the returned path.",
-		Risk:   domain.RiskRead,
-		Schema: searchSchema,
-		Decode: tools.StrictDecoder(func() any { return &searchArgs{} }),
+			"by prepending https://daintree.org to the returned path. " +
+			"PARALLEL: docs search/getPage/getRelatedPages calls batched in ONE reply run concurrently — emit several at once when researching.",
+		Risk: domain.RiskRead,
+		// Independent documentation read over the docs MCP with no ordering dependency on
+		// its siblings: a burst of research reads overlaps its network round-trips (up to
+		// the docs client's in-flight cap) instead of serializing. See terminal.extract.
+		Parallelizable: true,
+		Schema:         searchSchema,
+		Decode:         tools.StrictDecoder(func() any { return &searchArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a searchArgs
 			if res, ok := strictDecode(args, "docs.search", &a); !ok {
@@ -120,10 +125,14 @@ func newGetPageTool(deps Deps) *tools.Tool {
 		Name: "docs.getPage",
 		Description: "Fetch the full markdown of a specific Daintree documentation page by its URL path. " +
 			"Use AFTER docs.search when the search snippets lack the detail to answer accurately. " +
-			"Not for discovery — search first to find the page.",
-		Risk:   domain.RiskRead,
-		Schema: getPageSchema,
-		Decode: tools.StrictDecoder(func() any { return &getPageArgs{} }),
+			"Not for discovery — search first to find the page. " +
+			"PARALLEL: docs calls batched in ONE reply run concurrently — to read several pages, emit one getPage each in one batch.",
+		Risk: domain.RiskRead,
+		// Independent per-page documentation read, no ordering dependency on siblings: a
+		// batch of getPage calls overlaps its network round-trips. See terminal.extract.
+		Parallelizable: true,
+		Schema:         getPageSchema,
+		Decode:         tools.StrictDecoder(func() any { return &getPageArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a getPageArgs
 			if res, ok := strictDecode(args, "docs.getPage", &a); !ok {
@@ -160,9 +169,12 @@ func newGetRelatedPagesTool(deps Deps) *tools.Tool {
 		Name: "docs.getRelatedPages",
 		Description: "Find Daintree documentation pages related to a known page, for suggesting further reading. " +
 			"Use only when you already have a page URL (from docs.search) and want connected content — not for general search.",
-		Risk:   domain.RiskRead,
-		Schema: getRelatedPagesSchema,
-		Decode: tools.StrictDecoder(func() any { return &getRelatedPagesArgs{} }),
+		Risk: domain.RiskRead,
+		// Independent related-pages lookup, no ordering dependency on siblings: batched
+		// docs reads overlap their network round-trips. See terminal.extract.
+		Parallelizable: true,
+		Schema:         getRelatedPagesSchema,
+		Decode:         tools.StrictDecoder(func() any { return &getRelatedPagesArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a getRelatedPagesArgs
 			if res, ok := strictDecode(args, "docs.getRelatedPages", &a); !ok {

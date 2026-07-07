@@ -139,12 +139,20 @@ var listSchema = json.RawMessage(`{
 
 func newListTool() tools.Tool {
 	return tools.Tool{
-		Name:        "fs.list",
-		Description: "List directory entries under the project root (read-only). Skips .git, node_modules, and dist.",
-		Risk:        domain.RiskRead,
-		Schema:      listSchema,
-		Decode:      tools.StrictDecoder(func() any { return &listArgs{} }),
-		Handle:      handleList,
+		Name: "fs.list",
+		Description: "List directory entries under the project root (read-only). Skips .git, node_modules, and dist. " +
+			"PARALLEL: fs.read/fs.list calls batched in ONE reply run concurrently — to survey several directories, emit one fs.list each in one batch.",
+		Risk: domain.RiskRead,
+		// Independent, bounded filesystem snapshot read with no ordering dependency on its
+		// batch siblings, and (unlike a DB read) genuinely concurrent — the single-directory
+		// listing is not serialized behind the single-connection store. A batch of these
+		// overlaps instead of stacking one syscall round at a time. See terminal.extract.
+		// (fs.search is deliberately NOT parallelized — a full recursive project walk is a
+		// heavy, ctx-unaware scan; running six at once would redundantly re-walk the tree.)
+		Parallelizable: true,
+		Schema:         listSchema,
+		Decode:         tools.StrictDecoder(func() any { return &listArgs{} }),
+		Handle:         handleList,
 	}
 }
 
@@ -281,12 +289,18 @@ var readSchema = json.RawMessage(`{
 
 func newReadTool() tools.Tool {
 	return tools.Tool{
-		Name:        "fs.read",
-		Description: "Read a UTF-8 text file from the project (read-only).",
-		Risk:        domain.RiskRead,
-		Schema:      readSchema,
-		Decode:      tools.StrictDecoder(func() any { return &readArgs{} }),
-		Handle:      handleRead,
+		Name: "fs.read",
+		Description: "Read a UTF-8 text file from the project (read-only). " +
+			"PARALLEL: fs.read/fs.list calls batched in ONE reply run concurrently — to read several files, emit one fs.read each in one batch, not one per turn.",
+		Risk: domain.RiskRead,
+		// Independent, bounded filesystem snapshot read, genuinely concurrent (not
+		// serialized behind the single-connection store like a DB read): a batch of
+		// fs.read calls overlaps their disk I/O instead of running one at a time. See
+		// terminal.extract.
+		Parallelizable: true,
+		Schema:         readSchema,
+		Decode:         tools.StrictDecoder(func() any { return &readArgs{} }),
+		Handle:         handleRead,
 	}
 }
 
@@ -406,9 +420,14 @@ func newSearchTool() tools.Tool {
 		Name:        "fs.search",
 		Description: "Text-search file contents across the project (read-only). Recursive pure-Go walk skipping .git, node_modules, and dist.",
 		Risk:        domain.RiskRead,
-		Schema:      searchSchema,
-		Decode:      tools.StrictDecoder(func() any { return &searchArgs{} }),
-		Handle:      handleSearch,
+		// NOT Parallelizable — deliberate exclusion. Unlike the bounded point reads
+		// fs.read/fs.list, this is a full recursive project walk that reads file contents
+		// and ignores ctx (no mid-scan cancellation). Running six concurrently would
+		// redundantly re-walk the whole tree six times and spike I/O for no real overlap
+		// win; a batch of searches is better served serially (warm OS page cache).
+		Schema: searchSchema,
+		Decode: tools.StrictDecoder(func() any { return &searchArgs{} }),
+		Handle: handleSearch,
 	}
 }
 
