@@ -298,6 +298,29 @@ func TestQuestion_RenderShowsOptionsAndHighlight(t *testing.T) {
 	if !strings.Contains(out, "› B. Staging") {
 		t.Errorf("selected option not marked:\n%s", out)
 	}
+	// Layout: a blank line after the title sets the question off; a full-width rule
+	// frames the option list above and below. Rules are matched by LINE equality (not
+	// substring count) so an over-wide rule can't false-pass.
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[1]) != "" {
+		t.Errorf("expected a blank line after the title:\n%s", out)
+	}
+	rule := strings.Repeat(m.theme.Glyphs.Rule, 56)
+	var ruleIdx []int
+	for i, l := range lines {
+		if l == rule {
+			ruleIdx = append(ruleIdx, i)
+		}
+	}
+	if len(ruleIdx) != 2 {
+		t.Fatalf("expected exactly 2 rule lines framing the options, got %d:\n%s", len(ruleIdx), out)
+	}
+	between := strings.Join(lines[ruleIdx[0]+1:ruleIdx[1]], "\n")
+	for _, want := range []string{"A. Local", "› B. Staging", "C. Production"} {
+		if !strings.Contains(between, want) {
+			t.Errorf("option %q should sit inside the rule frame:\n%s", want, out)
+		}
+	}
 }
 
 func TestQuestion_BottomBandReplacesComposer(t *testing.T) {
@@ -316,15 +339,24 @@ func TestQuestion_ManyOptionsWindowed(t *testing.T) {
 	for i := range opts {
 		opts[i] = "option-" + string(rune('a'+i))
 	}
-	m, _ := questionPending(t, questionReqOf("Pick one", opts...))
-	m.pendingQuestion.selected = 0
+	// Worst-case height: a question long enough to fill maxQuestionRows AND a
+	// mid-list selection so BOTH scroll cues render inside the frame.
+	long := strings.Repeat("which of these many candidate options should we pick ", 4)
+	m, _ := questionPending(t, questionReqOf(long, opts...))
+	m.pendingQuestion.selected = 10
 	out := renderQuestion(m.theme, m.pendingQuestion, 56)
 	rows := strings.Count(out, "\n") + 1
-	// title + question + (<= maxQuestionOptionRows) + a "↓ more" cue + hint — bounded.
-	if rows > maxQuestionOptionRows+6 {
+	// title + blank + question(≤maxQuestionRows) + rule + ↑cue + (≤maxQuestionOptionRows)
+	// + ↓cue + rule + hint — bounded.
+	if rows > maxQuestionOptionRows+maxQuestionRows+7 {
 		t.Fatalf("windowed sheet is %d rows — should stay bounded", rows)
 	}
-	if !strings.Contains(out, "more") {
-		t.Errorf("a 20-option list should show a scroll cue:\n%s", out)
+	// Match the cues by their indented prefix so the hint row's "↑/↓ select" can't
+	// false-satisfy the check.
+	plain := stripAnsi(out)
+	for _, cue := range []string{"  ↑ ", "  ↓ "} {
+		if !strings.Contains(plain, cue) {
+			t.Errorf("a mid-list selection should show the %q scroll cue:\n%s", cue, plain)
+		}
 	}
 }
