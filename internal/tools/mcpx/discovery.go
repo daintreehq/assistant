@@ -240,8 +240,6 @@ var wrappedMCPTools = map[string]string{
 	"terminal.disarmAll":           "terminal.disarmAll (typed wrapper — no args needed)",
 	"copyTree.injectToTerminal":    "copyTree.injectToTerminal (typed wrapper — pass terminalId)",
 	"copyTree.generateAndCopyFile": "copyTree.generateAndCopyFile (typed wrapper — pass an optional worktreeId)",
-	"git.snapshotRevert":           "git.snapshotRevert (typed wrapper — pass worktreeId)",
-	"git.snapshotDelete":           "git.snapshotDelete (typed wrapper — pass worktreeId)",
 	"git.getProjectPulse":          "git.getProjectPulse (typed read wrapper — pass an optional arguments object, e.g. {arguments:{worktreeId:\"...\"}}; read tier, no confirmation)",
 
 	// Typed wrappers in internal/tools/mcpwrap — forwarding their raw MCP action

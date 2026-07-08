@@ -16,7 +16,7 @@ const DefaultDocsURL = "https://daintree.org/api/mcp"
 // DocsDocumentedToolNames is the drift baseline for the docs MCP — its three live
 // read tools (search, get_page, get_related_pages). It is passed as
 // Options.DriftBaseline so the docs client checks drift against ITS OWN surface and
-// never false-warns that the 60 Daintree control-plane tools (DocumentedMcpToolNames)
+// never false-warns that the 59 Daintree control-plane tools (DocumentedMcpToolNames)
 // are "missing" — that baseline belongs to the primary client alone. Keep in sync with
 // the live server.
 var DocsDocumentedToolNames = []string{

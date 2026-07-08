@@ -347,7 +347,7 @@ func Create(opts CreateOptions) (*App, error) {
 	// answers "how do I use Daintree" help questions via live doc search. Its endpoint is
 	// a fixed product URL (DAINTREE_DOCS_MCP_URL overrides it for dev/test, mirroring the
 	// DAINTREE_BACKEND_URL pattern). Anonymous (no bearer) with its own short drift
-	// baseline so it never warns that the 60 Daintree control-plane tools are "missing".
+	// baseline so it never warns that the 59 Daintree control-plane tools are "missing".
 	// Connected in parallel with the primary MCP during the boot splash (ConnectMcp).
 	docsURL := mcp.DefaultDocsURL
 	if v := strings.TrimSpace(os.Getenv("DAINTREE_DOCS_MCP_URL")); v != "" {

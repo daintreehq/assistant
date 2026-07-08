@@ -67,11 +67,12 @@ Resource lifecycle: `worktree.resource.provision`, `worktree.resource.teardown`,
 docs listing it here.)
 
 Git: `git.getProjectPulse` (HISTORICAL activity/pulse), `git.getStagingStatus` (live
-working-tree state), `git.commit`, `git.push`, `git.stageFile`, `git.unstageFile`,
-`git.snapshotList`, `git.snapshotGet`, `git.snapshotRevert`, `git.snapshotDelete`.
-(Of these, only `git.getProjectPulse`, `git.snapshotRevert`, and `git.snapshotDelete`
-have a typed CLI wrapper — the rest, incl. `git.commit`/`git.push`/`git.getStagingStatus`,
-are reached via `daintree.call`.)
+working-tree state), `git.commit`, `git.push`, `git.stageAll`, `git.stageFile`,
+`git.unstageAll`, `git.unstageFile`, `git.listCommits`, `git.getFileDiff`.
+(Of these, only `git.getProjectPulse` has a typed CLI wrapper — the rest, incl.
+`git.commit`/`git.push`/`git.getStagingStatus`, are reached via `daintree.call`. The
+former `git.snapshot*` family was removed from Daintree as part of a feature cleanup;
+the CLI dropped its `git.snapshotRevert`/`git.snapshotDelete` wrappers in lockstep.)
 
 Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`.
 Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssue`,
@@ -252,9 +253,10 @@ changes, update them together:
    — the cached, model-facing reference. It names the local wrappers plus a few high-value
    unwrapped tools, and reminds the model to use `tool.search` for the rest. It deliberately
    does **not** enumerate every server tool.
-3. **The drift baseline** — `DocumentedMCPToolNames` (prompts) and `DocumentedMcpToolNames`
-   (`internal/mcp/tools.go`), kept identical and pinned by tests. This is an **exact,
-   minimal, verified** subset: at startup the CLI checks each name is still on the live
+3. **The drift baseline** — `DocumentedMcpToolNames` (`internal/mcp/tools.go`), the single
+   authoritative list, pinned by tests. (The old duplicate prompts-side baseline was deleted
+   with the rest of the server-owned prompt machinery.) This is an **exact, minimal,
+   verified** subset: at startup the CLI checks each name is still on the live
    server (a missing one signals the doc went stale). Drift is *missing-only* — extra live
    tools (like `worktree.compareDiff` or the `worktree.resource.*` family) are expected and
    ignored, so they don't need to be added here to be callable via `daintree.call`.

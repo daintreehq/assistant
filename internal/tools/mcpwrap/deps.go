@@ -1,5 +1,5 @@
 // Package mcpwrap holds the typed Daintree-MCP wrapper tools: recipe, worktree,
-// forge reads, git-snapshot, focus, and the workflow MCP passthroughs. Each
+// forge reads, git.getProjectPulse, focus, and the workflow MCP passthroughs. Each
 // forwards a validated argument set to a same-named (or remapped) Daintree MCP
 // action via a shared passthrough forwarder. Unlike daintree.call (the raw
 // escape hatch), these carry exact arg JSON-schemas + risk classes so the model

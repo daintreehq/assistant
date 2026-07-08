@@ -33,7 +33,7 @@ internal/
     mcpx/        daintree.status / listTools / call · tool.search · terminal.focus /
                  sendCommand / arm / disarm / disarmAll · copyTree.* · agent.focus*
     mcpwrap/     typed MCP wrappers (USE_TYPED_WRAPPER guard): forge reads ·
-                 worktree.list / getCurrent / createWithRecipe · git.snapshot* ·
+                 worktree.list / getCurrent / createWithRecipe · git.getProjectPulse ·
                  recipe.* · workflow.startWorkOnIssue / prepBranchForReview / focusNextAttention
     contextx/    context.snapshot / terminal.summarize / terminal.read
     extractionx/ terminal.extract / terminal.extract.async
@@ -157,8 +157,8 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   fast with `USE_TYPED_WRAPPER` when a typed equivalent exists (e.g. `agent.launch` →
   `agentTask.spawnForEdits`). Members: `forge.listIssues` / `getIssue` / `listPRs` /
   `getPR` (read), `worktree.list` / `getCurrent` (read) / `createWithRecipe` (project),
-  `recipe.list` (read) / `recipe.run` (project), `git.snapshotRevert` / `snapshotDelete`
-  (git), `workflow.startWorkOnIssue` / `prepBranchForReview` (external) /
+  `recipe.list` (read) / `recipe.run` (project), `git.getProjectPulse` (read),
+  `workflow.startWorkOnIssue` / `prepBranchForReview` (external) /
   `focusNextAttention` (ui).
 - **contextx** — `context.snapshot` (read; MCP status + best-effort context/worktree/
   terminal lists + open queue digest, never throws if MCP is down), `terminal.summarize`

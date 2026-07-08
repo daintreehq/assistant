@@ -40,8 +40,8 @@ var alwaysConfirm = setOf(
 
 // typedConfirm is the SUBSET of alwaysConfirm whose actions are irreversible
 // enough to demand a typed phrase (not a single keypress) from the interactive
-// human: system-level calls (daintree.call) and ALL git operations (the only
-// RiskGit tools discard or delete uncommitted work). This is a single policy
+// human: system-level calls (daintree.call) and ALL git operations (a RiskGit
+// tool can rewrite or publish history — discard, reset, force-push). This is a single policy
 // axis so every surface — cockpit AND classic REPL — gates the same action with
 // equal friction, rather than each UI re-deriving the rule for itself.
 var typedConfirm = setOf(domain.RiskGit, domain.RiskSystem)

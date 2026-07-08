@@ -101,7 +101,7 @@ type Options struct {
 	// as a "DAINTREE_MCP_TOKEN not set" misconfiguration.
 	Anonymous bool
 	// DriftBaseline overrides the documented-tool drift baseline. nil ⇒
-	// DocumentedMcpToolNames (the 60 Daintree tools). A second server passes its OWN
+	// DocumentedMcpToolNames (the 59 Daintree tools). A second server passes its OWN
 	// short baseline (e.g. DocsDocumentedToolNames) so it never false-warns that the
 	// Daintree tools are missing from it.
 	DriftBaseline []string

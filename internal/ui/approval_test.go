@@ -177,7 +177,7 @@ func TestApproval_AllowForeverNeverDecrements(t *testing.T) {
 func TestApproval_FDoesNotRememberGit(t *testing.T) {
 	// Git/system actions enter typed-confirmation mode, so 'f' is just a phrase character
 	// there — it must never become an approve-and-remember-forever shortcut.
-	m, ch := approvalPending(t, confirmReq("git.snapshotDelete", domain.RiskGit, ""))
+	m, ch := approvalPending(t, confirmReq("git.push", domain.RiskGit, ""))
 	if m.pending == nil || !m.pending.requireType {
 		t.Fatal("an irreversible git action did not enter typed-confirmation mode")
 	}
@@ -287,10 +287,10 @@ func TestApproval_PreseededGitNeverAutoApproves(t *testing.T) {
 	// Even a (never-set-in-practice) forever grant on a git tool must not auto-approve:
 	// rememberable() gates the auto path, so it falls through to typed-confirmation.
 	m := harnessModel()
-	m.approvedTools = map[string]int{"git.snapshotDelete": allowForeverCount}
+	m.approvedTools = map[string]int{"git.push": allowForeverCount}
 	ch := make(chan bool, 1)
 	mm := asModel(t, mustModel(m.Update(ApprovalRequestedMsg{
-		Request: confirmReq("git.snapshotDelete", domain.RiskGit, ""), Resolve: ch,
+		Request: confirmReq("git.push", domain.RiskGit, ""), Resolve: ch,
 	})))
 	if mm.pending == nil || !mm.pending.requireType {
 		t.Fatal("a preseeded git grant bypassed typed-confirmation")
@@ -309,11 +309,11 @@ func TestApprovals_UnknownSubcommandReportsUsage(t *testing.T) {
 }
 
 func TestApproval_GitEntersTypedConfirm(t *testing.T) {
-	// The only RiskGit tools (git.snapshotRevert / git.snapshotDelete) discard or delete
-	// uncommitted work — they must require a TYPED confirmation, never single-key approve,
-	// and never be remembered. (Regression guard: an earlier `strings.Contains(tool,"push")`
-	// gate never matched these and let them through with a single keypress.)
-	m, ch := approvalPending(t, confirmReq("git.snapshotDelete", domain.RiskGit, ""))
+	// A RiskGit action (e.g. git.push) may rewrite or publish history — it must require a
+	// TYPED confirmation, never single-key approve, and never be remembered. (Regression
+	// guard: an earlier `strings.Contains(tool,"push")` gate was name-based; the verdict is
+	// driven by the RiskGit class, so ANY git-risk tool routes to typed-confirm.)
+	m, ch := approvalPending(t, confirmReq("git.push", domain.RiskGit, ""))
 	if m.pending == nil || !m.pending.requireType {
 		t.Fatal("an irreversible git action did not enter typed-confirmation mode")
 	}

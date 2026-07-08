@@ -20,7 +20,7 @@ func TestDaintreeCallDenylistNamesWrapper(t *testing.T) {
 		"terminal.sendCommand": "terminal.sendCommand",
 		"terminal.rename":      "terminal.rename",
 		"terminal.arm":         "terminal.arm",
-		"git.snapshotDelete":   "git.snapshotDelete",
+		"git.getProjectPulse":  "git.getProjectPulse",
 	} {
 		decoded, _ := tool.Decode(json.RawMessage(`{"name":"` + raw + `"}`))
 		res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})

@@ -197,27 +197,6 @@ func TestForgeGetPRRejectsNonPositive(t *testing.T) {
 	}
 }
 
-// git.snapshotDelete trims worktreeId and rejects blank, then forwards the
-// trimmed value.
-func TestGitSnapshotTrims(t *testing.T) {
-	m := &fakeMCP{connected: true, result: tools.MCPCallResult{Text: "done"}}
-	tool := findTool(Tools(Deps{}), "git.snapshotDelete")
-	if tool.Risk != domain.RiskGit {
-		t.Fatalf("expected git risk, got %s", tool.Risk)
-	}
-	parsed, err := tool.Decode(json.RawMessage(`{"worktreeId":"  wt1  "}`))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	res := tool.Handle(context.Background(), parsed, ctxWith(m))
-	if !res.Ok {
-		t.Fatalf("expected ok, got %+v", res.Error)
-	}
-	if m.lastArgs["worktreeId"] != "wt1" {
-		t.Fatalf("worktreeId not trimmed: %v", m.lastArgs["worktreeId"])
-	}
-}
-
 // workflow.startWorkOnIssue must NOT forward the assistant-side attachWatcher
 // flag to Daintree.
 func TestStartWorkOnIssueDoesNotForwardAttachWatcher(t *testing.T) {

@@ -185,7 +185,7 @@ The registry is the source of truth (`internal/tools` + the wiring in
 |---|---|
 | `fsx` | `fs.list` `fs.read` `fs.search` |
 | `mcpx` | `daintree.status` `daintree.listTools` `tool.search` `daintree.call` · `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` · `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` · `agent.focusNextWaiting` `agent.focusNextWorking` `agent.focusNextAgent` `agent.focusPreviousAgent` |
-| `mcpwrap` | `recipe.list` `recipe.run` · `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` · `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR` · `git.snapshotRevert` `git.snapshotDelete` · `workflow.startWorkOnIssue` `workflow.prepBranchForReview` `workflow.focusNextAttention` |
+| `mcpwrap` | `recipe.list` `recipe.run` · `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` · `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR` · `git.getProjectPulse` · `workflow.startWorkOnIssue` `workflow.prepBranchForReview` `workflow.focusNextAttention` |
 | `contextx` | `context.snapshot` `terminal.read` `terminal.summarize` |
 | `extractionx` | `terminal.extract` `terminal.extract.async` |
 | `timer` | `timer.schedule` `timer.list` `timer.cancel` |

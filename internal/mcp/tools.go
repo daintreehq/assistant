@@ -50,7 +50,7 @@ func ToolsAdvertiseGrantSupport(tools []ToolInfo, grantNames []string) bool {
 // (NOT parsed from prose, which names non-existent tools as negative examples).
 // Drift is missing-only:
 // documented names absent from the live server are warned; extra live tools are
-// expected and ignored. 61 names — keep byte-stable with the reference prose.
+// expected and ignored. 59 names — keep byte-stable with the reference prose.
 var DocumentedMcpToolNames = []string{
 	"actions.getContext", "actions.list", "actions.search", "actions.getSchema",
 	"agent.focusNextAgent", "agent.focusNextWaiting", "agent.focusNextWorking",
@@ -62,7 +62,7 @@ var DocumentedMcpToolNames = []string{
 	"forge.getIssue", "forge.getPR", "forge.listIssues", "forge.listPRs",
 	"forge.markPRReadyForReview", "forge.mergePR", "forge.removeIssueLabel", "forge.reopenIssue",
 	"forge.reopenPR", "forge.requestChanges", "forge.requestReviewers", "forge.unassignIssue",
-	"git.getProjectPulse", "git.snapshotDelete", "git.snapshotRevert",
+	"git.getProjectPulse",
 	"panel.focus", "recipe.list", "recipe.run",
 	"terminal.arm", "terminal.close", "terminal.disarm", "terminal.disarmAll", "terminal.getOutput",
 	"terminal.getStatus", "terminal.list", "terminal.rename", "terminal.sendCommand", "terminal.waitUntilIdle",

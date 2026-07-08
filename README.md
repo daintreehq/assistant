@@ -217,7 +217,7 @@ A current snapshot; the registry (`internal/tools`) is the source of truth, and
 | Queue             | `queue.publish` `queue.digest` `queue.resolve`                             |
 | Workflows         | `workflow.create` `workflow.get` `workflow.list` `workflow.update` `workflow.startWorkOnIssue` `workflow.prepBranchForReview` |
 | Recipes/worktrees | `recipe.list` `recipe.run` `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` |
-| Git snapshots     | `git.snapshotRevert` `git.snapshotDelete`                                  |
+| Git               | `git.getProjectPulse`                                                       |
 | Context export    | `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` |
 | Forge             | `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR`         |
 | Agent tasks       | `agentTask.spawnForEdits` (no-file-edit escape hatch) `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |

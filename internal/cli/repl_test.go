@@ -83,9 +83,9 @@ func TestBuildConfirmFunc(t *testing.T) {
 			ask := func(string) string { return c.answer }
 			fn := buildConfirmFunc(r, ask)
 			got, err := fn(context.Background(), tools.ConfirmRequest{
-				ToolName:          "git.snapshotDelete",
+				ToolName:          "git.push",
 				Risk:              domain.RiskGit,
-				Summary:           "discard uncommitted work",
+				Summary:           "push branch to origin",
 				NeedsTypedConfirm: c.typed,
 			})
 			if err != nil {

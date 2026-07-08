@@ -27,8 +27,6 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 		"forge.listPRs":                domain.RiskRead,
 		"forge.getPR":                  domain.RiskRead,
 		"git.getProjectPulse":          domain.RiskRead,
-		"git.snapshotDelete":           domain.RiskGit,
-		"git.snapshotRevert":           domain.RiskGit,
 		"workflow.startWorkOnIssue":    domain.RiskExternal,
 		"workflow.prepBranchForReview": domain.RiskRead, // read-only readiness verdict; no commit/push/PR
 		"workflow.focusNextAttention":  domain.RiskUI,
@@ -69,23 +67,6 @@ func TestPassthroughDisconnectedNamesReconnect(t *testing.T) {
 	}
 	if !strings.Contains(res.Error.Message, "/reconnect") {
 		t.Errorf("disconnected hint must name /reconnect: %q", res.Error.Message)
-	}
-}
-
-// A whitespace-only required field is rejected locally — never forwarded to MCP.
-func TestGitSnapshotRejectsBlankWorktreeLocally(t *testing.T) {
-	m := &fakeMCP{connected: true, result: mcpResult("ok")}
-	tool := findTool(Tools(Deps{}), "git.snapshotDelete")
-	parsed, err := tool.Decode(json.RawMessage(`{"worktreeId":"   "}`))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	res := tool.Handle(context.Background(), parsed, ctxWith(m))
-	if res.Ok || res.Error.Code != codeInvalidArgs {
-		t.Fatalf("blank worktreeId should be INVALID_ARGS, got %+v", res)
-	}
-	if m.lastName != "" {
-		t.Fatalf("MCP must not be called for a locally-rejected field, called %q", m.lastName)
 	}
 }
 

@@ -76,7 +76,7 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 86 tools (incl. the agentTask.superviseTerminal
+// over it. The parity worklist expects 84 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
@@ -92,8 +92,8 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	defer a.Shutdown()
 
 	got := len(a.Registry.List())
-	if got != 87 {
-		t.Errorf("registered tools = %d, want 87", got)
+	if got != 85 {
+		t.Errorf("registered tools = %d, want 85", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
@@ -117,7 +117,7 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 			t.Errorf("%s (async-futures family) not registered", name)
 		}
 	}
-	// The 86→87 bump is user.askMultipleChoice (the multiple-choice question tool).
+	// The 84→85 bump is user.askMultipleChoice (the multiple-choice question tool).
 	if !a.Registry.Has("user.askMultipleChoice") {
 		t.Error("user.askMultipleChoice (question tool) not registered")
 	}
