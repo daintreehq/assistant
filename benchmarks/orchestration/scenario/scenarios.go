@@ -30,6 +30,8 @@ func All() []Scenario {
 		fastFinisherRelay(),
 		throttledReadsRecover(),
 		questionSurfacedNotHung(),
+		latencyChat(),
+		latencyToolRead(),
 	}
 }
 
@@ -526,5 +528,52 @@ func questionSurfacedNotHung() Scenario {
 			Under(4 * time.Minute),
 		},
 		Notes: "Mid-task question: the turn must surface the agent's question to the user, not hang or ignore it.",
+	}
+}
+
+// --- latency: response-speed decomposition ------------------------------------
+//
+// These scenarios exist for their RoundDetail metrics, not their checks: cheap,
+// fast, deterministic turns whose per-round latency decomposition (gap /
+// preStream / cache hit) is the benchmark. Diff two runs' latency tables to see
+// what a prompt/backend/CLI change did to user-felt response speed.
+
+func latencyChat() Scenario {
+	return Scenario{
+		ID:       "latency-chat",
+		Category: "latency",
+		Prompt:   "Reply with the single word: pong",
+		Timeout:  2 * time.Minute,
+		Checks: []Check{
+			ResultSuccess(),
+			AnswerContains("pong"),
+			SpawnCount(0),
+		},
+		Notes: "Pure conversational round-trip in an empty world: isolates first-response latency with no tool work.",
+	}
+}
+
+func latencyToolRead() Scenario {
+	return Scenario{
+		ID:       "latency-tool-read",
+		Category: "latency",
+		Prompt:   "The build agent in the build-runner terminal just finished — what BUILD_TAG did it print? Answer with just the tag.",
+		Timeout:  2 * time.Minute,
+		Setup: func(w *world.World) {
+			w.AddTerminal(world.Terminal{
+				ID: "terminal-build-runner", Name: "Claude: build-runner", AgentID: "claude",
+				SpawnedAt: backdated(),
+				Script: world.Script{Phases: []world.Phase{
+					{After: 0, State: "waiting", WaitingReason: "prompt", Append: "Build complete in 41s.\nBUILD_TAG=bt-5f21c9\nAll artifacts uploaded.\n"},
+				}},
+			})
+		},
+		Checks: []Check{
+			ResultSuccess(),
+			WorldCalledAny(1, "terminal.getOutput", "terminal.getStatus"),
+			SpawnCount(0),
+			AnswerContains("bt-5f21c9"),
+		},
+		Notes: "Canonical read-then-answer turn: measures inter-round gaps and prompt-cache reuse across rounds.",
 	}
 }

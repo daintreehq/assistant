@@ -47,6 +47,36 @@ type RunResult struct {
 	DebugLogPath string
 	Stderr       string
 	TimedOut     bool
+
+	// Latency decomposition, reconstructed from the debug-log timeline.
+	TurnMS        int64         // turn.start → turn.end (excludes process boot/exit)
+	FirstSignalMS int64         // turn.start → round 0's SSE meta: first backend signal the user can see
+	RoundDetail   []RoundMetric // one entry per model round, in round order
+}
+
+// RoundMetric is one model round's latency decomposition. PreStreamMS is the
+// user-felt "dead air" of a round: the backend's pre-stream work (selector,
+// prompt assembly) plus upstream prefill up to the first SSE event — on cached
+// prompts it collapses toward the provider's floor, on cache misses it grows
+// with the uncached token count.
+type RoundMetric struct {
+	Round            int    `json:"round"`
+	GapBeforeMS      int64  `json:"gapBeforeMs"`            // prior round's done → this request: tool execution + CLI bookkeeping (round 0: turn.start → request)
+	PreStreamMS      int64  `json:"preStreamMs"`            // request → SSE meta
+	FirstTokenMS     int64  `json:"firstTokenMs,omitempty"` // request → first content delta (0 on tool-call-only rounds)
+	TotalMS          int64  `json:"totalMs"`                // request → done (the whole round)
+	PromptTokens     int    `json:"promptTokens"`
+	CachedTokens     int    `json:"cachedTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	FinishReason     string `json:"finishReason,omitempty"`
+}
+
+// CacheHitPct is the round's prompt-cache hit rate in percent (0 when unknown).
+func (m RoundMetric) CacheHitPct() float64 {
+	if m.PromptTokens <= 0 {
+		return 0
+	}
+	return 100 * float64(m.CachedTokens) / float64(m.PromptTokens)
 }
 
 // Event is one parsed JSONL line from the --json stream.

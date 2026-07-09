@@ -183,9 +183,12 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   (`domain.ControlMessageCount == 0`), only `user`/`assistant`/`tool` roles reach the wire,
   and every volatile per-turn fact rides the **structured** `request.runtime` / `request.turn`
   blocks (inert data the backend renders) rather than mutating an earlier message. See
-  `docs/BACKEND.md`. (The backend assembles most-stable-first — base prompt → integrations →
-  active skill bodies → conversation → synthetic skill-load → runtime/turn context LAST — so
-  skill bodies sit in the cached prefix.)
+  `docs/BACKEND.md`. (The backend assembles stable-content-first — base prompt → integrations →
+  active skill bodies → response contract → conversation → runtime/turn context LAST as one
+  user-role injected-context block. Only STABLE content may be system-role: DeepSeek
+  serializes [all system messages] → [tools] → [conversation], so a volatile system message
+  anywhere in the array lands before the ~18k-token tool schemas and busts their cache —
+  measured 2026-07-08 by the latency benchmark, 36% → 99% prompt-cache hit after the fix.)
 - **Single-owner, durable supervision (the persistent supervisor).** Exactly ONE
   process at a time owns a project's `state.db` — an open assistant or the
   `daintree-assistant daemon` — serialized by the flock owner lease (`internal/ipc`).

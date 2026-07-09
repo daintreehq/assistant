@@ -200,6 +200,8 @@ func printSummary(results []runner.ScenarioResult, elapsed time.Duration) {
 	}
 	fmt.Printf("\n%d/%d trials passed in %s\n", passed, len(results), elapsed.Round(time.Second))
 
+	printLatency(results)
+
 	// Failed-check detail: the part you actually read.
 	for _, r := range results {
 		if r.Passed {
@@ -216,6 +218,33 @@ func printSummary(results []runner.ScenarioResult, elapsed time.Duration) {
 		}
 		if r.DebugLog != "" {
 			fmt.Printf("    debug log: %s\n", r.DebugLog)
+		}
+	}
+}
+
+// printLatency renders the per-round latency decomposition for the latency
+// category (the scenarios that exist FOR these numbers). Other categories keep
+// the summary table readable; their full RoundDetail is in the results JSON.
+func printLatency(results []runner.ScenarioResult) {
+	any := false
+	for _, r := range results {
+		if r.Category != "latency" || len(r.RoundDetail) == 0 {
+			continue
+		}
+		if !any {
+			fmt.Printf("\nLATENCY (per round: gapBefore → preStream → total; cache = cached/prompt tokens)\n")
+			any = true
+		}
+		fmt.Printf("%-22s t%-3d firstSignal=%5dms  turn=%6dms  rounds=%d\n",
+			r.ID, r.Trial, r.FirstSignalMS, r.TurnMS, r.Rounds)
+		for _, m := range r.RoundDetail {
+			ftok := "     -"
+			if m.FirstTokenMS > 0 {
+				ftok = fmt.Sprintf("%5dms", m.FirstTokenMS)
+			}
+			fmt.Printf("    r%-2d gap %6dms   preStream %6dms   firstTok %s   total %6dms   %6d tok (%3.0f%% cached)  %s\n",
+				m.Round, m.GapBeforeMS, m.PreStreamMS, ftok, m.TotalMS,
+				m.PromptTokens, m.CacheHitPct(), m.FinishReason)
 		}
 	}
 }

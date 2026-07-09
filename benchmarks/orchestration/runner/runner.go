@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -72,6 +74,11 @@ type ScenarioResult struct {
 	Answer       string         `json:"answer"`
 	DebugLog     string         `json:"debugLog"`
 	Error        string         `json:"error,omitempty"`
+
+	// Latency decomposition (see scenario.RoundMetric).
+	TurnMS        int64                  `json:"turnMs,omitempty"`
+	FirstSignalMS int64                  `json:"firstSignalMs,omitempty"`
+	RoundDetail   []scenario.RoundMetric `json:"roundDetail,omitempty"`
 }
 
 // RunScenario executes one trial of one scenario.
@@ -199,6 +206,9 @@ func RunScenario(ctx context.Context, bin string, sc scenario.Scenario, opts Opt
 	res.TimedOut = rr.TimedOut
 	res.Answer = rr.FinalContent
 	res.DebugLog = rr.DebugLogPath
+	res.TurnMS = rr.TurnMS
+	res.FirstSignalMS = rr.FirstSignalMS
+	res.RoundDetail = rr.RoundDetail
 	return res
 }
 
@@ -254,9 +264,26 @@ func findDebugLog(logDir string) string {
 	return ""
 }
 
-// parseDebugLog extracts rounds + usage totals from backend.respond.done events.
-// Format (debuglog.formatLine): a timestamped event line with inline scalars,
-// then indented blocks; `usage` is a block holding indented JSON.
+// roundTimeline accumulates one model round's trace events while scanning the log.
+type roundTimeline struct {
+	round      int
+	requestTS  time.Time
+	metaTS     time.Time
+	doneTS     time.Time
+	totalMS    int64
+	firstTokMS int64
+	finish     string
+	usage      scenario.UsageTotals
+	hasDone    bool
+}
+
+// parseDebugLog reconstructs the turn's timeline from the trace events:
+// turn.start → per-round backend.respond.{request,meta,done} → turn.end. It
+// fills round counts + usage totals (as before) AND the per-round latency
+// decomposition (RoundDetail / FirstSignalMS / TurnMS). Format
+// (debuglog.formatLine): "<ISO-ts>  <event>[  k=v ...]" lines with ms-precision
+// UTC timestamps, then indented blocks; `usage` is a block of indented JSON
+// under backend.respond.done.
 func parseDebugLog(rr *scenario.RunResult) {
 	if rr.DebugLogPath == "" {
 		return
@@ -267,12 +294,23 @@ func parseDebugLog(rr *scenario.RunResult) {
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	inDone := false
-	inUsage := false
-	var usageBuf strings.Builder
-	flush := func() {
+	var (
+		turnStart time.Time
+		runID     string // first turn's runId — later turns (a wake, a retry) are ignored
+		rounds    = map[int]*roundTimeline{}
+		curDone   *roundTimeline // done event whose indented usage block is pending
+		inUsage   bool
+		usageBuf  strings.Builder
+	)
+	ensure := func(n int) *roundTimeline {
+		if rt, ok := rounds[n]; ok {
+			return rt
+		}
+		rt := &roundTimeline{round: n}
+		rounds[n] = rt
+		return rt
+	}
+	flushUsage := func() {
 		if usageBuf.Len() == 0 {
 			return
 		}
@@ -281,29 +319,114 @@ func parseDebugLog(rr *scenario.RunResult) {
 			CompletionTokens int `json:"completionTokens"`
 			CachedTokens     int `json:"cachedTokens"`
 		}
-		if json.Unmarshal([]byte(usageBuf.String()), &u) == nil {
-			rr.Usage.PromptTokens += u.PromptTokens
-			rr.Usage.CompletionTokens += u.CompletionTokens
-			rr.Usage.CachedTokens += u.CachedTokens
+		if json.Unmarshal([]byte(usageBuf.String()), &u) == nil && curDone != nil {
+			curDone.usage = scenario.UsageTotals{
+				PromptTokens:     u.PromptTokens,
+				CompletionTokens: u.CompletionTokens,
+				CachedTokens:     u.CachedTokens,
+			}
 		}
 		usageBuf.Reset()
 	}
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		isEventLine := len(line) > 0 && line[0] >= '0' && line[0] <= '9'
 		if isEventLine {
-			flush()
+			flushUsage()
 			inUsage = false
 			// Line shape: "<ts>  <event>[  k=v ...]" — compare the event token
 			// exactly (a substring match could hit an inline field value).
 			parts := strings.SplitN(line, "  ", 3)
-			inDone = len(parts) >= 2 && parts[1] == "backend.respond.done"
-			if inDone {
-				rr.Rounds++
+			if len(parts) < 2 {
+				curDone = nil
+				continue
+			}
+			ts, tsErr := time.Parse(time.RFC3339, parts[0])
+			rest := ""
+			if len(parts) == 3 {
+				rest = parts[2]
+			}
+			// Scope to the FIRST turn: a wake/retry turn in the same log (runId
+			// differs) must not merge its round numbers into this timeline. Read
+			// runId from the RIGHT — free-text previews sort before it and could
+			// contain a "  runId=" lookalike; every real field after it is a
+			// machine value.
+			if evRun := strFieldLast(rest, "runId"); runID != "" && evRun != "" && evRun != runID {
+				curDone = nil
+				continue
+			}
+			switch parts[1] {
+			case "turn.start":
+				// promptPreview (free user text) sorts before runId — read from the right.
+				if turnStart.IsZero() && tsErr == nil {
+					turnStart = ts
+					runID = strFieldLast(rest, "runId")
+				}
+				curDone = nil
+			case "backend.respond.request":
+				if n, ok := intField(rest, "round"); ok && tsErr == nil {
+					rt := ensure(n)
+					if rt.requestTS.IsZero() {
+						rt.requestTS = ts
+					}
+				}
+				curDone = nil
+			case "backend.respond.meta":
+				if n, ok := intField(rest, "round"); ok && tsErr == nil {
+					rt := ensure(n)
+					if rt.metaTS.IsZero() {
+						rt.metaTS = ts
+					}
+				}
+				curDone = nil
+			case "backend.respond.done":
+				// done lines carry contentPreview — free model text that sorts
+				// BEFORE these keys and may itself contain "  key=" lookalikes, so
+				// extract from the RIGHT (the fields after the preview are all
+				// machine values). See strFieldLast.
+				if n, ok := intFieldLast(rest, "round"); ok {
+					rt := ensure(n)
+					if tsErr == nil {
+						rt.doneTS = ts
+					}
+					rt.hasDone = true
+					rt.totalMS = int64FieldLast(rest, "durationMs")
+					rt.firstTokMS = int64FieldLast(rest, "firstTokenMs")
+					rt.finish = strFieldLast(rest, "finishReason")
+					curDone = rt
+				} else {
+					curDone = nil
+				}
+			case "backend.respond.error":
+				// A failed round has no done event. Record its end so RoundDetail is
+				// honest (TotalMS + finish=error) and the NEXT round's GapBefore
+				// chains from the failure instant, not from this round's request.
+				// hasDone stays false: rr.Rounds remains "completed rounds".
+				if n, ok := intField(rest, "round"); ok {
+					rt := ensure(n)
+					if tsErr == nil {
+						rt.doneTS = ts
+					}
+					rt.totalMS = int64Field(rest, "durationMs")
+					rt.finish = "error"
+				}
+				curDone = nil
+			case "turn.end":
+				// replyPreview sorts AFTER durationMs here, so first-match is the
+				// real field (the preview can't shadow a key that precedes it).
+				if rr.TurnMS == 0 {
+					rr.TurnMS = int64Field(rest, "durationMs")
+				}
+				curDone = nil
+			default:
+				curDone = nil
 			}
 			continue
 		}
-		if !inDone {
+		if curDone == nil {
 			continue
 		}
 		if strings.HasPrefix(line, "  usage:") {
@@ -315,10 +438,146 @@ func parseDebugLog(rr *scenario.RunResult) {
 				usageBuf.WriteString(strings.TrimPrefix(line, "    "))
 				usageBuf.WriteString("\n")
 			} else {
-				flush()
+				flushUsage()
 				inUsage = false
 			}
 		}
 	}
-	flush()
+	flushUsage()
+
+	// Assemble the ordered decomposition. GapBefore chains prior-done → request
+	// (round 0 chains from turn.start), so tool time and CLI bookkeeping between
+	// rounds is visible; an errored round (no done) chains from its request.
+	nums := make([]int, 0, len(rounds))
+	for n := range rounds {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	prev := turnStart
+	for _, n := range nums {
+		rt := rounds[n]
+		rm := scenario.RoundMetric{
+			Round:            n,
+			TotalMS:          rt.totalMS,
+			FirstTokenMS:     rt.firstTokMS,
+			FinishReason:     rt.finish,
+			PromptTokens:     rt.usage.PromptTokens,
+			CachedTokens:     rt.usage.CachedTokens,
+			CompletionTokens: rt.usage.CompletionTokens,
+		}
+		if !rt.requestTS.IsZero() && !rt.metaTS.IsZero() {
+			rm.PreStreamMS = rt.metaTS.Sub(rt.requestTS).Milliseconds()
+		}
+		if !rt.requestTS.IsZero() && !prev.IsZero() {
+			rm.GapBeforeMS = rt.requestTS.Sub(prev).Milliseconds()
+		}
+		if rt.hasDone {
+			rr.Rounds++
+			rr.Usage.PromptTokens += rt.usage.PromptTokens
+			rr.Usage.CompletionTokens += rt.usage.CompletionTokens
+			rr.Usage.CachedTokens += rt.usage.CachedTokens
+		}
+		switch {
+		case !rt.doneTS.IsZero():
+			prev = rt.doneTS
+		case !rt.requestTS.IsZero():
+			prev = rt.requestTS
+		}
+		rr.RoundDetail = append(rr.RoundDetail, rm)
+	}
+	if len(nums) > 0 && !turnStart.IsZero() {
+		if first := rounds[nums[0]]; !first.metaTS.IsZero() {
+			rr.FirstSignalMS = first.metaTS.Sub(turnStart).Milliseconds()
+		}
+	}
+}
+
+// Inline-field extraction. formatLine renders fields ALPHABETICALLY as
+// "  k=v" pairs, and free-text string values (contentPreview, replyPreview,
+// promptPreview — bounded, newline-free) are NOT escaped, so a preview can
+// contain a "  key=" lookalike. Disambiguation uses the sorted order:
+//   - a key that sorts BEFORE every free-text field on its line → first match
+//     is the real field (strField/intField);
+//   - a key that sorts AFTER the free-text field, with only machine values
+//     behind it → LAST match is the real field (strFieldLast/intFieldLast).
+// Every extraction call site notes which case applies.
+
+// intField extracts an integer "  k=v" inline field (first match).
+func intField(rest, key string) (int, bool) {
+	return parseIntField(strField(rest, key))
+}
+
+// intFieldLast is intField scanning from the right (last match).
+func intFieldLast(rest, key string) (int, bool) {
+	return parseIntField(strFieldLast(rest, key))
+}
+
+func parseIntField(v string) (int, bool) {
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// int64Field is intField for int64, returning 0 when absent.
+func int64Field(rest, key string) int64 {
+	n, ok := intField(rest, key)
+	if !ok {
+		return 0
+	}
+	return int64(n)
+}
+
+// int64FieldLast is int64Field scanning from the right.
+func int64FieldLast(rest, key string) int64 {
+	n, ok := intFieldLast(rest, key)
+	if !ok {
+		return 0
+	}
+	return int64(n)
+}
+
+// strField extracts a string inline field value (up to the next two-space
+// separator or end of line), taking the FIRST occurrence. Empty when absent.
+func strField(rest, key string) string {
+	tok := key + "="
+	var idx int
+	switch {
+	case strings.HasPrefix(rest, tok):
+		idx = 0
+	default:
+		i := strings.Index(rest, "  "+tok)
+		if i < 0 {
+			return ""
+		}
+		idx = i + 2
+	}
+	return fieldValueAt(rest, idx+len(tok))
+}
+
+// strFieldLast is strField taking the LAST occurrence — for keys that sort
+// after a free-text preview field on their line.
+func strFieldLast(rest, key string) string {
+	tok := key + "="
+	if i := strings.LastIndex(rest, "  "+tok); i >= 0 {
+		return fieldValueAt(rest, i+2+len(tok))
+	}
+	if strings.HasPrefix(rest, tok) {
+		return fieldValueAt(rest, len(tok))
+	}
+	return ""
+}
+
+// fieldValueAt returns the field value starting at byte offset idx, ending at
+// the next two-space separator or end of line.
+func fieldValueAt(rest string, idx int) string {
+	val := rest[idx:]
+	if end := strings.Index(val, "  "); end >= 0 {
+		val = val[:end]
+	}
+	return val
 }

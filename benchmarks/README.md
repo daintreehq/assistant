@@ -66,9 +66,44 @@ go run ./benchmarks/orchestration -parallel 4        # concurrent trials
 go run ./benchmarks/orchestration -bin ./bin/daintree-assistant   # skip rebuild
 ```
 
-Categories: `status`, `extract`, `spawn`, `interact`, `fault`. The fault
+Categories: `status`, `extract`, `spawn`, `interact`, `fault`, `latency`. The fault
 scenarios reproduce Daintree quirks that caused real incidents (blank-padded
 status tails, rate-limited reads, never-finishing agents, sub-2s finishers).
+
+### The latency suite (response speed)
+
+The `latency` scenarios exist for their **RoundDetail metrics**, not their checks:
+cheap, fast turns whose per-round decomposition is the benchmark. Every trial
+reconstructs the turn timeline from the debug log and reports, per model round:
+
+- `gapBeforeMs` — prior round's done → this request (tool execution + CLI bookkeeping)
+- `preStreamMs` — request → SSE meta: the user-felt "dead air" (backend selector +
+  prompt assembly + upstream prefill/thinking up to the first event)
+- `firstTokenMs` — request → first content delta (absent on tool-call-only rounds)
+- prompt/cached tokens — the round's prompt-cache hit rate
+
+Run it serially (parallel trials contend and skew latency):
+
+```bash
+go run ./benchmarks/orchestration -filter latency -trials 4 -parallel 1
+```
+
+The results JSON carries the same fields (`roundDetail`, `firstSignalMs`,
+`turnMs`) — diff two runs to see what a change did to response speed. The
+backend logs the matching server-side split per request (`selector_ms`,
+`pre_upstream_ms`, `respond_upstream_open.upstream_first_event_ms`).
+
+**Cache forensics:** set `DAINTREE_DUMP_UPSTREAM_DIR=<dir>` on the backend to
+dump every upstream request body as numbered JSON, then diff two dumps to find
+the exact divergence byte. This is how the 2026-07-08 cache-busting layout bug
+was found (volatile system-role runtime context serialized before the tool
+schemas — 36% cache hit on byte-identical turns; 99% after the fix). The rule it
+established: **only stable content may ride a system-role message** — DeepSeek
+serializes [all system messages] → [tools] → [conversation] regardless of array
+order. Known remaining lever (measured, not yet taken): the skill selector's
+serial round-trip costs ~1.5s of every round-0 preStream; racing a speculative
+main call with the prior skill set against the selector would erase it whenever
+selection is unchanged.
 
 Each trial is fully isolated: its own fake world, its own
 `DAINTREE_ASSISTANT_STATE_DIR`, its own debug log, its own empty CWD. One-shot
