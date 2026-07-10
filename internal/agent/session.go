@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 )
 
 // coreToolNames are the essential tools asserted to be registered at boot
@@ -561,6 +562,18 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		return domain.CancelledReply
 	}
 
+	// 3a. Join the splash-time stable discovery before the first request. A fast submit
+	// during the handoff can otherwise beat Bubble Tea's bootstrap command and send an
+	// avoidably empty project/agent snapshot. The app callback is bounded and fail-open.
+	if s.deps.EnsureStartupContext != nil {
+		s.deps.EnsureStartupContext(ctx)
+	}
+	if ctx.Err() != nil {
+		s.events.Phase(domain.PhaseCancelled)
+		s.events.AssistantCancelled("")
+		return domain.CancelledReply
+	}
+
 	// 3b. Recall relevant memories ONCE per turn (best-effort), seeded by the
 	//     originating ask. The top BM25 hits are injected into every round's merged
 	//     memories footer block (`## Relevant` subblock) so distilled, non-pinned facts
@@ -701,11 +714,11 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 		s.events.AssistantStart()
 
-		// 10d. Stream the backend. The CLI sends ONLY the visible conversation
-		//      (user/assistant/tool); the runtime + per-turn context travel as
-		//      STRUCTURED data (request.runtime / request.turn), not as a system/footer
-		//      message. The backend owns the system prompt, skill selection, and prompt
-		//      assembly, and streams named SSE events (meta / delta / done / error).
+		// 10d. Stream the backend. The CLI sends one stable, request-only user-role
+		//      startup-data message before the visible conversation; runtime + per-turn
+		//      context still travel through the existing structured request.runtime /
+		//      request.turn contract. The backend owns every system prompt, skill
+		//      selection, and final assembly, and streams named SSE events.
 		gotToken := false
 		// Read an immutable SNAPSHOT of the history under the lock, then stream with the
 		// lock RELEASED — the call is long, and a concurrent InjectNote (daemon) or
@@ -725,6 +738,21 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			return msg
 		}
 
+		promptContext := s.promptContext()
+		worktreeReadAttempted := s.deps.CurrentWorktreeFetcher != nil
+		if worktreeReadAttempted {
+			// Assign nil too: a failed live read means "unknown this round", not "reuse
+			// the cached splash/reconnect selection as if it were still current".
+			worktree := s.currentWorktreeContext(ctx)
+			// The read itself can degrade the shared MCP transport. Re-snapshot afterward
+			// so this same runtime tail never claims MCP is connected after CallTool tore it
+			// down; then preserve the explicit success/none/failure result from this read.
+			promptContext = s.promptContext()
+			promptContext.Worktree = worktree
+		}
+		if startup := buildStartupMessage(promptContext); startup != nil {
+			bmsgs = append([]backend.Message{*startup}, bmsgs...)
+		}
 		req := backend.RespondRequest{
 			Session: backend.RespondSession{
 				ID:                  s.deps.SessionID,
@@ -738,7 +766,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				Tools:      btools,
 				ToolChoice: "auto",
 			},
-			Runtime:    s.buildRuntimeContext(s.currentRoster()),
+			Runtime:    s.buildRuntimeContext(promptContext, s.currentRoster(), worktreeReadAttempted),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
@@ -1593,29 +1621,48 @@ func (s *Session) emitBackendUsage(u backend.Usage, model string) {
 	s.events.Usage(ev)
 }
 
-// buildRuntimeContext maps the session's PromptContext to the backend's structured
-// runtime block — environment/project facts the backend renders as inert data
-// (NOT a system prompt). The context is pulled LIVE every round when a provider is
-// wired (PromptContextFunc), so a mid-session MCP connect / tier change / scheduler
-// start reaches the backend on the next request — the structured-data replacement for
-// the old RefreshRuntimeContext push. The worktree is read per round too. The
-// openTerminals snapshot is read from the cross-turn cache (currentRoster) fresh EACH
-// round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn is
-// reflected on the next round without ever blocking the turn on an MCP read.
-func (s *Session) buildRuntimeContext(openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
+// promptContext pulls the app's atomic snapshot once per backend round so the startup
+// prefix and fresh runtime tail can never observe different halves of a reconnect.
+func (s *Session) promptContext() prompts.MainPromptContext {
 	pc := s.deps.PromptContext
 	if s.deps.PromptContextFunc != nil {
 		pc = s.deps.PromptContextFunc()
 	}
+	return pc
+}
+
+const currentWorktreeReadBudget = time.Second
+
+func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeContext {
+	if s.deps.CurrentWorktreeFetcher == nil {
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(currentWorktreeReadBudget, cancel)
+	worktree := s.deps.CurrentWorktreeFetcher(cctx)
+	timer.Stop()
+	cancel()
+	return worktree
+}
+
+// buildRuntimeContext maps PromptContext onto the backend's existing structured runtime
+// contract. Stable project/agent details ride only the request-only startup message so
+// they are not duplicated in the backend's fresh runtime tail. The context is pulled live
+// every round, so a mid-session MCP connect / tier change / scheduler start reaches the
+// next request. The
+// openTerminals snapshot is read from the cross-turn cache (currentRoster) fresh EACH
+// round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn is
+// reflected on the next round without ever blocking the turn on an MCP read.
+func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminals []backend.OpenTerminal, worktreeReadAttempted bool) *backend.RuntimeContext {
 	rc := &backend.RuntimeContext{
-		PermissionTier:      string(pc.Tier),
-		ProjectPath:         pc.ProjectPath,
-		ProjectID:           pc.ProjectID,
-		ConfiguredAgentIDs:  pc.ConfiguredAgentIDs,
-		SchedulerActive:     pc.SchedulerActive,
-		ActiveWorktree:      s.activeWorktree(),
-		ProjectInstructions: pc.ProjectInstructions,
-		OpenTerminals:       openTerminals,
+		PermissionTier:  string(pc.Tier),
+		SchedulerActive: pc.SchedulerActive,
+		OpenTerminals:   openTerminals,
+	}
+	if label := worktreeRuntimeLabel(pc.Worktree); label != "" {
+		rc.ActiveWorktree = label
+	} else if !worktreeReadAttempted {
+		rc.ActiveWorktree = s.activeWorktree()
 	}
 	if pc.MCPConnected || strings.TrimSpace(pc.MCPStatusLine) != "" {
 		// When connected the backend builds its status line from transport + tool_count
@@ -2207,6 +2254,14 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 		return nil
 	}
 	return append([]backend.OpenTerminal(nil), s.roster...)
+}
+
+// WarmOpenTerminals starts the same detached roster refresh normally kicked at turn
+// start. App.ConnectMcp calls it during the splash so the first user request can already
+// carry terminal metadata; the existing in-flight gate makes repeated connect/bootstrap
+// calls harmless.
+func (s *Session) WarmOpenTerminals() {
+	s.refreshRosterAsync()
 }
 
 // refreshRosterAsync starts a detached, best-effort refresh of the cached open-terminal

@@ -240,6 +240,9 @@ func TestReadOnlyAllowlistOnlyDocumentedReads(t *testing.T) {
 	for _, n := range DocsDocumentedToolNames {
 		documented[n] = struct{}{}
 	}
+	for _, n := range AdditionalReadToolNames {
+		documented[n] = struct{}{}
+	}
 	for n := range readOnlyToolNames {
 		if _, ok := documented[n]; !ok {
 			t.Errorf("read-only allowlist entry %q is not a documented MCP tool", n)

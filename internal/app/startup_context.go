@@ -1,0 +1,392 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+)
+
+// startupReadTimeout bounds every best-effort Daintree snapshot read. Use a plain
+// cancellation timer rather than context.WithTimeout: the shared MCP client treats
+// DeadlineExceeded as a transport failure, while Canceled is an intentional abort that
+// must not degrade a healthy connection.
+const startupReadTimeout = 5 * time.Second
+
+// refreshStartupContext fetches the stable project/agent snapshot and current
+// worktree concurrently. Interactive boot calls this while the logo is animating; a
+// reconnect replaces the whole cache atomically only after all reads settle. Failures are
+// represented as nil snapshots, never stale values from a prior connection.
+func (a *App) refreshStartupContext(ctx context.Context, connected bool) {
+	a.updateStartupContext(ctx, connected, true)
+}
+
+func (a *App) ensureStartupContext(ctx context.Context, connected bool) {
+	a.updateStartupContext(ctx, connected, false)
+}
+
+func (a *App) updateStartupContext(ctx context.Context, connected, force bool) {
+	a.startupRefreshMu.Lock()
+	defer a.startupRefreshMu.Unlock()
+
+	if !connected {
+		a.startupMu.Lock()
+		a.startupGeneration++
+		a.cachedProject = nil
+		a.cachedAgents = nil
+		a.cachedWorktree = nil
+		a.startupReady = false
+		a.startupMu.Unlock()
+		return
+	}
+	if !force {
+		a.startupMu.RLock()
+		ready := a.startupReady
+		a.startupMu.RUnlock()
+		if ready {
+			return
+		}
+	}
+	a.startupMu.Lock()
+	a.startupGeneration++
+	generation := a.startupGeneration
+	a.startupMu.Unlock()
+
+	projectCh := make(chan *prompts.ProjectContext, 1)
+	agentsCh := make(chan *prompts.AgentRosterContext, 1)
+	worktreeCh := make(chan *prompts.WorktreeContext, 1)
+	go func() { projectCh <- a.fetchProjectContext(ctx) }()
+	go func() { agentsCh <- a.fetchAgentRoster(ctx) }()
+	go func() { worktreeCh <- a.fetchWorktreeContext(ctx) }()
+
+	project := <-projectCh
+	agents := <-agentsCh
+	worktree := <-worktreeCh
+	a.startupMu.Lock()
+	if a.startupGeneration != generation {
+		a.startupMu.Unlock()
+		return
+	}
+	a.cachedProject = project
+	a.cachedAgents = agents
+	a.cachedWorktree = worktree
+	// A canceled splash must not count as ready: Bubble Tea bootstrap or a fast first
+	// submit will join the serialized refresh and retry. Ordinary read failures with a
+	// live parent context are an explicit degraded snapshot and should fail open rather
+	// than stalling every later user turn on repeated discovery attempts.
+	a.startupReady = ctx.Err() == nil
+	a.startupMu.Unlock()
+}
+
+// ensureStartupForTurn joins the splash prefetch when it is still running, or performs
+// the same bounded discovery itself after a canceled/fast handoff. Thus the first
+// backend request never races an empty boot cache merely because the user submitted
+// before Bubble Tea's bootstrap command completed.
+func (a *App) ensureStartupForTurn(ctx context.Context) {
+	// Taking the lifecycle gate first joins an in-flight splash/bootstrap connect. Read
+	// all gate state while holding it so a disconnected, already-attempted host fails open
+	// on later turns instead of repeating an unbounded network handshake every time.
+	a.mcpLifecycleMu.Lock()
+	a.startupMu.RLock()
+	ready := a.startupReady
+	a.startupMu.RUnlock()
+	connected := a.MCP.Status().Connected
+	attempted := a.startupConnectAttempted
+	a.mcpLifecycleMu.Unlock()
+	if (ready && connected) || attempted {
+		return
+	}
+	// The prior attempt was canceled by splash handoff (or no boot path ran), so this live
+	// turn gets one bounded retry before the first backend request.
+	a.ConnectMcp(ctx)
+}
+
+// refreshCurrentWorktree re-reads the live renderer selection for every backend round
+// and publishes successful results into the shared snapshot. A nil return is an
+// unavailable read; `{Present:false}` is Daintree reporting no resolvable current row.
+func (a *App) refreshCurrentWorktree(ctx context.Context) *prompts.WorktreeContext {
+	a.startupMu.RLock()
+	generation := a.startupGeneration
+	a.startupMu.RUnlock()
+	worktree := a.fetchWorktreeContext(ctx)
+	if worktree == nil {
+		return nil
+	}
+	a.startupMu.Lock()
+	if a.startupGeneration != generation {
+		a.startupMu.Unlock()
+		return nil
+	}
+	a.cachedWorktree = worktree
+	a.startupMu.Unlock()
+	return worktree
+}
+
+func (a *App) fetchProjectContext(ctx context.Context) *prompts.ProjectContext {
+	if res, ok := a.callStartupRead(ctx, "project.getCurrent"); ok {
+		obj := mergedResultObject(res)
+		if raw, present := obj["project"]; present {
+			if raw == nil {
+				return nil
+			}
+			var row struct {
+				ID                    string `json:"id"`
+				Name                  string `json:"name"`
+				Path                  string `json:"path"`
+				Status                string `json:"status"`
+				DaintreeConfigPresent *bool  `json:"daintreeConfigPresent"`
+				InRepoSettings        *bool  `json:"inRepoSettings"`
+			}
+			if decodeAny(raw, &row) {
+				return &prompts.ProjectContext{
+					ID:                    strings.TrimSpace(row.ID),
+					Name:                  strings.TrimSpace(row.Name),
+					Path:                  strings.TrimSpace(row.Path),
+					Status:                strings.TrimSpace(row.Status),
+					DaintreeConfigPresent: row.DaintreeConfigPresent,
+					InRepoSettings:        row.InRepoSettings,
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (a *App) fetchAgentRoster(ctx context.Context) *prompts.AgentRosterContext {
+	if res, ok := a.callStartupRead(ctx, "agent.listAvailable"); ok {
+		if rows, complete, availabilityComplete, parsed := parseAvailableAgents(res); parsed {
+			return &prompts.AgentRosterContext{
+				Agents:               rows,
+				Complete:             complete,
+				AvailabilityComplete: availabilityComplete,
+				TotalCount:           len(rows),
+			}
+		}
+	}
+
+	return nil
+}
+
+func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, bool, bool) {
+	type rawAgent struct {
+		ID             string `json:"id"`
+		DisplayName    string `json:"displayName"`
+		Source         string `json:"source"`
+		Availability   string `json:"availability"`
+		Installed      *bool  `json:"installed"`
+		Launchable     *bool  `json:"launchable"`
+		Pinned         *bool  `json:"pinned"`
+		ToolbarVisible *bool  `json:"toolbarVisible"`
+	}
+	var complete, availabilityComplete, parsed bool
+	byID := map[string]prompts.AgentContext{}
+	order := make([]string, 0)
+	addRows := func(raw any) bool {
+		if raw == nil {
+			return false
+		}
+		var rows []rawAgent
+		if !decodeAny(raw, &rows) {
+			return false
+		}
+		for _, raw := range rows {
+			id := raw.ID
+			if strings.TrimSpace(id) == "" || id == "daintree-assistant" {
+				continue
+			}
+			row, exists := byID[id]
+			if !exists {
+				row.ID = id
+				order = append(order, id)
+			}
+			if value := strings.TrimSpace(raw.DisplayName); value != "" {
+				row.DisplayName = value
+			}
+			if value := strings.TrimSpace(raw.Source); value != "" {
+				row.Source = value
+			}
+			if value := strings.TrimSpace(raw.Availability); value != "" {
+				row.Availability = value
+			}
+			if raw.Installed != nil {
+				row.Installed = raw.Installed
+			}
+			if raw.Launchable != nil {
+				row.Launchable = raw.Launchable
+			}
+			if raw.Pinned != nil {
+				row.Pinned = raw.Pinned
+			}
+			if raw.ToolbarVisible != nil {
+				row.ToolbarVisible = raw.ToolbarVisible
+			}
+			byID[id] = row
+		}
+		return true
+	}
+	applyObject := func(obj map[string]any) {
+		if raw, present := obj["agents"]; present {
+			parsed = addRows(raw) || parsed
+		}
+		if value, ok := obj["complete"].(bool); ok {
+			complete = value
+		}
+		if value, ok := obj["availabilityComplete"].(bool); ok {
+			availabilityComplete = value
+		}
+	}
+	if strings.TrimSpace(res.Text) != "" {
+		var obj map[string]any
+		if json.Unmarshal([]byte(res.Text), &obj) == nil {
+			applyObject(obj)
+		}
+	}
+	if obj, ok := res.StructuredContent.(map[string]any); ok {
+		applyObject(obj) // structured values update text rows without dropping text-only ids
+	}
+	if !parsed {
+		return nil, false, false, false
+	}
+	rows := make([]prompts.AgentContext, 0, len(order))
+	for _, id := range order {
+		row := byID[id]
+		if row.Installed == nil && row.Availability != "" {
+			value := availabilityInstalled(row.Availability)
+			row.Installed = &value
+		}
+		if row.Launchable == nil && row.Availability != "" {
+			value := row.Availability == "ready" || row.Availability == "unauthenticated"
+			row.Launchable = &value
+		}
+		rows = append(rows, row)
+	}
+	return rows, complete, availabilityComplete, true
+}
+
+func availabilityInstalled(state string) bool {
+	switch state {
+	case "installed", "ready", "blocked", "unauthenticated":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) fetchWorktreeContext(ctx context.Context) *prompts.WorktreeContext {
+	res, ok := a.callStartupRead(ctx, "worktree.getCurrent")
+	if !ok {
+		return nil
+	}
+	obj := mergedResultObject(res)
+	raw, present := obj["worktree"]
+	if !present {
+		return nil
+	}
+	if raw == nil {
+		return &prompts.WorktreeContext{Present: false}
+	}
+	var row struct {
+		ID          string `json:"id"`
+		Path        string `json:"path"`
+		Branch      string `json:"branch"`
+		IsMain      bool   `json:"isMain"`
+		IssueNumber *int   `json:"issueNumber"`
+		IssueTitle  string `json:"issueTitle"`
+		PRNumber    *int   `json:"prNumber"`
+		PRTitle     string `json:"prTitle"`
+		PRURL       string `json:"prUrl"`
+		Status      string `json:"status"`
+		LastCommit  string `json:"lastCommit"`
+	}
+	if !decodeAny(raw, &row) {
+		return nil
+	}
+	return &prompts.WorktreeContext{
+		Present:     true,
+		ID:          strings.TrimSpace(row.ID),
+		Path:        strings.TrimSpace(row.Path),
+		Branch:      strings.TrimSpace(row.Branch),
+		IsMain:      row.IsMain,
+		IssueNumber: row.IssueNumber,
+		IssueTitle:  strings.TrimSpace(row.IssueTitle),
+		PRNumber:    row.PRNumber,
+		PRTitle:     strings.TrimSpace(row.PRTitle),
+		PRURL:       strings.TrimSpace(row.PRURL),
+		Status:      strings.TrimSpace(row.Status),
+		LastCommit:  strings.TrimSpace(row.LastCommit),
+	}
+}
+
+func (a *App) callStartupRead(ctx context.Context, tool string) (mcp.CallResult, bool) {
+	cctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(startupReadTimeout, cancel)
+	res, err := a.MCP.CallTool(cctx, tool, map[string]any{}, mcp.CallOptions{})
+	timer.Stop()
+	cancel()
+	return res, err == nil && !res.IsError
+}
+
+// mergedResultObject unions Daintree's JSON text body with structuredContent, with the
+// structured form winning recursively. The host normally returns identical values in
+// both channels, but this prevents a partial transport projection from silently dropping
+// fields that were present in the other representation.
+func mergedResultObject(res mcp.CallResult) map[string]any {
+	out := map[string]any{}
+	if strings.TrimSpace(res.Text) != "" {
+		var textObj map[string]any
+		if json.Unmarshal([]byte(res.Text), &textObj) == nil {
+			mergeObject(out, textObj)
+		}
+	}
+	if structured, ok := res.StructuredContent.(map[string]any); ok {
+		mergeObject(out, structured)
+	}
+	return out
+}
+
+func mergeObject(dst, src map[string]any) {
+	for key, value := range src {
+		srcMap, srcOK := value.(map[string]any)
+		dstMap, dstOK := dst[key].(map[string]any)
+		if srcOK && dstOK {
+			mergeObject(dstMap, srcMap)
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func decodeAny(value any, dst any) bool {
+	raw, err := json.Marshal(value)
+	return err == nil && json.Unmarshal(raw, dst) == nil
+}
+
+// ProjectName is the splash/masthead view of the same cached startup project sent to
+// the backend. It is intentionally a non-blocking field read.
+func (a *App) ProjectName() string {
+	a.startupMu.RLock()
+	defer a.startupMu.RUnlock()
+	if a.cachedProject == nil {
+		return ""
+	}
+	return a.cachedProject.Name
+}
+
+func worktreeLabel(w *prompts.WorktreeContext) string {
+	if w == nil {
+		return ""
+	}
+	if !w.Present {
+		return "(none — not in a worktree)"
+	}
+	for _, value := range []string{w.Branch, w.ID, w.Path} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}

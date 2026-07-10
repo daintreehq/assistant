@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
-	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
 )
 
 // ConnectMcp connects the MCP transport, rolls up any tool drift to one log line,
@@ -21,34 +19,79 @@ import (
 // structured data on every backend round (built from PromptContext), so there is no
 // session message to rewrite here anymore.
 func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
+	a.mcpLifecycleMu.Lock()
+	defer a.mcpLifecycleMu.Unlock()
+	attemptCtx, cancelAttempt := boundedMCPConnectContext(ctx)
+	defer cancelAttempt()
+
 	// Kick off the docs-MCP handshake in PARALLEL (fire-and-forget) so it rides alongside
 	// the Daintree connect during the boot splash WITHOUT sitting on the critical path —
 	// a slow/unreachable public docs server must never add latency to boot, one-shot runs,
 	// doctor, or /reconnect. The docs tools fail cleanly with MCP_UNAVAILABLE until it lands.
 	a.connectDocsAsync(false)
-	st := a.MCP.Connect(ctx)
+	wasConnected := a.MCP.Status().Connected
+	st := a.MCP.Connect(attemptCtx)
 	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
-	a.refreshStartupContext(ctx, st.Connected)
+	if st.Connected && !wasConnected && a.Session != nil {
+		// Warm the live-terminal inventory alongside the other splash reads so a fast
+		// first user turn does not have to start from an empty roster.
+		a.Session.WarmOpenTerminals()
+	}
+	a.ensureStartupContext(attemptCtx, st.Connected)
+	final := a.MCP.Status()
 	// Boot-only: reconcile the durable ledger against the live terminal inventory on
 	// the first successful connect (idempotency-guarded inside).
-	a.maybeReconcileLedger(ctx, st.Connected)
-	return st
+	a.maybeReconcileLedger(attemptCtx, final.Connected)
+	if ctx.Err() == nil {
+		// A normal completed/timeout attempt fails open permanently for ordinary turns;
+		// manual /reconnect owns later retries. A splash canceled by handoff leaves this
+		// false so bootstrap or a fast first turn can retry once with a live context.
+		a.startupConnectAttempted = true
+	}
+	return final
 }
 
 // ReconnectMcp re-establishes the transport.
 func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
+	a.mcpLifecycleMu.Lock()
+	defer a.mcpLifecycleMu.Unlock()
+	attemptCtx, cancelAttempt := boundedMCPConnectContext(ctx)
+	defer cancelAttempt()
+
 	// Reconnect the docs MCP in parallel too (fire-and-forget), so /reconnect refreshes
 	// BOTH transports without the docs link gating the primary status it returns.
 	a.connectDocsAsync(true)
-	st := a.MCP.Reconnect(ctx)
+	st := a.MCP.Reconnect(attemptCtx)
 	a.logMcpCredentials(st)
 	a.warnOnDrift(st)
-	a.refreshStartupContext(ctx, st.Connected)
+	if st.Connected && a.Session != nil {
+		a.Session.WarmOpenTerminals()
+	}
+	a.refreshStartupContext(attemptCtx, st.Connected)
+	final := a.MCP.Status()
 	// If the initial connect never succeeded, the boot reconcile runs on this first
 	// successful (re)connect instead; the once-guard makes a later reconnect a no-op.
-	a.maybeReconcileLedger(ctx, st.Connected)
-	return st
+	a.maybeReconcileLedger(attemptCtx, final.Connected)
+	if ctx.Err() == nil {
+		a.startupConnectAttempted = true
+	}
+	return final
+}
+
+const primaryMCPConnectBudget = 8 * time.Second
+
+// boundedMCPConnectContext uses cancellation rather than a deadline so the MCP client
+// treats the budget as an intentional abort, not a connection-degrading tool failure.
+// The budget spans handshake, stable discovery, and boot reconcile; an unreachable host
+// can therefore never pin a user turn indefinitely.
+func boundedMCPConnectContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	timer := time.AfterFunc(primaryMCPConnectBudget, cancel)
+	return ctx, func() {
+		timer.Stop()
+		cancel()
+	}
 }
 
 // docsConnectTimeout bounds the docs-MCP handshake so a wedged or unreachable docs
@@ -95,113 +138,6 @@ func (a *App) connectDocsAsync(reconnect bool) {
 			a.DocsMCP.Connect(ctx)
 		}
 	}()
-}
-
-// startupReadTimeout bounds each startup-context Daintree read (worktree.getCurrent)
-// so a wedged server can't stall a (re)connect. These are cheap local lookups in
-// practice (single-digit ms), so a few seconds is generous slack, not a real ceiling.
-// (ConfiguredAgentIDs applies its own equivalent bound internally.)
-const startupReadTimeout = 5 * time.Second
-
-// noActiveWorktreeLabel is the message[1] label when Daintree reports no current
-// worktree (worktree.getCurrent → {worktree: null}) — a definitive answer, distinct
-// from the "(unknown — read with context.snapshot)" placeholder used when the read
-// wasn't attempted or failed (degraded mode).
-const noActiveWorktreeLabel = "(none — not in a worktree)"
-
-// refreshStartupContext refreshes the message[1] startup cache — the configured-agents
-// roster and the current worktree label — from Daintree. The caller follows it with a
-// RefreshRuntimeContext so the refreshed facts land in message[1]. It is the ONLY
-// writer of the rosterMu-guarded cache.
-//
-// Both reads are best-effort and bounded: a hung or absent Daintree must never stall a
-// (re)connect, so each failure falls open to empty. When not connected we clear the
-// cache so message[1] honestly drops the roster line and shows the worktree
-// "(unknown)" placeholder rather than stale facts from a prior connection. The cache is
-// replaced ATOMICALLY after both reads complete (never cleared before the fetch), so a
-// concurrent PromptContext on a mid-session /reconnect never observes a half-populated
-// snapshot — it sees the prior values until both reads finish, then the new ones.
-func (a *App) refreshStartupContext(ctx context.Context, connected bool) {
-	var agentIDs []string
-	var worktree string
-	if connected {
-		// agentSettings.get — the user-configured agents roster. ConfiguredAgentIDs bounds
-		// its own read and fails open (nil) on any error, so the roster line simply omits.
-		agentIDs = agenttaskx.ConfiguredAgentIDs(ctx, agentTaskMCPAdapter{c: a.MCP})
-		// worktree.getCurrent — the active worktree label. Bound it with a CANCEL-based
-		// deadline (not context.WithTimeout): mcp.Client degrades the connection on any
-		// non-abort CallTool error, and a DeadlineExceeded is NOT an abort — only a
-		// Canceled is. A best-effort startup read must never tear down a working
-		// connection just because it was slow, so a timeout surfaces as a cancel; on any
-		// error/IsError the label stays "" → the "(unknown)" placeholder.
-		wctx, cancel := context.WithCancel(ctx)
-		timer := time.AfterFunc(startupReadTimeout, cancel)
-		res, err := a.MCP.CallTool(wctx, "worktree.getCurrent", map[string]any{}, mcp.CallOptions{})
-		timer.Stop()
-		cancel()
-		if err == nil && !res.IsError {
-			worktree = parseCurrentWorktreeLabel(res.StructuredContent, res.Text)
-		}
-	}
-	a.rosterMu.Lock()
-	a.cachedAgentIDs = agentIDs
-	a.cachedActiveWorktree = worktree
-	a.rosterMu.Unlock()
-}
-
-// parseCurrentWorktreeLabel turns a worktree.getCurrent result into a short, human-
-// readable label for message[1]. Daintree returns { worktree: { id, path, branch, … }
-// | null }. The label prefers branch (most meaningful to the model), then id, then
-// path. A definitively-null worktree (the key is present but null) yields
-// noActiveWorktreeLabel so the runtime context states "not in a worktree" rather than
-// telling the model to go read it; an absent/unparseable payload yields "" so the
-// caller falls back to the "(unknown — read with context.snapshot)" placeholder. Unions
-// structuredContent and the JSON text body (Daintree returns results in text), mirroring
-// the other Daintree parsers, so a divergence between the two sources can't strand the
-// label. Never throws.
-func parseCurrentWorktreeLabel(structured any, text string) string {
-	if sc, ok := structured.(map[string]any); ok {
-		if wt, present := sc["worktree"]; present {
-			if wt == nil {
-				return noActiveWorktreeLabel
-			}
-			if m, ok := wt.(map[string]any); ok {
-				if label := worktreeLabelFromMap(m); label != "" {
-					return label
-				}
-			}
-		}
-	}
-	if strings.TrimSpace(text) != "" {
-		var parsed struct {
-			Worktree json.RawMessage `json:"worktree"`
-		}
-		if json.Unmarshal([]byte(text), &parsed) == nil && len(parsed.Worktree) > 0 {
-			if strings.TrimSpace(string(parsed.Worktree)) == "null" {
-				return noActiveWorktreeLabel
-			}
-			var m map[string]any
-			if json.Unmarshal(parsed.Worktree, &m) == nil {
-				if label := worktreeLabelFromMap(m); label != "" {
-					return label
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// worktreeLabelFromMap picks the best human-readable label from a worktree-summary
-// object: branch first, then id, then path. Returns "" when none are usable strings.
-func worktreeLabelFromMap(m map[string]any) string {
-	for _, key := range []string{"branch", "id", "path"} {
-		if s, ok := m[key].(string); ok {
-			if s = strings.TrimSpace(s); s != "" {
-				return s
-			}
-		}
-	}
-	return ""
 }
 
 // logMcpCredentials dumps the RAW Daintree MCP URL and bearer token to the debug log on

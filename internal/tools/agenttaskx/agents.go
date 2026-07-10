@@ -8,25 +8,25 @@ import (
 	"time"
 )
 
-// agentRosterTimeout bounds the agentSettings.get read so a hung Daintree can't
-// freeze a spawn (or a startup-context refresh) for the MCP transport's (much longer)
+// agentRosterTimeout bounds the agent.listAvailable read so a hung Daintree can't
+// freeze a spawn for the MCP transport's (much longer)
 // default timeout before the caller falls open. A configured-agents read is a cheap
 // local lookup (single-digit ms in practice), so a few seconds is generous slack, not a
 // real ceiling. A var (not const) only so tests can shorten it.
 var agentRosterTimeout = 5 * time.Second
 
-// ConfiguredAgentIDs reads Daintree's per-agent settings map (agentSettings.get,
-// no args -> { agents: { <id>: {...} } }) and returns the configured agent ids,
-// sorted. Returns nil on any error, timeout, a non-map payload, or an empty map so
-// callers FAIL OPEN — a discovery hiccup must never block a spawn. Unions the
-// structuredContent map and the JSON text body (Daintree returns results in text),
-// mirroring parseTerminalList, so a divergence between the two sources can't drop ids.
-//
-// NOTE: this is the user-CONFIGURED subset, not Daintree's full launchable catalog
-// (the built-in AGENT_REGISTRY is baked into Daintree and exposed by no MCP tool).
-// It is exported so the composition root can also fetch it once at MCP-connect time to
-// surface the roster in the startup runtime context — not just lazily at spawn time.
-func ConfiguredAgentIDs(ctx context.Context, mcp MCPClient) []string {
+type availableAgent struct {
+	ID           string `json:"id"`
+	Availability string `json:"availability"`
+	Launchable   *bool  `json:"launchable"`
+}
+
+// availableAgentRoster reads Daintree's narrow effective direct-agent registry. Registry
+// membership and launchability are intentionally separate: missing/installed/blocked rows
+// are useful discovery results but must not be mistaken for runnable editing agents.
+// Returns nil on any read/shape failure so callers fail open when discovery itself is
+// unavailable. Text and structured result channels are unioned by exact id.
+func availableAgentRoster(ctx context.Context, mcp MCPClient) []availableAgent {
 	// Bound the read with a CANCEL-based deadline, NOT context.WithTimeout. The shared
 	// mcp.Client degrades (tears down) the connection on any non-abort CallTool error,
 	// and a context.DeadlineExceeded is NOT treated as an abort — only context.Canceled
@@ -37,62 +37,108 @@ func ConfiguredAgentIDs(ctx context.Context, mcp MCPClient) []string {
 	defer cancel()
 	timer := time.AfterFunc(agentRosterTimeout, cancel)
 	defer timer.Stop()
-	res, err := mcp.CallTool(cctx, "agentSettings.get", map[string]any{})
+	res, err := mcp.CallTool(cctx, "agent.listAvailable", map[string]any{})
 	if err != nil || res.IsError {
 		return nil
 	}
-	ids := map[string]struct{}{}
-	add := func(id string) {
-		if id = strings.TrimSpace(id); id != "" {
-			ids[id] = struct{}{}
+	rowsByID := map[string]availableAgent{}
+	add := func(row availableAgent) {
+		if strings.TrimSpace(row.ID) == "" {
+			return
 		}
+		existing := rowsByID[row.ID]
+		existing.ID = row.ID
+		if availability := strings.TrimSpace(row.Availability); availability != "" {
+			existing.Availability = availability
+		}
+		if row.Launchable != nil {
+			existing.Launchable = row.Launchable
+		}
+		rowsByID[row.ID] = existing
 	}
 	if sc, ok := res.StructuredContent.(map[string]any); ok {
-		if agents, ok := sc["agents"].(map[string]any); ok {
-			for id := range agents {
-				add(id)
+		if raw, present := sc["agents"]; present {
+			encoded, marshalErr := json.Marshal(raw)
+			var rows []availableAgent
+			if marshalErr == nil && json.Unmarshal(encoded, &rows) == nil {
+				for _, row := range rows {
+					add(row)
+				}
 			}
 		}
 	}
 	if strings.TrimSpace(res.Text) != "" {
 		var parsed struct {
-			Agents map[string]json.RawMessage `json:"agents"`
+			Agents []availableAgent `json:"agents"`
 		}
 		if json.Unmarshal([]byte(res.Text), &parsed) == nil {
-			for id := range parsed.Agents {
-				add(id)
+			for _, row := range parsed.Agents {
+				add(row)
 			}
 		}
 	}
-	if len(ids) == 0 {
+	if len(rowsByID) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(ids))
-	for id := range ids {
-		out = append(out, id)
+	out := make([]availableAgent, 0, len(rowsByID))
+	for _, row := range rowsByID {
+		out = append(out, row)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// resolveAgentID validates agentID against Daintree's configured agents. It returns
-// ok=true (proceed) when the id is configured OR the list is unavailable/empty (fail
-// open — never block a spawn on a discovery hiccup). When the id is definitively
-// absent it returns ok=false with the available ids and the closest near-miss, so the
-// caller can say "did you mean …". This is the ONLY place a typo'd or mis-transcribed
-// agent name is caught: Daintree's agent.launch does NOT validate agentId — it
-// silently launches a terminal that immediately detaches with zero output.
-func resolveAgentID(ctx context.Context, mcp MCPClient, agentID string) (ok bool, available []string, suggestion string) {
-	available = ConfiguredAgentIDs(ctx, mcp)
-	if len(available) == 0 {
-		return true, nil, "" // fail open: unknown roster, let the launch proceed
+// RegisteredAgentIDs is the sorted registry-membership view used by diagnostics/tests.
+// It includes known-unlaunchable rows; resolveAgentID performs the launchability gate.
+func RegisteredAgentIDs(ctx context.Context, mcp MCPClient) []string {
+	roster := availableAgentRoster(ctx, mcp)
+	if len(roster) == 0 {
+		return nil
 	}
-	for _, id := range available {
-		if id == agentID {
-			return true, available, ""
+	ids := make([]string, len(roster))
+	for i, row := range roster {
+		ids[i] = row.ID
+	}
+	return ids
+}
+
+// resolveAgentID validates both membership and the host's known launchability state.
+// An unreadable roster or omitted availability fails open; an explicit false or one of
+// missing/installed/blocked fails closed before agent.launch can return a diagnostic setup
+// panel that looks superficially like a successfully spawned terminal.
+func resolveAgentID(ctx context.Context, mcp MCPClient, agentID string) (ok bool, available []string, suggestion, unavailableState string) {
+	roster := availableAgentRoster(ctx, mcp)
+	if len(roster) == 0 {
+		return true, nil, "", "" // fail open: unknown roster, let the launch proceed
+	}
+	available = make([]string, len(roster))
+	for i, row := range roster {
+		available[i] = row.ID
+	}
+	for _, row := range roster {
+		if row.ID != agentID {
+			continue
+		}
+		if row.Launchable != nil {
+			if *row.Launchable {
+				return true, available, "", ""
+			}
+			state := row.Availability
+			if state == "" {
+				state = "not-launchable"
+			}
+			return false, available, "", state
+		}
+		switch row.Availability {
+		case "ready", "unauthenticated", "":
+			return true, available, "", ""
+		case "missing", "installed", "blocked":
+			return false, available, "", row.Availability
+		default:
+			return true, available, "", "" // forward-compatible unknown state
 		}
 	}
-	return false, available, closestAgentID(agentID, available)
+	return false, available, closestAgentID(agentID, available), ""
 }
 
 // closestAgentID returns the candidate with the smallest case-insensitive edit

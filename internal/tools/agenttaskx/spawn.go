@@ -24,6 +24,7 @@ const (
 	codeNoTerminalID         = "NO_TERMINAL_ID"
 	codeLaunchNotFound       = "LAUNCH_NOT_FOUND"
 	codeUnknownAgent         = "UNKNOWN_AGENT"
+	codeAgentUnavailable     = "AGENT_UNAVAILABLE"
 	codeUnknownWorktree      = "UNKNOWN_WORKTREE"
 )
 
@@ -247,7 +248,7 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 		})
 	}
 
-	// Validate the agent id against Daintree's configured agents BEFORE a FRESH launch
+	// Validate the agent id against Daintree's effective registry BEFORE a FRESH launch
 	// (after the idempotent-retry lookup, so reconciling an in-flight saga is never
 	// blocked by a stale roster, and an already-bound idempotent hit skips this read).
 	// Daintree's agent.launch silently accepts ANY agentId and launches a terminal that
@@ -256,7 +257,13 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	// retry on a key collision. Catch it here with the available roster + a "did you
 	// mean" hint; fail OPEN when the roster can't be read so a discovery hiccup never
 	// blocks a legitimate spawn.
-	if ok, available, suggestion := resolveAgentID(ctx, deps.MCP, agentID); !ok {
+	if ok, available, suggestion, unavailableState := resolveAgentID(ctx, deps.MCP, agentID); !ok {
+		if unavailableState != "" {
+			msg := fmt.Sprintf("Agent %q is registered but is not currently launchable (availability: %s). Complete its setup or choose an agent whose status is ready or unauthenticated.", agentID, unavailableState)
+			return tools.Fail(codeAgentUnavailable, msg, tools.WithDetails(map[string]any{
+				"requestedAgentId": agentID, "availability": unavailableState, "registeredAgents": available,
+			}))
+		}
 		msg := fmt.Sprintf("Unknown agent %q — Daintree has no agent configured with that id.", agentID)
 		if suggestion != "" {
 			msg += fmt.Sprintf(" Did you mean %q?", suggestion)
@@ -331,6 +338,18 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 		})
 		return tools.Fail(codeAgentLaunchFailed, "agent.launch reported an error: "+detail,
 			tools.WithDetails(res.StructuredContent))
+	}
+	if spawnStatus := extractField(res, "spawnStatus"); spawnStatus == "missing-cli" {
+		// Daintree atomically re-checks availability inside its launcher. A registry
+		// preflight can race an install/auth/security change (or fail open), so this
+		// discriminant is the authoritative answer that no agent PTY was started.
+		_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{
+			"stage": string(domain.LaunchFailed), "errorCode": codeAgentUnavailable,
+			"errorMessage": "Daintree opened a missing-CLI diagnostic instead of an agent PTY.",
+		})
+		return tools.Fail(codeAgentUnavailable,
+			fmt.Sprintf("Agent %q was not launchable when Daintree executed the launch. Daintree opened a setup diagnostic instead of an agent terminal; complete setup or choose another ready agent.", agentID),
+			tools.WithDetails(map[string]any{"launchId": record.ID, "agentId": agentID, "spawnStatus": spawnStatus}))
 	}
 
 	_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{"stage": string(domain.AgentStarted)})

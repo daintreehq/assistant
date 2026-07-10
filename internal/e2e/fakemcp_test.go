@@ -13,9 +13,8 @@ import (
 // handler, served on httptest. The assistant's mcp.Client connects to it exactly as
 // it would the live Daintree server (Streamable HTTP + Bearer token), so this is a
 // genuine transport-level fake — not an interface stub. It advertises the read-only
-// tools the assistant probes at boot: `getContext` (project identity), plus the two
-// startup-context reads `agentSettings.get` (configured-agents roster) and
-// `worktree.getCurrent` (active worktree). The latter two MUST exist: the shared
+// tools the assistant probes at boot: project identity, full effective agent
+// availability, toolbar state, and the active worktree. These MUST exist: the shared
 // mcp.Client degrades its connection status on ANY non-abort CallTool error, so a
 // missing boot-read tool would flip Status().Connected to false right after a healthy
 // connect (which the runtime-context builder then reports as "not connected"). Live
@@ -45,9 +44,71 @@ func newFakeMCP(t *testing.T) *fakeMCP {
 		}, out, nil
 	})
 
-	// agentSettings.get: the configured-agents roster read (agenttaskx.ConfiguredAgentIDs)
-	// the assistant runs on every (re)connect. An empty roster is a valid, successful
-	// answer — what matters is that the call SUCCEEDS so it doesn't degrade the connection.
+	// project.getCurrent: the stable project snapshot attached before every conversation.
+	type projectCurrentIn struct{}
+	type projectCurrentOut struct {
+		Project map[string]any `json:"project"`
+	}
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "project.getCurrent",
+		Description: "Return the current project.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in projectCurrentIn) (*sdkmcp.CallToolResult, projectCurrentOut, error) {
+		project := map[string]any{"id": "fake-project-id", "name": "fake-project", "path": "/fake/project", "status": "active"}
+		out := projectCurrentOut{Project: project}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"project":{"id":"fake-project-id","name":"fake-project","path":"/fake/project","status":"active"}}`}},
+		}, out, nil
+	})
+
+	// agent.listAvailable is the authoritative startup agent catalog.
+	type availableAgentsIn struct{}
+	type availableAgentsOut struct {
+		Complete             bool             `json:"complete"`
+		AvailabilityComplete bool             `json:"availabilityComplete"`
+		Agents               []map[string]any `json:"agents"`
+	}
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "agent.listAvailable",
+		Description: "Return every directly launchable agent.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in availableAgentsIn) (*sdkmcp.CallToolResult, availableAgentsOut, error) {
+		agents := []map[string]any{
+			{"id": "claude", "displayName": "Claude Code", "source": "built-in", "availability": "ready", "installed": true, "toolbarVisible": true, "pinned": true},
+			{"id": "team-agent", "displayName": "Team Agent", "source": "user", "availability": "unauthenticated", "installed": true},
+		}
+		out := availableAgentsOut{Complete: true, AvailabilityComplete: true, Agents: agents}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"complete":true,"availabilityComplete":true,"agents":[{"id":"claude","displayName":"Claude Code","source":"built-in","availability":"ready","installed":true,"toolbarVisible":true,"pinned":true},{"id":"team-agent","displayName":"Team Agent","source":"user","availability":"unauthenticated","installed":true}]}`}},
+		}, out, nil
+	})
+
+	// Retain the individual discovery reads because the model can still request them.
+	type toolbarIn struct{}
+	type toolbarOut struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "agent.listToolbar",
+		Description: "Return toolbar agent state.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in toolbarIn) (*sdkmcp.CallToolResult, toolbarOut, error) {
+		agents := []map[string]any{{"id": "claude", "displayName": "Claude Code", "installed": true, "visible": true, "pinned": true}}
+		out := toolbarOut{Agents: agents}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"agents":[{"id":"claude","displayName":"Claude Code","installed":true,"visible":true,"pinned":true}]}`}},
+		}, out, nil
+	})
+	type availabilityIn struct{}
+	type availabilityOut map[string]string
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "cliAvailability.get",
+		Description: "Return effective agent availability.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in availabilityIn) (*sdkmcp.CallToolResult, availabilityOut, error) {
+		out := availabilityOut{"claude": "ready", "team-agent": "unauthenticated"}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"claude":"ready","team-agent":"unauthenticated"}`}},
+		}, out, nil
+	})
+
+	// agentSettings.get remains available for spawn-validation coverage.
 	type agentSettingsIn struct{}
 	type agentSettingsOut struct {
 		Agents map[string]any `json:"agents"`

@@ -135,6 +135,10 @@ func bootFetchProjectName(ctx context.Context, a *app.App) string {
 	if st := a.ConnectMcp(ctx); st.Connected {
 		debuglog.BootTrace("boot.mcp.connected")
 		for {
+			if name := a.ProjectName(); name != "" {
+				debuglog.BootTrace("boot.projectname.done")
+				return name
+			}
 			if name := a.MCP.FetchProjectName(ctx); name != "" {
 				debuglog.BootTrace("boot.projectname.done")
 				return name

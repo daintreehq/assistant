@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
@@ -355,33 +356,37 @@ func TestResumedWatchersForFooterSchedulerGate(t *testing.T) {
 	}
 }
 
-// TestStartupContextRosterSurfacesInPromptContext asserts the cached configured-agents
-// roster (populated by refreshStartupContext on connect) propagates through the App's
-// live PromptContext, which the session maps into the backend's structured runtime block
-// (backend.RuntimeContext.ConfiguredAgentIDs) — there is no message[1] runtime context to
-// rewrite anymore. The cache is set directly here — the connect fetch itself is exercised
-// by the agenttaskx unit tests; this pins the wiring App cache → MainPromptContext. The
-// worktree label flows through the uncached footer seam (issue #263), not PromptContext.
-func TestStartupContextRosterSurfacesInPromptContext(t *testing.T) {
+// TestStartupSnapshotSurfacesInPromptContext pins the atomic cache → request-context
+// wiring. Project/agents become the stable pre-conversation block; worktree becomes the
+// fresh tail, but all three originate from one published Daintree snapshot.
+func TestStartupSnapshotSurfacesInPromptContext(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	// Before any connect the cache is empty → no roster surfaced.
-	if got := a.PromptContext().ConfiguredAgentIDs; len(got) != 0 {
-		t.Fatalf("expected empty roster before connect, got %v", got)
+	if got := a.PromptContext().AgentRoster; got != nil {
+		t.Fatalf("expected unknown roster before connect, got %+v", got)
 	}
 
-	// Stand in for a connect having cached the roster + worktree.
-	a.rosterMu.Lock()
-	a.cachedAgentIDs = []string{"claude", "codex"}
-	a.cachedActiveWorktree = "feature/issue-230"
-	a.rosterMu.Unlock()
+	installed, visible := true, true
+	a.startupMu.Lock()
+	a.cachedProject = &prompts.ProjectContext{ID: "project-1", Name: "Demo", Path: "/repo"}
+	a.cachedAgents = &prompts.AgentRosterContext{Agents: []prompts.AgentContext{
+		{ID: "claude", Installed: &installed, ToolbarVisible: &visible},
+		{ID: "codex", Installed: &installed},
+	}}
+	a.cachedWorktree = &prompts.WorktreeContext{Present: true, ID: "wt-1", Branch: "feature/issue-230"}
+	a.startupMu.Unlock()
 
 	pc := a.PromptContext()
-	if len(pc.ConfiguredAgentIDs) != 2 || pc.ConfiguredAgentIDs[0] != "claude" || pc.ConfiguredAgentIDs[1] != "codex" {
-		t.Fatalf("PromptContext did not surface the roster: %+v", pc.ConfiguredAgentIDs)
+	if pc.Project == nil || pc.Project.Name != "Demo" {
+		t.Fatalf("PromptContext did not surface the project: %+v", pc.Project)
 	}
-	// The worktree label is NOT in PromptContext; it flows through the footer seam instead.
+	if pc.AgentRoster == nil || len(pc.AgentRoster.Agents) != 2 || pc.AgentRoster.Agents[0].ID != "claude" {
+		t.Fatalf("PromptContext did not surface the roster: %+v", pc.AgentRoster)
+	}
+	if pc.Worktree == nil || pc.Worktree.ID != "wt-1" {
+		t.Fatalf("PromptContext did not surface the worktree: %+v", pc.Worktree)
+	}
 	if got := a.activeWorktreeForFooter(); got != "feature/issue-230" {
 		t.Fatalf("footer worktree seam = %q, want the cached label", got)
 	}

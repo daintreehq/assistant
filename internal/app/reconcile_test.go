@@ -55,6 +55,16 @@ func mustRunStatus(t *testing.T, s *storage.Store, id string) domain.WorkflowRun
 	return r.Status
 }
 
+func TestReconcileLedgerCompletionSignalOnlyCommitsParseableRead(t *testing.T) {
+	s := reconcileTestStore(t)
+	if _, completed := reconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText()}, debuglog.Config{}); !completed {
+		t.Fatal("parseable empty inventory must count as a completed reconcile attempt")
+	}
+	if _, completed := reconcileLedger(context.Background(), s, &fakeReconcileMCP{err: context.Canceled}, debuglog.Config{}); completed {
+		t.Fatal("canceled terminal read must remain retryable")
+	}
+}
+
 // TestReconcileLedgerCancelsStaleRun — an open run whose only terminal is gone from
 // the live inventory is cancelled.
 func TestReconcileLedgerCancelsStaleRun(t *testing.T) {

@@ -13,32 +13,57 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
-// PromptContext builds the dynamic MainPromptContext from the live MCP status +
-// config + scheduler state. It is re-read on every connect/reconnect
-// and on /permissions changes so message[1] stays current.
+// PromptContext combines live runtime state with the atomic splash-time Daintree
+// snapshot. The session splits it into the cacheable startup-data message (project,
+// agents, project instructions) and the fresh existing runtime/turn tail (tier, MCP,
+// scheduler, worktree).
 func (a *App) PromptContext() prompts.MainPromptContext {
 	// Snapshot Config under cfgMu so a concurrent SetTier (/permissions) can't tear
 	// the Tier read while a turn is rebuilding its runtime context.
 	cfg := a.snapshotConfig()
 	st := a.MCP.Status()
 	schedulerActive := a.scheduler != nil
-	// Read the startup cache (configured-agents roster) under its own lock, SEQUENTIALLY —
-	// snapshotConfig already released cfgMu, so rosterMu is never nested inside cfgMu.
-	// refreshStartupContext (the sole writer) populated it on the last (re)connect; this is
-	// a plain field read, no MCP round-trip. The active-worktree label is NO LONGER read
-	// here: it moved to the uncached footer (issue #263), reached via SessionDeps.ActiveWorktreeFunc.
-	a.rosterMu.RLock()
-	agentIDs := a.cachedAgentIDs
-	a.rosterMu.RUnlock()
+	// Snapshot the cached pointers under startupMu after releasing cfgMu. Values are
+	// immutable after publication; copy the structs/slice headers so the returned context
+	// cannot alias a later cache replacement.
+	a.startupMu.RLock()
+	var project *prompts.ProjectContext
+	if a.cachedProject != nil {
+		copy := *a.cachedProject
+		project = &copy
+	}
+	var agents *prompts.AgentRosterContext
+	if a.cachedAgents != nil {
+		copy := *a.cachedAgents
+		copy.Agents = append([]prompts.AgentContext(nil), a.cachedAgents.Agents...)
+		agents = &copy
+	}
+	var worktree *prompts.WorktreeContext
+	if a.cachedWorktree != nil {
+		copy := *a.cachedWorktree
+		worktree = &copy
+	}
+	a.startupMu.RUnlock()
+	if project == nil && (cfg.ProjectID != "" || cfg.ProjectPath != "") {
+		project = &prompts.ProjectContext{ID: cfg.ProjectID, Path: cfg.ProjectPath}
+	}
+	if project != nil && project.ID == "" {
+		project.ID = cfg.ProjectID
+	}
+	if project != nil && project.Path == "" {
+		project.Path = cfg.ProjectPath
+	}
 	return prompts.MainPromptContext{
 		Tier:                cfg.Tier,
 		ProjectPath:         cfg.ProjectPath,
 		ProjectID:           cfg.ProjectID,
+		Project:             project,
+		AgentRoster:         agents,
+		Worktree:            worktree,
 		MCPConnected:        st.Connected,
 		MCPStatusLine:       mcpStatusLine(st),
 		MCPTransport:        st.Transport,
 		MCPToolCount:        st.ToolCount,
-		ConfiguredAgentIDs:  agentIDs,
 		SchedulerActive:     schedulerActive,
 		ProjectInstructions: cfg.ProjectInstructions,
 	}
@@ -53,15 +78,13 @@ func (a *App) Send(ctx context.Context, userInput string, opts agent.SendOptions
 	return a.Session.Send(ctx, userInput, opts)
 }
 
-// activeWorktreeForFooter returns the current active-worktree label for the footer's
-// `# Active worktree` section (SessionDeps.ActiveWorktreeFunc). It reads the startup cache
-// under rosterMu — the same field PromptContext used to surface in message[1] — so a
-// mid-session switch (refreshStartupContext on reconnect) shows up on the next round
-// without rewriting the cached runtime context (issue #263).
+// activeWorktreeForFooter is the legacy label seam used by Session tests and as a
+// fallback when a caller supplies no typed WorktreeContext. Production reads the same
+// cached typed snapshot that PromptContext sends in request.runtime.
 func (a *App) activeWorktreeForFooter() string {
-	a.rosterMu.RLock()
-	defer a.rosterMu.RUnlock()
-	return a.cachedActiveWorktree
+	a.startupMu.RLock()
+	defer a.startupMu.RUnlock()
+	return worktreeLabel(a.cachedWorktree)
 }
 
 // resumedWatchersForFooter returns the titles of live watchers this process adopted

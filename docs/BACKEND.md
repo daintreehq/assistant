@@ -10,7 +10,7 @@ project context collection, memory + scheduler state, stream rendering, and the 
 backend state token.
 
 ```
-User → Daintree CLI ──(visible conversation + structured context + tool inventory)──► Daintree backend
+User → Daintree CLI ──(stable startup row + visible conversation + structured context + tools)──► Daintree backend
         │  stores conversation, exposes & runs local tools,                            owns prompts, skills,
         │  streams assistant text, persists backend state                              model routing, DeepSeek
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
@@ -54,12 +54,37 @@ The Go client mirrors it in `internal/backend`:
 
 - **No `system` / `developer` messages.** Only `user` / `assistant` / `tool` reach the
   backend (the converter `internal/agent/backendconv.go` rejects anything else up front).
-  The CLI holds **no client-side control prefix** — `domain.ControlMessageCount == 0`,
-  and a fresh conversation starts at index 0.
-- **Runtime + turn context are structured data**, not prose. The old system/footer
-  messages became `request.runtime` (tier, project, MCP, agents, scheduler, worktree,
-  project instructions) and `request.turn` (goal, wake, workflow runs, async operations,
-  memories, session-ended watchers). The backend renders them.
+  `domain.ControlMessageCount == 0`: no synthetic row is persisted in visible history.
+  At request assembly only, the CLI prepends one clearly framed user-role startup-data
+  message before that history.
+- **Context uses the existing backend contract.** The request-only startup message carries
+  the cacheable curated project identity, the effective agent catalog (including
+  availability and toolbar state), and safely framed bounded `DAINTREE.md` instructions.
+  The catalog has an aggregate size budget; any whole rows that do not fit are explicitly
+  counted rather than emitting a truncated, unusable agent id. `request.runtime` carries
+  tier, MCP, scheduler, a freshly read worktree label, and open terminals. Stable project
+  and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
+  wake, workflow runs, async operations, memories, and session-ended watchers.
+- **Splash-time discovery is bounded and parallel.** A successful MCP connect starts
+  `project.getCurrent`, canonical `agent.listAvailable`, `worktree.getCurrent`, and the
+  open-terminal warm-up while the logo is animating. The agent action returns the current
+  effective built-in/user/plugin launch registry with display names, source, coarse CLI
+  availability, and built-in tri-state pin/resolved toolbar visibility. A fast first submit
+  joins the whole connect+prefetch gate rather than racing an empty snapshot; duplicate boot
+  connects reuse it. The primary lifecycle has an 8-second cancellation budget. A completed
+  degraded attempt fails open for later turns (manual `/reconnect` owns retries), while a
+  splash attempt canceled by handoff remains retryable once by bootstrap/the first turn.
+- **The cache boundary is intentional.** The CLI places the stable startup-data message
+  immediately before the append-only conversation; the backend keeps its existing fresh
+  runtime/turn user message at the end. Worktree is re-read on every backend round, so a
+  switch only changes the tail. A project or pin change changes the startup block and
+  following conversation, but leaves the backend's system prompts and large tool schemas
+  cached. Raw `project.getSettings` is never injected because its open-ended values may
+  include environment or other sensitive configuration.
+- **Current selector caveat.** The frozen backend contract has no tagged startup-context
+  field, so this cache-friendly prefix is an ordinary, clearly framed `user` row and is
+  visible to existing conversation/skill-selector consumers. A future backend convention
+  can distinguish or strip it without changing the CLI's discovery sources or ordering.
 - **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
   backend's selector picks and injects runbooks and returns a `skills` block (active set
   + a synthetic-load `prelude` the CLI surfaces). The CLI keeps only the local

@@ -21,15 +21,15 @@ type recordedCall struct {
 // throw, and a recorded call log. It also runs an optional hook on agent.launch
 // (used to model an abort torn mid-launch).
 type scriptMCP struct {
-	connected     bool
-	launchResult  MCPCallResult
-	launchThrows  bool
-	launchErr     error
-	listResult    MCPCallResult
-	agentSettings MCPCallResult // agentSettings.get response; zero value ⇒ fail-open roster
-	worktreeList  MCPCallResult // worktree.list response; zero value ⇒ fail-open roster
-	onLaunch      func()
-	calls         []recordedCall
+	connected    bool
+	launchResult MCPCallResult
+	launchThrows bool
+	launchErr    error
+	listResult   MCPCallResult
+	agentRoster  MCPCallResult // agent.listAvailable response; zero value ⇒ fail-open roster
+	worktreeList MCPCallResult // worktree.list response; zero value ⇒ fail-open roster
+	onLaunch     func()
+	calls        []recordedCall
 }
 
 func (m *scriptMCP) Connected() bool { return m.connected }
@@ -50,8 +50,8 @@ func (m *scriptMCP) CallTool(_ context.Context, name string, args map[string]any
 		return m.launchResult, nil
 	case "terminal.list":
 		return m.listResult, nil
-	case "agentSettings.get":
-		return m.agentSettings, nil
+	case "agent.listAvailable":
+		return m.agentRoster, nil
 	case "worktree.list":
 		return m.worktreeList, nil
 	}
@@ -255,6 +255,12 @@ func launchNoTerminal() MCPCallResult {
 	return MCPCallResult{StructuredContent: map[string]any{"location": "grid"}}
 }
 
+func launchMissingCLI(terminalID string) MCPCallResult {
+	return MCPCallResult{StructuredContent: map[string]any{
+		"terminalId": terminalID, "location": "grid", "spawnStatus": "missing-cli",
+	}}
+}
+
 func terminalListResult(entries ...map[string]any) MCPCallResult {
 	arr := make([]any, len(entries))
 	for i, e := range entries {
@@ -443,6 +449,22 @@ func TestSpawnExplicitErrorIsCleanFailure(t *testing.T) {
 	res := runSpawn(Deps{MCP: mcp, DB: newSagaStore()}, baseSpawn())
 	if res.Ok || res.Error.Code != codeAgentLaunchFailed {
 		t.Fatalf("expected AGENT_LAUNCH_FAILED, got %+v", res)
+	}
+}
+
+func TestSpawnRejectsAtomicMissingCLIDiagnostic(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchMissingCLI("diagnostic-panel")}
+	st := newSagaStore()
+	res := runSpawn(Deps{MCP: mcp, DB: st}, baseSpawn())
+	if res.Ok || res.Error.Code != codeAgentUnavailable {
+		t.Fatalf("missing-CLI diagnostic must not count as an agent spawn: %+v", res)
+	}
+	launchID := res.Error.Details.(map[string]any)["launchId"].(string)
+	if got := st.get(launchID).Stage; got != domain.LaunchFailed {
+		t.Fatalf("diagnostic launch stage = %s, want failed", got)
+	}
+	if len(st.watchers) != 0 {
+		t.Fatalf("diagnostic panel received %d watcher(s)", len(st.watchers))
 	}
 }
 

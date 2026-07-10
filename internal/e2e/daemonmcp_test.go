@@ -44,6 +44,22 @@ func newScriptableMCP(t *testing.T) *scriptableMCP {
 		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
 			return textResult(`{"projectName":"fake-project"}`), nil, nil
 		})
+	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "project.getCurrent", Description: "project"},
+		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
+			return textResult(`{"project":{"id":"fake-project-id","name":"fake-project","path":"/fake/project"}}`), nil, nil
+		})
+	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "agent.listAvailable", Description: "agents"},
+		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
+			return textResult(`{"complete":true,"availabilityComplete":true,"agents":[]}`), nil, nil
+		})
+	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "agent.listToolbar", Description: "toolbar"},
+		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
+			return textResult(`{"agents":[]}`), nil, nil
+		})
+	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "cliAvailability.get", Description: "availability"},
+		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
+			return textResult(`{}`), nil, nil
+		})
 	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "agentSettings.get", Description: "roster"},
 		func(ctx context.Context, req *sdkmcp.CallToolRequest, in emptyIn) (*sdkmcp.CallToolResult, any, error) {
 			return textResult(`{"agents":{}}`), nil, nil

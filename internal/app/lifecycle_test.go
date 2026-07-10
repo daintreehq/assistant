@@ -3,72 +3,211 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 )
 
-// TestParseCurrentWorktreeLabel covers how a worktree.getCurrent result becomes the
-// message[1] label across the response shapes Daintree can return: a structured object
-// (branch preferred, then id, then path), an explicit null (→ the no-worktree sentinel),
-// the JSON text-body fallback Daintree often uses, and absent/malformed payloads (→ "",
-// which the renderer turns into the "(unknown)" placeholder).
-func TestParseCurrentWorktreeLabel(t *testing.T) {
-	wt := func(fields map[string]any) any { return map[string]any{"worktree": fields} }
+func TestEnsureStartupForTurnJoinsMcpLifecycleGate(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
 
-	cases := []struct {
-		name       string
-		structured any
-		text       string
-		want       string
-	}{
-		{"branch preferred", wt(map[string]any{"branch": "feature/x", "id": "wt_1", "path": "/p"}), "", "feature/x"},
-		{"id fallback when no branch", wt(map[string]any{"id": "wt_1", "path": "/p"}), "", "wt_1"},
-		{"path fallback when no branch/id", wt(map[string]any{"path": "/p/q"}), "", "/p/q"},
-		{"explicit null structured", map[string]any{"worktree": nil}, "", noActiveWorktreeLabel},
-		{"text body branch wins", nil, `{"worktree":{"branch":"main","id":"wt_2"}}`, "main"},
-		{"text body id fallback", nil, `{"worktree":{"id":"wt_3"}}`, "wt_3"},
-		{"text body null", nil, `{"worktree":null}`, noActiveWorktreeLabel},
-		{"absent key structured", map[string]any{"other": 1}, "", ""},
-		{"empty everything", nil, "", ""},
-		{"malformed text", nil, "not json", ""},
-		{"whitespace-only fields fall through to empty", wt(map[string]any{"branch": "  ", "id": " "}), "", ""},
-		{"structured empty-label falls to text body", wt(map[string]any{}), `{"worktree":{"branch":"dev"}}`, "dev"},
+	a.mcpLifecycleMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.ensureStartupForTurn(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("first turn raced ahead while the MCP lifecycle gate was held")
+	case <-time.After(20 * time.Millisecond):
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := parseCurrentWorktreeLabel(tc.structured, tc.text); got != tc.want {
-				t.Errorf("parseCurrentWorktreeLabel(%v, %q) = %q, want %q", tc.structured, tc.text, got, tc.want)
-			}
-		})
+	a.mcpLifecycleMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not resume after the MCP lifecycle gate completed")
 	}
 }
 
-// TestRefreshStartupContextNotConnectedClears asserts the not-connected refresh clears
-// the startup cache, so message[1] drops stale configured-agents / worktree facts when a
-// session goes degraded rather than carrying a prior connection's roster forward.
+func TestEnsureStartupForTurnDoesNotRetryCompletedDegradedAttempt(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	a.mcpLifecycleMu.Lock()
+	a.startupConnectAttempted = true
+	a.mcpLifecycleMu.Unlock()
+
+	// If ensure incorrectly calls ConnectMcp, the disconnected refresh will block on
+	// startupRefreshMu. A completed degraded attempt must instead fail open immediately.
+	a.startupRefreshMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.ensureStartupForTurn(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		a.startupRefreshMu.Unlock()
+		t.Fatal("degraded turn retried the full MCP connect/discovery path")
+	}
+	a.startupRefreshMu.Unlock()
+}
+
+func TestCanceledSplashAttemptRemainsRetryable(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.ConnectMcp(ctx)
+	a.mcpLifecycleMu.Lock()
+	attempted := a.startupConnectAttempted
+	a.mcpLifecycleMu.Unlock()
+	if attempted {
+		t.Fatal("canceled splash was recorded as the one completed automatic attempt")
+	}
+}
+
+func TestCancelledSplashDoesNotSpendLedgerReconcileOnce(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.maybeReconcileLedger(ctx, true)
+	a.reconcileLedgerMu.Lock()
+	done := a.reconcileLedgerDone
+	a.reconcileLedgerMu.Unlock()
+	if done {
+		t.Fatal("canceled splash permanently spent the reconcile gate")
+	}
+}
+
+func TestMergedResultObjectRecursivelyUnionsTextAndStructured(t *testing.T) {
+	res := mcp.CallResult{
+		Text: `{"project":{"id":"p1","name":"from text"},"textOnly":true}`,
+		StructuredContent: map[string]any{
+			"project": map[string]any{"name": "structured", "path": "/repo"},
+		},
+	}
+	got := mergedResultObject(res)
+	project, ok := got["project"].(map[string]any)
+	if !ok {
+		t.Fatalf("project = %#v, want object", got["project"])
+	}
+	if project["id"] != "p1" || project["name"] != "structured" || project["path"] != "/repo" {
+		t.Fatalf("recursive merge lost fields or precedence: %#v", project)
+	}
+	if got["textOnly"] != true {
+		t.Fatalf("text-only field missing: %#v", got)
+	}
+}
+
+func TestParseAvailableAgentsPreservesCompleteRegistryMetadata(t *testing.T) {
+	res := mcp.CallResult{Text: `{"agents":[
+        {"id":"claude","displayName":"Claude Code","source":"built-in","availability":"ready","installed":true,"toolbarVisible":true,"pinned":true},
+        {"id":"custom-agent","displayName":"Team Agent","source":"user","availability":"unauthenticated"},
+        {"id":"daintree-assistant","displayName":"Assistant","source":"built-in"},
+        {"id":"  "}
+    ]}`}
+	got, complete, availabilityComplete, ok := parseAvailableAgents(res)
+	if !ok {
+		t.Fatal("canonical available-agent payload was not recognized")
+	}
+	if complete || availabilityComplete {
+		t.Fatalf("omitted completeness flags must remain false: complete=%v availability=%v", complete, availabilityComplete)
+	}
+	if len(got) != 2 {
+		t.Fatalf("agents = %+v, want two valid rows", got)
+	}
+	if got[0].ID != "claude" || got[0].Source != "built-in" || got[0].Pinned == nil || !*got[0].Pinned {
+		t.Fatalf("explicit pin was not preserved: %+v", got[0])
+	}
+	if got[0].ToolbarVisible == nil || !*got[0].ToolbarVisible {
+		t.Fatalf("resolved toolbar state was not preserved: %+v", got[0])
+	}
+	if got[1].Source != "user" || got[1].Installed == nil || !*got[1].Installed {
+		t.Fatalf("custom availability metadata was not derived: %+v", got[1])
+	}
+}
+
+func TestParseAvailableAgentsRejectsMissingWrapper(t *testing.T) {
+	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"complete":true}`}); ok || got != nil {
+		t.Fatalf("missing agents wrapper parsed as got=%+v ok=%v", got, ok)
+	}
+	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"agents":"not-an-array"}`}); ok || got != nil {
+		t.Fatalf("malformed agents wrapper parsed as got=%+v ok=%v", got, ok)
+	}
+	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"agents":null}`}); ok || got != nil {
+		t.Fatalf("null agents wrapper parsed as got=%+v ok=%v", got, ok)
+	}
+}
+
+func TestParseAvailableAgentsUnionsTextAndStructuredRows(t *testing.T) {
+	pinned := true
+	res := mcp.CallResult{
+		Text: `{"complete":true,"agents":[{"id":"text-agent","displayName":"Text Agent","availability":"ready"}]}`,
+		StructuredContent: map[string]any{
+			"availabilityComplete": true,
+			"agents": []any{
+				map[string]any{"id": "text-agent", "pinned": pinned},
+				map[string]any{"id": "structured-agent", "displayName": "Structured Agent"},
+			},
+		},
+	}
+	rows, complete, availabilityComplete, ok := parseAvailableAgents(res)
+	if !ok || !complete || !availabilityComplete || len(rows) != 2 {
+		t.Fatalf("union = rows:%+v complete:%v availability:%v ok:%v", rows, complete, availabilityComplete, ok)
+	}
+	if rows[0].ID != "text-agent" || rows[0].DisplayName != "Text Agent" || rows[0].Pinned == nil || !*rows[0].Pinned {
+		t.Fatalf("structured update dropped text fields: %+v", rows[0])
+	}
+	if rows[1].ID != "structured-agent" {
+		t.Fatalf("structured-only row missing: %+v", rows)
+	}
+}
+
+func TestWorktreeLabelDistinguishesUnknownAndNone(t *testing.T) {
+	if got := worktreeLabel(nil); got != "" {
+		t.Fatalf("unknown worktree label = %q, want empty", got)
+	}
+	if got := worktreeLabel(&prompts.WorktreeContext{Present: false}); got != "(none — not in a worktree)" {
+		t.Fatalf("definitive-none label = %q", got)
+	}
+	if got := worktreeLabel(&prompts.WorktreeContext{Present: true, Branch: "feature/x", ID: "wt-1"}); got != "feature/x" {
+		t.Fatalf("branch should win, got %q", got)
+	}
+	if got := worktreeLabel(&prompts.WorktreeContext{Present: true, ID: "wt-1", Path: "/repo"}); got != "wt-1" {
+		t.Fatalf("id fallback = %q", got)
+	}
+}
+
+// A degraded reconnect must clear every Daintree-owned snapshot atomically instead of
+// leaking a prior project's agents/worktree into later backend requests.
 func TestRefreshStartupContextNotConnectedClears(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	a.rosterMu.Lock()
-	a.cachedAgentIDs = []string{"claude"}
-	a.cachedActiveWorktree = "feature/x"
-	a.rosterMu.Unlock()
+	a.startupMu.Lock()
+	a.cachedProject = &prompts.ProjectContext{ID: "old"}
+	a.cachedAgents = &prompts.AgentRosterContext{Agents: []prompts.AgentContext{{ID: "claude"}}}
+	a.cachedWorktree = &prompts.WorktreeContext{Present: true, Branch: "feature/x"}
+	a.startupMu.Unlock()
 
 	a.refreshStartupContext(context.Background(), false)
 
-	a.rosterMu.RLock()
-	gotIDs, gotWt := a.cachedAgentIDs, a.cachedActiveWorktree
-	a.rosterMu.RUnlock()
-	if gotIDs != nil || gotWt != "" {
-		t.Fatalf("not-connected refresh must clear the cache, got ids=%v wt=%q", gotIDs, gotWt)
+	a.startupMu.RLock()
+	project, agents, worktree := a.cachedProject, a.cachedAgents, a.cachedWorktree
+	a.startupMu.RUnlock()
+	if project != nil || agents != nil || worktree != nil {
+		t.Fatalf("degraded refresh retained stale context: project=%+v agents=%+v worktree=%+v", project, agents, worktree)
 	}
-
-	// And it propagates through the live PromptContext: the cleared cache drops the stale
-	// roster (now carried as structured backend.RuntimeContext data, no message[1] to
-	// rewrite) and makes the footer worktree seam report "" until the next connect.
-	if got := a.PromptContext().ConfiguredAgentIDs; len(got) != 0 {
-		t.Fatalf("degraded PromptContext must not carry a stale roster, got %v", got)
+	pc := a.PromptContext()
+	if pc.AgentRoster != nil || pc.Worktree != nil {
+		t.Fatalf("PromptContext retained stale Daintree state: %+v", pc)
 	}
 	if got := a.activeWorktreeForFooter(); got != "" {
-		t.Fatalf("a cleared cache must make the footer worktree seam empty, got %q", got)
+		t.Fatalf("cleared worktree label = %q, want empty", got)
 	}
 }

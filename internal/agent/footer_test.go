@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 )
 
 // ptrOf returns a pointer to v — the nullable WorkflowRunRecord fields (issue, branch,
@@ -1216,6 +1218,218 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	mem := be.turnAt(1).Memories
 	if mem == nil || !anyContains(mem.Pinned, "pin B totally different") {
 		t.Fatalf("turn-2 turn context should reflect the changed pin; got %+v", mem)
+	}
+}
+
+func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
+		{Content: "final"},
+	}}
+	contextCalls := 0
+	launchable := true
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	deps.PromptContextFunc = func() prompts.MainPromptContext {
+		contextCalls++
+		tier := domain.TierOperator
+		if contextCalls > 1 {
+			tier = domain.TierSupervisor
+		}
+		return prompts.MainPromptContext{
+			Tier: tier,
+			Project: &prompts.ProjectContext{
+				ID: "project-1", Name: "Demo", Path: "/repo",
+			},
+			AgentRoster: &prompts.AgentRosterContext{Agents: []prompts.AgentContext{
+				{ID: "codex", Availability: "ready", Launchable: &launchable},
+			}},
+			ProjectInstructions: "Run the linter.",
+		}
+	}
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.requests()) < 2 {
+		t.Fatalf("want two rounds, got %d", len(be.requests()))
+	}
+	for i := 0; i < 2; i++ {
+		req := be.requests()[i]
+		if len(req.Input.Messages) < 2 || req.Input.Messages[0].Role != "user" {
+			t.Fatalf("round %d missing injected startup message: %+v", i, req.Input.Messages)
+		}
+		var content string
+		if err := json.Unmarshal(req.Input.Messages[0].Content, &content); err != nil {
+			t.Fatalf("round %d invalid startup content: %v", i, err)
+		}
+		if !strings.Contains(content, "Injected startup context") || !strings.Contains(content, "Demo") || !strings.Contains(content, "codex") {
+			t.Fatalf("round %d startup message missing project/agent facts: %s", i, content)
+		}
+		if i > 0 && string(req.Input.Messages[0].Content) != string(be.requests()[0].Input.Messages[0].Content) {
+			t.Fatalf("round %d changed the stable startup bytes", i)
+		}
+		if !strings.Contains(content, "Run the linter.") || !strings.Contains(content, "<project_instructions>") {
+			t.Fatalf("round %d missing framed project instructions in startup message", i)
+		}
+		runtime := be.runtimeAt(i)
+		if runtime.ProjectInstructions != "" || runtime.ProjectID != "" || runtime.ProjectPath != "" || len(runtime.ConfiguredAgentIDs) != 0 {
+			t.Fatalf("round %d duplicated stable startup facts in volatile runtime tail: %+v", i, runtime)
+		}
+		wantTier := string(domain.TierOperator)
+		if i > 0 {
+			wantTier = string(domain.TierSupervisor)
+		}
+		if runtime.PermissionTier != wantTier {
+			t.Fatalf("round %d runtime tier = %q", i, runtime.PermissionTier)
+		}
+	}
+	wantRoles := [][]string{{"user", "user"}, {"user", "user", "assistant", "tool"}}
+	for round, want := range wantRoles {
+		messages := be.requests()[round].Input.Messages
+		if len(messages) != len(want) {
+			t.Fatalf("round %d message count = %d, want roles %v", round, len(messages), want)
+		}
+		for i, role := range want {
+			if messages[i].Role != role {
+				t.Fatalf("round %d message %d role = %q, want %q", round, i, messages[i].Role, role)
+			}
+		}
+	}
+	for _, message := range s.Messages() {
+		if strings.Contains(message.StringContent, "Injected startup context") {
+			t.Fatalf("request-only startup row leaked into durable/live history: %+v", message)
+		}
+	}
+}
+
+func TestEnsureStartupContextRunsBeforeFirstBackendSnapshot(t *testing.T) {
+	ready := false
+	deps, be := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "done"}}}, &fakeTools{})
+	deps.EnsureStartupContext = func(context.Context) { ready = true }
+	deps.PromptContextFunc = func() prompts.MainPromptContext {
+		if !ready {
+			return prompts.MainPromptContext{}
+		}
+		return prompts.MainPromptContext{Project: &prompts.ProjectContext{Name: "Warmed project"}}
+	}
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "hello", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	reqs := be.requests()
+	if len(reqs) != 1 || len(reqs[0].Input.Messages) < 2 {
+		t.Fatalf("first request did not wait for startup context: %+v", reqs)
+	}
+	if !strings.Contains(string(reqs[0].Input.Messages[0].Content), "Warmed project") {
+		t.Fatalf("first startup message = %s", reqs[0].Input.Messages[0].Content)
+	}
+}
+
+func TestStartupMessageStaysRequestOnlyAcrossPersistenceAndResume(t *testing.T) {
+	store := &recordingStore{}
+	promptContext := prompts.MainPromptContext{Project: &prompts.ProjectContext{ID: "p1", Name: "Persistent Demo"}}
+	firstDeps, _ := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "first answer"}}}, &fakeTools{})
+	firstDeps.Store = store
+	firstDeps.SessionID = "ses_startup_resume"
+	firstDeps.PromptContext = promptContext
+	first := NewSession(firstDeps)
+	if _, err := first.Send(context.Background(), "first ask", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range store.msgs {
+		if strings.Contains(row.Content, "Injected startup context") {
+			t.Fatalf("startup scaffold persisted at seq %d", row.Seq)
+		}
+	}
+	restore, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("persisted visible history did not rehydrate")
+	}
+	secondDeps, secondBackend := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "second answer"}}}, &fakeTools{})
+	secondDeps.Store = store
+	secondDeps.SessionID = "ses_startup_resume"
+	secondDeps.PromptContext = promptContext
+	secondDeps.RestoredMessages = restore.RestoredMessages
+	secondDeps.InitialSeq = restore.InitialSeq
+	resumed := NewSession(secondDeps)
+	if _, err := resumed.Send(context.Background(), "second ask", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	requests := secondBackend.requests()
+	if len(requests) != 1 {
+		t.Fatalf("resumed turn requests = %d, want 1", len(requests))
+	}
+	prefixes := 0
+	for i, message := range requests[0].Input.Messages {
+		var content string
+		if json.Unmarshal(message.Content, &content) == nil && strings.Contains(content, "Injected startup context") {
+			prefixes++
+			if i != 0 {
+				t.Fatalf("startup prefix moved to message %d", i)
+			}
+		}
+	}
+	if prefixes != 1 {
+		t.Fatalf("resumed request has %d startup prefixes, want exactly 1", prefixes)
+	}
+	for _, row := range store.msgs {
+		if strings.Contains(row.Content, "Injected startup context") {
+			t.Fatalf("resumed turn persisted startup scaffold at seq %d", row.Seq)
+		}
+	}
+}
+
+func TestCurrentWorktreeFetcherRefreshesEveryBackendRound(t *testing.T) {
+	r := &injectRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
+		{Content: "final"},
+	}}
+	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
+	calls := 0
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		calls++
+		return &prompts.WorktreeContext{Present: true, Branch: "feature/" + strconv.Itoa(calls)}
+	}
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "work", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("worktree fetch calls = %d, want one per backend round", calls)
+	}
+	if got := be.runtimeAt(0).ActiveWorktree; !strings.Contains(got, "feature/1") {
+		t.Fatalf("round 0 worktree = %q", got)
+	}
+	if got := be.runtimeAt(1).ActiveWorktree; !strings.Contains(got, "feature/2") {
+		t.Fatalf("round 1 worktree = %q", got)
+	}
+}
+
+func TestFailedCurrentWorktreeReadDoesNotMasqueradeCachedValueAsCurrent(t *testing.T) {
+	deps, be := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "done"}}}, &fakeTools{})
+	contextReads := 0
+	deps.PromptContextFunc = func() prompts.MainPromptContext {
+		contextReads++
+		if contextReads == 1 {
+			return prompts.MainPromptContext{
+				MCPConnected:  true,
+				MCPStatusLine: "connected",
+				Worktree:      &prompts.WorktreeContext{Present: true, Branch: "stale/from-splash"},
+			}
+		}
+		return prompts.MainPromptContext{}
+	}
+	deps.ActiveWorktreeFunc = func() string { return "stale/legacy-fallback" }
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext { return nil }
+	s := NewSession(deps)
+	if _, err := s.Send(context.Background(), "work", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := be.runtimeAt(0).ActiveWorktree; got != "" {
+		t.Fatalf("failed live read reused stale worktree %q", got)
+	}
+	if got := be.runtimeAt(0).MCP; got != nil {
+		t.Fatalf("runtime retained pre-failure MCP status: %+v", got)
 	}
 }
 

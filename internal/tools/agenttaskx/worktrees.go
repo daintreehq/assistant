@@ -27,7 +27,7 @@ type worktreeInfo struct {
 // isActive,isMain}] }) and returns the entries, deduped by id. Returns nil on any error,
 // timeout, a non-list payload, or an empty list so callers FAIL OPEN — a discovery hiccup
 // must never block a spawn. Unions the structuredContent payload and the JSON text body
-// (Daintree returns results in text), mirroring ConfiguredAgentIDs / parseTerminalList, so
+// (Daintree returns results in text), mirroring RegisteredAgentIDs / parseTerminalList, so
 // a divergence between the two sources can't drop a worktree.
 func listWorktrees(ctx context.Context, mcp MCPClient) []worktreeInfo {
 	// Bound the read with a CANCEL-based deadline, NOT context.WithTimeout: the shared

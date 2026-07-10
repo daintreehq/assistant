@@ -57,11 +57,19 @@ type ledgerReconcileStore interface {
 // untouched. Returns the number of ledger rows cancelled (0 on any skip) for
 // observability and tests.
 func ReconcileLedger(ctx context.Context, store ledgerReconcileStore, client ledgerReconcileMCP, dbg debuglog.Config) int {
+	cancelled, _ := reconcileLedger(ctx, store, client, dbg)
+	return cancelled
+}
+
+// reconcileLedger's second result says the terminal inventory was successfully read and
+// the attempt ran to completion. App uses it to commit its once-only state only after a
+// real attempt; the public count-only wrapper remains stable for existing callers/tests.
+func reconcileLedger(ctx context.Context, store ledgerReconcileStore, client ledgerReconcileMCP, dbg debuglog.Config) (int, bool) {
 	live, ok := readLiveTerminalIDs(ctx, client)
 	if !ok {
 		// A failed/error read must NOT be read as "every terminal gone" — skip, leaving
 		// the ledger untouched, so a transient transport blip can't mass-cancel runs.
-		return 0
+		return 0, false
 	}
 
 	cancelled := 0
@@ -136,7 +144,7 @@ func ReconcileLedger(ctx context.Context, store ledgerReconcileStore, client led
 	if cancelled > 0 {
 		debuglog.LogDebug(dbg, "reconcile.summary", map[string]any{"cancelled": cancelled, "liveTerminals": len(live)})
 	}
-	return cancelled
+	return cancelled, true
 }
 
 // readLiveTerminalIDs reads the live terminal inventory once, bounded by a cancel-based
@@ -248,17 +256,25 @@ func isTerminalWorkflowStatus(s domain.WorkflowRunStatus) bool {
 	}
 }
 
-// maybeReconcileLedger runs the boot ledger reconcile exactly ONCE per process — on
-// the first successful MCP connect — guarded by reconcileLedgerOnce. A mid-session
+// maybeReconcileLedger runs the boot ledger reconcile exactly once per process — on
+// the first successful MCP connect with a parseable live-terminal read. A mid-session
 // /reconnect must NOT re-run it: it reads the LIVE terminal.list, so a re-run after the
 // user ended a terminal in-session could wrongly expire a run still being worked. It is
-// a no-op when not connected (so the once is spent only on a real attempt).
+// a no-op when not connected. The mutex serializes duplicate splash/bootstrap calls, and
+// `done` is committed only after a completed attempt, so cancellation at any point in
+// terminal.list remains retryable.
 func (a *App) maybeReconcileLedger(ctx context.Context, connected bool) {
 	if !connected {
 		return
 	}
-	a.reconcileLedgerOnce.Do(func() {
-		ReconcileLedger(ctx, a.Store, a.MCP,
-			debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir})
-	})
+	a.reconcileLedgerMu.Lock()
+	defer a.reconcileLedgerMu.Unlock()
+	if a.reconcileLedgerDone {
+		return
+	}
+	_, completed := reconcileLedger(ctx, a.Store, a.MCP,
+		debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir})
+	if completed {
+		a.reconcileLedgerDone = true
+	}
 }

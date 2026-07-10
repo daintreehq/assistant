@@ -1,8 +1,9 @@
 // Package backend is the native Daintree Assistant backend client. It replaces
 // the direct DeepSeek/OpenAI model client for assistant turns and utility tasks.
 //
-// The CLI is a thin local runtime: it stores the visible conversation, exposes
-// and executes local function tools, and ships structured runtime/turn context.
+// The CLI is a thin local runtime: it stores the visible conversation, exposes and
+// executes local function tools, prepends a request-only stable startup-data row, and
+// ships structured runtime/turn context.
 // The backend owns the system prompt, developer instructions, skill/runbook
 // selection, model choice, prompt assembly, and the utility-model prompts — and
 // it talks to DeepSeek/OpenAI internally. The wire contract here is
@@ -60,8 +61,9 @@ type RespondSession struct {
 	Round               int    `json:"round,omitempty"`
 }
 
-// RespondInput is the visible conversation plus the client's current tool
-// inventory. messages must be non-empty and carry only user/assistant/tool roles.
+// RespondInput is the request conversation (an optional framed startup-data user message
+// followed by visible history) plus the client's current tool inventory. Messages must
+// be non-empty and carry only user/assistant/tool roles.
 type RespondInput struct {
 	Messages   []Message `json:"messages"`
 	Tools      []Tool    `json:"tools,omitempty"`

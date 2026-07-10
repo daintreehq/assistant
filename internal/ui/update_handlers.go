@@ -1161,6 +1161,9 @@ func (m Model) fetchProjectNameCmd() tea.Cmd {
 			if !a.MCP.IsConnected() {
 				break
 			}
+			if name := a.ProjectName(); name != "" {
+				return ProjectNameMsg{Name: name}
+			}
 			if name := a.MCP.FetchProjectName(ctx); name != "" {
 				return ProjectNameMsg{Name: name}
 			}

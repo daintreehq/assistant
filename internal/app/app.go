@@ -24,6 +24,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -195,23 +196,30 @@ type App struct {
 	// launch. Immutable after Create, so it needs no lock.
 	InitialTier domain.Tier
 
-	// rosterMu guards the startup-context cache: the configured-agents roster (surfaced in
-	// message[1] via PromptContext) and the current worktree label (surfaced in the
-	// uncached footer via activeWorktreeForFooter since issue #263). Both are fetched once
-	// per MCP (re)connect by refreshStartupContext (under the boot/reconnect goroutine) and
-	// read on agent/tool goroutines, so — exactly like cfgMu — the write and those reads
-	// must be serialized. RWMutex because reads (one per turn-context rebuild / footer
-	// build) vastly outnumber writes (one per connect). NEVER nest it with cfgMu:
-	// PromptContext takes them sequentially, never one inside the other.
-	rosterMu             sync.RWMutex
-	cachedAgentIDs       []string
-	cachedActiveWorktree string
+	// startupMu guards the typed Daintree snapshot fetched during the splash: project,
+	// full effective agent catalog + toolbar state, and Daintree's current worktree.
+	// refreshStartupContext publishes all three atomically after concurrent reads, so a
+	// backend round sees either the previous complete snapshot or the new one, never a
+	// half-refreshed mix. Project/agents feed the cacheable pre-conversation startup block;
+	// worktree stays in the fresh tail. NEVER nest startupMu with cfgMu.
+	// mcpLifecycleMu serializes the entire primary MCP connect/reconnect + discovery
+	// publication. A fast first turn joins this gate instead of sampling `Connected=false`
+	// while the splash handshake is still in flight and racing ahead with empty context.
+	mcpLifecycleMu          sync.Mutex
+	startupConnectAttempted bool // guarded by mcpLifecycleMu; canceled splash attempts do not set it
+	startupRefreshMu        sync.Mutex
+	startupMu               sync.RWMutex
+	cachedProject           *prompts.ProjectContext
+	cachedAgents            *prompts.AgentRosterContext
+	cachedWorktree          *prompts.WorktreeContext
+	startupReady            bool
+	startupGeneration       uint64
 
-	// reconcileLedgerOnce guards the boot ledger reconcile (ReconcileLedger) so it runs
-	// exactly once per process — on the first successful MCP connect. A mid-session
-	// /reconnect must NOT re-run it: it reads the LIVE terminal.list, so a re-run after
-	// the user ended a terminal in-session could wrongly expire a run still being worked.
-	reconcileLedgerOnce sync.Once
+	// reconcileLedgerMu/done guard the boot ledger reconcile. `done` is committed only
+	// after terminal.list returned a parseable inventory; a splash cancellation or transient
+	// read failure stays retryable by the normal bootstrap. A completed attempt never reruns.
+	reconcileLedgerMu   sync.Mutex
+	reconcileLedgerDone bool
 
 	// docsConnectWG tracks in-flight docs-MCP (re)connect goroutines (connectDocsAsync).
 	// Shutdown waits on it AFTER baseCancel so a late applyConnected can't install a docs
@@ -587,8 +595,10 @@ func Create(opts CreateOptions) (*App, error) {
 		// no-output terminal.getStatus snapshot attached to the runtime block so the model
 		// sees the live roster as inert data instead of discovering it mid-turn. Best-effort
 		// and bounded; reuses the same MCP read adapter as the extraction/id-resolution path.
-		OpenTerminalsFetcher: terminalReaderAdapter{c: a.MCP}.FetchOpenTerminals,
-		PromptContext:        a.PromptContext(),
+		OpenTerminalsFetcher:   terminalReaderAdapter{c: a.MCP}.FetchOpenTerminals,
+		PromptContext:          a.PromptContext(),
+		EnsureStartupContext:   a.ensureStartupForTurn,
+		CurrentWorktreeFetcher: a.refreshCurrentWorktree,
 		// Live runtime context: pulled every round so a post-construction MCP connect,
 		// /permissions tier change, or scheduler start reaches the backend (replaces the
 		// removed RefreshRuntimeContext push). a.PromptContext reads live MCP/scheduler state.

@@ -96,7 +96,27 @@ other writes).
 > `forge.list*` / `forge.get*` reads instead.
 
 Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed by
-**agent** id), `agent.terminal`, `agentSessionHistory.list`, `recipe.list`, `recipe.run`.
+**agent** id), `agent.terminal`, `agent.listAvailable`, `agent.listToolbar`, `cliAvailability.get`,
+`agentSessionHistory.list`, `recipe.list`, `recipe.run`.
+
+> **Agent discovery.** `agent.listAvailable` is the canonical narrow snapshot. It reads
+> the main process's current effective direct-agent registry (built-in + user + plugin),
+> excludes assistant-only `daintree-assistant`, and returns `{ complete,
+> availabilityComplete, agents: [{ id, displayName, source, availability?, installed?,
+> launchable?, pinned?, toolbarVisible? }] }`. `launchable` is true only for `ready` or
+> `unauthenticated`, false for a known non-runnable state, and omitted when availability is
+> still unknown. Built-ins carry explicit tri-state `pinned`
+> plus resolved `toolbarVisible`; user/plugin agents have no toolbar fields. An omitted
+> availability means the CLI probe cache has not covered that new registry row yet — it is
+> not equivalent to `missing`. `ready` is immediately launchable; `unauthenticated` may
+> prompt for login; `installed` and `blocked` need setup/support before direct launch.
+>
+> `agent.listToolbar` remains the built-in-only toolbar view, and `cliAvailability.get`
+> remains the raw coarse status map. The assistant uses the canonical combined action
+> during its splash and for spawn validation, so registry membership, display names, and
+> toolbar state come from one coherent read. Never substitute broad `agentSettings.get`:
+> settings can include flags, presets, and environment configuration, and its keys are not
+> an availability catalog.
 
 > **Closed / resumable sessions.** `agentSessionHistory.list` (workbench tier,
 > `danger:safe`, reached via `daintree.call` — no typed wrapper) lists the closed agent
@@ -138,6 +158,15 @@ Code/Files (Daintree-side): `copyTree.generate`, `copyTree.injectToTerminal`,
 
 Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema`.
 
+Projects: `project.getCurrent` returns `{ project }` for the active window (or null).
+The assistant keeps only id/name/path/status and the two repository-config booleans from
+that record. It intentionally does not inject `project.getSettings`, whose open-ended map
+can contain environment or other sensitive configuration. Presentation/recency fields
+(emoji, color, pinned, last-opened/frecency, auto-park timestamps) are also omitted because
+they do not improve ordinary orchestration. Broader or volatile reads — all projects, all
+worktrees, and `git.getProjectPulse` — remain available on demand instead of bloating or
+invalidating every request.
+
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
@@ -152,7 +181,9 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
-  `{ terminalId, location }` **only** (no `worktreeId`, no `taskId` in the response).
+  `{ terminalId, location, spawnStatus? }` (no `worktreeId` or `taskId`). Optional
+  `spawnStatus: "missing-cli"` is an atomic negative result: Daintree opened a setup
+  diagnostic panel and did **not** spawn an agent PTY, so the Assistant fails the saga.
   `model?` (optional string) overrides the model the spawned agent runs under; omit
   it to use the agent's default.
 - `terminal.armByState` / `terminal.armAll` / `terminal.armDefault` and the whole
@@ -163,7 +194,9 @@ Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema
   `panel.focus({ panelId })` where the terminal id *is* the `panelId`. The local
   `terminal.focus` wrapper maps onto it.
 - Read tools (workbench tier, no confirmation): `actions.getContext` / `list` / `search` /
-  `getSchema`, `worktree.list`, `worktree.getCurrent`, `git.getProjectPulse`, `terminal.list`.
+  `getSchema`, `project.getCurrent`, `agent.listAvailable`, `agent.listToolbar`,
+  `cliAvailability.get`,
+  `worktree.list`, `worktree.getCurrent`, `git.getProjectPulse`, `terminal.list`.
   `agent.launch` and `terminal.waitUntilIdle` are action tier (mutations confirm).
 
 ## State models (from Daintree)
@@ -226,9 +259,11 @@ when Daintree closes the gap.
    (`internal/daemon/watcher.go`). It is **not** a completion trust gate: there is still no
    test/lint runner signal, so the irreversible-action gate from **issue #3** continues to
    derive completion trust from a deterministic git-cleanliness check, not the exit code.
-2. **`agent.launch` returns only `{ terminalId, location }`.** No `worktreeId` or `taskId`, so
-   `internal/tools/agenttaskx` degrades gracefully (caller-supplied `worktreeId`, no `taskId`).
-   If Daintree returns these, the spawn tool can stop guessing.
+2. **`agent.launch` returns `{ terminalId, location, spawnStatus? }`.** No `worktreeId` or
+   `taskId`, so `internal/tools/agenttaskx` degrades gracefully (caller-supplied
+   `worktreeId`, no `taskId`). `spawnStatus: "missing-cli"` is a clean unavailable failure
+   even though the diagnostic panel has an id. If Daintree returns the missing identity
+   fields later, the spawn tool can stop guessing.
 3. **`DAINTREE_WINDOW_ID` contract.** Daintree injects it but it had been referenced only inside
    a prompt string; it is now read into config so per-window/per-project state isolation can use
    it. This overlaps directly with **issue #4** (per-project state isolation) — #4 owns the

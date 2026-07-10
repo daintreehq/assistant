@@ -75,11 +75,11 @@ type TurnContext struct {
 
 // AssistantBackend is the native Daintree backend seam (satisfied by
 // *backend.Client). The turn loop streams a respond round through RespondStream;
-// utility/compaction work runs server-owned tasks through RunTask. The CLI sends
-// only the visible conversation + structured context; the backend owns the system
-// prompt, skill selection, and model routing. A narrow interface (no generic
-// Chat/JSON) is deliberate: generic prompt calls are exactly what this migration
-// removed.
+// utility/compaction work runs server-owned tasks through RunTask. The CLI sends a
+// request-only stable startup row, visible conversation, and structured runtime/turn
+// context; the backend owns the system prompt, skill selection, and model routing. A
+// narrow interface (no generic Chat/JSON) is deliberate: generic prompt calls are
+// exactly what this migration removed.
 type AssistantBackend interface {
 	RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error)
 	RunTask(ctx context.Context, req backend.TaskRequest) (backend.TaskResult, error)
@@ -253,9 +253,17 @@ type SessionDeps struct {
 	// tests); a slow/failed MCP read returns nil. The app wires this to
 	// terminalReaderAdapter.FetchOpenTerminals.
 	OpenTerminalsFetcher func(ctx context.Context) []backend.OpenTerminal
-	// PromptContext is the seed/fallback runtime context (used when PromptContextFunc is
-	// nil — the test default). The structured runtime block the backend receives each
-	// round is built from this.
+	// EnsureStartupContext joins or performs the splash-time stable project/agent
+	// discovery before the first backend request. Optional; nil keeps tests/local callers
+	// independent of Daintree. It is expected to be bounded and best-effort.
+	EnsureStartupContext func(ctx context.Context)
+	// CurrentWorktreeFetcher returns Daintree's live current worktree. Session invokes it
+	// once per backend round under a short cancellation budget so a worktree switch is
+	// reflected without making an unhealthy MCP block model generation.
+	CurrentWorktreeFetcher func(ctx context.Context) *prompts.WorktreeContext
+	// PromptContext is the seed/fallback context (used when PromptContextFunc is nil — the
+	// test default). Stable fields build the request-only startup row; live fields build
+	// the structured runtime block on each round.
 	PromptContext prompts.MainPromptContext
 	// PromptContextFunc, when set, is read EVERY round to build the per-request runtime
 	// context, so facts that populate after construction — a successful MCP connect, a

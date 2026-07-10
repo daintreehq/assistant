@@ -70,6 +70,17 @@ var DocumentedMcpToolNames = []string{
 	"worktree.createWithRecipe", "worktree.getCurrent", "worktree.list",
 }
 
+// AdditionalReadToolNames are safe Daintree reads the runtime calls directly but does
+// not add to the tools/list drift baseline. Some are deliberately discoverable (callable
+// after actions.search but omitted from eager tools/list), while newer core reads are
+// allowed to roll out without making an older host's otherwise-healthy connect warn.
+var AdditionalReadToolNames = []string{
+	"agent.listAvailable",
+	"agent.listToolbar",
+	"cliAvailability.get",
+	"project.getCurrent",
+}
+
 // readOnlyToolNames is the allowlist of Daintree MCP tools that are safe to
 // auto-retry on a transient transport failure: they only READ Daintree state, so
 // re-issuing one after a blip can never double-apply a mutation. CallTool honors
@@ -88,6 +99,11 @@ var readOnlyToolNames = map[string]struct{}{
 	"actions.list":        {},
 	"actions.search":      {},
 	"actions.getSchema":   {},
+	"agent.listAvailable": {},
+	"agent.listToolbar":   {},
+	"agentSettings.get":   {},
+	"cliAvailability.get": {},
+	"project.getCurrent":  {},
 	"worktree.list":       {},
 	"worktree.getCurrent": {},
 	"git.getProjectPulse": {},
