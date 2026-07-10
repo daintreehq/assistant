@@ -1192,15 +1192,19 @@ func bootCapCmd() tea.Cmd {
 // bootCap matches the original 8000ms backstop.
 const bootCap = 8000 * time.Millisecond
 
-// bootstrapCmd runs the async MCP connect + scheduler start off the loop and reports
-// MCPConnected/Degraded + wires the attention callback. The boot→cockpit hand-off
-// (masthead commit + redraw) is driven by the 3-gate lock, NOT here.
+// bootstrapCmd awaits the splash-started MCP future, starts the scheduler off-loop,
+// reports MCPConnected/Degraded, and wires the attention callback. It never launches a
+// duplicate post-handoff connect; the composer remains editable while it waits.
 func (m Model) bootstrapCmd() tea.Cmd {
 	a := m.app
 	ctx := m.ctx
 	pump := m.pump
+	prefetch := m.bootPrefetch
 	return func() tea.Msg {
-		st := a.ConnectMcp(ctx)
+		// The raw splash already started the one automatic MCP connect. Await that SAME
+		// future here (off the Update loop) instead of issuing a second ConnectMcp after
+		// hand-off. The composer remains editable throughout this wait.
+		st := prefetch.awaitMCP(ctx, a)
 		// Start the foreground daemon; attention events route through the pump's
 		// program via a channel the scheduler callback writes (delivered as a
 		// pump-adjacent attention batch). We surface them through the App log hook +

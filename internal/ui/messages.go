@@ -17,8 +17,9 @@ import (
 
 // --- bootstrap / connection lifecycle ---
 
-// BootstrapMsg fires once after the program is up: it kicks the async MCP connect
-// + scheduler start (the composer is already interactive — boot never gates input).
+// BootstrapMsg fires once after the program is up: it awaits the ONE MCP connect that
+// already started under the splash, then starts the scheduler. The wait runs off-loop,
+// so the composer is interactive while any remaining discovery settles.
 type BootstrapMsg struct{}
 
 // MCPConnectedMsg lands when the async MCP connect settles successfully. ToolCount

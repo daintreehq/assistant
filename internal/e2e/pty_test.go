@@ -257,6 +257,153 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	runtime.KeepAlive(ptm)
 }
 
+// TestPTYSplashDelayedConnectKeepsFooter is the real-terminal regression for the
+// startup failure where the one-time "Connected to Daintree MCPs" tea.Println landed,
+// then the composer/footer vanished until the next keypress. The trigger requires the
+// exact combination the older PTY tests deliberately skipped: the raw splash hand-off,
+// an MCP startup read that outlives the logo, and an immutable note committed while the
+// post-logo composer is otherwise unchanged.
+//
+// It also locks the intended boot UX: the logo remains present, discovery continues
+// ONCE across hand-off, and the user can edit a draft while that discovery finishes.
+func TestPTYSplashDelayedConnectKeepsFooter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("splash PTY regression allocates a real pseudoterminal and delayed MCP server")
+	}
+	bin := buildBinary(t)
+	backend := newFakeBackend(t)
+	mcpServer := newFakeMCPWithAgentDelay(t, 2*time.Second)
+
+	const rows, cols = 40, 100
+	cmd := exec.Command(bin)
+	env := make([]string, 0, len(os.Environ())+14)
+	for _, kv := range os.Environ() {
+		// Presence alone changes these startup paths, so remove inherited values rather
+		// than relying on a duplicate empty assignment later in the environment.
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") ||
+			strings.HasPrefix(kv, "DAINTREE_ASSISTANT_NO_SPLASH=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	stateDir := t.TempDir()
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
+		"TERM=xterm-256color",
+		"DAINTREE_BACKEND_URL="+backend.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_ASSISTANT_STATE_DIR="+stateDir,
+		"DAINTREE_ASSISTANT_LOG_DIR="+stateDir+"/logs",
+		"DAINTREE_ASSISTANT_DEBUG_LOG=1", // matches the reported logging-badge geometry
+		"DAINTREE_ASSISTANT_NO_DAEMON=1", // isolate this process's single boot attempt
+		"DAINTREE_ASSISTANT_TIER=system",
+		"DAINTREE_WINDOW_ID=test-window", // exercise the embedded Daintree-pane gutter
+		"DAINTREE_MCP_URL="+mcpServer.url(),
+		"DAINTREE_MCP_TOKEN=fake-token",
+		"DAINTREE_DOCS_MCP_URL="+mcpServer.url(),
+	)
+
+	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
+	if err != nil {
+		t.Fatalf("start binary under pty: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
+
+	screen := newVTScreen(rows, cols)
+	var rawMu sync.Mutex
+	var raw bytes.Buffer
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := ptm.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				screen.Feed(chunk)
+				rawMu.Lock()
+				raw.Write(chunk)
+				rawMu.Unlock()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+	rawCount := func(sub string) int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return bytes.Count(raw.Bytes(), []byte(sub))
+	}
+	rawLen := func() int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return raw.Len()
+	}
+
+	// The logo finishes before agent.listAvailable. The hand-off must expose a live
+	// composer immediately; no connection completion is required before editing.
+	if !waitForPTY(10*time.Second, func() bool {
+		visible := screen.VisiblePlain()
+		return strings.Contains(visible, composerGlyph) &&
+			!strings.Contains(screen.Plain(), "Connected to Daintree MCPs")
+	}) {
+		t.Fatalf("post-logo composer did not become editable while MCP discovery was pending:\n%s", screen.Plain())
+	}
+	// Forty animation frames each clear+home the viewport. Requiring a substantial
+	// number proves this test did not accidentally take the no-splash path.
+	if got := rawCount("\x1b[2J\x1b[H"); got < 20 {
+		t.Fatalf("splash logo was not rendered (viewport-reset frames=%d, want >=20)", got)
+	}
+
+	const draft = "draft while loading"
+	if _, err := ptm.Write([]byte(draft)); err != nil {
+		t.Fatalf("type draft while loading: %v", err)
+	}
+	if !waitForPTY(5*time.Second, func() bool {
+		return strings.Contains(screen.VisiblePlain(), draft)
+	}) {
+		t.Fatalf("composer did not accept input while startup discovery was pending:\n%s", screen.Plain())
+	}
+
+	if !waitForPTY(15*time.Second, func() bool {
+		return strings.Contains(screen.Plain(), "Connected to Daintree MCPs")
+	}) {
+		t.Fatalf("connected note never arrived:\n%s", screen.Plain())
+	}
+	// Let Println + its queue ack + the following renderer frame fully settle WITHOUT
+	// sending another key. Before the fix this is exactly where the visible grid lost
+	// the composer; typing one more character made it reappear.
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+	visible := screen.VisiblePlain()
+	if !strings.Contains(visible, composerGlyph) || !strings.Contains(visible, draft) {
+		t.Fatalf("connected-note commit erased the live footer until keypress:\n%s", screen.Plain())
+	}
+	if got := mcpServer.agentListCallCount(); got != 1 {
+		t.Fatalf("startup discovery ran agent.listAvailable %d times, want exactly 1 across splash hand-off", got)
+	}
+
+	// Ctrl+C is independent of the draft buffer and gives the staged shutdown its two
+	// presses without changing the footer before the regression assertions above.
+	_, _ = ptm.Write([]byte{3, 3})
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitErr
+		t.Error("cockpit did not exit within 10s after staged Ctrl+C")
+	}
+	_ = ptm.Close()
+	drainWG.Wait()
+	runtime.KeepAlive(ptm)
+}
+
 // TestPTYLargePasteScrollback is the regression for the large-paste scrollback corruption:
 // pasting a block taller than the viewport made the YOU card commit in a SINGLE tea.Println
 // taller than the screen, and Bubble Tea v2's insertAbove then clamped its CursorUp at the

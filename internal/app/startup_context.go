@@ -73,16 +73,16 @@ func (a *App) updateStartupContext(ctx context.Context, connected, force bool) {
 	a.cachedProject = project
 	a.cachedAgents = agents
 	a.cachedWorktree = worktree
-	// A canceled splash must not count as ready: Bubble Tea bootstrap or a fast first
-	// submit will join the serialized refresh and retry. Ordinary read failures with a
-	// live parent context are an explicit degraded snapshot and should fail open rather
+	// A cancelled launch must not count as ready: a later bootstrap or first submit can
+	// retry. Ordinary read failures with a live parent context are an explicit degraded
+	// snapshot and should fail open rather
 	// than stalling every later user turn on repeated discovery attempts.
 	a.startupReady = ctx.Err() == nil
 	a.startupMu.Unlock()
 }
 
 // ensureStartupForTurn joins the splash prefetch when it is still running, or performs
-// the same bounded discovery itself after a canceled/fast handoff. Thus the first
+// the same bounded discovery itself when no live boot attempt exists. Thus the first
 // backend request never races an empty boot cache merely because the user submitted
 // before Bubble Tea's bootstrap command completed.
 func (a *App) ensureStartupForTurn(ctx context.Context) {
@@ -99,8 +99,8 @@ func (a *App) ensureStartupForTurn(ctx context.Context) {
 	if (ready && connected) || attempted {
 		return
 	}
-	// The prior attempt was canceled by splash handoff (or no boot path ran), so this live
-	// turn gets one bounded retry before the first backend request.
+	// The prior attempt was cancelled externally (or no boot path ran), so this live turn
+	// gets one bounded retry before the first backend request.
 	a.ConnectMcp(ctx)
 }
 

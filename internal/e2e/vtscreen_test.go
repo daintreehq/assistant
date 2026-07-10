@@ -321,6 +321,23 @@ func (s *vtScreen) PlainLines() []string {
 // Plain joins PlainLines with newlines.
 func (s *vtScreen) Plain() string { return strings.Join(s.PlainLines(), "\n") }
 
+// VisiblePlain returns only the current terminal grid, excluding native scrollback.
+// Startup-footer tests use it so a composer row frozen in history cannot masquerade as
+// a footer that is still physically present after a tea.Println commit.
+func (s *vtScreen) VisiblePlain() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lines := make([]string, 0, s.rows)
+	for _, row := range s.grid {
+		lines = append(lines, strings.TrimRight(string(row), " "))
+	}
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return strings.Join(lines[:end], "\n")
+}
+
 // CountLineSubstr counts how many composed lines contain sub. Counting per-line
 // (not raw occurrences) is the robust signal for the no-duplicate-prose invariant:
 // a unique marker placed once should land on exactly one composed line.

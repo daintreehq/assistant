@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -145,12 +147,30 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 	}
 }
 
-// commitCmd builds the print-above-program command for a block. It prefers the
-// styled Rendered string and falls back to Plain when rendering produced nothing,
-// then emits a ScrollbackCommittedMsg ack carrying the block id. tea.Println prints
-// ABOVE the live program and persists across renders — exactly the native-scrollback
-// commit.
+// commitCmd builds the pre-print render barrier for a block. Bubble Tea only flushes
+// View on its FPS ticker, so the actual tea.Println is scheduled later, from Update's
+// scrollbackCommitReadyMsg handler, after it re-validates the queue generation and
+// resize state. Splitting barrier from print prevents a delayed stale command from
+// landing after /clear or a resize reset.
 func commitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
+	// Bubble Tea's renderer is ticker-flushed. Without a barrier, a cell can be appended
+	// to View, printed above the program, and acked (therefore removed from View) before
+	// even ONE renderer tick. The final View then equals the pre-cell View, so Bubble Tea
+	// skips its redraw even though insertAbove physically moved/erased the footer. The
+	// symptom is the whole composer disappearing until a keypress changes the View.
+	//
+	// Hold the print command for several renderer ticks first. That lets the live View
+	// containing this immutable cell become lastView; after Println + ack remove the cell,
+	// the View is observably different and Bubble Tea deterministically repaints the footer.
+	return tea.Tick(rendererSettleDelay, func(time.Time) tea.Msg {
+		return scrollbackCommitReadyMsg{Block: blk, MaxRows: maxRows}
+	})
+}
+
+// printCommitCmd performs the now-safe print-above operation and emits its ack. The
+// ready-message reducer calls this only while the originating generation is still live
+// and commits are not disarmed by a pending redraw.
+func printCommitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 	text := blk.Rendered
 	if text == "" {
 		text = blk.Plain
@@ -161,4 +181,11 @@ func commitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 	cmds := chunkPrintlns(text, maxRows)
 	cmds = append(cmds, func() tea.Msg { return ScrollbackCommittedMsg{ID: blk.ID, Gen: blk.Gen} })
 	return tea.Sequence(cmds...)
+}
+
+// scrollbackCommitReadyMsg closes the renderer barrier. Block is the immutable render
+// captured when the queue head was selected; Update checks its generation before print.
+type scrollbackCommitReadyMsg struct {
+	Block   ScrollbackBlock
+	MaxRows int
 }

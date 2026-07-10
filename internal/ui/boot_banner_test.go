@@ -10,8 +10,8 @@ import (
 )
 
 // The one-time boot "Connected to Daintree MCP" banner must commit directly under the
-// masthead, never below a turn the user already ran. The boot connect is async and the 8s
-// bootCap can drop the cockpit in before it resolves, so a turn (with a SUCCESSFUL MCP
+// masthead, never below a turn the user already ran. The boot connect is async and the raw
+// splash can hand off before it resolves, so a turn (with a SUCCESSFUL MCP
 // call) can precede the late MCPConnectedMsg. The banner is therefore gated on an
 // empty-of-work transcript, not on connect timing.
 func TestMCPConnectedBannerGatedToTopOfTranscript(t *testing.T) {
@@ -83,7 +83,7 @@ func TestBootBanner_CommitsAboveFirstTurn(t *testing.T) {
 	}
 
 	// The user's first turn starts before the (still-uncommitted) note has drained — exactly the
-	// bootCap race. The note now sits AHEAD of the active turn in the transcript.
+	// post-splash race. The note now sits AHEAD of the active turn in the transcript.
 	next, _ := m.startTurn("ask three agents for a fact")
 	m = next.(Model)
 	turn := m.activeTurnCell() // shared *TurnCell — its FlushedRows tracks across step() copies

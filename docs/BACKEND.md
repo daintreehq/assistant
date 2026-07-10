@@ -79,10 +79,11 @@ The Go client mirrors it in `internal/backend`:
   open-terminal warm-up while the logo is animating. The agent action returns the current
   effective built-in/user/plugin launch registry with display names, source, coarse CLI
   availability, and built-in tri-state pin/resolved toolbar visibility. A fast first submit
-  joins the whole connect+prefetch gate rather than racing an empty snapshot; duplicate boot
-  connects reuse it. The primary lifecycle has an 8-second cancellation budget. A completed
-  degraded attempt fails open for later turns (manual `/reconnect` owns retries), while a
-  splash attempt canceled by handoff remains retryable once by bootstrap/the first turn.
+  joins the whole connect+prefetch gate rather than racing an empty snapshot; the post-logo
+  bootstrap awaits that same single attempt instead of reconnecting. The primary lifecycle
+  has an 8-second cancellation budget. A completed degraded attempt fails open for later
+  turns (manual `/reconnect` owns retries), while an externally cancelled launch remains
+  retryable once by bootstrap/the first turn.
 - **The cache boundary is intentional.** The backend places the structured stable startup
   block immediately before the append-only conversation and keeps its fresh
   runtime/turn user message at the end. Worktree is re-read on every backend round, so a

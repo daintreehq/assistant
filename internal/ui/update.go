@@ -15,9 +15,9 @@ import (
 // and schedules scrollback commits.
 
 // Init kicks the event pump, the dashboard/spinner ticks, and the one-shot bootstrap
-// (async MCP connect + scheduler). The splash already played BEFORE the program
-// started (boot_splash.go), so there is no in-program splash tick or boot-cap — the
-// cockpit is live immediately. The composer is interactive from frame one.
+// (await the splash-started MCP future + start the scheduler). The splash already played
+// BEFORE the program started (boot_splash.go), so there is no in-program splash tick or
+// boot-cap — the cockpit is live immediately. The composer is interactive from frame one.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.pump.waitEvent(),
@@ -90,8 +90,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// footer only flags the link BY EXCEPTION when down.)
 		//
 		// But ONLY while the transcript is still just the masthead — before any turn has run.
-		// The boot connect is async (bootstrapCmd → MCPConnectedMsg) and the 8s bootCap can
-		// drop the cockpit in before it resolves, so the user may already have run a turn that
+		// The boot connect is async (bootstrapCmd → MCPConnectedMsg) and the raw splash hands
+		// off before slow discovery resolves, so the user may already have run a turn that
 		// SUCCESSFULLY called an MCP tool. Notes commit to scrollback in transcript order, so
 		// appending the banner after that turn would land it mid-transcript — a confusing
 		// "just connected" line below a turn that already proved the link was up. If work has
@@ -225,6 +225,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case AttentionBatchMsg:
 		return m.onAttention(msg)
+
+	case scrollbackCommitReadyMsg:
+		// The barrier command was scheduled against a specific queue generation. A
+		// /clear or redraw may have reset that generation while it waited; a resize may
+		// also have disarmed commits pending its ordered redraw. Never let the old print
+		// land after either reset. While still current, the delay has allowed the live
+		// cell to reach Bubble Tea's lastView, so Println+ack will force a real footer
+		// repaint when the cell leaves View.
+		if msg.Block.Gen != m.queue.gen || !m.queue.inFlight ||
+			!m.commitArmed || m.redrawPending {
+			return m, nil
+		}
+		return m, printCommitCmd(msg.Block, msg.MaxRows)
 
 	case ScrollbackCommittedMsg:
 		m.queue.ack(msg.ID, msg.Gen, len(m.transcript))

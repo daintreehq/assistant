@@ -10,6 +10,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/terminal"
 )
 
@@ -37,6 +38,7 @@ func Run(ctx context.Context, a *app.App) error {
 	}
 	debuglog.BootTrace("boot.splash.start")
 	bootPrefetch := startBootPrefetch(ctx, a)
+	m.bootPrefetch = bootPrefetch
 	defer bootPrefetch.stop()
 	handoffFrame := func(cols, rows int) string {
 		debuglog.BootTrace("boot.splash.handoff")
@@ -44,7 +46,6 @@ func Run(ctx context.Context, a *app.App) error {
 			m.masthead.ProjectName = name
 		}
 		bootPrefetch.backendHandshakeComplete()
-		bootPrefetch.stop()
 		// Lay the frame out for the terminal as it IS at hand-off time. The splash
 		// re-measures every frame (boot_splash.go) — a host resize mid-animation
 		// (embedded-pane layout hydration) would otherwise leave the masthead and
@@ -73,7 +74,6 @@ func Run(ctx context.Context, a *app.App) error {
 		m.handoffCols = paintedCols
 		m.handoffRows = paintedRows
 	} else {
-		bootPrefetch.stop()
 		m.syncComposer()
 	}
 
@@ -106,51 +106,57 @@ func Run(ctx context.Context, a *app.App) error {
 }
 
 type bootPrefetch struct {
-	projectNameDone <-chan string
-	backendDone     <-chan error
-	cancel          context.CancelFunc
+	mcpDone     chan struct{}
+	mcpResult   bootMCPResult
+	backendDone <-chan error
+	cancel      context.CancelFunc
+}
+
+type bootMCPResult struct {
+	status      mcp.Status
+	projectName string
 }
 
 func startBootPrefetch(ctx context.Context, a *app.App) *bootPrefetch {
 	bootCtx, cancel := context.WithCancel(ctx)
-	projectNameDone := make(chan string, 1)
 	backendDone := make(chan error, 1)
+	p := &bootPrefetch{
+		mcpDone:     make(chan struct{}),
+		backendDone: backendDone,
+		cancel:      cancel,
+	}
 	go func() {
-		projectNameDone <- bootFetchProjectName(bootCtx, a)
+		p.mcpResult = bootConnectMCP(bootCtx, a)
+		close(p.mcpDone)
 	}()
 	go func() {
 		backendDone <- bootHandshakeBackend(ctx, a)
 	}()
-	return &bootPrefetch{
-		projectNameDone: projectNameDone,
-		backendDone:     backendDone,
-		cancel:          cancel,
-	}
+	return p
 }
 
-func bootFetchProjectName(ctx context.Context, a *app.App) string {
+// bootConnectMCP owns the ONE automatic connect/discovery attempt for an interactive
+// launch. It starts under the logo and is deliberately allowed to outlive the visual
+// splash: Bubble Tea's bootstrap command awaits this same result instead of cancelling
+// it at hand-off and starting the whole discovery path again. That keeps the cockpit
+// interactive after the logo while slow startup reads finish in the background.
+func bootConnectMCP(ctx context.Context, a *app.App) bootMCPResult {
 	if a == nil || a.MCP == nil {
-		return ""
+		return bootMCPResult{}
 	}
-	if st := a.ConnectMcp(ctx); st.Connected {
+	st := a.ConnectMcp(ctx)
+	result := bootMCPResult{status: st}
+	if st.Connected {
 		debuglog.BootTrace("boot.mcp.connected")
-		for {
-			if name := a.ProjectName(); name != "" {
-				debuglog.BootTrace("boot.projectname.done")
-				return name
-			}
-			if name := a.MCP.FetchProjectName(ctx); name != "" {
-				debuglog.BootTrace("boot.projectname.done")
-				return name
-			}
-			select {
-			case <-ctx.Done():
-				return ""
-			case <-time.After(bootProjectNameRetryDelay):
-			}
+		// ConnectMcp has already completed the atomic startup-context refresh, so the
+		// cached project is the authoritative non-blocking value here. A miss is fine:
+		// the post-bootstrap ProjectNameMsg path retains its bounded fallback retries.
+		result.projectName = a.ProjectName()
+		if result.projectName != "" {
+			debuglog.BootTrace("boot.projectname.done")
 		}
 	}
-	return ""
+	return result
 }
 
 func bootHandshakeBackend(ctx context.Context, a *app.App) error {
@@ -189,14 +195,35 @@ func logBootBackendHandshake(a *app.App, dur time.Duration, err error) {
 }
 
 func (p *bootPrefetch) projectName() string {
-	if p == nil || p.projectNameDone == nil {
+	if p == nil || p.mcpDone == nil {
 		return ""
 	}
 	select {
-	case name := <-p.projectNameDone:
-		return name
+	case <-p.mcpDone:
+		return p.mcpResult.projectName
 	default:
 		return ""
+	}
+}
+
+// awaitMCP returns the splash-started connect/discovery result. The wait happens in a
+// tea.Cmd goroutine, never on the Update loop, so the post-logo composer remains fully
+// editable while a slow Daintree read settles.
+func (p *bootPrefetch) awaitMCP(ctx context.Context, a *app.App) mcp.Status {
+	if p == nil || p.mcpDone == nil {
+		if a == nil {
+			return mcp.Status{}
+		}
+		return a.ConnectMcp(ctx)
+	}
+	select {
+	case <-p.mcpDone:
+		return p.mcpResult.status
+	case <-ctx.Done():
+		if a == nil || a.MCP == nil {
+			return mcp.Status{}
+		}
+		return a.MCP.Status()
 	}
 }
 
@@ -218,5 +245,4 @@ func (p *bootPrefetch) stop() {
 	}
 }
 
-const bootProjectNameRetryDelay = 150 * time.Millisecond
 const bootBackendHandshakeTimeout = 3 * time.Second

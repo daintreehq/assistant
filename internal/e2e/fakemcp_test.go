@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -20,13 +22,23 @@ import (
 // connect (which the runtime-context builder then reports as "not connected"). Live
 // Daintree implements all three, so a faithful fake must too.
 type fakeMCP struct {
-	srv *httptest.Server
+	srv            *httptest.Server
+	agentListDelay time.Duration
+	agentListCalls atomic.Int32
 }
 
 // newFakeMCP starts the fake MCP server. The returned URL is the value to feed
 // DAINTREE_MCP_URL (a /mcp endpoint).
 func newFakeMCP(t *testing.T) *fakeMCP {
+	return newFakeMCPWithAgentDelay(t, 0)
+}
+
+// newFakeMCPWithAgentDelay makes the stable agent-catalog read deliberately outlive
+// the ~740ms logo. The splash/PTY regression uses it to prove startup discovery keeps
+// running once across hand-off while the composer is already accepting input.
+func newFakeMCPWithAgentDelay(t *testing.T, delay time.Duration) *fakeMCP {
 	t.Helper()
+	m := &fakeMCP{agentListDelay: delay}
 	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "fake-daintree", Version: "v0.0.1"}, nil)
 
 	// getContext: the project-identity read the assistant probes at boot / in doctor.
@@ -71,6 +83,14 @@ func newFakeMCP(t *testing.T) *fakeMCP {
 		Name:        "agent.listAvailable",
 		Description: "Return every directly launchable agent.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in availableAgentsIn) (*sdkmcp.CallToolResult, availableAgentsOut, error) {
+		m.agentListCalls.Add(1)
+		if m.agentListDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, availableAgentsOut{}, ctx.Err()
+			case <-time.After(m.agentListDelay):
+			}
+		}
 		agents := []map[string]any{
 			{"id": "claude", "displayName": "Claude Code", "source": "built-in", "availability": "ready", "installed": true, "toolbarVisible": true, "pinned": true},
 			{"id": "team-agent", "displayName": "Team Agent", "source": "user", "availability": "unauthenticated", "installed": true},
@@ -160,10 +180,12 @@ func newFakeMCP(t *testing.T) *fakeMCP {
 	handler := sdkmcp.NewStreamableHTTPHandler(func(r *http.Request) *sdkmcp.Server {
 		return server
 	}, &sdkmcp.StreamableHTTPOptions{})
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return &fakeMCP{srv: srv}
+	m.srv = httptest.NewServer(handler)
+	t.Cleanup(m.srv.Close)
+	return m
 }
 
 // url is the /mcp endpoint to feed DAINTREE_MCP_URL.
 func (m *fakeMCP) url() string { return m.srv.URL + "/mcp" }
+
+func (m *fakeMCP) agentListCallCount() int { return int(m.agentListCalls.Load()) }

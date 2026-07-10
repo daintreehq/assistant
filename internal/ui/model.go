@@ -61,8 +61,11 @@ type Model struct {
 	app        *app.App
 	controller *controller
 	pump       *eventPump
-	theme      theme.Theme
-	md         *markdown.Renderer
+	// bootPrefetch is the single connect/discovery future started under the raw splash.
+	// bootstrapCmd awaits it off-loop so hand-off never cancels and repeats startup.
+	bootPrefetch *bootPrefetch
+	theme        theme.Theme
+	md           *markdown.Renderer
 
 	// terminal geometry (from tea.WindowSizeMsg).
 	columns  int

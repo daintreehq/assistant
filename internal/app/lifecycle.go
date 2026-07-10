@@ -45,8 +45,8 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	a.maybeReconcileLedger(attemptCtx, final.Connected)
 	if ctx.Err() == nil {
 		// A normal completed/timeout attempt fails open permanently for ordinary turns;
-		// manual /reconnect owns later retries. A splash canceled by handoff leaves this
-		// false so bootstrap or a fast first turn can retry once with a live context.
+		// manual /reconnect owns later retries. An externally cancelled launch leaves this
+		// false so a later live bootstrap/turn can still retry once.
 		a.startupConnectAttempted = true
 	}
 	return final

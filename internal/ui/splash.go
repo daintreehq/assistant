@@ -76,6 +76,10 @@ const (
 	// signalling done so it doesn't vanish the instant the draw lands.
 	splashFPS = 80
 	lingerMs  = 240
+	// rendererSettleDelay spans several 60fps renderer ticks. It is used both before
+	// the first scrollback commit and as the print barrier for later immutable cells.
+	// Bubble Tea queues View changes immediately but only flushes them on its FPS ticker.
+	rendererSettleDelay = 60 * time.Millisecond
 )
 
 // splashModel holds the overlay's frame index + running flag. It is mutated only in
@@ -104,7 +108,7 @@ func lingerCmd() tea.Cmd {
 // commitArmCmd fires CommitArmMsg after one short delay, arming the first scrollback
 // commit once Bubble Tea has flushed the short footer (see scheduleCommit).
 func commitArmCmd() tea.Cmd {
-	return tea.Tick(60*time.Millisecond, func(time.Time) tea.Msg { return CommitArmMsg{} })
+	return tea.Tick(rendererSettleDelay, func(time.Time) tea.Msg { return CommitArmMsg{} })
 }
 
 // advance steps the frame index and returns the next command: another tick while

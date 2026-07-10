@@ -206,7 +206,7 @@ type App struct {
 	// publication. A fast first turn joins this gate instead of sampling `Connected=false`
 	// while the splash handshake is still in flight and racing ahead with empty context.
 	mcpLifecycleMu          sync.Mutex
-	startupConnectAttempted bool // guarded by mcpLifecycleMu; canceled splash attempts do not set it
+	startupConnectAttempted bool // guarded by mcpLifecycleMu; cancelled launch attempts do not set it
 	startupRefreshMu        sync.Mutex
 	startupMu               sync.RWMutex
 	cachedProject           *prompts.ProjectContext
@@ -216,7 +216,7 @@ type App struct {
 	startupGeneration       uint64
 
 	// reconcileLedgerMu/done guard the boot ledger reconcile. `done` is committed only
-	// after terminal.list returned a parseable inventory; a splash cancellation or transient
+	// after terminal.list returned a parseable inventory; launch cancellation or a transient
 	// read failure stays retryable by the normal bootstrap. A completed attempt never reruns.
 	reconcileLedgerMu   sync.Mutex
 	reconcileLedgerDone bool
