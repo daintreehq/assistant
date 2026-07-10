@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -92,5 +95,71 @@ func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("reset notice must mention schema %s; got %q", want, out)
 		}
+	}
+}
+
+// A cancelled launch context is a shutdown request, not evidence that the cockpit
+// is unavailable. In particular, SIGTERM cancels main's launch context and Bubble
+// Tea returns an error; the CLI must exit with the cancelled code instead of falling
+// through to startRepl, which intentionally detaches itself from that context.
+func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	t.Setenv(NoDaemonEnv, "1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runnerCalled := false
+	opts := Options{
+		Offline: true,
+		Project: t.TempDir(),
+		Cockpit: func(context.Context, *app.App) error {
+			runnerCalled = true
+			cancel()
+			return context.Canceled
+		},
+	}
+
+	if code := runInteractive(ctx, opts, true); code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("cancelled cockpit exit = %d, want Cancelled(%d)", code, domain.OneShotExitCode.Cancelled)
+	}
+	if !runnerCalled {
+		t.Fatal("cockpit seam was not called")
+	}
+}
+
+// A real cockpit startup failure keeps the established classic-REPL fallback. Feed
+// that REPL an immediate EOF so the unit test exercises the branch without blocking.
+func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	t.Setenv(NoDaemonEnv, "1")
+
+	stdin, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stdinWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+		_ = stdin.Close()
+	})
+
+	runnerCalled := false
+	opts := Options{
+		Offline: true,
+		Project: t.TempDir(),
+		Cockpit: func(context.Context, *app.App) error {
+			runnerCalled = true
+			return errors.New("cockpit unavailable in test")
+		},
+	}
+
+	if code := runInteractive(context.Background(), opts, true); code != domain.OneShotExitCode.Success {
+		t.Fatalf("fallback REPL exit = %d, want Success(%d)", code, domain.OneShotExitCode.Success)
+	}
+	if !runnerCalled {
+		t.Fatal("cockpit seam was not called")
 	}
 }

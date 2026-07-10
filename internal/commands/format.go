@@ -151,17 +151,35 @@ func ParseAuditExportArgs(args []string) AuditExportResult {
 		}
 		switch k {
 		case "tool":
+			if v == "" {
+				res.Error = "Audit export filter 'tool' requires a value."
+				return res
+			}
 			vv := v
 			res.Filters.ToolName = &vv
 		case "outcome":
+			if v == "" {
+				res.Error = "Audit export filter 'outcome' requires a value."
+				return res
+			}
 			vv := v
 			res.Filters.Outcome = &vv
 		case "actor":
 			act := domain.ToolActor(v)
+			switch act {
+			case domain.ActorMain, domain.ActorWatcher, domain.ActorTimer, domain.ActorWorkflow, domain.ActorSystem, domain.ActorWake:
+				// Valid actor.
+			default:
+				res.Error = "Unknown audit actor '" + v + "'. Use main|watcher|timer|workflow|system|wake."
+				return res
+			}
 			res.Filters.Actor = &act
 		case "n":
 			if n := atoiSafe(v); n > 0 {
 				res.Filters.Limit = &n
+			} else {
+				res.Error = "Audit export limit must be a positive integer."
+				return res
 			}
 		default:
 			res.Error = "Unknown audit export filter '" + k + "'."
@@ -183,6 +201,9 @@ func SerializeAudit(rows []domain.AuditRecord, format string) string {
 		}
 		w.Flush()
 		return sb.String()
+	}
+	if rows == nil {
+		rows = []domain.AuditRecord{}
 	}
 	b, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {

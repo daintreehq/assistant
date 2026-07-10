@@ -45,6 +45,9 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	st := a.MCP.Status()
 	var checks []DoctorCheck
 	push := func(label string, ok bool, detail, fix string) {
+		if ok {
+			fix = ""
+		}
 		checks = append(checks, DoctorCheck{Label: label, OK: ok, Detail: detail, Fix: fix})
 	}
 
@@ -81,27 +84,35 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	push("backend tools", len(forbidden) == 0, fmt.Sprintf("%d exposed", exposed),
 		"a reserved tool is exposed: "+joinNames(forbidden))
 
-	// mcp url / token.
-	push("mcp url", cfg.McpURL != "", orUnset(cfg.McpURL), "set DAINTREE_MCP_URL to Daintree's MCP endpoint")
-	push("mcp token", cfg.McpToken != "", presentOrMissing(cfg.McpToken), "set DAINTREE_MCP_TOKEN")
+	if cfg.Offline {
+		// Offline is an explicit operating mode, not four independent MCP failures.
+		push("mcp mode", true, "offline (connection checks skipped)", "")
+	} else {
+		// mcp url / token.
+		push("mcp url", cfg.McpURL != "", orUnset(cfg.McpURL), "set DAINTREE_MCP_URL to Daintree's MCP endpoint")
+		push("mcp token", cfg.McpToken != "", presentOrMissing(cfg.McpToken), "set DAINTREE_MCP_TOKEN")
 
-	// mcp connection.
-	connDetail := "ok (" + st.Transport + ")"
-	if !st.Connected {
-		connDetail = st.Error
-		if connDetail == "" {
-			connDetail = "not connected"
+		// mcp connection.
+		connDetail := "ok (" + st.Transport + ")"
+		if !st.Connected {
+			connDetail = st.Error
+			if connDetail == "" {
+				connDetail = "not connected"
+			}
+		}
+		push("mcp connection", st.Connected, connDetail, "start Daintree, then run /reconnect")
+
+		// A tool-count check is meaningful only after connection succeeds; otherwise it
+		// merely repeats the connection failure with a misleading remediation.
+		if st.Connected {
+			toolCount := 0
+			if st.ToolCount != nil {
+				toolCount = *st.ToolCount
+			}
+			push("mcp tools", toolCount > 0, fmt.Sprintf("%d tools", toolCount),
+				"connected but no tools listed; run /reconnect")
 		}
 	}
-	push("mcp connection", st.Connected, connDetail, "start Daintree, then run /reconnect")
-
-	// mcp tools.
-	toolCount := 0
-	if st.ToolCount != nil {
-		toolCount = *st.ToolCount
-	}
-	push("mcp tools", st.Connected && toolCount > 0, fmt.Sprintf("%d tools", toolCount),
-		"connected but no tools listed; run /reconnect")
 
 	// Live probe — only when connected.
 	if st.Connected {
@@ -169,7 +180,7 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	return checks
 }
 
-// FormatDoctor renders the checklist: "✓|✗ label<pad16>: detail  → fix" per line.
+// FormatDoctor renders the checklist; remediation is shown only for failed checks.
 func FormatDoctor(checks []DoctorCheck) string {
 	var b []byte
 	for i, c := range checks {
@@ -181,7 +192,7 @@ func FormatDoctor(checks []DoctorCheck) string {
 			mark = "✓"
 		}
 		line := mark + " " + padRight(c.Label, 16) + ": " + c.Detail
-		if c.Fix != "" {
+		if !c.OK && c.Fix != "" {
 			line += "  → " + c.Fix
 		}
 		b = append(b, line...)

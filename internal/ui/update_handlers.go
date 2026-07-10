@@ -664,7 +664,7 @@ func (m *Model) handleApprovalsCommand(text string) (title, body string, ok bool
 		return "", "", false
 	}
 	if len(fields) > 1 {
-		if strings.EqualFold(fields[1], "clear") {
+		if len(fields) == 2 && strings.EqualFold(fields[1], "clear") {
 			n := len(m.approvedTools)
 			m.approvedTools = nil
 			if n == 0 {

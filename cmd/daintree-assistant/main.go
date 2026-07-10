@@ -1,22 +1,23 @@
 // Command daintree-assistant is the single static-binary entrypoint for Daintree's
 // local orchestration assistant. It parses the CLI surface, then routes to exactly
-// one of: the `doctor` environment check, the `host --stdio` embedded transport, a
-// one-shot prompt run, or the interactive path (Bubble Tea cockpit on a TTY, classic
-// REPL otherwise). All the real wiring lives in internal/cli; this file is the thin
-// flag/route shim plus the two seams main owns: the cockpit runner (ui.Run) and the
-// build version stamped into the masthead.
+// one of: environment/status commands, the persistent supervisor, the embedded
+// stdio host, a one-shot prompt, or the interactive path (Bubble Tea cockpit on a
+// TTY, classic REPL otherwise). All real wiring lives in internal/cli; this file is
+// the thin flag/route shim plus main's cockpit and build-version seams.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
 	"github.com/daintreehq/daintree-assistant/internal/cli"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/ui"
 )
 
@@ -28,7 +29,21 @@ import (
 var version = "dev"
 
 func main() {
-	opts, route := parseArgs(os.Args[1:])
+	parsed, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+		fmt.Fprintln(os.Stderr, "Run 'daintree-assistant --help' for usage.")
+		os.Exit(2)
+	}
+	if parsed.Help {
+		writeUsage(os.Stdout, version)
+		return
+	}
+	if parsed.Version {
+		fmt.Printf("daintree-assistant %s\n", version)
+		return
+	}
+	opts, route := parsed.Options, parsed.Route
 
 	// Stamp the build version into the cockpit masthead before any UI is constructed
 	// (UIVersion is a package var read at model-init time, so set it up front), and
@@ -36,10 +51,16 @@ func main() {
 	ui.UIVersion = version
 	cli.SetVersion(version)
 
-	// Cancel the run context on SIGINT/SIGTERM for the cooked-mode paths (one-shot,
-	// classic REPL, host). The cockpit runs the terminal in raw mode, so Ctrl-C never
-	// reaches us as a signal there — Bubble Tea reads it as a key — and this is inert.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Interactive mode owns Ctrl-C itself: the cockpit receives it as a raw key and
+	// the classic REPL uses it to cancel only the current turn. Capturing SIGINT in
+	// this parent context would permanently poison later classic turns. SIGTERM is
+	// always a process shutdown; one-shot and subcommand paths additionally use
+	// SIGINT as ordinary context cancellation.
+	signals := []os.Signal{syscall.SIGTERM}
+	if route != routeDefault || opts.HasPrompt {
+		signals = append(signals, os.Interrupt)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
 
 	// The cockpit runner is main's seam: internal/cli only knows the CockpitRunner
@@ -65,9 +86,9 @@ func main() {
 	os.Exit(code)
 }
 
-// route is the top-level dispatch decided purely from argv: a leading `doctor`,
-// `host`, `daemon`, or `status` subcommand wins; everything else falls through
-// to cli.Run, which itself splits one-shot (a prompt arg) from interactive.
+// route is the top-level dispatch decided purely from argv. A leading command
+// word wins unless `--json` or the `--` terminator explicitly makes it a prompt;
+// everything else falls through to cli.Run for one-shot versus interactive.
 type route int
 
 const (
@@ -79,102 +100,228 @@ const (
 	routeStatus
 )
 
-// parseArgs parses the CLI surface into cli.Options + a route: the flags, the
-// `doctor` subcommand, and `host --stdio`. Unlike Go's stock flag parsing, flags
-// and the positional prompt may be interspersed (Daintree/users rely on forms
-// like `--json "prompt"`); the loop below re-parses after each positional so a
-// trailing flag is still seen.
-func parseArgs(args []string) (cli.Options, route) {
+// parsedArgs is the pure result of command-line parsing. main is the only place
+// that prints or exits, which keeps the argument contract table-testable.
+type parsedArgs struct {
+	Options cli.Options
+	Route   route
+	Help    bool
+	Version bool
+}
+
+// parseArgs parses the CLI surface while preserving two useful properties that
+// Go's stock FlagSet does not combine: options may be interspersed with a prompt,
+// and `--` permanently ends option/subcommand parsing. The latter matters for
+// prompts such as `-- "status"` and `-- "--summarize this"`.
+func parseArgs(args []string) (parsedArgs, error) {
 	fs := flag.NewFlagSet("daintree-assistant", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 
 	var (
-		mcpURL   = fs.String("mcp-url", "", "Daintree MCP base URL (else $DAINTREE_MCP_URL)")
-		mcpToken = fs.String("mcp-token", "", "Daintree MCP bearer token (else $DAINTREE_MCP_TOKEN)")
-		project  = fs.String("project", "", "project path (DAINTREE.md is read from its root; default cwd)")
-		tier     = fs.String("tier", "", "permission tier: supervisor | operator | system")
-		offline  = fs.Bool("offline", false, "no network calls (degraded local mode)")
-		classic  = fs.Bool("classic", false, "force the classic line REPL (no cockpit)")
-		inline   = fs.Bool("inline", false, "DEPRECATED NO-OP (the cockpit is always inline)")
-		jsonOut  = fs.Bool("json", false, "one-shot JSONL event stream to stdout (requires a prompt)")
-		stdio    = fs.Bool("stdio", false, "embedded host over stdio NDJSON (use with the `host` subcommand)")
-		showVer  = fs.Bool("version", false, "print the version and exit")
+		mcpURL   = fs.String("mcp-url", "", "")
+		mcpToken = fs.String("mcp-token", "", "")
+		project  = fs.String("project", "", "")
+		tier     = fs.String("tier", "", "")
+		offline  = fs.Bool("offline", false, "")
+		classic  = fs.Bool("classic", false, "")
+		inline   = fs.Bool("inline", false, "") // deprecated, accepted but hidden
+		jsonOut  = fs.Bool("json", false, "")
+		stdio    = fs.Bool("stdio", false, "") // host compatibility spelling
+		showVer  = fs.Bool("version", false, "")
 	)
 
-	fs.Usage = func() {
-		w := fs.Output()
-		fmt.Fprintf(w, "daintree-assistant %s — Daintree's local orchestration assistant (DeepSeek-powered).\n\n", version)
-		fmt.Fprintln(w, "Usage:")
-		fmt.Fprintln(w, "  daintree-assistant [flags] [prompt]   interactive cockpit, or one-shot when a prompt is given")
-		fmt.Fprintln(w, "  daintree-assistant doctor             environment check (MCP / DeepSeek key / project / tier)")
-		fmt.Fprintln(w, "  daintree-assistant host --stdio       embedded host: stdio NDJSON transport")
-		fmt.Fprintln(w, "  daintree-assistant daemon [stop]      run (or stop) the persistent project supervisor")
-		fmt.Fprintln(w, "  daintree-assistant status             show the project supervisor's health and live work")
-		fmt.Fprintln(w, "\nFlags:")
-		fs.PrintDefaults()
-		fmt.Fprintln(w, "\nWithout DEEPSEEK_API_KEY, read-only slash commands still work: /tools, /skills, /doctor.")
-		fmt.Fprintln(w, "A project .env may set DEEPSEEK_API_KEY and DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL;")
-		fmt.Fprintln(w, "the Daintree MCP URL/token come only from the real environment, never a project .env.")
+	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
+	if err != nil {
+		return parsedArgs{}, err
 	}
-
-	// Interspersed parse: collect every non-flag token as a positional while still
-	// letting flags appear before, between, and after them.
-	var positionals []string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			// flag already wrote the error + usage to stderr; -h/--help returns ErrHelp.
-			if err == flag.ErrHelp {
-				os.Exit(0)
-			}
-			os.Exit(2)
-		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positionals = append(positionals, rest[0])
-		rest = rest[1:]
+	if err := fs.Parse(flagArgs); err != nil {
+		return parsedArgs{}, err
 	}
-
+	if help {
+		return parsedArgs{Help: true}, nil
+	}
 	if *showVer {
-		fmt.Printf("daintree-assistant %s\n", version)
-		os.Exit(0)
+		return parsedArgs{Version: true}, nil
+	}
+
+	tierValue := strings.TrimSpace(*tier)
+	if flagWasSet(fs, "tier") && !domain.Tier(tierValue).IsValid() {
+		return parsedArgs{}, fmt.Errorf("invalid --tier %q (choose supervisor, operator, or system)", *tier)
 	}
 
 	opts := cli.Options{
 		McpURL:   *mcpURL,
 		McpToken: *mcpToken,
 		Project:  *project,
-		Tier:     *tier,
+		Tier:     tierValue,
 		Offline:  *offline,
 		Classic:  *classic,
 		JSON:     *jsonOut,
 		Inline:   *inline, // accepted and ignored (deprecated)
 	}
 
-	// A leading `doctor`/`host`/`daemon`/`status` positional is a subcommand;
-	// anything else is the one-shot prompt. `host` implies the stdio transport
-	// (the only one), so the bare `--stdio` flag is just an accepted alias.
-	if len(positionals) > 0 {
+	parsed := parsedArgs{Options: opts, Route: routeDefault}
+	// --json is unambiguously a one-shot request, so a prompt that happens to be
+	// named "status" or "doctor" remains a prompt. `--` provides the same escape
+	// for the human-output path.
+	if len(positionals) > 0 && !forcePrompt && !*jsonOut {
 		switch positionals[0] {
 		case "doctor":
-			return opts, routeDoctor
-		case "host":
-			_ = *stdio // accepted for `host --stdio`; host.Run always uses stdio
-			return opts, routeHost
-		case "daemon":
-			if len(positionals) > 1 && positionals[1] == "stop" {
-				return opts, routeDaemonStop
+			if err := rejectCommandArgs("doctor", positionals[1:]); err != nil {
+				return parsedArgs{}, err
 			}
-			return opts, routeDaemon
+			parsed.Route = routeDoctor
+		case "host":
+			if err := rejectCommandArgs("host", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeHost
+		case "daemon":
+			switch {
+			case len(positionals) == 1:
+				parsed.Route = routeDaemon
+			case positionals[1] != "stop":
+				return parsedArgs{}, fmt.Errorf("unknown daemon action %q (only 'stop' is supported)", positionals[1])
+			case len(positionals) > 2:
+				return parsedArgs{}, fmt.Errorf("daemon stop does not accept arguments: %s", strings.Join(positionals[2:], " "))
+			default:
+				parsed.Route = routeDaemonStop
+			}
 		case "status":
-			return opts, routeStatus
+			if err := rejectCommandArgs("status", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeStatus
 		}
-		// Join remaining tokens so an unquoted multi-word prompt still works; a single
-		// quoted arg passes through unchanged.
-		opts.Prompt = strings.Join(positionals, " ")
-		opts.HasPrompt = true
+		if parsed.Route != routeDefault {
+			if *stdio && parsed.Route != routeHost {
+				return parsedArgs{}, stdioRequiresHostError()
+			}
+			return parsed, nil
+		}
 	}
 
-	return opts, routeDefault
+	if *stdio {
+		return parsedArgs{}, stdioRequiresHostError()
+	}
+	if len(positionals) > 0 {
+		// Join remaining tokens so an unquoted multi-word prompt still works; a single
+		// quoted arg passes through unchanged.
+		parsed.Options.Prompt = strings.Join(positionals, " ")
+		parsed.Options.HasPrompt = true
+	}
+	if *jsonOut && !parsed.Options.HasPrompt {
+		return parsedArgs{}, fmt.Errorf("--json requires a prompt")
+	}
+
+	return parsed, nil
+}
+
+// splitInterspersedArgs separates registered options from positional tokens
+// without losing their order. Once `--` appears every remaining token is a
+// positional, including strings beginning with '-' and reserved command names.
+func splitInterspersedArgs(fs *flag.FlagSet, args []string) (flagArgs, positionals []string, help, forcePrompt bool, err error) {
+	literal := false
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if literal {
+			positionals = append(positionals, token)
+			continue
+		}
+		if token == "--" {
+			literal = true
+			// Only a leading terminator opts out of subcommand routing. A trailing
+			// terminator affects subsequent tokens but must not retroactively turn
+			// `status --` into a prompt.
+			forcePrompt = len(positionals) == 0
+			continue
+		}
+		if token == "-h" || token == "-help" || token == "--help" {
+			help = true
+			continue
+		}
+		if token == "-" || !strings.HasPrefix(token, "-") {
+			positionals = append(positionals, token)
+			continue
+		}
+
+		name, inlineValue := optionName(token)
+		f := fs.Lookup(name)
+		if f == nil {
+			return nil, nil, false, false, fmt.Errorf("unknown option %q", token)
+		}
+		flagArgs = append(flagArgs, token)
+		if inlineValue || isBoolFlag(f) {
+			continue
+		}
+		if i+1 >= len(args) {
+			return nil, nil, false, false, fmt.Errorf("option %q requires a value", token)
+		}
+		i++
+		flagArgs = append(flagArgs, args[i])
+	}
+	return flagArgs, positionals, help, forcePrompt, nil
+}
+
+func optionName(token string) (name string, inlineValue bool) {
+	name = strings.TrimPrefix(token, "--")
+	if name == token {
+		name = strings.TrimPrefix(token, "-")
+	}
+	if i := strings.IndexByte(name, '='); i >= 0 {
+		return name[:i], true
+	}
+	return name, false
+}
+
+func isBoolFlag(f *flag.Flag) bool {
+	b, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
+func rejectCommandArgs(command string, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s does not accept arguments: %s", command, strings.Join(args, " "))
+}
+
+func stdioRequiresHostError() error {
+	return fmt.Errorf("--stdio is only valid with the host command")
+}
+
+// writeUsage owns the human help layout instead of flag.PrintDefaults: requested
+// help goes to stdout, long options use their documented `--` spelling, and
+// compatibility-only flags stay accepted without cluttering the public surface.
+func writeUsage(w io.Writer, buildVersion string) {
+	fmt.Fprintf(w, "daintree-assistant %s — Daintree's local operations officer.\n\n", buildVersion)
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  daintree-assistant [options]                 interactive cockpit")
+	fmt.Fprintln(w, "  daintree-assistant [options] <prompt...>     run one prompt and exit")
+	fmt.Fprintln(w, "  daintree-assistant [options] <command>")
+	fmt.Fprintln(w, "\nCommands:")
+	fmt.Fprintln(w, "  doctor              check backend, MCP, project, and permissions")
+	fmt.Fprintln(w, "  status              show supervisor health and live work")
+	fmt.Fprintln(w, "  daemon              run the project supervisor in the foreground")
+	fmt.Fprintln(w, "  daemon stop         stop the project supervisor")
+	fmt.Fprintln(w, "  host [--stdio]      serve embedded-host NDJSON over stdio")
+	fmt.Fprintln(w, "\nOptions:")
+	fmt.Fprintln(w, "  --project PATH      project root (default: current directory)")
+	fmt.Fprintln(w, "  --tier TIER         supervisor, operator, or system")
+	fmt.Fprintln(w, "  --offline           run without the Daintree MCP connection")
+	fmt.Fprintln(w, "  --classic           use the line-oriented REPL instead of the cockpit")
+	fmt.Fprintln(w, "  --json              emit JSONL for a one-shot prompt")
+	fmt.Fprintln(w, "  --mcp-url URL       Daintree MCP URL (env: DAINTREE_MCP_URL)")
+	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
+	fmt.Fprintln(w, "  --version           print the version and exit")
+	fmt.Fprintln(w, "  -h, --help          show this help")
+	fmt.Fprintln(w, "  --                  end option parsing; before the first word, force a prompt")
+	fmt.Fprintln(w, "\nUse -- before a prompt that begins with an option or command name.")
+	fmt.Fprintln(w, "Without Daintree MCP credentials, the assistant runs in degraded local mode.")
 }

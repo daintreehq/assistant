@@ -22,8 +22,8 @@ type CommandMeta struct {
 // exit/q ⇐ quit) are handled by the parsers but intentionally NOT listed here.
 // Order is a product contract (drives the help/palette ordering).
 var COMMAND_REGISTRY = []CommandMeta{
-	{Name: "status", Syntax: "/status", Palette: "connection and session", Help: "Daintree connection, project, models, tier"},
-	{Name: "inbox", Syntax: "/inbox [sev]", Palette: "items requiring attention", Help: "watcher/timer events (info|attention|urgent)"},
+	{Name: "status", Syntax: "/status", Palette: "runtime and connections", Help: "backend, MCP, project, session, tier"},
+	{Name: "inbox", Syntax: "/inbox [sev]", Palette: "items requiring attention", Help: "watcher/timer events (info|attention|urgent|blocked)"},
 	{Name: "tools", Syntax: "/tools [query]", Palette: "list / search tools", Help: "list/search available tools"},
 	{Name: "timers", Syntax: "/timers", Palette: "scheduled operations", Help: "scheduled timers"},
 	{Name: "watchers", Syntax: "/watchers", Palette: "supervised agents", Help: "active watchers"},
@@ -33,17 +33,17 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "launches", Syntax: "/launches", Palette: "recent agent launches", Help: "recent agent-spawn sagas (newest first)"},
 	{Name: "audit", Syntax: "/audit [n]", Palette: "recent tool calls · export", Help: "recent calls (def 15); export <json|csv>"},
 	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},
-	{Name: "models", Syntax: "/models", Palette: "model routing", Help: "model routing (large/medium/small tiers)"},
+	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
-	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "session tool approvals", Help: "list session tool approvals; clear resets them"},
+	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "cockpit tool approvals", Help: "cockpit session approvals; clear resets them"},
 	{Name: "skills", Syntax: "/skills", Palette: "how skills work (backend-managed)", Help: "explain server-owned skill selection (no local catalog)"},
 	{Name: "memory", Syntax: "/memory [sub]", Palette: "list · pin · unpin · forget", Help: "list | pin <id> | unpin <id> | forget <id>"},
 	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
 	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},
 	{Name: "doctor", Syntax: "/doctor", Palette: "environment check", Help: "check MCP / config / project (with fixes)"},
 	{Name: "reconnect", Syntax: "/reconnect", Palette: "retry the Daintree connection", Help: "retry the Daintree MCP connection"},
-	{Name: "help", Syntax: "/help", Palette: "all commands and keys", Help: "this help"},
-	{Name: "quit", Syntax: "/quit", Palette: "exit", Help: "exit"},
+	{Name: "help", Syntax: "/help", Palette: "all commands and keys", Help: "this help (alias: /?)"},
+	{Name: "quit", Syntax: "/quit", Palette: "exit", Help: "exit (aliases: /q, /exit)"},
 }
 
 // helpPad is the syntax column width (clears the widest syntax "/permissions [tier]").

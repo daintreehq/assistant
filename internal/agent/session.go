@@ -1450,7 +1450,7 @@ func (s *Session) classifyBackendError(err error) string {
 		// buried in dialer noise). /doctor probes exactly this. The prefix is a
 		// registered WAKE_FAILURE_PREFIX (see wake.go) so a wake that fails this way
 		// is still treated as a non-result.
-		msg := "Can't reach the Daintree assistant backend — is it running? Run /doctor to check."
+		msg := "Can't reach the Daintree assistant backend — is it running? Use /doctor here, or run 'daintree-assistant doctor' from your shell."
 		s.events.Phase(domain.PhaseFailed)
 		s.events.Error(msg)
 		return msg

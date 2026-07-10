@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
@@ -41,7 +39,11 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 	if cmd == "" {
 		return UICommandResult{Handled: false}
 	}
-	switch canonical(cmd) {
+	name := canonical(cmd)
+	if usage := noArgUsage(name, rest); usage != "" {
+		return UICommandResult{Handled: true, Title: "Usage", Text: usage}
+	}
+	switch name {
 	case "quit":
 		return UICommandResult{Handled: true, Quit: true}
 	case "help":
@@ -49,8 +51,12 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 	case "status":
 		return UICommandResult{Handled: true, Title: "Status", Text: statusText(a)}
 	case "inbox":
-		title, text := inboxView(ctx, a, arg)
-		return UICommandResult{Handled: true, SwitchPanel: PanelInbox, Title: title, Text: text}
+		title, text, showPanel := inboxView(ctx, a, arg)
+		result := UICommandResult{Handled: true, Title: title, Text: text}
+		if showPanel {
+			result.SwitchPanel = PanelInbox
+		}
+		return result
 	case "tools":
 		title, text := toolsView(a, arg)
 		return UICommandResult{Handled: true, Title: title, Text: text}
@@ -68,7 +74,12 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 	case "launches":
 		return UICommandResult{Handled: true, Title: "Launches", Text: launchesText(a)}
 	case "audit":
-		return UICommandResult{Handled: true, SwitchPanel: PanelAudit, Title: "Audit", Text: auditText(a, rest, false)}
+		text, showPanel := auditText(a, rest, false)
+		result := UICommandResult{Handled: true, Title: "Audit", Text: text}
+		if showPanel {
+			result.SwitchPanel = PanelAudit
+		}
+		return result
 	case "explain":
 		return UICommandResult{Handled: true, Title: "Explain", Text: explainText(a, arg)}
 	case "models":
@@ -130,10 +141,12 @@ func HelpTextUI() string {
 func KeyHelpLines() []string {
 	return []string{
 		"Keys",
-		`  Enter           send  ·  Shift/Alt+Enter or trailing \ then Enter → newline`,
+		"  Enter           send · Shift/Alt+Enter → newline",
+		`                  trailing \ then Enter → newline`,
 		"  ↑ / ↓           recall prompt history",
 		"  /               command palette  ·  Tab complete  ·  ↑/↓ navigate",
-		"  Esc             clear the input  ·  while busy, retract the last queued turn (else cancel)",
+		"  Esc             clear input · busy: retract latest queued turn",
+		"                  otherwise cancel the running turn",
 		"  Ctrl+C          cancel the running turn  ·  press again to exit",
 		"  Ctrl+D          exit at an empty prompt",
 		"  Ctrl+O          toggle the operations deck",
@@ -141,7 +154,9 @@ func KeyHelpLines() []string {
 		"  Ctrl+L          redraw the screen (recover a corrupted footer)",
 		"  ?               show this help (at an empty prompt)",
 		"  ↑/↓ PgUp/PgDn   scroll the operations deck / help when it overflows",
-		"  Editing         Ctrl+A/E home/end · Ctrl+W/U/K kill · Ctrl+Y yank · Alt+B/F word · Alt+D kill-word",
+		"  Editing         Ctrl+R search · Ctrl+A/E home/end · Ctrl+W kill word",
+		"                  Ctrl+U/K kill line/to end · Ctrl+Y yank",
+		"                  Alt+B/F move by word · Alt+D kill word",
 	}
 }
 
@@ -158,18 +173,28 @@ func HelpTextREPL() string {
 // --- shared data accessors (used by both surfaces) ---
 
 func statusText(a *app.App) string {
-	mcpLine := "Daintree MCP: " + mcpStatusLine(mcpStatusOf(a))
-	desc := config.DescribeConfig(a.Config)
-	keys := make([]string, 0, len(desc))
-	for k := range desc {
-		keys = append(keys, k)
+	rows := [][2]string{
+		{"backend", a.Backend.BaseURL()},
+		{"Daintree MCP", mcpStatusLine(mcpStatusOf(a))},
+		{"project", a.Config.ProjectPath},
+		{"session", a.SessionID},
+		{"state", a.Config.StateDir},
+		{"tier", string(a.Tier())},
+		{"debug logging", enabledText(a.Config.DebugLog)},
+		{"workflow graphs", enabledText(a.Config.WorkflowIntelligence)},
 	}
-	sort.Strings(keys)
-	lines := []string{mcpLine}
-	for _, k := range keys {
-		lines = append(lines, "  "+padRight(k, 20)+desc[k])
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, padRight(row[0], 17)+": "+row[1])
 	}
 	return strings.Join(lines, "\n")
+}
+
+func enabledText(on bool) string {
+	if on {
+		return "enabled"
+	}
+	return "off"
 }
 
 // mcpStatusLine mirrors app.mcpStatusLine (unexported there).
@@ -202,17 +227,24 @@ func mcpStatusOf(a *app.App) mcpStatusLike {
 	return mcpStatusLike{Connected: st.Connected, Transport: st.Transport, ToolCount: st.ToolCount, Error: st.Error}
 }
 
-func inboxView(ctx context.Context, a *app.App, arg string) (string, string) {
+func inboxView(ctx context.Context, a *app.App, arg string) (title, text string, showPanel bool) {
 	var sev *domain.Severity
-	if s, ok := inboxSeverities[strings.TrimSpace(arg)]; ok {
+	filter := strings.ToLower(strings.TrimSpace(arg))
+	if filter != "" {
+		s, ok := inboxSeverities[filter]
+		if !ok {
+			return "Inbox", "Unknown severity '" + arg + "'.\nUsage: /inbox [info|attention|urgent|blocked]", false
+		}
 		sev = &s
 	}
 	maxItems := 30
 	events, err := a.Queue.Digest(ctx, domain.QueueDigestOptions{SeverityAtLeast: sev, MaxItems: &maxItems})
 	if err != nil {
-		return "Inbox", "Failed to read inbox: " + err.Error()
+		return "Inbox", "Failed to read inbox: " + err.Error(), false
 	}
-	return fmt.Sprintf("Inbox (%d)", len(events)), a.Queue.Format(events)
+	// The operations deck has its own fixed attention+ filter. Only bare /inbox
+	// maps to that deck; an explicit severity must render this computed digest.
+	return fmt.Sprintf("Inbox (%d)", len(events)), a.Queue.Format(events), filter == ""
 }
 
 func toolsView(a *app.App, arg string) (string, string) {
@@ -225,7 +257,8 @@ func toolsView(a *app.App, arg string) (string, string) {
 			continue
 		}
 		matched++
-		rows = append(rows, padRight(t.Name, 26)+"["+string(t.Risk)+"] "+t.Description)
+		desc := truncateText(strings.Join(strings.Fields(t.Description), " "), 96)
+		rows = append(rows, padRight(t.Name, 26)+"["+string(t.Risk)+"] "+desc)
 	}
 	title := fmt.Sprintf("Tools (%d/%d)", matched, len(all))
 	if len(rows) == 0 {
@@ -337,6 +370,11 @@ func workflowsText(a *app.App, arg string) string {
 		status = string(domain.WorkflowActive)
 	case "all":
 		status = ""
+	case string(domain.WorkflowPending), string(domain.WorkflowActive), string(domain.WorkflowBlocked),
+		string(domain.WorkflowDone), string(domain.WorkflowCancelled), string(domain.WorkflowFailed):
+		// Valid explicit status.
+	default:
+		return "Unknown workflow status '" + arg + "'.\nUsage: /workflows [pending|active|blocked|done|cancelled|failed|all]"
 	}
 	withHeader := func(body string) string {
 		if len(graphHeader) == 0 {
@@ -429,31 +467,38 @@ func launchError(l domain.AgentLaunchRecord) string {
 	}
 }
 
-// auditText renders the audit view. rest[0]=="export" triggers a serialized dump.
-func auditText(a *app.App, rest []string, _ bool) string {
+// auditText renders the audit view. showPanel is true only for a successful list;
+// exports and errors must remain transcript cards because panel switches discard Text.
+func auditText(a *app.App, rest []string, _ bool) (text string, showPanel bool) {
 	if len(rest) > 0 && rest[0] == "export" {
 		parsed := ParseAuditExportArgs(rest[1:])
 		if parsed.Error != "" {
-			return parsed.Error
+			return parsed.Error, false
 		}
 		rows, err := a.Store.QueryAudit(parsed.Filters)
 		if err != nil {
-			return "Audit export failed: " + err.Error()
+			return "Audit export failed: " + err.Error(), false
 		}
-		return SerializeAudit(rows, parsed.Format)
+		return SerializeAudit(rows, parsed.Format), false
 	}
+	const usage = "Usage: /audit [n] | /audit export <json|csv> [tool=<name>] [outcome=<value>] [actor=<actor>] [n=<limit>]"
 	n := 15
 	if len(rest) > 0 {
-		if v := atoiSafe(rest[0]); v > 0 {
-			n = v
+		if len(rest) > 1 {
+			return usage, false
 		}
+		v := atoiSafe(rest[0])
+		if v <= 0 {
+			return usage, false
+		}
+		n = v
 	}
 	rows, err := a.Store.ListAudit(n)
 	if err != nil {
-		return "Failed to read audit: " + err.Error()
+		return "Failed to read audit: " + err.Error(), false
 	}
 	if len(rows) == 0 {
-		return "(no audit entries)"
+		return "(no audit entries)", len(rest) == 0
 	}
 	var lines []string
 	for _, r := range rows {
@@ -464,7 +509,36 @@ func auditText(a *app.App, rest []string, _ bool) string {
 		lines = append(lines, fmt.Sprintf("%s %s %s %dms — %s",
 			localTime(r.Ts), padRight(r.ToolName, 22), outcome, r.DurationMs, r.Summary))
 	}
-	return strings.Join(lines, "\n")
+	// The deck owns its own fixed row limit. Only bare /audit maps to it; /audit N
+	// must render the exact N-row result computed here.
+	return strings.Join(lines, "\n"), len(rest) == 0
+}
+
+// noArgUsage rejects arguments to commands whose syntax has no argument form.
+// Silently accepting `/clear now` or `/quit later` makes typos look successful,
+// which is especially surprising for state-changing commands.
+func noArgUsage(name string, rest []string) string {
+	if len(rest) == 0 {
+		return ""
+	}
+	switch name {
+	case "status", "timers", "watchers", "grants", "launches", "models", "skills",
+		"compact", "clear", "doctor", "reconnect", "help", "quit":
+		return "Usage: /" + name
+	default:
+		return ""
+	}
+}
+
+func truncateText(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	if limit < 2 {
+		return string(r[:limit])
+	}
+	return string(r[:limit-1]) + "…"
 }
 
 func explainText(a *app.App, arg string) string {
@@ -537,9 +611,9 @@ func skillsText(_ context.Context, _ *app.App, _ []string) string {
 // memoryText powers /memory: bare/list shows the pinned-first memory store, and
 // pin/unpin/forget curate by id. A pin-state change needs no runtime-context refresh —
 // pinned memories live in the uncached turn footer now (issue #263), re-read every round,
-// so the change surfaces on the assistant's next turn automatically. Mirrors skillsText's
-// subcommand shape. The classic REPL reaches this via its default delegation to
-// HandleUICommand, so there is no separate REPL handler.
+// so the change surfaces on the assistant's next turn automatically. The classic REPL
+// reaches this via its default delegation to HandleUICommand, so there is no separate
+// REPL handler.
 func memoryText(a *app.App, rest []string) string {
 	const usage = "Usage: /memory list | pin <id> | unpin <id> | forget <id>"
 	sub := ""
@@ -548,6 +622,9 @@ func memoryText(a *app.App, rest []string) string {
 	}
 	switch sub {
 	case "", "list":
+		if (sub == "" && len(rest) != 0) || (sub == "list" && len(rest) != 1) {
+			return usage
+		}
 		limit := 50
 		rows, err := a.Store.ListMemories(storage.MemoryListOptions{Limit: &limit})
 		if err != nil {
@@ -567,10 +644,10 @@ func memoryText(a *app.App, rest []string) string {
 		lines = append(lines, "", usage)
 		return strings.Join(lines, "\n")
 	case "pin":
-		id := argAt(rest, 1)
-		if id == "" {
+		if len(rest) != 2 {
 			return "Usage: /memory pin <id>"
 		}
+		id := argAt(rest, 1)
 		rec, err := a.Store.PinMemory(id, domain.NowMS())
 		if err != nil {
 			return "Failed to pin: " + err.Error()
@@ -582,10 +659,10 @@ func memoryText(a *app.App, rest []string) string {
 		// re-read every round, so the pin surfaces on the assistant's next turn automatically.
 		return "Pinned " + id + " — it surfaces in the assistant's context on its next turn."
 	case "unpin":
-		id := argAt(rest, 1)
-		if id == "" {
+		if len(rest) != 2 {
 			return "Usage: /memory unpin <id>"
 		}
+		id := argAt(rest, 1)
 		rec, err := a.Store.UnpinMemory(id, domain.NowMS())
 		if err != nil {
 			return "Failed to unpin: " + err.Error()
@@ -597,10 +674,10 @@ func memoryText(a *app.App, rest []string) string {
 		// it from the assistant's context on its next turn.
 		return "Unpinned " + id + "."
 	case "forget":
-		id := argAt(rest, 1)
-		if id == "" {
+		if len(rest) != 2 {
 			return "Usage: /memory forget <id>"
 		}
+		id := argAt(rest, 1)
 		found, err := a.Store.ForgetMemory(id, domain.NowMS())
 		if err != nil {
 			return "Failed to forget: " + err.Error()

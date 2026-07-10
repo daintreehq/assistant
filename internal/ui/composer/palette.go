@@ -5,8 +5,9 @@ import (
 	"strings"
 )
 
-// paletteCap bounds the slash palette to 5 rows, so a long
-// command list never pushes the input off-screen.
+// paletteCap bounds the RENDERED slash palette to 5 rows, so a long command
+// list never pushes the input off-screen. suggestionsFor deliberately returns
+// every match; paletteWindow selects the visible slice around paletteSel.
 const paletteCap = 5
 
 // Command is one palette entry: the slash command name (with leading "/"), a short intent
@@ -22,7 +23,9 @@ type Command struct {
 // suggestionsFor filters + ranks the command list for a draft. A palette is meaningful only
 // when the draft starts with "/". It matches on the FIRST whitespace token (so the palette
 // stays open while typing arguments) and ranks by a fuzzy hierarchy: exact name > name prefix
-// > name subsequence > description substring. "/" alone shows the whole list. Capped at 5.
+// > name subsequence > description substring. "/" alone shows the whole list. The result is
+// intentionally NOT capped: keyboard navigation must be able to reach every matching command;
+// View applies the five-row display cap with paletteWindow.
 func suggestionsFor(cmds []Command, value string) []Command {
 	if !strings.HasPrefix(value, "/") {
 		return nil
@@ -34,14 +37,9 @@ func suggestionsFor(cmds []Command, value string) []Command {
 		q = q[:i]
 	}
 
-	out := make([]Command, 0, paletteCap)
+	out := make([]Command, 0, len(cmds))
 	if q == "" {
-		for _, c := range cmds {
-			out = append(out, c)
-			if len(out) == paletteCap {
-				break
-			}
-		}
+		out = append(out, cmds...)
 		return out
 	}
 
@@ -64,11 +62,31 @@ func suggestionsFor(cmds []Command, value string) []Command {
 	})
 	for _, m := range matches {
 		out = append(out, m.c)
-		if len(out) == paletteCap {
-			break
-		}
 	}
 	return out
+}
+
+// paletteWindow returns the at-most-five rows that should be rendered for the current
+// selection, plus the selection's LOCAL index within that slice. The window follows the
+// highlight once it moves beyond the first page, keeping every reachable match visible.
+// Navigation itself still wraps across the full suggestion list.
+func paletteWindow(suggestions []Command, selected int) ([]Command, int) {
+	if len(suggestions) == 0 {
+		return nil, 0
+	}
+	selected = clampInt(selected, 0, len(suggestions)-1)
+	if len(suggestions) <= paletteCap {
+		return suggestions, selected
+	}
+	start := selected - paletteCap + 1
+	if start < 0 {
+		start = 0
+	}
+	maxStart := len(suggestions) - paletteCap
+	if start > maxStart {
+		start = maxStart
+	}
+	return suggestions[start : start+paletteCap], selected - start
 }
 
 // fuzzyScore ranks a command for query q (all lower-case): exact name (1000) > name prefix

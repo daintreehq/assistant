@@ -37,27 +37,55 @@ func clearHostTerminal() {
 func startRepl(ctx context.Context, a *app.App) int {
 	r := render.Stdout()
 	reader := bufio.NewReader(os.Stdin)
-
-	ask := func(prompt string) string {
-		r.Out(prompt)
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(line)
+	type lineResult struct {
+		line string
+		err  error
 	}
-	// askLine is ask that DISTINGUISHES an EOF / closed-stdin read (ok=false) from an
-	// empty line (ok=true, ""), so the multiple-choice prompt can cancel on EOF instead
-	// of silently taking the default answer.
-	askLine := func(prompt string) (string, bool) {
+	lines := make(chan lineResult)
+	go func() {
+		defer close(lines)
+		for {
+			line, err := reader.ReadString('\n')
+			select {
+			case lines <- lineResult{line: line, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Keep the read error alongside the line so EOF is distinguishable from an
+	// intentionally empty submission. Reading on a goroutine also lets SIGTERM or
+	// parent cancellation release an otherwise-blocked idle REPL cleanly.
+	readLine := func(prompt string) (string, bool) {
 		r.Out(prompt)
-		line, err := reader.ReadString('\n')
-		trimmed := strings.TrimSpace(line)
-		if err != nil && trimmed == "" {
+		var result lineResult
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return "", false
+		case result, ok = <-lines:
+			if !ok {
+				return "", false
+			}
+		}
+		trimmed := strings.TrimSpace(result.line)
+		if result.err != nil && trimmed == "" {
 			return "", false
 		}
 		return trimmed, true
 	}
+	ask := func(prompt string) string {
+		line, _ := readLine(prompt)
+		return line
+	}
+	// askLine is ask that DISTINGUISHES an EOF / closed-stdin read (ok=false) from an
+	// empty line (ok=true, ""), so the multiple-choice prompt can cancel on EOF instead
+	// of silently taking the default answer.
+	askLine := readLine
 
 	confirm := buildConfirmFunc(r, ask)
 	askChoice := buildAskChoiceFunc(r, askLine)
@@ -73,10 +101,10 @@ func startRepl(ctx context.Context, a *app.App) int {
 	// Own SIGINT for the REPL: a Ctrl-C DURING a turn cancels that one generation and
 	// keeps the REPL alive (the high-value fix — previously the process was killed); at
 	// idle it is a no-op (the cooked-mode line read can't be interrupted portably — exit
-	// with Ctrl-D or /exit). The session + scheduler + slash commands run on a base
-	// context DECOUPLED from main's signal context, which cancels exactly once on the
-	// first Ctrl-C; reusing it would wedge every later turn after a single interrupt.
-	base := context.WithoutCancel(ctx)
+	// with Ctrl-D or /exit). main deliberately excludes SIGINT from the interactive
+	// launch context, so Ctrl-C cannot poison later work. SIGTERM and explicit parent
+	// cancellation still flow through base and shut the REPL down.
+	base := ctx
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
@@ -99,13 +127,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 	// error; read-only slash commands work regardless.
 
 	for {
-		line := ask(r.Cyan("\ndaintree ❯ "))
+		line, ok := readLine(r.Cyan("\ndaintree ❯ "))
+		if !ok {
+			break
+		}
 		if line == "" {
-			// EOF (Ctrl-D) returns "" from a closed stream; treat a bare empty as
-			// a continue, but a closed reader ends the loop.
-			if _, err := reader.Peek(1); err != nil {
-				break
-			}
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
@@ -114,8 +140,8 @@ func startRepl(ctx context.Context, a *app.App) int {
 				break
 			}
 			// /clear additionally wipes the host terminal in the REPL.
-			cmd, _, _ := splitCmd(line)
-			if cmd == "clear" {
+			cmd, _, args := splitCmd(line)
+			if cmd == "clear" && len(args) == 0 {
 				clearHostTerminal()
 			}
 			continue
@@ -126,12 +152,19 @@ func startRepl(ctx context.Context, a *app.App) int {
 		case <-sigCh:
 		default:
 		}
-		if err := runReplTurn(base, a, sigCh, line); err != nil {
+		err := runReplTurn(base, a, sigCh, line)
+		if base.Err() != nil {
+			break
+		}
+		if err != nil {
 			r.Error(err.Error())
 		}
 	}
 
 	_ = a.Shutdown()
+	if ctx.Err() != nil {
+		return domain.OneShotExitCode.Cancelled
+	}
 	r.Line(r.Gray("Goodbye."))
 	return 0
 }
@@ -284,14 +317,14 @@ func printBanner(r *render.Renderer, a *app.App, connected bool, transport strin
 	if connected {
 		mcpLine = "connected (" + transport + ")"
 	}
-	d := a.Router.Describe()
 	lines := []string{
 		r.Bold("Daintree Assistant") + "  — local operations officer",
 		"project   " + a.Config.ProjectPath,
+		"backend   " + a.Backend.BaseURL(),
 		"mcp       " + mcpLine,
-		"models    large=" + basename(d["large"]) + " · small=" + basename(d["small"]),
 		"tier      " + string(a.Tier()),
-		r.Gray("Type /help for commands. I never edit files directly — I spawn and supervise agents."),
+		r.Gray("Type /help for commands; Ctrl+D or /quit exits."),
+		r.Gray("I never edit files directly — I spawn and supervise agents."),
 	}
 	r.Banner(lines)
 }
@@ -315,12 +348,4 @@ func printAttention(r *render.Renderer, events []domain.QueueEvent) {
 		}
 	}
 	r.Out(r.Cyan("\ndaintree ❯ "))
-}
-
-// basename returns the model id's last path segment (split("/").pop()).
-func basename(model string) string {
-	if i := strings.LastIndexByte(model, '/'); i >= 0 {
-		return model[i+1:]
-	}
-	return model
 }

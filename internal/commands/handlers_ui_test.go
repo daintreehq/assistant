@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
 // Exercises handleUiCommand + the disconnected /doctor probe. Builds an offline
@@ -62,6 +63,69 @@ func TestUIStatusReportsMCPAndConfig(t *testing.T) {
 	}
 	if !strings.Contains(r.Text, "Daintree MCP") || !strings.Contains(r.Text, "disconnected") {
 		t.Fatalf("status text missing MCP/disconnected: %q", r.Text)
+	}
+	for _, want := range []string{"backend", "project", "session", "state", "tier"} {
+		if !strings.Contains(r.Text, want) {
+			t.Errorf("status text missing %q: %q", want, r.Text)
+		}
+	}
+	for _, stale := range []string{"deepseekApiKey", "largeModel", "workflowIntelligencefalse"} {
+		if strings.Contains(r.Text, stale) {
+			t.Errorf("status text contains stale/malformed field %q: %q", stale, r.Text)
+		}
+	}
+}
+
+func TestUIRejectsInvalidConstrainedArguments(t *testing.T) {
+	a := newOfflineApp(t)
+	tests := []struct {
+		line string
+		want string
+	}{
+		{line: "/inbox bananas", want: "Unknown severity"},
+		{line: "/audit bananas", want: "Usage: /audit"},
+		{line: "/audit 5 extra", want: "Usage: /audit"},
+		{line: "/status extra", want: "Usage: /status"},
+		{line: "/clear extra", want: "Usage: /clear"},
+		{line: "/quit extra", want: "Usage: /quit"},
+		{line: "/workflow cancel wfg_example extra", want: "Usage: /workflow cancel"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			r := ui(a, tt.line)
+			if !r.Handled || !strings.Contains(r.Text, tt.want) {
+				t.Fatalf("%s = %+v, want %q", tt.line, r, tt.want)
+			}
+			if r.Quit || r.ClearTranscript || r.SwitchPanel != "" {
+				t.Fatalf("invalid command arguments caused an action: %+v", r)
+			}
+		})
+	}
+}
+
+func TestUIFilteredPanelCommandsRenderTheirExactResult(t *testing.T) {
+	a := newOfflineApp(t)
+	for _, line := range []string{"/inbox urgent", "/audit 2"} {
+		r := ui(a, line)
+		if !r.Handled || r.SwitchPanel != "" || r.Text == "" {
+			t.Fatalf("%s should render a result card, not an independently-filtered panel: %+v", line, r)
+		}
+	}
+}
+
+func TestUIAuditExportRendersInsteadOfDiscardingTextInPanel(t *testing.T) {
+	a := newOfflineApp(t)
+	r := ui(a, "/audit export json actor=main n=1")
+	if !r.Handled || r.SwitchPanel != "" || !strings.HasPrefix(r.Text, "[") {
+		t.Fatalf("audit export should render a transcript card: %+v", r)
+	}
+}
+
+func TestToolDescriptionsAreCompactedForCommandOutput(t *testing.T) {
+	in := "first line\n\nsecond   line " + strings.Repeat("x", 120)
+	got := truncateText(strings.Join(strings.Fields(in), " "), 40)
+	if strings.Contains(got, "\n") || len([]rune(got)) > 40 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("compacted tool description = %q", got)
 	}
 }
 
@@ -205,7 +269,7 @@ func TestUIAuditExportJSON(t *testing.T) {
 		Outcome: "error", DurationMs: 2, Summary: "boom",
 	})
 	r := ui(a, "/audit export json actor=main")
-	if r.SwitchPanel != PanelAudit || !strings.Contains(r.Title, "Audit") {
+	if r.SwitchPanel != "" || !strings.Contains(r.Title, "Audit") {
 		t.Fatalf("export json card wrong: %+v", r)
 	}
 	var rows []map[string]any
@@ -236,7 +300,7 @@ func TestUIAuditExportCSV(t *testing.T) {
 func TestUIAuditExportBadFormat(t *testing.T) {
 	a := newOfflineApp(t)
 	r := ui(a, "/audit export xml")
-	if r.SwitchPanel != PanelAudit {
+	if r.SwitchPanel != "" {
 		t.Fatalf("export panel = %q", r.SwitchPanel)
 	}
 	if !strings.Contains(strings.ToLower(r.Text), "use export") && !strings.Contains(r.Text, "Unknown") {
@@ -513,19 +577,15 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 }
 
 // TestUISkillsInformational: skill selection is now SERVER-OWNED — there is no local
-// catalog to browse, find, or load, so /skills (with or without a subcommand) is a
-// static informational card. It must never fall through to unknown-command and must
-// point the user at the backend-managed selector.
+// catalog to browse, find, or load, so /skills is a static informational card.
 func TestUISkillsInformational(t *testing.T) {
 	a := newOfflineApp(t)
-	for _, line := range []string{"/skills", "/skills clear", "/skills load daintree.orchestration.basic"} {
-		r := ui(a, line)
-		if !r.Handled || r.Title != "Skills" {
-			t.Fatalf("%s not handled as the Skills card: %+v", line, r)
-		}
-		if !strings.Contains(r.Text, "Daintree backend") {
-			t.Errorf("%s should explain skills are backend-managed, got: %q", line, r.Text)
-		}
+	r := ui(a, "/skills")
+	if !r.Handled || r.Title != "Skills" || !strings.Contains(r.Text, "Daintree backend") {
+		t.Fatalf("/skills not handled as the backend-managed info card: %+v", r)
+	}
+	if r := ui(a, "/skills load anything"); r.Title != "Usage" || r.Text != "Usage: /skills" {
+		t.Fatalf("/skills arguments should be rejected: %+v", r)
 	}
 }
 
@@ -597,16 +657,33 @@ func TestUIMemoryCommand(t *testing.T) {
 	if !r.Handled || !strings.Contains(r.Text, "No such memory") {
 		t.Fatalf("/memory pin unknown id: %+v", r)
 	}
+	// Trailing garbage must not turn a malformed state-changing command into a mutation.
+	if r := ui(a, "/memory pin "+rec.ID+" extra"); !strings.Contains(r.Text, "Usage:") {
+		t.Fatalf("/memory pin accepted trailing arguments: %+v", r)
+	}
+	if rows, err := a.Store.ListMemories(storage.MemoryListOptions{}); err != nil || len(rows) != 0 {
+		t.Fatalf("invalid trailing-argument command mutated memories: rows=%+v err=%v", rows, err)
+	}
 }
 
 // TestDoctorNoProbeWhenDisconnected: with MCP offline/disconnected, runDoctor adds
 // no "mcp probe" check (the live probe is connection-gated).
 func TestDoctorNoProbeWhenDisconnected(t *testing.T) {
 	a := newOfflineApp(t)
+	foundMode := false
 	for _, c := range RunDoctor(context.Background(), a) {
 		if c.Label == "mcp probe" {
 			t.Fatalf("disconnected MCP must add no probe check, got %+v", c)
 		}
+		if c.Label == "mcp mode" && c.OK && strings.Contains(c.Detail, "offline") {
+			foundMode = true
+		}
+		if c.OK && c.Fix != "" {
+			t.Fatalf("successful doctor check must not carry remediation: %+v", c)
+		}
+	}
+	if !foundMode {
+		t.Fatal("explicit offline mode should collapse MCP checks into one informational row")
 	}
 }
 
@@ -742,7 +819,8 @@ func TestUILaunchesNoErrorSuffix(t *testing.T) {
 }
 
 // TestUIWorkflowsCapCaseAndInvalid: the display caps at 20 rows with a "(+N more)"
-// trailer, mixed-case status args are normalized, and an unknown status yields "(none)".
+// trailer, mixed-case status args are normalized, and an unknown status is rejected
+// with the accepted values instead of masquerading as a valid empty result.
 func TestUIWorkflowsCapCaseAndInvalid(t *testing.T) {
 	a := newOfflineApp(t)
 	for i := 0; i < 21; i++ {
@@ -762,9 +840,9 @@ func TestUIWorkflowsCapCaseAndInvalid(t *testing.T) {
 	if r := ui(a, "/workflows ACTIVE"); !strings.Contains(r.Text, "[active]") {
 		t.Fatalf("/workflows ACTIVE should match active runs: %q", r.Text)
 	}
-	// An unknown status filters everything out rather than erroring.
-	if r := ui(a, "/workflows nope"); r.Text != "(none)" {
-		t.Fatalf("/workflows nope should be (none): %q", r.Text)
+	// An unknown status is a usage error, not a valid empty filter.
+	if r := ui(a, "/workflows nope"); !strings.Contains(r.Text, "Unknown workflow status") || !strings.Contains(r.Text, "pending|active") {
+		t.Fatalf("/workflows nope should report accepted statuses: %q", r.Text)
 	}
 }
 

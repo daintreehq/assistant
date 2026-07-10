@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
+	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -24,6 +26,35 @@ func TestRunCancellable_PropagatesNormalError(t *testing.T) {
 	})
 	if got != want {
 		t.Fatalf("normal completion error = %v, want %v", got, want)
+	}
+}
+
+func TestClassicREPL_ParentCancellationExits(t *testing.T) {
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	a, err := app.Create(app.CreateOptions{Overrides: overridesFromOptions(Options{
+		Offline: true,
+		Project: t.TempDir(),
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdin, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+		_ = writer.Close()
+		_ = stdin.Close()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := startRepl(ctx, a); code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("cancelled classic REPL exit = %d, want %d", code, domain.OneShotExitCode.Cancelled)
 	}
 }
 
@@ -51,7 +82,67 @@ func TestRunCancellable_SignalCancelsTheUnit(t *testing.T) {
 
 func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	var buf bytes.Buffer
-	return &consoleSink{r: render.New(&buf), tty: tty}, &buf
+	r := render.New(&buf)
+	return &consoleSink{r: r, diagnostics: r, tty: tty}, &buf
+}
+
+func TestOneShotConsoleSinkSeparatesDiagnosticsAndTracksCancellation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	s := newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))
+
+	s.Error("backend unavailable")
+	if !s.Failed() || !strings.Contains(stderr.String(), "backend unavailable") {
+		t.Fatalf("error was not tracked on stderr: failed=%v stderr=%q", s.Failed(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("failed one-shot wrote to stdout: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	s = newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))
+	s.AssistantCancelled("")
+	if !s.Cancelled() || !strings.Contains(stderr.String(), "Turn cancelled") {
+		t.Fatalf("cancellation was not tracked on stderr: cancelled=%v stderr=%q", s.Cancelled(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("cancelled one-shot with no content wrote to stdout: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	s = newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))
+	s.AssistantStart()
+	s.AssistantToken("hello")
+	s.AssistantEnd("hello", "")
+	if got := stdout.String(); got != "\nhello\n" {
+		t.Fatalf("successful streamed answer formatting = %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	s = newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))
+	s.AssistantToken("partial")
+	s.Error("stream failed")
+	if got := stdout.String(); got != "\npartial\n" {
+		t.Fatalf("failed partial answer was not cleanly terminated: %q", got)
+	}
+	if !strings.Contains(stderr.String(), "stream failed") {
+		t.Fatalf("partial-stream error missing from stderr: %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	s = newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))
+	s.AssistantToken("before")
+	s.ToolCall(agent.ToolCallEvent{Name: "memory.list", Args: `{}`})
+	s.ToolResult(agent.ToolResultEvent{Result: domain.Ok("listed", nil)})
+	s.AssistantToken("after")
+	s.AssistantEnd("beforeafter", "")
+	got := stdout.String()
+	if strings.Count(got, "before") != 1 || strings.Count(got, "after") != 1 || !strings.Contains(got, "memory.list") {
+		t.Fatalf("multi-round console output lost or duplicated content: %q", got)
+	}
 }
 
 // The classic-REPL confirm handler must mirror the cockpit's friction off the safety

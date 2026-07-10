@@ -47,10 +47,11 @@ func (m *Model) View(p ViewParams) string {
 	if sugg := m.activeSuggestions(); len(sugg) > 0 {
 		pad := strings.Repeat(" ", palettePadLeft)
 		sel := clampInt(m.paletteSel, 0, len(sugg)-1)
-		for i, c := range sugg {
+		visible, visibleSel := paletteWindow(sugg, sel)
+		for i, c := range visible {
 			marker := "  "
 			nameStyle := m.theme.Info()
-			if i == sel {
+			if i == visibleSel {
 				// Highlight the selected row so Tab's target is visible (the audit gap).
 				marker = m.theme.Info().Render("› ")
 				nameStyle = m.theme.Body().Reverse(true)
@@ -62,7 +63,13 @@ func (m *Model) View(p ViewParams) string {
 			b.WriteByte('\n')
 		}
 		// Inline usage + accept hint for the highlighted command (surfaces the arg form).
-		hint := "Tab complete · ↑↓ move · Enter run"
+		hint := "Tab complete · ↑↓ history · Enter run"
+		if len(sugg) > 1 {
+			hint = "Tab complete · ↑↓ move · Enter run"
+		}
+		if len(sugg) > paletteCap {
+			hint = itoa(sel+1) + "/" + itoa(len(sugg)) + " · " + hint
+		}
 		if syn := sugg[sel].Syntax; syn != "" {
 			hint = syn + "   " + hint
 		}

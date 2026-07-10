@@ -76,11 +76,16 @@ func TestParseAuditExportArgs(t *testing.T) {
 	if bad.Error == "" {
 		t.Fatalf("expected error for unrecognized arg")
 	}
+	for _, args := range [][]string{{"json", "n=abc"}, {"json", "n=0"}, {"json", "actor=robot"}, {"json", "tool="}} {
+		if got := ParseAuditExportArgs(args); got.Error == "" {
+			t.Errorf("ParseAuditExportArgs(%v) accepted an invalid filter", args)
+		}
+	}
 }
 
 func TestFormatDoctorMarks(t *testing.T) {
 	out := FormatDoctor([]DoctorCheck{
-		{Label: "deepseek key", OK: true, Detail: "present"},
+		{Label: "backend health", OK: true, Detail: "ok", Fix: "start backend"},
 		{Label: "mcp url", OK: false, Detail: "(unset)", Fix: "set DAINTREE_MCP_URL"},
 	})
 	if want := "✓ "; out[:len(want)] != want {
@@ -88,6 +93,9 @@ func TestFormatDoctorMarks(t *testing.T) {
 	}
 	if !contains(out, "✗ ") || !contains(out, "→ set DAINTREE_MCP_URL") {
 		t.Fatalf("missing ✗ row or fix arrow: %q", out)
+	}
+	if contains(out, "start backend") {
+		t.Fatalf("successful check rendered failure remediation: %q", out)
 	}
 }
 

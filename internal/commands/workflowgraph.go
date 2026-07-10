@@ -22,6 +22,24 @@ const workflowFeatureOffText = "Workflow intelligence is off. Set DAINTREE_WORKF
 
 // workflowGraphCommand dispatches the /workflow sub-commands.
 func workflowGraphCommand(ctx context.Context, a *app.App, rest []string) (title, text string) {
+	if len(rest) > 0 {
+		switch rest[0] {
+		case "resume":
+			// The remaining words are the optional resume message.
+		case "reconcile":
+			if len(rest) != 2 {
+				return "Workflow reconcile", "Usage: /workflow reconcile <wfg_id>"
+			}
+		case "cancel":
+			if len(rest) != 2 {
+				return "Workflow cancel", "Usage: /workflow cancel <wfg_id>"
+			}
+		default:
+			if len(rest) != 1 {
+				return "Workflow", "Usage: /workflow <wfg_id> | resume [message] | reconcile <wfg_id> | cancel <wfg_id>"
+			}
+		}
+	}
 	svc := a.WorkflowGraphs()
 	if svc == nil {
 		return "Workflow", workflowFeatureOffText
@@ -33,14 +51,8 @@ func workflowGraphCommand(ctx context.Context, a *app.App, rest []string) (title
 	case "resume":
 		return "Workflow resume", workflowResumeText(ctx, svc, strings.Join(rest[1:], " "))
 	case "reconcile":
-		if len(rest) < 2 {
-			return "Workflow reconcile", "Usage: /workflow reconcile <wfg_id>"
-		}
 		return "Workflow reconcile", workflowReconcileText(ctx, svc, rest[1])
 	case "cancel":
-		if len(rest) < 2 {
-			return "Workflow cancel", "Usage: /workflow cancel <wfg_id>"
-		}
 		return "Workflow cancel", workflowCancelText(svc, rest[1])
 	default:
 		return "Workflow", workflowGraphDetailText(svc, rest[0])

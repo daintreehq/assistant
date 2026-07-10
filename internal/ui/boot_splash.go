@@ -14,6 +14,14 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
+const (
+	// splashViewportReset clears only the visible viewport and homes the cursor.
+	// Deliberately omit ESC[3J: startup must preserve the host terminal's native
+	// scrollback. Explicit user-requested clear/redraw actions own any scrollback wipe.
+	splashViewportReset = "\x1b[2J\x1b[H"
+	splashAbortCleanup  = "\x1b[?25h" + splashViewportReset
+)
+
 // boot_splash.go plays the startup animation DIRECTLY to the terminal, BEFORE the
 // Bubble Tea program starts. This is the idiomatic pattern for an inline (non-alt-
 // screen) Bubble Tea app, and it is the fix for a whole class of rendering bugs we hit
@@ -74,7 +82,7 @@ func playBootSplash(
 		if handoffPainted {
 			return
 		}
-		_, _ = io.WriteString(w, "\x1b[?25h\x1b[2J\x1b[3J\x1b[H") // restore cursor + clean slate for BT
+		_, _ = io.WriteString(w, splashAbortCleanup) // restore cursor + clean viewport for BT
 	}()
 
 	// Frames are paced against ABSOLUTE deadlines from a single start instant, not a
@@ -197,7 +205,7 @@ func renderBootHandoffFrame(header, footer string) string {
 	var b strings.Builder
 	b.WriteString("\x1b[?2026h") // begin synchronized update
 	b.WriteString("\x1b[?25l")   // keep cursor hidden across the BT hand-off
-	b.WriteString("\x1b[2J\x1b[3J\x1b[H")
+	b.WriteString(splashViewportReset)
 	if header != "" {
 		b.WriteString(toCRLF(header))
 		b.WriteString("\r\n")

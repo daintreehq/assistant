@@ -59,6 +59,9 @@ Start the backend (`../assistant-backend`, on `127.0.0.1:8473`), then run:
 ./bin/daintree-assistant "which worktrees are ready for review?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"                       # one-shot, JSONL event stream to stdout
 ./bin/daintree-assistant doctor                           # environment check
+./bin/daintree-assistant daemon                           # run the persistent project supervisor
+./bin/daintree-assistant daemon stop                      # stop the project supervisor
+./bin/daintree-assistant status                           # supervisor health and live work
 ./bin/daintree-assistant host --stdio                     # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 ```
 
@@ -174,7 +177,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ```
 /status  /inbox [sev]  /tools [query]  /timers  /watchers  /grants
-/workflows [status]  /launches  /audit [n]  /explain [runId]  /models
+/workflows [status]  /workflow [id|sub]  /launches  /audit [n]  /explain [runId]  /models
 /permissions [tier]  /approvals [clear]  /skills
 /memory [list|pin <id>|unpin <id>|forget <id>]  /compact  /clear  /doctor
 /reconnect  /help  /quit
@@ -229,15 +232,17 @@ A current snapshot; the registry (`internal/tools`) is the source of truth, and
 
 ## Environment variables
 
-`DEEPSEEK_API_KEY` (required) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+The CLI needs no model-provider API key or model-routing variables; the Daintree Assistant
+backend owns both. Runtime settings are `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` ·
-`DAINTREE_ASSISTANT_DEBUG_LOG` / `DAINTREE_ASSISTANT_LOG_DIR` ·
-`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` · `DEEPSEEK_BASE_URL`.
+`DAINTREE_ASSISTANT_DEBUG_LOG` / `DAINTREE_ASSISTANT_LOG_DIR`.
 
-Resolution order: CLI overrides → real process env → project `.env` → the assistant's own
-`.env` → built-in defaults. State lives under `~/.daintree/assistant-cli/`.
+Resolution is setting-specific at the trust boundary: CLI overrides win; MCP credentials,
+Daintree identity, and debug logging never come from a project's untrusted `.env`; tier,
+offline mode, state dir, and log dir come only from CLI/real process environment. State
+lives under `~/.daintree/assistant-cli/`.
 
 ## Debug logging
 
@@ -245,9 +250,9 @@ A full-fidelity trace for debugging the assistant itself. When enabled it append
 **everything** — every model request and response, every tool/function call with its
 arguments and result, and the whole watcher lifecycle — to a single human-readable log.
 
-**Enable it** with `DAINTREE_ASSISTANT_DEBUG_LOG=1` (read from the process env, the bound
-project's `.env`, or the assistant's own `.env`). It writes to a **global** dir (default
-`~/.daintree/logs`, override `DAINTREE_ASSISTANT_LOG_DIR`); each run gets its own
+**Enable it** with `DAINTREE_ASSISTANT_DEBUG_LOG=1` (read from the process environment or
+the assistant's own `.env`, never the bound project's `.env`). It writes to a **global**
+dir (default `~/.daintree/logs`, override `DAINTREE_ASSISTANT_LOG_DIR`); each run gets its own
 `<YYYY-MM-DD>-<sessionId>.log`, and logs older than 7 days are pruned at boot.
 
 ```bash
@@ -258,7 +263,7 @@ tail -f ~/.daintree/logs/2026-06-21-ses_ab12cd34.log
 ## Testing
 
 ```bash
-go test ./...        # all tests (980+ across 44 packages), no network — fakes for MCP + models
+go test ./...        # all tests (2200+ across 58 packages), no network — fakes for MCP + backend
 go test -race ./...
 go vet ./...
 gofmt -l .           # must print nothing
@@ -266,9 +271,10 @@ gofmt -l .           # must print nothing
 
 ## Notes / roadmap
 
-- The daemon runs **in-process** and **foreground-only** in this prototype. State lives
-  in SQLite so it's ready to split into a detachable background process later (the
-  scheduler decision record is in `docs/ARCHITECTURE.md`).
+- The persistent per-project supervisor is started automatically by an interactive launch.
+  It keeps watchers, async operations, timers, and wake turns running after the UI exits,
+  then yields ownership when an assistant attaches. Use `status` and `daemon stop` to
+  inspect or stop it; see [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
 - **UI boundary:** the runtime (App, Session, Registry, Scheduler, Store, Queue, MCP,
   Router) emits structured events and exposes state; only `internal/ui` imports Bubble
   Tea. Tools never render, the watcher engine never paints, and the model loop never

@@ -229,6 +229,16 @@ func TestApprovals_CommandListsAndClears(t *testing.T) {
 	if c := lastCommandCell(t, mm2); !strings.Contains(c.Text, "Cleared") {
 		t.Fatalf("/approvals clear card = %q, want a Cleared… note", c.Text)
 	}
+
+	// Trailing garbage is a usage error and must not clear the allow-list.
+	mm2.approvedTools = map[string]int{"git.commit": 2}
+	mm3 := asModel(t, mustModel(mm2.onSubmit("/approvals clear extra")))
+	if len(mm3.approvedTools) != 1 {
+		t.Fatalf("malformed /approvals clear mutated the allow-list: %+v", mm3.approvedTools)
+	}
+	if c := lastCommandCell(t, mm3); !strings.Contains(c.Text, "Usage:") {
+		t.Fatalf("malformed /approvals clear card = %q, want usage", c.Text)
+	}
 }
 
 func TestApprovals_CommandEmptyState(t *testing.T) {

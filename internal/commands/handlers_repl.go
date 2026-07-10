@@ -20,11 +20,15 @@ type CommandResult struct {
 // (the REPL owns stdout), signalled via the returned result + this handler's wipe
 // of the conversation.
 func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.Renderer) CommandResult {
-	cmd, _, _ := parseCommand(line)
+	cmd, _, rest := parseCommand(line)
 	if cmd == "" {
 		return CommandResult{Handled: false}
 	}
 	name := canonical(cmd)
+	if usage := noArgUsage(name, rest); usage != "" {
+		r.Line(usage)
+		return CommandResult{Handled: true}
+	}
 
 	switch name {
 	case "quit":
@@ -54,7 +58,7 @@ func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.
 func printDoctor(r *render.Renderer, checks []DoctorCheck) {
 	for _, c := range checks {
 		line := padRight(c.Label, 16) + ": " + c.Detail
-		if c.Fix != "" {
+		if !c.OK && c.Fix != "" {
 			line += "  → " + c.Fix
 		}
 		if c.OK {

@@ -177,7 +177,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	// Boot settles in two beats: the live footer (composer glyph) renders first, then
 	// one render cycle later CommitArm fires and the masthead commits to scrollback. Wait
 	// for BOTH, then let the burst settle, so the masthead-commit count is read clean.
-	if !waitFor(20*time.Second, func() bool {
+	if !waitForPTY(20*time.Second, func() bool {
 		return rawCount(mastheadText) >= 1 && strings.Contains(screen.Plain(), composerGlyph)
 	}) {
 		t.Fatalf("cockpit never reached steady state (masthead commits=%d, composer glyph present=%v):\n%s",
@@ -194,7 +194,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	if _, err := ptm.Write([]byte("summarize my memory\r")); err != nil {
 		t.Fatalf("write prompt to pty: %v", err)
 	}
-	if !waitFor(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
+	if !waitForPTY(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
 		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
 	}
 	// Let the seal's final commit + footer repaint settle.
@@ -225,7 +225,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		t.Fatalf("resize pty: %v", err)
 	}
 	screen.Resize(newRows, newCols) // keep the VT model's geometry in step with the terminal
-	if !waitFor(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
+	if !waitForPTY(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
 		t.Fatalf("resize did not re-commit the masthead (%d occurrences, want >= %d)", rawCount(mastheadText), preMasthead+1)
 	}
 	// Guard window: ensure no SECOND re-commit follows (the debounce coalesces a
@@ -359,7 +359,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 	}
 
 	// Phase 1: boot → steady state (composer glyph present).
-	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+	if !waitForPTY(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
 		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
 	}
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
@@ -369,14 +369,14 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 	if _, err := ptm.Write([]byte("\x1b[200~" + pasteBody + "\x1b[201~")); err != nil {
 		t.Fatalf("write bracketed paste: %v", err)
 	}
-	placeholder := fmt.Sprintf("[pasted %d lines]", nPasteLines)
-	if !waitFor(10*time.Second, func() bool { return strings.Contains(screen.Plain(), placeholder) }) {
+	placeholder := fmt.Sprintf("[pasted %d lines #1]", nPasteLines)
+	if !waitForPTY(10*time.Second, func() bool { return strings.Contains(screen.Plain(), placeholder) }) {
 		t.Fatalf("composer never showed the large-paste placeholder %q:\n%s", placeholder, screen.Plain())
 	}
 	if _, err := ptm.Write([]byte("\r")); err != nil {
 		t.Fatalf("write submit: %v", err)
 	}
-	if !waitFor(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
+	if !waitForPTY(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
 		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
 	}
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
@@ -405,7 +405,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 		t.Fatalf("resize pty: %v", err)
 	}
 	screen.Resize(newRows, newCols)
-	if !waitFor(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
+	if !waitForPTY(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
 		t.Fatalf("resize did not re-commit the masthead (count=%d, want >= %d)", rawCount(mastheadText), preMasthead+1)
 	}
 	waitQuiet(rawLen, 400*time.Millisecond, 4*time.Second)
@@ -542,7 +542,7 @@ func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
 	}
 
 	// Phase 1: boot → steady state.
-	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+	if !waitForPTY(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
 		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
 	}
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
@@ -726,7 +726,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 	}
 
 	// Phase 1: boot → steady state.
-	if !waitFor(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
+	if !waitForPTY(20*time.Second, func() bool { return strings.Contains(screen.Plain(), composerGlyph) }) {
 		t.Fatalf("cockpit never reached steady state:\n%s", screen.Plain())
 	}
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
@@ -736,7 +736,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 	if _, err := ptm.Write([]byte("summarize the project\r")); err != nil {
 		t.Fatalf("write prompt to pty: %v", err)
 	}
-	if !waitFor(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
+	if !waitForPTY(30*time.Second, func() bool { return strings.Contains(screen.Plain(), sentinel) }) {
 		t.Fatalf("turn never completed (sentinel %q not seen):\n%s", sentinel, screen.Plain())
 	}
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
@@ -780,7 +780,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 
 // waitFor polls cond every 50ms until it is true or the timeout elapses. Returns
 // the final value of cond so the caller can fail with context on a miss.
-func waitFor(timeout time.Duration, cond func() bool) bool {
+func waitForPTY(timeout time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {

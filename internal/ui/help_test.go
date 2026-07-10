@@ -74,7 +74,7 @@ func TestQuestionMark_WithTextTypesLiterally(t *testing.T) {
 
 func TestHelpText_IncludesKeyCheatSheet(t *testing.T) {
 	help := commands.HelpTextUI()
-	for _, want := range []string{"Keys", "Ctrl+C", "command palette", "Ctrl+A/E"} {
+	for _, want := range []string{"Keys", "Ctrl+C", "Ctrl+R", "command palette", "Ctrl+A/E", "/q, /exit"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("help text is missing the key cheat-sheet entry %q", want)
 		}

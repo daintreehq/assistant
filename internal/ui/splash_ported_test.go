@@ -400,8 +400,11 @@ func TestBootHandoffFramePrepaintsCockpitAndParksAtFooter(t *testing.T) {
 	if !strings.Contains(frame, "\x1b[?2026h") || !strings.Contains(frame, "\x1b[?2026l") {
 		t.Fatal("boot handoff frame must use synchronized output")
 	}
-	if !strings.Contains(frame, "\x1b[2J\x1b[3J\x1b[H") {
-		t.Fatal("boot handoff frame must clear screen and scrollback before painting")
+	if !strings.Contains(frame, splashViewportReset) {
+		t.Fatal("boot handoff frame must clear the viewport and home the cursor before painting")
+	}
+	if strings.Contains(frame, "\x1b[3J") {
+		t.Fatal("boot handoff frame must preserve native terminal scrollback")
 	}
 	if !strings.Contains(plain, "Daintree Assistant") {
 		t.Fatalf("boot handoff frame missing masthead: %q", plain)
@@ -418,6 +421,17 @@ func TestBootHandoffFramePrepaintsCockpitAndParksAtFooter(t *testing.T) {
 	cursorAtFooter := "\x1b[" + itoa(lineCount(header)+1) + ";1H"
 	if !strings.Contains(frame, cursorAtFooter) {
 		t.Fatalf("boot handoff frame must park cursor at footer origin %q, frame %q", cursorAtFooter, frame)
+	}
+}
+
+func TestSplashAbortCleanupRestoresCursorWithoutErasingScrollback(t *testing.T) {
+	for _, want := range []string{"\x1b[?25h", "\x1b[2J", "\x1b[H"} {
+		if !strings.Contains(splashAbortCleanup, want) {
+			t.Fatalf("splash cleanup missing %q: %q", want, splashAbortCleanup)
+		}
+	}
+	if strings.Contains(splashAbortCleanup, "\x1b[3J") {
+		t.Fatal("splash cleanup must preserve native terminal scrollback")
 	}
 }
 

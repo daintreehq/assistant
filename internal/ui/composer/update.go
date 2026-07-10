@@ -128,16 +128,20 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 		return Outcome{}
 	}
 
-	// 3) Slash-palette navigation. While the palette is open, ↑/↓ and
-	// Shift-Tab move the highlighted row and Tab ACCEPTS it (fills "<cmd> "); when the palette
-	// is closed these keys fall through to history/line motion below.
+	// 3) Slash-palette navigation. While the palette has MULTIPLE matches, ↑/↓ move
+	// the highlighted row. A single exact match leaves those keys to history/line motion, so
+	// recalling "/status" does not trap the user on that history entry. Shift-Tab still moves
+	// (or harmlessly wraps a single row), and Tab ACCEPTS the highlight (fills "<cmd> ").
 	if sugg := m.activeSuggestions(); len(sugg) > 0 {
 		switch {
-		case k.Code == tea.KeyUp || (k.Code == tea.KeyTab && shift):
+		case k.Code == tea.KeyUp && len(sugg) > 1:
 			m.paletteSel = paletteWrap(m.paletteSel-1, len(sugg))
 			return Outcome{}
-		case k.Code == tea.KeyDown:
+		case k.Code == tea.KeyDown && len(sugg) > 1:
 			m.paletteSel = paletteWrap(m.paletteSel+1, len(sugg))
+			return Outcome{}
+		case k.Code == tea.KeyTab && shift:
+			m.paletteSel = paletteWrap(m.paletteSel-1, len(sugg))
 			return Outcome{}
 		case k.Code == tea.KeyTab && mod == 0:
 			// Tab completes the highlighted command and parks a trailing space so the

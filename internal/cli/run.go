@@ -98,7 +98,7 @@ func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
 // Run routes per the top-level dispatch:
 //
 //	prompt        → RunOneShot
-//	--json no prompt → usage error (exit 1, stderr)
+//	--json no prompt → usage error (exit 2, stderr; normally caught by main)
 //	else          → RunInteractive
 func Run(ctx context.Context, opts Options) int {
 	if opts.HasPrompt {
@@ -106,7 +106,7 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	if opts.JSON {
 		fmt.Fprint(os.Stderr, "--json requires a prompt argument (one-shot mode only).\n")
-		return 1
+		return 2
 	}
 	return RunInteractive(ctx, opts)
 }
@@ -154,14 +154,11 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		return domain.OneShotExitCode.Error
 	}
 
-	// Debug log: JSON → stderr notice; else gray stdout notice.
+	// A debug-log path is diagnostic metadata, never answer content. Keep it on
+	// stderr for every one-shot mode so stdout remains empty on a failed human run.
 	if path := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
 		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath}); path != "" {
-		if sink != nil {
-			fmt.Fprintf(os.Stderr, "logging to %s\n", path)
-		} else {
-			render.Stdout().Line(render.Stdout().Gray("logging to " + path))
-		}
+		stderrR.Line(stderrR.Gray("logging to " + path))
 	}
 
 	// No model-key preflight: the CLI no longer holds model credentials (the backend
@@ -186,7 +183,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		}
 	}
 
-	cs := NewConsoleSink(render.Stdout())
+	cs := newOneShotConsoleSink(render.Stdout(), stderrR)
 	var events agent.EventSink = cs
 	if sink != nil {
 		events = sink
@@ -225,12 +222,21 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	if runErr != nil || cs.Failed() {
 		return domain.OneShotExitCode.Error
 	}
+	if cs.Cancelled() {
+		return domain.OneShotExitCode.Cancelled
+	}
 	return domain.OneShotExitCode.Success
 }
 
 // RunInteractive routes to the cockpit (TTY + !classic) or the classic REPL.
 func RunInteractive(ctx context.Context, opts Options) int {
-	ttyOK := stdinIsTTY() && stdoutIsTTY()
+	return runInteractive(ctx, opts, stdinIsTTY() && stdoutIsTTY())
+}
+
+// runInteractive is the testable core of RunInteractive. ttyOK is measured at the
+// process boundary by RunInteractive; keeping it explicit here lets the cockpit seam
+// be exercised without requiring a pseudoterminal in unit tests.
+func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	wantsCockpit := !opts.Classic && ttyOK
 
 	r := render.Stdout()
@@ -278,6 +284,14 @@ func RunInteractive(ctx context.Context, opts Options) int {
 			runner = DefaultCockpitRunner
 		}
 		if cerr := runner(ctx, a); cerr != nil {
+			// A cancelled launch context is a process shutdown request (SIGTERM on the
+			// cockpit path). Bubble Tea reports that cancellation as a runner error; it
+			// must not be mistaken for an unavailable cockpit and resurrect the process
+			// in a classic REPL detached from the cancelled context.
+			if ctx.Err() != nil {
+				_ = a.Shutdown()
+				return domain.OneShotExitCode.Cancelled
+			}
 			// Cockpit unavailable → fall back to the classic REPL.
 			render.Stdout().Warn("cockpit unavailable (" + cerr.Error() + ") — falling back to the classic REPL")
 			announceDebugLog(a)
