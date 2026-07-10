@@ -30,7 +30,7 @@ Powered by the **Daintree Assistant backend** (`../assistant-backend`,
 `~/Projects/Daintree/assistant-backend`, on GitHub at
 <https://github.com/daintreehq/assistant-backend>), a Daintree-native
 HTTP API — **not** OpenAI-compatible. The CLI is a thin local runtime: it sends only a
-framed startup-data message + visible conversation + structured runtime/turn context + its tool inventory, and the
+structured stable startup snapshot + visible conversation + structured runtime/turn context + its tool inventory, and the
 backend owns the system prompt, developer instructions, **skill/runbook selection**, model
 choice, prompt assembly, the utility-model prompts, and the upstream model credentials
 (DeepSeek, spoken internally behind a provider abstraction). The CLI executes the local
@@ -146,8 +146,8 @@ internal/
 **Data flow:** `app.App.Create()` builds every dependency once (Store, MCP, Queue,
 Backend client, Registry, Session) and exposes a `ToolContext` factory. `agent.Session.Send()`
 runs a turn: optional auto-compact → push user message → `Backend.RespondStream(req, …)`
-(sends a request-only stable startup-data message before the visible conversation,
-structured `request.runtime`/`request.turn` context, the local tool inventory, and the opaque
+(sends structured `request.startup`, `request.runtime`, and `request.turn` context alongside
+the visible conversation, the local tool inventory, and the opaque
 backend `state` token) with a
 token callback → the FIRST
 SSE `meta` event carries the refreshed state token + the server's `skills` block. **Skill
@@ -183,10 +183,10 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   `prompt_cache_key`. The CLI's only contribution to cache stability is keeping the
   conversation prefix stable: no client-side control prefix
   (`domain.ControlMessageCount == 0`), only `user`/`assistant`/`tool` roles reach the wire,
-  project/agent facts ride a request-only framed user-role message before visible history,
+  project/agent facts ride the dedicated cache-friendly `request.startup` value,
   while volatile per-turn facts ride `request.runtime` / `request.turn` (inert data the
   backend renders). See `docs/BACKEND.md`. The effective order is stable backend system
-  layers → tools → stable startup-data message → append-only conversation → fresh runtime/
+  layers → tools → stable startup block → append-only conversation → fresh runtime/
   turn user block LAST. Only STABLE content may be system-role: DeepSeek
   serializes [all system messages] → [tools] → [conversation], so a volatile system message
   anywhere in the array lands before the ~18k-token tool schemas and busts their cache —

@@ -2,8 +2,7 @@
 // the direct DeepSeek/OpenAI model client for assistant turns and utility tasks.
 //
 // The CLI is a thin local runtime: it stores the visible conversation, exposes and
-// executes local function tools, prepends a request-only stable startup-data row, and
-// ships structured runtime/turn context.
+// executes local function tools, and ships structured startup/runtime/turn context.
 // The backend owns the system prompt, developer instructions, skill/runbook
 // selection, model choice, prompt assembly, and the utility-model prompts — and
 // it talks to DeepSeek/OpenAI internally. The wire contract here is
@@ -20,7 +19,7 @@ import "encoding/json"
 // ProtocolVersion is the Daintree wire protocol the CLI speaks. The backend
 // advertises a supported range via /version and /v1/daintree/capabilities; a
 // mismatch yields HTTP 426.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // DefaultBaseURL is the single, HARDCODED backend endpoint.
 //
@@ -37,18 +36,64 @@ const DefaultBaseURL = "http://127.0.0.1:8473"
 
 // RespondRequest is the single request body for the generation endpoint. The
 // backend validates it with extra="forbid" at the top level, so every field here
-// must be one the backend knows; optional sub-objects are pointers with omitempty
-// so an absent one is never sent as null.
+// must be one the backend knows; optional sub-objects are pointers with omitempty so an
+// absent one is never sent as null. Startup is the required value exception and therefore
+// always serializes, including as {} when discovery is unavailable.
 type RespondRequest struct {
 	ProtocolVersion int             `json:"protocol_version"`
 	Session         RespondSession  `json:"session"`
 	State           *string         `json:"state,omitempty"`
+	Startup         StartupContext  `json:"startup"`
 	Input           RespondInput    `json:"input"`
 	Runtime         *RuntimeContext `json:"runtime,omitempty"`
 	Turn            *TurnContext    `json:"turn,omitempty"`
 	Selection       *Selection      `json:"selection,omitempty"`
 	Generation      *Generation     `json:"generation,omitempty"`
 	Client          *ClientInfo     `json:"client,omitempty"`
+}
+
+// StartupContext is the stable, cache-friendly Daintree snapshot collected while the
+// splash animation is visible. It is a required value on every generation request: an
+// unavailable discovery serializes as {}, never as null. The backend places it before
+// the visible conversation and treats every value as inert, untrusted project data.
+type StartupContext struct {
+	Project             *ProjectSnapshot     `json:"project,omitempty"`
+	AgentRoster         *AgentRosterSnapshot `json:"agent_roster,omitempty"`
+	ProjectInstructions string               `json:"project_instructions,omitempty"`
+}
+
+// ProjectSnapshot is the deliberately narrow subset of project.getCurrent that is
+// useful on ordinary turns. The boolean pointers preserve unknown/false/true.
+type ProjectSnapshot struct {
+	ID                    string `json:"id,omitempty"`
+	Name                  string `json:"name,omitempty"`
+	Path                  string `json:"path,omitempty"`
+	Status                string `json:"status,omitempty"`
+	DaintreeConfigPresent *bool  `json:"daintree_config_present,omitempty"`
+	InRepoSettings        *bool  `json:"in_repo_settings,omitempty"`
+}
+
+// AgentRosterSnapshot is one authoritative direct-agent registry read. Agents is not
+// omitempty so a successful empty read remains [] rather than disappearing.
+type AgentRosterSnapshot struct {
+	Agents               []AgentSnapshot `json:"agents"`
+	Complete             bool            `json:"complete"`
+	AvailabilityComplete bool            `json:"availability_complete"`
+	TotalCount           int             `json:"total_count"`
+}
+
+// AgentSnapshot preserves the exact registered identifier and required provenance.
+// Pointer booleans retain the registry's tri-state semantics; absent availability remains
+// unknown.
+type AgentSnapshot struct {
+	ID             string `json:"id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	Source         string `json:"source"`
+	Availability   string `json:"availability,omitempty"`
+	Installed      *bool  `json:"installed,omitempty"`
+	Launchable     *bool  `json:"launchable,omitempty"`
+	Pinned         *bool  `json:"pinned,omitempty"`
+	ToolbarVisible *bool  `json:"toolbar_visible,omitempty"`
 }
 
 // RespondSession identifies the conversation and turn so the backend's skill
@@ -61,9 +106,9 @@ type RespondSession struct {
 	Round               int    `json:"round,omitempty"`
 }
 
-// RespondInput is the request conversation (an optional framed startup-data user message
-// followed by visible history) plus the client's current tool inventory. Messages must
-// be non-empty and carry only user/assistant/tool roles.
+// RespondInput is the visible conversation plus the client's current tool inventory.
+// Stable discovery belongs in RespondRequest.Startup and must never be inserted here.
+// Messages must be non-empty and carry only user/assistant/tool roles.
 type RespondInput struct {
 	Messages   []Message `json:"messages"`
 	Tools      []Tool    `json:"tools,omitempty"`
@@ -110,16 +155,35 @@ type ClientInfo struct {
 // true on the backend, so it is sent WITHOUT omitempty — an inactive scheduler
 // must be representable as an explicit false.
 type RuntimeContext struct {
-	PermissionTier      string         `json:"permission_tier,omitempty"`
-	ProjectPath         string         `json:"project_path,omitempty"`
-	ProjectID           string         `json:"project_id,omitempty"`
-	MCP                 *MCPInfo       `json:"mcp,omitempty"`
-	MCPServers          []MCPServer    `json:"mcp_servers,omitempty"`
-	ConfiguredAgentIDs  []string       `json:"configured_agent_ids,omitempty"`
-	SchedulerActive     bool           `json:"scheduler_active"`
-	ActiveWorktree      string         `json:"active_worktree,omitempty"`
-	ProjectInstructions string         `json:"project_instructions,omitempty"`
-	OpenTerminals       []OpenTerminal `json:"open_terminals,omitempty"`
+	PermissionTier  string                   `json:"permission_tier,omitempty"`
+	MCP             *MCPInfo                 `json:"mcp,omitempty"`
+	MCPServers      []MCPServer              `json:"mcp_servers,omitempty"`
+	SchedulerActive bool                     `json:"scheduler_active"`
+	Worktree        *CurrentWorktreeSnapshot `json:"worktree,omitempty"`
+	OpenTerminals   []OpenTerminal           `json:"open_terminals,omitempty"`
+}
+
+// CurrentWorktreeSnapshot preserves the three states of the live read. A nil Runtime
+// Worktree means the read was unavailable; {"current":null} is a successful, definitive
+// "none selected" response; a non-nil Current carries the full useful snapshot.
+type CurrentWorktreeSnapshot struct {
+	Current *WorktreeSnapshot `json:"current"`
+}
+
+// WorktreeSnapshot is the useful subset of worktree.getCurrent, normalized and bounded
+// by the CLI before it reaches the backend's strict request validator.
+type WorktreeSnapshot struct {
+	ID          string `json:"id,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	IsMain      bool   `json:"is_main"`
+	IssueNumber *int   `json:"issue_number,omitempty"`
+	IssueTitle  string `json:"issue_title,omitempty"`
+	PRNumber    *int   `json:"pr_number,omitempty"`
+	PRTitle     string `json:"pr_title,omitempty"`
+	PRURL       string `json:"pr_url,omitempty"`
+	Status      string `json:"status,omitempty"`
+	LastCommit  string `json:"last_commit,omitempty"`
 }
 
 // OpenTerminal is one live Daintree terminal in the per-turn inventory the CLI attaches

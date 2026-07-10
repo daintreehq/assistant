@@ -74,8 +74,8 @@ A turn runs through `agent.Session.Send()`:
 2. Project the FULL tool registry into the request inventory (skills never narrow it).
 3. Loop:
    - Phase `Analyzing` / `Integrating`; `Backend.RespondStream(req, …)` with a token
-     callback — sends a stable framed startup-data message before the conversation,
-     structured runtime/turn context, and the tool inventory
+     callback — sends structured stable startup data separately from the visible
+     conversation, plus fresh runtime/turn context and the tool inventory
      + the opaque state token. The first SSE `meta` event carries the refreshed state +
      the server's `skills` block (selection + injection are server-owned).
    - Append the assistant message. **No tool calls** → phase `Complete`, return the answer.

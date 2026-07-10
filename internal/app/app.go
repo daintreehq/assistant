@@ -571,13 +571,12 @@ func Create(opts CreateOptions) (*App, error) {
 		MemoryStore:        store,
 		MemoryRecaller:     memoryRecallerAdapter{s: store},
 		PinnedMemoryLister: pinnedMemoryListerAdapter{s: store},
-		// The footer's volatile-state seams (issue #263): the worktree label and the
-		// one-time resumed-watchers note. Both are bound App methods so the wiring is
-		// testable directly; see activeWorktreeForFooter / resumedWatchersForFooter.
-		ActiveWorktreeFunc: a.activeWorktreeForFooter,
-		ResumedWatchers:    a.resumedWatchersForFooter,
-		ArtifactPersister:  store,
-		WorkflowRunLister:  store,
+		// One-time resumed-watchers note. Worktree data now travels through the typed
+		// request.runtime.worktree field; activeWorktreeForFooter remains available to
+		// workflow intelligence but is no longer a Session dependency.
+		ResumedWatchers:   a.resumedWatchersForFooter,
+		ArtifactPersister: store,
+		WorkflowRunLister: store,
 		// Durable mirror + seed for the opaque backend state token, so a session
 		// handed over between processes (cockpit ↔ supervisor daemon) keeps the
 		// backend's skill-selection cadence. Seeded only on a genuine resume: a

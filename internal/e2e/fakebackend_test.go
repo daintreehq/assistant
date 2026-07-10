@@ -75,7 +75,7 @@ func newFakeBackend(t *testing.T, rounds ...sseRound) *fakeBackend {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"status": "ok"}) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"status": "ready"}) })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"server_version": "test", "protocol": map[string]any{"min": 1, "max": 1}})
+		writeJSON(w, map[string]any{"server_version": "test", "protocol": map[string]any{"min": 2, "max": 2}})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -121,7 +121,7 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 	// meta ALWAYS first, before any token — carries the opaque state token, the skills
 	// outcome (empty here), and version markers. The client errors if it never arrives.
 	writeEvent("meta", map[string]any{
-		"protocol_version": 1,
+		"protocol_version": 2,
 		"request_id":       "req_1",
 		"model":            "daintree-assistant",
 		"skills": map[string]any{
@@ -215,7 +215,7 @@ func (f *fakeBackend) handleTasks(w http.ResponseWriter, r *http.Request) {
 func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
 		"server_version": "test",
-		"protocol":       map[string]any{"min": 1, "max": 1},
+		"protocol":       map[string]any{"min": 2, "max": 2},
 		"respond": map[string]any{
 			"endpoint":                 "/v1/daintree/respond",
 			"model":                    "daintree-assistant",

@@ -3,14 +3,13 @@
 //
 // The backend owns the system prompt, developer instructions, skill bodies, and fresh
 // runtime/turn rendering. The CLI renders no system message; it projects this carrier
-// into one framed stable user-role data message plus the backend's existing structured
-// request.runtime block.
+// into the backend's structured request.startup and request.runtime blocks.
 package prompts
 
 import "github.com/daintreehq/daintree-assistant/internal/domain"
 
 // MainPromptContext is the CLI-collected environment state. Stable project/agent/
-// instruction fields build the request-only startup row; live tier/MCP/scheduler/worktree
+// instruction fields build request.startup; live tier/MCP/scheduler/worktree
 // fields map to request.runtime each round. PromptContextFunc is pulled live so a
 // mid-session MCP change, /permissions tier change, or scheduler start reaches the next
 // request. Pinned/recalled memories and session-ended-watchers remain turn context.
@@ -20,9 +19,9 @@ type MainPromptContext struct {
 	ProjectID   string
 	// Project / AgentRoster / Worktree are the richer Daintree-owned snapshot. The app
 	// fetches them in parallel while the splash is playing and ships the cached immutable
-	// values on every backend round. The session puts project/agents in a request-only
-	// user-role message before visible history and maps worktree to the existing runtime
-	// label. ProjectPath / ProjectID remain useful fallbacks when Daintree is unavailable.
+	// values on every backend round. The session puts project/agents in request.startup
+	// and maps worktree to typed request.runtime.worktree. ProjectPath / ProjectID remain
+	// useful fallbacks when Daintree is unavailable.
 	Project       *ProjectContext
 	AgentRoster   *AgentRosterContext
 	Worktree      *WorktreeContext

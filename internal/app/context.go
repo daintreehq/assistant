@@ -14,9 +14,9 @@ import (
 )
 
 // PromptContext combines live runtime state with the atomic splash-time Daintree
-// snapshot. The session splits it into the cacheable startup-data message (project,
-// agents, project instructions) and the fresh existing runtime/turn tail (tier, MCP,
-// scheduler, worktree).
+// snapshot. The session splits it into the cacheable request.startup value (project,
+// agents, project instructions) and the fresh runtime/turn tail (tier, MCP, scheduler,
+// worktree).
 func (a *App) PromptContext() prompts.MainPromptContext {
 	// Snapshot Config under cfgMu so a concurrent SetTier (/permissions) can't tear
 	// the Tier read while a turn is rebuilding its runtime context.
@@ -78,9 +78,8 @@ func (a *App) Send(ctx context.Context, userInput string, opts agent.SendOptions
 	return a.Session.Send(ctx, userInput, opts)
 }
 
-// activeWorktreeForFooter is the legacy label seam used by Session tests and as a
-// fallback when a caller supplies no typed WorktreeContext. Production reads the same
-// cached typed snapshot that PromptContext sends in request.runtime.
+// activeWorktreeForFooter is the compact label workflow intelligence records alongside
+// its event inputs. Assistant requests use the typed snapshot in request.runtime instead.
 func (a *App) activeWorktreeForFooter() string {
 	a.startupMu.RLock()
 	defer a.startupMu.RUnlock()

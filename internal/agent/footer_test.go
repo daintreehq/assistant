@@ -1099,16 +1099,19 @@ func TestComposeTurnFooter_PinnedListerErrorSwallowed(t *testing.T) {
 	}
 }
 
-// Session-level: the active-worktree provider is called EVERY round and its label travels
-// in the structured runtime context.
-func TestComposeTurnFooter_ActiveWorktreeEveryRound(t *testing.T) {
+// Session-level: the live typed worktree is fetched EVERY round and travels in the
+// structured runtime context.
+func TestComposeTurnFooter_TypedWorktreeEveryRound(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
 		{Content: "final"},
 	}}
 	calls := 0
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	deps.ActiveWorktreeFunc = func() string { calls++; return "feature/issue-263" }
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		calls++
+		return &prompts.WorktreeContext{Present: true, Branch: "feature/issue-263"}
+	}
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
@@ -1117,8 +1120,9 @@ func TestComposeTurnFooter_ActiveWorktreeEveryRound(t *testing.T) {
 		t.Errorf("worktree func called %d times, want once per round (>= 2)", calls)
 	}
 	for i := 0; i < 2; i++ {
-		if got := be.runtimeAt(i).ActiveWorktree; got != "feature/issue-263" {
-			t.Errorf("round %d runtime worktree = %q, want feature/issue-263", i, got)
+		got := be.runtimeAt(i).Worktree
+		if got == nil || got.Current == nil || got.Current.Branch != "feature/issue-263" {
+			t.Errorf("round %d runtime worktree = %+v, want feature/issue-263", i, got)
 		}
 	}
 }
@@ -1186,7 +1190,9 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	wt := "feature/one"
 	pins := []domain.MemoryRecord{{Content: "pin A"}}
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	deps.ActiveWorktreeFunc = func() string { return wt }
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		return &prompts.WorktreeContext{Present: true, Branch: wt}
+	}
 	deps.PinnedMemoryLister = &fakePinnedLister{rows: pins}
 	s := NewSession(deps)
 
@@ -1212,8 +1218,9 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 		}
 	}
 	// The change DID land — in the second turn's structured request.
-	if got := be.runtimeAt(1).ActiveWorktree; got != "feature/two" {
-		t.Fatalf("turn-2 runtime should reflect the changed worktree; got %q", got)
+	gotWorktree := be.runtimeAt(1).Worktree
+	if gotWorktree == nil || gotWorktree.Current == nil || gotWorktree.Current.Branch != "feature/two" {
+		t.Fatalf("turn-2 runtime should reflect the changed worktree; got %+v", gotWorktree)
 	}
 	mem := be.turnAt(1).Memories
 	if mem == nil || !anyContains(mem.Pinned, "pin B totally different") {
@@ -1221,7 +1228,7 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	}
 }
 
-func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T) {
+func TestStableStartupContextRidesEveryRoundWhileMessagesStayVisibleOnly(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
 		{Content: "final"},
@@ -1241,7 +1248,7 @@ func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T)
 				ID: "project-1", Name: "Demo", Path: "/repo",
 			},
 			AgentRoster: &prompts.AgentRosterContext{Agents: []prompts.AgentContext{
-				{ID: "codex", Availability: "ready", Launchable: &launchable},
+				{ID: "codex", Source: "built-in", Availability: "ready", Launchable: &launchable},
 			}},
 			ProjectInstructions: "Run the linter.",
 		}
@@ -1255,26 +1262,20 @@ func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T)
 	}
 	for i := 0; i < 2; i++ {
 		req := be.requests()[i]
-		if len(req.Input.Messages) < 2 || req.Input.Messages[0].Role != "user" {
-			t.Fatalf("round %d missing injected startup message: %+v", i, req.Input.Messages)
+		if req.Startup.Project == nil || req.Startup.Project.Name != "Demo" || req.Startup.AgentRoster == nil || len(req.Startup.AgentRoster.Agents) != 1 || req.Startup.AgentRoster.Agents[0].ID != "codex" {
+			t.Fatalf("round %d startup context missing project/agent facts: %+v", i, req.Startup)
 		}
-		var content string
-		if err := json.Unmarshal(req.Input.Messages[0].Content, &content); err != nil {
-			t.Fatalf("round %d invalid startup content: %v", i, err)
+		if req.Startup.ProjectInstructions != "Run the linter." {
+			t.Fatalf("round %d project instructions = %q", i, req.Startup.ProjectInstructions)
 		}
-		if !strings.Contains(content, "Injected startup context") || !strings.Contains(content, "Demo") || !strings.Contains(content, "codex") {
-			t.Fatalf("round %d startup message missing project/agent facts: %s", i, content)
-		}
-		if i > 0 && string(req.Input.Messages[0].Content) != string(be.requests()[0].Input.Messages[0].Content) {
-			t.Fatalf("round %d changed the stable startup bytes", i)
-		}
-		if !strings.Contains(content, "Run the linter.") || !strings.Contains(content, "<project_instructions>") {
-			t.Fatalf("round %d missing framed project instructions in startup message", i)
+		if i > 0 {
+			first, _ := json.Marshal(be.requests()[0].Startup)
+			current, _ := json.Marshal(req.Startup)
+			if string(first) != string(current) {
+				t.Fatalf("round %d changed the stable startup bytes", i)
+			}
 		}
 		runtime := be.runtimeAt(i)
-		if runtime.ProjectInstructions != "" || runtime.ProjectID != "" || runtime.ProjectPath != "" || len(runtime.ConfiguredAgentIDs) != 0 {
-			t.Fatalf("round %d duplicated stable startup facts in volatile runtime tail: %+v", i, runtime)
-		}
 		wantTier := string(domain.TierOperator)
 		if i > 0 {
 			wantTier = string(domain.TierSupervisor)
@@ -1283,7 +1284,7 @@ func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T)
 			t.Fatalf("round %d runtime tier = %q", i, runtime.PermissionTier)
 		}
 	}
-	wantRoles := [][]string{{"user", "user"}, {"user", "user", "assistant", "tool"}}
+	wantRoles := [][]string{{"user"}, {"user", "assistant", "tool"}}
 	for round, want := range wantRoles {
 		messages := be.requests()[round].Input.Messages
 		if len(messages) != len(want) {
@@ -1293,11 +1294,6 @@ func TestStableStartupMessageRidesEveryRoundWhileRuntimeStaysFresh(t *testing.T)
 			if messages[i].Role != role {
 				t.Fatalf("round %d message %d role = %q, want %q", round, i, messages[i].Role, role)
 			}
-		}
-	}
-	for _, message := range s.Messages() {
-		if strings.Contains(message.StringContent, "Injected startup context") {
-			t.Fatalf("request-only startup row leaked into durable/live history: %+v", message)
 		}
 	}
 }
@@ -1317,15 +1313,15 @@ func TestEnsureStartupContextRunsBeforeFirstBackendSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqs := be.requests()
-	if len(reqs) != 1 || len(reqs[0].Input.Messages) < 2 {
+	if len(reqs) != 1 || len(reqs[0].Input.Messages) != 1 {
 		t.Fatalf("first request did not wait for startup context: %+v", reqs)
 	}
-	if !strings.Contains(string(reqs[0].Input.Messages[0].Content), "Warmed project") {
-		t.Fatalf("first startup message = %s", reqs[0].Input.Messages[0].Content)
+	if reqs[0].Startup.Project == nil || reqs[0].Startup.Project.Name != "Warmed project" {
+		t.Fatalf("first startup context = %+v", reqs[0].Startup)
 	}
 }
 
-func TestStartupMessageStaysRequestOnlyAcrossPersistenceAndResume(t *testing.T) {
+func TestStartupContextStaysOutOfMessagesAcrossPersistenceAndResume(t *testing.T) {
 	store := &recordingStore{}
 	promptContext := prompts.MainPromptContext{Project: &prompts.ProjectContext{ID: "p1", Name: "Persistent Demo"}}
 	firstDeps, _ := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "first answer"}}}, &fakeTools{})
@@ -1337,8 +1333,8 @@ func TestStartupMessageStaysRequestOnlyAcrossPersistenceAndResume(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, row := range store.msgs {
-		if strings.Contains(row.Content, "Injected startup context") {
-			t.Fatalf("startup scaffold persisted at seq %d", row.Seq)
+		if strings.Contains(row.Content, "Persistent Demo") {
+			t.Fatalf("startup project persisted at seq %d", row.Seq)
 		}
 	}
 	restore, ok := RehydrateSession(store.msgs)
@@ -1359,22 +1355,21 @@ func TestStartupMessageStaysRequestOnlyAcrossPersistenceAndResume(t *testing.T) 
 	if len(requests) != 1 {
 		t.Fatalf("resumed turn requests = %d, want 1", len(requests))
 	}
-	prefixes := 0
-	for i, message := range requests[0].Input.Messages {
-		var content string
-		if json.Unmarshal(message.Content, &content) == nil && strings.Contains(content, "Injected startup context") {
-			prefixes++
-			if i != 0 {
-				t.Fatalf("startup prefix moved to message %d", i)
-			}
+	if requests[0].Startup.Project == nil || requests[0].Startup.Project.Name != "Persistent Demo" {
+		t.Fatalf("resumed request startup = %+v", requests[0].Startup)
+	}
+	wantRoles := []string{"user", "assistant", "user"}
+	if len(requests[0].Input.Messages) != len(wantRoles) {
+		t.Fatalf("resumed visible message count = %d, want %d", len(requests[0].Input.Messages), len(wantRoles))
+	}
+	for i, want := range wantRoles {
+		if got := requests[0].Input.Messages[i].Role; got != want {
+			t.Fatalf("resumed visible message %d role = %q, want %q", i, got, want)
 		}
 	}
-	if prefixes != 1 {
-		t.Fatalf("resumed request has %d startup prefixes, want exactly 1", prefixes)
-	}
 	for _, row := range store.msgs {
-		if strings.Contains(row.Content, "Injected startup context") {
-			t.Fatalf("resumed turn persisted startup scaffold at seq %d", row.Seq)
+		if strings.Contains(row.Content, "Persistent Demo") {
+			t.Fatalf("resumed turn persisted startup project at seq %d", row.Seq)
 		}
 	}
 }
@@ -1397,11 +1392,11 @@ func TestCurrentWorktreeFetcherRefreshesEveryBackendRound(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("worktree fetch calls = %d, want one per backend round", calls)
 	}
-	if got := be.runtimeAt(0).ActiveWorktree; !strings.Contains(got, "feature/1") {
-		t.Fatalf("round 0 worktree = %q", got)
+	if got := be.runtimeAt(0).Worktree; got == nil || got.Current == nil || got.Current.Branch != "feature/1" {
+		t.Fatalf("round 0 worktree = %+v", got)
 	}
-	if got := be.runtimeAt(1).ActiveWorktree; !strings.Contains(got, "feature/2") {
-		t.Fatalf("round 1 worktree = %q", got)
+	if got := be.runtimeAt(1).Worktree; got == nil || got.Current == nil || got.Current.Branch != "feature/2" {
+		t.Fatalf("round 1 worktree = %+v", got)
 	}
 }
 
@@ -1419,14 +1414,13 @@ func TestFailedCurrentWorktreeReadDoesNotMasqueradeCachedValueAsCurrent(t *testi
 		}
 		return prompts.MainPromptContext{}
 	}
-	deps.ActiveWorktreeFunc = func() string { return "stale/legacy-fallback" }
 	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext { return nil }
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "work", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := be.runtimeAt(0).ActiveWorktree; got != "" {
-		t.Fatalf("failed live read reused stale worktree %q", got)
+	if got := be.runtimeAt(0).Worktree; got != nil {
+		t.Fatalf("failed live read reused stale worktree %+v", got)
 	}
 	if got := be.runtimeAt(0).MCP; got != nil {
 		t.Fatalf("runtime retained pre-failure MCP status: %+v", got)

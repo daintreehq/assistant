@@ -76,7 +76,7 @@ type TurnContext struct {
 // AssistantBackend is the native Daintree backend seam (satisfied by
 // *backend.Client). The turn loop streams a respond round through RespondStream;
 // utility/compaction work runs server-owned tasks through RunTask. The CLI sends a
-// request-only stable startup row, visible conversation, and structured runtime/turn
+// structured stable startup data, visible conversation, and structured runtime/turn
 // context; the backend owns the system prompt, skill selection, and model routing. A
 // narrow interface (no generic Chat/JSON) is deliberate: generic prompt calls are
 // exactly what this migration removed.
@@ -207,12 +207,6 @@ type SessionDeps struct {
 	// project memories, re-read every round (optional; nil ⇒ the pinned subblock is
 	// omitted, the default in tests). Best-effort, never breaks the turn.
 	PinnedMemoryLister PinnedMemoryLister
-	// ActiveWorktreeFunc returns the current active-worktree label for the footer's
-	// `# Active worktree` section, called every round so a mid-turn worktree switch
-	// surfaces next round (optional; nil ⇒ the section is omitted). It replaces the old
-	// message[1] "Active worktree:" line so a worktree switch no longer rewrites the
-	// cached runtime context. Must not block — it reads a cached label, not MCP.
-	ActiveWorktreeFunc func() string
 	// ResumedWatchers returns the titles of live watchers this process ADOPTED from a
 	// prior owner at ownership boot (watchers are project-scoped and keep running
 	// across restarts/detach). The footer surfaces them as a one-time `# Session note`
@@ -262,8 +256,8 @@ type SessionDeps struct {
 	// reflected without making an unhealthy MCP block model generation.
 	CurrentWorktreeFetcher func(ctx context.Context) *prompts.WorktreeContext
 	// PromptContext is the seed/fallback context (used when PromptContextFunc is nil — the
-	// test default). Stable fields build the request-only startup row; live fields build
-	// the structured runtime block on each round.
+	// test default). Stable fields build request.startup; live fields build the structured
+	// runtime block on each round.
 	PromptContext prompts.MainPromptContext
 	// PromptContextFunc, when set, is read EVERY round to build the per-request runtime
 	// context, so facts that populate after construction — a successful MCP connect, a

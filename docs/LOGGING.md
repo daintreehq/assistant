@@ -54,7 +54,7 @@ written — only first-token timing + aggregate stats.
 ### Backend respond round (the model call)
 | event | when | key fields |
 |---|---|---|
-| `backend.respond.request` | before each round's stream | `round` `instructionRevision` `statePresent`/`stateBytes`; `input` = `{messageCount, messageRoles, messagesSha, toolCount, toolNames, toolsetSha, toolChoice, lastMessage}` (the hash includes the request-only startup-data message); `runtime` (tier/MCP/worktree/open terminals); `turn` (goal preview + memory/workflow counts) |
+| `backend.respond.request` | before each round's stream | `round` `instructionRevision` `statePresent`/`stateBytes`; `startup` = `{sha, projectPresent, rosterPresent, instructionBytes, agent counts/completeness}` (never instruction contents); `input` = visible-history `{messageCount, messageRoles, messagesSha, toolCount, toolNames, toolsetSha, toolChoice, lastMessage}`; `runtime` (tier/MCP/typed worktree/open terminals); `turn` (goal preview + memory/workflow counts) |
 | `backend.respond.meta` | first SSE meta event | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}` |
 | `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `reasoningPresent` |
 | `backend.respond.error` | non-cancel respond failure | `durationMs` `error` |

@@ -122,9 +122,9 @@ func TestLiveCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	// The CLI speaks protocol version 1, so the advertised range must include it.
-	if !(caps.Protocol.Min <= 1 && 1 <= caps.Protocol.Max) {
-		t.Errorf("protocol range [%d,%d] does not include 1", caps.Protocol.Min, caps.Protocol.Max)
+	// The CLI speaks protocol version 2, so the advertised range must include it.
+	if !(caps.Protocol.Min <= 2 && 2 <= caps.Protocol.Max) {
+		t.Errorf("protocol range [%d,%d] does not include 2", caps.Protocol.Min, caps.Protocol.Max)
 	}
 	if len(caps.Tasks) == 0 {
 		t.Errorf("capabilities advertised no tasks; want a non-empty task list")

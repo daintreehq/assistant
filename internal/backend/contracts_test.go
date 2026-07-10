@@ -6,6 +6,50 @@ import (
 	"testing"
 )
 
+func TestRespondRequest_AlwaysSerializesStartupValue(t *testing.T) {
+	b, err := json.Marshal(RespondRequest{
+		Session: RespondSession{ID: "s", TurnID: "t"},
+		Startup: StartupContext{},
+		Input: RespondInput{Messages: []Message{
+			{Role: "user", Content: json.RawMessage(`"hello"`)},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"startup":{}`) {
+		t.Fatalf("required empty startup value missing: %s", b)
+	}
+}
+
+func TestRuntimeContext_WorktreeReadStates(t *testing.T) {
+	unavailable, err := json.Marshal(RuntimeContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unavailable), `"worktree"`) {
+		t.Fatalf("unavailable read should omit worktree: %s", unavailable)
+	}
+
+	none, err := json.Marshal(RuntimeContext{Worktree: &CurrentWorktreeSnapshot{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(none), `"worktree":{"current":null}`) {
+		t.Fatalf("definitive none lost current:null: %s", none)
+	}
+
+	current, err := json.Marshal(RuntimeContext{Worktree: &CurrentWorktreeSnapshot{
+		Current: &WorktreeSnapshot{ID: "wt-1", Branch: "feature/x", IsMain: false},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(current), `"current":{"id":"wt-1","branch":"feature/x","is_main":false}`) {
+		t.Fatalf("typed current worktree wire mismatch: %s", current)
+	}
+}
+
 // The open-terminal inventory must serialize with snake_case keys (the backend reads them)
 // and exit_code must distinguish a clean 0 exit (present) from "no exit code" (absent) —
 // the reason ExitCode is a pointer.

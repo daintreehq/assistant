@@ -714,11 +714,11 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 		s.events.AssistantStart()
 
-		// 10d. Stream the backend. The CLI sends one stable, request-only user-role
-		//      startup-data message before the visible conversation; runtime + per-turn
-		//      context still travel through the existing structured request.runtime /
-		//      request.turn contract. The backend owns every system prompt, skill
-		//      selection, and final assembly, and streams named SSE events.
+		// 10d. Stream the backend. Stable discovery travels through request.startup;
+		//      input.messages contains visible conversation only. Runtime + per-turn
+		//      context travel through request.runtime / request.turn. The backend owns
+		//      every system prompt, skill selection, and final assembly, and streams
+		//      named SSE events.
 		gotToken := false
 		// Read an immutable SNAPSHOT of the history under the lock, then stream with the
 		// lock RELEASED — the call is long, and a concurrent InjectNote (daemon) or
@@ -739,8 +739,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 
 		promptContext := s.promptContext()
-		worktreeReadAttempted := s.deps.CurrentWorktreeFetcher != nil
-		if worktreeReadAttempted {
+		if s.deps.CurrentWorktreeFetcher != nil {
 			// Assign nil too: a failed live read means "unknown this round", not "reuse
 			// the cached splash/reconnect selection as if it were still current".
 			worktree := s.currentWorktreeContext(ctx)
@@ -750,9 +749,6 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			promptContext = s.promptContext()
 			promptContext.Worktree = worktree
 		}
-		if startup := buildStartupMessage(promptContext); startup != nil {
-			bmsgs = append([]backend.Message{*startup}, bmsgs...)
-		}
 		req := backend.RespondRequest{
 			Session: backend.RespondSession{
 				ID:                  s.deps.SessionID,
@@ -760,13 +756,14 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				InstructionRevision: instructionRevision,
 				Round:               iter,
 			},
-			State: s.backendStatePtr(),
+			Startup: buildStartupContext(promptContext),
+			State:   s.backendStatePtr(),
 			Input: backend.RespondInput{
 				Messages:   bmsgs,
 				Tools:      btools,
 				ToolChoice: "auto",
 			},
-			Runtime:    s.buildRuntimeContext(promptContext, s.currentRoster(), worktreeReadAttempted),
+			Runtime:    s.buildRuntimeContext(promptContext, s.currentRoster()),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
@@ -1621,8 +1618,8 @@ func (s *Session) emitBackendUsage(u backend.Usage, model string) {
 	s.events.Usage(ev)
 }
 
-// promptContext pulls the app's atomic snapshot once per backend round so the startup
-// prefix and fresh runtime tail can never observe different halves of a reconnect.
+// promptContext pulls the app's atomic snapshot once per backend round so the stable
+// startup value and fresh runtime tail can never observe different halves of a reconnect.
 func (s *Session) promptContext() prompts.MainPromptContext {
 	pc := s.deps.PromptContext
 	if s.deps.PromptContextFunc != nil {
@@ -1645,24 +1642,20 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 	return worktree
 }
 
-// buildRuntimeContext maps PromptContext onto the backend's existing structured runtime
-// contract. Stable project/agent details ride only the request-only startup message so
-// they are not duplicated in the backend's fresh runtime tail. The context is pulled live
+// buildRuntimeContext maps PromptContext onto the backend's structured runtime contract.
+// Stable project/agent details ride only request.startup, so they are not duplicated in
+// the backend's fresh runtime tail. The context is pulled live
 // every round, so a mid-session MCP connect / tier change / scheduler start reaches the
 // next request. The
 // openTerminals snapshot is read from the cross-turn cache (currentRoster) fresh EACH
 // round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn is
 // reflected on the next round without ever blocking the turn on an MCP read.
-func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminals []backend.OpenTerminal, worktreeReadAttempted bool) *backend.RuntimeContext {
+func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
 	rc := &backend.RuntimeContext{
 		PermissionTier:  string(pc.Tier),
 		SchedulerActive: pc.SchedulerActive,
+		Worktree:        buildCurrentWorktreeSnapshot(pc.Worktree),
 		OpenTerminals:   openTerminals,
-	}
-	if label := worktreeRuntimeLabel(pc.Worktree); label != "" {
-		rc.ActiveWorktree = label
-	} else if !worktreeReadAttempted {
-		rc.ActiveWorktree = s.activeWorktree()
 	}
 	if pc.MCPConnected || strings.TrimSpace(pc.MCPStatusLine) != "" {
 		// When connected the backend builds its status line from transport + tool_count
@@ -1903,16 +1896,6 @@ func (s *Session) pinnedMemoriesForFooter() []domain.MemoryRecord {
 	}
 	rows, _ := s.deps.PinnedMemoryLister.ListPinnedMemories(pinnedMemoriesMaxRows)
 	return rows
-}
-
-// activeWorktree returns the current active-worktree label for this round's footer, ""
-// when no provider is wired (tests) so the `# Active worktree` section is omitted. The
-// provider reads a cached label (not MCP), so the per-round call never blocks the turn.
-func (s *Session) activeWorktree() string {
-	if s.deps.ActiveWorktreeFunc == nil {
-		return ""
-	}
-	return s.deps.ActiveWorktreeFunc()
 }
 
 // pushMessage appends to the live history and persists (best-effort), under the

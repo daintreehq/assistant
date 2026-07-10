@@ -167,6 +167,12 @@ they do not improve ordinary orchestration. Broader or volatile reads — all pr
 worktrees, and `git.getProjectPulse` — remain available on demand instead of bloating or
 invalidating every request.
 
+The curated project row and canonical `agent.listAvailable` roster are cached into the
+structured `request.startup` block. `worktree.getCurrent` is re-read for every model round
+and sent as typed `request.runtime.worktree`: omission means the read was unavailable,
+`{current:null}` is a definitive no-current-worktree result, and a current object carries
+the useful id/path/branch/issue/PR/status/last-commit metadata.
+
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`

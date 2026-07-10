@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 )
 
 // traceEvent is one captured (event, fields) pair from the Trace seam.
@@ -129,6 +133,52 @@ func TestTraceTurnAndBackendRoundsEmitted(t *testing.T) {
 	}
 	if dones[1].fields["contentPreview"] != "all done" {
 		t.Errorf("done[1] contentPreview = %v want %q", dones[1].fields["contentPreview"], "all done")
+	}
+}
+
+func TestTraceBackendRequestSummarizesStartupWithoutInstructionContents(t *testing.T) {
+	const secretInstructions = "PRIVATE PROJECT INSTRUCTION CONTENT"
+	cap := &traceCapture{}
+	deps := baseDeps(&fakeRouter{results: []models.ChatResult{{Content: "done"}}}, &fakeTools{})
+	deps.Trace = cap.record
+	deps.PromptContext = prompts.MainPromptContext{
+		Project:             &prompts.ProjectContext{ID: "project-1", Name: "Demo"},
+		AgentRoster:         &prompts.AgentRosterContext{Complete: true, Agents: []prompts.AgentContext{{ID: "codex", Source: "built-in"}}},
+		ProjectInstructions: secretInstructions,
+	}
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		return &prompts.WorktreeContext{Present: true, ID: "wt-1", Branch: "feature/x"}
+	}
+	if _, err := NewSession(deps).Send(context.Background(), "hello", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ev, ok := cap.first("backend.respond.request")
+	if !ok {
+		t.Fatal("missing backend.respond.request")
+	}
+	encoded, err := json.Marshal(ev.fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secretInstructions) {
+		t.Fatalf("trace leaked project instructions: %s", encoded)
+	}
+	startup, ok := ev.fields["startup"].(map[string]any)
+	if !ok || startup["sha"] == "" || startup["instructionBytes"] != len(secretInstructions) || startup["agentCount"] != 1 {
+		t.Fatalf("startup trace metadata = %+v", ev.fields["startup"])
+	}
+	runtime, ok := ev.fields["runtime"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime trace metadata = %+v", ev.fields["runtime"])
+	}
+	worktree, ok := runtime["worktree"].(map[string]any)
+	if !ok || worktree["currentPresent"] != true {
+		t.Fatalf("worktree trace metadata = %+v", runtime["worktree"])
+	}
+	current, ok := worktree["current"].(*backend.WorktreeSnapshot)
+	if !ok || current.ID != "wt-1" || current.Branch != "feature/x" {
+		t.Fatalf("typed worktree trace = %+v", worktree["current"])
 	}
 }
 

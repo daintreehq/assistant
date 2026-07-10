@@ -91,7 +91,8 @@ func (s *Session) traceTurnEnd(runID, turnID, reply string, durationMs int64, ro
 // count + role sequence, a hash of the whole serialized history (so an unchanged
 // prefix is recognisable round-to-round without re-printing it), a preview of ONLY
 // the newest message, the tool inventory (count + names + hash), and the structured
-// runtime/turn context — all bounded.
+// startup/runtime/turn context — all bounded. Startup instructions are represented only
+// by byte count and the aggregate hash; their contents are never written to the trace.
 func (s *Session) traceBackendRequest(runID, turnID string, round int, req backend.RespondRequest, msgs []backend.Message, tools []backend.Tool) {
 	s.safeTrace("backend.respond.request", func() map[string]any {
 		roles := make([]string, len(msgs))
@@ -128,16 +129,33 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 			"statePresent":        req.State != nil,
 			"input":               input,
 		}
+		startup := map[string]any{
+			"sha":              debuglog.SummarizeJSON(req.Startup, 0).SHA,
+			"projectPresent":   req.Startup.Project != nil,
+			"rosterPresent":    req.Startup.AgentRoster != nil,
+			"instructionBytes": len(req.Startup.ProjectInstructions),
+		}
+		if roster := req.Startup.AgentRoster; roster != nil {
+			startup["agentCount"] = len(roster.Agents)
+			startup["totalAgentCount"] = roster.TotalCount
+			startup["complete"] = roster.Complete
+			startup["availabilityComplete"] = roster.AvailabilityComplete
+		}
+		fields["startup"] = startup
 		if req.State != nil {
 			fields["stateBytes"] = len(*req.State)
 		}
 		if rc := req.Runtime; rc != nil {
 			runtime := map[string]any{
 				"permissionTier":  rc.PermissionTier,
-				"projectPath":     rc.ProjectPath,
-				"projectId":       rc.ProjectID,
 				"schedulerActive": rc.SchedulerActive,
-				"activeWorktree":  rc.ActiveWorktree,
+			}
+			if rc.Worktree != nil {
+				worktree := map[string]any{"currentPresent": rc.Worktree.Current != nil}
+				if current := rc.Worktree.Current; current != nil {
+					worktree["current"] = current
+				}
+				runtime["worktree"] = worktree
 			}
 			if rc.MCP != nil {
 				mcp := map[string]any{"connected": rc.MCP.Connected, "transport": rc.MCP.Transport, "status": rc.MCP.Status}

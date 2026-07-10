@@ -10,7 +10,7 @@ project context collection, memory + scheduler state, stream rendering, and the 
 backend state token.
 
 ```
-User → Daintree CLI ──(stable startup row + visible conversation + structured context + tools)──► Daintree backend
+User → Daintree CLI ──(structured startup + visible conversation + runtime/turn + tools)──► Daintree backend
         │  stores conversation, exposes & runs local tools,                            owns prompts, skills,
         │  streams assistant text, persists backend state                              model routing, DeepSeek
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
@@ -40,7 +40,8 @@ validation: `.../services/validation.py`.
 The Go client mirrors it in `internal/backend`:
 
 - `contracts.go` — the strict request envelope (`RespondRequest`: `protocol_version`,
-  `session{id,turn_id,instruction_revision,round}`, `state`, `input{messages,tools,tool_choice}`,
+  `session{id,turn_id,instruction_revision,round}`, `state`, `startup`,
+  `input{messages,tools,tool_choice}`,
   `runtime`, `turn`, `selection`, `generation`, `client`), the response / stream payloads,
   the tasks envelope, and capabilities.
 - `sse.go` — the **named-event** SSE parser (`meta` → `delta` → `done` / `error`). `meta`
@@ -55,14 +56,15 @@ The Go client mirrors it in `internal/backend`:
 - **No `system` / `developer` messages.** Only `user` / `assistant` / `tool` reach the
   backend (the converter `internal/agent/backendconv.go` rejects anything else up front).
   `domain.ControlMessageCount == 0`: no synthetic row is persisted in visible history.
-  At request assembly only, the CLI prepends one clearly framed user-role startup-data
-  message before that history.
-- **Context uses the existing backend contract.** The request-only startup message carries
+  `input.messages` contains visible history only; startup data never masquerades as a
+  user-authored message.
+- **Context uses dedicated structured channels.** Required `request.startup` carries
   the cacheable curated project identity, the effective agent catalog (including
-  availability and toolbar state), and safely framed bounded `DAINTREE.md` instructions.
-  The catalog has an aggregate size budget; any whole rows that do not fit are explicitly
-  counted rather than emitting a truncated, unusable agent id. `request.runtime` carries
-  tier, MCP, scheduler, a freshly read worktree label, and open terminals. Stable project
+  availability and toolbar state), and normalized bounded `DAINTREE.md` instructions.
+  The catalog has a 16 KiB encoded-row budget; any row that does not fit is omitted whole
+  while `total_count` retains the discovered total, rather than emitting a truncated,
+  unusable agent id. `request.runtime` carries tier, MCP, scheduler, a freshly read typed
+  worktree snapshot, and open terminals. Stable project
   and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
   wake, workflow runs, async operations, memories, and session-ended watchers.
 - **Splash-time discovery is bounded and parallel.** A successful MCP connect starts
@@ -74,17 +76,16 @@ The Go client mirrors it in `internal/backend`:
   connects reuse it. The primary lifecycle has an 8-second cancellation budget. A completed
   degraded attempt fails open for later turns (manual `/reconnect` owns retries), while a
   splash attempt canceled by handoff remains retryable once by bootstrap/the first turn.
-- **The cache boundary is intentional.** The CLI places the stable startup-data message
-  immediately before the append-only conversation; the backend keeps its existing fresh
+- **The cache boundary is intentional.** The backend places the structured stable startup
+  block immediately before the append-only conversation and keeps its fresh
   runtime/turn user message at the end. Worktree is re-read on every backend round, so a
   switch only changes the tail. A project or pin change changes the startup block and
   following conversation, but leaves the backend's system prompts and large tool schemas
   cached. Raw `project.getSettings` is never injected because its open-ended values may
   include environment or other sensitive configuration.
-- **Current selector caveat.** The frozen backend contract has no tagged startup-context
-  field, so this cache-friendly prefix is an ordinary, clearly framed `user` row and is
-  visible to existing conversation/skill-selector consumers. A future backend convention
-  can distinguish or strip it without changing the CLI's discovery sources or ordering.
+- **Worktree read state is explicit.** An omitted `runtime.worktree` means the live read was
+  unavailable, `{current:null}` means Daintree definitively reports no current worktree,
+  and a current object carries id/path/branch/issue/PR/status/last-commit fields.
 - **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
   backend's selector picks and injects runbooks and returns a `skills` block (active set
   + a synthetic-load `prelude` the CLI surfaces). The CLI keeps only the local
