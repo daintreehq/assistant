@@ -14,6 +14,12 @@ import (
 // these callbacks exist for live UI (token streaming, surfacing newly-loaded
 // skills up front). They are invoked synchronously on the reader goroutine.
 type StreamCallbacks struct {
+	// OnRawMeta fires immediately when each HTTP attempt's SSE meta event is
+	// decoded. Unlike OnMeta, it is a transport-observation hook: retries can make
+	// it fire more than once for one RespondStream call, and callers must not use it
+	// to adopt state or perform visible side effects. It exists so diagnostics can
+	// distinguish actual meta arrival from the retry-safe committed OnMeta callback.
+	OnRawMeta func(StreamMeta)
 	// OnMeta carries the refreshed state token, the skills outcome, and version
 	// markers. Client.RespondStream defers it until the attempt commits so retries
 	// cannot duplicate stateful side effects.
@@ -85,6 +91,9 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			}
 			result.Meta = m
 			metaSeen = true
+			if cb.OnRawMeta != nil {
+				cb.OnRawMeta(m)
+			}
 			if cb.OnSkillLoaded != nil && len(m.Skills.NewlyLoaded) > 0 {
 				cb.OnSkillLoaded(m.Skills.NewlyLoaded)
 			}

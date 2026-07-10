@@ -55,7 +55,9 @@ written — only first-token timing + aggregate stats.
 | event | when | key fields |
 |---|---|---|
 | `backend.respond.request` | before each round's stream | `round` `instructionRevision` `statePresent`/`stateBytes`; `startup` = `{sha, projectPresent, rosterPresent, instructionBytes, agent counts/completeness}` (never instruction contents); `input` = visible-history `{messageCount, messageRoles, messagesSha, toolCount, toolNames, toolsetSha, toolChoice, lastMessage}`; `runtime` (tier/MCP/typed worktree/open terminals); `turn` (goal preview + memory/workflow counts) |
-| `backend.respond.meta` | first SSE meta event | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}` |
+| `backend.respond.raw_meta` | each HTTP attempt's SSE meta arrives | `backendRequestId` `model` `newlyLoadedCount`; transport observation only, so a retried logical round can contain more than one |
+| `backend.respond.skill_cue` | eager skill-loaded cue reaches the sinks | `skills`; absent when no new skill is surfaced and de-duplicated across retries |
+| `backend.respond.meta` | retry-safe meta commits | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}`; normally fires with first content or successful tool-only completion |
 | `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `reasoningPresent` |
 | `backend.respond.error` | non-cancel respond failure | `durationMs` `error` |
 
@@ -95,7 +97,7 @@ it **produced**.
 
 1. Scan `turn.end` for `status=failed|cancelled` (or a slow `durationMs`).
 2. `grep <runId>` to pull that turn's whole timeline.
-3. Read its `backend.respond.request`/`meta`/`done` per round: was the model shown the
+3. Read its `backend.respond.request`/`raw_meta`/`skill_cue`/`meta`/`done` per round: was the model shown the
    right context? did it load the right skill? what did it choose?
 4. Inspect failed `tool.call` / `tool.args.invalid` / `tool.repeat.*` for that turn.
 5. Follow a failing `tool.call` down to its `mcp.call` to see whether the fault was the

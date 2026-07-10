@@ -148,8 +148,12 @@ func backendMessagesToModel(bms []backend.Message) []models.ChatMessage {
 
 func (b backendFromRouter) RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
 	model := b.r.ModelFor(domain.ModelLarge)
+	meta := backend.StreamMeta{Model: model, State: "dst1.test"}
+	if cb.OnRawMeta != nil {
+		cb.OnRawMeta(meta)
+	}
 	if cb.OnMeta != nil {
-		cb.OnMeta(backend.StreamMeta{Model: model, State: "dst1.test"})
+		cb.OnMeta(meta)
 	}
 	res, err := b.r.Stream(ctx, domain.ModelLarge,
 		models.ChatOptions{Messages: backendMessagesToModel(req.Input.Messages)}, cb.OnContent)
@@ -169,7 +173,7 @@ func (b backendFromRouter) RespondStream(ctx context.Context, req backend.Respon
 		return backend.RespondResult{}, err
 	}
 	return backend.RespondResult{
-		Meta:         backend.StreamMeta{Model: model, State: "dst1.test"},
+		Meta:         meta,
 		Message:      backend.RespondMessage{Content: res.Content, ToolCalls: toBackendToolCalls(res.ToolCalls)},
 		FinishReason: res.FinishReason,
 		Usage:        usageFromChat(res.Usage),

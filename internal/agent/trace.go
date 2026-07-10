@@ -13,10 +13,10 @@ import (
 // log blind exactly where it used to be richest: there is no more
 // model.request/model.response, so a log reader could not see what the backend was
 // shown or what it chose. These helpers restore that — turn.start/turn.end bracket a
-// turn, and backend.respond.{request,meta,done,error} narrate each round — while
-// keeping payloads BOUNDED (previews + hashes, never the full prompt every round, the
-// O(turns²) trap). All debuglog usage in the agent package is concentrated here; the
-// rest of the turn loop only calls these s.traceXxx methods.
+// turn, and backend.respond.{request,raw_meta,skill_cue,meta,done,error} narrate each
+// round — while keeping payloads BOUNDED (previews + hashes, never the full prompt
+// every round, the O(turns²) trap). All debuglog usage in the agent package is
+// concentrated here; the rest of the turn loop only calls these s.traceXxx methods.
 
 // safeTrace builds and emits one trace event under a single guard. It is a no-op when
 // no seam is wired (the test default, and every normal non-debug run — the app wires
@@ -185,11 +185,43 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 	})
 }
 
-// traceBackendMeta records the backend's own report (the SSE meta event): request id,
-// chosen model, prompt/catalog version markers, warnings, and the skill-selection
-// outcome (active vs newly-loaded runbooks + the selector verdict). This is the
-// surface that says where a fix belongs — wrong/no skill loaded points at the backend
-// selector, not a local tool.
+// traceBackendRawMeta records when an HTTP attempt's SSE meta event actually arrives.
+// It is deliberately separate from traceBackendMeta: the client defers committed meta
+// until first content (or a successful tool-only completion), and a retry can produce
+// multiple raw meta events for one logical round. Benchmark parsing uses the first raw
+// event to measure backend pre-stream latency without confusing it with commit time.
+func (s *Session) traceBackendRawMeta(runID, turnID string, round int, m backend.StreamMeta) {
+	s.safeTrace("backend.respond.raw_meta", func() map[string]any {
+		return map[string]any{
+			"runId":            runID,
+			"turnId":           turnID,
+			"round":            round,
+			"backendRequestId": m.RequestID,
+			"model":            m.Model,
+			"newlyLoadedCount": len(m.Skills.NewlyLoaded),
+		}
+	})
+}
+
+// traceBackendSkillCue records when the eager, de-duplicated skill-loaded event has
+// actually been handed to the UI/output sinks. It only exists for rounds that surface
+// at least one newly-loaded skill.
+func (s *Session) traceBackendSkillCue(runID, turnID string, round int, refs []backend.SkillRef) {
+	s.safeTrace("backend.respond.skill_cue", func() map[string]any {
+		return map[string]any{
+			"runId":  runID,
+			"turnId": turnID,
+			"round":  round,
+			"skills": skillRefLabels(refs),
+		}
+	})
+}
+
+// traceBackendMeta records the committed backend report: request id, chosen model,
+// prompt/catalog version markers, warnings, and the skill-selection outcome (active
+// vs newly-loaded runbooks + the selector verdict). This is the surface that says
+// where a fix belongs — wrong/no skill loaded points at the backend selector, not a
+// local tool. Its timestamp is commit time, not raw SSE arrival time.
 func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.StreamMeta) {
 	s.safeTrace("backend.respond.meta", func() map[string]any {
 		fields := map[string]any{

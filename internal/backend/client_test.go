@@ -117,29 +117,48 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	skillsCh := make(chan []SkillRef, 1)
-	metaCh := make(chan StreamMeta, 1)
+	type observed struct {
+		kind string
+		refs []SkillRef
+		meta StreamMeta
+	}
+	eventsCh := make(chan observed, 3)
 	doneCh := make(chan error, 1)
 	c := NewClient(ClientConfig{BaseURL: srv.URL})
 	go func() {
 		_, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
-			OnSkillLoaded: func(refs []SkillRef) { skillsCh <- refs },
-			OnMeta:        func(m StreamMeta) { metaCh <- m },
+			OnRawMeta: func(m StreamMeta) {
+				eventsCh <- observed{kind: "raw", meta: m}
+			},
+			OnSkillLoaded: func(refs []SkillRef) {
+				eventsCh <- observed{kind: "skill", refs: refs}
+			},
+			OnMeta: func(m StreamMeta) {
+				eventsCh <- observed{kind: "committed", meta: m}
+			},
 		})
 		doneCh <- err
 	}()
 
 	select {
-	case refs := <-skillsCh:
-		if len(refs) != 1 || refs[0].ID != "multi_agent" || refs[0].Title != "Multi-agent orchestration" {
-			t.Fatalf("skill refs = %+v", refs)
+	case ev := <-eventsCh:
+		if ev.kind != "raw" || ev.meta.State != "dst1.skill" {
+			t.Fatalf("first callback = %+v, want raw meta", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("raw-meta callback waited for model content")
+	}
+	select {
+	case ev := <-eventsCh:
+		if ev.kind != "skill" || len(ev.refs) != 1 || ev.refs[0].ID != "multi_agent" || ev.refs[0].Title != "Multi-agent orchestration" {
+			t.Fatalf("second callback = %+v, want eager skill cue", ev)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("skill callback waited for model content")
 	}
 	select {
-	case <-metaCh:
-		t.Fatal("committed meta callback fired before first content")
+	case ev := <-eventsCh:
+		t.Fatalf("callback %q fired before first content", ev.kind)
 	default:
 	}
 
@@ -154,9 +173,9 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 		t.Fatal("RespondStream did not finish after content was released")
 	}
 	select {
-	case m := <-metaCh:
-		if m.State != "dst1.skill" {
-			t.Fatalf("committed meta state = %q", m.State)
+	case ev := <-eventsCh:
+		if ev.kind != "committed" || ev.meta.State != "dst1.skill" {
+			t.Fatalf("post-content callback = %+v, want committed meta", ev)
 		}
 	default:
 		t.Fatal("committed meta callback did not fire with first content")

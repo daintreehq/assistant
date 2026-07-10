@@ -70,8 +70,8 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	}
 }
 
-// eagerSkillBackend mirrors the production callback order: the newly-loaded skill
-// notification is delivered from SSE meta before committed meta and model content.
+// eagerSkillBackend mirrors the production callback order: raw SSE meta is observed,
+// then the newly-loaded skill notification arrives before committed meta and content.
 type eagerSkillBackend struct{}
 
 func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
@@ -84,6 +84,9 @@ func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondReque
 		Model:  "daintree-assistant",
 		State:  "dst1.skill",
 		Skills: backend.SkillsBlock{NewlyLoaded: refs},
+	}
+	if cb.OnRawMeta != nil {
+		cb.OnRawMeta(meta)
 	}
 	if cb.OnSkillLoaded != nil {
 		cb.OnSkillLoaded(refs)
@@ -110,6 +113,8 @@ func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 	deps := baseDeps(r, &fakeTools{})
 	deps.Backend = eagerSkillBackend{}
 	deps.Events = sink
+	cap := &traceCapture{}
+	deps.Trace = cap.record
 	s := NewSession(deps)
 
 	out, err := s.Send(context.Background(), "use agents", SendOptions{})
@@ -128,6 +133,18 @@ func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 	}
 	if !equalStrings(sink.log, want) {
 		t.Fatalf("event log = %v want %v", sink.log, want)
+	}
+	traceIndex := func(name string) int {
+		for i, ev := range cap.events {
+			if ev.event == name {
+				return i
+			}
+		}
+		return -1
+	}
+	raw, cue, committed := traceIndex("backend.respond.raw_meta"), traceIndex("backend.respond.skill_cue"), traceIndex("backend.respond.meta")
+	if raw < 0 || cue <= raw || committed <= cue {
+		t.Fatalf("trace callback order raw=%d cue=%d committed=%d; events=%+v", raw, cue, committed, cap.events)
 	}
 }
 

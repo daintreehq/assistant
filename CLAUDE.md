@@ -326,15 +326,17 @@ reconstruct its timeline; see `docs/LOGGING.md` for the full event reference.
   `toolCallId`/`runId`/`risk`. (Rejections that never reach dispatch — bad-JSON args,
   not-offered — log as `tool.args.invalid` / `tool.not_offered` and carry the model's RAW
   args; a stuck loop logs `tool.repeat.warning` / `tool.repeat.abort`.)
-- `backend.respond.request` / `backend.respond.meta` / `backend.respond.done` /
-  `backend.respond.error` — the backend-era successor to `model.request`/`model.response`
+- `backend.respond.request` / `backend.respond.raw_meta` / `backend.respond.skill_cue` /
+  `backend.respond.meta` / `backend.respond.done` / `backend.respond.error` — the
+  backend-era successor to `model.request`/`model.response`
   (which no longer exist for the main loop — that path is `Backend.RespondStream`, not the
   vestigial Router). `request` summarizes what the backend was SHOWN (message count +
   role sequence + history hash + newest-message preview + tool inventory + runtime/turn
-  context — bounded, not the full prompt); `meta` is the backend's own report (model,
-  prompt/catalog version, and the skill-selection outcome — the surface that says whether
-  a fix belongs in the backend selector); `done` is what it PRODUCED (content preview,
-  tool calls, finish reason, usage).
+  context — bounded, not the full prompt); `raw_meta` timestamps actual SSE arrival,
+  `skill_cue` timestamps the optional eager user cue, `meta` is the retry-safe committed
+  backend report (model, prompt/catalog version, and skill-selection outcome — the surface
+  that says whether a fix belongs in the backend selector); `done` is what it PRODUCED
+  (content preview, tool calls, finish reason, usage).
 - `mcp.call` — every MCP tool call with `callKind`, `attempts`, `durationMs`, and a
   bounded preview/hash of the result (or the normalized error). The layer where many
   tool failures actually originate (throttle results, transport blips).

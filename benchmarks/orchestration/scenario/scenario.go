@@ -49,22 +49,25 @@ type RunResult struct {
 	TimedOut     bool
 
 	// Latency decomposition, reconstructed from the debug-log timeline.
-	TurnMS        int64         // turn.start → turn.end (excludes process boot/exit)
-	FirstSignalMS int64         // turn.start → round 0's SSE meta: first backend signal the user can see
-	RoundDetail   []RoundMetric // one entry per model round, in round order
+	TurnMS          int64         // turn.start → turn.end (excludes process boot/exit)
+	FirstRawMetaMS  int64         // turn.start → round 0's raw SSE meta
+	FirstSkillCueMS int64         // turn.start → first eager skill-loaded cue (0 when none)
+	FirstContentMS  int64         // turn.start → first visible content across all rounds (0 when none)
+	RoundDetail     []RoundMetric // one entry per model round, in round order
 }
 
-// RoundMetric is one model round's latency decomposition. PreStreamMS is the
-// user-felt "dead air" of a round: the backend's pre-stream work (selector,
-// prompt assembly) plus upstream prefill up to the first SSE event — on cached
-// prompts it collapses toward the provider's floor, on cache misses it grows
-// with the uncached token count.
+// RoundMetric is one model round's latency decomposition. RawMetaMS observes the
+// actual SSE meta arrival; SkillCueMS observes the optional eager user cue;
+// CommittedMetaMS observes retry-safe state adoption; and FirstTokenMS observes
+// visible model content.
 type RoundMetric struct {
 	Round            int    `json:"round"`
-	GapBeforeMS      int64  `json:"gapBeforeMs"`            // prior round's done → this request: tool execution + CLI bookkeeping (round 0: turn.start → request)
-	PreStreamMS      int64  `json:"preStreamMs"`            // request → SSE meta
-	FirstTokenMS     int64  `json:"firstTokenMs,omitempty"` // request → first content delta (0 on tool-call-only rounds)
-	TotalMS          int64  `json:"totalMs"`                // request → done (the whole round)
+	GapBeforeMS      int64  `json:"gapBeforeMs"`               // prior round's done → this request: tool execution + CLI bookkeeping (round 0: turn.start → request)
+	RawMetaMS        int64  `json:"rawMetaMs,omitempty"`       // request → raw SSE meta arrival
+	SkillCueMS       int64  `json:"skillCueMs,omitempty"`      // request → eager skill-loaded cue (0 when none)
+	CommittedMetaMS  int64  `json:"committedMetaMs,omitempty"` // request → retry-safe OnMeta callback
+	FirstTokenMS     int64  `json:"firstTokenMs,omitempty"`    // request → first content delta (0 on tool-call-only rounds)
+	TotalMS          int64  `json:"totalMs"`                   // request → done (the whole round)
 	PromptTokens     int    `json:"promptTokens"`
 	CachedTokens     int    `json:"cachedTokens"`
 	CompletionTokens int    `json:"completionTokens"`

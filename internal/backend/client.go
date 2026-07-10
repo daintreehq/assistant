@@ -127,6 +127,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 
 	// Retries must not double-fire side-effecting callbacks.
 	//
+	//   - OnRawMeta is intentionally observational and remains per-attempt. It may
+	//     fire more than once so latency/debug instrumentation sees the real transport
+	//     timeline; it must never adopt state or produce user-visible effects.
 	//   - OnSkillLoaded is intentionally EAGER: a successful selector result is useful
 	//     feedback before the upstream model connects or emits a token. The same request
 	//     can be retried after receiving meta, so identical skill refs are de-duplicated

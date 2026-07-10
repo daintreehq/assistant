@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,12 +9,60 @@ import (
 	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/scenario"
 )
 
+// The pre-release schema exposes only the precise timing dimensions; ambiguous legacy
+// aliases must not creep back into persisted benchmark results.
+func TestLatencyJSONUsesCanonicalFields(t *testing.T) {
+	result := ScenarioResult{
+		FirstRawMetaMS:  600,
+		FirstSkillCueMS: 602,
+		FirstContentMS:  1400,
+		RoundDetail: []scenario.RoundMetric{{
+			RawMetaMS:       590,
+			SkillCueMS:      592,
+			CommittedMetaMS: 1390,
+			FirstTokenMS:    1390,
+		}},
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"firstRawMetaMs", "firstSkillCueMs", "firstContentMs"} {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("result JSON missing %q: %s", key, b)
+		}
+	}
+	rounds, ok := doc["roundDetail"].([]any)
+	if !ok || len(rounds) != 1 {
+		t.Fatalf("roundDetail = %#v, want one row", doc["roundDetail"])
+	}
+	round, _ := rounds[0].(map[string]any)
+	for _, key := range []string{"rawMetaMs", "skillCueMs", "committedMetaMs", "firstTokenMs"} {
+		if _, ok := round[key]; !ok {
+			t.Errorf("round JSON missing %q: %s", key, b)
+		}
+	}
+	for _, key := range []string{"firstSignalMs", "preStreamMs"} {
+		if _, topLevel := doc[key]; topLevel {
+			t.Errorf("result JSON contains removed alias %q: %s", key, b)
+		}
+		if _, perRound := round[key]; perRound {
+			t.Errorf("round JSON contains removed alias %q: %s", key, b)
+		}
+	}
+}
+
 // syntheticLog mirrors debuglog.formatLine output for a 2-round turn: round 0 is
 // a tool-call round (no content, meta+done together), round 1 streams content.
 // Timestamps are chosen so every derived gap is a distinct, assertable value.
 const syntheticLog = `2026-07-07T14:25:46.000Z  session.start  sessionId=ses_test
 2026-07-07T14:25:46.180Z  turn.start  historyLen=0  promptBytes=100  runId=run_1  sessionId=ses_test
 2026-07-07T14:25:46.185Z  backend.respond.request  instructionRevision=0  round=0  runId=run_1  statePresent=false  turnId=turn_1
+2026-07-07T14:25:50.000Z  backend.respond.raw_meta  backendRequestId=req_0  model=daintree-assistant  round=0  runId=run_1  turnId=turn_1
 2026-07-07T14:25:51.499Z  backend.respond.meta  backendRequestId=req_0  model=daintree-assistant  round=0  runId=run_1  turnId=turn_1
   skills:
     {
@@ -36,6 +85,7 @@ const syntheticLog = `2026-07-07T14:25:46.000Z  session.start  sessionId=ses_tes
     }
 2026-07-07T14:25:51.602Z  tool.call  actor=main  durationMs=102  ok=true  outcome=ok  risk=read  runId=run_1  tool=context.snapshot
 2026-07-07T14:25:51.603Z  backend.respond.request  instructionRevision=0  round=1  runId=run_1  statePresent=true  turnId=turn_1
+2026-07-07T14:25:53.000Z  backend.respond.raw_meta  backendRequestId=req_1  model=daintree-assistant  round=1  runId=run_1  turnId=turn_1
 2026-07-07T14:25:54.483Z  backend.respond.meta  backendRequestId=req_1  model=daintree-assistant  round=1  runId=run_1  turnId=turn_1
 2026-07-07T14:25:55.578Z  backend.respond.done  contentChars=22  contentPreview=**Report ID: TH-2231**  durationMs=3975  finishReason=stop  firstTokenMs=2881  round=1  runId=run_1  turnId=turn_1
   usage:
@@ -64,9 +114,13 @@ func TestParseDebugLogLatencyDecomposition(t *testing.T) {
 	if rr.TurnMS != 9400 {
 		t.Errorf("TurnMS = %d, want 9400", rr.TurnMS)
 	}
-	// turn.start 46.180 → round-0 meta 51.499.
-	if rr.FirstSignalMS != 5319 {
-		t.Errorf("FirstSignalMS = %d, want 5319", rr.FirstSignalMS)
+	// turn.start 46.180 → round-0 raw meta 50.000.
+	if rr.FirstRawMetaMS != 3820 || rr.FirstSkillCueMS != 0 {
+		t.Errorf("first raw/cue timings = %d/%d, want 3820/0", rr.FirstRawMetaMS, rr.FirstSkillCueMS)
+	}
+	// Round 0 is tool-only, so the first content is round 1 request 51.603 + 2881ms.
+	if rr.FirstContentMS != 8304 {
+		t.Errorf("FirstContentMS = %d, want 8304", rr.FirstContentMS)
 	}
 	if got, want := rr.Usage.PromptTokens, 32992+33632; got != want {
 		t.Errorf("Usage.PromptTokens = %d, want %d", got, want)
@@ -83,12 +137,13 @@ func TestParseDebugLogLatencyDecomposition(t *testing.T) {
 	}
 	r0, r1 := rr.RoundDetail[0], rr.RoundDetail[1]
 
-	// Round 0: request 46.185 (5ms after turn.start), meta/done 51.499.
+	// Round 0: request 46.185, raw meta 50.000, committed meta/done 51.499.
 	if r0.GapBeforeMS != 5 {
 		t.Errorf("r0.GapBeforeMS = %d, want 5", r0.GapBeforeMS)
 	}
-	if r0.PreStreamMS != 5314 {
-		t.Errorf("r0.PreStreamMS = %d, want 5314", r0.PreStreamMS)
+	if r0.RawMetaMS != 3815 || r0.SkillCueMS != 0 || r0.CommittedMetaMS != 5314 {
+		t.Errorf("r0 meta metrics = raw %d cue %d committed %d, want 3815/0/5314",
+			r0.RawMetaMS, r0.SkillCueMS, r0.CommittedMetaMS)
 	}
 	if r0.FirstTokenMS != 0 {
 		t.Errorf("r0.FirstTokenMS = %d, want 0 (tool-call-only round)", r0.FirstTokenMS)
@@ -105,12 +160,13 @@ func TestParseDebugLogLatencyDecomposition(t *testing.T) {
 	}
 
 	// Round 1: prior done 51.499 → request 51.603 (104ms: tool ran in between),
-	// meta 54.483 (2880ms pre-stream), done 55.578.
+	// raw meta 53.000, committed meta 54.483, done 55.578.
 	if r1.GapBeforeMS != 104 {
 		t.Errorf("r1.GapBeforeMS = %d, want 104", r1.GapBeforeMS)
 	}
-	if r1.PreStreamMS != 2880 {
-		t.Errorf("r1.PreStreamMS = %d, want 2880", r1.PreStreamMS)
+	if r1.RawMetaMS != 1397 || r1.CommittedMetaMS != 2880 {
+		t.Errorf("r1 meta metrics = raw %d committed %d, want 1397/2880",
+			r1.RawMetaMS, r1.CommittedMetaMS)
 	}
 	if r1.FirstTokenMS != 2881 {
 		t.Errorf("r1.FirstTokenMS = %d, want 2881", r1.FirstTokenMS)
@@ -126,6 +182,43 @@ func TestParseDebugLogLatencyDecomposition(t *testing.T) {
 	}
 }
 
+// New traces separate raw SSE meta arrival, the optional eager skill cue, committed
+// metadata, and first content. This is the distinction the speculation benchmark
+// needs: committed OnMeta intentionally waits until the attempt is safe to keep.
+func TestParseDebugLogEagerSkillTiming(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eager.log")
+	log := "2026-07-07T14:25:46.000Z  turn.start  runId=run_1  sessionId=ses_x\n" +
+		"2026-07-07T14:25:46.010Z  backend.respond.request  round=0  runId=run_1  turnId=turn_1\n" +
+		"2026-07-07T14:25:46.600Z  backend.respond.raw_meta  backendRequestId=req_first  round=0  runId=run_1  turnId=turn_1\n" +
+		"2026-07-07T14:25:46.602Z  backend.respond.skill_cue  round=0  runId=run_1  turnId=turn_1\n" +
+		// A failed attempt may produce another raw meta; the first observation remains
+		// the pre-stream measurement, while committed meta belongs to the kept attempt.
+		"2026-07-07T14:25:46.900Z  backend.respond.raw_meta  backendRequestId=req_retry  round=0  runId=run_1  turnId=turn_1\n" +
+		"2026-07-07T14:25:47.400Z  backend.respond.meta  backendRequestId=req_retry  round=0  runId=run_1  turnId=turn_1\n" +
+		"2026-07-07T14:25:47.800Z  backend.respond.done  contentChars=2  contentPreview=ok  durationMs=1790  finishReason=stop  firstTokenMs=1390  round=0  runId=run_1  turnId=turn_1\n" +
+		"2026-07-07T14:25:47.810Z  turn.end  durationMs=1810  rounds=1  runId=run_1  status=complete  turnId=turn_1\n"
+	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := &scenario.RunResult{DebugLogPath: path}
+	parseDebugLog(rr)
+
+	if rr.FirstRawMetaMS != 600 || rr.FirstSkillCueMS != 602 || rr.FirstContentMS != 1400 {
+		t.Errorf("first timings = raw %d cue %d content %d, want 600/602/1400",
+			rr.FirstRawMetaMS, rr.FirstSkillCueMS, rr.FirstContentMS)
+	}
+	if len(rr.RoundDetail) != 1 {
+		t.Fatalf("RoundDetail len = %d, want 1", len(rr.RoundDetail))
+	}
+	r0 := rr.RoundDetail[0]
+	if r0.GapBeforeMS != 10 || r0.RawMetaMS != 590 ||
+		r0.SkillCueMS != 592 || r0.CommittedMetaMS != 1390 || r0.FirstTokenMS != 1390 {
+		t.Errorf("round timings = %+v, want gap/raw/cue/commit/token 10/590/592/1390/1390", r0)
+	}
+}
+
 // A log with no backend rounds (e.g. the turn failed before the first request)
 // must parse to zeros, not panic or invent rounds.
 func TestParseDebugLogEmptyTurn(t *testing.T) {
@@ -138,9 +231,9 @@ func TestParseDebugLogEmptyTurn(t *testing.T) {
 	}
 	rr := &scenario.RunResult{DebugLogPath: path}
 	parseDebugLog(rr)
-	if rr.Rounds != 0 || len(rr.RoundDetail) != 0 || rr.FirstSignalMS != 0 {
-		t.Errorf("empty turn parsed to rounds=%d detail=%d firstSignal=%d, want all zero",
-			rr.Rounds, len(rr.RoundDetail), rr.FirstSignalMS)
+	if rr.Rounds != 0 || len(rr.RoundDetail) != 0 || rr.FirstRawMetaMS != 0 {
+		t.Errorf("empty turn parsed to rounds=%d detail=%d firstRawMeta=%d, want all zero",
+			rr.Rounds, len(rr.RoundDetail), rr.FirstRawMetaMS)
 	}
 }
 
@@ -264,7 +357,7 @@ func TestStrFieldExtraction(t *testing.T) {
 		t.Errorf("first-position round = %q, want 7", got)
 	}
 	// Absent key.
-	if got := int64Field(rest, "firstSignalMs"); got != 0 {
+	if got := int64Field(rest, "missingMs"); got != 0 {
 		t.Errorf("absent key = %d, want 0", got)
 	}
 }

@@ -48,9 +48,9 @@ func (c *traceCapture) first(name string) (traceEvent, bool) {
 }
 
 // TestTraceTurnAndBackendRoundsEmitted verifies a normal tool-using turn produces the
-// turn lifecycle bracket plus one backend.respond.{request,meta,done} per round — the
-// trace coverage the backend migration removed (acceptance criterion #1: a one-turn
-// answer yields one turn.start, the round events, and one turn.end).
+// turn lifecycle bracket plus one backend.respond.{request,raw_meta,meta,done} per
+// round — the trace coverage the backend migration removed (acceptance criterion #1:
+// a one-turn answer yields one turn.start, the round events, and one turn.end).
 func TestTraceTurnAndBackendRoundsEmitted(t *testing.T) {
 	cap := &traceCapture{}
 	// Round 0 requests a tool; round 1 returns the final answer.
@@ -100,7 +100,7 @@ func TestTraceTurnAndBackendRoundsEmitted(t *testing.T) {
 		t.Errorf("turn.end turnId = %v want %v", end.fields["turnId"], turnID)
 	}
 
-	// Two backend rounds, numbered 0 and 1, each with a request/meta/done.
+	// Two backend rounds, numbered 0 and 1, each with a request/raw-meta/meta/done.
 	reqs := cap.only("backend.respond.request")
 	if len(reqs) != 2 {
 		t.Fatalf("backend.respond.request count = %d want 2", len(reqs))
@@ -122,6 +122,9 @@ func TestTraceTurnAndBackendRoundsEmitted(t *testing.T) {
 	}
 	if got := len(cap.only("backend.respond.meta")); got != 2 {
 		t.Errorf("backend.respond.meta count = %d want 2", got)
+	}
+	if got := len(cap.only("backend.respond.raw_meta")); got != 2 {
+		t.Errorf("backend.respond.raw_meta count = %d want 2", got)
 	}
 	dones := cap.only("backend.respond.done")
 	if len(dones) != 2 {

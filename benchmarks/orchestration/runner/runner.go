@@ -76,9 +76,11 @@ type ScenarioResult struct {
 	Error        string         `json:"error,omitempty"`
 
 	// Latency decomposition (see scenario.RoundMetric).
-	TurnMS        int64                  `json:"turnMs,omitempty"`
-	FirstSignalMS int64                  `json:"firstSignalMs,omitempty"`
-	RoundDetail   []scenario.RoundMetric `json:"roundDetail,omitempty"`
+	TurnMS          int64                  `json:"turnMs,omitempty"`
+	FirstRawMetaMS  int64                  `json:"firstRawMetaMs,omitempty"`
+	FirstSkillCueMS int64                  `json:"firstSkillCueMs,omitempty"`
+	FirstContentMS  int64                  `json:"firstContentMs,omitempty"`
+	RoundDetail     []scenario.RoundMetric `json:"roundDetail,omitempty"`
 }
 
 // RunScenario executes one trial of one scenario.
@@ -207,7 +209,9 @@ func RunScenario(ctx context.Context, bin string, sc scenario.Scenario, opts Opt
 	res.Answer = rr.FinalContent
 	res.DebugLog = rr.DebugLogPath
 	res.TurnMS = rr.TurnMS
-	res.FirstSignalMS = rr.FirstSignalMS
+	res.FirstRawMetaMS = rr.FirstRawMetaMS
+	res.FirstSkillCueMS = rr.FirstSkillCueMS
+	res.FirstContentMS = rr.FirstContentMS
 	res.RoundDetail = rr.RoundDetail
 	return res
 }
@@ -266,21 +270,23 @@ func findDebugLog(logDir string) string {
 
 // roundTimeline accumulates one model round's trace events while scanning the log.
 type roundTimeline struct {
-	round      int
-	requestTS  time.Time
-	metaTS     time.Time
-	doneTS     time.Time
-	totalMS    int64
-	firstTokMS int64
-	finish     string
-	usage      scenario.UsageTotals
-	hasDone    bool
+	round           int
+	requestTS       time.Time
+	rawMetaTS       time.Time
+	skillCueTS      time.Time
+	committedMetaTS time.Time
+	doneTS          time.Time
+	totalMS         int64
+	firstTokMS      int64
+	finish          string
+	usage           scenario.UsageTotals
+	hasDone         bool
 }
 
 // parseDebugLog reconstructs the turn's timeline from the trace events:
-// turn.start → per-round backend.respond.{request,meta,done} → turn.end. It
-// fills round counts + usage totals (as before) AND the per-round latency
-// decomposition (RoundDetail / FirstSignalMS / TurnMS). Format
+// turn.start → per-round backend.respond.{request,raw_meta,skill_cue,meta,done}
+// → turn.end. It fills round counts + usage totals (as before) AND the per-round
+// latency decomposition. Format
 // (debuglog.formatLine): "<ISO-ts>  <event>[  k=v ...]" lines with ms-precision
 // UTC timestamps, then indented blocks; `usage` is a block of indented JSON
 // under backend.respond.done.
@@ -374,11 +380,27 @@ func parseDebugLog(rr *scenario.RunResult) {
 					}
 				}
 				curDone = nil
+			case "backend.respond.raw_meta":
+				if n, ok := intField(rest, "round"); ok && tsErr == nil {
+					rt := ensure(n)
+					if rt.rawMetaTS.IsZero() {
+						rt.rawMetaTS = ts
+					}
+				}
+				curDone = nil
+			case "backend.respond.skill_cue":
+				if n, ok := intField(rest, "round"); ok && tsErr == nil {
+					rt := ensure(n)
+					if rt.skillCueTS.IsZero() {
+						rt.skillCueTS = ts
+					}
+				}
+				curDone = nil
 			case "backend.respond.meta":
 				if n, ok := intField(rest, "round"); ok && tsErr == nil {
 					rt := ensure(n)
-					if rt.metaTS.IsZero() {
-						rt.metaTS = ts
+					if rt.committedMetaTS.IsZero() {
+						rt.committedMetaTS = ts
 					}
 				}
 				curDone = nil
@@ -465,8 +487,16 @@ func parseDebugLog(rr *scenario.RunResult) {
 			CachedTokens:     rt.usage.CachedTokens,
 			CompletionTokens: rt.usage.CompletionTokens,
 		}
-		if !rt.requestTS.IsZero() && !rt.metaTS.IsZero() {
-			rm.PreStreamMS = rt.metaTS.Sub(rt.requestTS).Milliseconds()
+		if !rt.requestTS.IsZero() {
+			if !rt.rawMetaTS.IsZero() {
+				rm.RawMetaMS = rt.rawMetaTS.Sub(rt.requestTS).Milliseconds()
+			}
+			if !rt.skillCueTS.IsZero() {
+				rm.SkillCueMS = rt.skillCueTS.Sub(rt.requestTS).Milliseconds()
+			}
+			if !rt.committedMetaTS.IsZero() {
+				rm.CommittedMetaMS = rt.committedMetaTS.Sub(rt.requestTS).Milliseconds()
+			}
 		}
 		if !rt.requestTS.IsZero() && !prev.IsZero() {
 			rm.GapBeforeMS = rt.requestTS.Sub(prev).Milliseconds()
@@ -486,8 +516,28 @@ func parseDebugLog(rr *scenario.RunResult) {
 		rr.RoundDetail = append(rr.RoundDetail, rm)
 	}
 	if len(nums) > 0 && !turnStart.IsZero() {
-		if first := rounds[nums[0]]; !first.metaTS.IsZero() {
-			rr.FirstSignalMS = first.metaTS.Sub(turnStart).Milliseconds()
+		first := rounds[nums[0]]
+		if !first.rawMetaTS.IsZero() {
+			rr.FirstRawMetaMS = first.rawMetaTS.Sub(turnStart).Milliseconds()
+		}
+		var firstCue, firstContent time.Time
+		for _, n := range nums {
+			rt := rounds[n]
+			if !rt.skillCueTS.IsZero() && (firstCue.IsZero() || rt.skillCueTS.Before(firstCue)) {
+				firstCue = rt.skillCueTS
+			}
+			if rt.firstTokMS > 0 && !rt.requestTS.IsZero() {
+				ts := rt.requestTS.Add(time.Duration(rt.firstTokMS) * time.Millisecond)
+				if firstContent.IsZero() || ts.Before(firstContent) {
+					firstContent = ts
+				}
+			}
+		}
+		if !firstCue.IsZero() {
+			rr.FirstSkillCueMS = firstCue.Sub(turnStart).Milliseconds()
+		}
+		if !firstContent.IsZero() {
+			rr.FirstContentMS = firstContent.Sub(turnStart).Milliseconds()
 		}
 	}
 }

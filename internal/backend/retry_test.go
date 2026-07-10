@@ -281,16 +281,20 @@ func TestRespondStream_MetaForwardedOnceAcrossRetries(t *testing.T) {
 	})
 	defer srv.Close()
 
-	var metaCount int
+	var metaCount, rawMetaCount int
 	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(6)})
 	_, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
-		OnMeta: func(StreamMeta) { metaCount++ },
+		OnRawMeta: func(StreamMeta) { rawMetaCount++ },
+		OnMeta:    func(StreamMeta) { metaCount++ },
 	})
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if metaCount != 1 {
 		t.Fatalf("OnMeta fired %d times, want 1 (deferred until the committed attempt)", metaCount)
+	}
+	if rawMetaCount != failFirst+1 {
+		t.Fatalf("OnRawMeta fired %d times, want %d (once per HTTP attempt)", rawMetaCount, failFirst+1)
 	}
 }
 

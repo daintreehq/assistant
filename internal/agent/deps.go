@@ -291,8 +291,9 @@ type SessionDeps struct {
 
 	// Trace, when set, receives structured diagnostic events for the per-session debug
 	// log: the turn lifecycle (turn.start/turn.end) and the backend respond round
-	// (backend.respond.request/meta/done/error) — the trace gap the backend migration
-	// left where the legacy router's model.request/model.response used to be. The app
+	// (backend.respond.request/raw_meta/skill_cue/meta/done/error) — the trace gap the
+	// backend migration left where the legacy router's model.request/model.response
+	// used to be. The app
 	// wires it to debuglog.LogDebug, keeping the agent package free of any debuglog
 	// dependency. Optional; nil ⇒ no tracing (the default in tests). It must never
 	// block (the debug write is append-only and best-effort) and the session guards

@@ -778,8 +778,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		var firstTokenMS int64
 
 		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
+			OnRawMeta: func(m backend.StreamMeta) {
+				s.traceBackendRawMeta(runID, turnID, iter, m)
+			},
 			OnSkillLoaded: func(refs []backend.SkillRef) {
-				s.emitSkillLoads(refs)
+				if s.emitSkillLoads(refs) {
+					s.traceBackendSkillCue(runID, turnID, iter, refs)
+				}
 			},
 			OnMeta: func(m backend.StreamMeta) {
 				s.applyStreamMeta(m)
@@ -1562,9 +1567,9 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 // It is fed by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives, without
 // waiting for the first model token. Best-effort and informational only; the prelude
 // is NEVER replayed into client history.
-func (s *Session) emitSkillLoads(refs []backend.SkillRef) {
+func (s *Session) emitSkillLoads(refs []backend.SkillRef) bool {
 	if len(refs) == 0 {
-		return
+		return false
 	}
 	titles := make([]string, 0, len(refs))
 	for _, ref := range refs {
@@ -1580,9 +1585,10 @@ func (s *Session) emitSkillLoads(refs []backend.SkillRef) {
 		titles = append(titles, label)
 	}
 	if len(titles) == 0 {
-		return
+		return false
 	}
 	s.events.SkillLoaded(titles)
+	return true
 }
 
 // emitBackendUsage emits the per-round UsageEvent from the backend's reported usage.
