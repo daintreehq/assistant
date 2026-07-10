@@ -11,7 +11,8 @@ import (
 // Envelope is the stable Daintree error envelope. It is delivered pre-stream as a
 // JSON body and mid-stream as a terminal SSE `error` event with the same shape.
 type Envelope struct {
-	Error EnvelopeError `json:"error"`
+	Error      EnvelopeError `json:"error"`
+	RetryAfter string        `json:"retry_after,omitempty"`
 }
 
 // EnvelopeError is the inner error object.
@@ -24,8 +25,9 @@ type EnvelopeError struct {
 
 // Error is a backend failure surfaced to the agent loop. HTTPStatus is 0 for a
 // mid-stream SSE error (the 200 was already committed). RetryAfter is set from the
-// Retry-After header on a 429. Stream is true when the failure arrived as a
-// terminal `error` event after the meta event (vs. a pre-stream JSON error).
+// Retry-After header on an HTTP error or the top-level retry_after field on an SSE
+// error. Stream is true when the failure arrived as a terminal `error` event after
+// the meta event (vs. a pre-stream JSON error).
 type Error struct {
 	HTTPStatus int
 	Type       string

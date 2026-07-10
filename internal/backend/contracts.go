@@ -537,7 +537,7 @@ type StreamDone struct {
 // --------------------------------------------------------------------------
 
 // SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces ONLY the
-// NewlyLoaded titles (as an info note in emitSkillsMeta); Active, Prelude, and
+// NewlyLoaded refs through the eager OnSkillLoaded callback; Active, Prelude, and
 // Selector are decoded off the wire but not rendered. The backend no longer
 // injects anything into the upstream transcript — a newly-active skill reaches
 // the model as its body in a "# Loaded skills" system message (plain context),

@@ -96,10 +96,10 @@ func (c *Client) setHeaders(req *http.Request, accept string) {
 
 // RespondStream runs one generation round against /v1/daintree/respond as a
 // named-event SSE stream and returns the accumulated result. It forces
-// generation.stream = true. A pre-stream failure (the backend prefetches the first
-// upstream token before committing the 200) arrives as an ordinary JSON error; a
-// failure after the meta event arrives as a terminal SSE error event — both surface
-// as *Error. The caller owns cancellation via ctx.
+// generation.stream = true. A failure before the backend opens the SSE response
+// arrives as an ordinary JSON error; upstream connection/generation failures after
+// the eager meta event arrive as terminal SSE error events — both surface as *Error.
+// The caller owns cancellation via ctx.
 //
 // Transient failures (connect errors, 5xx/gateway statuses, rate limits, and the
 // mid-stream upstream/truncation errors the backend surfaces after the 200) are
@@ -127,15 +127,21 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 
 	// Retries must not double-fire side-effecting callbacks.
 	//
+	//   - OnSkillLoaded is intentionally EAGER: a successful selector result is useful
+	//     feedback before the upstream model connects or emits a token. The same request
+	//     can be retried after receiving meta, so identical skill refs are de-duplicated
+	//     across attempts before reaching the caller. A failed attempt's signed state is
+	//     also adopted into the next POST so the backend reuses that selection instead of
+	//     selecting a different skill after the first one is already visible.
 	//   - OnContent is the retry BOUNDARY: once any visible token has reached the
 	//     caller the turn is committed (a replay would duplicate on-screen text), so we
 	//     only retry failures that arrive before the first content fragment.
-	//   - OnMeta carries the state token and surfaces newly-loaded skills (visible UI
-	//     cards + durable log rows). Firing it once per attempt would duplicate those
-	//     and advance state from a doomed attempt, so we CAPTURE each attempt's meta and
-	//     forward it exactly once — from the attempt that commits (first content) or
-	//     when the loop returns (success or terminal failure), for parity with the
-	//     pre-retry behaviour where meta always reached the caller once.
+	//   - OnMeta carries committed state/version metadata. Firing it once per attempt
+	//     would advance state from a doomed attempt, so we CAPTURE each attempt's meta
+	//     and forward it exactly once — from the attempt that commits (first content) or
+	//     when the loop returns. If the terminal/cancelled attempt dies before meta, the
+	//     last received (and retry-adopted) meta is forwarded so its signed state is not
+	//     lost after its eager skill cue was already shown.
 	//
 	// (OnToolCallDelta is intentionally NOT a boundary — see its doc on StreamCallbacks:
 	// callers must treat the returned ToolCalls as authoritative, since a pre-content
@@ -143,22 +149,61 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	contentStreamed := false
 	metaForwarded := false
 	var pendingMeta *StreamMeta
+	var lastReceivedMeta *StreamMeta
 	userOnMeta := cb.OnMeta
+	userOnSkillLoaded := cb.OnSkillLoaded
 	userOnContent := cb.OnContent
+	seenSkillLoads := make(map[string]struct{})
 
 	flushMeta := func() {
-		if pendingMeta == nil || metaForwarded {
+		if metaForwarded {
+			return
+		}
+		meta := pendingMeta
+		if meta == nil {
+			// A later retry can fail or be cancelled before receiving its own meta.
+			// Preserve the last selector/state outcome already surfaced and adopted
+			// rather than silently losing it at the terminal boundary.
+			meta = lastReceivedMeta
+		}
+		if meta == nil {
 			return
 		}
 		metaForwarded = true
 		if userOnMeta != nil {
-			userOnMeta(*pendingMeta)
+			userOnMeta(*meta)
 		}
 	}
 
 	cb.OnMeta = func(m StreamMeta) {
 		mm := m
 		pendingMeta = &mm // captured; not forwarded until the attempt commits
+		lastReceivedMeta = &mm
+	}
+	if userOnSkillLoaded != nil {
+		cb.OnSkillLoaded = func(refs []SkillRef) {
+			unseen := make([]SkillRef, 0, len(refs))
+			for _, ref := range refs {
+				// The id is the stable skill identity. Fall back to the display title for
+				// older/malformed refs, but do not let harmless version/title drift on a
+				// retry produce a duplicate card for the same id.
+				key := strings.TrimSpace(ref.ID)
+				if key == "" {
+					key = strings.TrimSpace(ref.Title)
+				}
+				if key == "" {
+					continue
+				}
+				if _, ok := seenSkillLoads[key]; ok {
+					continue
+				}
+				seenSkillLoads[key] = struct{}{}
+				unseen = append(unseen, ref)
+			}
+			if len(unseen) > 0 {
+				userOnSkillLoaded(unseen)
+			}
+		}
 	}
 	cb.OnContent = func(s string) {
 		flushMeta() // first token commits this attempt → its meta is the real one
@@ -186,6 +231,21 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		if contentStreamed || !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts {
 			flushMeta()
 			return result, serr
+		}
+		// Selection already completed if this attempt delivered meta. Pin that signed
+		// outcome into the next request before replaying the turn: the eager skill card
+		// is now visible, so a full-request retry must reuse the same active set rather
+		// than rerun a selector that could choose something different. OnMeta remains
+		// deferred; adopting the opaque token here is transport bookkeeping only.
+		if pendingMeta != nil && pendingMeta.State != "" {
+			state := pendingMeta.State
+			req.State = &state
+			nextBody, marshalErr := json.Marshal(req)
+			if marshalErr != nil {
+				flushMeta()
+				return result, fmt.Errorf("backend: marshal retry request: %w", marshalErr)
+			}
+			body = nextBody
 		}
 		// Retrying: this attempt's meta is discarded (reset at the loop top).
 		delay := c.retry.backoff(attempt, be.RetryAfter)

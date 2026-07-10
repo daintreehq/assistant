@@ -10,19 +10,20 @@ import (
 // Retry defaults. The streamed respond turn is the only retried path: a transient
 // upstream blip (the classic DeepSeek 502 surfaced mid-stream as an `upstream_error`
 // event) is worth a few automatic re-issues before failing the whole turn. The
-// conversation prefix is unchanged across attempts and the backend prefix-caches it,
-// so a replay is nearly free. This is a SECOND line of defence — the backend retries
-// the upstream provider itself; the CLI retry additionally covers the CLI↔backend hop
-// (a dropped connection, a backend restart, a stream truncated before any content).
+// conversation prefix is unchanged across attempts and the backend prefix-caches it;
+// after an eager meta, the retry also carries that attempt's signed state so skill
+// selection is reused. This is a SECOND line of defence — the backend retries the
+// upstream provider itself; the CLI retry additionally covers the CLI↔backend hop (a
+// dropped connection, a backend restart, a stream truncated before any content).
 const (
 	defaultMaxAttempts = 6 // initial attempt + 5 retries
 	defaultBaseDelay   = 400 * time.Millisecond
 	defaultMaxDelay    = 5 * time.Second
 	// maxRetryAfterWait bounds how long a server-provided Retry-After can stall a
-	// turn. We HONOUR Retry-After (a 429 directive) rather than clamping it down to
-	// the small jittered-backoff cap — retrying earlier than the server asked just
-	// earns another 429 and burns the budget — but a pathological value can't freeze
-	// the cockpit indefinitely.
+	// turn. We HONOUR Retry-After (from an HTTP response or SSE error) rather than
+	// clamping it down to the small jittered-backoff cap — retrying earlier than the
+	// server asked just burns the budget — but a pathological value can't freeze the
+	// cockpit indefinitely.
 	maxRetryAfterWait = 30 * time.Second
 )
 
@@ -70,13 +71,13 @@ func isRetriable(e *Error) bool {
 	if e.IsRateLimited() {
 		return true
 	}
-	// Transient gateway statuses on a PRE-stream failure (the backend prefetches the
-	// first upstream token before committing the 200, so an upstream hiccup can surface
-	// here as a plain 5xx). 502/503/504 mean the request did NOT complete at the app
-	// (bad gateway / unavailable / gateway timeout) — replaying a non-idempotent POST is
-	// safe. 500 is DELIBERATELY excluded: an application error may fire after the backend
-	// has already done side effects, so a blind replay could duplicate them; the backend
-	// owns retrying its own transient internals.
+	// Transient gateway statuses before the backend opens the SSE response. 502/503/504
+	// mean the request did NOT complete at the app (bad gateway / unavailable / gateway
+	// timeout) — replaying a non-idempotent POST is safe. 500 is DELIBERATELY excluded:
+	// an application error may fire after the backend has already done side effects, so
+	// a blind replay could duplicate them; the backend owns retrying its own transient
+	// internals. Upstream connection/generation failures after the eager meta event use
+	// the SSE error path below instead.
 	switch e.HTTPStatus {
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
@@ -86,7 +87,7 @@ func isRetriable(e *Error) bool {
 	// transient read error, or a stream that died before its meta event.
 	if e.Stream {
 		switch e.Code {
-		case "upstream_error", "upstream_rate_limited", "stream_read",
+		case "upstream_error", "upstream_timeout", "upstream_rate_limited", "stream_read",
 			"stream_interrupted", "stream_no_meta", "stream_error":
 			return true
 		}
@@ -95,10 +96,10 @@ func isRetriable(e *Error) bool {
 }
 
 // backoff computes the wait before the retry for a 0-based attempt. A server-provided
-// Retry-After is HONOURED (a 429 directive — retrying earlier just earns another 429),
-// bounded only by maxRetryAfterWait so a hostile value can't freeze the turn. Otherwise
-// it is exponential (BaseDelay·2^attempt, capped at MaxDelay) with full jitter in
-// [d/2, d] to decorrelate retries across concurrent sessions.
+// Retry-After is HONOURED (from an HTTP response or terminal SSE error), bounded only
+// by maxRetryAfterWait so a hostile value can't freeze the turn. Otherwise it is
+// exponential (BaseDelay·2^attempt, capped at MaxDelay) with full jitter in [d/2, d]
+// to decorrelate retries across concurrent sessions.
 func (p RetryPolicy) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	if retryAfter > 0 {
 		if retryAfter > maxRetryAfterWait {

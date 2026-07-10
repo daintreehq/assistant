@@ -150,12 +150,16 @@ runs a turn: optional auto-compact → push user message → `Backend.RespondStr
 the visible conversation, the local tool inventory, and the opaque
 backend `state` token) with a
 token callback → the FIRST
-SSE `meta` event carries the refreshed state token + the server's `skills` block. **Skill
-selection is server-owned**: the backend's selector picks/injects runbook bodies and a
-synthetic `skill__load` exchange *before* it calls the upstream model, so the runbook is in
-hand for that same generation; the CLI just stores the state token and surfaces newly-loaded
-titles. On tool calls, announce the whole batch (`ToolBatch`) then `registry.Dispatch()` each
-in the safe sequence, feed results back and re-`RespondStream` (replaying the state token).
+SSE `meta` event carries the refreshed state token + the server's `skills` block and is
+flushed as soon as selection finishes, before the upstream model connects. The CLI emits
+new skill cards immediately through `OnSkillLoaded`, while committed state handling stays
+on the retry-safe deferred `OnMeta` callback; a full-request retry adopts the eager meta's
+signed state so the backend reuses that already-visible selection. **Skill selection is
+server-owned**: the backend's selector picks/injects runbook bodies before it calls the
+upstream model, so the runbook is in hand for that same generation; the CLI just stores the
+state token and surfaces newly-loaded titles. On tool calls, announce the whole batch
+(`ToolBatch`) then `registry.Dispatch()` each in the safe sequence, feed results back and
+re-`RespondStream` (replaying the state token).
 `Dispatch` = validate args → tier gate (`safety.Decide`) → confirmation/grant → run handler →
 audit. The daemon `Scheduler` ticks every 3s, firing due timers and watcher checks. All
 sub-threads publish to the **attention queue** instead of interrupting the main thread.

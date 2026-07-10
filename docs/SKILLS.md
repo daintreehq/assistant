@@ -17,17 +17,25 @@ conversation against the catalog and picks the runbook(s); the backend then:
 
 1. Renders the **active skill bodies** into a cached system message (in the stable
    prefix, so they ride DeepSeek's prefix cache across a turn's rounds).
-2. Appends a synthetic `skill__load` tool-call + result to the upstream transcript so
-   the main model *observes* the load — **before** it calls the model for generation,
-   so the runbook is in hand for that same response (no extra round trip).
-3. Returns a first-class `skills` block (`active` + `newly_loaded` + a `prelude`) plus
-   a refreshed opaque **state token** in the first SSE `meta` event.
+2. Opens the response stream with a first-class `skills` block (`active` +
+   `newly_loaded` + a vestigial `prelude`) plus
+   a refreshed opaque **state token** in the first SSE `meta` event. That event is
+   flushed as soon as skill selection finishes, before the upstream model connection
+   or first generated token.
+3. Starts upstream generation with the selected bodies already present in the prompt,
+   so the runbook is in hand for that same response (no extra main-model round trip).
 
 The CLI is a thin runtime over that: it stores the opaque state token and replays it
 on the next request (the entire client-side "keep skills loaded" mechanism — the
 backend is stateless and recovers the active set from the token, **not** from the
-message history), and surfaces newly-loaded skills as a single info note
-(`emitSkillsMeta` → `events.Info("Loaded skill: …")`). Skills **never** narrow the
+message history). `StreamCallbacks.OnSkillLoaded` surfaces each newly-loaded skill
+immediately as a `SkillLoaded` event/card, while the state-bearing `OnMeta` callback
+remains deferred until the stream attempt commits so retries cannot advance state from
+a failed attempt. If a full POST retry is needed after meta, the client adopts that
+attempt's signed `state` into the next request so the backend reuses the already-visible
+selection instead of selecting again; repeated refs are also de-duplicated defensively.
+If the terminal retry fails before receiving its own meta, the client still forwards the
+last adopted meta once so that selection state is persisted. Skills **never** narrow the
 local toolset — the full registry is offered every turn (`requiredTools` is a backend
 focus-hint only, not a capability gate).
 

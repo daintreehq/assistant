@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sseServer spins an httptest server whose /v1/daintree/respond writes the given
@@ -87,6 +88,81 @@ func TestRespondStream_BasicAnswer(t *testing.T) {
 	}
 }
 
+func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
+	releaseContent := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseContent)
+		}
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: meta\n"+
+			`data: {"request_id":"req_skill","skills":{"newly_loaded":[{"id":"multi_agent","version":"1.0.0","title":"Multi-agent orchestration"}]},"state":"dst1.skill"}`+
+			"\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
+		// Keep the model side gated after meta. The skill callback must reach the
+		// caller while this handler is still waiting here.
+		<-releaseContent
+		_, _ = io.WriteString(w, "event: delta\n"+
+			`data: {"content":"answer"}`+"\n\n"+
+			"event: done\n"+
+			`data: {"finish_reason":"stop","usage":{}}`+"\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	skillsCh := make(chan []SkillRef, 1)
+	metaCh := make(chan StreamMeta, 1)
+	doneCh := make(chan error, 1)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+	go func() {
+		_, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
+			OnSkillLoaded: func(refs []SkillRef) { skillsCh <- refs },
+			OnMeta:        func(m StreamMeta) { metaCh <- m },
+		})
+		doneCh <- err
+	}()
+
+	select {
+	case refs := <-skillsCh:
+		if len(refs) != 1 || refs[0].ID != "multi_agent" || refs[0].Title != "Multi-agent orchestration" {
+			t.Fatalf("skill refs = %+v", refs)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("skill callback waited for model content")
+	}
+	select {
+	case <-metaCh:
+		t.Fatal("committed meta callback fired before first content")
+	default:
+	}
+
+	close(releaseContent)
+	released = true
+	select {
+	case err := <-doneCh:
+		if err != nil {
+			t.Fatalf("RespondStream: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RespondStream did not finish after content was released")
+	}
+	select {
+	case m := <-metaCh:
+		if m.State != "dst1.skill" {
+			t.Fatalf("committed meta state = %q", m.State)
+		}
+	default:
+		t.Fatal("committed meta callback did not fire with first content")
+	}
+}
+
 func TestRespondStream_ToolCallAccumulation(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
@@ -158,7 +234,7 @@ func TestRespondStream_ErrorEvent(t *testing.T) {
 		`data: {"request_id":"r","model":"m","state":"s"}`,
 		``,
 		`event: error`,
-		`data: {"error":{"type":"api_error","code":"upstream_failed","message":"model failed"}}`,
+		`data: {"error":{"type":"api_error","code":"upstream_failed","message":"model failed"},"retry_after":"5"}`,
 		``,
 	}, "\n")
 	srv := sseServer(t, body, nil)
@@ -176,6 +252,9 @@ func TestRespondStream_ErrorEvent(t *testing.T) {
 	}
 	if be.Code != "upstream_failed" || !be.Stream {
 		t.Errorf("error = %+v", be)
+	}
+	if be.RetryAfter != 5*time.Second {
+		t.Errorf("retry after = %v, want 5s", be.RetryAfter)
 	}
 	// A failed stream must NOT yield a completed assistant message with content.
 	if res.Message.Content != "" {

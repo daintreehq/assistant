@@ -45,9 +45,16 @@ The Go client mirrors it in `internal/backend`:
   `runtime`, `turn`, `selection`, `generation`, `client`), the response / stream payloads,
   the tasks envelope, and capabilities.
 - `sse.go` — the **named-event** SSE parser (`meta` → `delta` → `done` / `error`). `meta`
-  is always first (carries the refreshed `state` token + the first-class `skills` block).
-  Tool-call deltas accumulate by index (OpenAI-style fragments). EOF before `done` is an
-  error — the parser never fabricates a successful finish.
+  is always first (carries the refreshed `state` token + the first-class `skills` block)
+  and is flushed as soon as selection finishes, before the upstream model connects. The
+  client immediately emits de-duplicated `newly_loaded` refs through `OnSkillLoaded`, while
+  deferring stateful `OnMeta` until an attempt commits. A retry after meta adopts its signed
+  `state` in the next POST so the backend reuses the same selection. If a terminal retry
+  then dies before its own meta, the last received/adopted meta is forwarded once so that
+  state is still persisted. Terminal error events may carry a top-level `retry_after`
+  string, which feeds the bounded retry delay; provider timeouts are transient. Tool-call
+  deltas accumulate by index (OpenAI-style fragments). EOF before `done` is an error — the
+  parser never fabricates a successful finish.
 - `client.go` — `RespondStream`, `RunTask`, `Capabilities`, `Health`, `Ready`, `Version`.
 - `tasks.go` — typed helpers for the server-owned utility tasks.
 
@@ -87,8 +94,8 @@ The Go client mirrors it in `internal/backend`:
   unavailable, `{current:null}` means Daintree definitively reports no current worktree,
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.
 - **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
-  backend's selector picks and injects runbooks and returns a `skills` block (active set
-  + a synthetic-load `prelude` the CLI surfaces). The CLI keeps only the local
+  backend's selector picks and injects runbooks and returns a `skills` block. The CLI
+  immediately surfaces its `newly_loaded` refs as skill cards and keeps only the local
   run-tracking tools `skill.run.get` / `skill.step.advance` (the backend prompt drives them).
 - **Opaque state token.** `meta.state` is stored verbatim and replayed on the next request;
   the CLI never inspects, signs, or mutates it. A missing token is valid for a new session.

@@ -24,7 +24,10 @@ func (s *orderSink) AssistantToken(t string)     { s.log = append(s.log, "tok:"+
 func (s *orderSink) AssistantEnd(c, _ string)    { s.log = append(s.log, "end:"+c) }
 func (s *orderSink) AssistantCancelled(c string) { s.log = append(s.log, "cancelled:"+c) }
 func (s *orderSink) Interjection(t string)       { s.log = append(s.log, "interject:"+t) }
-func (s *orderSink) ToolCall(ev ToolCallEvent)   { s.log = append(s.log, "call:"+ev.Name+":"+ev.ID) }
+func (s *orderSink) SkillLoaded(titles []string) {
+	s.log = append(s.log, "skill:"+strings.Join(titles, ","))
+}
+func (s *orderSink) ToolCall(ev ToolCallEvent) { s.log = append(s.log, "call:"+ev.Name+":"+ev.ID) }
 func (s *orderSink) ToolResult(ev ToolResultEvent) {
 	ok := "false"
 	if ev.Result.Ok {
@@ -62,6 +65,67 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	// turn:prompt is emitted FIRST (before the assistant round) so /explain can
 	// label the run by what prompted it.
 	want := []string{"prompt:hi", "start", "tok:Hel", "tok:lo", "end:Hello"}
+	if !equalStrings(sink.log, want) {
+		t.Fatalf("event log = %v want %v", sink.log, want)
+	}
+}
+
+// eagerSkillBackend mirrors the production callback order: the newly-loaded skill
+// notification is delivered from SSE meta before committed meta and model content.
+type eagerSkillBackend struct{}
+
+func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	refs := []backend.SkillRef{
+		{ID: "multi_agent", Version: "1.0.0", Title: "Multi-agent orchestration"},
+		{ID: "fallback_skill", Version: "1.0.0"},
+		{}, // malformed refs never produce a blank card
+	}
+	meta := backend.StreamMeta{
+		Model:  "daintree-assistant",
+		State:  "dst1.skill",
+		Skills: backend.SkillsBlock{NewlyLoaded: refs},
+	}
+	if cb.OnSkillLoaded != nil {
+		cb.OnSkillLoaded(refs)
+	}
+	if cb.OnMeta != nil {
+		cb.OnMeta(meta)
+	}
+	if cb.OnContent != nil {
+		cb.OnContent("answer")
+	}
+	return backend.RespondResult{
+		Meta:    meta,
+		Message: backend.RespondMessage{Role: "assistant", Content: "answer"},
+	}, nil
+}
+
+func (eagerSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
+	return backend.TaskResult{}, nil
+}
+
+func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
+	sink := &orderSink{}
+	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Backend = eagerSkillBackend{}
+	deps.Events = sink
+	s := NewSession(deps)
+
+	out, err := s.Send(context.Background(), "use agents", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "answer" {
+		t.Fatalf("reply = %q", out)
+	}
+	want := []string{
+		"prompt:use agents",
+		"start",
+		"skill:Multi-agent orchestration,fallback_skill",
+		"tok:answer",
+		"end:answer",
+	}
 	if !equalStrings(sink.log, want) {
 		t.Fatalf("event log = %v want %v", sink.log, want)
 	}

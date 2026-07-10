@@ -11,12 +11,18 @@ import (
 
 // StreamCallbacks receives streamed events as they arrive. All are optional. The
 // final assembled message + usage are returned by the stream parser regardless;
-// these callbacks exist for live UI (token streaming, surfacing the newly-loaded
-// skill titles up front). They are invoked synchronously on the reader goroutine.
+// these callbacks exist for live UI (token streaming, surfacing newly-loaded
+// skills up front). They are invoked synchronously on the reader goroutine.
 type StreamCallbacks struct {
-	// OnMeta fires once, before any content — carries the refreshed state token,
-	// the skills outcome, and version markers.
+	// OnMeta carries the refreshed state token, the skills outcome, and version
+	// markers. Client.RespondStream defers it until the attempt commits so retries
+	// cannot duplicate stateful side effects.
 	OnMeta func(StreamMeta)
+	// OnSkillLoaded fires as soon as a meta event reports newly-loaded skills,
+	// before the upstream model needs to produce content. Client.RespondStream
+	// de-duplicates identical refs across retry attempts, so callers can use this
+	// for immediate user feedback without producing duplicate cards.
+	OnSkillLoaded func([]SkillRef)
 	// OnContent fires for each visible content fragment, in order.
 	OnContent func(string)
 	// OnReasoning fires for each chain-of-thought fragment (DeepSeek thinking mode),
@@ -79,6 +85,9 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			}
 			result.Meta = m
 			metaSeen = true
+			if cb.OnSkillLoaded != nil && len(m.Skills.NewlyLoaded) > 0 {
+				cb.OnSkillLoaded(m.Skills.NewlyLoaded)
+			}
 			if cb.OnMeta != nil {
 				cb.OnMeta(m)
 			}
@@ -129,7 +138,7 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				env.Error.Code = "stream_error"
 				env.Error.Message = "backend stream emitted an error event"
 			}
-			return newError(0, env, 0, true)
+			return newError(0, env, parseRetryAfter(env.RetryAfter), true)
 		default:
 			// Unknown event name: ignore for forward compatibility.
 		}

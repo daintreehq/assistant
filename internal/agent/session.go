@@ -778,6 +778,9 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		var firstTokenMS int64
 
 		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
+			OnSkillLoaded: func(refs []backend.SkillRef) {
+				s.emitSkillLoads(refs)
+			},
 			OnMeta: func(m backend.StreamMeta) {
 				s.applyStreamMeta(m)
 				s.traceBackendMeta(runID, turnID, iter, m)
@@ -1535,12 +1538,13 @@ func (s *Session) backendStatePtr() *string {
 }
 
 // applyStreamMeta stores the refreshed state token + version markers from the
-// stream's meta event and surfaces the skill outcome to the UI. The CLI treats the
-// state token as opaque (store-and-replay only). The token is also mirrored to
-// durable storage (best-effort) so a DIFFERENT process — the supervisor daemon
-// picking this session up after a detach, or the next cockpit after the daemon —
-// replays the same token instead of forcing the backend to re-run skill selection
-// from scratch mid-conversation.
+// committed stream attempt. The CLI treats the state token as opaque
+// (store-and-replay only). The token is also mirrored to durable storage
+// (best-effort) so a DIFFERENT process — the supervisor daemon picking this session
+// up after a detach, or the next cockpit after the daemon — replays the same token
+// instead of forcing the backend to re-run skill selection from scratch
+// mid-conversation. Newly-loaded skills travel through the eager OnSkillLoaded
+// callback instead, so their user-visible cue does not wait for model content.
 func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	s.mu.Lock()
 	s.backendState = m.State
@@ -1551,19 +1555,19 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 		// Side-channel: a persistence failure must never break the live stream.
 		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, m.State)
 	}
-	s.emitSkillsMeta(m.Skills)
 }
 
-// emitSkillsMeta surfaces the backend's skill outcome (the newly-loaded runbooks)
-// as a dedicated SkillLoaded event, which the cockpit folds into the running turn as
-// an inline "Skill loaded" card. Best-effort and informational only; the prelude is
-// NEVER replayed into client history.
-func (s *Session) emitSkillsMeta(sk backend.SkillsBlock) {
-	if len(sk.NewlyLoaded) == 0 {
+// emitSkillLoads surfaces newly-loaded runbooks as a dedicated SkillLoaded event,
+// which the cockpit folds into the running turn as an inline "Skill loaded" card.
+// It is fed by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives, without
+// waiting for the first model token. Best-effort and informational only; the prelude
+// is NEVER replayed into client history.
+func (s *Session) emitSkillLoads(refs []backend.SkillRef) {
+	if len(refs) == 0 {
 		return
 	}
-	titles := make([]string, 0, len(sk.NewlyLoaded))
-	for _, ref := range sk.NewlyLoaded {
+	titles := make([]string, 0, len(refs))
+	for _, ref := range refs {
 		// Prefer the title; fall back to the id. A ref with NEITHER is malformed —
 		// skip it rather than surface a bare card.
 		label := strings.TrimSpace(ref.Title)

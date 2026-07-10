@@ -190,17 +190,17 @@ mode they print to the console.
 
 Behavior is steered by **skills** — short procedural runbooks — but selection and
 injection are **server-owned**. The Daintree backend's selector classifies the
-conversation, picks the relevant runbook(s) for the turn, injects their bodies (plus a
-synthetic `skill__load` exchange so the model observes the load) into the prompt *before*
-generation, and returns a `skills` block + an opaque signed `state` token in the first
-SSE `meta` event. The CLI is a thin runtime: it stores+replays the opaque state token
-(the entire client-side "keep skills loaded" mechanism — the backend is stateless and
-recovers the active set from the token, not from the message history), surfaces a newly
-loaded skill as an info note, and keeps two local run-tracking tools — `skill.run.get`
-and `skill.step.advance`. There is **no** local skill catalog and no
-`skill.find`/`skill.load`. Skills never narrow the toolset. Authoring lives in
-`../assistant-backend`. See [`docs/SKILLS.md`](docs/SKILLS.md) and
-[`docs/BACKEND.md`](docs/BACKEND.md).
+conversation, picks the relevant runbook(s) for the turn, and injects their bodies into
+the prompt before generation. It returns a `skills` block + an opaque signed `state`
+token in the first SSE `meta` event, flushed before the upstream model connects. The CLI
+immediately surfaces de-duplicated `newly_loaded` refs as skill cards and stores+replays
+the opaque state token (including on a full-request retry, so the already-visible
+selection is reused). This is the entire client-side "keep skills loaded" mechanism —
+the backend is stateless and recovers the active set from the token, not from the message
+history. The CLI also keeps two local run-tracking tools — `skill.run.get` and
+`skill.step.advance`. There is **no** local skill catalog and no `skill.find`/`skill.load`.
+Skills never narrow the toolset. Authoring lives in `../assistant-backend`. See
+[`docs/SKILLS.md`](docs/SKILLS.md) and [`docs/BACKEND.md`](docs/BACKEND.md).
 
 ## Tools the model can call
 
