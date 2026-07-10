@@ -164,6 +164,36 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 				}
 				runtime["mcp"] = mcp
 			}
+			// The open-terminal roster the model reasons over this round is inert runtime
+			// data, but it is EXACTLY what "the model thought terminal X was closed / still
+			// asking a question" archaeology needs — and Daintree's terminal.list can return
+			// an inconsistent subset across calls, so the roster the model actually SAW must
+			// be recoverable straight from the log, not guessed at or re-derived after the
+			// fact. Log a compact, bounded projection: count + per-terminal id, agent, state,
+			// waiting reason and exit code. Metadata only — never terminal output.
+			if n := len(rc.OpenTerminals); n > 0 {
+				runtime["openTerminalCount"] = n
+				const maxRosterEntries = 24
+				shown := min(n, maxRosterEntries)
+				terms := make([]map[string]any, 0, shown)
+				for _, t := range rc.OpenTerminals[:shown] {
+					entry := map[string]any{"id": t.ID}
+					if t.AgentID != "" {
+						entry["agentId"] = t.AgentID
+					}
+					if t.AgentState != "" {
+						entry["agentState"] = t.AgentState
+					}
+					if t.WaitingReason != "" {
+						entry["waitingReason"] = t.WaitingReason
+					}
+					if t.ExitCode != nil {
+						entry["exitCode"] = *t.ExitCode
+					}
+					terms = append(terms, entry)
+				}
+				runtime["openTerminals"] = terms
+			}
 			fields["runtime"] = runtime
 		}
 		if tc := req.Turn; tc != nil {
