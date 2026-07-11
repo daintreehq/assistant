@@ -307,13 +307,19 @@ func lastLines(s string, n int) string {
 }
 
 // liveCellsView renders the transcript cells still LIVE in the footer (the active
-// turn + any sealed cell still draining this frame). Sealed cells leave the footer
-// the frame their commit acks (committed cursor advances).
+// turn + any sealed cell not yet claimed by a commit). A sealed cell leaves the
+// footer the frame its commit is SELECTED (queue.inFlightCell), not when the ack
+// lands: the footer must shrink and flush BEFORE the commit's Printlns run, so the
+// insertAboves re-pin the shortened footer to the terminal's bottom row instead of
+// stranding it above dead scroll area (see scrollbackQueue.inFlightCell).
 func (m Model) liveCellsView(w int) string {
 	cw := m.contentW()
 	start := m.queue.liveStart(len(m.transcript))
 	var parts []string
 	for i := start; i < len(m.transcript); i++ {
+		if m.queue.inFlight && i == m.queue.inFlightCell {
+			continue // committing: already rendered as an immutable block, mid-print
+		}
 		cell := m.transcript[i]
 		var s string
 		switch {

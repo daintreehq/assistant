@@ -46,7 +46,25 @@ type scrollbackQueue struct {
 	committed  int  // # of transcript cells (from the front) now in scrollback
 	resetKey   int  // clearNonce + redrawNonce; a change re-arms the cursor + header
 	inFlight   bool // a commit is awaiting its ack
-	gen        int  // commit generation (#4); bumped on every reset, stamped on each block
+	// inFlightCell is the transcript index of the cell whose commit is in flight, or -1
+	// (none, or the masthead). The live View drops this cell the moment it is SELECTED —
+	// not when its ack lands — so the footer shrinks BEFORE the barrier's Printlns run.
+	// Order matters for the host viewport: ultraviolet repaints a shrunken inline view
+	// top-anchored (old origin, erase below), which strands the footer above dead blank
+	// rows; a subsequent insertAbove slides the view back down onto the terminal's
+	// bottom row. Shrink-then-print therefore re-pins the composer at the bottom, while
+	// print-then-shrink (the old ack-time drop) left it stranded above dead scroll area
+	// after every turn (the 2026-07-11 "extra scroll area below the composer" report).
+	inFlightCell int
+	gen          int // commit generation (#4); bumped on every reset, stamped on each block
+}
+
+// release clears the in-flight claim (and the live-View cell drop that rides it).
+// Every path that abandons or completes a commit must go through this so the two
+// fields can never desync.
+func (q *scrollbackQueue) release() {
+	q.inFlight = false
+	q.inFlightCell = -1
 }
 
 // applyResetKey re-arms the queue when the reset key changes (a /clear or resize
@@ -66,7 +84,7 @@ func (q *scrollbackQueue) applyResetKey(key int) {
 		q.committed = 0
 		q.headerDone = false
 		q.gen++
-		q.inFlight = false // the prior in-flight ack is now stale (wrong gen) → ignored
+		q.release() // the prior in-flight ack is now stale (wrong gen) → ignored
 	}
 }
 
@@ -107,6 +125,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := headerBlock()
 		blk.Gen = q.gen
 		q.inFlight = true
+		q.inFlightCell = -1 // the masthead is not a transcript cell — nothing leaves the footer
 		return commitCmd(blk, selectionBound)
 	}
 	// 2. Sealed transcript cells in index order from the cursor.
@@ -119,6 +138,10 @@ func (q *scrollbackQueue) nextCommit(
 		blk := sealedBlock(i)
 		blk.Gen = q.gen
 		q.inFlight = true
+		// Drop the cell from the live View NOW (liveCellsView skips inFlightCell): the
+		// footer shrink flushes during the render barrier, and the Printlns that follow
+		// re-pin the shortened footer to the terminal's bottom row (see the field doc).
+		q.inFlightCell = i
 		return commitCmd(blk, selectionBound)
 	}
 	return nil
@@ -137,7 +160,7 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 	if gen != q.gen {
 		return // stale ack from a pre-reset commit — drop it
 	}
-	q.inFlight = false
+	q.release()
 	if id == headerID {
 		q.headerDone = true
 		return
@@ -154,15 +177,18 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 // resize state. Splitting barrier from print prevents a delayed stale command from
 // landing after /clear or a resize reset.
 func commitCmd(blk ScrollbackBlock, selectionBound int) tea.Cmd {
-	// Bubble Tea's renderer is ticker-flushed. Without a barrier, a cell can be appended
-	// to View, printed above the program, and acked (therefore removed from View) before
-	// even ONE renderer tick. The final View then equals the pre-cell View, so Bubble Tea
-	// skips its redraw even though insertAbove physically moved/erased the footer. The
-	// symptom is the whole composer disappearing until a keypress changes the View.
+	// Bubble Tea's renderer is ticker-flushed. Without a barrier, a commit's Printlns
+	// would execute against a renderer cell buffer that has not yet caught up with the
+	// selection-time View change (the committing cell just left the footer —
+	// scrollbackQueue.inFlightCell), and insertAbove's geometry desyncs against the
+	// stale, taller frame. The boot-time variant of that desync erased the whole
+	// composer until a keypress (the 2026-07-10 MCP-note regression).
 	//
-	// Hold the print command for several renderer ticks first. That lets the live View
-	// containing this immutable cell become lastView; after Println + ack remove the cell,
-	// the View is observably different and Bubble Tea deterministically repaints the footer.
+	// Hold the print command for several renderer ticks first. That lets the SHORT
+	// footer — without the committing cell — flush to the terminal; the Printlns then
+	// land above it and slide it back onto the terminal's bottom row (insertAbove
+	// consumes the rows the shrink left behind), so no dead scroll area survives below
+	// the composer after the commit.
 	//
 	// Geometry across the barrier: the live footer can CHANGE while the barrier waits
 	// (typed/pasted composer lines, a question/approval card appearing or closing, an

@@ -512,6 +512,9 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	m.dashboard.Inbox = nil
 	m.clearNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
+	// Stale footer-debt must not survive the wipe, and a validated re-pin tick must
+	// not print blank rows over the fresh screen (repin.go).
+	m.resetRepinLedger()
 	// The "conversation cleared" confirmation card.
 	m.transcript = append(m.transcript, TranscriptCell{Command: &CommandCell{
 		ID: domain.NewID("cmd_"), Title: title, Text: text, Ts: domain.NowMS(),
@@ -1111,6 +1114,9 @@ func (m Model) nuclearRedraw() (tea.Model, tea.Cmd) {
 	m.redrawNonce++
 	m.queue.applyResetKey(m.clearNonce + m.redrawNonce)
 	m.resetFlushState()
+	// The wipe + replay re-lays the footer wholesale; drop ledger state and invalidate
+	// any in-flight re-pin barrier so it can't print blanks into the replay (repin.go).
+	m.resetRepinLedger()
 	// A resize changes the View dimensions, so the renderer's cell buffer is sized to
 	// the OLD geometry until it re-flushes. Recommitting the masthead immediately would
 	// tea.Println it at that stale height and wipe the footer (charmbracelet/bubbletea

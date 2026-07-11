@@ -241,27 +241,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// belonged to this barrier, and holding it with no print (and no ack) coming
 		// would stall the queue forever if no reset ever bumped the generation.
 		if !m.commitArmed || m.redrawPending {
-			m.queue.inFlight = false
+			m.queue.release()
 			return m, nil
 		}
-		// Still live: the delay has let the View containing this cell reach Bubble
-		// Tea's lastView, so Println+ack will force a real footer repaint when the
-		// cell leaves View. Chunk to the SMALLER of the print-time measurement and
-		// the selection-time cap: a fresh measurement catches a footer that GREW
-		// during the barrier, the cap catches one that just SHRANK (the renderer's
-		// cell buffer can still hold the taller footer — see commitCmd). Either
-		// stale direction alone would let insertAbove clamp and wipe the footer
+		// Still live: the barrier has let the footer WITHOUT this cell (dropped from
+		// the live View at selection — scrollbackQueue.inFlightCell) flush to the
+		// terminal, so the Printlns land above the already-short footer and slide it
+		// back onto the terminal's bottom row. Chunk to the SMALLER of the print-time
+		// measurement and the selection-time cap: a fresh measurement catches a footer
+		// that GREW during the barrier, the cap catches one that just SHRANK (the
+		// renderer's cell buffer can still hold the taller footer — see commitCmd).
+		// Either stale direction alone would let insertAbove clamp and wipe the footer
 		// (#1613). The cap is >0 whenever it came from a real selection; guard it
 		// so a zero value can never floor the bound to a no-op.
 		bound := m.scrollbackChunkRows()
 		if msg.SelectionBound > 0 && msg.SelectionBound < bound {
 			bound = msg.SelectionBound
 		}
+		// Credit this print's rows to the footer-debt ledger (repin.go): the insertAbove
+		// slides the footer over that many of the dead rows the selection-time shrink
+		// left behind, and the ledger must not heal them a second time when the shrink
+		// itself is observed at the ack.
+		text := msg.Block.Rendered
+		if text == "" {
+			text = msg.Block.Plain
+		}
+		m.creditRepinRows(lineCount(text))
 		return m, printCommitCmd(msg.Block, bound)
 
 	case ScrollbackCommittedMsg:
 		m.queue.ack(msg.ID, msg.Gen, len(m.transcript))
 		return m.afterStateChange(nil)
+
+	case footerRepinMsg:
+		return m.onFooterRepin(msg)
 
 	case RedrawMsg:
 		return m.onRedraw(msg)
@@ -523,7 +536,10 @@ func (m Model) afterStateChange(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	// on headerDone). Emitting the flush in the SAME batch is fine: tea.Println preserves
 	// emit order, and the queue's masthead commit is enqueued first here.
 	flush := m.flushActiveTurn()
-	return m, tea.Batch(extra, commit, flush, spin)
+	// Reconcile the footer re-pin ledger LAST (after the commit selection, so a fresh
+	// in-flight claim defers healing to that commit's own print — see repin.go).
+	repin := m.scheduleFooterRepin()
+	return m, tea.Batch(extra, commit, flush, spin, repin)
 }
 
 // ensureSpinnerForState starts the ~10fps spinner tick when a turn is in flight and the

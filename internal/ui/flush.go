@@ -209,6 +209,11 @@ func (m *Model) flushActiveTurn() tea.Cmd {
 		return nil
 	}
 	chunk := indentLines(strings.Join(final[start:target], "\n"), LeftPad)
+	// Credit the ledger (repin.go): these rows leave the live tail on the very next
+	// render, and this print slides the footer over that shrink physically — without
+	// the credit, a stream pause right after a settle would heal the same rows AGAIN
+	// with blank lines mid-turn.
+	m.creditRepinRows(lineCount(chunk))
 	// Commit in viewport-sized slices: a SINGLE tea.Println taller than the screen
 	// corrupts the inline render (see scrollbackChunkRows + splitRowChunks). A large
 	// PASTE makes the YOU card hundreds of rows, so this is the one place an immutable

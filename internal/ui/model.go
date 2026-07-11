@@ -126,6 +126,18 @@ type Model struct {
 	// tea.Println safe even when the footer grew tall to hold a withheld block (bubbletea#1613). nil
 	// in headless tests (which never call View); scrollbackChunkRows falls back to the static bound.
 	footerRows *int
+	// Footer re-pin ledger (repin.go): rows the RENDERED footer has shrunk that no print
+	// has slid the view back down over yet. footerPrevRows is the last height the ledger
+	// reconciled against; repinCredit is rows our own insertAboves (commit prints, turn
+	// flushes) have laid down but whose matching rendered shrink has not been observed
+	// yet; repinPending/repinNonce arm at most ONE live re-pin barrier; repinArmedRows
+	// is the footer height the pending barrier was armed against (a change re-arms).
+	footerDebt     int
+	footerPrevRows int
+	repinCredit    int
+	repinPending   bool
+	repinNonce     int
+	repinArmedRows int
 
 	// work serialization.
 	inFlight   bool   // exactly one Session.Send outstanding
