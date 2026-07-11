@@ -12,13 +12,15 @@ import (
 // commitCmd → Update's scrollbackCommitReadyMsg → printCommitCmd) against the two ways
 // the 60ms barrier window can go wrong:
 //
-//  1. GEOMETRY GOING STALE ACROSS THE BARRIER. The live footer can grow while the
-//     barrier waits (a paste wrapping the composer, a question/approval card, an
-//     attention note). A chunk bound frozen at SELECTION time can then exceed the rows
-//     above the now-taller footer, and Bubble Tea's insertAbove CursorUp clamps at the
-//     viewport top — freezing a copy of the footer into scrollback and erasing the live
-//     one (#1613). The intermittent "footer flashes and disappears" bug. The bound must
-//     be measured at PRINT time.
+//  1. GEOMETRY GOING STALE ACROSS THE BARRIER. The live footer can change while the
+//     barrier waits (a paste wrapping the composer, a question/approval card appearing
+//     or closing, an attention note). A chunk taller than the rows above the footer at
+//     print time makes Bubble Tea's insertAbove CursorUp clamp at the viewport top —
+//     freezing a copy of the footer into scrollback and erasing the live one (#1613).
+//     The intermittent "footer flashes and disappears" bug. Neither endpoint alone is
+//     safe (growth invalidates the selection-time bound; shrink invalidates a fresh
+//     print-time bound, because the renderer's cell buffer still holds the tall
+//     footer), so the print chunks to min(selection bound, print-time bound).
 //
 //  2. A DROPPED BARRIER STRANDING THE QUEUE. When the barrier closes inside a resize's
 //     disarm window its print must not land — but the queue's in-flight claim belonged
@@ -52,34 +54,47 @@ func flattenCmd(t *testing.T, cmd tea.Cmd) []tea.Msg {
 	return []tea.Msg{msg}
 }
 
-// TestCommitBarrier_ChunkBoundMeasuredAtPrintTime is the regression for the intermittent
-// disappearing footer: the footer grows during the barrier window, and the print must
-// chunk against the GROWN footer, not the height frozen when the block was selected.
-func TestCommitBarrier_ChunkBoundMeasuredAtPrintTime(t *testing.T) {
+// runBarrierPrint drives the REAL commit chain for one tall sealed block: selection via
+// scheduleCommit (which stamps the selection-time bound into the barrier), the barrier
+// tick, an optional footer mutation while the barrier waits, then the ready message
+// through the real Update. It returns the number of chunk Printlns the print emitted.
+func runBarrierPrint(t *testing.T, footerAtSelection, footerAtPrint int, rendered string) int {
+	t.Helper()
 	m := testModel(100) // rows = 40
 	m.footerRows = new(int)
 	m.commitArmed = true
 	m.queue.headerDone = true
-	m.queue.inFlight = true
+	m.transcript = []TranscriptCell{
+		{Note: &NoteCell{ID: "note_1", Level: NoteInfo, Text: "sealed"}},
+	}
+	*m.footerRows = footerAtSelection
 
-	// A 30-row immutable block, pre-wrapped like every committed render.
-	tall := strings.TrimRight(strings.Repeat("row\n", 30), "\n")
-	blk := ScrollbackBlock{ID: "note_1", Kind: BlockNote, Rendered: tall, Gen: m.queue.gen}
-
-	// Selection-time geometry: a short footer, under which the whole block fits ONE
-	// Println. If the stale bound were reused at print time, one over-tall insertAbove
-	// would clamp and wipe the footer.
-	*m.footerRows = 3
-	if staleBound := m.scrollbackChunkRows(); len(splitRowChunks(tall, staleBound)) != 1 {
-		t.Fatalf("setup: block must fit one chunk at selection-time geometry (bound %d)", staleBound)
+	// SELECTION under the selection-time footer, exactly as scheduleCommit does it —
+	// same queue call, same selection-bound stamp — but with a pinned block render so
+	// the expected chunk counts are exact regardless of note styling.
+	barrier := m.queue.nextCommit(
+		m.transcript,
+		func(int) ScrollbackBlock { return ScrollbackBlock{ID: "note_1", Kind: BlockNote, Rendered: rendered} },
+		m.headerBlock,
+		m.scrollbackChunkRows(),
+	)
+	if barrier == nil || !m.queue.inFlight {
+		t.Fatal("selection must claim the queue and return the barrier")
+	}
+	msgs := flattenCmd(t, barrier) // waits out the real render barrier tick
+	if len(msgs) != 1 {
+		t.Fatalf("barrier yielded %d messages, want exactly the ready message", len(msgs))
+	}
+	ready, ok := msgs[0].(scrollbackCommitReadyMsg)
+	if !ok {
+		t.Fatalf("barrier produced %T, want scrollbackCommitReadyMsg", msgs[0])
 	}
 
-	// The footer GROWS while the barrier waits.
-	*m.footerRows = 30
+	// The footer mutates while the barrier waits.
+	*m.footerRows = footerAtPrint
 
-	next, cmd := m.Update(scrollbackCommitReadyMsg{Block: blk})
-	nm, ok := next.(Model)
-	if !ok {
+	next, cmd := m.Update(ready)
+	if _, ok := next.(Model); !ok {
 		t.Fatalf("Update returned %T, want ui.Model", next)
 	}
 	if cmd == nil {
@@ -93,19 +108,40 @@ func TestCommitBarrier_ChunkBoundMeasuredAtPrintTime(t *testing.T) {
 	if !ok {
 		t.Fatalf("last message = %T, want the ScrollbackCommittedMsg ack", leafs[len(leafs)-1])
 	}
-	if ack.ID != blk.ID || ack.Gen != blk.Gen {
-		t.Fatalf("ack = %+v, want id %q gen %d", ack, blk.ID, blk.Gen)
+	if ack.ID != "note_1" || ack.Gen != ready.Block.Gen {
+		t.Fatalf("ack = %+v, want id note_1 gen %d", ack, ready.Block.Gen)
 	}
+	return len(leafs) - 1
+}
 
-	prints := len(leafs) - 1
-	printBound := nm.scrollbackChunkRows() // rows(40) - (footer 30 + 1) = 9
-	want := len(splitRowChunks(tall, printBound))
-	if want < 2 {
-		t.Fatalf("setup: the grown footer must force multiple chunks (bound %d)", printBound)
+// TestCommitBarrier_FooterGrowsDuringBarrier is the regression for the intermittent
+// disappearing footer: the footer GROWS during the barrier window (a paste, a question
+// or approval card, an attention note), and the print must chunk against the grown
+// footer — a bound frozen at selection time would emit one over-tall insertAbove, whose
+// CursorUp clamp freezes a copy of the footer into scrollback and erases the live one.
+func TestCommitBarrier_FooterGrowsDuringBarrier(t *testing.T) {
+	tall := strings.TrimRight(strings.Repeat("row\n", 30), "\n")
+	// Selection: footer 3 → bound 36, the block fits ONE chunk (the unsafe stale count).
+	// Print: footer 30 → bound 9 → min(36, 9) = 9 → ceil(30/9) = 4 chunks.
+	prints := runBarrierPrint(t, 3, 30, tall)
+	if prints != 4 {
+		t.Fatalf("printed %d chunks, want 4 — the bound must be re-measured at PRINT time, not frozen at selection (stale bound would print 1 over-tall chunk)", prints)
 	}
-	if prints != want {
-		t.Fatalf("printed %d chunks, want %d — the chunk bound must be measured at PRINT time (footer now %d rows), not frozen at selection time",
-			prints, want, *m.footerRows)
+}
+
+// TestCommitBarrier_FooterShrinksDuringBarrier is the mirror regression: the footer
+// SHRINKS during the barrier window (a question card closes). footerRows updates the
+// instant View() is written, but Bubble Tea's renderer keeps the TALLER footer in its
+// cell buffer until the next ticker flush — and insertAbove uses the buffer's height.
+// A print-time-only measurement would trust the new short footer and emit one over-tall
+// chunk into a screen still holding the tall one. The selection-time bound must cap it.
+func TestCommitBarrier_FooterShrinksDuringBarrier(t *testing.T) {
+	tall := strings.TrimRight(strings.Repeat("row\n", 30), "\n")
+	// Selection: footer 30 → bound 9. Print: footer 3 → fresh bound 36; min(9, 36) = 9
+	// → 4 chunks, each safe under EITHER footer height.
+	prints := runBarrierPrint(t, 30, 3, tall)
+	if prints != 4 {
+		t.Fatalf("printed %d chunks, want 4 — the selection-time bound must cap a print-time measurement taken after the footer shrank (fresh-only bound would print 1 over-tall chunk)", prints)
 	}
 }
 

@@ -89,13 +89,15 @@ func (q *scrollbackQueue) liveStart(n int) int {
 //
 // Commit order: masthead first, then sealed transcript cells in index order
 // from the committed cursor forward. A cell is eligible only when isSealed.
-// The Println chunk bound (Model.scrollbackChunkRows) is deliberately NOT captured
-// here: the print fires after the render barrier (commitCmd), so the geometry must
-// be measured at PRINT time in Update, never frozen at selection time.
+// selectionBound is the Println chunk bound (Model.scrollbackChunkRows) measured at
+// SELECTION time. It rides the barrier as a conservative CAP only — the print fires
+// after the render barrier (commitCmd), so Update re-measures the geometry at PRINT
+// time and chunks to the SMALLER of the two (see the scrollbackCommitReadyMsg case).
 func (q *scrollbackQueue) nextCommit(
 	cells []TranscriptCell,
 	sealedBlock func(i int) ScrollbackBlock,
 	headerBlock func() ScrollbackBlock,
+	selectionBound int,
 ) tea.Cmd {
 	if q.inFlight {
 		return nil
@@ -105,7 +107,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := headerBlock()
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk)
+		return commitCmd(blk, selectionBound)
 	}
 	// 2. Sealed transcript cells in index order from the cursor.
 	for i := q.liveStart(len(cells)); i < len(cells); i++ {
@@ -117,7 +119,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := sealedBlock(i)
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk)
+		return commitCmd(blk, selectionBound)
 	}
 	return nil
 }
@@ -151,7 +153,7 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 // scrollbackCommitReadyMsg handler, after it re-validates the queue generation and
 // resize state. Splitting barrier from print prevents a delayed stale command from
 // landing after /clear or a resize reset.
-func commitCmd(blk ScrollbackBlock) tea.Cmd {
+func commitCmd(blk ScrollbackBlock, selectionBound int) tea.Cmd {
 	// Bubble Tea's renderer is ticker-flushed. Without a barrier, a cell can be appended
 	// to View, printed above the program, and acked (therefore removed from View) before
 	// even ONE renderer tick. The final View then equals the pre-cell View, so Bubble Tea
@@ -162,14 +164,21 @@ func commitCmd(blk ScrollbackBlock) tea.Cmd {
 	// containing this immutable cell become lastView; after Println + ack remove the cell,
 	// the View is observably different and Bubble Tea deterministically repaints the footer.
 	//
-	// The message carries ONLY the immutable block. Geometry (the chunk row bound) must
-	// NOT ride along: the live footer can grow while the barrier waits (typed/pasted
-	// composer lines, a question or approval card, an attention note), and a chunk sized
-	// against the pre-barrier footer can then exceed the rows above the taller footer —
-	// insertAbove's CursorUp clamps and freezes a copy of the footer into scrollback
-	// (#1613). Update re-measures scrollbackChunkRows when the barrier closes.
+	// Geometry across the barrier: the live footer can CHANGE while the barrier waits
+	// (typed/pasted composer lines, a question/approval card appearing or closing, an
+	// attention note), and a chunk taller than the rows above the footer at print time
+	// makes insertAbove's CursorUp clamp — freezing a copy of the footer into scrollback
+	// (#1613). Neither endpoint alone is safe: a bound frozen at SELECTION time misses a
+	// footer that GREW during the barrier, while a fresh PRINT-time measurement misses a
+	// footer that just SHRANK (footerRows updates on View() write, but the renderer's
+	// cell buffer keeps the taller footer until its next ticker flush — insertAbove uses
+	// the buffer's height). So the selection-time bound rides along as a CAP and Update
+	// chunks to min(selectionBound, print-time bound): growth is caught by the fresh
+	// measurement, shrink by this cap. (The residual sub-frame window — the footer
+	// mutating between Update's measurement and the Println's execution — is the same
+	// one-frame lag the +1 reserve margin in scrollbackChunkRows absorbs.)
 	return tea.Tick(rendererSettleDelay, func(time.Time) tea.Msg {
-		return scrollbackCommitReadyMsg{Block: blk}
+		return scrollbackCommitReadyMsg{Block: blk, SelectionBound: selectionBound}
 	})
 }
 
@@ -190,8 +199,11 @@ func printCommitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 }
 
 // scrollbackCommitReadyMsg closes the renderer barrier. Block is the immutable render
-// captured when the queue head was selected; Update checks its generation before print
-// and measures the chunk bound fresh (never a value frozen at selection time).
+// captured when the queue head was selected. SelectionBound is the chunk bound measured
+// at selection time — a conservative cap folded into the print-time measurement via
+// min() (see commitCmd), never the sole source. Update checks the block's generation
+// before printing.
 type scrollbackCommitReadyMsg struct {
-	Block ScrollbackBlock
+	Block          ScrollbackBlock
+	SelectionBound int
 }

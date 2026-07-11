@@ -205,7 +205,7 @@ func TestScrollback_StaleAckAfterResetIgnored(t *testing.T) {
 	sealed := func(i int) ScrollbackBlock { return ScrollbackBlock{ID: cells[i].ID()} }
 
 	// Commit the masthead at gen 0 (it goes in flight, carrying gen 0).
-	if q.nextCommit(cells, sealed, header) == nil {
+	if q.nextCommit(cells, sealed, header, 80) == nil {
 		t.Fatal("expected a masthead commit")
 	}
 	staleGen := q.gen
@@ -224,7 +224,7 @@ func TestScrollback_StaleAckAfterResetIgnored(t *testing.T) {
 	}
 
 	// The masthead still commits fresh under the new generation, and its ack lands.
-	cmd := q.nextCommit(cells, sealed, header)
+	cmd := q.nextCommit(cells, sealed, header, 80)
 	if cmd == nil {
 		t.Fatal("the masthead must recommit after the reset")
 	}

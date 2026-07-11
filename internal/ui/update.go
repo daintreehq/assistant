@@ -246,10 +246,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Still live: the delay has let the View containing this cell reach Bubble
 		// Tea's lastView, so Println+ack will force a real footer repaint when the
-		// cell leaves View. Measure the chunk bound NOW — the footer may have grown
-		// while the barrier waited, and a bound frozen at selection time could exceed
-		// the rows above the current footer (insertAbove clamp, #1613).
-		return m, printCommitCmd(msg.Block, m.scrollbackChunkRows())
+		// cell leaves View. Chunk to the SMALLER of the print-time measurement and
+		// the selection-time cap: a fresh measurement catches a footer that GREW
+		// during the barrier, the cap catches one that just SHRANK (the renderer's
+		// cell buffer can still hold the taller footer — see commitCmd). Either
+		// stale direction alone would let insertAbove clamp and wipe the footer
+		// (#1613). The cap is >0 whenever it came from a real selection; guard it
+		// so a zero value can never floor the bound to a no-op.
+		bound := m.scrollbackChunkRows()
+		if msg.SelectionBound > 0 && msg.SelectionBound < bound {
+			bound = msg.SelectionBound
+		}
+		return m, printCommitCmd(msg.Block, bound)
 
 	case ScrollbackCommittedMsg:
 		m.queue.ack(msg.ID, msg.Gen, len(m.transcript))
@@ -550,7 +558,7 @@ func (m *Model) scheduleCommit() tea.Cmd {
 	if !m.commitArmed {
 		return nil
 	}
-	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock)
+	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock, m.scrollbackChunkRows())
 }
 
 // finishBootIfReady flips booting off ONCE all three boot gates are satisfied
