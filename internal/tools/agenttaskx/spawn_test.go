@@ -30,12 +30,18 @@ type scriptMCP struct {
 	worktreeList MCPCallResult // worktree.list response; zero value ⇒ fail-open roster
 	onLaunch     func()
 	calls        []recordedCall
+	// listCtxErrs records ctx.Err() at each terminal.list call, so a test can prove
+	// a reconcile read ran on a LIVE (detached) ctx even after the turn's ctx died.
+	listCtxErrs []error
 }
 
 func (m *scriptMCP) Connected() bool { return m.connected }
 
-func (m *scriptMCP) CallTool(_ context.Context, name string, args map[string]any) (MCPCallResult, error) {
+func (m *scriptMCP) CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error) {
 	m.calls = append(m.calls, recordedCall{name: name, args: args})
+	if name == "terminal.list" {
+		m.listCtxErrs = append(m.listCtxErrs, ctx.Err())
+	}
 	switch name {
 	case "agent.launch":
 		if m.onLaunch != nil {

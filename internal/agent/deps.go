@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -54,6 +55,21 @@ type ToolRunner interface {
 // simply keep the fully-serial path, so serial-ordering tests are unaffected.
 type parallelSafeRunner interface {
 	ParallelSafe(name string) bool
+}
+
+// parallelMutationRunner is the second OPTIONAL concurrency capability: it lets the
+// batch loop dispatch a bounded cohort of consecutive SAME-NAME mutating calls
+// concurrently (the spawn fan-out — N independent agentTask.spawnForEdits in one
+// batch). ParallelMutationSafe must return true only when a call of that tool is
+// ALREADY fully authorized (interactive main actor + tier allows + auto-approve) —
+// grouping must never create a confirmation prompt or consume a grant concurrently.
+// ParallelConflictKey classifies per-call independence: each returned key names a
+// conflict dimension, two calls sharing ANY key stay serial; ok=false keeps a call
+// out of any cohort. Test fakes that implement neither capability keep the
+// fully-serial path.
+type parallelMutationRunner interface {
+	ParallelMutationSafe(name string) bool
+	ParallelConflictKey(name string, args json.RawMessage) (keys []string, ok bool)
 }
 
 // TurnContext carries the per-turn fields the ToolRunner stamps onto each call's

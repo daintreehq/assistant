@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +20,14 @@ import (
 // peers that will never arrive). maxInFlight is the peak concurrency observed. All
 // shared state is mutex/Once-guarded so the fake is race-clean under `go test -race`.
 type parallelFakeTools struct {
-	parallelNames map[string]bool    // internal names classified read-only (ParallelSafe)
+	parallelNames map[string]bool // internal names classified read-only (ParallelSafe)
+	// mutationNames are the internal names classified as pre-authorized homogeneous
+	// mutations (ParallelMutationSafe); conflictKey is the optional per-call
+	// independence classifier (nil ⇒ every call independent). The fake always
+	// implements parallelMutationRunner — an empty mutationNames map keeps every
+	// mutating call on the serial path, mirroring a tool without the opt-in.
+	mutationNames map[string]bool
+	conflictKey   func(name string, args json.RawMessage) ([]string, bool)
 	expect        int                // barrier size: releases once this many reads overlap
 	failWith      *domain.ToolResult // when set, every dispatch returns this (else Ok)
 
@@ -36,6 +44,14 @@ type parallelFakeTools struct {
 func (t *parallelFakeTools) OpenAITools([]string) ([]models.ChatTool, error) { return nil, nil }
 func (t *parallelFakeTools) ResolveWireName(w string) string                 { return strings.ReplaceAll(w, "__", ".") }
 func (t *parallelFakeTools) ParallelSafe(name string) bool                   { return t.parallelNames[name] }
+func (t *parallelFakeTools) ParallelMutationSafe(name string) bool           { return t.mutationNames[name] }
+
+func (t *parallelFakeTools) ParallelConflictKey(name string, args json.RawMessage) ([]string, bool) {
+	if t.conflictKey != nil {
+		return t.conflictKey(name, args)
+	}
+	return nil, true
+}
 
 func (t *parallelFakeTools) resultFor(name string) domain.ToolResult {
 	if t.failWith != nil {
@@ -48,9 +64,9 @@ func (t *parallelFakeTools) Dispatch(ctx context.Context, name, args string, tur
 	t.mu.Lock()
 	t.dispatched++
 	t.seen = append(t.seen, name)
-	// A serial (non-parallel-safe) call returns straight away: it runs alone, so waiting
+	// A serial (non-groupable) call returns straight away: it runs alone, so waiting
 	// for `expect` peers would deadlock.
-	if !t.parallelNames[name] {
+	if !t.parallelNames[name] && !t.mutationNames[name] {
 		t.mu.Unlock()
 		return t.resultFor(name)
 	}
@@ -420,5 +436,181 @@ func TestWaitBearingExtractNotParallelSafe(t *testing.T) {
 	empty := toolCall("d", "terminal__extract", `{}`)
 	if s.callParallelSafe(empty, nil) {
 		t.Error("empty args must not be parallel-safe (serial truncation/validation path)")
+	}
+}
+
+// spawnCall builds a spawn-shaped tool call for the mutation-cohort tests.
+func spawnCall(id, args string) models.ToolCallRequest {
+	return toolCall(id, "agentTask__spawnForEdits", args)
+}
+
+// TestSpawnFanOutDispatchesConcurrently is the mutation-cohort win: a batch of
+// same-name, pre-authorized, independent spawn calls runs as one concurrent cohort
+// instead of N serial ~5s launches — while the transcript still folds in call order.
+func TestSpawnFanOutDispatchesConcurrently(t *testing.T) {
+	tools := &parallelFakeTools{
+		mutationNames: map[string]bool{"agentTask.spawnForEdits": true},
+		expect:        3,
+		gate:          make(chan struct{}),
+	}
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{
+			spawnCall("a", `{"title":"one","taskPrompt":"p1"}`),
+			spawnCall("b", `{"title":"two","taskPrompt":"p2"}`),
+			spawnCall("c", `{"title":"three","taskPrompt":"p3"}`),
+		}},
+		{Content: "final"},
+	}}
+	s := NewSession(baseDeps(r, tools))
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tools.maxInFlight != 3 {
+		t.Fatalf("peak concurrent dispatch = %d, want 3 (an independent spawn fan-out must run as one cohort)", tools.maxInFlight)
+	}
+	if tools.dispatched != 3 {
+		t.Fatalf("dispatched %d calls, want 3", tools.dispatched)
+	}
+	assertToolOrder(t, s.Messages(), []string{"a", "b", "c"})
+}
+
+// TestSpawnFanOutBoundedByCohortCap proves a long spawn run dispatches as
+// successive ≤maxParallelMutationDispatch cohorts (the breaker/cancel cadence),
+// never one unbounded group.
+func TestSpawnFanOutBoundedByCohortCap(t *testing.T) {
+	nCalls := maxParallelMutationDispatch + 2
+	tools := &parallelFakeTools{
+		mutationNames: map[string]bool{"agentTask.spawnForEdits": true},
+		expect:        maxParallelMutationDispatch,
+		gate:          make(chan struct{}),
+	}
+	calls := make([]models.ToolCallRequest, nCalls)
+	for i := range calls {
+		calls[i] = spawnCall(itoa(i), `{"title":"t`+itoa(i)+`","taskPrompt":"p"}`)
+	}
+	r := &fakeRouter{results: []models.ChatResult{{ToolCalls: calls}, {Content: "final"}}}
+	s := NewSession(baseDeps(r, tools))
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tools.maxInFlight != maxParallelMutationDispatch {
+		t.Fatalf("peak concurrent dispatch = %d, want exactly %d (the mutation cohort cap)", tools.maxInFlight, maxParallelMutationDispatch)
+	}
+	if tools.dispatched != nCalls {
+		t.Fatalf("dispatched %d calls, want %d (the overflow wave must still run)", tools.dispatched, nCalls)
+	}
+}
+
+// TestSpawnDuplicateArgsSplitCohort guards the idempotency-saga race: a spawn whose
+// canonicalized args byte-match an earlier cohort member must fall out of the group
+// and run serially AFTER it, where the saga lookup sees the first insert (a clean
+// idempotent hit instead of a concurrent check-then-insert race).
+func TestSpawnDuplicateArgsSplitCohort(t *testing.T) {
+	tools := &parallelFakeTools{
+		mutationNames: map[string]bool{"agentTask.spawnForEdits": true},
+		expect:        2, // only the two distinct spawns overlap
+		gate:          make(chan struct{}),
+	}
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{
+			spawnCall("a", `{"title":"same","taskPrompt":"p"}`),
+			spawnCall("b", `{"title":"other","taskPrompt":"p"}`),
+			// Key order differs from "a" but canonicalizes identically — still a dup.
+			spawnCall("c", `{"taskPrompt":"p","title":"same"}`),
+		}},
+		{Content: "final"},
+	}}
+	s := NewSession(baseDeps(r, tools))
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tools.maxInFlight != 2 {
+		t.Fatalf("peak concurrent dispatch = %d, want 2 (the duplicate must not join the cohort)", tools.maxInFlight)
+	}
+	if tools.dispatched != 3 {
+		t.Fatalf("dispatched %d calls, want 3 (the duplicate still runs, serially)", tools.dispatched)
+	}
+	assertToolOrder(t, s.Messages(), []string{"a", "b", "c"})
+}
+
+// TestMutationRunEndBoundaries pins every cohort boundary in one place: the cap, a
+// name change, a duplicate, a conflict-key collision, a cohort-refusing call
+// (ok=false), and a tool without the opt-in.
+func TestMutationRunEndBoundaries(t *testing.T) {
+	tools := &parallelFakeTools{
+		mutationNames: map[string]bool{"agentTask.spawnForEdits": true},
+		conflictKey: func(_ string, args json.RawMessage) ([]string, bool) {
+			var m map[string]string
+			if json.Unmarshal(args, &m) != nil {
+				return nil, false
+			}
+			if m["solo"] != "" {
+				return nil, false // a call that refuses cohort membership entirely
+			}
+			if m["wt"] != "" {
+				// Two dimensions, mirroring the real spawn classifier's shape.
+				return []string{"title:" + m["title"], "wt:" + m["wt"]}, true
+			}
+			return []string{"title:" + m["title"]}, true
+		},
+	}
+	s := NewSession(baseDeps(&fakeRouter{}, tools))
+
+	// Distinct independent calls group up to the cap; the overflow starts the next cohort.
+	long := make([]models.ToolCallRequest, maxParallelMutationDispatch+2)
+	for i := range long {
+		long[i] = spawnCall(itoa(i), `{"title":"t`+itoa(i)+`"}`)
+	}
+	if e := s.mutationRunEnd(long, 0, nil); e != maxParallelMutationDispatch {
+		t.Errorf("cap: run end = %d, want %d", e, maxParallelMutationDispatch)
+	}
+
+	// A different tool name ends the cohort (homogeneous means SAME tool only).
+	mixed := []models.ToolCallRequest{
+		spawnCall("a", `{"title":"1"}`),
+		toolCall("x", "timer__create", `{"title":"2"}`),
+		spawnCall("b", `{"title":"3"}`),
+	}
+	if e := s.mutationRunEnd(mixed, 0, nil); e != 1 {
+		t.Errorf("name change: run end = %d, want 1", e)
+	}
+
+	// A collision on ANY conflict dimension ends the cohort; distinct keys coexist.
+	conf := []models.ToolCallRequest{
+		spawnCall("a", `{"title":"1","wt":"w1"}`),
+		spawnCall("b", `{"title":"2","wt":"w2"}`),
+		spawnCall("c", `{"title":"3","wt":"w1"}`), // distinct title, shared worktree
+	}
+	if e := s.mutationRunEnd(conf, 0, nil); e != 2 {
+		t.Errorf("conflict collision: run end = %d, want 2", e)
+	}
+	// The second dimension alone also conflicts: same title, distinct worktrees.
+	confTitle := []models.ToolCallRequest{
+		spawnCall("a", `{"title":"same","wt":"w1"}`),
+		spawnCall("b", `{"title":"same","wt":"w2"}`),
+	}
+	if e := s.mutationRunEnd(confTitle, 0, nil); e != 1 {
+		t.Errorf("identity collision: run end = %d, want 1", e)
+	}
+
+	// ok=false keeps the call out of any cohort — even as the leading call.
+	refuse := []models.ToolCallRequest{
+		spawnCall("a", `{"solo":"yes"}`),
+		spawnCall("b", `{"title":"2"}`),
+	}
+	if e := s.mutationRunEnd(refuse, 0, nil); e != 0 {
+		t.Errorf("cohort-refusing lead: run end = %d, want 0", e)
+	}
+
+	// A tool without the ParallelMutationSafe opt-in never forms a cohort.
+	other := []models.ToolCallRequest{
+		toolCall("x", "timer__create", `{"title":"1"}`),
+		toolCall("y", "timer__create", `{"title":"2"}`),
+	}
+	if e := s.mutationRunEnd(other, 0, nil); e != 0 {
+		t.Errorf("no opt-in: run end = %d, want 0", e)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/safety"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -299,6 +300,51 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 func (t *toolRunner) ParallelSafe(name string) bool {
 	tool := t.app.Registry.Get(name)
 	return tool != nil && tool.Parallelizable && tool.Risk == domain.RiskRead
+}
+
+// ParallelMutationSafe reports whether the named MUTATING tool may dispatch
+// concurrently with consecutive same-name batch siblings (the spawn fan-out).
+// The bar is deliberately higher than ParallelSafe: beyond the per-tool
+// ParallelHomogeneous opt-in, every member must be ALREADY fully authorized at
+// grouping time — interactive main actor, tier allows the risk, and auto-approve
+// removing the prompt. Anything that would reach dispatch's confirmation or
+// grant branch stays serial: the cockpit holds exactly ONE pending approval
+// (concurrent Confirm calls would overwrite each other's resolve channels), and
+// which concurrent call consumes a bounded grant's last use must never be
+// scheduling-dependent. The same dispatch pipeline still runs per call — this
+// gate only decides grouping, never authorization itself. Satisfies the agent's
+// optional parallelMutationRunner capability.
+func (t *toolRunner) ParallelMutationSafe(name string) bool {
+	tool := t.app.Registry.Get(name)
+	if tool == nil || !tool.ParallelHomogeneous || tool.Risk == domain.RiskRead {
+		return false
+	}
+	actor, _ := t.app.turnActor()
+	if actor != domain.ActorMain {
+		return false
+	}
+	// Snapshot under cfgMu so a concurrent /permissions tier change can't tear the
+	// read; the SAME snapshot rule dispatch itself uses (buildContext).
+	cfg := t.app.snapshotConfig()
+	decision := safety.Decide(tool.Risk, cfg.Tier)
+	if !decision.Allowed {
+		return false
+	}
+	return !decision.NeedsConfirmation || cfg.AutoApprove
+}
+
+// ParallelConflictKey resolves a call's independence classification for a
+// homogeneous-mutation cohort from the tool's own ParallelConflictKey (nil ⇒
+// freely independent). Unknown tools never join a cohort.
+func (t *toolRunner) ParallelConflictKey(name string, args json.RawMessage) ([]string, bool) {
+	tool := t.app.Registry.Get(name)
+	if tool == nil {
+		return nil, false
+	}
+	if tool.ParallelConflictKey == nil {
+		return nil, true
+	}
+	return tool.ParallelConflictKey(args)
 }
 
 // --- storeToolAdapter: tools.Store over *storage.Store ---

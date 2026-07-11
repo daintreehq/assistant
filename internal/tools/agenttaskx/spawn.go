@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -13,6 +15,11 @@ import (
 
 // SupervisorDefaultCadenceMs is the supervisor-watcher cadence.
 const supervisorDefaultCadenceMs = 3000
+
+// cancelledLaunchReconcileBudget bounds the single best-effort reconcile read made
+// after a turn cancellation landed while agent.launch was in flight — long enough
+// for one terminal.list, short enough that Escape stays responsive.
+const cancelledLaunchReconcileBudget = 3 * time.Second
 
 // agentTask error codes (model-facing).
 const (
@@ -128,13 +135,74 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		Consequence: "Opens a visible agent terminal in a worktree that can edit project files. Changes stay in the worktree until you commit them.",
 		Risk:        domain.RiskProject,
 		Schema:      spawnSchema,
-		Decode:      tools.StrictDecoder(func() any { return &spawnArgs{} }),
+		// A batch of independent spawns (the fan-out: N agents launched in one model
+		// round) dispatches as a concurrent cohort when pre-authorized — each launch
+		// is ~5s of MCP wall-clock with no ordering dependency on its siblings. The
+		// conflict key keeps same-target edit spawns serial (see below).
+		ParallelHomogeneous: true,
+		ParallelConflictKey: spawnParallelConflictKeys,
+		Decode:              tools.StrictDecoder(func() any { return &spawnArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a spawnArgs
 			_ = json.Unmarshal(raw, &a)
 			return spawn(ctx, deps, &a)
 		},
 	}
+}
+
+// spawnParallelConflictKeys classifies one spawn call's independence within a
+// concurrent cohort (tools.Tool.ParallelConflictKey), from the NORMALIZED launch
+// identity — the same defaults/derivations spawn() itself applies — never the raw
+// spelling. Two dimensions:
+//
+//   - "name:<launch name>" (every mode). The deterministic terminal name is the
+//     spawn saga's reconciliation identity (reconcileViaTerminalList matches on
+//     it), and the idempotency key embeds it — so two same-name calls could both
+//     race one saga row AND cross-bind each other's terminal when one member's
+//     launch goes ambiguous. Same name ⇒ serial. Because the name derives from
+//     (title, agentId) with defaults applied, this also collapses raw-spelling
+//     twins (omitted vs explicit agentId "claude", differing watchGoal) that the
+//     session's byte-level dedup cannot see.
+//   - "worktree:<cleaned absolute path>" (edit mode only). Edit spawns share
+//     mutable state through their worktree, and concurrent launch into one
+//     working tree is unproven server-side. Only an explicit canonical-shaped id
+//     (an absolute path — Daintree worktree ids ARE paths) can prove two edit
+//     spawns target DISTINCT worktrees: an omitted id targets the unknown active
+//     worktree, and a branch-style alias (e.g. "main") resolves to a path only
+//     via an MCP read this classifier must never make — both refuse cohort
+//     membership entirely (ok=false ⇒ serial). Explore spawns are read-only by
+//     contract, so their worktree is not a conflict dimension; an alias-spelled
+//     explore worktree still refuses cohorts so the name key above is always
+//     computed from the same value the handler will resolve and launch with.
+func spawnParallelConflictKeys(raw json.RawMessage) ([]string, bool) {
+	var a spawnArgs
+	if json.Unmarshal(raw, &a) != nil {
+		return nil, false
+	}
+	// Mirror spawn()'s own normalization so every key is a function of the
+	// identity the handler acts on, not the model's spelling.
+	agentID := strings.TrimSpace(a.AgentID)
+	if agentID == "" {
+		agentID = defaultAgentID
+	}
+	if a.Mode == "" {
+		a.Mode = "edit"
+	}
+	worktreeID := strings.TrimSpace(a.WorktreeID)
+	if worktreeID != "" {
+		if !strings.HasPrefix(worktreeID, "/") {
+			return nil, false
+		}
+		worktreeID = path.Clean(worktreeID)
+	}
+	keys := []string{"name:" + buildAgentLaunchName(a.Title, agentID)}
+	if a.Mode != "explore" {
+		if worktreeID == "" {
+			return nil, false
+		}
+		keys = append(keys, "worktree:"+worktreeID)
+	}
+	return keys, true
 }
 
 func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
@@ -300,13 +368,34 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	}
 	res, err := deps.MCP.CallTool(ctx, "agent.launch", launchArgs)
 	if err != nil {
-		// A mid-launch cancellation is CANCELLED, not an ambiguous launch.
+		// A cancellation landing while agent.launch was IN FLIGHT is not "nothing
+		// happened": the request may have reached Daintree before the client aborted,
+		// so claiming CANCELLED (as the pre-launch checks above rightly do) could be
+		// untruthful — an agent may be running right now. Treat it like the transport
+		// throw below: mark the saga ambiguous and attempt ONE bounded reconcile on a
+		// ctx DETACHED from the cancelled turn (cancel-bounded via AfterFunc, never a
+		// deadline — DeadlineExceeded degrades the MCP conn). Unresolved, the saga
+		// stays `ambiguous`, so a same-args retry reconciles with the running agent
+		// instead of double-launching.
 		if ctx.Err() != nil {
 			_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{
-				"stage": string(domain.LaunchFailed), "errorCode": codeCancelled,
-				"errorMessage": "Turn cancelled during agent launch.",
+				"stage": string(domain.LaunchAmbiguous), "errorCode": codeAgentLaunchAmbiguous,
+				"errorMessage": "Turn cancelled while agent.launch was in flight; the agent may have started.",
 			})
-			return tools.Fail(codeCancelled, "Turn cancelled during agent launch.",
+			rctx, rcancel := context.WithCancel(context.WithoutCancel(ctx))
+			defer rcancel()
+			stop := time.AfterFunc(cancelledLaunchReconcileBudget, rcancel)
+			defer stop.Stop()
+			reconciled := reconcileViaTerminalList(rctx, deps.MCP, name, agentID, worktreeID)
+			if reconciled != "" {
+				_ = deps.DB.UpdateAgentLaunch(record.ID, map[string]any{
+					"stage": string(domain.TerminalBound), "terminalId": reconciled,
+					"errorCode": nil, "errorMessage": nil,
+				})
+				return finishBoundLaunch(deps, a, &record, reconciled, worktreeID, "", "reconciled")
+			}
+			return tools.Fail(codeAgentLaunchAmbiguous,
+				fmt.Sprintf("Turn cancelled while the launch for %q was in flight, so it is unknown whether an agent started. Check Daintree's terminals; re-issuing the same spawn reconciles with a running agent instead of double-launching.", a.Title),
 				tools.WithDetails(map[string]any{"launchId": record.ID}))
 		}
 		// The transport threw — the request MAY have reached Daintree, so this is
