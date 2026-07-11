@@ -331,6 +331,136 @@ func TestGovernorBackgroundAntiStarvation(t *testing.T) {
 	relB()
 }
 
+// TestGovernorAgedBacklogCannotStarveInteractive proves the alternation guard on
+// the anti-starvation override: with the reserved slot pinned by a long
+// Interactive call and a SUSTAINED aged-Background backlog, a queued Interactive
+// waiter must be granted within two shared grants — the aged backlog may win one
+// override, but never two consecutive shared grants while Interactive waits.
+func TestGovernorAgedBacklogCannotStarveInteractive(t *testing.T) {
+	oldAge := governorStarvationAge
+	governorStarvationAge = 30 * time.Millisecond
+	defer func() { governorStarvationAge = oldAge }()
+
+	g := newGovernor(2, 0) // capTotal 2, capShared 1
+	// A long Interactive call pins the reserved slot for the whole test.
+	relLong, err := g.acquire(interactiveCtx())
+	if err != nil {
+		t.Fatalf("long interactive holder: %v", err)
+	}
+	// A Background call holds the single shared slot.
+	relShared, err := g.acquire(backgroundCtx())
+	if err != nil {
+		t.Fatalf("background holder: %v", err)
+	}
+
+	// Sustained backlog: several Background waiters queue up (they will all age
+	// past the starvation threshold), plus one Interactive waiter.
+	order := make(chan string, 8)
+	const backlog = 4
+	for i := 0; i < backlog; i++ {
+		go func() {
+			rel, err := g.acquire(backgroundCtx())
+			if err != nil {
+				t.Errorf("backlog acquire: %v", err)
+				return
+			}
+			order <- "background"
+			rel()
+		}()
+	}
+	waitFor(t, func() bool { return g.queuedCount(PriorityBackground) == backlog })
+
+	go func() {
+		rel, err := g.acquire(interactiveCtx())
+		if err != nil {
+			t.Errorf("interactive waiter: %v", err)
+			return
+		}
+		order <- "interactive"
+		rel()
+	}()
+	waitFor(t, func() bool { return g.queuedCount(PriorityInteractive) == 1 })
+
+	// Age the whole Background backlog past the threshold, then free the shared
+	// slot. Every released Background grant re-queues nothing, but each release
+	// hands the shared slot onward — the backlog stays aged throughout, so
+	// WITHOUT the alternation guard the overrides would win every shared grant
+	// and the Interactive waiter would only run after all four.
+	time.Sleep(3 * governorStarvationAge)
+	relShared()
+
+	first := <-order
+	second := <-order
+	if first != "background" {
+		t.Fatalf("first grant = %q; want the aged background override", first)
+	}
+	if second != "interactive" {
+		t.Fatalf("second grant = %q; want interactive within 2 grants (alternation guard)", second)
+	}
+	// Drain the rest.
+	for i := 0; i < backlog-1; i++ {
+		select {
+		case <-order:
+		case <-time.After(2 * time.Second):
+			t.Fatal("backlog waiter never granted")
+		}
+	}
+	relLong()
+}
+
+// TestGovernorCancelledPacingReclaimsReservation proves a paced waiter that
+// aborts before its start tick hands the reservation back: N sequential
+// cancelled paced acquires must not delay the next real acquire by more than one
+// pacing interval.
+func TestGovernorCancelledPacingReclaimsReservation(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	g := newGovernor(4, interval)
+	// Prime the pacer so every subsequent acquire owes a paced wait.
+	rel, err := g.acquire(backgroundCtx())
+	if err != nil {
+		t.Fatalf("prime acquire: %v", err)
+	}
+	rel()
+	baseline := func() time.Time {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.nextStartAt
+	}()
+
+	// N cancelled paced acquires, sequentially (each reserves a tick, sleeps,
+	// aborts). Each must reclaim its reservation.
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(backgroundCtx(), 10*time.Millisecond)
+		if _, err := g.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			t.Fatalf("cancelled paced acquire %d err = %v; want context.DeadlineExceeded", i, err)
+		}
+		cancel()
+	}
+
+	after := func() time.Time {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.nextStartAt
+	}()
+	// The pacer must not have advanced beyond one interval past where the primed
+	// baseline left it — the cancelled reservations were reclaimed.
+	if drift := after.Sub(baseline); drift > interval {
+		t.Fatalf("cancelled paced acquires advanced nextStartAt by %v; want ≤ one %v interval", drift, interval)
+	}
+
+	// And the next REAL acquire waits at most ~one interval.
+	start := time.Now()
+	rel2, err := g.acquire(backgroundCtx())
+	if err != nil {
+		t.Fatalf("post-cancel acquire: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > interval+interval/2 {
+		t.Fatalf("post-cancel acquire waited %v; want ≤ ~one %v interval", elapsed, interval)
+	}
+	rel2()
+}
+
 // TestGovernorAcquireAbortsWhileQueuedForSlot proves a caller cancelled while
 // waiting for a slot returns ctx.Err() and does not leak capacity.
 func TestGovernorAcquireAbortsWhileQueuedForSlot(t *testing.T) {

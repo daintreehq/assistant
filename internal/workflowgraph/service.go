@@ -311,6 +311,14 @@ func (s *Service) mirrorResourceLinks(g *Graph, p *Patch) {
 
 /* ---------------------------------- plan --------------------------------- */
 
+// Backend WorkflowPlanInput list caps (contracts/tasks.py: active_skill_ids
+// max_length 16, constraints max_length 25). maxPlanNotes leaves one constraint
+// slot for the mandatory local no-file-edit constraint Plan always prepends.
+const (
+	maxPlanSkillIDs = 16
+	maxPlanNotes    = 24
+)
+
 // PlanRequest is workflow.plan's input.
 type PlanRequest struct {
 	Goal               string
@@ -346,6 +354,24 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 		return PlanResult{}, fmt.Errorf("goal is required")
 	}
 
+	// Clamp the unbounded request lists to the backend's strict pydantic caps
+	// (WorkflowPlanInput: active_skill_ids ≤ 16, constraints ≤ 25 — one of which
+	// the mandatory local constraint below consumes). Head-truncate: earlier
+	// entries are the caller's highest-signal ones. A clamped input degrades
+	// gracefully where an over-cap list would 422 the whole task.
+	skillIDs := req.ActiveSkillIDs
+	if len(skillIDs) > maxPlanSkillIDs {
+		s.trace("workflow.plan.clamped", map[string]any{
+			"field": "active_skill_ids", "sent": maxPlanSkillIDs, "dropped": len(skillIDs) - maxPlanSkillIDs})
+		skillIDs = skillIDs[:maxPlanSkillIDs]
+	}
+	notes := req.Notes
+	if len(notes) > maxPlanNotes {
+		s.trace("workflow.plan.clamped", map[string]any{
+			"field": "notes", "sent": maxPlanNotes, "dropped": len(notes) - maxPlanNotes})
+		notes = notes[:maxPlanNotes]
+	}
+
 	var existing *Graph
 	var existingRevision int64
 	if req.ExistingWorkflowID != "" {
@@ -366,10 +392,10 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 	input := backend.WorkflowPlanInput{
 		Goal:           goal,
 		Scope:          strings.TrimSpace(req.Scope),
-		ActiveSkillIDs: req.ActiveSkillIDs,
+		ActiveSkillIDs: skillIDs,
 		Constraints: append([]string{
 			"the assistant must never edit project files directly — file changes go through visible agents (agentTask.spawnForEdits)",
-		}, req.Notes...),
+		}, notes...),
 	}
 	if s.deps.RuntimeSummary != nil {
 		input.RuntimeSummary = s.deps.RuntimeSummary()
@@ -546,6 +572,17 @@ func (s *Service) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcil
 	}
 	outJSON, _ := json.Marshal(out)
 	outputHash := hashPayload(string(outJSON))
+
+	// A non-null base_revision echo that disagrees with the LOCAL revision means
+	// the patch was reasoned against a stale (or replayed) snapshot: REJECT it
+	// before any dry-run/apply — a patch for revision N must never mutate
+	// revision N+1. A null echo stays allowed (the backend may omit it).
+	if out.Patch.BaseRevision != nil && *out.Patch.BaseRevision != revision {
+		verr := fmt.Errorf("patch base_revision %d does not match local revision %d",
+			*out.Patch.BaseRevision, revision)
+		finishRun("rejected", nil, outputHash, verr.Error())
+		return ReconcileResult{}, fmt.Errorf("reconcile patch rejected: %w", verr)
+	}
 
 	patch, warnings := PatchFromWire(out, g.ID, revision, s.deps.HasTool, s.now())
 

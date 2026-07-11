@@ -190,12 +190,11 @@ func (f *fakeStore) UpdateWorkflowRun(id string, patch map[string]any) error {
 }
 
 type fakeQueue struct {
-	mu          sync.Mutex
-	published   []domain.QueuePublishArgs
-	digest      []domain.QueueEvent
-	markedIDs   [][]string
-	publishErr  error
-	failDeliver bool
+	mu         sync.Mutex
+	published  []domain.QueuePublishArgs
+	digest     []domain.QueueEvent
+	markedIDs  [][]string
+	publishErr error
 	// autoDigest makes Publish land the event in the digest slice too (like the
 	// real queue), so notify() sees what a mid-tick job just published.
 	autoDigest bool
@@ -214,28 +213,56 @@ func (q *fakeQueue) Publish(args domain.QueuePublishArgs) error {
 			Severity: args.Severity,
 			Title:    args.Title,
 			Summary:  args.Summary,
+			Count:    1,
 		})
 	}
 	return q.publishErr
 }
 
+// Digest mirrors the real store's filter contract for the options notify() uses —
+// crucially it ENFORCES MaxItems (the real query LIMITs; a fake returning
+// everything would mask a notify pass that fails to drain past one page).
 func (q *fakeQueue) Digest(opts domain.QueueDigestOptions) ([]domain.QueueEvent, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	// Return only un-marked events (NotifiedIsNull semantics handled by markNotified
-	// removing them from the digest slice).
-	return append([]domain.QueueEvent(nil), q.digest...), nil
+	// The digest slice holds only un-marked events (NotifiedIsNull semantics —
+	// markNotified removes acknowledged rows).
+	var out []domain.QueueEvent
+	for _, e := range q.digest {
+		if opts.SeverityAtLeast != nil && domain.RankOf(e.Severity) < domain.RankOf(*opts.SeverityAtLeast) {
+			continue
+		}
+		out = append(out, e)
+	}
+	if opts.MaxItems != nil && *opts.MaxItems < len(out) {
+		out = out[:*opts.MaxItems]
+	}
+	return append([]domain.QueueEvent(nil), out...), nil
 }
 
-func (q *fakeQueue) MarkNotified(ids []string) error {
+// MarkNotified mirrors the daemon.Queue contract: the acknowledgement is
+// VERSION-CONDITIONAL. An event whose stored row no longer matches the digested
+// snapshot (count or updated-at changed — a publisher updated it between Digest
+// and the mark) stays in the digest for re-delivery.
+func (q *fakeQueue) MarkNotified(evs []domain.QueueEvent) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	ids := make([]string, 0, len(evs))
+	marked := map[string]bool{}
+	for _, ack := range evs {
+		for _, cur := range q.digest {
+			if cur.ID != ack.ID {
+				continue
+			}
+			if cur.Count == ack.Count && coalesceUpdated(cur) == coalesceUpdated(ack) {
+				marked[ack.ID] = true
+				ids = append(ids, ack.ID)
+			}
+			break
+		}
+	}
 	q.markedIDs = append(q.markedIDs, ids)
 	// Drop marked events from the digest so a re-poll won't re-deliver them.
-	marked := map[string]bool{}
-	for _, id := range ids {
-		marked[id] = true
-	}
 	var keep []domain.QueueEvent
 	for _, e := range q.digest {
 		if !marked[e.ID] {
@@ -244,6 +271,29 @@ func (q *fakeQueue) MarkNotified(ids []string) error {
 	}
 	q.digest = keep
 	return nil
+}
+
+// bump models a publisher's dedupe update racing the notify pass: count+1,
+// updatedAt advanced, content refreshed (the row stays unnotified).
+func (q *fakeQueue) bump(id, title, summary string, at int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := range q.digest {
+		if q.digest[i].ID == id {
+			q.digest[i].Count++
+			q.digest[i].Title = title
+			q.digest[i].Summary = summary
+			q.digest[i].UpdatedAt = &at
+			return
+		}
+	}
+}
+
+func coalesceUpdated(e domain.QueueEvent) int64 {
+	if e.UpdatedAt != nil {
+		return *e.UpdatedAt
+	}
+	return e.CreatedAt
 }
 
 type fakeMCP struct {

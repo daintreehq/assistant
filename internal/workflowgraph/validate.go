@@ -165,13 +165,19 @@ func Validate(g *Graph, opts ValidateOptions) error {
 	}
 
 	// NextAction: a recommendation must be executable — its tool must exist in
-	// the live registry. (It still carries zero authority; dispatch decides.)
+	// the live registry, and an optional node binding must name a real node.
+	// (It still carries zero authority; dispatch decides.) The ingest paths
+	// (GraphFromPlan / ApplyPatch) DROP an unknown binding before validation, so
+	// this is a backstop against locally-constructed corruption.
 	if g.NextAction != nil {
 		if strings.TrimSpace(g.NextAction.ToolName) == "" {
 			return fmt.Errorf("nextAction has an empty toolName")
 		}
 		if opts.HasTool != nil && !opts.HasTool(g.NextAction.ToolName) {
 			return fmt.Errorf("nextAction names unknown tool %q", g.NextAction.ToolName)
+		}
+		if g.NextAction.NodeID != "" && !nodeIDs[g.NextAction.NodeID] {
+			return fmt.Errorf("nextAction references unknown node %q", g.NextAction.NodeID)
 		}
 	}
 

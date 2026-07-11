@@ -100,6 +100,10 @@ func (h *hostAppAdapter) StartScheduler(onAttention func(events []domain.QueueEv
 	h.app.StartScheduler(h.ctx, onAttention)
 }
 
+func (h *hostAppAdapter) RearmAttention(ids []string) error {
+	return h.app.RearmAttention(ids)
+}
+
 func (h *hostAppAdapter) Session() *agent.Session { return h.app.Session }
 
 func (h *hostAppAdapter) RiskOf(toolName string) (domain.RiskClass, bool) {

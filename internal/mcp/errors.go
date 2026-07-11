@@ -2,8 +2,48 @@ package mcp
 
 import (
 	"errors"
+	"net/url"
+	"regexp"
 	"strings"
 )
+
+// urlishRe matches an absolute URL embedded in error text. Go transport errors
+// (*url.Error and the SDK errors wrapping them) format the FULL request URL into
+// their message — including the query string, which for an MCP endpoint can carry
+// credentials (?session=<token>). Every error string this package logs or stores
+// is run through sanitizeErrText before it can reach lastError/Status/debug logs.
+var urlishRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"']+`)
+
+// sanitizeErrText strips credential-bearing URL parts (userinfo, query string,
+// fragment) from every URL embedded in an error message, leaving
+// scheme://host/path so the message stays diagnosable. Deliberately NOT
+// URL.Redacted(), which masks only the userinfo password and leaves query
+// parameters verbatim.
+func sanitizeErrText(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return urlishRe.ReplaceAllStringFunc(msg, redactURLText)
+}
+
+// redactURLText rebuilds one matched URL without userinfo/query/fragment. An
+// unparseable match falls back to cutting at the first '?'/'#' so a token can
+// never survive on the parse-failure path.
+func redactURLText(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if i := strings.IndexAny(raw, "?#"); i >= 0 {
+			return raw[:i]
+		}
+		return raw
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
+}
 
 // IsCredentialTerminalStatus reports whether a connection status/error string
 // marks this session's MCP credentials as PERMANENTLY dead: the per-session

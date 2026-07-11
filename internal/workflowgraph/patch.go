@@ -231,6 +231,13 @@ func ApplyPatch(g *Graph, p *Patch, now int64, opts ValidateOptions) (*Graph, er
 	if p.NextAction != nil {
 		na := *p.NextAction
 		na.Label = clampRunes(na.Label, MaxTitleRunes)
+		// The node binding is an advisory hint; one that names a node this graph
+		// doesn't have (post-additions) is dropped rather than failing the patch —
+		// the action itself is still actionable. Matches actionFromWire's posture
+		// of degrading bad hints instead of sinking the whole mutation.
+		if na.NodeID != "" && out.NodeByID(na.NodeID) == nil {
+			na.NodeID = ""
+		}
 		out.NextAction = &na
 	}
 	if p.CriteriaWaived != nil {

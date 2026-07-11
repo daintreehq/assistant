@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,9 +91,11 @@ func TestCancelledSplashDoesNotSpendLedgerReconcileOnce(t *testing.T) {
 	}
 }
 
-// The MCP connect diagnostics line must never contain token material — only the URL
-// host and a short non-reversible fingerprint. This is the guard against reintroducing
-// the old raw-credential debug dump.
+// The MCP connect diagnostics line must never contain token material — no raw token,
+// no substring, and no token-DERIVED value either (a truncated hash fingerprint is an
+// offline verification oracle for low-entropy tokens). Only the URL host plus token
+// presence and length may appear. This is the guard against reintroducing the old
+// raw-credential debug dump or the hash fingerprint.
 func TestMcpConnectDiagnosticsContainsNoTokenMaterial(t *testing.T) {
 	dir := t.TempDir()
 	const token = "dmt_live_supersecret_bearer_value_1234567890"
@@ -128,14 +133,18 @@ func TestMcpConnectDiagnosticsContainsNoTokenMaterial(t *testing.T) {
 	if !strings.Contains(logged, "127.0.0.1:45454") {
 		t.Fatalf("diagnostics line lost the URL host:\n%s", logged)
 	}
-	if !strings.Contains(logged, tokenFingerprint(token)) {
-		t.Fatalf("diagnostics line lost the token fingerprint:\n%s", logged)
+	// No token-derived fingerprint may appear either — a short hash is an offline
+	// verification oracle for a low-entropy token.
+	sum := sha256.Sum256([]byte(token))
+	if strings.Contains(logged, hex.EncodeToString(sum[:4])) {
+		t.Fatalf("debug log contains a token-derived hash fingerprint:\n%s", logged)
 	}
-	if len(tokenFingerprint(token)) != 8 {
-		t.Fatalf("fingerprint length = %d, want 8 hex chars", len(tokenFingerprint(token)))
+	// Presence + length are the only token facts allowed on the line.
+	if !strings.Contains(logged, "tokenPresent=true") {
+		t.Fatalf("diagnostics line lost the token-presence flag:\n%s", logged)
 	}
-	if tokenFingerprint("") != "" {
-		t.Fatalf("empty token fingerprint = %q, want empty", tokenFingerprint(""))
+	if !strings.Contains(logged, fmt.Sprintf("tokenLength=%d", len(token))) {
+		t.Fatalf("diagnostics line lost the token length:\n%s", logged)
 	}
 }
 

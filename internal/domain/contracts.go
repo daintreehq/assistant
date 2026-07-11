@@ -20,6 +20,11 @@ type RecommendedAction struct {
 	Args                 any       `json:"args,omitempty"`
 	Risk                 RiskClass `json:"risk,omitempty"`
 	RequiresConfirmation bool      `json:"requiresConfirmation,omitempty"`
+	// NodeID optionally binds the recommendation to one workflow-graph node (the
+	// backend's next_action.node_id), disambiguating which ready node the action
+	// advances when several share a tool. Advisory only; ingest paths drop a
+	// binding that names a node the target graph doesn't have.
+	NodeID string `json:"nodeId,omitempty"`
 }
 
 // QueuePublishArgs is the input to Queue.publish. epistemicKind MUST be declared

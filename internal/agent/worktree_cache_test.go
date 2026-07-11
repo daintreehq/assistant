@@ -201,6 +201,73 @@ func TestWorktree_YoungCacheKicksNoRefresh(t *testing.T) {
 	}
 }
 
+// The cold-cache grace is a ONE-SHOT courtesy: while the FIRST fetch is still in
+// flight, only the first consult waits worktreeFirstFetchGrace — once that grace
+// fully elapses, every later consult of the still-cold cache proceeds immediately
+// (nil worktree is fine). A degraded 5s MCP read must not cost 250ms per round.
+func TestWorktree_ColdGracePaidOnceWhileFirstFetchInFlight(t *testing.T) {
+	release := make(chan struct{})
+	deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		<-release // the first fetch stays in flight for the whole test
+		return &prompts.WorktreeContext{Present: true, Branch: "slow/branch"}
+	}
+	s := NewSession(deps)
+	defer func() {
+		close(release)
+		s.DrainBackgroundWork()
+	}()
+
+	// First consult: pays the grace in full (the fetch never lands), latches.
+	start := time.Now()
+	if got := s.currentWorktreeContext(context.Background()); got != nil {
+		t.Fatalf("cold consult must degrade to nil while the fetch hangs, got %+v", got)
+	}
+	if elapsed := time.Since(start); elapsed < worktreeFirstFetchGrace {
+		t.Fatalf("the FIRST cold consult should wait the grace, returned after %v", elapsed)
+	}
+	s.worktreeMu.Lock()
+	latched := s.worktreeGraceElapsed
+	s.worktreeMu.Unlock()
+	if !latched {
+		t.Fatal("a fully-elapsed grace must latch worktreeGraceElapsed")
+	}
+
+	// Later consults: same cold cache, same in-flight fetch — NO further grace.
+	for i := 0; i < 3; i++ {
+		start = time.Now()
+		if got := s.currentWorktreeContext(context.Background()); got != nil {
+			t.Fatalf("round %d: still-cold consult must serve nil, got %+v", i, got)
+		}
+		if elapsed := time.Since(start); elapsed >= worktreeFirstFetchGrace {
+			t.Fatalf("round %d: consult after the latch paid the grace again (%v)", i, elapsed)
+		}
+	}
+}
+
+// A grace the fetch BEATS does not latch: nothing was wasted, the cache is warm,
+// and (test-only) a re-cooled cache may use the grace again — so the latch only
+// ever suppresses waits that already proved useless.
+func TestWorktree_GraceBeatenByFastFetchDoesNotLatch(t *testing.T) {
+	deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		return &prompts.WorktreeContext{Present: true, Branch: "fast/branch"}
+	}
+	s := NewSession(deps)
+
+	got := s.currentWorktreeContext(context.Background())
+	if got == nil || got.Branch != "fast/branch" {
+		t.Fatalf("a fast first fetch should land within the grace, got %+v", got)
+	}
+	s.worktreeMu.Lock()
+	latched := s.worktreeGraceElapsed
+	s.worktreeMu.Unlock()
+	if latched {
+		t.Fatal("a grace the fetch beat must not latch")
+	}
+	s.DrainBackgroundWork()
+}
+
 // WarmOpenTerminals (the splash/reconnect warm) fills the worktree cache too, so a
 // fast first submit finds it already fetched.
 func TestWorktree_WarmOpenTerminalsWarmsWorktreeCache(t *testing.T) {

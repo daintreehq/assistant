@@ -33,7 +33,10 @@ package mcp
 //     governorStarvationAge gets the next shared grant even over waiting
 //     Interactive work (which still has the reserved slot, so user work keeps
 //     flowing) — sustained Interactive load degrades Background to a trickle
-//     but can never park it forever;
+//     but can never park it forever. The override ALTERNATES: while Interactive
+//     waits, an aged backlog cannot win two consecutive shared grants, so
+//     Interactive is granted within two grants even when the reserved slot is
+//     pinned by a long Interactive call;
 //   - Interactive skips the start pacing (a human is waiting; user-driven calls
 //     are sparse, and the pacer exists to trickle background bursts, which
 //     remain paced).
@@ -93,6 +96,13 @@ type governor struct {
 	// queues holds FIFO waiters per class, indexed by Priority.
 	queues      [numPriorities][]*govWaiter
 	nextStartAt time.Time
+	// starvedOverrideDebt latches when a shared grant went to an aged
+	// Refresh/Background waiter via the anti-starvation override. While it is set
+	// AND Interactive work is queued, the override is suppressed for the NEXT
+	// shared grant, so an aged backlog can never win two consecutive shared
+	// grants over waiting Interactive work — Interactive is guaranteed a grant
+	// within two. Cleared when an Interactive waiter is granted.
+	starvedOverrideDebt bool
 }
 
 func newGovernor(maxConcurrent int, minInterval time.Duration) *governor {
@@ -175,11 +185,19 @@ func (g *governor) acquire(ctx context.Context) (func(), error) {
 		g.mu.Unlock()
 		if wait := time.Until(start); wait > 0 {
 			if err := abortableSleep(ctx, wait); err != nil {
-				// The reserved start tick is deliberately NOT returned to the pacer: a
-				// burst of cancelled callers leaving small holes is extra backpressure
-				// in exactly the situations (slow server, expiring deadlines) where
-				// slowing down further is the desired behavior. Each hole is at most
-				// one minInterval, so the cost is bounded and self-limiting.
+				// Reclaim the reserved start tick when it is safe to do so: if
+				// nextStartAt still equals OUR reservation's successor, no later
+				// waiter has reserved after us, so handing `start` back cannot give
+				// the same tick to two callers. (A middle-of-the-queue cancel leaves
+				// its hole in place — reclaiming it could collide with a tick a later
+				// waiter already holds.) Without this, a storm of cancelled paced
+				// acquires would push future Refresh/Background starts arbitrarily
+				// far out even though nothing ever hit the wire.
+				g.mu.Lock()
+				if g.nextStartAt.Equal(start.Add(g.minInterval)) {
+					g.nextStartAt = start
+				}
+				g.mu.Unlock()
 				release()
 				return nil, err
 			}
@@ -202,9 +220,16 @@ func (g *governor) releaseLocked(class Priority) {
 // grantLocked grants slots to queued waiters until no waiter is eligible.
 func (g *governor) grantLocked(now time.Time) {
 	for {
-		w := g.pickLocked(now)
+		w, override := g.pickLocked(now)
 		if w == nil {
 			return
+		}
+		// Alternation bookkeeping for the anti-starvation rule: an override grant
+		// latches the debt; an Interactive grant settles it. (See pickLocked.)
+		if override {
+			g.starvedOverrideDebt = true
+		} else if w.class == PriorityInteractive {
+			g.starvedOverrideDebt = false
 		}
 		// pickLocked only ever returns a class-queue head (FIFO within class).
 		g.queues[w.class] = g.queues[w.class][1:]
@@ -217,36 +242,42 @@ func (g *governor) grantLocked(now time.Time) {
 	}
 }
 
-// pickLocked chooses the next waiter to grant, or nil when none is eligible:
+// pickLocked chooses the next waiter to grant, or (nil, false) when none is
+// eligible. override reports the pick came from the anti-starvation rule:
 //
 //  1. anti-starvation first: the OLDEST Refresh/Background waiter aged past
 //     governorStarvationAge takes the next shared grant, even over waiting
-//     Interactive work (which is never starved — it has the reserved slot);
+//     Interactive work (which is never starved — it has the reserved slot).
+//     ALTERNATION GUARD: while Interactive work is queued, an aged override may
+//     not win two consecutive shared grants (starvedOverrideDebt) — otherwise a
+//     sustained aged backlog could park Interactive behind the reserved slot's
+//     long holder indefinitely. Interactive is thus granted within two grants.
 //  2. Interactive next — head of the queue for shared capacity too, and the
 //     only class allowed to consume the reserved slot (held may reach capTotal);
 //  3. then Refresh, then Background, within shared capacity.
-func (g *governor) pickLocked(now time.Time) *govWaiter {
+func (g *governor) pickLocked(now time.Time) (w *govWaiter, override bool) {
 	if g.held >= g.capTotal {
-		return nil
+		return nil, false
 	}
+	interactiveWaiting := len(g.queues[PriorityInteractive]) > 0
 	sharedFree := g.heldShared < g.capShared
-	if sharedFree {
+	if sharedFree && !(g.starvedOverrideDebt && interactiveWaiting) {
 		if w := g.oldestStarvedLocked(now); w != nil {
-			return w
+			return w, true
 		}
 	}
-	if q := g.queues[PriorityInteractive]; len(q) > 0 {
-		return q[0]
+	if interactiveWaiting {
+		return g.queues[PriorityInteractive][0], false
 	}
 	if sharedFree {
 		if q := g.queues[PriorityRefresh]; len(q) > 0 {
-			return q[0]
+			return q[0], false
 		}
 		if q := g.queues[PriorityBackground]; len(q) > 0 {
-			return q[0]
+			return q[0], false
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // oldestStarvedLocked returns the oldest Refresh/Background waiter queued

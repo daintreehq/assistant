@@ -25,6 +25,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -255,45 +257,95 @@ func ResetDB(dbPath string) error {
 	return nil
 }
 
+// backupRename is the rename primitive BackupDB moves files with. A var so the
+// fault-injection tests can fail the second/third move and prove the rollback
+// contract; production always uses os.Rename.
+var backupRename = os.Rename
+
 // BackupDB moves the SQLite database at dbPath — together with its -wal/-shm
-// sidecars — to a timestamped backup alongside it
-// (<db>.bak-v<oldVersion>-<unixts>) and returns the backup's main-file path. It
-// is the non-destructive form of ResetDB for the stale-schema recovery: a rename
-// is atomic and cheap (same directory), the next Open rebuilds a fresh schema at
-// dbPath, and the user's previous state (timers, watchers, memories, history)
-// stays recoverable on disk instead of being silently wiped.
+// sidecars — into a freshly-created backup DIRECTORY alongside it
+// (<db>.bak-v<oldVersion>-<unixts>/) and returns the backup's main-file path
+// inside it. It is the non-destructive form of ResetDB for the stale-schema
+// recovery: same-directory renames are atomic and cheap, the next Open rebuilds
+// a fresh schema at dbPath, and the user's previous state (timers, watchers,
+// memories, history) stays recoverable on disk instead of being silently wiped.
 //
-// Failure posture is conservative: if the MAIN file's rename fails, nothing has
-// moved and the error is returned — the caller must NOT go on to delete anything.
-// Sidecars are moved best-effort AFTER the main file; one that can't be renamed
-// is removed instead (a stale -wal/-shm left beside a fresh db would poison it),
-// and only an un-removable sidecar surfaces an error. A missing main file returns
-// ("", nil): nothing to back up.
+// The backup directory is created EXCLUSIVELY (os.Mkdir, retrying suffixed names
+// on EEXIST), so a concurrent backup can never be overwritten — os.Rename onto an
+// existing destination would silently replace it, which is why the old
+// stat-then-rename naming was not collision-safe.
+//
+// Failure posture: all-or-nothing. The db → wal → shm triplet moves as one unit;
+// if ANY move fails, everything already moved is moved BACK (and the directory
+// removed), so the caller sees either a complete backup or the original files in
+// place — a WAL is NEVER deleted (committed transactions can live only in the
+// WAL; dropping it would corrupt the backup). Success (and the backup path) is
+// reported only when the whole triplet moved. If the rollback itself also fails,
+// the returned error states exactly which files remain where. A missing main
+// file returns ("", nil): nothing to back up.
 func BackupDB(dbPath string, oldVersion int) (string, error) {
-	backup := fmt.Sprintf("%s.bak-v%d-%d", dbPath, oldVersion, time.Now().Unix())
-	// Never overwrite an existing backup (two resets inside one second): pick a
-	// distinct suffixed name instead. Bounded — on a weird stat failure the rename
-	// below surfaces the real error.
-	for i := 2; i < 100; i++ {
-		if _, err := os.Stat(backup); err != nil {
+	// Exclusively create the backup directory; suffix on collision.
+	base := fmt.Sprintf("%s.bak-v%d-%d", dbPath, oldVersion, time.Now().Unix())
+	dir := base
+	for i := 2; ; i++ {
+		err := os.Mkdir(dir, 0o700)
+		if err == nil {
 			break
 		}
-		backup = fmt.Sprintf("%s.bak-v%d-%d-%d", dbPath, oldVersion, time.Now().Unix(), i)
-	}
-	if err := os.Rename(dbPath, backup); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("backup database: create backup dir %s: %w", dir, err)
 		}
-		return "", fmt.Errorf("backup database %s: %w", dbPath, err)
+		if i >= 100 {
+			return "", fmt.Errorf("backup database: create backup dir %s: too many existing backups", base)
+		}
+		dir = fmt.Sprintf("%s-%d", base, i)
 	}
-	for _, ext := range []string{"-wal", "-shm"} {
-		if err := os.Rename(dbPath+ext, backup+ext); err != nil && !errors.Is(err, os.ErrNotExist) {
-			if rerr := os.Remove(dbPath + ext); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				return backup, fmt.Errorf("backup database: clear sidecar %s: %w", dbPath+ext, rerr)
+
+	// Move the triplet; remember every completed move for rollback.
+	type moved struct{ src, dst string }
+	var done []moved
+	rollback := func() error {
+		var stuck []string
+		for i := len(done) - 1; i >= 0; i-- {
+			if rerr := backupRename(done[i].dst, done[i].src); rerr != nil {
+				stuck = append(stuck, fmt.Sprintf("%s could not be moved back from %s: %v",
+					done[i].src, done[i].dst, rerr))
 			}
 		}
+		if len(stuck) == 0 {
+			_ = os.Remove(dir) // empty now; best-effort
+			return nil
+		}
+		return errors.New(strings.Join(stuck, "; "))
 	}
-	return backup, nil
+
+	for i, src := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		dst := filepath.Join(dir, filepath.Base(src))
+		err := backupRename(src, dst)
+		if err == nil {
+			done = append(done, moved{src: src, dst: dst})
+			continue
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			// Main file absent (i==0): nothing to back up at all. An absent sidecar
+			// is normal (no -wal/-shm after a clean close) — skip it.
+			if i == 0 {
+				_ = os.Remove(dir)
+				return "", nil
+			}
+			continue
+		}
+		// A move failed mid-triplet: restore what already moved. NEVER delete the
+		// stranded file — a WAL can hold the only copy of committed transactions.
+		if rberr := rollback(); rberr != nil {
+			return "", fmt.Errorf(
+				"backup database: move %s failed (%v) AND rolling back already-moved files failed — "+
+					"the database is split between %s and its backup dir %s: %w",
+				src, err, filepath.Dir(dbPath), dir, rberr)
+		}
+		return "", fmt.Errorf("backup database: move %s: %w (all files restored to their original location)", src, err)
+	}
+	return filepath.Join(dir, filepath.Base(dbPath)), nil
 }
 
 // Close releases the database handle.

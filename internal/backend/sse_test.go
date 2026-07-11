@@ -157,6 +157,87 @@ func TestRespondStream_OversizedEventRejected(t *testing.T) {
 	}
 }
 
+// endlessRepeatReader yields chunk over and over, forever — a peer that never
+// stops sending. Any parse over it MUST terminate via a bound, or the test hangs.
+type endlessRepeatReader struct {
+	chunk []byte
+	off   int
+}
+
+func (r *endlessRepeatReader) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		c := copy(p[n:], r.chunk[r.off:])
+		n += c
+		r.off = (r.off + c) % len(r.chunk)
+	}
+	return n, nil
+}
+
+// A flood of EMPTY `data:` lines carries zero payload bytes but still buffers
+// per line; the event cap must count the buffered joins so the stream aborts
+// with the typed event-too-large error under bounded memory instead of growing
+// a per-line buffer forever. (An endless reader proves termination: pre-fix,
+// this test would hang/OOM rather than fail politely.)
+func TestParseRespondStream_EmptyDataLineFloodBounded(t *testing.T) {
+	r := io.MultiReader(
+		strings.NewReader("event: meta\ndata: {}\n\nevent: delta\n"),
+		&endlessRepeatReader{chunk: []byte("data:\n")},
+	)
+	_, err := parseRespondStream(r, StreamCallbacks{})
+	var be *Error
+	if !errorsAs(err, &be) || be.Code != "stream_event_too_large" || !be.Stream {
+		t.Fatalf("error = %v, want typed stream_event_too_large", err)
+	}
+}
+
+// The idle watchdog's timer callback can lose the race against a concurrent
+// Reset: the timer fires, the callback blocks on the mutex, and read progress
+// re-arms the window before the callback runs. A callback that then observes a
+// still-future deadline is STALE and must be a no-op — it must never abort a
+// stream that just made progress. A genuinely-elapsed deadline still aborts.
+func TestIdleWatchdogStaleFireIsNoOp(t *testing.T) {
+	aborted := make(chan struct{}, 2)
+	w := newIdleWatchdog(time.Hour, func() { aborted <- struct{}{} })
+	defer w.Stop()
+
+	// Simulate the race deterministically: Reset (read progress) lands first,
+	// then the delayed stale callback runs. It must observe the future deadline
+	// and do nothing.
+	w.Reset()
+	w.fire()
+	if w.Fired() {
+		t.Fatal("stale fire must not mark the watchdog fired")
+	}
+	select {
+	case <-aborted:
+		t.Fatal("stale fire aborted a healthy stream")
+	default:
+	}
+
+	// A callback whose deadline HAS elapsed is a real idle expiry: it aborts.
+	w.mu.Lock()
+	w.deadline = time.Now().Add(-time.Millisecond)
+	w.mu.Unlock()
+	w.fire()
+	if !w.Fired() {
+		t.Fatal("an elapsed deadline must mark the watchdog fired")
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatal("an elapsed deadline must run the abort")
+	}
+
+	// Once fired (or stopped), later fires stay no-ops.
+	w.fire()
+	select {
+	case <-aborted:
+		t.Fatal("a second fire must not re-run the abort")
+	default:
+	}
+}
+
 // A normal multi-event stream under all bounds is untouched by the new guards, and a
 // line exactly at the boundary still parses (the bound is exclusive).
 func TestReadBoundedLineBoundary(t *testing.T) {

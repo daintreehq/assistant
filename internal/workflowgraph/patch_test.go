@@ -203,6 +203,34 @@ func TestApplyPatchGraphStatusAndNextAction(t *testing.T) {
 	}
 }
 
+// A next action's node binding is an advisory hint: a binding that names a node
+// the graph has (including one added by the SAME patch) survives; one that names
+// an unknown node is dropped while the action itself is kept.
+func TestApplyPatchNextActionNodeBinding(t *testing.T) {
+	g := twoNodeGraph()
+	next, err := ApplyPatch(g, &Patch{
+		NextAction: &domain.RecommendedAction{
+			Label: "verify", ToolName: "user.askMultipleChoice", NodeID: "n_verify"},
+	}, 100, ValidateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.NextAction == nil || next.NextAction.NodeID != "n_verify" {
+		t.Fatalf("a known node binding must survive, got %+v", next.NextAction)
+	}
+
+	dropped, err := ApplyPatch(g, &Patch{
+		NextAction: &domain.RecommendedAction{
+			Label: "verify", ToolName: "user.askMultipleChoice", NodeID: "n_ghost"},
+	}, 100, ValidateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped.NextAction == nil || dropped.NextAction.NodeID != "" {
+		t.Fatalf("an unknown node binding must be dropped (action kept), got %+v", dropped.NextAction)
+	}
+}
+
 func TestApplyPatchFailedNodeRetryClearsCompletion(t *testing.T) {
 	g := twoNodeGraph()
 	g.Nodes[0].Status = NodeFailed

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
@@ -77,6 +78,22 @@ func (h *Host) handlePrompt(text string) {
 		// holds the text it sent, so there's no echo — just a status so it knows the prompt
 		// joined the running turn rather than starting a new one.
 		h.session.InjectPrompt(text)
+		// RACE CLOSE: the running turn may have passed its FINAL injection-fold
+		// check and completed before the injection above landed — the prompt would
+		// then sit buffered forever while we report it folded. Re-check under the
+		// lock: if the turn is gone, reclaim whatever is still buffered and
+		// dispatch it as a fresh turn. (The other interleaving — the injection
+		// landing BEFORE the turn's finally releases busy — is covered by
+		// finishPromptTurn's own reclaim, which runs while busy is still held.)
+		h.turnMu.Lock()
+		stillBusy := h.busy
+		h.turnMu.Unlock()
+		if !stillBusy {
+			if stranded := h.reclaimStrandedInjections(); stranded != "" {
+				h.handlePrompt(stranded)
+				return
+			}
+		}
 		h.report("prompt-folded",
 			"A turn is already running; this message was folded into it and will be picked up between tasks.")
 		return
@@ -99,7 +116,7 @@ func (h *Host) handlePrompt(text string) {
 			if r := recover(); r != nil {
 				h.report("turn-failed", fmt.Sprintf("turn panicked: %v\n%s", r, debug.Stack()))
 			}
-			h.finishPromptTurn(gen)
+			h.finishPromptTurn(gen, ctx)
 		}()
 		if _, err := h.session.Send(ctx, text, agent.SendOptions{}); err != nil {
 			h.report("turn-failed", fmt.Sprintf("send failed: %v", err))
@@ -112,20 +129,68 @@ func (h *Host) handlePrompt(text string) {
 // finishPromptTurn is the prompt finally. Identity guard: only clear turnCancel
 // when this turn's generation is still the active one (a later prompt bumped the
 // generation, so a stale finally leaves the newer turn's cancel intact). Then
-// settle any dangling assistant turn, clear busy, and drain deferred wakes.
-func (h *Host) finishPromptTurn(gen uint64) {
+// settle any dangling assistant turn, reclaim injections the turn never
+// consumed, clear busy, and drain deferred wakes.
+func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 	h.bridge.SettleTurn(OutcomeAnswered)
+
+	cancelled := ctx.Err() != nil
+	if cancelled {
+		// An aborted turn drops its unconsumed injections (the cockpit's Ctrl+C
+		// discard): a message folded into work the user abandoned must not
+		// resurrect as a fresh turn. handleInterrupt discards too — this covers
+		// an injection that slipped in while the cancelled turn was unwinding.
+		h.session.DiscardPendingInjections()
+	}
 
 	h.turnMu.Lock()
 	if h.turnGen == gen {
 		h.turnCancel = nil
 	}
+	// Reclaim injections the finished turn never folded in, BEFORE releasing
+	// busy: while busy is held no new turn can start, so anything buffered here
+	// is provably stranded (Send has already returned — its final fold check is
+	// behind us). An injection landing after this reclaim is caught by
+	// handlePrompt's own post-inject busy re-check instead. Together the two
+	// checks close the "prompt reported folded but never consumed" race.
+	stranded := ""
+	if !cancelled && !h.closing {
+		stranded = h.reclaimStrandedInjections()
+	}
 	h.busy = false
 	more := len(h.pendingWake) > 0
 	h.turnMu.Unlock()
+	if stranded != "" {
+		// Dispatch the stranded prompt as a fresh command turn. Deferred wakes
+		// stay queued — that turn's own finally drains them.
+		h.handlePrompt(stranded)
+		return
+	}
 	if more {
 		go h.reactWake()
 	}
+}
+
+// reclaimStrandedInjections drains every buffered-but-unfolded injection from
+// the session (retraction is LIFO; arrival order is restored) and returns them
+// joined as one prompt text — "" when none. Used by the strand-race closes in
+// handlePrompt/finishPromptTurn/reactWake.
+func (h *Host) reclaimStrandedInjections() string {
+	var texts []string
+	for {
+		text, ok := h.session.RetractPendingInjection()
+		if !ok {
+			break
+		}
+		texts = append(texts, text)
+	}
+	if len(texts) == 0 {
+		return ""
+	}
+	for i, j := 0, len(texts)-1; i < j; i, j = i+1, j-1 {
+		texts[i], texts[j] = texts[j], texts[i]
+	}
+	return strings.Join(texts, "\n\n")
 }
 
 // handleInterrupt is the three coordinated actions. Order
@@ -138,7 +203,18 @@ func (h *Host) finishPromptTurn(gen uint64) {
 // wake fold into it via InjectPrompt instead. Shutdown/hibernate/parent-exit DO
 // cancel wakes — see teardown/cancelWake.
 func (h *Host) handleInterrupt() {
-	h.cancelTurn()
+	h.turnMu.Lock()
+	cancel := h.turnCancel
+	h.turnMu.Unlock()
+	if cancel != nil {
+		// Drop buffered-but-unfolded injections BEFORE cancelling: the turn they
+		// were folded into is being abandoned, and finishPromptTurn must not
+		// resurrect them as a fresh turn (mirrors the cockpit's Ctrl+C discard).
+		// Guarded on a live COMMAND turn: during a wake (turnCancel nil) folded
+		// prompts stay — the wake keeps running and will consume them.
+		h.session.DiscardPendingInjections()
+		cancel()
+	}
 	h.bridge.SettlePendingApprovals(DecisionRejected)
 	h.bridge.Interrupt()
 }
@@ -218,16 +294,24 @@ func (h *Host) reactWake() {
 		// IsWake: autonomous watcher-wake turn (not user-typed) → the footer anchors on the
 		// active workflow objective instead of echoing the verbose wake blob.
 		reply, err := h.session.Send(ctx, prompt, agent.SendOptions{IsWake: true})
+		if ctx.Err() != nil && (err != nil || reply == domain.CancelledReply) {
+			// Shutdown/hibernate cancelled the wake mid-turn. Detect it via ctx —
+			// NOT via err: the real Session reports cooperative cancellation as
+			// (CancelledReply, nil), never an error, so an err-keyed check would
+			// silently drop the burst. Requeue it (without consuming the retry
+			// budget) and stay quiet — interruption is not failure. Wakes are only
+			// ever cancelled by teardown, whose post-join sweep DURABLY re-arms
+			// everything left in pendingWake (the queue already stamped these
+			// events notified, and this in-memory requeue dies with the process) so
+			// the next run re-delivers them. This requeue happens under turnMu
+			// BEFORE the worker's turnWG.Done, which is what guarantees teardown's
+			// join-then-sweep observes it.
+			h.turnMu.Lock()
+			h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
+			h.turnMu.Unlock()
+			return
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				// Shutdown cancelled the wake mid-turn: requeue the burst (without
-				// consuming the retry budget) and stay quiet — interruption is not
-				// failure, and teardown is already unwinding the process.
-				h.turnMu.Lock()
-				h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
-				h.turnMu.Unlock()
-				return
-			}
 			h.report("wake-failed", fmt.Sprintf("wake send failed: %v", err))
 			h.turnMu.Lock()
 			if !h.wakeRetried {
@@ -260,12 +344,46 @@ func (h *Host) reactWake() {
 
 	h.turnMu.Lock()
 	h.wakeCancel = nil
+	// Same strand close as finishPromptTurn: a prompt folded into this wake near
+	// its end may never have been consumed — reclaim it (before releasing busy)
+	// and dispatch it as a fresh command turn. A cancelled wake skips this: the
+	// shutdown paths latch closing first, so nothing new may start.
+	stranded := ""
+	if ctx.Err() == nil && !h.closing {
+		stranded = h.reclaimStrandedInjections()
+	}
 	h.busy = false
 	more := len(h.pendingWake) > 0 && !h.closing
 	h.turnMu.Unlock()
 	cancel() // release the child context's resources
+	if stranded != "" {
+		// Deferred wakes stay queued — the dispatched turn's finally drains them.
+		h.handlePrompt(stranded)
+		return
+	}
 	if more {
 		go h.reactWake()
+	}
+}
+
+// rearmWakeEvents durably re-arms an undelivered wake burst's queue events so
+// the NEXT process run re-delivers them (see App.RearmAttention). Best-effort: a
+// failure is logged to stderr. nil-app / empty-burst safe.
+func (h *Host) rearmWakeEvents(events []domain.QueueEvent) {
+	if h.app == nil {
+		return
+	}
+	ids := make([]string, 0, len(events))
+	for _, e := range events {
+		if e.ID != "" {
+			ids = append(ids, e.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if err := h.app.RearmAttention(ids); err != nil {
+		h.tr.diag(fmt.Sprintf("host: failed to re-arm %d undelivered wake event(s) for the next run: %v", len(ids), err))
 	}
 }
 
@@ -306,6 +424,20 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		// ignores cancellation cannot wedge shutdown (we then proceed and accept
 		// the abandonment — the process is exiting anyway).
 		h.joinTurns(h.turnJoinTimeout)
+
+		// DURABLE wake re-arm: any burst still in pendingWake dies with this
+		// process — a queued burst that never started, or one a cancelled wake
+		// worker just requeued (its requeue lands under turnMu before its
+		// turnWG.Done, so the join above ordered it before this sweep). The
+		// scheduler stamped those queue events notified when it handed them over,
+		// so without nulling notifiedAt here the next run's notify pass would
+		// never re-digest them and the wake would be silently lost forever.
+		// Runs BEFORE app.Shutdown (the store must still be open); best-effort.
+		h.turnMu.Lock()
+		leftover := h.pendingWake
+		h.pendingWake = nil
+		h.turnMu.Unlock()
+		h.rearmWakeEvents(leftover)
 
 		if h.app != nil {
 			func() {

@@ -235,6 +235,15 @@ type Session struct {
 	// to worktreeFirstFetchGrace on it so the very first round usually still carries
 	// a worktree, without ever blocking on a slow MCP. Guarded by worktreeMu.
 	worktreeRefreshDone chan struct{}
+
+	// worktreeGraceElapsed latches true once a cold-cache consult has paid the FULL
+	// worktreeFirstFetchGrace without the fetch landing. From then on, consults that
+	// still find a cold cache (the same slow first fetch, later rounds) proceed
+	// immediately — the grace is a one-shot first-round courtesy, never a per-round
+	// tax while a degraded MCP read (seconds) is in flight. A grace wait that the
+	// fetch DID beat does not latch (nothing was wasted, and the cache is warm
+	// anyway). Guarded by worktreeMu.
+	worktreeGraceElapsed bool
 }
 
 // toolProjCache holds the last OpenAITools projection plus the key that produced
@@ -1739,10 +1748,13 @@ const (
 // currentWorktreeContext returns the cached current-worktree snapshot for this round,
 // kicking a detached refresh when the cache is older than worktreeSnapshotTTL (the
 // open-terminal roster pattern — the round itself NEVER blocks on the MCP read). The
-// one exception is a cold cache (first-ever consult): it waits up to
+// one exception is a cold cache (never fetched): the FIRST such consult waits up to
 // worktreeFirstFetchGrace for the just-kicked refresh so the session's first round
-// usually still carries a worktree (see the constant's comment). ctx bounds only that
-// short grace wait, never the fetch itself (which is detached and self-bounded).
+// usually still carries a worktree (see the constant's comment). If that grace fully
+// elapses with the fetch still in flight, worktreeGraceElapsed latches and every
+// later cold consult proceeds immediately — a slow first fetch costs one grace for
+// the whole session, not one per round. ctx bounds only that short grace wait, never
+// the fetch itself (which is detached and self-bounded).
 //
 // NOTE deliberately not implemented: marking a >60s-old snapshot as stale in the
 // injected context. The snapshot travels the backend's strict typed wire contract
@@ -1761,13 +1773,19 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 	s.worktreeMu.Lock()
 	cold := s.worktreeFetchedAt.IsZero()
 	done := s.worktreeRefreshDone
+	graceSpent := s.worktreeGraceElapsed
 	s.worktreeMu.Unlock()
 
-	if cold && done != nil {
+	if cold && done != nil && !graceSpent {
 		t := time.NewTimer(worktreeFirstFetchGrace)
 		select {
 		case <-done:
 		case <-t.C:
+			// The full grace was paid and the fetch is STILL in flight: latch, so
+			// the remaining rounds of this slow first fetch don't each pay it again.
+			s.worktreeMu.Lock()
+			s.worktreeGraceElapsed = true
+			s.worktreeMu.Unlock()
 		case <-ctx.Done():
 		}
 		t.Stop()

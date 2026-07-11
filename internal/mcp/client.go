@@ -770,7 +770,10 @@ func (c *Client) traceCall(name string, retries, attempts int, durationMs, queue
 		fields["queuedMs"] = queuedMs
 	}
 	if err != nil {
-		fields["error"] = err.Error()
+		// errMsg (not err.Error()) so a transport error's embedded request URL is
+		// stripped of its query string before it lands in the debug log — MCP
+		// endpoints can carry credentials in query params.
+		fields["error"] = errMsg(err)
 		debuglog.LogDebug(dbg, "mcp.call", fields)
 		return
 	}

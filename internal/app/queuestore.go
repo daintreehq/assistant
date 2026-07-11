@@ -57,16 +57,15 @@ func (a queueEventStore) UpsertEvent(_ context.Context, args domain.QueuePublish
 
 // ClearNotified re-arms an event for the next notify() pass by nulling notifiedAt.
 func (a queueEventStore) ClearNotified(_ context.Context, id string) error {
-	_, err := a.s.DB().Exec("UPDATE events SET notifiedAt = NULL WHERE id = ?", id)
-	return err
+	return a.s.ClearNotified([]string{id})
 }
 
 func (a queueEventStore) ListEvents(_ context.Context, opts domain.QueueDigestOptions, _ int64) ([]domain.QueueEvent, error) {
 	return a.s.ListEvents(opts)
 }
 
-func (a queueEventStore) MarkNotified(_ context.Context, ids []string, ts int64) error {
-	return a.s.MarkNotified(ids, ts)
+func (a queueEventStore) MarkNotified(_ context.Context, evs []domain.QueueEvent, ts int64) error {
+	return a.s.MarkNotified(evs, ts)
 }
 
 func (a queueEventStore) ResolveEvent(_ context.Context, id string, _ int64) (bool, error) {

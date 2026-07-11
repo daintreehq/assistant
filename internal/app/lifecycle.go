@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/url"
 	"strings"
 	"time"
@@ -145,12 +143,13 @@ func (a *App) connectDocsAsync(reconnect bool) {
 
 // logMcpConnectDiagnostics writes one connection-diagnostics line to the debug log on
 // every (re)connect: the MCP URL host, whether the connect succeeded, the transport,
-// and a short NON-REVERSIBLE fingerprint of the bearer token (the first 8 hex chars of
-// its SHA-256). The fingerprint lets a developer confirm WHICH credential the CLI is
-// holding — e.g. that two sessions share a token, or that a rotation actually landed —
-// without the log ever containing material that could authenticate a request. The raw
-// token (and the URL path/query, which can embed per-session secrets) must never be
-// logged, even into the 0600 per-session debug log.
+// and the bearer token's PRESENCE + LENGTH only. No token-derived material is logged —
+// not even a truncated hash: a short fingerprint is an offline verification oracle for
+// a low-entropy token (a log holder can hash candidate tokens and compare), while an
+// integer length leaks nothing usable. Presence + length still answers the diagnostic
+// questions ("is a token configured at all?", "did a rotation to a different-length
+// credential land?"). The raw token (and the URL path/query, which can embed
+// per-session secrets) must never be logged, even into the 0600 per-session debug log.
 func (a *App) logMcpConnectDiagnostics(st mcp.Status) {
 	rawURL := a.Config.McpURL
 	if rawURL == "" {
@@ -167,24 +166,13 @@ func (a *App) logMcpConnectDiagnostics(st mcp.Status) {
 		debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
 		"mcp.connect",
 		map[string]any{
-			"host":             host,
-			"tokenFingerprint": tokenFingerprint(a.Config.McpToken),
-			"connected":        st.Connected,
-			"transport":        st.Transport,
+			"host":         host,
+			"tokenPresent": a.Config.McpToken != "",
+			"tokenLength":  len(a.Config.McpToken),
+			"connected":    st.Connected,
+			"transport":    st.Transport,
 		},
 	)
-}
-
-// tokenFingerprint returns a short, non-reversible identifier for a secret: the first
-// 8 hex characters of its SHA-256. Empty secret → "" (rendered as an empty field, so a
-// missing token is still visible in diagnostics). 8 hex chars (32 bits) is plenty to
-// distinguish credentials while being useless for reconstruction.
-func tokenFingerprint(secret string) string {
-	if secret == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(sum[:4])
 }
 
 // warnOnDrift emits ONE rollup log line when the live server advertises fewer
@@ -380,8 +368,17 @@ func (a daemonQueueAdapter) Publish(args domain.QueuePublishArgs) error {
 func (a daemonQueueAdapter) Digest(opts domain.QueueDigestOptions) ([]domain.QueueEvent, error) {
 	return a.q.Digest(context.Background(), opts)
 }
-func (a daemonQueueAdapter) MarkNotified(ids []string) error {
-	return a.q.MarkNotified(context.Background(), ids)
+func (a daemonQueueAdapter) MarkNotified(evs []domain.QueueEvent) error {
+	return a.q.MarkNotified(context.Background(), evs)
+}
+
+// RearmAttention durably re-arms delivered attention events (nulls notifiedAt in
+// the project store) so the next owner's notify pass re-digests and re-delivers
+// them. The embedded host calls it when a shutdown/hibernate cancels a wake turn
+// mid-flight — the burst was already marked notified when it was handed to the
+// dying process, so without the re-arm it would be lost across the restart.
+func (a *App) RearmAttention(ids []string) error {
+	return a.Store.ClearNotified(ids)
 }
 
 // daemonRegistryAdapter runs a call_safe_tool timer payload through the registry as

@@ -293,13 +293,17 @@ func Create(opts CreateOptions) (*App, error) {
 			return nil, err // declined → keep the actionable stale-schema error
 		}
 		// Even an authorised reset never DELETES state: the old database (plus
-		// WAL/SHM) is renamed to a timestamped backup beside it. If that backup
-		// move fails, refuse to reset — surface the actionable error rather than
-		// wiping the only copy of the user's timers/watchers/memories/history.
+		// WAL/SHM) is moved into a timestamped backup directory beside it as ONE
+		// all-or-nothing unit. If that backup fails, refuse to reset — and let
+		// BackupDB's error state the on-disk truth, which differs per branch: on a
+		// clean failure every file was rolled back to its original location, while
+		// a failed rollback reports exactly which files remain in the backup dir.
+		// Claiming "left untouched" here unconditionally would be a lie in the
+		// second case, so the wrapper only says what is always true.
 		backupPath, berr := storage.BackupDB(cfg.DBPath, stale.Have)
 		if berr != nil {
 			return nil, fmt.Errorf(
-				"stale database left untouched (backing it up failed, refusing to delete): %w", berr)
+				"refusing to reset the stale database — backing it up failed: %w", berr)
 		}
 		if opts.OnSchemaReset != nil {
 			opts.OnSchemaReset(backupPath)

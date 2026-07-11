@@ -146,13 +146,24 @@ func (m *memStore) ListEvents(_ context.Context, opts domain.QueueDigestOptions,
 	return out, nil
 }
 
-func (m *memStore) MarkNotified(_ context.Context, ids []string, ts int64) error {
+// MarkNotified mirrors the storage contract: VERSION-CONDITIONAL — a row is
+// stamped only while it still matches the digested snapshot (same count and
+// coalesced updated-at, not already notified).
+func (m *memStore) MarkNotified(_ context.Context, evs []domain.QueueEvent, ts int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, id := range ids {
-		if _, ok := m.rows[id]; ok {
-			m.notified[id] = ts
+	for _, e := range evs {
+		r, ok := m.rows[e.ID]
+		if !ok {
+			continue
 		}
+		if _, already := m.notified[e.ID]; already {
+			continue
+		}
+		if r.Count != e.Count || coalesce(*r) != coalesce(e) {
+			continue // the publisher moved the row on since the digest
+		}
+		m.notified[e.ID] = ts
 	}
 	return nil
 }
@@ -360,7 +371,7 @@ func TestMarkNotifiedAndNotifiedIsNullFilter(t *testing.T) {
 	a, _ := q.Publish(ctx, domain.QueuePublishArgs{Source: domain.SourceSystem, Severity: domain.SeverityInfo, Title: "a", Summary: "s"})
 	_, _ = q.Publish(ctx, domain.QueuePublishArgs{Source: domain.SourceSystem, Severity: domain.SeverityInfo, Title: "b", Summary: "s"})
 
-	if err := q.MarkNotified(ctx, []string{a.ID}); err != nil {
+	if err := q.MarkNotified(ctx, []domain.QueueEvent{a}); err != nil {
 		t.Fatal(err)
 	}
 	unnotified, err := q.Digest(ctx, domain.QueueDigestOptions{NotifiedIsNull: true})
@@ -464,7 +475,7 @@ func TestPublishRearmsOnMaterialChange(t *testing.T) {
 		Title: "w: waiting", Summary: "agent waiting", DedupeKey: "k",
 	})
 	// Notifier delivered it.
-	if err := q.MarkNotified(ctx, []string{first.ID}); err != nil {
+	if err := q.MarkNotified(ctx, []domain.QueueEvent{first}); err != nil {
 		t.Fatal(err)
 	}
 	unnotified, _ := q.Digest(ctx, domain.QueueDigestOptions{NotifiedIsNull: true})

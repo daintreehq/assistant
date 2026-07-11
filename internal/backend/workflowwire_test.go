@@ -44,6 +44,34 @@ func readFixture(t *testing.T, name string) []byte {
 	return b
 }
 
+// deref unwraps a nullable wire string for assertions (nil → "").
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// An explicit EMPTY string on a nullable patch field must decode as a non-nil
+// pointer to "" — the wire-level carrier of clear semantics (last_error:""
+// clears a previous error) — while null/omitted decodes to nil.
+func TestNodePatchNullVsEmptyDistinguished(t *testing.T) {
+	out, err := backend.RunWorkflowReconcile(context.Background(),
+		fixtureRunner{out: json.RawMessage(
+			`{"patch":{"node_updates":[{"node_id":"n1","last_error":"","note":null}]}}`)},
+		backend.WorkflowReconcileInput{Workflow: &backend.WorkflowSnapshot{ID: "w"}, Reason: "manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nu := out.Patch.NodeUpdates[0]
+	if nu.LastError == nil || *nu.LastError != "" {
+		t.Fatalf("explicit last_error:\"\" must decode non-nil empty (clear), got %v", nu.LastError)
+	}
+	if nu.Note != nil || nu.Status != nil || nu.Title != nil {
+		t.Fatalf("null/omitted fields must decode nil, got %+v", nu)
+	}
+}
+
 /* ------------------------------ plan output ------------------------------- */
 
 func TestPlanOutputFixtureDecodesWithRealDTOs(t *testing.T) {
@@ -122,13 +150,17 @@ func TestReconcileOutputFixtureDecodesWithRealDTOs(t *testing.T) {
 	if len(p.NodeUpdates) != 2 {
 		t.Fatalf("node_updates: want 2, got %d", len(p.NodeUpdates))
 	}
-	if p.NodeUpdates[0].NodeID != "verify-tests" || p.NodeUpdates[0].Status != "failed" ||
-		p.NodeUpdates[0].LastError != "pytest exited 1: 2 watcher tests still failing" ||
-		p.NodeUpdates[0].Title != "" || p.NodeUpdates[0].Note != "" {
-		t.Errorf("node_updates[0] drifted (node_id spelling?): %+v", p.NodeUpdates[0])
+	// The nullable fields are POINTERS (backend NodePatchOut: `... | None`), so an
+	// explicit null must decode to nil — NOT to "" — keeping "leave unchanged"
+	// distinguishable from an explicit empty value (clear semantics).
+	if p.NodeUpdates[0].NodeID != "verify-tests" || deref(p.NodeUpdates[0].Status) != "failed" ||
+		deref(p.NodeUpdates[0].LastError) != "pytest exited 1: 2 watcher tests still failing" ||
+		p.NodeUpdates[0].Title != nil || p.NodeUpdates[0].Note != nil {
+		t.Errorf("node_updates[0] drifted (node_id spelling / null-vs-empty?): %+v", p.NodeUpdates[0])
 	}
-	if p.NodeUpdates[1].NodeID != "report-outcome" || p.NodeUpdates[1].Note == "" ||
-		p.NodeUpdates[1].Title == "" || p.NodeUpdates[1].Status != "" {
+	if p.NodeUpdates[1].NodeID != "report-outcome" || deref(p.NodeUpdates[1].Note) == "" ||
+		deref(p.NodeUpdates[1].Title) == "" || p.NodeUpdates[1].Status != nil ||
+		p.NodeUpdates[1].LastError != nil {
 		t.Errorf("node_updates[1] drifted: %+v", p.NodeUpdates[1])
 	}
 
@@ -145,8 +177,8 @@ func TestReconcileOutputFixtureDecodesWithRealDTOs(t *testing.T) {
 		t.Fatalf("resource_updates: want 1, got %d", len(p.ResourceUpdates))
 	}
 	ru := p.ResourceUpdates[0]
-	if ru.ResourceID != "term-verify-1" || ru.Status != "exited" ||
-		ru.NodeID != "verify-tests" || ru.Label != "pytest verify run (exit 1)" {
+	if ru.ResourceID != "term-verify-1" || deref(ru.Status) != "exited" ||
+		deref(ru.NodeID) != "verify-tests" || deref(ru.Label) != "pytest verify run (exit 1)" {
 		t.Errorf("resource_updates[0] drifted (resource_id spelling?): %+v", ru)
 	}
 

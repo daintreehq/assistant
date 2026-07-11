@@ -72,6 +72,13 @@ func GraphFromPlan(out backend.WorkflowPlanOutput, goal string, source Source, h
 	} else if warn != "" {
 		warnings = append(warnings, warn)
 	}
+	// A node binding that names no node in THIS plan is a hallucinated hint:
+	// drop the binding (the action itself is still useful), warn.
+	if g.NextAction != nil && g.NextAction.NodeID != "" && g.NodeByID(g.NextAction.NodeID) == nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"next action node binding dropped: plan has no node %q", g.NextAction.NodeID))
+		g.NextAction.NodeID = ""
+	}
 
 	RecomputeDerived(g, now)
 	return g, warnings, nil
@@ -90,31 +97,25 @@ func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseR
 		BaseRevision: baseRevision,
 		Rationale:    clampRunes(wp.Rationale, MaxReasonRunes),
 	}
-	// The LOCAL revision is authoritative (the commit path re-checks it); a
-	// backend echo that disagrees means the patch was reasoned against a stale
-	// snapshot — worth a warning, not a hard failure (validation still gates).
-	if wp.BaseRevision != nil && *wp.BaseRevision != baseRevision {
-		warnings = append(warnings, fmt.Sprintf(
-			"backend patch base_revision %d differs from local revision %d", *wp.BaseRevision, baseRevision))
-	}
+	// NOTE: a non-null wp.BaseRevision that disagrees with the local revision is
+	// REJECTED by Service.Reconcile BEFORE conversion — a patch reasoned against
+	// a stale/replayed snapshot must never be applied to a newer revision. This
+	// converter only ever sees a null or matching echo.
 	if wp.NewStatus != "" {
 		s := Status(wp.NewStatus)
 		p.NewStatus = &s
 	}
+	// Nullable wire fields (pointers) carry three-way semantics: nil = leave
+	// unchanged, non-nil = apply — INCLUDING an explicit "" (e.g. last_error:""
+	// clears a previous error). Structural validity remains ApplyPatch's job.
 	for _, nu := range wp.NodeUpdates {
 		np := NodePatch{ID: nu.NodeID}
-		if nu.Status != "" {
-			s := NodeStatus(nu.Status)
+		if nu.Status != nil {
+			s := NodeStatus(*nu.Status)
 			np.Status = &s
 		}
-		if nu.Title != "" {
-			t := nu.Title
-			np.Title = &t
-		}
-		if nu.LastError != "" {
-			e := nu.LastError
-			np.LastError = &e
-		}
+		np.Title = nu.Title
+		np.LastError = nu.LastError
 		// nu.Note is advisory prose for the operator; the local graph keeps no
 		// per-node note field, so it is intentionally not persisted.
 		p.NodeUpdates = append(p.NodeUpdates, np)
@@ -126,20 +127,9 @@ func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseR
 		p.AddEdges = append(p.AddEdges, Edge{From: e.Source, To: e.Target})
 	}
 	for _, ru := range wp.ResourceUpdates {
-		rp := ResourcePatch{ID: ru.ResourceID}
-		if ru.Status != "" {
-			s := ru.Status
-			rp.Status = &s
-		}
-		if ru.NodeID != "" {
-			nid := ru.NodeID
-			rp.NodeID = &nid
-		}
-		if ru.Label != "" {
-			l := ru.Label
-			rp.Label = &l
-		}
-		p.ResourceUpdates = append(p.ResourceUpdates, rp)
+		p.ResourceUpdates = append(p.ResourceUpdates, ResourcePatch{
+			ID: ru.ResourceID, Status: ru.Status, NodeID: ru.NodeID, Label: ru.Label,
+		})
 	}
 	for _, b := range wp.AddBlockers {
 		p.AddBlockers = append(p.AddBlockers, Blocker{
@@ -215,6 +205,11 @@ func actionFromWire(a *backend.RecommendedActionOut, hasTool func(string) bool) 
 		Args:                 a.Args,
 		Risk:                 domain.RiskClass(a.Risk),
 		RequiresConfirmation: a.RequiresConfirmation,
+		// The node binding disambiguates WHICH ready node this action advances
+		// when several share a tool. Validated against the graph where the
+		// action lands (GraphFromPlan above / ApplyPatch): an unknown node
+		// drops the binding, never the action.
+		NodeID: strings.TrimSpace(a.NodeID),
 	}, ""
 }
 

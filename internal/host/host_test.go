@@ -19,9 +19,14 @@ import (
 
 // fakeApp is a host.App test double. SetHooks captures the sink so the test can
 // drive turn events; Send blocks on a channel so the test controls turn timing.
+// rearmed records RearmAttention calls (the durable re-arm of a cancelled wake
+// burst).
 type fakeApp struct {
 	hooks   AppHooks
 	session *agent.Session
+
+	mu      sync.Mutex
+	rearmed []string
 }
 
 func (f *fakeApp) SetHooks(h AppHooks)                             { f.hooks = h }
@@ -31,6 +36,19 @@ func (f *fakeApp) Session() *agent.Session                         { return f.se
 func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }
 func (f *fakeApp) Config() config.AppConfig                        { return config.AppConfig{} }
 func (f *fakeApp) Shutdown(context.Context) error                  { return nil }
+
+func (f *fakeApp) RearmAttention(ids []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rearmed = append(f.rearmed, ids...)
+	return nil
+}
+
+func (f *fakeApp) rearmedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rearmed...)
+}
 
 // syncBuf is a goroutine-safe writer collecting NDJSON output.
 type syncBuf struct {

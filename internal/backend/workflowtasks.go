@@ -184,21 +184,27 @@ type WorkflowReconcileInput struct {
 // --------------------------------------------------------------------------
 
 // NodePatchOut is one node mutation in a backend patch (identity: node_id).
+// The mutable fields are POINTERS because the backend model declares them
+// `... | None` (contracts/tasks.py NodePatchOut): JSON null / omitted means
+// "leave unchanged" and must stay distinguishable from an explicit "" — a
+// returned last_error:"" CLEARS a previous error, which a value string would
+// silently swallow.
 type NodePatchOut struct {
-	NodeID    string `json:"node_id"`
-	Status    string `json:"status,omitempty"`
-	Title     string `json:"title,omitempty"`
-	LastError string `json:"last_error,omitempty"`
-	Note      string `json:"note,omitempty"`
+	NodeID    string  `json:"node_id"`
+	Status    *string `json:"status,omitempty"`
+	Title     *string `json:"title,omitempty"`
+	LastError *string `json:"last_error,omitempty"`
+	Note      *string `json:"note,omitempty"`
 }
 
 // ResourcePatchOut is one resource mutation in a backend patch (identity:
-// resource_id — the id the client supplied in the reconcile snapshot).
+// resource_id — the id the client supplied in the reconcile snapshot). Same
+// pointer-nullability contract as NodePatchOut (backend ResourcePatchOut).
 type ResourcePatchOut struct {
-	ResourceID string `json:"resource_id"`
-	Status     string `json:"status,omitempty"`
-	NodeID     string `json:"node_id,omitempty"`
-	Label      string `json:"label,omitempty"`
+	ResourceID string  `json:"resource_id"`
+	Status     *string `json:"status,omitempty"`
+	NodeID     *string `json:"node_id,omitempty"`
+	Label      *string `json:"label,omitempty"`
 }
 
 // WorkflowBlockerOut is one blocker addition in a backend patch. Summary is

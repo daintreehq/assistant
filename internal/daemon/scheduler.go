@@ -474,8 +474,24 @@ func (s *Scheduler) prefetchWatcherStatuses(ctx context.Context, watchers []doma
 // of blocking the caller.
 func (s *Scheduler) NotifyNow() { s.requestNotify() }
 
-// notify delivers newly-unnotified attention+ events exactly once, marking them
-// notified REGARDLESS of delivery success (else the same events re-fire forever).
+// notifyPageSize bounds one Digest page inside a notify pass. notify() DRAINS —
+// it keeps digesting while pages come back full — so the cap bounds memory per
+// read, not delivery: a burst larger than one page is fully delivered within the
+// same pass instead of stranding its tail until an unrelated tick.
+const notifyPageSize = 20
+
+// notifyMaxPages hard-bounds the drain loop so a publisher continuously bumping
+// an event (whose conditional ack then keeps failing) can never wedge a notify
+// pass; whatever remains is picked up by the pending re-run / next tick.
+const notifyMaxPages = 50
+
+// notify delivers newly-unnotified attention+ events exactly once, draining page
+// by page until the digest runs dry. Events are marked notified REGARDLESS of
+// delivery success (else the same events re-fire forever) — but the mark is
+// VERSION-CONDITIONAL (daemon.Queue.MarkNotified): an event a publisher
+// materially updated between the Digest read and the mark keeps notifiedAt NULL,
+// so the update is re-delivered on the next page/pass instead of being stamped
+// away undelivered.
 func (s *Scheduler) notify() {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
@@ -487,25 +503,26 @@ func (s *Scheduler) notify() {
 		return
 	}
 	atLeast := domain.SeverityAttention
-	maxItems := 20
-	fresh, err := s.deps.Queue.Digest(domain.QueueDigestOptions{
-		SeverityAtLeast: &atLeast,
-		NotifiedIsNull:  true,
-		MaxItems:        &maxItems,
-	})
-	if err != nil || len(fresh) == 0 {
-		return
+	maxItems := notifyPageSize
+	for page := 0; page < notifyMaxPages; page++ {
+		fresh, err := s.deps.Queue.Digest(domain.QueueDigestOptions{
+			SeverityAtLeast: &atLeast,
+			NotifiedIsNull:  true,
+			MaxItems:        &maxItems,
+		})
+		if err != nil || len(fresh) == 0 {
+			return
+		}
+		func() {
+			// Best-effort delivery: a panic in the callback must NOT skip markNotified.
+			defer func() { _ = recover() }()
+			cb(fresh)
+		}()
+		_ = s.deps.Queue.MarkNotified(fresh)
+		if len(fresh) < maxItems {
+			return // short page: the digest is drained
+		}
 	}
-	func() {
-		// Best-effort delivery: a panic in the callback must NOT skip markNotified.
-		defer func() { _ = recover() }()
-		cb(fresh)
-	}()
-	ids := make([]string, len(fresh))
-	for i, e := range fresh {
-		ids[i] = e.ID
-	}
-	_ = s.deps.Queue.MarkNotified(ids)
 }
 
 // timerPayload is the parsed timer payload shape.

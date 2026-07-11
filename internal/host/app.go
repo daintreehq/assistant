@@ -31,6 +31,17 @@ type App interface {
 	// receives each surfaced attention burst; the host filters for actionable wakes.
 	StartScheduler(onAttention func(events []domain.QueueEvent))
 
+	// RearmAttention durably re-arms delivered-but-unhandled attention events
+	// (nulls their notifiedAt in the project store) so the NEXT owner's notify
+	// pass re-digests and re-delivers them. Teardown calls it with whatever is
+	// left in pendingWake — a burst a shutdown/hibernate-cancelled wake turn
+	// requeued, or one that was queued but never started: those events were
+	// already marked notified when they were handed to this process, and the
+	// in-memory queue dies with it — without the durable re-arm the wake would
+	// be silently lost across the restart. Best-effort (the host only logs a
+	// failure).
+	RearmAttention(ids []string) error
+
 	// Session is the turn engine driven by prompt/wake.
 	Session() *agent.Session
 
@@ -48,9 +59,23 @@ type App interface {
 // (command prompts and autonomous wake turns). It exists as a seam so loop tests
 // can run the REAL prompt/wake/teardown wiring against a cooperative fake session;
 // boot fills it with h.app.Session().
+//
+// RetractPendingInjection/DiscardPendingInjections exist for the injection-strand
+// race: InjectPrompt only BUFFERS — the running turn folds the buffer in at its
+// next iteration boundary, but a turn past its FINAL fold check can complete
+// before the injection lands, leaving the prompt buffered forever while the host
+// has told the parent it was folded. The host therefore reclaims unconsumed
+// injections when a turn finishes (and re-dispatches them as a fresh turn), and
+// discards them when the turn was aborted. See finishPromptTurn/handlePrompt.
 type turnSession interface {
 	Send(ctx context.Context, text string, opts agent.SendOptions) (string, error)
 	InjectPrompt(text string)
+	// RetractPendingInjection removes and returns the most recently buffered
+	// injection that has NOT yet been folded into the running turn (LIFO); ok is
+	// false when nothing is buffered.
+	RetractPendingInjection() (string, bool)
+	// DiscardPendingInjections drops every buffered-but-unfolded injection.
+	DiscardPendingInjections()
 }
 
 // ConfirmRequest is the confirm payload the host bridges to an approval. The App

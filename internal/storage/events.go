@@ -221,16 +221,46 @@ func (s *Store) ListEvents(opts domain.QueueDigestOptions) ([]domain.QueueEvent,
 	return out, rows.Err()
 }
 
-// MarkNotified stamps notifiedAt on each id (ts defaults to now when <=0).
-func (s *Store) MarkNotified(ids []string, ts int64) error {
+// MarkNotified stamps notifiedAt on each digested event (ts defaults to now when
+// <=0) — VERSION-CONDITIONALLY: a row is stamped only while it still matches the
+// snapshot that was actually delivered (same count, same
+// COALESCE(updatedAt,createdAt), notifiedAt still NULL). A publisher that
+// materially updates an event between the notifier's Digest read and this
+// acknowledgement bumps count/updatedAt (and re-arms notifiedAt), so the
+// condition fails, the row stays unnotified, and the NEXT notify pass re-digests
+// and delivers the update. Without the condition the update would be stamped
+// notified without the human ever seeing it.
+func (s *Store) MarkNotified(evs []domain.QueueEvent, ts int64) error {
 	// ts<=0 ⇒ "use the store clock". Epoch-ms 0 is 1970 and never a real stamp, so
 	// the sentinel can't collide with a legitimate caller-supplied time.
 	if ts <= 0 {
 		ts = s.now()
 	}
-	for _, id := range ids {
-		if _, err := s.db.Exec("UPDATE events SET notifiedAt = ? WHERE id = ?", ts, id); err != nil {
+	for _, e := range evs {
+		version := e.CreatedAt
+		if e.UpdatedAt != nil {
+			version = *e.UpdatedAt
+		}
+		if _, err := s.db.Exec(
+			`UPDATE events SET notifiedAt = ?
+			  WHERE id = ? AND notifiedAt IS NULL AND count = ?
+			    AND COALESCE(updatedAt, createdAt) = ?`,
+			ts, e.ID, e.Count, version); err != nil {
 			return fmt.Errorf("mark notified: %w", err)
+		}
+	}
+	return nil
+}
+
+// ClearNotified nulls notifiedAt for each id, re-arming the events so the next
+// notify pass digests and delivers them again. Idempotent (an already-NULL row is
+// a no-op). Two callers: the queue's material-change re-arm on a dedupe bump, and
+// the host's shutdown-cancelled-wake re-arm (a burst handed to a dying process
+// was already stamped notified; without the re-arm it would never be delivered).
+func (s *Store) ClearNotified(ids []string) error {
+	for _, id := range ids {
+		if _, err := s.db.Exec("UPDATE events SET notifiedAt = NULL WHERE id = ?", id); err != nil {
+			return fmt.Errorf("clear notified: %w", err)
 		}
 	}
 	return nil

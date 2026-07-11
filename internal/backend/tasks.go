@@ -297,23 +297,16 @@ func RunWatcherClassify(ctx context.Context, r TaskRunner, in WatcherClassifyInp
 	return out, err
 }
 
-// validateJudgeOutput rejects a fully-zero judge verdict (the shape `{}` decodes to):
-// the backend contract always carries a reason, so an all-empty verdict is a decode
-// of nothing, not a real "no". Shared by terminal_judge and skill_step_consistency.
-func validateJudgeOutput(out *JudgeOutput) error {
-	if out.Reason == "" && out.Confidence == 0 && !out.Matched {
-		return errors.New("decoded judge verdict is structurally empty")
-	}
-	return nil
-}
-
-// RunTerminalJudge answers one yes/no question about a terminal.
+// RunTerminalJudge answers one yes/no question about a terminal. No validate hook:
+// the AUTHORITATIVE backend schema (contracts/tasks.py JudgeOutput) defaults
+// reason to "" and matched to false, so {matched:false, confidence:0, reason:""}
+// is a schema-valid NEGATIVE verdict — rejecting it client-side would turn a
+// legitimate "no" into a task error. Only the no-output-at-all wire round is
+// rejected (by runTyped). Same posture for skill_step_consistency below.
 func RunTerminalJudge(ctx context.Context, r TaskRunner, in TerminalJudgeInput) (JudgeOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out JudgeOutput
-	err := runTypedValidated(ctx, r, TaskTerminalJudge, in, nil, &out, func() error {
-		return validateJudgeOutput(&out)
-	})
+	err := runTyped(ctx, r, TaskTerminalJudge, in, nil, &out)
 	return out, err
 }
 
@@ -355,26 +348,20 @@ func RunTerminalExtractJSON(ctx context.Context, r TaskRunner, in TerminalExtrac
 }
 
 // RunExtractionVerdict judges whether an extracted result satisfies a condition.
+// No validate hook: the backend ExtractionVerdictOutput defaults reason to "", so
+// {pass:false, reason:""} is a schema-valid failing judgement (see RunTerminalJudge).
 func RunExtractionVerdict(ctx context.Context, r TaskRunner, in ExtractionVerdictInput) (ExtractionVerdictOutput, error) {
 	in.Result = clampHeadRunes(in.Result, maxTaskResultRunes)
 	var out ExtractionVerdictOutput
-	err := runTypedValidated(ctx, r, TaskExtractionVerdict, in, nil, &out, func() error {
-		// The backend contract always carries a reason; a fully-zero verdict
-		// ({pass:false, reason:""}) is `{}` decoded, not a real failing judgement.
-		if !out.Passed && out.Reason == "" {
-			return errors.New("decoded verdict is structurally empty")
-		}
-		return nil
-	})
+	err := runTyped(ctx, r, TaskExtractionVerdict, in, nil, &out)
 	return out, err
 }
 
 // RunSkillStepConsistency judges whether one skill-step advance is consistent.
+// No validate hook — same reasoning as RunTerminalJudge (shared JudgeOutput schema).
 func RunSkillStepConsistency(ctx context.Context, r TaskRunner, in SkillStepConsistencyInput) (JudgeOutput, error) {
 	var out JudgeOutput
-	err := runTypedValidated(ctx, r, TaskSkillStepConsistency, in, nil, &out, func() error {
-		return validateJudgeOutput(&out)
-	})
+	err := runTyped(ctx, r, TaskSkillStepConsistency, in, nil, &out)
 	return out, err
 }
 

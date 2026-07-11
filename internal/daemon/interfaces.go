@@ -66,11 +66,15 @@ type MemoryWriter interface {
 
 // Queue is the attention-queue surface the daemon publishes to and reads from in
 // notify(). Publish dedupes by dedupeKey; Digest filters open events; MarkNotified
-// stamps notifiedAt.
+// stamps notifiedAt on the DIGESTED events version-conditionally — a row is
+// stamped only while it still matches the delivered snapshot (same count and
+// updated-at), so an event a publisher materially updated between the Digest read
+// and the acknowledgement stays un-notified and is re-delivered on the next pass
+// instead of being silently buried.
 type Queue interface {
 	Publish(args domain.QueuePublishArgs) error
 	Digest(opts domain.QueueDigestOptions) ([]domain.QueueEvent, error)
-	MarkNotified(ids []string) error
+	MarkNotified(evs []domain.QueueEvent) error
 }
 
 // MCPResult is the raw MCP tool-call result the watcher engines parse. Daintree

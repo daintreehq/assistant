@@ -165,6 +165,86 @@ func TestEventDedupeUpsert(t *testing.T) {
 	}
 }
 
+// TestMarkNotifiedIsVersionConditional proves the acknowledgement SQL: a stale
+// snapshot (the row was bumped after the digest read) must NOT stamp notifiedAt
+// — the update stays digestable — while the fresh snapshot stamps it normally.
+func TestMarkNotifiedIsVersionConditional(t *testing.T) {
+	now := int64(5000)
+	s, _ := Open(":memory:", &Options{Now: func() int64 { return now }})
+	defer s.Close()
+	stale, err := s.UpsertEvent(domain.QueuePublishArgs{
+		Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "w: waiting", Summary: "v1", DedupeKey: "k",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Publisher bump lands AFTER the notifier digested `stale` (count+1, updatedAt
+	// advanced) — the classic digest/ack race.
+	now = 6000
+	if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+		Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "w: tests failed", Summary: "v2", DedupeKey: "k",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale acknowledgement must not stick.
+	if err := s.MarkNotified([]domain.QueueEvent{stale}, 0); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.ListEvents(domain.QueueDigestOptions{NotifiedIsNull: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].ID != stale.ID || fresh[0].Summary != "v2" {
+		t.Fatalf("bumped event must stay digestable after a stale ack, got %+v", fresh)
+	}
+
+	// The fresh snapshot acknowledges normally.
+	if err := s.MarkNotified(fresh, 0); err != nil {
+		t.Fatal(err)
+	}
+	left, _ := s.ListEvents(domain.QueueDigestOptions{NotifiedIsNull: true})
+	if len(left) != 0 {
+		t.Fatalf("fresh ack must stamp notifiedAt, %d events still digestable", len(left))
+	}
+}
+
+// TestClearNotifiedRearmsForNextDigest is the store half of the cancelled-wake
+// recovery: a burst handed to a dying process was already stamped notified, so
+// the host re-arms it via ClearNotified — after which the next run's notify-pass
+// digest (NotifiedIsNull) returns the events again for re-delivery.
+func TestClearNotifiedRearmsForNextDigest(t *testing.T) {
+	s := openTest(t, 5000)
+	ev, err := s.UpsertEvent(domain.QueuePublishArgs{
+		Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "agent finished", Summary: "terminal settled",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The scheduler delivered the burst to the (soon-cancelled) wake and stamped it.
+	if err := s.MarkNotified([]domain.QueueEvent{ev}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, _ := s.ListEvents(domain.QueueDigestOptions{NotifiedIsNull: true}); len(fresh) != 0 {
+		t.Fatalf("sanity: event should be suppressed after MarkNotified, got %d", len(fresh))
+	}
+	// Shutdown cancelled the wake: the host durably re-arms the burst.
+	if err := s.ClearNotified([]string{ev.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// The next run's scheduler pass re-digests it.
+	fresh, err := s.ListEvents(domain.QueueDigestOptions{NotifiedIsNull: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].ID != ev.ID {
+		t.Fatalf("re-armed event must be digestable again, got %+v", fresh)
+	}
+}
+
 func TestListEventsSeverityOrder(t *testing.T) {
 	s := openTest(t, 1)
 	for _, sv := range []domain.Severity{domain.SeverityDone, domain.SeverityError, domain.SeverityInfo, domain.SeverityAttention} {

@@ -494,7 +494,9 @@ func TestBackupDBFailureLeavesFilesUntouched(t *testing.T) {
 }
 
 // TestBackupDBDistinctNamesWithinOneSecond: two resets in the same second must not
-// overwrite each other's backup.
+// overwrite each other's backup. The backup directory is created EXCLUSIVELY
+// (os.Mkdir), so a name collision picks a suffixed sibling instead of renaming
+// over an existing backup.
 func TestBackupDBDistinctNamesWithinOneSecond(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.db")
@@ -516,5 +518,136 @@ func TestBackupDBDistinctNamesWithinOneSecond(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("backup %s missing: %v", p, err)
 		}
+	}
+}
+
+// failNthRename installs a backupRename hook that fails the Nth move call
+// (1-based) with a synthetic error and restores os.Rename on cleanup. Rollback
+// renames (made after the failure) go through the hook too, so failEverAfter
+// can additionally model a wedged rollback.
+func failNthRename(t *testing.T, n int, failEverAfter bool) {
+	t.Helper()
+	calls := 0
+	failed := false
+	backupRename = func(oldpath, newpath string) error {
+		calls++
+		if calls == n || (failed && failEverAfter) {
+			failed = true
+			return errors.New("synthetic rename failure")
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	t.Cleanup(func() { backupRename = os.Rename })
+}
+
+// TestBackupDBWalMoveFailureRollsBackAndNeverDeletesWal is the finding-7 core:
+// when the WAL's move (the SECOND rename) fails, the already-moved main DB must
+// be moved BACK, the WAL must still exist with its original bytes (a WAL can
+// hold the only copy of committed transactions — it is NEVER deleted), and the
+// error must be returned with no backup path.
+func TestBackupDBWalMoveFailureRollsBackAndNeverDeletesWal(t *testing.T) {
+	dir := t.TempDir()
+	path := stampStaleDB(t, filepath.Join(dir, "state.db"))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-wal", []byte("wal-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-shm", []byte("shm-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	failNthRename(t, 2, false) // 1st = main db OK, 2nd = wal fails
+
+	backup, err := BackupDB(path, 1)
+	if err == nil {
+		t.Fatalf("BackupDB must fail when the WAL move fails, got backup %q", backup)
+	}
+	if backup != "" {
+		t.Fatalf("a failed backup must not report a backup path, got %q", backup)
+	}
+	// The triplet is back in place, byte-identical.
+	if got, rerr := os.ReadFile(path); rerr != nil || string(got) != string(original) {
+		t.Fatalf("main db not rolled back intact (err=%v)", rerr)
+	}
+	if got, rerr := os.ReadFile(path + "-wal"); rerr != nil || string(got) != "wal-bytes" {
+		t.Fatalf("WAL was deleted or altered on a failed backup (err=%v got=%q)", rerr, got)
+	}
+	if got, rerr := os.ReadFile(path + "-shm"); rerr != nil || string(got) != "shm-bytes" {
+		t.Fatalf("SHM was deleted or altered on a failed backup (err=%v got=%q)", rerr, got)
+	}
+	if !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("clean-rollback error must state the files were restored, got: %v", err)
+	}
+}
+
+// TestBackupDBShmMoveFailureRollsBackWholeTriplet: a THIRD-rename (shm) failure
+// must move back BOTH the main db and the wal — a partial backup is never
+// reported as success.
+func TestBackupDBShmMoveFailureRollsBackWholeTriplet(t *testing.T) {
+	dir := t.TempDir()
+	path := stampStaleDB(t, filepath.Join(dir, "state.db"))
+	if err := os.WriteFile(path+"-wal", []byte("wal-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-shm", []byte("shm-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	failNthRename(t, 3, false) // main + wal move, shm fails
+
+	backup, err := BackupDB(path, 1)
+	if err == nil {
+		t.Fatalf("BackupDB must fail when the SHM move fails, got backup %q", backup)
+	}
+	for p, want := range map[string]string{path + "-wal": "wal-bytes", path + "-shm": "shm-bytes"} {
+		if got, rerr := os.ReadFile(p); rerr != nil || string(got) != want {
+			t.Fatalf("%s not rolled back intact (err=%v got=%q)", p, rerr, got)
+		}
+	}
+	if _, rerr := os.Stat(path); rerr != nil {
+		t.Fatalf("main db not rolled back: %v", rerr)
+	}
+}
+
+// TestBackupDBFailedRollbackReportsTrueState: when a move fails AND the rollback
+// cannot restore the already-moved files, the error must say the database is
+// split (never claim it was left untouched), and the stranded files must still
+// exist in the backup directory — nothing is deleted.
+func TestBackupDBFailedRollbackReportsTrueState(t *testing.T) {
+	dir := t.TempDir()
+	path := stampStaleDB(t, filepath.Join(dir, "state.db"))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-wal", []byte("wal-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2nd rename (wal) fails, and every rename after it (the rollback) fails too.
+	failNthRename(t, 2, true)
+
+	backup, err := BackupDB(path, 1)
+	if err == nil {
+		t.Fatalf("BackupDB must fail, got backup %q", backup)
+	}
+	if !strings.Contains(err.Error(), "split") {
+		t.Fatalf("failed-rollback error must state the split reality, got: %v", err)
+	}
+	// The main db is stranded in the backup dir — but it must EXIST, intact.
+	matches, _ := filepath.Glob(path + ".bak-v1-*")
+	if len(matches) != 1 {
+		t.Fatalf("want exactly one backup dir, got %v", matches)
+	}
+	got, rerr := os.ReadFile(filepath.Join(matches[0], filepath.Base(path)))
+	if rerr != nil || string(got) != string(original) {
+		t.Fatalf("stranded main db missing or altered (err=%v)", rerr)
+	}
+	// The WAL never moved and was never deleted.
+	if got, rerr := os.ReadFile(path + "-wal"); rerr != nil || string(got) != "wal-bytes" {
+		t.Fatalf("WAL deleted/altered during failed rollback (err=%v got=%q)", rerr, got)
 	}
 }

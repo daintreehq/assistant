@@ -228,12 +228,17 @@ func isAborted(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)
 }
 
-// errMsg renders any error as a string (TS errMsg shim). nil → "".
+// errMsg renders any error as a string (TS errMsg shim). nil → "". The text is
+// sanitized: a transport error (*url.Error and the SDK errors wrapping it)
+// embeds the FULL request URL — query string included, which for an MCP endpoint
+// can carry credentials — so every URL in the message is stripped to
+// scheme://host/path before the string can reach lastError/Status()/debug logs
+// (see sanitizeErrText in errors.go).
 func errMsg(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return sanitizeErrText(err.Error())
 }
 
 // isBindingTerminal reports whether a tool-result text carries one of Daintree's

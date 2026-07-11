@@ -52,24 +52,51 @@ func TestRunTypedEmptyOutputIsTypedError(t *testing.T) {
 	assertTaskOutputError(t, err, TaskMemoryDistill)
 }
 
-// `{}` decodes cleanly but yields structurally empty required results; every helper
-// with obviously-required output fields must reject it with a typed error.
+// `{}` decodes cleanly but yields structurally empty required results; helpers whose
+// output has an obviously-required field must reject it with a typed error. The
+// judge/verdict tasks are deliberately NOT here: their backend schemas default
+// reason to "" (see TestJudgeAndVerdictZeroValuesAreLegitimateNegatives).
 func TestRunTypedValidateRejectsStructurallyEmptyResults(t *testing.T) {
 	empty := `{}`
 
 	_, err := RunWatcherClassify(context.Background(), withOutput(empty), WatcherClassifyInput{Tail: "x"})
 	assertTaskOutputError(t, err, TaskWatcherClassify)
 
-	_, err = RunTerminalJudge(context.Background(), withOutput(empty), TerminalJudgeInput{Question: "done?"})
-	assertTaskOutputError(t, err, TaskTerminalJudge)
-
-	_, err = RunSkillStepConsistency(context.Background(), withOutput(empty), SkillStepConsistencyInput{SkillID: "s"})
-	assertTaskOutputError(t, err, TaskSkillStepConsistency)
-
 	_, err = RunTerminalExtractJSON(context.Background(), withOutput(empty), TerminalExtractJSONInput{Instruction: "x"}, nil)
 	assertTaskOutputError(t, err, TaskTerminalExtractJSON)
+}
 
-	_, err = RunExtractionVerdict(context.Background(), withOutput(empty), ExtractionVerdictInput{Result: "r", Condition: "c"})
+// The backend JudgeOutput / ExtractionVerdictOutput schemas accept an empty reason
+// (it defaults to ""), so an all-zero verdict is a legitimate NEGATIVE answer the
+// client must accept — while a wire round with no output at all stays rejected.
+func TestJudgeAndVerdictZeroValuesAreLegitimateNegatives(t *testing.T) {
+	zeroJudge := `{"reason":"","confidence":0,"matched":false}`
+
+	judge, err := RunTerminalJudge(context.Background(), withOutput(zeroJudge), TerminalJudgeInput{Question: "done?"})
+	if err != nil || judge.Matched || judge.Reason != "" {
+		t.Fatalf("terminal judge zero verdict: out=%+v err=%v, want accepted negative", judge, err)
+	}
+
+	skill, err := RunSkillStepConsistency(context.Background(), withOutput(zeroJudge), SkillStepConsistencyInput{SkillID: "s"})
+	if err != nil || skill.Matched {
+		t.Fatalf("skill consistency zero verdict: out=%+v err=%v, want accepted negative", skill, err)
+	}
+
+	verdict, err := RunExtractionVerdict(context.Background(), withOutput(`{"pass":false,"reason":""}`),
+		ExtractionVerdictInput{Result: "r", Condition: "c"})
+	if err != nil || verdict.Passed {
+		t.Fatalf("extraction verdict zero verdict: out=%+v err=%v, want accepted negative", verdict, err)
+	}
+
+	// No output at all is still a typed error for all three.
+	r := &scriptedRunner{res: TaskResult{Output: nil}}
+	if _, err := RunTerminalJudge(context.Background(), r, TerminalJudgeInput{Question: "q"}); err == nil {
+		t.Fatal("terminal judge with no output must stay rejected")
+	}
+	if _, err := RunSkillStepConsistency(context.Background(), r, SkillStepConsistencyInput{SkillID: "s"}); err == nil {
+		t.Fatal("skill consistency with no output must stay rejected")
+	}
+	_, err = RunExtractionVerdict(context.Background(), r, ExtractionVerdictInput{Result: "r", Condition: "c"})
 	assertTaskOutputError(t, err, TaskExtractionVerdict)
 }
 

@@ -108,6 +108,18 @@ func TestValidateNextActionToolMustExist(t *testing.T) {
 	}
 }
 
+// A next action's node binding must reference a real node (backstop — the ingest
+// paths drop an unknown binding before validation ever sees it).
+func TestValidateNextActionNodeBinding(t *testing.T) {
+	g := twoNodeGraph()
+	g.NextAction = &domain.RecommendedAction{Label: "verify", ToolName: "terminal.run", NodeID: "n_verify"}
+	if err := Validate(g, ValidateOptions{}); err != nil {
+		t.Fatalf("a known node binding should validate, got %v", err)
+	}
+	g.NextAction.NodeID = "n_ghost"
+	wantInvalid(t, g, ValidateOptions{}, "unknown node")
+}
+
 func TestValidateDoneRequiresTerminalNonFailedNodes(t *testing.T) {
 	g := twoNodeGraph()
 	g.Status = StatusDone

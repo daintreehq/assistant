@@ -41,27 +41,42 @@ var errSSELineTooLong = errors.New("sse line exceeds size bound")
 // (or after Stop) further resets are no-ops. The abort func runs on the timer
 // goroutine, so it must be safe to call concurrently with the reader (context
 // cancellation is).
+//
+// deadline guards against the timer-vs-Reset race: time.AfterFunc's callback can
+// already be running (blocked on mu) when a concurrent Reset re-arms the timer,
+// and Timer.Reset cannot recall it. Every Reset therefore also advances deadline
+// under the mutex, and fire treats a callback that observes a still-future
+// deadline as STALE — a no-op, never an abort of a stream that just made
+// progress. The Reset that made it stale already re-armed the timer, so a
+// genuine idle window still fires later.
 type idleWatchdog struct {
-	d     time.Duration
-	mu    sync.Mutex
-	timer *time.Timer
-	fired bool
-	done  bool
+	d        time.Duration
+	abort    func()
+	mu       sync.Mutex
+	timer    *time.Timer
+	deadline time.Time
+	fired    bool
+	done     bool
 }
 
 func newIdleWatchdog(d time.Duration, abort func()) *idleWatchdog {
-	w := &idleWatchdog{d: d}
-	w.timer = time.AfterFunc(d, func() {
-		w.mu.Lock()
-		if w.done {
-			w.mu.Unlock()
-			return
-		}
-		w.fired = true
-		w.mu.Unlock()
-		abort()
-	})
+	w := &idleWatchdog{d: d, abort: abort, deadline: time.Now().Add(d)}
+	w.timer = time.AfterFunc(d, w.fire)
 	return w
+}
+
+// fire is the timer callback. It aborts only when the CURRENT deadline has
+// genuinely elapsed; a stale fire (a Reset raced past the timer's expiry) is a
+// no-op because that Reset already re-armed the timer for the new deadline.
+func (w *idleWatchdog) fire() {
+	w.mu.Lock()
+	if w.done || w.fired || time.Now().Before(w.deadline) {
+		w.mu.Unlock()
+		return
+	}
+	w.fired = true
+	w.mu.Unlock()
+	w.abort()
 }
 
 // Reset re-arms the window after read progress. No-op once fired or stopped.
@@ -71,6 +86,7 @@ func (w *idleWatchdog) Reset() {
 	if w.fired || w.done {
 		return
 	}
+	w.deadline = time.Now().Add(w.d)
 	w.timer.Reset(w.d)
 }
 
@@ -182,25 +198,30 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 	reader := bufio.NewReaderSize(r, 64*1024)
 
 	var (
-		result     RespondResult
-		eventName  string
-		dataLines  []string
-		eventBytes int // accumulated data-payload bytes of the event being buffered
-		content    strings.Builder
-		reasoning  strings.Builder
-		acc        = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
-		metaSeen   bool
-		doneSeen   bool
+		result    RespondResult
+		eventName string
+		// eventData accumulates the event's data lines, newline-joined AS THEY
+		// ARRIVE, so its Len() — which the maxSSEEventBytes cap below reads —
+		// counts every buffered byte including the separators. A per-line []string
+		// buffer measured by summed payload length would let a flood of EMPTY
+		// `data:` lines grow slice/header memory without ever moving the counter.
+		eventData strings.Builder
+		dataSeen  bool // one or more data lines buffered (an empty line still counts)
+		content   strings.Builder
+		reasoning strings.Builder
+		acc       = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
+		metaSeen  bool
+		doneSeen  bool
 	)
 
 	// dispatch decodes and applies one fully-buffered event, then clears the
 	// buffer. A terminal `error` event returns a non-nil *Error.
 	dispatch := func() error {
 		name := eventName
-		data := strings.Join(dataLines, "\n")
+		data := eventData.String()
 		eventName = ""
-		dataLines = nil
-		eventBytes = 0
+		eventData.Reset()
+		dataSeen = false
 		if name == "" && strings.TrimSpace(data) == "" {
 			return nil
 		}
@@ -306,20 +327,26 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				eventName = strings.TrimSpace(trimmed[len("event:"):])
 			case strings.HasPrefix(trimmed, "data:"):
 				d := strings.TrimPrefix(trimmed[len("data:"):], " ")
-				eventBytes += len(d)
-				if eventBytes > maxSSEEventBytes {
+				if dataSeen {
+					eventData.WriteByte('\n')
+				}
+				eventData.WriteString(d)
+				dataSeen = true
+				// The cap reads the BUFFERED size (payload + joining newlines), so
+				// even a stream of millions of empty data lines advances it — one
+				// byte per line — and aborts here instead of growing without bound.
+				if eventData.Len() > maxSSEEventBytes {
 					return result, &Error{
 						Code:    "stream_event_too_large",
 						Message: fmt.Sprintf("SSE event payload exceeded %d bytes", maxSSEEventBytes),
 						Stream:  true,
 					}
 				}
-				dataLines = append(dataLines, d)
 			}
 		}
 		if err != nil {
 			// Flush a trailing event that had no terminating blank line.
-			if eventName != "" || len(dataLines) > 0 {
+			if eventName != "" || dataSeen {
 				if derr := dispatch(); derr != nil {
 					return result, derr
 				}

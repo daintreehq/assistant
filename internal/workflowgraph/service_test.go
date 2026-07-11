@@ -283,6 +283,46 @@ func TestServicePlanDropsUnknownNextActionTool(t *testing.T) {
 	}
 }
 
+// The plan's next_action.node_id survives conversion into the stored graph when
+// it names a plan node; an unknown binding is dropped (with a warning) while the
+// action itself is kept.
+func TestServicePlanNextActionNodeBinding(t *testing.T) {
+	base := `{"label": "Orient on repo state", "tool_name": "agentTask.spawnForEdits"}`
+
+	bound := strings.ReplaceAll(validPlanJSON, base,
+		`{"label": "Orient on repo state", "tool_name": "agentTask.spawnForEdits", "node_id": "n_orient"}`)
+	svc := newTestService(t, newMemGraphStore(),
+		&fakeTasks{outputs: map[string]string{backend.TaskWorkflowPlan: bound}})
+	res, err := svc.Plan(context.Background(), PlanRequest{Goal: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Graph.NextAction == nil || res.Graph.NextAction.NodeID != "n_orient" {
+		t.Fatalf("a known node binding must survive into the graph, got %+v", res.Graph.NextAction)
+	}
+
+	ghost := strings.ReplaceAll(validPlanJSON, base,
+		`{"label": "Orient on repo state", "tool_name": "agentTask.spawnForEdits", "node_id": "n_ghost"}`)
+	svc = newTestService(t, newMemGraphStore(),
+		&fakeTasks{outputs: map[string]string{backend.TaskWorkflowPlan: ghost}})
+	res, err = svc.Plan(context.Background(), PlanRequest{Goal: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Graph.NextAction == nil || res.Graph.NextAction.NodeID != "" {
+		t.Fatalf("an unknown node binding must be dropped (action kept), got %+v", res.Graph.NextAction)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "n_ghost") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dropping the binding must surface a warning, got %v", res.Warnings)
+	}
+}
+
 func TestServicePlanRejectsCyclicPlan(t *testing.T) {
 	store := newMemGraphStore()
 	cyclic := `{"goal":"g","nodes":[
@@ -380,6 +420,117 @@ func TestServiceReconcileAppliesValidatedPatch(t *testing.T) {
 	}
 	if run.Status != "applied" || run.AppliedRevision == nil || *run.AppliedRevision != 2 {
 		t.Fatalf("reconcile run should be applied@2, got %+v", run)
+	}
+}
+
+// A patch whose non-null base_revision disagrees with the LOCAL revision was
+// reasoned against a stale/replayed snapshot: it must be rejected BEFORE any
+// dry-run/apply — never warned about and applied anyway.
+func TestServiceReconcileRejectsStaleBaseRevision(t *testing.T) {
+	store := newMemGraphStore()
+	stale := `{"patch": {"base_revision": 99, "node_updates": [{"node_id": "n_orient", "status": "done"}]}}`
+	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowReconcile: stale}}
+	svc := newTestService(t, store, tasks)
+	g := twoNodeGraph()
+	seedGraph(t, svc, g) // stored at revision 1
+
+	_, err := svc.Reconcile(context.Background(), ReconcileRequest{WorkflowID: g.ID, Reason: "manual", Apply: true})
+	if err == nil || !strings.Contains(err.Error(), "base_revision 99") {
+		t.Fatalf("stale base_revision must be rejected, got %v", err)
+	}
+	// No mutation: still revision 1, node untouched.
+	cur, rev, _ := svc.Get(g.ID)
+	if rev != 1 || cur.NodeByID("n_orient").Status != NodeReady {
+		t.Fatalf("stale patch must not mutate the graph (rev=%d, status=%s)", rev, cur.NodeByID("n_orient").Status)
+	}
+	var run domain.WorkflowReconcileRunRecord
+	for _, r := range store.reconciles {
+		run = r
+	}
+	if run.Status != "rejected" || run.Warning == nil || !strings.Contains(*run.Warning, "base_revision") {
+		t.Fatalf("reconcile run should record the rejection, got %+v", run)
+	}
+}
+
+// A MATCHING base_revision echo applies normally (null is covered by
+// TestServiceReconcileAppliesValidatedPatch — the canned patch omits it).
+func TestServiceReconcileAppliesMatchingBaseRevision(t *testing.T) {
+	store := newMemGraphStore()
+	matching := `{"patch": {"base_revision": 1, "node_updates": [{"node_id": "n_orient", "status": "done"}]}}`
+	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowReconcile: matching}}
+	svc := newTestService(t, store, tasks)
+	g := twoNodeGraph()
+	seedGraph(t, svc, g)
+
+	res, err := svc.Reconcile(context.Background(), ReconcileRequest{WorkflowID: g.ID, Reason: "manual", Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied || res.Revision != 2 || res.Graph.NodeByID("n_orient").Status != NodeDone {
+		t.Fatalf("matching base_revision must apply, got applied=%v rev=%d", res.Applied, res.Revision)
+	}
+}
+
+// A reconcile patch can CLEAR a node's previous last_error with an explicit ""
+// (JSON null leaves it unchanged) — the pointer-nullable wire contract.
+func TestServiceReconcileClearsLastErrorWithExplicitEmpty(t *testing.T) {
+	store := newMemGraphStore()
+	clearPatch := `{"patch": {"node_updates": [{"node_id": "n_orient", "last_error": "", "title": null}]}}`
+	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowReconcile: clearPatch}}
+	svc := newTestService(t, store, tasks)
+	g := twoNodeGraph()
+	g.Nodes[0].LastError = "previous failure"
+	seedGraph(t, svc, g)
+
+	res, err := svc.Reconcile(context.Background(), ReconcileRequest{WorkflowID: g.ID, Reason: "manual", Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := res.Graph.NodeByID("n_orient")
+	if n.LastError != "" {
+		t.Fatalf("explicit last_error:\"\" must clear the previous error, got %q", n.LastError)
+	}
+	if n.Title != "Orient on repo" {
+		t.Fatalf("null title must leave the title unchanged, got %q", n.Title)
+	}
+}
+
+// The plan input clamps its unbounded request lists to the backend pydantic caps
+// (16 skill ids; 24 notes + the mandatory local constraint = 25) instead of
+// letting an over-cap list 422 the whole task.
+func TestServicePlanClampsSkillIDsAndNotes(t *testing.T) {
+	store := newMemGraphStore()
+	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowPlan: validPlanJSON}}
+	svc := newTestService(t, store, tasks)
+
+	ids := make([]string, 20)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("skill-%02d", i)
+	}
+	notes := make([]string, 30)
+	for i := range notes {
+		notes[i] = fmt.Sprintf("note %02d", i)
+	}
+	if _, err := svc.Plan(context.Background(), PlanRequest{
+		Goal: "g", ActiveSkillIDs: ids, Notes: notes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	in := tasks.inputs[0]
+	gotIDs, _ := in["active_skill_ids"].([]any)
+	if len(gotIDs) != maxPlanSkillIDs || gotIDs[0] != "skill-00" || gotIDs[15] != "skill-15" {
+		t.Fatalf("active_skill_ids must head-truncate to %d, got %d: %v", maxPlanSkillIDs, len(gotIDs), gotIDs)
+	}
+	gotCons, _ := in["constraints"].([]any)
+	if len(gotCons) != maxPlanNotes+1 { // + the mandatory local constraint
+		t.Fatalf("constraints must clamp to %d, got %d", maxPlanNotes+1, len(gotCons))
+	}
+	if s, _ := gotCons[0].(string); !strings.Contains(s, "never edit project files") {
+		t.Fatalf("the local constraint must survive the clamp in slot 0, got %v", gotCons[0])
+	}
+	if gotCons[1] != "note 00" || gotCons[maxPlanNotes] != "note 23" {
+		t.Fatalf("notes must head-truncate, got first=%v last=%v", gotCons[1], gotCons[maxPlanNotes])
 	}
 }
 

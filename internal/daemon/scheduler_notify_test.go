@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -84,6 +85,87 @@ func TestScheduler_FastJobNotifyNotDelayedBySlowSibling(t *testing.T) {
 	}
 	if fastCount != 1 {
 		t.Fatalf("fast event delivered %d times, want exactly once", fastCount)
+	}
+}
+
+// Finding: an event materially updated by its publisher BETWEEN the notify
+// pass's Digest read and its MarkNotified acknowledgement must not be stamped
+// notified with the update undelivered. The ack is version-conditional, so the
+// stale mark fails, the row stays unnotified, and the next notify request
+// delivers the updated content.
+func TestScheduler_PublishUpdateRacingNotifyIsRedelivered(t *testing.T) {
+	queue := newFakeQueue()
+	created := int64(100)
+	queue.digest = []domain.QueueEvent{{
+		ID: "evt_1", Severity: domain.SeverityAttention,
+		Title: "watcher: waiting", Summary: "v1", Count: 1, CreatedAt: created,
+	}}
+
+	var mu sync.Mutex
+	var delivered []string
+	bumped := false
+	s := NewScheduler(SchedulerDeps{Store: newFakeStore(), Queue: queue, Registry: &fakeRegistry{}})
+	s.SetOnAttention(func(evs []domain.QueueEvent) {
+		mu.Lock()
+		for _, e := range evs {
+			delivered = append(delivered, e.Summary)
+		}
+		mu.Unlock()
+		// The callback runs BETWEEN Digest and MarkNotified — exactly where a
+		// publisher's dedupe update can land. Bump once, on the first delivery.
+		if !bumped {
+			bumped = true
+			queue.bump("evt_1", "watcher: tests failed", "v2", 200)
+		}
+	})
+
+	s.NotifyNow() // delivers v1; the ack races the bump and must NOT stick
+	s.NotifyNow() // the pending rerun: must deliver the updated v2
+	s.NotifyNow() // and then nothing further (v2's ack matched)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 2 || delivered[0] != "v1" || delivered[1] != "v2" {
+		t.Fatalf("delivered = %v; want [v1 v2] (update re-delivered exactly once)", delivered)
+	}
+}
+
+// Finding: the per-pass digest is capped (one page), and coalescing collapses a
+// burst of N requests into at most two passes — so without draining, a burst
+// bigger than two pages strands its tail until an unrelated tick. notify() must
+// loop while pages come back full: 45 events (> 2×20) through ONE request must
+// all be delivered.
+func TestScheduler_NotifyDrainsBurstBeyondOnePage(t *testing.T) {
+	queue := newFakeQueue()
+	for i := 0; i < 45; i++ {
+		queue.digest = append(queue.digest, domain.QueueEvent{
+			ID: fmt.Sprintf("evt_%02d", i), Severity: domain.SeverityAttention,
+			Title: "T", Summary: "s", Count: 1, CreatedAt: int64(i),
+		})
+	}
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	s := NewScheduler(SchedulerDeps{Store: newFakeStore(), Queue: queue, Registry: &fakeRegistry{}})
+	s.SetOnAttention(func(evs []domain.QueueEvent) {
+		mu.Lock()
+		for _, e := range evs {
+			seen[e.ID]++
+		}
+		mu.Unlock()
+	})
+
+	s.NotifyNow() // ONE request must drain the whole burst
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 45 {
+		t.Fatalf("delivered %d distinct events, want all 45 in one drained pass", len(seen))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("event %s delivered %d times, want exactly once", id, n)
+		}
 	}
 }
 

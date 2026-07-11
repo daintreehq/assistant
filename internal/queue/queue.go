@@ -56,8 +56,13 @@ type EventStore interface {
 	// (the SEV_CASE expression is mirrored by SeverityCaseSQL in this package).
 	ListEvents(ctx context.Context, opts domain.QueueDigestOptions, now int64) ([]domain.QueueEvent, error)
 
-	// MarkNotified stamps notifiedAt=ts on each id (no-op on empty input).
-	MarkNotified(ctx context.Context, ids []string, ts int64) error
+	// MarkNotified stamps notifiedAt=ts on each digested event — VERSION-
+	// CONDITIONALLY: a row is stamped only while it still matches the delivered
+	// snapshot (same count and COALESCE(updatedAt,createdAt), notifiedAt still
+	// NULL). An event materially updated between the Digest read and this
+	// acknowledgement is left unstamped so the next notify pass re-delivers the
+	// update instead of silently burying it. No-op on empty input.
+	MarkNotified(ctx context.Context, evs []domain.QueueEvent, ts int64) error
 
 	// ResolveEvent stamps resolvedAt=now WHERE id=? AND resolvedAt IS NULL and
 	// reports whether a row changed (false ⇒ already resolved / absent).
@@ -153,13 +158,17 @@ func (q *Queue) Resolve(ctx context.Context, id string) (bool, error) {
 	return q.store.ResolveEvent(ctx, id, q.now())
 }
 
-// MarkNotified records that the given events have been pushed to the attention
-// notifier so they are not re-notified. No-op on empty input.
-func (q *Queue) MarkNotified(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+// MarkNotified records that the given DIGESTED events have been pushed to the
+// attention notifier so they are not re-notified. The acknowledgement is
+// version-conditional (see EventStore.MarkNotified): an event a publisher
+// updated after the caller's Digest read stays un-notified and re-surfaces on
+// the next pass, so an update can never be stamped away undelivered. No-op on
+// empty input.
+func (q *Queue) MarkNotified(ctx context.Context, evs []domain.QueueEvent) error {
+	if len(evs) == 0 {
 		return nil
 	}
-	return q.store.MarkNotified(ctx, ids, q.now())
+	return q.store.MarkNotified(ctx, evs, q.now())
 }
 
 // severityIcon maps a severity to its /inbox glyph. Unknown severities fall back
