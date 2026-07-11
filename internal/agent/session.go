@@ -218,6 +218,25 @@ type Session struct {
 	// mismatch. Guarded by rosterMu.
 	rosterGen uint64
 
+	// rosterTombstones maps every terminal id this session has CONFIRMED closed (a
+	// terminal.close result's `closed` list) to the tombstone's expiry. rosterGen only
+	// guards against fetches that started BEFORE a local mutation; it cannot help when
+	// the fetch starts after the mutation but reads a server that hasn't caught up —
+	// Daintree acks terminal.close before the teardown reaches terminal.list, so the
+	// reconciliation fetch kicked right after a close can read a pre-close list and
+	// resurrect the ids the prune just removed (seen 2026-07-11, ses_a9e0a6ef: the
+	// kicked fetch landed 2ms after the close acks and re-committed all 6 closed
+	// terminals, which the next turn's round 0 then served to the model). Every fetch
+	// commit filters against this set, so a confirmed close stays closed regardless of
+	// server-side lag. Tombstones EXPIRE (rosterTombstoneTTL) rather than live for the
+	// session: close moves a terminal to Daintree's TRASH (terminal.kill is the
+	// permanent delete), so the same id can legitimately reappear if a human restores
+	// it — the TTL is orders of magnitude above the observed settle lag yet lets a
+	// restored terminal surface on the first refresh after expiry. Lazily allocated;
+	// expired entries are deleted at each fetch commit (dropTombstoned), bounding the
+	// map by RECENT closes. Guarded by rosterMu.
+	rosterTombstones map[string]time.Time
+
 	// worktreeMu guards the cached current-worktree snapshot below — the same
 	// dedicated-mutex reasoning as rosterMu (the detached refresher must never block
 	// on a turn holding s.mu, and vice versa; critical sections are pointer swaps).
@@ -2599,10 +2618,12 @@ func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain
 	switch internalName {
 	case "terminal.close":
 		// Ok and partial-failure results both carry the faithfully-closed ids. Prune
-		// what we know (which also bumps rosterGen); an unrecognized payload shape
-		// (contract drift) still invalidates so a pre-close fetch can't land over the
-		// close. Either way exactly ONE gen bump — a fetch mid-close retries once, and
-		// the refresh kick reconciles the cache with live truth.
+		// what we know (which also bumps rosterGen AND tombstones the ids — the kicked
+		// refresh below can read a server that hasn't processed the close yet, and the
+		// tombstones stop that laggy snapshot from resurrecting them); an unrecognized
+		// payload shape (contract drift) still invalidates so a pre-close fetch can't
+		// land over the close. Either way exactly ONE gen bump — a fetch mid-close
+		// retries once, and the refresh kick reconciles the cache with live truth.
 		if ids := closedTerminalIDs(res); len(ids) > 0 {
 			s.pruneRosterTerminals(ids)
 			s.refreshRosterAsync()
@@ -2620,6 +2641,10 @@ func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain
 		// The raw escape hatch can reach unwrapped terminal mutations (terminal.new,
 		// terminal.kill — the wrapped ones are denylisted and redirected). Only the
 		// inner tool name tells; failures never ran, so only successes invalidate.
+		// Best-effort by design: no result ids are extracted, so no tombstones — a
+		// laggy post-kill fetch can transiently resurrect the terminal until the next
+		// refresh. Acceptable for a rarely-used escape hatch; the wrapped close path
+		// (the only one the model is steered to) gets the full tombstone guarantee.
 		if res.Ok && strings.HasPrefix(strings.ToLower(rawCallInnerName(rawArgs)), "terminal.") {
 			s.invalidateRosterAndRefresh()
 		}
@@ -2648,9 +2673,11 @@ func rawCallInnerName(rawArgs string) string {
 	return strings.TrimSpace(a.Name)
 }
 
-// pruneRosterTerminals drops the given terminal ids from the cached roster and bumps
-// rosterGen so a concurrent pre-mutation fetch is discarded rather than committed.
-// The cache goes stale-DOWN only: a pruned id can never reappear from this path.
+// pruneRosterTerminals drops the given terminal ids from the cached roster, bumps
+// rosterGen so a concurrent pre-mutation fetch is discarded rather than committed,
+// and tombstones the ids so no LATER fetch can resurrect them either (the server
+// acks a close before its terminal.list reflects it — see the rosterTombstones doc).
+// Together those make the prune monotonic: a confirmed-closed id never reappears.
 func (s *Session) pruneRosterTerminals(ids []string) {
 	drop := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
@@ -2664,6 +2691,13 @@ func (s *Session) pruneRosterTerminals(ids []string) {
 	s.rosterMu.Lock()
 	defer s.rosterMu.Unlock()
 	s.rosterGen++
+	if s.rosterTombstones == nil {
+		s.rosterTombstones = make(map[string]time.Time, len(drop))
+	}
+	expiry := time.Now().Add(rosterTombstoneTTL)
+	for id := range drop {
+		s.rosterTombstones[id] = expiry
+	}
 	if len(s.roster) == 0 {
 		return
 	}
@@ -2674,6 +2708,48 @@ func (s *Session) pruneRosterTerminals(ids []string) {
 		}
 	}
 	s.roster = kept
+}
+
+// rosterTombstoneTTL bounds how long a confirmed-closed terminal id suppresses
+// fetched roster entries. It only needs to outlive the server's close→list settle
+// lag (observed: milliseconds — see the rosterTombstones field doc); it must NOT be
+// unbounded, because close TRASHES the terminal rather than deleting it, so a human
+// restore can legitimately bring the same id back.
+const rosterTombstoneTTL = 30 * time.Second
+
+// dropTombstoned returns fetched minus any terminals whose ids carry a live
+// (unexpired) tombstone, deleting expired tombstones as it goes so the map stays
+// bounded by recent closes. The common cases allocate nothing: no tombstones, an
+// empty fetch, or a fetch with no tombstoned entries all return the input as-is.
+// Caller must hold rosterMu (tombstones is the guarded map, and it is mutated here).
+func dropTombstoned(fetched []backend.OpenTerminal, tombstones map[string]time.Time, now time.Time) []backend.OpenTerminal {
+	if len(tombstones) == 0 {
+		return fetched
+	}
+	for id, expiry := range tombstones {
+		if !now.Before(expiry) { // expired at now >= expiry, not only strictly after
+			delete(tombstones, id)
+		}
+	}
+	if len(tombstones) == 0 || len(fetched) == 0 {
+		return fetched
+	}
+	dead := 0
+	for _, t := range fetched {
+		if _, gone := tombstones[t.ID]; gone {
+			dead++
+		}
+	}
+	if dead == 0 {
+		return fetched
+	}
+	kept := make([]backend.OpenTerminal, 0, len(fetched)-dead)
+	for _, t := range fetched {
+		if _, gone := tombstones[t.ID]; !gone {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 // closedTerminalIDs extracts the faithfully-closed terminal ids from a terminal.close
@@ -2694,7 +2770,16 @@ func closedTerminalIDs(res domain.ToolResult) []string {
 	}
 	switch v := m["closed"].(type) {
 	case []string:
-		return v
+		// Drop empties here too (not just the []any branch): a malformed all-empty
+		// list must yield len 0 so the caller takes the invalidate path (gen bump) —
+		// pruneRosterTerminals would silently no-op on it without bumping.
+		out := make([]string, 0, len(v))
+		for _, id := range v {
+			if id != "" {
+				out = append(out, id)
+			}
+		}
+		return out
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, e := range v {
@@ -2765,9 +2850,17 @@ func (s *Session) refreshRosterAsync() {
 
 	go func() {
 		defer s.wg.Done()
-		// Safety net only (a fetcher panic): the normal exits below clear the flag
-		// INSIDE the commit critical section — see why at the bottom of the loop.
-		defer clearInFlight()
+		// Safety net only (a fetcher panic): the normal exit clears the flag INSIDE
+		// the commit critical section (see why at the bottom of the loop) and must
+		// then leave it ALONE — an unconditional deferred clear would run after that
+		// commit, racing a newer refresher that has since claimed the flag for itself
+		// and stomping its ownership (two refreshers could then run concurrently).
+		committed := false
+		defer func() {
+			if !committed {
+				clearInFlight()
+			}
+		}()
 		// Loop until a fetch lands with rosterGen unchanged: a fetch that raced a local
 		// roster mutation (gen moved while it was in flight) may predate that mutation,
 		// so committing it would resurrect terminals the session just closed (or hide
@@ -2788,18 +2881,31 @@ func (s *Session) refreshRosterAsync() {
 			// synchronous behaviour (each turn showed exactly its own fetch result); a
 			// transient blip simply blanks the roster for a round and self-heals on the next
 			// refresh — a false negative the model recovers from, never a stale false positive.
-			s.rosterMu.Lock()
-			if s.rosterGen == startGen {
-				s.roster = fresh
+			// The critical section is a closure with a DEFERRED unlock so that a panic
+			// inside it releases rosterMu during unwinding — the safety-net defer above
+			// then locks it to clear the flag, which would self-deadlock otherwise.
+			if func() bool {
+				s.rosterMu.Lock()
+				defer s.rosterMu.Unlock()
+				if s.rosterGen != startGen {
+					return false
+				}
+				// Drop confirmed-closed ids the server may still be listing: a fetch that
+				// started AFTER a close (gen matches) can still carry a PRE-close server
+				// snapshot, because Daintree acks the close before terminal.list reflects
+				// it. Without this filter that snapshot resurrects the closed terminals
+				// until the next natural refresh (see the rosterTombstones field doc).
+				s.roster = dropTombstoned(fresh, s.rosterTombstones, time.Now())
 				// Retire the single-flight flag ATOMICALLY with the commit. Clearing it
 				// later (the deferred path) would open a window where a mutation settles
 				// after the commit, its refresh kick dedupes against this already-decided
 				// refresher, and the mutation is never serviced — a lost refresh.
 				s.rosterRefreshing = false
-				s.rosterMu.Unlock()
+				committed = true
+				return true
+			}() {
 				return
 			}
-			s.rosterMu.Unlock()
 		}
 	}()
 }

@@ -305,6 +305,90 @@ func TestOpenTerminals_StaleFetchCannotResurrectClosedTerminals(t *testing.T) {
 	}
 }
 
+// TestOpenTerminals_LaggyServerFetchCannotResurrectClosedTerminals pins the tombstone
+// guard — the 2026-07-11 (ses_a9e0a6ef) regression the rosterGen guard is blind to:
+// Daintree acks terminal.close BEFORE terminal.list reflects the teardown, so the
+// reconciliation fetch kicked by the close itself (started after the prune — gen
+// matches at commit time) read a pre-close list and re-committed all the closed
+// terminals, which the next turn's round 0 then served to the model. A fetch commit
+// must drop confirmed-closed ids no matter when the fetch ran.
+func TestOpenTerminals_LaggyServerFetchCannotResurrectClosedTerminals(t *testing.T) {
+	var calls atomic.Int32
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(ctx context.Context) []backend.OpenTerminal {
+		// The laggy server: the close has been acked, but list still shows both.
+		calls.Add(1)
+		return []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}}
+	}
+	s := NewSession(deps)
+
+	// The warmed pre-close cache an earlier completed refresh would have left.
+	s.rosterMu.Lock()
+	s.roster = []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}}
+	s.rosterMu.Unlock()
+
+	// terminal-2 closes. The settle path prunes + tombstones it, then kicks the
+	// reconciliation refresh — which fetches the stale pre-close list above.
+	s.observeRosterMutation("terminal.close", "{}",
+		domain.Ok("Closed 1 terminal(s): terminal-2.", map[string]any{"closed": []string{"terminal-2"}}))
+	// Join the kicked refresh WITHOUT draining (drain is terminal and would block the
+	// second refresh below). The refresh registered on s.wg before observe returned,
+	// and nothing else is on the wg in this test.
+	s.wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("the close settle must kick exactly one reconciliation fetch, got %d", n)
+	}
+	got := s.currentRoster()
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("laggy post-close fetch must not resurrect terminal-2; want [terminal-1], got %+v", got)
+	}
+
+	// A LATER, unrelated refresh reading a still-stale list must be filtered too —
+	// the tombstone outlives the immediately-kicked reconciliation fetch.
+	s.WarmOpenTerminals()
+	s.DrainBackgroundWork()
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("want two completed fetches (reconciliation + warm), got %d", n)
+	}
+	got = s.currentRoster()
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("later stale fetch must not resurrect terminal-2 either; want [terminal-1], got %+v", got)
+	}
+}
+
+// TestOpenTerminals_TombstoneExpiryLetsRestoredTerminalReappear pins the OTHER side of
+// the tombstone contract: terminal.close moves a terminal to Daintree's TRASH (only
+// terminal.kill deletes permanently), so a human can restore it under the SAME id — a
+// tombstone must therefore expire (rosterTombstoneTTL) rather than suppress the id for
+// the whole session, and an expired entry is deleted at the fetch commit so the map
+// stays bounded by recent closes.
+func TestOpenTerminals_TombstoneExpiryLetsRestoredTerminalReappear(t *testing.T) {
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		return []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}}
+	}
+	s := NewSession(deps)
+
+	// terminal-2 was closed long ago (whitebox: its tombstone already expired) and has
+	// since been restored from the trash — the server legitimately lists it again.
+	s.rosterMu.Lock()
+	s.rosterTombstones = map[string]time.Time{"terminal-2": time.Now().Add(-time.Second)}
+	s.rosterMu.Unlock()
+
+	s.WarmOpenTerminals()
+	s.DrainBackgroundWork()
+
+	if got := s.currentRoster(); len(got) != 2 {
+		t.Fatalf("an expired tombstone must not suppress a restored terminal; want both entries, got %+v", got)
+	}
+	s.rosterMu.Lock()
+	_, still := s.rosterTombstones["terminal-2"]
+	s.rosterMu.Unlock()
+	if still {
+		t.Fatal("the expired tombstone should be deleted at the fetch commit")
+	}
+}
+
 // TestOpenTerminals_SpawnSettleInvalidatesInFlightFetch: a successful spawn can't be
 // patched into the cache locally (the roster entry needs live agent state), but it must
 // still invalidate an in-flight PRE-spawn fetch so the refetch picks the new terminal up.
@@ -395,6 +479,7 @@ func TestObserveRosterMutation_InvalidatesOnlyRosterMutators(t *testing.T) {
 	}{
 		{"close ok", "terminal.close", "{}", domain.Ok("closed", map[string]any{"closed": []string{"t"}}), true},
 		{"close with unrecognized payload still reconciles", "terminal.close", "{}", domain.Ok("closed", nil), true},
+		{"close with only empty reported ids still reconciles", "terminal.close", "{}", domain.Ok("closed", map[string]any{"closed": []string{""}}), true},
 		{"spawn ok", "agentTask.spawnForEdits", "{}", domain.Ok("spawned", nil), true},
 		{"spawn failure may have launched", "agentTask.spawnForEdits", "{}", domain.Fail("AGENT_LAUNCH_AMBIGUOUS", "ambiguous"), true},
 		{"startWorkOnIssue ok", "workflow.startWorkOnIssue", "{}", domain.Ok("started", nil), true},
@@ -441,6 +526,8 @@ func TestClosedTerminalIDs_Shapes(t *testing.T) {
 		want []string
 	}{
 		{"ok with []string", domain.Ok("closed", map[string]any{"closed": []string{"a", "b"}}), []string{"a", "b"}},
+		{"native []string drops empty entries", domain.Ok("closed", map[string]any{"closed": []string{"a", "", "b"}}), []string{"a", "b"}},
+		{"all-empty []string yields none", domain.Ok("closed", map[string]any{"closed": []string{""}}), nil},
 		{"partial failure carries details", domain.Fail("mcp_tool_error", "partial",
 			domain.WithDetails(map[string]any{"closed": []string{"a"}, "failed": []string{"b"}})), []string{"a"}},
 		{"json-roundtripped []any", domain.Ok("closed", map[string]any{"closed": []any{"a", "", "b"}}), []string{"a", "b"}},
