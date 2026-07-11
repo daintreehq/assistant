@@ -153,8 +153,13 @@ func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 	// behind us). An injection landing after this reclaim is caught by
 	// handlePrompt's own post-inject busy re-check instead. Together the two
 	// checks close the "prompt reported folded but never consumed" race.
+	//
+	// Cancelled turns reclaim too: the Ctrl+C discard above already dropped
+	// everything folded into the abandoned work, so an injection still buffered
+	// HERE provably arrived after that discard — a new prompt typed while the
+	// turn unwound. It must become a fresh turn, not vanish with the old one.
 	stranded := ""
-	if !cancelled && !h.closing {
+	if !h.closing {
 		stranded = h.reclaimStrandedInjections()
 	}
 	h.busy = false
@@ -307,8 +312,18 @@ func (h *Host) reactWake() {
 			// BEFORE the worker's turnWG.Done, which is what guarantees teardown's
 			// join-then-sweep observes it.
 			h.turnMu.Lock()
-			h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
+			sweepDone := h.wakeSweepDone
+			if !sweepDone {
+				h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
+			}
 			h.turnMu.Unlock()
+			if sweepDone {
+				// This wake outlived the bounded join: the durable sweep already
+				// ran, so an in-memory requeue would die with the process. Re-arm
+				// directly instead — best-effort, the store may itself be
+				// mid-shutdown by now.
+				h.rearmWakeEvents(events)
+			}
 			return
 		}
 		if err != nil {
@@ -436,6 +451,9 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		h.turnMu.Lock()
 		leftover := h.pendingWake
 		h.pendingWake = nil
+		// A wake that outlives the bounded join re-arms itself directly once this
+		// flag is set (see reactWake's cancellation path).
+		h.wakeSweepDone = true
 		h.turnMu.Unlock()
 		h.rearmWakeEvents(leftover)
 

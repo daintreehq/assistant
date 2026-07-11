@@ -523,6 +523,13 @@ func (s *Scheduler) notify() {
 			return // short page: the digest is drained
 		}
 	}
+	// The pass exhausted its page bound with the digest still returning full
+	// pages (>1000-event burst, or a publisher whose bumps keep failing the
+	// conditional ack). Schedule another coalesced pass instead of stranding
+	// the tail until an unrelated tick — the bound keeps each PASS finite, not
+	// overall delivery. Via goroutine: notify() is also called directly by the
+	// tick backstop, where a synchronous requestNotify would re-enter notifyMu.
+	go s.requestNotify()
 }
 
 // timerPayload is the parsed timer payload shape.

@@ -53,7 +53,7 @@ type Host struct {
 
 	// turnMu guards every field touched by BOTH the command loop AND a worker
 	// goroutine (prompt/wake run Send off-loop and finish off-loop): busy, closing,
-	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetried,
+	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetried, wakeSweepDone,
 	// summarizedTerminals, and the turnWG.Add gate. The command loop must stay
 	// non-blocking, so it only ever takes this short lock.
 	turnMu              sync.Mutex
@@ -64,6 +64,7 @@ type Host struct {
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
 	wakeRetried         bool
+	wakeSweepDone       bool // teardown's durable re-arm sweep ran; late requeues go straight to rearmWakeEvents
 	summarizedTerminals map[string]struct{}
 
 	// turnWG tracks live prompt/wake worker goroutines. Add happens under turnMu
