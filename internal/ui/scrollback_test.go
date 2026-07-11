@@ -26,7 +26,7 @@ func TestScrollback_MastheadFirstThenOrdered(t *testing.T) {
 	// the in-flight head by id) until nothing is eligible.
 	var order []string
 	step := func() bool {
-		cmd := q.nextCommit(cells, sealed, header, 80)
+		cmd := q.nextCommit(cells, sealed, header)
 		if cmd == nil {
 			return false
 		}
@@ -69,19 +69,19 @@ func TestScrollback_OneInFlight(t *testing.T) {
 	sealed := func(i int) ScrollbackBlock { return ScrollbackBlock{ID: cells[i].ID()} }
 
 	// First commit starts (masthead) and marks inFlight.
-	if cmd := q.nextCommit(cells, sealed, header, 80); cmd == nil {
+	if cmd := q.nextCommit(cells, sealed, header); cmd == nil {
 		t.Fatal("expected a masthead commit cmd")
 	}
 	if !q.inFlight {
 		t.Fatal("queue should be inFlight after a commit starts")
 	}
 	// A SECOND nextCommit before the ack must return nil (one in flight only).
-	if cmd := q.nextCommit(cells, sealed, header, 80); cmd != nil {
+	if cmd := q.nextCommit(cells, sealed, header); cmd != nil {
 		t.Error("nextCommit must return nil while a commit is in flight")
 	}
 	// Ack the header → frontier advances; the next commit (turn_1) is now eligible.
 	q.ack(headerID, q.gen, len(cells))
-	if cmd := q.nextCommit(cells, sealed, header, 80); cmd == nil {
+	if cmd := q.nextCommit(cells, sealed, header); cmd == nil {
 		t.Error("expected turn_1 commit after the masthead ack")
 	}
 }

@@ -89,14 +89,13 @@ func (q *scrollbackQueue) liveStart(n int) int {
 //
 // Commit order: masthead first, then sealed transcript cells in index order
 // from the committed cursor forward. A cell is eligible only when isSealed.
-// maxRows bounds a single tea.Println's height (see Model.scrollbackChunkRows): a tall
-// sealed cell — e.g. a turn whose user message was a large paste, re-committed whole on a
-// resize redraw — is split so no insertAbove exceeds the viewport (#1613).
+// The Println chunk bound (Model.scrollbackChunkRows) is deliberately NOT captured
+// here: the print fires after the render barrier (commitCmd), so the geometry must
+// be measured at PRINT time in Update, never frozen at selection time.
 func (q *scrollbackQueue) nextCommit(
 	cells []TranscriptCell,
 	sealedBlock func(i int) ScrollbackBlock,
 	headerBlock func() ScrollbackBlock,
-	maxRows int,
 ) tea.Cmd {
 	if q.inFlight {
 		return nil
@@ -106,7 +105,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := headerBlock()
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk, maxRows)
+		return commitCmd(blk)
 	}
 	// 2. Sealed transcript cells in index order from the cursor.
 	for i := q.liveStart(len(cells)); i < len(cells); i++ {
@@ -118,7 +117,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk := sealedBlock(i)
 		blk.Gen = q.gen
 		q.inFlight = true
-		return commitCmd(blk, maxRows)
+		return commitCmd(blk)
 	}
 	return nil
 }
@@ -152,7 +151,7 @@ func (q *scrollbackQueue) ack(id string, gen, n int) {
 // scrollbackCommitReadyMsg handler, after it re-validates the queue generation and
 // resize state. Splitting barrier from print prevents a delayed stale command from
 // landing after /clear or a resize reset.
-func commitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
+func commitCmd(blk ScrollbackBlock) tea.Cmd {
 	// Bubble Tea's renderer is ticker-flushed. Without a barrier, a cell can be appended
 	// to View, printed above the program, and acked (therefore removed from View) before
 	// even ONE renderer tick. The final View then equals the pre-cell View, so Bubble Tea
@@ -162,8 +161,15 @@ func commitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 	// Hold the print command for several renderer ticks first. That lets the live View
 	// containing this immutable cell become lastView; after Println + ack remove the cell,
 	// the View is observably different and Bubble Tea deterministically repaints the footer.
+	//
+	// The message carries ONLY the immutable block. Geometry (the chunk row bound) must
+	// NOT ride along: the live footer can grow while the barrier waits (typed/pasted
+	// composer lines, a question or approval card, an attention note), and a chunk sized
+	// against the pre-barrier footer can then exceed the rows above the taller footer —
+	// insertAbove's CursorUp clamps and freezes a copy of the footer into scrollback
+	// (#1613). Update re-measures scrollbackChunkRows when the barrier closes.
 	return tea.Tick(rendererSettleDelay, func(time.Time) tea.Msg {
-		return scrollbackCommitReadyMsg{Block: blk, MaxRows: maxRows}
+		return scrollbackCommitReadyMsg{Block: blk}
 	})
 }
 
@@ -184,8 +190,8 @@ func printCommitCmd(blk ScrollbackBlock, maxRows int) tea.Cmd {
 }
 
 // scrollbackCommitReadyMsg closes the renderer barrier. Block is the immutable render
-// captured when the queue head was selected; Update checks its generation before print.
+// captured when the queue head was selected; Update checks its generation before print
+// and measures the chunk bound fresh (never a value frozen at selection time).
 type scrollbackCommitReadyMsg struct {
-	Block   ScrollbackBlock
-	MaxRows int
+	Block ScrollbackBlock
 }

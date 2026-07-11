@@ -228,16 +228,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scrollbackCommitReadyMsg:
 		// The barrier command was scheduled against a specific queue generation. A
-		// /clear or redraw may have reset that generation while it waited; a resize may
-		// also have disarmed commits pending its ordered redraw. Never let the old print
-		// land after either reset. While still current, the delay has allowed the live
-		// cell to reach Bubble Tea's lastView, so Println+ack will force a real footer
-		// repaint when the cell leaves View.
-		if msg.Block.Gen != m.queue.gen || !m.queue.inFlight ||
-			!m.commitArmed || m.redrawPending {
+		// /clear or redraw may have reset that generation while it waited — the reset
+		// already cleared inFlight and will re-commit from the top under the new gen,
+		// so a stale barrier is dropped without touching the queue.
+		if msg.Block.Gen != m.queue.gen || !m.queue.inFlight {
 			return m, nil
 		}
-		return m, printCommitCmd(msg.Block, msg.MaxRows)
+		// Commits were DISARMED while this (still-current) barrier waited — a resize's
+		// debounce window (onSize) or a wipe path. The pending redraw re-renders and
+		// re-commits everything under a bumped generation, so this block's print must
+		// never land. Release the queue's in-flight claim as we drop it: the claim
+		// belonged to this barrier, and holding it with no print (and no ack) coming
+		// would stall the queue forever if no reset ever bumped the generation.
+		if !m.commitArmed || m.redrawPending {
+			m.queue.inFlight = false
+			return m, nil
+		}
+		// Still live: the delay has let the View containing this cell reach Bubble
+		// Tea's lastView, so Println+ack will force a real footer repaint when the
+		// cell leaves View. Measure the chunk bound NOW — the footer may have grown
+		// while the barrier waited, and a bound frozen at selection time could exceed
+		// the rows above the current footer (insertAbove clamp, #1613).
+		return m, printCommitCmd(msg.Block, m.scrollbackChunkRows())
 
 	case ScrollbackCommittedMsg:
 		m.queue.ack(msg.ID, msg.Gen, len(m.transcript))
@@ -538,7 +550,7 @@ func (m *Model) scheduleCommit() tea.Cmd {
 	if !m.commitArmed {
 		return nil
 	}
-	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock, m.scrollbackChunkRows())
+	return m.queue.nextCommit(m.transcript, m.sealedBlock, m.headerBlock)
 }
 
 // finishBootIfReady flips booting off ONCE all three boot gates are satisfied
