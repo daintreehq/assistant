@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -187,6 +188,279 @@ func TestOpenTerminals_RefreshDedupedAcrossTurns(t *testing.T) {
 
 	close(release)
 	s.DrainBackgroundWork()
+}
+
+// TestOpenTerminals_CloseSettlePrunesRosterForNextRound pins the close-consistency
+// contract end-to-end through the turn loop: when a terminal.close result settles, the
+// closed ids are pruned from the cached roster SYNCHRONOUSLY, so the very next round's
+// runtime block already reflects the close — it never waits on (or races) a detached
+// MCP refresh. This is the 2026-07-11 regression: a close in turn N left the cache
+// showing the closed terminals as open, and the model in turn N+1 announced the close
+// "didn't stick".
+func TestOpenTerminals_CloseSettlePrunesRosterForNextRound(t *testing.T) {
+	snap := []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}, {ID: "terminal-3"}}
+	r := &injectRouter{results: []models.ChatResult{
+		{Content: "warm"}, // turn 1, round 0 → ends (warms the cache)
+		{ToolCalls: []models.ToolCallRequest{
+			toolCall("c1", "terminal__close", `{"terminalIds":["terminal-2","terminal-3"]}`),
+		}}, // turn 2, round 0 → close
+		{Content: "done"}, // turn 2, round 1 → ends
+	}}
+	closeRes := domain.Ok("Closed 2 terminal(s): terminal-2, terminal-3.",
+		map[string]any{"closed": []string{"terminal-2", "terminal-3"}})
+	deps, be := recordingDeps(r, &fakeTools{result: closeRes})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal { return snap }
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "warm", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// Land turn 1's refresh in the cache. Drain is terminal — no later fetch can run —
+	// so any change the next round sees can ONLY be the synchronous settle-time prune.
+	s.DrainBackgroundWork()
+
+	if _, err := s.Send(context.Background(), "close 2 and 3", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 2 round 0 (req[1], built BEFORE the close settled) carries the full roster.
+	if got := be.runtimeAt(1).OpenTerminals; len(got) != 3 {
+		t.Fatalf("round 0 should carry the pre-close roster, got %+v", got)
+	}
+	// Turn 2 round 1 (req[2], built right AFTER the close settled) must already be pruned.
+	got := be.runtimeAt(2).OpenTerminals
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("round after the close should carry only terminal-1, got %+v", got)
+	}
+}
+
+// TestOpenTerminals_StaleFetchCannotResurrectClosedTerminals pins the rosterGen race
+// guard, including the NEVER-stale property (not just eventual consistency): a
+// detached fetch that STARTED before a close settles carries pre-close truth, so
+// committing it after the prune would resurrect the closed terminal in the cache. The
+// refresher must discard that stale snapshot — the cache mid-refetch must already show
+// the pruned roster — and the refetch (started after the close) commits post-close truth.
+func TestOpenTerminals_StaleFetchCannotResurrectClosedTerminals(t *testing.T) {
+	release1 := make(chan struct{})
+	release2 := make(chan struct{})
+	entered1 := make(chan struct{}, 1)
+	entered2 := make(chan struct{}, 1)
+	var once1, once2 sync.Once
+	// A t.Fatal on a timeout below must not strand the fetcher goroutine on its gate.
+	t.Cleanup(func() { once1.Do(func() { close(release1) }); once2.Do(func() { close(release2) }) })
+	var calls atomic.Int32
+
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(ctx context.Context) []backend.OpenTerminal {
+		if calls.Add(1) == 1 {
+			entered1 <- struct{}{}
+			<-release1                                                            // hold the PRE-close fetch in flight across the prune
+			return []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}} // pre-close truth
+		}
+		entered2 <- struct{}{}
+		<-release2                                        // hold the refetch open so the discard window is observable
+		return []backend.OpenTerminal{{ID: "terminal-1"}} // post-close truth
+	}
+	s := NewSession(deps)
+
+	// Seed the warmed cache directly (whitebox): the pre-close roster an earlier
+	// completed refresh would have left. Fetch #1 below is held open, so nothing else
+	// could warm it deterministically.
+	s.rosterMu.Lock()
+	s.roster = []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}}
+	s.rosterMu.Unlock()
+
+	s.WarmOpenTerminals()
+	select {
+	case <-entered1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never entered the fetcher")
+	}
+
+	// terminal-2 closes while the pre-close fetch is still in flight.
+	s.observeRosterMutation("terminal.close", "{}",
+		domain.Ok("Closed 1 terminal(s): terminal-2.", map[string]any{"closed": []string{"terminal-2"}}))
+
+	once1.Do(func() { close(release1) })
+	select {
+	case <-entered2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never refetched after the discarded stale attempt")
+	}
+	// The refetch is in flight, so fetch #1 has been fully decided: had it committed,
+	// terminal-2 would be back. The cache must still show exactly the pruned roster.
+	if got := s.currentRoster(); len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("stale pre-close fetch must never commit; want [terminal-1] mid-refetch, got %+v", got)
+	}
+
+	once2.Do(func() { close(release2) })
+	s.DrainBackgroundWork() // join the refresher: the refetch commits post-close truth
+
+	got := s.currentRoster()
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("want [terminal-1] after the refetch commits, got %+v", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("refresher should refetch exactly once after the discard, got %d fetches", n)
+	}
+}
+
+// TestOpenTerminals_SpawnSettleInvalidatesInFlightFetch: a successful spawn can't be
+// patched into the cache locally (the roster entry needs live agent state), but it must
+// still invalidate an in-flight PRE-spawn fetch so the refetch picks the new terminal up.
+func TestOpenTerminals_SpawnSettleInvalidatesInFlightFetch(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	var calls atomic.Int32
+
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(ctx context.Context) []backend.OpenTerminal {
+		if calls.Add(1) == 1 {
+			entered <- struct{}{}
+			<-release  // hold the PRE-spawn fetch in flight across the spawn settle
+			return nil // pre-spawn truth: nothing open
+		}
+		return []backend.OpenTerminal{{ID: "terminal-new", AgentID: "claude"}} // post-spawn truth
+	}
+	s := NewSession(deps)
+
+	s.WarmOpenTerminals()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never entered the fetcher")
+	}
+
+	s.observeRosterMutation("agentTask.spawnForEdits", "{}", domain.Ok("Spawned claude.", nil))
+
+	once.Do(func() { close(release) })
+	s.DrainBackgroundWork()
+
+	got := s.currentRoster()
+	if len(got) != 1 || got[0].ID != "terminal-new" {
+		t.Fatalf("post-spawn refetch should carry the new terminal, got %+v", got)
+	}
+}
+
+// TestOpenTerminals_PartialCloseFailurePrunesOnlyReportedIDs drives a PARTIAL close
+// failure through the full settle path: the model asked to close terminal-2 AND
+// terminal-3, but the result reports only terminal-2 closed (terminal-3 failed). The
+// prune must be RESULT-driven — terminal-2 leaves the roster, terminal-3 stays — and a
+// failed result must not be ignored (its details ids DID close).
+func TestOpenTerminals_PartialCloseFailurePrunesOnlyReportedIDs(t *testing.T) {
+	snap := []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}, {ID: "terminal-3"}}
+	r := &injectRouter{results: []models.ChatResult{
+		{Content: "warm"}, // turn 1, round 0 → ends (warms the cache)
+		{ToolCalls: []models.ToolCallRequest{
+			toolCall("c1", "terminal__close", `{"terminalIds":["terminal-2","terminal-3"]}`),
+		}}, // turn 2, round 0 → close (partially fails)
+		{Content: "done"}, // turn 2, round 1 → ends
+	}}
+	closeRes := domain.Fail("mcp_tool_error",
+		"Closed 1 of 2 terminal(s); failed to close: terminal-3.",
+		domain.WithDetails(map[string]any{"closed": []string{"terminal-2"}, "failed": []string{"terminal-3"}}))
+	deps, be := recordingDeps(r, &fakeTools{result: closeRes})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal { return snap }
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "warm", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.DrainBackgroundWork() // land turn 1's refresh; drain is terminal — only the prune can change the cache
+
+	if _, err := s.Send(context.Background(), "close 2 and 3", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := be.runtimeAt(2).OpenTerminals
+	if len(got) != 2 || got[0].ID != "terminal-1" || got[1].ID != "terminal-3" {
+		t.Fatalf("partial failure must prune only the reported id; want [terminal-1 terminal-3], got %+v", got)
+	}
+}
+
+// TestObserveRosterMutation_InvalidatesOnlyRosterMutators pins the classification: which
+// settled tools invalidate the roster cache (bump rosterGen) and which must not. Notably
+// workflow.prepBranchForReview is a READ-ONLY readiness diagnostic (despite the name),
+// spawn-family failures still invalidate (an ambiguous failure may have launched), and
+// daintree.call invalidates only for successful inner terminal.* mutations.
+func TestObserveRosterMutation_InvalidatesOnlyRosterMutators(t *testing.T) {
+	cases := []struct {
+		label string
+		tool  string
+		args  string
+		res   domain.ToolResult
+		want  bool
+	}{
+		{"close ok", "terminal.close", "{}", domain.Ok("closed", map[string]any{"closed": []string{"t"}}), true},
+		{"close with unrecognized payload still reconciles", "terminal.close", "{}", domain.Ok("closed", nil), true},
+		{"spawn ok", "agentTask.spawnForEdits", "{}", domain.Ok("spawned", nil), true},
+		{"spawn failure may have launched", "agentTask.spawnForEdits", "{}", domain.Fail("AGENT_LAUNCH_AMBIGUOUS", "ambiguous"), true},
+		{"startWorkOnIssue ok", "workflow.startWorkOnIssue", "{}", domain.Ok("started", nil), true},
+		{"recipe.run ok", "recipe.run", "{}", domain.Ok("ran", nil), true},
+		{"worktree.createWithRecipe ok", "worktree.createWithRecipe", "{}", domain.Ok("created", nil), true},
+		{"prepBranchForReview is read-only", "workflow.prepBranchForReview", "{}", domain.Ok("ready", nil), false},
+		{"daintree.call inner terminal mutation", "daintree.call", `{"name":"terminal.kill","arguments":{}}`, domain.Ok("ok", nil), true},
+		{"daintree.call inner read tool", "daintree.call", `{"name":"docs.search"}`, domain.Ok("ok", nil), false},
+		{"daintree.call failed never ran", "daintree.call", `{"name":"terminal.new"}`, domain.Fail("mcp_tool_error", "nope"), false},
+		// A read-only unwrapped terminal.* raw call (e.g. terminal.list) is a KNOWN,
+		// accepted false positive: a spare refresh is harmless, a missed mutation is not.
+		{"daintree.call read-only terminal tool (accepted false positive)", "daintree.call", `{"name":"terminal.list"}`, domain.Ok("ok", nil), true},
+		{"daintree.call malformed args", "daintree.call", `{not json`, domain.Ok("ok", nil), false},
+		{"daintree.call non-string name", "daintree.call", `{"name":7}`, domain.Ok("ok", nil), false},
+		{"unrelated read tool", "fs.read", "{}", domain.Ok("ok", nil), false},
+	}
+	for _, tc := range cases {
+		deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
+		deps.OpenTerminalsFetcher = nil // the kick no-ops; only the gen bump is observed
+		s := NewSession(deps)
+
+		s.rosterMu.Lock()
+		before := s.rosterGen
+		s.rosterMu.Unlock()
+		s.observeRosterMutation(tc.tool, tc.args, tc.res)
+		s.rosterMu.Lock()
+		bumped := s.rosterGen != before
+		s.rosterMu.Unlock()
+
+		if bumped != tc.want {
+			t.Errorf("%s: rosterGen bumped = %v, want %v", tc.label, bumped, tc.want)
+		}
+	}
+}
+
+// TestClosedTerminalIDs_Shapes pins the extraction across every result shape a
+// terminal.close can produce: a clean success (Result), a partial failure (the ids in
+// Error.Details DID close), a JSON-roundtripped []any payload, and the unrecognized
+// shapes that must yield nil rather than guess.
+func TestClosedTerminalIDs_Shapes(t *testing.T) {
+	cases := []struct {
+		name string
+		res  domain.ToolResult
+		want []string
+	}{
+		{"ok with []string", domain.Ok("closed", map[string]any{"closed": []string{"a", "b"}}), []string{"a", "b"}},
+		{"partial failure carries details", domain.Fail("mcp_tool_error", "partial",
+			domain.WithDetails(map[string]any{"closed": []string{"a"}, "failed": []string{"b"}})), []string{"a"}},
+		{"json-roundtripped []any", domain.Ok("closed", map[string]any{"closed": []any{"a", "", "b"}}), []string{"a", "b"}},
+		{"ok with nil result", domain.Ok("closed", nil), nil},
+		{"failure without details", domain.Fail("cancelled", "cancelled"), nil},
+		{"unrecognized closed type", domain.Ok("closed", map[string]any{"closed": "a"}), nil},
+	}
+	for _, tc := range cases {
+		got := closedTerminalIDs(tc.res)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
 }
 
 // TestOpenTerminals_NilFetcherOmitsInventory: a nil fetcher (the default and the non-MCP

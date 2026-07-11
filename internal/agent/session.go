@@ -208,6 +208,16 @@ type Session struct {
 	// cannot stack a second one behind it. Guarded by rosterMu.
 	rosterRefreshing bool
 
+	// rosterGen is bumped by every LOCAL roster mutation (a terminal.close pruning ids,
+	// a spawn adding terminals) so an in-flight detached fetch that STARTED before the
+	// mutation cannot land afterwards and resurrect state the session itself just
+	// changed — the exact failure seen 2026-07-11 (ses_d33fa2d8): the turn-start fetch
+	// listed 6 terminals, the turn then closed 5, the stale fetch result sat in the
+	// cache for the next turn and the model reported the close "didn't stick". The
+	// refresher snapshots rosterGen before fetching and discards (and refetches) on
+	// mismatch. Guarded by rosterMu.
+	rosterGen uint64
+
 	// worktreeMu guards the cached current-worktree snapshot below — the same
 	// dedicated-mutex reasoning as rosterMu (the detached refresher must never block
 	// on a turn holding s.mu, and vice versa; critical sections are pointer swaps).
@@ -1252,6 +1262,13 @@ func (s *Session) dispatchCall(ctx context.Context, call models.ToolCallRequest,
 // and EXCEPT a synthetic stub that never dispatched (a question-batch skip). MUST run
 // on the turn goroutine — the durable run-event sink is not goroutine-safe.
 func (s *Session) emitToolSettled(ctx context.Context, call models.ToolCallRequest, internalName string, res domain.ToolResult, endedAt int64, synthetic bool) {
+	// Keep the cached roster consistent with this call's own terminal mutation
+	// (close prunes ids; spawns kick a refresh) — a synthetic stub never dispatched,
+	// so it mutated nothing. Runs before the events so the very next round's runtime
+	// block already reflects the change.
+	if !synthetic {
+		s.observeRosterMutation(internalName, call.Function.Arguments, res)
+	}
 	failCount := 0
 	if !res.Ok && ctx.Err() == nil && !synthetic {
 		failCount = s.recordToolFailure(internalName)
@@ -2563,6 +2580,133 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 	return append([]backend.OpenTerminal(nil), s.roster...)
 }
 
+// observeRosterMutation keeps the cached open-terminal roster consistent with the
+// session's OWN terminal mutations the moment their tool results settle, instead of
+// waiting for the next turn's detached refresh (which the round-0 request always
+// outraces). terminal.close prunes exactly the ids the result reports closed — a
+// synchronous, MCP-free cache patch, honoured even on a PARTIAL failure (the ids in
+// the failure's details DID close). Terminal-opening tools can't be patched in
+// locally (the roster entry needs live agent state), so they just invalidate any
+// in-flight fetch and kick a fresh one. Every path bumps rosterGen (via
+// invalidateRosterAndRefresh / pruneRosterTerminals) so a fetch that started before
+// the mutation can never land over it (see the rosterGen field doc).
+//
+// Scope: this observes SESSION-dispatched tools only (both dispatch paths funnel
+// through emitToolSettled — wake turns included, since they run Session.Send). A
+// daemon timer's direct safe-tool action bypasses it, but those cannot mutate
+// terminals today; the roster also self-heals on the next turn-start refresh.
+func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain.ToolResult) {
+	switch internalName {
+	case "terminal.close":
+		// Ok and partial-failure results both carry the faithfully-closed ids. Prune
+		// what we know (which also bumps rosterGen); an unrecognized payload shape
+		// (contract drift) still invalidates so a pre-close fetch can't land over the
+		// close. Either way exactly ONE gen bump — a fetch mid-close retries once, and
+		// the refresh kick reconciles the cache with live truth.
+		if ids := closedTerminalIDs(res); len(ids) > 0 {
+			s.pruneRosterTerminals(ids)
+			s.refreshRosterAsync()
+		} else {
+			s.invalidateRosterAndRefresh()
+		}
+	case "agentTask.spawnForEdits", "workflow.startWorkOnIssue", "recipe.run", "worktree.createWithRecipe":
+		// Invalidate on FAILURE too: a spawn can fail ambiguously with the launch
+		// already accepted by Daintree (saga `ambiguous`), or after Daintree opened a
+		// diagnostic terminal — a pre-launch fetch committing afterwards would then
+		// hide a terminal that really exists. A spare roster read on the rare failed
+		// spawn is cheap; a stale false negative is not.
+		s.invalidateRosterAndRefresh()
+	case "daintree.call":
+		// The raw escape hatch can reach unwrapped terminal mutations (terminal.new,
+		// terminal.kill — the wrapped ones are denylisted and redirected). Only the
+		// inner tool name tells; failures never ran, so only successes invalidate.
+		if res.Ok && strings.HasPrefix(strings.ToLower(rawCallInnerName(rawArgs)), "terminal.") {
+			s.invalidateRosterAndRefresh()
+		}
+	}
+}
+
+// invalidateRosterAndRefresh bumps rosterGen — discarding any in-flight pre-mutation
+// fetch — and kicks a detached refresh to reconcile the cache with live truth.
+func (s *Session) invalidateRosterAndRefresh() {
+	s.rosterMu.Lock()
+	s.rosterGen++
+	s.rosterMu.Unlock()
+	s.refreshRosterAsync()
+}
+
+// rawCallInnerName extracts the inner MCP tool name from daintree.call arguments
+// (`{"name": "terminal.kill", ...}`). Empty on any parse failure — the caller then
+// treats the call as non-roster.
+func rawCallInnerName(rawArgs string) string {
+	var a struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal([]byte(rawArgs), &a) != nil {
+		return ""
+	}
+	return strings.TrimSpace(a.Name)
+}
+
+// pruneRosterTerminals drops the given terminal ids from the cached roster and bumps
+// rosterGen so a concurrent pre-mutation fetch is discarded rather than committed.
+// The cache goes stale-DOWN only: a pruned id can never reappear from this path.
+func (s *Session) pruneRosterTerminals(ids []string) {
+	drop := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			drop[id] = struct{}{}
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	s.rosterMu.Lock()
+	defer s.rosterMu.Unlock()
+	s.rosterGen++
+	if len(s.roster) == 0 {
+		return
+	}
+	kept := make([]backend.OpenTerminal, 0, len(s.roster))
+	for _, t := range s.roster {
+		if _, gone := drop[t.ID]; !gone {
+			kept = append(kept, t)
+		}
+	}
+	s.roster = kept
+}
+
+// closedTerminalIDs extracts the faithfully-closed terminal ids from a terminal.close
+// result: Result["closed"] on success, Error.Details["closed"] on a partial failure
+// (those ids DID close before the batch broke). Tolerates []any for any payload that
+// crossed a JSON boundary. Nil when the shape is unrecognized — the caller then
+// leaves the cache to the detached refresh.
+func closedTerminalIDs(res domain.ToolResult) []string {
+	var payload any
+	if res.Ok {
+		payload = res.Result
+	} else if res.Error != nil {
+		payload = res.Error.Details
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch v := m["closed"].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // WarmOpenTerminals starts the same detached roster refresh normally kicked at turn
 // start. App.ConnectMcp calls it during the splash so the first user request can already
 // carry terminal metadata; the existing in-flight gate makes repeated connect/bootstrap
@@ -2621,17 +2765,42 @@ func (s *Session) refreshRosterAsync() {
 
 	go func() {
 		defer s.wg.Done()
+		// Safety net only (a fetcher panic): the normal exits below clear the flag
+		// INSIDE the commit critical section — see why at the bottom of the loop.
 		defer clearInFlight()
-		fresh := s.deps.OpenTerminalsFetcher(s.bgCtx)
-		// Replace unconditionally (nil included): the fetcher returns nil both for a
-		// transient failure AND for a genuinely-empty roster (all terminals closed), and
-		// the model must not keep seeing terminals that are gone. This mirrors the old
-		// synchronous behaviour (each turn showed exactly its own fetch result); a
-		// transient blip simply blanks the roster for a round and self-heals on the next
-		// refresh — a false negative the model recovers from, never a stale false positive.
-		s.rosterMu.Lock()
-		s.roster = fresh
-		s.rosterMu.Unlock()
+		// Loop until a fetch lands with rosterGen unchanged: a fetch that raced a local
+		// roster mutation (gen moved while it was in flight) may predate that mutation,
+		// so committing it would resurrect terminals the session just closed (or hide
+		// ones it just spawned) — discard it and refetch; the refetch starts after the
+		// mutation, so it carries post-mutation truth. The loop needs no artificial cap:
+		// each extra iteration requires a FRESH gen bump during the previous fetch, so
+		// total iterations are bounded by the number of actual local mutations — and a
+		// capped give-up would silently drop the raced mutation's refresh (its kick was
+		// deduped against THIS refresher, so nobody else would service it).
+		for {
+			s.rosterMu.Lock()
+			startGen := s.rosterGen
+			s.rosterMu.Unlock()
+			fresh := s.deps.OpenTerminalsFetcher(s.bgCtx)
+			// Replace unconditionally (nil included): the fetcher returns nil both for a
+			// transient failure AND for a genuinely-empty roster (all terminals closed), and
+			// the model must not keep seeing terminals that are gone. This mirrors the old
+			// synchronous behaviour (each turn showed exactly its own fetch result); a
+			// transient blip simply blanks the roster for a round and self-heals on the next
+			// refresh — a false negative the model recovers from, never a stale false positive.
+			s.rosterMu.Lock()
+			if s.rosterGen == startGen {
+				s.roster = fresh
+				// Retire the single-flight flag ATOMICALLY with the commit. Clearing it
+				// later (the deferred path) would open a window where a mutation settles
+				// after the commit, its refresh kick dedupes against this already-decided
+				// refresher, and the mutation is never serviced — a lost refresh.
+				s.rosterRefreshing = false
+				s.rosterMu.Unlock()
+				return
+			}
+			s.rosterMu.Unlock()
+		}
 	}()
 }
 
