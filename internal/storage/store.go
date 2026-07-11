@@ -243,6 +243,9 @@ func (e *SchemaStaleError) Error() string {
 // file is not an error (idempotent). The handle must be closed first — a failed Open
 // already closes it before returning the SchemaStaleError, so the typical caller can
 // reset and re-Open immediately.
+//
+// Prefer BackupDB for the stale-schema recovery path: it moves the files aside
+// (recoverable) instead of destroying the user's timers/watchers/memories/history.
 func ResetDB(dbPath string) error {
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -250,6 +253,47 @@ func ResetDB(dbPath string) error {
 		}
 	}
 	return nil
+}
+
+// BackupDB moves the SQLite database at dbPath — together with its -wal/-shm
+// sidecars — to a timestamped backup alongside it
+// (<db>.bak-v<oldVersion>-<unixts>) and returns the backup's main-file path. It
+// is the non-destructive form of ResetDB for the stale-schema recovery: a rename
+// is atomic and cheap (same directory), the next Open rebuilds a fresh schema at
+// dbPath, and the user's previous state (timers, watchers, memories, history)
+// stays recoverable on disk instead of being silently wiped.
+//
+// Failure posture is conservative: if the MAIN file's rename fails, nothing has
+// moved and the error is returned — the caller must NOT go on to delete anything.
+// Sidecars are moved best-effort AFTER the main file; one that can't be renamed
+// is removed instead (a stale -wal/-shm left beside a fresh db would poison it),
+// and only an un-removable sidecar surfaces an error. A missing main file returns
+// ("", nil): nothing to back up.
+func BackupDB(dbPath string, oldVersion int) (string, error) {
+	backup := fmt.Sprintf("%s.bak-v%d-%d", dbPath, oldVersion, time.Now().Unix())
+	// Never overwrite an existing backup (two resets inside one second): pick a
+	// distinct suffixed name instead. Bounded — on a weird stat failure the rename
+	// below surfaces the real error.
+	for i := 2; i < 100; i++ {
+		if _, err := os.Stat(backup); err != nil {
+			break
+		}
+		backup = fmt.Sprintf("%s.bak-v%d-%d-%d", dbPath, oldVersion, time.Now().Unix(), i)
+	}
+	if err := os.Rename(dbPath, backup); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("backup database %s: %w", dbPath, err)
+	}
+	for _, ext := range []string{"-wal", "-shm"} {
+		if err := os.Rename(dbPath+ext, backup+ext); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if rerr := os.Remove(dbPath + ext); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return backup, fmt.Errorf("backup database: clear sidecar %s: %w", dbPath+ext, rerr)
+			}
+		}
+	}
+	return backup, nil
 }
 
 // Close releases the database handle.

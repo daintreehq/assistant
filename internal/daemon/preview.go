@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"sync"
+
+	// Aliased: the local `mcp MCP` parameters shadow the package name.
+	mcpclient "github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
 // TerminalPreview is one preview card. Raw scrollback shown to the human ONLY —
@@ -72,6 +75,9 @@ type PreviewWatcher struct {
 // The tail is capped to previewTailBytes; status is attributed only when the
 // returned id matches the requested one.
 func FetchPreviews(ctx context.Context, mcp MCP, targets []PreviewTarget, now int64) []TerminalPreview {
+	// Preview polls are Refresh-class MCP traffic: a card can show a slightly
+	// stale tail, but the poll shouldn't be parked behind Background maintenance.
+	ctx = mcpclient.WithPriority(ctx, mcpclient.PriorityRefresh)
 	out := make([]TerminalPreview, len(targets))
 	ids := make([]string, len(targets))
 	for i, t := range targets {

@@ -264,6 +264,7 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	// automated context.
 	if ttyOK {
 		createOpts.OnSchemaStale = schemaAutoReset(r)
+		createOpts.OnSchemaReset = schemaResetNotice(r)
 	}
 	a, err := app.Create(createOpts)
 	if err != nil {
@@ -392,8 +393,10 @@ func stdoutIsTTY() bool { return isatty.IsTerminal(os.Stdout.Fd()) }
 // SQLite state is a single clean pre-release baseline that we hard-reset (never migrate)
 // on a schema bump — a stale on-disk DB has exactly one sensible recovery, so we take it
 // automatically rather than block every fresh-folder launch on a y/N whose answer is
-// always "yes". It prints one concise notice (local state was cleared; code + Daintree
-// untouched) and authorises the wipe-and-rebuild. Wired only when stdin/stdout are TTYs
+// always "yes". It prints one concise notice (local state reset, previous state kept as
+// a backup; code + Daintree untouched) and authorises the rebuild — app.Create then
+// moves the old DB aside (never deletes it) and reports the backup path through the
+// OnSchemaReset handler (schemaResetNotice). Wired only when stdin/stdout are TTYs
 // (see RunInteractive), so a piped/non-TTY launch still keeps the loud, actionable
 // stale-schema error rather than silently destroying local state in an automated context.
 func schemaAutoReset(r *render.Renderer) func(have, want int) (bool, error) {
@@ -402,5 +405,18 @@ func schemaAutoReset(r *render.Renderer) func(have, want int) (bool, error) {
 			"Local assistant database was from an older version (schema %d → %d) — resetting local state; your code and Daintree are untouched.",
 			have, want)))
 		return true, nil
+	}
+}
+
+// schemaResetNotice returns the app.Create OnSchemaReset handler paired with
+// schemaAutoReset: once the stale database has been safely moved aside it names
+// the backup path, so the reset never reads as silent data loss — the previous
+// state (timers, watchers, memories, history) is right there on disk.
+func schemaResetNotice(r *render.Renderer) func(backupPath string) {
+	return func(backupPath string) {
+		if backupPath == "" {
+			return
+		}
+		r.Line(r.Gray("Previous state backed up to " + backupPath))
 	}
 }

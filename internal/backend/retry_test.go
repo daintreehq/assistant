@@ -219,6 +219,18 @@ func TestDefaultRetryPolicyApplied(t *testing.T) {
 	}
 }
 
+// The CLI covers only the CLI↔backend hop — the backend owns provider retries — so
+// the default budget is exactly one retry, and a server Retry-After can stall a turn
+// at most 10s. These are alignment invariants, not tunables; lock them.
+func TestDefaultRetryAlignment(t *testing.T) {
+	if got := DefaultRetryPolicy().MaxAttempts; got != 2 {
+		t.Fatalf("default MaxAttempts = %d, want 2 (initial attempt + 1 retry)", got)
+	}
+	if maxRetryAfterWait != 10*time.Second {
+		t.Fatalf("maxRetryAfterWait = %v, want 10s", maxRetryAfterWait)
+	}
+}
+
 func TestIsRetriableClassification(t *testing.T) {
 	cases := []struct {
 		name string
@@ -237,6 +249,9 @@ func TestIsRetriableClassification(t *testing.T) {
 		{"contract 400", &Error{HTTPStatus: http.StatusBadRequest}, false},
 		{"protocol 426", &Error{HTTPStatus: http.StatusUpgradeRequired}, false},
 		{"stream decode bug", &Error{Code: "stream_decode", Stream: true}, false},
+		{"idle stream abort", &Error{Code: "stream_idle_timeout", Stream: true}, true},
+		{"oversized line", &Error{Code: "stream_line_too_large", Stream: true}, false},
+		{"oversized event", &Error{Code: "stream_event_too_large", Stream: true}, false},
 		{"nil", nil, false},
 	}
 	for _, tc := range cases {
@@ -250,8 +265,8 @@ func TestBackoffHonorsRetryAfterAndCap(t *testing.T) {
 	p := RetryPolicy{MaxAttempts: 6, BaseDelay: 100 * time.Millisecond, MaxDelay: time.Second}
 	// Retry-After is HONOURED (not clamped down to the small backoff cap), so a server
 	// rate-limit directive is respected rather than retried early.
-	if d := p.backoff(0, 10*time.Second); d != 10*time.Second {
-		t.Fatalf("retry-after honoured: got %v, want %v", d, 10*time.Second)
+	if d := p.backoff(0, 8*time.Second); d != 8*time.Second {
+		t.Fatalf("retry-after honoured: got %v, want %v", d, 8*time.Second)
 	}
 	if d := p.backoff(0, 250*time.Millisecond); d != 250*time.Millisecond {
 		t.Fatalf("retry-after passthrough: got %v, want %v", d, 250*time.Millisecond)

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -195,6 +196,9 @@ type fakeQueue struct {
 	markedIDs   [][]string
 	publishErr  error
 	failDeliver bool
+	// autoDigest makes Publish land the event in the digest slice too (like the
+	// real queue), so notify() sees what a mid-tick job just published.
+	autoDigest bool
 }
 
 func newFakeQueue() *fakeQueue { return &fakeQueue{} }
@@ -203,6 +207,15 @@ func (q *fakeQueue) Publish(args domain.QueuePublishArgs) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.published = append(q.published, args)
+	if q.autoDigest {
+		q.digest = append(q.digest, domain.QueueEvent{
+			ID:       fmt.Sprintf("evt_%d", len(q.published)),
+			Source:   args.Source,
+			Severity: args.Severity,
+			Title:    args.Title,
+			Summary:  args.Summary,
+		})
+	}
 	return q.publishErr
 }
 

@@ -9,6 +9,7 @@ type RunPhase int
 const (
 	PhaseReceived         RunPhase = iota // submission accepted
 	PhaseAnalyzing                        // waiting for first model output
+	PhaseThinking                         // model working: chain-of-thought underway, no visible token yet
 	PhaseGenerating                       // visible response tokens arriving
 	PhaseToolQueued                       // tool batch announced, none running yet
 	PhaseToolRunning                      // a tool is executing
@@ -25,6 +26,7 @@ const (
 var phaseNames = map[RunPhase]string{
 	PhaseReceived:         "received",
 	PhaseAnalyzing:        "analyzing",
+	PhaseThinking:         "thinking",
 	PhaseGenerating:       "generating",
 	PhaseToolQueued:       "tool_queued",
 	PhaseToolRunning:      "tool_running",

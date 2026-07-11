@@ -557,14 +557,15 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	// server, and connect/doctor probes must queue behind (not pile onto) an
 	// in-flight read burst. Same discipline too: re-snapshot the session after
 	// the queue wait, and release via defer so a panic can't leak the slot.
-	if gerr := c.gov.acquire(ctx); gerr != nil {
+	release, gerr := c.gov.acquire(ctx)
+	if gerr != nil {
 		return nil, gerr
 	}
 	if l2, g2, err2 := c.ensure(); err2 == nil {
 		low, gen = l2, g2
 	}
 	rawTools, err := func() ([]rawTool, error) {
-		defer c.gov.release()
+		defer release()
 		return low.ListTools(ctx)
 	}()
 	if err != nil {
@@ -653,7 +654,8 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		// needs an end-to-end budget bounds ctx itself, which aborts the queue wait
 		// too.
 		queueStart := time.Now()
-		if gerr := c.gov.acquire(ctx); gerr != nil {
+		release, gerr := c.gov.acquire(ctx)
+		if gerr != nil {
 			return CallResult{}, gerr
 		}
 		queuedMs += time.Since(queueStart).Milliseconds()
@@ -669,7 +671,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		res, err = func() (rawResult, error) {
 			// Deferred so an SDK panic can't leak the slot — a leaked slot is a
 			// permanent capacity loss for the whole process.
-			defer c.gov.release()
+			defer release()
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			return low.CallTool(callCtx, name, args)

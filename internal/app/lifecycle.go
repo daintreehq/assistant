@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,7 +34,7 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	a.connectDocsAsync(false)
 	wasConnected := a.MCP.Status().Connected
 	st := a.MCP.Connect(attemptCtx)
-	a.logMcpCredentials(st)
+	a.logMcpConnectDiagnostics(st)
 	a.warnOnDrift(st)
 	if st.Connected && !wasConnected && a.Session != nil {
 		// Warm the live-terminal inventory alongside the other splash reads so a fast
@@ -63,7 +66,7 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	// BOTH transports without the docs link gating the primary status it returns.
 	a.connectDocsAsync(true)
 	st := a.MCP.Reconnect(attemptCtx)
-	a.logMcpCredentials(st)
+	a.logMcpConnectDiagnostics(st)
 	a.warnOnDrift(st)
 	if st.Connected && a.Session != nil {
 		a.Session.WarmOpenTerminals()
@@ -140,37 +143,48 @@ func (a *App) connectDocsAsync(reconnect bool) {
 	}()
 }
 
-// logMcpCredentials dumps the RAW Daintree MCP URL and bearer token to the debug log on
-// every (re)connect, so a developer can replay MCP calls by hand — e.g. curl the same
-// endpoint that terminal.extract hits — and see the real server responses while chasing
-// the extract breakage. It deliberately writes the UNREDACTED token (the whole point is to
-// reuse it).
-//
-// TODO: remove this method and its two call sites above once the terminal.extract
-// investigation is closed — it is a temporary debug aid, not a permanent feature.
-//
-// It is doubly gated: it only writes when full debug logging is already enabled
-// (DAINTREE_ASSISTANT_DEBUG_LOG=1) and only into the 0600 per-session log under
-// ~/.daintree/logs. The line's `note` field flags it as temporary so it stays greppable.
-func (a *App) logMcpCredentials(st mcp.Status) {
-	url := a.Config.McpURL
-	if url == "" {
-		url = st.URL // fall back to the resolved/connected URL
+// logMcpConnectDiagnostics writes one connection-diagnostics line to the debug log on
+// every (re)connect: the MCP URL host, whether the connect succeeded, the transport,
+// and a short NON-REVERSIBLE fingerprint of the bearer token (the first 8 hex chars of
+// its SHA-256). The fingerprint lets a developer confirm WHICH credential the CLI is
+// holding — e.g. that two sessions share a token, or that a rotation actually landed —
+// without the log ever containing material that could authenticate a request. The raw
+// token (and the URL path/query, which can embed per-session secrets) must never be
+// logged, even into the 0600 per-session debug log.
+func (a *App) logMcpConnectDiagnostics(st mcp.Status) {
+	rawURL := a.Config.McpURL
+	if rawURL == "" {
+		rawURL = st.URL // fall back to the resolved/connected URL
 	}
-	if url == "" && a.Config.McpToken == "" {
-		return // nothing to replay against — don't emit a useless line
+	if rawURL == "" && a.Config.McpToken == "" {
+		return // nothing configured — don't emit a useless line
+	}
+	host := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		host = u.Host
 	}
 	debuglog.LogDebug(
 		debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-		"mcp.credentials",
+		"mcp.connect",
 		map[string]any{
-			"note":      "TODO: temporary debug — remove this. Raw Daintree MCP URL + bearer token so calls can be replayed by hand to debug terminal.extract.",
-			"url":       url,
-			"token":     a.Config.McpToken,
-			"connected": st.Connected,
-			"transport": st.Transport,
+			"host":             host,
+			"tokenFingerprint": tokenFingerprint(a.Config.McpToken),
+			"connected":        st.Connected,
+			"transport":        st.Transport,
 		},
 	)
+}
+
+// tokenFingerprint returns a short, non-reversible identifier for a secret: the first
+// 8 hex characters of its SHA-256. Empty secret → "" (rendered as an empty field, so a
+// missing token is still visible in diagnostics). 8 hex chars (32 bits) is plenty to
+// distinguish credentials while being useless for reconstruction.
+func tokenFingerprint(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:4])
 }
 
 // warnOnDrift emits ONE rollup log line when the live server advertises fewer

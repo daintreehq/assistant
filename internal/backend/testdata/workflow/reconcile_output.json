@@ -1,0 +1,94 @@
+{
+  "patch": {
+    "base_revision": 12,
+    "new_status": "active",
+    "node_updates": [
+      {
+        "node_id": "verify-tests",
+        "status": "failed",
+        "title": null,
+        "last_error": "pytest exited 1: 2 watcher tests still failing",
+        "note": null
+      },
+      {
+        "node_id": "report-outcome",
+        "status": null,
+        "title": "Report the diagnosis and the remaining failures",
+        "last_error": null,
+        "note": "The report must now cover the residual failures"
+      }
+    ],
+    "add_nodes": [
+      {
+        "id": "diagnose-failures",
+        "title": "Read the verify output and diagnose the residual failures",
+        "kind": "orient",
+        "status": "ready",
+        "depends_on": [
+          "verify-tests"
+        ],
+        "tool_name": "terminal.read",
+        "tool_args": {
+          "terminalId": "term-verify-1",
+          "lines": 200
+        },
+        "risk": "read",
+        "requires_confirm": false,
+        "expected_evidence": [
+          "Names of the two still-failing tests"
+        ],
+        "async_policy": "blocking",
+        "owner": "assistant"
+      }
+    ],
+    "add_edges": [
+      {
+        "source": "diagnose-failures",
+        "target": "report-outcome"
+      }
+    ],
+    "resource_updates": [
+      {
+        "resource_id": "term-verify-1",
+        "status": "exited",
+        "node_id": "verify-tests",
+        "label": "pytest verify run (exit 1)"
+      }
+    ],
+    "add_blockers": [
+      {
+        "id": "blk-residual-failures",
+        "summary": "Two watcher tests still fail after the agent's edits",
+        "node_id": "verify-tests",
+        "kind": "task"
+      },
+      {
+        "id": null,
+        "summary": "Awaiting user guidance on whether to run the full suite",
+        "node_id": null,
+        "kind": "other"
+      }
+    ],
+    "resolve_blockers": [
+      "blk-flaky-network"
+    ],
+    "rationale": "The verify run failed, so the plan needs a diagnosis step before reporting."
+  },
+  "next_action": {
+    "label": "Read the verify terminal to identify the failing tests",
+    "tool_name": "terminal.read",
+    "args": {
+      "terminalId": "term-verify-1",
+      "lines": 200
+    },
+    "risk": "read",
+    "requires_confirmation": false,
+    "node_id": "diagnose-failures"
+  },
+  "user_question": null,
+  "summary": "Verify failed with 2 residual watcher failures; added a diagnosis step and updated resources and blockers.",
+  "warnings": [
+    "The workflow has already been through one failed verify cycle"
+  ],
+  "confidence": 0.72
+}

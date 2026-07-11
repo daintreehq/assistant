@@ -1,0 +1,39 @@
+{
+  "ranked": [
+    {
+      "workflow_id": "wf-fix-watcher-tests",
+      "rank": 1,
+      "headline": "Watcher-test fix is one diagnosis step from a report",
+      "status": "active",
+      "summary": "The editing agent landed changes but two watcher tests still fail; the next step reads the verify terminal to diagnose the residue.",
+      "blockers": [
+        "Two watcher tests still fail after the agent's edits"
+      ],
+      "recommended_action": {
+        "label": "Read the verify terminal to identify the failing tests",
+        "tool_name": "terminal.read",
+        "args": {
+          "terminalId": "term-verify-1",
+          "lines": 200
+        },
+        "risk": "read",
+        "requires_confirmation": false,
+        "node_id": "diagnose-failures"
+      }
+    },
+    {
+      "workflow_id": "wf-changelog-draft",
+      "rank": 2,
+      "headline": "Changelog draft is parked with no blockers",
+      "status": "",
+      "summary": "",
+      "blockers": [],
+      "recommended_action": null
+    }
+  ],
+  "suggested_focus_workflow_id": "wf-fix-watcher-tests",
+  "assistant_context_lines": [
+    "Resume focus: wf-fix-watcher-tests is blocked on two residual watcher-test failures.",
+    "wf-changelog-draft is idle and can wait."
+  ]
+}

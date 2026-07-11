@@ -1,0 +1,154 @@
+{
+  "goal": "Get the failing watcher unit tests green and report the fix",
+  "status": "active",
+  "success_criteria": [
+    "pytest tests/unit/test_watcher.py exits 0",
+    "No unrelated files are modified"
+  ],
+  "assumptions": [
+    "Repository dependencies are already installed"
+  ],
+  "nodes": [
+    {
+      "id": "orient-repo",
+      "title": "Snapshot the repository and failing-test state",
+      "kind": "orient",
+      "status": "done",
+      "depends_on": [],
+      "tool_name": "context.snapshot",
+      "tool_args": {
+        "include": [
+          "git_status",
+          "recent_tests"
+        ]
+      },
+      "risk": "read",
+      "requires_confirm": false,
+      "expected_evidence": [
+        "Failing test names captured"
+      ],
+      "async_policy": "blocking",
+      "owner": "assistant"
+    },
+    {
+      "id": "fix-watcher-tests",
+      "title": "Delegate the watcher test fix to an editing agent",
+      "kind": "delegate",
+      "status": "running",
+      "depends_on": [
+        "orient-repo"
+      ],
+      "tool_name": "agentTask.spawnForEdits",
+      "tool_args": {
+        "goal": "Fix the failing watcher unit tests",
+        "paths": [
+          "tests/unit"
+        ]
+      },
+      "risk": "project",
+      "requires_confirm": false,
+      "expected_evidence": [
+        "Agent reports the edited files",
+        "Agent reports a passing test run"
+      ],
+      "async_policy": "async_required",
+      "owner": "agent"
+    },
+    {
+      "id": "await-agent",
+      "title": "Wait for the editing agent to finish",
+      "kind": "wait",
+      "status": "waiting",
+      "depends_on": [
+        "fix-watcher-tests"
+      ],
+      "tool_name": "terminal.await.async",
+      "tool_args": {
+        "terminalId": "term-agent-1"
+      },
+      "risk": "local",
+      "requires_confirm": false,
+      "expected_evidence": [
+        "Agent terminal reached a final state"
+      ],
+      "async_policy": "wake_only",
+      "owner": "assistant"
+    },
+    {
+      "id": "verify-tests",
+      "title": "Re-run the watcher tests to verify the fix",
+      "kind": "verify",
+      "status": "pending",
+      "depends_on": [
+        "await-agent"
+      ],
+      "tool_name": "terminal.run",
+      "tool_args": {
+        "command": "pytest tests/unit/test_watcher.py -q"
+      },
+      "risk": "terminal",
+      "requires_confirm": true,
+      "expected_evidence": [
+        "pytest exit code 0"
+      ],
+      "async_policy": "async_ok",
+      "owner": "assistant"
+    },
+    {
+      "id": "report-outcome",
+      "title": "Report the fix and test results to the user",
+      "kind": "report",
+      "status": "pending",
+      "depends_on": [
+        "verify-tests"
+      ],
+      "tool_name": null,
+      "tool_args": {},
+      "risk": null,
+      "requires_confirm": false,
+      "expected_evidence": [],
+      "async_policy": "blocking",
+      "owner": "assistant"
+    }
+  ],
+  "edges": [
+    {
+      "source": "orient-repo",
+      "target": "fix-watcher-tests"
+    },
+    {
+      "source": "fix-watcher-tests",
+      "target": "await-agent"
+    },
+    {
+      "source": "await-agent",
+      "target": "verify-tests"
+    },
+    {
+      "source": "verify-tests",
+      "target": "report-outcome"
+    }
+  ],
+  "next_action": {
+    "label": "Wait for the editing agent to finish",
+    "tool_name": "terminal.await.async",
+    "args": {
+      "terminalId": "term-agent-1"
+    },
+    "risk": "local",
+    "requires_confirmation": false,
+    "node_id": "await-agent"
+  },
+  "user_question": {
+    "question": "Should the verify step also run the full test suite?",
+    "options": [
+      "Only the watcher tests",
+      "The full test suite"
+    ],
+    "allow_other": true
+  },
+  "warnings": [
+    "Node 'verify-tests' requires confirmation before the terminal command runs"
+  ],
+  "confidence": 0.85
+}

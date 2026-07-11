@@ -9,6 +9,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/daintree-assistant/internal/waitbudget"
 )
 
 // terminal.awaitAll is the IN-TURN cohort finish-wait: the orchestrator spawns
@@ -83,7 +84,7 @@ var awaitSchema = json.RawMessage(`{
   "properties": {
     "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "All the agent terminals to wait on — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it. BOUND the re-await loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal). After that a still-working terminal is HUNG — escalate (publish a blocked inbox item with queue.publish and attach a watcher with watcher.terminal.create) and end the turn rather than awaiting it again." },
     "pollIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 2000, "description": "Delay between poll rounds in ms." },
-    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 240, "default": 30, "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s — durations assume the default 2s pollIntervalMs). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default." }
+    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 240, "default": 30, "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s — durations assume the default 2s pollIntervalMs). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default. Independent of the cap, the turn's ENFORCED cumulative foreground-wait budget (shared across all awaitAll calls this turn — see the tool description) can end the wait earlier with budgetExhausted:true." }
   },
   "required": ["terminalIds"]
 }`)
@@ -101,7 +102,10 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			"watcher.cancel them yourself and do NOT expect a later completion notification for those agents. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
 			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
 			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
-			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. INTERRUPTIBLE: if the user sends a message while you are waiting, awaitAll returns EARLY with interruptedByUser:true plus whatever has settled so far — their message is already folded into the conversation, so READ IT and adapt (they may want to redirect, e.g. 'that agent errored, re-spawn it') before deciding whether to re-await the stillWorking agents. Read-only; requires Daintree MCP.",
+			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. " +
+			fmt.Sprintf("ENFORCED BUDGET: all awaitAll calls in one turn share a cumulative foreground-wait budget of %ds — this is enforced, not advisory. ", int(waitbudget.TurnBudget/time.Second)) +
+			"When it runs out mid-wait the call returns early with budgetExhausted:true (still-working agents in stillWorking), and every further awaitAll this turn returns immediately with the same marker — so on budgetExhausted do NOT re-await: hand the stragglers to the async path (watcher.terminal.create + queue.publish) and end the turn. " +
+			"INTERRUPTIBLE: if the user sends a message while you are waiting, awaitAll returns EARLY with interruptedByUser:true plus whatever has settled so far — their message is already folded into the conversation, so READ IT and adapt (they may want to redirect, e.g. 'that agent errored, re-spawn it') before deciding whether to re-await the stillWorking agents. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitArgs{} }),
@@ -117,6 +121,18 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			d := deps
 			if tctx != nil {
 				d.InjectionsPending = tctx.InjectionsPending
+			}
+			// Per-turn cumulative foreground-wait budget (waitbudget carried on the
+			// turn ctx by the agent session; a budget-less ctx — other callers, tests
+			// — is unbudgeted and behaves exactly as before budgets existed). Already
+			// exhausted ⇒ return IMMEDIATELY, before even the roster resolve: the
+			// normal result shape with every requested terminal reported still
+			// working plus the machine-readable budgetExhausted marker, so the model
+			// routes to the async path instead of burning another wait discovering
+			// the same dead end.
+			budget := waitbudget.From(ctx)
+			if budget != nil && budget.Exhausted() {
+				return buildAwaitResult(a.TerminalIDs, map[string]*awaitOutcome{}, 0, 0, false, 0, true)
 			}
 			// Canonicalize the ids against the live roster ONCE, up front. A truncated/prefix
 			// id (the model abbreviates Daintree's full terminal-<uuid> ids) would otherwise
@@ -135,6 +151,12 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			startedAt := time.Now().UnixMilli()
 			outcomes, attempts, interrupted := awaitCohort(ctx, d, a.TerminalIDs, pollIntervalMs, maxAttempts, startedAt, nil)
 			elapsedMs := time.Now().UnixMilli() - startedAt
+			// Exhaustion is read AFTER the wait: awaitCohort stops polling the moment
+			// the shared balance hits zero mid-wait, and this flag tells the model the
+			// cutoff was the TURN's cumulative budget (no further foreground waits
+			// this turn), distinct from this call's own maxAttempts cap. nil-safe:
+			// an unbudgeted ctx is never exhausted.
+			budgetExhausted := budget.Exhausted()
 
 			// The turn just consumed these completions directly, so the spawn-attached
 			// supervisor watchers on the DONE terminals are redundant — retire them now,
@@ -156,7 +178,7 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 				}
 			}
 
-			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs, interrupted, retired)
+			return buildAwaitResult(a.TerminalIDs, outcomes, attempts, elapsedMs, interrupted, retired, budgetExhausted)
 		},
 	}
 }
@@ -186,6 +208,12 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	if nowMS == nil {
 		nowMS = func() int64 { return time.Now().UnixMilli() }
 	}
+	// The turn's cumulative foreground-wait budget: each poll sleep is debited from
+	// the shared balance BEFORE it happens, and a granted slice shorter than the
+	// interval is slept as-is (the very next poll then draws zero and stops). Sleeps
+	// are what the budget meters — the getStatus ticks themselves are the cheap
+	// no-output reads this FSM was built around. nil (unbudgeted ctx) grants in full.
+	budget := waitbudget.From(ctx)
 	term := make(map[string]*awaitTerminal, len(ids))
 	for _, id := range ids {
 		// Seed the settle gate from the session's cross-call observation memory: an
@@ -281,7 +309,17 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			break
 		}
 		if !isFinal && pollIntervalMs > 0 {
-			delay(ctx, pollIntervalMs)
+			// Draw the next sleep from the turn budget. A zero grant means the
+			// cumulative allowance ran out mid-wait: stop polling NOW (the caller
+			// reports budgetExhausted) rather than free-running to the attempt cap.
+			// Checked AFTER the interruption test so interruptedByUser semantics are
+			// untouched — a user message still wins the race and is reported as the
+			// interruption it is.
+			granted := budget.Consume(time.Duration(pollIntervalMs) * time.Millisecond)
+			if granted <= 0 {
+				break
+			}
+			delay(ctx, int(granted/time.Millisecond))
 		}
 	}
 
@@ -310,7 +348,12 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 // retiredSupervisors (>0) is surfaced as watchersRetired so the model knows those
 // terminals' spawn-attached watchers are already gone — no watcher.cancel needed, and no
 // later completion notification is coming for them.
-func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64, interrupted bool, retiredSupervisors int) tools.ToolResult {
+//
+// budgetExhausted marks that the TURN's cumulative foreground-wait budget is spent —
+// the machine-readable "do not re-await this turn" signal, distinct from this call's
+// own attempt cap. It rides the result plus (when stragglers remain) a note routing
+// the model to the async handoff instead of another blocking wait.
+func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts int, elapsedMs int64, interrupted bool, retiredSupervisors int, budgetExhausted bool) tools.ToolResult {
 	perTerminal := make([]map[string]any, 0, len(ids))
 	stillWorking := make([]string, 0, len(ids))
 	askingQuestion := make([]string, 0, len(ids))
@@ -372,7 +415,12 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		summary = fmt.Sprintf("No agents (of %d %s).", total, agentWord)
 	}
 	// An interruption is the headline of the summary: the orchestrator must read the
-	// user's new message before doing anything else, so lead with it.
+	// user's new message before doing anything else, so lead with it. Budget
+	// exhaustion is the second-loudest headline (only when not interrupted — an
+	// interruption already demands the model stop and re-read regardless of budget).
+	if budgetExhausted && !interrupted {
+		summary = "Foreground wait budget for this turn is exhausted. " + summary
+	}
 	if interrupted {
 		summary = "Paused — you sent a message. " + summary
 	}
@@ -392,11 +440,22 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		// by hand nor waits for a completion notification that will never come.
 		result["watchersRetired"] = retiredSupervisors
 	}
+	if budgetExhausted {
+		// Machine-readable marker: the turn's CUMULATIVE foreground-wait budget is
+		// spent (enforced across every awaitAll call this turn), so re-awaiting can
+		// only return this same result immediately. Set even when everything
+		// settled — it truthfully says "no more foreground waiting this turn".
+		result["budgetExhausted"] = true
+		if workingCount > 0 && !interrupted {
+			result["note"] = "This turn's cumulative foreground-wait budget is exhausted — do NOT call terminal.awaitAll (or any blocking wait) again this turn; it will return immediately with this same result. Hand the stillWorking agents to the async path instead: attach a watcher to each (watcher.terminal.create), publish a blocked inbox item if you are blocked on them (queue.publish severity 'blocked'), then end the turn — their completions will arrive as watcher notifications."
+		}
+	}
 	if interrupted {
-		// The wait stopped early because the human typed — NOT because the budget ran
-		// out. The message is already folded into the conversation; the model should
-		// read it and adapt (it may redirect the whole plan) before deciding whether to
-		// re-await the stillWorking agents.
+		// The wait stopped early because the human typed — NOT (only) because the
+		// budget ran out. The message is already folded into the conversation; the
+		// model should read it and adapt (it may redirect the whole plan) before
+		// deciding whether to re-await the stillWorking agents. This note wins over
+		// the budget note: reading the user comes first.
 		result["interruptedByUser"] = true
 		result["note"] = "You stopped early because the user sent a message (now folded into the conversation). Read it and adapt before re-awaiting — they may want to change course. The stillWorking agents are still running; re-await them only if their original work is still wanted."
 	}

@@ -44,6 +44,15 @@ type App interface {
 	Shutdown(ctx context.Context) error
 }
 
+// turnSession is the narrow slice of *agent.Session the host's turn paths drive
+// (command prompts and autonomous wake turns). It exists as a seam so loop tests
+// can run the REAL prompt/wake/teardown wiring against a cooperative fake session;
+// boot fills it with h.app.Session().
+type turnSession interface {
+	Send(ctx context.Context, text string, opts agent.SendOptions) (string, error)
+	InjectPrompt(text string)
+}
+
 // ConfirmRequest is the confirm payload the host bridges to an approval. The App
 // adapts its tool-context ConfirmRequest (tools.ConfirmRequest) into this when
 // calling the installed hook. Beyond the tool name + summary, it carries the

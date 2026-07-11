@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -1099,25 +1100,27 @@ func TestComposeTurnFooter_PinnedListerErrorSwallowed(t *testing.T) {
 	}
 }
 
-// Session-level: the live typed worktree is fetched EVERY round and travels in the
-// structured runtime context.
+// Session-level: the typed worktree travels in the structured runtime context on
+// EVERY round — served from the cross-turn cache (fetched ONCE, detached, at turn
+// start), never re-read inline per round.
 func TestComposeTurnFooter_TypedWorktreeEveryRound(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
 		{Content: "final"},
 	}}
-	calls := 0
+	var calls atomic.Int32
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
 	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
-		calls++
+		calls.Add(1)
 		return &prompts.WorktreeContext{Present: true, Branch: "feature/issue-263"}
 	}
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "do the thing", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if calls < 2 {
-		t.Errorf("worktree func called %d times, want once per round (>= 2)", calls)
+	s.DrainBackgroundWork() // join the detached refresh before reading its call count
+	if got := calls.Load(); got != 1 {
+		t.Errorf("worktree fetcher entered %d times, want exactly 1 (cached, never per round)", got)
 	}
 	for i := 0; i < 2; i++ {
 		got := be.runtimeAt(i).Worktree
@@ -1201,8 +1204,13 @@ func TestComposeTurnFooter_RuntimeContextStableAcrossVolatileChanges(t *testing.
 	}
 
 	// Mutate the volatile inputs (same backing array / captured var the fakes read), then
-	// run a second turn.
+	// run a second turn. The worktree snapshot is TTL-cached across turns now, so make
+	// the change observable deterministically: wait for turn 1's detached refresh to
+	// land, then expire the cache — turn 2's warm re-fetches and picks up feature/two
+	// (in production the same happens ≤ worktreeSnapshotTTL later).
+	waitForWorktreeIdle(t, s)
 	wt = "feature/two"
+	expireWorktreeCache(s)
 	pins[0] = domain.MemoryRecord{Content: "pin B totally different"}
 	if _, err := s.Send(context.Background(), "second", SendOptions{}); err != nil {
 		t.Fatal(err)
@@ -1374,45 +1382,47 @@ func TestStartupContextStaysOutOfMessagesAcrossPersistenceAndResume(t *testing.T
 	}
 }
 
-func TestCurrentWorktreeFetcherRefreshesEveryBackendRound(t *testing.T) {
+// The inverse of the old per-round refresh contract: one detached fetch serves BOTH
+// rounds of a multi-round turn (the runtime block carries the same cached snapshot),
+// and the fetcher is never re-entered per round. A worktree switch instead reaches the
+// model via TTL expiry (see TestWorktree_TTLExpiryKicksDetachedRefresh).
+func TestCurrentWorktreeCachedSnapshotServesEveryBackendRound(t *testing.T) {
 	r := &injectRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}},
 		{Content: "final"},
 	}}
 	deps, be := recordingDeps(r, &fakeTools{result: domain.Ok("ok", nil)})
-	calls := 0
+	var calls atomic.Int32
 	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
-		calls++
-		return &prompts.WorktreeContext{Present: true, Branch: "feature/" + strconv.Itoa(calls)}
+		n := int(calls.Add(1))
+		return &prompts.WorktreeContext{Present: true, Branch: "feature/" + strconv.Itoa(n)}
 	}
 	s := NewSession(deps)
 	if _, err := s.Send(context.Background(), "work", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("worktree fetch calls = %d, want one per backend round", calls)
+	s.DrainBackgroundWork()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("worktree fetch calls = %d, want exactly one for the whole turn", got)
 	}
-	if got := be.runtimeAt(0).Worktree; got == nil || got.Current == nil || got.Current.Branch != "feature/1" {
-		t.Fatalf("round 0 worktree = %+v", got)
-	}
-	if got := be.runtimeAt(1).Worktree; got == nil || got.Current == nil || got.Current.Branch != "feature/2" {
-		t.Fatalf("round 1 worktree = %+v", got)
+	for i := 0; i < 2; i++ {
+		if got := be.runtimeAt(i).Worktree; got == nil || got.Current == nil || got.Current.Branch != "feature/1" {
+			t.Fatalf("round %d worktree = %+v, want the cached feature/1 snapshot", i, got)
+		}
 	}
 }
 
+// A FAILED worktree read (fetcher → nil) is cached as "unknown" and injected as nil —
+// never papered over with the stale splash/reconnect selection the prompt context
+// still carries. (The old companion assertion — that the runtime tail re-snapshots
+// MCP state after the read — is gone WITH its cause: the fetch is detached now, so an
+// inline read can no longer degrade the shared MCP transport mid-round.)
 func TestFailedCurrentWorktreeReadDoesNotMasqueradeCachedValueAsCurrent(t *testing.T) {
 	deps, be := recordingDeps(&injectRouter{results: []models.ChatResult{{Content: "done"}}}, &fakeTools{})
-	contextReads := 0
 	deps.PromptContextFunc = func() prompts.MainPromptContext {
-		contextReads++
-		if contextReads == 1 {
-			return prompts.MainPromptContext{
-				MCPConnected:  true,
-				MCPStatusLine: "connected",
-				Worktree:      &prompts.WorktreeContext{Present: true, Branch: "stale/from-splash"},
-			}
+		return prompts.MainPromptContext{
+			Worktree: &prompts.WorktreeContext{Present: true, Branch: "stale/from-splash"},
 		}
-		return prompts.MainPromptContext{}
 	}
 	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext { return nil }
 	s := NewSession(deps)
@@ -1422,9 +1432,7 @@ func TestFailedCurrentWorktreeReadDoesNotMasqueradeCachedValueAsCurrent(t *testi
 	if got := be.runtimeAt(0).Worktree; got != nil {
 		t.Fatalf("failed live read reused stale worktree %+v", got)
 	}
-	if got := be.runtimeAt(0).MCP; got != nil {
-		t.Fatalf("runtime retained pre-failure MCP status: %+v", got)
-	}
+	s.DrainBackgroundWork()
 }
 
 // Send-level: an autonomous wake turn (SendOptions.IsWake) ships the IsWake flag plus the

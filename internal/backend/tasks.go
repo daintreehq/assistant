@@ -3,7 +3,9 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 // Task IDs the backend exposes via /v1/daintree/tasks. Use these constants rather
@@ -204,9 +206,35 @@ func clampHeadRunes(s string, maxRunes int) string {
 	return string(r[:maxRunes])
 }
 
+// TaskOutputError reports a task round that "succeeded" on the wire but produced a
+// result the typed caller cannot use: no output at all, or a decode that yielded a
+// structurally empty required result. It is typed so callers can distinguish a bad
+// task result from transport failures, and so a zero-valued struct is never silently
+// treated as a real answer.
+type TaskOutputError struct {
+	Task   string
+	Reason string
+}
+
+func (e *TaskOutputError) Error() string {
+	return fmt.Sprintf("backend: task %s: %s", e.Task, e.Reason)
+}
+
 // runTyped marshals a typed input into the task envelope, runs it, and decodes the
-// output into out.
+// output into out. Every backend task returns an output object, so when a typed
+// target is supplied an empty output is a *TaskOutputError, never a silent zero-value
+// success. (No current typed caller legitimately expects empty output; if one ever
+// does, give that call an explicit allowEmpty variant rather than weakening this.)
 func runTyped(ctx context.Context, r TaskRunner, task string, input any, schema map[string]any, out any) error {
+	return runTypedValidated(ctx, r, task, input, schema, out, nil)
+}
+
+// runTypedValidated is runTyped plus an optional post-decode validation hook: after a
+// successful decode into out, validate (if non-nil) inspects the decoded value and
+// returns a reason when it is structurally unusable (e.g. a required field decoded
+// empty). A validation failure surfaces as *TaskOutputError. Typed helpers — the
+// workflow ones included — wire their obviously-required-field checks through this.
+func runTypedValidated(ctx context.Context, r TaskRunner, task string, input any, schema map[string]any, out any, validate func() error) error {
 	m, err := structToMap(input)
 	if err != nil {
 		return fmt.Errorf("backend: encode %s input: %w", task, err)
@@ -215,15 +243,29 @@ func runTyped(ctx context.Context, r TaskRunner, task string, input any, schema 
 	if err != nil {
 		return err
 	}
-	if out != nil && len(res.Output) > 0 {
-		if err := json.Unmarshal(res.Output, out); err != nil {
-			return fmt.Errorf("backend: decode %s output: %w", task, err)
+	if out == nil {
+		return nil
+	}
+	if len(res.Output) == 0 {
+		return &TaskOutputError{Task: task, Reason: "returned no output"}
+	}
+	if err := json.Unmarshal(res.Output, out); err != nil {
+		return fmt.Errorf("backend: decode %s output: %w", task, err)
+	}
+	if validate != nil {
+		if verr := validate(); verr != nil {
+			return &TaskOutputError{Task: task, Reason: verr.Error()}
 		}
 	}
 	return nil
 }
 
-// RunCheckpoint compacts a transcript into a structured checkpoint.
+// RunCheckpoint compacts a transcript into a structured checkpoint. Deliberately NO
+// structurally-empty validate hook: the agent's compaction path (see
+// agent/checkpoint.go) treats an all-empty checkpoint as a legitimate best-effort
+// degradation — a prose/degenerate model reply must never block compaction, and its
+// validateCheckpoint pass mines the load-bearing IDs into the empty object afterward.
+// Only a wire round with NO output at all is rejected (by runTyped).
 func RunCheckpoint(ctx context.Context, r TaskRunner, in CheckpointInput) (CheckpointOutput, error) {
 	in.Transcript = clampTailRunes(in.Transcript, maxTaskTranscriptRunes)
 	var out CheckpointOutput
@@ -231,7 +273,8 @@ func RunCheckpoint(ctx context.Context, r TaskRunner, in CheckpointInput) (Check
 	return out, err
 }
 
-// RunMemoryDistill distills durable facts from a discarded transcript.
+// RunMemoryDistill distills durable facts from a discarded transcript. No validate
+// hook: an empty fact list is a legitimate result (nothing durable to keep).
 func RunMemoryDistill(ctx context.Context, r TaskRunner, in MemoryDistillInput) (MemoryDistillOutput, error) {
 	in.Transcript = clampTailRunes(in.Transcript, maxTaskTranscriptRunes)
 	var out MemoryDistillOutput
@@ -243,19 +286,41 @@ func RunMemoryDistill(ctx context.Context, r TaskRunner, in MemoryDistillInput) 
 func RunWatcherClassify(ctx context.Context, r TaskRunner, in WatcherClassifyInput) (WatcherClassifyOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out WatcherClassifyOutput
-	err := runTyped(ctx, r, TaskWatcherClassify, in, nil, &out)
+	err := runTypedValidated(ctx, r, TaskWatcherClassify, in, nil, &out, func() error {
+		// Classification is the verdict's required field; without it the watcher
+		// state machine has nothing to act on (callers already fall back on error).
+		if strings.TrimSpace(out.Classification) == "" {
+			return errors.New("output missing classification")
+		}
+		return nil
+	})
 	return out, err
+}
+
+// validateJudgeOutput rejects a fully-zero judge verdict (the shape `{}` decodes to):
+// the backend contract always carries a reason, so an all-empty verdict is a decode
+// of nothing, not a real "no". Shared by terminal_judge and skill_step_consistency.
+func validateJudgeOutput(out *JudgeOutput) error {
+	if out.Reason == "" && out.Confidence == 0 && !out.Matched {
+		return errors.New("decoded judge verdict is structurally empty")
+	}
+	return nil
 }
 
 // RunTerminalJudge answers one yes/no question about a terminal.
 func RunTerminalJudge(ctx context.Context, r TaskRunner, in TerminalJudgeInput) (JudgeOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out JudgeOutput
-	err := runTyped(ctx, r, TaskTerminalJudge, in, nil, &out)
+	err := runTypedValidated(ctx, r, TaskTerminalJudge, in, nil, &out, func() error {
+		return validateJudgeOutput(&out)
+	})
 	return out, err
 }
 
-// RunTerminalSummarize produces a terse summary of terminal output.
+// RunTerminalSummarize produces a terse summary of terminal output. No validate
+// hook: `{"text": ""}` is indistinguishable post-decode from an intentionally empty
+// answer (e.g. extracting from a blank terminal), so only the missing-output case —
+// covered by runTyped — is rejected.
 func RunTerminalSummarize(ctx context.Context, r TaskRunner, in TerminalSummarizeInput) (TextOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out TextOutput
@@ -263,7 +328,8 @@ func RunTerminalSummarize(ctx context.Context, r TaskRunner, in TerminalSummariz
 	return out, err
 }
 
-// RunTerminalExtractText extracts free text from terminal output.
+// RunTerminalExtractText extracts free text from terminal output. No validate hook —
+// same reasoning as RunTerminalSummarize (empty extracted text can be legitimate).
 func RunTerminalExtractText(ctx context.Context, r TaskRunner, in TerminalExtractTextInput) (TextOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out TextOutput
@@ -277,7 +343,14 @@ func RunTerminalExtractText(ctx context.Context, r TaskRunner, in TerminalExtrac
 func RunTerminalExtractJSON(ctx context.Context, r TaskRunner, in TerminalExtractJSONInput, schema map[string]any) (ExtractJSONOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out ExtractJSONOutput
-	err := runTyped(ctx, r, TaskTerminalExtractJSON, in, schema, &out)
+	err := runTypedValidated(ctx, r, TaskTerminalExtractJSON, in, schema, &out, func() error {
+		// The result envelope is the whole point of this task; a missing/empty
+		// `result` means the extraction produced nothing decodable.
+		if len(out.Result) == 0 {
+			return errors.New("output missing result")
+		}
+		return nil
+	})
 	return out, err
 }
 
@@ -285,14 +358,23 @@ func RunTerminalExtractJSON(ctx context.Context, r TaskRunner, in TerminalExtrac
 func RunExtractionVerdict(ctx context.Context, r TaskRunner, in ExtractionVerdictInput) (ExtractionVerdictOutput, error) {
 	in.Result = clampHeadRunes(in.Result, maxTaskResultRunes)
 	var out ExtractionVerdictOutput
-	err := runTyped(ctx, r, TaskExtractionVerdict, in, nil, &out)
+	err := runTypedValidated(ctx, r, TaskExtractionVerdict, in, nil, &out, func() error {
+		// The backend contract always carries a reason; a fully-zero verdict
+		// ({pass:false, reason:""}) is `{}` decoded, not a real failing judgement.
+		if !out.Passed && out.Reason == "" {
+			return errors.New("decoded verdict is structurally empty")
+		}
+		return nil
+	})
 	return out, err
 }
 
 // RunSkillStepConsistency judges whether one skill-step advance is consistent.
 func RunSkillStepConsistency(ctx context.Context, r TaskRunner, in SkillStepConsistencyInput) (JudgeOutput, error) {
 	var out JudgeOutput
-	err := runTyped(ctx, r, TaskSkillStepConsistency, in, nil, &out)
+	err := runTypedValidated(ctx, r, TaskSkillStepConsistency, in, nil, &out, func() error {
+		return validateJudgeOutput(&out)
+	})
 	return out, err
 }
 

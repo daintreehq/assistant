@@ -64,7 +64,7 @@ func GraphFromPlan(out backend.WorkflowPlanOutput, goal string, source Source, h
 		g.Nodes = append(g.Nodes, nodeFromWire(n, now))
 	}
 	for _, e := range out.Edges {
-		g.Edges = append(g.Edges, Edge{From: e.From, To: e.To})
+		g.Edges = append(g.Edges, Edge{From: e.Source, To: e.Target})
 	}
 
 	if na, warn := actionFromWire(out.NextAction, hasTool); na != nil {
@@ -90,12 +90,19 @@ func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseR
 		BaseRevision: baseRevision,
 		Rationale:    clampRunes(wp.Rationale, MaxReasonRunes),
 	}
+	// The LOCAL revision is authoritative (the commit path re-checks it); a
+	// backend echo that disagrees means the patch was reasoned against a stale
+	// snapshot — worth a warning, not a hard failure (validation still gates).
+	if wp.BaseRevision != nil && *wp.BaseRevision != baseRevision {
+		warnings = append(warnings, fmt.Sprintf(
+			"backend patch base_revision %d differs from local revision %d", *wp.BaseRevision, baseRevision))
+	}
 	if wp.NewStatus != "" {
 		s := Status(wp.NewStatus)
 		p.NewStatus = &s
 	}
 	for _, nu := range wp.NodeUpdates {
-		np := NodePatch{ID: nu.ID, BumpAttempts: nu.BumpAttempts}
+		np := NodePatch{ID: nu.NodeID}
 		if nu.Status != "" {
 			s := NodeStatus(nu.Status)
 			np.Status = &s
@@ -104,24 +111,22 @@ func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseR
 			t := nu.Title
 			np.Title = &t
 		}
-		if nu.Owner != "" {
-			o := nu.Owner
-			np.Owner = &o
-		}
 		if nu.LastError != "" {
 			e := nu.LastError
 			np.LastError = &e
 		}
+		// nu.Note is advisory prose for the operator; the local graph keeps no
+		// per-node note field, so it is intentionally not persisted.
 		p.NodeUpdates = append(p.NodeUpdates, np)
 	}
 	for _, n := range wp.AddNodes {
 		p.AddNodes = append(p.AddNodes, nodeFromWire(n, now))
 	}
 	for _, e := range wp.AddEdges {
-		p.AddEdges = append(p.AddEdges, Edge{From: e.From, To: e.To})
+		p.AddEdges = append(p.AddEdges, Edge{From: e.Source, To: e.Target})
 	}
 	for _, ru := range wp.ResourceUpdates {
-		rp := ResourcePatch{ID: ru.ID}
+		rp := ResourcePatch{ID: ru.ResourceID}
 		if ru.Status != "" {
 			s := ru.Status
 			rp.Status = &s
@@ -136,20 +141,13 @@ func PatchFromWire(out backend.WorkflowReconcileOutput, workflowID string, baseR
 		}
 		p.ResourceUpdates = append(p.ResourceUpdates, rp)
 	}
-	for _, r := range wp.AddResources {
-		p.AddResources = append(p.AddResources, Resource{
-			Type: r.Type, Ref: r.Ref, Label: r.Label, NodeID: r.NodeID, Status: r.Status,
-		})
-	}
 	for _, b := range wp.AddBlockers {
-		p.AddBlockers = append(p.AddBlockers, Blocker{NodeID: b.NodeID, Reason: b.Reason})
+		p.AddBlockers = append(p.AddBlockers, Blocker{
+			ID: strings.TrimSpace(b.ID), NodeID: b.NodeID,
+			Reason: b.Summary, Kind: b.Kind,
+		})
 	}
 	p.ResolveBlockers = append(p.ResolveBlockers, wp.ResolveBlockers...)
-	for _, ev := range wp.AddEvidence {
-		p.AddEvidence = append(p.AddEvidence, EvidenceRef{
-			NodeID: ev.NodeID, Kind: ev.Kind, Summary: ev.Summary, RefID: ev.RefID,
-		})
-	}
 
 	if na, warn := actionFromWire(out.NextAction, hasTool); na != nil {
 		p.NextAction = na
@@ -218,4 +216,79 @@ func actionFromWire(a *backend.RecommendedActionOut, hasTool func(string) bool) 
 		Risk:                 domain.RiskClass(a.Risk),
 		RequiresConfirmation: a.RequiresConfirmation,
 	}, ""
+}
+
+// SnapshotFromGraph projects the local graph into the canonical snake_case
+// wire snapshot the reconcile task (and plan's existing_workflow) carries —
+// built field-by-field, never via a JSON round-trip of the camelCase local
+// shape, because the backend's cycle detection and terminal-status guard read
+// exactly these keys. Each node's depends_on is unioned with its incoming
+// explicit edges so the backend sees EVERY pre-existing dependency; only open
+// blockers travel (resolved ones are history, not state).
+func SnapshotFromGraph(g *Graph, revision int64) *backend.WorkflowSnapshot {
+	snap := &backend.WorkflowSnapshot{
+		ID:        g.ID,
+		Revision:  revision,
+		Goal:      g.Goal,
+		Status:    string(g.Status),
+		Nodes:     make([]backend.WorkflowSnapshotNode, 0, len(g.Nodes)),
+		Edges:     make([]backend.WorkflowEdgeOut, 0, len(g.Edges)),
+		Resources: make([]backend.WorkflowSnapshotResource, 0, len(g.Resources)),
+		Blockers:  []backend.WorkflowSnapshotBlocker{},
+	}
+	incoming := make(map[string][]string, len(g.Nodes))
+	for _, e := range g.Edges {
+		incoming[e.To] = append(incoming[e.To], e.From)
+	}
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		deps := make([]string, 0, len(n.DependsOn)+len(incoming[n.ID]))
+		seen := make(map[string]bool, cap(deps))
+		for _, d := range n.DependsOn {
+			if d != "" && !seen[d] {
+				seen[d] = true
+				deps = append(deps, d)
+			}
+		}
+		for _, d := range incoming[n.ID] {
+			if d != "" && !seen[d] {
+				seen[d] = true
+				deps = append(deps, d)
+			}
+		}
+		snap.Nodes = append(snap.Nodes, backend.WorkflowSnapshotNode{
+			ID:        n.ID,
+			Title:     n.Title,
+			Kind:      string(n.Kind),
+			Status:    string(n.Status),
+			DependsOn: deps,
+			ToolName:  n.ToolName,
+		})
+	}
+	for _, e := range g.Edges {
+		snap.Edges = append(snap.Edges, backend.WorkflowEdgeOut{Source: e.From, Target: e.To})
+	}
+	for i := range g.Resources {
+		r := &g.Resources[i]
+		snap.Resources = append(snap.Resources, backend.WorkflowSnapshotResource{
+			ID:     r.ID,
+			Kind:   r.Type,
+			Status: r.Status,
+			NodeID: r.NodeID,
+			Label:  r.Label,
+		})
+	}
+	for _, b := range g.OpenBlockers() {
+		kind := b.Kind
+		if kind == "" {
+			kind = "other"
+		}
+		snap.Blockers = append(snap.Blockers, backend.WorkflowSnapshotBlocker{
+			ID:      b.ID,
+			Summary: b.Reason,
+			NodeID:  b.NodeID,
+			Kind:    kind,
+		})
+	}
+	return snap
 }

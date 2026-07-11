@@ -1,0 +1,140 @@
+{
+  "workflow": {
+    "id": "wf-fix-watcher-tests",
+    "revision": 12,
+    "goal": "Get the failing watcher unit tests green and report the fix",
+    "status": "active",
+    "nodes": [
+      {
+        "id": "orient-repo",
+        "title": "Snapshot the repository and failing-test state",
+        "kind": "orient",
+        "status": "done",
+        "depends_on": []
+      },
+      {
+        "id": "fix-watcher-tests",
+        "title": "Delegate the watcher test fix to an editing agent",
+        "kind": "delegate",
+        "status": "done",
+        "depends_on": [
+          "orient-repo"
+        ]
+      },
+      {
+        "id": "await-agent",
+        "title": "Wait for the editing agent to finish",
+        "kind": "wait",
+        "status": "done",
+        "depends_on": [
+          "fix-watcher-tests"
+        ]
+      },
+      {
+        "id": "verify-tests",
+        "title": "Re-run the watcher tests to verify the fix",
+        "kind": "verify",
+        "status": "running",
+        "depends_on": [
+          "await-agent"
+        ],
+        "tool_name": "terminal.run"
+      },
+      {
+        "id": "report-outcome",
+        "title": "Report the fix and test results to the user",
+        "kind": "report",
+        "status": "pending",
+        "depends_on": [
+          "verify-tests"
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "source": "orient-repo",
+        "target": "fix-watcher-tests"
+      },
+      {
+        "source": "fix-watcher-tests",
+        "target": "await-agent"
+      },
+      {
+        "source": "await-agent",
+        "target": "verify-tests"
+      },
+      {
+        "source": "verify-tests",
+        "target": "report-outcome"
+      }
+    ],
+    "resources": [
+      {
+        "id": "term-verify-1",
+        "kind": "terminal",
+        "status": "running",
+        "node_id": "verify-tests",
+        "label": "pytest verify run"
+      }
+    ],
+    "blockers": [
+      {
+        "id": "blk-flaky-network",
+        "summary": "PyPI timed out during the dependency install",
+        "node_id": "fix-watcher-tests",
+        "kind": "environment"
+      }
+    ]
+  },
+  "recent_events": [
+    {
+      "type": "node_status",
+      "node_id": "await-agent",
+      "summary": "Editing agent finished; edits landed in tests/unit",
+      "at": "2026-07-11T09:12:41Z"
+    },
+    {
+      "type": "tool_result",
+      "node_id": "verify-tests",
+      "tool_name": "terminal.run",
+      "summary": "pytest exited 1: 2 watcher tests still failing",
+      "at": "2026-07-11T09:14:03Z"
+    }
+  ],
+  "runtime_summary": {
+    "cwd": "/work/repo",
+    "open_terminals": 1,
+    "platform": "darwin"
+  },
+  "queue_events": [
+    {
+      "id": "queue-1",
+      "kind": "wake",
+      "summary": "terminal term-verify-1 produced new output"
+    }
+  ],
+  "latest_user_message": "The verify run finished - what happened?",
+  "reason": "tool_result",
+  "tool_inventory": [
+    {
+      "name": "context.snapshot",
+      "risk": "read"
+    },
+    {
+      "name": "terminal.run",
+      "risk": "terminal"
+    },
+    {
+      "name": "terminal.read",
+      "risk": "read"
+    },
+    {
+      "name": "terminal.await.async",
+      "risk": "local"
+    },
+    {
+      "name": "agentTask.spawnForEdits",
+      "risk": "project"
+    }
+  ]
+}

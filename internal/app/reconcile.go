@@ -65,6 +65,9 @@ func ReconcileLedger(ctx context.Context, store ledgerReconcileStore, client led
 // the attempt ran to completion. App uses it to commit its once-only state only after a
 // real attempt; the public count-only wrapper remains stable for existing callers/tests.
 func reconcileLedger(ctx context.Context, store ledgerReconcileStore, client ledgerReconcileMCP, dbg debuglog.Config) (int, bool) {
+	// Boot reconcile is Refresh-class MCP traffic: worth doing promptly, but it
+	// must queue behind in-turn tool calls (and it degrades to a skip anyway).
+	ctx = mcp.WithPriority(ctx, mcp.PriorityRefresh)
 	live, ok := readLiveTerminalIDs(ctx, client)
 	if !ok {
 		// A failed/error read must NOT be read as "every terminal gone" — skip, leaving

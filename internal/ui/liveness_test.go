@@ -68,6 +68,7 @@ func TestLiveStatusLabel_FromPhase(t *testing.T) {
 		want  string
 	}{
 		{domain.PhaseAnalyzing, "Analyzing request"},
+		{domain.PhaseThinking, "Model working"}, // reasoning underway — a liveness cue, never the text
 		{domain.PhaseIntegrating, "Integrating results"},
 		{domain.PhaseAwaitingApproval, "Waiting for approval"},
 		{domain.PhaseCancelling, "Cancelling"},
@@ -87,6 +88,7 @@ func TestRunStageLabel_NeverThinking_GenericProcessing(t *testing.T) {
 	want := map[domain.RunPhase]string{
 		domain.PhaseReceived:         "Received",
 		domain.PhaseAnalyzing:        "Analyzing request…",
+		domain.PhaseThinking:         "Model working…",
 		domain.PhaseIntegrating:      "Integrating results…",
 		domain.PhaseAwaitingApproval: "Waiting for approval…",
 		domain.PhaseToolRunning:      "Inspecting project…",

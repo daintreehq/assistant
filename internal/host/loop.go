@@ -5,10 +5,17 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
+
+// defaultTurnJoinTimeout bounds teardown's wait for cancelled prompt/wake turns to
+// unwind before app.Shutdown closes the resources they use. Generous enough for a
+// cooperative Send to observe its cancelled context; short enough that a wedged
+// turn can't hang shutdown.
+const defaultTurnJoinTimeout = 5 * time.Second
 
 // handleCommand dispatches one validated command. It must NOT
 // block the command loop on a running Send — prompt/wake run on worker goroutines
@@ -31,9 +38,9 @@ func (h *Host) handleCommand(cmd HostCommand) {
 	case CmdHibernate:
 		// Cancel any in-flight turn + reject pending approvals BEFORE teardown — a
 		// command-driven hibernate must unpark a blocked dispatch exactly like the
-		// parent-exit path (teardown also drains approvals, but the turn's context is
-		// only cancelled here). The resume handle IS the sessionId (conversation
-		// persists keyed by it).
+		// parent-exit path (teardown re-does both, idempotently, and additionally
+		// cancels + joins a live WAKE turn). The resume handle IS the sessionId
+		// (conversation persists keyed by it).
 		h.cancelTurn()
 		h.teardown(ShutdownHibernate, h.sessionID)
 	case CmdShutdown:
@@ -55,13 +62,21 @@ func (h *Host) handlePrompt(text string) {
 	// aren't comparable, so we tag each turn).
 	ctx, cancel := context.WithCancel(h.runCtx)
 	h.turnMu.Lock()
+	if h.closing {
+		// Teardown already latched: no new turn may start (the turnWG join below
+		// would otherwise race a fresh Add).
+		h.turnMu.Unlock()
+		cancel()
+		h.report("not-ready", "Host is shutting down.")
+		return
+	}
 	if h.busy {
 		h.turnMu.Unlock()
 		cancel()
 		// Fold it into the in-flight turn instead of rejecting. Daintree's parent already
 		// holds the text it sent, so there's no echo — just a status so it knows the prompt
 		// joined the running turn rather than starting a new one.
-		h.app.Session().InjectPrompt(text)
+		h.session.InjectPrompt(text)
 		h.report("prompt-folded",
 			"A turn is already running; this message was folded into it and will be picked up between tasks.")
 		return
@@ -70,11 +85,15 @@ func (h *Host) handlePrompt(text string) {
 	h.turnGen++
 	gen := h.turnGen
 	h.turnCancel = cancel
+	// Registered under the SAME lock hold that checked `closing`, so teardown's
+	// bounded join always covers this worker.
+	h.turnWG.Add(1)
 	h.turnMu.Unlock()
 
 	h.bridge.StartExchange()
 
 	go func() {
+		defer h.turnWG.Done()
 		defer func() {
 			// A panic in a turn worker is fatal-for-turn, not fatal-for-host.
 			if r := recover(); r != nil {
@@ -82,7 +101,7 @@ func (h *Host) handlePrompt(text string) {
 			}
 			h.finishPromptTurn(gen)
 		}()
-		if _, err := h.app.Session().Send(ctx, text, agent.SendOptions{}); err != nil {
+		if _, err := h.session.Send(ctx, text, agent.SendOptions{}); err != nil {
 			h.report("turn-failed", fmt.Sprintf("send failed: %v", err))
 		}
 		// The one-time session-ended-watchers note is owned by the Session now (it surfaces
@@ -112,6 +131,12 @@ func (h *Host) finishPromptTurn(gen uint64) {
 // handleInterrupt is the three coordinated actions. Order
 // matters: abort the turn signal, reject pending approvals (an awaited confirm
 // can't be unparked by the signal alone), then the display-side bridge interrupt.
+//
+// DELIBERATE: interrupt aborts only COMMAND turns (turnCancel), never a wake turn.
+// A wake has already claimed its attention burst (the queue marked those events
+// notified), so a user abort would strand them undelivered; prompts sent during a
+// wake fold into it via InjectPrompt instead. Shutdown/hibernate/parent-exit DO
+// cancel wakes — see teardown/cancelWake.
 func (h *Host) handleInterrupt() {
 	h.cancelTurn()
 	h.bridge.SettlePendingApprovals(DecisionRejected)
@@ -129,13 +154,31 @@ func (h *Host) cancelTurn() {
 	}
 }
 
+// cancelWake aborts the in-flight WAKE turn's context (if any). Called only on
+// the shutdown paths (teardown) — user interrupt deliberately leaves wakes alone
+// (see handleInterrupt). Safe to call with no active wake.
+func (h *Host) cancelWake() {
+	h.turnMu.Lock()
+	cancel := h.wakeCancel
+	h.turnMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // reactWake runs an autonomous wake turn — full capability, like a user turn, so the
 // reactor can act (relay between agents, resolve inbox items), not just report. Gated
-// by busy/ready; drains pendingWake; chains itself if more remain. Wake turns do NOT
-// register turnCancel (unabortable by design).
+// by busy/ready/closing; drains pendingWake; chains itself if more remain.
+//
+// Cancellation semantics: a wake registers its own child cancel context
+// (wakeCancel), which the SHUTDOWN paths (teardown — shutdown/hibernate/parent-exit)
+// cancel and then join before app.Shutdown, so resources are never closed under a
+// live Send. User interrupt deliberately does NOT abort a wake (the burst is
+// already claimed — see handleInterrupt); prompts arriving mid-wake fold in via
+// InjectPrompt.
 func (h *Host) reactWake() {
 	h.turnMu.Lock()
-	if h.busy || !h.ready || h.bridge == nil || h.app == nil {
+	if h.busy || h.closing || !h.ready || h.bridge == nil || h.app == nil {
 		h.turnMu.Unlock()
 		return
 	}
@@ -146,12 +189,22 @@ func (h *Host) reactWake() {
 		return
 	}
 	h.busy = true
+	ctx, cancel := context.WithCancel(h.runCtx)
+	h.wakeCancel = cancel
+	// Add under the SAME lock hold that checked `closing` (the supervisor wakeWG
+	// pattern): teardown latches closing before Waiting, so this registration can
+	// never race the join.
+	h.turnWG.Add(1)
 	// Snapshot the cross-burst summarized set for the prompt builder.
 	already := make(map[string]struct{}, len(h.summarizedTerminals))
 	for id := range h.summarizedTerminals {
 		already[id] = struct{}{}
 	}
 	h.turnMu.Unlock()
+
+	// Deferred FIRST so it runs LAST: the whole unwind (settle, busy clear) is
+	// covered by teardown's join.
+	defer h.turnWG.Done()
 
 	h.bridge.StartExchange()
 
@@ -164,8 +217,17 @@ func (h *Host) reactWake() {
 		prompt := agent.BuildWakePrompt(events, already)
 		// IsWake: autonomous watcher-wake turn (not user-typed) → the footer anchors on the
 		// active workflow objective instead of echoing the verbose wake blob.
-		reply, err := h.app.Session().Send(h.runCtx, prompt, agent.SendOptions{IsWake: true})
+		reply, err := h.session.Send(ctx, prompt, agent.SendOptions{IsWake: true})
 		if err != nil {
+			if ctx.Err() != nil {
+				// Shutdown cancelled the wake mid-turn: requeue the burst (without
+				// consuming the retry budget) and stay quiet — interruption is not
+				// failure, and teardown is already unwinding the process.
+				h.turnMu.Lock()
+				h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
+				h.turnMu.Unlock()
+				return
+			}
 			h.report("wake-failed", fmt.Sprintf("wake send failed: %v", err))
 			h.turnMu.Lock()
 			if !h.wakeRetried {
@@ -197,19 +259,32 @@ func (h *Host) reactWake() {
 	h.bridge.SettleTurn(OutcomeAnswered)
 
 	h.turnMu.Lock()
+	h.wakeCancel = nil
 	h.busy = false
-	more := len(h.pendingWake) > 0
+	more := len(h.pendingWake) > 0 && !h.closing
 	h.turnMu.Unlock()
+	cancel() // release the child context's resources
 	if more {
 		go h.reactWake()
 	}
 }
 
 // teardown emits host:shutdown FIRST (so Daintree sees the reason even if the App
-// shutdown hangs), drains pending approvals, shuts the App, flushes, and exits.
-// Idempotent via teardownOnce.
+// shutdown hangs), drains pending approvals, cancels + joins in-flight turns
+// (bounded), shuts the App, flushes, and exits. Idempotent via teardownOnce.
 func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 	h.teardownOnce.Do(func() {
+		// Latch closing FIRST, under turnMu (the supervisor wakeWG pattern): after
+		// this no prompt/wake worker can register on turnWG, so the bounded join
+		// below can never race a fresh Add.
+		h.turnMu.Lock()
+		h.closing = true
+		h.turnMu.Unlock()
+		// Abort the in-flight command turn AND any live wake turn so their Sends
+		// unwind before app.Shutdown closes the resources they use. (Command paths
+		// already call cancelTurn before teardown; both are idempotent.)
+		h.cancelTurn()
+		h.cancelWake()
 		// Reject every outstanding approval so a parked dispatch unblocks (declined).
 		if h.bridge != nil {
 			h.bridge.SettlePendingApprovals(DecisionRejected)
@@ -217,13 +292,20 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		// host:shutdown BEFORE app.Shutdown() — reason reaches Daintree regardless.
 		// Written SYNCHRONOUSLY (bypassing the queue) so the final frame can't be
 		// lost in the writer-goroutine close race, then Close() stops the writer +
-		// unblocks the reader.
+		// unblocks the reader. (Events a dying turn posts after Close are dropped —
+		// host:shutdown stays the last frame on the wire.)
 		ev := EvShutdown{Reason: reason}
 		if resumeSessionID != "" {
 			ev.ResumeSessionID = resumeSessionID
 		}
 		h.tr.sendSync(h.sessionID, ev)
 		h.tr.Close()
+
+		// Bounded join: wait for the cancelled workers to actually unwind before
+		// app.Shutdown closes the store/MCP under them. Bounded so a Send that
+		// ignores cancellation cannot wedge shutdown (we then proceed and accept
+		// the abandonment — the process is exiting anyway).
+		h.joinTurns(h.turnJoinTimeout)
 
 		if h.app != nil {
 			func() {
@@ -234,6 +316,22 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		// Flush stdout, then exit (deferred so the final write lands first).
 		h.exit(0)
 	})
+}
+
+// joinTurns waits (bounded) for every live prompt/wake worker to unwind. The
+// WaitGroup is raced-free against new Adds because teardown latched `closing`
+// under turnMu before calling this (workers Add under the same mutex).
+func (h *Host) joinTurns(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		h.turnWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		h.tr.diag("host: teardown timed out waiting for an in-flight turn to unwind; proceeding")
+	}
 }
 
 // onPanic is the boot-phase / steady-state fatal funnel (TS errorGuard). Before

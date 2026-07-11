@@ -3,11 +3,125 @@ package backend
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
+
+// Stream-liveness and size bounds for the respond SSE stream.
+const (
+	// sseIdleTimeout is the rolling idle window for the respond stream: if NO bytes
+	// arrive on the response body for this long (between events, mid-event, anywhere),
+	// the attempt is aborted with a typed stream_idle_timeout error instead of hanging
+	// a turn forever on a half-dead connection. The window resets on EVERY read
+	// progress — including SSE comment lines, so it must comfortably exceed the
+	// backend's heartbeat cadence once it starts emitting ": hb" comments every ~10s:
+	// 90s tolerates several missed heartbeats before declaring the stream dead.
+	sseIdleTimeout = 90 * time.Second
+	// maxSSELineBytes bounds one SSE line. A single line carries at most one event's
+	// JSON payload fragment; 1 MiB is far beyond anything the backend legitimately
+	// emits, so exceeding it is a protocol error, not a big answer.
+	maxSSELineBytes = 1 << 20 // 1 MiB
+	// maxSSEEventBytes bounds one accumulated event payload (all its data lines).
+	// Exceeding it aborts the stream with a typed protocol error rather than letting
+	// a misbehaving peer grow the buffer without limit.
+	maxSSEEventBytes = 4 << 20 // 4 MiB
+)
+
+// errSSELineTooLong is the internal sentinel readBoundedLine returns when a single
+// line exceeds maxSSELineBytes; parseRespondStream converts it to a typed *Error.
+var errSSELineTooLong = errors.New("sse line exceeds size bound")
+
+// idleWatchdog aborts a stream attempt that makes no read progress within the
+// window. It is armed at construction; Reset re-arms it on progress; once it fires
+// (or after Stop) further resets are no-ops. The abort func runs on the timer
+// goroutine, so it must be safe to call concurrently with the reader (context
+// cancellation is).
+type idleWatchdog struct {
+	d     time.Duration
+	mu    sync.Mutex
+	timer *time.Timer
+	fired bool
+	done  bool
+}
+
+func newIdleWatchdog(d time.Duration, abort func()) *idleWatchdog {
+	w := &idleWatchdog{d: d}
+	w.timer = time.AfterFunc(d, func() {
+		w.mu.Lock()
+		if w.done {
+			w.mu.Unlock()
+			return
+		}
+		w.fired = true
+		w.mu.Unlock()
+		abort()
+	})
+	return w
+}
+
+// Reset re-arms the window after read progress. No-op once fired or stopped.
+func (w *idleWatchdog) Reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.done {
+		return
+	}
+	w.timer.Reset(w.d)
+}
+
+// Fired reports whether the idle window elapsed (i.e. the abort was triggered).
+func (w *idleWatchdog) Fired() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fired
+}
+
+// Stop disarms the watchdog (stream finished, success or failure).
+func (w *idleWatchdog) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.done = true
+	w.timer.Stop()
+}
+
+// idleResetReader resets the idle watchdog on every read that makes progress —
+// including bytes that are only SSE comments/heartbeats, which never reach the
+// event dispatcher but still prove the connection is alive.
+type idleResetReader struct {
+	r     io.Reader
+	reset func()
+}
+
+func (a *idleResetReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.reset()
+	}
+	return n, err
+}
+
+// readBoundedLine reads one '\n'-terminated line like bufio.Reader.ReadString,
+// but fails with errSSELineTooLong once the line exceeds maxSSELineBytes instead
+// of buffering without limit.
+func readBoundedLine(r *bufio.Reader) (string, error) {
+	var b strings.Builder
+	for {
+		chunk, err := r.ReadSlice('\n')
+		b.Write(chunk)
+		if b.Len() > maxSSELineBytes {
+			return "", errSSELineTooLong
+		}
+		if err == bufio.ErrBufferFull {
+			continue // line spans buffer chunks; keep accumulating under the bound
+		}
+		return b.String(), err
+	}
+}
 
 // StreamCallbacks receives streamed events as they arrive. All are optional. The
 // final assembled message + usage are returned by the stream parser regardless;
@@ -56,21 +170,27 @@ type StreamCallbacks struct {
 //   - done terminates successfully; a terminal error event terminates with that
 //     error; EOF before done is an "interrupted" error — the parser NEVER
 //     fabricates a successful finish the backend did not send;
-//   - tool-call delta fragments are accumulated by index into whole tool calls.
+//   - tool-call delta fragments are accumulated by index into whole tool calls;
+//   - lines and event payloads are size-bounded (maxSSELineBytes / maxSSEEventBytes);
+//     exceeding either aborts with a typed protocol error rather than buffering
+//     without limit.
 //
-// There is no OpenAI choices envelope and no [DONE] sentinel.
+// There is no OpenAI choices envelope and no [DONE] sentinel. Idle-liveness is NOT
+// enforced here — respondStreamOnce wraps r in an idleResetReader tied to a watchdog
+// that cancels the request when the connection goes silent.
 func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) {
 	reader := bufio.NewReaderSize(r, 64*1024)
 
 	var (
-		result    RespondResult
-		eventName string
-		dataLines []string
-		content   strings.Builder
-		reasoning strings.Builder
-		acc       = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
-		metaSeen  bool
-		doneSeen  bool
+		result     RespondResult
+		eventName  string
+		dataLines  []string
+		eventBytes int // accumulated data-payload bytes of the event being buffered
+		content    strings.Builder
+		reasoning  strings.Builder
+		acc        = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
+		metaSeen   bool
+		doneSeen   bool
 	)
 
 	// dispatch decodes and applies one fully-buffered event, then clears the
@@ -80,6 +200,7 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		data := strings.Join(dataLines, "\n")
 		eventName = ""
 		dataLines = nil
+		eventBytes = 0
 		if name == "" && strings.TrimSpace(data) == "" {
 			return nil
 		}
@@ -155,7 +276,14 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 	}
 
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readBoundedLine(reader)
+		if errors.Is(err, errSSELineTooLong) {
+			return result, &Error{
+				Code:    "stream_line_too_large",
+				Message: fmt.Sprintf("SSE line exceeded %d bytes", maxSSELineBytes),
+				Stream:  true,
+			}
+		}
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
 			switch {
@@ -164,17 +292,28 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 					return result, derr
 				}
 				// `done` is terminal: stop reading immediately rather than blocking on
-				// ReadString for an EOF the server may never send promptly (keep-alive /
+				// the next read for an EOF the server may never send promptly (keep-alive /
 				// proxy buffering would otherwise hang the whole turn).
 				if doneSeen {
 					goto finish
 				}
 			case strings.HasPrefix(trimmed, ":"):
-				// SSE comment line; ignore.
+				// SSE comment line (e.g. the backend's ": hb" heartbeat): carries no
+				// event data and is ignored here. Its BYTES still reset the idle
+				// watchdog upstream (idleResetReader sees every read), which is the
+				// whole point of the heartbeat.
 			case strings.HasPrefix(trimmed, "event:"):
 				eventName = strings.TrimSpace(trimmed[len("event:"):])
 			case strings.HasPrefix(trimmed, "data:"):
 				d := strings.TrimPrefix(trimmed[len("data:"):], " ")
+				eventBytes += len(d)
+				if eventBytes > maxSSEEventBytes {
+					return result, &Error{
+						Code:    "stream_event_too_large",
+						Message: fmt.Sprintf("SSE event payload exceeded %d bytes", maxSSEEventBytes),
+						Stream:  true,
+					}
+				}
 				dataLines = append(dataLines, d)
 			}
 		}

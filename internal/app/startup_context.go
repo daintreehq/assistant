@@ -104,9 +104,13 @@ func (a *App) ensureStartupForTurn(ctx context.Context) {
 	a.ConnectMcp(ctx)
 }
 
-// refreshCurrentWorktree re-reads the live renderer selection for every backend round
-// and publishes successful results into the shared snapshot. A nil return is an
-// unavailable read; `{Present:false}` is Daintree reporting no resolvable current row.
+// refreshCurrentWorktree re-reads the live renderer selection and publishes successful
+// results into the shared snapshot. It is the Session's CurrentWorktreeFetcher: invoked
+// on the session's DETACHED worktree refresher (TTL-gated, never inline on a model
+// round) with the app-scoped background context — deadline-free by contract, since
+// callStartupRead self-bounds with a plain cancel timer (a ctx deadline would make
+// mcp.Client tear down the shared transport). A nil return is an unavailable read;
+// `{Present:false}` is Daintree reporting no resolvable current row.
 func (a *App) refreshCurrentWorktree(ctx context.Context) *prompts.WorktreeContext {
 	a.startupMu.RLock()
 	generation := a.startupGeneration

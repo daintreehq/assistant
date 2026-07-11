@@ -251,9 +251,17 @@ type SessionDeps struct {
 	// discovery before the first backend request. Optional; nil keeps tests/local callers
 	// independent of Daintree. It is expected to be bounded and best-effort.
 	EnsureStartupContext func(ctx context.Context)
-	// CurrentWorktreeFetcher returns Daintree's live current worktree. Session invokes it
-	// once per backend round under a short cancellation budget so a worktree switch is
-	// reflected without making an unhealthy MCP block model generation.
+	// CurrentWorktreeFetcher returns Daintree's live current worktree. Like
+	// OpenTerminalsFetcher, it is invoked on a DETACHED goroutine (refreshWorktreeAsync),
+	// never inline on a model round: each round serves the cross-turn cached snapshot and
+	// kicks a refresh only when the cache is older than worktreeSnapshotTTL, so a worktree
+	// switch is reflected within ~one TTL without an unhealthy MCP ever blocking model
+	// generation. It receives the app-scoped background context (bgCtx), which must NOT
+	// carry a deadline — mcp.Client tears the connection down on a DeadlineExceeded, so
+	// the fetcher self-bounds with its own cancel timer (app.callStartupRead). Best-effort:
+	// nil ⇒ no worktree context (the default in tests); a slow/failed read returns nil
+	// ("unknown"), which is cached as such rather than reviving a stale prior selection.
+	// The app wires this to App.refreshCurrentWorktree.
 	CurrentWorktreeFetcher func(ctx context.Context) *prompts.WorktreeContext
 	// PromptContext is the seed/fallback context (used when PromptContextFunc is nil — the
 	// test default). Stable fields build request.startup; live fields build the structured

@@ -10,9 +10,32 @@ import (
 	"time"
 )
 
+func interactiveCtx() context.Context {
+	return WithPriority(context.Background(), PriorityInteractive)
+}
+
+func backgroundCtx() context.Context {
+	return WithPriority(context.Background(), PriorityBackground)
+}
+
+// TestPriorityFromContextDefault proves untagged callers land on the Refresh
+// middle ground, and tagged ones round-trip.
+func TestPriorityFromContextDefault(t *testing.T) {
+	if got := priorityFromContext(context.Background()); got != PriorityRefresh {
+		t.Fatalf("untagged ctx class = %v; want PriorityRefresh", got)
+	}
+	if got := priorityFromContext(interactiveCtx()); got != PriorityInteractive {
+		t.Fatalf("tagged ctx class = %v; want PriorityInteractive", got)
+	}
+	if got := priorityFromContext(WithPriority(context.Background(), Priority(99))); got != PriorityRefresh {
+		t.Fatalf("out-of-range class = %v; want PriorityRefresh", got)
+	}
+}
+
 // TestGovernorConcurrencyCap proves at most maxConcurrent acquires are held at
 // once: 6 workers race through a cap-2 governor while tracking the high-water
-// mark of concurrently-held slots.
+// mark of concurrently-held slots. Interactive class so the full cap (reserved
+// slot included) is exercised.
 func TestGovernorConcurrencyCap(t *testing.T) {
 	g := newGovernor(2, 0)
 	var inFlight, maxSeen int64
@@ -21,7 +44,8 @@ func TestGovernorConcurrencyCap(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := g.acquire(context.Background()); err != nil {
+			rel, err := g.acquire(interactiveCtx())
+			if err != nil {
 				t.Errorf("acquire: %v", err)
 				return
 			}
@@ -34,12 +58,46 @@ func TestGovernorConcurrencyCap(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 			atomic.AddInt64(&inFlight, -1)
-			g.release()
+			rel()
 		}()
 	}
 	wg.Wait()
 	if got := atomic.LoadInt64(&maxSeen); got > 2 {
 		t.Fatalf("observed %d concurrent holders; cap is 2", got)
+	}
+}
+
+// TestGovernorSharedCapExcludesReserved proves non-Interactive traffic can
+// never occupy the reserved slot: 8 default-class (Refresh) workers through a
+// cap-4 governor top out at 3 concurrent holders.
+func TestGovernorSharedCapExcludesReserved(t *testing.T) {
+	g := newGovernor(4, 0)
+	var inFlight, maxSeen int64
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rel, err := g.acquire(context.Background())
+			if err != nil {
+				t.Errorf("acquire: %v", err)
+				return
+			}
+			n := atomic.AddInt64(&inFlight, 1)
+			for {
+				m := atomic.LoadInt64(&maxSeen)
+				if n <= m || atomic.CompareAndSwapInt64(&maxSeen, m, n) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			atomic.AddInt64(&inFlight, -1)
+			rel()
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt64(&maxSeen); got > 3 {
+		t.Fatalf("observed %d concurrent non-Interactive holders; shared cap is 3", got)
 	}
 }
 
@@ -55,12 +113,13 @@ func TestGovernorPacingSpacesStarts(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if err := g.acquire(context.Background()); err != nil {
+			rel, err := g.acquire(context.Background())
+			if err != nil {
 				t.Errorf("acquire: %v", err)
 				return
 			}
 			times[i] = time.Now()
-			g.release()
+			rel()
 		}(i)
 	}
 	wg.Wait()
@@ -74,44 +133,293 @@ func TestGovernorPacingSpacesStarts(t *testing.T) {
 	}
 }
 
+// TestGovernorInteractiveSkipsPacing proves Interactive acquires bypass the
+// min-interval pacer: with a primed pacer that would delay a Refresh start by
+// ~300ms, an Interactive acquire returns near-instantly.
+func TestGovernorInteractiveSkipsPacing(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	g := newGovernor(4, interval)
+	// Prime the pacer: the first (Refresh) acquire starts immediately but books
+	// the next paced start ~300ms out.
+	rel, err := g.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("prime acquire: %v", err)
+	}
+	rel()
+
+	start := time.Now()
+	reli, err := g.acquire(interactiveCtx())
+	if err != nil {
+		t.Fatalf("interactive acquire: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > interval/2 {
+		t.Fatalf("interactive acquire took %v; want well under the %v pacing interval", elapsed, interval)
+	}
+	reli()
+
+	// Contrast: a Refresh acquire right now still owes the pacer its tick — the
+	// Interactive call must not have consumed (or reset) it.
+	start = time.Now()
+	relr, err := g.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("refresh acquire: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < interval/3 {
+		t.Fatalf("refresh acquire returned in %v; want a paced wait of roughly %v", elapsed, interval)
+	}
+	relr()
+}
+
+// TestGovernorReservedSlotForInteractive proves the reserved slot: with the
+// shared capacity (3 of 4) fully held by Background, one more Background caller
+// queues, but an Interactive acquire succeeds promptly.
+func TestGovernorReservedSlotForInteractive(t *testing.T) {
+	g := newGovernor(4, 0)
+	rels := make([]func(), 0, 3)
+	for i := 0; i < 3; i++ {
+		rel, err := g.acquire(backgroundCtx())
+		if err != nil {
+			t.Fatalf("background acquire %d: %v", i, err)
+		}
+		rels = append(rels, rel)
+	}
+
+	// A 4th Background caller must queue: the remaining slot is Interactive-only.
+	bgGranted := make(chan func(), 1)
+	go func() {
+		rel, err := g.acquire(backgroundCtx())
+		if err != nil {
+			return
+		}
+		bgGranted <- rel
+	}()
+	waitFor(t, func() bool { return g.queuedCount(PriorityBackground) == 1 })
+	select {
+	case rel := <-bgGranted:
+		rel()
+		t.Fatal("4th Background acquire took the reserved slot")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Interactive walks straight into the reserved slot.
+	done := make(chan func(), 1)
+	go func() {
+		rel, err := g.acquire(interactiveCtx())
+		if err != nil {
+			t.Errorf("interactive acquire: %v", err)
+			return
+		}
+		done <- rel
+	}()
+	select {
+	case rel := <-done:
+		rel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("Interactive acquire did not get the reserved slot promptly")
+	}
+
+	for _, rel := range rels {
+		rel()
+	}
+	// Drain the queued Background waiter (granted once shared capacity freed).
+	select {
+	case rel := <-bgGranted:
+		rel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued Background waiter never granted after release")
+	}
+}
+
+// TestGovernorInteractiveQueueJumpsSharedQueue proves grant ordering on a shared
+// slot: with Background and Refresh already queued, a later-arriving Interactive
+// waiter is granted first (then Refresh, then Background).
+func TestGovernorInteractiveQueueJumpsSharedQueue(t *testing.T) {
+	g := newGovernor(1, 0) // cap 1 ⇒ no reserved slot; ordering alone decides.
+	hold, err := g.acquire(backgroundCtx())
+	if err != nil {
+		t.Fatalf("holder acquire: %v", err)
+	}
+
+	order := make(chan string, 3)
+	spawn := func(name string, ctx context.Context, class Priority, queued int) {
+		go func() {
+			rel, err := g.acquire(ctx)
+			if err != nil {
+				t.Errorf("%s acquire: %v", name, err)
+				return
+			}
+			order <- name
+			rel()
+		}()
+		waitFor(t, func() bool { return g.queuedCount(class) == queued })
+	}
+	spawn("background", backgroundCtx(), PriorityBackground, 1)
+	spawn("refresh", context.Background(), PriorityRefresh, 1)
+	spawn("interactive", interactiveCtx(), PriorityInteractive, 1)
+
+	hold() // release the held slot: the cascade should run interactive → refresh → background
+	want := []string{"interactive", "refresh", "background"}
+	for i, w := range want {
+		select {
+		case got := <-order:
+			if got != w {
+				t.Fatalf("grant %d = %q; want %q", i, got, w)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("grant %d (%q) never arrived", i, w)
+		}
+	}
+}
+
+// TestGovernorBackgroundAntiStarvation proves the aging rule: a Background
+// waiter queued past governorStarvationAge takes the next shared grant even
+// though an Interactive waiter is also queued.
+func TestGovernorBackgroundAntiStarvation(t *testing.T) {
+	oldAge := governorStarvationAge
+	governorStarvationAge = 30 * time.Millisecond
+	defer func() { governorStarvationAge = oldAge }()
+
+	g := newGovernor(2, 0) // capTotal 2, capShared 1
+	relA, err := g.acquire(interactiveCtx())
+	if err != nil {
+		t.Fatalf("interactive holder A: %v", err)
+	}
+	relB, err := g.acquire(interactiveCtx())
+	if err != nil {
+		t.Fatalf("interactive holder B: %v", err)
+	}
+
+	order := make(chan string, 2)
+	go func() {
+		rel, err := g.acquire(backgroundCtx())
+		if err != nil {
+			t.Errorf("background acquire: %v", err)
+			return
+		}
+		order <- "background"
+		rel()
+	}()
+	waitFor(t, func() bool { return g.queuedCount(PriorityBackground) == 1 })
+
+	go func() {
+		rel, err := g.acquire(interactiveCtx())
+		if err != nil {
+			t.Errorf("interactive waiter: %v", err)
+			return
+		}
+		order <- "interactive"
+		rel()
+	}()
+	waitFor(t, func() bool { return g.queuedCount(PriorityInteractive) == 1 })
+
+	// Age the Background waiter past the starvation threshold, then free one
+	// slot. The aged Background waiter must beat the queued Interactive one.
+	time.Sleep(3 * governorStarvationAge)
+	relA()
+
+	want := []string{"background", "interactive"}
+	for i, w := range want {
+		select {
+		case got := <-order:
+			if got != w {
+				t.Fatalf("grant %d = %q; want %q (anti-starvation)", i, got, w)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("grant %d (%q) never arrived", i, w)
+		}
+	}
+	relB()
+}
+
 // TestGovernorAcquireAbortsWhileQueuedForSlot proves a caller cancelled while
 // waiting for a slot returns ctx.Err() and does not leak capacity.
 func TestGovernorAcquireAbortsWhileQueuedForSlot(t *testing.T) {
 	g := newGovernor(1, 0)
-	if err := g.acquire(context.Background()); err != nil {
+	rel, err := g.acquire(context.Background())
+	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := g.acquire(ctx); !errors.Is(err, context.Canceled) {
+	if _, err := g.acquire(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("queued acquire err = %v; want context.Canceled", err)
 	}
-	g.release()
+	rel()
 	// The slot released above must be immediately acquirable — the aborted
 	// waiter took nothing.
-	if err := g.acquire(context.Background()); err != nil {
+	rel2, err := g.acquire(context.Background())
+	if err != nil {
 		t.Fatalf("post-abort acquire: %v", err)
 	}
-	g.release()
+	rel2()
+}
+
+// TestGovernorAbortWhileQueuedBehindHolder proves a waiter that entered the
+// queue (slot busy) and is then cancelled unblocks with ctx.Err(), leaves the
+// queue, and the eventually-freed slot goes to the next real waiter.
+func TestGovernorAbortWhileQueuedBehindHolder(t *testing.T) {
+	g := newGovernor(1, 0)
+	hold, err := g.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("holder acquire: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := g.acquire(ctx)
+		errCh <- err
+	}()
+	waitFor(t, func() bool { return g.queuedCount(PriorityRefresh) == 1 })
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued acquire err = %v; want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled waiter never unblocked")
+	}
+	if got := g.queuedCount(PriorityRefresh); got != 0 {
+		t.Fatalf("cancelled waiter still queued (%d)", got)
+	}
+	hold()
+	rel, err := g.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("post-abort acquire: %v", err)
+	}
+	rel()
 }
 
 // TestGovernorAbortDuringPacingReleasesSlot proves a caller cancelled during the
-// pacing sleep gives its slot back (the semaphore drains to empty).
+// pacing sleep gives its slot back (held count drains to zero).
 func TestGovernorAbortDuringPacingReleasesSlot(t *testing.T) {
 	g := newGovernor(1, time.Second)
 	// Prime the pacer so the next acquire must sleep ~1s.
-	if err := g.acquire(context.Background()); err != nil {
+	rel, err := g.acquire(context.Background())
+	if err != nil {
 		t.Fatalf("prime acquire: %v", err)
 	}
-	g.release()
+	rel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if err := g.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := g.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("pacing-sleep acquire err = %v; want context.DeadlineExceeded", err)
 	}
-	if len(g.slots) != 0 {
-		t.Fatalf("slot leaked: %d held after aborted acquire", len(g.slots))
+	if got := g.heldCount(); got != 0 {
+		t.Fatalf("slot leaked: %d held after aborted acquire", got)
+	}
+}
+
+// waitFor polls cond until true or fails the test after 2s.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition never became true")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -139,8 +447,8 @@ func (b *blockingLow) CallTool(ctx context.Context, name string, args map[string
 }
 
 // TestCallToolGovernedConcurrency proves Client.CallTool enforces the in-flight
-// cap across concurrent callers: 8 parallel calls against a cap-2 governor never
-// exceed 2 simultaneous low-level calls.
+// cap across concurrent callers: 8 parallel Interactive calls against a cap-2
+// governor never exceed 2 simultaneous low-level calls.
 func TestCallToolGovernedConcurrency(t *testing.T) {
 	low := &blockingLow{gate: make(chan struct{})}
 	c := newInjected(low)
@@ -152,7 +460,7 @@ func TestCallToolGovernedConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{})
+			_, _ = c.CallTool(interactiveCtx(), "terminal.getStatus", nil, CallOptions{})
 		}()
 	}
 	// Let callers queue up, then check the cap held, then drain everyone.

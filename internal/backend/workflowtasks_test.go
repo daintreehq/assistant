@@ -82,7 +82,7 @@ func TestWorkflowTaskWireShapes(t *testing.T) {
 	}
 
 	_, _ = RunWorkflowReconcile(context.Background(), runner, WorkflowReconcileInput{
-		Workflow: map[string]any{"id": "wfg_1"}, Reason: "wake",
+		Workflow: &WorkflowSnapshot{ID: "wfg_1"}, Reason: "wake",
 	})
 	if got.Task != TaskWorkflowReconcile || got.Input["reason"] != "wake" {
 		t.Fatalf("reconcile wire mismatch: %s %v", got.Task, got.Input)

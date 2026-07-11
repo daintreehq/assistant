@@ -264,6 +264,11 @@ func (t *toolRunner) ResolveWireName(wireName string) string {
 // blocked-denial) must gate mutations instead of a confirm prompt nobody can
 // answer.
 func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn agent.TurnContext) domain.ToolResult {
+	// In-turn tool dispatch is the user-facing path: every MCP call made under
+	// this ctx — including the awaitAll/extract poll loops inside handlers —
+	// rides the Interactive traffic class, so background polls can never occupy
+	// all governor capacity while the turn's calls queue.
+	ctx = mcp.WithPriority(ctx, mcp.PriorityInteractive)
 	actor, actorID := t.app.turnActor()
 	tctx := t.app.buildContext(actor, actorID)
 	tctx.RunID = turn.RunID

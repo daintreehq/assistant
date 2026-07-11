@@ -245,11 +245,15 @@ type Resource struct {
 	UpdatedAt int64          `json:"updatedAt,omitempty"`
 }
 
-// Blocker is one open obstacle. ResolvedAt nil = still blocking.
+// Blocker is one open obstacle. ResolvedAt nil = still blocking. Kind is the
+// backend's blocker taxonomy (task/environment/approval/…; "" reads as
+// "other") — carried so a backend-added blocker round-trips into the next
+// reconcile snapshot intact.
 type Blocker struct {
 	ID         string `json:"id"`
 	NodeID     string `json:"nodeId,omitempty"`
 	Reason     string `json:"reason"`
+	Kind       string `json:"kind,omitempty"`
 	CreatedAt  int64  `json:"createdAt,omitempty"`
 	ResolvedAt *int64 `json:"resolvedAt,omitempty"`
 }

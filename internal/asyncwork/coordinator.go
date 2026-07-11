@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
 // Defaults. The poll tick is deliberately 1s (not the scheduler's 3s): an async
@@ -265,6 +266,10 @@ func (c *Coordinator) Start(parent context.Context) {
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
+	// Coordinator polls are maintenance traffic: every MCP call made under the
+	// loop ctx (ticks and nudged polls) is Background class, so the 1s status
+	// poll queues behind user-facing calls instead of crowding them out.
+	ctx = mcp.WithPriority(ctx, mcp.PriorityBackground)
 	c.cancel = cancel
 	c.stopped = false
 	c.started = true

@@ -340,8 +340,7 @@ func TestServicePlanOfflineFailsGracefully(t *testing.T) {
 
 const reconcilePatchJSON = `{
   "patch": {
-    "node_updates": [{"id": "n_orient", "status": "done"}],
-    "add_evidence": [{"node_id": "n_orient", "kind": "manual_note", "summary": "repo state confirmed"}],
+    "node_updates": [{"node_id": "n_orient", "status": "done"}],
     "rationale": "orientation finished"
   },
   "next_action": {"label": "Verify the tests", "tool_name": "terminal.await.async"},
@@ -387,7 +386,7 @@ func TestServiceReconcileAppliesValidatedPatch(t *testing.T) {
 func TestServiceReconcileRejectsCorruptPatch(t *testing.T) {
 	store := newMemGraphStore()
 	// done → running on a done node = illegal transition.
-	bad := `{"patch": {"node_updates": [{"id": "n_orient", "status": "banana"}]}}`
+	bad := `{"patch": {"node_updates": [{"node_id": "n_orient", "status": "banana"}]}}`
 	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowReconcile: bad}}
 	svc := newTestService(t, store, tasks)
 	g := twoNodeGraph()
@@ -550,8 +549,9 @@ func TestServiceWorkflowDigestsOmitsTerminalGraphs(t *testing.T) {
 
 func TestServiceResumeDigest(t *testing.T) {
 	store := newMemGraphStore()
-	out := `{"ranked": [{"workflow_id": "wfg_test0001", "goal": "fix the watcher tests", "status": "active",
-	  "summary": "agent finished; verify next", "next_action": "run the tests"}],
+	out := `{"ranked": [{"workflow_id": "wfg_test0001", "rank": 1, "headline": "fix the watcher tests",
+	  "status": "active", "summary": "agent finished; verify next", "blockers": [],
+	  "recommended_action": {"label": "run the tests", "tool_name": "terminal.run"}}],
 	  "suggested_focus_workflow_id": "wfg_test0001"}`
 	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowResumeDigest: out}}
 	svc := newTestService(t, store, tasks)

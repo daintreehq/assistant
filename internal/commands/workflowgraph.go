@@ -172,15 +172,19 @@ func workflowResumeText(ctx context.Context, svc *workflowgraph.Service, userMes
 		if item.WorkflowID == out.SuggestedFocusWorkflowID {
 			focus = "  ← suggested focus"
 		}
-		fmt.Fprintf(&b, "%d. %s [%s] %s%s\n", i+1, item.WorkflowID, item.Status, graphLine(item.Goal, 48), focus)
+		fmt.Fprintf(&b, "%d. %s [%s] %s%s\n", i+1, item.WorkflowID, item.Status, graphLine(item.Headline, 48), focus)
 		if item.Summary != "" {
 			fmt.Fprintf(&b, "   %s\n", graphLine(item.Summary, 72))
 		}
-		if item.NextAction != "" {
-			fmt.Fprintf(&b, "   next: %s\n", graphLine(item.NextAction, 68))
+		if item.RecommendedAction != nil {
+			next := item.RecommendedAction.Label
+			if item.RecommendedAction.ToolName != "" {
+				next += " (" + item.RecommendedAction.ToolName + ")"
+			}
+			fmt.Fprintf(&b, "   next: %s\n", graphLine(next, 68))
 		}
-		if item.BlockedReason != "" {
-			fmt.Fprintf(&b, "   blocked: %s\n", graphLine(item.BlockedReason, 64))
+		for _, blocker := range item.Blockers {
+			fmt.Fprintf(&b, "   blocked: %s\n", graphLine(blocker, 64))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")

@@ -14,6 +14,12 @@ func liveStatusLabel(p domain.RunPhase) string {
 	switch p {
 	case domain.PhaseAnalyzing:
 		return "Analyzing request"
+	case domain.PhaseThinking:
+		// Chain-of-thought is streaming (a liveness signal only — the reasoning text
+		// itself is NEVER surfaced). Deliberately not the word "Thinking": the cockpit
+		// vocabulary reserves that word as forbidden (it historically meant a phase
+		// INFERRED from emptiness — see TestRunStageLabel_NeverThinking).
+		return "Model working"
 	case domain.PhaseGenerating:
 		// Prose streams LIVE in the footer token by token, then settles into scrollback line by
 		// line (paragraph by paragraph for a markdown tail — render_turn.go). The spinner carries
@@ -44,6 +50,10 @@ func runStageLabel(p domain.RunPhase) string {
 		return "Received"
 	case domain.PhaseAnalyzing:
 		return "Analyzing request…"
+	case domain.PhaseThinking:
+		// Match the LiveRunStatus label above so the composer cue and the live status
+		// agree (the same pairing PhaseGenerating uses for "Writing").
+		return "Model working…"
 	case domain.PhaseIntegrating:
 		return "Integrating results…"
 	case domain.PhaseAwaitingApproval:

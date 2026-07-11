@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -30,10 +31,16 @@ type Backend interface {
 type Client struct {
 	baseURL string
 	apiKey  string
-	http    *http.Client
-	info    ClientInfo
-	retry   RetryPolicy
-	onRetry func(RetryInfo)
+	// http serves the streamed respond POST; jsonHTTP serves everything routed
+	// through doJSON. They differ only in ResponseHeaderTimeout (see NewClient).
+	http     *http.Client
+	jsonHTTP *http.Client
+	info     ClientInfo
+	retry    RetryPolicy
+	onRetry  func(RetryInfo)
+	// streamIdleTimeout overrides sseIdleTimeout for the respond stream's idle
+	// watchdog. Zero selects the default; tests shrink it to exercise the abort.
+	streamIdleTimeout time.Duration
 }
 
 // ClientConfig configures a Client. APIKey is OPTIONAL — local development runs
@@ -46,12 +53,47 @@ type ClientConfig struct {
 	HTTPClient *http.Client
 	ClientInfo ClientInfo
 	// Retry tunes transient-failure retries for the streamed respond turn. The zero
-	// value selects DefaultRetryPolicy (initial attempt + 5 exponential-backoff
-	// retries). Set Retry.MaxAttempts to 1 to disable retries.
+	// value selects DefaultRetryPolicy (initial attempt + 1 backoff retry — the
+	// backend owns provider retries; this covers only the CLI↔backend hop). Set
+	// Retry.MaxAttempts to 1 to disable retries.
 	Retry RetryPolicy
 	// OnRetry, if set, is invoked just before each backoff sleep when a transient
 	// respond failure will be retried (observability only — it must not block).
 	OnRetry func(RetryInfo)
+}
+
+// Connection-establishment timeouts shared by both default transports. These bound
+// the phases that can hang silently on a dead network path; they do NOT bound how
+// long an accepted request may take to answer or stream.
+const (
+	transportDialTimeout         = 5 * time.Second
+	transportTLSHandshakeTimeout = 5 * time.Second
+	// streamResponseHeaderTimeout bounds how long the respond POST may wait for the
+	// response headers. The backend commits the SSE response as soon as skill
+	// selection completes (~1.5–2.5s), well before the upstream model produces
+	// anything, so 10s is generous headroom without letting a wedged backend pin a
+	// turn. doJSON's client deliberately has NO header timeout — a utility task runs
+	// its whole model call before responding, which routinely exceeds 10s.
+	streamResponseHeaderTimeout = 10 * time.Second
+)
+
+// newTransport builds the structured default transport: bounded dial + TLS
+// handshake, keep-alives on (connection reuse matters — every turn round-trips),
+// and an optional response-header bound (0 = none).
+func newTransport(responseHeaderTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   transportDialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   transportTLSHandshakeTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 // NewClient builds a Client. An empty BaseURL falls back to DefaultBaseURL.
@@ -60,23 +102,36 @@ func NewClient(cfg ClientConfig) *Client {
 	if base == "" {
 		base = DefaultBaseURL
 	}
+	// A caller-supplied client is used for BOTH paths (tests inject one fake
+	// transport). Otherwise build two clients over structured transports:
+	//
+	//   - stream client: NO client-wide Timeout — a streamed turn can legitimately
+	//     run for minutes, so liveness is enforced by the connection-phase timeouts
+	//     above plus the rolling SSE idle watchdog (see respondStreamOnce), never by
+	//     a whole-request deadline. Cancellation is via context.
+	//   - JSON client: also NO client-wide Timeout, because doJSON guarantees every
+	//     call a context deadline (60s default when the caller sets none) — a
+	//     per-call ctx deadline composes with caller-chosen budgets, where a global
+	//     Timeout would silently cap them. No ResponseHeaderTimeout either: utility
+	//     tasks answer only after their full server-side model call.
 	hc := cfg.HTTPClient
+	jc := cfg.HTTPClient
 	if hc == nil {
-		// No client-wide timeout: the respond stream can legitimately run for
-		// minutes. Per-call deadlines are imposed with context where appropriate.
-		hc = &http.Client{}
+		hc = &http.Client{Transport: newTransport(streamResponseHeaderTimeout)}
+		jc = &http.Client{Transport: newTransport(0)}
 	}
 	retry := cfg.Retry
 	if retry.MaxAttempts == 0 {
 		retry = DefaultRetryPolicy()
 	}
 	return &Client{
-		baseURL: base,
-		apiKey:  strings.TrimSpace(cfg.APIKey),
-		http:    hc,
-		info:    cfg.ClientInfo,
-		retry:   retry,
-		onRetry: cfg.OnRetry,
+		baseURL:  base,
+		apiKey:   strings.TrimSpace(cfg.APIKey),
+		http:     hc,
+		jsonHTTP: jc,
+		info:     cfg.ClientInfo,
+		retry:    retry,
+		onRetry:  cfg.OnRetry,
 	}
 }
 
@@ -267,8 +322,17 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 // respondStreamOnce performs a single respond attempt: build the request from the
 // already-marshaled body, POST it, and parse the SSE stream. Each attempt builds a
 // fresh *http.Request because the body reader is consumed.
+//
+// The parse is guarded by a rolling idle watchdog: any read progress on the response
+// body (data, comments/heartbeats, anything) resets it; a stream that stays open but
+// goes silent past the window is aborted by cancelling THIS attempt's request context
+// and surfaced as a typed stream_idle_timeout error — distinct from a caller
+// cancellation, which leaves the parent ctx.Err() non-nil.
 func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCallbacks) (RespondResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/daintree/respond", bytes.NewReader(body))
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	defer cancelAttempt()
+
+	httpReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+"/v1/daintree/respond", bytes.NewReader(body))
 	if err != nil {
 		return RespondResult{}, fmt.Errorf("backend: build respond request: %w", err)
 	}
@@ -283,7 +347,23 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	if resp.StatusCode != http.StatusOK {
 		return RespondResult{}, c.readErrorResponse(resp)
 	}
-	return parseRespondStream(resp.Body, cb)
+
+	idle := c.streamIdleTimeout
+	if idle <= 0 {
+		idle = sseIdleTimeout
+	}
+	watchdog := newIdleWatchdog(idle, cancelAttempt)
+	defer watchdog.Stop()
+
+	result, perr := parseRespondStream(&idleResetReader{r: resp.Body, reset: watchdog.Reset}, cb)
+	if perr != nil && watchdog.Fired() && ctx.Err() == nil {
+		return result, &Error{
+			Code:    "stream_idle_timeout",
+			Message: fmt.Sprintf("stream idle: no bytes from the backend for %s", idle),
+			Stream:  true,
+		}
+	}
+	return result, perr
 }
 
 // Respond runs a non-streaming generation round (used for tests / simple callers).
@@ -397,7 +477,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	}
 	c.setHeaders(req, "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.jsonHTTP.Do(req)
 	if err != nil {
 		return &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
 	}

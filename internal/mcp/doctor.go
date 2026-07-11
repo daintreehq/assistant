@@ -27,6 +27,9 @@ const doctorProbeTool = "actions.getContext"
 //
 // Both calls get the 5s doctorProbeTimeout via a derived context.
 func (c *Client) Doctor(ctx context.Context) DoctorProbeResult {
+	// Diagnostics are Refresh-class traffic: they must queue behind in-turn tool
+	// calls, but a doctor run should not be parked behind maintenance polls.
+	ctx = WithPriority(ctx, PriorityRefresh)
 	if !c.IsConnected() {
 		return DoctorProbeResult{Reachable: false, Detail: "Daintree MCP is not connected"}
 	}
@@ -76,6 +79,8 @@ func (c *Client) FetchProjectName(ctx context.Context) string {
 	if !c.IsConnected() {
 		return ""
 	}
+	// Discovery read: Refresh class (see Doctor).
+	ctx = WithPriority(ctx, PriorityRefresh)
 	callCtx, cancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	defer cancel()
 	res, err := c.CallTool(callCtx, doctorProbeTool, map[string]any{}, CallOptions{Timeout: doctorProbeTimeout})

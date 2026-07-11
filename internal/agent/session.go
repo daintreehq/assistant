@@ -15,6 +15,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/waitbudget"
 )
 
 // coreToolNames are the essential tools asserted to be registered at boot
@@ -206,6 +207,34 @@ type Session struct {
 	// rosterRefreshing dedupes concurrent refreshers so a slow fetch spanning two turns
 	// cannot stack a second one behind it. Guarded by rosterMu.
 	rosterRefreshing bool
+
+	// worktreeMu guards the cached current-worktree snapshot below — the same
+	// dedicated-mutex reasoning as rosterMu (the detached refresher must never block
+	// on a turn holding s.mu, and vice versa; critical sections are pointer swaps).
+	worktreeMu sync.Mutex
+
+	// worktreeSnap is the most recent completed CurrentWorktreeFetcher result, served
+	// to every round's runtime block WITHOUT an inline MCP read (the roster pattern).
+	// nil is a faithful cache of a FAILED read ("unknown", exactly what the old
+	// synchronous path injected when its 1s budget expired) — never a stale prior
+	// selection masquerading as current. Guarded by worktreeMu.
+	worktreeSnap *prompts.WorktreeContext
+
+	// worktreeFetchedAt is when the last refresh COMPLETED (zero ⇒ never fetched).
+	// Consulted-at-send-time staleness beyond worktreeSnapshotTTL triggers a detached
+	// refresh; the round itself always proceeds on the cached value. Guarded by
+	// worktreeMu.
+	worktreeFetchedAt time.Time
+
+	// worktreeRefreshing dedupes concurrent worktree refreshers (single-flight),
+	// mirroring rosterRefreshing. Guarded by worktreeMu.
+	worktreeRefreshing bool
+
+	// worktreeRefreshDone is closed when the in-flight refresh lands (nil when none
+	// is in flight). It exists ONLY for the first-ever fetch: a cold cache waits up
+	// to worktreeFirstFetchGrace on it so the very first round usually still carries
+	// a worktree, without ever blocking on a slow MCP. Guarded by worktreeMu.
+	worktreeRefreshDone chan struct{}
 }
 
 // toolProjCache holds the last OpenAITools projection plus the key that produced
@@ -512,6 +541,16 @@ func (s *Session) recallMemories(userInput string) []domain.MemoryRecord {
 
 // runTurn is the core loop (ordering is load-bearing).
 func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) (reply string) {
+	// The per-turn cumulative foreground-wait budget (reset per USER TURN, not per
+	// model round) rides the turn context into every tool dispatch (values only —
+	// cancellation semantics are untouched). Blocking waits inside tools — today
+	// terminal.awaitAll's poll sleeps — draw down this one shared allowance; when it
+	// is gone a wait returns immediately with budgetExhausted so the model hands the
+	// remaining supervision to the async path (watchers/queue) instead of chaining
+	// foreground waits across rounds indefinitely. Mid-turn injections deliberately
+	// do NOT reset it: an injected message extends the same foreground occupation.
+	ctx = waitbudget.With(ctx, waitbudget.New(waitbudget.TurnBudget))
+
 	s.events.Phase(domain.PhaseReceived)
 
 	// Bracket the whole turn in the debug trace: turn.start gives a log reader one
@@ -613,6 +652,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	//     harmless: the roster is a convenience, and the model can still tool-call
 	//     terminal.list to discover it.
 	s.refreshRosterAsync()
+
+	// 3e′. Current-worktree snapshot: same cached/detached pattern as the roster
+	//      (issue: the per-round synchronous worktree.getCurrent read sat on every
+	//      round's first-byte path). Warm it at turn start — TTL-gated, so a turn
+	//      arriving seconds after the last fetch kicks nothing — and each round below
+	//      reads the freshest cached snapshot (currentWorktreeContext).
+	s.maybeRefreshWorktreeAsync()
 
 	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
 	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
@@ -740,14 +786,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 		promptContext := s.promptContext()
 		if s.deps.CurrentWorktreeFetcher != nil {
-			// Assign nil too: a failed live read means "unknown this round", not "reuse
-			// the cached splash/reconnect selection as if it were still current".
-			worktree := s.currentWorktreeContext(ctx)
-			// The read itself can degrade the shared MCP transport. Re-snapshot afterward
-			// so this same runtime tail never claims MCP is connected after CallTool tore it
-			// down; then preserve the explicit success/none/failure result from this read.
-			promptContext = s.promptContext()
-			promptContext.Worktree = worktree
+			// Served from the cross-turn cache (assign nil too: a failed cached read
+			// means "unknown this round", not "reuse the splash/reconnect selection as
+			// if it were still current"). The fetch itself runs DETACHED — kicked here
+			// when the cache has passed its TTL — so, unlike the old inline read, it
+			// can neither block this round nor degrade the shared MCP transport
+			// mid-round (no post-read promptContext re-snapshot needed anymore).
+			promptContext.Worktree = s.currentWorktreeContext(ctx)
 		}
 		req := backend.RespondRequest{
 			Session: backend.RespondSession{
@@ -777,6 +822,20 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		roundStartMS := domain.NowMS()
 		var firstTokenMS int64
 
+		// thinkingShown latches the once-per-round Analyzing/Integrating → Thinking
+		// flip. All stream callbacks run synchronously on the reader goroutine, so
+		// plain bools (like gotToken) are race-free. The flip is suppressed once a
+		// visible token has arrived: Generating is the more specific state and must
+		// never regress to Thinking on a trailing reasoning fragment.
+		thinkingShown := false
+		markThinking := func() {
+			if thinkingShown || gotToken {
+				return
+			}
+			thinkingShown = true
+			s.events.Phase(domain.PhaseThinking)
+		}
+
 		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
 			OnRawMeta: func(m backend.StreamMeta) {
 				s.traceBackendRawMeta(runID, turnID, iter, m)
@@ -789,6 +848,25 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			OnMeta: func(m backend.StreamMeta) {
 				s.applyStreamMeta(m)
 				s.traceBackendMeta(runID, turnID, iter, m)
+			},
+			OnStatus: func(st backend.StreamStatus) {
+				// The backend emits status ONCE, phase "thinking", the instant
+				// chain-of-thought begins (backend/sse.go contract). Map only that
+				// value; any unknown/future phase keeps the current UI phase — a
+				// conservative posture so a new backend status can never blank or
+				// scramble the cockpit's liveness line.
+				if st.Phase == "thinking" {
+					markThinking()
+				}
+			},
+			OnReasoning: func(string) {
+				// Reasoning deltas are a pure LIVENESS signal: the first one flips
+				// the phase so the footer shows the model is working instead of
+				// sitting on "Analyzing request" through a long thinking stretch.
+				// The text itself is deliberately dropped — chain-of-thought is
+				// NEVER surfaced to the user (no AssistantToken, no event carries
+				// it); the parser still accumulates it for the final message.
+				markThinking()
 			},
 			OnContent: func(tok string) {
 				if !gotToken {
@@ -1638,18 +1716,144 @@ func (s *Session) promptContext() prompts.MainPromptContext {
 	return pc
 }
 
-const currentWorktreeReadBudget = time.Second
+const (
+	// worktreeSnapshotTTL is how old the cached current-worktree snapshot may be, at
+	// the moment a round consults it, before a detached refresh is kicked. A worktree
+	// switch therefore reaches the model within ~one TTL + one round — plenty for a
+	// human-scale action ("switch to the fix branch") — while a multi-round turn stops
+	// paying a per-round MCP read on its first-byte path.
+	worktreeSnapshotTTL = 15 * time.Second
 
+	// worktreeFirstFetchGrace is how long a COLD cache (never fetched) waits for the
+	// just-kicked first refresh before proceeding without worktree context. Chosen
+	// over proceeding immediately: the old synchronous path gave the read a 1s inline
+	// budget, so the first round of a session virtually always carried a worktree —
+	// proceeding at once would regress that to "first round never has one". 250ms
+	// keeps that hit rate for a healthy MCP (the read is a single local round-trip,
+	// typically tens of ms) while capping the worst case at a quarter of the old
+	// budget; a slow/hung MCP degrades to exactly what budget-expiry produced before:
+	// no worktree this round, self-healing on a later round via the cache.
+	worktreeFirstFetchGrace = 250 * time.Millisecond
+)
+
+// currentWorktreeContext returns the cached current-worktree snapshot for this round,
+// kicking a detached refresh when the cache is older than worktreeSnapshotTTL (the
+// open-terminal roster pattern — the round itself NEVER blocks on the MCP read). The
+// one exception is a cold cache (first-ever consult): it waits up to
+// worktreeFirstFetchGrace for the just-kicked refresh so the session's first round
+// usually still carries a worktree (see the constant's comment). ctx bounds only that
+// short grace wait, never the fetch itself (which is detached and self-bounded).
+//
+// NOTE deliberately not implemented: marking a >60s-old snapshot as stale in the
+// injected context. The snapshot travels the backend's strict typed wire contract
+// (backend.CurrentWorktreeSnapshot — internal/backend/contracts.go, mirrored by the
+// server's extensions.py schema with extra="forbid"), which has no staleness field and
+// no free-text slot to carry one; overloading the 64-rune Status enum would corrupt a
+// semantic field the backend renders. Adding a field means a coordinated wire change
+// in the backend package another agent owns. The TTL keeps ordinary staleness ≤ ~15s
+// + one fetch anyway, well under that 60s bar.
 func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeContext {
 	if s.deps.CurrentWorktreeFetcher == nil {
 		return nil
 	}
-	cctx, cancel := context.WithCancel(ctx)
-	timer := time.AfterFunc(currentWorktreeReadBudget, cancel)
-	worktree := s.deps.CurrentWorktreeFetcher(cctx)
-	timer.Stop()
-	cancel()
-	return worktree
+	s.maybeRefreshWorktreeAsync()
+
+	s.worktreeMu.Lock()
+	cold := s.worktreeFetchedAt.IsZero()
+	done := s.worktreeRefreshDone
+	s.worktreeMu.Unlock()
+
+	if cold && done != nil {
+		t := time.NewTimer(worktreeFirstFetchGrace)
+		select {
+		case <-done:
+		case <-t.C:
+		case <-ctx.Done():
+		}
+		t.Stop()
+	}
+
+	s.worktreeMu.Lock()
+	defer s.worktreeMu.Unlock()
+	// The snapshot is replaced whole by the refresher and treated as read-only by
+	// every consumer, so sharing the pointer is safe (no copy needed).
+	return s.worktreeSnap
+}
+
+// maybeRefreshWorktreeAsync kicks a detached current-worktree refresh when the cache
+// is stale (older than worktreeSnapshotTTL) or was never filled. TTL-gated at the
+// call site so the per-round consult and the turn/splash warm calls share one policy:
+// a turn starting seconds after the last fetch re-reads nothing.
+func (s *Session) maybeRefreshWorktreeAsync() {
+	if s.deps.CurrentWorktreeFetcher == nil {
+		return
+	}
+	s.worktreeMu.Lock()
+	stale := s.worktreeFetchedAt.IsZero() || time.Since(s.worktreeFetchedAt) > worktreeSnapshotTTL
+	s.worktreeMu.Unlock()
+	if stale {
+		s.refreshWorktreeAsync()
+	}
+}
+
+// refreshWorktreeAsync starts a detached, best-effort refresh of the cached
+// current-worktree snapshot unless one is already in flight — the exact
+// refreshRosterAsync shape: single-flight dedupe, wg.Add gated under s.mu with the
+// draining flag (so Shutdown's drain never races the Add), and parented off bgCtx
+// WITHOUT a deadline (the fetcher self-bounds via its own cancel timer; a ctx
+// deadline would make mcp.Client tear down the shared transport). The result —
+// nil for a failed read included — replaces the cache the moment it lands, so the
+// next round's runtime block picks it up without ever blocking a turn.
+func (s *Session) refreshWorktreeAsync() {
+	if s.deps.CurrentWorktreeFetcher == nil {
+		return
+	}
+	s.worktreeMu.Lock()
+	if s.worktreeRefreshing {
+		s.worktreeMu.Unlock()
+		return
+	}
+	s.worktreeRefreshing = true
+	done := make(chan struct{})
+	s.worktreeRefreshDone = done
+	s.worktreeMu.Unlock()
+
+	// Clear the in-flight state on EVERY exit path (draining bail-out included) so a
+	// refusal can never wedge the dedupe flag true, and close(done) so a cold-cache
+	// grace waiter is released rather than sleeping out its full grace.
+	abandon := func() {
+		s.worktreeMu.Lock()
+		s.worktreeRefreshing = false
+		s.worktreeRefreshDone = nil
+		s.worktreeMu.Unlock()
+		close(done)
+	}
+
+	s.mu.Lock()
+	if s.draining {
+		s.mu.Unlock()
+		abandon()
+		return
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.wg.Done()
+		fresh := s.deps.CurrentWorktreeFetcher(s.bgCtx)
+		// Replace unconditionally (nil included): a failed live read means "unknown
+		// this round", never "reuse the cached splash/reconnect selection as if it
+		// were still current" — the same posture the old synchronous path enforced.
+		// The failure is still cached under the TTL (a broken MCP is retried every
+		// ~15s, not hammered every round) and self-heals on a later refresh.
+		s.worktreeMu.Lock()
+		s.worktreeSnap = fresh
+		s.worktreeFetchedAt = time.Now()
+		s.worktreeRefreshing = false
+		s.worktreeRefreshDone = nil
+		s.worktreeMu.Unlock()
+		close(done)
+	}()
 }
 
 // buildRuntimeContext maps PromptContext onto the backend's structured runtime contract.
@@ -2252,9 +2456,12 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 // WarmOpenTerminals starts the same detached roster refresh normally kicked at turn
 // start. App.ConnectMcp calls it during the splash so the first user request can already
 // carry terminal metadata; the existing in-flight gate makes repeated connect/bootstrap
-// calls harmless.
+// calls harmless. It warms the current-worktree cache too — same motivation (a fast
+// first submit should find both cross-turn caches already filling), same single-flight
+// + TTL gates making repeated calls free.
 func (s *Session) WarmOpenTerminals() {
 	s.refreshRosterAsync()
+	s.maybeRefreshWorktreeAsync()
 }
 
 // refreshRosterAsync starts a detached, best-effort refresh of the cached open-terminal

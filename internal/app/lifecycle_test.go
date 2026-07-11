@@ -2,9 +2,13 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
 )
@@ -81,6 +85,57 @@ func TestCancelledSplashDoesNotSpendLedgerReconcileOnce(t *testing.T) {
 	a.reconcileLedgerMu.Unlock()
 	if done {
 		t.Fatal("canceled splash permanently spent the reconcile gate")
+	}
+}
+
+// The MCP connect diagnostics line must never contain token material — only the URL
+// host and a short non-reversible fingerprint. This is the guard against reintroducing
+// the old raw-credential debug dump.
+func TestMcpConnectDiagnosticsContainsNoTokenMaterial(t *testing.T) {
+	dir := t.TempDir()
+	const token = "dmt_live_supersecret_bearer_value_1234567890"
+	a := &App{Config: config.AppConfig{
+		McpURL:   "http://127.0.0.1:45454/mcp?session=" + token,
+		McpToken: token,
+		DebugLog: true,
+		LogDir:   dir,
+	}}
+	a.logMcpConnectDiagnostics(mcp.Status{Connected: true, Transport: "streamable-http"})
+
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("no debug log written (err=%v entries=%d)", err, len(entries))
+	}
+	var content strings.Builder
+	for _, e := range entries {
+		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			t.Fatalf("read %s: %v", e.Name(), rerr)
+		}
+		content.Write(b)
+	}
+	logged := content.String()
+	if logged == "" {
+		t.Fatal("debug log is empty — diagnostics line was not written")
+	}
+	if strings.Contains(logged, token) {
+		t.Fatalf("debug log contains the raw MCP token:\n%s", logged)
+	}
+	// No long token substring may leak either (e.g. via the URL query).
+	if strings.Contains(logged, token[:16]) {
+		t.Fatalf("debug log contains token material (prefix leak):\n%s", logged)
+	}
+	if !strings.Contains(logged, "127.0.0.1:45454") {
+		t.Fatalf("diagnostics line lost the URL host:\n%s", logged)
+	}
+	if !strings.Contains(logged, tokenFingerprint(token)) {
+		t.Fatalf("diagnostics line lost the token fingerprint:\n%s", logged)
+	}
+	if len(tokenFingerprint(token)) != 8 {
+		t.Fatalf("fingerprint length = %d, want 8 hex chars", len(tokenFingerprint(token)))
+	}
+	if tokenFingerprint("") != "" {
+		t.Fatalf("empty token fingerprint = %q, want empty", tokenFingerprint(""))
 	}
 }
 

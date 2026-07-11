@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
 // SchedulerDeps wires the scheduler to its dependencies.
@@ -31,7 +32,8 @@ type SchedulerDeps struct {
 }
 
 // Scheduler is the in-process daemon. One pass per tick: fire due timers, run due
-// watchers, then notify. No-overlap guarded; Drain waits for the in-flight tick.
+// watchers, delivering attention as each job settles (with an end-of-pass backstop
+// notify). No-overlap guarded; Drain waits for the in-flight tick.
 type Scheduler struct {
 	deps   SchedulerDeps
 	tickMs int64
@@ -39,11 +41,20 @@ type Scheduler struct {
 	mu          sync.Mutex
 	onAttention func(events []domain.QueueEvent)
 
-	// notifyMu serializes notify() between the tick path and NotifyNow (the async
-	// coordinator's post-publish push). Two concurrent notify passes could both
-	// digest the same fresh event before either marks it notified, delivering one
-	// completion twice — the lock makes delivery exactly-once.
+	// notifyMu serializes notify() between the per-job settles, the end-of-tick
+	// backstop, and NotifyNow (the async coordinator's post-publish push). Two
+	// concurrent notify passes could both digest the same fresh event before either
+	// marks it notified, delivering one completion twice — the lock makes delivery
+	// exactly-once.
 	notifyMu sync.Mutex
+
+	// notifyReqMu guards the requestNotify coalescing state. A burst of
+	// near-simultaneous requests (several jobs settling together, NotifyNow pushes)
+	// collapses into one active runner plus at most one pending re-run — see
+	// requestNotify.
+	notifyReqMu   sync.Mutex
+	notifyActive  bool
+	notifyPending bool
 
 	// running guards against overlapping ticks; current is the in-flight tick
 	// goroutine's done channel that Drain awaits. A skipped tick must NOT replace
@@ -92,6 +103,10 @@ func (s *Scheduler) Start(parent context.Context) {
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
+	// Watcher ticks are maintenance traffic: every MCP call made under the loop
+	// ctx (ticks, resource wakes, check dispatches) is Background class, so a
+	// tick fan-out queues behind user-facing calls instead of crowding them out.
+	ctx = mcp.WithPriority(ctx, mcp.PriorityBackground)
 	s.cancel = cancel
 	s.stopped = false
 	s.ticker = time.NewTicker(time.Duration(s.tickMs) * time.Millisecond)
@@ -254,16 +269,18 @@ func drainResourceUpdates(ch <-chan string) {
 }
 
 // runPass is the unguarded body of one tick: fire due timers, run due watchers,
-// then notify — each item isolated so one failure can't starve the others or skip
-// notify(). Due timers and due watchers run as BOUNDED, INDEPENDENT jobs (each on
-// its own goroutine with a per-item deadline) so a slow timer/watcher/MCP-read/
-// model-judge can't block later items or delay notification delivery. Job
-// EXECUTION is capped at tickJobConcurrency: an unbounded fan-out let ten due
-// watchers land ten simultaneous MCP read bursts on Daintree in the same instant
-// — the pool keeps the tick's aggregate pressure flat no matter how many items
-// come due together. notify() runs only after every job settles, so attention is
-// always delivered at the end of the tick. The whole pass stays no-overlap (the
-// guard is in Tick).
+// delivering attention AS EACH JOB SETTLES — each item isolated so one failure
+// can't starve the others or skip delivery. Due timers and due watchers run as
+// BOUNDED, INDEPENDENT jobs (each on its own goroutine with a per-item deadline)
+// so a slow timer/watcher/MCP-read/model-judge can't block later items or delay
+// notification delivery. Job EXECUTION is capped at tickJobConcurrency: an
+// unbounded fan-out let ten due watchers land ten simultaneous MCP read bursts on
+// Daintree in the same instant — the pool keeps the tick's aggregate pressure flat
+// no matter how many items come due together. Each job triggers requestNotify()
+// when it settles (so a fast timer's wake is never parked behind a wedged watcher
+// burning its 120s deadline), and one backstop notify() still runs after every job
+// settles so the pass can never end with undelivered attention. The whole pass
+// stays no-overlap (the guard is in Tick).
 func (s *Scheduler) runPass(ctx context.Context, now int64) {
 	timers, _ := s.deps.Store.DueTimers(now)
 	watchers, _ := s.deps.Store.DueWatchers(now)
@@ -286,9 +303,17 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 				return // shutdown while queued: skip, the row stays due for the next owner
 			}
 			defer func() { <-sem }()
-			jctx, cancel := context.WithTimeout(ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
-			defer cancel()
-			job(jctx)
+			func() {
+				jctx, cancel := context.WithTimeout(ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
+				defer cancel()
+				job(jctx)
+			}()
+			// Deliver anything THIS item published immediately — don't wait for the
+			// rest of the group (a wedged sibling would otherwise park a completed
+			// timer's wake for minutes). Coalesced, so a batch settling together
+			// costs at most two delivery passes. (A panicking job skips this; the
+			// end-of-pass backstop still delivers its published error event.)
+			s.requestNotify()
 		}()
 	}
 
@@ -330,12 +355,44 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 		})
 	}
 
-	// ALWAYS reach notification delivery: wait for every job to settle, then notify
-	// once. A single slow/hung job is bounded by its per-item deadline, so this can
-	// at worst wait a few deadline rounds under the pool — it never blocks
-	// indefinitely on one item.
+	// Backstop: after every job settles, one final delivery pass. Per-job
+	// requestNotify already delivered the common cases as they happened; this
+	// catches anything that slipped past it (a panicking job's published error, a
+	// publish racing the last in-flight Digest) so the pass can never end with
+	// undelivered attention. A single slow/hung job is bounded by its per-item
+	// deadline, so this can at worst wait a few deadline rounds under the pool — it
+	// never blocks indefinitely on one item.
 	wg.Wait()
 	s.notify()
+}
+
+// requestNotify triggers attention delivery, coalescing concurrent requests: if a
+// delivery pass is already running, the request just latches `pending` and returns
+// — the active runner re-runs notify() before retiring, so an event published
+// before ANY request is always covered by a Digest that starts after it, and a
+// burst of N near-simultaneous settles costs at most two passes instead of N.
+// Never blocks the caller behind another caller's full delivery (beyond notify's
+// own exactly-once serialization).
+func (s *Scheduler) requestNotify() {
+	s.notifyReqMu.Lock()
+	if s.notifyActive {
+		s.notifyPending = true
+		s.notifyReqMu.Unlock()
+		return
+	}
+	s.notifyActive = true
+	s.notifyReqMu.Unlock()
+	for {
+		s.notify()
+		s.notifyReqMu.Lock()
+		if !s.notifyPending {
+			s.notifyActive = false
+			s.notifyReqMu.Unlock()
+			return
+		}
+		s.notifyPending = false
+		s.notifyReqMu.Unlock()
+	}
 }
 
 // prefetchBudget bounds the tick-shared status prefetch. It is applied via a
@@ -411,9 +468,11 @@ func (s *Scheduler) prefetchWatcherStatuses(ctx context.Context, watchers []doma
 
 // NotifyNow delivers any fresh attention+ events immediately — the async
 // coordinator calls it right after publishing a completion so the wake fires
-// now instead of on the next tick. Safe concurrently with the tick's own
-// notify (notifyMu serializes delivery).
-func (s *Scheduler) NotifyNow() { s.notify() }
+// now instead of on the next tick. Routed through requestNotify: safe (and
+// coalesced) concurrently with the per-job settles and the tick's backstop, and
+// a push arriving mid-delivery is covered by the runner's pending re-run instead
+// of blocking the caller.
+func (s *Scheduler) NotifyNow() { s.requestNotify() }
 
 // notify delivers newly-unnotified attention+ events exactly once, marking them
 // notified REGARDLESS of delivery success (else the same events re-fire forever).

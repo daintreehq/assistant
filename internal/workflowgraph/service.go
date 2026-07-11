@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -346,11 +347,13 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 	}
 
 	var existing *Graph
+	var existingRevision int64
 	if req.ExistingWorkflowID != "" {
-		g, _, err := s.Get(req.ExistingWorkflowID)
+		g, rev, err := s.Get(req.ExistingWorkflowID)
 		if err != nil {
 			return PlanResult{}, err
 		}
+		existingRevision = rev
 		if g == nil {
 			return PlanResult{}, fmt.Errorf("no such workflow graph: %s", req.ExistingWorkflowID)
 		}
@@ -375,7 +378,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 		input.ToolInventory = s.deps.ToolInventory()
 	}
 	if existing != nil {
-		input.ExistingWorkflow = backend.AnyToMap(existing)
+		input.ExistingWorkflow = SnapshotFromGraph(existing, existingRevision)
 	}
 
 	out, err := backend.RunWorkflowPlan(ctx, s.deps.Tasks, input)
@@ -496,8 +499,11 @@ func (s *Service) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcil
 		return ReconcileResult{}, err
 	}
 
+	// The snapshot travels in the CANONICAL snake_case wire shape (see
+	// backend.WorkflowSnapshot) — never a JSON dump of the camelCase Graph,
+	// which the backend's safety checks would silently fail to read.
 	input := backend.WorkflowReconcileInput{
-		Workflow:          backend.AnyToMap(g),
+		Workflow:          SnapshotFromGraph(g, revision),
 		RecentEvents:      eventMaps(events),
 		LatestUserMessage: req.LatestUserMessage,
 		Reason:            req.Reason,
@@ -586,14 +592,15 @@ func (s *Service) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcil
 }
 
 // eventMaps projects event records to the bounded generic maps the reconcile
-// input carries.
+// input carries (canonical keys per the wire fixtures: type / node_id /
+// summary / at, timestamps as RFC 3339 UTC).
 func eventMaps(events []domain.WorkflowGraphEventRecord) []map[string]any {
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
 		m := map[string]any{
-			"kind":      e.Kind,
-			"summary":   e.Summary,
-			"createdAt": e.CreatedAt,
+			"type":    e.Kind,
+			"summary": e.Summary,
+			"at":      time.UnixMilli(e.CreatedAt).UTC().Format(time.RFC3339),
 		}
 		if e.NodeID != nil {
 			m["node_id"] = *e.NodeID

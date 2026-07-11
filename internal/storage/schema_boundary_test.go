@@ -390,3 +390,131 @@ func TestDueWatchersWindow(t *testing.T) {
 		t.Fatalf("want due+exactly, got %v", ids)
 	}
 }
+
+// TestBackupDBMovesStateAsideAndFreshOpenRebuilds is the stale-schema recovery
+// contract: BackupDB renames the DB and its WAL/SHM sidecars to a timestamped
+// backup (content intact — nothing is deleted), and a subsequent Open rebuilds a
+// fresh current-version schema at the original path.
+func TestBackupDBMovesStateAsideAndFreshOpenRebuilds(t *testing.T) {
+	path := stampStaleDB(t, filepath.Join(t.TempDir(), "state.db"))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stand-in WAL/SHM sidecars with distinct content to prove they travel too.
+	if err := os.WriteFile(path+"-wal", []byte("wal-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-shm", []byte("shm-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := BackupDB(path, 1)
+	if err != nil {
+		t.Fatalf("BackupDB: %v", err)
+	}
+	if !strings.Contains(backup, ".bak-v1-") {
+		t.Fatalf("backup path should carry the old version + timestamp, got %q", backup)
+	}
+	// Originals gone (a fresh Open must see an empty slot)…
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s should have been moved aside, stat err = %v", p, err)
+		}
+	}
+	// …and the backup holds the ORIGINAL bytes: state was preserved, not wiped.
+	got, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("backup main file missing: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatal("backup main file content differs from the original DB")
+	}
+	if got, _ := os.ReadFile(backup + "-wal"); string(got) != "wal-bytes" {
+		t.Fatalf("backup -wal content = %q, want original", got)
+	}
+	if got, _ := os.ReadFile(backup + "-shm"); string(got) != "shm-bytes" {
+		t.Fatalf("backup -shm content = %q, want original", got)
+	}
+
+	// A fresh Open at the original path rebuilds the current schema.
+	s := openFile(t, path, 1)
+	defer s.Close()
+	var version int
+	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaUserVersion {
+		t.Fatalf("after backup+reopen user_version want %d got %d", schemaUserVersion, version)
+	}
+}
+
+// TestBackupDBMissingFileIsNoop: nothing on disk → nothing to back up, no error.
+func TestBackupDBMissingFileIsNoop(t *testing.T) {
+	backup, err := BackupDB(filepath.Join(t.TempDir(), "absent.db"), 3)
+	if err != nil {
+		t.Fatalf("BackupDB on a missing file must be a no-op, got: %v", err)
+	}
+	if backup != "" {
+		t.Fatalf("no file was backed up, path should be empty, got %q", backup)
+	}
+}
+
+// TestBackupDBFailureLeavesFilesUntouched is the conservative-failure contract:
+// when the backup rename cannot be performed, BackupDB returns the error and the
+// original DB stays exactly where it was — the caller must never proceed to wipe.
+func TestBackupDBFailureLeavesFilesUntouched(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("directory permissions do not bind root")
+	}
+	dir := t.TempDir()
+	path := stampStaleDB(t, filepath.Join(dir, "state.db"))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A read-only directory makes the same-dir rename fail.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	backup, err := BackupDB(path, 1)
+	if err == nil {
+		t.Fatalf("BackupDB must fail when the rename fails, got backup %q", backup)
+	}
+	_ = os.Chmod(dir, 0o755)
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("original DB must survive a failed backup: %v", rerr)
+	}
+	if string(got) != string(original) {
+		t.Fatal("original DB content changed across a failed backup")
+	}
+}
+
+// TestBackupDBDistinctNamesWithinOneSecond: two resets in the same second must not
+// overwrite each other's backup.
+func TestBackupDBDistinctNamesWithinOneSecond(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+
+	stampStaleDB(t, path)
+	first, err := BackupDB(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampStaleDB(t, path)
+	second, err := BackupDB(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || second == "" || first == second {
+		t.Fatalf("backups must land at distinct paths, got %q and %q", first, second)
+	}
+	for _, p := range []string{first, second} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("backup %s missing: %v", p, err)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
@@ -45,17 +46,37 @@ type Host struct {
 	bridge *Bridge
 	app    App
 
+	// session is the turn engine the prompt/wake paths drive, narrowed to the
+	// turnSession seam. Set once in boot (h.app.Session()) before any worker runs;
+	// tests inject a cooperative fake to exercise the REAL loop wiring.
+	session turnSession
+
 	// turnMu guards every field touched by BOTH the command loop AND a worker
-	// goroutine (prompt/wake run Send off-loop and finish off-loop): busy,
-	// turnCancel, turnGen, pendingWake, wakeRetried, summarizedTerminals. The
-	// command loop must stay non-blocking, so it only ever takes this short lock.
+	// goroutine (prompt/wake run Send off-loop and finish off-loop): busy, closing,
+	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetried,
+	// summarizedTerminals, and the turnWG.Add gate. The command loop must stay
+	// non-blocking, so it only ever takes this short lock.
 	turnMu              sync.Mutex
 	busy                bool
+	closing             bool // latched by teardown; no new prompt/wake worker may start
 	turnCancel          context.CancelFunc
+	wakeCancel          context.CancelFunc // aborts the in-flight WAKE turn (shutdown paths only)
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
 	wakeRetried         bool
 	summarizedTerminals map[string]struct{}
+
+	// turnWG tracks live prompt/wake worker goroutines. Add happens under turnMu
+	// with `closing` checked (the supervisor wakeWG pattern), and teardown latches
+	// `closing` under the same mutex before its bounded Wait — that mutual
+	// exclusion is what makes the Add/Wait pair race-free, so app.Shutdown can
+	// never close the store/MCP under a Send that is still unwinding.
+	turnWG sync.WaitGroup
+
+	// turnJoinTimeout bounds teardown's wait for in-flight turns to unwind after
+	// their contexts are cancelled (a Send that ignores cancellation must not
+	// wedge shutdown). Tests shrink it.
+	turnJoinTimeout time.Duration
 
 	// errorGuard phase: before host:ready a panic reports "bootstrap-error" + exit
 	// 1; after ready the steady-state path reports "uncaught" + teardown error.
@@ -76,6 +97,7 @@ func NewHost(factory AppFactory, in io.Reader, out, errw io.Writer) *Host {
 		state:               stateAwaitDescriptor,
 		summarizedTerminals: map[string]struct{}{},
 		guardActive:         true,
+		turnJoinTimeout:     defaultTurnJoinTimeout,
 	}
 }
 
@@ -244,6 +266,7 @@ func (h *Host) boot(desc SessionDescriptor) {
 		return
 	}
 	h.app = app
+	h.session = app.Session()
 
 	// startDebugLog (no-op unless enabled). Best-effort; never fatal.
 	cfg := app.Config()

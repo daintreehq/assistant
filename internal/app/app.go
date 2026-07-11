@@ -73,11 +73,17 @@ type CreateOptions struct {
 	BuildTools ToolBuilder
 	// OnSchemaStale, when non-nil, is consulted if the on-disk SQLite database was
 	// initialized at an OLDER schema baseline than this build (a storage.SchemaStaleError).
-	// It returns true to authorise a DESTRUCTIVE reset (wipe the DB files + rebuild the
-	// schema) or false to abort with the stale-schema error. Interactive callers wire a
-	// y/N terminal prompt here; non-interactive callers leave it nil, preserving the loud,
-	// actionable failure — a script/host path must never silently destroy local state.
+	// It returns true to authorise a reset (move the DB files aside as a backup +
+	// rebuild the schema) or false to abort with the stale-schema error. Interactive
+	// callers wire a terminal notice/prompt here; non-interactive callers leave it nil,
+	// preserving the loud, actionable failure — a script/host path must never silently
+	// destroy local state.
 	OnSchemaStale func(have, want int) (bool, error)
+	// OnSchemaReset, when non-nil, is invoked after an authorised stale-schema reset
+	// has safely moved the old database aside, with the backup's main-file path (""
+	// when there was no file to back up). Informational only — interactive callers
+	// use it to tell the user where their previous state went.
+	OnSchemaReset func(backupPath string)
 	// DispatchActor overrides the actor identity the Session's tool dispatches run
 	// under. Zero ⇒ ActorMain (every interactive path). The supervisor daemon sets
 	// ActorWake so its unattended wake turns take dispatch's grant-or-blocked
@@ -271,9 +277,10 @@ func Create(opts CreateOptions) (*App, error) {
 		// A stale on-disk schema is the one open failure with a clean, supported
 		// recovery (pre-release policy resets rather than migrates). If the caller
 		// supplied an OnSchemaStale handler — an interactive terminal that can ask the
-		// human — consult it; on a "yes" wipe the DB files and re-Open onto a fresh
-		// schema. Without a handler (scripts / host / non-TTY) the actionable error
-		// propagates untouched, so we never silently destroy local state.
+		// human — consult it; on a "yes" move the DB files aside as a timestamped
+		// backup and re-Open onto a fresh schema. Without a handler (scripts / host /
+		// non-TTY) the actionable error propagates untouched, so we never silently
+		// destroy local state.
 		var stale *storage.SchemaStaleError
 		if !errors.As(err, &stale) || opts.OnSchemaStale == nil {
 			return nil, err
@@ -285,8 +292,17 @@ func Create(opts CreateOptions) (*App, error) {
 		if !reset {
 			return nil, err // declined → keep the actionable stale-schema error
 		}
-		if rerr := storage.ResetDB(cfg.DBPath); rerr != nil {
-			return nil, fmt.Errorf("reset database: %w", rerr)
+		// Even an authorised reset never DELETES state: the old database (plus
+		// WAL/SHM) is renamed to a timestamped backup beside it. If that backup
+		// move fails, refuse to reset — surface the actionable error rather than
+		// wiping the only copy of the user's timers/watchers/memories/history.
+		backupPath, berr := storage.BackupDB(cfg.DBPath, stale.Have)
+		if berr != nil {
+			return nil, fmt.Errorf(
+				"stale database left untouched (backing it up failed, refusing to delete): %w", berr)
+		}
+		if opts.OnSchemaReset != nil {
+			opts.OnSchemaReset(backupPath)
 		}
 		if store, err = storage.Open(cfg.DBPath, nil); err != nil {
 			return nil, err
