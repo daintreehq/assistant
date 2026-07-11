@@ -184,7 +184,15 @@ func reconcileViaTerminalList(ctx context.Context, mcp MCPClient, name, agentID,
 		return ""
 	}
 	var matches []reconcileTerminal
+	// parseTerminalList can yield the SAME terminal twice (once from the structured
+	// payload, once from the JSON text body) — without id-dedup a lone true match
+	// counts as two and is wrongly rejected as ambiguous.
+	seen := make(map[string]struct{})
 	for _, t := range parseTerminalList(res) {
+		if _, dup := seen[t.id]; dup {
+			continue
+		}
+		seen[t.id] = struct{}{}
 		if t.name != name {
 			continue
 		}

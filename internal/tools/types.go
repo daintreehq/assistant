@@ -168,6 +168,36 @@ type Tool struct {
 	// mutating tool can't be parallelized even if this is set by mistake.
 	Parallelizable bool
 
+	// ParallelHomogeneous opts a MUTATING tool into concurrent dispatch with
+	// consecutive SAME-NAME batch siblings — the spawn-fan-out case: the model emits
+	// N independent agentTask.spawnForEdits calls in one batch and serial dispatch
+	// costs N×5s where the launches don't depend on each other. This is a SEPARATE,
+	// narrower contract than Parallelizable (which means "read-only, groups with any
+	// other read"): a homogeneous-mutation cohort groups only calls of this exact
+	// tool, only when every member is ALREADY fully authorized (interactive main
+	// actor + auto-approve + tier allows — see the ParallelMutationSafe adapter;
+	// anything that would need a confirmation prompt or an automation grant stays
+	// serial, because the cockpit holds ONE pending approval and grant consumption
+	// order must stay deterministic), and only up to the mutation cohort cap.
+	// Ordering caveat mirrors Parallelizable: never set it on a tool a later batch
+	// sibling depends on.
+	ParallelHomogeneous bool
+
+	// ParallelConflictKey, when set on a ParallelHomogeneous tool, classifies a
+	// call's INDEPENDENCE within a candidate cohort from its raw args. Return
+	// (keys, true) where each key names one conflict dimension the call occupies
+	// (a shared target, a collision-prone identity, …) — two calls sharing ANY key
+	// conflict and never run concurrently (e.g. two edit-mode spawns into one
+	// worktree, or two spawns whose launch identities would collide). Return
+	// (nil, true) for a call that is freely independent, or (_, false) for a call
+	// that must not join any cohort at all (e.g. an edit-mode spawn into the
+	// implicit active worktree, whose target is unknown here). Keys must be
+	// computed from the NORMALIZED identity the handler will actually act on
+	// (defaults applied, values canonicalized) — raw-spelling keys let two
+	// spellings of one target slip into the same cohort. nil func ⇒ every call of
+	// the tool is treated as independent.
+	ParallelConflictKey func(args json.RawMessage) (keys []string, ok bool)
+
 	// projectionParams is the canonical compact JSON the projection emits as the
 	// tool's `parameters`, computed ONCE from Schema at Register (the cold path) so
 	// OpenAITools never re-unmarshals the schema on the hot projection path (rebuilt

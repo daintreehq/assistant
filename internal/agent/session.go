@@ -965,11 +965,15 @@ func (s *Session) firstQuestionIndex(calls []models.ToolCallRequest) int {
 }
 
 // runToolBatch dispatches a batch of tool calls after announcing the whole batch as
-// queued. Maximal consecutive runs of parallel-safe calls (no-wait snapshot reads
-// that opted in via Tool.Parallelizable — terminal.extract/.json) dispatch
-// CONCURRENTLY, collapsing N extraction round-trips into roughly the slowest one,
-// with each member's settled result streamed live as it completes; every other call
-// runs serially in place, preserving exact ordering and side-effect sequencing. Two
+// queued. Two kinds of consecutive runs dispatch CONCURRENTLY, with each member's
+// settled result streamed live as it completes: maximal runs of parallel-safe calls
+// (no-wait snapshot reads that opted in via Tool.Parallelizable —
+// terminal.extract/.json), and bounded homogeneous-mutation cohorts (consecutive
+// SAME-NAME pre-authorized mutating calls that opted in via Tool.ParallelHomogeneous
+// — the agentTask.spawnForEdits fan-out, collapsing N ~5s launches into roughly the
+// slowest wave; see mutationRunEnd for the authorization/independence bar). Every
+// other call runs serially in place, preserving exact ordering and side-effect
+// sequencing. Two
 // circuit breakers trip MID-batch (stopping + stubbing the remaining calls the
 // instant a runaway is detected, so one giant batch can't fully dispatch first): the
 // FINE breaker on identical args, and the COARSE breaker on a tool repeating the same
@@ -1010,14 +1014,21 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		}
 
 		// Gather a maximal run of consecutive parallel-safe calls (no-wait snapshot
-		// reads that opted in via Tool.Parallelizable) and dispatch a run of ≥2
+		// reads that opted in via Tool.Parallelizable) — or, failing that, a bounded
+		// homogeneous-mutation cohort (consecutive SAME-NAME pre-authorized mutating
+		// calls, e.g. a spawn fan-out; see mutationRunEnd) — and dispatch a run of ≥2
 		// CONCURRENTLY — each member's result streams live as it settles. Everything
 		// else runs on the serial path below, preserving today's exact ordering and
 		// side-effect sequencing. A batch carrying a multiple-choice question stays
 		// fully serial: every non-question sibling is skipped synthetically, so there
-		// is nothing to overlap.
+		// is nothing to overlap. The two groupings never mix in one group: reads
+		// require RiskRead, mutation cohorts require a same-name mutating tool.
 		if questionIdx < 0 {
-			if e := s.parallelRunEnd(calls, c, allowedSet); e-c >= 2 {
+			e := s.parallelRunEnd(calls, c, allowedSet)
+			if e-c < 2 {
+				e = s.mutationRunEnd(calls, c, allowedSet)
+			}
+			if e-c >= 2 {
 				s.runParallelGroup(ctx, calls, c, e, turn, failureCounts, coarseCounts, &worstFine, &worstCoarse)
 				c = e
 				// Apply the serial path's per-call mid-batch guards at the group
@@ -1314,19 +1325,14 @@ func (s *Session) parallelRunEnd(calls []models.ToolCallRequest, c int, allowedS
 	return e
 }
 
-// callParallelSafe reports whether one call may join a concurrent group: its
-// arguments parse to a real object (empty/degenerate args stay serial so the
+// callBatchable applies the call-level checks shared by BOTH concurrent groupings:
+// the arguments parse to a real object (empty/degenerate args stay serial so the
 // truncation/invalid-args paths keep today's exact ordering and never race a
-// sibling), it carries no `wait` barrier, it survives the (dormant) allow-list gate,
-// and the runner classifies the tool as parallel-safe (Tool.Parallelizable + read
-// risk — an explicit per-tool opt-in, NOT every read tool: barrier reads like
-// terminal.awaitAll are deliberately excluded). A `wait` condition turns even an
-// opted-in extract into a BARRIER — it polls until a terminal settles, and a later
-// call in the batch may depend on that settle — so a wait-bearing call runs
-// serially. Only the production registry adapter implements parallelSafeRunner; a
-// test fake that doesn't keeps the fully-serial path, so serial-ordering tests are
-// unaffected.
-func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[string]struct{}) bool {
+// sibling), the call carries no `wait` barrier (a `wait` condition turns even an
+// opted-in call into a BARRIER — it polls until a terminal settles, and a later
+// call in the batch may depend on that settle), and it survives the (dormant)
+// allow-list gate.
+func (s *Session) callBatchable(call models.ToolCallRequest, allowedSet map[string]struct{}) bool {
 	trimmed := strings.TrimSpace(call.Function.Arguments)
 	if trimmed == "" || trimmed == "{}" {
 		return false
@@ -1340,12 +1346,98 @@ func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[s
 	if len(probe.Wait) > 0 && strings.TrimSpace(string(probe.Wait)) != "null" {
 		return false
 	}
-	internalName := s.resolveInternal(call.Function.Name)
-	if allowedSet != nil && !setHas(allowedSet, internalName) {
+	if allowedSet != nil && !setHas(allowedSet, s.resolveInternal(call.Function.Name)) {
+		return false
+	}
+	return true
+}
+
+// callParallelSafe reports whether one call may join a concurrent READ group: it
+// passes the shared batchable checks (callBatchable) and the runner classifies the
+// tool as parallel-safe (Tool.Parallelizable + read risk — an explicit per-tool
+// opt-in, NOT every read tool: barrier reads like terminal.awaitAll are
+// deliberately excluded). Only the production registry adapter implements
+// parallelSafeRunner; a test fake that doesn't keeps the fully-serial path, so
+// serial-ordering tests are unaffected.
+func (s *Session) callParallelSafe(call models.ToolCallRequest, allowedSet map[string]struct{}) bool {
+	if !s.callBatchable(call, allowedSet) {
 		return false
 	}
 	runner, ok := s.deps.Tools.(parallelSafeRunner)
-	return ok && runner.ParallelSafe(internalName)
+	return ok && runner.ParallelSafe(s.resolveInternal(call.Function.Name))
+}
+
+// maxParallelMutationDispatch bounds a homogeneous-mutation cohort. Matched to the
+// MCP request governor's in-flight cap (4): unlike extraction (whose wall-clock is a
+// backend model call), a spawn IS an MCP mutation, so members beyond the governor's
+// cap would only queue at the wire while inflating the cohort the breakers can't see
+// into. The bound also serves as the breaker/cancel cadence: a longer run dispatches
+// as successive ≤4-call cohorts with the mid-batch guards re-applied between waves,
+// so a runaway 50-spawn batch is stoppable, never one giant unstoppable group.
+const maxParallelMutationDispatch = 4
+
+// mutationRunEnd returns the end (exclusive) of the bounded homogeneous-mutation
+// cohort starting at c — consecutive calls of the SAME internal tool name whose tool
+// opted in via Tool.ParallelHomogeneous AND is pre-authorized to run without any
+// confirmation/grant interaction (interactive main + auto-approve + tier allows —
+// the runner's ParallelMutationSafe; anything else keeps today's serial path). Two
+// independence guards end the cohort early at the offending call: a call whose
+// canonicalized args byte-match an earlier member (a generic backstop — the
+// per-tool keys below carry the real identity semantics), and a call sharing ANY
+// ParallelConflictKey dimension with an earlier member (a normalized shared target
+// or collision-prone identity — e.g. two edit-mode spawns into one worktree, or
+// two spawns whose launch names collide and could cross-bind on reconcile). The
+// offender never overlaps the member it conflicts with: it dispatches only after
+// this cohort fully settles (in the next cohort or serially — the caller re-enters
+// at e). The caller forms a concurrent group only when e-c ≥ 2; a lone qualifying
+// call (e == c+1) falls back to the serial path.
+func (s *Session) mutationRunEnd(calls []models.ToolCallRequest, c int, allowedSet map[string]struct{}) int {
+	runner, ok := s.deps.Tools.(parallelMutationRunner)
+	if !ok || c >= len(calls) {
+		return c
+	}
+	name := s.resolveInternal(calls[c].Function.Name)
+	if !runner.ParallelMutationSafe(name) {
+		return c
+	}
+	seenSigs := make(map[string]struct{}, maxParallelMutationDispatch)
+	seenKeys := make(map[string]struct{}, maxParallelMutationDispatch)
+	e := c
+	for e < len(calls) && e-c < maxParallelMutationDispatch {
+		call := calls[e]
+		if s.resolveInternal(call.Function.Name) != name || !s.callBatchable(call, allowedSet) {
+			break
+		}
+		keys, keyOK := runner.ParallelConflictKey(name, json.RawMessage(call.Function.Arguments))
+		if !keyOK {
+			break
+		}
+		sig := canonicalJSON(call.Function.Arguments)
+		if _, dup := seenSigs[sig]; dup {
+			break
+		}
+		clash := false
+		for _, k := range keys {
+			if k == "" {
+				continue
+			}
+			if _, hit := seenKeys[k]; hit {
+				clash = true
+				break
+			}
+		}
+		if clash {
+			break
+		}
+		for _, k := range keys {
+			if k != "" {
+				seenKeys[k] = struct{}{}
+			}
+		}
+		seenSigs[sig] = struct{}{}
+		e++
+	}
+	return e
 }
 
 // runParallelGroup dispatches calls[from:to) CONCURRENTLY (bounded by
