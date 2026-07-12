@@ -131,9 +131,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		m.spinnerFrame++
-		// Keep ticking only while a turn is in flight; idle, let it lapse (afterStateChange
-		// re-arms it the instant the next turn starts) so the cockpit can quiesce.
-		if !m.inFlight {
+		// Keep ticking only while a turn or a slash command is in flight; idle, let it
+		// lapse (afterStateChange re-arms it the instant the next one starts) so the
+		// cockpit can quiesce.
+		if !m.inFlight && m.commandsRunning == 0 {
 			m.spinnerRunning = false
 			return m, nil
 		}
@@ -281,6 +282,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applyPumpEvent fans one pump event into a model mutation. Returns any follow-up
 // cmd (none for most). It mutates the active TurnCell's ordered steps + phase.
 func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
+	// Command progress is COMMAND-scoped, not turn-scoped: handle it before the
+	// heartbeat touch below, so an unrelated slash command's stage update can never
+	// refresh the active turn's LastActivityAt and postpone its "still working" cue.
+	if ev.kind == pumpCommandProgress {
+		// Ignore a stale label after the command finished (goroutine race).
+		if m.commandsRunning > 0 {
+			m.commandStage = ev.msg
+		}
+		return nil
+	}
 	t := m.activeTurnCell()
 	if t != nil {
 		// Any streamed event is a heartbeat — reset the stall timer (see renderLiveStatus).
@@ -513,11 +524,12 @@ func (m Model) afterStateChange(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(extra, commit, flush, spin, repin)
 }
 
-// ensureSpinnerForState starts the ~10fps spinner tick when a turn is in flight and the
-// tick isn't already running. Returns nil (no extra wakeups) when idle or already ticking;
-// spinnerTickMsg stops it once the turn settles.
+// ensureSpinnerForState starts the ~10fps spinner tick when a turn OR a slash command
+// is in flight and the tick isn't already running (the command liveness line animates
+// off the same frame counter). Returns nil (no extra wakeups) when idle or already
+// ticking; spinnerTickMsg stops it once both settle.
 func (m *Model) ensureSpinnerForState() tea.Cmd {
-	if m.inFlight && !m.spinnerRunning {
+	if (m.inFlight || m.commandsRunning > 0) && !m.spinnerRunning {
 		m.spinnerRunning = true
 		return spinnerTickCmd()
 	}

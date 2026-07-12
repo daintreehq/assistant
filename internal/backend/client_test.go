@@ -428,6 +428,49 @@ func TestRunTask(t *testing.T) {
 	}
 }
 
+// TestRunTaskOnTaskHook pins the task-observability seam: every RunTask round trip
+// (success AND failure) invokes OnTask with the task name, outcome, and bounded
+// sizes — the hook the app routes to the debug log's backend.task event. Without it
+// utility tasks (a /compact's checkpoint + memory_distill included) are invisible
+// in session logs.
+func TestRunTaskOnTaskHook(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/daintree/tasks" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"checkpoint","model":"m","output":{"goal":"g"},"finish_reason":"stop","usage":{"total_tokens":5},"prompt_version":"checkpoint"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var got []TaskTraceInfo
+	c := NewClient(ClientConfig{BaseURL: srv.URL, OnTask: func(info TaskTraceInfo) { got = append(got, info) }})
+
+	if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "long transcript"}); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("OnTask calls = %d, want 1", len(got))
+	}
+	if got[0].Task != "checkpoint" || got[0].Err != nil {
+		t.Errorf("OnTask info = %+v, want task=checkpoint err=nil", got[0])
+	}
+	if got[0].InputBytes <= 0 || got[0].OutputBytes <= 0 {
+		t.Errorf("OnTask sizes = in %d out %d, want both > 0", got[0].InputBytes, got[0].OutputBytes)
+	}
+
+	// Failure path: a dead endpoint still reports the attempt, with Err set.
+	srv.Close()
+	got = nil
+	if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "t"}); err == nil {
+		t.Fatalf("RunCheckpoint after close: want error")
+	}
+	if len(got) != 1 || got[0].Err == nil {
+		t.Fatalf("OnTask on failure = %+v, want one call with Err set", got)
+	}
+}
+
 func TestCapabilitiesAndHealth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

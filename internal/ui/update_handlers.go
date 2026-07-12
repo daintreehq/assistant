@@ -244,8 +244,14 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 			return m.onCommandComplete(CommandCompleteMsg{Title: title, Text: body})
 		}
 		// Slash command: run off the loop (some hit the model). Keep single-flight
-		// independent — a command isn't a model turn.
-		return m, m.controller.runCommand(m.ctx, text)
+		// independent — a command isn't a model turn. Track it so the composer shows a
+		// busy cue while it runs (the model-backed /compact takes tens of seconds and
+		// used to leave the cockpit looking completely idle until its card appeared);
+		// the command reports finer stage labels through the pump as it progresses.
+		m.commandsRunning++
+		m.commandStage = "Running " + firstCommandWord(text) + "…"
+		m.commandStartedAt = domain.NowMS()
+		return m.afterStateChange(m.controller.runCommand(m.ctx, text))
 	}
 
 	if m.inFlight {
@@ -260,6 +266,17 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 	}
 
 	return m.startTurn(text)
+}
+
+// firstCommandWord returns the leading "/name" token of a slash line ("/compact",
+// from "/compact focus on x") for the footer's generic command busy cue. Split on
+// ANY whitespace (tab, newline included) so pasted arguments can never leak into
+// the single-row liveness label.
+func firstCommandWord(line string) string {
+	if fields := strings.Fields(line); len(fields) > 0 {
+		return fields[0]
+	}
+	return strings.TrimSpace(line)
 }
 
 // startTurn creates the active TurnCell and dispatches Session.Send single-flight.
@@ -453,6 +470,21 @@ func terminalTurnState(phase domain.RunPhase, reply string) TurnState {
 // --- slash command completion ---
 
 func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
+	// Retire the liveness cue ONLY for tracked completions (controller.runCommand),
+	// whose submit incremented the counter. The synchronous /approvals shortcut also
+	// lands here without ever incrementing — decrementing for it would retire a
+	// DIFFERENT still-running command's cue and let its spinner lapse mid-run.
+	if msg.Tracked && m.commandsRunning > 0 {
+		m.commandsRunning--
+	}
+	if m.commandsRunning == 0 {
+		m.commandStage = ""
+	}
+	// A rejected submission (bare "/") completes silently: the counter is retired
+	// above, but there is no result card to print.
+	if msg.Unhandled {
+		return m.afterStateChange(nil)
+	}
 	if msg.Quit {
 		return m.onShutdown()
 	}

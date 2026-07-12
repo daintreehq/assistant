@@ -136,10 +136,12 @@ func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
 		}
 		assertControlsUnchanged(t, before, s)
 		// Guard against a vacuous pass: confirm a compaction note actually replaced the
-		// working history (controls + exactly one summary note).
+		// working history (checkpoint note first, then the small verbatim tail the manual
+		// path now keeps — same layout as the auto path).
 		after := s.Messages()
-		if len(after) != domain.ControlMessageCount+1 {
-			t.Fatalf("manual compact = %d messages, want %d (controls + 1 note)", len(after), domain.ControlMessageCount+1)
+		if len(after) <= domain.ControlMessageCount ||
+			!strings.Contains(after[domain.ControlMessageCount].StringContent, "[checkpoint | depth") {
+			t.Fatalf("manual compact did not produce a checkpoint note: %+v", after)
 		}
 	})
 

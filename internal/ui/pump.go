@@ -90,6 +90,7 @@ const (
 	pumpAttention
 	pumpComplete         // turn / wake completion, delivered IN-STREAM (#1)
 	pumpModelRateLimited // provider 429 after the retry budget — raise the health badge
+	pumpCommandProgress  // a slash command's live stage label (msg carries the text)
 )
 
 // eventPump is the agent.EventSink implementation. It coalesces tokens and forwards
@@ -285,6 +286,14 @@ func (p *eventPump) Warn(msg string) {
 
 func (p *eventPump) Info(msg string) {
 	p.emit(pumpEvent{kind: pumpLog, level: NoteInfo, msg: msg})
+}
+
+// CommandProgress forwards a running slash command's stage label (e.g. /compact's
+// "Checkpointing conversation…") so the composer's busy cue can narrate the silent
+// model-backed stretches. Called from the command goroutine, ordered like any other
+// event; the reducer just updates the label (no transcript mutation).
+func (p *eventPump) CommandProgress(stage string) {
+	p.emit(pumpEvent{kind: pumpCommandProgress, msg: stage})
 }
 
 // Complete delivers a turn/wake completion THROUGH the ordered stream (#1) so it

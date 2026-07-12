@@ -79,6 +79,11 @@ it **produced**.
 |---|---|---|
 | `mcp.call` | every MCP tool call (once, on exit) | `mcpTool` `callKind` (read/mutation) `retries` `attempts` `durationMs` `transportOk`; `isError` + `text`/`structured` summary on success, `error` on failure (`transportOk` = no Go error; a tool-level failure still has `transportOk=true` + `isError=true`) |
 
+### Backend utility tasks
+| event | when | key fields |
+|---|---|---|
+| `backend.task` | every RunTask round trip, success or failure (checkpoint, memory_distill, watcher_classify, terminal_judge/summarize/extract, …) | `task` `durationMs` `inputBytes` `outputBytes` `ok`; `error` on failure. A `/compact` shows up as one `checkpoint` + one `memory_distill` line. |
+
 ### Async futures (asyncwork.Coordinator)
 | event | when | key fields |
 |---|---|---|

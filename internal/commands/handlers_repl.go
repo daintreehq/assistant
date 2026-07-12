@@ -42,8 +42,12 @@ func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.
 	default:
 		// Every other command reuses the UI handler's data accessors and prints
 		// the resulting card text. This keeps the two surfaces in sync (one source
-		// of behavior) while honoring the REPL "print to stdout" contract.
-		res := HandleUICommand(ctx, line, a)
+		// of behavior) while honoring the REPL "print to stdout" contract. Stage
+		// progress from the slow model-backed commands (/compact) prints as it
+		// happens so the REPL is never silent for the whole run.
+		res := HandleUICommandWithProgress(ctx, line, a, func(stage string) {
+			r.Line("· " + stage)
+		})
 		if !res.Handled {
 			return CommandResult{Handled: false}
 		}

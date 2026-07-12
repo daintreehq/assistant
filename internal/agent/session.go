@@ -475,17 +475,29 @@ func (s *Session) clearLocked() {
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
-// Compact replaces the working history with one "[checkpoint…]" user note,
-// persisting a system marker then the note. Returns ErrTurnInProgress when a turn
-// is in flight (the interactive /compact path) — the in-turn auto-compact uses
-// compactLocked instead.
+// Compact replaces the working history with one "[checkpoint…]" user note plus a
+// small verbatim tail of the most-recent messages, persisting a system marker then
+// the note. The tail mirrors the healthy auto-compact path (same keepValidTail
+// budget): the checkpoint rounds off the exact references a mid-task orchestrator
+// still needs — terminal/watcher/workflow IDs, the active branch, an open grant —
+// while the raw tail keeps them intact, so a manual /compact no longer loses MORE
+// than an automatic one. Returns ErrTurnInProgress when a turn is in flight (the
+// interactive /compact path) — the in-turn auto-compact uses compactLocked instead.
 func (s *Session) Compact(summary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inFlight {
 		return ErrTurnInProgress
 	}
+	// Snapshot BEFORE compactLocked reslices; keepValidTail copies + orphan-cleans, so
+	// the re-appended tail never aliases the reslice and is a valid history.
+	tail := keepValidTail(s.messages[domain.ControlMessageCount:],
+		domain.AutoCompactVerbatimTailMessages, domain.AutoCompactVerbatimTailTokenBudget)
 	s.compactLocked(summary)
+	for _, m := range tail {
+		s.messages = append(s.messages, m)
+		s.persistMessageLocked(m)
+	}
 	return nil
 }
 
@@ -2320,6 +2332,11 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 	_, _ = s.deps.Store.InsertMessage(rec)
 }
 
+// EstimateTokens exposes the working-history size estimate to surfaces that report
+// context size — e.g. /compact's "~412k → ~9k tokens" before/after line. Same chars/4
+// heuristic as the auto-compact gate; approximate by design.
+func (s *Session) EstimateTokens() int { return s.estimateTokens() }
+
 // estimateTokens approximates the conversation size (dependency-free):
 // sum of each message's flattened-text length + tool-call argument JSON length,
 // divided by CHARS_PER_TOKEN and ceil'd. Approximate by design.
@@ -2454,30 +2471,10 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	}
 	// Capture a flattened transcript of the about-to-be-discarded history (still under
 	// the lock). The backend's checkpoint task OWNS the prompt; the CLI sends only
-	// this transcript. Each tool call's name + argument JSON is folded into the text so
+	// this transcript. FlattenTranscript folds tool-call names + argument JSON in so
 	// load-bearing IDs that live ONLY in arguments — e.g. terminal.read
 	// {"terminalId":"term_x"} — survive into the checkpoint's ID-preservation pass.
-	transcript := ""
-	for _, m := range s.messages[domain.ControlMessageCount:] {
-		text := m.ContentToText()
-		for _, tc := range m.ToolCalls {
-			if text != "" {
-				text += "\n"
-			}
-			text += "[tool call " + tc.Function.Name + " " + tc.Function.Arguments + "]"
-		}
-		if m.Role == "tool" {
-			if text == "" {
-				text = "[tool result]"
-			} else {
-				text = "[tool result] " + text
-			}
-		}
-		if text == "" {
-			text = "[tool call]"
-		}
-		transcript += m.Role + ": " + text + "\n"
-	}
+	transcript := FlattenTranscript(s.messages[domain.ControlMessageCount:])
 	s.mu.Unlock()
 
 	// Run the backend's checkpoint task. On an ERROR (not a reply): a cancel is the
@@ -2485,7 +2482,7 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 	// counts toward the bounded-growth truncation fallback (issue #202). A successful
 	// result always compacts — even a sparse checkpoint, because validateCheckpoint still
 	// mines every load-bearing ID from the transcript into PreservedIDs.
-	cp, err := buildCheckpoint(ctx, s.deps.Backend, transcript)
+	cp, err := BuildCheckpoint(ctx, s.deps.Backend, transcript)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

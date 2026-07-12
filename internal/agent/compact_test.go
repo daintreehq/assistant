@@ -51,19 +51,18 @@ func TestCompactKeepsControlsPlusSummary(t *testing.T) {
 	s.Compact("goals: X. open: none. next: Y.")
 	msgs := s.Messages()
 	// No client-side control prefix anymore (ControlMessageCount == 0): a manual compact
-	// collapses the visible history to a single checkpoint note at index 0.
-	if len(msgs) != domain.ControlMessageCount+1 {
-		t.Fatalf("messages = %d want %d (controls + 1 summary)", len(msgs), domain.ControlMessageCount+1)
+	// leads with the checkpoint note at index 0, followed by a small verbatim tail
+	// (bounded by the auto path's keepN — see TestCompactManualKeepsVerbatimTail).
+	if len(msgs) < domain.ControlMessageCount+1 ||
+		len(msgs) > domain.ControlMessageCount+1+domain.AutoCompactVerbatimTailMessages {
+		t.Fatalf("messages = %d want between %d and %d (summary + bounded tail)",
+			len(msgs), domain.ControlMessageCount+1,
+			domain.ControlMessageCount+1+domain.AutoCompactVerbatimTailMessages)
 	}
 	note := msgs[domain.ControlMessageCount]
 	if note.Role != "user" || !strings.Contains(note.StringContent, "checkpoint") ||
 		!strings.Contains(note.StringContent, "goals: X") {
 		t.Fatalf("note = %+v want a checkpoint note", note)
-	}
-	for _, m := range msgs {
-		if strings.Contains(m.StringContent, "first") {
-			t.Fatal("old turns must be gone from context")
-		}
 	}
 }
 
@@ -149,8 +148,10 @@ func TestClearDropsPriorCompactionSummary(t *testing.T) {
 	s, _ := compactSession(t, plainRouter())
 	s.InjectNote("pre")
 	s.Compact("goals: X. open: none. next: Y.")
-	if len(s.Messages()) != domain.ControlMessageCount+1 {
-		t.Fatalf("compact should leave %d messages, got %d", domain.ControlMessageCount+1, len(s.Messages()))
+	// Manual compact leaves the note + a small verbatim tail; the subject here is only
+	// that a later Clear drops ALL of it.
+	if len(s.Messages()) <= domain.ControlMessageCount {
+		t.Fatalf("compact should leave a checkpoint note, got %d messages", len(s.Messages()))
 	}
 	s.Clear()
 	msgs := s.Messages()
@@ -1413,25 +1414,33 @@ func TestAutoCompactTailTokenBudgetCaps(t *testing.T) {
 	}
 }
 
-// TestCompactManualKeepsNoTail is the regression guard for the shared compactLocked: the
-// manual /compact path must still collapse to controls + summary only, NOT keep a verbatim
-// tail (which is healthy-auto-path-only behaviour).
-func TestCompactManualKeepsNoTail(t *testing.T) {
+// TestCompactManualKeepsVerbatimTail pins the manual /compact path to the SAME
+// summary + verbatim-tail layout as the healthy auto path: the checkpoint note comes
+// first, and the most-recent messages survive verbatim (the checkpoint rounds off the
+// exact IDs a mid-task orchestrator still needs; the raw tail keeps them intact). A
+// manual compaction must never be LOSSIER than an automatic one.
+func TestCompactManualKeepsVerbatimTail(t *testing.T) {
 	s, _ := compactSession(t, plainRouter())
-	// Recent small notes the AUTO path would keep as a verbatim tail.
+	// Recent small notes — exactly what the auto path would keep as a verbatim tail.
 	s.InjectNote("MANUAL_RECENT_A")
 	s.InjectNote("MANUAL_RECENT_B")
 	if err := s.Compact("manual summary"); err != nil {
 		t.Fatal(err)
 	}
 	msgs := s.Messages()
-	if len(msgs) != domain.ControlMessageCount+1 {
-		t.Fatalf("manual compact must produce controls + summary only, got %d", len(msgs))
+	if len(msgs) <= domain.ControlMessageCount+1 {
+		t.Fatalf("manual compact should keep summary + verbatim tail, got %d messages", len(msgs))
 	}
-	for _, m := range msgs {
-		if strings.Contains(m.StringContent, "MANUAL_RECENT_") {
-			t.Fatal("manual /compact must NOT keep a verbatim tail")
-		}
+	if !strings.Contains(msgs[domain.ControlMessageCount].StringContent, "manual summary") {
+		t.Fatalf("first working message should be the checkpoint note, got %q",
+			msgs[domain.ControlMessageCount].StringContent)
+	}
+	joined := ""
+	for _, m := range msgs[domain.ControlMessageCount+1:] {
+		joined += m.StringContent + "\n"
+	}
+	if !strings.Contains(joined, "MANUAL_RECENT_A") || !strings.Contains(joined, "MANUAL_RECENT_B") {
+		t.Fatalf("verbatim tail should keep the recent notes, got %q", joined)
 	}
 }
 

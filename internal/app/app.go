@@ -407,7 +407,7 @@ func Create(opts CreateOptions) (*App, error) {
 			baseURL = v
 		}
 		dbg := debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}
-		a.Backend = backend.NewClient(backend.ClientConfig{
+		clientCfg := backend.ClientConfig{
 			BaseURL: baseURL,
 			ClientInfo: backend.ClientInfo{
 				Name:     "daintree-cli",
@@ -423,7 +423,29 @@ func Create(opts CreateOptions) (*App, error) {
 					"error":   info.Err.Error(),
 				})
 			},
-		})
+		}
+		// Every utility-task round trip lands in the session log. Without this the
+		// tasks were the one backend surface the trace couldn't see — a /compact's
+		// checkpoint + memory_distill calls left literally zero log lines (observed
+		// 2026-07-12), so compaction archaeology was impossible. Wired ONLY when debug
+		// logging is on (same rule as the Session trace seam): the hook re-serializes
+		// the task input to measure it, and that must cost nothing in a normal run.
+		if cfg.DebugLog {
+			clientCfg.OnTask = func(info backend.TaskTraceInfo) {
+				fields := map[string]any{
+					"task":        info.Task,
+					"durationMs":  info.Duration.Milliseconds(),
+					"inputBytes":  info.InputBytes,
+					"outputBytes": info.OutputBytes,
+					"ok":          info.Err == nil,
+				}
+				if info.Err != nil {
+					fields["error"] = info.Err.Error()
+				}
+				debuglog.LogDebug(dbg, "backend.task", fields)
+			}
+		}
+		a.Backend = backend.NewClient(clientCfg)
 	}
 	a.Router = models.NewRouter(
 		models.RouterConfig{LargeModel: cfg.LargeModel, MediumModel: cfg.MediumModel, SmallModel: cfg.SmallModel},

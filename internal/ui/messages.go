@@ -165,6 +165,15 @@ type CommandCompleteMsg struct {
 	// SwitchPanel switches the live view instead of printing a card: PanelHelp → the help
 	// view; PanelInbox/Watchers/Timers/Audit → the ops deck focused on that section.
 	SwitchPanel PanelKey
+	// Tracked marks a completion from controller.runCommand — the async path whose
+	// submit incremented commandsRunning. Only tracked completions decrement it: the
+	// synchronous /approvals shortcut also lands here but never incremented, and an
+	// untracked decrement would retire ANOTHER command's liveness cue mid-run.
+	Tracked bool
+	// Unhandled marks a tracked submission the commands package rejected (a bare "/"
+	// parses to no command). It must still complete — otherwise the counter leaks and
+	// the spinner ticks forever — but prints no card.
+	Unhandled bool
 }
 
 // --- approval lifecycle ---

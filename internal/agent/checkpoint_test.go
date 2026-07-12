@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
 // TestValidateCheckpointReinjectsMissingIDs is the issue's core guarantee: an ID present
@@ -29,6 +30,20 @@ assistant: spawned wch_12345678 and grt_cafef00d and agt_00112233 and tmr_998877
 		if !found {
 			t.Fatalf("ID %q not preserved; PreservedIDs = %+v", want, cp.PreservedIDs)
 		}
+	}
+}
+
+// TestValidateCheckpointPreservesTerminalUUIDs pins the real Daintree MCP terminal-id
+// shape (terminal-<uuid>): a full UUID id dropped by the model is re-injected, while a
+// model-truncated prefix (terminal-5284bfef — matches no terminal) is NOT treated as a
+// preservable ID of its own.
+func TestValidateCheckpointPreservesTerminalUUIDs(t *testing.T) {
+	transcript := `assistant: [tool call terminal.read {"terminalId":"terminal-5284bfef-3d11-424c-90cb-136f24046295"}]
+assistant: also mentioned the truncated terminal-5284bfef by mistake`
+	var cp backend.CheckpointOutput
+	validateCheckpoint(&cp, transcript)
+	if len(cp.PreservedIDs) != 1 || cp.PreservedIDs[0] != "terminal-5284bfef-3d11-424c-90cb-136f24046295" {
+		t.Fatalf("want exactly the full terminal UUID preserved, got %+v", cp.PreservedIDs)
 	}
 }
 
@@ -89,6 +104,42 @@ func TestValidateCheckpointDedupes(t *testing.T) {
 	}
 }
 
+// TestFlattenTranscript pins the SHARED flattener both compaction paths feed the
+// backend's transcript tasks: tool-call names + argument JSON folded in (argument-only
+// IDs must reach the ID-preservation pass), tool results prefixed, system rows
+// (deliberately) skipped, empty tool-call rows stubbed.
+func TestFlattenTranscript(t *testing.T) {
+	call := models.TextMessage("assistant", "spawning now")
+	call.ToolCalls = []models.ToolCallRequest{{
+		Type: "function",
+		Function: models.ToolCallFunction{
+			Name:      "terminal.read",
+			Arguments: `{"terminalId":"terminal-5284bfef-3d11-424c-90cb-136f24046295"}`,
+		},
+	}}
+	msgs := []models.ChatMessage{
+		models.TextMessage("system", "CONTROL_ROW"),
+		models.TextMessage("user", "please read the terminal"),
+		call,
+		models.TextMessage("tool", "tail contents"),
+		{Role: "tool"}, // empty tool result → stubbed
+	}
+	got := FlattenTranscript(msgs)
+	for _, want := range []string{
+		"user: please read the terminal",
+		"[tool call terminal.read {\"terminalId\":\"terminal-5284bfef-3d11-424c-90cb-136f24046295\"}]",
+		"tool: [tool result] tail contents",
+		"tool: [tool result]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("flattened transcript missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "CONTROL_ROW") {
+		t.Fatalf("system rows must be skipped:\n%s", got)
+	}
+}
+
 // TestRenderCheckpointEmptyIsBraces proves an empty checkpoint renders to a non-empty,
 // valid JSON object — never the empty string, which the caller would treat as a failed
 // compaction. The typed backend.CheckpointOutput has no omitempty tags, so an empty
@@ -110,10 +161,20 @@ func TestRenderCheckpointEmptyIsBraces(t *testing.T) {
 // TestRenderCheckpointContainsFields proves the rendered JSON carries the populated fields
 // (so the model can read its own state back on rehydration).
 func TestRenderCheckpointContainsFields(t *testing.T) {
-	cp := backend.CheckpointOutput{Goal: "ship", PreservedIDs: []string{"term_a1b2"}}
+	cp := backend.CheckpointOutput{
+		Goal:           "ship",
+		UserDirectives: []string{"never close terminals uninvited"},
+		PreservedIDs:   []string{"term_a1b2"},
+	}
 	got := renderCheckpoint(cp)
 	if !strings.Contains(got, "ship") || !strings.Contains(got, "term_a1b2") {
 		t.Fatalf("render dropped fields: %q", got)
+	}
+	// user_directives is load-bearing (a dropped directive means the assistant starts
+	// violating an explicit user instruction after compaction) — pin tag + render.
+	if !strings.Contains(got, "user_directives") ||
+		!strings.Contains(got, "never close terminals uninvited") {
+		t.Fatalf("render dropped user_directives: %q", got)
 	}
 	if !strings.Contains(got, "\n") {
 		t.Fatalf("render should be indented (pretty) JSON: %q", got)
@@ -124,7 +185,7 @@ func TestRenderCheckpointContainsFields(t *testing.T) {
 // checkpoint and no error.
 func TestBuildCheckpointParsesReply(t *testing.T) {
 	r := &jsonChatRouter{content: `{"goal":"ship it","next_actions":["open PR"]}`}
-	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "transcript with no ids")
+	cp, err := BuildCheckpoint(context.Background(), backendFromRouter{r: r}, "transcript with no ids")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +199,7 @@ func TestBuildCheckpointParsesReply(t *testing.T) {
 // fallback): the checkpoint is sparse but never loses a load-bearing identifier.
 func TestBuildCheckpointModelErrorExtractsIDs(t *testing.T) {
 	r := &errChatRouter{err: errors.New("model down")}
-	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "using term_a1b2 now")
+	cp, err := BuildCheckpoint(context.Background(), backendFromRouter{r: r}, "using term_a1b2 now")
 	if err == nil {
 		t.Fatal("a model error must be surfaced to the caller")
 	}
@@ -152,7 +213,7 @@ func TestBuildCheckpointModelErrorExtractsIDs(t *testing.T) {
 // degrades to a zero value and validateCheckpoint mines the IDs into PreservedIDs.
 func TestBuildCheckpointProseReplyExtractsIDs(t *testing.T) {
 	r := &jsonChatRouter{content: "Here is a prose summary; we used term_a1b2."}
-	cp, err := buildCheckpoint(context.Background(), backendFromRouter{r: r}, "we used term_a1b2.")
+	cp, err := BuildCheckpoint(context.Background(), backendFromRouter{r: r}, "we used term_a1b2.")
 	if err != nil {
 		t.Fatalf("a prose reply is not an error: %v", err)
 	}

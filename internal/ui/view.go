@@ -192,6 +192,14 @@ func (m Model) bottomBand(w int) string {
 		b.WriteString(indentLines(sl, LeftPad))
 		b.WriteString("\n\n")
 	}
+	// A running slash command's liveness line ("⠋ Checkpointing conversation… · 3s"):
+	// commands run OUTSIDE the turn engine (no TurnCell, no live region entry), so
+	// without this the model-backed /compact — two serial backend calls — left the
+	// cockpit looking completely idle until its result card appeared.
+	if cl := m.commandLiveView(w); cl != "" {
+		b.WriteString(indentLines(cl, LeftPad))
+		b.WriteString("\n\n")
+	}
 	// Staged-Ctrl+C cue: a single warning line directly above the composer while the
 	// quit is armed, so the confirming second press is discoverable.
 	if m.quitArmed {
@@ -200,6 +208,31 @@ func (m Model) bottomBand(w int) string {
 	}
 	b.WriteString(indentLines(m.composerView(w), LeftPad))
 	return b.String()
+}
+
+// commandLiveView renders the in-flight slash command's status line — the same
+// spinner + dim-label shape as a turn's renderLiveStatus. An active TURN keeps
+// precedence (its own live status already narrates the footer; two spinners would
+// read as two concurrent activities). Truncated to w: the footer's height budget
+// counts "\n"-delimited rows (lineCount), so an over-wide row that soft-wraps in the
+// terminal would silently undercount the band and let View outgrow the terminal
+// (the #1613 class).
+func (m Model) commandLiveView(w int) string {
+	if m.commandsRunning == 0 || m.inFlight {
+		return ""
+	}
+	label := m.commandStage
+	if label == "" {
+		label = "Running command…"
+	}
+	g := m.theme.Glyphs
+	spin := g.Active
+	if len(g.Spinner) > 0 {
+		spin = g.Spinner[m.spinnerFrame%len(g.Spinner)]
+	}
+	line := m.theme.Body().Render(spin) +
+		m.theme.Dim().Render(" "+label+elapsedToken(m.commandStartedAt, domain.NowMS()))
+	return truncateCells(line, w)
 }
 
 func (m Model) mcpDegradedView(w int) string {

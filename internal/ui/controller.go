@@ -174,14 +174,20 @@ func (c *controller) discardPendingInjections() {
 }
 
 // runCommand executes a slash command off the loop and reports CommandCompleteMsg.
-// Some commands (compact, skills find) hit the model, so this must not block Update.
+// Some commands (compact, skills find) hit the model, so this must not block Update —
+// their stage labels stream back through the pump (CommandProgress) so the composer's
+// busy cue narrates the silent stretches instead of looking idle for the whole run.
 func (c *controller) runCommand(parent context.Context, line string) tea.Cmd {
 	return func() tea.Msg {
-		res := commands.HandleUICommand(parent, line, c.app)
+		res := commands.HandleUICommandWithProgress(parent, line, c.app, c.pump.CommandProgress)
 		if !res.Handled {
-			return nil
+			// EVERY submission that reached here incremented commandsRunning, so even a
+			// rejected line (a bare "/") must complete — silently — or the counter leaks
+			// and the liveness spinner ticks forever.
+			return CommandCompleteMsg{Tracked: true, Unhandled: true}
 		}
 		return CommandCompleteMsg{
+			Tracked:         true,
 			Title:           res.Title,
 			Text:            res.Text,
 			ClearTranscript: res.ClearTranscript,

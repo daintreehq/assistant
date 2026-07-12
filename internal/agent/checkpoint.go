@@ -4,36 +4,86 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
 // checkpoint.go is the agent-side orchestration for the structured compaction object.
 // The prompt is now SERVER-OWNED: the CLI sends only the flattened transcript to the
 // backend's checkpoint task, which returns the structured CheckpointOutput. This
 // file still validates that no load-bearing identifier was dropped and renders the
-// note body. The auto-compact path in session.go calls buildCheckpoint and feeds the
+// note body. The auto-compact path in session.go calls BuildCheckpoint and feeds the
 // rendered body to compactLocked (which prepends the [checkpoint | depth N] header).
 // Best-effort throughout: a sparse checkpoint that still carries every ID is strictly
 // better than the old prose-of-prose, so this never blocks compaction.
 
 // checkpointIDPattern matches the load-bearing identifiers a checkpoint must preserve:
-// terminal IDs (term_, assigned by the Daintree MCP — short alphanumeric, e.g. term_1
-// or term_a1b2), plus the internally-minted prefixes from domain/ids.go for timers
-// (tmr_), watchers (wch_), workflow runs (wfr_), agent launches (agt_), and grant tokens
-// (grt_). The suffix class is broad ([0-9a-zA-Z]{1,32}) to cover both the MCP's short
-// handles and our "<prefix>+8 hex" shape; over-matching at worst preserves a non-ID token
-// in preserved_ids (harmless), while under-matching would silently lose a real ID
-// (unrecoverable). run_*/wkf_* from the old prose prompt are intentionally omitted: there
-// is no such domain prefix, and run_ collides with provenance tokens like run_test.
-var checkpointIDPattern = regexp.MustCompile(`\b(?:term_|tmr_|wch_|wfr_|agt_|grt_)[0-9a-zA-Z]{1,32}\b`)
+// the Daintree MCP's real terminal IDs (terminal-<uuid>, e.g.
+// terminal-5284bfef-3d11-424c-90cb-136f24046295 — the checkpoint prompt's ID-preservation
+// pass names exactly this shape, and every live session log shows it, so omitting it
+// here silently dropped the single most load-bearing ID class), the legacy short term_
+// handles, plus the internally-minted prefixes from domain/ids.go for timers (tmr_),
+// watchers (wch_), workflow runs (wfr_), agent launches (agt_), and grant tokens (grt_).
+// The short-prefix suffix class is broad ([0-9a-zA-Z]{1,32}) to cover both short handles
+// and our "<prefix>+8 hex" shape; over-matching at worst preserves a non-ID token in
+// preserved_ids (harmless), while under-matching would silently lose a real ID
+// (unrecoverable). The terminal-<uuid> alternative requires the FULL 36-char UUID so a
+// model-truncated prefix (terminal-5284bfef — matches no terminal, see the terminal-id
+// resolver) is never "preserved" as if it were real. run_*/wkf_* from the old prose
+// prompt are intentionally omitted: there is no such domain prefix, and run_ collides
+// with provenance tokens like run_test.
+var checkpointIDPattern = regexp.MustCompile(`\b(?:(?:term_|tmr_|wch_|wfr_|agt_|grt_)[0-9a-zA-Z]{1,32}|terminal-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b`)
 
-// buildCheckpoint runs the backend's checkpoint task over the soon-to-be-discarded
-// transcript, then runs the ID-preservation validation pass. The caller
-// (maybeAutoCompact) handles the backend-down case (err != nil) separately — here a
-// non-nil error simply yields a zero-value checkpoint that still gets its IDs mined
-// from the transcript. transcript is the flattened, tool-call-synthesized history.
-func buildCheckpoint(ctx context.Context, runner backend.TaskRunner, transcript string) (backend.CheckpointOutput, error) {
+// FlattenTranscript renders a working history as "role: text" lines for the backend's
+// transcript-digesting tasks (checkpoint, memory_distill). Each tool call's name +
+// argument JSON is folded into the text so load-bearing IDs that live ONLY in arguments
+// — e.g. terminal.read {"terminalId":"terminal-…"} — survive into the checkpoint's
+// ID-preservation pass; tool results are prefixed so the model can tell them from
+// prose. Shared by the auto-compact path (session.go) and the manual /compact command
+// (commands package) so the two flatteners can never drift again — the manual one used
+// to emit a bare "[tool call]" and silently dropped every argument-only ID.
+func FlattenTranscript(msgs []models.ChatMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Role == "system" {
+			continue
+		}
+		text := m.ContentToText()
+		for _, tc := range m.ToolCalls {
+			if text != "" {
+				text += "\n"
+			}
+			text += "[tool call " + tc.Function.Name + " " + tc.Function.Arguments + "]"
+		}
+		if m.Role == "tool" {
+			if text == "" {
+				text = "[tool result]"
+			} else {
+				text = "[tool result] " + text
+			}
+		}
+		if text == "" {
+			text = "[tool call]"
+		}
+		b.WriteString(m.Role)
+		b.WriteString(": ")
+		b.WriteString(text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// BuildCheckpoint runs the backend's checkpoint task over the soon-to-be-discarded
+// transcript, then runs the ID-preservation validation pass. Exported because BOTH
+// compaction entry points must go through it — the auto path (maybeAutoCompact) and
+// the manual /compact command; calling backend.RunCheckpoint directly would skip
+// validateCheckpoint and silently lose any ID the model dropped. Callers handle the
+// backend-down case (err != nil) themselves — here a non-nil error simply yields a
+// zero-value checkpoint that still gets its IDs mined from the transcript.
+// transcript is the flattened, tool-call-synthesized history (FlattenTranscript).
+func BuildCheckpoint(ctx context.Context, runner backend.TaskRunner, transcript string) (backend.CheckpointOutput, error) {
 	cp, err := backend.RunCheckpoint(ctx, runner, backend.CheckpointInput{Transcript: transcript})
 	validateCheckpoint(&cp, transcript)
 	return cp, err

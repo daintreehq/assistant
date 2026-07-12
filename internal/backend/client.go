@@ -38,6 +38,7 @@ type Client struct {
 	info     ClientInfo
 	retry    RetryPolicy
 	onRetry  func(RetryInfo)
+	onTask   func(TaskTraceInfo)
 	// streamIdleTimeout overrides sseIdleTimeout for the respond stream's idle
 	// watchdog. Zero selects the default; tests shrink it to exercise the abort.
 	streamIdleTimeout time.Duration
@@ -60,6 +61,23 @@ type ClientConfig struct {
 	// OnRetry, if set, is invoked just before each backoff sleep when a transient
 	// respond failure will be retried (observability only — it must not block).
 	OnRetry func(RetryInfo)
+	// OnTask, if set, is invoked after every RunTask round trip (success or failure).
+	// Observability only — it must not block. Without it the utility tasks are the
+	// one backend surface a session log cannot see: a /compact's checkpoint +
+	// memory_distill calls (and every watcher classify/judge/extract) would leave no
+	// trace at all.
+	OnTask func(TaskTraceInfo)
+}
+
+// TaskTraceInfo describes one completed RunTask round trip for the OnTask hook.
+// Err is nil on success; sizes are the serialized envelope input and the raw task
+// output (bounded facts for a log line — never the payloads themselves).
+type TaskTraceInfo struct {
+	Task        string
+	Duration    time.Duration
+	InputBytes  int
+	OutputBytes int
+	Err         error
 }
 
 // Connection-establishment timeouts shared by both default transports. These bound
@@ -132,6 +150,7 @@ func NewClient(cfg ClientConfig) *Client {
 		info:     cfg.ClientInfo,
 		retry:    retry,
 		onRetry:  cfg.OnRetry,
+		onTask:   cfg.OnTask,
 	}
 }
 
@@ -390,8 +409,24 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 // sends task DATA only; the backend owns the prompt, model, schema, and output
 // mode. Decode TaskResult.Output into the task-specific output struct.
 func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, error) {
+	start := time.Now()
 	var out TaskResult
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/tasks", req, &out); err != nil {
+	err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/tasks", req, &out)
+	if c.onTask != nil {
+		// Guarded side-channel: a hook panic must never fail the task call itself.
+		func() {
+			defer func() { _ = recover() }()
+			info := TaskTraceInfo{Task: req.Task, Duration: time.Since(start), Err: err}
+			// The input size is re-serialized ONLY when someone is listening; the
+			// envelope is small next to the model round trip it narrates.
+			if blob, merr := json.Marshal(req.Input); merr == nil {
+				info.InputBytes = len(blob)
+			}
+			info.OutputBytes = len(out.Output)
+			c.onTask(info)
+		}()
+	}
+	if err != nil {
 		return TaskResult{}, err
 	}
 	return out, nil

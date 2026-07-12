@@ -116,7 +116,11 @@ type SkillStepConsistencyInput struct {
 
 // CheckpointOutput is the structured compaction checkpoint.
 type CheckpointOutput struct {
-	Goal             string   `json:"goal"`
+	Goal string `json:"goal"`
+	// Standing user instructions/constraints stated mid-conversation ("never close
+	// terminals", "always branch first") — preserved near-verbatim by the backend's
+	// checkpoint task so an explicit instruction survives compaction.
+	UserDirectives   []string `json:"user_directives"`
 	ActiveTerminals  []string `json:"active_terminals"`
 	ActiveWatchers   []string `json:"active_watchers"`
 	WorkflowRunIDs   []string `json:"workflow_run_ids"`

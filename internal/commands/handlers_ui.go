@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -35,6 +36,19 @@ var inboxSeverities = map[string]domain.Severity{
 // HandleUICommand handles a slash line for the cockpit, returning structured data.
 // ctx carries cancellation for the model-backed commands (e.g. compact).
 func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResult {
+	return HandleUICommandWithProgress(ctx, line, a, nil)
+}
+
+// HandleUICommandWithProgress is HandleUICommand plus a live stage reporter for the
+// slow, model-backed commands (/compact runs two backend model calls back to back —
+// tens of seconds of otherwise total silence). progress is called with short
+// human-readable stage labels ("Checkpointing conversation…"); nil is fine (one-shot
+// and callers that have nowhere to show it). It is UI-thread-agnostic: the cockpit
+// routes it through the event pump, the classic REPL prints it.
+func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, progress func(stage string)) UICommandResult {
+	if progress == nil {
+		progress = func(string) {}
+	}
 	cmd, arg, rest := parseCommand(line)
 	if cmd == "" {
 		return UICommandResult{Handled: false}
@@ -96,7 +110,7 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 	case "memory":
 		return UICommandResult{Handled: true, Title: "Memory", Text: memoryText(a, rest)}
 	case "compact":
-		return UICommandResult{Handled: true, Title: "Compact", Text: compactRun(ctx, a)}
+		return UICommandResult{Handled: true, Title: "Compact", Text: compactRun(ctx, a, progress)}
 	case "clear":
 		// #5: only wipe the UI transcript AFTER Session.Clear() actually succeeds. A
 		// mid-turn clear returns ErrTurnInProgress (a clear would corrupt the streaming
@@ -696,10 +710,20 @@ func memoryText(a *app.App, rest []string) string {
 
 // compactRun checkpoints the conversation via the backend's checkpoint task then
 // compacts, after distilling any durable facts from the transcript so they survive
-// the discard.
-func compactRun(ctx context.Context, a *app.App) string {
+// the discard. progress narrates each stage (two serial backend model calls — the
+// caller shows the labels so the user is never staring at a silent cockpit).
+func compactRun(ctx context.Context, a *app.App, progress func(string)) string {
+	// The FULL flattened transcript, not a 12k tail: RunCheckpoint clamps to the task
+	// contract's own (much larger) bound, and the checkpoint prompt's whole job is to
+	// digest everything that is about to be discarded — a tail-only input silently
+	// dropped every ID and decision older than the last few exchanges.
 	full := transcriptString(a)
-	cp, err := backend.RunCheckpoint(ctx, a.Backend, backend.CheckpointInput{Transcript: capTail(full, 12000)})
+	before := a.Session.EstimateTokens()
+	progress("Checkpointing conversation…")
+	// agent.BuildCheckpoint, NOT backend.RunCheckpoint directly: it runs the
+	// ID-preservation validation pass over the FULL transcript, so an ID the model
+	// dropped is re-injected — the same guarantee the auto-compact path has.
+	cp, err := agent.BuildCheckpoint(ctx, a.Backend, full)
 	if err != nil {
 		return "Compaction failed: " + err.Error()
 	}
@@ -707,18 +731,31 @@ func compactRun(ctx context.Context, a *app.App) string {
 	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
 	// discards it.
 	distillInput := capTail(full, domain.DistillTranscriptMaxRunes)
+	progress("Compacting history…")
 	if err := a.Session.Compact(summary); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
+	after := a.Session.EstimateTokens()
 	// Only AFTER the history is actually discarded do we persist the distilled facts —
 	// so a rejected compaction never writes premature memories (best-effort; the
 	// distillation itself never affects the already-completed compaction).
+	progress("Distilling memories…")
 	saved := distillFromTranscript(ctx, a, distillInput)
-	msg := "Conversation compacted."
+	msg := fmt.Sprintf("Conversation compacted: ~%s → ~%s tokens (est).",
+		formatTokenCount(before), formatTokenCount(after))
 	if saved > 0 {
 		msg += fmt.Sprintf(" Distilled %d %s.", saved, pluralMemory(saved))
 	}
 	return msg
+}
+
+// formatTokenCount renders an approximate token count for the compaction report:
+// 412_345 → "412k", 950 → "950".
+func formatTokenCount(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", (n+500)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // renderCheckpointJSON pretty-prints a checkpoint object as the compaction note body.
@@ -824,27 +861,15 @@ func reconnectRun(ctx context.Context, a *app.App) string {
 
 func intPtr(n int) *int { return &n }
 
-// transcriptString flattens the non-system history to "role: text" lines (empty text
-// → "[tool call]"), newline-joined and uncapped. Capping is the caller's choice — both
-// the summary and distillation callers use capTail, keeping the freshest content where
-// active handles (IDs, branches, grants) and durable decisions are most likely to live;
-// the head is the part normal compaction would have summarized away anyway.
+// transcriptString flattens the non-system history to "role: text" lines via the
+// SHARED agent.FlattenTranscript (tool-call names + argument JSON folded in — the
+// manual path used to emit a bare "[tool call]" and silently dropped every
+// argument-only ID from the checkpoint's preservation pass). Uncapped: the checkpoint
+// caller sends it whole (the task clamps server-side); the distillation caller keeps
+// the freshest tail via capTail, where active handles and durable decisions are most
+// likely to live.
 func transcriptString(a *app.App) string {
-	var b strings.Builder
-	for _, m := range a.Session.Messages() {
-		if m.Role == "system" {
-			continue
-		}
-		text := m.ContentToText()
-		if strings.TrimSpace(text) == "" {
-			text = "[tool call]"
-		}
-		b.WriteString(m.Role)
-		b.WriteString(": ")
-		b.WriteString(text)
-		b.WriteString("\n")
-	}
-	return b.String()
+	return agent.FlattenTranscript(a.Session.Messages())
 }
 
 // capTail keeps the last maxRunes runes (freshest content).
