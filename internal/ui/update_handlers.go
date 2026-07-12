@@ -1180,9 +1180,109 @@ func (m Model) nuclearRedraw() (tea.Model, tea.Cmd) {
 func (m Model) onMcpResolved() (tea.Model, tea.Cmd) {
 	m.mcpResolved = true
 	gate := m.recomputeStartupSettled()
-	// Fetch the real project name (gates the splash via projectSettled). The 8s boot-cap
-	// backstop is already armed from launch (Init), so it isn't re-armed here.
-	return m.afterStateChange(tea.Batch(gate, m.fetchProjectNameCmd()))
+	// Fetch the real project name (gates the splash via projectSettled).
+	name := m.fetchProjectNameCmd()
+	// Arm the one-shot "baseline" redraw. Called as its OWN statement (it mutates m
+	// via a pointer receiver) so the arm is committed to this m before afterStateChange
+	// copies the receiver — inlining it as a Batch arg leaves the receiver/argument
+	// evaluation order unspecified enough to lose the mutation.
+	baseline := m.scheduleMcpBaselineRedraw()
+	return m.afterStateChange(tea.Batch(gate, name, baseline))
+}
+
+// mcpRedrawMaxTries bounds how long the baseline redraw will wait for a quiet frame
+// (a mid-stream turn, a draining commit, an unfinished boot) before giving up. At
+// resizeRedrawDelay (150ms) per re-arm this is ~9s of patience — long enough to
+// outlast a short startup turn, short enough that a permanently busy cockpit doesn't
+// poll forever. Giving up is safe: a later resize or Ctrl+L still re-lays on demand.
+const mcpRedrawMaxTries = 60
+
+// scheduleMcpBaselineRedraw arms a ONE-SHOT nuclear redraw fired after the MCP
+// connection first settles — Daintree's request for a guaranteed clean "starting
+// point" once the link is up, re-laying the cockpit over any splash/hand-off residue.
+// The live in-program boot lifecycle is vestigial (the splash plays BEFORE the program
+// in boot_splash.go, so booting is always false and completeBoot never runs), so this
+// is the only post-connect re-lay; it therefore fires on EVERY launch, not just a rare
+// path. Latched so a degraded→connected pair (or any later reconnect) schedules at
+// most once. The actual fire is deferred to a quiet frame (onMcpRedraw).
+func (m *Model) scheduleMcpBaselineRedraw() tea.Cmd {
+	if m.mcpBaselineRedrawDone {
+		return nil
+	}
+	m.mcpBaselineRedrawDone = true
+	return m.armMcpRedraw()
+}
+
+// armMcpRedraw ticks a debounced mcpRedrawMsg under the current nonce, deferring the
+// wipe one debounce window so it lands on a settled frame (and coalesces a
+// degraded→connected pair that both arrive close together).
+func (m *Model) armMcpRedraw() tea.Cmd {
+	m.mcpRedrawPending++
+	n := m.mcpRedrawPending
+	return tea.Tick(resizeRedrawDelay, func(time.Time) tea.Msg { return mcpRedrawMsg{Nonce: n} })
+}
+
+// readyForBaselineRedraw reports whether the cockpit has SETTLED enough for the
+// one-shot baseline repaint to reflect the final layout: the masthead has committed
+// (headerDone), no scrollback commit is draining (queue.inFlight), commits are armed,
+// no resize redraw is pending, and no turn is streaming into the footer. The repaint
+// itself is non-destructive (softBaselineRedraw), so these are settle conditions, not
+// safety gates — they keep the one shot on a frame that represents the real cockpit
+// rather than a half-built boot frame, and avoid churning a mid-stream turn.
+func (m *Model) readyForBaselineRedraw() bool {
+	return !m.booting && !m.quitting && !m.inFlight &&
+		!m.redrawPending && m.commitArmed &&
+		m.queue.headerDone && !m.queue.inFlight
+}
+
+// onMcpRedraw fires the baseline repaint once the cockpit reaches a settled frame
+// (readyForBaselineRedraw). Until then it re-arms the same one-shot — bounded by
+// mcpRedrawMaxTries so a cockpit that never settles gives up instead of polling
+// forever. On a settled frame it runs softBaselineRedraw.
+func (m Model) onMcpRedraw(msg mcpRedrawMsg) (tea.Model, tea.Cmd) {
+	if msg.Nonce != m.mcpRedrawPending {
+		return m, nil // superseded by a newer arm
+	}
+	if !m.readyForBaselineRedraw() {
+		if m.mcpRedrawTries >= mcpRedrawMaxTries {
+			return m, nil // gave up waiting for a settled frame — a later resize/Ctrl+L recovers
+		}
+		m.mcpRedrawTries++
+		return m, m.armMcpRedraw()
+	}
+	return m.softBaselineRedraw()
+}
+
+// softBaselineRedraw forces Bubble Tea to fully repaint its live region (the composer/
+// footer) — the non-destructive "clean starting point" after the MCP link settles. It
+// heals any live-region residue from the pre-program splash hand-off exactly the way a
+// keypress would, WITHOUT wiping host scrollback (no ESC[3J) or re-committing the
+// masthead, so the draft (live-region model state) is simply re-rendered.
+//
+// Mechanism (why two steps, ordered): tea.ClearScreen marks the inline renderer for a
+// full erase, but on an UNCHANGED frame flush() early-returns — viewEquals(lastView) &&
+// bounds match (cursed_renderer.go) — and the pending erase never emits. That is why a
+// bare ClearScreen is a no-op here and why only a keypress (which CHANGES the view)
+// heals the footer. So the clear is followed by mcpRepaintViewMsg, which durably flips
+// mcpRepaintView → View() appends a zero-cell SGR reset. That changes View.Content's
+// string identity (viewEquals now fails) WITHOUT adding a cell or a row, so exactly one
+// flush proceeds and consumes the erase: ultraviolet's non-fullscreen full-clear
+// repaints every live line via erase-below from the live-region origin (NOT ESC[3J), so
+// native scrollback and the committed masthead survive. The tag stays set, so there is
+// no revert frame and no second repaint. tea.Sequence (not Batch) is required so the
+// clear is marked BEFORE the content changes.
+//
+// The full nuclearRedraw (Ctrl+L, resize) is deliberately NOT used here: re-committing
+// the masthead on every launch both duplicates it in scrollback and reintroduces the
+// blank-footer-until-keypress race — the e2e PTY startup contract
+// (TestPTYSplashConnectKeepsFooter / TestPTYCockpitRenderHarness) fails on the nuclear
+// variant and passes on this one. It also honors the boot_splash.go invariant that
+// startup must preserve the host terminal's native scrollback.
+func (m Model) softBaselineRedraw() (tea.Model, tea.Cmd) {
+	return m, tea.Sequence(
+		tea.ClearScreen,
+		func() tea.Msg { return mcpRepaintViewMsg{} },
+	)
 }
 
 // recomputeStartupSettled flips startupSettled true once BOTH the MCP connect resolved

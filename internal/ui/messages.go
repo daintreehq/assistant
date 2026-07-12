@@ -252,3 +252,16 @@ type QuitArmExpireMsg struct{ Gen int }
 // the masthead + whole transcript fresh at the new width; the transcript model is
 // left intact (separate from /clear). Nonce dedupes a drag storm.
 type RedrawMsg struct{ Nonce int }
+
+// mcpRedrawMsg fires the one-shot baseline repaint after the MCP connection first
+// settles (see Model.mcpBaselineRedrawDone). Debounced off the resolve event so it
+// lands on a settled frame; the handler re-arms (a fresh nonce) until the cockpit has
+// settled (readyForBaselineRedraw). Nonce dedupes against a superseding arm.
+type mcpRedrawMsg struct{ Nonce int }
+
+// mcpRepaintViewMsg is the SECOND half of the baseline repaint (softBaselineRedraw):
+// it lands right after tea.ClearScreen and durably flips Model.mcpRepaintView so the
+// next View() carries a zero-cell content tag. That tag changes View.Content's string
+// identity — the only way to force Bubble Tea's inline renderer past its unchanged-
+// frame flush skip so the pending erase actually emits a full live-region repaint.
+type mcpRepaintViewMsg struct{}

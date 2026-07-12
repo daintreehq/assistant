@@ -438,6 +438,169 @@ func runSplashConnectKeepsFooter(
 	runtime.KeepAlive(ptm)
 }
 
+// TestPTYBaselineRepaintEmits proves the one-shot post-MCP baseline repaint
+// (softBaselineRedraw) actually EMITS a full live-region repaint rather than being a
+// silent no-op — the exact failure mode a bare tea.ClearScreen has (Bubble Tea skips
+// the flush on an unchanged frame). The discriminator: type a probe draft BEFORE the
+// connect, snapshot the raw stream, then let the connect settle. The status change is a
+// diff render that leaves the unchanged draft line alone, so the ONLY way the probe text
+// re-appears in the post-snapshot bytes is a full-footer repaint — which is exactly what
+// the ClearScreen + durable-content-tag sequence forces. It must do so WITHOUT an ESC[3J
+// scrollback wipe, without a second masthead commit, and without losing the draft.
+func TestPTYBaselineRepaintEmits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("baseline-repaint PTY test allocates a real pseudoterminal and delayed MCP server")
+	}
+	bin := buildBinary(t)
+	backend := newFakeBackend(t)
+	// A generously delayed discovery leaves the composer interactive long enough to type
+	// the probe and snapshot the raw stream BEFORE the connect settles (and thus before
+	// the baseline repaint arms), with comfortable margin on loaded CI.
+	mcpServer := newFakeMCPWithAgentDelay(t, 2500*time.Millisecond)
+
+	const rows, cols = 40, 100
+	cmd := exec.Command(bin)
+	env := make([]string, 0, len(os.Environ())+14)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_ASCII=") ||
+			strings.HasPrefix(kv, "DAINTREE_ASSISTANT_NO_SPLASH=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	stateDir := t.TempDir()
+	cmd.Env = append(env,
+		"LC_ALL=C.UTF-8",
+		"TERM=xterm-256color",
+		"DAINTREE_BACKEND_URL="+backend.baseURL(),
+		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_ASSISTANT_STATE_DIR="+stateDir,
+		"DAINTREE_ASSISTANT_LOG_DIR="+stateDir+"/logs",
+		"DAINTREE_ASSISTANT_NO_DAEMON=1",
+		"DAINTREE_ASSISTANT_TIER=system",
+		"DAINTREE_MCP_URL="+mcpServer.url(),
+		"DAINTREE_MCP_TOKEN=fake-token",
+		"DAINTREE_DOCS_MCP_URL="+mcpServer.url(),
+	)
+
+	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
+	if err != nil {
+		t.Fatalf("start binary under pty: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = ptm.Close()
+	})
+
+	screen := newVTScreen(rows, cols)
+	var rawMu sync.Mutex
+	var raw bytes.Buffer
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := ptm.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				screen.Feed(chunk)
+				rawMu.Lock()
+				raw.Write(chunk)
+				rawMu.Unlock()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+	rawLen := func() int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return raw.Len()
+	}
+	rawCount := func(sub string) int {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return bytes.Count(raw.Bytes(), []byte(sub))
+	}
+	rawFrom := func(off int) []byte {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return append([]byte(nil), raw.Bytes()[off:]...)
+	}
+
+	// Composer live before the connect settles.
+	if !waitForPTY(10*time.Second, func() bool {
+		return strings.Contains(screen.VisiblePlain(), composerGlyph)
+	}) {
+		t.Fatalf("composer did not become visible before connect:\n%s", screen.Plain())
+	}
+
+	// Type a unique probe draft and let its render settle.
+	const probe = "REPAINTPROBE7391"
+	if _, err := ptm.Write([]byte(probe)); err != nil {
+		t.Fatalf("type probe draft: %v", err)
+	}
+	if !waitForPTY(5*time.Second, func() bool {
+		return strings.Contains(screen.VisiblePlain(), probe)
+	}) {
+		t.Fatalf("probe draft never rendered:\n%s", screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	// Snapshot AFTER the draft has settled but BEFORE the connect + baseline repaint.
+	before := rawLen()
+
+	// Wait DIRECTLY on the event we assert: the baseline repaint re-emitting the
+	// (unchanged) probe line into the post-snapshot stream. Waiting on this rather than a
+	// call-count or a fixed quiet window makes the test independent of the fake's timing
+	// (its counter increments at request-start, not completion). A status-only diff
+	// render leaves the probe row untouched, so only a full-footer repaint re-emits it —
+	// exactly what the ClearScreen + content-tag sequence forces. A bare-ClearScreen
+	// no-op never re-emits and this times out (verified: it fails there, passes here).
+	if !waitForPTY(20*time.Second, func() bool {
+		return bytes.Contains(rawFrom(before), []byte(probe))
+	}) {
+		t.Fatalf("baseline repaint did not re-emit the live footer (probe absent from post-connect output) — it was a no-op:\n%s", screen.Plain())
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
+
+	delta := rawFrom(before)
+	// Non-destructive: no scrollback wipe, no host-style viewport wipe.
+	if bytes.Contains(delta, []byte("\x1b[3J")) {
+		t.Fatal("baseline repaint destroyed native scrollback (ESC[3J)")
+	}
+	if bytes.Contains(delta, []byte("\x1b[2J")) {
+		t.Fatal("baseline repaint performed a host-style viewport wipe (ESC[2J)")
+	}
+	// Masthead committed exactly once across the whole session (no re-commit / duplicate).
+	if got := rawCount(mastheadText); got != 1 {
+		t.Fatalf("masthead committed %d times, want exactly 1 (no baseline re-commit)", got)
+	}
+	// The draft survived and is shown once (no frozen copy).
+	if !strings.Contains(screen.VisiblePlain(), probe) {
+		t.Fatalf("baseline repaint lost the in-progress draft:\n%s", screen.Plain())
+	}
+	if got := screen.CountLineSubstr(probe); got != 1 {
+		t.Fatalf("probe draft appears on %d composed lines, want exactly one live composer:\n%s", got, screen.Plain())
+	}
+
+	_, _ = ptm.Write([]byte{3, 3})
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitErr
+		t.Error("cockpit did not exit within 10s after staged Ctrl+C")
+	}
+	_ = ptm.Close()
+	drainWG.Wait()
+	runtime.KeepAlive(ptm)
+}
+
 // TestPTYLargePasteScrollback is the regression for the large-paste scrollback corruption:
 // pasting a block taller than the viewport made the YOU card commit in a SINGLE tea.Println
 // taller than the screen, and Bubble Tea v2's insertAbove then clamped its CursorUp at the

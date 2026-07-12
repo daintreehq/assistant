@@ -260,6 +260,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RedrawMsg:
 		return m.onRedraw(msg)
 
+	case mcpRedrawMsg:
+		return m.onMcpRedraw(msg)
+
+	case mcpRepaintViewMsg:
+		// Second half of the baseline repaint: durably flip the View-content tag that
+		// forces the post-ClearScreen flush past the unchanged-frame skip (see
+		// softBaselineRedraw). Left set — a harmless trailing SGR reset.
+		m.mcpRepaintView = true
+		return m, nil
+
 	case LogMsg:
 		m.addNote(msg.Level, msg.Text)
 		return m.afterStateChange(nil)

@@ -194,6 +194,24 @@ type Model struct {
 	handoffRows int
 	attentionN  int
 
+	// One-shot "baseline" repaint fired after the MCP connection first settles: a
+	// non-destructive clean "starting point" (softBaselineRedraw — a full live-region
+	// repaint, no host wipe) over any splash/hand-off residue. The live boot lifecycle
+	// is vestigial (splash plays pre-program), so this is the only post-connect repaint
+	// and runs on every launch. Latched (…Done) so a degraded→connected pair or a
+	// reconnect repaints at most once; the tick (…Pending nonce) defers to a settled
+	// frame and re-arms (up to mcpRedrawMaxTries, counted by …Tries) while a turn is
+	// streaming or a commit is draining, so the one shot reflects the real cockpit.
+	mcpBaselineRedrawDone bool
+	mcpRedrawPending      int
+	mcpRedrawTries        int
+	// mcpRepaintView is the durable content tag that makes the baseline repaint emit:
+	// once set (by mcpRepaintViewMsg, right after tea.ClearScreen), View() appends a
+	// zero-cell SGR reset so View.Content's identity differs for one frame, defeating
+	// the renderer's unchanged-frame flush skip. Left set forever (a harmless trailing
+	// reset), so there is no revert frame and no second repaint.
+	mcpRepaintView bool
+
 	// spinner frame (advanced on a periodic tick) for animated active rows. The tick only
 	// runs while a turn is in flight (spinnerRunning) — idle, it lapses so the process can
 	// quiesce instead of repainting ~10×/s forever.
