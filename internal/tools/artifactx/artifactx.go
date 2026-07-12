@@ -79,7 +79,7 @@ var readSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "artifactId": { "type": "string", "description": "The artifactId from a truncated tool result." },
+    "artifactId": { "type": "string", "description": "The artifactId from a truncated tool result, or from a checkpoint note's archived-transcript breadcrumb." },
     "offset": { "type": "number", "minimum": 0, "description": "Character offset where this page starts. Use 0 for the first page, then the nextOffset returned by the previous read." },
     "limit": { "type": "number", "minimum": 1, "maximum": 3500, "description": "Optional page size in characters. Omit to use the default and maximum of 3500 per read. Do NOT set this to totalChars — one read returns at most 3500 chars regardless." }
   },
@@ -90,7 +90,8 @@ var readSchema = json.RawMessage(`{
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{{
 		Name: "artifact.read",
-		Description: "Read ONE page of a large tool result that was archived as an artifact because it overflowed the inline size limit. " +
+		Description: "Read ONE page of an archived artifact: a large tool result that overflowed the inline size limit, " +
+			"or the full pre-compaction transcript a [checkpoint] note's breadcrumb points at (page a few relevant pages surgically — never replay the whole transcript). " +
 			"A page is at most 3500 characters — a single call NEVER returns the whole artifact. " +
 			"To read it: call with the artifactId and offset 0 (omit limit; it defaults to the 3500 max), then call again with offset set to the returned nextOffset, repeating until eof is true. " +
 			"Do NOT set limit to totalChars (or any value above 3500) to grab it all at once — that still returns just one 3500-char page; page with offset/nextOffset instead.",

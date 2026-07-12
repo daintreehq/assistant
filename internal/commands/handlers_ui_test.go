@@ -55,6 +55,34 @@ func ui(a *app.App, line string) UICommandResult {
 	return HandleUICommand(context.Background(), line, a)
 }
 
+// TestUICompactManualBreadcrumbAndStages pins the manual /compact end-to-end against
+// the scripted backend: the three stage labels stream in order, the compaction note
+// carries the checkpoint AND the archived-transcript breadcrumb (the escape hatch back
+// to the discarded history), and the completion message reports the token estimate.
+func TestUICompactManualBreadcrumbAndStages(t *testing.T) {
+	a := newOfflineApp(t)
+	a.Session.InjectNote("UNIQUE_COMPACT_DETAIL: canary deploys go to studio-05")
+	a.Session.InjectNote("a second note so the history is non-trivial")
+
+	var stages []string
+	res := HandleUICommandWithProgress(context.Background(), "/compact", a,
+		func(s string) { stages = append(stages, s) })
+	if !res.Handled || !strings.HasPrefix(res.Text, "Conversation compacted") {
+		t.Fatalf("unexpected /compact result: %+v", res)
+	}
+	if got, want := strings.Join(stages, "|"),
+		"Compacting conversation…|Applying compaction…|Distilling memories…"; got != want {
+		t.Fatalf("stages = %q, want %q", got, want)
+	}
+	note := a.Session.Messages()[domain.ControlMessageCount].ContentToText()
+	if !strings.Contains(note, "checkpoint") || !strings.Contains(note, "compacted") {
+		t.Fatalf("first working message should be the checkpoint note, got %q", note)
+	}
+	if !strings.Contains(note, "artifact.read") || !strings.Contains(note, "artifact_") {
+		t.Fatalf("note missing the archived-transcript breadcrumb: %q", note)
+	}
+}
+
 func TestUIStatusReportsMCPAndConfig(t *testing.T) {
 	a := newOfflineApp(t)
 	r := ui(a, "/status")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -183,6 +184,27 @@ func (r *chatCountRouter) Chat(ctx context.Context, tier domain.ModelTier, opts 
 }
 func (r *chatCountRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
 func (r *chatCountRouter) FlushMeter() []models.TierUsage   { return nil }
+
+// TestAutoCompactNoteCarriesTranscriptBreadcrumb pins the compaction escape hatch
+// end-to-end: the note points at a durable artifact holding the FULL flattened
+// pre-compaction transcript, so detail the checkpoint rounded off stays recoverable
+// via artifact.read instead of being lost forever.
+func TestAutoCompactNoteCarriesTranscriptBreadcrumb(t *testing.T) {
+	r := &chatCountRouter{summary: `{"goal":"G"}`}
+	s, _ := compactSession(t, r)
+	s.InjectNote("small-companion") // clears the "no real history" single-message guard
+	s.InjectNote("UNIQUE_DETAIL_XYZ" + softTripFiller())
+	s.maybeAutoCompact(context.Background(), "run_breadcrumb")
+	note := s.Messages()[domain.ControlMessageCount].StringContent
+	id := regexp.MustCompile(`artifact_[0-9a-f]{8}`).FindString(note)
+	if id == "" {
+		t.Fatalf("compaction note carries no transcript breadcrumb: %q", note)
+	}
+	archived, ok := s.artifacts.Get(id)
+	if !ok || !strings.Contains(archived, "UNIQUE_DETAIL_XYZ") {
+		t.Fatalf("archived transcript missing the discarded detail (found=%v)", ok)
+	}
+}
 
 func TestAutoCompactsAboveThreshold(t *testing.T) {
 	r := &chatCountRouter{summary: `{"goal":"AUTO_SUMMARY"}`}

@@ -202,7 +202,7 @@ type Model struct {
 
 	// Slash commands in flight (commands run independently of turn single-flight, so a
 	// count not a bool) + the latest stage label a running command reported through the
-	// pump (/compact's "Checkpointing conversation…"). While non-zero and no turn is
+	// pump (/compact's "Compacting conversation…"). While non-zero and no turn is
 	// active, the composer shows the stage as its busy cue — a model-backed command
 	// (two serial backend calls) must never leave the cockpit looking idle.
 	commandsRunning  int

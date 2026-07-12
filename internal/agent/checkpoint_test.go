@@ -140,6 +140,20 @@ func TestFlattenTranscript(t *testing.T) {
 	}
 }
 
+// TestAppendTranscriptBreadcrumb pins the compaction escape hatch: with an artifact id
+// the note gains a pageable artifact.read pointer; without one the summary is unchanged.
+func TestAppendTranscriptBreadcrumb(t *testing.T) {
+	if got := AppendTranscriptBreadcrumb("SUMMARY", ""); got != "SUMMARY" {
+		t.Fatalf("empty id must leave the summary unchanged, got %q", got)
+	}
+	got := AppendTranscriptBreadcrumb("SUMMARY", "artifact_ab12cd34")
+	if !strings.Contains(got, "SUMMARY") ||
+		!strings.Contains(got, "artifact_ab12cd34") ||
+		!strings.Contains(got, `artifact.read {"artifactId":"artifact_ab12cd34"}`) {
+		t.Fatalf("breadcrumb missing pieces: %q", got)
+	}
+}
+
 // TestRenderCheckpointEmptyIsBraces proves an empty checkpoint renders to a non-empty,
 // valid JSON object — never the empty string, which the caller would treat as a failed
 // compaction. The typed backend.CheckpointOutput has no omitempty tags, so an empty

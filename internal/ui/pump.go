@@ -289,7 +289,7 @@ func (p *eventPump) Info(msg string) {
 }
 
 // CommandProgress forwards a running slash command's stage label (e.g. /compact's
-// "Checkpointing conversation…") so the composer's busy cue can narrate the silent
+// "Compacting conversation…") so the composer's busy cue can narrate the silent
 // model-backed stretches. Called from the command goroutine, ordered like any other
 // event; the reducer just updates the label (no transcript mutation).
 func (p *eventPump) CommandProgress(stage string) {

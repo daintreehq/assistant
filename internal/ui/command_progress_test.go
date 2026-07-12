@@ -32,8 +32,8 @@ func TestCommandLiveCue_ShowsWhileRunning(t *testing.T) {
 func TestCommandLiveCue_ProgressUpdatesStage(t *testing.T) {
 	m := harnessModel()
 	mm := submitCommand(t, m, "/compact")
-	mm.applyPumpEvent(pumpEvent{kind: pumpCommandProgress, msg: "Checkpointing conversation…"})
-	if !strings.Contains(mm.bottomBand(80), "Checkpointing conversation…") {
+	mm.applyPumpEvent(pumpEvent{kind: pumpCommandProgress, msg: "Compacting conversation…"})
+	if !strings.Contains(mm.bottomBand(80), "Compacting conversation…") {
 		t.Fatalf("footer should show the reported stage, got:\n%s", mm.bottomBand(80))
 	}
 	mm.applyPumpEvent(pumpEvent{kind: pumpCommandProgress, msg: "Distilling memories…"})
@@ -130,7 +130,7 @@ func TestCommandLiveCue_ProgressDoesNotTouchTurnHeartbeat(t *testing.T) {
 	mm.activeTurn = cell.ID
 	mm.inFlight = true
 	mm.commandsRunning = 1
-	mm.applyPumpEvent(pumpEvent{kind: pumpCommandProgress, msg: "Checkpointing conversation…"})
+	mm.applyPumpEvent(pumpEvent{kind: pumpCommandProgress, msg: "Compacting conversation…"})
 	if cell.LastActivityAt != 12345 {
 		t.Fatalf("command progress refreshed the turn heartbeat: %d", cell.LastActivityAt)
 	}

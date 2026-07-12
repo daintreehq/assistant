@@ -42,7 +42,7 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 // HandleUICommandWithProgress is HandleUICommand plus a live stage reporter for the
 // slow, model-backed commands (/compact runs two backend model calls back to back —
 // tens of seconds of otherwise total silence). progress is called with short
-// human-readable stage labels ("Checkpointing conversation…"); nil is fine (one-shot
+// human-readable stage labels ("Compacting conversation…"); nil is fine (one-shot
 // and callers that have nowhere to show it). It is UI-thread-agnostic: the cockpit
 // routes it through the event pump, the classic REPL prints it.
 func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, progress func(stage string)) UICommandResult {
@@ -719,7 +719,9 @@ func compactRun(ctx context.Context, a *app.App, progress func(string)) string {
 	// dropped every ID and decision older than the last few exchanges.
 	full := transcriptString(a)
 	before := a.Session.EstimateTokens()
-	progress("Checkpointing conversation…")
+	// User-facing stage labels say "compacting", never "checkpointing" — the checkpoint
+	// is the mechanism, compaction is what the user asked for.
+	progress("Compacting conversation…")
 	// agent.BuildCheckpoint, NOT backend.RunCheckpoint directly: it runs the
 	// ID-preservation validation pass over the FULL transcript, so an ID the model
 	// dropped is re-injected — the same guarantee the auto-compact path has.
@@ -731,8 +733,12 @@ func compactRun(ctx context.Context, a *app.App, progress func(string)) string {
 	// Capture the distill input (freshest TAIL of the history) BEFORE compaction
 	// discards it.
 	distillInput := capTail(full, domain.DistillTranscriptMaxRunes)
-	progress("Compacting history…")
-	if err := a.Session.Compact(summary); err != nil {
+	progress("Applying compaction…")
+	// CompactWithTranscript archives the full transcript as a durable artifact and
+	// appends the escape-hatch breadcrumb to the note (same as auto-compact) — and
+	// rejects a busy session BEFORE archiving, so a refused /compact never strands
+	// an orphaned transcript artifact.
+	if err := a.Session.CompactWithTranscript(summary, full); err != nil {
 		return "Can't compact while a turn is in progress — cancel it (Esc) or wait for it to finish, then try again."
 	}
 	after := a.Session.EstimateTokens()

@@ -129,6 +129,51 @@ func validateCheckpoint(cp *backend.CheckpointOutput, transcript string) {
 	}
 }
 
+// AppendTranscriptBreadcrumb appends the compaction escape hatch to a checkpoint note
+// body: the full pre-compaction transcript is preserved as a durable artifact, and this
+// line tells the post-compaction model exactly how to page it back. Compaction is lossy
+// by design — the breadcrumb makes the loss recoverable on demand (the pattern Claude
+// Code uses with its on-disk transcript pointer) instead of permanent. A missing id
+// (nothing archived / no artifact store) returns the summary unchanged.
+func AppendTranscriptBreadcrumb(summary, artifactID string) string {
+	if artifactID == "" {
+		return summary
+	}
+	return summary + "\n\nFull pre-compaction transcript preserved as artifact " + artifactID +
+		` — if you need exact details this checkpoint rounded off (verbatim tool output, error text, the user's earlier wording), page it back with artifact.read {"artifactId":"` + artifactID + `"}.`
+}
+
+// ArchiveCompactionTranscript stores the flattened pre-compaction transcript as a
+// durable session artifact and returns its id, so the checkpoint note can carry a
+// breadcrumb back to the exact history the compaction discarded (readable via
+// artifact.read, which pages). Best-effort: "" when there is nothing to store or no
+// artifact store is wired — the caller appends no breadcrumb and compaction proceeds
+// exactly as before. Takes no session lock (the artifact store has its own).
+func (s *Session) ArchiveCompactionTranscript(transcript string) string {
+	if s.artifacts == nil || trimSpace(transcript) == "" {
+		return ""
+	}
+	return s.artifacts.set(transcript)
+}
+
+// CompactWithTranscript is the manual /compact entry: it rejects a busy session
+// BEFORE archiving, then archives the transcript, appends the breadcrumb to the
+// summary, and compacts. Ordering matters — archiving first and letting Compact
+// reject afterwards stranded a multi-megabyte orphaned artifact (durable row + a
+// hot-cache slot) on every /compact attempted while a turn was in flight. The
+// pre-check leaves a tiny window in which a turn starts before Compact re-checks;
+// that rare race just recreates the bounded, GC'd orphan — never corruption.
+func (s *Session) CompactWithTranscript(summary, transcript string) error {
+	s.mu.Lock()
+	busy := s.inFlight
+	s.mu.Unlock()
+	if busy {
+		return ErrTurnInProgress
+	}
+	summary = AppendTranscriptBreadcrumb(summary, s.ArchiveCompactionTranscript(transcript))
+	return s.Compact(summary)
+}
+
 // renderCheckpoint produces the note BODY — pretty-printed JSON of the checkpoint. The
 // [checkpoint | depth N] header is added by compactLocked via compactionNotePrefix, so
 // the body is header-free here. Indented JSON is the most model-legible form on

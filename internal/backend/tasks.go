@@ -120,11 +120,14 @@ type CheckpointOutput struct {
 	// Standing user instructions/constraints stated mid-conversation ("never close
 	// terminals", "always branch first") — preserved near-verbatim by the backend's
 	// checkpoint task so an explicit instruction survives compaction.
-	UserDirectives   []string `json:"user_directives"`
-	ActiveTerminals  []string `json:"active_terminals"`
-	ActiveWatchers   []string `json:"active_watchers"`
-	WorkflowRunIDs   []string `json:"workflow_run_ids"`
-	Decisions        []string `json:"decisions"`
+	UserDirectives  []string `json:"user_directives"`
+	ActiveTerminals []string `json:"active_terminals"`
+	ActiveWatchers  []string `json:"active_watchers"`
+	WorkflowRunIDs  []string `json:"workflow_run_ids"`
+	Decisions       []string `json:"decisions"`
+	// The loop-prevention register: approaches tried and failed (with why), so the
+	// post-compaction assistant does not repeat them.
+	FailedApproaches []string `json:"failed_approaches"`
 	PendingToolState []string `json:"pending_tool_state"`
 	NextActions      []string `json:"next_actions"`
 	OpenQuestions    []string `json:"open_questions"`
@@ -200,6 +203,33 @@ func clampTailRunes(s string, maxRunes int) string {
 	return string(r[len(r)-maxRunes:])
 }
 
+// checkpointHeadReserveRunes is the slice of the checkpoint transcript budget reserved
+// for the HEAD when the whole transcript exceeds the cap. The head carries what a
+// tail-only clamp silently destroyed: the prior "[checkpoint | depth N]" note (which
+// the checkpoint prompt's carry-forward rule needs IN HAND to preserve directives,
+// decisions, and failed approaches across repeated compactions) and, on a first
+// compaction, the user's original request. A note is a few thousand runes, so 16k is
+// generous; the remaining ~383k stays with the recent tail where the live state lives.
+const checkpointHeadReserveRunes = 16_000
+
+// transcriptElisionMarker separates head from tail in a clamped checkpoint transcript,
+// so the model knows content was cut BETWEEN them (not that the head flows into the tail).
+const transcriptElisionMarker = "\n[... middle of transcript elided for length ...]\n"
+
+// clampHeadTailRunes keeps the first headRunes AND the freshest remainder of the
+// budget, joined by the elision marker — total exactly maxRunes when clamped. Used by
+// the checkpoint task only; recency-only inputs (memory_distill, terminal tails) keep
+// the plain tail clamp.
+func clampHeadTailRunes(s string, maxRunes, headRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	marker := []rune(transcriptElisionMarker)
+	tailRunes := maxRunes - headRunes - len(marker)
+	return string(r[:headRunes]) + transcriptElisionMarker + string(r[len(r)-tailRunes:])
+}
+
 // clampHeadRunes keeps the first maxRunes (the head) of s — an extracted result's
 // answer is usually at the start.
 func clampHeadRunes(s string, maxRunes int) string {
@@ -271,7 +301,11 @@ func runTypedValidated(ctx context.Context, r TaskRunner, task string, input any
 // validateCheckpoint pass mines the load-bearing IDs into the empty object afterward.
 // Only a wire round with NO output at all is rejected (by runTyped).
 func RunCheckpoint(ctx context.Context, r TaskRunner, in CheckpointInput) (CheckpointOutput, error) {
-	in.Transcript = clampTailRunes(in.Transcript, maxTaskTranscriptRunes)
+	// Head+tail, not tail-only: at the auto-compact threshold the transcript is ~4×
+	// this cap, and a tail-only clamp cut the prior checkpoint note (always at the
+	// HEAD) out of the input — so the prompt's carry-forward rule could never fire and
+	// directives/decisions decayed on every repeated compaction.
+	in.Transcript = clampHeadTailRunes(in.Transcript, maxTaskTranscriptRunes, checkpointHeadReserveRunes)
 	var out CheckpointOutput
 	err := runTyped(ctx, r, TaskCheckpoint, in, nil, &out)
 	return out, err

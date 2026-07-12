@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,44 @@ func (s *scriptedRunner) RunTask(_ context.Context, req TaskRequest) (TaskResult
 
 func withOutput(raw string) *scriptedRunner {
 	return &scriptedRunner{res: TaskResult{Output: json.RawMessage(raw)}}
+}
+
+// TestCheckpointClampKeepsHeadAndTail pins the head+tail clamp: an over-budget
+// checkpoint transcript keeps its HEAD (where a prior "[checkpoint | depth N]" note
+// lives — the carry-forward rule needs it in hand) AND the freshest tail, joined by
+// the elision marker, at exactly the task cap. A tail-only clamp silently cut the
+// prior checkpoint out of every over-threshold auto-compaction.
+func TestCheckpointClampKeepsHeadAndTail(t *testing.T) {
+	head := "user: [checkpoint | depth 1] HEAD_DIRECTIVE_MARKER\n"
+	filler := strings.Repeat("x", maxTaskTranscriptRunes*2)
+	transcript := head + filler + "TAIL_MARKER_END"
+
+	r := withOutput(`{"goal":"g"}`)
+	if _, err := RunCheckpoint(context.Background(), r, CheckpointInput{Transcript: transcript}); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	got, _ := r.gotReq.Input["transcript"].(string)
+	if n := len([]rune(got)); n != maxTaskTranscriptRunes {
+		t.Fatalf("clamped transcript = %d runes, want exactly %d", n, maxTaskTranscriptRunes)
+	}
+	if !strings.HasPrefix(got, head) {
+		t.Fatal("clamp dropped the head (prior checkpoint note)")
+	}
+	if !strings.Contains(got, transcriptElisionMarker) {
+		t.Fatal("clamp missing the elision marker between head and tail")
+	}
+	if !strings.HasSuffix(got, "TAIL_MARKER_END") {
+		t.Fatal("clamp dropped the freshest tail")
+	}
+
+	// Under budget → untouched (no marker injected).
+	r2 := withOutput(`{"goal":"g"}`)
+	if _, err := RunCheckpoint(context.Background(), r2, CheckpointInput{Transcript: "short"}); err != nil {
+		t.Fatalf("RunCheckpoint short: %v", err)
+	}
+	if got, _ := r2.gotReq.Input["transcript"].(string); got != "short" {
+		t.Fatalf("under-budget transcript must pass through unchanged, got %q", got)
+	}
 }
 
 func assertTaskOutputError(t *testing.T, err error, task string) {

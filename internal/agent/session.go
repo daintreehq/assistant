@@ -2505,6 +2505,10 @@ func (s *Session) maybeAutoCompact(ctx context.Context, runID string) {
 		return
 	}
 	summary := renderCheckpoint(cp)
+	// Escape hatch: archive the full flattened transcript as a durable artifact and
+	// point the note at it, so anything the checkpoint rounded off stays recoverable
+	// via artifact.read instead of being lost forever. Best-effort ("" appends nothing).
+	summary = AppendTranscriptBreadcrumb(summary, s.ArchiveCompactionTranscript(transcript))
 
 	// Checkpoint in hand: compact IMMEDIATELY so the large-model stream is unblocked,
 	// then distill durable facts off the critical path. compactLocked resets the

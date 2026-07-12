@@ -192,7 +192,7 @@ func (m Model) bottomBand(w int) string {
 		b.WriteString(indentLines(sl, LeftPad))
 		b.WriteString("\n\n")
 	}
-	// A running slash command's liveness line ("⠋ Checkpointing conversation… · 3s"):
+	// A running slash command's liveness line ("⠋ Compacting conversation… · 3s"):
 	// commands run OUTSIDE the turn engine (no TurnCell, no live region entry), so
 	// without this the model-backed /compact — two serial backend calls — left the
 	// cockpit looking completely idle until its result card appeared.
