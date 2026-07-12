@@ -768,8 +768,8 @@ func noteGlyph(th theme.Theme, level NoteLevel) (string, string) {
 		// Attention mark from the GlyphSet (unicode "»" / ASCII "!").
 		return g.Attention, "warning"
 	case NoteSuccess:
-		// A filled connection dot in accent green (the "● Connected to Daintree MCP"
-		// status line). ASCII fallback uses the done glyph so it never renders blank.
+		// A filled settled-good dot in accent green. ASCII fallback uses the done
+		// glyph so it never renders blank.
 		if g.Brand == "#" { // ASCII glyph set
 			return g.Done, "success"
 		}

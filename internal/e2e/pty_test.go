@@ -257,24 +257,39 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	runtime.KeepAlive(ptm)
 }
 
-// TestPTYSplashDelayedConnectKeepsFooter is the real-terminal regression for the
-// startup failure where the one-time "Connected to Daintree MCPs" tea.Println landed,
-// then the composer/footer vanished until the next keypress. The trigger requires the
-// exact combination the older PTY tests deliberately skipped: the raw splash hand-off,
-// an MCP startup read that outlives the logo, and an immutable note committed while the
-// post-logo composer is otherwise unchanged.
-//
-// It also locks the intended boot UX: the logo remains present, discovery continues
-// ONCE across hand-off, and the user can edit a draft while that discovery finishes.
-func TestPTYSplashDelayedConnectKeepsFooter(t *testing.T) {
+// TestPTYSplashConnectKeepsFooter is the real-terminal regression matrix for the
+// startup failure where MCP completion followed the raw splash hand-off and the
+// composer vanished until the next keypress. It spans both sides of the ~740ms
+// splash boundary, the reported embedded-pane dimensions, a host-style redundant
+// winsize reassertion, and delayed completion. Healthy MCP startup must stay silent.
+func TestPTYSplashConnectKeepsFooter(t *testing.T) {
+	t.Run("immediate_embedded_pane", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 0, 29, 94, true)
+	})
+	t.Run("finishes_under_splash", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 450*time.Millisecond, 40, 100, false)
+	})
+	t.Run("just_after_handoff", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 900*time.Millisecond, 29, 94, false)
+	})
+	t.Run("delayed", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 2*time.Second, 40, 100, false)
+	})
+}
+
+func runSplashConnectKeepsFooter(
+	t *testing.T,
+	connectDelay time.Duration,
+	rows, cols uint16,
+	reassertWinsize bool,
+) {
 	if testing.Short() {
 		t.Skip("splash PTY regression allocates a real pseudoterminal and delayed MCP server")
 	}
 	bin := buildBinary(t)
 	backend := newFakeBackend(t)
-	mcpServer := newFakeMCPWithAgentDelay(t, 2*time.Second)
+	mcpServer := newFakeMCPWithAgentDelay(t, connectDelay)
 
-	const rows, cols = 40, 100
 	cmd := exec.Command(bin)
 	env := make([]string, 0, len(os.Environ())+14)
 	for _, kv := range os.Environ() {
@@ -312,7 +327,7 @@ func TestPTYSplashDelayedConnectKeepsFooter(t *testing.T) {
 		_ = ptm.Close()
 	})
 
-	screen := newVTScreen(rows, cols)
+	screen := newVTScreen(int(rows), int(cols))
 	var rawMu sync.Mutex
 	var raw bytes.Buffer
 	var drainWG sync.WaitGroup
@@ -345,43 +360,62 @@ func TestPTYSplashDelayedConnectKeepsFooter(t *testing.T) {
 		return raw.Len()
 	}
 
-	// The logo finishes before agent.listAvailable. The hand-off must expose a live
-	// composer immediately; no connection completion is required before editing.
+	// The raw hand-off must expose a live composer before any user input. For a
+	// delayed connection, prove this occurs while discovery is still pending. For
+	// an immediate connection, completion can beat the hand-off, so the composer
+	// alone is the pre-completion invariant.
 	if !waitForPTY(10*time.Second, func() bool {
 		visible := screen.VisiblePlain()
-		return strings.Contains(visible, composerGlyph) &&
-			!strings.Contains(screen.Plain(), "Connected to Daintree MCPs")
+		if !strings.Contains(visible, composerGlyph) {
+			return false
+		}
+		return true
 	}) {
-		t.Fatalf("post-logo composer did not become editable while MCP discovery was pending:\n%s", screen.Plain())
+		t.Fatalf("post-logo composer did not become visible before user input:\n%s", screen.Plain())
 	}
 	// Forty animation frames each clear+home the viewport. Requiring a substantial
 	// number proves this test did not accidentally take the no-splash path.
 	if got := rawCount("\x1b[2J\x1b[H"); got < 20 {
 		t.Fatalf("splash logo was not rendered (viewport-reset frames=%d, want >=20)", got)
 	}
-
-	const draft = "draft while loading"
-	if _, err := ptm.Write([]byte(draft)); err != nil {
-		t.Fatalf("type draft while loading: %v", err)
-	}
-	if !waitForPTY(5*time.Second, func() bool {
-		return strings.Contains(screen.VisiblePlain(), draft)
-	}) {
-		t.Fatalf("composer did not accept input while startup discovery was pending:\n%s", screen.Plain())
-	}
-
 	if !waitForPTY(15*time.Second, func() bool {
-		return strings.Contains(screen.Plain(), "Connected to Daintree MCPs")
+		return mcpServer.agentListCallCount() == 1
 	}) {
-		t.Fatalf("connected note never arrived:\n%s", screen.Plain())
+		t.Fatalf("MCP discovery never completed:\n%s", screen.Plain())
 	}
-	// Let Println + its queue ack + the following renderer frame fully settle WITHOUT
-	// sending another key. Before the fix this is exactly where the visible grid lost
-	// the composer; typing one more character made it reappear.
+	if reassertWinsize {
+		// Daintree's cached-project reveal path reasserts the current PTY grid even
+		// when it did not change. This may emit SIGWINCH; the cockpit must treat it
+		// as geometry-idempotent rather than running a destructive clear/replay.
+		if err := pty.Setsize(ptm, &pty.Winsize{Rows: rows, Cols: cols}); err != nil {
+			t.Fatalf("reassert embedded-pane winsize: %v", err)
+		}
+	}
+	// Let MCP completion and following renderer frames settle WITHOUT sending a key.
+	// Before the fix this is exactly where the visible grid lost the composer; typing
+	// one more character made it reappear.
 	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
 	visible := screen.VisiblePlain()
-	if !strings.Contains(visible, composerGlyph) || !strings.Contains(visible, draft) {
-		t.Fatalf("connected-note commit erased the live footer until keypress:\n%s", screen.Plain())
+	if !strings.Contains(visible, composerGlyph) {
+		t.Fatalf("healthy MCP completion erased the live footer until keypress:\n%s", screen.Plain())
+	}
+	if rawCount("Connecting to Daintree MCPs") != 0 || rawCount("Connected to Daintree MCPs") != 0 {
+		t.Fatalf("healthy startup emitted MCP connection chatter:\n%s", screen.Plain())
+	}
+	if !strings.Contains(visible, "MCP") {
+		t.Fatalf("compact MCP status missing from composer hint row:\n%s", screen.Plain())
+	}
+	// Only type AFTER the regression assertion. Earlier input can mask a missing
+	// first paint by supplying the repaint itself.
+	const draft = "draft after connect"
+	if _, err := ptm.Write([]byte(draft)); err != nil {
+		t.Fatalf("type draft after connect: %v", err)
+	}
+	if !waitForPTY(5*time.Second, func() bool { return strings.Contains(screen.VisiblePlain(), draft) }) {
+		t.Fatalf("composer did not accept input after startup discovery:\n%s", screen.Plain())
+	}
+	if got := screen.CountLineSubstr(draft); got != 1 {
+		t.Fatalf("draft appears on %d composed lines, want one live composer (no frozen copy):\n%s", got, screen.Plain())
 	}
 	if got := mcpServer.agentListCallCount(); got != 1 {
 		t.Fatalf("startup discovery ran agent.listAvailable %d times, want exactly 1 across splash hand-off", got)

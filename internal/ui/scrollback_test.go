@@ -86,6 +86,32 @@ func TestScrollback_OneInFlight(t *testing.T) {
 	}
 }
 
+func TestScrollback_ShortNoteKeepsDistinctBarrierFrame(t *testing.T) {
+	cells := []TranscriptCell{
+		{Note: &NoteCell{ID: "note_1", Level: NoteSuccess, Text: "Connected to Daintree MCPs"}},
+		{Turn: &TurnCell{ID: "turn_1", State: TurnComplete}},
+	}
+	sealed := func(i int) ScrollbackBlock {
+		return ScrollbackBlock{ID: cells[i].ID(), Rendered: cells[i].ID()}
+	}
+	header := func() ScrollbackBlock { return ScrollbackBlock{ID: headerID} }
+
+	q := scrollbackQueue{headerDone: true}
+	if cmd := q.nextCommit(cells, sealed, header, 80); cmd == nil {
+		t.Fatal("expected short note commit")
+	}
+	if q.dropInFlightCell {
+		t.Fatal("short system note must remain in the barrier frame so ack forces a repaint")
+	}
+	q.ack("note_1", q.gen, len(cells))
+	if cmd := q.nextCommit(cells, sealed, header, 80); cmd == nil {
+		t.Fatal("expected turn commit")
+	}
+	if !q.dropInFlightCell {
+		t.Fatal("turn must leave at selection time so its print re-pins the shortened footer")
+	}
+}
+
 func TestScrollback_ResetKeyReArms(t *testing.T) {
 	var q scrollbackQueue
 	q.headerDone = true

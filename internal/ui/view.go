@@ -170,13 +170,21 @@ func (m Model) footer() string {
 // sheet when a confirmation is pending, else the status line (when it has content), then
 // the composer — the input always anchored last.
 func (m Model) bottomBand(w int) string {
+	var b strings.Builder
+	// Healthy MCP connectivity is the normal state and stays silent. A degraded
+	// link makes the assistant's Daintree tools unusable, so surface a prominent
+	// live warning without committing anything into terminal scrollback.
+	if degraded := m.mcpDegradedView(w); degraded != "" {
+		b.WriteString(indentLines(degraded, LeftPad))
+		b.WriteString("\n\n")
+	}
 	// A pending multiple-choice question REPLACES the composer entirely: the sheet IS the
 	// input surface until the user answers or cancels. (An approval and a question can't
 	// both be pending — tool dispatch is sequential, so only one tool blocks at a time.)
 	if m.pendingQuestion != nil {
-		return indentLines(renderQuestion(m.theme, m.pendingQuestion, w), LeftPad)
+		b.WriteString(indentLines(renderQuestion(m.theme, m.pendingQuestion, w), LeftPad))
+		return b.String()
 	}
-	var b strings.Builder
 	if m.pending != nil {
 		b.WriteString(indentLines(renderApproval(m.theme, m.pending, w), LeftPad))
 		b.WriteString("\n\n")
@@ -192,6 +200,20 @@ func (m Model) bottomBand(w int) string {
 	}
 	b.WriteString(indentLines(m.composerView(w), LeftPad))
 	return b.String()
+}
+
+func (m Model) mcpDegradedView(w int) string {
+	if !m.degraded {
+		return ""
+	}
+	title := m.theme.Warning().Bold(true).Render(
+		truncateCells(m.theme.Glyphs.Alert+" Daintree MCP unavailable", w),
+	)
+	detail := wrapCells(
+		"Daintree tools are unavailable. Check the MCP server, then restart the assistant.",
+		w,
+	)
+	return title + "\n" + m.theme.Warning().Render(detail)
 }
 
 // deckBody renders the scrollable body for whichever footer deck is active (operations or
@@ -307,18 +329,17 @@ func lastLines(s string, n int) string {
 }
 
 // liveCellsView renders the transcript cells still LIVE in the footer (the active
-// turn + any sealed cell not yet claimed by a commit). A sealed cell leaves the
-// footer the frame its commit is SELECTED (queue.inFlightCell), not when the ack
-// lands: the footer must shrink and flush BEFORE the commit's Printlns run, so the
-// insertAboves re-pin the shortened footer to the terminal's bottom row instead of
-// stranding it above dead scroll area (see scrollbackQueue.inFlightCell).
+// turn + any sealed cell not yet claimed by a commit). Large committing cells leave
+// at selection time so Println re-pins the already-short footer; short cells stay
+// through the render barrier and leave at ack time so the renderer cannot skip the
+// post-print repaint when the surrounding footer is otherwise unchanged.
 func (m Model) liveCellsView(w int) string {
 	cw := m.contentW()
 	start := m.queue.liveStart(len(m.transcript))
 	var parts []string
 	for i := start; i < len(m.transcript); i++ {
-		if m.queue.inFlight && i == m.queue.inFlightCell {
-			continue // committing: already rendered as an immutable block, mid-print
+		if m.queue.inFlight && m.queue.dropInFlightCell && i == m.queue.inFlightCell {
+			continue // large committing cell: print against the already-short footer
 		}
 		cell := m.transcript[i]
 		var s string
@@ -368,6 +389,14 @@ func (m Model) composerView(w int) string {
 		}
 	}
 	cancellable := m.inFlight
+	mcpStatus := composer.MCPConnecting
+	if m.mcpResolved {
+		if m.degraded {
+			mcpStatus = composer.MCPDegraded
+		} else {
+			mcpStatus = composer.MCPConnected
+		}
+	}
 	return m.composer.View(composer.ViewParams{
 		Width:       w,
 		Stage:       stage,
@@ -375,6 +404,7 @@ func (m Model) composerView(w int) string {
 		Cancellable: &cancellable,
 		Attention:   m.attentionN > 0,
 		Placeholder: "Ask Daintree…  ·  / for commands",
+		MCPStatus:   mcpStatus,
 	})
 }
 
@@ -398,7 +428,7 @@ func (m Model) statusView(w int) string {
 		Cost:             m.cost,
 		AttentionN:       m.attentionN,
 		TopSeverity:      m.dashboard.topSeverity(),
-		Degraded:         m.degraded,
+		Degraded:         false, // rendered by the fixed-height MCP row above
 		ModelRateLimited: m.modelRateLimited,
 		ActiveTone:       aTone,
 		ActiveLabel:      aLabel,

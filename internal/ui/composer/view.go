@@ -18,7 +18,17 @@ type ViewParams struct {
 	Attention   bool   // actionable attention pending (promotes ^O)
 	ContextHint string // right-aligned session summary
 	Placeholder string // shown when the buffer is empty
+	MCPStatus   MCPStatus
 }
+
+type MCPStatus int
+
+const (
+	MCPHidden MCPStatus = iota
+	MCPConnecting
+	MCPConnected
+	MCPDegraded
+)
 
 // promptGlyph is the single input marker. Daintree is already named in the
 // header, so the composer line just shows a caret-style prompt (U+203A + space,
@@ -384,6 +394,19 @@ func (m *Model) renderHints(p ViewParams) string {
 		}
 		row.WriteString(m.theme.Info().Render(h.Key))
 		row.WriteString(m.theme.Dim().Render(" " + h.Action))
+	}
+	if p.MCPStatus != MCPHidden {
+		row.WriteString(sep)
+		dot := g.Async
+		label := " MCP"
+		switch p.MCPStatus {
+		case MCPConnected:
+			row.WriteString(m.theme.Body().Foreground(m.theme.Color.Accent).Render(dot + label))
+		case MCPDegraded:
+			row.WriteString(m.theme.Danger().Render(dot + label))
+		default:
+			row.WriteString(m.theme.Warning().Render(dot + label))
+		}
 	}
 	return truncateCells(row.String(), p.Width)
 }

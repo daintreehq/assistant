@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
 
 // composer_ported_test.go exercises the remaining editor-key
@@ -162,6 +164,35 @@ func TestView_OpsHintTrailingWhenNoAttention(t *testing.T) {
 	}
 	if strings.Count(hint, "inspect ops") != 1 {
 		t.Errorf("^O must appear exactly once: %q", hint)
+	}
+}
+
+func TestView_MCPStatusLivesInHintRowWithoutChangingHeight(t *testing.T) {
+	m := newModel()
+	th := theme.Resolve()
+	th.Mode = theme.ModeDark
+	th.Color = theme.PaletteFor(theme.ModeDark)
+	m.SetTheme(th)
+	connecting := m.View(ViewParams{Width: 100, MCPStatus: MCPConnecting})
+	connected := m.View(ViewParams{Width: 100, MCPStatus: MCPConnected})
+	degraded := m.View(ViewParams{Width: 100, MCPStatus: MCPDegraded})
+
+	connectingHint := hintLineC(stripAnsiC(connecting))
+	connectedHint := hintLineC(stripAnsiC(connected))
+	if !strings.Contains(connectingHint, "MCP") || !strings.Contains(connectedHint, "MCP") {
+		t.Fatalf("MCP status missing from hint row: connecting=%q connected=%q", connectingHint, connectedHint)
+	}
+	if strings.Contains(connectingHint, "Connecting") || strings.Contains(connectedHint, "Connected") {
+		t.Fatalf("MCP hint must stay compact: connecting=%q connected=%q", connectingHint, connectedHint)
+	}
+	if strings.Count(connecting, "\n") != strings.Count(connected, "\n") {
+		t.Fatal("MCP color-state swap changed composer height")
+	}
+	if connecting == connected {
+		t.Fatal("connecting and connected MCP states must use distinct styling")
+	}
+	if degraded == connected || !strings.Contains(hintLineC(stripAnsiC(degraded)), "● MCP") {
+		t.Fatal("degraded MCP state must use the compact red-dot status")
 	}
 }
 

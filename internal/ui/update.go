@@ -82,30 +82,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MCPConnectedMsg:
 		m.degraded = false
-		// Surface the link as a TOP status note (green "● Connected to Daintree MCPs"), not a
-		// permanent footer segment: the assistant exists to drive Daintree over MCP, so the
-		// connection is worth announcing ONCE, right under the masthead. The plural "MCPs"
-		// covers BOTH servers the assistant connects to — the Daintree control-plane MCP
-		// (this message) and the documentation MCP (connected in parallel during boot). (The
-		// footer only flags the link BY EXCEPTION when down.)
-		//
-		// But ONLY while the transcript is still just the masthead — before any turn has run.
-		// The boot connect is async (bootstrapCmd → MCPConnectedMsg) and the raw splash hands
-		// off before slow discovery resolves, so the user may already have run a turn that
-		// SUCCESSFULLY called an MCP tool. Notes commit to scrollback in transcript order, so
-		// appending the banner after that turn would land it mid-transcript — a confusing
-		// "just connected" line below a turn that already proved the link was up. If work has
-		// started, stay silent: m.degraded is false and the footer reflects the link by
-		// exception, so a live connection needs no late banner. (In the normal/idle case the
-		// transcript is still empty here, so the banner shows and commits under the masthead.)
-		if !m.transcriptHasWork() {
-			m.addNote(NoteSuccess, "Connected to Daintree MCPs")
-		}
 		return m.onMcpResolved()
 
 	case MCPDegradedMsg:
 		m.degraded = true
-		m.addNote(NoteWarn, "Daintree MCP degraded — "+msg.Reason)
 		return m.onMcpResolved()
 
 	case ProjectNameMsg:
@@ -514,15 +494,6 @@ func (m *Model) addSeverityNote(level NoteLevel, sev domain.Severity, text strin
 // committing directly under it rather than below a turn the user already ran. It scans
 // appended-but-not-yet-committed cells too (committed cells stay in m.transcript, tracked
 // by a cursor), so it stays correct even after early commits.
-func (m Model) transcriptHasWork() bool {
-	for _, c := range m.transcript {
-		if c.Turn != nil || c.Command != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // afterStateChange is the common tail: schedule the next scrollback commit (if the
 // frontier advanced), incrementally flush the active turn's newly-final rows to
 // native scrollback (keeps the live View ~constant-height — see flush.go), and update

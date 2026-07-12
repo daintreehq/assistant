@@ -99,6 +99,25 @@ func TestResize_LaterResizeSchedulesNuclearRedraw(t *testing.T) {
 	}
 }
 
+func TestResize_DuplicateSizeFromProjectRevealIsIgnored(t *testing.T) {
+	m := bootToSteadyState(t)
+	beforePending := m.resizePending
+	beforeRedraw := m.redrawNonce
+	beforeArmed := m.commitArmed
+
+	next, cmd := step(t, m, tea.WindowSizeMsg{Width: m.columns, Height: m.rows})
+	mm := asModel(t, next)
+	if cmd != nil {
+		t.Fatal("an identical PTY size reassertion must not schedule a redraw")
+	}
+	if mm.resizePending != beforePending || mm.redrawNonce != beforeRedraw {
+		t.Fatal("an identical PTY size reassertion must not enter the nuclear-redraw path")
+	}
+	if mm.commitArmed != beforeArmed || mm.redrawPending {
+		t.Fatal("an identical PTY size reassertion must not disturb commit state")
+	}
+}
+
 // A CommitArmMsg that fires INSIDE a resize's disarm window (Init's 60ms arm
 // tick racing the 150ms redraw debounce) must not re-arm commits: a commit
 // landing before the nuclear redraw would Println against pre-redraw geometry

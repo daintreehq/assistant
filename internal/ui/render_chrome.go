@@ -207,10 +207,8 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	}
 	var segs []string
 
-	// MCP connection — surfaced BY EXCEPTION only. A healthy link is announced once as a
-	// top status note when it settles ("● Connected to Daintree MCP", see update.go), so the
-	// always-visible footer stays quiet while connected; it speaks only when the link is DOWN
-	// (a persistent condition the operator must see), never a steady-state healthy badge.
+	// Legacy/general callers may still supply degraded MCP state here. The cockpit's
+	// primary path uses compact composer status plus the prominent warning in view.go.
 	if p.Degraded {
 		segs = append(segs, th.Warning().Render(g.Alert+" Daintree MCP unavailable"))
 	}
@@ -339,7 +337,7 @@ func renderNoteCell(th theme.Theme, n *NoteCell, width int) string {
 		glyph = attentionSeverityGlyph(g, n.Severity)
 	}
 	// Tone the │ continuation spine with the note tone (green info / red error)
-	// instead of flat muted gray — matches the greenish MCP-connected note.
+	// instead of flat muted gray — matches the greenish MCP-connected row.
 	cont := styleFor(th, tone, g.Continuation)
 	return truncateCells(cont+styleFor(th, tone, glyph)+" "+th.Body().Render(n.Text), width)
 }

@@ -47,16 +47,16 @@ type scrollbackQueue struct {
 	resetKey   int  // clearNonce + redrawNonce; a change re-arms the cursor + header
 	inFlight   bool // a commit is awaiting its ack
 	// inFlightCell is the transcript index of the cell whose commit is in flight, or -1
-	// (none, or the masthead). The live View drops this cell the moment it is SELECTED —
-	// not when its ack lands — so the footer shrinks BEFORE the barrier's Printlns run.
-	// Order matters for the host viewport: ultraviolet repaints a shrunken inline view
-	// top-anchored (old origin, erase below), which strands the footer above dead blank
-	// rows; a subsequent insertAbove slides the view back down onto the terminal's
-	// bottom row. Shrink-then-print therefore re-pins the composer at the bottom, while
-	// print-then-shrink (the old ack-time drop) left it stranded above dead scroll area
-	// after every turn (the 2026-07-11 "extra scroll area below the composer" report).
+	// (none, or the masthead). Turns, commands, and large notes leave the live View at
+	// selection time so the footer shrinks BEFORE Println; short notes stay through the
+	// barrier so their ack creates an observable post-print repaint (see below).
 	inFlightCell int
-	gen          int // commit generation (#4); bumped on every reset, stamped on each block
+	// dropInFlightCell selects the geometry-safe early-drop path. Short system notes
+	// deliberately remain visible through the barrier: if an idle startup note is
+	// removed before it ever renders, the footer View is identical before and after
+	// Println, Bubble Tea skips the repaint, and the composer vanishes until a keypress.
+	dropInFlightCell bool
+	gen              int // commit generation (#4); bumped on every reset, stamped on each block
 }
 
 // release clears the in-flight claim (and the live-View cell drop that rides it).
@@ -65,6 +65,7 @@ type scrollbackQueue struct {
 func (q *scrollbackQueue) release() {
 	q.inFlight = false
 	q.inFlightCell = -1
+	q.dropInFlightCell = false
 }
 
 // applyResetKey re-arms the queue when the reset key changes (a /clear or resize
@@ -126,6 +127,7 @@ func (q *scrollbackQueue) nextCommit(
 		blk.Gen = q.gen
 		q.inFlight = true
 		q.inFlightCell = -1 // the masthead is not a transcript cell — nothing leaves the footer
+		q.dropInFlightCell = false
 		return commitCmd(blk, selectionBound)
 	}
 	// 2. Sealed transcript cells in index order from the cursor.
@@ -138,10 +140,15 @@ func (q *scrollbackQueue) nextCommit(
 		blk := sealedBlock(i)
 		blk.Gen = q.gen
 		q.inFlight = true
-		// Drop the cell from the live View NOW (liveCellsView skips inFlightCell): the
-		// footer shrink flushes during the render barrier, and the Printlns that follow
-		// re-pin the shortened footer to the terminal's bottom row (see the field doc).
 		q.inFlightCell = i
+		text := blk.Rendered
+		if text == "" {
+			text = blk.Plain
+		}
+		// Turns and command cards can occupy far more live rows than their immutable
+		// commit tail suggests, so they always take the early-drop geometry path.
+		// Only genuinely short system notes stay for the distinct barrier frame.
+		q.dropInFlightCell = cells[i].Note == nil || lineCount(text) > repinDebtCap
 		return commitCmd(blk, selectionBound)
 	}
 	return nil

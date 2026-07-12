@@ -1050,8 +1050,19 @@ func (m Model) onAttention(msg AttentionBatchMsg) (tea.Model, tea.Cmd) {
 // --- resize / redraw ---
 
 func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	// PTY hosts may re-assert the current grid when a cached project view is
+	// revealed. node-pty delivers that as SIGWINCH and Bubble Tea emits another
+	// WindowSizeMsg even though no geometry changed. Treating the duplicate as a
+	// real resize runs the destructive clear + transcript replay below; on a
+	// project switch that races the host's xterm repaint and can leave the live
+	// footer blank until the next keypress. The first size still has to pass
+	// through so sizedOnce and the splash hand-off validation are established.
+	unchanged := m.sizedOnce && msg.Width == m.columns && msg.Height == m.rows
 	m.columns = msg.Width
 	m.rows = msg.Height
+	if unchanged {
+		return m, nil
+	}
 	// The FIRST size normally just establishes geometry (nothing is committed yet at
 	// boot, so there is nothing to redraw) — UNLESS a boot hand-off frame was painted
 	// and this size disagrees with the dims it was painted at. Then the terminal was

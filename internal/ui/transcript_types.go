@@ -13,7 +13,7 @@ const (
 	NoteInfo NoteLevel = iota
 	NoteWarn
 	NoteError
-	NoteSuccess // green ● — a settled-good event (e.g. "Connected to Daintree MCP")
+	NoteSuccess // green ● — a settled-good operational event
 )
 
 // TurnState is the lifecycle of a turn cell. A turn seals (commits to scrollback)

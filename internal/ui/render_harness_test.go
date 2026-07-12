@@ -100,7 +100,7 @@ func drainCommits(t *testing.T, m Model) Model {
 // bootToSteadyState drives launch → steady-state cockpit and returns the Model with the
 // masthead committed and the composer live. The program opens in the cockpit; the only
 // gate on the first scrollback commit is CommitArmMsg (one render cycle in — see
-// scheduleCommit). MCP/project/snapshot messages add the connected note + dashboard.
+// scheduleCommit). MCP/project/snapshot messages update live connection state + dashboard.
 func bootToSteadyState(t *testing.T) Model {
 	t.Helper()
 	m := harnessModel()
