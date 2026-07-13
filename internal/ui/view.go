@@ -35,14 +35,6 @@ func (m Model) View() tea.View {
 	if m.footerRows != nil {
 		*m.footerRows = lineCount(s)
 	}
-	// Baseline-repaint tag (see softBaselineRedraw): once mcpRepaintView is set, append a
-	// zero-cell SGR reset AFTER the height is measured. It changes View.Content's string
-	// identity so the post-ClearScreen flush can't be optimized away as an unchanged frame,
-	// without adding a cell or a row. Durable and visually inert; skipped on an empty footer
-	// (a quitting/cleared View must stay exactly "").
-	if m.mcpRepaintView && s != "" {
-		s += "\x1b[0m"
-	}
 	v.SetContent(s)
 	v.WindowTitle = m.windowTitle()
 	return v

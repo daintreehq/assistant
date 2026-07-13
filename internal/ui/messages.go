@@ -38,8 +38,7 @@ type MCPDegradedMsg struct {
 
 // ProjectNameMsg carries the authoritative project name from Daintree's
 // actions.getContext (or an empty Name when the fetch gave up / the link is down).
-// It closes the projectSettled boot gate: the masthead commits to scrollback ONCE on
-// the boot hand-off, so the name must be resolved before that first paint.
+// It closes the projectSettled boot gate and updates later redraws/session metadata.
 type ProjectNameMsg struct {
 	Name string
 }
@@ -252,16 +251,3 @@ type QuitArmExpireMsg struct{ Gen int }
 // the masthead + whole transcript fresh at the new width; the transcript model is
 // left intact (separate from /clear). Nonce dedupes a drag storm.
 type RedrawMsg struct{ Nonce int }
-
-// mcpRedrawMsg fires the one-shot baseline repaint after the MCP connection first
-// settles (see Model.mcpBaselineRedrawDone). Debounced off the resolve event so it
-// lands on a settled frame; the handler re-arms (a fresh nonce) until the cockpit has
-// settled (readyForBaselineRedraw). Nonce dedupes against a superseding arm.
-type mcpRedrawMsg struct{ Nonce int }
-
-// mcpRepaintViewMsg is the SECOND half of the baseline repaint (softBaselineRedraw):
-// it lands right after tea.ClearScreen and durably flips Model.mcpRepaintView so the
-// next View() carries a zero-cell content tag. That tag changes View.Content's string
-// identity — the only way to force Bubble Tea's inline renderer past its unchanged-
-// frame flush skip so the pending erase actually emits a full live-region repaint.
-type mcpRepaintViewMsg struct{}

@@ -90,8 +90,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ProjectNameMsg:
 		// The authoritative project name resolved (or the fetch gave up / the link is
-		// down). The masthead is committed to scrollback ONCE on the boot hand-off, so
-		// the name must be in BEFORE the first paint — this is the third boot gate.
+		// down). If the splash prefetch did not already supply it, retain it for later
+		// redraws and session metadata.
 		if msg.Name != "" {
 			m.masthead.ProjectName = msg.Name
 		}
@@ -259,16 +259,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RedrawMsg:
 		return m.onRedraw(msg)
-
-	case mcpRedrawMsg:
-		return m.onMcpRedraw(msg)
-
-	case mcpRepaintViewMsg:
-		// Second half of the baseline repaint: durably flip the View-content tag that
-		// forces the post-ClearScreen flush past the unchanged-frame skip (see
-		// softBaselineRedraw). Left set — a harmless trailing SGR reset.
-		m.mcpRepaintView = true
-		return m, nil
 
 	case LogMsg:
 		m.addNote(msg.Level, msg.Text)

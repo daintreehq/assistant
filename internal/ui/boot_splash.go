@@ -20,6 +20,14 @@ const (
 	// scrollback. Explicit user-requested clear/redraw actions own any scrollback wipe.
 	splashViewportReset = "\x1b[2J\x1b[H"
 	splashAbortCleanup  = "\x1b[?25h" + splashViewportReset
+	// Daintree's renderer reconciliation watchdog runs every three seconds. On a
+	// cold assistant mount it can discover that xterm's provisional grid differs
+	// from the already-correct PTY grid, then reflow xterm without sending SIGWINCH
+	// (the PTY resize is deduplicated because its dimensions did not change). An
+	// inline renderer cannot observe that cursor move. Keep the directly-painted
+	// splash up through the first sweep, plus a small scheduling margin, so Bubble
+	// Tea establishes its relative cursor origin only after host geometry settles.
+	embeddedHostGeometrySettle = 3500 * time.Millisecond
 )
 
 // boot_splash.go plays the startup animation DIRECTLY to the terminal, BEFORE the
@@ -44,30 +52,29 @@ const (
 // terminal is too small for the 48×18 mark. Ctrl-C / ctx cancellation aborts cleanly,
 // restoring the cursor and leaving a clean screen for BT.
 //
-// When the full animation completes, handoffFrame is called with the FRESHLY measured
-// terminal dimensions and written immediately under synchronized output. That removes
-// the visible blank interval between the host-owned splash and Bubble Tea's first
-// renderer tick. The return value reports whether that hand-off frame was painted, and
-// at which dimensions (0×0 when not painted).
+// When the full animation completes, onComplete is called with the freshly measured
+// terminal dimensions, then the viewport is cleared for Bubble Tea. The cockpit is not
+// pre-painted here: the embedded Daintree host can reflow xterm during project load, and
+// an absolute cursor park would leave Bubble Tea tracking a stale inline origin.
 //
 // The terminal size is re-measured EVERY frame, not once: an embedded pane (the
 // Daintree sidebar) can be resized by its host mid-animation — layout hydration,
 // project switch-back reveal — and a frame rendered for the old width autowraps in
 // the new one, stranding mis-wrapped rows the inline renderer can never repaint.
 // Each frame is a full clear+repaint, so rendering against the current width makes
-// the animation self-healing; the hand-off frame gets the same treatment.
+// the animation self-healing.
 func playBootSplash(
 	ctx context.Context,
 	w io.Writer,
 	th theme.Theme,
-	handoffFrame func(cols, rows int) string,
-) (painted bool, paintedCols, paintedRows int) {
+	onComplete func(cols, rows int),
+) {
 	if os.Getenv("DAINTREE_ASSISTANT_NO_SPLASH") != "" {
-		return false, 0, 0
+		return
 	}
 	cols, rows, ok := terminalSize(w)
 	if !ok || cols <= SplashWidth || rows < SplashHeight+2 {
-		return false, 0, 0 // too small / not a real terminal — skip rather than clip the mark
+		return // too small / not a real terminal — skip rather than clip the mark
 	}
 
 	// stdin is still cooked here (BT hasn't taken the terminal), so a Ctrl-C delivers
@@ -76,14 +83,8 @@ func playBootSplash(
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	handoffPainted := false
 	_, _ = io.WriteString(w, "\x1b[?25l") // hide cursor for the draw
-	defer func() {
-		if handoffPainted {
-			return
-		}
-		_, _ = io.WriteString(w, splashAbortCleanup) // restore cursor + clean viewport for BT
-	}()
+	defer func() { _, _ = io.WriteString(w, splashAbortCleanup) }()
 
 	// Frames are paced against ABSOLUTE deadlines from a single start instant, not a
 	// fixed post-write delay: a per-frame `time.After(frameDelay)` stacks the render/
@@ -104,69 +105,52 @@ func playBootSplash(
 			cols, rows = c, r
 		}
 		if cols <= SplashWidth || rows < SplashHeight+2 {
-			return false, 0, 0
+			return
 		}
 		_, _ = io.WriteString(w, renderSplashFrame(th, i, cols))
 		if wait := time.Until(start.Add(time.Duration(i+1) * frameDelay)); wait > 0 {
 			select {
 			case <-sigCtx.Done():
-				return false, 0, 0
+				return
 			case <-time.After(wait):
 			}
 		} else if sigCtx.Err() != nil {
-			return false, 0, 0 // behind schedule: still honor an abort between frames
+			return // behind schedule: still honor an abort between frames
 		}
 	}
 	// Hold the finished logo (the linger) before handing off to the cockpit; the hold
 	// ends at the same absolute origin (start + draw + linger) so the whole splash
 	// keeps its designed duration.
-	lingerUntil := start.Add(time.Duration(SplashFrames)*frameDelay + time.Duration(lingerMs)*time.Millisecond)
+	lingerUntil := start.Add(bootSplashDuration())
 	if wait := time.Until(lingerUntil); wait > 0 {
 		select {
 		case <-sigCtx.Done():
-			return false, 0, 0
+			return
 		case <-time.After(wait):
 		}
 	} else if sigCtx.Err() != nil {
-		return false, 0, 0 // behind schedule: still honor an abort before the handoff
+		return // behind schedule: still honor an abort before splash completion
 	}
-	// Measure ONCE more right before the hand-off: the linger is the longest
-	// write-quiet window in the whole boot, so a host-side resize is most likely
-	// to have landed here. The hand-off frame must be laid out (wrapped, cursor
-	// parked) for the terminal as it IS, not as it was when the splash began.
+	// Measure once more after the linger, the longest write-quiet window in boot, so
+	// Bubble Tea starts from the host's latest dimensions.
 	if c, r, mok := terminalSize(w); mok {
 		cols, rows = c, r
 	}
-	frame := ""
-	if handoffFrame != nil {
-		frame = handoffFrame(cols, rows)
+	if onComplete != nil {
+		onComplete(cols, rows)
 	}
-	if frame == "" {
-		return false, 0, 0
-	}
-	// A frame taller than the terminal scrolls while printing, so the absolute
-	// ESC[row;1H cursor park lands on the wrong physical row and Bubble Tea
-	// adopts a wrong inline origin — and because the recorded hand-off dims
-	// then MATCH BT's first size probe, no recovery redraw ever fires. Skip the
-	// hand-off instead (the deferred cleanup leaves a clean slate); the
-	// no-hand-off boot path commits the masthead through the queue, which is
-	// height-safe by construction.
-	if handoffFrameRows(frame) > rows {
-		return false, 0, 0
-	}
-	if _, err := io.WriteString(w, frame); err != nil {
-		return false, 0, 0
-	}
-	handoffPainted = true
-	return true, cols, rows
 }
 
-// handoffFrameRows is the number of physical terminal rows the hand-off frame
-// occupies when printed. Frame content is pre-wrapped to the measured width
-// (bootHandoffFrame renders at the fresh cols), so CRLF count + 1 is the
-// physical row count; the trailing cursor-park/sync sequences add no rows.
-func handoffFrameRows(frame string) int {
-	return strings.Count(frame, "\r\n") + 1
+// bootSplashDuration keeps ordinary terminal startup at the designed ~740ms,
+// extending only launches inside Daintree's embedded terminal. DAINTREE_WINDOW_ID
+// is injected by that host and already controls other embedded-pane behavior.
+func bootSplashDuration() time.Duration {
+	d := time.Duration(SplashFrames)*(time.Second/time.Duration(splashFPS)) +
+		time.Duration(lingerMs)*time.Millisecond
+	if os.Getenv("DAINTREE_WINDOW_ID") != "" && d < embeddedHostGeometrySettle {
+		return embeddedHostGeometrySettle
+	}
+	return d
 }
 
 // terminalSize returns the dimensions of a terminal-backed writer.
@@ -180,46 +164,6 @@ func terminalSize(w io.Writer) (cols, rows int, ok bool) {
 		return 0, 0, false
 	}
 	return cols, rows, true
-}
-
-// bootHandoffFrame renders the first steady cockpit screen before Bubble Tea starts.
-// It reuses the normal masthead and footer renderers, then parks the physical cursor
-// at the footer origin. Bubble Tea's inline renderer treats that cursor line as row 0,
-// so its first clear/redraw only touches the already pre-painted footer; the masthead
-// above it remains stable and the queue can consider it committed.
-func (m Model) bootHandoffFrame() string {
-	header := m.headerBlock().Rendered
-	footer := m.View().Content
-	return renderBootHandoffFrame(header, footer)
-}
-
-func renderBootHandoffFrame(header, footer string) string {
-	if header == "" && footer == "" {
-		return ""
-	}
-	footerTop := 1
-	if header != "" {
-		footerTop = lineCount(header) + 1
-	}
-
-	var b strings.Builder
-	b.WriteString("\x1b[?2026h") // begin synchronized update
-	b.WriteString("\x1b[?25l")   // keep cursor hidden across the BT hand-off
-	b.WriteString(splashViewportReset)
-	if header != "" {
-		b.WriteString(toCRLF(header))
-		b.WriteString("\r\n")
-	}
-	b.WriteString(toCRLF(footer))
-	b.WriteString("\x1b[")
-	b.WriteString(itoa(footerTop))
-	b.WriteString(";1H")
-	b.WriteString("\x1b[?2026l") // end synchronized update
-	return b.String()
-}
-
-func toCRLF(s string) string {
-	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
 // renderSplashFrame builds one full frame: a synchronized-output update (so the per-

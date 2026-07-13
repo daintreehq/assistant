@@ -96,7 +96,7 @@ type Model struct {
 
 	// boot splash overlay (never gates input).
 	//
-	// The boot hand-off is a 3-GATE LOCK matching the original controller
+	// The legacy in-program boot lifecycle is a 3-GATE LOCK matching the original controller
 	// (useDaintreeController): booting flips false ONLY once startupSettled (MCP
 	// connect resolved — connected or degraded — and the first dashboard snapshot is
 	// in) AND animationDone (the splash draw + linger finished) AND projectSettled
@@ -104,7 +104,7 @@ type Model struct {
 	// up) are ALL true. A fast connect can't cut the animation short and a slow one
 	// can't flash a half-built cockpit; the 8s bootCap is the backstop so a hung
 	// startup never strands the user on the splash. The masthead is committed to
-	// scrollback only AFTER the hand-off (see scheduleCommit), exactly like the
+	// scrollback only after boot (see scheduleCommit), exactly like the
 	// original withholding the header (booting ? null) until the cockpit is up.
 	booting        bool
 	splash         splashModel
@@ -184,33 +184,7 @@ type Model struct {
 	// state-ordered, and re-arming mid-window lets a commit Println against
 	// the pre-redraw geometry (#1613) before the nuclear redraw wipes it.
 	redrawPending bool
-	// Dimensions the pre-program boot hand-off frame was PAINTED at (run.go), or
-	// 0×0 when no hand-off frame was painted (splash skipped / non-TTY). The
-	// first WindowSizeMsg is only swallowed when it MATCHES these dims — a host
-	// that resized the terminal during the splash (an embedded pane hydrating
-	// its layout) leaves the painted frame stale, and the mismatch must trigger
-	// the nuclear redraw that a plain first-size swallow would skip (onResize).
-	handoffCols int
-	handoffRows int
-	attentionN  int
-
-	// One-shot "baseline" repaint fired after the MCP connection first settles: a
-	// non-destructive clean "starting point" (softBaselineRedraw — a full live-region
-	// repaint, no host wipe) over any splash/hand-off residue. The live boot lifecycle
-	// is vestigial (splash plays pre-program), so this is the only post-connect repaint
-	// and runs on every launch. Latched (…Done) so a degraded→connected pair or a
-	// reconnect repaints at most once; the tick (…Pending nonce) defers to a settled
-	// frame and re-arms (up to mcpRedrawMaxTries, counted by …Tries) while a turn is
-	// streaming or a commit is draining, so the one shot reflects the real cockpit.
-	mcpBaselineRedrawDone bool
-	mcpRedrawPending      int
-	mcpRedrawTries        int
-	// mcpRepaintView is the durable content tag that makes the baseline repaint emit:
-	// once set (by mcpRepaintViewMsg, right after tea.ClearScreen), View() appends a
-	// zero-cell SGR reset so View.Content's identity differs for one frame, defeating
-	// the renderer's unchanged-frame flush skip. Left set forever (a harmless trailing
-	// reset), so there is no revert frame and no second repaint.
-	mcpRepaintView bool
+	attentionN    int
 
 	// spinner frame (advanced on a periodic tick) for animated active rows. The tick only
 	// runs while a turn is in flight (spinnerRunning) — idle, it lapses so the process can
@@ -260,7 +234,7 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 		summarizedTerminals: map[string]struct{}{},
 		// The splash is played BEFORE the program starts (see boot_splash.go), so the
 		// program begins already in the cockpit: View() is the short footer from frame
-		// one, and the masthead commits cleanly to scrollback (no tall-View handoff).
+		// one, and the masthead commits cleanly to scrollback (no tall live View).
 		booting: false,
 		masthead: mastheadParams{
 			Version:     UIVersion,

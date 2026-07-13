@@ -258,22 +258,27 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 }
 
 // TestPTYSplashConnectKeepsFooter is the real-terminal regression matrix for the
-// startup failure where MCP completion followed the raw splash hand-off and the
+// startup failure where MCP completion followed the raw splash and the
 // composer vanished until the next keypress. It spans both sides of the ~740ms
 // splash boundary, the reported embedded-pane dimensions, a host-style redundant
 // winsize reassertion, and delayed completion. Healthy MCP startup must stay silent.
 func TestPTYSplashConnectKeepsFooter(t *testing.T) {
 	t.Run("immediate_embedded_pane", func(t *testing.T) {
-		runSplashConnectKeepsFooter(t, 0, 29, 94, true)
+		runSplashConnectKeepsFooter(t, 0, 29, 94, true, true)
 	})
 	t.Run("finishes_under_splash", func(t *testing.T) {
-		runSplashConnectKeepsFooter(t, 450*time.Millisecond, 40, 100, false)
+		runSplashConnectKeepsFooter(t, 450*time.Millisecond, 40, 100, false, false)
 	})
-	t.Run("just_after_handoff", func(t *testing.T) {
-		runSplashConnectKeepsFooter(t, 900*time.Millisecond, 29, 94, false)
+	t.Run("just_after_splash", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 900*time.Millisecond, 29, 94, false, false)
 	})
 	t.Run("delayed", func(t *testing.T) {
-		runSplashConnectKeepsFooter(t, 2*time.Second, 40, 100, false)
+		runSplashConnectKeepsFooter(t, 2*time.Second, 40, 100, false, false)
+	})
+	// Mirrors the recording: Daintree's 3s geometry sweep lands while MCP discovery
+	// is still pending, then the status changes after Bubble Tea starts.
+	t.Run("delayed_embedded_pane", func(t *testing.T) {
+		runSplashConnectKeepsFooter(t, 5*time.Second, 29, 94, true, true)
 	})
 }
 
@@ -281,6 +286,7 @@ func runSplashConnectKeepsFooter(
 	t *testing.T,
 	connectDelay time.Duration,
 	rows, cols uint16,
+	embedded bool,
 	reassertWinsize bool,
 ) {
 	if testing.Short() {
@@ -312,11 +318,13 @@ func runSplashConnectKeepsFooter(
 		"DAINTREE_ASSISTANT_DEBUG_LOG=1", // matches the reported logging-badge geometry
 		"DAINTREE_ASSISTANT_NO_DAEMON=1", // isolate this process's single boot attempt
 		"DAINTREE_ASSISTANT_TIER=system",
-		"DAINTREE_WINDOW_ID=test-window", // exercise the embedded Daintree-pane gutter
 		"DAINTREE_MCP_URL="+mcpServer.url(),
 		"DAINTREE_MCP_TOKEN=fake-token",
 		"DAINTREE_DOCS_MCP_URL="+mcpServer.url(),
 	)
+	if embedded {
+		cmd.Env = append(cmd.Env, "DAINTREE_WINDOW_ID=test-window")
+	}
 
 	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 	if err != nil {
@@ -360,9 +368,9 @@ func runSplashConnectKeepsFooter(
 		return raw.Len()
 	}
 
-	// The raw hand-off must expose a live composer before any user input. For a
+	// Bubble Tea's first frame must expose a live composer before any user input. For a
 	// delayed connection, prove this occurs while discovery is still pending. For
-	// an immediate connection, completion can beat the hand-off, so the composer
+	// an immediate connection, completion can beat the first frame, so the composer
 	// alone is the pre-completion invariant.
 	if !waitForPTY(10*time.Second, func() bool {
 		visible := screen.VisiblePlain()
@@ -378,6 +386,7 @@ func runSplashConnectKeepsFooter(
 	if got := rawCount("\x1b[2J\x1b[H"); got < 20 {
 		t.Fatalf("splash logo was not rendered (viewport-reset frames=%d, want >=20)", got)
 	}
+	clearsAfterCockpit := rawCount("\x1b[2J")
 	if !waitForPTY(15*time.Second, func() bool {
 		return mcpServer.agentListCallCount() == 1
 	}) {
@@ -405,6 +414,12 @@ func runSplashConnectKeepsFooter(
 	if !strings.Contains(visible, "MCP") {
 		t.Fatalf("compact MCP status missing from composer hint row:\n%s", screen.Plain())
 	}
+	if got := rawCount("\x1b[2J"); got != clearsAfterCockpit {
+		t.Fatalf("startup issued a viewport clear after Bubble Tea took ownership: clears %d→%d", clearsAfterCockpit, got)
+	}
+	if got := rawCount(mastheadText); got != 1 {
+		t.Fatalf("masthead committed %d times, want exactly once", got)
+	}
 	// Only type AFTER the regression assertion. Earlier input can mask a missing
 	// first paint by supplying the repaint itself.
 	const draft = "draft after connect"
@@ -418,174 +433,11 @@ func runSplashConnectKeepsFooter(
 		t.Fatalf("draft appears on %d composed lines, want one live composer (no frozen copy):\n%s", got, screen.Plain())
 	}
 	if got := mcpServer.agentListCallCount(); got != 1 {
-		t.Fatalf("startup discovery ran agent.listAvailable %d times, want exactly 1 across splash hand-off", got)
+		t.Fatalf("startup discovery ran agent.listAvailable %d times, want exactly 1 across splash", got)
 	}
 
 	// Ctrl+C is independent of the draft buffer and gives the staged shutdown its two
 	// presses without changing the footer before the regression assertions above.
-	_, _ = ptm.Write([]byte{3, 3})
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait() }()
-	select {
-	case <-waitErr:
-	case <-time.After(10 * time.Second):
-		_ = cmd.Process.Kill()
-		<-waitErr
-		t.Error("cockpit did not exit within 10s after staged Ctrl+C")
-	}
-	_ = ptm.Close()
-	drainWG.Wait()
-	runtime.KeepAlive(ptm)
-}
-
-// TestPTYBaselineRepaintEmits proves the one-shot post-MCP baseline repaint
-// (softBaselineRedraw) actually EMITS a full live-region repaint rather than being a
-// silent no-op — the exact failure mode a bare tea.ClearScreen has (Bubble Tea skips
-// the flush on an unchanged frame). The discriminator: type a probe draft BEFORE the
-// connect, snapshot the raw stream, then let the connect settle. The status change is a
-// diff render that leaves the unchanged draft line alone, so the ONLY way the probe text
-// re-appears in the post-snapshot bytes is a full-footer repaint — which is exactly what
-// the ClearScreen + durable-content-tag sequence forces. It must do so WITHOUT an ESC[3J
-// scrollback wipe, without a second masthead commit, and without losing the draft.
-func TestPTYBaselineRepaintEmits(t *testing.T) {
-	if testing.Short() {
-		t.Skip("baseline-repaint PTY test allocates a real pseudoterminal and delayed MCP server")
-	}
-	bin := buildBinary(t)
-	backend := newFakeBackend(t)
-	// A generously delayed discovery leaves the composer interactive long enough to type
-	// the probe and snapshot the raw stream BEFORE the connect settles (and thus before
-	// the baseline repaint arms), with comfortable margin on loaded CI.
-	mcpServer := newFakeMCPWithAgentDelay(t, 2500*time.Millisecond)
-
-	const rows, cols = 40, 100
-	cmd := exec.Command(bin)
-	env := make([]string, 0, len(os.Environ())+14)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "DAINTREE_ASCII=") ||
-			strings.HasPrefix(kv, "DAINTREE_ASSISTANT_NO_SPLASH=") {
-			continue
-		}
-		env = append(env, kv)
-	}
-	stateDir := t.TempDir()
-	cmd.Env = append(env,
-		"LC_ALL=C.UTF-8",
-		"TERM=xterm-256color",
-		"DAINTREE_BACKEND_URL="+backend.baseURL(),
-		"DEEPSEEK_API_KEY=test-key",
-		"DAINTREE_ASSISTANT_STATE_DIR="+stateDir,
-		"DAINTREE_ASSISTANT_LOG_DIR="+stateDir+"/logs",
-		"DAINTREE_ASSISTANT_NO_DAEMON=1",
-		"DAINTREE_ASSISTANT_TIER=system",
-		"DAINTREE_MCP_URL="+mcpServer.url(),
-		"DAINTREE_MCP_TOKEN=fake-token",
-		"DAINTREE_DOCS_MCP_URL="+mcpServer.url(),
-	)
-
-	ptm, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
-	if err != nil {
-		t.Fatalf("start binary under pty: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = ptm.Close()
-	})
-
-	screen := newVTScreen(rows, cols)
-	var rawMu sync.Mutex
-	var raw bytes.Buffer
-	var drainWG sync.WaitGroup
-	drainWG.Add(1)
-	go func() {
-		defer drainWG.Done()
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := ptm.Read(buf)
-			if n > 0 {
-				chunk := append([]byte(nil), buf[:n]...)
-				screen.Feed(chunk)
-				rawMu.Lock()
-				raw.Write(chunk)
-				rawMu.Unlock()
-			}
-			if readErr != nil {
-				return
-			}
-		}
-	}()
-	rawLen := func() int {
-		rawMu.Lock()
-		defer rawMu.Unlock()
-		return raw.Len()
-	}
-	rawCount := func(sub string) int {
-		rawMu.Lock()
-		defer rawMu.Unlock()
-		return bytes.Count(raw.Bytes(), []byte(sub))
-	}
-	rawFrom := func(off int) []byte {
-		rawMu.Lock()
-		defer rawMu.Unlock()
-		return append([]byte(nil), raw.Bytes()[off:]...)
-	}
-
-	// Composer live before the connect settles.
-	if !waitForPTY(10*time.Second, func() bool {
-		return strings.Contains(screen.VisiblePlain(), composerGlyph)
-	}) {
-		t.Fatalf("composer did not become visible before connect:\n%s", screen.Plain())
-	}
-
-	// Type a unique probe draft and let its render settle.
-	const probe = "REPAINTPROBE7391"
-	if _, err := ptm.Write([]byte(probe)); err != nil {
-		t.Fatalf("type probe draft: %v", err)
-	}
-	if !waitForPTY(5*time.Second, func() bool {
-		return strings.Contains(screen.VisiblePlain(), probe)
-	}) {
-		t.Fatalf("probe draft never rendered:\n%s", screen.Plain())
-	}
-	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
-
-	// Snapshot AFTER the draft has settled but BEFORE the connect + baseline repaint.
-	before := rawLen()
-
-	// Wait DIRECTLY on the event we assert: the baseline repaint re-emitting the
-	// (unchanged) probe line into the post-snapshot stream. Waiting on this rather than a
-	// call-count or a fixed quiet window makes the test independent of the fake's timing
-	// (its counter increments at request-start, not completion). A status-only diff
-	// render leaves the probe row untouched, so only a full-footer repaint re-emits it —
-	// exactly what the ClearScreen + content-tag sequence forces. A bare-ClearScreen
-	// no-op never re-emits and this times out (verified: it fails there, passes here).
-	if !waitForPTY(20*time.Second, func() bool {
-		return bytes.Contains(rawFrom(before), []byte(probe))
-	}) {
-		t.Fatalf("baseline repaint did not re-emit the live footer (probe absent from post-connect output) — it was a no-op:\n%s", screen.Plain())
-	}
-	waitQuiet(rawLen, 300*time.Millisecond, 4*time.Second)
-
-	delta := rawFrom(before)
-	// Non-destructive: no scrollback wipe, no host-style viewport wipe.
-	if bytes.Contains(delta, []byte("\x1b[3J")) {
-		t.Fatal("baseline repaint destroyed native scrollback (ESC[3J)")
-	}
-	if bytes.Contains(delta, []byte("\x1b[2J")) {
-		t.Fatal("baseline repaint performed a host-style viewport wipe (ESC[2J)")
-	}
-	// Masthead committed exactly once across the whole session (no re-commit / duplicate).
-	if got := rawCount(mastheadText); got != 1 {
-		t.Fatalf("masthead committed %d times, want exactly 1 (no baseline re-commit)", got)
-	}
-	// The draft survived and is shown once (no frozen copy).
-	if !strings.Contains(screen.VisiblePlain(), probe) {
-		t.Fatalf("baseline repaint lost the in-progress draft:\n%s", screen.Plain())
-	}
-	if got := screen.CountLineSubstr(probe); got != 1 {
-		t.Fatalf("probe draft appears on %d composed lines, want exactly one live composer:\n%s", got, screen.Plain())
-	}
-
 	_, _ = ptm.Write([]byte{3, 3})
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()

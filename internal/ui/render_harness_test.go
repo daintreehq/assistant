@@ -129,13 +129,13 @@ func steadyStateView(t *testing.T) string {
 	return out
 }
 
-// TestSteadyStateShowsComposer is the regression lock for the boot-handoff bug: after
+// TestSteadyStateShowsComposer is the regression lock for the startup-render bug: after
 // the masthead commits to scrollback, the live footer must STILL render the composer
 // (prompt glyph) and must not collapse to empty/whitespace.
 func TestSteadyStateShowsComposer(t *testing.T) {
 	out := steadyStateView(t)
 	if strings.TrimSpace(ansi.Strip(out)) == "" {
-		t.Fatalf("steady-state View() is empty/whitespace — footer collapsed after boot handoff")
+		t.Fatalf("steady-state View() is empty/whitespace — footer collapsed after startup")
 	}
 	// The composer prompt glyph is the unambiguous "the composer is present" marker.
 	if !strings.Contains(out, composerPromptGlyph) {

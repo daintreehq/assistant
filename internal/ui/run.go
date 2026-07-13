@@ -29,9 +29,8 @@ func Run(ctx context.Context, a *app.App) error {
 
 	// Seed the first cockpit frame with the real terminal size when available, then use
 	// the splash duration to connect MCP, fetch the authoritative project name, and
-	// warm the Assistant backend. The hand-off frame is built at the end of the logo
-	// linger so it can include that name if it arrived in time; otherwise the stable
-	// placeholder remains.
+	// warm the Assistant backend. At the end of the logo linger, fold in any project
+	// name and final dimensions that arrived in time; otherwise keep the stable defaults.
 	if cols, rows, ok := terminalSize(os.Stdout); ok {
 		m.columns = cols
 		m.rows = rows
@@ -40,42 +39,30 @@ func Run(ctx context.Context, a *app.App) error {
 	bootPrefetch := startBootPrefetch(ctx, a)
 	m.bootPrefetch = bootPrefetch
 	defer bootPrefetch.stop()
-	handoffFrame := func(cols, rows int) string {
-		debuglog.BootTrace("boot.splash.handoff")
+	finishSplash := func(cols, rows int) {
+		debuglog.BootTrace("boot.splash.complete")
 		if name := bootPrefetch.projectName(); name != "" {
 			m.masthead.ProjectName = name
 		}
 		bootPrefetch.backendHandshakeComplete()
-		// Lay the frame out for the terminal as it IS at hand-off time. The splash
-		// re-measures every frame (boot_splash.go) — a host resize mid-animation
-		// (embedded-pane layout hydration) would otherwise leave the masthead and
-		// footer wrapped for a width the terminal no longer has, autowrapping the
-		// pre-painted rows and parking Bubble Tea's inline origin on the wrong row.
+		// Seed Bubble Tea from the terminal as it is when the splash completes. The splash
+		// re-measures every frame because embedded-pane layout can hydrate mid-animation.
 		if cols > 0 && rows > 0 {
 			m.columns = cols
 			m.rows = rows
 		}
 		m.syncComposer()
-		return m.bootHandoffFrame()
 	}
 
-	// Play the boot animation OUTSIDE Bubble Tea, then start the program with a stable
-	// short footer (see boot_splash.go for why this — not a tall animated View() — is
-	// the correct pattern for an inline cockpit). No-op on non-TTY / tiny terminals.
-	if painted, paintedCols, paintedRows := playBootSplash(ctx, os.Stdout, th, handoffFrame); painted {
-		defer io.WriteString(os.Stdout, "\x1b[?25h") // defensive if BT exits before its first cursor restore
-		// The hand-off frame includes the masthead above the live footer. Treat it as
-		// already committed so the first scrollback commit does not duplicate it; later
-		// redraws still reset and recommit through the normal queue path.
-		m.queue.headerDone = true
-		// Record the dims the frame was painted at: onResize compares the FIRST
-		// WindowSizeMsg against these and fires the nuclear redraw on a mismatch
-		// (the terminal changed between the hand-off write and BT's size probe).
-		m.handoffCols = paintedCols
-		m.handoffRows = paintedRows
-	} else {
-		m.syncComposer()
-	}
+	// Play the boot animation OUTSIDE Bubble Tea, then leave a clean viewport and let
+	// Bubble Tea establish the inline origin itself. Pre-painting the cockpit and parking
+	// the cursor at an absolute footer row made the renderer's origin depend on host
+	// geometry that xterm can reflow during Daintree's project-load reveal pass. Once
+	// the program starts, Bubble Tea exclusively owns the live region and the normal
+	// commit queue places the masthead above it.
+	playBootSplash(ctx, os.Stdout, th, finishSplash)
+	defer io.WriteString(os.Stdout, "\x1b[?25h")
+	m.syncComposer()
 
 	// progRef lets the confirm-hook closure reach the program that is created below
 	// (the one callback that can't ride the re-armed command, because the runtime

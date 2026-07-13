@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
@@ -357,7 +358,7 @@ func TestSplash_CentersHorizontally(t *testing.T) {
 
 func TestSplash_NarrowSkipsButStillCompletes(t *testing.T) {
 	// A terminal too narrow to hold the mark renders nothing — but the overlay must
-	// still mark itself tooSmall so the boot handoff fires its done path (never hangs).
+	// still mark itself tooSmall so the boot lifecycle takes its done path (never hangs).
 	s := newSplash(SplashWidth) // columns <= SplashWidth → too small
 	if !s.tooSmall {
 		t.Fatal("a too-narrow splash must flag tooSmall")
@@ -388,42 +389,6 @@ func TestSplash_AdvanceTicksThenLingers(t *testing.T) {
 	}
 }
 
-func TestBootHandoffFramePrepaintsCockpitAndParksAtFooter(t *testing.T) {
-	m := testModel(72)
-	m.rows = 30
-	m.syncComposer()
-
-	header := m.headerBlock().Rendered
-	frame := m.bootHandoffFrame()
-	plain := stripAnsi(frame)
-
-	if !strings.Contains(frame, "\x1b[?2026h") || !strings.Contains(frame, "\x1b[?2026l") {
-		t.Fatal("boot handoff frame must use synchronized output")
-	}
-	if !strings.Contains(frame, splashViewportReset) {
-		t.Fatal("boot handoff frame must clear the viewport and home the cursor before painting")
-	}
-	if strings.Contains(frame, "\x1b[3J") {
-		t.Fatal("boot handoff frame must preserve native terminal scrollback")
-	}
-	if !strings.Contains(plain, "Daintree Assistant") {
-		t.Fatalf("boot handoff frame missing masthead: %q", plain)
-	}
-	if !strings.Contains(plain, "Ask Daintree") {
-		t.Fatalf("boot handoff frame missing initial composer footer: %q", plain)
-	}
-	lines := strings.Split(strings.ReplaceAll(plain, "\r\n", "\n"), "\n")
-	headerLines := strings.Split(strings.TrimSuffix(stripAnsi(header), "\n"), "\n")
-	if len(lines) <= len(headerLines) || strings.TrimSpace(lines[len(headerLines)]) != "" {
-		t.Fatalf("boot handoff frame must reserve a blank line below the masthead, got %q", plain)
-	}
-
-	cursorAtFooter := "\x1b[" + itoa(lineCount(header)+1) + ";1H"
-	if !strings.Contains(frame, cursorAtFooter) {
-		t.Fatalf("boot handoff frame must park cursor at footer origin %q, frame %q", cursorAtFooter, frame)
-	}
-}
-
 func TestSplashAbortCleanupRestoresCursorWithoutErasingScrollback(t *testing.T) {
 	for _, want := range []string{"\x1b[?25h", "\x1b[2J", "\x1b[H"} {
 		if !strings.Contains(splashAbortCleanup, want) {
@@ -435,9 +400,18 @@ func TestSplashAbortCleanupRestoresCursorWithoutErasingScrollback(t *testing.T) 
 	}
 }
 
-func TestBootHandoffFrameEmpty(t *testing.T) {
-	if got := renderBootHandoffFrame("", ""); got != "" {
-		t.Fatalf("empty boot handoff frame = %q, want empty", got)
+func TestBootSplashDurationWaitsForEmbeddedHostGeometry(t *testing.T) {
+	t.Setenv("DAINTREE_WINDOW_ID", "")
+	normal := bootSplashDuration()
+	wantNormal := time.Duration(SplashFrames)*(time.Second/time.Duration(splashFPS)) +
+		time.Duration(lingerMs)*time.Millisecond
+	if normal != wantNormal {
+		t.Fatalf("ordinary splash duration = %s, want %s", normal, wantNormal)
+	}
+
+	t.Setenv("DAINTREE_WINDOW_ID", "window-1")
+	if got := bootSplashDuration(); got != embeddedHostGeometrySettle {
+		t.Fatalf("embedded splash duration = %s, want geometry-settle delay %s", got, embeddedHostGeometrySettle)
 	}
 }
 
@@ -528,17 +502,5 @@ func splashGlyphHorizontalCoverage(r rune) float64 {
 		return 1
 	default:
 		return 0
-	}
-}
-
-// A hand-off frame taller than the terminal scrolls while printing, breaking
-// the absolute cursor park — playBootSplash must skip it (handoffFrameRows
-// gates the write). Rows = CRLF count + 1; trailing park/sync sequences after
-// the last CRLF occupy the final row, adding none.
-func TestHandoffFrameRows(t *testing.T) {
-	frame := renderBootHandoffFrame("line1\nline2\nline3", "footer1\nfooter2")
-	// 3 header rows + 2 footer rows joined by single CRLFs = 5 physical rows.
-	if got := handoffFrameRows(frame); got != 5 {
-		t.Fatalf("handoffFrameRows = %d, want 5", got)
 	}
 }
