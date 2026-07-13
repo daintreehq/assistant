@@ -35,6 +35,14 @@ func (m Model) View() tea.View {
 	if m.footerRows != nil {
 		*m.footerRows = lineCount(s)
 	}
+	// A raw host wipe erases pixels Bubble Tea still believes are present. Its v2
+	// renderer skips a pending ClearScreen when the next View string and bounds match
+	// the previous frame, leaving the composer blank until a keypress changes content.
+	// redrawHostCmd sequences rendererRepaintMsg after the clear; toggling this
+	// zero-cell tag changes string identity without changing width, height, or pixels.
+	if m.rendererRepaintTag && s != "" {
+		s += "\x1b[0m"
+	}
 	v.SetContent(s)
 	v.WindowTitle = m.windowTitle()
 	return v

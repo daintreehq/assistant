@@ -553,21 +553,21 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	}})
 	// Wipe-then-recommit, the SAME ordered shape as onRedraw/completeBoot:
 	//
-	//  - hostClearCmd erases the host screen + scrollback. But that raw escape also wipes the
-	//    live footer (composer + status line) WITHOUT telling Bubble Tea — its diff renderer
-	//    still believes those cells are on screen, so it writes nothing for the unchanged
-	//    footer and the composer stays blank until the next content change (the user typing).
-	//    tea.ClearScreen resets BT's OWN cell buffer, forcing a full repaint so the composer
-	//    reappears immediately.
+	//  - hostClearCmd erases the host screen + scrollback. That raw escape also wipes the
+	//    live footer WITHOUT telling Bubble Tea. tea.ClearScreen marks BT's own buffer for
+	//    repaint, then rendererRepaintMsg toggles a zero-cell View tag: without that content
+	//    change Bubble Tea v2 skips the pending clear as an unchanged frame and the composer
+	//    stays blank until the user types.
 	//  - DISARM commits and re-arm them one cycle out (commitArmCmd): committing the masthead
 	//    in the same breath as tea.ClearScreen would tea.Println it before the footer has
 	//    re-flushed, laying it out at a stale height (charmbracelet/bubbletea#1613). The deferred
 	//    arm lets the footer settle first, then the masthead + card recommit above it.
 	//
-	// Sequence (NOT Batch) keeps the order: wipe → reset buffer → (deferred) recommit, so a
-	// stale commit can never print after the clear nor wipe a freshly committed masthead.
+	// Sequence (NOT Batch) keeps the order: wipe → reset buffer → force footer repaint →
+	// (deferred) recommit, so a stale commit cannot print after the clear or wipe a freshly
+	// committed masthead.
 	m.commitArmed = false
-	return m, tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
+	return m, redrawHostCmd()
 }
 
 // --- approval ---
@@ -1159,12 +1159,12 @@ func (m Model) nuclearRedraw() (tea.Model, tea.Cmd) {
 	// A resize changes the View dimensions, so the renderer's cell buffer is sized to
 	// the OLD geometry until it re-flushes. Recommitting the masthead immediately would
 	// tea.Println it at that stale height and wipe the footer (charmbracelet/bubbletea
-	// #1613). So: clear the host + reset BT's buffer
-	// (tea.ClearScreen), DISARM commits, and re-arm them one cycle out (commitArmCmd) —
-	// by which point the footer has re-flushed at the new size and the masthead recommits
-	// above a correctly-sized footer. See scheduleCommit.
+	// #1613). So: clear the host + reset BT's buffer, force a physically observable
+	// footer repaint (rendererRepaintMsg), DISARM commits, and re-arm them one cycle out
+	// (commitArmCmd) — by which point the footer has re-flushed at the new size and the
+	// masthead recommits above it. See scheduleCommit.
 	m.commitArmed = false
-	return m, tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
+	return m, redrawHostCmd()
 }
 
 // --- bootstrap / dashboard / boot gate ---

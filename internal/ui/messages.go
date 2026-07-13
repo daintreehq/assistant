@@ -55,6 +55,13 @@ type BootCapMsg struct{}
 // rather than wiping it (charmbracelet/bubbletea#1613). See scheduleCommit.
 type CommitArmMsg struct{}
 
+// rendererRepaintMsg is the post-clear half of a host redraw. Bubble Tea v2 can
+// optimize away tea.ClearScreen when View.Content and its bounds are unchanged,
+// even though hostClearCmd has already erased the physical terminal. Handling this
+// message toggles a zero-cell content tag so the next renderer flush cannot take
+// that equality fast path. It must be sequenced AFTER tea.ClearScreen.
+type rendererRepaintMsg struct{}
+
 // --- dashboard / operations snapshots ---
 
 // DashboardTickMsg is the ~1s poll that refreshes the operations deck + status

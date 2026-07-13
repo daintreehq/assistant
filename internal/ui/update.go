@@ -178,6 +178,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commitArmed = true
 		return m.afterStateChange(nil)
 
+	case rendererRepaintMsg:
+		// This message is deliberately sequenced after tea.ClearScreen (redrawHostCmd).
+		// Toggle rather than latch so every later resize/clear also changes the raw View
+		// string and forces its own physical footer repaint.
+		m.rendererRepaintTag = !m.rendererRepaintTag
+		return m, nil
+
 	case SplashDoneMsg:
 		// The splash draw + linger finished — one of the THREE boot gates (animationDone).
 		// Booting does NOT flip here on its own: it waits for startup + project to settle
@@ -591,9 +598,10 @@ func (m *Model) completeBoot() tea.Cmd {
 	//
 	// The boot view was a tall (20-row) block, so right now Bubble Tea's renderer still
 	// reserves that height. Committing the masthead immediately lays it out with stale
-	// geometry (a misplaced erase-below then wipes it). So: clear the host + reset BT's
-	// own cell buffer (tea.ClearScreen), then DEFER the masthead commit one render cycle
-	// (bootCommitMsg) — by which point the short footer has rendered and the renderer's
-	// live-area model has shrunk, so the masthead prints above a correctly-sized footer.
-	return tea.Sequence(hostClearCmd(), tea.ClearScreen, commitArmCmd())
+	// geometry (a misplaced erase-below then wipes it). So: clear the host, reset BT's
+	// own cell buffer, force an otherwise-identical footer frame to repaint, then DEFER
+	// the masthead commit one render cycle (commitArmCmd) — by which point the short footer
+	// has rendered and the renderer's live-area model has shrunk, so the masthead prints
+	// above a correctly-sized footer.
+	return redrawHostCmd()
 }

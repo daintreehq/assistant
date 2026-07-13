@@ -172,6 +172,11 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		defer rawMu.Unlock()
 		return raw.Len()
 	}
+	rawFrom := func(off int) []byte {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return append([]byte(nil), raw.Bytes()[off:]...)
+	}
 
 	// --- Phase 1: boot → steady state ---
 	// Boot settles in two beats: the live footer (composer glyph) renders first, then
@@ -187,6 +192,59 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	preMasthead := rawCount(mastheadText)
 	if preMasthead != 1 {
 		t.Fatalf("masthead committed %d times at boot, want exactly 1:\n%s", preMasthead, screen.Plain())
+	}
+
+	// --- Phase 1b: idle resize must repaint an unchanged live footer ---
+	// Keep a draft in model state, resize without sending any later input, and prove the
+	// host-clear recovery physically writes that same draft again. This is the exact
+	// Daintree regression: the resize wipe removed the composer, then the next keypress
+	// changed View.Content and made the still-present draft suddenly reappear.
+	const resizeDraft = "PTY-RESIZE-DRAFT"
+	if _, err := ptm.Write([]byte(resizeDraft)); err != nil {
+		t.Fatalf("type pre-resize draft: %v", err)
+	}
+	if !waitForPTY(5*time.Second, func() bool {
+		return strings.Contains(screen.VisiblePlain(), resizeDraft)
+	}) {
+		t.Fatalf("pre-resize draft never appeared:\n%s", screen.Plain())
+	}
+
+	const idleRows, idleCols = 36, 90
+	idleResizeStart := rawLen()
+	if err := pty.Setsize(ptm, &pty.Winsize{Rows: idleRows, Cols: idleCols}); err != nil {
+		t.Fatalf("idle resize pty: %v", err)
+	}
+	screen.Resize(idleRows, idleCols)
+	if !waitForPTY(15*time.Second, func() bool { return rawCount(mastheadText) >= preMasthead+1 }) {
+		t.Fatalf("idle resize did not re-commit the masthead (%d occurrences, want >= %d)", rawCount(mastheadText), preMasthead+1)
+	}
+	waitQuiet(rawLen, 300*time.Millisecond, 3*time.Second)
+	idleResizeBytes := rawFrom(idleResizeStart)
+	hostClear := []byte("\x1b[2J\x1b[3J\x1b[H")
+	idleLastClear := bytes.LastIndex(idleResizeBytes, hostClear)
+	if idleLastClear < 0 {
+		t.Fatal("idle resize never emitted the expected host viewport+scrollback clear")
+	}
+	idleAfterClear := idleResizeBytes[idleLastClear+len(hostClear):]
+	if !bytes.Contains(idleAfterClear, []byte(resizeDraft)) {
+		t.Error("idle resize emitted no draft repaint bytes after the host clear")
+	}
+	if visible := screen.VisiblePlain(); !strings.Contains(visible, composerGlyph) || !strings.Contains(visible, resizeDraft) {
+		t.Errorf("idle resize lost the live composer/draft until keypress:\n%s", screen.Plain())
+	}
+	if got := rawCount(mastheadText); got != preMasthead+1 {
+		t.Fatalf("idle resize re-committed masthead %d times, want exactly one", got-preMasthead)
+	}
+	preMasthead++
+
+	// Remove the probe without submitting it so the scripted turn below remains unchanged.
+	if _, err := ptm.Write(bytes.Repeat([]byte{0x7f}, len(resizeDraft))); err != nil {
+		t.Fatalf("erase pre-resize draft: %v", err)
+	}
+	if !waitForPTY(5*time.Second, func() bool {
+		return !strings.Contains(screen.VisiblePlain(), resizeDraft)
+	}) {
+		t.Fatalf("pre-resize draft did not clear:\n%s", screen.Plain())
 	}
 
 	// --- Phase 2: drive a streamed multi-paragraph turn (+ tool batch) ---
@@ -221,6 +279,7 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 
 	// --- Phase 3: settled resize → exactly one masthead re-commit at the new width ---
 	const newRows, newCols = 24, 72
+	resizeRawStart := rawLen()
 	if err := pty.Setsize(ptm, &pty.Winsize{Rows: newRows, Cols: newCols}); err != nil {
 		t.Fatalf("resize pty: %v", err)
 	}
@@ -233,6 +292,21 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 	waitQuiet(rawLen, 400*time.Millisecond, 3*time.Second)
 	if got := rawCount(mastheadText); got != preMasthead+1 {
 		t.Errorf("resize re-committed the masthead %d time(s) (total %d occurrences), want exactly 1 (total %d)", got-preMasthead, got, preMasthead+1)
+	}
+	// The resize's host wipe also erases the physical live footer. It must be repainted
+	// without relying on a later keypress to change View.Content — the production symptom
+	// was an absent composer that reappeared only when the user started typing.
+	if !strings.Contains(screen.VisiblePlain(), composerGlyph) {
+		t.Errorf("resize left the live composer blank until keypress:\n%s", screen.Plain())
+	}
+	resizeBytes := rawFrom(resizeRawStart)
+	lastClear := bytes.LastIndex(resizeBytes, hostClear)
+	if lastClear < 0 {
+		t.Fatal("resize never emitted the expected host viewport+scrollback clear")
+	}
+	afterClear := resizeBytes[lastClear+len(hostClear):]
+	if !bytes.Contains(afterClear, []byte(composerGlyph)) {
+		t.Error("resize emitted no composer repaint bytes after the host clear")
 	}
 
 	// --- Phase 4: clean shutdown via /quit ---

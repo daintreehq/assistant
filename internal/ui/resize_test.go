@@ -26,6 +26,48 @@ func TestResize_FirstSizeRecordsGeometryNoRedraw(t *testing.T) {
 	}
 }
 
+func TestRendererRepaintTagChangesIdentityWithoutChangingGeometry(t *testing.T) {
+	m := testModel(80)
+	m.footerRows = new(int)
+	before := m.View().Content
+	beforeRows := lineCount(before)
+
+	next, _ := m.Update(rendererRepaintMsg{})
+	m = asModel(t, next)
+	after := m.View().Content
+	if after == before {
+		t.Fatal("renderer repaint message must change raw View.Content identity")
+	}
+	if stripAnsi(after) != stripAnsi(before) {
+		t.Fatal("renderer repaint tag must be visually inert")
+	}
+	if got := lineCount(after); got != beforeRows {
+		t.Fatalf("renderer repaint tag changed footer height: %d -> %d", beforeRows, got)
+	}
+
+	// It toggles, rather than latches, so every later resize changes identity too.
+	next, _ = m.Update(rendererRepaintMsg{})
+	m = asModel(t, next)
+	if got := m.View().Content; got != before {
+		t.Fatal("second renderer repaint must toggle back to the original zero-cell form")
+	}
+}
+
+func TestRedrawHostCmdOrdersForcedRepaintBeforeCommitArm(t *testing.T) {
+	msgs := flattenCmd(t, redrawHostCmd())
+	// hostClearCmd returns no message. The observable sequence is Bubble Tea's
+	// clear-screen message, our forced-repaint message, then the delayed commit arm.
+	if len(msgs) != 3 {
+		t.Fatalf("redraw host sequence yielded %d messages, want clear + repaint + arm", len(msgs))
+	}
+	if _, ok := msgs[1].(rendererRepaintMsg); !ok {
+		t.Fatalf("redraw host message 2 = %T, want rendererRepaintMsg", msgs[1])
+	}
+	if _, ok := msgs[2].(CommitArmMsg); !ok {
+		t.Fatalf("redraw host message 3 = %T, want CommitArmMsg", msgs[2])
+	}
+}
+
 func TestResize_FirstSizeMatchingHandoffDimsIsSwallowed(t *testing.T) {
 	m := harnessModel()
 	m.handoffCols = 90

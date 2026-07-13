@@ -126,6 +126,10 @@ type Model struct {
 	// tea.Println safe even when the footer grew tall to hold a withheld block (bubbletea#1613). nil
 	// in headless tests (which never call View); scrollbackChunkRows falls back to the static bound.
 	footerRows *int
+	// rendererRepaintTag is toggled after every raw host clear. View appends a
+	// zero-cell SGR reset while it is true, making otherwise-identical footer frames
+	// differ to Bubble Tea so its pending ClearScreen cannot be optimized away.
+	rendererRepaintTag bool
 	// Footer re-pin ledger (repin.go): rows the RENDERED footer has shrunk that no print
 	// has slid the view back down over yet. footerPrevRows is the last height the ledger
 	// reconciled against; repinCredit is rows our own insertAboves (commit prints, turn

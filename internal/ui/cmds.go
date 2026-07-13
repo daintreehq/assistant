@@ -26,6 +26,27 @@ func hostClearCmd() tea.Cmd {
 	}
 }
 
+// redrawHostCmd performs the one safe full-host redraw sequence used by /clear,
+// settled resize recovery, Ctrl+L, and the legacy in-program boot hand-off:
+//
+//  1. erase the physical viewport + native scrollback;
+//  2. mark Bubble Tea's managed screen for a full redraw;
+//  3. change View.Content by zero cells so Bubble Tea cannot skip that redraw as
+//     an unchanged frame;
+//  4. wait several renderer ticks before allowing tea.Println commits again.
+//
+// Sequence ordering is load-bearing. In particular, toggling the content tag in
+// the reducer that requests the wipe can render too early, only for hostClearCmd to
+// erase it afterward. rendererRepaintMsg must land after tea.ClearScreen.
+func redrawHostCmd() tea.Cmd {
+	return tea.Sequence(
+		hostClearCmd(),
+		tea.ClearScreen,
+		func() tea.Msg { return rendererRepaintMsg{} },
+		commitArmCmd(),
+	)
+}
+
 // bellCmd rings the terminal BEL once (fresh-attention ding). TTY-gated, no-op off
 // a terminal, never throws.
 func bellCmd() tea.Cmd {
