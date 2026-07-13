@@ -389,6 +389,58 @@ func TestSplash_AdvanceTicksThenLingers(t *testing.T) {
 	}
 }
 
+func TestBootHandoffFramePrepaintsCompleteLoadingCockpit(t *testing.T) {
+	m := testModel(72)
+	m.rows = 30
+	m.masthead.Logging = true
+	m.masthead.LogFile = "/tmp/daintree-session.log"
+	m.syncComposer()
+
+	header := m.headerBlock().Rendered
+	frame := m.bootHandoffFrame()
+	plain := stripAnsi(frame)
+
+	if !strings.Contains(frame, "\x1b[?2026h") || !strings.Contains(frame, "\x1b[?2026l") {
+		t.Fatal("boot handoff frame must use synchronized output")
+	}
+	if !strings.Contains(frame, splashViewportReset) {
+		t.Fatal("boot handoff frame must clear and home before replacing the final logo frame")
+	}
+	if strings.Contains(frame, "\x1b[3J") {
+		t.Fatal("boot handoff frame must preserve native terminal scrollback")
+	}
+	for _, want := range []string{"Daintree Assistant", "logging", "Ask Daintree", "MCP"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("boot handoff frame missing %q: %q", want, plain)
+		}
+	}
+	if m.mcpResolved {
+		t.Fatal("test precondition: handoff must render before MCP resolution reaches the model")
+	}
+	lines := strings.Split(strings.ReplaceAll(plain, "\r\n", "\n"), "\n")
+	headerLines := strings.Split(strings.TrimSuffix(stripAnsi(header), "\n"), "\n")
+	if len(lines) <= len(headerLines) || strings.TrimSpace(lines[len(headerLines)]) != "" {
+		t.Fatalf("boot handoff frame must reserve a blank line below the masthead, got %q", plain)
+	}
+
+	cursorAtFooter := "\x1b[" + itoa(lineCount(header)+1) + ";1H"
+	if !strings.Contains(frame, cursorAtFooter) {
+		t.Fatalf("boot handoff frame must park cursor at footer origin %q, frame %q", cursorAtFooter, frame)
+	}
+}
+
+func TestBootHandoffFrameEmpty(t *testing.T) {
+	if got := renderBootHandoffFrame("", ""); got != "" {
+		t.Fatalf("empty boot handoff frame = %q, want empty", got)
+	}
+}
+
+func TestHandoffFrameRows(t *testing.T) {
+	if got := handoffFrameRows("one\r\ntwo\r\nthree"); got != 3 {
+		t.Fatalf("handoff frame rows = %d, want 3", got)
+	}
+}
+
 func TestSplashAbortCleanupRestoresCursorWithoutErasingScrollback(t *testing.T) {
 	for _, want := range []string{"\x1b[?25h", "\x1b[2J", "\x1b[H"} {
 		if !strings.Contains(splashAbortCleanup, want) {
@@ -400,18 +452,16 @@ func TestSplashAbortCleanupRestoresCursorWithoutErasingScrollback(t *testing.T) 
 	}
 }
 
-func TestBootSplashDurationWaitsForEmbeddedHostGeometry(t *testing.T) {
-	t.Setenv("DAINTREE_WINDOW_ID", "")
-	normal := bootSplashDuration()
+func TestBootSplashDurationNeverWaitsForHostStartup(t *testing.T) {
 	wantNormal := time.Duration(SplashFrames)*(time.Second/time.Duration(splashFPS)) +
 		time.Duration(lingerMs)*time.Millisecond
-	if normal != wantNormal {
-		t.Fatalf("ordinary splash duration = %s, want %s", normal, wantNormal)
-	}
-
-	t.Setenv("DAINTREE_WINDOW_ID", "window-1")
-	if got := bootSplashDuration(); got != embeddedHostGeometrySettle {
-		t.Fatalf("embedded splash duration = %s, want geometry-settle delay %s", got, embeddedHostGeometrySettle)
+	for _, windowID := range []string{"", "window-1"} {
+		t.Run(windowID, func(t *testing.T) {
+			t.Setenv("DAINTREE_WINDOW_ID", windowID)
+			if got := bootSplashDuration(); got != wantNormal {
+				t.Fatalf("splash duration = %s, want fixed visual budget %s", got, wantNormal)
+			}
+		})
 	}
 }
 

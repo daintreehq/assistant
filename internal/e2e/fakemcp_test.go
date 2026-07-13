@@ -25,6 +25,7 @@ type fakeMCP struct {
 	srv            *httptest.Server
 	agentListDelay time.Duration
 	agentListCalls atomic.Int32
+	agentListDone  atomic.Int32
 }
 
 // newFakeMCP starts the fake MCP server. The returned URL is the value to feed
@@ -96,6 +97,7 @@ func newFakeMCPWithAgentDelay(t *testing.T, delay time.Duration) *fakeMCP {
 			{"id": "team-agent", "displayName": "Team Agent", "source": "user", "availability": "unauthenticated", "installed": true},
 		}
 		out := availableAgentsOut{Complete: true, AvailabilityComplete: true, Agents: agents}
+		m.agentListDone.Add(1)
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"complete":true,"availabilityComplete":true,"agents":[{"id":"claude","displayName":"Claude Code","source":"built-in","availability":"ready","installed":true,"toolbarVisible":true,"pinned":true},{"id":"team-agent","displayName":"Team Agent","source":"user","availability":"unauthenticated","installed":true}]}`}},
 		}, out, nil
@@ -189,3 +191,5 @@ func newFakeMCPWithAgentDelay(t *testing.T, delay time.Duration) *fakeMCP {
 func (m *fakeMCP) url() string { return m.srv.URL + "/mcp" }
 
 func (m *fakeMCP) agentListCallCount() int { return int(m.agentListCalls.Load()) }
+
+func (m *fakeMCP) agentListCompletionCount() int { return int(m.agentListDone.Load()) }

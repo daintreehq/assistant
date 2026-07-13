@@ -184,7 +184,12 @@ type Model struct {
 	// state-ordered, and re-arming mid-window lets a commit Println against
 	// the pre-redraw geometry (#1613) before the nuclear redraw wipes it.
 	redrawPending bool
-	attentionN    int
+	// Dimensions the atomic boot hand-off was painted at, or 0×0 when the splash was
+	// skipped. The first WindowSizeMsg validates these so a genuine resize in the narrow
+	// hand-off→program gap triggers a full redraw instead of preserving stale wrapping.
+	handoffCols int
+	handoffRows int
+	attentionN  int
 
 	// spinner frame (advanced on a periodic tick) for animated active rows. The tick only
 	// runs while a turn is in flight (spinnerRunning) — idle, it lapses so the process can

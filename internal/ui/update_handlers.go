@@ -1088,16 +1088,18 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// real resize runs the destructive clear + transcript replay below; on a
 	// project switch that races the host's xterm repaint and can leave the live
 	// footer blank until the next keypress. The first size still has to pass
-	// through so sizedOnce and the initial geometry are established.
+	// through so sizedOnce and the splash hand-off geometry are validated.
 	unchanged := m.sizedOnce && msg.Width == m.columns && msg.Height == m.rows
 	m.columns = msg.Width
 	m.rows = msg.Height
 	if unchanged {
 		return m, nil
 	}
-	// The FIRST size just establishes geometry. The splash leaves a clean viewport and
-	// Bubble Tea owns the cockpit from its first frame, so there is no pre-painted content
-	// to repair.
+	// The FIRST size normally just establishes geometry. If an atomic boot hand-off was
+	// painted and the size now differs, however, the terminal changed between that write
+	// and Bubble Tea's startup probe. The pre-painted rows and parked inline origin are
+	// stale real content, so repair them through the same debounced redraw as any later
+	// resize instead of swallowing the mismatch.
 	// Every LATER resize schedules a DEBOUNCED NUCLEAR REDRAW (onRedraw): wipe the
 	// host + re-commit the masthead and the whole transcript fresh at the new width,
 	// then repaint the sticky footer. Without it, Bubble Tea's in-place repaint
@@ -1105,7 +1107,11 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// debounce coalesces a SIGWINCH drag-storm into a single redraw.
 	if !m.sizedOnce {
 		m.sizedOnce = true
-		return m, nil
+		handoffStale := m.handoffCols > 0 &&
+			(msg.Width != m.handoffCols || msg.Height != m.handoffRows)
+		if !handoffStale {
+			return m, nil
+		}
 	}
 	// DISARM commits for the whole debounce window, not just at onRedraw. Bubble Tea has already
 	// recorded the new (possibly smaller) m.rows, but its cell buffer stays at the OLD footer height

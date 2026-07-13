@@ -29,8 +29,9 @@ func Run(ctx context.Context, a *app.App) error {
 
 	// Seed the first cockpit frame with the real terminal size when available, then use
 	// the splash duration to connect MCP, fetch the authoritative project name, and
-	// warm the Assistant backend. At the end of the logo linger, fold in any project
-	// name and final dimensions that arrived in time; otherwise keep the stable defaults.
+	// warm the Assistant backend. The hand-off frame is built at the end of the logo
+	// linger so it can include any project name that arrived in time; otherwise the
+	// stable placeholder remains.
 	if cols, rows, ok := terminalSize(os.Stdout); ok {
 		m.columns = cols
 		m.rows = rows
@@ -39,8 +40,8 @@ func Run(ctx context.Context, a *app.App) error {
 	bootPrefetch := startBootPrefetch(ctx, a)
 	m.bootPrefetch = bootPrefetch
 	defer bootPrefetch.stop()
-	finishSplash := func(cols, rows int) {
-		debuglog.BootTrace("boot.splash.complete")
+	handoffFrame := func(cols, rows int) string {
+		debuglog.BootTrace("boot.splash.handoff")
 		if name := bootPrefetch.projectName(); name != "" {
 			m.masthead.ProjectName = name
 		}
@@ -52,17 +53,25 @@ func Run(ctx context.Context, a *app.App) error {
 			m.rows = rows
 		}
 		m.syncComposer()
+		return m.bootHandoffFrame()
 	}
 
-	// Play the boot animation OUTSIDE Bubble Tea, then leave a clean viewport and let
-	// Bubble Tea establish the inline origin itself. Pre-painting the cockpit and parking
-	// the cursor at an absolute footer row made the renderer's origin depend on host
-	// geometry that xterm can reflow during Daintree's project-load reveal pass. Once
-	// the program starts, Bubble Tea exclusively owns the live region and the normal
-	// commit queue places the masthead above it.
-	playBootSplash(ctx, os.Stdout, th, finishSplash)
-	defer io.WriteString(os.Stdout, "\x1b[?25h")
-	m.syncComposer()
+	// Play the animation outside Bubble Tea, then replace its last frame atomically with
+	// the complete cockpit. Bubble Tea adopts the already-painted footer as its live
+	// region, so there is no blank or footer-only frame while the masthead commit barrier
+	// runs. The hand-off keeps MCP unresolved (amber) and the composer immediately live.
+	if painted, paintedCols, paintedRows := playBootSplash(ctx, os.Stdout, th, handoffFrame); painted {
+		defer io.WriteString(os.Stdout, "\x1b[?25h") // defensive if BT exits before its first cursor restore
+		// The hand-off already placed the masthead above the live footer. Treat it as
+		// committed so the queue cannot print a duplicate.
+		m.queue.headerDone = true
+		// A real resize between this write and Bubble Tea's first size probe must repair
+		// the pre-painted geometry instead of swallowing that first size message.
+		m.handoffCols = paintedCols
+		m.handoffRows = paintedRows
+	} else {
+		m.syncComposer()
+	}
 
 	// progRef lets the confirm-hook closure reach the program that is created below
 	// (the one callback that can't ride the re-armed command, because the runtime

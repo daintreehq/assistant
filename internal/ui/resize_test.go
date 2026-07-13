@@ -26,6 +26,48 @@ func TestResize_FirstSizeRecordsGeometryNoRedraw(t *testing.T) {
 	}
 }
 
+func TestResize_FirstSizeMatchingHandoffDimsIsSwallowed(t *testing.T) {
+	m := harnessModel()
+	m.handoffCols = 90
+	m.handoffRows = 30
+	next, cmd := step(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
+	mm := asModel(t, next)
+	if !mm.sizedOnce {
+		t.Fatal("first WindowSizeMsg did not flip sizedOnce")
+	}
+	if cmd != nil {
+		t.Fatal("a first size matching the hand-off dimensions must not redraw")
+	}
+}
+
+func TestResize_FirstSizeMismatchingHandoffDimsSchedulesRedraw(t *testing.T) {
+	m := harnessModel()
+	m.handoffCols = 90
+	m.handoffRows = 30
+	m.commitArmed = true
+	next, cmd := step(t, m, tea.WindowSizeMsg{Width: 74, Height: 30})
+	mm := asModel(t, next)
+	if !mm.sizedOnce {
+		t.Fatal("first WindowSizeMsg did not flip sizedOnce")
+	}
+	if cmd == nil {
+		t.Fatal("a first size differing from the hand-off dimensions must schedule a redraw")
+	}
+	if mm.commitArmed {
+		t.Fatal("the hand-off mismatch must disarm commits for the redraw window")
+	}
+	if !mm.redrawPending || mm.resizePending == 0 {
+		t.Fatal("the hand-off mismatch must arm the debounced redraw")
+	}
+
+	beforeNonce := mm.redrawNonce
+	next2, _ := step(t, mm, RedrawMsg{Nonce: mm.resizePending})
+	mm2 := asModel(t, next2)
+	if mm2.redrawNonce == beforeNonce {
+		t.Fatal("the hand-off mismatch redraw must re-arm the masthead commit generation")
+	}
+}
+
 func TestResize_LaterResizeSchedulesNuclearRedraw(t *testing.T) {
 	m := bootToSteadyState(t) // consumes the first size (sizedOnce=true), masthead committed
 	beforeNonce := m.redrawNonce

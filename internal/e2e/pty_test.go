@@ -278,7 +278,7 @@ func TestPTYSplashConnectKeepsFooter(t *testing.T) {
 	// Mirrors the recording: Daintree's 3s geometry sweep lands while MCP discovery
 	// is still pending, then the status changes after Bubble Tea starts.
 	t.Run("delayed_embedded_pane", func(t *testing.T) {
-		runSplashConnectKeepsFooter(t, 5*time.Second, 29, 94, true, true)
+		runSplashConnectKeepsFooter(t, 4*time.Second, 29, 94, true, true)
 	})
 }
 
@@ -367,28 +367,72 @@ func runSplashConnectKeepsFooter(
 		defer rawMu.Unlock()
 		return raw.Len()
 	}
+	rawSnapshot := func() []byte {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		return append([]byte(nil), raw.Bytes()...)
+	}
 
-	// Bubble Tea's first frame must expose a live composer before any user input. For a
-	// delayed connection, prove this occurs while discovery is still pending. For
-	// an immediate connection, completion can beat the first frame, so the composer
-	// alone is the pre-completion invariant.
-	if !waitForPTY(10*time.Second, func() bool {
+	// The atomic hand-off must expose the COMPLETE cockpit before any user input. An
+	// embedded launch gets the same short logo budget as every other terminal; it must
+	// never wait for Daintree's old three-second geometry sweep.
+	composerTimeout := 10 * time.Second
+	if embedded {
+		composerTimeout = 2 * time.Second
+	}
+	if !waitForPTY(composerTimeout, func() bool {
 		visible := screen.VisiblePlain()
-		if !strings.Contains(visible, composerGlyph) {
-			return false
-		}
-		return true
+		return strings.Contains(visible, composerGlyph) && strings.Contains(visible, mastheadText)
 	}) {
-		t.Fatalf("post-logo composer did not become visible before user input:\n%s", screen.Plain())
+		t.Fatalf("complete post-logo cockpit did not become visible before user input:\n%s", screen.Plain())
+	}
+	// Byte ordering is the durable regression check for the video flash. Before this
+	// fix, Bubble Tea emitted the composer about 120ms before tea.Println emitted the
+	// masthead, so the first composer occurrence preceded the first masthead occurrence.
+	// The synchronized hand-off writes the masthead first and the composer beneath it in
+	// the same output frame.
+	startup := rawSnapshot()
+	firstHeader := bytes.Index(startup, []byte(mastheadText))
+	firstComposer := bytes.Index(startup, []byte(composerGlyph))
+	if firstHeader < 0 || firstComposer < 0 || firstHeader > firstComposer {
+		t.Fatalf("first post-logo frame was not the complete cockpit (header byte=%d composer byte=%d)", firstHeader, firstComposer)
 	}
 	// Forty animation frames each clear+home the viewport. Requiring a substantial
 	// number proves this test did not accidentally take the no-splash path.
 	if got := rawCount("\x1b[2J\x1b[H"); got < 20 {
 		t.Fatalf("splash logo was not rendered (viewport-reset frames=%d, want >=20)", got)
 	}
+
+	// On the deliberately slow embedded case, type before MCP discovery completes.
+	// This is the product contract: the logo may cover the first ~740ms, but a slow
+	// connection must never keep the user's draft behind it.
+	draft := ""
+	if embedded && connectDelay >= 3*time.Second {
+		if !waitForPTY(2*time.Second, func() bool {
+			return mcpServer.agentListCallCount() == 1
+		}) {
+			t.Fatalf("MCP discovery did not start under the logo:\n%s", screen.Plain())
+		}
+		if got := mcpServer.agentListCompletionCount(); got != 0 {
+			t.Fatalf("slow MCP discovery completed before interactive-handoff assertion: %d", got)
+		}
+		draft = "draft while MCP connects"
+		if _, err := ptm.Write([]byte(draft)); err != nil {
+			t.Fatalf("type draft while MCP connects: %v", err)
+		}
+		if !waitForPTY(2*time.Second, func() bool {
+			return strings.Contains(screen.VisiblePlain(), draft)
+		}) {
+			t.Fatalf("composer did not accept input while MCP was pending:\n%s", screen.Plain())
+		}
+		if got := mcpServer.agentListCompletionCount(); got != 0 {
+			t.Fatalf("MCP discovery was no longer pending when draft appeared: completions=%d", got)
+		}
+	}
+
 	clearsAfterCockpit := rawCount("\x1b[2J")
 	if !waitForPTY(15*time.Second, func() bool {
-		return mcpServer.agentListCallCount() == 1
+		return mcpServer.agentListCompletionCount() == 1
 	}) {
 		t.Fatalf("MCP discovery never completed:\n%s", screen.Plain())
 	}
@@ -420,14 +464,20 @@ func runSplashConnectKeepsFooter(
 	if got := rawCount(mastheadText); got != 1 {
 		t.Fatalf("masthead committed %d times, want exactly once", got)
 	}
-	// Only type AFTER the regression assertion. Earlier input can mask a missing
-	// first paint by supplying the repaint itself.
-	const draft = "draft after connect"
-	if _, err := ptm.Write([]byte(draft)); err != nil {
-		t.Fatalf("type draft after connect: %v", err)
-	}
-	if !waitForPTY(5*time.Second, func() bool { return strings.Contains(screen.VisiblePlain(), draft) }) {
-		t.Fatalf("composer did not accept input after startup discovery:\n%s", screen.Plain())
+	if draft == "" {
+		// For the fast cases, type only AFTER the regression assertion. Earlier input can
+		// mask a missing first paint by supplying the repaint itself.
+		draft = "draft after connect"
+		if _, err := ptm.Write([]byte(draft)); err != nil {
+			t.Fatalf("type draft after connect: %v", err)
+		}
+		if !waitForPTY(5*time.Second, func() bool {
+			return strings.Contains(screen.VisiblePlain(), draft)
+		}) {
+			t.Fatalf("composer did not accept input after startup discovery:\n%s", screen.Plain())
+		}
+	} else if !strings.Contains(screen.VisiblePlain(), draft) {
+		t.Fatalf("draft typed during MCP discovery did not survive completion:\n%s", screen.Plain())
 	}
 	if got := screen.CountLineSubstr(draft); got != 1 {
 		t.Fatalf("draft appears on %d composed lines, want one live composer (no frozen copy):\n%s", got, screen.Plain())
