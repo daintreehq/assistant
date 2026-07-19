@@ -1,6 +1,7 @@
 package markdown
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -121,6 +122,18 @@ func TestCacheEvicts(t *testing.T) {
 	r.Render("c", 40, false) // evicts "a"
 	if got := r.cache.len(); got != 2 {
 		t.Fatalf("LRU did not bound: got %d entries, want 2", got)
+	}
+}
+
+func TestTermRendererCacheIsBoundedAcrossWidths(t *testing.T) {
+	r := NewWithCacheSize(darkTheme(), 1)
+	for width := 20; width < 20+maxTermRenderers*2; width++ {
+		// Unique content bypasses the rendered-output cache and exercises the
+		// secondary glamour pipeline cache for every width.
+		r.Render(fmt.Sprintf("width %d", width), width, false)
+	}
+	if got := len(r.trs); got != maxTermRenderers {
+		t.Fatalf("term renderer cache = %d, want bound %d", got, maxTermRenderers)
 	}
 }
 

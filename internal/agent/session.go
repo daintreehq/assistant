@@ -284,6 +284,8 @@ type toolProjCache struct {
 	unconstrained bool              // allowedNames was nil (the full registry)
 	allowedNames  []string          // the filter that produced tools (cache key)
 	tools         []models.ChatTool // the cached projection
+	backendValid  bool
+	backendTools  []backend.Tool // cached validation + backend wire projection
 }
 
 // NewSession builds a Session. The CLI holds NO client-side control prefix — the
@@ -826,7 +828,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			s.events.Error(msg)
 			return msg
 		}
-		btools, terr := toBackendTools(tools)
+		btools, terr := s.toBackendToolsCached(tools)
 		if terr != nil {
 			msg := "Tool inventory rejected before send: " + terr.Error()
 			s.events.Phase(domain.PhaseFailed)
@@ -2192,6 +2194,26 @@ func (s *Session) projectToolsLocked(allowedNames []string) ([]models.ChatTool, 
 		tools:        tools,
 	}
 	return tools, nil
+}
+
+// toBackendToolsCached validates and converts the stable model-tool projection once.
+// projectToolsLocked replaces the whole cache whenever its key changes, naturally
+// invalidating this secondary representation. With the full registry stable for the
+// process, later model rounds reuse the same immutable backend slice.
+func (s *Session) toBackendToolsCached(tools []models.ChatTool) ([]backend.Tool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := &s.toolProj
+	if c.backendValid {
+		return c.backendTools, nil
+	}
+	btools, err := toBackendTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	c.backendTools = btools
+	c.backendValid = true
+	return btools, nil
 }
 
 // resolveInternal maps a wire name back to its internal name, falling through to

@@ -248,6 +248,14 @@ func (s *Store) ListWatchers(status string) ([]domain.WatcherRecord, error) {
 	return queryWatchers(s.db, q, args...)
 }
 
+// ListLiveWatchers returns only operational watcher rows, oldest first. Dashboard
+// and ownership callers must not materialize the unbounded terminal-history set
+// merely to discard it in Go.
+func (s *Store) ListLiveWatchers() ([]domain.WatcherRecord, error) {
+	return queryWatchers(s.db,
+		"SELECT "+watcherCols+" FROM watchers WHERE status IN ('active','created','paused') ORDER BY createdAt")
+}
+
 // DueWatchers returns active watchers with nextCheckAt <= now, ORDER BY nextCheckAt.
 func (s *Store) DueWatchers(now int64) ([]domain.WatcherRecord, error) {
 	return queryWatchers(s.db,

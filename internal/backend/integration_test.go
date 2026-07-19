@@ -2,11 +2,10 @@ package backend_test
 
 // Live integration tests against a REAL Daintree assistant backend on
 // 127.0.0.1:8473. They are skip-guarded: every test first probes /healthz with a
-// short timeout and t.Skip()s when the backend is down, so `go test ./...` stays
-// hermetic on machines without a running server. Run them deliberately with the
-// backend up:
+// explicit opt-in and then probe /healthz, so `go test ./...` stays hermetic even
+// when a developer happens to have the backend running. Run them deliberately:
 //
-//	go test ./internal/backend/... -run Live -count=1
+//	DAINTREE_LIVE_TESTS=1 go test ./internal/backend/... -run Live -count=1
 //
 // These exercise the actual wire contract (named-event SSE stream, task envelope,
 // capability descriptor) end-to-end — the unit tests in client_test.go cover the
@@ -16,6 +15,7 @@ package backend_test
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +30,9 @@ const liveBaseURL = "http://127.0.0.1:8473"
 // backend is unreachable or unhealthy. Returns a Client bound to the live endpoint.
 func requireLiveBackend(t *testing.T) *backend.Client {
 	t.Helper()
+	if os.Getenv("DAINTREE_LIVE_TESTS") != "1" {
+		t.Skip("set DAINTREE_LIVE_TESTS=1 to run live backend integration tests")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

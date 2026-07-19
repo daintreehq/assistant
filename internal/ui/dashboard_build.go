@@ -44,7 +44,7 @@ func buildDashboard(ctx context.Context, a *app.App, opts dashboardBuildOptions)
 		d.Timers = timers
 	}
 	var watchers []domain.WatcherRecord
-	if ws, err := a.Store.ListWatchers(""); err == nil {
+	if ws, err := a.Store.ListLiveWatchers(); err == nil {
 		watchers = ws
 		d.Watchers = ws
 	}

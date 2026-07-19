@@ -266,6 +266,19 @@ func Serve(w *World) *Server {
 
 	add("panel.focus", func(args map[string]any) (string, bool) { return `{"ok":true}`, false })
 
+	// Startup discovery reads are intentionally outside the documented tools/list
+	// drift baseline, but the real assistant calls them when available. Keep the
+	// deterministic world capability-complete so an optional read cannot turn every
+	// tool scenario into an unrelated disconnected-MCP fallback.
+	add("project.getCurrent", func(args map[string]any) (string, bool) {
+		return `{"project":null}`, false
+	})
+	add("agent.listAvailable", func(args map[string]any) (string, bool) {
+		return `{"agents":[],"complete":true,"availabilityComplete":true}`, false
+	})
+	add("agent.listToolbar", func(args map[string]any) (string, bool) { return `{"agents":[]}`, false })
+	add("cliAvailability.get", func(args map[string]any) (string, bool) { return `{"available":true}`, false })
+
 	// --- everything else documented: recorded failing stubs -----------------
 
 	for _, name := range internalmcp.DocumentedMcpToolNames {

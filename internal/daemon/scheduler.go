@@ -271,7 +271,7 @@ func drainResourceUpdates(ch <-chan string) {
 // runPass is the unguarded body of one tick: fire due timers, run due watchers,
 // delivering attention AS EACH JOB SETTLES — each item isolated so one failure
 // can't starve the others or skip delivery. Due timers and due watchers run as
-// BOUNDED, INDEPENDENT jobs (each on its own goroutine with a per-item deadline)
+// BOUNDED, INDEPENDENT jobs (through a fixed worker pool with per-item deadlines)
 // so a slow timer/watcher/MCP-read/model-judge can't block later items or delay
 // notification delivery. Job EXECUTION is capped at tickJobConcurrency: an
 // unbounded fan-out let ten due watchers land ten simultaneous MCP read bursts on
@@ -285,43 +285,16 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 	timers, _ := s.deps.Store.DueTimers(now)
 	watchers, _ := s.deps.Store.DueWatchers(now)
 
-	sem := make(chan struct{}, tickJobConcurrency)
-	var wg sync.WaitGroup
-	// runJob runs one isolated, deadline-bounded item under the concurrency cap.
-	// The deadline starts when the job STARTS (inside the semaphore hold), so an
-	// item queued behind a slow batch never burns its budget while waiting.
-	runJob := func(job func(jctx context.Context)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Isolate per-item failures — including a panicking CtxFor, which sits
-			// outside the check itself — so one bad item can't abort the pass.
-			defer func() { _ = recover() }()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return // shutdown while queued: skip, the row stays due for the next owner
-			}
-			defer func() { <-sem }()
-			func() {
-				jctx, cancel := context.WithTimeout(ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
-				defer cancel()
-				job(jctx)
-			}()
-			// Deliver anything THIS item published immediately — don't wait for the
-			// rest of the group (a wedged sibling would otherwise park a completed
-			// timer's wake for minutes). Coalesced, so a batch settling together
-			// costs at most two delivery passes. (A panicking job skips this; the
-			// end-of-pass backstop still delivers its published error event.)
-			s.requestNotify()
-		}()
-	}
+	// A fixed worker set bounds BOTH execution and goroutine count. The previous
+	// semaphore capped active work but still created one waiting goroutine per due
+	// row, making a large catch-up backlog allocate in proportion to history.
+	pool := newTickJobPool(ctx, len(timers)+len(watchers), s.requestNotify)
 
 	for _, t := range timers {
 		rec := t
-		runJob(func(jctx context.Context) {
+		pool.Submit(func(jctx context.Context) {
 			// fireTimer's inner handling covers payload execution; reschedule/publish
-			// run outside it, so the runJob recover keeps a panic there from taking
+			// run outside it, so the pool's recovery keeps a panic there from taking
 			// down the pass. The per-item deadline bounds a slow call_safe_tool dispatch.
 			s.fireTimer(jctx, rec, now)
 		})
@@ -337,7 +310,7 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 
 	for _, w := range watchers {
 		rec := w
-		runJob(func(jctx context.Context) {
+		pool.Submit(func(jctx context.Context) {
 			switch rec.Kind {
 			case "terminal":
 				cctx := s.deps.CtxFor(jctx, domain.ActorWatcher, rec.ID)
@@ -362,8 +335,72 @@ func (s *Scheduler) runPass(ctx context.Context, now int64) {
 	// undelivered attention. A single slow/hung job is bounded by its per-item
 	// deadline, so this can at worst wait a few deadline rounds under the pool — it
 	// never blocks indefinitely on one item.
-	wg.Wait()
+	pool.CloseAndWait()
 	s.notify()
+}
+
+// tickJobPool executes a pass through a fixed number of workers. The buffered
+// queue is sized to this pass's known due set: it retains one small function value
+// per row but never one goroutine stack per row. Each worker applies the deadline
+// when an item actually starts, preserving the old queued-job budget semantics.
+type tickJobPool struct {
+	ctx       context.Context
+	jobs      chan func(context.Context)
+	onSettled func()
+	workers   sync.WaitGroup
+}
+
+func newTickJobPool(ctx context.Context, capacity int, onSettled func()) *tickJobPool {
+	p := &tickJobPool{
+		ctx:       ctx,
+		onSettled: onSettled,
+	}
+	if capacity <= 0 {
+		return p
+	}
+	p.jobs = make(chan func(context.Context), capacity)
+	workers := min(capacity, tickJobConcurrency)
+	for i := 0; i < workers; i++ {
+		p.workers.Add(1)
+		go p.work()
+	}
+	return p
+}
+
+func (p *tickJobPool) Submit(job func(context.Context)) {
+	if p.jobs == nil {
+		return
+	}
+	p.jobs <- job
+}
+
+func (p *tickJobPool) CloseAndWait() {
+	if p.jobs != nil {
+		close(p.jobs)
+	}
+	p.workers.Wait()
+}
+
+func (p *tickJobPool) work() {
+	defer p.workers.Done()
+	for job := range p.jobs {
+		if p.ctx.Err() != nil {
+			continue // shutdown: leave queued durable rows due for the next owner
+		}
+		settled := func() (ok bool) {
+			// Isolate a panicking job without killing this worker or starving the
+			// remainder of the queue. As before, a panic skips the per-item notify;
+			// the end-of-pass backstop still delivers anything it published.
+			defer func() { _ = recover() }()
+			jctx, cancel := context.WithTimeout(p.ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
+			defer cancel()
+			job(jctx)
+			return true
+		}()
+		if settled && p.onSettled != nil {
+			p.onSettled()
+		}
+	}
 }
 
 // requestNotify triggers attention delivery, coalescing concurrent requests: if a

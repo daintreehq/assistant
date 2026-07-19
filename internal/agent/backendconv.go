@@ -3,8 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/models"
@@ -15,7 +15,7 @@ import (
 // wire-safe double-underscore names (fs.read → fs__read), which match this; a
 // leaked dotted name is rejected here BEFORE the request, giving a clear local
 // failure instead of a backend 400.
-var backendToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+const backendToolNamePattern = `^[A-Za-z0-9_-]{1,64}$`
 
 // reservedBackendTools are tool names the backend rejects outright: skill
 // find/load (selection is server-owned) in both dotted and wire forms.
@@ -128,11 +128,9 @@ func backendStringOrParts(m models.ChatMessage) (json.RawMessage, error) {
 // arguments unchanged; only the wire copy is coerced to "{}" so history stays
 // acceptable and the model can recover.
 func coerceToolArgs(args string) string {
-	if strings.TrimSpace(args) == "" {
-		return "{}"
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(args), &obj); err != nil || obj == nil {
+	trimmed := strings.TrimSpace(args)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' ||
+		!json.Valid([]byte(trimmed)) {
 		return "{}"
 	}
 	return args
@@ -172,13 +170,30 @@ func validateBackendTools(tools []backend.Tool) error {
 		if strings.HasPrefix(name, reservedBackendToolPrefix) {
 			return fmt.Errorf("reserved backend tool exposed: %s", name)
 		}
-		if !backendToolNameRE.MatchString(name) {
-			return fmt.Errorf("invalid backend tool name: %q (must match %s)", name, backendToolNameRE.String())
+		if !validBackendToolName(name) {
+			return fmt.Errorf("invalid backend tool name: %q (must match %s)", name, backendToolNamePattern)
 		}
-		if n := len([]rune(t.Function.Description)); n > backendToolDescriptionMaxRunes {
+		if n := utf8.RuneCountInString(t.Function.Description); n > backendToolDescriptionMaxRunes {
 			return fmt.Errorf("tool %s description is %d chars, over the backend's %d limit (the backend rejects, never truncates — shorten the Description)",
 				name, n, backendToolDescriptionMaxRunes)
 		}
 	}
 	return nil
+}
+
+// validBackendToolName is the backend's ASCII function-name rule without the
+// regular-expression engine overhead on every tool in every inventory validation.
+func validBackendToolName(name string) bool {
+	if len(name) < 1 || len(name) > 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }

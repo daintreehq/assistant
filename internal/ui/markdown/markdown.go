@@ -13,7 +13,8 @@
 //   - Security: strip pre-existing ANSI from the INPUT before parsing (untrusted
 //     model output could inject SGR / OSC-8 links); when color is off, strip the
 //     OUTPUT too.
-//   - Bounded LRU cache keyed (contentHash, width, theme, expanded).
+//   - Bounded LRU cache keyed (contentHash, width, expanded); each Renderer owns
+//     one immutable theme, so theme is implicit in the cache instance.
 //   - Plain fallback on unknown lexer / render failure / empty prose.
 package markdown
 
@@ -32,6 +33,11 @@ import (
 // currently near the live footer plus those being (re)committed on a resize; a
 // few hundred entries comfortably covers that without unbounded growth.
 const defaultCacheSize = 512
+
+// maxTermRenderers bounds the secondary per-width glamour pipeline cache. The
+// rendered-output LRU handles normal resize reuse; retaining every width ever seen
+// would otherwise grow for the lifetime of a heavily resized cockpit.
+const maxTermRenderers = 16
 
 // Rendered is the output of a render: the styled ANSI string and the plain-text
 // fallback. Plain is ALWAYS populated (even when ANSI is) so a downstream commit
@@ -55,6 +61,9 @@ type Renderer struct {
 	// LRU above absorbs hits) and the cockpit renders from a single loop.
 	trMu sync.Mutex
 	trs  map[int]*glamour.TermRenderer
+	// trWidths is oldest-created first and capped. The rendered-output LRU above
+	// handles normal resize reuse, so this secondary cache only needs a simple bound.
+	trWidths []int
 }
 
 // New builds a Renderer for the given theme with the default cache bound.
@@ -81,12 +90,14 @@ func (r *Renderer) Render(content string, width int, expanded bool) Rendered {
 	// Security: strip any ANSI the model may have injected into its own prose
 	// BEFORE hashing/parsing, so an injected SGR/OSC-8 can never reach the output
 	// and the cache key is computed over the sanitized text.
-	clean := ansi.Strip(content)
+	clean := content
+	if strings.IndexByte(content, '\x1b') >= 0 {
+		clean = ansi.Strip(content)
+	}
 
 	key := cacheKey{
 		contentHash: hashContent(clean),
 		width:       width,
-		theme:       r.theme.Mode.String(),
 		expanded:    expanded,
 	}
 	if hit, ok := r.cache.get(key); ok {
@@ -156,14 +167,19 @@ func (r *Renderer) glamourRender(src string, width int) (string, error) {
 		if r.trs == nil {
 			r.trs = map[int]*glamour.TermRenderer{}
 		}
+		if len(r.trWidths) >= maxTermRenderers {
+			delete(r.trs, r.trWidths[0])
+			r.trWidths = r.trWidths[1:]
+		}
 		r.trs[width] = tr
+		r.trWidths = append(r.trWidths, width)
 	}
 	return tr.Render(src)
 }
 
 // hashContent is a fast non-cryptographic content hash for the cache key. FNV-1a
 // over the sanitized text — collisions are astronomically unlikely for the block
-// sizes we render, and the key also pins width/theme/expanded.
+// sizes we render.
 func hashContent(s string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))

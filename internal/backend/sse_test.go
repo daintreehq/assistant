@@ -243,7 +243,7 @@ func TestIdleWatchdogStaleFireIsNoOp(t *testing.T) {
 func TestReadBoundedLineBoundary(t *testing.T) {
 	// Exactly maxSSELineBytes (including the newline) passes.
 	exact := strings.Repeat("x", maxSSELineBytes-1) + "\n"
-	if got, err := readBoundedLine(newTestBufReader(exact)); err != nil || got != exact {
+	if got, err := readBoundedLine(newTestBufReader(exact)); err != nil || string(got) != exact {
 		t.Fatalf("boundary line: err=%v len=%d, want clean read of %d", err, len(got), len(exact))
 	}
 	// One byte over fails with the sentinel.
@@ -252,7 +252,7 @@ func TestReadBoundedLineBoundary(t *testing.T) {
 		t.Fatalf("over-boundary line err = %v, want errSSELineTooLong", err)
 	}
 	// A final line without a newline is returned with io.EOF, like ReadString.
-	if got, err := readBoundedLine(newTestBufReader("tail")); err != io.EOF || got != "tail" {
+	if got, err := readBoundedLine(newTestBufReader("tail")); err != io.EOF || string(got) != "tail" {
 		t.Fatalf("unterminated tail: got %q err=%v, want \"tail\" io.EOF", got, err)
 	}
 }

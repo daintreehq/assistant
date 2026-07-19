@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,18 +125,26 @@ func (a *idleResetReader) Read(p []byte) (int, error) {
 // readBoundedLine reads one '\n'-terminated line like bufio.Reader.ReadString,
 // but fails with errSSELineTooLong once the line exceeds maxSSELineBytes instead
 // of buffering without limit.
-func readBoundedLine(r *bufio.Reader) (string, error) {
-	var b strings.Builder
+func readBoundedLine(r *bufio.Reader) ([]byte, error) {
+	var b bytes.Buffer
 	for {
 		chunk, err := r.ReadSlice('\n')
-		b.Write(chunk)
+		// Normal SSE lines fit in the reader buffer. Return that borrowed slice
+		// directly; parseRespondStream consumes it before its next read.
+		if b.Len() == 0 && err != bufio.ErrBufferFull {
+			if len(chunk) > maxSSELineBytes {
+				return nil, errSSELineTooLong
+			}
+			return chunk, err
+		}
+		_, _ = b.Write(chunk)
 		if b.Len() > maxSSELineBytes {
-			return "", errSSELineTooLong
+			return nil, errSSELineTooLong
 		}
 		if err == bufio.ErrBufferFull {
 			continue // line spans buffer chunks; keep accumulating under the bound
 		}
-		return b.String(), err
+		return b.Bytes(), err
 	}
 }
 
@@ -180,6 +189,37 @@ type StreamCallbacks struct {
 	OnToolCallDelta func(ToolCallDelta)
 }
 
+type sseEventKind uint8
+
+const (
+	sseEventNone sseEventKind = iota
+	sseEventUnknown
+	sseEventMeta
+	sseEventStatus
+	sseEventDelta
+	sseEventDone
+	sseEventError
+)
+
+func parseSSEEventKind(name []byte) sseEventKind {
+	switch string(bytes.TrimSpace(name)) {
+	case "meta":
+		return sseEventMeta
+	case "status":
+		return sseEventStatus
+	case "delta":
+		return sseEventDelta
+	case "done":
+		return sseEventDone
+	case "error":
+		return sseEventError
+	case "":
+		return sseEventNone
+	default:
+		return sseEventUnknown
+	}
+}
+
 // parseRespondStream reads a named-event SSE stream (meta / delta / done / error)
 // and returns the accumulated RespondResult. Guarantees enforced:
 //   - meta must arrive (a stream that ends without it is an error);
@@ -199,17 +239,17 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 
 	var (
 		result    RespondResult
-		eventName string
+		eventKind sseEventKind
 		// eventData accumulates the event's data lines, newline-joined AS THEY
 		// ARRIVE, so its Len() — which the maxSSEEventBytes cap below reads —
 		// counts every buffered byte including the separators. A per-line []string
 		// buffer measured by summed payload length would let a flood of EMPTY
 		// `data:` lines grow slice/header memory without ever moving the counter.
-		eventData strings.Builder
+		eventData bytes.Buffer
 		dataSeen  bool // one or more data lines buffered (an empty line still counts)
 		content   strings.Builder
 		reasoning strings.Builder
-		acc       = toolCallAccumulator{byIndex: map[int]*toolAccEntry{}}
+		acc       toolCallAccumulator
 		metaSeen  bool
 		doneSeen  bool
 	)
@@ -217,18 +257,18 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 	// dispatch decodes and applies one fully-buffered event, then clears the
 	// buffer. A terminal `error` event returns a non-nil *Error.
 	dispatch := func() error {
-		name := eventName
-		data := eventData.String()
-		eventName = ""
+		kind := eventKind
+		data := eventData.Bytes()
+		eventKind = sseEventNone
 		eventData.Reset()
 		dataSeen = false
-		if name == "" && strings.TrimSpace(data) == "" {
+		if kind == sseEventNone && len(bytes.TrimSpace(data)) == 0 {
 			return nil
 		}
-		switch name {
-		case "meta":
+		switch kind {
+		case sseEventMeta:
 			var m StreamMeta
-			if err := json.Unmarshal([]byte(data), &m); err != nil {
+			if err := json.Unmarshal(data, &m); err != nil {
 				return decodeErr("meta", err)
 			}
 			result.Meta = m
@@ -242,16 +282,16 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			if cb.OnMeta != nil {
 				cb.OnMeta(m)
 			}
-		case "status":
+		case sseEventStatus:
 			// Optional thinking-phase marker (DeepSeek thinking mode). Decode for the
 			// UX hook; a malformed/unknown status is ignored, never an error.
 			var st StreamStatus
-			if json.Unmarshal([]byte(data), &st) == nil && cb.OnStatus != nil {
+			if json.Unmarshal(data, &st) == nil && cb.OnStatus != nil {
 				cb.OnStatus(st)
 			}
-		case "delta":
+		case sseEventDelta:
 			var d StreamDelta
-			if err := json.Unmarshal([]byte(data), &d); err != nil {
+			if err := json.Unmarshal(data, &d); err != nil {
 				return decodeErr("delta", err)
 			}
 			if d.ReasoningContent != "" {
@@ -272,19 +312,19 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 					cb.OnToolCallDelta(tc)
 				}
 			}
-		case "done":
+		case sseEventDone:
 			var dn StreamDone
-			if err := json.Unmarshal([]byte(data), &dn); err != nil {
+			if err := json.Unmarshal(data, &dn); err != nil {
 				return decodeErr("done", err)
 			}
 			result.FinishReason = dn.FinishReason
 			result.Usage = dn.Usage
 			doneSeen = true
-		case "error":
+		case sseEventError:
 			var env Envelope
 			// Best-effort decode; a malformed error payload still terminates the
 			// stream with a generic error rather than a fake success.
-			_ = json.Unmarshal([]byte(data), &env)
+			_ = json.Unmarshal(data, &env)
 			if env.Error.Message == "" && env.Error.Code == "" {
 				env.Error.Code = "stream_error"
 				env.Error.Message = "backend stream emitted an error event"
@@ -306,9 +346,9 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			}
 		}
 		if len(line) > 0 {
-			trimmed := strings.TrimRight(line, "\r\n")
+			trimmed := bytes.TrimRight(line, "\r\n")
 			switch {
-			case trimmed == "":
+			case len(trimmed) == 0:
 				if derr := dispatch(); derr != nil {
 					return result, derr
 				}
@@ -318,19 +358,19 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				if doneSeen {
 					goto finish
 				}
-			case strings.HasPrefix(trimmed, ":"):
+			case bytes.HasPrefix(trimmed, []byte(":")):
 				// SSE comment line (e.g. the backend's ": hb" heartbeat): carries no
 				// event data and is ignored here. Its BYTES still reset the idle
 				// watchdog upstream (idleResetReader sees every read), which is the
 				// whole point of the heartbeat.
-			case strings.HasPrefix(trimmed, "event:"):
-				eventName = strings.TrimSpace(trimmed[len("event:"):])
-			case strings.HasPrefix(trimmed, "data:"):
-				d := strings.TrimPrefix(trimmed[len("data:"):], " ")
+			case bytes.HasPrefix(trimmed, []byte("event:")):
+				eventKind = parseSSEEventKind(trimmed[len("event:"):])
+			case bytes.HasPrefix(trimmed, []byte("data:")):
+				d := bytes.TrimPrefix(trimmed[len("data:"):], []byte(" "))
 				if dataSeen {
 					eventData.WriteByte('\n')
 				}
-				eventData.WriteString(d)
+				_, _ = eventData.Write(d)
 				dataSeen = true
 				// The cap reads the BUFFERED size (payload + joining newlines), so
 				// even a stream of millions of empty data lines advances it — one
@@ -346,7 +386,7 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		}
 		if err != nil {
 			// Flush a trailing event that had no terminating blank line.
-			if eventName != "" || dataSeen {
+			if eventKind != sseEventNone || dataSeen {
 				if derr := dispatch(); derr != nil {
 					return result, derr
 				}
@@ -404,6 +444,9 @@ type toolCallAccumulator struct {
 // call share an index; id/name/type arrive once and argument text streams in
 // pieces, so each non-empty field overwrites and arguments concatenate.
 func (a *toolCallAccumulator) add(tc ToolCallDelta) {
+	if a.byIndex == nil {
+		a.byIndex = make(map[int]*toolAccEntry)
+	}
 	idx := 0
 	if tc.Index != nil {
 		idx = *tc.Index

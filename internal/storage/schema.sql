@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS timers (
   createdAt     INTEGER NOT NULL,
   lastFiredAt   INTEGER
 );
+-- The scheduler runs this predicate every tick. Status first excludes the much
+-- larger terminal-history set, while fireAt supplies both the range and ordering.
+CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(status, fireAt);
 
 -- 3.2 watchers — project-scoped supervisors: rows survive process boundaries
 -- and are adopted by the next owner (cockpit or supervisor daemon); /clear is
@@ -56,6 +59,10 @@ CREATE TABLE IF NOT EXISTS watchers (
   -- that row's status as the watcher reaches a terminal state.
   workflowRunId      TEXT
 );
+-- Scheduler due scans and status-filtered operational views must stay proportional
+-- to LIVE rows, not to the lifetime history retained in this project database.
+CREATE INDEX IF NOT EXISTS idx_watchers_due ON watchers(status, nextCheckAt);
+CREATE INDEX IF NOT EXISTS idx_watchers_status_created ON watchers(status, createdAt);
 
 -- 3.3 events — attention-queue inbox. createdAt is pinned; updatedAt is the
 -- dedupe-bump recency key.

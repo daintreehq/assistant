@@ -59,7 +59,7 @@ endif
 
 .DEFAULT_GOAL := build
 
-.PHONY: build install test test-race test-pty vet fmt generate run clean db-reset
+.PHONY: build install test test-race test-pty bench-local vet fmt generate run clean db-reset
 
 ## build: compile the binary into ./bin with version + trimpath.
 build:
@@ -81,6 +81,11 @@ test-race:
 ## test-pty: run the real PTY render harness (allocates a pseudoterminal; not in the default suite).
 test-pty:
 	go test -count=1 -v -tags pty -run TestPTY ./internal/e2e/...
+
+## bench-local: deterministic, offline hot-path benchmarks with allocation counts.
+bench-local:
+	go test -p 1 -run '^$$' -bench . -benchmem \
+		./internal/storage ./internal/backend ./internal/agent ./internal/daemon ./internal/ui/markdown
 
 ## vet: run go vet across all packages.
 vet:

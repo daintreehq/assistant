@@ -6,7 +6,7 @@ import (
 )
 
 // renderCache is a bounded LRU over rendered markdown. A render is PURE given its
-// key (contentHash, width, theme, expanded), so caching is safe and lets us reuse
+// key (contentHash, width, expanded), so caching is safe and lets us reuse
 // a block across frames and across the live→sealed transition (the scrollback
 // commit re-renders at the same width, hitting the cache). The cache NEVER does
 // I/O and holds only finished strings, so a hit is allocation-light.
@@ -21,11 +21,11 @@ type renderCache struct {
 }
 
 // cacheKey is the pure-render identity. contentHash (not the content itself)
-// keeps the key small and comparable; width/theme/expanded all change the output.
+// keeps the key small and comparable; width/expanded change the output, while theme
+// is fixed for the lifetime of the owning Renderer.
 type cacheKey struct {
 	contentHash uint64
 	width       int
-	theme       string // theme.Mode.String() — color set + glyphs depend on it
 	expanded    bool
 }
 

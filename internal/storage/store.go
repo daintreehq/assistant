@@ -383,15 +383,12 @@ func (s *Store) BeginOwnership(now int64) (OwnershipSummary, error) {
 	if err := s.resetStaleAgentLaunches(); err != nil {
 		return sum, err
 	}
-	watchers, err := s.ListWatchers("")
+	watchers, err := s.ListLiveWatchers()
 	if err != nil {
-		return sum, fmt.Errorf("ownership boot: list watchers: %w", err)
+		return sum, fmt.Errorf("ownership boot: list live watchers: %w", err)
 	}
 	for _, w := range watchers {
-		switch w.Status {
-		case "active", "created", "paused":
-			sum.ResumedWatcherTitles = append(sum.ResumedWatcherTitles, w.Title)
-		}
+		sum.ResumedWatcherTitles = append(sum.ResumedWatcherTitles, w.Title)
 	}
 	live, err := s.ListLiveAsyncInvocations()
 	if err != nil {

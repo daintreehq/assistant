@@ -93,3 +93,19 @@ func TestProjectToolsNilVsEmptyDistinctIdentity(t *testing.T) {
 		t.Fatalf("repeat empty key should hit the cache, got %d builds", tr.projectCalls)
 	}
 }
+
+func TestBackendToolProjectionReused(t *testing.T) {
+	tools := []models.ChatTool{{Function: models.ChatToolFunc{Name: "fs__read"}}}
+	s := &Session{toolProj: toolProjCache{valid: true, unconstrained: true, tools: tools}}
+	first, err := s.toBackendToolsCached(tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.toBackendToolsCached(tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 || &first[0] != &second[0] {
+		t.Fatal("stable tool inventory should reuse the cached backend projection")
+	}
+}
