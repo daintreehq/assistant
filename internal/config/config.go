@@ -13,12 +13,12 @@
 // THREE trust tiers govern which sources a setting may come from:
 //   - trusted-only (trustedGet): tier/autoApprove/offline/stateDir/logDir — real env only;
 //     a bound project must never escalate the assistant.
-//   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (DeepSeek base
-//     URL, MCP URL + token) PLUS the Daintree-injected identity (project id, window id) and
+//   - trusted-or-own (trustedOrOwnGet): the endpoint / secret-pairing vars (the MCP
+//     URL + token) PLUS the Daintree-injected identity (project id, window id) and
 //     the debug-logging toggle — real env or the assistant's own .env, NEVER the project
 //     .env, so a malicious repo can't redirect where a trusted key/token is sent
 //     (exfiltration), spoof identity (cross-project state access), or silently enable tracing.
-//   - merged (mergedGet): everything else (model routing, api key) — real env > project .env > own .env.
+//   - merged (mergedGet): everything else — real env > project .env > own .env.
 package config
 
 import (
@@ -36,27 +36,14 @@ import (
 )
 
 // DEFAULTS holds the built-in default values (the CODE defaults, not the
-// CLAUDE.md prose). All three tiers run deepseek-v4-flash: it is the validated
-// orchestration model, not an experiment — flash carries the main thread well
-// because the loaded skills (procedural memory) supply the step-by-step
-// playbooks, so a heavier reasoning model on the large tier earned nothing.
-// Override any tier with DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL when a particular
-// deployment wants a beefier model for judgment-heavy steps.
+// CLAUDE.md prose).
+//
+// There are no model or provider defaults here any more. Model choice, prompt
+// assembly, and the upstream credentials all belong to the Daintree backend
+// (docs/BACKEND.md); the CLI is a local runtime that never talks to a provider.
 var DEFAULTS = struct {
-	DeepSeekBaseURL string
-	LargeModel      string
-	MediumModel     string
-	SmallModel      string
-	DefaultMcpURL   string
+	DefaultMcpURL string
 }{
-	// DeepSeek's OpenAI-compatible endpoint. The client appends /chat/completions.
-	DeepSeekBaseURL: "https://api.deepseek.com",
-	// Bare DeepSeek model ids — no "accounts/<vendor>/models/" path (that was the
-	// Fireworks routing prefix). deepseek-v4-flash is the validated orchestration
-	// model; the loaded skills carry the playbooks, so a heavier model earned nothing.
-	LargeModel:  "deepseek-v4-flash",
-	MediumModel: "deepseek-v4-flash",
-	SmallModel:  "deepseek-v4-flash",
 	// Declared but NOT applied as a default for mcpUrl; mcpUrl is left empty when
 	// unset → degraded local mode.
 	DefaultMcpURL: "http://127.0.0.1:45454/mcp",
@@ -75,12 +62,6 @@ type AppConfig struct {
 	StateDir    string
 	DBPath      string
 	LogDir      string
-
-	DeepSeekAPIKey  string
-	DeepSeekBaseURL string
-	LargeModel      string
-	MediumModel     string
-	SmallModel      string
 
 	McpURL    string
 	McpToken  string
@@ -102,8 +83,9 @@ type AppConfig struct {
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
-// pointers mean "not provided". Note: NO MediumModel, DeepSeekBaseURL override
-// (per the spec's ConfigOverrides field list).
+// pointers mean "not provided". There are deliberately no model/provider overrides:
+// the CLI holds no model credentials and never talks to a provider — the backend
+// owns the model choice, the prompts, and the keys (see docs/BACKEND.md).
 type ConfigOverrides struct {
 	ProjectPath          *string
 	StateDir             *string
@@ -111,9 +93,6 @@ type ConfigOverrides struct {
 	WindowID             *string
 	McpURL               *string
 	McpToken             *string
-	DeepSeekAPIKey       *string
-	LargeModel           *string
-	SmallModel           *string
 	Tier                 *string
 	AutoApprove          *bool
 	Offline              *bool
@@ -179,12 +158,20 @@ func (e *env) trustedGet(key string) string { return e.trusted[key] }
 
 // mergedGet is the normal precedence (real env > project .env > own .env), skipping blanks
 // so an empty real-env var correctly falls through to a .env value.
+//
+// NOTE: this tier currently has NO members. Every setting is either trusted-only or
+// trusted-or-own, because the last merged settings were the model/provider vars
+// (DEEPSEEK_API_KEY, DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL) and those went away with
+// the direct provider client — the backend owns model choice and credentials now.
+// It is kept as the DEFAULT tier: a new setting that is neither an escalation vector
+// nor a secret-pairing endpoint belongs here, and a project .env may legitimately
+// supply it. Its precedence is pinned by TestMergedGetPrecedence.
 func (e *env) mergedGet(key string) string {
 	return FirstString(e.trusted[key], e.projectEnv[key], e.ownEnv[key])
 }
 
 // trustedOrOwnGet EXCLUDES the untrusted project .env (real env > own .env). It governs the
-// endpoint / secret-pairing vars (DeepSeek base URL, MCP URL + token) so a malicious repo's
+// endpoint / secret-pairing vars (the MCP URL + token) so a malicious repo's
 // .env can NEVER redirect where a TRUSTED API key / token is sent — a confused-deputy
 // exfiltration. A custom endpoint must be set in the real env or the assistant's own .env.
 func (e *env) trustedOrOwnGet(key string) string {
@@ -231,13 +218,8 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	cfg := AppConfig{ProjectPath: projectPath}
 
 	// --- merged-env-OK settings ---
-	cfg.DeepSeekAPIKey = FirstString(deref(overrides.DeepSeekAPIKey), e.mergedGet("DEEPSEEK_API_KEY"))
 	// DEEPSEEK_BASE_URL is trustedOrOwn (NOT mergedGet): the API key is a trusted secret,
 	// so a project .env must never redirect where it is sent (exfiltration).
-	cfg.DeepSeekBaseURL = FirstString(e.trustedOrOwnGet("DEEPSEEK_BASE_URL"), DEFAULTS.DeepSeekBaseURL)
-	cfg.LargeModel = FirstString(deref(overrides.LargeModel), e.mergedGet("DAINTREE_LARGE_MODEL"), DEFAULTS.LargeModel)
-	cfg.MediumModel = FirstString(e.mergedGet("DAINTREE_MEDIUM_MODEL"), DEFAULTS.MediumModel)
-	cfg.SmallModel = FirstString(deref(overrides.SmallModel), e.mergedGet("DAINTREE_SMALL_MODEL"), DEFAULTS.SmallModel)
 	// The MCP endpoint + token are the Daintree connection credentials (injected by Daintree
 	// into the real env). They are trustedOrOwn so a project .env can't redirect the link or
 	// inject a token: no default → degraded local mode when genuinely unset.
@@ -364,11 +346,6 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"stateDir":             cfg.StateDir,
 		"dbPath":               cfg.DBPath,
 		"logDir":               cfg.LogDir,
-		"deepseekApiKey":       redactSecret(cfg.DeepSeekAPIKey),
-		"deepseekBaseUrl":      cfg.DeepSeekBaseURL,
-		"largeModel":           cfg.LargeModel,
-		"mediumModel":          cfg.MediumModel,
-		"smallModel":           cfg.SmallModel,
 		"mcpToken":             redactSecret(cfg.McpToken),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),

@@ -58,7 +58,7 @@ var prepBranchForReviewSchema = json.RawMessage(`{
 func newWorkflowStartWorkOnIssueTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.startWorkOnIssue",
-		Description: "Start work on an issue in Daintree (spawns a worktree + agent terminal), then attach a supervisor watcher.",
+		Description: "Ask Daintree to start work on an issue: it creates the worktree and spawns the agent terminal, then (unless attachWatcher:false) this attaches a durable supervisor watcher and opens a workflow ledger row so the run is tracked and reported. `arguments` is Daintree-defined and forwarded verbatim; attachWatcher is assistant-side and never sent. Use agentTask.spawnForEdits instead when the work is a task, not an issue.",
 		Risk:        domain.RiskExternal,
 		Consequence: "Spawns a worktree and a visible agent terminal to start work on the issue.",
 		Schema:      startWorkOnIssueSchema,

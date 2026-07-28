@@ -14,7 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 )
 
@@ -43,7 +43,7 @@ func boolPtr(b bool) *bool    { return &b }
 func strPtr(s string) *string { return &s }
 
 // TestCreateWiresEveryDependency asserts App.Create builds the full dependency
-// graph in the canonical order — config → store → mcp → queue → router → registry
+// graph in the canonical order — config → store → mcp → queue → backend → registry
 // (AssertSafe already passed inside Create) → skills → session — with no nil seam.
 func TestCreateWiresEveryDependency(t *testing.T) {
 	a := newOfflineApp(t)
@@ -57,9 +57,6 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 	}
 	if a.Queue == nil {
 		t.Error("Queue is nil")
-	}
-	if a.Router == nil {
-		t.Error("Router is nil")
 	}
 	if a.Backend == nil {
 		t.Error("Backend is nil")
@@ -92,9 +89,12 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
+	// The exact count is a deliberate tripwire: the tool inventory is sent on EVERY
+	// model round (~16k tokens), and inventory size measurably degrades tool-selection
+	// accuracy, so a family that quietly grows must be a conscious decision.
 	got := len(a.Registry.List())
-	if got != 85 {
-		t.Errorf("registered tools = %d, want 85", got)
+	if got != 79 {
+		t.Errorf("registered tools = %d, want 79", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.

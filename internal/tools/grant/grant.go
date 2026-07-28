@@ -245,7 +245,7 @@ var listSchema = json.RawMessage(`{
 func newListTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "grant.list",
-		Description: "List live automation grants (non-revoked, non-expired, with uses remaining).",
+		Description: "List the LIVE automation grants (non-revoked, non-expired, uses remaining), optionally filtered by actorId: grant id, actorId/actorType (watcher|timer|wake), the allowed risk classes and tool names, expiresAt and usesRemaining. Grants do NOT ride the turn context — call this when the user asks what may run unattended, before minting a duplicate, or to get the id for grant.revoke.",
 		Risk:        domain.RiskRead,
 		Schema:      listSchema,
 		Decode:      tools.StrictDecoder(func() any { return &listArgs{} }),
@@ -319,7 +319,7 @@ var revokeSchema = json.RawMessage(`{
 func newRevokeTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "grant.revoke",
-		Description: "Revoke an automation grant by id.",
+		Description: "Revoke an automation grant by its grt_… id, immediately withdrawing that actor's pre-authorization to run confirm-required tools unattended — the next watcher/timer/wake call that needed it becomes a blocked pending-approval inbox item instead. Interactive main actor only (else GRANT_ACTOR_FORBIDDEN); an unknown id fails GRANT_NOT_FOUND. Use it when the user calls off unattended work.",
 		Risk:        domain.RiskLocal,
 		Schema:      revokeSchema,
 		Decode:      tools.StrictDecoder(func() any { return &revokeArgs{} }),

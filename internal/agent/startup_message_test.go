@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 )
 
 func TestBuildStartupContextProjectsStableFactsAndTriStates(t *testing.T) {

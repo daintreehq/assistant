@@ -209,7 +209,7 @@ type Tool struct {
 // ToolContext is everything a handler can reach. Built once at startup; the
 // optional per-turn/per-actor fields are filled by the caller and handlers fail
 // gracefully when they are absent. Cross-subsystem deps (Store, MCPClient,
-// Queue, Router) are reached through the SMALL consumer-defined interfaces in
+// Queue) are reached through the SMALL consumer-defined interfaces in
 // deps.go — NOT the concrete packages — so this package compiles in isolation.
 type ToolContext struct {
 	// --- required ---
@@ -217,7 +217,6 @@ type ToolContext struct {
 	MCP         MCPClient        // MCP transport (daintree.call)
 	DB          Store            // ConsumeGrant + InsertAudit used by the registry
 	Queue       Queue            // attention queue; registry publishes denial events
-	Router      Router           // model access
 	ProjectPath string           // project root (fs path containment)
 	Actor       domain.ToolActor // gates the confirmation branch
 	// Confirm approves a mutating action. A returned error is treated as a

@@ -8,7 +8,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/safety"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -165,7 +165,6 @@ func (a *App) buildContext(actor domain.ToolActor, actorID string) *tools.ToolCo
 		MCP:          mcpToolAdapter{c: a.MCP},
 		DB:           storeToolAdapter{s: a.Store},
 		Queue:        a.Queue,
-		Router:       a.Router,
 		ProjectPath:  cfg.ProjectPath,
 		Actor:        actor,
 		Confirm:      confirm,

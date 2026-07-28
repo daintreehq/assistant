@@ -90,10 +90,6 @@ func Tools(deps Deps) []tools.Tool {
 		newTerminalDisarmTool(deps),
 		newTerminalDisarmAllTool(deps),
 		newCopyTreeInjectTool(deps),
-		newFocusNextWaitingTool(deps),
-		newFocusNextWorkingTool(deps),
-		newFocusNextAgentTool(deps),
-		newFocusPreviousAgentTool(deps),
 		newCopyTreeGenerateAndCopyFileTool(deps),
 	}
 }

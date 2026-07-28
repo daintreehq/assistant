@@ -99,7 +99,7 @@ var publishSchema = json.RawMessage(`{
 func newPublishTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "queue.publish",
-		Description: "Publish an event to the attention queue (the human's inbox). Use dedupeKey to collapse repeats.",
+		Description: "Publish ONE event to the human's attention inbox — how background work reports without interrupting the conversation. Use it when you must STOP leaving something the user needs to see later (a blocked step, a finished long run, an escalation from a wait you gave up on); in a live turn, just say it in your reply instead. Pass a stable dedupeKey so repeats collapse into one counted item.",
 		Risk:        domain.RiskLocal,
 		Schema:      publishSchema,
 		Decode:      tools.StrictDecoder(func() any { return &domain.QueuePublishArgs{} }),
@@ -153,7 +153,7 @@ var digestSchema = json.RawMessage(`{
 func newDigestTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "queue.digest",
-		Description: "Read a digest of the attention queue, optionally filtered by minimum severity.",
+		Description: "Read the human's attention inbox: open events newest-first (default 50, max 200), filter with severityAtLeast, add includeResolved for history. Returns the structured events plus a pre-rendered `text` digest you can relay. The inbox does NOT ride the turn context, so call this when the user asks what needs attention, or on a wake turn to see what was published while you were away.",
 		Risk:        domain.RiskRead,
 		Schema:      digestSchema,
 		Decode:      tools.StrictDecoder(func() any { return &digestArgs{} }),
@@ -212,7 +212,7 @@ var resolveSchema = json.RawMessage(`{
 func newResolveTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "queue.resolve",
-		Description: "Mark an attention-queue event resolved by id.",
+		Description: "Mark ONE attention-queue (inbox) event resolved by its id so it stops appearing in queue.digest and stops re-surfacing as open work. Call it AFTER you have actually acted on the item — resolving is the acknowledgement, not the fix. An unknown or already-resolved id fails QUEUE_NOT_FOUND (unrecoverable). Local bookkeeping only: it never touches terminals, watchers or async work.",
 		Risk:        domain.RiskLocal,
 		Schema:      resolveSchema,
 		Decode:      tools.StrictDecoder(func() any { return &resolveArgs{} }),

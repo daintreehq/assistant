@@ -35,6 +35,27 @@ In Bubble Tea v2 the model's `View()` returns a `tea.View` whose `AltScreen` fie
 left `false` and whose `MouseMode` is the zero value `tea.MouseModeNone`. The `View()`
 string is ONLY the live footer — never the whole transcript.
 
+### The pre-program splash hand-off
+
+The boot splash is painted with **raw ANSI, before `tea.NewProgram` exists**
+(`internal/ui/run.go` → `playBootSplash`). The final splash frame *is* the complete
+cockpit — masthead above a live footer — so Bubble Tea adopts an already-painted screen
+as its live region and there is never a blank or footer-only frame. Two pieces of state
+carry the hand-off into the program:
+
+- `m.queue.headerDone = true` — the masthead is already on screen, so the commit queue
+  must not print a duplicate.
+- `m.handoffCols` / `m.handoffRows` — the dimensions it was painted at. The first
+  `WindowSizeMsg` validates them, so a genuine resize in the narrow hand-off→program gap
+  triggers a full redraw instead of preserving stale wrapping.
+
+**Consequence for anyone reading `model.go`:** the in-program 3-gate boot lock
+(`booting` / `startupSettled` / `animationDone` / `projectSettled`, `completeBoot`,
+`BootCapMsg`) is **legacy and inert in production** — `NewModel` sets `booting: false`
+(`model.go:247`). Every `!m.booting` guard therefore fires on every launch. Don't reason
+about startup as if that lock still runs; don't delete it without checking the non-TTY
+and test paths that still construct a model directly.
+
 ### Why not render the whole tree into a viewport
 
 Repainting the entire transcript into a FIXED viewport — the whole transcript in the
@@ -82,7 +103,114 @@ The `scrollbackQueue` owns the frontier and the one-in-flight discipline:
 **Commit order is exact:** masthead first (so it lands on top of scrollback and scrolls
 away above all history), then sealed cells in index order, one at a time.
 
-## 3. The event pump and token coalescer
+## 3. The incremental flush — the ACTIVE turn streams into scrollback
+
+`internal/ui/flush.go`. The commit queue above handles *sealed* cells. But a long turn
+would still grow the footer without bound before it seals, and a tall live footer is
+exactly what triggers the `tea.Println` corruption class below. So the **active** turn
+also flushes, continuously:
+
+- `finalizedStepCount` finds the turn's IMMUTABLE leading steps. A prose/note step is
+  final once it is no longer the last step. A contiguous tool run is final only when
+  every activity in it is terminal **and** it is closed by a following non-tool step — so
+  a branch tree commits atomically and is never split across the flush frontier.
+- Beyond that frontier, the live prose step commits **line by line**: every wrapped row
+  except the still-mutable last one (greedy word-wrap closes earlier rows). A
+  markdown-risky tail falls back to paragraph-level commit. Prose therefore flows into
+  scrollback token by token and the footer holds only the partial last line plus the
+  live status.
+
+Two rules keep the flushed bytes byte-identical to what the seal would emit, so nothing
+is ever duplicated:
+
+- Live-ness rides ONLY the position of the last step — an earlier prose step renders as
+  final markdown, so the flush never freezes a half-rendered paragraph.
+- The **reflow guard**: before splicing `final[FlushedRows:target]`, the already-flushed
+  prefix must still render identically this frame (`t.flushedRowsText`). A rare markdown
+  re-wrap makes the flush HOLD and lets the seal commit the tail instead — misaligned
+  content beneath a prefix already in scrollback is unrecoverable.
+- `sealTail` strips the flushed prefix at a row boundary on seal (exact text match, with
+  a row-count fallback).
+
+`LeftPad` is applied at commit and at footer assembly, never inside the row builders, so
+a flushed row lines up column-for-column with the live tail.
+
+## 4. Chunked commits — never print taller than the viewport
+
+`scrollbackChunkRows` + `splitRowChunks` (`flush.go`). Bubble Tea v2's `insertAbove`
+scrolls the screen by the printed line count, then moves the cursor UP by that count
+**plus the live-footer height**. When the printed block is taller than the rows above the
+footer, that `CursorUp` clamps at the top of the viewport and the geometry desyncs —
+freezing a copy of the footer into scrollback with a band of blank rows
+(charmbracelet/bubbletea#1613). A large paste making the YOU card hundreds of rows is the
+realistic trigger.
+
+So **every** commit is split into viewport-sized slices. The bound is measured at PRINT
+time from `m.footerRows` — the footer's actual last-RENDERED height, written by `View()`
+through a shared pointer because `Model` has value-copy semantics. It lags state by
+exactly one frame, which is precisely the cell-buffer height `insertAbove` will use for a
+commit fired in the next `Update`. Reserve it (plus one row of margin) and every chunk
+stays within one screen.
+
+> Measuring at *selection* time instead of *print* time, or reserving a static cap, both
+> reintroduce #1613 — that regression has been fixed twice. Floor the result at 1 so a
+> tiny terminal still makes progress.
+
+## 5. The footer re-pin ledger
+
+`internal/ui/repin.go`. Ultraviolet repaints a SHRUNKEN inline view **top-anchored**: the
+shorter footer is redrawn at the old frame's origin and the freed rows below are erased,
+but they remain in the host's viewport as dead, scrollable blank area *below* the
+composer. Growth and `tea.Println` recover it — a shrink matched by a print self-heals.
+
+The one that does not is **the last shrink of a turn**: run-status chrome leaves the
+footer after the final block has already printed (often an empty block — a fully
+line-flushed turn has nothing left to commit), stranding the composer 1–3 rows above the
+bottom with dead scroll area underneath after *every* response.
+
+The fix is a small double-entry ledger reconciled on every state pass:
+
+| Event | Ledger effect |
+| --- | --- |
+| Rendered footer SHRINK | accrues **debt** (dead rows below the footer) |
+| An `insertAbove` we emit (queue commit, turn flush) | accrues **credit** first — its rows slide the footer over the matching shrink physically, so debt accrues only for the uncovered remainder |
+| Rendered GROWTH | repays debt directly and ends the credit story |
+| Small leftover debt | healed after a render-settle barrier by printing that many blank rows above the footer |
+| Debt > `repinDebtCap` (4) | **forgiven** — dumping a visible blank band into scrollback is worse than the strand; the next real commit heals it organically |
+
+At most ONE re-pin barrier is armed at a time, nonce-guarded so a stale tick can't act.
+If the footer height changed while the barrier waited, it re-arms rather than printing —
+the new frame needs its own settle delay before an `insertAbove` can trust the renderer's
+cell-buffer height. `resetRepinLedger` is mandatory whenever host scrollback is wiped
+(`/clear`, the nuclear resize redraw): stale debt must not survive into a fresh layout.
+
+Every path that emits an `insertAbove` **must** credit the ledger (`creditRepinRows`).
+A path that forgets will heal rows a second time with blank lines mid-turn.
+
+## 6. Forcing a repaint — `tea.ClearScreen` alone is inert
+
+Bubble Tea v2 optimizes away a pending `tea.ClearScreen` when `View.Content` and its
+bounds are unchanged. Since `hostClearCmd` has *already* erased the physical terminal by
+raw escape, that fast path leaves a blank screen. A host redraw therefore needs a content
+change to defeat the equality check.
+
+`redrawHostCmd()` (`internal/ui/cmds.go`) is the ONE safe sequence — used by `/clear`,
+settled resize recovery, `Ctrl+L`, and the legacy boot hand-off. **Order is load-bearing:**
+
+1. `hostClearCmd()` — erase the physical viewport + native scrollback;
+2. `tea.ClearScreen` — mark Bubble Tea's managed screen for full redraw;
+3. `rendererRepaintMsg` — toggles `rendererRepaintTag`, so `View()` appends a zero-cell
+   SGR reset (`\x1b[0m`) and otherwise-identical frames differ;
+4. `commitArmCmd()` — wait several renderer ticks before allowing `tea.Println` again.
+
+Step 3 must land **after** step 2. Toggling the tag in the reducer that requests the wipe
+renders too early, only for `hostClearCmd` to erase it afterward.
+
+Commits stay disarmed for the whole window (`redrawPending`). `CommitArmMsg` must NOT
+re-arm inside it: the arm tick from `Init` is timer-ordered, not state-ordered, and
+re-arming mid-window lets a commit `Println` against pre-redraw geometry.
+
+## 7. The event pump and token coalescer
 
 `internal/ui/pump.go` bridges the runtime to Bubble Tea. The agent runs on its own
 goroutine and emits through an `agent.EventSink`; the pump implements that sink by
@@ -98,7 +226,7 @@ on a short tick (16–33 ms) or immediately before any non-token event, so the f
 repaints at a sane rate without a typewriter delay. **No artificial typing effect** —
 flush coalesced tokens straight through.
 
-## 4. Liveness: explicit RunPhase, ordered TurnSteps
+## 8. Liveness: explicit RunPhase, ordered TurnSteps
 
 The active turn is driven by a first-class `domain.RunPhase`, **never** inferred from
 `streaming && assistantText == ""`:
@@ -125,7 +253,7 @@ before sequential dispatch, then promotes each `queued → active → done|faile
 Activity glyphs are visually distinct (`◦ queued`, `⠋ active`, `◇ waiting`, `✓ complete`,
 `✗ failed`); active rows animate the spinner and show live elapsed time.
 
-## 5. The dedicated composer
+## 9. The dedicated composer
 
 `internal/ui/composer/` is a purpose-built editor model (not Bubbles' `textarea`). It owns
 its buffer (a flat rune string with embedded `\n`), cursor offset, history, and kill-ring,
@@ -137,7 +265,7 @@ clears / Esc-empty-while-busy cancels". App chords (`Ctrl-C`, `Ctrl-O`, `Ctrl-X`
 `Esc`) are handled by the shell in `Update`, routed by current view + focus (there is no
 global key bus).
 
-## 6. The no-alt-screen / no-mouse contract (enforced)
+## 10. The no-alt-screen / no-mouse contract (enforced)
 
 These are hard rules; `internal/ui/view_test.go` enforces them:
 
@@ -151,30 +279,41 @@ These are hard rules; `internal/ui/view_test.go` enforces them:
 Never enable `WithMouseAllMotion` / `WithMouseCellMotion`, never raw-parse SGR mouse mode,
 never implement an internal scrollback viewport. The host owns scroll.
 
-## 7. `/clear` — the only scrollback wipe
+## 11. `/clear` — the only scrollback wipe
 
 `internal/terminal/clear.go` holds the **only** sanctioned host-scrollback wipe:
 `ClearHost` writes `\x1b[2J\x1b[3J\x1b[H` (erase viewport, erase scrollback, cursor home),
-TTY-gated and error-swallowing. It is used by `/clear` (and, conceptually, a resize
-redraw); it never touches the alternate buffer. Everything else goes through Bubble Tea's
-managed render path — there is **no** raw per-frame painting.
+TTY-gated and error-swallowing. It never touches the alternate buffer. Everything else
+goes through Bubble Tea's managed render path — there is **no** raw per-frame painting.
+
+Callers reach it only through `redrawHostCmd()` (§6), never directly — the raw wipe on its
+own leaves Bubble Tea's managed screen believing the frame is still on the terminal. The
+paths that use it are `/clear`, `Ctrl+L`, and settled resize recovery. Each must also
+bump `redrawNonce` (resetting the commit queue's `resetKey`, so `committed`/`headerDone`
+re-arm), call `resetFlushState()` (or a re-committed turn will skip rows the wipe erased),
+and call `resetRepinLedger()`.
 
 ## Package map (`internal/ui`)
 
 | File / dir            | Responsibility                                                        |
 | --------------------- | --------------------------------------------------------------------- |
-| `run.go`              | cockpit entry (`Run(ctx, *app.App)`), builds the `tea.Program`        |
-| `model.go`            | the root model, dependency wiring                                     |
+| `run.go`              | cockpit entry (`Run(ctx, *app.App)`), pre-program splash hand-off, boot prefetch, builds the `tea.Program` |
+| `model.go`            | the root model, dependency wiring, the re-pin ledger fields           |
 | `update.go` / `update_handlers.go` | the `Update` reducer + message handlers (single-flight Send) |
-| `view.go`             | the `tea.View` (live footer only) + program options                   |
+| `cmds.go`             | `redrawHostCmd` (the one safe full-host redraw), `hostClearCmd`, `bellCmd` |
+| `messages.go`         | the message vocabulary, incl. `rendererRepaintMsg` / `CommitArmMsg`    |
+| `view.go`             | the `tea.View` (live footer only) + program options; writes `footerRows` |
 | `pump.go`             | event pump (`EventSink` → channel → re-armed `waitEvent`) + coalescer  |
 | `scrollback.go`       | the commit-queue protocol (`tea.Println`, one-in-flight, ack)         |
+| `flush.go`            | incremental active-turn flush + the viewport-sized chunk bound         |
+| `repin.go`            | the footer re-pin debt/credit ledger                                   |
 | `transcript_types.go` | `TranscriptCell` / `TurnCell` / `TurnStep` / `isSealed`               |
 | `runstatus.go`        | `LiveRunStatus`, driven by `RunPhase`                                  |
 | `render_*.go`         | turn / activity / chrome / approval / operations rendering            |
-| `splash.go`           | the static embedded splash wordmark (cosmetic, Ctrl-C-skippable)      |
+| `splash.go` / `boot_splash.go` / `splash_vector.go` / `splash_frames.go` | the pre-program raw-ANSI boot splash + hand-off frame |
 | `widths.go`           | width budget / gutter math                                            |
 | `controller.go`       | confirm-hook + runtime callbacks into the program                     |
+| `dashboard*.go`       | the operations deck snapshot + build                                   |
 | `composer/`           | the dedicated editor model                                            |
 | `theme/`              | colors, styles, splash gradient (`DAINTREE_THEME`)                    |
 | `markdown/`           | glamour-backed markdown rendering                                     |
@@ -195,3 +334,12 @@ managed render path — there is **no** raw per-frame painting.
   a visible dimmed queued turn, promoted in place — not a second concurrent `Send`.
 - **Never mutate the model outside `Update`.** All state changes flow through messages.
   The one sanctioned cross-goroutine path is `Program.Send` (the confirm-hook callback).
+- **Never `tea.Println` a block taller than the rows above the footer.** Always go through
+  `chunkPrintlns` / `scrollbackChunkRows`, and measure the bound at PRINT time from the
+  last-rendered `footerRows` — not at selection time, not from a static cap (§4).
+- **Never emit an `insertAbove` without crediting the re-pin ledger** (`creditRepinRows`),
+  or the same rows get healed twice with blank lines mid-turn (§5).
+- **Never expect a bare `tea.ClearScreen` to repaint.** v2 skips it on an unchanged frame;
+  use `redrawHostCmd()` so the zero-cell content tag defeats the equality fast path (§6).
+- **Never flush a row that can still reflow.** Honour the reflow guard — a prefix already
+  in scrollback can never be corrected (§3).

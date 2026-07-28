@@ -4,7 +4,7 @@ The CLI connects to Daintree's **local MCP server** as an external client. In pr
 Daintree launches the CLI and passes the connection details via environment / flags.
 
 > **Source of truth.** The CLI-side verified contract lives in
-> [`internal/models/prompts`](../internal/models/prompts) — it is embedded in the
+> [`internal/prompts`](../internal/prompts) — it is embedded in the
 > cached system prompt, so it is what the model actually reasons against. This doc is
 > the human-facing companion; keep the two in sync. If they ever disagree, the prompt
 > source wins.
@@ -290,7 +290,7 @@ changes, update them together:
 1. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. May list more raw
    Daintree tools than the model is told about (the catalog above is illustrative, not the
    model's allowlist).
-2. **The model prompt** (`internal/models/prompts/daintree_mcp.go`, `daintreeMCPReference`)
+2. **The model prompt** (`internal/prompts/daintree_mcp.go`, `daintreeMCPReference`)
    — the cached, model-facing reference. It names the local wrappers plus a few high-value
    unwrapped tools, and reminds the model to use `tool.search` for the rest. It deliberately
    does **not** enumerate every server tool.

@@ -128,7 +128,7 @@ var createSchema = json.RawMessage(`{
 func newCreateTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.create",
-		Description: "Create a workflow ledger entry tracking an end-to-end run (issue/branch/worktree/PR).",
+		Description: "Open a workflow ledger row tracking ONE end-to-end unit of work (issue → branch → worktree → agent terminals → PR) so it survives compaction, restarts and wake turns — every open row rides each round's turn context. Status defaults to pending. Returns the wfr_… id; advance the row with workflow.update as the work progresses. A local record only: it spawns nothing and runs nothing.",
 		Risk:        domain.RiskLocal,
 		Schema:      createSchema,
 		Decode:      tools.StrictDecoder(func() any { return &mutableFields{} }),
@@ -188,7 +188,7 @@ var getSchema = json.RawMessage(`{
 func newGetTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.get",
-		Description: "Get a workflow ledger entry by id.",
+		Description: "Read ONE workflow ledger row by its wfr_… id: status, issue/branch/worktree/PR, the terminal/watcher/queue-event ids it owns, notes and nextAction. Open runs already ride every round's turn context as one-line rows, so call this only when you need a run's FULL detail — its notes, complete id lists, or a run that has already finished. Unknown id ⇒ WORKFLOW_NOT_FOUND (unrecoverable).",
 		Risk:        domain.RiskRead,
 		Schema:      getSchema,
 		Decode:      tools.StrictDecoder(func() any { return &idArgs{} }),
@@ -224,7 +224,7 @@ var listSchema = json.RawMessage(`{
 func newListTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.list",
-		Description: "List workflow ledger entries, optionally filtered by status.",
+		Description: "List workflow ledger runs, newest-updated first (capped at 100), optionally filtered by status (pending|active|blocked|done|cancelled|failed). OPEN runs already ride every round's turn context as one-line rows, so call this for HISTORY — finished/cancelled/failed runs, or a full listing the user asked for. Each row carries the run id, status, issue/branch/worktree/PR, its id lists and nextAction.",
 		Risk:        domain.RiskRead,
 		Schema:      listSchema,
 		Decode:      tools.StrictDecoder(func() any { return &listArgs{} }),
@@ -276,7 +276,7 @@ var updateSchema = json.RawMessage(`{
 func newUpdateTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "workflow.update",
-		Description: "Update a workflow ledger entry. Provided array fields REPLACE the stored arrays.",
+		Description: "Patch a workflow ledger row by id: status, issue/branch/worktree/PR fields, nextAction, or the terminalIds/watcherIds/queueEventIds/notes arrays. Every provided ARRAY field REPLACES the stored array wholesale — to append one note or id, read the row with workflow.get and send the full list back. Omitted fields are untouched. A move to done/cancelled/failed stamps completedAt once.",
 		Risk:        domain.RiskLocal,
 		Schema:      updateSchema,
 		Decode:      tools.StrictDecoder(func() any { return &updateArgs{} }),

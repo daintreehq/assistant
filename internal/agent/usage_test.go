@@ -28,7 +28,6 @@ func (r *usageRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mode
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *usageRouter) ModelFor(domain.ModelTier) string { return r.model }
-func (r *usageRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func derefp(p *int) int {
 	if p == nil {

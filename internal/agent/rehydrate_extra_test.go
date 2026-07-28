@@ -221,7 +221,6 @@ func resumeDeps(t *testing.T, store *recordingStore, restore RehydrateResult) Se
 	r := plainRouter()
 	return SessionDeps{
 		Backend:          backendFromRouter{r: r},
-		Router:           r,
 		Tools:            &fakeTools{},
 		Store:            store,
 		SessionID:        "ses_resume",
@@ -288,7 +287,6 @@ func newOnStore(t *testing.T, store *recordingStore) *Session {
 	r := plainRouter()
 	return NewSession(SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r,
 		Tools:     &fakeTools{},
 		Store:     store,
 		SessionID: "ses_resume",

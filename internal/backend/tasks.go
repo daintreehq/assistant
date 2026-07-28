@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // Task IDs the backend exposes via /v1/daintree/tasks. Use these constants rather
-// than string literals at call sites. (Confirm availability against
-// Capabilities.Tasks at startup.)
+// than string literals at call sites. Availability against a live backend is
+// verified by CheckTasks (surfaced by /doctor and the debug log) — see below.
 const (
 	TaskCheckpoint           = "checkpoint"
 	TaskMemoryDistill        = "memory_distill"
@@ -22,6 +23,87 @@ const (
 	TaskExtractionVerdict    = "extraction_verdict"
 	TaskSkillStepConsistency = "skill_step_consistency"
 )
+
+// coreTaskIDs is the frozen wire contract: every task id this CLI will ever ask a
+// backend to run, outside the flag-gated workflow set. It exists so drift can be
+// DETECTED instead of discovered as a runtime 404.
+//
+// This is not hypothetical. On 2026-07-07 the backend dropped a `.v1` suffix from
+// every task id; the CLI kept sending the old ids and 404'd mid-turn, and neither
+// side's tests noticed because BOTH asserted only a COUNT — and the count was
+// unchanged. Nothing in the CLI compared the ids it sends against the ids the
+// server advertises, even though /doctor already had Capabilities in hand.
+//
+// taskcheck_test.go parses this file's AST and fails if a Task* constant is added
+// without being listed here, so the manifest cannot silently fall behind.
+var coreTaskIDs = []string{
+	TaskCheckpoint,
+	TaskMemoryDistill,
+	TaskWatcherClassify,
+	TaskTerminalJudge,
+	TaskTerminalSummarize,
+	TaskTerminalExtractText,
+	TaskTerminalExtractJSON,
+	TaskExtractionVerdict,
+	TaskSkillStepConsistency,
+}
+
+// CoreTaskIDs returns the always-required task ids (a copy — callers must not
+// mutate the manifest).
+func CoreTaskIDs() []string { return append([]string(nil), coreTaskIDs...) }
+
+// TaskAvailability is the result of comparing the ids this CLI sends against the
+// ids a live backend advertises.
+type TaskAvailability struct {
+	// Reported is false when the backend's task list could not be read at all (a
+	// fetch error, or a server that advertises none). Missing is meaningless then:
+	// the honest verdict is "cannot verify", never "drifted" — /v1/daintree/capabilities
+	// sits behind require_auth AND require_ready, so a live-but-not-ready backend
+	// legitimately yields no list.
+	Reported bool
+	// Missing are required ids the backend did NOT advertise, sorted. Non-empty
+	// while Reported means real drift: those calls will 404 at the moment of use.
+	Missing []string
+	// Required is how many ids were checked (core, plus the workflow set when the
+	// workflow-intelligence flag is on).
+	Required int
+}
+
+// OK reports whether every required task is available. An unreported inventory is
+// NOT a failure — it is unverifiable, and treating "cannot verify" as "broken"
+// would fail /doctor against a backend that is merely still warming up.
+func (a TaskAvailability) OK() bool { return !a.Reported || len(a.Missing) == 0 }
+
+// CheckTasks compares the task ids this CLI depends on against the ids a live
+// backend advertises in Capabilities.Tasks. includeWorkflow adds the flag-gated
+// workflow-intelligence ids, which are only required when
+// DAINTREE_WORKFLOW_INTELLIGENCE is on — a backend without them is perfectly
+// healthy for a CLI that will never call them.
+//
+// Extra server-side tasks are deliberately ignored: the backend may legitimately
+// expose more than this CLI knows about, and that is forward compatibility, not drift.
+func CheckTasks(caps Capabilities, includeWorkflow bool) TaskAvailability {
+	required := CoreTaskIDs()
+	if includeWorkflow {
+		required = append(required, WorkflowTaskIDs()...)
+	}
+	out := TaskAvailability{Required: len(required)}
+	if len(caps.Tasks) == 0 {
+		return out // not reported → unverifiable, not drifted
+	}
+	out.Reported = true
+	have := make(map[string]struct{}, len(caps.Tasks))
+	for _, id := range caps.Tasks {
+		have[id] = struct{}{}
+	}
+	for _, id := range required {
+		if _, ok := have[id]; !ok {
+			out.Missing = append(out.Missing, id)
+		}
+	}
+	sort.Strings(out.Missing)
+	return out
+}
 
 // TaskRunner is the narrow seam the typed task helpers depend on (satisfied by
 // *Client and trivially by a fake). Keeping the helpers free functions over this

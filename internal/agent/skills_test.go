@@ -7,7 +7,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 )
 
 // These tests pin the post-migration session-history + tool-projection contract.
@@ -45,7 +45,6 @@ func skillSession(t *testing.T, r Router, tr ToolRunner) *Session {
 	t.Helper()
 	deps := SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r,
 		Tools:     tr,
 		SessionID: "ses_skills",
 		Events:    NoopEventSink{},

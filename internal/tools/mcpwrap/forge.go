@@ -55,15 +55,15 @@ func forgeRead(name, desc string) *tools.Tool {
 }
 
 func newForgeListIssuesTool() *tools.Tool {
-	return forgeRead("forge.listIssues", "List forge (GitHub) issues for the project.")
+	return forgeRead("forge.listIssues", "List the project's GitHub issues through Daintree's forge integration. `arguments` is a forge-defined options record forwarded verbatim (state, labels, limit, …) — omit it for the default listing rather than inventing keys. Read-only. PARALLEL: forge.* reads batched in ONE reply run concurrently. MCP_UNAVAILABLE when Daintree is disconnected; a forge refusal returns MCP_TOOL_ERROR.")
 }
 
 func newForgeListPRsTool() *tools.Tool {
-	return forgeRead("forge.listPRs", "List forge (GitHub) pull requests for the project.")
+	return forgeRead("forge.listPRs", "List the project's GitHub pull requests through Daintree's forge integration. `arguments` is a forge-defined options record forwarded verbatim (state, limit, …) — omit it for the default listing rather than inventing keys. Read-only. PARALLEL: forge.* reads batched in ONE reply run concurrently. For one PR's full detail use forge.getPR with its prNumber.")
 }
 
 func newForgeGetIssueTool() *tools.Tool {
-	return forgeRead("forge.getIssue", "Get a single forge (GitHub) issue.")
+	return forgeRead("forge.getIssue", "Fetch ONE GitHub issue's detail through Daintree's forge integration. `arguments` is forwarded verbatim — pass the issue number under the key the forge expects (mirror what forge.listIssues returned); do not invent keys. Read-only. PARALLEL: several forge.* reads in ONE batch run concurrently, so fetch multiple issues in a single reply rather than one per turn.")
 }
 
 // forgeGetPRArgs is the typed shape for forge.getPR: a required positive

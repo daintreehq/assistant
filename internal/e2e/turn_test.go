@@ -121,13 +121,11 @@ func TestFullTurnAgainstFakes(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
 
 	dir := t.TempDir()
-	key := "test-key"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{
-			StateDir:       &dir,
-			ProjectPath:    &dir,
-			Tier:           strPtr("operator"),
-			DeepSeekAPIKey: &key,
+			StateDir:    &dir,
+			ProjectPath: &dir,
+			Tier:        strPtr("operator"),
 		},
 	})
 	if err != nil {
@@ -283,16 +281,9 @@ func countToolRoleMessages(msgs []map[string]any) int {
 // — the CLI no longer chooses the model id or sets a `thinking`/`reasoning_effort` field
 // on the wire (the request carries only the visible conversation + structured context).
 // So the old per-round wire assertions on model id / reasoning_effort / thinking are gone
-// (they exercised removed client-side behavior). The config.DEFAULTS.LargeModel guard
-// survives as a cheap check that the legacy default is still the validated flash model.
+// (they exercised removed client-side behavior), as is the config.DEFAULTS.LargeModel
+// guard — the CLI no longer carries a model default at all; the backend picks the model.
 func TestOrchestratorMultiStep(t *testing.T) {
-	// Guard the legacy default at its source: the configured large-tier default IS flash
-	// (used now only by the transitional Router seam, never the turn loop).
-	if config.DEFAULTS.LargeModel != flashModelID {
-		t.Fatalf("config.DEFAULTS.LargeModel = %q, want the validated orchestration model %q",
-			config.DEFAULTS.LargeModel, flashModelID)
-	}
-
 	fake := newFakeBackend(t,
 		// Round 1: orchestrator opens the deduction — list what's in memory.
 		sseRound{
@@ -319,13 +310,11 @@ func TestOrchestratorMultiStep(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_DEBUG_LOG", "0")
 
 	dir := t.TempDir()
-	key := "test-key"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{
-			StateDir:       &dir,
-			ProjectPath:    &dir,
-			Tier:           strPtr("operator"),
-			DeepSeekAPIKey: &key,
+			StateDir:    &dir,
+			ProjectPath: &dir,
+			Tier:        strPtr("operator"),
 		},
 	})
 	if err != nil {

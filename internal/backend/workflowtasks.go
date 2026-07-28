@@ -17,6 +17,20 @@ const (
 	TaskWorkflowResumeDigest = "workflow_resume_digest"
 )
 
+// workflowTaskIDs is the flag-gated half of the frozen task manifest (see
+// coreTaskIDs in tasks.go). CheckTasks requires these ONLY when
+// DAINTREE_WORKFLOW_INTELLIGENCE is on — a backend that predates the workflow
+// tasks is perfectly healthy for a CLI that will never call them. Kept in
+// lockstep with the const block above by the AST scan in taskcheck_test.go.
+var workflowTaskIDs = []string{
+	TaskWorkflowPlan,
+	TaskWorkflowReconcile,
+	TaskWorkflowResumeDigest,
+}
+
+// WorkflowTaskIDs returns the workflow-intelligence task ids (a copy).
+func WorkflowTaskIDs() []string { return append([]string(nil), workflowTaskIDs...) }
+
 // Input size caps (mirror the backend pydantic max_length constraints; clamped
 // client-side so a large goal/message can never 422 the task).
 const (

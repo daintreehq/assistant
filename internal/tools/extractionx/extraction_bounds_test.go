@@ -33,22 +33,3 @@ func TestExtractRejectsOutOfBoundsNumerics(t *testing.T) {
 		t.Errorf("valid extract numerics should decode: %v", err)
 	}
 }
-
-// terminal.extract.async's ttlMs must match its schema's minimum:1 — an explicit
-// non-positive TTL is the "no expiry" storage sentinel, which omission already
-// means; passing it explicitly is a mistake and is rejected.
-func TestExtractAsyncRejectsNonPositiveTTL(t *testing.T) {
-	tool := newExtractAsyncTool(Deps{})
-	for _, bad := range []string{
-		`{"terminalIds":["t"],"instruction":"x","ttlMs":0}`,
-		`{"terminalIds":["t"],"instruction":"x","ttlMs":-5}`,
-	} {
-		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
-			t.Errorf("non-positive ttlMs should be rejected: %s", bad)
-		}
-	}
-	if _, err := tool.Decode(json.RawMessage(
-		`{"terminalIds":["t"],"instruction":"x","ttlMs":60000}`)); err != nil {
-		t.Errorf("valid ttlMs should decode: %v", err)
-	}
-}

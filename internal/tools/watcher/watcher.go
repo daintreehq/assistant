@@ -136,23 +136,41 @@ type terminalCreateArgs struct {
 // PROPERTY literally named not, NOT the JSON-Schema not keyword. Unlike the
 // extract tools' wait (which rejects modelJudge), watchers support modelJudge, so
 // it is enumerated here. Keep in lockstep with the domain validator.
-func watchConditionSchema(role string) string {
+//
+// leafDocs controls only the per-LEAF description prose, never structure. The
+// subschema is rendered TWICE in this one tool (stopWhen + alertWhen), and the tool
+// inventory ships on every model round, so documenting each leaf twice was pure
+// duplication — it made watcher.terminal.create the third-largest tool in the
+// registry, ~62% of it description text. The FIRST occurrence (stopWhen) carries the
+// full prose, including the hard-won warnings; the second points at it.
+//
+// What must NOT differ is the machine-readable half: both copies keep every
+// structural keyword (type/enum/minLength/minimum/minProperties/maxProperties/
+// additionalProperties/items). A model that reads only the schema keywords sees two
+// identical unions — pinned by TestStopWhenAndAlertWhenAreStructurallyIdentical.
+func watchConditionSchema(role string, leafDocs bool) string {
+	doc := func(verbose, terse string) string {
+		if leafDocs {
+			return verbose
+		}
+		return terse
+	}
 	return `{
       "type": "object",
       "minProperties": 1,
       "maxProperties": 1,
       "additionalProperties": false,
-      "description": "` + role + ` A WatchCondition object with EXACTLY ONE of the keys below.",
+      "description": "` + role + ` A WatchCondition object with EXACTLY ONE of the keys below` + doc(".", ` — the same shape as stopWhen, see its per-key descriptions.`) + `",
       "properties": {
-        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. A bare stateIs:'waiting' fires too early for 'agent finished' (pre-start, paused, and backgrounded agents also read waiting) — pair it with a modelJudge under all:[...], or rely on the default supervisor's confirmed completion." },
-        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
-        "contains": { "type": "string", "minLength": 1, "description": "Fires when the terminal tail contains this literal substring (non-empty)." },
-        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile)." },
-        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "Fires once no NEW output has appeared for this many ms." },
-        "modelJudge": { "type": "string", "minLength": 1, "description": "A yes/no question answered against the terminal tail on each check. Costs one model call per check at the watcher's modelTier (deduped across stopWhen/alertWhen) — prefer the free deterministic leaves when they can express the condition." },
-        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "AND — every nested condition (each the same one-key WatchCondition shape) must hold." },
-        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "OR — at least one nested condition (same one-key shape) holds." },
-        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "Negates ONE nested condition (same one-key shape)." }
+        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "` + doc("Fires when the agent state equals this value exactly. A bare stateIs:'waiting' fires too early for 'agent finished' (pre-start, paused, and backgrounded agents also read waiting) — pair it with a modelJudge under all:[...], or rely on the default supervisor's confirmed completion.", "Agent state equals this value exactly.") + `" },
+        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "` + doc("Fires on the coarse terminal runtime status.", "Coarse terminal runtime status.") + `" },
+        "contains": { "type": "string", "minLength": 1, "description": "` + doc("Fires when the terminal tail contains this literal substring (non-empty).", "Tail contains this literal substring.") + `" },
+        "regex": { "type": "string", "minLength": 1, "description": "` + doc("Fires when the tail matches this Go/RE2 regular expression (must compile).", "Tail matches this Go/RE2 regex.") + `" },
+        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "` + doc("Fires once no NEW output has appeared for this many ms.", "No new output for this many ms.") + `" },
+        "modelJudge": { "type": "string", "minLength": 1, "description": "` + doc("A yes/no question answered against the terminal tail on each check. Costs one model call per check at the watcher's modelTier (deduped across stopWhen/alertWhen) — prefer the free deterministic leaves when they can express the condition.", "Yes/no question against the tail (costs a model call per check).") + `" },
+        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "` + doc("AND — every nested condition (each the same one-key WatchCondition shape) must hold.", "AND over nested one-key conditions.") + `" },
+        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "` + doc("OR — at least one nested condition (same one-key shape) holds.", "OR over nested one-key conditions.") + `" },
+        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "` + doc("Negates ONE nested condition (same one-key shape).", "Negates ONE nested one-key condition.") + `" }
       }
     }`
 }
@@ -168,8 +186,8 @@ var terminalCreateSchema = json.RawMessage(`{
     "cadenceMs": { "type": "integer", "minimum": 1, "default": 120000, "description": "How often the watcher checks, in ms." },
     "startAfterMs": { "type": "integer", "minimum": 0 },
     "stopAfterMs": { "type": "integer", "minimum": 1, "description": "Lifetime ceiling in ms; defaults to 86400000 (24 h) when omitted — a watcher never runs forever." },
-    "stopWhen": ` + watchConditionSchema("Condition that ENDS the watcher (status condition_met).") + `,
-    "alertWhen": ` + watchConditionSchema("Condition that publishes an attention alert (the watcher keeps running).") + `,
+    "stopWhen": ` + watchConditionSchema("Condition that ENDS the watcher (status condition_met).", true) + `,
+    "alertWhen": ` + watchConditionSchema("Condition that publishes an attention alert (the watcher keeps running).", false) + `,
     "modelTier": { "type": "string", "enum": ["small", "medium"], "default": "small", "description": "Model used for per-check classification and modelJudge questions." }
   }
 }`)
@@ -177,7 +195,7 @@ var terminalCreateSchema = json.RawMessage(`{
 func newTerminalCreateTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "watcher.terminal.create",
-		Description: "Create a background watcher over one or more terminals that classifies their state and alerts on a condition.",
+		Description: "Attach a durable background watcher to one or more terminals: it classifies their state on a cadence (default 120s), publishes an attention event when alertWhen fires, and ends on stopWhen or after 24h. Use it for work you are NOT waiting on this turn — for an in-turn wait use terminal.awaitAll, and note agentTask.spawnForEdits attaches its own supervisor only when you pass watch:true or watchGoal. stopWhen/alertWhen are one-key WatchCondition objects, e.g. {\"stateIs\": \"idle\"}. Returns the wch_… id.",
 		Risk:        domain.RiskLocal,
 		Schema:      terminalCreateSchema,
 		// No StrictDecoder: WatchCondition has a custom UnmarshalJSON guard; we
@@ -310,7 +328,7 @@ type prWatcherOptions struct {
 func newWatchPRTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "watcher.watchPR",
-		Description: "Watch a pull request's state (open/merged/draft/closed) and alert on a change.",
+		Description: "Create a durable background watcher on ONE GitHub PR: it polls every 60s and publishes an attention event when the PR's state changes (open/merged/closed) or the draft flag flips — use it instead of re-polling forge.getPR yourself. Returns the wch_… id. Project-scoped: it keeps running after the assistant closes and self-expires after 24h unless stopAfterMs says otherwise. It only OBSERVES; it never merges or comments.",
 		Risk:        domain.RiskLocal,
 		Schema:      watchPRSchema,
 		Decode:      tools.StrictDecoder(func() any { return &watchPRArgs{} }),
@@ -395,7 +413,7 @@ func newListTool(deps Deps) *tools.Tool {
 	schema, _ := json.Marshal(tools.NoArgs)
 	return &tools.Tool{
 		Name:        "watcher.list",
-		Description: "List active watchers.",
+		Description: "List the project's ACTIVE watchers: id, kind (terminal|pr_state), title, goal, targets, cadence, status, last classification and nextCheckAt. Live watchers do NOT ride the turn context — this is the ONLY way to see what is being supervised, so call it before attaching a watcher to a terminal (never double-supervise one) and to get the wch_… id for watcher.cancel. Ended watchers are never listed.",
 		Risk:        domain.RiskRead,
 		Schema:      schema,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
@@ -427,7 +445,7 @@ var cancelSchema = json.RawMessage(`{
 func newCancelTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "watcher.cancel",
-		Description: "Cancel an active watcher by id.",
+		Description: "Stop an ACTIVE watcher by its wch_… id: it stops checking, its automation grants are revoked, and any workflow ledger row it supervises closes as cancelled. Use it when the watched work is done or the user no longer wants it supervised. An already-ended watcher (condition_met/timeout/error/cancelled) returns WATCHER_NOT_FOUND — do not re-cancel. This NEVER touches the terminal: nothing is closed or killed.",
 		Risk:        domain.RiskLocal,
 		Schema:      cancelSchema,
 		Decode:      tools.StrictDecoder(func() any { return &cancelArgs{} }),

@@ -13,7 +13,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/config"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 )
 
 func TestEnsureStartupForTurnJoinsMcpLifecycleGate(t *testing.T) {

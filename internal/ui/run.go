@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/terminal"
@@ -162,10 +163,37 @@ func bootHandshakeBackend(ctx context.Context, a *app.App) error {
 	started := time.Now()
 	hctx, cancel := context.WithTimeout(ctx, bootBackendHandshakeTimeout)
 	defer cancel()
-	_, err := a.Backend.Capabilities(hctx)
+	caps, err := a.Backend.Capabilities(hctx)
 	logBootBackendHandshake(a, time.Since(started), err)
+	if err == nil {
+		// The handshake already has the task inventory in hand, so auditing it here
+		// costs nothing extra — no second HTTP call, no goroutine. A drifted id set
+		// otherwise surfaces only as a 404 mid-turn (the 2026-07-07 incident); this
+		// puts it in the session log where a "why did that tool fail" archaeology
+		// pass will actually find it. /doctor carries the user-facing row.
+		logBackendTaskAudit(a, caps)
+	}
 	debuglog.BootTrace("boot.backend.handshake")
 	return err
+}
+
+// logBackendTaskAudit writes a backend.tasks debug-log line whenever the ids this
+// CLI depends on cannot all be found in the backend's advertised inventory.
+// Silent on a clean or unverifiable audit — a log line every boot would be noise.
+func logBackendTaskAudit(a *app.App, caps backend.Capabilities) {
+	if a == nil {
+		return
+	}
+	av := backend.CheckTasks(caps, a.Config.WorkflowIntelligence)
+	if av.OK() {
+		return
+	}
+	debuglog.LogDebug(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir}, "backend.tasks", map[string]any{
+		"missing":    av.Missing,
+		"required":   av.Required,
+		"advertised": len(caps.Tasks),
+		"detail":     "CLI/backend task-id drift — these task calls will fail at runtime",
+	})
 }
 
 func logBootBackendHandshake(a *app.App, dur time.Duration, err error) {

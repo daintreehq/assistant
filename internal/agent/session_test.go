@@ -39,7 +39,6 @@ func (r *fakeRouter) Chat(ctx context.Context, tier domain.ModelTier, opts model
 	return models.ChatResult{Content: "summary"}, nil
 }
 func (r *fakeRouter) ModelFor(tier domain.ModelTier) string { return "minimax-m3" }
-func (r *fakeRouter) FlushMeter() []models.TierUsage        { return nil }
 
 type fakeTools struct {
 	// dispatch returns this result for every call (the repeat-failure scenario).
@@ -158,17 +157,12 @@ func (b backendFromRouter) RespondStream(ctx context.Context, req backend.Respon
 	res, err := b.r.Stream(ctx, domain.ModelLarge,
 		models.ChatOptions{Messages: backendMessagesToModel(req.Input.Messages)}, cb.OnContent)
 	if err != nil {
-		// Map the old model-error vocabulary onto what the new turn loop expects: a
-		// CancelledError (or an actually-cancelled ctx) reads as a clean stop; a
-		// RateLimitedError becomes a 429 backend error; anything else passes through raw
-		// so classifyBackendError renders "Model error: <msg>".
-		var ce *models.CancelledError
-		if errors.As(err, &ce) || ctx.Err() != nil {
+		// A cancellation (explicit or via the ctx) reads as a clean stop. Everything
+		// else — including a *backend.Error a fake router wants classified as a rate
+		// limit — passes through untouched, so classifyBackendError sees exactly what
+		// the real backend client would hand it.
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			return backend.RespondResult{}, context.Canceled
-		}
-		var rl *models.RateLimitedError
-		if errors.As(err, &rl) {
-			return backend.RespondResult{}, &backend.Error{HTTPStatus: 429, Type: "rate_limit", Code: "upstream_rate_limited", Message: rl.Error()}
 		}
 		return backend.RespondResult{}, err
 	}
@@ -254,7 +248,6 @@ func parseDistillFacts(content string) []backend.DistilledFact {
 func baseDeps(r Router, tr ToolRunner) SessionDeps {
 	return SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r, // vestigial; the loop no longer uses it
 		Tools:     tr,
 		Store:     nil, // best-effort persistence; nil exercises the nil-guard
 		SessionID: "sess_test",
@@ -480,7 +473,7 @@ func TestClassifyRateLimitedStreamError(t *testing.T) {
 	// byte-stable "Model rate-limited:" reply, fires the ModelRateLimited health cue,
 	// and is a wake-failure sentinel so a background wake won't record it as a result.
 	sink := &captureSink{}
-	r := &errRouter{err: &models.RateLimitedError{Message: "provider quota/throughput exceeded", RetryAfterMs: 1500}}
+	r := &errRouter{err: &backend.Error{HTTPStatus: 429, Type: "rate_limit", Code: "upstream_rate_limited", Message: "provider quota/throughput exceeded"}}
 	deps := baseDeps(r, &fakeTools{})
 	deps.Events = sink
 	s := NewSession(deps)

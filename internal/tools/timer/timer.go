@@ -154,7 +154,7 @@ var scheduleSchema = json.RawMessage(`{
 func newScheduleTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "timer.schedule",
-		Description: "Schedule a durable timer that enqueues a reminder or runs a safe tool at a future time (optionally repeating).",
+		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"enqueue\" posts message to the attention inbox; \"call_safe_tool\" runs toolCall.toolName — a MUTATING tool there needs a grant.create for that tmr_… actor or the call lands as a blocked approval. Timers keep firing after the assistant closes; missed occurrences catch up. Returns the timer id.",
 		Risk:        domain.RiskLocal,
 		Schema:      scheduleSchema,
 		Decode:      tools.StrictDecoder(func() any { return &scheduleArgs{} }),
@@ -254,7 +254,7 @@ func newListTool(deps Deps) *tools.Tool {
 	schema, _ := json.Marshal(tools.NoArgs)
 	return &tools.Tool{
 		Name:        "timer.list",
-		Description: "List scheduled (not-yet-fired) timers.",
+		Description: "List the timers still SCHEDULED (not yet fired, not cancelled): id, title, fireAt (RFC3339 UTC), payloadType, runCount and any repeat settings. Timers do NOT ride the turn context, so this is the only way to see what is pending — call it before scheduling a near-duplicate reminder, when the user asks what is scheduled, or to get a tmr_… id for timer.cancel.",
 		Risk:        domain.RiskRead,
 		Schema:      schema,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
@@ -304,7 +304,7 @@ var cancelSchema = json.RawMessage(`{
 func newCancelTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "timer.cancel",
-		Description: "Cancel a scheduled timer by id.",
+		Description: "Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by that timer actor is revoked. Use it when the reminder or scheduled tool call is no longer wanted. An unknown id fails TIMER_NOT_FOUND (unrecoverable). Local bookkeeping only — it never touches terminals or project state.",
 		Risk:        domain.RiskLocal,
 		Schema:      cancelSchema,
 		Decode:      tools.StrictDecoder(func() any { return &cancelArgs{} }),

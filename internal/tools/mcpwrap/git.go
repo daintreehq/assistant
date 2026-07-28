@@ -15,5 +15,5 @@ import "github.com/daintreehq/daintree-assistant/internal/tools"
 // Daintree dropping its snapshot tool family — the live server no longer advertises
 // them, so wrapping them only produced tool-not-found drift.)
 func newGitGetProjectPulseTool() *tools.Tool {
-	return forgeRead("git.getProjectPulse", "Read a worktree's git pulse — branch state, uncommitted changes, and recent commits — for the current or a specified worktree.")
+	return forgeRead("git.getProjectPulse", "Read a worktree's git pulse through Daintree: current branch, uncommitted/staged changes and recent commits. Takes an optional opaque {worktreeId} — omit it for the active worktree. Read-only, no confirmation: this wrapper is why a plain \"what's the git state?\" never needs the system-tier daintree.call escape hatch. For a review-readiness go/no-go verdict use workflow.prepBranchForReview.")
 }

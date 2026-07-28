@@ -21,9 +21,11 @@ internal/
   backend/       Daintree backend client — the CLI's model gateway. client.go (Respond/
                  RunTask/Health), contracts.go (wire envelope), sse.go (named-event parser),
                  tasks.go (server-owned utility tasks). See BACKEND.md
-  models/        VESTIGIAL: legacy Router + DeepSeekClient + pricing — no turn or task uses
-                 it. prompts/ now holds ONLY MainPromptContext (structured runtime facts;
-                 the prompt-text + loaded-skills builders were deleted, the backend owns them)
+  models/        conversation wire VOCABULARY only (ChatMessage/ChatTool/ToolCallRequest/
+                 ChatResult/Usage) — NOT a model client; the DeepSeek transport, Router,
+                 SSE parser, retry layer and pricing were deleted with the backend migration
+  prompts/       MainPromptContext (structured runtime facts; the prompt-text +
+                 loaded-skills builders were deleted, the backend owns them)
   mcp/           Daintree MCP client (go-sdk: Streamable HTTP, SSE fallback) + typed wrappers
   safety/        policy.go — Decide(risk, tier), AlwaysConfirm, no-file-edit guard
   tools/
@@ -34,9 +36,9 @@ internal/
                  sendCommand / arm / disarm / disarmAll · copyTree.* · agent.focus*
     mcpwrap/     typed MCP wrappers (USE_TYPED_WRAPPER guard): forge reads ·
                  worktree.list / getCurrent / createWithRecipe · git.getProjectPulse ·
-                 recipe.* · workflow.startWorkOnIssue / prepBranchForReview / focusNextAttention
+                 recipe.* · workflow.startWorkOnIssue / prepBranchForReview
     contextx/    context.snapshot / terminal.summarize / terminal.read
-    extractionx/ terminal.extract / terminal.extract.async
+    extractionx/ terminal.extract / terminal.extract.json / terminal.awaitAll
     timer/       timer.schedule / timer.list / timer.cancel
     watcher/     watcher.terminal.create / watcher.watchPR / watcher.list / watcher.cancel
     queue/       queue.publish / queue.digest / queue.resolve
@@ -152,8 +154,10 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   wrappers: `terminal.focus` (ui), `terminal.sendCommand` (terminal),
   `terminal.arm` / `disarm` / `disarmAll` (terminal), `copyTree.generate` (read) /
   `generateAndCopyFile` (system) / `injectToTerminal` (terminal), and the UI-focus
-  verbs `agent.focusNextWaiting` / `focusNextWorking` / `focusNextAgent` /
-  `focusPreviousAgent` (ui).
+  verb `terminal.focus` (ui). The five zero-arg focus CYCLERS
+  (`agent.focusNext*`/`focusPreviousAgent`, `workflow.focusNextAttention`) were removed:
+  they cost ~2 KB of the per-round tool inventory to expose UI navigation the model has
+  no reason to drive, and nothing in the prompts or skills referenced them.
 - **mcpwrap** — typed wrappers over Daintree MCP actions; a raw `daintree.call` fails
   fast with `USE_TYPED_WRAPPER` when a typed equivalent exists (e.g. `agent.launch` →
   `agentTask.spawnForEdits`). Members: `forge.listIssues` / `getIssue` / `listPRs` /

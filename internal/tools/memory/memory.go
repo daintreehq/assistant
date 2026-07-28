@@ -160,7 +160,7 @@ var recallSchema = json.RawMessage(`{
 func newRecallTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.recall",
-		Description: "Recall project memories most relevant to a query (BM25-ranked full-text search).",
+		Description: "BM25-ranked full-text search over this project's saved memories (default 10 hits, max 50; optional category filter). Returns id, content, kind, pinned flag and timestamps. Every turn ALREADY carries the pinned memories plus an automatic recall snapshot for the user's ask — so call this only to dig for what those did not surface (a past decision, a convention, an earlier attempt). Query with a few plain keywords.",
 		Risk:        domain.RiskRead,
 		Schema:      recallSchema,
 		Decode:      tools.StrictDecoder(func() any { return &recallArgs{} }),
@@ -214,7 +214,7 @@ var listSchema = json.RawMessage(`{
 func newListTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.list",
-		Description: "List project memories (pinned first, then most recent).",
+		Description: "Browse saved project memories, pinned first then most recent (default 50, max 200); filter by category or pinnedOnly. Pinned memories and this turn's recall hits ALREADY ride every round's turn context, so use this to audit the store — spot a stale fact to memory.forget, or grab a mem_… id to pin/unpin. To find facts on a topic, use memory.recall instead.",
 		Risk:        domain.RiskRead,
 		Schema:      listSchema,
 		Decode:      tools.StrictDecoder(func() any { return &listArgs{} }),
@@ -284,7 +284,7 @@ var saveSchema = json.RawMessage(`{
 func newSaveTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.save",
-		Description: "Save a durable project memory (persists across sessions).",
+		Description: "Save ONE durable fact about this project — it persists across sessions and is BM25-searchable via memory.recall. Save decisions, conventions and stable user preferences ('always X', 'never Y'); do NOT save transient run state (use scratch.*) or anything you can re-derive. kind defaults to semantic; use episodic for session-scoped events and ttlMs for a fact with a shelf life. Returns the mem_… id.",
 		Risk:        domain.RiskLocal,
 		Schema:      saveSchema,
 		Decode:      tools.StrictDecoder(func() any { return &saveArgs{} }),
@@ -387,7 +387,7 @@ var idSchema = json.RawMessage(`{
 func newForgetTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.forget",
-		Description: "Soft-delete a project memory by id.",
+		Description: "Soft-delete ONE project memory by its mem_… id so it stops surfacing in recall, in memory.list, and in the pinned block. Use it when a saved fact is wrong or obsolete — prefer forgetting the stale fact over saving a contradicting one. Unknown id ⇒ MEMORY_NOT_FOUND (unrecoverable). There is no undo tool; the row is soft-deleted, not restorable from here.",
 		Risk:        domain.RiskLocal,
 		Schema:      idSchema,
 		Decode:      tools.StrictDecoder(func() any { return &idArgs{} }),
@@ -416,7 +416,7 @@ func newForgetTool(deps Deps) *tools.Tool {
 func newPinTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.pin",
-		Description: "Pin a project memory so it sorts first and resists pruning (idempotent).",
+		Description: "Pin a project memory by its mem_… id so it rides EVERY round's turn context (the pinned block) and resists pruning. Idempotent. Pin sparingly — each pin costs tokens on every round, so reserve it for standing directives and facts you must not lose mid-task; ordinary facts are fine unpinned and reachable through memory.recall. Unknown id ⇒ MEMORY_NOT_FOUND.",
 		Risk:        domain.RiskLocal,
 		Schema:      idSchema,
 		Decode:      tools.StrictDecoder(func() any { return &idArgs{} }),
@@ -444,7 +444,7 @@ func newPinTool(deps Deps) *tools.Tool {
 func newUnpinTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "memory.unpin",
-		Description: "Unpin a project memory (idempotent).",
+		Description: "Unpin a project memory by its mem_… id: it stays saved and recallable but drops out of the pinned block that rides every round's turn context. Idempotent — unpinning an unpinned memory succeeds. Use it when a pin is no longer worth its per-round token cost. Unknown id ⇒ MEMORY_NOT_FOUND. To delete the fact outright use memory.forget.",
 		Risk:        domain.RiskLocal,
 		Schema:      idSchema,
 		Decode:      tools.StrictDecoder(func() any { return &idArgs{} }),

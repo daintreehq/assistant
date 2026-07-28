@@ -166,11 +166,14 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
   a spawned agent (`agentTask.spawnForEdits`).
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md), [`docs/DEEPSEEK.md`](docs/DEEPSEEK.md),
+[`docs/BACKEND.md`](docs/BACKEND.md) (the model/skill/prompt story — start here),
+[`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md) (the cockpit contract),
+[`docs/SUPERVISOR.md`](docs/SUPERVISOR.md) (the persistent daemon),
 [`docs/DAINTREE_MCP.md`](docs/DAINTREE_MCP.md) (Daintree's MCP protocol),
 [`docs/DAINTREE_HOST.md`](docs/DAINTREE_HOST.md) (how Daintree embeds this CLI),
 [`docs/TOOLS.md`](docs/TOOLS.md)
-(adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (server-owned skills), and
+(adding a tool), [`docs/SKILLS.md`](docs/SKILLS.md) (server-owned skills),
+[`docs/LOGGING.md`](docs/LOGGING.md) (the debug-log event reference), and
 [`docs/RUNTIME.md`](docs/RUNTIME.md) (auto-compaction + model error behavior).
 
 ## Commands (cockpit or classic REPL)
@@ -212,9 +215,9 @@ A current snapshot; the registry (`internal/tools`) is the source of truth, and
 | Project read      | `fs.list` `fs.read` `fs.search`                                             |
 | Daintree (raw)    | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
 | Terminal control  | `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` |
-| Focus (UI)        | `agent.focusNextWaiting` `agent.focusNextWorking` `agent.focusNextAgent` `agent.focusPreviousAgent` `workflow.focusNextAttention` |
+| Focus (UI)        | `terminal.focus`                                                          |
 | Context           | `context.snapshot` `terminal.read` `terminal.summarize`                    |
-| Extraction        | `terminal.extract` `terminal.extract.async`                               |
+| Extraction        | `terminal.extract` `terminal.extract.json`                                |
 | Timers            | `timer.schedule` `timer.list` `timer.cancel`                               |
 | Watchers          | `watcher.terminal.create` `watcher.watchPR` `watcher.list` `watcher.cancel` |
 | Queue             | `queue.publish` `queue.digest` `queue.resolve`                             |

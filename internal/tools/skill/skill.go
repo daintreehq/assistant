@@ -98,7 +98,7 @@ var runGetSchema = json.RawMessage(`{
 func newRunGetTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "skill.run.get",
-		Description: "Get the stepwise progress state of a skill run in this session (absence is a normal OK answer).",
+		Description: "Read your stepwise progress through a loaded skill's runbook in THIS session: currentStep, per-step status (done|skipped) with notes and timestamps, and the run status. Absence is a NORMAL ok answer ({state: null}) — it means no step has been advanced yet, not an error. Use it after a compaction or a wake turn to find where you left off. Requires a live session.",
 		Risk:        domain.RiskRead,
 		Schema:      runGetSchema,
 		Decode:      tools.StrictDecoder(func() any { return &runGetArgs{} }),
@@ -155,7 +155,7 @@ var stepAdvanceSchema = json.RawMessage(`{
 func newStepAdvanceTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "skill.step.advance",
-		Description: "Record that a skill step is complete (or skipped) and advance to the next step. Omitting nextStep finishes the run.",
+		Description: "Record that step N of a loaded skill's runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the run. Call it as you complete each step, not in one batch at the end — this is the progress record a compaction or a wake turn reads back through skill.run.get. currentStep never regresses. notes is an optional one-liner about what the step produced. Requires a live session.",
 		Risk:        domain.RiskLocal,
 		Schema:      stepAdvanceSchema,
 		Decode:      tools.StrictDecoder(func() any { return &stepAdvanceArgs{} }),

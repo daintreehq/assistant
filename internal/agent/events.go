@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
 )
 
 // --- Event vocabulary (liveness) ---
@@ -86,11 +85,6 @@ type UsageEvent struct {
 	CostUsd *float64
 	Tier    string
 	Model   string
-	// Tiers is the per-(tier,model) breakdown the aggregate above is summed from
-	// (large stream + small-tier background work). nil when nothing was metered
-	// this round. The UI footer reads the aggregate; the durable run-event log
-	// captures the breakdown.
-	Tiers []models.TierUsage
 }
 
 // EventSink is the structured-event vocabulary the loop emits. The cockpit's
@@ -448,26 +442,6 @@ func (s *RunEventSink) Usage(ev UsageEvent) {
 	}
 	if ev.CostUsd != nil {
 		payload["costUsd"] = *ev.CostUsd
-	}
-	if len(ev.Tiers) > 0 {
-		tiers := make([]map[string]any, 0, len(ev.Tiers))
-		for _, t := range ev.Tiers {
-			m := map[string]any{
-				"tier":             t.Tier,
-				"model":            t.Model,
-				"promptTokens":     t.PromptTokens,
-				"completionTokens": t.CompletionTokens,
-				"totalTokens":      t.TotalTokens,
-			}
-			if t.CachedTokens != nil {
-				m["cachedTokens"] = *t.CachedTokens
-			}
-			if t.CostUsd != nil {
-				m["costUsd"] = *t.CostUsd
-			}
-			tiers = append(tiers, m)
-		}
-		payload["tiers"] = tiers
 	}
 	s.write("usage", payload)
 }

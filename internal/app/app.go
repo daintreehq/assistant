@@ -1,6 +1,6 @@
 // Package app is the single composition root. App.Create
 // builds every dependency once in a fixed order — config → store → mcp → queue →
-// router → tools registry → skills → agent session → (lazy) scheduler — exposes a
+// backend → tools registry → skills → agent session → (lazy) scheduler — exposes a
 // ToolContext factory, the main AgentSession, and drives both the CLI and the
 // (future Bubble Tea) cockpit. Shutdown tears the dependencies down in reverse.
 package app
@@ -24,7 +24,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 	"github.com/daintreehq/daintree-assistant/internal/queue"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -100,7 +100,7 @@ type CreateOptions struct {
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
 // the tool-family wiring wave registers the real families here; until then the
 // default builds the safe core set so the module stays green. The App passes
-// itself so a builder can reach config/store/mcp/queue/router.
+// itself so a builder can reach config/store/mcp/queue/backend.
 type ToolBuilder func(a *App) ([]*tools.Tool, error)
 
 // App is the composition root. Fields are effectively read-only after Create
@@ -120,10 +120,7 @@ type App struct {
 	// Backend is the native Daintree backend — the assistant turn engine and the
 	// server-owned utility tasks. It replaces the direct model provider. Held as an
 	// interface so tests can inject a fake (CreateOptions.BackendOverride).
-	Backend backend.Backend
-	// Router is the legacy DeepSeek model router, retained transitionally only for the
-	// ToolContext.Router seam / diagnostics; no assistant turn or utility task uses it.
-	Router   *models.Router
+	Backend  backend.Backend
 	Registry *tools.Registry
 
 	SessionID string
@@ -323,6 +320,12 @@ func Create(opts CreateOptions) (*App, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("ownership boot: %w", err)
 	}
+	// Adopted watchers carry a PERSISTED `subscribed` latch whose subscription is
+	// per-PROCESS in-memory state (mcp.Client.subs starts empty here), so it must be
+	// cleared at the ownership boundary or an adopted watcher believes in a push
+	// channel that will never deliver — and widens its poll to 30s on the strength
+	// of it. Best-effort: never blocks boot. See daemon.ClearAdoptedSubscriptionLatches.
+	_ = daemon.ClearAdoptedSubscriptionLatches(store)
 
 	sessionID := opts.SessionID
 	resumedSession := opts.SessionID != ""
@@ -447,12 +450,6 @@ func Create(opts CreateOptions) (*App, error) {
 		}
 		a.Backend = backend.NewClient(clientCfg)
 	}
-	a.Router = models.NewRouter(
-		models.RouterConfig{LargeModel: cfg.LargeModel, MediumModel: cfg.MediumModel, SmallModel: cfg.SmallModel},
-		models.NewDeepSeekClient(models.DeepSeekConfig{BaseURL: cfg.DeepSeekBaseURL, APIKey: cfg.DeepSeekAPIKey, Offline: cfg.Offline}),
-		debugLogAdapter{cfg: debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}},
-	)
-
 	// The async coordinator is built BEFORE the tool registry (the asyncx family
 	// captures it) and started later, alongside the scheduler (StartScheduler).
 	// Its Notify hook pushes a fresh completion to the scheduler's delivery path
@@ -607,7 +604,6 @@ func Create(opts CreateOptions) (*App, error) {
 
 	a.Session = agent.NewSession(agent.SessionDeps{
 		Backend:            a.Backend,
-		Router:             a.Router,
 		Tools:              newToolRunner(a),
 		Store:              store,
 		MemoryStore:        store,
@@ -770,11 +766,4 @@ func (a *App) AttachSummaryLines() []string {
 		lines = append(lines, fmt.Sprintf("%d attention item(s) carried over — see /inbox.", own.OpenAttentionCount))
 	}
 	return lines
-}
-
-// debugLogAdapter routes the router's debug trace through the global debug log.
-type debugLogAdapter struct{ cfg debuglog.Config }
-
-func (a debugLogAdapter) LogDebug(event string, fields map[string]any) {
-	debuglog.LogDebug(a.cfg, event, fields)
 }

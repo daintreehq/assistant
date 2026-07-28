@@ -8,10 +8,14 @@
 //     `instruction` for a finished/condition gate).
 //   - terminal.extract.json  — risk "read"; inline STRUCTURED extract; `instruction`
 //     and `jsonSchema` are both required.
-//   - terminal.extract.async — risk "local"; runs the same poll+text-extract in the
-//     background and publishes the outcome to the attention
-//     queue, OUTLIVING the turn (so it must not carry the
-//     turn's cancellation).
+//
+// There is deliberately NO async variant. terminal.extract.async used to run the same
+// poll+extract on a detached goroutine and publish to the attention queue, but it was a
+// bare `go func()` on an app-scoped context: no durable ledger row, no adoption by the
+// next owner, no exactly-once publish, and it never appeared in the turn's
+// async_operations block. The runtime-owned async futures (terminal.run.async /
+// terminal.await.async + the asyncwork coordinator) supersede it on every one of those
+// axes — do the wait there, then read with terminal.extract.
 //
 // The poll loop reuses the watcher DSL vocabulary; modelJudge conditions are
 // intentionally unsupported here (they would re-run the classifier every tick).
@@ -20,7 +24,6 @@ package extractionx
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -101,11 +104,6 @@ type Router interface {
 	Judge(ctx context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error)
 }
 
-// Queue is the slice of the attention queue terminal.extract.async publishes to.
-type Queue interface {
-	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)
-}
-
 // Observations is the session-scoped, cross-call settle memory (see
 // internal/tools/terminalobs) this family READS to seed the working→waiting
 // settle gate and WRITES its live working observations into. Without it every
@@ -141,15 +139,6 @@ type SupervisorRetirer interface {
 type Deps struct {
 	Reader TerminalReader
 	Router Router
-	Queue  Queue
-	// BaseContext is the APP-SCOPED background context detached async work derives
-	// from (terminal.extract.async OUTLIVES the turn, so it must not carry the
-	// turn's cancellation — but it MUST stop when the App shuts down, instead of
-	// leaking into closed deps). nil ⇒ context.Background() (tests / safe default).
-	BaseContext context.Context
-	// DebugLog routes the async-extraction trace (publish failures/drops) to the
-	// global debug log. Zero value ⇒ disabled (a no-op).
-	DebugLog debuglog.Config
 	// InjectionsPending lets the IN-TURN cohort wait (terminal.awaitAll) notice that
 	// the human typed a message mid-wait and break early, handing control back so the
 	// message is acted on now instead of after the whole wait elapses. Set per-call
@@ -163,21 +152,11 @@ type Deps struct {
 	Observations Observations
 }
 
-// baseContext returns the app-scoped background context, falling back to
-// context.Background() when none was wired (keeps the family usable in tests).
-func (d Deps) baseContext() context.Context {
-	if d.BaseContext != nil {
-		return d.BaseContext
-	}
-	return context.Background()
-}
-
 // Tools returns the extraction family.
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{
 		newExtractTool(deps),
 		newExtractJSONTool(deps),
-		newExtractAsyncTool(deps),
 		newAwaitAllTool(deps),
 	}
 }

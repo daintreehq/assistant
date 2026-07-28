@@ -38,7 +38,7 @@ func makeCallable(activeToolNames []string) func(string) bool {
 func newStatusTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "daintree.status",
-		Description: "Report Daintree MCP connection status (connected, transport, tool count). Works even when disconnected.",
+		Description: "Report the Daintree MCP link: connected, transport, tool count, and the error text when it is down. Works even while disconnected — it never fails on a broken link. The same summary ALREADY rides every round's runtime context, so call this only when diagnosing an MCP_UNAVAILABLE failure or when the user asks whether Daintree is reachable — not to orient yourself each turn.",
 		Risk:        domain.RiskRead,
 		Schema:      noArgs,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {

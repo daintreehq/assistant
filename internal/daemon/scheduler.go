@@ -72,6 +72,12 @@ type Scheduler struct {
 	// but not yet started) is covered too — the loop can't have exited until it
 	// stops launching ticks.
 	loopDone chan struct{}
+	// notifyWG tracks the overflow notify re-run goroutine (see spawnNotifyRerun).
+	// It is Add()ed under stateMu and only while !stopped, so once Stop() has
+	// latched no new runner can appear and Drain's Wait can never miss one —
+	// closing the hole where an orphan pass outlived Drain() and hit a Store the
+	// caller had already closed.
+	notifyWG sync.WaitGroup
 
 	cancel context.CancelFunc
 	ticker *time.Ticker
@@ -184,6 +190,11 @@ func (s *Scheduler) Drain() {
 	if done != nil {
 		<-done
 	}
+	// Finally await any overflow notify re-run (spawnNotifyRerun). Stop() has
+	// already latched `stopped` under stateMu, so no further runner can be added
+	// and this Wait is the last thing standing between Drain and a safe teardown
+	// of Queue/Store.
+	s.notifyWG.Wait()
 }
 
 // Tick runs one scheduler pass. Safe to call directly in tests and the no-overlap
@@ -392,7 +403,18 @@ func (p *tickJobPool) work() {
 			// remainder of the queue. As before, a panic skips the per-item notify;
 			// the end-of-pass backstop still delivers anything it published.
 			defer func() { _ = recover() }()
-			jctx, cancel := context.WithTimeout(p.ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
+			// The per-item budget is applied via a CANCEL-based timer, NOT
+			// context.WithTimeout — the same mcp-bestEffort-reads rule spelled out
+			// for prefetchBudget below. This ctx is threaded into every watcher/timer
+			// MCP read (CtxFor → CheckContext.Ctx → CallRead → CallTool), so a
+			// DeadlineExceeded here would reach the mcp client's degrade path and
+			// tear down the process-wide connection — turning one over-budget item
+			// into a supervision blackout for every other watcher, the async
+			// coordinator, and any interactive turn. Expiring as a plain
+			// context.Canceled makes it a clean per-item abort instead.
+			jctx, cancel := context.WithCancel(p.ctx)
+			timer := time.AfterFunc(time.Duration(itemDeadlineMS)*time.Millisecond, cancel)
+			defer timer.Stop()
 			defer cancel()
 			job(jctx)
 			return true
@@ -564,9 +586,34 @@ func (s *Scheduler) notify() {
 	// pages (>1000-event burst, or a publisher whose bumps keep failing the
 	// conditional ack). Schedule another coalesced pass instead of stranding
 	// the tail until an unrelated tick — the bound keeps each PASS finite, not
-	// overall delivery. Via goroutine: notify() is also called directly by the
-	// tick backstop, where a synchronous requestNotify would re-enter notifyMu.
-	go s.requestNotify()
+	// overall delivery.
+	s.spawnNotifyRerun()
+}
+
+// spawnNotifyRerun schedules a coalesced follow-up notify pass on its own
+// goroutine. It must be a goroutine: notify() is also called directly by the tick
+// backstop and still holds notifyMu here, so a synchronous requestNotify would
+// re-enter it.
+//
+// The runner is TRACKED (notifyWG) and refused once Stop() has latched, because
+// Drain's contract is "call after Stop, before tearing down deps" — an untracked
+// runner could outlive Drain() and call Queue.Digest / MarkNotified against an
+// already-closed Store, silently dropping the delivery it was spawned to make.
+// Both the stopped check and the Add happen under stateMu, which Stop() also
+// holds, so no runner can be added after Stop() returns and Drain's Wait cannot
+// miss one.
+func (s *Scheduler) spawnNotifyRerun() {
+	s.stateMu.Lock()
+	if s.stopped {
+		s.stateMu.Unlock()
+		return // shutting down: the next owner's boot pass delivers the tail
+	}
+	s.notifyWG.Add(1)
+	s.stateMu.Unlock()
+	go func() {
+		defer s.notifyWG.Done()
+		s.requestNotify()
+	}()
 }
 
 // timerPayload is the parsed timer payload shape.

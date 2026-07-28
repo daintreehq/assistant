@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
@@ -161,5 +163,61 @@ func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 	}
 	if !runnerCalled {
 		t.Fatal("cockpit seam was not called")
+	}
+}
+
+// capsBackendURL starts a backend answering /healthz AND /v1/daintree/capabilities,
+// advertising exactly the task ids given.
+func capsBackendURL(t *testing.T, taskIDs []string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case "/v1/daintree/capabilities":
+			body, _ := json.Marshal(backend.Capabilities{
+				Protocol: backend.ProtocolRange{Min: backend.ProtocolVersion, Max: backend.ProtocolVersion},
+				Tasks:    taskIDs,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// A backend that advertises every required task id exits Success.
+func TestRunDoctor_TasksPresentReturnsSuccess(t *testing.T) {
+	t.Setenv("DAINTREE_BACKEND_URL", capsBackendURL(t, backend.CoreTaskIDs()))
+	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Success {
+		t.Fatalf("doctor with a complete task inventory must exit Success(%d), got %d", domain.OneShotExitCode.Success, code)
+	}
+}
+
+// Task-ID DRIFT must exit Error. This reproduces the 2026-07-07 incident exactly:
+// the backend served the same NUMBER of tasks under renamed ids (a `.v1` suffix was
+// dropped), so every count-based check passed while every task call 404'd at
+// runtime. `doctor` is the surface that must catch this before a turn does.
+func TestRunDoctor_TaskIDDriftReturnsError(t *testing.T) {
+	var renamed []string
+	for _, id := range backend.CoreTaskIDs() {
+		renamed = append(renamed, id+".v1")
+	}
+	t.Setenv("DAINTREE_BACKEND_URL", capsBackendURL(t, renamed))
+	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Error {
+		t.Fatalf("doctor must exit Error(%d) on task-id drift, got %d", domain.OneShotExitCode.Error, code)
+	}
+}
+
+// A backend that cannot report its inventory is UNVERIFIABLE, not drifted — a
+// warming backend (capabilities sits behind require_ready) must not fail doctor.
+func TestRunDoctor_UnverifiableTasksDoesNotFail(t *testing.T) {
+	t.Setenv("DAINTREE_BACKEND_URL", capsBackendURL(t, nil))
+	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Success {
+		t.Fatalf("an unreported task inventory must not fail doctor, got %d", code)
 	}
 }

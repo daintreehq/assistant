@@ -48,8 +48,9 @@ tool calls the backend asks for and streams the assistant's text. See `docs/BACK
 assistant supports exactly this one endpoint for now (a later phase swaps in the
 production URL + a real login flow). The only override is the dev/test env var
 `DAINTREE_BACKEND_URL`; there is no product config knob. Run `../assistant-backend`
-locally (`python -m daintree_assistant_server`). The legacy `internal/models` DeepSeek
-client/Router is retained transitionally but no assistant turn or utility task uses it.
+locally (`python -m daintree_assistant_server`). The CLI holds **no model credentials
+and no provider client at all** — the direct DeepSeek transport, the tier Router, and the
+model/provider config knobs were deleted once the backend became the only gateway.
 
 ## Commands
 
@@ -100,7 +101,7 @@ internal/
                  RunPhase, ToolResult (Ok/Fail), AgentEvent union, DB-row records, constants
                  (MainPromptCacheKey, MaxToolIterations), WatchCondition DSL, IDs
   config/        LoadConfig(ConfigOverrides) → AppConfig; trusted-env boundary; DEFAULTS
-  ports/         interface seams: EventSink, Store, Router, ToolRegistry, MCPClient, Queue
+  ports/         interface seams: EventSink, Store, ToolRegistry, MCPClient, Queue
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
   storage/       Store (store.go) over modernc.org/sqlite — timers, watchers, events, audit,
@@ -108,9 +109,12 @@ internal/
   backend/       Daintree backend client — the CLI's ONLY model gateway. client.go (Respond/
                  RunTask/Health), contracts.go (strict wire envelope), sse.go (named-event
                  meta/delta/done/error parser), tasks.go (server-owned utility tasks). See docs/BACKEND.md
-  models/        VESTIGIAL: legacy Router + DeepSeekClient + pricing, retained transitionally —
-                 no assistant turn or utility task uses it. prompts/ now holds ONLY MainPromptContext
-                 (the structured runtime facts the CLI collects); the prompt-TEXT builders were deleted
+  models/        conversation WIRE VOCABULARY only (ChatMessage/ChatTool/ToolCallRequest/
+                 ChatResult/Usage) — NOT a model client. The DeepSeek transport, Router,
+                 SSE parser, retry layer and pricing table were deleted with the backend
+                 migration; do not add a provider client back here (it would let a handler
+                 bypass the backend that owns prompts, skills, and credentials)
+  prompts/       MainPromptContext — the structured runtime facts the CLI collects
   mcp/           Daintree MCP client over the go-sdk (Streamable HTTP, SSE fallback)
   queue/         Queue — attention queue (Publish / Digest / Resolve)
   safety/        policy.go — Decide(risk, tier), tier gating, AlwaysConfirm, no-file-edit guard
@@ -372,9 +376,9 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the
 workflow execution-graph layer, off by default — needs a backend carrying the matching
 `workflow_state` turn-context contract + workflow tasks; see docs/WORKFLOW_INTELLIGENCE.md).
-(The old `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` /
-`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` knobs now configure the **backend** or feed the
-vestigial `internal/models` Router; the CLI no longer requires a model key to start.)
+(`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` are
+**backend-only** now — the CLI reads none of them, and its `AppConfig` carries no model
+or provider fields at all.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project
@@ -390,8 +394,7 @@ workflow execution-graph layer: graph model, tools, observer, async linking, and
 backend contract it expects),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
-`docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI).
-**STALE — predates the backend migration,
-do not trust:** `docs/DEEPSEEK.md` (the direct DeepSeek client — the CLI no longer talks to
-DeepSeek; the backend does). Skill authoring + the model live in `../assistant-backend`
+`docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),
+`docs/LOGGING.md` (the debug-log event reference), `docs/RUNTIME.md` (auto-compaction +
+model error behavior), `docs/TOOLS.md` (adding a tool). Skill authoring + the model live in `../assistant-backend`
 (its `skills/files/*.md` + `docs/DAINTREE_API.md`).

@@ -13,13 +13,12 @@ import (
 type cancelledStreamRouter struct{}
 
 func (cancelledStreamRouter) Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error) {
-	return models.ChatResult{}, &models.CancelledError{}
+	return models.ChatResult{}, context.Canceled
 }
 func (cancelledStreamRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error) {
 	return models.ChatResult{Content: "S"}, nil
 }
 func (cancelledStreamRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (cancelledStreamRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestCancelMidStreamReturnsSentinelNotError(t *testing.T) {
 	sink := &orderSink{}
@@ -58,7 +57,6 @@ func (r *signalRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mod
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *signalRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *signalRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // signalTool records the dispatch context so we can prove the turn ctx threads in.
 type signalTool struct {
@@ -122,7 +120,6 @@ func (r *twoCallRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mo
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *twoCallRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *twoCallRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestCancelMidBatchStubsRemainingCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -196,7 +193,6 @@ func (r *cancelThenTwoCallsRouter) Chat(ctx context.Context, tier domain.ModelTi
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *cancelThenTwoCallsRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *cancelThenTwoCallsRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestCancelBeforeFirstDispatchStubsAllCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -253,7 +249,6 @@ func (r *preTurnAbortRouter) Chat(ctx context.Context, tier domain.ModelTier, op
 	return models.ChatResult{Content: "summary"}, nil
 }
 func (r *preTurnAbortRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *preTurnAbortRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestCancelDuringPreTurnAwaitsPushesNoUserMessage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

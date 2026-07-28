@@ -105,7 +105,35 @@ The Go client mirrors it in `internal/backend`:
 - **Utility work is server-owned tasks** (`/v1/daintree/tasks`): `checkpoint`,
   `memory_distill`, `watcher_classify`, `terminal_judge`, `terminal_summarize`,
   `terminal_extract_text`, `terminal_extract_json`, `extraction_verdict`,
-  `skill_step_consistency`. The CLI sends task *data* only — never prompts.
+  `skill_step_consistency`, plus the flag-gated `workflow_plan`,
+  `workflow_reconcile`, `workflow_resume_digest`. The CLI sends task *data* only —
+  never prompts.
+
+### Task ids are a frozen wire contract
+
+The ids above are hardcoded on BOTH sides and must change in lockstep:
+
+| Side | Manifest | Guard |
+| --- | --- | --- |
+| CLI | `internal/backend/tasks.go` (`coreTaskIDs`) + `workflowtasks.go` (`workflowTaskIDs`) | `taskcheck_test.go` parses the AST and fails if a `Task*` constant is not in the manifest |
+| Backend | `task_runner` profiles | `EXPECTED_TASK_IDS` in `tests/unit/test_task_runner.py`, asserted as an exact SET |
+
+`backend.CheckTasks(caps, workflowIntelligence)` diffs the CLI's manifest against the
+live `Capabilities.Tasks`. It surfaces in three places: the `backend tasks` row in
+`/doctor`, the `doctor` subcommand's banner (**and its exit code** — drift is a gating
+failure), and a `backend.tasks` debug-log line at boot.
+
+Three rules the checker encodes:
+
+- **Extra server tasks are fine** — forward compatibility, not drift.
+- **An unreported inventory is "cannot verify", never a failure.**
+  `/v1/daintree/capabilities` sits behind `require_auth` *and* `require_ready`, so a
+  warming backend legitimately advertises nothing.
+- **Workflow ids are required only when `DAINTREE_WORKFLOW_INTELLIGENCE=1`.**
+
+> Why the machinery: on **2026-07-07** the backend dropped a `.v1` suffix from every
+> task id. The count was unchanged, and *both* sides asserted only a count — so every
+> test stayed green while every task call 404'd mid-turn. Never assert `len(tasks)`.
 
 ## When changing protocol behavior
 

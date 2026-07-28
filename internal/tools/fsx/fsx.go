@@ -418,7 +418,7 @@ var searchSchema = json.RawMessage(`{
 func newSearchTool() tools.Tool {
 	return tools.Tool{
 		Name:        "fs.search",
-		Description: "Text-search file contents across the project (read-only). Recursive pure-Go walk skipping .git, node_modules, and dist.",
+		Description: "Substring search across the project's text files (read-only): a recursive walk skipping .git/node_modules/dist and credential paths, an optional filename-suffix `glob`, capped at maxResults (default 50, max 500). Returns file/line/text per match plus a `capped` flag. LITERAL substring — not a regex, not case-insensitive. Locate code here, then read it with fs.read; it runs serially, so prefer one good needle to a batch of searches.",
 		Risk:        domain.RiskRead,
 		// NOT Parallelizable — deliberate exclusion. Unlike the bounded point reads
 		// fs.read/fs.list, this is a full recursive project walk that reads file contents

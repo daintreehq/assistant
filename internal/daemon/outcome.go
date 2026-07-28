@@ -205,6 +205,23 @@ type TerminalState struct {
 	// built from AgentID) is subscribed in the CURRENT session, so the check skips
 	// re-subscribing every tick. AgentID/ResourceURI are persisted so a reconnect
 	// can re-issue the (session-scoped) subscription without a fresh getStatus read.
+	//
+	// Subscribed IS persisted, because optionsJson is this watcher's only memory
+	// between ticks — the check reloads its state from the store every pass, so
+	// dropping the field would re-issue a Subscribe on every single tick.
+	//
+	// But the subscription it records is PER-PROCESS in-memory state
+	// (mcp.Client.subs, which starts empty in every new process and is the only
+	// source resubscribe replays from), so the latch MUST be cleared at the
+	// ownership boundary — see Store.BeginOwnership. Without that reset an adopted
+	// watcher believes in a push channel that no longer exists after a
+	// cockpit↔daemon handover: ensureSubscribed early-returns, no Subscribe is ever
+	// issued and no resources/updated can arrive, yet the quiet-subscribed path
+	// still widens the poll cadence to SubscribedReconcileMS on the strength of
+	// that phantom — delaying notice of a finished agent for the whole span. It
+	// also lets the adopted watcher's unsubscribeAll decrement the refcount for a
+	// URI it never subscribed to in this process, silently killing a sibling
+	// watcher's real push path.
 	AgentID     string `json:"agentId,omitempty"`
 	ResourceURI string `json:"resourceUri,omitempty"`
 	Subscribed  bool   `json:"subscribed,omitempty"`

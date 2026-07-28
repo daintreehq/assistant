@@ -34,7 +34,7 @@ var focusSchema = json.RawMessage(`{
 func newTerminalFocusTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "terminal.focus",
-		Description: "Focus/reveal a Daintree terminal in the UI (read-only side effect on the UI; no state mutation).",
+		Description: "Bring ONE Daintree terminal to the front in the UI (forwards to Daintree's panel.focus with the terminal id as the panelId). Pure UI: no confirmation, no state change — it does not read, send to, or close anything. Use it when the user asks to see or switch to a terminal, or to point them at a tab you just spawned. Pass the full terminal-<uuid> id.",
 		Risk:        domain.RiskUI,
 		Schema:      focusSchema,
 		Decode:      tools.StrictDecoder(func() any { return &focusArgs{} }),
@@ -409,45 +409,4 @@ func newTerminalDisarmAllTool(deps Deps) tools.Tool {
 				map[string]any{}, "Cleared the fleet arming set.")
 		},
 	}
-}
-
-/* ------------------------------- agent.focus* ----------------------------- */
-
-// focusTool builds a no-arg UI focus wrapper that forwards to a same-named MCP
-// action. All four agent-focus tools share this exact shape.
-func focusTool(deps Deps, name, description, mcpName string) tools.Tool {
-	return tools.Tool{
-		Name:        name,
-		Description: description,
-		Risk:        domain.RiskUI,
-		Schema:      noArgs,
-		Decode:      tools.StrictDecoder(func() any { return &struct{}{} }),
-		Handle: func(ctx context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			return passthrough(ctx, deps.MCP, mcpName, map[string]any{}, "")
-		},
-	}
-}
-
-func newFocusNextWaitingTool(deps Deps) tools.Tool {
-	return focusTool(deps, "agent.focusNextWaiting",
-		"Focus the next agent terminal that is waiting for input or a decision (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextWaiting MCP tool.",
-		"agent.focusNextWaiting")
-}
-
-func newFocusNextWorkingTool(deps Deps) tools.Tool {
-	return focusTool(deps, "agent.focusNextWorking",
-		"Focus the next agent terminal that is actively working (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextWorking MCP tool.",
-		"agent.focusNextWorking")
-}
-
-func newFocusNextAgentTool(deps Deps) tools.Tool {
-	return focusTool(deps, "agent.focusNextAgent",
-		"Focus the next agent terminal in order (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusNextAgent MCP tool.",
-		"agent.focusNextAgent")
-}
-
-func newFocusPreviousAgentTool(deps Deps) tools.Tool {
-	return focusTool(deps, "agent.focusPreviousAgent",
-		"Focus the previous agent terminal in order (UI focus change; no state mutation). Typed wrapper around the Daintree agent.focusPreviousAgent MCP tool.",
-		"agent.focusPreviousAgent")
 }

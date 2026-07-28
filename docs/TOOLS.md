@@ -207,7 +207,7 @@ the tools whose wrapper does validation worth protecting, so a few simple read p
 aren't on it). Reach for the wrapper, not the raw call. The model-facing reference for the
 Daintree MCP surface is
 [`DAINTREE_MCP.md`](DAINTREE_MCP.md) (and the embedded prompt in
-`internal/models/prompts/daintree_mcp.go`).
+`internal/prompts/daintree_mcp.go`).
 
 ## Worked example
 

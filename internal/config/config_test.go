@@ -46,19 +46,15 @@ func mustLoad(t *testing.T, o ConfigOverrides) AppConfig {
 func TestLoadConfig_Overrides(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := mustLoad(t, ConfigOverrides{
-		StateDir:   strptr(stateDir),
-		McpURL:     strptr("http://example.test/mcp"),
-		Tier:       strptr("supervisor"),
-		SmallModel: strptr("accounts/custom/models/tiny"),
+		StateDir: strptr(stateDir),
+		McpURL:   strptr("http://example.test/mcp"),
+		Tier:     strptr("supervisor"),
 	})
 	if cfg.McpURL != "http://example.test/mcp" {
 		t.Errorf("mcpUrl = %q", cfg.McpURL)
 	}
 	if cfg.Tier != domain.TierSupervisor {
 		t.Errorf("tier = %q", cfg.Tier)
-	}
-	if cfg.SmallModel != "accounts/custom/models/tiny" {
-		t.Errorf("smallModel = %q", cfg.SmallModel)
 	}
 	if cfg.StateDir != stateDir {
 		t.Errorf("stateDir = %q, want %q", cfg.StateDir, stateDir)
@@ -77,33 +73,6 @@ func TestLoadConfig_AutoApproveDefaultAndEnv(t *testing.T) {
 	// An explicit override beats the env.
 	if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), AutoApprove: boolptr(false)}).AutoApprove {
 		t.Error("explicit override should beat env")
-	}
-}
-
-func TestLoadConfig_LargeModelDefault(t *testing.T) {
-	stateDir := t.TempDir()
-	t.Setenv("DAINTREE_LARGE_MODEL", "")
-	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
-	if cfg.LargeModel != DEFAULTS.LargeModel {
-		t.Errorf("largeModel = %q, want default %q", cfg.LargeModel, DEFAULTS.LargeModel)
-	}
-}
-
-// TestLoadConfig_AllTiersDefaultToFlash is the issue-238 guard: with a clean env and
-// no overrides, all three model tiers resolve to deepseek-v4-flash — the validated
-// orchestration model. If any default ever drifts back to a heavier model, this fails.
-func TestLoadConfig_AllTiersDefaultToFlash(t *testing.T) {
-	isolatedHome(t)
-	const flash = "deepseek-v4-flash"
-	cfg := mustLoad(t, ConfigOverrides{})
-	for tier, got := range map[string]string{
-		"large":  cfg.LargeModel,
-		"medium": cfg.MediumModel,
-		"small":  cfg.SmallModel,
-	} {
-		if got != flash {
-			t.Errorf("%s tier = %q, want validated flash model %q", tier, got, flash)
-		}
 	}
 }
 
@@ -218,34 +187,51 @@ func TestLoadConfig_TrustedEnvBoundary(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_TrustedEnvBeatsProjectEnv(t *testing.T) {
-	isolatedHome(t)
-	projectDir := t.TempDir()
-	// A genuinely MERGED key (largeModel: real > project > own) demonstrates that the
-	// real process env beats the project .env.
-	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
-		[]byte("DAINTREE_LARGE_MODEL=from-project-env\n"), 0o600); err != nil {
-		t.Fatal(err)
+// The MERGED trust tier (real env > project .env > own .env) currently has no
+// config members — the model/provider vars that used to live there went away with
+// the direct provider client. Its precedence is still security-relevant (it is the
+// default tier any new non-sensitive setting lands in), so pin it directly rather
+// than let the rule go untested until something quietly depends on it.
+func TestMergedGetPrecedence(t *testing.T) {
+	e := &env{
+		trusted:    map[string]string{"K": "from-real-env"},
+		projectEnv: map[string]string{"K": "from-project-env"},
+		ownEnv:     map[string]string{"K": "from-own-env"},
 	}
-	t.Setenv("DAINTREE_LARGE_MODEL", "from-real-env")
-	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
-	if cfg.LargeModel != "from-real-env" {
-		t.Errorf("largeModel = %q, real env should win over project .env", cfg.LargeModel)
+	if got := e.mergedGet("K"); got != "from-real-env" {
+		t.Errorf("real env must win: got %q", got)
+	}
+
+	// A blank real-env value falls THROUGH to the project .env (not an empty result).
+	e.trusted["K"] = ""
+	if got := e.mergedGet("K"); got != "from-project-env" {
+		t.Errorf("project .env must supply a merged var when the real env is unset/blank: got %q", got)
+	}
+
+	delete(e.projectEnv, "K")
+	if got := e.mergedGet("K"); got != "from-own-env" {
+		t.Errorf("own .env is the last fallback: got %q", got)
 	}
 }
 
-// TestLoadConfig_ProjectEnvMergesWhenRealUnset proves a project .env DOES supply a merged
-// var when the real env doesn't set it (the normal fallback still works).
-func TestLoadConfig_ProjectEnvMergesWhenRealUnset(t *testing.T) {
-	isolatedHome(t)
-	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, ".env"),
-		[]byte("DAINTREE_LARGE_MODEL=from-project-env\n"), 0o600); err != nil {
-		t.Fatal(err)
+// The two RESTRICTED tiers must reject the untrusted project .env — this is the
+// confused-deputy / escalation boundary, and unlike the merged tier it has real
+// members today (tier/offline/stateDir; the MCP URL + token).
+func TestRestrictedTiersIgnoreProjectEnv(t *testing.T) {
+	e := &env{
+		trusted:    map[string]string{},
+		projectEnv: map[string]string{"K": "from-project-env"},
+		ownEnv:     map[string]string{"K": "from-own-env"},
 	}
-	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
-	if cfg.LargeModel != "from-project-env" {
-		t.Errorf("largeModel = %q, project .env should supply a merged var when real env is unset", cfg.LargeModel)
+	if got := e.trustedGet("K"); got != "" {
+		t.Errorf("trustedGet must ignore BOTH .env files: got %q", got)
+	}
+	if got := e.trustedOrOwnGet("K"); got != "from-own-env" {
+		t.Errorf("trustedOrOwnGet must skip the project .env and take the own .env: got %q", got)
+	}
+	e.trusted["K"] = "from-real-env"
+	if got := e.trustedOrOwnGet("K"); got != "from-real-env" {
+		t.Errorf("real env must still win in trustedOrOwnGet: got %q", got)
 	}
 }
 
@@ -282,7 +268,6 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 	isolatedHome(t)
 	projectDir := t.TempDir()
 	envBody := strings.Join([]string{
-		"DEEPSEEK_BASE_URL=https://attacker.example/v1",
 		"DAINTREE_MCP_URL=http://attacker.example/mcp",
 		"DAINTREE_MCP_TOKEN=stolen",
 	}, "\n") + "\n"
@@ -291,9 +276,6 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 	}
 	cfg := mustLoad(t, ConfigOverrides{ProjectPath: strptr(projectDir)})
 
-	if cfg.DeepSeekBaseURL != DEFAULTS.DeepSeekBaseURL {
-		t.Errorf("project .env redirected DeepSeekBaseURL to %q (trusted-key exfiltration)", cfg.DeepSeekBaseURL)
-	}
 	if cfg.McpURL != "" {
 		t.Errorf("project .env set McpURL to %q (must stay unset → degraded local mode)", cfg.McpURL)
 	}
@@ -304,16 +286,19 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 
 // --- describeConfig: redaction + placeholders + byte counts ---
 
+// The MCP bearer token is now the only secret DescribeConfig carries (the model
+// credentials moved to the backend), so it is what must never render verbatim —
+// DescribeConfig output reaches /status and the debug log.
 func TestDescribeConfig_RedactsSecrets(t *testing.T) {
 	stateDir := t.TempDir()
-	rawKey := "sk-secret-1234567890"
-	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), DeepSeekAPIKey: strptr(rawKey)})
+	rawToken := "mcp-secret-1234567890"
+	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), McpToken: strptr(rawToken)})
 	d := DescribeConfig(cfg)
-	if cfg.DeepSeekAPIKey != rawKey {
-		t.Errorf("loadConfig mangled the key: %q", cfg.DeepSeekAPIKey)
+	if cfg.McpToken != rawToken {
+		t.Errorf("loadConfig mangled the token: %q", cfg.McpToken)
 	}
-	if d["deepseekApiKey"] == rawKey || strings.Contains(d["deepseekApiKey"], rawKey) {
-		t.Errorf("deepseekApiKey not redacted: %q", d["deepseekApiKey"])
+	if d["mcpToken"] == rawToken || strings.Contains(d["mcpToken"], rawToken) {
+		t.Errorf("mcpToken not redacted: %q", d["mcpToken"])
 	}
 }
 

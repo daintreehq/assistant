@@ -1,7 +1,6 @@
 package app
 
 import (
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 
@@ -72,9 +71,6 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, addr(extractionx.Tools(extractionx.Deps{
 		Reader:       terminalReaderAdapter{c: a.MCP},
 		Router:       extractionRouterAdapter{tasks: a.Backend},
-		Queue:        a.Queue,
-		BaseContext:  a.baseCtx,
-		DebugLog:     debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
 		Supervisors:  supervisorRetireAdapter{app: a},
 		Observations: a.terminalObs,
 	}))...)

@@ -268,4 +268,3 @@ func (r *errRouter) Chat(ctx context.Context, tier domain.ModelTier, opts models
 	return models.ChatResult{Content: "S"}, nil
 }
 func (r *errRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *errRouter) FlushMeter() []models.TierUsage   { return nil }

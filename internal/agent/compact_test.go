@@ -32,7 +32,6 @@ func compactSession(t *testing.T, r Router) (*Session, *recordingStore) {
 	store := &recordingStore{}
 	deps := SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r,
 		Tools:     &fakeTools{},
 		Store:     store,
 		SessionID: "ses_compact",
@@ -183,7 +182,6 @@ func (r *chatCountRouter) Chat(ctx context.Context, tier domain.ModelTier, opts 
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *chatCountRouter) ModelFor(domain.ModelTier) string { return "minimax-m3" }
-func (r *chatCountRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestAutoCompactNoteCarriesTranscriptBreadcrumb pins the compaction escape hatch
 // end-to-end: the note points at a durable artifact holding the FULL flattened
@@ -250,7 +248,6 @@ func (r *summaryCaptureRouter) Chat(ctx context.Context, tier domain.ModelTier, 
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *summaryCaptureRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *summaryCaptureRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestAutoCompactCheckpointPayloadHasNoBareToolRole is the regression guard for the
 // DeepSeek 400 "messages[N]: missing field `tool_call_id`" that failed EVERY auto-compact
@@ -417,7 +414,6 @@ func (r *jsonChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts m
 	return models.ChatResult{Content: r.content}, nil
 }
 func (r *jsonChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *jsonChatRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func TestDistillCompactSavesNovelFacts(t *testing.T) {
 	r := &jsonChatRouter{content: `["fact A", "fact B"]`}
@@ -553,7 +549,6 @@ func (r *seqChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mo
 	return models.ChatResult{Content: ""}, nil
 }
 func (r *seqChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *seqChatRouter) FlushMeter() []models.TierUsage   { return nil }
 func (r *seqChatRouter) calls() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -674,7 +669,6 @@ func (r *blockingDistillRouter) Chat(ctx context.Context, tier domain.ModelTier,
 	return models.ChatResult{Content: `["distilled fact"]`}, nil
 }
 func (r *blockingDistillRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *blockingDistillRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestAutoCompactDistillRunsOffCriticalPath proves the fix for the "Analyzing" stall:
 // the turn compacts and returns BEFORE the (now background) distill round-trip
@@ -741,7 +735,6 @@ func (r *errChatRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mo
 	return models.ChatResult{}, r.err
 }
 func (r *errChatRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *errChatRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // flakyRouter fails the first failFirst Chat calls, then returns summary. Used to
 // prove the consecutive-failure counter resets on a successful compaction.
@@ -766,7 +759,6 @@ func (r *flakyRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mode
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *flakyRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *flakyRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // overHardThresholdNote is a single note large enough to exceed
 // AutoCompactHardTruncationThreshold (≈800k tokens ⇒ ≈3.2M chars).
@@ -889,7 +881,6 @@ func TestAutoCompactSkipNoteEmittedOncePerStreak(t *testing.T) {
 	sink := &infoCountSink{}
 	s := NewSession(SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r,
 		Tools:     &fakeTools{},
 		Store:     &recordingStore{},
 		SessionID: "ses_skipnote",
@@ -1151,7 +1142,6 @@ func (r *reportingRouter) Chat(ctx context.Context, tier domain.ModelTier, opts 
 	return models.ChatResult{Content: r.summary}, nil
 }
 func (r *reportingRouter) ModelFor(domain.ModelTier) string { return "glm-5p2" }
-func (r *reportingRouter) FlushMeter() []models.TierUsage   { return nil }
 
 // TestSendStashedTokensGateNextRoundCompaction is the end-to-end proof: round 1's
 // emitUsage stashes the provider-reported prompt_tokens (over threshold), and round 2's

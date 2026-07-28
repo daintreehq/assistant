@@ -66,24 +66,6 @@ func TestExtractJSONRequiresInstructionAndSchema(t *testing.T) {
 	}
 }
 
-func TestExtractAsyncRequiresInstruction(t *testing.T) {
-	tool := newExtractAsyncTool(Deps{})
-	for name, bad := range map[string]string{
-		"missing instruction": `{"terminalIds":["t"]}`,
-		"empty instruction":   `{"terminalIds":["t"],"instruction":""}`,
-		"blank instruction":   `{"terminalIds":["t"],"instruction":"   "}`,
-		"missing terminalIds": `{"instruction":"x"}`,
-		"format unknown now":  `{"terminalIds":["t"],"instruction":"x","format":"json"}`,
-	} {
-		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
-			t.Errorf("async %s should be rejected: %s", name, bad)
-		}
-	}
-	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t"],"instruction":"pull the answer"}`)); err != nil {
-		t.Errorf("valid async args should decode: %v", err)
-	}
-}
-
 // --- Finding 4 supports: cancellation + publish-failure ---
 
 // stubReader is a TerminalReader that always reports "running" so a wait condition
@@ -110,66 +92,6 @@ type failingQueue struct{ called int }
 func (q *failingQueue) Publish(_ context.Context, _ domain.QueuePublishArgs) (domain.QueueEvent, error) {
 	q.called++
 	return domain.QueueEvent{}, errors.New("queue offline")
-}
-
-// Finding 4: a detached async extraction must (a) stop when its context is
-// cancelled (it inherits the app-scoped ctx, not the turn's), and (b) survive a
-// Publish that returns an error — the goroutine must not panic, and the failure
-// must be surfaced (attempted), not swallowed silently. Here the app-scoped ctx is
-// already cancelled, so the poll returns immediately with matched=false and the
-// "wait timed out" event is published (and fails) without panicking.
-func TestRunAsyncExtractionCancelAndPublishFailure(t *testing.T) {
-	q := &failingQueue{}
-	deps := Deps{Reader: stubReader{}, Queue: q}
-	wait := settledWait()
-	base := resolvedBase{
-		terminalIDs:    []string{"t"},
-		wait:           &wait,
-		pollIntervalMs: 10,
-		maxAttempts:    5,
-		tailBytes:      100,
-		maxTokens:      100,
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // simulate an app shutdown / already-cancelled app-scoped ctx
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// Must not panic even though Publish errors.
-		runAsyncExtraction(ctx, deps, base, extractAsyncArgs{Instruction: "x"}, "req-1")
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runAsyncExtraction did not return promptly on a cancelled ctx")
-	}
-	if q.called == 0 {
-		t.Fatal("expected a publish attempt (so the failure is surfaced, not silently dropped)")
-	}
-}
-
-// A nil queue must not panic the background goroutine.
-func TestRunAsyncExtractionNilQueueSafe(t *testing.T) {
-	deps := Deps{Reader: stubReader{}, Queue: nil}
-	wait := settledWait()
-	base := resolvedBase{
-		terminalIDs: []string{"t"}, wait: &wait,
-		pollIntervalMs: 10, maxAttempts: 2, tailBytes: 100, maxTokens: 100,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		runAsyncExtraction(ctx, deps, base, extractAsyncArgs{Instruction: "x"}, "req-nil")
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runAsyncExtraction with a nil queue hung")
-	}
 }
 
 // asyncDeadline must derive a sane, bounded deadline from the poll knobs.

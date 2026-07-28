@@ -7,27 +7,13 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/models/prompts"
+	"github.com/daintreehq/daintree-assistant/internal/prompts"
 )
 
 // Consumer-defined seams. The loop depends on these narrow interfaces, not the
 // concrete provider packages, so it compiles, tests, and stays decoupled. Each is
 // satisfied by the real provider (e.g. *backend.Client, *tools.Registry,
 // *storage.Store) and trivially by a fake in tests.
-
-// Router is the model-access seam (satisfied by *models.Router). The loop only
-// streams the large model and chats the small model (auto-compact + skill
-// selector). Stream's ChatResult/ChatOptions/ChatTool come from internal/models.
-type Router interface {
-	Stream(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions, onToken func(string)) (models.ChatResult, error)
-	Chat(ctx context.Context, tier domain.ModelTier, opts models.ChatOptions) (models.ChatResult, error)
-	ModelFor(tier domain.ModelTier) string
-	// FlushMeter drains the Router's accumulated per-tier usage since the last
-	// flush. emitUsage calls it once per streamed round so the UsageEvent sums
-	// EVERY model call in the turn (large stream + small-tier background work),
-	// not just the large-thread stream result.
-	FlushMeter() []models.TierUsage
-}
 
 // ToolRunner is the tool-registry seam (satisfied by an adapter over
 // *tools.Registry). It projects tools to OpenAI specs, resolves wire→internal
@@ -208,12 +194,8 @@ type BackendStateStore interface {
 type SessionDeps struct {
 	// Backend is the native Daintree backend (assistant turns + utility tasks).
 	Backend AssistantBackend
-	// Router is the legacy model seam, retained ONLY for the compaction/distill
-	// utility calls that have not yet moved to backend tasks; the main turn loop no
-	// longer uses it. Optional once those move (a nil Router disables them).
-	Router Router
-	Tools  ToolRunner
-	Store  MessageStore
+	Tools   ToolRunner
+	Store   MessageStore
 	// MemoryStore enables distill-on-compact (optional; nil ⇒ disabled).
 	MemoryStore MemoryStore
 	// MemoryRecaller enables per-turn BM25 recall into the footer (optional; nil ⇒ the
@@ -309,7 +291,7 @@ type SessionDeps struct {
 	// BackgroundCtx is the APP-SCOPED context for detached work that must OUTLIVE a
 	// single turn (the post-compaction distill goroutine) but NOT outlive the app —
 	// wire app.baseCtx so distill calls are cancelled on App.Shutdown rather than
-	// touching a closed Router/Store. Optional; nil defaults to context.Background()
+	// touching a closed Store. Optional; nil defaults to context.Background()
 	// in NewSession (the test default, where no distill outlives the test).
 	BackgroundCtx context.Context
 

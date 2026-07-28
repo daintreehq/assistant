@@ -36,7 +36,6 @@ func (r *injectRouter) Chat(ctx context.Context, tier domain.ModelTier, opts mod
 	return models.ChatResult{Content: "summary"}, nil
 }
 func (r *injectRouter) ModelFor(domain.ModelTier) string { return "m" }
-func (r *injectRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func userTextSeen(round []models.ChatMessage, want string) bool {
 	for _, m := range round {

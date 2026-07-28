@@ -223,9 +223,34 @@ func abortableSleep(ctx context.Context, d time.Duration) error {
 
 // isAborted reports whether the context error is a caller cancellation (NOT a
 // deadline). "aborted" in the spec maps to context.Canceled — a deadline is a
-// timeout, which the retry/degrade logic treats differently.
+// timeout, which the RETRY logic treats differently (a client-side per-attempt
+// timeout is exactly the transient blip a retry exists to absorb).
 func isAborted(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)
+}
+
+// callerDone reports whether the CALLER's context is finished for ANY reason —
+// cancellation or deadline. This is the correct gate for the DEGRADE decision,
+// which isAborted is not.
+//
+// Every network attempt runs on a per-attempt CHILD context
+// (`context.WithTimeout(ctx, timeout)` in CallTool), so the two cases are
+// distinguishable at the degrade site:
+//
+//   - the client's OWN per-attempt deadline fired → the child is done but the
+//     caller's ctx is still clean → the transport really is wedged → DEGRADE;
+//   - the CALLER's budget ran out → ctx.Err() is non-nil → the transport told us
+//     nothing about its health → do NOT degrade.
+//
+// Conflating them lets any caller-side timeout tear down the process-wide MCP
+// session (markDegraded nulls c.low, clears connected, and Closes the transport),
+// which is how a bounded /doctor probe or an over-budget scheduler job could take
+// the whole cockpit offline until the next reconnect. Callers are still expected
+// to bound best-effort reads with time.AfterFunc(cancel) rather than
+// context.WithTimeout (see internal/app/toolterminal.go) — this is the
+// belt-and-braces guard for the ones that don't.
+func callerDone(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 // errMsg renders any error as a string (TS errMsg shim). nil → "". The text is

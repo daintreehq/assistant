@@ -63,7 +63,6 @@ func (r *summaryInputCaptureRouter) Chat(ctx context.Context, tier domain.ModelT
 }
 
 func (r *summaryInputCaptureRouter) ModelFor(domain.ModelTier) string { return "deepseek-v4-flash" }
-func (r *summaryInputCaptureRouter) FlushMeter() []models.TierUsage   { return nil }
 
 func (r *summaryInputCaptureRouter) captured() []models.ChatMessage {
 	r.mu.Lock()

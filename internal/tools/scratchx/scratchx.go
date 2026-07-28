@@ -455,7 +455,7 @@ var deleteSchema = json.RawMessage(`{
 func newDeleteTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "scratch.delete",
-		Description: "Delete one key from a scratch store. To remove the entire store, use scratch.drop.",
+		Description: "Delete ONE key from a scratch store (storeId + key). Use it to drop an intermediate result you no longer need, including to free a slot when a store hits its 100-key limit (SCRATCH_KEYS_FULL). A missing key fails SCRATCH_KEY_NOT_FOUND and a missing store SCRATCH_STORE_NOT_FOUND, both unrecoverable. To discard the whole store instead, use scratch.drop.",
 		Risk:        domain.RiskLocal,
 		Schema:      deleteSchema,
 		Decode:      tools.StrictDecoder(func() any { return &deleteArgs{} }),
@@ -512,7 +512,7 @@ var dropSchema = json.RawMessage(`{
 func newDropTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "scratch.drop",
-		Description: "Discard an entire scratch store and all of its keys. Frees a slot toward the per-session store limit.",
+		Description: "Discard an ENTIRE scratch store and every key in it, freeing one of the 20 per-session store slots (drop a finished store when scratch.create returns SCRATCH_STORE_FULL). Unknown storeId ⇒ SCRATCH_STORE_NOT_FOUND (unrecoverable). Scratch data is in-memory and session-only so nothing durable is lost — but there is no undo. To remove a single key instead, use scratch.delete.",
 		Risk:        domain.RiskLocal,
 		Schema:      dropSchema,
 		Decode:      tools.StrictDecoder(func() any { return &dropArgs{} }),

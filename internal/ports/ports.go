@@ -73,31 +73,6 @@ type Store interface {
 	Close() error
 }
 
-// ChatMessage is a single message in a model request. Kept minimal; the models
-// package owns the full request/response shape.
-type ChatMessage struct {
-	Role       string
-	Content    string
-	ToolCallID string
-}
-
-// ModelChunk is one streamed delta from the router.
-type ModelChunk struct {
-	Content   string
-	ToolCalls []domain.ToolCallInfo
-	Done      bool
-	Usage     *domain.Usage
-}
-
-// Router selects a model tier and streams a completion. The full router surface
-// (retry, json mode, tool calling) lives in the models package; this is the seam
-// the loop calls.
-type Router interface {
-	// Stream runs a streaming completion for the given tier, delivering chunks
-	// on the returned channel until it closes. ctx cancellation aborts the turn.
-	Stream(ctx context.Context, tier domain.ModelTier, messages []ChatMessage) (<-chan ModelChunk, error)
-}
-
 // ToolRegistry validates, gates, runs and audits a tool call. The no-file-edit
 // guard and the tier gate live behind Dispatch. The seam here is what the loop
 // invokes per call.

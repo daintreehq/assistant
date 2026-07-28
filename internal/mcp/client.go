@@ -569,9 +569,12 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 		return low.ListTools(ctx)
 	}()
 	if err != nil {
-		// An abort (caller cancel) says nothing about connection health → don't
-		// degrade. UnavailableError already means disconnected → don't re-degrade.
-		if degradeOnErr && !isUnavailable(err) && !isAborted(ctx) {
+		// A finished CALLER context — cancel OR deadline — says nothing about
+		// connection health → don't degrade. UnavailableError already means
+		// disconnected → don't re-degrade. (callerDone, not isAborted: /doctor
+		// bounds this very call with a 5s budget, and a slow-but-alive server
+		// must not make the diagnostic cause the outage it reports.)
+		if degradeOnErr && !isUnavailable(err) && !callerDone(ctx) {
 			c.markDegraded(err, gen)
 		}
 		return nil, err
@@ -709,8 +712,13 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		}
 
 		// Degrade path: only for a real, non-abort, non-unavailable failure, and
-		// only if this call's session (gen) is still the live one.
-		if !isUnavailable(err) && !aborted {
+		// only if this call's session (gen) is still the live one. callerDone (not
+		// the narrower `aborted`) is the gate: a DEADLINE that came from the
+		// CALLER's own budget says nothing about transport health, and degrading on
+		// it would close the process-wide session out from under every other
+		// consumer. Only the client's own per-attempt deadline — which leaves the
+		// caller's ctx clean — counts as evidence the transport is wedged.
+		if !isUnavailable(err) && !callerDone(ctx) {
 			c.markDegraded(err, gen)
 		}
 		return CallResult{}, err

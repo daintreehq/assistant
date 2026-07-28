@@ -24,7 +24,7 @@ var recipeListSchema = json.RawMessage(`{
 func newRecipeListTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "recipe.list",
-		Description: "List the available Daintree recipes (worktree/operation templates).",
+		Description: "List the Daintree recipes available in this project — the worktree/operation templates that recipe.run and worktree.createWithRecipe execute — with their ids and recipe-defined argument shapes. Read-only passthrough to Daintree. Call it BEFORE recipe.run so you pass a real recipeId and real argument keys instead of guessing. MCP_UNAVAILABLE when Daintree is disconnected.",
 		Risk:        domain.RiskRead,
 		Schema:      recipeListSchema,
 		Decode:      tools.StrictDecoder(func() any { return &recipeListArgs{} }),
@@ -61,7 +61,7 @@ var recipeRunSchema = json.RawMessage(`{
 func newRecipeRunTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "recipe.run",
-		Description: "Run a Daintree recipe by id. Creates/operates on project state per the recipe.",
+		Description: "Run a Daintree recipe by recipeId, forwarding the recipe-defined `arguments` record verbatim. MUTATING (always confirms): a recipe can create worktrees, branches and terminals. Read recipe.list first for the real recipeId and argument keys — never invent either. Pass requestKey to make a retry idempotent. Returns Daintree's raw result; a refusal comes back as MCP_TOOL_ERROR.",
 		Risk:        domain.RiskProject,
 		Consequence: "Runs a Daintree recipe that can create worktrees and mutate project state.",
 		Schema:      recipeRunSchema,
@@ -105,7 +105,7 @@ var worktreeCreateWithRecipeSchema = json.RawMessage(`{
 func newWorktreeCreateWithRecipeTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "worktree.createWithRecipe",
-		Description: "Create a worktree from a recipe. Arguments are recipe-defined and forwarded verbatim.",
+		Description: "Create a NEW git worktree from a Daintree recipe, forwarding the recipe-defined `arguments` record verbatim (Daintree owns the keys — read recipe.list for the real ones, do not invent them). MUTATING project state, so it always confirms. Prefer agentTask.spawnForEdits when what you actually want is a worktree WITH a supervised agent in it. Pass requestKey so a retry is idempotent.",
 		Risk:        domain.RiskProject,
 		Consequence: "Creates a new git worktree from a recipe template.",
 		Schema:      worktreeCreateWithRecipeSchema,

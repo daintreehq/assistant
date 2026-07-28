@@ -28,6 +28,24 @@ const doctorProbeTool = "actions.getContext"
 // doctorProbeTimeout bounds both listTools and the probe call.
 const doctorProbeTimeout = 5 * time.Second
 
+// boundedProbeCtx bounds a LIVE-client MCP probe with a CANCEL-based timer rather
+// than context.WithTimeout — the mcp-bestEffort-reads rule (see
+// internal/app/toolterminal.go). /doctor runs against the cockpit's live
+// a.MCP, and the client's own per-attempt budget (20s) is longer than this 5s
+// one, so a slow-but-alive server would otherwise surface the CALLER's
+// DeadlineExceeded to the client's degrade path and close the session — making
+// the diagnostic cause the very outage it then reports ("connection may be
+// stale; run /reconnect"). Expiring as a plain context.Canceled keeps the probe
+// a read-only observation of connection health.
+func boundedProbeCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	pctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(doctorProbeTimeout, cancel)
+	return pctx, func() {
+		timer.Stop()
+		cancel()
+	}
+}
+
 // RunDoctor runs the rich /doctor checklist. Order matters.
 // It may opportunistically reconnect when the URL/token are present but the
 // session is cold.
@@ -78,6 +96,23 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 		push("backend protocol", protoOK,
 			fmt.Sprintf("server v%d–%d, CLI v%d · %d tasks", caps.Protocol.Min, caps.Protocol.Max, backend.ProtocolVersion, len(caps.Tasks)),
 			"CLI/backend protocol mismatch — update the CLI or backend")
+
+		// Task-ID drift. The row above deliberately reports only a COUNT, and a count
+		// is provably blind to the failure that actually happened: on 2026-07-07 the
+		// backend renamed every task id (dropping a `.v1` suffix) and the count stayed
+		// identical, so the CLI 404'd mid-turn instead of failing loudly here. Diff the
+		// ids the CLI will actually send against the ids the server advertises.
+		av := backend.CheckTasks(caps, cfg.WorkflowIntelligence)
+		switch {
+		case !av.Reported:
+			push("backend tasks", true, "not advertised — cannot verify", "")
+		case av.OK():
+			push("backend tasks", true, fmt.Sprintf("%d/%d required present", av.Required, av.Required), "")
+		default:
+			push("backend tasks", false,
+				fmt.Sprintf("%d of %d required task(s) MISSING: %s", len(av.Missing), av.Required, joinNames(av.Missing)),
+				"CLI/backend task-id drift — these calls will fail at runtime; update the CLI or backend")
+		}
 	}
 	// forbidden tools must never be exposed to the backend (skill find/load are reserved).
 	exposed, forbidden := exposedAndForbiddenTools(a)
@@ -117,7 +152,7 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// Live probe — only when connected.
 	if st.Connected {
 		probeAdvertised := false
-		listCtx, cancelList := context.WithTimeout(ctx, doctorProbeTimeout)
+		listCtx, cancelList := boundedProbeCtx(ctx)
 		toolList, listErr := a.MCP.ListTools(listCtx, false)
 		cancelList()
 		if listErr == nil {
@@ -132,7 +167,7 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 			push("mcp probe", false, doctorProbeTool+" not advertised — workbench tier may be unavailable",
 				"verify the MCP token grants at least workbench tier")
 		} else {
-			callCtx, cancelCall := context.WithTimeout(ctx, doctorProbeTimeout)
+			callCtx, cancelCall := boundedProbeCtx(ctx)
 			start := time.Now()
 			res, callErr := a.MCP.CallTool(callCtx, doctorProbeTool, map[string]any{}, mcp.CallOptions{})
 			cancelCall()

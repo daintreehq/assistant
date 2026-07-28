@@ -120,7 +120,6 @@ func TestDirtyFreshStartSessionContinuesSeqPastDirtyRows(t *testing.T) {
 	r := plainRouter()
 	deps := SessionDeps{
 		Backend:   backendFromRouter{r: r},
-		Router:    r,
 		Tools:     &fakeTools{},
 		Store:     store,
 		SessionID: "ses_dirty",

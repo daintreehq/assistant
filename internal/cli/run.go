@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/cli/jsonout"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/config"
@@ -343,6 +345,33 @@ func RunDoctor(ctx context.Context, opts Options) int {
 		anyFail = true
 	}
 	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)
+
+	// Task-ID drift is a GATING failure: every id in the manifest is one this CLI
+	// will actually send, so a missing one is a guaranteed runtime 404 mid-turn (the
+	// 2026-07-07 de-versioning incident, which a count-only check could not see).
+	// A capabilities FETCH error is not a failure — /v1/daintree/capabilities sits
+	// behind require_ready, so a warming backend legitimately yields nothing and the
+	// honest verdict is "cannot verify".
+	cctx, ccancel := context.WithTimeout(ctx, 3*time.Second)
+	caps, cerr := a.Backend.Capabilities(cctx)
+	ccancel()
+	switch {
+	case cerr != nil:
+		r.Line("  backend tasks  : cannot verify — " + cerr.Error())
+	default:
+		av := backend.CheckTasks(caps, a.Config.WorkflowIntelligence)
+		switch {
+		case !av.Reported:
+			r.Line("  backend tasks  : not advertised — cannot verify")
+		case av.OK():
+			r.Line(fmt.Sprintf("  backend tasks  : ok (%d/%d required present)", av.Required, av.Required))
+		default:
+			r.Line(fmt.Sprintf("  backend tasks  : DRIFT — %d of %d missing: %s",
+				len(av.Missing), av.Required, strings.Join(av.Missing, ", ")))
+			anyFail = true
+		}
+	}
+
 	mcpURL := a.Config.McpURL
 	if mcpURL == "" {
 		mcpURL = "(unset)"

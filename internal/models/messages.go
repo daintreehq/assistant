@@ -1,9 +1,18 @@
+// Package models is the CONVERSATION WIRE VOCABULARY shared by the agent loop, the
+// tool registry, and the backend client: the message/tool/result shapes a turn is
+// built from.
+//
+// It is NOT a model client. The DeepSeek HTTP transport, the tier Router, the SSE
+// parser, the retry/reliability layer, and the pricing table all used to live here;
+// they were deleted once the backend became the CLI's only model gateway
+// (internal/backend). Nothing in this package talks to a provider, and nothing
+// should: adding a transport back here would let a handler bypass the backend that
+// owns prompt assembly, skill selection, and the provider credentials.
+
 package models
 
 import (
-	"bytes"
 	"encoding/json"
-	"strconv"
 	"strings"
 )
 
@@ -101,19 +110,6 @@ func TextMessage(role, content string) ChatMessage {
 	return ChatMessage{Role: role, StringContent: content}
 }
 
-// HasImageContent reports whether any message carries an image content part. This
-// drives the router's tier gate (only the large tier is vision-capable).
-func HasImageContent(messages []ChatMessage) bool {
-	for _, m := range messages {
-		for _, part := range m.Parts {
-			if part.Type == "image_url" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // ContentToText flattens a message's content to plain text for the string-only
 // paths. Image parts collapse to an "[image omitted]" marker — never stringified
 // to their (huge) base64 URI.
@@ -153,250 +149,47 @@ type ChatToolFunc struct {
 // rejects — an absent schema is "no arguments", i.e. an empty object.
 var emptySchema = json.RawMessage(`{}`)
 
-// normalizeTools returns a copy of tools with any nil/empty Parameters replaced by
-// the empty-object schema `{}`, so a parameterless tool never marshals to a wire
-// `null`. Returns the input unchanged when there's nothing to fix.
-func normalizeTools(tools []ChatTool) []ChatTool {
-	needsFix := false
-	for _, t := range tools {
-		if len(bytesTrimSpace(t.Function.Parameters)) == 0 {
-			needsFix = true
-			break
-		}
-	}
-	if !needsFix {
-		return tools
-	}
-	out := make([]ChatTool, len(tools))
-	copy(out, tools)
-	for i := range out {
-		if len(bytesTrimSpace(out[i].Function.Parameters)) == 0 {
-			out[i].Function.Parameters = emptySchema
-		}
-	}
-	return out
+// Usage is the per-call token accounting, with pointer fields mirroring the
+// optional wire fields (a missing count is nil, not a misleading 0).
+type Usage struct {
+	PromptTokens     *int
+	CompletionTokens *int
+	TotalTokens      *int
+	// CachedTokens is the cached-prompt subset (billed at a discount), when the
+	// provider reports it under prompt_tokens_details.cached_tokens.
+	CachedTokens *int
 }
 
-// bytesTrimSpace trims ASCII whitespace from a raw JSON message so a whitespace-
-// only Parameters value counts as empty.
-func bytesTrimSpace(b json.RawMessage) []byte {
-	return bytes.TrimSpace(b)
+// ChatOptions is the input to a model call. The turn's cancellation is carried by
+// the context.Context passed to each method (the AbortSignal equivalent).
+type ChatOptions struct {
+	Model       string
+	Messages    []ChatMessage
+	Tools       []ChatTool
+	ToolChoice  string // "auto" | "none" | "required" | "" (omit)
+	Temperature *float64
+	MaxTokens   *int
+	// PromptCacheKey caches a static system-prompt prefix on the DeepSeek side.
+	// Sent ONLY on chat/chatStream (never on json) and only when non-empty.
+	PromptCacheKey string
+	// ReasoningEffort is the abstract think-control the Router sets per tier. It does
+	// NOT map 1:1 to a DeepSeek wire field, because DeepSeek splits the two concerns:
+	//   - the OFF switch is the `thinking` object — DeepSeek's reasoning_effort has NO
+	//     "none" variant (it accepts only high|low|medium|max|xhigh and 400s on "none").
+	//   - a real effort (high|low|…) passes straight through as `reasoning_effort`.
+	// So buildBody translates: "none" ⇒ thinking:{type:"disabled"} (think-free, what the
+	// Router forces for the small tier and for flash everywhere so every deepseek-v4-flash
+	// call — judge / summary / extraction / classification — stays fast and light); any
+	// other non-empty value ⇒ the `reasoning_effort` field verbatim; empty ⇒ omit both
+	// (provider default, which for a reasoning model is think-ON).
+	ReasoningEffort string
 }
 
-// wireMessage is the reduced shape we actually send to DeepSeek. Pointers /
-// omitempty honour the omit-when-undefined rule (never send null for an absent
-// optional field, except where null content is deliberately coalesced to "").
-type wireMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	ToolCalls  []wireToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-}
-
-type wireToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"` // "function"
-	Function ToolCallFunction `json:"function"`
-}
-
-// toWireMessages reduces internal ChatMessages to exactly the fields DeepSeek
-// accepts (extra fields cause a 400 on replay). Per role:
-//   - tool: content is always flattened to text; the internal `name` is dropped.
-//   - assistant: content as-is (null→null literal), tool_calls only when present,
-//     emitted as {id,type,function} only.
-//   - user/system: multimodal Parts forwarded verbatim; null content → "".
-func toWireMessages(messages []ChatMessage) ([]wireMessage, error) {
-	out := make([]wireMessage, 0, len(messages))
-	for _, m := range messages {
-		switch m.Role {
-		case "tool":
-			c, err := json.Marshal(m.ContentToText())
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, wireMessage{Role: "tool", Content: c, ToolCallID: m.ToolCallID})
-		case "assistant":
-			wm := wireMessage{Role: "assistant"}
-			// Assistant content: a string, or the `null` literal for a pure
-			// tool-call turn. A null content serializes as JSON null (not omitted)
-			// so the provider sees an explicit null on a tool-call turn.
-			if m.ContentNull && m.Parts == nil {
-				wm.Content = json.RawMessage("null")
-			} else {
-				c, err := marshalStringOrParts(m)
-				if err != nil {
-					return nil, err
-				}
-				wm.Content = c
-			}
-			if len(m.ToolCalls) > 0 {
-				wm.ToolCalls = make([]wireToolCall, 0, len(m.ToolCalls))
-				for _, t := range m.ToolCalls {
-					wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
-						ID: t.ID, Type: "function",
-						Function: ToolCallFunction{Name: t.Function.Name, Arguments: validToolArgs(t.Function.Arguments)},
-					})
-				}
-			}
-			out = append(out, wm)
-		default: // user / system
-			c, err := marshalStringOrParts(m)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, wireMessage{Role: m.Role, Content: c})
-		}
-	}
-	return out, nil
-}
-
-// validToolArgs returns a tool call's arguments as a guaranteed-valid JSON OBJECT
-// string for the OUTGOING request. The provider (DeepSeek) re-validates EVERY
-// message in the replayed history and rejects the whole request with a 400 when any
-// assistant tool call's arguments are not a JSON object — so a single malformed-JSON
-// tool call the model emitted (already caught and rejected locally as
-// INVALID_TOOL_ARGS_JSON) would otherwise poison every subsequent turn and kill the
-// session. The raw arguments are still handed to the LOCAL executor unchanged (so it
-// keeps rejecting the bad call); here, at the wire boundary ONLY, an empty /
-// malformed / non-object value is coerced to "{}" so the history stays acceptable and
-// the model can recover next turn. A valid object passes through untouched. "null"
-// unmarshals to a nil map without error, so the explicit nil check rejects it too.
-func validToolArgs(args string) string {
-	if strings.TrimSpace(args) == "" {
-		return "{}"
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(args), &obj); err != nil || obj == nil {
-		return "{}"
-	}
-	return args
-}
-
-// marshalStringOrParts marshals a message's content: a multimodal part array
-// verbatim, else the string content (null coalesced to "").
-func marshalStringOrParts(m ChatMessage) (json.RawMessage, error) {
-	if m.Parts != nil {
-		return json.Marshal(m.Parts)
-	}
-	s := m.StringContent
-	if m.ContentNull {
-		s = "" // user/system null coalesces to ""
-	}
-	return json.Marshal(s)
-}
-
-// normalizeToolCalls maps raw response tool-calls to ToolCallRequest, filtering to
-// those with a function name, synthesizing a stable id from hashString when the
-// provider omitted one, and defaulting arguments to "{}".
-func normalizeToolCalls(calls []rawToolCall) []ToolCallRequest {
-	out := make([]ToolCallRequest, 0, len(calls))
-	for _, c := range calls {
-		if c.Function == nil || c.Function.Name == "" {
-			continue
-		}
-		id := c.ID
-		if id == "" {
-			id = "call_" + strconv.Itoa(absInt(hashString(c.Function.Name)))
-		}
-		args := c.Function.Arguments
-		if args == "" {
-			args = "{}"
-		}
-		out = append(out, ToolCallRequest{
-			ID: id, Type: "function",
-			Function: ToolCallFunction{Name: c.Function.Name, Arguments: args},
-		})
-	}
-	return out
-}
-
-// hashString is a DJB2-style hash over UTF-16 code units, NOT runes, forced to
-// int32 each step — so synthesized tool-call ids stay stable across transcripts:
-// h = (h<<5) - h + <UTF-16 code unit at i>. A non-BMP rune contributes two code
-// units.
-func hashString(s string) int32 {
-	var h int32
-	for _, u := range utf16Units(s) {
-		h = (h << 5) - h + int32(u)
-		// A 32-bit signed truncation is required each step; int32 arithmetic already
-		// wraps, so no extra masking is needed.
-	}
-	return h
-}
-
-// utf16Units returns the UTF-16 code units of s.
-func utf16Units(s string) []uint16 {
-	var units []uint16
-	for _, r := range s {
-		if r <= 0xFFFF {
-			units = append(units, uint16(r))
-		} else {
-			r -= 0x10000
-			units = append(units, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
-		}
-	}
-	return units
-}
-
-// absInt mirrors Math.abs over the int32 hash. Math.abs(-2147483648) yields
-// 2147483648 (a JS number, not wrapped), so widen to int before negating to avoid
-// the int32 overflow that would keep it negative.
-func absInt(v int32) int {
-	n := int(v)
-	if n < 0 {
-		return -n
-	}
-	return n
-}
-
-// ExtractJson pulls the first balanced JSON object/array out of a string, ignoring
-// trailing prose or stray <think> residue. String- and escape-aware so braces
-// inside string literals don't unbalance the count. Operates on bytes; the
-// bracket/quote/escape bytes are all ASCII so byte indexing is safe.
-func ExtractJson(s string) string {
-	b := []byte(s)
-	start := -1
-	for i, ch := range b {
-		if ch == '[' || ch == '{' {
-			start = i
-			break
-		}
-	}
-	if start == -1 {
-		return s
-	}
-	open := b[start]
-	var closeCh byte = '}'
-	if open == '[' {
-		closeCh = ']'
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(b); i++ {
-		ch := b[i]
-		if inString {
-			if escaped {
-				escaped = false
-			} else if ch == '\\' {
-				escaped = true
-			} else if ch == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch ch {
-		case '"':
-			inString = true
-		case open:
-			depth++
-		case closeCh:
-			depth--
-			if depth == 0 {
-				return string(b[start : i+1])
-			}
-		}
-	}
-	// Unbalanced — return from the first bracket and let the JSON parser report it.
-	return string(b[start:])
+// ChatResult is the normalized output of a model call.
+type ChatResult struct {
+	Content      string
+	Reasoning    string
+	ToolCalls    []ToolCallRequest
+	FinishReason string
+	Usage        *Usage
 }

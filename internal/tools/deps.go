@@ -49,11 +49,3 @@ type MCPCallResult struct {
 type Queue interface {
 	Publish(ctx context.Context, args domain.QueuePublishArgs) (domain.QueueEvent, error)
 }
-
-// Router is the slice of model access a handler may reach. The dispatch pipeline
-// itself does not call it; it is threaded through ToolContext for handlers (e.g.
-// summarization tools).
-type Router interface {
-	// Reserved for handler use; kept minimal so the registry compiles in isolation.
-	// Tool families that need streaming will widen their own consumer interface.
-}
