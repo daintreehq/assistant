@@ -574,7 +574,12 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 		// disconnected → don't re-degrade. (callerDone, not isAborted: /doctor
 		// bounds this very call with a 5s budget, and a slow-but-alive server
 		// must not make the diagnostic cause the outage it reports.)
-		if degradeOnErr && !isUnavailable(err) && !callerDone(ctx) {
+		// Definitive session death overrides degradeOnErr too. The warm path passes
+		// degradeOnErr=false so a transient first-list blip can't tear down a
+		// just-established transport — but a CLOSED/EVICTED session is not a blip:
+		// suppressing it there let Connect return "connected" over a session that had
+		// already died between the handshake and the warm ListTools.
+		if !isUnavailable(err) && (isSessionDead(err) || (degradeOnErr && !callerDone(ctx))) {
 			c.markDegraded(err, gen)
 		}
 		return nil, err
@@ -718,7 +723,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		// it would close the process-wide session out from under every other
 		// consumer. Only the client's own per-attempt deadline — which leaves the
 		// caller's ctx clean — counts as evidence the transport is wedged.
-		if !isUnavailable(err) && !callerDone(ctx) {
+		// isSessionDead is the escape hatch: a definitively closed transport is
+		// evidence regardless of the caller's context state, and suppressing it
+		// would leave `connected` true over a session that can never answer again
+		// (the supervisor's monitorMcp only reads Status().Connected, so nothing
+		// else would ever trigger a reconnect).
+		if !isUnavailable(err) && (!callerDone(ctx) || isSessionDead(err)) {
 			c.markDegraded(err, gen)
 		}
 		return CallResult{}, err

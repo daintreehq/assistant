@@ -403,18 +403,26 @@ func (p *tickJobPool) work() {
 			// remainder of the queue. As before, a panic skips the per-item notify;
 			// the end-of-pass backstop still delivers anything it published.
 			defer func() { _ = recover() }()
-			// The per-item budget is applied via a CANCEL-based timer, NOT
-			// context.WithTimeout — the same mcp-bestEffort-reads rule spelled out
-			// for prefetchBudget below. This ctx is threaded into every watcher/timer
-			// MCP read (CtxFor → CheckContext.Ctx → CallRead → CallTool), so a
-			// DeadlineExceeded here would reach the mcp client's degrade path and
-			// tear down the process-wide connection — turning one over-budget item
-			// into a supervision blackout for every other watcher, the async
-			// coordinator, and any interactive turn. Expiring as a plain
-			// context.Canceled makes it a clean per-item abort instead.
-			jctx, cancel := context.WithCancel(p.ctx)
-			timer := time.AfterFunc(time.Duration(itemDeadlineMS)*time.Millisecond, cancel)
-			defer timer.Stop()
+			// The per-item budget stays a real context.WithTimeout, deliberately —
+			// unlike prefetchBudget below, which is cancel-based.
+			//
+			// Two forces pull in opposite directions here. This ctx is threaded into
+			// every watcher/timer MCP read (CtxFor → CheckContext.Ctx → CallRead →
+			// CallTool), where a DeadlineExceeded used to reach the client's degrade
+			// path and tear the process-wide connection down over ONE over-budget
+			// item. That is now handled at the source: mcp's degrade gate keys on
+			// callerDone (any finished CALLER context), so a deadline that came from
+			// this budget no longer degrades. A cancel-based timer here would be
+			// redundant belt-and-braces.
+			//
+			// And it would COST something real: a cancel-only context advertises no
+			// Deadline(), and backend.doJSON applies its own 60s default only when the
+			// caller has none. Dropping the deadline silently halved the watcher
+			// classify / model-judge budget from this 120s item allowance to 60s, so a
+			// task finishing at 75s would start timing out and the watcher would
+			// re-arm on an unmatched fallback. Keeping WithTimeout keeps the item
+			// budget the single, honest deadline every downstream consumer sees.
+			jctx, cancel := context.WithTimeout(p.ctx, time.Duration(itemDeadlineMS)*time.Millisecond)
 			defer cancel()
 			job(jctx)
 			return true

@@ -362,7 +362,8 @@ func RunDoctor(ctx context.Context, opts Options) int {
 		av := backend.CheckTasks(caps, a.Config.WorkflowIntelligence)
 		switch {
 		case !av.Reported:
-			r.Line("  backend tasks  : not advertised — cannot verify")
+			r.Line("  backend tasks  : NONE advertised — every task call will fail")
+			anyFail = true
 		case av.OK():
 			r.Line(fmt.Sprintf("  backend tasks  : ok (%d/%d required present)", av.Required, av.Required))
 		default:

@@ -55,11 +55,15 @@ func CoreTaskIDs() []string { return append([]string(nil), coreTaskIDs...) }
 // TaskAvailability is the result of comparing the ids this CLI sends against the
 // ids a live backend advertises.
 type TaskAvailability struct {
-	// Reported is false when the backend's task list could not be read at all (a
-	// fetch error, or a server that advertises none). Missing is meaningless then:
-	// the honest verdict is "cannot verify", never "drifted" — /v1/daintree/capabilities
-	// sits behind require_auth AND require_ready, so a live-but-not-ready backend
-	// legitimately yields no list.
+	// Reported is false when the backend returned a SUCCESSFUL capabilities
+	// response that advertised no tasks at all. That is a broken backend, not a
+	// warming one, and it is NOT excused: /v1/daintree/capabilities sits behind
+	// require_ready, which raises 503 BEFORE the handler runs, and a 200 always
+	// fills `tasks` from task_runner.task_ids(). So an empty list means the task
+	// registry itself is empty and every task call will 404.
+	//
+	// The genuine "cannot verify" case is a capabilities FETCH ERROR, which never
+	// reaches this function — callers branch on that first.
 	Reported bool
 	// Missing are required ids the backend did NOT advertise, sorted. Non-empty
 	// while Reported means real drift: those calls will 404 at the moment of use.
@@ -69,13 +73,14 @@ type TaskAvailability struct {
 	Required int
 }
 
-// OK reports whether every required task is available. An unreported inventory is
-// NOT a failure — it is unverifiable, and treating "cannot verify" as "broken"
-// would fail /doctor against a backend that is merely still warming up.
-func (a TaskAvailability) OK() bool { return !a.Reported || len(a.Missing) == 0 }
+// OK reports whether every required task is available. An empty inventory is a
+// FAILURE, not an excuse: see Reported.
+func (a TaskAvailability) OK() bool { return len(a.Missing) == 0 }
 
 // CheckTasks compares the task ids this CLI depends on against the ids a live
-// backend advertises in Capabilities.Tasks. includeWorkflow adds the flag-gated
+// backend advertises in Capabilities.Tasks. It assumes the capabilities fetch
+// SUCCEEDED — a fetch error is the caller's "cannot verify" branch and must not
+// reach here. includeWorkflow adds the flag-gated
 // workflow-intelligence ids, which are only required when
 // DAINTREE_WORKFLOW_INTELLIGENCE is on — a backend without them is perfectly
 // healthy for a CLI that will never call them.
@@ -87,11 +92,7 @@ func CheckTasks(caps Capabilities, includeWorkflow bool) TaskAvailability {
 	if includeWorkflow {
 		required = append(required, WorkflowTaskIDs()...)
 	}
-	out := TaskAvailability{Required: len(required)}
-	if len(caps.Tasks) == 0 {
-		return out // not reported → unverifiable, not drifted
-	}
-	out.Reported = true
+	out := TaskAvailability{Required: len(required), Reported: len(caps.Tasks) > 0}
 	have := make(map[string]struct{}, len(caps.Tasks))
 	for _, id := range caps.Tasks {
 		have[id] = struct{}{}

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,15 +14,36 @@ import (
 // reaches the degrade path) and must expire while the attempt is on the wire.
 // armed is off during Connect (whose own tool discovery would otherwise park
 // forever on a context that never completes) and switched on for the call under test.
+//
+// entered counts how many times an ARMED call actually reached the fake. Without it
+// these tests can pass VACUOUSLY: if a loaded machine makes governor.acquire outlast
+// the caller budget, the call fast-fails in the queue, never reaches the degrade
+// path, and "still connected" is trivially true. Asserting entered>0 turns that
+// silent loss of coverage into a visible failure.
 type ctxParkingLow struct {
 	*fakeLow
-	armed bool
+	armed   bool
+	mu      sync.Mutex
+	entered int
+}
+
+func (b *ctxParkingLow) enter() {
+	b.mu.Lock()
+	b.entered++
+	b.mu.Unlock()
+}
+
+func (b *ctxParkingLow) entries() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.entered
 }
 
 func (b *ctxParkingLow) CallTool(ctx context.Context, _ string, _ map[string]any) (rawResult, error) {
 	if !b.armed {
 		return rawResult{}, nil
 	}
+	b.enter()
 	<-ctx.Done()
 	return rawResult{}, ctx.Err()
 }
@@ -30,6 +52,7 @@ func (b *ctxParkingLow) ListTools(ctx context.Context) ([]rawTool, error) {
 	if !b.armed {
 		return nil, nil
 	}
+	b.enter()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -37,6 +60,11 @@ func (b *ctxParkingLow) ListTools(ctx context.Context) ([]rawTool, error) {
 func newCtxParkingClient() (*Client, *ctxParkingLow) {
 	low := &ctxParkingLow{fakeLow: &fakeLow{}}
 	c := newInjected(low)
+	// Drop the governor's 50ms pacing for this injected client. With pacing on, a
+	// loaded machine can burn the caller budget in the ACQUIRE QUEUE, so the call
+	// never reaches the transport and the test proves nothing (the entries() guard
+	// below would then turn that into a flaky failure rather than a silent pass).
+	c.gov = newGovernor(governorMaxConcurrent, 0)
 	c.Connect(context.Background())
 	low.armed = true
 	return c, low
@@ -63,7 +91,7 @@ func newCtxParkingClient() (*Client, *ctxParkingLow) {
 // propagates the context error without degrading) — that branch masks the bug
 // rather than fixing it, which is why the guard belongs at the degrade site.
 func TestCallToolCallerDeadlineDoesNotDegrade(t *testing.T) {
-	c, _ := newCtxParkingClient()
+	c, low := newCtxParkingClient()
 
 	// The budget must exceed the governor's 50ms pacing interval: a shorter one
 	// expires while the call is still queued in governor.acquire, which returns the
@@ -74,6 +102,9 @@ func TestCallToolCallerDeadlineDoesNotDegrade(t *testing.T) {
 
 	if _, err := c.CallTool(ctx, "actions.getContext", nil, CallOptions{Retries: 0}); err == nil {
 		t.Fatal("expected the deadline-exceeded call to surface an error")
+	}
+	if low.entries() == 0 {
+		t.Fatal("the call never reached the transport (governor queue outlasted the budget) — this test proved nothing")
 	}
 	if !c.IsConnected() {
 		t.Error("a CALLER-supplied deadline must NOT degrade the shared connection")
@@ -86,13 +117,16 @@ func TestCallToolCallerDeadlineDoesNotDegrade(t *testing.T) {
 // but a cold or force-refreshed list on a live client goes straight down this path,
 // and it must not degrade on a caller-side budget either.
 func TestListToolsCallerDeadlineDoesNotDegrade(t *testing.T) {
-	c, _ := newCtxParkingClient()
+	c, low := newCtxParkingClient()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
 	if _, err := c.ListTools(ctx, true); err == nil {
 		t.Fatal("expected the deadline-exceeded list to surface an error")
+	}
+	if low.entries() == 0 {
+		t.Fatal("the call never reached the transport (governor queue outlasted the budget) — this test proved nothing")
 	}
 	if !c.IsConnected() {
 		t.Error("a CALLER-supplied deadline must NOT degrade the shared connection")

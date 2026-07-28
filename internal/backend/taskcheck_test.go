@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,7 +28,7 @@ func declaredTaskConstants(t *testing.T, path string) map[string]string {
 	out := map[string]string{}
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
+		if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
 			continue
 		}
 		for _, spec := range gd.Specs {
@@ -35,12 +37,24 @@ func declaredTaskConstants(t *testing.T, path string) map[string]string {
 				continue
 			}
 			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "Task") || i >= len(vs.Values) {
+				if !strings.HasPrefix(name.Name, "Task") {
 					continue
+				}
+				// A Task* declared as a VAR is mutable and can drift at runtime; a
+				// const with an inherited/omitted RHS (iota carry-over) has no literal
+				// this scan can read. Both would be SKIPPED and therefore unverified.
+				if gd.Tok == token.VAR {
+					t.Fatalf("%s: %s is a var — task ids must be consts so the manifest guard can verify them", path, name.Name)
+				}
+				if i >= len(vs.Values) {
+					t.Fatalf("%s: const %s has no explicit value (inherited iota?); the manifest guard cannot verify it", path, name.Name)
 				}
 				lit, ok := vs.Values[i].(*ast.BasicLit)
 				if !ok || lit.Kind != token.STRING {
-					continue
+					// A Task* constant whose value is not a plain string literal (an
+					// alias, a concatenation, an iota) would be SKIPPED and therefore
+					// unverified — fail instead of silently narrowing the guard.
+					t.Fatalf("%s: Task constant %s is not a plain string literal; the manifest guard cannot verify it", path, name.Name)
 				}
 				val, err := strconv.Unquote(lit.Value)
 				if err != nil {
@@ -58,15 +72,28 @@ func declaredTaskConstants(t *testing.T, path string) map[string]string {
 // CLI would depend on a task nothing ever checked for, and drift on it would again
 // surface only as a runtime 404 mid-turn.
 //
-// Two ParseFile calls rather than a directory walk: this also fails loudly if a
-// task constant is ever moved to a third file, which is precisely what we want.
+// Scans EVERY non-test file in the package, not just tasks.go/workflowtasks.go: a
+// new `TaskCleanup` constant introduced in some third file is precisely the drift
+// this guard exists to catch, and a two-file scan would sail straight past it.
 func TestEveryTaskConstantIsInTheManifest(t *testing.T) {
-	declared := map[string]string{}
-	for name, val := range declaredTaskConstants(t, "tasks.go") {
-		declared[name] = val
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
 	}
-	for name, val := range declaredTaskConstants(t, "workflowtasks.go") {
-		declared[name] = val
+	declared := map[string]string{}
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		scanned++
+		for n, v := range declaredTaskConstants(t, filepath.Clean(name)) {
+			declared[n] = v
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no package files — the scan itself is broken")
 	}
 	if len(declared) == 0 {
 		t.Fatal("AST scan found no Task* constants — the scan itself is broken")
@@ -173,19 +200,21 @@ func TestCheckTasks(t *testing.T) {
 		}
 	})
 
-	t.Run("an empty inventory is unverifiable, never drifted", func(t *testing.T) {
-		// /v1/daintree/capabilities sits behind require_auth AND require_ready, so a
-		// live-but-still-warming backend legitimately reports nothing. Calling that
-		// "drift" would fail /doctor against a healthy server.
+	t.Run("an empty inventory is a FAILURE, not an excuse", func(t *testing.T) {
+		// require_ready raises 503 BEFORE the capabilities handler runs, and a 200
+		// always fills `tasks` from task_runner.task_ids(). So a successful response
+		// with no tasks means the registry is empty and EVERY task call will 404 —
+		// exactly the drift this check exists to catch. (A genuine "cannot verify" is
+		// a fetch error, which never reaches CheckTasks.)
 		av := CheckTasks(Capabilities{}, false)
 		if av.Reported {
 			t.Error("an empty list must not count as reported")
 		}
-		if !av.OK() {
-			t.Error("cannot-verify must not be a failure")
+		if av.OK() {
+			t.Fatal("an empty task inventory must NOT be OK")
 		}
-		if len(av.Missing) != 0 {
-			t.Errorf("Missing must stay empty when unreported, got %v", av.Missing)
+		if len(av.Missing) != len(CoreTaskIDs()) {
+			t.Errorf("every required id must be reported missing, got %v", av.Missing)
 		}
 	})
 

@@ -105,7 +105,8 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 		av := backend.CheckTasks(caps, cfg.WorkflowIntelligence)
 		switch {
 		case !av.Reported:
-			push("backend tasks", true, "not advertised — cannot verify", "")
+			push("backend tasks", false, "backend advertised NO tasks — every task call will fail",
+				"the backend's task registry is empty; restart/repair the backend")
 		case av.OK():
 			push("backend tasks", true, fmt.Sprintf("%d/%d required present", av.Required, av.Required), "")
 		default:

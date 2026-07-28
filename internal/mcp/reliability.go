@@ -253,6 +253,52 @@ func callerDone(ctx context.Context) bool {
 	return ctx.Err() != nil
 }
 
+// isSessionDead reports whether err is DEFINITIVE evidence that the transport is
+// gone — the session was closed underneath us — as opposed to an ambiguous timeout.
+//
+// This is the escape hatch on callerDone. Context state is not error provenance: a
+// caller's budget expiring at the same moment the transport dies is a coincidence,
+// and suppressing the degrade there would leave `connected` true over a session that
+// can never answer again. That is the dangerous direction, because the degrade IS
+// the health signal — the supervisor's monitorMcp only reads Status().Connected and
+// never probes independently, so nothing else would ever trigger a reconnect.
+//
+// Deliberately NARROW. context.DeadlineExceeded is excluded even though
+// isRetriableMcpError treats it as transport-level: a deadline is exactly the
+// ambiguous case (slow-but-alive server vs. wedged transport) that callerDone exists
+// to stop over-reading. Only an explicit closed/evicted-session sentinel or the
+// JSON-RPC ConnectionClosed code (-32000) counts. The broad connErrorRe patterns and
+// an HTTP/2 GOAWAY are deliberately NOT here — Streamable HTTP recovers those on a
+// fresh underlying connection.
+//
+// KNOWN GAP (not covered here, needs Daintree-side semantics to fix safely):
+// Daintree reports a dead window binding as a SUCCESSFUL JSON-RPC response carrying
+// CallToolResult{isError:true, code:SESSION_BINDING_GONE|BINDING_STALE} — see
+// buildToolError in daintree/electron/services/mcp-server/sessionServer.ts. That
+// lands in CallTool's `err == nil` branch, so it never reaches any degrade gate:
+// `connected` stays true, monitorMcp never reconnects, and watcher reads re-arm
+// against a dead window indefinitely. isBindingTerminal already recognises the
+// marker (it makes such results non-retriable) — the missing half is deciding
+// whether the binding is SESSION-scoped (degrade + reconnect is right) or
+// TERMINAL-scoped (degrading the shared transport would be a gross over-reaction on
+// one stale terminal). Resolve that before wiring it into markDegraded.
+func isSessionDead(err error) bool {
+	if err == nil {
+		return false
+	}
+	// ErrConnectionClosed: the transport is gone. ErrSessionMissing: Streamable
+	// HTTP answered 404 for our Mcp-Session-Id — the server evicted the session, so
+	// every future call on this client fails identically until we re-handshake.
+	if errors.Is(err, sdkmcp.ErrConnectionClosed) || errors.Is(err, sdkmcp.ErrSessionMissing) {
+		return true
+	}
+	var wire *jsonrpc.Error
+	if errors.As(err, &wire) && wire != nil && wire.Code == -32000 {
+		return true
+	}
+	return false
+}
+
 // errMsg renders any error as a string (TS errMsg shim). nil → "". The text is
 // sanitized: a transport error (*url.Error and the SDK errors wrapping it)
 // embeds the FULL request URL — query string included, which for an MCP endpoint

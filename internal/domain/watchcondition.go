@@ -54,6 +54,16 @@ type rawWatchCondition struct {
 func (c *WatchCondition) UnmarshalJSON(data []byte) error {
 	var raw rawWatchCondition
 	dec := json.NewDecoder(strings.NewReader(string(data)))
+	// Reject unknown keys. The schema advertises additionalProperties:false, and
+	// without this the decoder silently DROPS them: `{"contains":"DONE","state":
+	// "completed"}` decoded as a lone `contains` and validated fine, so a watcher
+	// built from it fires on a weaker condition than the model asked for — false
+	// supervision, the exact failure every other guard here exists to prevent. A
+	// misspelled key must fail loudly instead of quietly narrowing the condition.
+	//
+	// This covers NESTED conditions too: all/any/not members decode through this
+	// same UnmarshalJSON.
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&raw); err != nil {
 		return err
 	}

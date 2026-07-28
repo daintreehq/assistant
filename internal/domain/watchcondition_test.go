@@ -170,6 +170,15 @@ func TestWatchConditionUnmarshalJSONValidates(t *testing.T) {
 		{"empty all is rejected", `{"all":[]}`, "all must have at least one member"},
 		{"a degenerate NESTED member is rejected", `{"any":[{"contains":"ok"},{}]}`, "no variant key present"},
 		{"a degenerate member under not is rejected", `{"not":{"regex":""}}`, "regex must be non-empty"},
+
+		// Unknown keys must FAIL, not be silently dropped. The schema says
+		// additionalProperties:false; a decoder that ignored extras turned
+		// {"contains":"DONE","state":"completed"} into a lone `contains`, so the
+		// watcher fired on a weaker condition than the model asked for.
+		{"an unknown key beside a valid leaf is rejected", `{"contains":"DONE","state":"completed"}`, "unknown field"},
+		{"a misspelled key alone is rejected", `{"containz":"DONE"}`, "unknown field"},
+		{"an unknown key NESTED under all is rejected", `{"all":[{"contains":"x","bogus":1}]}`, "unknown field"},
+		{"an unknown key NESTED under not is rejected", `{"not":{"regex":"x","bogus":true}}`, "unknown field"},
 	}
 
 	for _, tc := range cases {

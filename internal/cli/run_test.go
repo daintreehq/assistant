@@ -32,6 +32,10 @@ import (
 func doctorOpts(t *testing.T) Options {
 	t.Helper()
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	// Force the workflow-intelligence flag OFF: with it ambiently on, CheckTasks
+	// would additionally require the three workflow ids and the core-only fixtures
+	// below would fail for an environment reason, not a code one.
+	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "0")
 	return Options{Offline: true, Project: t.TempDir()}
 }
 
@@ -213,11 +217,18 @@ func TestRunDoctor_TaskIDDriftReturnsError(t *testing.T) {
 	}
 }
 
-// A backend that cannot report its inventory is UNVERIFIABLE, not drifted — a
-// warming backend (capabilities sits behind require_ready) must not fail doctor.
-func TestRunDoctor_UnverifiableTasksDoesNotFail(t *testing.T) {
+// A backend that answers capabilities successfully but advertises NO tasks is
+// BROKEN, not merely unverifiable, and must fail. require_ready raises 503 before
+// the capabilities handler runs, and a 200 always fills `tasks` from
+// task_runner.task_ids() — so an empty list means the registry is empty and every
+// task call will 404.
+func TestRunDoctor_EmptyTaskInventoryFails(t *testing.T) {
 	t.Setenv("DAINTREE_BACKEND_URL", capsBackendURL(t, nil))
-	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Success {
-		t.Fatalf("an unreported task inventory must not fail doctor, got %d", code)
+	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Error {
+		t.Fatalf("an empty task inventory must fail doctor, got %d", code)
 	}
 }
+
+// The genuine "cannot verify" case is a capabilities FETCH error (an older backend
+// that 404s the endpoint). That must NOT fail doctor — it is covered by
+// TestRunDoctor_BackendReachableReturnsSuccess, whose stub serves only /healthz.
