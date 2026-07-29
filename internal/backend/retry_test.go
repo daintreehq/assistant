@@ -137,7 +137,7 @@ func TestRespondStream_NoRetryAfterContentStreamed(t *testing.T) {
 func TestRespondStream_NoRetryOnContractError(t *testing.T) {
 	// A 400 is a deterministic contract bug — retrying would fail identically.
 	srv, hits := countingServer(t, func(int) (int, string) {
-		return http.StatusBadRequest, `{"error":{"type":"invalid_request","code":"bad","message":"nope"}}`
+		return http.StatusBadRequest, `{"error":{"type":"invalid_request_error","code":"bad","message":"nope"}}`
 	})
 	defer srv.Close()
 
@@ -315,9 +315,9 @@ func TestRespondStream_MetaForwardedOnceAcrossRetries(t *testing.T) {
 
 func TestRespondStream_SkillLoadDeduplicatedAcrossRetries(t *testing.T) {
 	const firstMeta = "event: meta\n" +
-		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\"multi_agent\",\"version\":\"1.0.0\",\"title\":\"Multi-agent orchestration\"}]}}\n\n"
+		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\"multi_agent\",\"title\":\"Multi-agent orchestration\"}]}}\n\n"
 	const changedMeta = "event: meta\n" +
-		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\" multi_agent \",\"version\":\"1.0.1\",\"title\":\"Changed title\"}]}}\n\n"
+		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\" multi_agent \",\"title\":\"Changed title\"}]}}\n\n"
 	const failWithSkill = firstMeta +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 	const changedFailWithSkill = changedMeta +
@@ -362,7 +362,7 @@ func TestRespondStream_SkillLoadDeduplicatedAcrossRetries(t *testing.T) {
 func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) {
 	const selectedState = "dst1.selected"
 	const firstAttempt = "event: meta\n" +
-		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"version\":\"1.0.0\",\"title\":\"Skill A\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"title\":\"Skill A\"}]}}\n\n" +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 	const stableRetry = "event: meta\n" +
 		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[]}}\n\n" +
@@ -371,7 +371,7 @@ func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) 
 	// This branch models what would happen if the second POST omitted state and made
 	// the backend run selection again: a different skill would be reported.
 	const reselectedRetry = "event: meta\n" +
-		"data: {\"state\":\"dst1.different\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_b\",\"version\":\"1.0.0\",\"title\":\"Skill B\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.different\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_b\",\"title\":\"Skill B\"}]}}\n\n" +
 		"event: delta\ndata: {\"content\":\"wrong selection\"}\n\n" +
 		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
 
@@ -450,7 +450,7 @@ func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) 
 
 func TestRespondStream_TerminalPreMetaRetryFlushesLastReceivedMeta(t *testing.T) {
 	const firstAttempt = "event: meta\n" +
-		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"version\":\"1.0.0\",\"title\":\"Skill A\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"title\":\"Skill A\"}]}}\n\n" +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 
 	srv, hits := countingServer(t, func(n int) (int, string) {

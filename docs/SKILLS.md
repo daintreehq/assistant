@@ -44,8 +44,11 @@ focus-hint only, not a capability gate).
 A skill is a single Markdown file — YAML frontmatter + an opaque Markdown body —
 under `../assistant-backend/src/daintree_assistant_server/skills/files/<id>.md`,
 auto-globbed by the loader at startup (zero code per skill). Frontmatter is validated
-by `SkillMeta` (`id`, `title`, `version` SemVer, `summary`, `whenToUse`, `tags`,
-`priority`, `risk`, `requiredTools`); the body is free-form runbook prose. To add or
+by `SkillMeta` (`id`, `title`, `summary`, `whenToUse`, `foundation`, `tags`,
+`priority`, `risk`, `requiredTools`); the body is free-form runbook prose. Skills
+are **unversioned** — there is no `version` key, and because `SkillMeta` is
+`extra="forbid"` adding one fails the skill load outright. Change-busting rides
+the catalog content hash/revision instead. To add or
 change a workflow: edit the `.md`, run the backend locally
 (`cd ../assistant-backend && python -m daintree_assistant_server`, serves on
 `127.0.0.1:8473`), and retest through this CLI. Authoritative schema + selector

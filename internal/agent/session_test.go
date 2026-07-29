@@ -473,7 +473,7 @@ func TestClassifyRateLimitedStreamError(t *testing.T) {
 	// byte-stable "Model rate-limited:" reply, fires the ModelRateLimited health cue,
 	// and is a wake-failure sentinel so a background wake won't record it as a result.
 	sink := &captureSink{}
-	r := &errRouter{err: &backend.Error{HTTPStatus: 429, Type: "rate_limit", Code: "upstream_rate_limited", Message: "provider quota/throughput exceeded"}}
+	r := &errRouter{err: &backend.Error{HTTPStatus: 429, Type: "rate_limit_error", Code: "upstream_rate_limited", Message: "provider quota/throughput exceeded"}}
 	deps := baseDeps(r, &fakeTools{})
 	deps.Events = sink
 	s := NewSession(deps)

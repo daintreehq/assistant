@@ -549,11 +549,12 @@ type SkillsBlock struct {
 	Selector    SelectorMeta `json:"selector"`
 }
 
-// SkillRef identifies one active/loaded skill.
+// SkillRef identifies one active/loaded skill. Skills are UNVERSIONED by design
+// (change-busting rides the catalog content hash), so the backend's SkillRef
+// carries only id + title — there is no version field to decode.
 type SkillRef struct {
-	ID      string `json:"id"`
-	Version string `json:"version"`
-	Title   string `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // Prelude is optional skill-load metadata the backend still emits. The client

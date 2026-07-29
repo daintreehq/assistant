@@ -76,9 +76,9 @@ type eagerSkillBackend struct{}
 
 func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
 	refs := []backend.SkillRef{
-		{ID: "multi_agent", Version: "1.0.0", Title: "Multi-agent orchestration"},
-		{ID: "fallback_skill", Version: "1.0.0"},
-		{}, // malformed refs never produce a blank card
+		{ID: "multi_agent", Title: "Multi-agent orchestration"},
+		{ID: "fallback_skill"}, // no title: the card falls back to the id
+		{},                     // malformed refs never produce a blank card
 	}
 	meta := backend.StreamMeta{
 		Model:  "daintree-assistant",

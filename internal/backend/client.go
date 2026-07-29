@@ -262,8 +262,8 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			unseen := make([]SkillRef, 0, len(refs))
 			for _, ref := range refs {
 				// The id is the stable skill identity. Fall back to the display title for
-				// older/malformed refs, but do not let harmless version/title drift on a
-				// retry produce a duplicate card for the same id.
+				// malformed refs, but do not let harmless title drift on a retry produce
+				// a duplicate card for the same id.
 				key := strings.TrimSpace(ref.ID)
 				if key == "" {
 					key = strings.TrimSpace(ref.Title)

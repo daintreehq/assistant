@@ -101,7 +101,7 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "event: meta\n"+
-			`data: {"request_id":"req_skill","skills":{"newly_loaded":[{"id":"multi_agent","version":"1.0.0","title":"Multi-agent orchestration"}]},"state":"dst1.skill"}`+
+			`data: {"request_id":"req_skill","skills":{"newly_loaded":[{"id":"multi_agent","title":"Multi-agent orchestration"}]},"state":"dst1.skill"}`+
 			"\n\n")
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
@@ -309,7 +309,7 @@ func TestRespondStream_PreStreamHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request","code":"system_messages_not_allowed","message":"server owns system text","param":"input.messages[0].role"}}`)
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","code":"system_messages_not_allowed","message":"server owns system text","param":"input.messages[0].role"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	c := NewClient(ClientConfig{BaseURL: srv.URL})

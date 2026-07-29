@@ -17,7 +17,10 @@ type Envelope struct {
 
 // EnvelopeError is the inner error object.
 type EnvelopeError struct {
-	Type    string `json:"type"`    // invalid_request|authentication|rate_limit|api_error
+	// OpenAI taxonomy, "_error"-suffixed:
+	// invalid_request_error|authentication_error|rate_limit_error|api_error
+	Type string `json:"type"`
+
 	Code    string `json:"code"`    // stable machine code, e.g. system_messages_not_allowed
 	Message string `json:"message"` // human-readable detail
 	Param   string `json:"param"`   // offending field path, when applicable
@@ -70,8 +73,14 @@ func (e *Error) Error() string {
 func (e *Error) IsAuth() bool { return e.HTTPStatus == 401 || e.HTTPStatus == 403 }
 
 // IsRateLimited reports an upstream/model rate limit (429).
+//
+// The type check was previously "rate_limit", which the backend never emits — it
+// sends the "_error"-suffixed OpenAI taxonomy, so that comparison was dead and the
+// 429/code checks were carrying the whole function.
 func (e *Error) IsRateLimited() bool {
-	return e.HTTPStatus == 429 || e.Type == "rate_limit" || e.Code == "upstream_rate_limited"
+	return e.HTTPStatus == 429 ||
+		e.Type == "rate_limit_error" ||
+		e.Code == "upstream_rate_limited"
 }
 
 // IsConnect reports that the backend was unreachable — a connection-level failure
