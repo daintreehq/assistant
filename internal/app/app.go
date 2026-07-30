@@ -421,9 +421,11 @@ func Create(opts CreateOptions) (*App, error) {
 			// successful tool call (the gap that hid the wild 502).
 			OnRetry: func(info backend.RetryInfo) {
 				debuglog.LogDebug(dbg, "backend.retry", map[string]any{
-					"attempt": info.Attempt,
-					"delayMs": info.Delay.Milliseconds(),
-					"error":   info.Err.Error(),
+					"op":          info.Op,
+					"attempt":     info.Attempt,
+					"maxAttempts": info.MaxAttempts,
+					"delayMs":     info.Delay.Milliseconds(),
+					"error":       info.Err.Error(),
 				})
 			},
 		}

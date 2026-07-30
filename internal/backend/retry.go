@@ -7,25 +7,51 @@ import (
 	"time"
 )
 
-// Retry defaults. The streamed respond turn is the only retried path. This is a
-// SECOND line of defence — the backend owns retrying its upstream provider (the
-// classic DeepSeek 502 blips); the CLI retry covers ONLY the CLI↔backend hop (a
-// dropped connection, a backend restart, a stream truncated before any content), so
-// ONE retry is enough: anything a second local replay would fix, the first replay
-// already fixed. The conversation prefix is unchanged across attempts and the backend
-// prefix-caches it; after an eager meta, the retry also carries that attempt's signed
-// state so skill selection is reused.
+// Retry defaults, shared by the streamed respond turn and the JSON endpoints
+// (tasks / capabilities / health / ready).
+//
+// The budget is sized to RIDE OUT a backend that is down rather than to paper over
+// one dropped packet. The motivating failure (observed 2026-07-30) is the backend
+// being restarted or briefly wedged: the CLI got `connect: connection refused`,
+// burned its single 286ms retry against a socket that was still closed, and failed
+// the turn — when simply waiting ~30s would have found the backend back up. So the
+// schedule starts fast (a genuine blip is fixed in under a second) and settles into
+// a patient 10–15s poll:
+//
+//	0.5s · 1s · 2s · 4s · 8s · 15s · 15s · 15s · 15s   (9 retries, ~50–75s with jitter)
+//
+// This is still only the SECOND line of defence — the backend owns retrying its own
+// upstream provider — but it now covers the whole CLI↔backend hop for as long as a
+// restart plausibly takes. Replays are near-free: the conversation prefix is
+// unchanged across attempts and the backend prefix-caches it; after an eager meta,
+// the retry also carries that attempt's signed state so skill selection is reused.
 const (
-	defaultMaxAttempts = 2 // initial attempt + 1 retry (backend owns provider retries)
-	defaultBaseDelay   = 400 * time.Millisecond
-	defaultMaxDelay    = 5 * time.Second
+	defaultMaxAttempts = 10 // initial attempt + 9 retries
+	defaultBaseDelay   = 500 * time.Millisecond
+	defaultMaxDelay    = 15 * time.Second
+	// defaultMaxElapsed bounds the WHOLE retried call, because an attempt budget
+	// alone does not: the attempts themselves are not free. A JSON attempt may run
+	// its 60s per-attempt timeout and a stream attempt may burn its idle window, so
+	// ten of those plus the backoff sleeps could stall a deadline-less caller
+	// (compaction, an extraction task) for ten minutes or more. The budget is a
+	// restart-recovery window, not an endurance test: once it is spent, the honest
+	// answer is a failure the user can see. It never truncates the case it exists
+	// for — a refused socket fails in microseconds, so all 10 attempts fit inside
+	// the ~50–75s of backoff with room to spare.
+	defaultMaxElapsed = 2 * time.Minute
 	// maxRetryAfterWait bounds how long a server-provided Retry-After can stall a
 	// turn. We HONOUR Retry-After (from an HTTP response or SSE error) rather than
-	// clamping it down to the small jittered-backoff cap — retrying earlier than the
-	// server asked just burns the budget — but a pathological value can't freeze the
-	// cockpit: with a single-retry budget, anything past 10s is better surfaced to
-	// the user as a failure than served as a silent stall.
-	maxRetryAfterWait = 10 * time.Second
+	// clamping it down to the jittered-backoff cap — retrying earlier than the server
+	// asked just burns the budget — but a pathological value can't freeze the cockpit.
+	// It is pinned to the steady-state ceiling: a server asking for longer than the
+	// backoff's own maximum wait gets that maximum, and the budget absorbs the rest.
+	maxRetryAfterWait = defaultMaxDelay
+	// retryJitterFloorNum/Den set the jitter window as a fraction of the computed
+	// delay: [d·2/3, d]. Classic FULL jitter ([d/2, d]) decorrelates a thundering
+	// herd, which a single local CLI does not have; the narrower window keeps the
+	// steady-state poll inside the intended 10–15s band instead of dipping to 7.5s.
+	retryJitterFloorNum = 2
+	retryJitterFloorDen = 3
 )
 
 // RetryPolicy tunes transient-failure retries for RespondStream. The zero value is
@@ -35,28 +61,85 @@ type RetryPolicy struct {
 	MaxAttempts int           // total attempts INCLUDING the first; 1 = no retries
 	BaseDelay   time.Duration // backoff for the first retry (doubles thereafter)
 	MaxDelay    time.Duration // cap on a single backoff (0 = uncapped)
+	// MaxElapsed caps the wall clock of the whole retried call — attempts plus
+	// backoff sleeps — so slow failures can't multiply the attempt budget into
+	// minutes. 0 = unbounded (the attempt count is then the only limit).
+	MaxElapsed time.Duration
 }
 
-// DefaultRetryPolicy is the production policy: initial attempt + 1 backoff retry
-// (the CLI↔backend hop only — the backend owns provider retries), capped at 5s per
-// wait.
+// exhausted reports whether scheduling another attempt after `delay` would run past
+// the elapsed budget. Checked BEFORE sleeping, so the budget bounds when the last
+// attempt STARTS; a single in-flight attempt may still overrun it (its own timeout,
+// or the caller's context, bounds that).
+func (p RetryPolicy) exhausted(elapsed, delay time.Duration) bool {
+	return p.MaxElapsed > 0 && elapsed+delay >= p.MaxElapsed
+}
+
+// DefaultRetryPolicy is the production policy: 10 attempts total, exponential from
+// 500ms and settling into a 10–15s poll — enough to ride out a backend restart on
+// the CLI↔backend hop (the backend still owns its own provider retries).
 func DefaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{MaxAttempts: defaultMaxAttempts, BaseDelay: defaultBaseDelay, MaxDelay: defaultMaxDelay}
+	return RetryPolicy{
+		MaxAttempts: defaultMaxAttempts,
+		BaseDelay:   defaultBaseDelay,
+		MaxDelay:    defaultMaxDelay,
+		MaxElapsed:  defaultMaxElapsed,
+	}
 }
 
-// RetryInfo is handed to ClientConfig.OnRetry just before each backoff sleep, purely
-// for observability (debug log / metrics). Attempt is 0-based: 0 is the first failure
-// (about to make the first retry).
+// RetryInfo is handed to ClientConfig.OnRetry (and StreamCallbacks.OnRetry) just
+// before each backoff sleep, for observability and for the cockpit's "retrying…"
+// cue. Attempt is 0-based: 0 is the first failure (about to make the first retry).
+// MaxAttempts is the policy's total budget, so a renderer can say "2 of 10" without
+// reaching into the client. Op names the failing call ("respond", or the JSON
+// method+path) — with every endpoint retried now, a log line without it can't tell a
+// stalled turn from a stalled utility task.
 type RetryInfo struct {
-	Attempt int
-	Delay   time.Duration
-	Err     error
+	Attempt     int
+	MaxAttempts int
+	Delay       time.Duration
+	Op          string
+	Err         error
+}
+
+// noRetryCtxKey marks a context as a one-shot probe.
+type noRetryCtxKey struct{}
+
+// WithoutRetry returns a context whose backend calls make exactly ONE attempt.
+//
+// It exists for DIAGNOSTICS. `/doctor` and the doctor subcommand ask "is the hop up
+// right now?", and the answer must be immediate: with the patient default budget, a
+// probe against a refused socket would silently spend its whole timeout retrying and
+// report the same failure seconds later. Retrying there would also mask the exact
+// condition the probe exists to surface. Everything else — turns, tasks, the boot
+// handshake — wants the retries.
+func WithoutRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRetryCtxKey{}, true)
+}
+
+// retriesDisabled reports whether ctx was marked one-shot by WithoutRetry.
+func retriesDisabled(ctx context.Context) bool {
+	v, _ := ctx.Value(noRetryCtxKey{}).(bool)
+	return v
+}
+
+// nonRetriableAppCodes are the backend's stable machine codes that mean "the work
+// already ran and this is its verdict" — a replay would re-run the model to reach the
+// same answer. Keyed on `error.code` rather than the HTTP status because the backend
+// reuses 502 for both an application verdict and a genuine gateway failure. Applies
+// to PRE-stream errors only (see isRetriable).
+var nonRetriableAppCodes = map[string]bool{
+	"task_output_invalid": true,
+	"upstream_error":      true,
+	"internal_error":      true,
 }
 
 // isRetriable reports whether a backend failure is a transient class worth retrying.
-// Deterministic failures (auth, contract bugs, protocol mismatch) are never retried —
-// a replay would fail identically. The caller separately guarantees no visible content
-// has streamed yet, so replaying the turn cannot duplicate output.
+// Two families are never retried: deterministic failures (auth, contract bugs,
+// protocol mismatch), where a replay fails identically; and application VERDICTS,
+// where the work already ran and a replay would re-run the model to reach the same
+// answer. The caller separately guarantees no visible content has streamed yet, so
+// replaying the turn cannot duplicate output.
 func isRetriable(e *Error) bool {
 	if e == nil {
 		return false
@@ -73,13 +156,31 @@ func isRetriable(e *Error) bool {
 	if e.IsRateLimited() {
 		return true
 	}
-	// Transient gateway statuses before the backend opens the SSE response. 502/503/504
-	// mean the request did NOT complete at the app (bad gateway / unavailable / gateway
-	// timeout) — replaying a non-idempotent POST is safe. 500 is DELIBERATELY excluded:
-	// an application error may fire after the backend has already done side effects, so
-	// a blind replay could duplicate them; the backend owns retrying its own transient
-	// internals. Upstream connection/generation failures after the eager meta event use
-	// the SSE error path below instead.
+	// An application VERDICT that happens to ride a transient-looking status. The
+	// status alone is NOT enough to decide here, because the Daintree backend reuses
+	// 502 for "the work ran and its output was unusable" — see `_task_output_invalid`
+	// in ../assistant-backend (services/task_runner.py), whose own comment says to
+	// re-read the terminal a different way "rather than retrying the same structured
+	// extract". Replaying one of these burns a FULL model call per attempt to arrive
+	// at the identical verdict, so the pre-stream classes below are terminal:
+	//
+	//   task_output_invalid — output parsed neither first time nor after the repair pass
+	//   upstream_error      — provider REJECTED the request (backend default retryable=False)
+	//   internal_error      — a 500; may already have run a side effect
+	//
+	// Deliberately scoped to `!e.Stream`: the mid-stream contract below is different
+	// and load-bearing — an `upstream_error` arriving after the 200 but before any
+	// visible token is exactly the transient blip this retry layer was built for.
+	if !e.Stream && nonRetriableAppCodes[e.Code] {
+		return false
+	}
+	// Transient gateway statuses before the backend opens the SSE response. With the
+	// application verdicts above already excluded, what remains is a request that did
+	// NOT complete at the app: a genuine bad gateway from an intermediary, a warming
+	// backend (503 `service_unavailable`, which the backend sends with Retry-After: 5),
+	// or an upstream timeout (504, backend `retryable=True`). Replaying a
+	// non-idempotent POST is safe in those cases. Upstream connection/generation
+	// failures after the eager meta event use the SSE error path below instead.
 	switch e.HTTPStatus {
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
@@ -104,8 +205,9 @@ func isRetriable(e *Error) bool {
 // backoff computes the wait before the retry for a 0-based attempt. A server-provided
 // Retry-After is HONOURED (from an HTTP response or terminal SSE error), bounded only
 // by maxRetryAfterWait so a hostile value can't freeze the turn. Otherwise it is
-// exponential (BaseDelay·2^attempt, capped at MaxDelay) with full jitter in [d/2, d]
-// to decorrelate retries across concurrent sessions.
+// exponential (BaseDelay·2^attempt, capped at MaxDelay) with jitter in [d·2/3, d] —
+// enough to decorrelate concurrent sessions without letting the steady-state poll
+// drift below the intended band.
 func (p RetryPolicy) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	if retryAfter > 0 {
 		if retryAfter > maxRetryAfterWait {
@@ -135,11 +237,12 @@ func (p RetryPolicy) backoff(attempt int, retryAfter time.Duration) time.Duratio
 			d = base
 		}
 	}
-	half := d / 2
-	if half <= 0 {
+	floor := d * retryJitterFloorNum / retryJitterFloorDen
+	span := d - floor
+	if floor <= 0 || span <= 0 {
 		return d
 	}
-	return half + time.Duration(rand.Int63n(int64(half)+1))
+	return floor + time.Duration(rand.Int63n(int64(span)+1))
 }
 
 // sleepCtx waits for d, returning false if the context is cancelled first (so the

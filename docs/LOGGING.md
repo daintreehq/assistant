@@ -95,7 +95,10 @@ it **produced**.
 | `async.read.backoff` | consecutive status-read failures triggered the 5s backoff | `consecutiveFailures` |
 
 ### Other (pre-existing)
-`session.start`, `mcp.credentials` (temporary debug aid), `backend.retry`,
+`session.start`, `mcp.credentials` (temporary debug aid), `backend.retry`
+(`op` `attempt` `maxAttempts` `delayMs` `error` — fires per transient-failure replay on
+**any** backend call; `op` is `respond` or the JSON method+path, so a stalled turn and a
+stalled utility task are distinguishable),
 `watcher.*` / `spawn.*`, `skill.step.*`, `reconcile.*`, `session.checkpoint.resumed`.
 
 ## Suggested analyzer workflow

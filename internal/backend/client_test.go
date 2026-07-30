@@ -445,7 +445,15 @@ func TestRunTaskOnTaskHook(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var got []TaskTraceInfo
-	c := NewClient(ClientConfig{BaseURL: srv.URL, OnTask: func(info TaskTraceInfo) { got = append(got, info) }})
+	// Retries disabled: the failure leg below points at a CLOSED server, and the
+	// production policy would patiently replay that refused socket for ~a minute.
+	// OnTask fires once per whole RunTask call regardless of attempts — that
+	// once-per-call property is pinned by TestDoJSONRetriesTransientFailure.
+	c := NewClient(ClientConfig{
+		BaseURL: srv.URL,
+		Retry:   RetryPolicy{MaxAttempts: 1},
+		OnTask:  func(info TaskTraceInfo) { got = append(got, info) },
+	})
 
 	if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "long transcript"}); err != nil {
 		t.Fatalf("RunCheckpoint: %v", err)

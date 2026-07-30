@@ -112,12 +112,44 @@ reword them casually.
 | You pressed Escape to cancel the turn | `Turn cancelled` | A clean stop, not a failure — the loop treats it as such. |
 | Any other model/transport error | `Model error: …` | The underlying error text is appended. |
 
-**Where retries happen.** The CLI does **not** talk to the model provider — the backend
-does, and it owns the provider credentials and the upstream retry budget. The
-`Model rate-limited:` reply only appears once that budget is exhausted. Separately, on the
-Daintree MCP side, read-only tool calls are auto-retried on a transient transport blip or
-an `MCP_RATE_LIMITED` throttle result (honouring the server's `retryAfter`, capped);
-mutations are single-shot so a retry can never double-apply.
+**Where retries happen.** Three independent layers, and it matters which one you are
+looking at:
+
+1. **Provider hop (backend-owned).** The CLI does **not** talk to the model provider —
+   the backend does, and it owns the provider credentials and the upstream retry budget.
+   The `Model rate-limited:` reply only appears once *that* budget is exhausted.
+2. **CLI↔backend hop (`internal/backend/retry.go`).** Every call to the backend — the
+   streamed respond turn *and* everything routed through `doJSON` (tasks, capabilities,
+   health, ready, version, non-streaming respond) — retries transient failures:
+   **10 attempts**, exponential from 500ms and settling into a **10–15s** poll
+   (~50–75s of backoff), the whole call additionally capped by a **2-minute** elapsed
+   window (`MaxElapsed`) because the attempts themselves are not free. It is sized to ride
+   out a **backend restart**, the failure it exists for: before this, a restart mid-turn
+   meant one 286ms replay against a still-closed socket and a dead turn.
+
+   **What is replayed:** `connect` (never reached the backend), 429 rate limits
+   (honouring `Retry-After`, capped at 15s), and 502/503/504 that carry no application
+   verdict — plus, mid-stream, the pre-content upstream/truncation errors.
+   **What is not:** auth (401/403), contract (400), protocol (426); the backend's
+   application verdicts, keyed on `error.code` rather than status because it reuses 502
+   for both — `task_output_invalid` (the model ran and its output was unparseable),
+   `upstream_error` (the provider *rejected* the request), `internal_error` (500, which
+   may already have run a side effect); and a JSON attempt that exhausts its own 60s
+   per-attempt timeout (`timeout` — the backend was answering, just slowly). A respond
+   turn also stops retrying the moment any visible token has streamed, since a replay
+   would duplicate on-screen text.
+
+   **Visibility:** a respond retry emits ONE cockpit note per round (a note is a
+   standalone transcript cell, so one per attempt would stack up and commit out of order
+   with the answer). Every retry on every endpoint emits a `backend.retry` debug-log line
+   carrying `op`, so a stalled turn is distinguishable from a stalled utility task.
+   `/doctor` opts out via `backend.WithoutRetry` — a probe reports the hop's state *now*.
+3. **Daintree MCP side.** Read-only tool calls are auto-retried on a transient transport
+   blip or an `MCP_RATE_LIMITED` throttle result (honouring the server's `retryAfter`,
+   capped); mutations are single-shot so a retry can never double-apply.
+
+Retries are always bounded by the caller's context: Escape cancels mid-backoff, and a
+call that carries its own deadline (a boot handshake, a scheduler item) never outlives it.
 
 ## See also
 

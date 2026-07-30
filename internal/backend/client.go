@@ -53,13 +53,15 @@ type ClientConfig struct {
 	APIKey     string
 	HTTPClient *http.Client
 	ClientInfo ClientInfo
-	// Retry tunes transient-failure retries for the streamed respond turn. The zero
-	// value selects DefaultRetryPolicy (initial attempt + 1 backoff retry — the
+	// Retry tunes transient-failure retries for every backend call. The zero value
+	// selects DefaultRetryPolicy (10 attempts settling into a 10–15s poll — the
 	// backend owns provider retries; this covers only the CLI↔backend hop). Set
 	// Retry.MaxAttempts to 1 to disable retries.
 	Retry RetryPolicy
 	// OnRetry, if set, is invoked just before each backoff sleep when a transient
-	// respond failure will be retried (observability only — it must not block).
+	// failure will be retried — on the streamed respond turn AND on the JSON
+	// endpoints (tasks / capabilities / health / ready). Observability only; it must
+	// not block. RetryInfo.Op names which call is being replayed.
 	OnRetry func(RetryInfo)
 	// OnTask, if set, is invoked after every RunTask round trip (success or failure).
 	// Observability only — it must not block. Without it the utility tasks are the
@@ -290,6 +292,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		}
 	}
 
+	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		pendingMeta = nil // each attempt brings its own meta
 		result, serr := c.respondStreamOnce(ctx, body, cb)
@@ -305,7 +308,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		be, ok := serr.(*Error)
 		// Stop if content already streamed (can't replay), the failure isn't a
 		// transient class, retries are disabled, or the attempt budget is spent.
-		if contentStreamed || !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts {
+		if contentStreamed || !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
 			flushMeta()
 			return result, serr
 		}
@@ -326,8 +329,21 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		}
 		// Retrying: this attempt's meta is discarded (reset at the loop top).
 		delay := c.retry.backoff(attempt, be.RetryAfter)
+		// A stream attempt is not free — it can burn its whole idle window before
+		// failing — so the attempt budget alone does not bound the turn. Stop once
+		// the restart-recovery window is spent and surface the failure.
+		if c.retry.exhausted(time.Since(started), delay) {
+			flushMeta()
+			return result, serr
+		}
+		info := RetryInfo{Attempt: attempt, MaxAttempts: c.retry.MaxAttempts, Delay: delay, Op: "respond", Err: be}
 		if c.onRetry != nil {
-			c.onRetry(RetryInfo{Attempt: attempt, Delay: delay, Err: be})
+			c.onRetry(info)
+		}
+		// The per-call hook drives the live "retrying…" cue. With a budget that can
+		// now span a minute, a silent spinner would read as a hang.
+		if cb.OnRetry != nil {
+			cb.OnRetry(info)
 		}
 		if !sleepCtx(ctx, delay) {
 			// Cancelled mid-backoff: surface the last failure (the caller reads
@@ -485,28 +501,110 @@ func (c *Client) Ready(ctx context.Context) error {
 	return nil
 }
 
-// doJSON performs a JSON request/response with a default short deadline for the
-// non-streaming endpoints. A nil body sends no payload (GET); a non-2xx decodes the
-// error envelope. out may be nil to discard the body.
-func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
-	// Bound the non-streaming calls so a wedged backend can't hang a turn; the
-	// streamed respond path does NOT route through here.
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
-		defer cancel()
-	}
+// jsonAttemptTimeout bounds ONE attempt at a non-streaming endpoint when the caller
+// supplied no deadline of its own. It is per-attempt, not per-call: a utility task
+// runs a whole server-side model call before responding, and that budget should not
+// shrink because an earlier attempt died on a refused socket.
+const jsonAttemptTimeout = 60 * time.Second
 
-	var reader io.Reader
+// doJSON performs a JSON request/response against a non-streaming endpoint, retrying
+// transient failures under the client's RetryPolicy. A nil body sends no payload
+// (GET); a non-2xx decodes the error envelope. out may be nil to discard the body.
+//
+// These calls are all replay-safe: the GETs are trivially idempotent, and a task POST
+// is a stateless server-owned utility call (the CLI sends task DATA; the backend owns
+// prompt, model, and schema). isRetriable already excludes the classes where a replay
+// would either fail identically (auth, contract, protocol) or risk duplicating a
+// server-side effect (500).
+//
+// The request body is marshaled ONCE and replayed from the same bytes — a fresh
+// reader per attempt, since each is consumed.
+func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("backend: marshal %s: %w", path, err)
 		}
-		reader = bytes.NewReader(b)
+		payload = b
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	started := time.Now()
+	for attempt := 0; ; attempt++ {
+		err := c.doJSONOnce(ctx, method, path, payload, body != nil, out)
+		if err == nil {
+			return nil
+		}
+		// Caller cancellation (or an exhausted caller-supplied deadline) is a clean
+		// stop, never a retry.
+		if ctx.Err() != nil {
+			return err
+		}
+		be, ok := err.(*Error)
+		if !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
+			return err
+		}
+		delay := c.retry.backoff(attempt, be.RetryAfter)
+		// Attempts are not free here either: a slow-failing endpoint can spend most
+		// of jsonAttemptTimeout before each rejection, so the attempt count alone
+		// would let a deadline-less caller stall for many minutes.
+		if c.retry.exhausted(time.Since(started), delay) {
+			return err
+		}
+		if c.onRetry != nil {
+			c.onRetry(RetryInfo{
+				Attempt:     attempt,
+				MaxAttempts: c.retry.MaxAttempts,
+				Delay:       delay,
+				Op:          method + " " + path,
+				Err:         be,
+			})
+		}
+		if !sleepCtx(ctx, delay) {
+			return err
+		}
+	}
+}
+
+// doJSONOnce performs a single JSON attempt. hasBody distinguishes a nil body (GET,
+// no payload) from a body that marshaled to an empty-but-present document.
+func (c *Client) doJSONOnce(ctx context.Context, method, path string, payload []byte, hasBody bool, out any) error {
+	// Bound the attempt so a wedged backend can't hang a turn; the streamed respond
+	// path does NOT route through here. A caller-supplied deadline always wins — it
+	// is the budget for the WHOLE call, retries included.
+	attemptCtx := ctx
+	callerBounded := true
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		callerBounded = false
+		var cancel context.CancelFunc
+		attemptCtx, cancel = context.WithTimeout(ctx, jsonAttemptTimeout)
+		defer cancel()
+	}
+
+	err := c.doJSONAttempt(attemptCtx, method, path, payload, hasBody, out)
+	// Our OWN attempt timeout firing while the parent is still live means the backend
+	// accepted the request and simply took too long — a slow task, not a broken hop.
+	// Replaying would burn the same minute again, so it is terminal (code "timeout",
+	// deliberately not the retriable "connect").
+	//
+	// This wraps the WHOLE attempt, not just the round trip to first byte. A backend
+	// that flushes error headers and then stalls its body would otherwise surface as
+	// the retriable status it had already sent (a 503 whose truncated body read is
+	// discarded), and get replayed for the full attempt budget.
+	if err != nil && !callerBounded && attemptCtx.Err() != nil && ctx.Err() == nil {
+		return &Error{Code: "timeout", Message: fmt.Sprintf("backend did not answer %s within %s", path, jsonAttemptTimeout)}
+	}
+	return err
+}
+
+// doJSONAttempt is one request/response round trip under an already-bounded context.
+func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, payload []byte, hasBody bool, out any) error {
+	var reader io.Reader
+	if hasBody {
+		reader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(attemptCtx, method, c.baseURL+path, reader)
 	if err != nil {
 		return fmt.Errorf("backend: build %s request: %w", path, err)
 	}

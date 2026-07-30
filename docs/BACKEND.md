@@ -56,6 +56,17 @@ The Go client mirrors it in `internal/backend`:
   deltas accumulate by index (OpenAI-style fragments). EOF before `done` is an error — the
   parser never fabricates a successful finish.
 - `client.go` — `RespondStream`, `RunTask`, `Capabilities`, `Health`, `Ready`, `Version`.
+- `retry.go` — the transient-failure retry policy applied to **every** call above (10
+  attempts, exponential from 500ms, settling into a 10–15s poll ≈ 50–75s of backoff,
+  the whole call capped by a 2-minute elapsed window — sized to ride out a backend
+  restart). Never replays a deterministic failure (auth 401/403, contract 400, protocol
+  426), an application **verdict** (`task_output_invalid`, `upstream_error`,
+  `internal_error` — keyed on `error.code`, since the backend reuses 502 for both a
+  verdict and a real gateway failure; a replay would re-run the model to reach the same
+  answer), or a respond turn that has already streamed visible tokens. `WithoutRetry(ctx)`
+  makes a call one-shot, for `/doctor`'s probes. See
+  [RUNTIME.md](RUNTIME.md#model-errors-rate-limit-backend-down-unavailable) for how it
+  layers with the backend's own provider retries and the MCP read retries.
 - `tasks.go` — typed helpers for the server-owned utility tasks.
 
 ## Invariants the CLI upholds

@@ -187,6 +187,12 @@ type StreamCallbacks struct {
 	// from the final attempt's own fresh accumulator) as authoritative; do NOT execute
 	// or accumulate tool calls off these raw fragments across the call.
 	OnToolCallDelta func(ToolCallDelta)
+	// OnRetry fires just before each backoff sleep when Client.RespondStream is about
+	// to replay a transient failure. It exists so the caller can show a live cue: the
+	// retry budget can now span a minute of wall clock, and an unexplained spinner is
+	// indistinguishable from a hang. Observational only — it must not block, and it
+	// never fires from the stream parser (only from the retry loop above it).
+	OnRetry func(RetryInfo)
 }
 
 type sseEventKind uint8

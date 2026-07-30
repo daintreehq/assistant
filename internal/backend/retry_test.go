@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -219,15 +220,52 @@ func TestDefaultRetryPolicyApplied(t *testing.T) {
 	}
 }
 
-// The CLI covers only the CLI↔backend hop — the backend owns provider retries — so
-// the default budget is exactly one retry, and a server Retry-After can stall a turn
-// at most 10s. These are alignment invariants, not tunables; lock them.
+// The CLI covers only the CLI↔backend hop — the backend owns provider retries — but
+// the budget must be long enough to RIDE OUT a backend restart, settling into a
+// patient 10–15s poll rather than giving up after one fast replay against a socket
+// that is still closed. These are alignment invariants, not tunables; lock them.
 func TestDefaultRetryAlignment(t *testing.T) {
-	if got := DefaultRetryPolicy().MaxAttempts; got != 2 {
-		t.Fatalf("default MaxAttempts = %d, want 2 (initial attempt + 1 retry)", got)
+	p := DefaultRetryPolicy()
+	if p.MaxAttempts != 10 {
+		t.Fatalf("default MaxAttempts = %d, want 10 (initial attempt + 9 retries)", p.MaxAttempts)
 	}
-	if maxRetryAfterWait != 10*time.Second {
-		t.Fatalf("maxRetryAfterWait = %v, want 10s", maxRetryAfterWait)
+	// Assert the fields directly: the band checks below pass for a whole family of
+	// policies (a 1s base reaches the same ceiling), so they alone would not catch a
+	// changed ramp.
+	if p.BaseDelay != 500*time.Millisecond {
+		t.Fatalf("default BaseDelay = %v, want 500ms", p.BaseDelay)
+	}
+	if p.MaxDelay != 15*time.Second {
+		t.Fatalf("default MaxDelay = %v, want 15s", p.MaxDelay)
+	}
+	if p.MaxElapsed != 2*time.Minute {
+		t.Fatalf("default MaxElapsed = %v, want 2m (the restart-recovery window)", p.MaxElapsed)
+	}
+	if maxRetryAfterWait != p.MaxDelay {
+		t.Fatalf("maxRetryAfterWait = %v, want it pinned to MaxDelay (%v)", maxRetryAfterWait, p.MaxDelay)
+	}
+	// The steady-state poll: once the exponential ramp saturates, every wait must
+	// land in the intended 10–15s band (jitter floor 2/3 of the cap).
+	for attempt := 5; attempt < 20; attempt++ {
+		d := p.backoff(attempt, 0)
+		if d < 10*time.Second || d > 15*time.Second {
+			t.Fatalf("saturated attempt %d: backoff %v outside the 10–15s band", attempt, d)
+		}
+	}
+	// ...and the whole budget spans roughly a minute of patience, not three.
+	var total time.Duration
+	for attempt := 0; attempt < p.MaxAttempts-1; attempt++ {
+		total += p.backoff(attempt, 0)
+	}
+	if total < 40*time.Second || total > 90*time.Second {
+		t.Fatalf("total backoff budget %v, want roughly 40–90s", total)
+	}
+	// The elapsed window must never truncate the case the budget exists FOR: against a
+	// refused socket every attempt fails in microseconds, so the full retry chain has
+	// to fit inside MaxElapsed with room to spare. If this ever fails, a backend
+	// restart would be cut short by the very guard meant to bound the pathological case.
+	if p.exhausted(total, 0) {
+		t.Fatalf("MaxElapsed %v cannot fit the full backoff chain (%v)", p.MaxElapsed, total)
 	}
 }
 
@@ -275,11 +313,20 @@ func TestBackoffHonorsRetryAfterAndCap(t *testing.T) {
 	if d := p.backoff(0, time.Hour); d != maxRetryAfterWait {
 		t.Fatalf("retry-after ceiling: got %v, want %v", d, maxRetryAfterWait)
 	}
-	// Exponential backoff with full jitter stays within (0, MaxDelay].
+	// Exponential backoff with jitter stays within (0, MaxDelay], and lands in
+	// [d·2/3, d] of THAT attempt's own pre-jitter delay — a flat floor of
+	// BaseDelay·2/3 would pass even if the ramp collapsed to a constant.
 	for attempt := 0; attempt < 40; attempt++ {
+		want := p.BaseDelay << min(attempt, 40) // pre-jitter, before the cap
+		if want <= 0 || want > p.MaxDelay {
+			want = p.MaxDelay
+		}
 		d := p.backoff(attempt, 0)
 		if d <= 0 || d > p.MaxDelay {
 			t.Fatalf("attempt %d: backoff %v out of (0, %v]", attempt, d, p.MaxDelay)
+		}
+		if d < want*2/3 || d > want {
+			t.Fatalf("attempt %d: backoff %v outside the jitter window [%v, %v]", attempt, d, want*2/3, want)
 		}
 	}
 }
@@ -503,5 +550,329 @@ func TestRespondStream_MetaForwardedOnceOnTerminalFailure(t *testing.T) {
 	}
 	if metaCount != 1 {
 		t.Fatalf("OnMeta fired %d times, want 1 (forwarded once on terminal failure)", metaCount)
+	}
+}
+
+// jsonServer counts hits on a JSON endpoint and lets the test script per-attempt
+// responses. Unlike countingServer it speaks application/json, so it exercises the
+// doJSON path rather than the SSE parser.
+func jsonServer(t *testing.T, handler func(n int) (status int, body string)) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	var count int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n := count
+		count++
+		mu.Unlock()
+		status, body := handler(n)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return count
+	}
+}
+
+const taskOK = `{"id":"task_1","object":"daintree.task.result","task":"checkpoint","model":"m","output":{"goal":"g"},"finish_reason":"stop","usage":{"total_tokens":5},"prompt_version":"checkpoint"}`
+
+// The JSON endpoints (tasks / capabilities / health / ready) went entirely un-retried
+// before: a backend restart mid-turn failed a /compact checkpoint or a watcher judge
+// outright, even though the call is replay-safe. Pin that they now ride it out — and
+// that the OnTask observability hook still reports ONE round trip for the whole
+// retried call, not one per attempt.
+func TestDoJSONRetriesTransientFailure(t *testing.T) {
+	const failFirst = 3
+	srv, hits := jsonServer(t, func(n int) (int, string) {
+		if n < failFirst {
+			return http.StatusServiceUnavailable, `{"error":{"type":"api_error","code":"unavailable","message":"restarting"}}`
+		}
+		return http.StatusOK, taskOK
+	})
+
+	var tasks []TaskTraceInfo
+	c := NewClient(ClientConfig{
+		BaseURL: srv.URL,
+		Retry:   fastRetry(5),
+		OnTask:  func(info TaskTraceInfo) { tasks = append(tasks, info) },
+	})
+
+	out, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "t"})
+	if err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if out.Goal != "g" {
+		t.Fatalf("output goal = %q, want %q", out.Goal, "g")
+	}
+	if got := hits(); got != failFirst+1 {
+		t.Fatalf("server hit %d times, want %d", got, failFirst+1)
+	}
+	if len(tasks) != 1 || tasks[0].Err != nil {
+		t.Fatalf("OnTask = %+v, want exactly one successful round trip for the whole call", tasks)
+	}
+}
+
+// A deterministic rejection must fail on the first attempt: replaying a contract bug
+// burns the budget to arrive at the identical 400.
+func TestDoJSONDoesNotRetryContractError(t *testing.T) {
+	srv, hits := jsonServer(t, func(int) (int, string) {
+		return http.StatusBadRequest, `{"error":{"type":"invalid_request_error","code":"bad_field","message":"nope"}}`
+	})
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(5)})
+	if _, err := c.Capabilities(context.Background()); err == nil {
+		t.Fatal("expected the 400 to surface, got nil")
+	}
+	if got := hits(); got != 1 {
+		t.Fatalf("server hit %d times, want 1 (contract errors are not retried)", got)
+	}
+}
+
+// The retry loop is bounded by the CALLER's deadline: a boot handshake or a /doctor
+// probe with a 3s budget must not be extended into a minute of patient polling.
+func TestDoJSONRetriesStopAtCallerDeadline(t *testing.T) {
+	srv, hits := jsonServer(t, func(int) (int, string) {
+		return http.StatusBadGateway, `{"error":{"type":"api_error","code":"bad_gateway","message":"down"}}`
+	})
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 50, BaseDelay: 20 * time.Millisecond, MaxDelay: 20 * time.Millisecond}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := c.Health(ctx); err == nil {
+		t.Fatal("expected failure, got nil")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("retry loop ran %v past a 120ms caller deadline", elapsed)
+	}
+	// The budget allowed ~50 attempts; the deadline must have cut it far short.
+	if got := hits(); got == 0 || got > 20 {
+		t.Fatalf("server hit %d times, want a handful before the deadline cut in", got)
+	}
+}
+
+// The per-call cue that keeps a minute-long retry chain from reading as a hang.
+func TestRespondStream_OnRetryCallbackFires(t *testing.T) {
+	srv, _ := countingServer(t, func(n int) (int, string) {
+		if n == 0 {
+			return http.StatusOK, streamFail
+		}
+		return http.StatusOK, streamOK
+	})
+	defer srv.Close()
+
+	var infos []RetryInfo
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(3)})
+	if _, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
+		OnRetry: func(info RetryInfo) { infos = append(infos, info) },
+	}); err != nil {
+		t.Fatalf("RespondStream: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("OnRetry fired %d times, want 1", len(infos))
+	}
+	if infos[0].Attempt != 0 || infos[0].MaxAttempts != 3 || infos[0].Op != "respond" || infos[0].Err == nil {
+		t.Fatalf("RetryInfo = %+v, want attempt 0 of 3 on \"respond\" with the cause set", infos[0])
+	}
+}
+
+// Diagnostics opt out: /doctor probes must report the hop's current state instantly
+// rather than spend their whole timeout budget replaying a dead socket.
+func TestWithoutRetryMakesCallsOneShot(t *testing.T) {
+	jsonSrv, jsonHits := jsonServer(t, func(int) (int, string) {
+		return http.StatusServiceUnavailable, `{"error":{"type":"api_error","code":"unavailable","message":"down"}}`
+	})
+	c := NewClient(ClientConfig{BaseURL: jsonSrv.URL, Retry: fastRetry(5)})
+	if err := c.Health(backendWithoutRetryCtx()); err == nil {
+		t.Fatal("expected the 503 to surface, got nil")
+	}
+	if got := jsonHits(); got != 1 {
+		t.Fatalf("json endpoint hit %d times, want 1 (probe is one-shot)", got)
+	}
+
+	streamSrv, streamHits := countingServer(t, func(int) (int, string) { return http.StatusOK, streamFail })
+	defer streamSrv.Close()
+	sc := NewClient(ClientConfig{BaseURL: streamSrv.URL, Retry: fastRetry(5)})
+	if _, err := sc.RespondStream(backendWithoutRetryCtx(), RespondRequest{}, StreamCallbacks{}); err == nil {
+		t.Fatal("expected the stream failure to surface, got nil")
+	}
+	if got := streamHits(); got != 1 {
+		t.Fatalf("respond hit %d times, want 1 (probe is one-shot)", got)
+	}
+
+	// The marker is opt-in: an unmarked context keeps the retries.
+	if retriesDisabled(context.Background()) {
+		t.Fatal("a plain context must not disable retries")
+	}
+}
+
+func backendWithoutRetryCtx() context.Context { return WithoutRetry(context.Background()) }
+
+// A replayed POST must carry the FULL body every time. The body is marshaled once and
+// each attempt wraps it in a fresh reader; reusing one consumed reader would send an
+// empty document on every retry — and the server would answer a structurally valid
+// but wrong request, so nothing downstream would notice.
+func TestDoJSONReplaysFullBodyEveryAttempt(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		n := len(bodies)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"type":"api_error","code":"service_unavailable","message":"warming"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, taskOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var infos []RetryInfo
+	c := NewClient(ClientConfig{
+		BaseURL: srv.URL,
+		Retry:   fastRetry(5),
+		OnRetry: func(info RetryInfo) { infos = append(infos, info) },
+	})
+	if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "a distinctive transcript"}); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 3 {
+		t.Fatalf("server saw %d requests, want 3", len(bodies))
+	}
+	for i, b := range bodies {
+		if !strings.Contains(b, "a distinctive transcript") {
+			t.Fatalf("attempt %d body did not carry the payload: %q", i, b)
+		}
+		if b != bodies[0] {
+			t.Fatalf("attempt %d body differs from the first attempt", i)
+		}
+	}
+	// The JSON path must report which call is being replayed — with every endpoint
+	// retried, an `op`-less log line can't tell a stalled turn from a stalled task.
+	if len(infos) != 2 {
+		t.Fatalf("OnRetry fired %d times, want 2", len(infos))
+	}
+	if infos[0].Op != "POST /v1/daintree/tasks" || infos[0].MaxAttempts != 5 {
+		t.Fatalf("RetryInfo = %+v, want op=POST /v1/daintree/tasks maxAttempts=5", infos[0])
+	}
+}
+
+// The backend reuses 502 for an application VERDICT: `task_output_invalid` means the
+// model already ran and its output could not be parsed, and the backend's own comment
+// says to read the terminal a different way rather than retry. Replaying it would burn
+// a full model call per attempt to reach the identical answer.
+func TestDoJSONDoesNotRetryApplicationVerdicts(t *testing.T) {
+	for _, code := range []string{"task_output_invalid", "upstream_error", "internal_error"} {
+		t.Run(code, func(t *testing.T) {
+			srv, hits := jsonServer(t, func(int) (int, string) {
+				return http.StatusBadGateway, `{"error":{"type":"api_error","code":"` + code + `","message":"verdict"}}`
+			})
+			c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(5)})
+			if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "t"}); err == nil {
+				t.Fatal("expected the verdict to surface, got nil")
+			}
+			if got := hits(); got != 1 {
+				t.Fatalf("server hit %d times, want 1 (an application verdict is terminal)", got)
+			}
+		})
+	}
+
+	// ...but a bare 502 with no application code is a genuine gateway failure and is
+	// still replayed, as is the warming-backend 503.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"bare gateway 502", `{"error":{"type":"api_error","message":"bad gateway"}}`},
+		{"warming backend", `{"error":{"type":"api_error","code":"service_unavailable","message":"not ready"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := http.StatusBadGateway
+			if strings.Contains(tc.body, "service_unavailable") {
+				status = http.StatusServiceUnavailable
+			}
+			srv, hits := jsonServer(t, func(n int) (int, string) {
+				if n == 0 {
+					return status, tc.body
+				}
+				return http.StatusOK, taskOK
+			})
+			c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(5)})
+			if _, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "t"}); err != nil {
+				t.Fatalf("RunCheckpoint: %v", err)
+			}
+			if got := hits(); got != 2 {
+				t.Fatalf("server hit %d times, want 2 (transient → replayed)", got)
+			}
+		})
+	}
+}
+
+// The mid-stream contract is deliberately DIFFERENT from the pre-stream one: an
+// `upstream_error` arriving after the 200 but before any visible token is the exact
+// transient blip this retry layer was built for, so excluding it pre-stream must not
+// leak into the stream path.
+func TestStreamUpstreamErrorStillRetriedAfterVerdictExclusion(t *testing.T) {
+	if !isRetriable(&Error{Code: "upstream_error", Stream: true}) {
+		t.Fatal("mid-stream upstream_error must stay retriable")
+	}
+	if isRetriable(&Error{Code: "upstream_error", HTTPStatus: http.StatusBadGateway}) {
+		t.Fatal("pre-stream upstream_error is an application verdict, not a gateway blip")
+	}
+}
+
+// The doctor paths mark the context and THEN wrap it in a timeout. Pin the real
+// ordering: context values must survive WithTimeout, or the opt-out silently stops
+// working and every probe goes back to burning its budget.
+func TestWithoutRetrySurvivesWithTimeoutWrapping(t *testing.T) {
+	srv, hits := jsonServer(t, func(int) (int, string) {
+		return http.StatusServiceUnavailable, `{"error":{"type":"api_error","code":"service_unavailable","message":"down"}}`
+	})
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(5)})
+
+	ctx, cancel := context.WithTimeout(WithoutRetry(context.Background()), 5*time.Second)
+	defer cancel()
+	if err := c.Health(ctx); err == nil {
+		t.Fatal("expected failure, got nil")
+	}
+	if got := hits(); got != 1 {
+		t.Fatalf("server hit %d times, want 1 (WithoutRetry must survive WithTimeout)", got)
+	}
+}
+
+// The elapsed window bounds the WHOLE call. Without it, ten slow-failing attempts plus
+// their backoff could stall a deadline-less caller (compaction, extraction) for many
+// minutes even though the attempt budget looks like "about a minute".
+func TestRetryStopsAtElapsedBudget(t *testing.T) {
+	srv, hits := jsonServer(t, func(int) (int, string) {
+		return http.StatusServiceUnavailable, `{"error":{"type":"api_error","code":"service_unavailable","message":"down"}}`
+	})
+	// A huge attempt budget, but an elapsed window that only affords a couple of waits.
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{
+		MaxAttempts: 50, BaseDelay: 30 * time.Millisecond, MaxDelay: 30 * time.Millisecond, MaxElapsed: 100 * time.Millisecond,
+	}})
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("expected failure, got nil")
+	}
+	if got := hits(); got == 0 || got > 6 {
+		t.Fatalf("server hit %d times, want a handful before the elapsed budget closed", got)
+	}
+
+	// Zero means unbounded — the attempt count is then the only limit.
+	if (RetryPolicy{MaxElapsed: 0}).exhausted(time.Hour, time.Hour) {
+		t.Fatal("MaxElapsed 0 must mean unbounded")
+	}
+	if !(RetryPolicy{MaxElapsed: time.Second}).exhausted(900*time.Millisecond, 200*time.Millisecond) {
+		t.Fatal("a wait that would overrun the window must stop the loop")
 	}
 }

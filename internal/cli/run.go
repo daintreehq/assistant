@@ -336,6 +336,10 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	anyFail := false
 
 	r.Line("Daintree Assistant — doctor")
+	// One-shot probes: a diagnostic reports the hop's CURRENT state. The patient
+	// turn-time retry budget would make a plainly-dead backend take seconds per row
+	// to report exactly the same thing.
+	ctx = backend.WithoutRetry(ctx)
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	herr := a.Backend.Health(hctx)
 	hcancel()

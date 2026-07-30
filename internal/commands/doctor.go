@@ -77,6 +77,12 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	}
 
 	// backend — the CLI's model gateway (owns the model credentials + prompts + skills).
+	//
+	// Every backend probe below runs one-shot. A turn PATIENTLY retries a transient
+	// failure (up to ~a minute, to ride out a restart), but a diagnostic must answer
+	// "up right now?" immediately — otherwise each row silently spends its whole
+	// probe budget replaying a refused socket to reach the same verdict.
+	ctx = backend.WithoutRetry(ctx)
 	push("backend url", true, a.Backend.BaseURL(), "")
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)

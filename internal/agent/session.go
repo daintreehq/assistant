@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -879,6 +880,10 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// plain bools (like gotToken) are race-free. The flip is suppressed once a
 		// visible token has arrived: Generating is the more specific state and must
 		// never regress to Thinking on a trailing reasoning fragment.
+		// retryNoticeShown latches the once-per-round retry cue (see OnRetry below).
+		// Race-free for the same reason as thinkingShown: RespondStream runs its retry
+		// loop and its stream callbacks synchronously on THIS goroutine.
+		retryNoticeShown := false
 		thinkingShown := false
 		markThinking := func() {
 			if thinkingShown || gotToken {
@@ -891,6 +896,21 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		result, serr := s.deps.Backend.RespondStream(ctx, req, backend.StreamCallbacks{
 			OnRawMeta: func(m backend.StreamMeta) {
 				s.traceBackendRawMeta(runID, turnID, iter, m)
+			},
+			OnRetry: func(info backend.RetryInfo) {
+				// The retry budget now rides out a backend restart (~a minute of wall
+				// clock), so say so ONCE per round. Without any cue the cockpit shows
+				// an unchanged spinner and a retried turn is indistinguishable from a
+				// hang; but a note is a STANDALONE transcript cell appended after the
+				// active turn, so one per attempt would stack up to nine cells that
+				// commit out of order with the answer they preceded and crowd the
+				// streaming text out of the live footer. Per-attempt detail stays in
+				// the debug log (`backend.retry`), where archaeology wants it anyway.
+				if retryNoticeShown {
+					return
+				}
+				retryNoticeShown = true
+				s.events.Warn(retryNotice(info))
 			},
 			OnSkillLoaded: func(refs []backend.SkillRef) {
 				if s.emitSkillLoads(refs) {
@@ -1684,6 +1704,40 @@ func (s *Session) stubCancelledFrom(calls []models.ToolCallRequest, from int) in
 		stubbed++
 	}
 	return stubbed
+}
+
+// retryNotice renders the one-line cue shown when a transient backend failure starts
+// being replayed. It fires ONCE per round (on the first retry), so it summarises the
+// whole budget rather than counting attempts: the cause in the user's terms, the
+// first wait, and how many attempts are coming — enough for a minute-long chain to
+// read as deliberate patience rather than a stall.
+func retryNotice(info backend.RetryInfo) string {
+	cause := "Backend error"
+	var be *backend.Error
+	switch {
+	case errors.As(info.Err, &be) && be.IsConnect():
+		cause = "Can't reach the backend"
+	case errors.As(info.Err, &be) && be.IsRateLimited():
+		cause = "Model rate-limited"
+	}
+	return fmt.Sprintf("%s — retrying in %s (up to %d attempts)",
+		cause, formatRetryDelay(info.Delay), info.MaxAttempts)
+}
+
+// formatRetryDelay renders a backoff wait for humans: milliseconds below a second,
+// one decimal through the jittered ramp (a 1.4s wait shown as "1s" reads as a wrong
+// countdown), and whole seconds for the steady-state 10–15s poll.
+func formatRetryDelay(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
+	case d < 10*time.Second:
+		// 'g' with -1 precision drops a trailing zero, so 2s stays "2s" and only a
+		// genuinely fractional wait grows a decimal.
+		return strconv.FormatFloat(d.Round(100*time.Millisecond).Seconds(), 'g', -1, 64) + "s"
+	default:
+		return strconv.Itoa(int(d.Round(time.Second)/time.Second)) + "s"
+	}
 }
 
 // classifyBackendError maps a backend respond error to its sentinel reply. The
