@@ -21,6 +21,13 @@ func TestDaintreeCallDenylistNamesWrapper(t *testing.T) {
 		"terminal.rename":      "terminal.rename",
 		"terminal.arm":         "terminal.arm",
 		"git.getProjectPulse":  "git.getProjectPulse",
+		// All three copyTree actions have typed wrappers that validate the
+		// curation options, so the raw escape hatch must never reach them —
+		// forwarding raw would skip the guards that stop an empty selection from
+		// bundling (and clipboarding) the whole worktree.
+		"copyTree.generate":            "copyTree.generate",
+		"copyTree.generateAndCopyFile": "copyTree.generateAndCopyFile",
+		"copyTree.injectToTerminal":    "copyTree.injectToTerminal",
 	} {
 		decoded, _ := tool.Decode(json.RawMessage(`{"name":"` + raw + `"}`))
 		res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})

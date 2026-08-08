@@ -427,11 +427,16 @@ func TestCopyTreeInjectSummary(t *testing.T) {
 		t.Errorf("forwarded wrong MCP name: %q", mcp.lastName)
 	}
 
-	// Optional worktreeId + options reach Daintree verbatim — guards against the
-	// wrapper's map-building dropping the optional fields.
+	// Optional worktreeId + typed curation options reach Daintree — guards against
+	// the wrapper's map-building dropping the optional fields. `depth` used to
+	// stand in for "any opaque key"; options is a typed, closed object now, so the
+	// stand-in is a real curation field.
 	mcpOpt := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 	toolOpt := newCopyTreeInjectTool(Deps{MCP: mcpOpt})
-	dOpt, _ := toolOpt.Decode(json.RawMessage(`{"terminalId":"t1","worktreeId":"wt-prod","options":{"depth":2}}`))
+	dOpt, err := toolOpt.Decode(json.RawMessage(`{"terminalId":"t1","worktreeId":"wt-prod","options":{"includePaths":["a.go"],"maxFileCount":2}}`))
+	if err != nil {
+		t.Fatalf("typed options should decode: %v", err)
+	}
 	rOpt := toolOpt.Handle(context.Background(), dOpt, &tools.ToolContext{})
 	if !rOpt.Ok {
 		t.Fatalf("expected ok with options, got %+v", rOpt.Error)
@@ -439,14 +444,23 @@ func TestCopyTreeInjectSummary(t *testing.T) {
 	if mcpOpt.lastArgs["worktreeId"] != "wt-prod" {
 		t.Errorf("worktreeId not forwarded: %v", mcpOpt.lastArgs)
 	}
-	if opts, _ := mcpOpt.lastArgs["options"].(map[string]any); opts == nil || opts["depth"] != float64(2) {
+	opts, _ := mcpOpt.lastArgs["options"].(map[string]any)
+	if opts == nil || opts["maxFileCount"] != float64(2) {
 		t.Errorf("options not forwarded: %v", mcpOpt.lastArgs["options"])
 	}
+	if paths, _ := opts["includePaths"].([]any); len(paths) != 1 || paths[0] != "a.go" {
+		t.Errorf("includePaths not forwarded: %v", opts["includePaths"])
+	}
 
-	// Whitespace-only terminalId is rejected before any MCP call.
+	// Whitespace-only terminalId is rejected at DECODE time (before dispatch's
+	// confirmation prompt), and the handler guard still catches it for any path
+	// that skips Decode.
 	mcp2 := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 	tool2 := newCopyTreeInjectTool(Deps{MCP: mcp2})
-	d2, _ := tool2.Decode(json.RawMessage(`{"terminalId":"  "}`))
+	d2, err2 := tool2.Decode(json.RawMessage(`{"terminalId":"  "}`))
+	if err2 == nil {
+		t.Errorf("blank terminalId should be rejected at decode time")
+	}
 	r2 := tool2.Handle(context.Background(), d2, &tools.ToolContext{})
 	if r2.Ok || r2.Error.Code != domain.CodeValidation {
 		t.Errorf("blank terminalId should be rejected: %+v", r2)
