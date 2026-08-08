@@ -291,25 +291,39 @@ func TestReadWindowStillSniffsFilePrefixForBinary(t *testing.T) {
 // steer to byteOffset rather than serve a line it never fully read.
 func TestReadLineWindowRespectsScanBudget(t *testing.T) {
 	root := t.TempDir()
-	// Each line is 10 bytes, so line 100001 starts at byte 1_000_000 — exactly at
-	// the budget, hence unreachable by a line window.
+	// 7-byte lines, so the 1_000_000-byte budget lands MID-LINE rather than on a
+	// boundary. Line N starts at (N-1)*7: line 142858 spans bytes 999_999..1_000_005,
+	// so the budget slices it in half. That is the case that matters — a budget
+	// falling neatly on a newline is indistinguishable from real EOF and would let
+	// a buggy implementation pass this test.
 	var b strings.Builder
-	for i := 0; i < 100_050; i++ {
-		b.WriteString("abcdefghi\n")
+	for i := 0; i < 142_900; i++ {
+		b.WriteString("abcdef\n")
 	}
 	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 100_020, "lineEnd": 100_020})
+
+	// The half-scanned line must NOT be served as though it were complete.
+	res := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 142_858, "lineEnd": 142_858})
 	if res.Ok {
-		t.Fatalf("a line beyond the scan budget must fail, got %+v", res.Result)
+		t.Fatalf("a line cut in half by the scan budget must fail, not return a fragment: %+v", res.Result)
 	}
 	if !contains(res.Error.Message, "byteOffset") {
 		t.Errorf("the error must steer to byteOffset, got %q", res.Error.Message)
 	}
-	// A line inside the budget still works, so the budget isn't just failing always.
-	if ok := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 5, "lineEnd": 5}); !ok.Ok {
-		t.Errorf("a line inside the budget must still read: %+v", ok.Error)
+
+	// The last line ENTIRELY inside the budget still reads — the guard must not
+	// swallow everything near the boundary.
+	ok := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 142_857, "lineEnd": 142_857})
+	if !ok.Ok {
+		t.Fatalf("the last line fully inside the budget must still read: %+v", ok.Error)
+	}
+	if got := ok.Result.(map[string]any)["content"].(string); got != "abcdef\n" {
+		t.Errorf("content = %q, want a whole line", got)
+	}
+	if early := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 5, "lineEnd": 5}); !early.Ok {
+		t.Errorf("a line early in the budget must still read: %+v", early.Error)
 	}
 }
 

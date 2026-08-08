@@ -287,6 +287,37 @@ func TestIgnoreDoesNotBlockAnExplicitlyNamedTarget(t *testing.T) {
 	}
 }
 
+// TestListNonRootPathIgnoreAnchoring covers the trickiest anchoring case: listing
+// a NON-ROOT path. Rules declared above the target still bind inside it (that is
+// what ancestorIgnoreRules is for), rules in the target itself bind, and rules
+// nested below it bind — all while entry names stay relative to the target.
+func TestListNonRootPathIgnoreAnchoring(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		".gitignore":       "*.log\n",
+		"a/.gitignore":     "ancestor.txt\n",
+		"a/b/.gitignore":   "nested.txt\n",
+		"a/b/keep.go":      "x\n",
+		"a/b/nested.txt":   "x\n",
+		"a/b/drop.log":     "x\n",
+		"a/b/ancestor.txt": "x\n",
+		"a/b/c/deep.go":    "x\n",
+		"a/b/c/deep.log":   "x\n",
+	})
+	names := listedNames(t, root, "a/b", 3)
+	if !names["keep.go"] || !names["c/deep.go"] {
+		t.Errorf("ordinary files must be listed: %v", names)
+	}
+	if names["nested.txt"] {
+		t.Error("the listing target's own .gitignore must apply")
+	}
+	if names["ancestor.txt"] {
+		t.Error("an ANCESTOR .gitignore must still bind inside the listing target")
+	}
+	if names["drop.log"] || names["c/deep.log"] {
+		t.Errorf("the root .gitignore's *.log must bind at any depth below the target: %v", names)
+	}
+}
+
 // TestIgnoreSymlinkedIgnoreFileIsNotFollowed is a containment test. A symlinked
 // .gitignore must be refused outright, in BOTH walkers: following one would let a
 // project point the parser outside the project (or at its own .env), and since
@@ -322,6 +353,40 @@ func TestIgnoreSymlinkedIgnoreFileIsNotFollowed(t *testing.T) {
 	}
 }
 
+// TestIgnoreRelativeInProjectSymlinkIsNotFollowed is the case the outside-symlink
+// test above does NOT cover: a symlink whose target stays inside the project is
+// happily followed by os.Root, so only the explicit regular-file check refuses it.
+// That matters because the target could be the project's own .env — ignore rules
+// change which paths come back, making it an oracle over the linked file.
+func TestIgnoreRelativeInProjectSymlinkIsNotFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privilege on Windows")
+	}
+	root := writeTree(t, map[string]string{
+		"rules.txt":   "hidden.txt\n",
+		"hidden.txt":  "x\n",
+		"visible.txt": "x\n",
+	})
+	// Relative, and resolves INSIDE the root — os.Root.Open would follow this.
+	if err := os.Symlink("rules.txt", filepath.Join(root, ".gitignore")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	if w := walked(root); !w["hidden.txt"] {
+		t.Error("a symlinked .gitignore must be refused even when its target is in-project")
+	}
+	if names := listedNames(t, root, "", 1); !names["hidden.txt"] {
+		t.Error("fs.list must refuse a symlinked .gitignore with an in-project target")
+	}
+	// Positive control: the SAME rules in a regular .gitignore do take effect, so
+	// the assertions above are not passing against an inert ignore layer.
+	root2 := writeTree(t, map[string]string{
+		".gitignore": "hidden.txt\n", "hidden.txt": "x\n", "visible.txt": "x\n",
+	})
+	if w := walked(root2); w["hidden.txt"] {
+		t.Error("positive control failed — a regular .gitignore should hide hidden.txt")
+	}
+}
+
 // TestOversizedIgnoreFileIsBounded: the size limit must bound the READ, not just
 // reject after the fact — otherwise a pathological ignore file is fully allocated
 // before being "skipped".
@@ -335,6 +400,10 @@ func TestOversizedIgnoreFileIsBounded(t *testing.T) {
 	w := walked(root)
 	if !w["keep.txt"] || !w["drop.txt"] {
 		t.Errorf("an over-cap ignore file must be skipped wholesale, got %v", w)
+	}
+	// fs.list goes through the same reader and must agree.
+	if names := listedNames(t, root, "", 1); !names["drop.txt"] {
+		t.Error("fs.list must also skip an over-cap ignore file")
 	}
 	// Positive control: the same rule in a normal-sized file DOES apply, proving
 	// the test above isn't just observing a no-op ignore layer.
@@ -350,6 +419,9 @@ func TestOversizedIgnoreFileIsBounded(t *testing.T) {
 // "\*.txt". Stripping that backslash unconditionally would turn it into a live
 // glob that hides every text file.
 func TestIgnoreEscapedMetacharacterStaysLiteral(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(`"*" is not a legal filename character on Windows`)
+	}
 	root := writeTree(t, map[string]string{
 		".gitignore": "\\*.txt\n",
 		"*.txt":      "the literally-named file\n",

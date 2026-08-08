@@ -154,6 +154,9 @@ func Tools(_ Deps) []tools.Tool {
 // from — BOTH walkers go through the same confined root here, so fs.list and
 // fs.search/fs.find can never disagree about whether a path is ignored.
 func readIgnoreRules(root *os.Root, base string) []ignoreRule {
+	if root == nil { // the walk degraded to ignore-unaware; see walkFiles
+		return nil
+	}
 	var rules []ignoreRule
 	for _, name := range ignoreFileNames {
 		rel := name
@@ -860,11 +863,13 @@ func walkFiles(root string) []walkEntry {
 	// ignored. Traversal itself stays on os.ReadDir (it never follows symlinked
 	// directories: ReadDir reports them as non-dir entries, so descent is already
 	// confined) — the white-box security test pins that behaviour.
+	// A root we cannot open costs us ignore-awareness, not the whole walk: degrade
+	// to the unconditional prunes rather than silently returning "no files", which
+	// would reach the model as a successful, empty search.
 	confined, cerr := openProjectRoot(root)
-	if cerr != nil {
-		return nil
+	if cerr == nil {
+		defer confined.Close()
 	}
-	defer confined.Close()
 
 	var out []walkEntry
 	var recurse func(dirAbs, dirRel string, ig ignoreStack)

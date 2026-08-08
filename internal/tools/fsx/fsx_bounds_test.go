@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
 
 // Finding 4: a negative maxBytes on fs.read previously reached make([]byte, toRead)
@@ -186,6 +189,26 @@ func TestGlobsRejectedAtDecode(t *testing.T) {
 	}
 	if _, err := search.Decode(json.RawMessage(`{"query":"q","glob":"**/*.ts"}`)); err != nil {
 		t.Errorf("valid fs.search glob should decode: %v", err)
+	}
+}
+
+// The schema's maxLength counts Unicode code points, so Validate must too — a
+// byte-length check would reject a multibyte glob the model was told is legal.
+func TestGlobLengthCountsRunesNotBytes(t *testing.T) {
+	// 4096 runes of a 3-byte character: legal by maxLength, ~12KB by len().
+	long := strings.Repeat("★", maxGlobLength)
+	for _, tool := range []tools.Tool{newFindTool(), newSearchTool()} {
+		args := `{"glob":"` + long + `"}`
+		if tool.Name == "fs.search" {
+			args = `{"query":"q","glob":"` + long + `"}`
+		}
+		if _, err := tool.Decode(json.RawMessage(args)); err != nil {
+			t.Errorf("%s: a %d-rune glob is within maxLength and must decode: %v", tool.Name, maxGlobLength, err)
+		}
+	}
+	// One rune over is rejected.
+	if _, err := newFindTool().Decode(json.RawMessage(`{"glob":"` + long + `★"}`)); err == nil {
+		t.Error("a glob past maxGlobLength runes must be rejected")
 	}
 }
 

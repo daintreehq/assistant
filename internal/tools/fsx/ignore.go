@@ -48,7 +48,10 @@ const maxIgnoreFileBytes = 256 * 1024
 //     its own .env — and since ignore rules change which paths come back, that is
 //     an observable oracle over the linked file's contents, not just a harmless
 //     parse. (git declines to follow symlinked ignore files for its own reasons;
-//     we land in the same place.)
+//     we land in the same place.) The Lstat and the Open are separate syscalls, so
+//     this is not proof against an adversary swapping the file between them — but
+//     os.Root still bounds the damage to in-project targets, and an attacker who
+//     can write to the project mid-walk has better options than this.
 //   - It reads at most maxIgnoreFileBytes+1 bytes. Checking the size AFTER an
 //     unbounded ReadFile would mean a multi-gigabyte .gitignore is fully allocated
 //     before being "skipped" — the bound has to apply to the read itself. The +1
