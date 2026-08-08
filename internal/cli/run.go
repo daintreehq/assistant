@@ -312,6 +312,14 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	// credential file inside app.Create). The ownership lease is held once,
 	// outside the loop, across restarts.
 	for {
+		// Same reasoning as the first-run gate: runLoginFlow returns false for a
+		// ctx cancellation exactly as it does for a user EOF, so a SIGTERM during
+		// a /login prompt is indistinguishable at the call site. Checking here
+		// covers all three restart paths at once — without it a shutdown request
+		// would rebuild a whole App and re-enter the surface on a dead context.
+		if ctx.Err() != nil {
+			return domain.OneShotExitCode.Cancelled
+		}
 		a, err := app.Create(createOpts)
 		if err != nil {
 			r.Error(err.Error())

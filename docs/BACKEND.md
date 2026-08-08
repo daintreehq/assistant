@@ -16,20 +16,54 @@ User → Daintree CLI ──(structured startup + visible conversation + runtime
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
 ```
 
-## Endpoint (development)
+## Endpoint & authentication
 
-**Hardcoded** to `http://127.0.0.1:8473`, **unauthenticated**. The assistant supports
-exactly this one endpoint for now; a later phase swaps in the production URL and a real
-login flow. The only override is the dev/test env var `DAINTREE_BACKEND_URL` (used by
-e2e tests to point at a fake backend). There is no product config knob. The constant
-lives at `backend.DefaultBaseURL`.
+The default endpoint is **production**: `backend.DefaultBaseURL` =
+`https://assistant.daintree.org`. Requests carry `Authorization: Bearer <key>`
+(`Client.setHeaders` in `internal/backend/client.go`) — but only when a key is configured;
+an empty key sends **no** `Authorization` header at all, which is what makes the
+unauthenticated local backend work unchanged.
 
-Run the backend from its sibling repo during local development:
+**Login.** On the first interactive launch with no persisted login and no
+`DAINTREE_BACKEND_URL`, the CLI runs a two-question flow (`internal/cli/login.go`):
+endpoint (the default, or a custom URL — validated by `config.NormalizeEndpoint`: absolute
+http/https, a host, no userinfo/query/fragment, trailing slashes stripped) then the API key
+(opaque to the CLI, only obvious paste accidents are rejected). Both are persisted to
+`~/.daintree/credentials.json` — written atomically, **file 0600 inside a 0700 dir**, and
+deliberately **global** rather than per-project (unlike the state dir, login does not repeat
+per project). The endpoint is stored even when it is the default, so changing the code
+default can never silently retarget an existing key. `/login` re-runs the same flow at any
+time: the surface returns `domain.ErrLoginRequested`, the launcher runs the prompt once the
+terminal is free, then rebuilds the App so the fresh credentials take effect.
+
+**Resolution + the pairing rule** (`config.LoadConfig`): explicit override → `DAINTREE_BACKEND_URL`
+(**trusted env only** — never a value loaded from a project `.env`, since a bound project must
+not be able to redirect where the key is sent) → the persisted login endpoint →
+`backend.DefaultBaseURL`. The persisted key is attached **only** when the resolved URL equals
+the persisted endpoint (`sameEndpoint`, fail-closed: an endpoint that does not normalize never
+matches). So pointing the CLI at a local or fake backend via the env var never hands it the
+real key. A credential file that exists but is corrupt/invalid is a hard error *when it would
+have chosen the endpoint* — with an override set it is moot and can't brick a dev/e2e run.
+
+**Auth failures.** A 401/403 (`Error.IsAuth`) is a rejected or missing key, not an outage. It
+is non-retriable, so it surfaces on the first attempt rather than after the transient poll:
+the turn fails with *"Backend authentication failed — the API key was rejected or missing.
+Run /login to set the backend endpoint and API key."* `doctor` reports the same fix rather
+than "backend down".
+
+**Local development** now needs the override explicitly — `127.0.0.1:8473` is no longer the
+default:
 
 ```bash
 cd ../assistant-backend
 python -m daintree_assistant_server   # serves on 127.0.0.1:8473 (its .env pins the port)
+
+# in the assistant shell — also suppresses the first-run login gate
+export DAINTREE_BACKEND_URL=http://127.0.0.1:8473
 ```
+
+(Or log in with option 2 / a pasted URL and point the persisted endpoint at the local
+backend; e2e tests use the env var to reach a fake backend.)
 
 ## Wire contract
 

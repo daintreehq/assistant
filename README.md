@@ -16,10 +16,11 @@ prompt assembly, and the upstream model credentials (DeepSeek, spoken internally
 CLI executes the local tool calls the backend asks for and streams the reply. See
 [`docs/BACKEND.md`](docs/BACKEND.md).
 
-> **Development:** the backend endpoint is hardcoded to `http://127.0.0.1:8473` and runs
-> unauthenticated. Run it locally from `../assistant-backend`
-> (`python -m daintree_assistant_server`). The assistant supports exactly this one
-> endpoint for now; a later phase swaps in the production URL and a real login flow.
+> **Login:** the first interactive launch asks for the backend endpoint (the production
+> default, or a custom URL) and an API key, and saves both to `~/.daintree/credentials.json`
+> (0600). Re-run it any time with `/login`. Set `DAINTREE_BACKEND_URL` to override the
+> endpoint for development — that also skips the first-run prompt, and the saved key is
+> never sent to an overridden endpoint.
 
 ## Build & install
 
@@ -40,12 +41,25 @@ go build -o bin/daintree-assistant ./cmd/daintree-assistant
 go install ./cmd/daintree-assistant                 # installs to $(go env GOPATH)/bin
 ```
 
-Start the backend (`../assistant-backend`, on `127.0.0.1:8473`), then run:
+Then just run it — the CLI needs no model key (the backend owns the model credentials); on
+the first launch it prompts for the backend endpoint and your API key:
 
 ```bash
-# The CLI needs no model key — the backend owns the model credentials. Just run it:
-./bin/daintree-assistant            # interactive cockpit (backend must be reachable)
-./bin/daintree-assistant doctor     # environment check (backend / MCP / project / tier)
+./bin/daintree-assistant            # interactive cockpit; first run prompts for login
+./bin/daintree-assistant doctor     # environment check (backend / key / MCP / project / tier)
+```
+
+At the prompt press Enter for the production default, or choose `2` (or paste a URL) for a
+custom endpoint. Credentials land in `~/.daintree/credentials.json`; `/login` re-runs the
+flow and restarts the session with the new endpoint/key.
+
+**Developing against a local backend.** `127.0.0.1:8473` is no longer the default, so point
+the CLI at it explicitly — this also skips the first-run login prompt, and your saved key is
+deliberately *not* sent to an env-overridden endpoint:
+
+```bash
+cd ../assistant-backend && python -m daintree_assistant_server   # serves on 127.0.0.1:8473
+export DAINTREE_BACKEND_URL=http://127.0.0.1:8473                # then run the assistant
 ```
 
 `make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·
