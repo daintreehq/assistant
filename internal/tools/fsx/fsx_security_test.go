@@ -81,6 +81,93 @@ func callRead(t *testing.T, root, path string, maxBytes int) tools.ToolResult {
 	return callTool(t, newReadTool(), root, string(b))
 }
 
+// callReadArgs runs fs.read with an arbitrary arg map (the window modes).
+func callReadArgs(t *testing.T, root string, args map[string]any) tools.ToolResult {
+	t.Helper()
+	b, _ := json.Marshal(args)
+	return callTool(t, newReadTool(), root, string(b))
+}
+
+// callFind runs fs.find; maxResults 0 means "leave it defaulted".
+func callFind(t *testing.T, root, glob string, maxResults int) tools.ToolResult {
+	t.Helper()
+	args := map[string]any{"glob": glob}
+	if maxResults > 0 {
+		args["maxResults"] = maxResults
+	}
+	b, _ := json.Marshal(args)
+	res := callTool(t, newFindTool(), root, string(b))
+	if !res.Ok {
+		t.Fatalf("find %q failed: %+v", glob, res.Error)
+	}
+	return res
+}
+
+// TestIgnoreNegationCannotExposeCredentialDir is the security invariant for the
+// new ignore layer: ignore files are project-controlled input, so a negation that
+// tries to re-include a credential store must have no effect whatsoever. The
+// sensitive-path prune runs before any ignore rule is consulted, at walk time.
+func TestIgnoreNegationCannotExposeCredentialDir(t *testing.T) {
+	root := buildSecurityFixture(t)
+	hostile := "!.ssh/\n!.ssh/**\n!**/.aws/**\n!.env\n!.env.local/**\n!.KUBE/**\n"
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(hostile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".copytreeignore"), []byte(hostile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	leaks := func(p string) bool {
+		for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
+			switch strings.ToLower(seg) {
+			case ".ssh", ".aws", ".env.local", ".kube":
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, e := range walkFiles(root) {
+		if leaks(e.rel) {
+			t.Fatalf("an ignore-file negation exposed a credential dir to the walk: %q", e.rel)
+		}
+	}
+	res := callList(t, root, "", 10)
+	if !res.Ok {
+		t.Fatalf("list failed: %+v", res.Error)
+	}
+	for _, e := range res.Result.(map[string]any)["entries"].([]listEntry) {
+		if leaks(e.Name) {
+			t.Errorf("fs.list leaked a credential segment under a hostile ignore file: %q", e.Name)
+		}
+	}
+	for _, f := range callFind(t, root, "*", 0).Result.(map[string]any)["files"].([]fileMatch) {
+		if leaks(f.Path) {
+			t.Errorf("fs.find leaked a credential path under a hostile ignore file: %q", f.Path)
+		}
+	}
+	for _, marker := range []string{"SSH_MARKER_aaa", "AWS_MARKER_bbb", "ENV_MARKER_ccc", "KUBE_MARKER_ddd"} {
+		sr := callSearch(t, root, marker, "")
+		if !sr.Ok {
+			t.Fatalf("search %s failed: %+v", marker, sr.Error)
+		}
+		if m := sr.Result.(map[string]any)["matches"].([]searchMatch); len(m) != 0 {
+			t.Errorf("fs.search leaked %q under a hostile ignore file: %+v", marker, m)
+		}
+	}
+}
+
+// TestFindRefusesSensitiveFiles: the finder must not surface a secrets FILE even
+// when the glob would happily match its name.
+func TestFindRefusesSensitiveFiles(t *testing.T) {
+	root := buildSecurityFixture(t)
+	for _, f := range callFind(t, root, "*", 0).Result.(map[string]any)["files"].([]fileMatch) {
+		if f.Path == ".env" || f.Path == "server.key" {
+			t.Errorf("fs.find must never surface the secrets file %q", f.Path)
+		}
+	}
+}
+
 // TestSearchPrunesCredentialDirsAtWalkTime is the load-bearing security test:
 // the walk must NEVER descend into a credential
 // dir. We assert it white-box against walkFiles — the dir's marker file never

@@ -1,6 +1,7 @@
 package fsx
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,23 +127,238 @@ func TestSearchFindsFileLineText(t *testing.T) {
 	}
 }
 
-// TestSearchRespectsGlobSuffix: the glob acts as a filename
-// suffix filter.
-func TestSearchRespectsGlobSuffix(t *testing.T) {
+// TestSearchUsesDoublestarGlob replaces the old suffix-filter test. `glob` is a
+// real pattern now: "*.txt" floats to any depth, a path-bearing pattern anchors,
+// and a bare ".txt" correctly matches nothing (it is not a suffix filter).
+func TestSearchUsesDoublestarGlob(t *testing.T) {
 	root := buildFunctionalFixture(t)
-	res := callSearch(t, root, "body", ".txt")
-	if !res.Ok {
-		t.Fatalf("search glob failed: %+v", res.Error)
+
+	hits := func(glob string) []searchMatch {
+		t.Helper()
+		res := callSearch(t, root, "body", glob)
+		if !res.Ok {
+			t.Fatalf("search glob %q failed: %+v", glob, res.Error)
+		}
+		return res.Result.(map[string]any)["matches"].([]searchMatch)
 	}
-	matches := res.Result.(map[string]any)["matches"].([]searchMatch)
-	found := false
-	for _, m := range matches {
-		if m.File == "sub/nested.txt" {
-			found = true
+	has := func(ms []searchMatch, file string) bool {
+		for _, m := range ms {
+			if m.File == file {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !has(hits("*.txt"), "sub/nested.txt") {
+		t.Error(`"*.txt" must match a nested file (a slashless pattern floats to any depth)`)
+	}
+	if !has(hits("sub/**"), "sub/nested.txt") {
+		t.Error(`"sub/**" must match sub/nested.txt`)
+	}
+	if has(hits("other/**"), "sub/nested.txt") {
+		t.Error(`"other/**" must not match under sub/`)
+	}
+	if ms := hits(".txt"); len(ms) != 0 {
+		t.Errorf(`a bare ".txt" is a pattern, not a suffix filter — want no matches, got %+v`, ms)
+	}
+}
+
+// TestReadReturnsByteWindow: byteOffset seeks straight to a mid-file window and
+// reports where it sat, so byteEnd can be fed back in to page forward.
+func TestReadReturnsByteWindow(t *testing.T) {
+	root := buildFunctionalFixture(t)
+	res := callReadArgs(t, root, map[string]any{"path": "readme.txt", "byteOffset": 15, "maxBytes": 5})
+	if !res.Ok {
+		t.Fatalf("byte window read failed: %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if got := m["content"].(string); got != "find-" {
+		t.Errorf("content = %q, want %q", got, "find-")
+	}
+	if m["byteStart"].(int64) != 15 || m["byteEnd"].(int64) != 20 {
+		t.Errorf("byteStart/byteEnd = %v/%v, want 15/20", m["byteStart"], m["byteEnd"])
+	}
+	if m["size"].(int64) != int64(len(fileText)) {
+		t.Errorf("size = %v, want %d", m["size"], len(fileText))
+	}
+	if !m["truncated"].(bool) {
+		t.Error("truncated must be true while content remains after the window")
+	}
+	// Paging with the returned byteEnd continues exactly where we left off.
+	next := callReadArgs(t, root, map[string]any{"path": "readme.txt", "byteOffset": m["byteEnd"], "maxBytes": 2})
+	if !next.Ok {
+		t.Fatalf("paged read failed: %+v", next.Error)
+	}
+	if got := next.Result.(map[string]any)["content"].(string); got != "me" {
+		t.Errorf("paged content = %q, want %q", got, "me")
+	}
+}
+
+// TestReadRejectsByteOffsetPastEnd: an offset at or past EOF is an honest error,
+// not a silent empty read the model would misinterpret as an empty file.
+func TestReadRejectsByteOffsetPastEnd(t *testing.T) {
+	root := buildFunctionalFixture(t)
+	res := callReadArgs(t, root, map[string]any{"path": "readme.txt", "byteOffset": 9999})
+	if res.Ok {
+		t.Fatal("a byteOffset past EOF must fail")
+	}
+	if res.Error.Code != codeFSRead {
+		t.Errorf("code = %s, want %s", res.Error.Code, codeFSRead)
+	}
+}
+
+// TestReadReturnsInclusiveLineWindow: lineStart/lineEnd are 1-based and inclusive,
+// and the result echoes the window actually served.
+func TestReadReturnsInclusiveLineWindow(t *testing.T) {
+	root := buildFunctionalFixture(t)
+
+	res := callReadArgs(t, root, map[string]any{"path": "readme.txt", "lineStart": 2, "lineEnd": 2})
+	if !res.Ok {
+		t.Fatalf("line window read failed: %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if got := m["content"].(string); got != "find-me-needle here\n" {
+		t.Errorf("content = %q, want the second line", got)
+	}
+	if m["lineStart"].(int) != 2 || m["lineEnd"].(int) != 2 {
+		t.Errorf("lineStart/lineEnd = %v/%v, want 2/2", m["lineStart"], m["lineEnd"])
+	}
+	if m["byteStart"].(int64) != 15 {
+		t.Errorf("byteStart = %v, want 15", m["byteStart"])
+	}
+
+	// A multi-line window concatenates the lines verbatim.
+	res = callReadArgs(t, root, map[string]any{"path": "readme.txt", "lineStart": 1, "lineEnd": 2})
+	if !res.Ok {
+		t.Fatalf("multi-line window failed: %+v", res.Error)
+	}
+	if got := res.Result.(map[string]any)["content"].(string); got != "hello daintree\nfind-me-needle here\n" {
+		t.Errorf("multi-line content = %q", got)
+	}
+
+	// The last line is reachable and reports truncated=false (nothing follows).
+	res = callReadArgs(t, root, map[string]any{"path": "readme.txt", "lineStart": 3, "lineEnd": 3})
+	if !res.Ok {
+		t.Fatalf("last-line window failed: %+v", res.Error)
+	}
+	m = res.Result.(map[string]any)
+	if got := m["content"].(string); got != "third line\n" {
+		t.Errorf("last line = %q", got)
+	}
+	if m["truncated"].(bool) {
+		t.Error("nothing follows the last line — truncated must be false")
+	}
+}
+
+// TestReadLineWindowPastEndOfFile: asking past the final line says so rather than
+// returning an empty window (the trailing-newline phantom-line trap).
+func TestReadLineWindowPastEndOfFile(t *testing.T) {
+	root := buildFunctionalFixture(t)
+	res := callReadArgs(t, root, map[string]any{"path": "readme.txt", "lineStart": 9, "lineEnd": 9})
+	if res.Ok {
+		t.Fatalf("a line window past EOF must fail, got %+v", res.Result)
+	}
+	if !contains(res.Error.Message, "only 3 lines") {
+		t.Errorf("error should report the real line count, got %q", res.Error.Message)
+	}
+}
+
+// TestListReportsFileSizesOnly: files carry a byte size (including 0 for an empty
+// file), directories carry none.
+func TestListReportsFileSizesOnly(t *testing.T) {
+	root := buildFunctionalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "empty.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := callList(t, root, "", 1)
+	if !res.Ok {
+		t.Fatalf("list failed: %+v", res.Error)
+	}
+	byName := map[string]listEntry{}
+	for _, e := range res.Result.(map[string]any)["entries"].([]listEntry) {
+		byName[e.Name] = e
+	}
+	if e := byName["readme.txt"]; e.Size == nil || *e.Size != int64(len(fileText)) {
+		t.Errorf("readme.txt size = %v, want %d", e.Size, len(fileText))
+	}
+	if e := byName["empty.txt"]; e.Size == nil || *e.Size != 0 {
+		t.Errorf("an empty file must report size 0, not omit it (got %v)", e.Size)
+	}
+	if e := byName["sub"]; e.Size != nil {
+		t.Errorf("a directory must not report a size, got %v", *e.Size)
+	}
+}
+
+// TestListCapsAfterDeterministicSort: the cap is applied to the SORTED list, so
+// the truncated result is a stable lexical prefix rather than an arbitrary
+// traversal-order sample.
+func TestListCapsAfterDeterministicSort(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"e.txt", "b.txt", "d.txt", "a.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(root, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !found {
-		t.Fatal("glob '.txt' should still match sub/nested.txt")
+	b, _ := json.Marshal(map[string]any{"depth": 1, "maxEntries": 3})
+	res := callTool(t, newListTool(), root, string(b))
+	if !res.Ok {
+		t.Fatalf("list failed: %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if !m["capped"].(bool) {
+		t.Error("capped must be true when entries were dropped")
+	}
+	entries := m["entries"].([]listEntry)
+	if len(entries) != 3 {
+		t.Fatalf("len(entries) = %d, want 3", len(entries))
+	}
+	for i, want := range []string{"a.txt", "b.txt", "c.txt"} {
+		if entries[i].Name != want {
+			t.Errorf("entries[%d] = %q, want %q (cap must follow the sort)", i, entries[i].Name, want)
+		}
+	}
+}
+
+// TestFindMatchesByNameAndPath: fs.find is the filename counterpart to fs.search,
+// returning sorted paths with sizes.
+func TestFindMatchesByNameAndPath(t *testing.T) {
+	root := buildFunctionalFixture(t)
+	files := callFind(t, root, "*.txt", 0).Result.(map[string]any)["files"].([]fileMatch)
+	if len(files) != 2 {
+		t.Fatalf("want 2 .txt files, got %+v", files)
+	}
+	if files[0].Path != "readme.txt" || files[1].Path != "sub/nested.txt" {
+		t.Errorf("results must be sorted by path, got %+v", files)
+	}
+	if files[0].Size != int64(len(fileText)) {
+		t.Errorf("size = %d, want %d", files[0].Size, len(fileText))
+	}
+
+	if f := callFind(t, root, "sub/**", 0).Result.(map[string]any)["files"].([]fileMatch); len(f) != 1 || f[0].Path != "sub/nested.txt" {
+		t.Errorf(`"sub/**" should match only sub/nested.txt, got %+v`, f)
+	}
+	if f := callFind(t, root, "*.rs", 0).Result.(map[string]any)["files"].([]fileMatch); len(f) != 0 {
+		t.Errorf("a non-matching glob must return no files, got %+v", f)
+	}
+}
+
+// TestFindCapsDeterministically: like fs.list, the cap follows the sort.
+func TestFindCapsDeterministically(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"e.go", "b.go", "d.go", "a.go", "c.go"} {
+		if err := os.WriteFile(filepath.Join(root, n), []byte("package x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := callFind(t, root, "*.go", 2)
+	m := res.Result.(map[string]any)
+	if !m["capped"].(bool) {
+		t.Error("capped must be true when results were dropped")
+	}
+	files := m["files"].([]fileMatch)
+	if len(files) != 2 || files[0].Path != "a.go" || files[1].Path != "b.go" {
+		t.Errorf("cap must follow the sort, got %+v", files)
 	}
 }
 

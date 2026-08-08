@@ -110,6 +110,115 @@ func TestSearchRefusesSymlinkEscapingRoot(t *testing.T) {
 	}
 }
 
+// The window args carry the same decode-time discipline as maxBytes: every bound
+// the schema advertises is enforced by Validate(), and the two modes are mutually
+// exclusive because they answer the same question in different coordinates.
+func TestReadRejectsInvalidWindowArgs(t *testing.T) {
+	tool := newReadTool()
+	bad := []string{
+		`{"path":"x.txt","byteOffset":-1}`,
+		`{"path":"x.txt","lineStart":1}`,                // lineEnd missing
+		`{"path":"x.txt","lineEnd":2}`,                  // lineStart missing
+		`{"path":"x.txt","lineStart":0,"lineEnd":2}`,    // 1-based
+		`{"path":"x.txt","lineStart":5,"lineEnd":2}`,    // inverted
+		`{"path":"x.txt","lineStart":1,"lineEnd":1001}`, // window too wide
+		`{"path":"x.txt","lineStart":1000001,"lineEnd":1000002}`,
+		`{"path":"x.txt","byteOffset":5,"lineStart":1,"lineEnd":2}`, // modes are exclusive
+		`{"path":"","maxBytes":10}`,                                 // empty path
+		`{"path":"x.txt","offset":5}`,                               // unknown field
+	}
+	for _, b := range bad {
+		if _, err := tool.Decode(json.RawMessage(b)); err == nil {
+			t.Errorf("should be rejected at decode: %s", b)
+		}
+	}
+	for _, good := range []string{
+		`{"path":"x.txt","byteOffset":0}`,
+		`{"path":"x.txt","byteOffset":4096,"maxBytes":100}`,
+		`{"path":"x.txt","lineStart":10,"lineEnd":20}`,
+		`{"path":"x.txt","lineStart":1,"lineEnd":1000}`,
+	} {
+		if _, err := tool.Decode(json.RawMessage(good)); err != nil {
+			t.Errorf("valid window args should decode (%s): %v", good, err)
+		}
+	}
+}
+
+// fs.list maxEntries is bounded 1..1000 — an unbounded result is exactly the gap
+// this arg closes, so a bad value must not silently fall through to "no cap".
+func TestListRejectsOutOfBoundsMaxEntries(t *testing.T) {
+	tool := newListTool()
+	for _, bad := range []string{`{"maxEntries":-1}`, `{"maxEntries":0}`, `{"maxEntries":1001}`} {
+		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("maxEntries out of bounds should be rejected: %s", bad)
+		}
+	}
+	if _, err := tool.Decode(json.RawMessage(`{"maxEntries":500}`)); err != nil {
+		t.Errorf("valid maxEntries should decode: %v", err)
+	}
+}
+
+// A malformed glob is rejected at DECODE on both pattern-taking tools, so the
+// model gets an INVALID_ARGS it can fix rather than a successful call that
+// silently matched nothing.
+func TestGlobsRejectedAtDecode(t *testing.T) {
+	find := newFindTool()
+	for _, bad := range []string{
+		`{"glob":"["}`,  // unterminated character class
+		`{"glob":""}`,   // empty is not "match everything"
+		`{"glob":"  "}`, // whitespace-only
+		`{"glob":"*","maxResults":0}`,
+		`{"glob":"*","maxResults":1001}`,
+	} {
+		if _, err := find.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("fs.find should reject at decode: %s", bad)
+		}
+	}
+	for _, good := range []string{`{"glob":"*.go"}`, `{"glob":"internal/**/*.go","maxResults":50}`} {
+		if _, err := find.Decode(json.RawMessage(good)); err != nil {
+			t.Errorf("valid fs.find args should decode (%s): %v", good, err)
+		}
+	}
+
+	search := newSearchTool()
+	if _, err := search.Decode(json.RawMessage(`{"query":"q","glob":"["}`)); err == nil {
+		t.Error("fs.search should reject a malformed glob at decode")
+	}
+	if _, err := search.Decode(json.RawMessage(`{"query":"q","glob":"**/*.ts"}`)); err != nil {
+		t.Errorf("valid fs.search glob should decode: %v", err)
+	}
+}
+
+// The backend forwards each tool's Schema to the model verbatim, so a bound that
+// lives only in the description prose does not actually steer the call. Every
+// numeric arg in this family must carry real minimum/maximum keywords.
+func TestSchemasEncodeBoundsAsRealKeywords(t *testing.T) {
+	for _, tool := range Tools(Deps{}) {
+		var schema struct {
+			Properties map[string]struct {
+				Type    string   `json:"type"`
+				Minimum *float64 `json:"minimum"`
+				Maximum *float64 `json:"maximum"`
+			} `json:"properties"`
+			AdditionalProperties *bool `json:"additionalProperties"`
+		}
+		if err := json.Unmarshal(tool.Schema, &schema); err != nil {
+			t.Fatalf("%s: schema is not valid JSON: %v", tool.Name, err)
+		}
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+			t.Errorf("%s: schema must set additionalProperties:false", tool.Name)
+		}
+		for name, prop := range schema.Properties {
+			if prop.Type != "integer" && prop.Type != "number" {
+				continue
+			}
+			if prop.Minimum == nil || prop.Maximum == nil {
+				t.Errorf("%s.%s is numeric but has no minimum/maximum keyword — prose bounds don't reach the model", tool.Name, name)
+			}
+		}
+	}
+}
+
 // fs.read still reads ordinary in-root files (the os.Root change is non-regressive).
 func TestReadStillReadsInRootFile(t *testing.T) {
 	root := t.TempDir()

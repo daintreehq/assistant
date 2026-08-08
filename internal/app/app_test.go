@@ -92,9 +92,15 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// The exact count is a deliberate tripwire: the tool inventory is sent on EVERY
 	// model round (~16k tokens), and inventory size measurably degrades tool-selection
 	// accuracy, so a family that quietly grows must be a conscious decision.
+	// 79→80: fs.find, the filename/pattern counterpart to fs.search's content
+	// search. A conscious add — finding files by name previously meant a full
+	// recursive fs.list or falling through to Daintree's files.search.
 	got := len(a.Registry.List())
-	if got != 79 {
-		t.Errorf("registered tools = %d, want 79", got)
+	if got != 80 {
+		t.Errorf("registered tools = %d, want 80", got)
+	}
+	if !a.Registry.Has("fs.find") {
+		t.Error("fs.find must be registered by the fsx family")
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
