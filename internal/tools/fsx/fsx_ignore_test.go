@@ -3,6 +3,7 @@ package fsx
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -121,16 +122,23 @@ func TestIgnoreLayersGitThenCopyTreeAtEveryDirectory(t *testing.T) {
 // ancestors'.
 func TestIgnoreNestedFilesApplyBelowTheirOwnDirectory(t *testing.T) {
 	root := writeTree(t, map[string]string{
-		".gitignore":       "*.tmp\n",
-		"a/.gitignore":     "!keep.tmp\nlocal.txt\n",
-		"a/keep.tmp":       "kept\n",
-		"a/drop.tmp":       "dropped\n",
-		"a/local.txt":      "local\n",
-		"b/local.txt":      "elsewhere\n",
-		"b/anything.tmp":   "dropped\n",
-		"b/c/deep/ok.go":   "ok\n",
-		"b/c/deep/x.tmp":   "dropped\n",
-		"b/c/.copytreeign": "unused\n",
+		".gitignore":     "*.tmp\n",
+		"a/.gitignore":   "!keep.tmp\nlocal.txt\n",
+		"a/keep.tmp":     "kept\n",
+		"a/drop.tmp":     "dropped\n",
+		"a/local.txt":    "local\n",
+		"b/local.txt":    "elsewhere\n",
+		"b/anything.tmp": "dropped\n",
+		"b/c/deep/ok.go": "ok\n",
+		"b/c/deep/x.tmp": "dropped\n",
+		// A nested .copytreeignore binds below its own directory too, and layers
+		// after the nested .gitignore at the same level.
+		"b/c/.gitignore":      "*.cfg\n",
+		"b/c/.copytreeignore": "!keepme.cfg\ndropme.log\n",
+		"b/c/keepme.cfg":      "kept\n",
+		"b/c/other.cfg":       "dropped\n",
+		"b/c/dropme.log":      "dropped\n",
+		"b/dropme.log":        "sibling — untouched by b/c rules\n",
 	})
 	w := walked(root)
 	if !w["a/keep.tmp"] {
@@ -147,6 +155,19 @@ func TestIgnoreNestedFilesApplyBelowTheirOwnDirectory(t *testing.T) {
 	}
 	if !w["b/c/deep/ok.go"] {
 		t.Error("ordinary deep file must survive")
+	}
+	// The nested .copytreeignore layers after the nested .gitignore at b/c.
+	if !w["b/c/keepme.cfg"] {
+		t.Error("nested .copytreeignore negation must beat the nested .gitignore's *.cfg")
+	}
+	if w["b/c/other.cfg"] {
+		t.Error("b/c/.gitignore's *.cfg must still apply")
+	}
+	if w["b/c/dropme.log"] {
+		t.Error("b/c/.copytreeignore must hide b/c/dropme.log")
+	}
+	if !w["b/dropme.log"] {
+		t.Error("b/c's ignore files must NOT reach up into b/")
 	}
 }
 
@@ -245,21 +266,6 @@ func TestSkipDirsWinOverIgnoreNegation(t *testing.T) {
 	}
 }
 
-// TestOversizedIgnoreFileIsSkipped: a pathological ignore file is skipped rather
-// than failing the whole call — a partial ruleset still prunes better than none.
-func TestOversizedIgnoreFileIsSkipped(t *testing.T) {
-	root := writeTree(t, map[string]string{
-		"keep.txt": "x\n",
-	})
-	huge := strings.Repeat("a-very-long-pattern-line\n", (maxIgnoreFileBytes/25)+64)
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(huge+"keep.txt\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if w := walked(root); !w["keep.txt"] {
-		t.Error("an oversized ignore file must be skipped, not applied")
-	}
-}
-
 // TestIgnoreDoesNotBlockAnExplicitlyNamedTarget pins the deliberate scope limit:
 // ignore rules prune DISCOVERY, they never refuse a path the caller names. Reading
 // a gitignored build output or listing a gitignored directory by exact path stays
@@ -278,6 +284,83 @@ func TestIgnoreDoesNotBlockAnExplicitlyNamedTarget(t *testing.T) {
 	}
 	if len(res.Result.(map[string]any)["entries"].([]listEntry)) != 1 {
 		t.Error("listing the named ignored dir should show its contents")
+	}
+}
+
+// TestIgnoreSymlinkedIgnoreFileIsNotFollowed is a containment test. A symlinked
+// .gitignore must be refused outright, in BOTH walkers: following one would let a
+// project point the parser outside the project (or at its own .env), and since
+// ignore rules change which paths come back, that is an observable oracle over the
+// linked file's contents — not a harmless parse.
+func TestIgnoreSymlinkedIgnoreFileIsNotFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privilege on Windows")
+	}
+	outside := t.TempDir()
+	rules := filepath.Join(outside, "outside-rules")
+	if err := os.WriteFile(rules, []byte("hidden.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := writeTree(t, map[string]string{
+		"hidden.txt":  "x\n",
+		"visible.txt": "x\n",
+	})
+	if err := os.Symlink(rules, filepath.Join(root, ".gitignore")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	if w := walked(root); !w["hidden.txt"] {
+		t.Error("walkFiles followed a symlinked .gitignore out of the project root")
+	}
+	if names := listedNames(t, root, "", 1); !names["hidden.txt"] {
+		t.Error("fs.list followed a symlinked .gitignore out of the project root")
+	}
+	// Both walkers must agree — that consistency is the point of the shared reader.
+	found := callFind(t, root, "hidden.txt", 0).Result.(map[string]any)["files"].([]fileMatch)
+	if len(found) != 1 {
+		t.Errorf("fs.find must agree with fs.list about the symlinked ignore file, got %+v", found)
+	}
+}
+
+// TestOversizedIgnoreFileIsBounded: the size limit must bound the READ, not just
+// reject after the fact — otherwise a pathological ignore file is fully allocated
+// before being "skipped".
+func TestOversizedIgnoreFileIsBounded(t *testing.T) {
+	root := writeTree(t, map[string]string{"keep.txt": "x\n", "drop.txt": "x\n"})
+	// Well over the cap, with a real rule at the very end that must NOT take effect.
+	huge := strings.Repeat("#"+strings.Repeat("p", 120)+"\n", (maxIgnoreFileBytes/121)+512)
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(huge+"drop.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := walked(root)
+	if !w["keep.txt"] || !w["drop.txt"] {
+		t.Errorf("an over-cap ignore file must be skipped wholesale, got %v", w)
+	}
+	// Positive control: the same rule in a normal-sized file DOES apply, proving
+	// the test above isn't just observing a no-op ignore layer.
+	root2 := writeTree(t, map[string]string{
+		".gitignore": "drop.txt\n", "keep.txt": "x\n", "drop.txt": "x\n",
+	})
+	if w2 := walked(root2); w2["drop.txt"] || !w2["keep.txt"] {
+		t.Errorf("positive control failed — ignore rules are not being applied at all: %v", w2)
+	}
+}
+
+// TestIgnoreEscapedMetacharacterStaysLiteral: git writes a literal "*.txt" as
+// "\*.txt". Stripping that backslash unconditionally would turn it into a live
+// glob that hides every text file.
+func TestIgnoreEscapedMetacharacterStaysLiteral(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		".gitignore": "\\*.txt\n",
+		"*.txt":      "the literally-named file\n",
+		"normal.txt": "x\n",
+	})
+	w := walked(root)
+	if !w["normal.txt"] {
+		t.Error(`\*.txt is a LITERAL name — it must not hide every .txt file`)
+	}
+	if w["*.txt"] {
+		t.Error(`\*.txt should still hide the file literally named "*.txt"`)
 	}
 }
 

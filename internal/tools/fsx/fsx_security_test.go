@@ -109,7 +109,13 @@ func callFind(t *testing.T, root, glob string, maxResults int) tools.ToolResult 
 // sensitive-path prune runs before any ignore rule is consulted, at walk time.
 func TestIgnoreNegationCannotExposeCredentialDir(t *testing.T) {
 	root := buildSecurityFixture(t)
-	hostile := "!.ssh/\n!.ssh/**\n!**/.aws/**\n!.env\n!.env.local/**\n!.KUBE/**\n"
+	// "canary.txt" is a positive control: it proves these ignore files are actually
+	// being parsed and applied, so the credential assertions below are not passing
+	// merely because ignore handling is inert.
+	hostile := "canary.txt\n!.ssh/\n!.ssh/**\n!**/.aws/**\n!.env\n!.env.local/**\n!.KUBE/**\n"
+	if err := os.WriteFile(filepath.Join(root, "canary.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(hostile), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +133,17 @@ func TestIgnoreNegationCannotExposeCredentialDir(t *testing.T) {
 		return false
 	}
 
+	var sawCanary bool
 	for _, e := range walkFiles(root) {
 		if leaks(e.rel) {
 			t.Fatalf("an ignore-file negation exposed a credential dir to the walk: %q", e.rel)
 		}
+		if filepath.ToSlash(e.rel) == "canary.txt" {
+			sawCanary = true
+		}
+	}
+	if sawCanary {
+		t.Fatal("the hostile ignore files were never applied — this test proves nothing as written")
 	}
 	res := callList(t, root, "", 10)
 	if !res.Ok {
@@ -161,10 +174,51 @@ func TestIgnoreNegationCannotExposeCredentialDir(t *testing.T) {
 // when the glob would happily match its name.
 func TestFindRefusesSensitiveFiles(t *testing.T) {
 	root := buildSecurityFixture(t)
-	for _, f := range callFind(t, root, "*", 0).Result.(map[string]any)["files"].([]fileMatch) {
+	files := callFind(t, root, "*", 0).Result.(map[string]any)["files"].([]fileMatch)
+	for _, f := range files {
 		if f.Path == ".env" || f.Path == "server.key" {
 			t.Errorf("fs.find must never surface the secrets file %q", f.Path)
 		}
+	}
+	// Positive control: ordinary files ARE found, so the assertions above are not
+	// passing merely because the finder returned nothing.
+	var sawOrdinary bool
+	for _, f := range files {
+		if f.Path == "app.ts" {
+			sawOrdinary = true
+		}
+	}
+	if !sawOrdinary {
+		t.Fatal("fs.find returned no ordinary files — the negative assertions above prove nothing")
+	}
+}
+
+// TestListNeverReturnsSensitiveFiles: fs.list must apply the same secrets filter as
+// fs.find/fs.search. It reports byte sizes now, and a project-controlled `!.env`
+// negation must not be able to put a credential file (or its size) into a listing.
+func TestListNeverReturnsSensitiveFiles(t *testing.T) {
+	root := buildSecurityFixture(t)
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("!.env\n!server.key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := callList(t, root, "", 3)
+	if !res.Ok {
+		t.Fatalf("list failed: %+v", res.Error)
+	}
+	entries := res.Result.(map[string]any)["entries"].([]listEntry)
+	for _, e := range entries {
+		if e.Name == ".env" || e.Name == "server.key" {
+			t.Errorf("fs.list must never surface the secrets file %q", e.Name)
+		}
+	}
+	var sawOrdinary bool
+	for _, e := range entries {
+		if e.Name == "app.ts" {
+			sawOrdinary = true
+		}
+	}
+	if !sawOrdinary {
+		t.Fatal("fs.list returned no ordinary files — the negative assertions above prove nothing")
 	}
 }
 

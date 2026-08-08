@@ -18,6 +18,8 @@
 package fsx
 
 import (
+	"io"
+	"os"
 	"path"
 	"strings"
 
@@ -37,6 +39,39 @@ var ignoreFileNames = []string{".gitignore", ".copytreeignore"}
 // prunes more accurately than no ruleset, and there is no such thing as a
 // gitignore parse error to report (every non-comment line is a valid pattern).
 const maxIgnoreFileBytes = 256 * 1024
+
+// readIgnoreFile reads one ignore file through the CONFINED root, and is the only
+// way either walker loads one. Two properties matter:
+//
+//   - It refuses anything that is not a regular file. A symlinked .gitignore would
+//     otherwise let a project point the parser outside the project entirely, or at
+//     its own .env — and since ignore rules change which paths come back, that is
+//     an observable oracle over the linked file's contents, not just a harmless
+//     parse. (git declines to follow symlinked ignore files for its own reasons;
+//     we land in the same place.)
+//   - It reads at most maxIgnoreFileBytes+1 bytes. Checking the size AFTER an
+//     unbounded ReadFile would mean a multi-gigabyte .gitignore is fully allocated
+//     before being "skipped" — the bound has to apply to the read itself. The +1
+//     is what lets the caller tell "exactly at the cap" from "over it".
+//
+// A missing ignore file is the overwhelmingly common case, so absence is not an
+// error worth surfacing: every failure path simply yields no rules.
+func readIgnoreFile(root *os.Root, rel string) []byte {
+	st, err := root.Lstat(rel)
+	if err != nil || !st.Mode().IsRegular() {
+		return nil
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxIgnoreFileBytes+1))
+	if err != nil || len(data) > maxIgnoreFileBytes {
+		return nil
+	}
+	return data
+}
 
 // ignoreRule is one parsed pattern line, remembered together with the directory it
 // was declared in (base, project-relative slash path, "" for the project root).
@@ -69,8 +104,11 @@ func parseIgnoreFile(base string, data []byte) []ignoreRule {
 		if strings.HasPrefix(line, "!") {
 			r.negate = true
 			line = line[1:]
-		} else if strings.HasPrefix(line, `\`) {
+		} else if strings.HasPrefix(line, `\#`) || strings.HasPrefix(line, `\!`) {
 			// `\#foo` / `\!foo` mean the literal character, not a comment/negation.
+			// ONLY these two: stripping a leading backslash unconditionally would
+			// turn `\*.txt` (git's way of writing the literal name "*.txt") into a
+			// live glob that hides every text file.
 			line = line[1:]
 		}
 		if line == "" {

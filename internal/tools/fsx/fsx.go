@@ -8,6 +8,7 @@
 package fsx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/safety"
@@ -147,17 +149,20 @@ func Tools(_ Deps) []tools.Tool {
 }
 
 // readIgnoreRules loads the ignore files declared in one directory, in
-// ignoreFileNames order, using the caller's reader (the confined os.Root for
-// fs.list, plain os.ReadFile for the walk — same rules either way). base is the
-// directory's project-relative slash path, "" at the root.
-func readIgnoreRules(base string, read func(name string) ([]byte, error)) []ignoreRule {
+// ignoreFileNames order. base is the directory's project-relative slash path ("" at
+// the root), which is both where the rules are anchored and where they are read
+// from — BOTH walkers go through the same confined root here, so fs.list and
+// fs.search/fs.find can never disagree about whether a path is ignored.
+func readIgnoreRules(root *os.Root, base string) []ignoreRule {
 	var rules []ignoreRule
 	for _, name := range ignoreFileNames {
-		data, err := read(name)
-		if err != nil || len(data) > maxIgnoreFileBytes {
-			continue
+		rel := name
+		if base != "" && base != "." {
+			rel = base + "/" + name
 		}
-		rules = append(rules, parseIgnoreFile(base, data)...)
+		if data := readIgnoreFile(root, rel); len(data) > 0 {
+			rules = append(rules, parseIgnoreFile(base, data)...)
+		}
 	}
 	return rules
 }
@@ -167,21 +172,11 @@ func readIgnoreRules(base string, read func(name string) ([]byte, error)) []igno
 // what lets fs.list("some/deep/dir") honour rules declared above its target
 // without walking anything else.
 func ancestorIgnoreRules(root *os.Root, dirRel string) ignoreStack {
-	var stack ignoreStack
-	base := ""
-	load := func(b string) {
-		stack = stack.descend(readIgnoreRules(b, func(name string) ([]byte, error) {
-			rel := name
-			if b != "" {
-				rel = b + "/" + name
-			}
-			return root.ReadFile(rel)
-		}))
-	}
-	load("")
+	stack := ignoreStack(nil).descend(readIgnoreRules(root, ""))
 	if dirRel == "" || dirRel == "." {
 		return stack
 	}
+	base := ""
 	for _, seg := range strings.Split(dirRel, "/") {
 		if seg == "" || seg == "." {
 			continue
@@ -191,7 +186,7 @@ func ancestorIgnoreRules(root *os.Root, dirRel string) ignoreStack {
 		} else {
 			base = base + "/" + seg
 		}
-		load(base)
+		stack = stack.descend(readIgnoreRules(root, base))
 	}
 	return stack
 }
@@ -234,9 +229,8 @@ var listSchema = json.RawMessage(`{
 func newListTool() tools.Tool {
 	return tools.Tool{
 		Name: "fs.list",
-		Description: "List directory entries under the project root (read-only), each with its `size` in bytes for files. " +
-			"Honours .gitignore and .copytreeignore during descent (so the tree matches what CopyTree would bundle) and always skips .git, node_modules, dist, build, coverage, .next, .turbo, .cache and vendor. " +
-			"Sorted by path and capped at maxEntries (default 200, max 1000) — check the `capped` flag and narrow `path`/`depth` if it is set. " +
+		Description: "List directory entries under the project root (read-only), each with its `size` in bytes for files. Sorted by path and capped at maxEntries (default 200, max 1000) — check the `capped` flag and narrow `path`/`depth` if it is set. Entry `name` is relative to the requested `path`. " +
+			"Honours .gitignore and .copytreeignore during descent (so the tree matches what CopyTree would bundle) and always skips .git, node_modules, dist, build, coverage, .next, .turbo, .cache, vendor and credential paths. " +
 			"PARALLEL: fs.read/fs.list calls batched in ONE reply run concurrently — to survey several directories, emit one fs.list each in one batch.",
 		Risk: domain.RiskRead,
 		// Independent, bounded filesystem snapshot read with no ordering dependency on its
@@ -358,6 +352,14 @@ func handleList(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 			if ig.ignored(ignoreRel, isDir) {
 				continue
 			}
+			// Second-layer secret guard, matching fs.search/fs.find: the segment
+			// check above catches credential DIRS, this catches a sensitive FILE
+			// basename (.env, server.key). Without it a `!.env` negation in a
+			// project-controlled ignore file could put a secrets file — and now its
+			// byte size — back into the listing.
+			if safety.IsSensitivePath(ignoreRel) {
+				continue
+			}
 			typ := "file"
 			var size *int64
 			if isDir {
@@ -368,9 +370,7 @@ func handleList(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 			}
 			entries = append(entries, listEntry{Name: childRel, Type: typ, Size: size})
 			if isDir && level+1 < depth {
-				recurse(childRoot, childRel, level+1, ig.descend(readIgnoreRules(ignoreRel, func(name string) ([]byte, error) {
-					return root.ReadFile(childRoot + "/" + name)
-				})))
+				recurse(childRoot, childRel, level+1, ig.descend(readIgnoreRules(root, ignoreRel)))
 			}
 		}
 	}
@@ -561,20 +561,36 @@ func handleRead(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 
 	case a.ByteOffset != nil:
 		byteStart = *a.ByteOffset
-		if byteStart >= size && size > 0 {
+		// An empty file has exactly one valid offset (0). For a non-empty file the
+		// end itself is out of bounds — there is nothing there to return, and a
+		// silent empty success would read as "this file is empty".
+		if (size == 0 && byteStart > 0) || (size > 0 && byteStart >= size) {
 			return tools.Fail(codeFSRead,
 				fmt.Sprintf("byteOffset %d is at or past the end of %s (%d bytes).", byteStart, a.Path, size))
 		}
 		if _, serr := f.Seek(byteStart, io.SeekStart); serr != nil {
 			return tools.Fail(codeFSRead, fmt.Sprintf("Could not read %s: %s", a.Path, serr.Error()))
 		}
-		slice = readUpTo(f, minInt64(int64(limit), size-byteStart))
+		var rerr error
+		if slice, rerr = readUpTo(f, minInt64(int64(limit), size-byteStart)); rerr != nil {
+			return tools.Fail(codeFSRead, fmt.Sprintf("Could not read %s: %s", a.Path, rerr.Error()))
+		}
 
 	default:
-		slice = readUpTo(f, minInt64(int64(limit), size))
+		var rerr error
+		if slice, rerr = readUpTo(f, minInt64(int64(limit), size)); rerr != nil {
+			return tools.Fail(codeFSRead, fmt.Sprintf("Could not read %s: %s", a.Path, rerr.Error()))
+		}
 	}
 
-	if looksBinary(slice) {
+	// Sniff the file's own PREFIX, not just the returned window. A window can sit
+	// in a run of readable text inside an otherwise binary file (a NUL-prefixed
+	// blob with an ASCII stretch at offset 8), and judging only the window would
+	// let byteOffset/lineStart walk straight past the guard that a plain head read
+	// and fs.search both enforce.
+	if binary, berr := fileLooksBinary(root, relForRoot); berr != nil {
+		return tools.Fail(codeFSRead, fmt.Sprintf("Could not read %s: %s", a.Path, berr.Error()))
+	} else if binary || looksBinary(slice) {
 		return tools.Fail(codeFSBinary,
 			fmt.Sprintf("Refusing to read %s: it appears to be a binary file.", a.Path),
 			tools.Unrecoverable())
@@ -606,17 +622,37 @@ func handleRead(_ context.Context, raw json.RawMessage, tctx *tools.ToolContext)
 
 // readUpTo reads at most n bytes from f, tolerating a short read. io.ReadFull
 // reports a partial-then-EOF as ErrUnexpectedEOF; either way the bytes it did read
-// are exactly what we want, and n is already bounded by the file size.
-func readUpTo(f io.Reader, n int64) []byte {
+// are exactly what we want, and n is already bounded by the file size. A GENUINE
+// I/O error is returned rather than swallowed — silently yielding an empty slice
+// would reach the model as a successful read of an empty file, which is a lie it
+// would then act on.
+func readUpTo(f io.Reader, n int64) ([]byte, error) {
 	if n <= 0 {
-		return nil
+		return nil, nil
 	}
 	buf := make([]byte, n)
 	read, err := io.ReadFull(f, buf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil
+		return nil, err
 	}
-	return buf[:read]
+	return buf[:read], nil
+}
+
+// fileLooksBinary re-opens the file and sniffs its first 4 KiB. Cheap (one bounded
+// read regardless of file size) and independent of whichever window the caller
+// asked for, so the binary refusal cannot be dodged by seeking past the giveaway
+// bytes.
+func fileLooksBinary(root *os.Root, rel string) (bool, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	head, rerr := readUpTo(f, 4096)
+	if rerr != nil {
+		return false, rerr
+	}
+	return looksBinary(head), nil
 }
 
 func minInt64(a, b int64) int64 {
@@ -644,7 +680,17 @@ type lineWindowResult struct {
 // byteOffset rather than quietly reading a huge file.
 func readLineWindow(f io.Reader, size int64, from, to, limit int) (lineWindowResult, error) {
 	budget := minInt64(maxLineScanBytes, size)
-	buf := readUpTo(f, budget)
+	buf, rerr := readUpTo(f, budget)
+	if rerr != nil {
+		return lineWindowResult{}, rerr
+	}
+
+	// scannedAll distinguishes "reached the real end of the file" from "ran out of
+	// scan budget". They look identical at the end of buf, but they are not: an
+	// unterminated remainder is a genuine final line only in the first case. In the
+	// second it is a line CUT IN HALF by the 1 MB budget, and serving it as though
+	// it were complete would hand the model a silently truncated line.
+	scannedAll := int64(len(buf)) == size
 
 	// Walk newline to newline, tracking each line's start offset, until we have
 	// passed `to` or run out of scanned bytes.
@@ -661,6 +707,11 @@ func readLineWindow(f io.Reader, size int64, from, to, limit int) (lineWindowRes
 		// counting it would make "line 4 of a 3-line file" quietly return an empty
 		// window instead of saying the file ends first.
 		if atEnd && lineStartOff == i && line > 1 {
+			break
+		}
+		// Past the budget with bytes still unread: whatever trails is a fragment,
+		// not a line. Stop without claiming it.
+		if atEnd && !scannedAll {
 			break
 		}
 		total = line
@@ -686,7 +737,7 @@ func readLineWindow(f io.Reader, size int64, from, to, limit int) (lineWindowRes
 	}
 
 	if winStart < 0 {
-		if int64(len(buf)) < size {
+		if !scannedAll {
 			return lineWindowResult{}, fmt.Errorf(
 				"line %d is beyond the first %d bytes; use byteOffset to seek further into this file", from, len(buf))
 		}
@@ -694,9 +745,28 @@ func readLineWindow(f io.Reader, size int64, from, to, limit int) (lineWindowRes
 	}
 	data := buf[winStart:winEnd]
 	if len(data) > limit {
+		// maxBytes cut the window short, so the line range computed above no longer
+		// describes what we are actually returning. Recount, or the result would
+		// claim lineEnd=N while the content stops at some earlier line — a lie the
+		// model would then act on when deciding where to read next.
 		data = data[:limit]
+		if present := countLines(data); present > 0 {
+			last = from + present - 1
+		} else {
+			last = from
+		}
 	}
 	return lineWindowResult{data: data, start: int64(winStart), firstLine: from, lastLine: last}, nil
+}
+
+// countLines counts the lines present in a window, counting a final unterminated
+// remainder as a (partial) line — it IS content the caller received.
+func countLines(data []byte) int {
+	n := bytes.Count(data, []byte{'\n'})
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		n++
+	}
+	return n
 }
 
 /* ------------------------------- fs.search ------------------------------- */
@@ -712,11 +782,18 @@ type searchArgs struct {
 // gets an INVALID_ARGS it can fix instead of a successful search that silently
 // matched nothing.
 func (a *searchArgs) Validate() error {
+	// StrictDecoder does not execute the JSON Schema, so `required` and
+	// `minLength` are advisory to the model and nothing more. An empty query would
+	// otherwise reach strings.Contains(line, "") — which is true for EVERY line —
+	// and dump maxResults worth of unrelated content after a full project walk.
+	if a.Query == "" {
+		return fmt.Errorf("query is required and must not be empty")
+	}
 	if a.MaxResults != nil && (*a.MaxResults < 1 || *a.MaxResults > 500) {
 		return fmt.Errorf("maxResults must be between 1 and 500")
 	}
 	if a.Glob != "" {
-		if len(a.Glob) > maxGlobLength {
+		if utf8.RuneCountInString(a.Glob) > maxGlobLength {
 			return fmt.Errorf("glob must be at most %d characters", maxGlobLength)
 		}
 		if err := validGlob(a.Glob); err != nil {
@@ -739,9 +816,11 @@ var searchSchema = json.RawMessage(`{
 
 func newSearchTool() tools.Tool {
 	return tools.Tool{
-		Name:        "fs.search",
-		Description: "Substring search across the project's text files (read-only): a recursive walk honouring .gitignore/.copytreeignore and skipping .git/node_modules/dist and credential paths, an optional filename `glob` (\"*.ts\" at any depth, \"internal/**/*.go\" path-anchored), capped at maxResults (default 50, max 500). Returns file/line/text per match plus a `capped` flag. LITERAL substring — not a regex, not case-insensitive. Locate code here, then peek at it with fs.read using the returned line number as lineStart; it runs serially, so prefer one good needle to a batch of searches. To find files by NAME rather than content, use fs.find.",
-		Risk:        domain.RiskRead,
+		Name: "fs.search",
+		Description: "Substring search across the project's text files (read-only), capped at maxResults (default 50, max 500). Optional filename `glob`: \"*.ts\" matches that name at any depth, \"internal/**/*.go\" anchors to a path. Returns file/line/text per match plus a `capped` flag. LITERAL substring — not a regex, not case-insensitive. " +
+			"Locate code here, then peek at it with fs.read passing lineStart AND lineEnd around the returned line number (e.g. line 120 → lineStart:110, lineEnd:140) — lineStart alone is rejected. " +
+			"The walk honours .gitignore/.copytreeignore and additionally always skips .git, node_modules, dist, build, coverage, .next, .turbo, .cache, vendor and credential paths. Runs serially, so prefer one good needle to a batch of searches. To find files by NAME rather than content, use fs.find.",
+		Risk: domain.RiskRead,
 		// NOT Parallelizable — deliberate exclusion. Unlike the bounded point reads
 		// fs.read/fs.list, this is a full recursive project walk that reads file contents
 		// and ignores ctx (no mid-scan cancellation). Running six concurrently would
@@ -775,6 +854,18 @@ type walkEntry struct {
 // (IsDir()==false), and the walk never follows symlinked directories at all —
 // os.ReadDir reports them as non-dir entries, so descent stays inside the root.
 func walkFiles(root string) []walkEntry {
+	// Ignore files are loaded through a CONFINED root, exactly as fs.list does, so
+	// a symlinked .gitignore can neither escape the project nor be aimed at an
+	// in-project secret — and so the two walkers can never disagree about what is
+	// ignored. Traversal itself stays on os.ReadDir (it never follows symlinked
+	// directories: ReadDir reports them as non-dir entries, so descent is already
+	// confined) — the white-box security test pins that behaviour.
+	confined, cerr := openProjectRoot(root)
+	if cerr != nil {
+		return nil
+	}
+	defer confined.Close()
+
 	var out []walkEntry
 	var recurse func(dirAbs, dirRel string, ig ignoreStack)
 	recurse = func(dirAbs, dirRel string, ig ignoreStack) {
@@ -782,9 +873,7 @@ func walkFiles(root string) []walkEntry {
 		if err != nil {
 			return
 		}
-		ig = ig.descend(readIgnoreRules(filepath.ToSlash(dirRel), func(name string) ([]byte, error) {
-			return os.ReadFile(filepath.Join(dirAbs, name))
-		}))
+		ig = ig.descend(readIgnoreRules(confined, filepath.ToSlash(dirRel)))
 		for _, de := range dirents {
 			isDir := de.IsDir()
 			if isDir && skipDirs[de.Name()] {
@@ -905,7 +994,7 @@ func (a *findArgs) Validate() error {
 	if strings.TrimSpace(a.Glob) == "" {
 		return fmt.Errorf("glob is required")
 	}
-	if len(a.Glob) > maxGlobLength {
+	if utf8.RuneCountInString(a.Glob) > maxGlobLength {
 		return fmt.Errorf("glob must be at most %d characters", maxGlobLength)
 	}
 	if err := validGlob(a.Glob); err != nil {
@@ -929,9 +1018,11 @@ var findSchema = json.RawMessage(`{
 
 func newFindTool() tools.Tool {
 	return tools.Tool{
-		Name:        "fs.find",
-		Description: "Find project files by NAME or path pattern (read-only), each with its byte `size`. Use \"*.ts\" to match a name at any depth, or \"internal/**/*.go\" to anchor to a path. Honours .gitignore/.copytreeignore and skips .git/node_modules/dist and credential paths, so the result matches what CopyTree would bundle. Sorted by path, capped at maxResults (default 200, max 1000). This is the filename counterpart to fs.search, which matches file CONTENTS.",
-		Risk:        domain.RiskRead,
+		Name: "fs.find",
+		Description: "Find project files by NAME or path pattern (read-only), each with its byte `size`. Sorted by path, capped at maxResults (default 200, max 1000) — check the `capped` flag. Use \"*.ts\" to match a name at any depth, or \"internal/**/*.go\" to anchor to a path. " +
+			"This is the filename counterpart to fs.search, which matches file CONTENTS. " +
+			"Applies the project's .gitignore/.copytreeignore rules, so results track what CopyTree would bundle; on top of those it ALWAYS skips .git, node_modules, dist, build, coverage, .next, .turbo, .cache, vendor and credential paths, which CopyTree itself might include.",
+		Risk: domain.RiskRead,
 		// NOT Parallelizable, for the same reason as fs.search: this is a full
 		// recursive project walk that ignores ctx, and a pattern matching nothing
 		// still traverses everything. Six concurrent copies would re-walk the tree

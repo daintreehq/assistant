@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -261,6 +262,109 @@ func TestReadLineWindowPastEndOfFile(t *testing.T) {
 	}
 	if !contains(res.Error.Message, "only 3 lines") {
 		t.Errorf("error should report the real line count, got %q", res.Error.Message)
+	}
+}
+
+// TestReadWindowStillSniffsFilePrefixForBinary: the binary refusal must judge the
+// FILE, not just the returned window — otherwise seeking past a NUL-bearing header
+// walks straight through a guard that a plain head read enforces.
+func TestReadWindowStillSniffsFilePrefixForBinary(t *testing.T) {
+	root := t.TempDir()
+	// A NUL-prefixed blob with a stretch of clean ASCII further in.
+	body := append([]byte{0x00, 0x01, 0x02, 0x00}, []byte("HDR\nplain readable text\n")...)
+	if err := os.WriteFile(filepath.Join(root, "blob.bin"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []map[string]any{
+		{"path": "blob.bin", "byteOffset": 8},
+		{"path": "blob.bin", "lineStart": 2, "lineEnd": 2},
+		{"path": "blob.bin"},
+	} {
+		res := callReadArgs(t, root, args)
+		if res.Ok || res.Error.Code != codeFSBinary {
+			t.Errorf("a window into a binary file must still be FS_BINARY (%v), got %+v", args, res)
+		}
+	}
+}
+
+// TestReadLineWindowRespectsScanBudget: past the 1MB scan budget the tool must
+// steer to byteOffset rather than serve a line it never fully read.
+func TestReadLineWindowRespectsScanBudget(t *testing.T) {
+	root := t.TempDir()
+	// Each line is 10 bytes, so line 100001 starts at byte 1_000_000 — exactly at
+	// the budget, hence unreachable by a line window.
+	var b strings.Builder
+	for i := 0; i < 100_050; i++ {
+		b.WriteString("abcdefghi\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 100_020, "lineEnd": 100_020})
+	if res.Ok {
+		t.Fatalf("a line beyond the scan budget must fail, got %+v", res.Result)
+	}
+	if !contains(res.Error.Message, "byteOffset") {
+		t.Errorf("the error must steer to byteOffset, got %q", res.Error.Message)
+	}
+	// A line inside the budget still works, so the budget isn't just failing always.
+	if ok := callReadArgs(t, root, map[string]any{"path": "big.txt", "lineStart": 5, "lineEnd": 5}); !ok.Ok {
+		t.Errorf("a line inside the budget must still read: %+v", ok.Error)
+	}
+}
+
+// TestReadLineWindowMaxBytesAdjustsLineEnd: when maxBytes cuts the window short,
+// the reported lineEnd must describe what was actually returned. Claiming lines it
+// did not serve would make the model skip them.
+func TestReadLineWindowMaxBytesAdjustsLineEnd(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "l.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := callReadArgs(t, root, map[string]any{"path": "l.txt", "lineStart": 1, "lineEnd": 3, "maxBytes": 5})
+	if !res.Ok {
+		t.Fatalf("read failed: %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if got := m["content"].(string); got != "one\nt" {
+		t.Fatalf("content = %q, want %q", got, "one\nt")
+	}
+	if got := m["lineEnd"].(int); got != 2 {
+		t.Errorf("lineEnd = %d, want 2 — the window only reaches into line 2", got)
+	}
+	if !m["truncated"].(bool) {
+		t.Error("a maxBytes-cut window must report truncated")
+	}
+}
+
+// TestReadEmptyFileByteOffsets: offset 0 on an empty file is the one valid read;
+// any positive offset is out of bounds and must not report impossible coordinates.
+func TestReadEmptyFileByteOffsets(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "empty.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := callReadArgs(t, root, map[string]any{"path": "empty.txt", "byteOffset": 0}); !res.Ok {
+		t.Errorf("byteOffset 0 on an empty file should succeed: %+v", res.Error)
+	}
+	if res := callReadArgs(t, root, map[string]any{"path": "empty.txt", "byteOffset": 1}); res.Ok {
+		t.Errorf("a positive byteOffset on an empty file must fail, got %+v", res.Result)
+	}
+}
+
+// TestSearchRejectsEmptyQueryAtDecode: StrictDecoder does not run the JSON Schema,
+// so `required`/`minLength` are advisory. Without a Validate() check an empty query
+// reaches strings.Contains(line, "") — true for every line — and dumps maxResults
+// worth of unrelated content after a full project walk.
+func TestSearchRejectsEmptyQueryAtDecode(t *testing.T) {
+	tool := newSearchTool()
+	for _, bad := range []string{`{}`, `{"query":""}`, `{"query":"","glob":"*.go"}`} {
+		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
+			t.Errorf("an empty/missing query must be rejected at decode: %s", bad)
+		}
+	}
+	if _, err := tool.Decode(json.RawMessage(`{"query":"needle"}`)); err != nil {
+		t.Errorf("a real query should decode: %v", err)
 	}
 }
 
