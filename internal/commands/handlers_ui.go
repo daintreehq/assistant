@@ -17,8 +17,13 @@ import (
 // UICommandResult is the structured return of the cockpit slash handler.
 // The cockpit renders a card / switches a panel; nothing is printed.
 type UICommandResult struct {
-	Handled         bool
-	Quit            bool
+	Handled bool
+	Quit    bool
+	// Login: the user asked to re-run the login flow. The blocking prompt cannot
+	// run under either surface (Bubble Tea owns the terminal; the REPL's app is
+	// about to be rebuilt), so the surface quits and the interactive launcher
+	// runs the flow + rebuilds the App with the fresh credentials.
+	Login           bool
 	Title           string
 	Text            string
 	SwitchPanel     PanelKey
@@ -60,6 +65,9 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 	switch name {
 	case "quit":
 		return UICommandResult{Handled: true, Quit: true}
+	case "login":
+		return UICommandResult{Handled: true, Login: true, Title: "Login",
+			Text: "Restarting to run the login flow…"}
 	case "help":
 		return UICommandResult{Handled: true, SwitchPanel: PanelHelp, Title: "Help", Text: HelpTextUI()}
 	case "status":
@@ -537,7 +545,7 @@ func noArgUsage(name string, rest []string) string {
 	}
 	switch name {
 	case "status", "timers", "watchers", "grants", "launches", "models", "skills",
-		"compact", "clear", "doctor", "reconnect", "help", "quit":
+		"compact", "clear", "doctor", "login", "reconnect", "help", "quit":
 		return "Usage: /" + name
 	default:
 		return ""

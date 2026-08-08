@@ -192,6 +192,7 @@ func (c *controller) runCommand(parent context.Context, line string) tea.Cmd {
 			Text:            res.Text,
 			ClearTranscript: res.ClearTranscript,
 			Quit:            res.Quit,
+			Login:           res.Login,
 			// commands.PanelKey and ui.PanelKey share the same string values; convert across
 			// the package seam so the cockpit can act on the requested view switch.
 			SwitchPanel: PanelKey(res.SwitchPanel),

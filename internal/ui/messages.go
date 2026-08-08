@@ -168,6 +168,10 @@ type CommandCompleteMsg struct {
 	Text            string
 	ClearTranscript bool
 	Quit            bool
+	// Login: /login — quit Bubble Tea like a shutdown, but flag the final model
+	// so ui.Run returns domain.ErrLoginRequested and the interactive launcher
+	// runs the blocking login prompt once the terminal is released.
+	Login bool
 	// SwitchPanel switches the live view instead of printing a card: PanelHelp → the help
 	// view; PanelInbox/Watchers/Timers/Audit → the ops deck focused on that section.
 	SwitchPanel PanelKey

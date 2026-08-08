@@ -111,6 +111,8 @@ func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
 func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
 	t.Setenv(NoDaemonEnv, "1")
+	// Skip the first-run login gate (and ignore any real ~/.daintree credentials).
+	t.Setenv("DAINTREE_BACKEND_URL", "http://127.0.0.1:0")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runnerCalled := false
@@ -137,6 +139,8 @@ func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
 	t.Setenv(NoDaemonEnv, "1")
+	// Skip the first-run login gate (and ignore any real ~/.daintree credentials).
+	t.Setenv("DAINTREE_BACKEND_URL", "http://127.0.0.1:0")
 
 	stdin, stdinWriter, err := os.Pipe()
 	if err != nil {

@@ -31,6 +31,9 @@ func boolPtr(b bool) *bool    { return &b }
 // newOfflineApp builds an offline App writing to a temp dir (cleaned by t).
 func newOfflineApp(t *testing.T) *app.App {
 	t.Helper()
+	// Isolate HOME so LoadConfig's backend-credential read can never see (or
+	// depend on) the developer's real ~/.daintree/credentials.json.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{

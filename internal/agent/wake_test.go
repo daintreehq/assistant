@@ -260,6 +260,8 @@ func TestIsWakeFailureReplyRecognizesSentinels(t *testing.T) {
 		"Model unavailable: 503",
 		"Model rate-limited: provider quota/throughput exceeded",
 		"Model error: boom",
+		"Can't reach the Daintree assistant backend — is it running? Use /doctor here, or run 'daintree-assistant doctor' from your shell.",
+		"Backend authentication failed — the API key was rejected or missing. Run /login to set the backend endpoint and API key.",
 		"Tool projection failed: dup name",
 		"Turn cancelled",
 		"Stopped: called watcher.terminal.create 3 times this turn with identical arguments, each failing the same way (INVALID_ARGS: ...).",

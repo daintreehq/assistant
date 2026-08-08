@@ -86,6 +86,11 @@ type Model struct {
 	pending         *pendingConfirm
 	pendingQuestion *pendingQuestion
 
+	// loginRequested: /login quit the program; ui.Run reads it off the final
+	// model and returns domain.ErrLoginRequested so the launcher runs the
+	// blocking login flow after Bubble Tea has restored the terminal.
+	loginRequested bool
+
 	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
 	// approval sheet's A / F actions, consulted in onApprovalRequested). The value is a
 	// REMAINING-COUNT: a missing key or 0 means "ask"; a positive n means "auto-approve n

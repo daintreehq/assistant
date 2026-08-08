@@ -41,6 +41,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
 	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},
 	{Name: "doctor", Syntax: "/doctor", Palette: "environment check", Help: "check MCP / config / project (with fixes)"},
+	{Name: "login", Syntax: "/login", Palette: "backend endpoint + API key", Help: "choose the backend endpoint and set the API key"},
 	{Name: "reconnect", Syntax: "/reconnect", Palette: "retry the Daintree connection", Help: "retry the Daintree MCP connection"},
 	{Name: "help", Syntax: "/help", Palette: "all commands and keys", Help: "this help (alias: /?)"},
 	{Name: "quit", Syntax: "/quit", Palette: "exit", Help: "exit (aliases: /q, /exit)"},

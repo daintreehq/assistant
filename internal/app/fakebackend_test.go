@@ -9,7 +9,7 @@ import (
 )
 
 // fakeBackend is a scripted backend.Backend for the app unit tests. The real client
-// points at the hardcoded dev endpoint (backend.DefaultBaseURL) and must never be
+// points at a real endpoint (the resolved BackendURL) and must never be
 // required by a unit test, so any test that runs a turn or a utility task injects one
 // of these via CreateOptions{BackendOverride: ...}. It satisfies the full
 // backend.Backend surface (RespondStream, RunTask, Capabilities, Version, Health,

@@ -44,13 +44,24 @@ tool calls the backend asks for and streams the assistant's text. See `docs/BACK
 > shape, fix it directly in `../assistant-backend` (prompt/skill changes land there; local
 > tool-shape changes land here) — no need to ask first.
 
-**Development endpoint:** hardcoded to `http://127.0.0.1:8473`, unauthenticated — the
-assistant supports exactly this one endpoint for now (a later phase swaps in the
-production URL + a real login flow). The only override is the dev/test env var
-`DAINTREE_BACKEND_URL`; there is no product config knob. Run `../assistant-backend`
-locally (`python -m daintree_assistant_server`). The CLI holds **no model credentials
-and no provider client at all** — the direct DeepSeek transport, the tier Router, and the
-model/provider config knobs were deleted once the backend became the only gateway.
+**Backend endpoint + login:** the default is **production** —
+`backend.DefaultBaseURL` = `https://assistant.daintree.org`, authenticated with an
+`Authorization: Bearer` key. On first interactive launch (and any time via `/login`) the
+CLI asks for the endpoint (default or a custom URL) and the API key, and persists both to
+the **global** `~/.daintree/credentials.json` (file 0600 in a 0700 dir; global, not
+per-project, unlike the state dir). Resolution, in `config.LoadConfig`: explicit override →
+`DAINTREE_BACKEND_URL` (**trusted env only**, never a loaded `.env` — a bound project must
+not be able to redirect where the key is sent) → the persisted login endpoint →
+`backend.DefaultBaseURL`. The persisted key is attached **only** when the resolved URL
+equals the persisted endpoint, so an env-overridden fake/dev backend never receives it.
+
+**Local dev now REQUIRES `DAINTREE_BACKEND_URL=http://127.0.0.1:8473`** (or a custom-endpoint
+login pointing there) — `127.0.0.1:8473` is no longer the default. Run `../assistant-backend`
+locally (`python -m daintree_assistant_server`); it runs unauthenticated, and an empty key
+simply sends no `Authorization` header. The CLI still holds **no model credentials and no
+provider client at all** — the direct DeepSeek transport, the tier Router, and the
+model/provider config knobs were deleted once the backend became the only gateway; the key
+above is a backend-account credential, opaque to the CLI and forwarded verbatim.
 
 ## Commands
 
@@ -368,8 +379,13 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 ## Key environment variables
 
-`DAINTREE_BACKEND_URL` (dev/test override of the hardcoded `http://127.0.0.1:8473`; the
-**backend** holds `DEEPSEEK_API_KEY`, not the CLI) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DAINTREE_BACKEND_URL` (the dev/test/e2e endpoint override — read from the **trusted env
+only**, never a loaded `.env`. Resolution: explicit override → `DAINTREE_BACKEND_URL` →
+the persisted `/login` endpoint in `~/.daintree/credentials.json` → `backend.DefaultBaseURL`
+(`https://assistant.daintree.org`). Pairing rule: the persisted API key is sent **only**
+when the resolved URL equals the persisted endpoint, so setting this var points the CLI at a
+local/fake backend *without* leaking the real key — and it also suppresses the first-run
+login gate. The **backend** holds `DEEPSEEK_API_KEY`, not the CLI) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /

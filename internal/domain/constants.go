@@ -1,5 +1,7 @@
 package domain
 
+import "errors"
+
 // Schema constants.
 const (
 	// VerificationEvidencePrefix marks an evidence string that carries a
@@ -125,6 +127,14 @@ const (
 	CancelledReply = "Turn cancelled"
 	ClearMarker    = "[conversation cleared — context reset to initial state]"
 )
+
+// ErrLoginRequested is the cross-surface sentinel a session surface (the cockpit
+// runner or the classic REPL) returns when the user asked to re-run the login
+// flow (/login). The interactive launcher catches it, runs the blocking prompt
+// once the surface has released the terminal, rebuilds the App with the fresh
+// credentials, and restarts the surface. Lives in domain because internal/ui and
+// internal/cli must both reference it without importing each other.
+var ErrLoginRequested = errors.New("login requested")
 
 // ungrantableTools can never be covered by an automation grant — keyed by
 // internal dotted tool name. Granting the grant tools themselves would let an

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,11 +85,23 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// probe budget replaying a refused socket to reach the same verdict.
 	ctx = backend.WithoutRetry(ctx)
 	push("backend url", true, a.Backend.BaseURL(), "")
+	// A missing key is a real failure on the production/persisted endpoint (the
+	// backend requires one). Only the DAINTREE_BACKEND_URL escape hatch — a
+	// dev/test backend that may run unauthenticated — makes keyless legitimate.
+	keyOK := cfg.BackendAPIKey != "" || strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")) != ""
+	push("backend key", keyOK, presentOrMissing(cfg.BackendAPIKey),
+		"run /login to set the backend API key")
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)
 	bcancel()
-	push("backend health", herr == nil, errDetail(herr, "ok"),
-		"start the Daintree backend (../assistant-backend)")
+	// A 401/403 is not "backend down" — it is a rejected/missing API key, and
+	// the fix is /login, not restarting anything.
+	healthFix := "start the Daintree backend (../assistant-backend)"
+	var berr *backend.Error
+	if errors.As(herr, &berr) && berr.IsAuth() {
+		healthFix = "the backend rejected the API key — run /login to replace it"
+	}
+	push("backend health", herr == nil, errDetail(herr, "ok"), healthFix)
 	rctx, rcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	rerr := a.Backend.Ready(rctx)
 	rcancel()

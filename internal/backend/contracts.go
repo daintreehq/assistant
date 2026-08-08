@@ -21,14 +21,13 @@ import "encoding/json"
 // mismatch yields HTTP 426.
 const ProtocolVersion = 2
 
-// DefaultBaseURL is the single, HARDCODED backend endpoint.
-//
-// DEVELOPMENT-ONLY: during development the assistant supports exactly this one
-// endpoint (the local backend on 127.0.0.1:8473) and there is no authentication. A
-// later phase will swap this constant for the production URL and add the real login
-// flow; until then the CLI does not expose any override (no env var, no config knob)
-// — it always talks to this address.
-const DefaultBaseURL = "http://127.0.0.1:8473"
+// DefaultBaseURL is the production backend endpoint — the default the first-run
+// login flow offers. Resolution lives in config.LoadConfig: an explicit override
+// or DAINTREE_BACKEND_URL (the dev/test escape hatch, e.g. the local backend on
+// 127.0.0.1:8473) wins, then the persisted /login endpoint, then this constant.
+// The API key travels only with the persisted login's own endpoint (see
+// AppConfig.BackendAPIKey).
+const DefaultBaseURL = "https://assistant.daintree.org"
 
 // --------------------------------------------------------------------------
 // Request: POST /v1/daintree/respond

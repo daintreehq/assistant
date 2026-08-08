@@ -1751,6 +1751,18 @@ func (s *Session) classifyBackendError(err error) string {
 		return domain.CancelledReply
 	}
 	var be *backend.Error
+	if errors.As(err, &be) && be.IsAuth() {
+		// Rejected/missing API key (401/403). Checked BEFORE IsRateLimited: the
+		// HTTP status is definitive, and envelope-level rate-limit metadata on a
+		// 401 must not send the user chasing quota instead of /login.
+		// Non-retriable (retry.go already excludes auth), so this surfaces on the
+		// FIRST attempt — never after the 10–15s transient poll. The prefix is a
+		// registered WAKE_FAILURE_PREFIX (see wake.go).
+		msg := "Backend authentication failed — the API key was rejected or missing. Run /login to set the backend endpoint and API key."
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg
+	}
 	if errors.As(err, &be) && be.IsRateLimited() {
 		// Upstream/model rate limit: a friendly, byte-stable reply plus a health
 		// badge — not the raw provider blob. The badge clears on the next good Usage.

@@ -493,6 +493,32 @@ func TestClassifyRateLimitedStreamError(t *testing.T) {
 	}
 }
 
+func TestClassifyAuthError(t *testing.T) {
+	// A 401 (rejected/missing API key) classifies to the plain authentication
+	// reply pointing at /login — never the generic "Model error:" blob — and is a
+	// wake-failure sentinel so a background wake won't record it as a result.
+	// (retry.go excludes auth errors, so this surfaces on the first attempt.)
+	sink := &captureSink{}
+	r := &errRouter{err: &backend.Error{HTTPStatus: 401, Type: "authentication", Code: "invalid_api_key", Message: "Invalid or missing API key."}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Events = sink
+	s := NewSession(deps)
+
+	reply, err := s.Send(context.Background(), "hi", SendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(reply, "Backend authentication failed") {
+		t.Fatalf("reply = %q, want a \"Backend authentication failed\" prefix", reply)
+	}
+	if !strings.Contains(reply, "/login") {
+		t.Fatalf("reply = %q must point the user at /login", reply)
+	}
+	if !IsWakeFailureReply(reply) {
+		t.Fatalf("reply %q must be a wake-failure sentinel", reply)
+	}
+}
+
 func TestSingleFlightConcurrentSend(t *testing.T) {
 	r := &fakeRouter{results: []models.ChatResult{{Content: "done"}}}
 	s := NewSession(baseDeps(r, &fakeTools{}))

@@ -138,13 +138,14 @@ func AcquireOwnership(ctx context.Context, cfg config.AppConfig, opts AcquireOpt
 }
 
 // credentialsFromConfig snapshots the freshest connection credentials this
-// process resolved, for the daemon's later detached spans.
+// process resolved, for the daemon's later detached spans. The backend URL is
+// always sent as a pointer — "" when this launch has no DAINTREE_BACKEND_URL —
+// so a daemon that once stored a dev override drops it the moment a cockpit
+// without the env var attaches (its spans then fall back to the persisted
+// /login endpoint read fresh from the global credential file).
 func credentialsFromConfig(cfg config.AppConfig) *ipc.Credentials {
-	c := &ipc.Credentials{McpURL: cfg.McpURL, McpToken: cfg.McpToken}
-	if v := os.Getenv("DAINTREE_BACKEND_URL"); v != "" {
-		c.BackendURL = v
-	}
-	return c
+	v := os.Getenv("DAINTREE_BACKEND_URL")
+	return &ipc.Credentials{McpURL: cfg.McpURL, McpToken: cfg.McpToken, BackendURL: &v}
 }
 
 // QueryStatus asks the project's daemon for its status snapshot.
