@@ -286,8 +286,8 @@ var directMCPDependencies = []string{
 //
 // NOTE: this is deliberately NOT just the keys of wrappedMCPTools. That map is a
 // daintree.call REDIRECT denylist, a different job — several typed wrappers
-// (copyTree.generate, worktree.list/getCurrent, the forge reads) have no entry
-// because nothing needs redirecting for them. Using it alone silently under-covered
+// (worktree.list/getCurrent, the forge reads) have no entry because nothing needs
+// redirecting for them. Using it alone silently under-covered
 // the dependency set, so the two are unioned here and a test scans the wrapper
 // sources to catch a new wrapper whose target was never declared.
 //
@@ -317,7 +317,9 @@ func WrappedMCPToolNames() []string {
 // it would start refusing raw calls that are currently allowed — which is a
 // separate decision from drift coverage.
 var wrapperMCPTargets = []string{
-	"copyTree.generate",
+	// copyTree.generate is deliberately absent: it now HAS a denylist entry (a raw
+	// daintree.call for it must be redirected to the typed wrapper so the curation
+	// options are strict-decoded), so the union already covers it from there.
 	"forge.getIssue",
 	"forge.listIssues",
 	"forge.listPRs",

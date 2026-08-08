@@ -463,7 +463,9 @@ func newCopyTreeGenerateTool(deps Deps) tools.Tool {
 			"pass includeContent:true for a bounded head of it. This is the endpoint that touches neither the clipboard nor a terminal: end a " +
 			"curation loop HERE when you just need the reference file, and reach for copyTree.generateAndCopyFile only when the user asked for " +
 			"it on their clipboard. Curate with " +
-			"options.includePaths — the explicit list of files that matter — instead of bundling the whole worktree. The temp file is pruned by age, so read it promptly.",
+			"options.includePaths — the explicit list of files that matter — instead of bundling the whole worktree. The returned path is a system temp file OUTSIDE " +
+			"the project, so fs.read and artifact.read CANNOT open it: use includeContent:true to eyeball the bundle yourself, or hand the path to an agent " +
+			"terminal that can read it. It is pruned by age either way, so use it promptly.",
 		Risk:   domain.RiskRead,
 		Schema: copyTreeGenerateSchema,
 		Decode: decode,
