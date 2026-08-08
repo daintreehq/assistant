@@ -34,6 +34,8 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Listed", []string{"path:rel", ".:lit"}
 	case "fs.search":
 		return "Searched", []string{"query"}
+	case "fs.find":
+		return "Found", []string{"glob"}
 	case "tool.search":
 		return "Searched tools", []string{"query"}
 	case "context.snapshot":

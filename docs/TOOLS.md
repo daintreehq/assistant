@@ -183,7 +183,7 @@ The registry is the source of truth (`internal/tools` + the wiring in
 
 | Family (`internal/tools/…`) | Tools |
 |---|---|
-| `fsx` | `fs.list` `fs.read` `fs.search` |
+| `fsx` | `fs.list` `fs.read` `fs.search` `fs.find` |
 | `mcpx` | `daintree.status` `daintree.listTools` `tool.search` `daintree.call` · `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` · `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` · `agent.focusNextWaiting` `agent.focusNextWorking` `agent.focusNextAgent` `agent.focusPreviousAgent` |
 | `mcpwrap` | `recipe.list` `recipe.run` · `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` · `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR` · `git.getProjectPulse` · `workflow.startWorkOnIssue` `workflow.prepBranchForReview` `workflow.focusNextAttention` |
 | `contextx` | `context.snapshot` `terminal.read` `terminal.summarize` |

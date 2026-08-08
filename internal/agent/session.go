@@ -29,6 +29,7 @@ var coreToolNames = []string{
 	"fs.read",
 	"fs.list",
 	"fs.search",
+	"fs.find",
 	"queue.digest",
 	"daintree.status",
 	"tool.search",

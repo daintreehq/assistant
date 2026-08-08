@@ -18,6 +18,7 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		"watcher.terminal.create": "Watching",
 		"fs.read":                 "Read",
 		"fs.list":                 "Listed",
+		"fs.find":                 "Found",
 		// The scheduling verb is keyed on the real tool name.
 		"timer.schedule": "Scheduled",
 		// High-frequency orchestration tools that used to fall through to their raw
@@ -49,6 +50,7 @@ func TestPresentTool_NoRawDottedNames(t *testing.T) {
 		"terminal.arm", "terminal.disarm", "terminal.disarmAll",
 		"terminal.run.async", "terminal.await.async", "async.list", "async.cancel",
 		"memory.recall", "memory.list", "memory.save", "memory.forget", "memory.pin", "memory.unpin",
+		"fs.find",
 		"artifact.read", "copyTree.generate", "copyTree.injectToTerminal",
 		"docs.search", "docs.getPage", "docs.getRelatedPages",
 		"forge.getPR", "watcher.watchPR", "audit.export",
