@@ -35,8 +35,12 @@ type lineResult struct {
 
 func newLineReader() *lineReader {
 	lr := &lineReader{req: make(chan struct{}), resp: make(chan lineResult, 1)}
+	// Capture os.Stdin synchronously: the goroutine reading the package-level
+	// var races with tests that swap it back in t.Cleanup (caught by -race), and
+	// bufio.NewReader performs no I/O, so eager construction keeps the reads
+	// themselves demand-driven.
+	reader := bufio.NewReader(os.Stdin)
 	go func() {
-		reader := bufio.NewReader(os.Stdin)
 		for range lr.req {
 			// EOF is deliberately NOT latched: on a TTY, Ctrl-D at an empty prompt
 			// yields io.EOF for that one read without closing the terminal — a user
