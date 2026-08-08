@@ -1,6 +1,7 @@
 package mcpx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -130,9 +131,22 @@ type copyTreeOptions struct {
 	// tool schemas are forwarded verbatim to the upstream model, where those are
 	// honoured inconsistently at best. Same reasoning as domain.WatchCondition's
 	// one-key discriminated union: no $ref, no oneOf.
-	Filter       []string `json:"filter,omitempty"`
-	Exclude      []string `json:"exclude,omitempty"`
-	Always       []string `json:"always,omitempty"`
+	Filter []string `json:"filter,omitempty"`
+
+	// Pointers, unlike the three selection lists, because an EMPTY exclude/always
+	// list is legal host-side and means something specific: Daintree back-fills
+	// the project's configured excludedPaths/alwaysExclude/alwaysInclude only
+	// when the field is `undefined` (electron/ipc/handlers/copyTree.ts,
+	// mergeCopyTreeOptions), so `[]` is how a caller says "use NO exclusions,
+	// ignore my project defaults". A plain slice with omitempty would erase that
+	// during StrictDecoder's canonical re-marshal and hand Daintree `undefined`
+	// instead — which back-fills the project's alwaysInclude, and since `always`
+	// is a force-include that overrides the normal filter, a project pattern like
+	// "**/*" would quietly defeat a curated includePaths. A non-nil pointer to an
+	// empty slice survives omitempty and marshals as `[]`.
+	Exclude *[]string `json:"exclude,omitempty"`
+	Always  *[]string `json:"always,omitempty"`
+
 	IncludePaths []string `json:"includePaths,omitempty"`
 	ScopePaths   []string `json:"scopePaths,omitempty"`
 
@@ -175,8 +189,9 @@ func (o *copyTreeOptions) validate() error {
 	}
 	// Non-empty at both levels, matching the host's .min(1) on the list and on
 	// each item. exclude/always are deliberately absent from this list: neither
-	// carries those refinements host-side, and an empty exclusion set is
-	// harmless (it narrows nothing).
+	// carries those refinements host-side, and an empty list there is a
+	// MEANINGFUL instruction (clear the project's configured defaults) rather
+	// than a malformed selection — see the pointer fields above.
 	for _, sel := range []struct {
 		name string
 		vals []string
@@ -219,6 +234,117 @@ func (o *copyTreeOptions) validate() error {
 	return nil
 }
 
+// copyTreeStrictDecoder is tools.StrictDecoder plus a raw-JSON pre-scan that
+// rejects explicit `null` and blank/whitespace-only strings ANYWHERE in a
+// copyTree argument object.
+//
+// It exists because Go's decoder quietly collapses both into "absent", and
+// StrictDecoder's canonical re-marshal then erases the evidence with omitempty —
+// the same fail-open the empty-list guard closes, reached through two other
+// doors:
+//
+//	{"options":{"includePaths":null}}  → nil slice  → no selection → whole worktree
+//	{"worktreeId":""}                  → ""         → no target    → whatever worktree is active
+//	{"options":{"changed":"  "}}       → dropped    → no git filter → whole worktree
+//	{"options":{"sort":""}}            → dropped    → back-fills the project's sort strategy
+//
+// Rejecting both is fidelity, not an invented rule: Daintree's fields are
+// `.optional()` (undefined-able, never nullable) and its worktree selectors are
+// `.min(1)` precisely so an empty selector can't silently become an
+// active-worktree fallback (locationArgs.ts). Every string in this argument
+// family is a path, pattern, git ref, id or enum member, so blank is never
+// meaningful in any of them — which is what lets one flat rule cover the lot.
+func copyTreeStrictDecoder(newArgs func() any) tools.DecodeFunc {
+	inner := tools.StrictDecoder(newArgs)
+	return func(raw json.RawMessage) (json.RawMessage, error) {
+		if err := scanCopyTreeArgs(raw); err != nil {
+			return nil, &tools.DecodeError{Message: err.Error(), Issues: []string{err.Error()}}
+		}
+		return inner(raw)
+	}
+}
+
+// scanCopyTreeArgs walks the RAW TOKEN STREAM rather than a decoded map, and that
+// distinction is load-bearing: a map has already discarded a repeated key
+// (last-wins collapses it), while encoding/json MERGES repeated object members
+// into the same destination struct. So
+//
+//	{"options":{"includePaths":null},"options":{}}
+//
+// decodes to a map holding no null at all — a map-based scan sees nothing wrong —
+// yet leaves IncludePaths nil in the struct, which is exactly the "no selection"
+// state that makes Daintree bundle the whole worktree. Rejecting duplicate keys
+// outright also closes a real strictness gap, since DisallowUnknownFields does
+// not consider a repeated key unknown.
+//
+// A malformed body is left to the strict decoder, which reports it far better
+// than this scan could — every error path here simply stops scanning.
+func scanCopyTreeArgs(raw json.RawMessage) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return scanCopyTreeValue(dec, "")
+}
+
+// scanCopyTreeValue consumes exactly one JSON value, naming the offending field
+// so the model can fix the one key it got wrong instead of re-sending blind.
+func scanCopyTreeValue(dec *json.Decoder, path string) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil
+	}
+	where := path
+	if where == "" {
+		where = "the arguments object"
+	}
+	switch t := tok.(type) {
+	case nil:
+		return fmt.Errorf("%s is null; omit the field entirely instead of sending null, which Daintree rejects and which would silently read here as 'no value given'", where)
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("%s is blank; every path, pattern, git ref, id and enum value here must be non-empty (omit the field if you have no value for it)", where)
+		}
+	case json.Delim:
+		switch t {
+		case '{':
+			seen := map[string]bool{}
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return nil
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return nil
+				}
+				if seen[key] {
+					return fmt.Errorf("%s names %q more than once; send each field exactly once (a repeated key silently overwrites the earlier one)", where, key)
+				}
+				seen[key] = true
+				child := key
+				if path != "" {
+					child = path + "." + key
+				}
+				if err := scanCopyTreeValue(dec, child); err != nil {
+					return err
+				}
+			}
+			if _, err := dec.Token(); err != nil { // consume '}'
+				return nil
+			}
+		case '[':
+			for i := 0; dec.More(); i++ {
+				if err := scanCopyTreeValue(dec, fmt.Sprintf("%s[%d]", where, i)); err != nil {
+					return err
+				}
+			}
+			if _, err := dec.Token(); err != nil { // consume ']'
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 // wire renders the typed options as the plain JSON object Daintree expects.
 // Going through encoding/json keeps ONE source of truth for the wire key names —
 // the struct tags — because hand-building a second 14-key map is exactly how the
@@ -248,16 +374,16 @@ func (o *copyTreeOptions) wire() map[string]any {
 const copyTreeOptionsSchemaJSON = `{
     "type": "object",
     "additionalProperties": false,
-    "description": "Curation and budget settings for the bundle. Once you have worked out WHICH files matter, name them here in ONE call — e.g. {\"includePaths\":[\"internal/a.go\",\"internal/a_test.go\",\"internal/b.go\"]} — rather than bundling the whole worktree and hoping. Omit this object entirely to bundle everything.",
+    "description": "Curation and budget settings for the bundle. Once you have worked out WHICH files matter, name them here in ONE call — e.g. {\"includePaths\":[\"internal/a.go\",\"internal/a_test.go\",\"internal/b.go\"]} — rather than bundling the whole worktree and hoping. Omit this object to apply no explicit selection; the project's own exclusions, ignore rules and size budgets still apply.",
     "properties": {
       "includePaths": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "THE curation field: worktree-relative exact paths (or glob patterns) to include. Use it to assemble a bundle of scattered but related files — the sources, the code they lean on, and their tests — in a single call. Unlike scopePaths it does not restrict traversal, so a pattern may match anywhere in the worktree. Combined with filter when both are given." },
       "filter": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "Worktree-relative glob patterns or exact paths to include. Combined with includePaths when both are given; omit both to include the whole worktree. Always an ARRAY here — pass a single pattern as a one-element array." },
-      "exclude": { "type": "array", "items": { "type": "string" }, "description": "Worktree-relative glob patterns to drop from the selection. Always an ARRAY here — pass a single pattern as a one-element array." },
-      "always": { "type": "array", "items": { "type": "string" }, "description": "Glob patterns to include even when they exceed the per-file maxFileSize gate." },
+      "exclude": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "Worktree-relative glob patterns to drop from the selection. Always an ARRAY here — pass a single pattern as a one-element array. Omit it to inherit the project's configured exclusions; pass an empty array to clear those for this call." },
+      "always": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "Force-include glob patterns: they survive the exclusions and the per-file maxFileSize gate. Omit to inherit the project's configured always-include patterns; pass an empty array to clear those for this call, which is what you want when the bundle should stay close to just what you listed. Note a worktree's own .copytree.yml may still force files in." },
       "scopePaths": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "LITERAL worktree-relative file or directory paths that restrict traversal to those subtrees — these are NOT glob patterns; nothing is globbed or escaped. Composes with filter/includePaths rather than replacing them. Omit to traverse the whole worktree; an empty list is rejected rather than read as 'no scoping', which would silently copy everything." },
       "format": { "type": "string", "enum": ["xml", "json", "markdown", "tree", "ndjson", "sarif"], "description": "Output format for the bundle. Omit for Daintree's default." },
       "modified": { "type": "boolean", "description": "Include only tracked files modified in the working directory (staged and unstaged changes; untracked files are excluded)." },
-      "changed": { "type": "string", "description": "Include only files changed since this commit or branch." },
+      "changed": { "type": "string", "minLength": 1, "description": "Include only files changed since this commit or branch. Give a ref that definitely exists: Daintree falls back to NO git filter when the diff can't be run, so a bad ref quietly widens the bundle instead of failing." },
       "maxFileSize": { "type": "integer", "minimum": 1, "description": "Per-file size gate in bytes; larger files are never opened. Patterns listed in 'always' override it. CopyTree's own 10MB memory-safety ceiling applies regardless and cannot be lifted." },
       "maxTotalSize": { "type": "integer", "minimum": 1, "description": "Total size budget in bytes across every retained file." },
       "maxFileCount": { "type": "integer", "minimum": 1, "description": "Maximum number of files retained after selection and sorting." },
@@ -311,20 +437,41 @@ var copyTreeGenerateSchema = json.RawMessage(`{
   "required": []
 }`)
 
+// copyTreeHandlerGuard re-runs the FULL decode contract inside a handler, so the
+// "defense in depth for a path that skipped Decode" claim is actually true rather
+// than a hand-copied subset that drifts. Cheap: these payloads are tiny and a
+// copyTree call is user-scale, not hot-path. In normal dispatch the raw is
+// already Decode's canonical output, so this can only ever agree with it.
+func copyTreeHandlerGuard[T any](decode tools.DecodeFunc, toolName string, raw json.RawMessage) (T, tools.ToolResult) {
+	var a T
+	canonical, err := decode(raw)
+	if err != nil {
+		return a, tools.Fail(domain.CodeValidation, toolName+": "+err.Error())
+	}
+	if err := json.Unmarshal(canonical, &a); err != nil {
+		return a, tools.Fail(domain.CodeValidation, toolName+": could not read arguments: "+err.Error())
+	}
+	return a, tools.ToolResult{Ok: true}
+}
+
 func newCopyTreeGenerateTool(deps Deps) tools.Tool {
+	decode := copyTreeStrictDecoder(func() any { return &copyTreeGenerateArgs{} })
 	return tools.Tool{
 		Name: "copyTree.generate",
 		Description: "Generate a Daintree 'copy tree' — a curated bundle of a worktree's files — written to a temporary file, and return that " +
 			"file's PATH plus its file count, byte size and budget stats. The bundle is NOT returned inline (it routinely runs to megabytes); " +
-			"pass includeContent:true for a bounded head of it. This is the read-only endpoint: end a curation loop HERE when you just need the " +
-			"reference file, and reach for copyTree.generateAndCopyFile only when the user asked for it on their clipboard. Curate with " +
+			"pass includeContent:true for a bounded head of it. This is the endpoint that touches neither the clipboard nor a terminal: end a " +
+			"curation loop HERE when you just need the reference file, and reach for copyTree.generateAndCopyFile only when the user asked for " +
+			"it on their clipboard. Curate with " +
 			"options.includePaths — the explicit list of files that matter — instead of bundling the whole worktree. The temp file is pruned by age, so read it promptly.",
 		Risk:   domain.RiskRead,
 		Schema: copyTreeGenerateSchema,
-		Decode: tools.StrictDecoder(func() any { return &copyTreeGenerateArgs{} }),
+		Decode: decode,
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a copyTreeGenerateArgs
-			_ = json.Unmarshal(raw, &a)
+			a, bad := copyTreeHandlerGuard[copyTreeGenerateArgs](decode, "copyTree.generate", raw)
+			if !bad.Ok {
+				return bad
+			}
 			return passthrough(ctx, deps.MCP, "copyTree.generate", a.forwardMap(), "")
 		},
 	}
@@ -383,25 +530,25 @@ var copyTreeCopyFileSchema = json.RawMessage(`{
 }`)
 
 func newCopyTreeGenerateAndCopyFileTool(deps Deps) tools.Tool {
+	decode := copyTreeStrictDecoder(func() any { return &copyTreeCopyFileArgs{} })
 	return tools.Tool{
 		Name: "copyTree.generateAndCopyFile",
-		Description: "Generate a worktree's copy tree and put the resulting file on the user's OS clipboard, replacing what they had copied. " +
-			"System tier — always confirms. Requires an EXPLICIT worktreeId (or worktreePath): there is no active-worktree fallback for " +
+		Description: "Generate a worktree's copy tree and put it on the user's OS clipboard, replacing what they had copied (macOS and Linux " +
+			"copy the file itself, Windows its path). System tier — always confirms. Requires an EXPLICIT worktreeId (or worktreePath): there is no active-worktree fallback for " +
 			"assistant calls, so name the worktree you curated against. Curate with options.includePaths — the explicit list of files that " +
 			"matter — instead of bundling the whole worktree. Daintree shows the user a 'Context copied' notification once the copy lands. " +
 			"When you only need the reference file and not the user's clipboard, use copyTree.generate instead.",
-		Consequence: "Replaces the operating-system clipboard's current contents with the generated bundle file, and notifies the user that the context was copied.",
+		Consequence: "Replaces the operating-system clipboard's current contents with the generated bundle (the file itself on macOS/Linux, its path on Windows), and notifies the user that the context was copied.",
 		Risk:        domain.RiskSystem,
 		Schema:      copyTreeCopyFileSchema,
-		Decode:      tools.StrictDecoder(func() any { return &copyTreeCopyFileArgs{} }),
+		Decode:      decode,
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a copyTreeCopyFileArgs
-			_ = json.Unmarshal(raw, &a)
 			// Defense in depth for any path that skips Decode — the host would
-			// reject this too, but only after the confirmation prompt.
-			if strings.TrimSpace(a.WorktreeID) == "" && strings.TrimSpace(a.WorktreePath) == "" {
-				return tools.Fail(domain.CodeValidation,
-					"copyTree.generateAndCopyFile: an explicit worktreeId or worktreePath is required (no active-worktree fallback for assistant calls).")
+			// reject a targetless call too, but only after the user has already
+			// confirmed a clipboard overwrite.
+			a, bad := copyTreeHandlerGuard[copyTreeCopyFileArgs](decode, "copyTree.generateAndCopyFile", raw)
+			if !bad.Ok {
+				return bad
 			}
 			return passthrough(ctx, deps.MCP, "copyTree.generateAndCopyFile", a.forwardMap(), "")
 		},
@@ -442,6 +589,7 @@ var copyTreeInjectSchema = json.RawMessage(`{
 }`)
 
 func newCopyTreeInjectTool(deps Deps) tools.Tool {
+	decode := copyTreeStrictDecoder(func() any { return &copyTreeInjectArgs{} })
 	return tools.Tool{
 		Name: "copyTree.injectToTerminal",
 		Description: "Generate a worktree's copy tree and inject it into a Daintree terminal's input — this is how you hand a large codebase " +
@@ -451,14 +599,15 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 		Consequence: "Pastes a generated file digest into the named terminal's input. May be large; review the target terminal before approving.",
 		Risk:        domain.RiskTerminal,
 		Schema:      copyTreeInjectSchema,
-		Decode:      tools.StrictDecoder(func() any { return &copyTreeInjectArgs{} }),
+		Decode:      decode,
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a copyTreeInjectArgs
-			_ = json.Unmarshal(raw, &a)
 			// Mirror terminal.sendCommand's guard: a blank terminalId would inject
-			// the digest into an unnamed target, so reject it before the MCP call.
-			if strings.TrimSpace(a.TerminalID) == "" {
-				return tools.Fail(domain.CodeValidation, "copyTree.injectToTerminal: terminalId must be non-empty.")
+			// the digest into an unnamed target, so reject it before the MCP call
+			// AND before the observer mark below (a mark for a call that never
+			// happened would make a settled agent look busy).
+			a, bad := copyTreeHandlerGuard[copyTreeInjectArgs](decode, "copyTree.injectToTerminal", raw)
+			if !bad.Ok {
+				return bad
 			}
 			m := map[string]any{"terminalId": a.TerminalID}
 			if a.WorktreeID != "" {

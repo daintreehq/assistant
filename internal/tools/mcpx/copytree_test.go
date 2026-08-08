@@ -46,6 +46,7 @@ type schemaObject struct {
 	MinLength            *int                    `json:"minLength"`
 	Minimum              *int                    `json:"minimum"`
 	Enum                 []string                `json:"enum"`
+	Description          string                  `json:"description"`
 }
 
 func parseSchema(t *testing.T, raw json.RawMessage) schemaObject {
@@ -169,7 +170,64 @@ func TestCopyTreeOptionsSchemaMatchesStruct(t *testing.T) {
 			if got := opts.Properties["sort"].Enum; !reflect.DeepEqual(got, copyTreeSorts) {
 				t.Errorf("sort enum drifted: got %v want %v", got, copyTreeSorts)
 			}
+
+			// Advertised TYPE per field. Without this the key-set check above
+			// would stay green while `modified` was advertised as a string or
+			// `exclude` as an array of integers — the model would then emit
+			// something the strict decoder rejects, with nothing to explain why.
+			wantType := map[string]string{
+				"always": "array", "changed": "string", "charLimit": "integer",
+				"exclude": "array", "filter": "array", "format": "string",
+				"includePaths": "array", "maxFileCount": "integer", "maxFileSize": "integer",
+				"maxTotalSize": "integer", "modified": "boolean", "scopePaths": "array",
+				"sort": "string", "withLineNumbers": "boolean",
+			}
+			for field, want := range wantType {
+				p := opts.Properties[field]
+				if p.Type != want {
+					t.Errorf("%s advertised as %q, want %q", field, p.Type, want)
+				}
+				if want == "array" && (p.Items == nil || p.Items.Type != "string") {
+					t.Errorf("%s must declare string items", field)
+				}
+			}
+
+			// Every field carries model-facing prose — these descriptions ARE the
+			// feature, so an empty one is a silent regression.
+			for field, p := range opts.Properties {
+				if strings.TrimSpace(p.Description) == "" {
+					t.Errorf("options.%s has no description; the model has nothing to go on", field)
+				}
+			}
+			if strings.TrimSpace(opts.Description) == "" {
+				t.Errorf("the options object itself needs a description")
+			}
 		})
+	}
+
+	// Required sets and risk classes, pinned per tool.
+	if got := parseSchema(t, newCopyTreeInjectTool(Deps{}).Schema).Required; !reflect.DeepEqual(got, []string{"terminalId"}) {
+		t.Errorf("inject must require terminalId, got %v", got)
+	}
+	for _, tool := range []string{"copyTree.generate", "copyTree.generateAndCopyFile"} {
+		found := false
+		for _, tc := range copyTreeCases {
+			if tc.name != tool {
+				continue
+			}
+			found = true
+			// Neither worktree selector is `required`: "at least one of two" needs
+			// a combinator, so Validate carries that constraint instead.
+			if got := parseSchema(t, tc.build(Deps{}).Schema).Required; len(got) != 0 {
+				t.Errorf("%s should require no field in the schema, got %v", tool, got)
+			}
+		}
+		if !found {
+			t.Fatalf("%s is missing from copyTreeCases; this assertion was silently doing nothing", tool)
+		}
+	}
+	if got := newCopyTreeInjectTool(Deps{}).Risk; got != domain.RiskTerminal {
+		t.Errorf("inject must stay RiskTerminal, got %v", got)
 	}
 }
 
@@ -235,25 +293,46 @@ func TestCopyTreeRejectsUnsafeEmptySelections(t *testing.T) {
 	unsafe := []struct {
 		name    string
 		options map[string]any
+		wantErr string
 	}{
-		{"empty includePaths", map[string]any{"includePaths": []string{}}},
-		{"empty scopePaths", map[string]any{"scopePaths": []string{}}},
-		{"empty filter", map[string]any{"filter": []string{}}},
-		{"blank includePaths entry", map[string]any{"includePaths": []string{"a.go", "   "}}},
-		{"blank scopePaths entry", map[string]any{"scopePaths": []string{""}}},
-		{"blank filter entry", map[string]any{"filter": []string{" "}}},
+		{"empty includePaths", map[string]any{"includePaths": []string{}}, "options.includePaths was supplied as an empty list"},
+		{"empty scopePaths", map[string]any{"scopePaths": []string{}}, "options.scopePaths was supplied as an empty list"},
+		{"empty filter", map[string]any{"filter": []string{}}, "options.filter was supplied as an empty list"},
+		{"blank includePaths entry", map[string]any{"includePaths": []string{"a.go", "   "}}, "is blank"},
+		{"blank scopePaths entry", map[string]any{"scopePaths": []string{""}}, "is blank"},
+		{"blank filter entry", map[string]any{"filter": []string{" "}}, "is blank"},
+
+		// Explicit JSON null is the same widening through a different door:
+		// encoding/json maps it onto a nil slice, which is indistinguishable from
+		// "omitted" by the time Validate runs, and omitempty then erases it during
+		// the canonical re-marshal. Daintree reads the resulting absent selection
+		// as "no filter" — the whole worktree.
+		{"null includePaths", map[string]any{"includePaths": nil}, "is null"},
+		{"null scopePaths", map[string]any{"scopePaths": nil}, "is null"},
+		{"null filter", map[string]any{"filter": nil}, "is null"},
+		{"null exclude", map[string]any{"exclude": nil}, "is null"},
+		{"null budget", map[string]any{"maxFileCount": nil}, "is null"},
+		{"null format", map[string]any{"format": nil}, "is null"},
+		{"blank changed", map[string]any{"changed": "   "}, "is blank"},
+		{"blank format", map[string]any{"format": ""}, "is blank"},
+		{"blank sort", map[string]any{"sort": ""}, "is blank"},
+		{"blank exclude entry", map[string]any{"exclude": []string{""}}, "is blank"},
+		{"blank always entry", map[string]any{"always": []string{" "}}, "is blank"},
 	}
 
 	for _, tc := range copyTreeCases {
 		for _, u := range unsafe {
 			t.Run(tc.name+"/"+u.name, func(t *testing.T) {
-				mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
-				tool := tc.build(Deps{MCP: mcp})
-				if _, err := tool.Decode(argsWithOptions(t, tc.baseArgs, u.options)); err == nil {
+				tool := tc.build(Deps{})
+				_, err := tool.Decode(argsWithOptions(t, tc.baseArgs, u.options))
+				if err == nil {
 					t.Fatalf("%s must be rejected — it would silently bundle the whole worktree", u.name)
 				}
-				if mcp.lastName != "" {
-					t.Errorf("rejected args must not reach MCP, called %q", mcp.lastName)
+				// Pin WHICH guard fired. Without this the test would still pass if
+				// the value were rejected incidentally (a type error, an unknown
+				// field) while the widening guard itself had been deleted.
+				if !strings.Contains(err.Error(), u.wantErr) {
+					t.Errorf("rejected for the wrong reason: want a message containing %q, got %q", u.wantErr, err)
 				}
 			})
 		}
@@ -279,30 +358,33 @@ func TestCopyTreeRejectsUnsafeEmptySelections(t *testing.T) {
 // Bounds the schema advertises but strict decoding alone can't enforce, plus the
 // closed-object rejection that makes a mistyped key visible instead of silent.
 func TestCopyTreeRejectsInvalidTypedValues(t *testing.T) {
+	// wantErr pins the MECHANISM, so a case can't quietly start passing for a
+	// different reason than the one it is named for.
 	cases := []struct {
-		name string
-		args string
+		name    string
+		args    string
+		wantErr string
 	}{
-		{"unknown nested option key", `{"options":{"depth":2}}`},
-		{"scalar filter (host union arm we do not accept)", `{"options":{"filter":"**/*.go"}}`},
-		{"scalar exclude", `{"options":{"exclude":"vendor/**"}}`},
-		{"off-menu format", `{"options":{"format":"yaml"}}`},
-		{"off-menu sort", `{"options":{"sort":"random"}}`},
-		{"zero maxFileCount", `{"options":{"maxFileCount":0}}`},
-		{"negative charLimit", `{"options":{"charLimit":-1}}`},
-		{"fractional maxTotalSize", `{"options":{"maxTotalSize":1.5}}`},
-		{"wrong type for modified", `{"options":{"modified":"yes"}}`},
-		{"unknown top-level key", `{"nope":1}`},
+		{"unknown nested option key", `{"options":{"depth":2}}`, "unknown field"},
+		{"scalar filter (host union arm we do not accept)", `{"options":{"filter":"**/*.go"}}`, "cannot unmarshal"},
+		{"scalar exclude", `{"options":{"exclude":"vendor/**"}}`, "cannot unmarshal"},
+		{"off-menu format", `{"options":{"format":"yaml"}}`, "options.format must be one of"},
+		{"off-menu sort", `{"options":{"sort":"random"}}`, "options.sort must be one of"},
+		{"zero maxFileCount", `{"options":{"maxFileCount":0}}`, "options.maxFileCount must be a positive integer"},
+		{"negative charLimit", `{"options":{"charLimit":-1}}`, "options.charLimit must be a positive integer"},
+		{"fractional maxTotalSize", `{"options":{"maxTotalSize":1.5}}`, "cannot unmarshal"},
+		{"wrong type for modified", `{"options":{"modified":"yes"}}`, "cannot unmarshal"},
+		{"unknown top-level key", `{"nope":1}`, "unknown field"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
-			tool := newCopyTreeGenerateTool(Deps{MCP: mcp})
-			if _, err := tool.Decode(json.RawMessage(c.args)); err == nil {
-				t.Errorf("%s must be rejected at decode", c.name)
+			tool := newCopyTreeGenerateTool(Deps{})
+			_, err := tool.Decode(json.RawMessage(c.args))
+			if err == nil {
+				t.Fatalf("%s must be rejected at decode", c.name)
 			}
-			if mcp.lastName != "" {
-				t.Errorf("rejected args must not reach MCP, called %q", mcp.lastName)
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("rejected for the wrong reason: want a message containing %q, got %q", c.wantErr, err)
 			}
 		})
 	}
@@ -324,12 +406,12 @@ func TestCopyTreeGenerateAndCopyFileRequiresExplicitTarget(t *testing.T) {
 	for _, bad := range []string{`{}`, `{"worktreeId":"  "}`, `{"worktreePath":""}`, `{"options":{"includePaths":["a.go"]}}`} {
 		mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 		tool := newCopyTreeGenerateAndCopyFileTool(Deps{MCP: mcp})
-		decoded, err := tool.Decode(json.RawMessage(bad))
-		if err == nil {
+		if _, err := tool.Decode(json.RawMessage(bad)); err == nil {
 			t.Errorf("%s must be rejected: the clipboard copy has no active-worktree fallback", bad)
 		}
-		// Defense in depth: the handler refuses too, for any path skipping Decode.
-		if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); res.Ok || res.Error.Code != domain.CodeValidation {
+		// Defense in depth: feed the handler the ORIGINAL payload, not the nil
+		// Decode returned — otherwise this only proves the handler rejects EOF.
+		if res := tool.Handle(context.Background(), json.RawMessage(bad), &tools.ToolContext{}); res.Ok || res.Error.Code != domain.CodeValidation {
 			t.Errorf("handler must also refuse %s: %+v", bad, res)
 		}
 		if mcp.lastName != "" {
@@ -411,6 +493,177 @@ func TestCopyTreeGenerateForwardsTargetAndIncludeContent(t *testing.T) {
 	for _, want := range []string{"includePaths", "PATH"} {
 		if !strings.Contains(tool.Description, want) {
 			t.Errorf("description must mention %q so the model knows how to curate and what comes back: %q", want, tool.Description)
+		}
+	}
+}
+
+// An explicitly empty or null worktree selector must be rejected, never quietly
+// dropped. Dropping it is what turns "bundle THIS worktree" into "bundle
+// whichever worktree happens to be active" — which is exactly the silent
+// retarget Daintree's own .min(1) on its selectors exists to prevent
+// (locationArgs.ts), and our schema already advertises minLength:1.
+func TestCopyTreeRejectsEmptyWorktreeSelectors(t *testing.T) {
+	cases := []struct {
+		tool string
+		args string
+	}{
+		{"copyTree.generate", `{"worktreeId":""}`},
+		{"copyTree.generate", `{"worktreePath":"   "}`},
+		{"copyTree.generate", `{"worktreeId":null}`},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1","worktreeId":""}`},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1","worktreeId":null}`},
+		// A valid target alongside a blank one is still malformed: the host would
+		// reject the blank spelling rather than let the good one paper over it.
+		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1","worktreePath":""}`},
+	}
+	for _, c := range cases {
+		t.Run(c.tool+" "+c.args, func(t *testing.T) {
+			var tool tools.Tool
+			for _, tc := range copyTreeCases {
+				if tc.name == c.tool {
+					tool = tc.build(Deps{})
+				}
+			}
+			_, err := tool.Decode(json.RawMessage(c.args))
+			if err == nil {
+				t.Fatalf("an explicitly empty/null selector must be rejected, not dropped to the active worktree")
+			}
+			if !strings.Contains(err.Error(), "is blank") && !strings.Contains(err.Error(), "is null") {
+				t.Errorf("rejected for the wrong reason: %q", err)
+			}
+		})
+	}
+}
+
+// A repeated JSON key is the one shape a map-based scan cannot see: decoding the
+// payload into map[string]any keeps only the LAST occurrence, while
+// encoding/json merges repeated members into the same destination struct — so a
+// null hidden in an earlier copy survives into the struct while the scan looks at
+// a clean later one. That lands as "no selection", i.e. the whole worktree, on the
+// clipboard. Built from raw strings on purpose: json.Marshal of a Go map can
+// never produce a duplicate key, so the helper used elsewhere cannot express it.
+func TestCopyTreeRejectsDuplicateKeys(t *testing.T) {
+	cases := []struct {
+		tool string
+		args string
+		// The scan walks lexically, so a null/blank inside the FIRST copy is
+		// reported before the duplicate key itself is reached. Either message
+		// proves the bypass is closed; wantErr records which one to expect so the
+		// case still pins a mechanism rather than "some error happened".
+		wantErr string
+	}{
+		// Purely duplicate — nothing else wrong with these, so ONLY duplicate
+		// detection can reject them.
+		{"copyTree.generate", `{"worktreeId":"wt-1","worktreeId":"wt-2"}`, "more than once"},
+		{"copyTree.generate", `{"options":{"includePaths":["a.go"]},"options":{}}`, "more than once"},
+		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1","options":{"scopePaths":["internal"]},"options":{}}`, "more than once"},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1","options":{"filter":["*.go"]},"options":{}}`, "more than once"},
+		// Duplicate hiding a null/blank in the earlier copy: caught on the way in.
+		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1","options":{"includePaths":null},"options":{}}`, "is null"},
+		{"copyTree.generate", `{"options":{"changed":"","format":"xml"},"options":{"format":"xml"}}`, "is blank"},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1","options":{"scopePaths":null},"options":{}}`, "is null"},
+	}
+	for _, c := range cases {
+		t.Run(c.tool+" "+c.args, func(t *testing.T) {
+			var tool tools.Tool
+			found := false
+			for _, tc := range copyTreeCases {
+				if tc.name == c.tool {
+					tool = tc.build(Deps{})
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("unknown tool %q in the case table", c.tool)
+			}
+			_, err := tool.Decode(json.RawMessage(c.args))
+			if err == nil {
+				t.Fatalf("a repeated key must be rejected; it can hide a null that widens the bundle")
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("rejected for the wrong reason: want a message containing %q, got %q", c.wantErr, err)
+			}
+		})
+	}
+}
+
+// An empty exclude/always list is LEGAL host-side and means "clear the project's
+// configured defaults for this call". Daintree back-fills excludedPaths /
+// alwaysExclude / alwaysInclude only when the field is undefined
+// (electron/ipc/handlers/copyTree.ts, mergeCopyTreeOptions), so an empty list
+// erased by omitempty would arrive as undefined and restore precisely the
+// patterns the caller was trying to drop. Since `always` is a force-include that
+// overrides the filter, a project pattern like "**/*" would then defeat a
+// curated includePaths — a narrow request widened back to the whole worktree.
+func TestCopyTreeEmptyExcludeAndAlwaysSurviveToTheWire(t *testing.T) {
+	for _, field := range []string{"exclude", "always"} {
+		t.Run(field, func(t *testing.T) {
+			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+			tool := newCopyTreeGenerateTool(Deps{MCP: mcp})
+			decoded, err := tool.Decode(argsWithOptions(t, nil, map[string]any{
+				"includePaths": []string{"safe.go"},
+				field:          []string{},
+			}))
+			if err != nil {
+				t.Fatalf("an empty %s is legal host-side and must decode: %v", field, err)
+			}
+			if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+				t.Fatalf("expected ok: %+v", res.Error)
+			}
+			opts, _ := mcp.lastArgs["options"].(map[string]any)
+			got, present := opts[field]
+			if !present {
+				t.Fatalf("an empty %s was erased; Daintree will back-fill the project's own patterns and can widen the bundle", field)
+			}
+			// Assert the type too: a present null, string or object would all
+			// yield a nil []any of length 0 and pass a length-only check.
+			list, ok := got.([]any)
+			if !ok || len(list) != 0 {
+				t.Errorf("%s should have arrived as an empty JSON array, got %#v", field, got)
+			}
+		})
+	}
+
+	// An empty options object carries no instruction at all, so it may be dropped
+	// — the host treats {} and absence identically.
+	mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+	tool := newCopyTreeGenerateTool(Deps{MCP: mcp})
+	decoded, err := tool.Decode(json.RawMessage(`{"options":{}}`))
+	if err != nil {
+		t.Fatalf("an empty options object must decode: %v", err)
+	}
+	if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+		t.Fatalf("expected ok: %+v", res.Error)
+	}
+	if _, present := mcp.lastArgs["options"]; present {
+		t.Errorf("an empty options object should stay off the wire, got %v", mcp.lastArgs["options"])
+	}
+}
+
+// A rejected injection must not reach the MCP *or* mark the terminal as
+// command-sent: that mark invalidates cross-call settle evidence, so firing it
+// for a call that never happened would make a settled agent look busy.
+func TestCopyTreeInjectRejectionTouchesNothing(t *testing.T) {
+	for _, bad := range []string{`{"terminalId":"  "}`, `{"terminalId":"t1","options":{"includePaths":[]}}`} {
+		mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+		obs := &recordObserver{}
+		tool := newCopyTreeInjectTool(Deps{MCP: mcp, Observer: obs})
+
+		_, err := tool.Decode(json.RawMessage(bad))
+		if err == nil {
+			t.Fatalf("%s must be rejected at decode", bad)
+		}
+		// Feed the ORIGINAL raw (not the nil Decode returned) so the handler's
+		// defense-in-depth path is genuinely exercised on real arguments.
+		res := tool.Handle(context.Background(), json.RawMessage(bad), &tools.ToolContext{})
+		if res.Ok || res.Error.Code != domain.CodeValidation {
+			t.Errorf("handler must refuse %s: %+v", bad, res)
+		}
+		if mcp.lastName != "" {
+			t.Errorf("rejected inject must not reach MCP, called %q", mcp.lastName)
+		}
+		if len(obs.marked) != 0 {
+			t.Errorf("rejected inject must not mark the terminal command-sent: %v", obs.marked)
 		}
 	}
 }
