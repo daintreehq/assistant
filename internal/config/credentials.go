@@ -62,6 +62,17 @@ func LoadCredentials(path string) (Credentials, bool, error) {
 	}
 	c.Endpoint = strings.TrimSpace(c.Endpoint)
 	c.APIKey = strings.TrimSpace(c.APIKey)
+	// A persisted endpoint is validated exactly like a typed one: a hand-edited
+	// file must not smuggle shapes the login prompt rejects (userinfo/query/
+	// fragment — /status prints this URL) past the gate. Invalid ⇒ error, so the
+	// login flow offers repair instead of the launcher trusting the value.
+	if c.Endpoint != "" {
+		norm, err := NormalizeEndpoint(c.Endpoint)
+		if err != nil {
+			return Credentials{}, false, fmt.Errorf("credentials %s: %w", path, err)
+		}
+		c.Endpoint = norm
+	}
 	return c, c.Complete(), nil
 }
 
@@ -126,7 +137,7 @@ func NormalizeEndpoint(raw string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("endpoint has no host: %q", raw)
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", fmt.Errorf("endpoint must be a bare base URL (no credentials, query, or fragment): %q", raw)
 	}
 	u.Path = strings.TrimRight(u.Path, "/")

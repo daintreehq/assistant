@@ -85,7 +85,12 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// probe budget replaying a refused socket to reach the same verdict.
 	ctx = backend.WithoutRetry(ctx)
 	push("backend url", true, a.Backend.BaseURL(), "")
-	push("backend key", true, presentOrMissing(cfg.BackendAPIKey), "")
+	// A missing key is a real failure on the production/persisted endpoint (the
+	// backend requires one). Only the DAINTREE_BACKEND_URL escape hatch — a
+	// dev/test backend that may run unauthenticated — makes keyless legitimate.
+	keyOK := cfg.BackendAPIKey != "" || strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")) != ""
+	push("backend key", keyOK, presentOrMissing(cfg.BackendAPIKey),
+		"run /login to set the backend API key")
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)
 	bcancel()

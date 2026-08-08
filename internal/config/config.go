@@ -295,7 +295,18 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// default. The key rides along ONLY when the resolved URL is the persisted
 	// login's own endpoint — an env-overridden fake backend gets no key.
 	cfg.BackendURL = FirstString(deref(overrides.BackendURL), e.trustedGet("DAINTREE_BACKEND_URL"))
-	creds, _, _ := LoadCredentials(DefaultCredentialsPath())
+	creds, _, credErr := LoadCredentials(DefaultCredentialsPath())
+	if credErr != nil && cfg.BackendURL == "" {
+		// A corrupt/invalid credential file must fail loudly when it would have
+		// picked the endpoint — not silently retarget a keyless client at the
+		// production default. The interactive launcher repairs this before
+		// app.Create (its login gate treats a load error as "login needed" and
+		// the save overwrites the file); every other path surfaces the
+		// actionable error. With an explicit override/env URL the file is moot
+		// (the pairing rule yields no key either way), so it cannot brick
+		// dev/e2e runs.
+		return AppConfig{}, fmt.Errorf("backend credentials unusable (re-run login or delete the file): %w", credErr)
+	}
 	if cfg.BackendURL == "" {
 		cfg.BackendURL = creds.Endpoint
 	}
@@ -309,16 +320,14 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	return cfg, nil
 }
 
-// sameEndpoint compares two endpoint URLs after normalization (falling back to
-// a trimmed string compare when either fails to parse). Empty never matches.
+// sameEndpoint compares two endpoint URLs after normalization. FAIL-CLOSED: an
+// endpoint that does not normalize never matches (the key stays home), and
+// empty never matches.
 func sameEndpoint(a, b string) bool {
-	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
-		return false
-	}
 	na, errA := NormalizeEndpoint(a)
 	nb, errB := NormalizeEndpoint(b)
 	if errA != nil || errB != nil {
-		return strings.TrimRight(strings.TrimSpace(a), "/") == strings.TrimRight(strings.TrimSpace(b), "/")
+		return false
 	}
 	return na == nb
 }

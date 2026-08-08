@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/daintreehq/daintree-assistant/internal/config"
@@ -25,7 +26,19 @@ func spawnDaemon(cfg config.AppConfig, version string) error {
 	}
 	cmd := exec.Command(exe, "daemon")
 	cmd.Dir = cfg.ProjectPath
-	env := append(os.Environ(),
+	// DAINTREE_BACKEND_URL is deliberately STRIPPED from the inherited env: the
+	// daemon receives the current override via every attach's credentials push
+	// (tri-state, so an unset var actively clears it). Inheriting it here would
+	// pin a stale dev endpoint in the daemon's own environment, where LoadConfig
+	// would keep resurrecting it long after the shell that set it moved on.
+	env := make([]string, 0, len(os.Environ())+8)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "DAINTREE_BACKEND_URL=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
 		"DAINTREE_ASSISTANT_STATE_DIR="+cfg.StateDir,
 		"DAINTREE_ASSISTANT_TIER="+string(cfg.Tier),
 	)

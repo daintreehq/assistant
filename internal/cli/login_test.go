@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 )
 
 // login_test.go locks the two-question login flow: default vs custom endpoint,
@@ -105,6 +108,71 @@ func TestRunLoginFlowNeverEchoesTheKey(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "sk-or-v1-supersecret") {
 		t.Fatal("the flow's own output must never contain the key")
+	}
+}
+
+// The /login restart loop end-to-end: a cockpit surface that requests login
+// (domain.ErrLoginRequested) hands the terminal back, the flow reads the new
+// endpoint + key from stdin, and the SECOND app in the same runInteractive call
+// is built against the freshly-saved credentials.
+func TestRunInteractive_LoginRestartRebuildsApp(t *testing.T) {
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	t.Setenv(NoDaemonEnv, "1")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DAINTREE_BACKEND_URL", "")
+	// The isolated HOME pushes the derived control-socket path past the unix
+	// socket limit — pin it to a short dir instead.
+	sock, err := os.MkdirTemp("/tmp", "dts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sock) })
+	t.Setenv("DAINTREE_ASSISTANT_SOCKET_DIR", sock)
+	// Seed a complete login so the first-run gate does not consume the script.
+	if err := config.SaveCredentials(config.DefaultCredentialsPath(),
+		config.Credentials{Endpoint: "https://old.example.com", APIKey: "old-key"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scripted stdin for the /login flow: custom endpoint, URL, key.
+	stdin, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString("2\nhttps://new.example.com\nnew-key\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+		_ = stdin.Close()
+	})
+
+	var urls []string
+	opts := Options{
+		Offline: true,
+		Project: t.TempDir(),
+		Cockpit: func(_ context.Context, a *app.App) error {
+			urls = append(urls, a.Backend.BaseURL())
+			if len(urls) == 1 {
+				return domain.ErrLoginRequested
+			}
+			return nil
+		},
+	}
+	if code := runInteractive(context.Background(), opts, true); code != 0 {
+		t.Fatalf("login-restart run exit = %d, want 0", code)
+	}
+	if len(urls) != 2 || urls[0] != "https://old.example.com" || urls[1] != "https://new.example.com" {
+		t.Fatalf("surface saw backend URLs %v, want [old, new]", urls)
+	}
+	creds, ok, err := config.LoadCredentials(config.DefaultCredentialsPath())
+	if err != nil || !ok || creds.APIKey != "new-key" {
+		t.Fatalf("persisted credentials after /login = (%+v, %v, %v)", creds, ok, err)
 	}
 }
 

@@ -489,6 +489,18 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 		return m.onShutdown()
 	}
 	if msg.Login {
+		// Another slash command still in flight (e.g. a slow /compact) would keep
+		// using the App this login restart is about to shut down and rebuild —
+		// closed-store writes from its goroutine. Defer to the user instead of
+		// racing: they re-run /login once the other command finishes.
+		if m.commandsRunning > 0 {
+			m.transcript = append(m.transcript, TranscriptCell{Command: &CommandCell{
+				ID: domain.NewID("cmd_"), Title: "Login",
+				Text: "Another command is still running — wait for it to finish, then run /login again.",
+				Ts:   domain.NowMS(),
+			}})
+			return m.afterStateChange(nil)
+		}
 		// /login tears the cockpit down exactly like a quit (reject pending
 		// confirms, cancel the in-flight turn) — the flag on the final model is
 		// what tells ui.Run to return ErrLoginRequested instead of a clean exit.

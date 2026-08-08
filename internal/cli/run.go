@@ -272,6 +272,12 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	// (non-TTY paths skip the gate entirely).
 	if ttyOK && backendLoginNeeded() {
 		login()
+		// A SIGTERM while the gate waited for input aborts the flow via ctx —
+		// that is a shutdown request, not a skipped login: exit Cancelled here
+		// instead of spending the ownership-acquisition budget on a dead launch.
+		if ctx.Err() != nil {
+			return domain.OneShotExitCode.Cancelled
+		}
 	}
 
 	// Interactive launch: ensure the project's supervisor daemon exists, attach
@@ -423,7 +429,13 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	cctx, ccancel := context.WithTimeout(ctx, 3*time.Second)
 	caps, cerr := a.Backend.Capabilities(cctx)
 	ccancel()
+	var cAuthErr *backend.Error
 	switch {
+	case errors.As(cerr, &cAuthErr) && cAuthErr.IsAuth():
+		// /healthz can be public while capabilities sits behind auth — a rejected
+		// key here is a GATING credential failure, not "cannot verify".
+		r.Line("  backend tasks  : API KEY REJECTED — run /login (or log in on next interactive start)")
+		anyFail = true
 	case cerr != nil:
 		r.Line("  backend tasks  : cannot verify — " + cerr.Error())
 	default:

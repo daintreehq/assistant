@@ -81,6 +81,51 @@ func TestLoadCredentialsMalformedIsAnError(t *testing.T) {
 	}
 }
 
+// A hand-edited file is validated exactly like typed input: a userinfo URL
+// (secret smuggled into an endpoint /status would print) must error, never
+// count as a complete login.
+func TestLoadCredentialsRejectsInvalidPersistedEndpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(path,
+		[]byte(`{"endpoint":"https://user:pw@evil.example.com","apiKey":"k"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadCredentials(path); err == nil {
+		t.Fatal("a persisted userinfo endpoint must be rejected on load")
+	}
+}
+
+// A corrupt credential file fails LoadConfig loudly when it would have picked
+// the endpoint — but must NOT brick a run whose endpoint is pinned by env
+// (dev/e2e), where the file is moot.
+func TestLoadConfigCorruptCredentials(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".daintree"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".daintree", "credentials.json"),
+		[]byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	proj := t.TempDir()
+
+	t.Setenv("DAINTREE_BACKEND_URL", "")
+	if _, err := LoadConfig(ConfigOverrides{ProjectPath: &proj}); err == nil {
+		t.Fatal("corrupt credentials with no env override must fail LoadConfig")
+	}
+
+	t.Setenv("DAINTREE_BACKEND_URL", "http://127.0.0.1:9999")
+	cfg, err := LoadConfig(ConfigOverrides{ProjectPath: &proj})
+	if err != nil {
+		t.Fatalf("env-pinned run must survive a corrupt credential file, got %v", err)
+	}
+	if cfg.BackendAPIKey != "" {
+		t.Fatalf("corrupt file must yield no key, got %q", cfg.BackendAPIKey)
+	}
+}
+
 func TestNormalizeEndpoint(t *testing.T) {
 	cases := []struct {
 		in, want string
@@ -96,6 +141,7 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{in: "https://", wantErr: true},
 		{in: "https://user:pw@x.example.com", wantErr: true},
 		{in: "https://x.example.com?k=v", wantErr: true},
+		{in: "https://x.example.com?", wantErr: true},
 		{in: "https://x.example.com#frag", wantErr: true},
 	}
 	for _, c := range cases {

@@ -37,18 +37,12 @@ func newLineReader() *lineReader {
 	lr := &lineReader{req: make(chan struct{}), resp: make(chan lineResult, 1)}
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
-		var dead error
 		for range lr.req {
-			if dead != nil {
-				// Stdin already hit EOF/error: answer every later request with it
-				// instead of blocking forever on a dead reader.
-				lr.resp <- lineResult{err: dead}
-				continue
-			}
+			// EOF is deliberately NOT latched: on a TTY, Ctrl-D at an empty prompt
+			// yields io.EOF for that one read without closing the terminal — a user
+			// who Ctrl-D's past the first-run gate must still be able to run /login
+			// later. A genuinely closed pipe simply keeps answering EOF per read.
 			line, err := reader.ReadString('\n')
-			if err != nil {
-				dead = err
-			}
 			lr.resp <- lineResult{line: line, err: err}
 		}
 	}()

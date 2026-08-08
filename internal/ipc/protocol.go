@@ -113,9 +113,13 @@ type AttachReply struct {
 }
 
 // Credentials is the ReqCredentials payload (also embedded in AttachRequest).
-// Empty fields mean "leave unchanged".
+// Empty MCP fields mean "leave unchanged". BackendURL is TRI-STATE: nil leaves
+// the daemon's value unchanged, a pointer REPLACES it — including a pointer to
+// "" which CLEARS a previously-pushed dev override (otherwise a daemon that
+// once saw DAINTREE_BACKEND_URL would pin the stale dev endpoint forever,
+// shadowing a later /login's persisted production endpoint).
 type Credentials struct {
-	McpURL     string `json:"mcpUrl,omitempty"`
-	McpToken   string `json:"mcpToken,omitempty"`
-	BackendURL string `json:"backendUrl,omitempty"`
+	McpURL     string  `json:"mcpUrl,omitempty"`
+	McpToken   string  `json:"mcpToken,omitempty"`
+	BackendURL *string `json:"backendUrl,omitempty"`
 }

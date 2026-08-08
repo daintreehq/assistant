@@ -112,6 +112,11 @@ type Runtime struct {
 	state        ipc.DaemonState
 	attachConnID uint64
 	creds        ipc.Credentials
+	// backendURL is the last PUSHED backend endpoint override (the cockpit's
+	// DAINTREE_BACKEND_URL escape hatch), replayed as a ConfigOverride on each
+	// span. "" means none: pushes are tri-state (see ipc.Credentials), so a
+	// cockpit launched WITHOUT the env var actively clears a stale dev value.
+	backendURL   string
 	app          *app.App           // non-nil while supervising
 	cancelSup    context.CancelFunc // cancels the active supervision span
 	handoverDone chan struct{}      // closed when the span fully released the lease
@@ -338,8 +343,8 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	// escape hatch) wins over whatever this daemon inherited at spawn. The
 	// persisted /login endpoint + API key need no push at all: LoadConfig reads
 	// the global credential file fresh inside app.Create on every span.
-	if r.creds.BackendURL != "" {
-		overrides.BackendURL = strPtr(r.creds.BackendURL)
+	if r.backendURL != "" {
+		overrides.BackendURL = strPtr(r.backendURL)
 	}
 	r.mu.Unlock()
 
@@ -789,8 +794,8 @@ func (r *Runtime) applyCredsLocked(c ipc.Credentials) (changed bool) {
 		r.creds.McpToken = c.McpToken
 		changed = true
 	}
-	if c.BackendURL != "" && c.BackendURL != r.creds.BackendURL {
-		r.creds.BackendURL = c.BackendURL
+	if c.BackendURL != nil && *c.BackendURL != r.backendURL {
+		r.backendURL = *c.BackendURL
 		changed = true
 	}
 	if changed {

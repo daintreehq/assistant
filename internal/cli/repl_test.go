@@ -31,6 +31,8 @@ func TestRunCancellable_PropagatesNormalError(t *testing.T) {
 
 func TestClassicREPL_ParentCancellationExits(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	// Isolate HOME so LoadConfig never reads the developer's real credentials.
+	t.Setenv("HOME", t.TempDir())
 	a, err := app.Create(app.CreateOptions{Overrides: overridesFromOptions(Options{
 		Offline: true,
 		Project: t.TempDir(),

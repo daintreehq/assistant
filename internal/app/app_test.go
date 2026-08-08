@@ -24,6 +24,9 @@ import (
 // real DefaultToolBuilder so AssertSafe runs over the whole wired tool set.
 func newOfflineApp(t *testing.T) *App {
 	t.Helper()
+	// Isolate HOME so LoadConfig's backend-credential read can never see (or
+	// depend on) the developer's real ~/.daintree/credentials.json.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	a, err := Create(CreateOptions{
 		Overrides: config.ConfigOverrides{
