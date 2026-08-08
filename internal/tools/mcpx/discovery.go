@@ -250,7 +250,15 @@ var wrappedMCPTools = map[string]string{
 	"worktree.createWithRecipe":    "worktree.createWithRecipe (typed wrapper — pass arguments)",
 	"workflow.startWorkOnIssue":    "workflow.startWorkOnIssue (typed wrapper — pass arguments; it also attaches a supervisor watcher)",
 	"workflow.prepBranchForReview": "workflow.prepBranchForReview (typed wrapper — pass arguments)",
-	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
+
+	// The forge reads are strictly typed on BOTH sides now (issue #299): the host
+	// validates them with closed schemas and the wrapper mirrors that contract, so
+	// forwarding the raw action through daintree.call trades a local, self-correcting
+	// INVALID_ARGS for an opaque host refusal.
+	"forge.listIssues": `forge.listIssues (typed wrapper — pass state/search/perPage/sort/direction/cursor/view as TOP-LEVEL fields, not an arguments object)`,
+	"forge.listPRs":    `forge.listPRs (typed wrapper — pass state/perPage/sort/direction/cursor/view as TOP-LEVEL fields; it has no search field)`,
+	"forge.getIssue":   "forge.getIssue (typed wrapper — pass issueNumber as a top-level positive integer)",
+	"forge.getPR":      "forge.getPR (typed wrapper — pass prNumber as a top-level positive integer)",
 }
 
 // directMCPDependencies are raw Daintree MCP tools this build calls by name WITHOUT

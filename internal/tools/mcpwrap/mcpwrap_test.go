@@ -183,17 +183,21 @@ func TestPassthroughDisconnected(t *testing.T) {
 	}
 }
 
-// forge.getPR rejects a non-positive prNumber (positive-int contract).
+// forge.getPR rejects a non-positive prNumber (positive-int contract) at BOTH
+// gates: the registry's Decode, which runs the args' Validate via StrictDecoder,
+// and a direct Handle call, whose strictDecode is structural only.
 func TestForgeGetPRRejectsNonPositive(t *testing.T) {
-	m := &fakeMCP{connected: true}
 	tool := findTool(Tools(Deps{}), "forge.getPR")
-	parsed, err := tool.Decode(json.RawMessage(`{"prNumber":0}`))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
+	if _, err := tool.Decode(json.RawMessage(`{"prNumber":0}`)); err == nil {
+		t.Fatal("Decode must reject prNumber:0")
 	}
-	res := tool.Handle(context.Background(), parsed, ctxWith(m))
+	m := &fakeMCP{connected: true}
+	res := tool.Handle(context.Background(), json.RawMessage(`{"prNumber":0}`), ctxWith(m))
 	if res.Ok || res.Error.Code != codeInvalidArgs {
 		t.Fatalf("expected INVALID_ARGS, got %+v", res)
+	}
+	if m.lastName != "" {
+		t.Fatalf("a rejected prNumber must never reach the MCP, called %q", m.lastName)
 	}
 }
 

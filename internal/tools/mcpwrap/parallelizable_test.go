@@ -8,12 +8,13 @@ import (
 )
 
 // TestForgeReadsParallelizable locks the concurrency opt-in for the read-only forge /
-// worktree / git wrapper family. forge.getPR and every forgeRead-built tool
-// (forge.listIssues/listPRs/getIssue, git.getProjectPulse, worktree.list/getCurrent) are
-// independent, bounded MCP snapshot reads with no ordering dependency on their batch
-// siblings, so checking several at once overlaps their round-trips instead of
-// serializing — the same win as terminal.extract. Every parallelizable tool must also be
-// RiskRead, or the runner's double-gate (ParallelSafe) would (correctly) refuse it.
+// worktree / git wrapper family. The four typed forge reads and every forgeRead-built
+// tool (git.getProjectPulse, worktree.list/getCurrent) are independent, bounded MCP
+// snapshot reads with no ordering dependency on their batch siblings, so checking
+// several at once overlaps their round-trips instead of serializing — the same win as
+// terminal.extract. Every parallelizable tool must also be RiskRead, or the runner's
+// double-gate (ParallelSafe) would (correctly) refuse it. The forge entries are listed
+// individually because they no longer share one constructor (issue #299).
 func TestForgeReadsParallelizable(t *testing.T) {
 	cases := []struct {
 		label string
@@ -22,6 +23,7 @@ func TestForgeReadsParallelizable(t *testing.T) {
 		{"forge.getPR", newForgeGetPRTool()},
 		{"forge.getIssue", newForgeGetIssueTool()},
 		{"forge.listPRs", newForgeListPRsTool()},
+		{"forge.listIssues", newForgeListIssuesTool()},
 		{"worktree.list", newWorktreeListTool()},
 	}
 	for _, c := range cases {
