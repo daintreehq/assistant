@@ -23,7 +23,8 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
-// liveBaseURL is the hardcoded local backend endpoint (mirrors backend.DefaultBaseURL).
+// liveBaseURL is the local development backend endpoint (DefaultBaseURL is the
+// production URL now, so the literal dev address is pinned here).
 const liveBaseURL = "http://127.0.0.1:8473"
 
 // requireLiveBackend probes /healthz with a 2s timeout and skips the test when the

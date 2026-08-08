@@ -187,6 +187,7 @@ var wakeFailurePrefixes = []string{
 	"Model rate-limited:",
 	"Model error:",
 	"Can't reach the Daintree assistant backend", // backend unreachable (classifyBackendError)
+	"Backend authentication failed",              // rejected/missing API key (classifyBackendError)
 	"Tool projection failed:",
 	"Stopped: called ",
 	"Turn cancelled",

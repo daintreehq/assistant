@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -32,51 +31,21 @@ func clearHostTerminal() {
 	fmt.Fprint(os.Stdout, hostTerminalClear)
 }
 
-// startRepl runs the classic line REPL. Returns the
-// process exit code.
-func startRepl(ctx context.Context, a *app.App) int {
+// startRepl runs the classic line REPL over the shared demand-driven stdin
+// reader (owned by the caller so it survives a /login restart of this surface).
+// Returns the process exit code plus loginRequested: true when the user asked
+// for /login — the caller shuts the app down, runs the blocking login flow, and
+// re-enters with a fresh app (this function deliberately does NOT run the
+// prompt itself, so both the REPL and the cockpit share one login path).
+func startRepl(ctx context.Context, a *app.App, lines *lineReader) (int, bool) {
 	r := render.Stdout()
-	reader := bufio.NewReader(os.Stdin)
-	type lineResult struct {
-		line string
-		err  error
-	}
-	lines := make(chan lineResult)
-	go func() {
-		defer close(lines)
-		for {
-			line, err := reader.ReadString('\n')
-			select {
-			case lines <- lineResult{line: line, err: err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
 
-	// Keep the read error alongside the line so EOF is distinguishable from an
-	// intentionally empty submission. Reading on a goroutine also lets SIGTERM or
-	// parent cancellation release an otherwise-blocked idle REPL cleanly.
+	// The lineReader keeps the read error alongside the line so EOF is
+	// distinguishable from an intentionally empty submission, and its goroutine
+	// lets SIGTERM or parent cancellation release an otherwise-blocked idle REPL.
 	readLine := func(prompt string) (string, bool) {
 		r.Out(prompt)
-		var result lineResult
-		var ok bool
-		select {
-		case <-ctx.Done():
-			return "", false
-		case result, ok = <-lines:
-			if !ok {
-				return "", false
-			}
-		}
-		trimmed := strings.TrimSpace(result.line)
-		if result.err != nil && trimmed == "" {
-			return "", false
-		}
-		return trimmed, true
+		return lines.Read(ctx)
 	}
 	ask := func(prompt string) string {
 		line, _ := readLine(prompt)
@@ -136,6 +105,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 		}
 		if strings.HasPrefix(line, "/") {
 			res := commands.HandleSlashCommand(base, line, a, r)
+			if res.Login {
+				// Hand control back to the launcher: it owns the login flow and
+				// the app rebuild; this loop's app is about to be shut down.
+				return 0, true
+			}
 			if res.Quit {
 				break
 			}
@@ -163,10 +137,10 @@ func startRepl(ctx context.Context, a *app.App) int {
 
 	_ = a.Shutdown()
 	if ctx.Err() != nil {
-		return domain.OneShotExitCode.Cancelled
+		return domain.OneShotExitCode.Cancelled, false
 	}
 	r.Line(r.Gray("Goodbye."))
-	return 0
+	return 0, false
 }
 
 // replConfirmPhrase is the word the human must type to approve a typed-confirm

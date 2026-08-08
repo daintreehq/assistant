@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/joho/godotenv"
 )
@@ -68,6 +69,15 @@ type AppConfig struct {
 	ProjectID string
 	WindowID  string
 
+	// BackendURL is the fully-resolved Daintree backend endpoint (env override →
+	// persisted login → production default; never empty). BackendAPIKey is the
+	// bearer key sent with every backend request — set ONLY when the resolved URL
+	// matches the persisted login's endpoint, so an env-overridden dev/test
+	// backend (a fake server) can never receive the real key from the
+	// developer's home dir. Empty means "send no Authorization header".
+	BackendURL    string
+	BackendAPIKey string
+
 	Tier        domain.Tier
 	AutoApprove bool
 	Offline     bool
@@ -93,6 +103,7 @@ type ConfigOverrides struct {
 	WindowID             *string
 	McpURL               *string
 	McpToken             *string
+	BackendURL           *string
 	Tier                 *string
 	AutoApprove          *bool
 	Offline              *bool
@@ -275,7 +286,41 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// projectInstructions: override only; loadConfig never reads the FS for this.
 	cfg.ProjectInstructions = deref(overrides.ProjectInstructions)
 
+	// --- backend endpoint + API key ---
+	// Trusted-only (NEVER a loaded .env): the API key is a trusted secret, so a
+	// bound project's .env must not be able to redirect where it is sent (the
+	// same confused-deputy rule as the MCP pair above). Precedence: explicit
+	// override (daemon handoff / tests) → real-env DAINTREE_BACKEND_URL (the
+	// dev/test escape hatch) → the persisted /login endpoint → the production
+	// default. The key rides along ONLY when the resolved URL is the persisted
+	// login's own endpoint — an env-overridden fake backend gets no key.
+	cfg.BackendURL = FirstString(deref(overrides.BackendURL), e.trustedGet("DAINTREE_BACKEND_URL"))
+	creds, _, _ := LoadCredentials(DefaultCredentialsPath())
+	if cfg.BackendURL == "" {
+		cfg.BackendURL = creds.Endpoint
+	}
+	if cfg.BackendURL == "" {
+		cfg.BackendURL = backend.DefaultBaseURL
+	}
+	if creds.APIKey != "" && sameEndpoint(cfg.BackendURL, creds.Endpoint) {
+		cfg.BackendAPIKey = creds.APIKey
+	}
+
 	return cfg, nil
+}
+
+// sameEndpoint compares two endpoint URLs after normalization (falling back to
+// a trimmed string compare when either fails to parse). Empty never matches.
+func sameEndpoint(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	na, errA := NormalizeEndpoint(a)
+	nb, errB := NormalizeEndpoint(b)
+	if errA != nil || errB != nil {
+		return strings.TrimRight(strings.TrimSpace(a), "/") == strings.TrimRight(strings.TrimSpace(b), "/")
+	}
+	return na == nb
 }
 
 // resolveTier implements the fail-closed tier resolution.
@@ -342,11 +387,15 @@ func derefOr(p *string, fallback string) string {
 // a byte count; mcpUrl notes degraded mode when unset.
 func DescribeConfig(cfg AppConfig) map[string]string {
 	out := map[string]string{
-		"projectPath":          cfg.ProjectPath,
-		"stateDir":             cfg.StateDir,
-		"dbPath":               cfg.DBPath,
-		"logDir":               cfg.LogDir,
-		"mcpToken":             redactSecret(cfg.McpToken),
+		"projectPath": cfg.ProjectPath,
+		"stateDir":    cfg.StateDir,
+		"dbPath":      cfg.DBPath,
+		"logDir":      cfg.LogDir,
+		"mcpToken":    redactSecret(cfg.McpToken),
+		"backendUrl":  cfg.BackendURL,
+		// Presence only, never even a redacted fragment: /status output is routinely
+		// pasted into issues/chats, and a partial key still narrows a brute force.
+		"backendApiKey":        presenceOnly(cfg.BackendAPIKey),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),
 		"tier":                 string(cfg.Tier),
@@ -375,6 +424,14 @@ func placeholderUnset(s string) string {
 		return "(unset)"
 	}
 	return s
+}
+
+// presenceOnly renders a secret as "configured" or "(unset)" — no fragment at all.
+func presenceOnly(s string) string {
+	if s == "" {
+		return "(unset)"
+	}
+	return "configured"
 }
 
 // redactSecret renders a secret as "<first4>…<last2> (<len>)" or "(unset)".

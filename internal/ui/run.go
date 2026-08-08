@@ -11,6 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 	"github.com/daintreehq/daintree-assistant/internal/terminal"
 )
@@ -95,10 +96,16 @@ func Run(ctx context.Context, a *app.App) error {
 	)
 
 	debuglog.BootTrace("boot.program.start")
-	_, err := prog.Run()
+	finalModel, err := prog.Run()
 
 	// Restore a clean window title on exit (Bubble Tea has released the terminal).
 	terminal.SetTitle(os.Stdout, "Daintree")
+	// /login quits the program with the flag set on the final model; surface it
+	// as the sentinel the interactive launcher acts on (run the blocking login
+	// prompt — impossible while Bubble Tea owned the terminal — then relaunch).
+	if fm, ok := finalModel.(Model); ok && fm.loginRequested && err == nil {
+		return domain.ErrLoginRequested
+	}
 	return err
 }
 

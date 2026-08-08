@@ -412,23 +412,18 @@ func Create(opts CreateOptions) (*App, error) {
 	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model
 	// credentials, prompt assembly, and skill selection.
 	//
-	// DEVELOPMENT-ONLY: the endpoint is HARDCODED to the single local backend
-	// (backend.DefaultBaseURL, http://127.0.0.1:8473) and there is no authentication.
-	// The assistant supports exactly this one endpoint for now; a later phase replaces
-	// the URL with the production endpoint and adds the real login flow. The only
-	// escape hatch is DAINTREE_BACKEND_URL, which exists for local dev + e2e tests (a
-	// fake backend server) — it is NOT a product config knob, and the default is always
-	// the hardcoded endpoint.
+	// Endpoint + API key are resolved by config.LoadConfig (DAINTREE_BACKEND_URL
+	// env escape hatch → persisted /login credentials → production default), and
+	// the key is paired to the persisted endpoint so a dev/test override never
+	// receives the real key. The first-run login flow and /login live in
+	// internal/cli; here the resolved values are simply wired into the client.
 	if opts.BackendOverride != nil {
 		a.Backend = opts.BackendOverride
 	} else {
-		baseURL := backend.DefaultBaseURL
-		if v := strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")); v != "" {
-			baseURL = v
-		}
 		dbg := debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}
 		clientCfg := backend.ClientConfig{
-			BaseURL: baseURL,
+			BaseURL: cfg.BackendURL,
+			APIKey:  cfg.BackendAPIKey,
 			ClientInfo: backend.ClientInfo{
 				Name:     "daintree-cli",
 				Platform: runtime.GOOS,

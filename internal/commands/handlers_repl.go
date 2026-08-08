@@ -7,10 +7,13 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 )
 
-// CommandResult is the REPL slash handler return.
+// CommandResult is the REPL slash handler return. Login mirrors
+// UICommandResult.Login: the REPL loop returns to the interactive launcher,
+// which runs the blocking login flow and rebuilds the app.
 type CommandResult struct {
 	Handled bool
 	Quit    bool
+	Login   bool
 }
 
 // HandleSlashCommand handles a slash line in the classic REPL, printing the result
@@ -54,7 +57,7 @@ func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.
 		if res.Text != "" {
 			r.Line(res.Text)
 		}
-		return CommandResult{Handled: true, Quit: res.Quit}
+		return CommandResult{Handled: true, Quit: res.Quit, Login: res.Login}
 	}
 }
 

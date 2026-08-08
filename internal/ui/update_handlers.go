@@ -488,6 +488,13 @@ func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
 	if msg.Quit {
 		return m.onShutdown()
 	}
+	if msg.Login {
+		// /login tears the cockpit down exactly like a quit (reject pending
+		// confirms, cancel the in-flight turn) — the flag on the final model is
+		// what tells ui.Run to return ErrLoginRequested instead of a clean exit.
+		m.loginRequested = true
+		return m.onShutdown()
+	}
 	if msg.ClearTranscript {
 		return m.onClear(msg.Title, msg.Text)
 	}

@@ -244,6 +244,36 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
 	debuglog.BootTrace("boot.overrides.loaded")
+
+	// The shared cooked-mode stdin reader, created lazily so a cockpit-only
+	// session (no first-run gate, no /login, no REPL) never spawns a competing
+	// stdin goroutine. Once created it is reused across /login restarts — a
+	// second bufio reader on the same fd would steal buffered lines.
+	var lines *lineReader
+	stdinLines := func() *lineReader {
+		if lines == nil {
+			lines = newLineReader()
+		}
+		return lines
+	}
+	// login runs the blocking login flow between surface runs (the terminal is
+	// ours here: before the cockpit starts, or after it has been released).
+	login := func() {
+		if !runLoginFlow(ctx, r, stdinLines().Read, config.DefaultCredentialsPath()) {
+			r.Warn("login skipped — run /login any time to set the backend endpoint and API key")
+		}
+	}
+
+	// First-run gate: an interactive TTY with no DAINTREE_BACKEND_URL escape
+	// hatch and no persisted login is asked to log in before anything else (the
+	// prompt must precede the cockpit taking the terminal). Declining (EOF)
+	// proceeds without credentials — the backend answers 401 and the error text
+	// points at /login — so a piped/automated launch can never deadlock here
+	// (non-TTY paths skip the gate entirely).
+	if ttyOK && backendLoginNeeded() {
+		login()
+	}
+
 	// Interactive launch: ensure the project's supervisor daemon exists, attach
 	// (it yields ownership + receives our fresh MCP credentials), and take the
 	// owner lease. Closing this assistant later hands supervision straight back
@@ -268,44 +298,73 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 		createOpts.OnSchemaStale = schemaAutoReset(r)
 		createOpts.OnSchemaReset = schemaResetNotice(r)
 	}
-	a, err := app.Create(createOpts)
-	if err != nil {
-		r.Error(err.Error())
-		return domain.OneShotExitCode.Error
-	}
-	debuglog.BootTrace("boot.app.created")
-	// This conversation is now the project's current session — the one the
-	// daemon's detached wake turns continue after we exit.
-	a.AdoptAsCurrentSession()
 
-	if wantsCockpit {
-		// Cockpit: open the debug log (header badge shows it, print nothing).
-		debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-			map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
-		runner := opts.Cockpit
-		if runner == nil {
-			runner = DefaultCockpitRunner
+	// The surface loop: each iteration builds a fresh App and runs one surface
+	// span (cockpit or REPL). It loops ONLY for /login — the surface releases
+	// the terminal, the login flow runs, and the app is rebuilt so the fresh
+	// endpoint/key take effect immediately (config.LoadConfig re-reads the
+	// credential file inside app.Create). The ownership lease is held once,
+	// outside the loop, across restarts.
+	for {
+		a, err := app.Create(createOpts)
+		if err != nil {
+			r.Error(err.Error())
+			return domain.OneShotExitCode.Error
 		}
-		if cerr := runner(ctx, a); cerr != nil {
-			// A cancelled launch context is a process shutdown request (SIGTERM on the
-			// cockpit path). Bubble Tea reports that cancellation as a runner error; it
-			// must not be mistaken for an unavailable cockpit and resurrect the process
-			// in a classic REPL detached from the cancelled context.
-			if ctx.Err() != nil {
-				_ = a.Shutdown()
-				return domain.OneShotExitCode.Cancelled
+		debuglog.BootTrace("boot.app.created")
+		// This conversation is now the project's current session — the one the
+		// daemon's detached wake turns continue after we exit.
+		a.AdoptAsCurrentSession()
+
+		if wantsCockpit {
+			// Cockpit: open the debug log (header badge shows it, print nothing).
+			debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+				map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
+			runner := opts.Cockpit
+			if runner == nil {
+				runner = DefaultCockpitRunner
 			}
-			// Cockpit unavailable → fall back to the classic REPL.
-			render.Stdout().Warn("cockpit unavailable (" + cerr.Error() + ") — falling back to the classic REPL")
-			announceDebugLog(a)
-			return startRepl(ctx, a)
+			cerr := runner(ctx, a)
+			if cerr != nil && errors.Is(cerr, domain.ErrLoginRequested) {
+				// /login in the cockpit: Bubble Tea has quit and restored the
+				// terminal; run the flow here and relaunch the cockpit.
+				_ = a.Shutdown()
+				login()
+				continue
+			}
+			if cerr != nil {
+				// A cancelled launch context is a process shutdown request (SIGTERM on the
+				// cockpit path). Bubble Tea reports that cancellation as a runner error; it
+				// must not be mistaken for an unavailable cockpit and resurrect the process
+				// in a classic REPL detached from the cancelled context.
+				if ctx.Err() != nil {
+					_ = a.Shutdown()
+					return domain.OneShotExitCode.Cancelled
+				}
+				// Cockpit unavailable → fall back to the classic REPL.
+				render.Stdout().Warn("cockpit unavailable (" + cerr.Error() + ") — falling back to the classic REPL")
+				announceDebugLog(a)
+				code, loginRequested := startRepl(ctx, a, stdinLines())
+				if loginRequested {
+					_ = a.Shutdown()
+					login()
+					continue
+				}
+				return code
+			}
+			_ = a.Shutdown()
+			return 0
 		}
-		_ = a.Shutdown()
-		return 0
-	}
 
-	announceDebugLog(a)
-	return startRepl(ctx, a)
+		announceDebugLog(a)
+		code, loginRequested := startRepl(ctx, a, stdinLines())
+		if loginRequested {
+			_ = a.Shutdown()
+			login()
+			continue
+		}
+		return code
+	}
 }
 
 // RunDoctor is the TERSE doctor subcommand banner — distinct from
@@ -346,6 +405,11 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	backendLine := "ok"
 	if herr != nil {
 		backendLine = "UNREACHABLE — " + herr.Error()
+		// A 401/403 is a credential problem, not connectivity — name the fix.
+		var berr *backend.Error
+		if errors.As(herr, &berr) && berr.IsAuth() {
+			backendLine = "API KEY REJECTED — run /login (or log in on next interactive start)"
+		}
 		anyFail = true
 	}
 	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)

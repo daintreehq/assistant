@@ -53,8 +53,12 @@ func TestClassicREPL_ParentCancellationExits(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if code := startRepl(ctx, a); code != domain.OneShotExitCode.Cancelled {
+	code, loginRequested := startRepl(ctx, a, newLineReader())
+	if code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("cancelled classic REPL exit = %d, want %d", code, domain.OneShotExitCode.Cancelled)
+	}
+	if loginRequested {
+		t.Fatal("cancelled REPL must not report a login request")
 	}
 }
 

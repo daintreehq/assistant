@@ -11,14 +11,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
-// liveBackendURL is the local development backend the live test targets. The CLI's
-// hardcoded dev endpoint (backend.DefaultBaseURL) is this address; a developer runs the
-// backend here, and the live test reaches it WITHOUT a DAINTREE_BACKEND_URL override.
-const liveBackendURL = backend.DefaultBaseURL // http://127.0.0.1:8473
+// liveBackendURL is the local development backend the live test targets. Pinned to
+// the literal dev address (NOT backend.DefaultBaseURL, which is the PRODUCTION
+// endpoint since the login flow landed): a developer runs the backend here, and the
+// test points the CLI at it explicitly via DAINTREE_BACKEND_URL.
+const liveBackendURL = "http://127.0.0.1:8473"
 
 // backendReachable probes the backend's liveness endpoint with a short deadline.
 // Returns false (skip the live test) when nothing is listening — so the suite passes
@@ -40,8 +39,8 @@ func backendReachable(url string) bool {
 
 // TestLiveBackendOneShot is the ONE test that proves a real end-to-end turn against the
 // live Daintree backend actually works: it builds the real binary, runs
-// `--json "<prompt>"` against the REAL backend on 127.0.0.1:8473 (no DAINTREE_BACKEND_URL
-// override → the hardcoded dev endpoint), with NO Daintree MCP, and asserts the JSONL
+// `--json "<prompt>"` against the REAL backend on 127.0.0.1:8473 (pinned via
+// DAINTREE_BACKEND_URL), with NO Daintree MCP, and asserts the JSONL
 // schema-v1 stream came back well-formed with non-empty assistant content over the wire.
 //
 // GATING (so the suite passes offline). It is opt-in on independent guards, each of
@@ -80,11 +79,14 @@ func TestLiveBackendOneShot(t *testing.T) {
 	cmd := exec.CommandContext(ctx, bin, "--json", "Reply with exactly the word: pong, nothing else.")
 
 	// Inherit the real environment FIRST, then layer the test-isolation overrides.
-	// Crucially we do NOT set DAINTREE_BACKEND_URL (so it hits the real default dev
-	// endpoint) and do NOT set DAINTREE_ASSISTANT_OFFLINE (offline would short-circuit
-	// the call). DEEPSEEK_API_KEY is a placeholder only to clear the CLI's vestigial
-	// one-shot key gate (cli/run.go) — the backend, not the CLI, holds the real model key.
+	// DAINTREE_BACKEND_URL pins the LOCAL dev backend explicitly (the code default
+	// is the production endpoint now — and the env override also keeps any real
+	// ~/.daintree/credentials.json API key from being sent here, per the endpoint/key
+	// pairing rule). We do NOT set DAINTREE_ASSISTANT_OFFLINE (offline would
+	// short-circuit the call). DEEPSEEK_API_KEY is a placeholder only to clear the
+	// CLI's vestigial one-shot key gate (cli/run.go) — the backend holds the real key.
 	cmd.Env = append(os.Environ(),
+		"DAINTREE_BACKEND_URL="+liveBackendURL,
 		"DAINTREE_MCP_URL=",   // no MCP → clean degraded local mode, no Daintree dependency
 		"DAINTREE_MCP_TOKEN=", // …and no stale token
 		"DEEPSEEK_API_KEY=placeholder-cli-gate-only",

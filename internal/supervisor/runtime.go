@@ -334,6 +334,13 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	if r.creds.McpToken != "" {
 		overrides.McpToken = strPtr(r.creds.McpToken)
 	}
+	// The backend endpoint pushed by the last cockpit (its DAINTREE_BACKEND_URL
+	// escape hatch) wins over whatever this daemon inherited at spawn. The
+	// persisted /login endpoint + API key need no push at all: LoadConfig reads
+	// the global credential file fresh inside app.Create on every span.
+	if r.creds.BackendURL != "" {
+		overrides.BackendURL = strPtr(r.creds.BackendURL)
+	}
 	r.mu.Unlock()
 
 	a, err := app.Create(app.CreateOptions{

@@ -1760,6 +1760,16 @@ func (s *Session) classifyBackendError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	if errors.As(err, &be) && be.IsAuth() {
+		// Rejected/missing API key (401/403). Non-retriable (retry.go already
+		// excludes auth), so this surfaces on the FIRST attempt — never after the
+		// 10–15s transient poll — and the fix is /login, not a restart. The
+		// prefix is a registered WAKE_FAILURE_PREFIX (see wake.go).
+		msg := "Backend authentication failed — the API key was rejected or missing. Run /login to set the backend endpoint and API key."
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg
+	}
 	if errors.As(err, &be) && be.IsConnect() {
 		// Backend unreachable — the most common local-dev failure. Name it as a
 		// connectivity problem with a next step instead of "Model error: dial tcp
