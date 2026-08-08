@@ -204,10 +204,9 @@ The registry is the source of truth (`internal/tools` + the wiring in
 through `daintree.call` is refused with `USE_TYPED_WRAPPER` and redirected to the wrapper
 (the exact denylist is `wrappedMCPTools` in `internal/tools/mcpx/discovery.go` — it covers
 the tools whose wrapper does validation worth protecting, so a few simple read passthroughs
-aren't on it). Reach for the wrapper, not the raw call. The model-facing reference for the
-Daintree MCP surface is
-[`DAINTREE_MCP.md`](DAINTREE_MCP.md) (and the embedded prompt in
-`internal/prompts/daintree_mcp.go`).
+aren't on it). Reach for the wrapper, not the raw call. The human-facing reference for the
+Daintree MCP surface is [`DAINTREE_MCP.md`](DAINTREE_MCP.md); the model-facing guidance is
+backend-owned (`../assistant-backend`, `src/daintree_assistant_server/skills/files/*.md`).
 
 ## Worked example
 

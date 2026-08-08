@@ -153,7 +153,12 @@ Electron main process), not the assistant backend. Key facts the CLI can rely on
   registered with the server's validator, and **rotated on every re-provision**. It is not
   the same as the persistent "API key" shown in the MCP server settings tab — that key is
   for *external* third-party clients (Cursor, Claude Code, scripts) and maps to a separate
-  `external` tier. The assistant is never `external`.
+  `external` tier. The assistant is never `external` — which matters since mid-2026, when
+  Daintree cut the external tier to a curated ~25-tool allowlist (no `forge.*` at all).
+  That cut removed **no** workbench/action/system permissions — the assistant's advertised
+  `tools/list` actually grew slightly, since the same change retired the old
+  "discoverable" callable-but-unlisted marker; see the tiers and discovery sections of
+  [`DAINTREE_MCP.md`](DAINTREE_MCP.md).
 - **The assistant runs at the `system` tier.** Daintree forces the Daintree Assistant's
   session tier to `system` ("the workspace's first-class conductor"), the top of the
   workbench ⊂ action ⊂ system ladder. So the host tier gate does **not** block the assistant
@@ -366,7 +371,8 @@ Two settings surfaces touch the assistant; both change what Daintree injects/enf
   so **the CLI owns confirmation of dangerous operations.**
 - `SESSION_BINDING_GONE` / `BINDING_STALE` are **terminal** — stop retrying that session and
   surface it to the user; they mean the bound window/project is gone.
-- Worktree identity is **not** in env or cwd — query it over MCP (`actions.getContext` /
+- Worktree identity is **not consumed** from env or cwd (`DAINTREE_WORKTREE_ID` is
+  stamped on the PTY but unread) — query it over MCP (`actions.getContext` /
   `worktree.getCurrent`); it's pinned at launch.
 - Hiding keeps the CLI alive; **New session** kills it and drops the host-side transcript;
   eviction/close/crash kill it (with a resume capture that, for this CLI, currently
@@ -399,9 +405,11 @@ drift**; trust the observable contract above, not these paths.
 - **Agent definition:** `shared/config/agents/daintree-assistant.ts` (command, `env-only`
   MCP, no min version), `shared/config/agentIds.ts` (excluded from launchable agents).
 - **MCP server + tiers + binding errors:** `electron/services/mcp-server/*`
-  (`httpLifecycle.ts`, `sessionServer.ts`, `tierAuth.ts`, `rendererBridge.ts`),
-  `shared/config/helpAssistantTierAllowlists.ts`, `src/services/ActionService.ts`
-  (`BINDING_STALE`).
+  (`httpLifecycle.ts`, `sessionServer.ts`, `tierAuth.ts`, `rendererBridge.ts`,
+  `surfaceManifest.ts` — the `mcp.surface` manifest),
+  `shared/config/helpAssistantTierAllowlists.ts`,
+  `shared/config/mcpExternalTierAllowlist.ts` (the curated external-tier cut),
+  `src/services/ActionService.ts` (`BINDING_STALE`).
 - **UI + lifecycle:** `src/components/HelpPanel/*` (panel, activity strip, banners),
   `src/controllers/HelpSessionController.ts` (launch/resume/hibernate FSM),
   `electron/window/ProjectViewManager.ts` (eviction), `electron/services/PendingHelpHibernationStore.ts`.

@@ -22,8 +22,11 @@ import (
 //     live Daintree. Every CLI parser unions structuredContent + text with a
 //     text fallback, and at least one real bug (the watcher's "empty getStatus")
 //     came from assuming structuredContent; the fake must keep that pressure.
-//   - agent.launch returns ONLY {terminalId, location} (the documented gap the
-//     spawn tool degrades around).
+//   - agent.launch returns ONLY {terminalId, location} — the LEGACY minimal
+//     shape. Live Daintree now returns launched + full worktree/branch identity;
+//     the spawn tool reads terminalId/spawnStatus/worktreeId (falling back to
+//     the requested worktree)/taskId, and the fixture keeps the minimal shape
+//     so a benchmark run exercises the CLI's tolerance of the old response.
 //   - Every documented Daintree tool name is registered (unimplemented ones as
 //     recorded failing stubs) so the boot drift check stays silent and a model
 //     wandering onto an unmodelled tool shows up in the call log instead of as
@@ -270,7 +273,10 @@ func Serve(w *World) *Server {
 			return `{"error":"prompt is required"}`, true
 		}
 		id := w.launch(agentID, name, worktreeID, prompt, requestKey)
-		// Faithful to the documented gap: terminalId + location ONLY.
+		// Legacy minimal shape: terminalId + location ONLY. Live Daintree now
+		// also returns launched + worktree/branch identity; the CLI reads
+		// terminalId/spawnStatus/worktreeId (falling back to the requested
+		// worktree)/taskId, so the minimal shape exercises that fallback.
 		return fmt.Sprintf(`{"terminalId":%q,"location":"window-1"}`, id), false
 	})
 

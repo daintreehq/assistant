@@ -1,13 +1,17 @@
 # Daintree MCP — integration notes
 
-The CLI connects to Daintree's **local MCP server** as an external client. In production
-Daintree launches the CLI and passes the connection details via environment / flags.
+The CLI connects to Daintree's **local MCP server** as a separate local process (an
+out-of-process MCP client — *not* the `external` API-key tier; see Tiers). In production
+Daintree launches the CLI and passes the connection details via environment variables.
 
-> **Source of truth.** The CLI-side verified contract lives in
-> [`internal/prompts`](../internal/prompts) — it is embedded in the
-> cached system prompt, so it is what the model actually reasons against. This doc is
-> the human-facing companion; keep the two in sync. If they ever disagree, the prompt
-> source wins.
+> **Source of truth.** This doc is the CLI repo's human-facing record of the verified
+> Daintree MCP contract. The **model-facing** guidance is backend-owned now: it lives in
+> the `../assistant-backend` skill files (e.g.
+> `src/daintree_assistant_server/skills/files/daintree.foundation.md`), injected
+> server-side — the old embedded prompt reference (`internal/prompts/daintree_mcp.go`)
+> was deleted with the backend migration. Keep this doc and the backend skills in sync;
+> the machine-checked pieces (retry safety, the wrapper drift baseline) are derived from
+> the live server and the local wrappers — see "Keeping the references in sync" below.
 
 ## Connection
 
@@ -36,17 +40,29 @@ falls back to the legacy SSE transport on failure.
 
 ## Tiers
 
-`workbench` (read/safe) ⊂ `action` (+mutations) ⊂ `system` (+dangerous). External API-key
-clients get an `external` tier (~70 read-safe + creation tools, no dangerous mutators like
-`worktree.delete`). The CLI treats the tier as advisory and adds its OWN safety layer on top.
+`workbench` (read/safe) ⊂ `action` (+mutations) ⊂ `system` (+dangerous). The assistant's
+session is granted **`system`**, so every MCP-exposed tool below is reachable to it
+(renderer-only actions like `terminal.armByState` stay unreachable regardless of tier).
+External
+API-key clients (Cursor, Claude Code, scripts) get a separate **`external`** tier that
+is now a **curated allowlist of ~25 orchestration primitives**
+(`shared/config/mcpExternalTierAllowlist.ts` in `daintreehq/daintree`, budget-enforced
+at 15–26 tools / 16,000 description bytes) — **zero `forge.*` tools** and no unlisted
+extras: the cut is a real dispatch allowlist, not `tools/list` filtering, so a tool
+absent from an external session's list is genuinely uncallable there. The cut removed
+**no** workbench/action/system permissions — if anything the assistant's advertised
+`tools/list` *grew* slightly, because the same change retired the old "discoverable"
+callable-but-unlisted visibility marker. The CLI treats its tier as advisory and adds
+its OWN safety layer on top.
 
 ## Representative action / tool ids (call via `daintree.call`)
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
 `terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
 `terminal.close`, `terminal.kill`, `terminal.arm` / `terminal.disarm` /
-`terminal.disarmAll`. (`terminal.armByState` / `armAll` and `fleet.*` are renderer-only —
-not MCP-callable; see the arming note below.)
+`terminal.disarmAll`. (`terminal.armByState` / `armAll` and the `fleet.*` dispatch
+family are renderer-only — not MCP-callable; the one exception is the read-only
+`fleet.getRunStatus` observer, which IS MCP-exposed. See the arming note below.)
 
 > `terminal.waitUntilIdle` blocks on **one** terminal — targeted use only; never fan out
 > many concurrent waits. Batch reads by passing several `terminalIds` to
@@ -74,16 +90,33 @@ working-tree state), `git.commit`, `git.push`, `git.stageAll`, `git.stageFile`,
 former `git.snapshot*` family was removed from Daintree as part of a feature cleanup;
 the CLI dropped its `git.snapshotRevert`/`git.snapshotDelete` wrappers in lockstep.)
 
-Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`.
+Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`,
+`forge.listIssueComments`, `forge.getCIStatus` (shapes below).
+
+> **Forge list arguments & the `view` projection.** The two list reads take a worktree
+> selector (`worktreeId` / `worktreePath`, or legacy `cwd`) plus `cursor` (opaque — pass
+> a previous response's `nextCursor` verbatim; an empty string is rejected, not "page
+> one"), `perPage` (1–100, default 20), `sort: "created"|"updated"` (default created),
+> `direction: "asc"|"desc"` (default desc), `bypassCache` (default false), and `state`
+> (default open) — `"open"|"closed"|"all"` on `forge.listIssues`,
+> `"open"|"closed"|"merged"|"all"` on `forge.listPRs`. `forge.listIssues` additionally takes `search`, a **provider-native**
+> query fragment (GitHub search dialect on GitHub — not a plain-text filter);
+> `forge.listPRs` deliberately has no `search` key. Both accept `view: "summary"|"full"`
+> — `summary` (the default) drops each row's body and raw provider payload (the
+> decision-making projection), `full` returns the provider's complete normalized rows.
+> Unknown argument keys are rejected, not ignored (the schemas are strict).
+
 Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssue`,
 `forge.editIssue`, `forge.addIssueComment`, `forge.addIssueLabel`,
 `forge.removeIssueLabel`, `forge.assignIssue`, `forge.unassignIssue`.
 Forge (PR writes): `forge.createPR`, `forge.closePR`, `forge.reopenPR`, `forge.mergePR`,
 `forge.convertPRToDraft`, `forge.markPRReadyForReview`, `forge.commentOnPR`, `forge.editPR`.
 Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismissReview`,
-`forge.requestReviewers`. All forge writes are `external`-risk and the CLI always confirms
-them (its own safety layer — note that on the Daintree side several issue writes are
-`danger:safe`, but the CLI confirms regardless). **Only the four forge READS
+`forge.requestReviewers`. All forge writes are always-confirm mutations — each is reached
+via `daintree.call`, whose local risk class is `system` (the CLI's own safety layer
+prompts unless an auto-approve session or a scoped automation grant covers it — note
+that on the Daintree side several issue writes are `danger:safe`, but the CLI confirms
+regardless). **Only the four forge READS
 (`listIssues`/`getIssue`/`listPRs`/`getPR`) have typed CLI wrappers** — every forge
 WRITE is reached via `daintree.call`. Most PR/review writes return `void`; only
 `forge.createPR`/`forge.editPR` return the PR object (re-read with `forge.getPR` after
@@ -142,7 +175,10 @@ Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed
 > optionally runs a recipe first, best-effort injects worktree context, and optionally
 > assigns the issue — returning `{ issueNumber, issueTitle, issueUrl, worktreeId,
 > worktreePath, branch, terminalId, recipeLaunched, spawnedTerminalCount,
-> failedTerminalCount, assignedToSelf, … }`. The CLI **wrapper** then attaches a
+> failedTerminalCount, assignedToSelf, … }` (now published as structured output —
+> `mcpOutputSchema` — so `structuredContent` carries the object). It validates `agentId`
+> **up front**: an unknown id, or the literal pseudo-ids `browser` / `dev-preview`, is
+> rejected before any worktree is created. The CLI **wrapper** then attaches a
 > supervisor watcher to that terminal (`attachWatcher` defaults true), so from the CLI it
 > is background supervision. `workflow.prepBranchForReview` is **READ-ONLY** despite the
 > name — it returns a go/no-go verdict (`ready` | `blocked_uncommitted_changes` |
@@ -156,7 +192,13 @@ Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed
 Code/Files (Daintree-side): `copyTree.generate`, `copyTree.injectToTerminal`,
 `files.search`, `file.view`, `file.openInEditor`.
 
-Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema`.
+Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema`,
+`mcp.surface` (see the discovery section below).
+
+Project checks: `project.detectRunners`, `project.runCheck` (shapes below) — an
+authoritative way to run a project-defined check over MCP and read its real exit code,
+superseding guesswork over terminal scrollback (`lastCheckResult` stays heuristic
+evidence).
 
 Projects: `project.getCurrent` returns `{ project }` for the active window (or null).
 The assistant keeps only id/name/path/status and the two repository-config booleans from
@@ -173,6 +215,35 @@ and sent as typed `request.runtime.worktree`: omission means the read was unavai
 `{current:null}` is a definitive no-current-worktree result, and a current object carries
 the useful id/path/branch/issue/PR/status/last-commit metadata.
 
+### Discovery & surface introspection
+
+Two discovery layers exist — don't conflate them:
+
+- **CLI-local discovery** (`tool.search`, `daintree.listTools`): both work off the CLI's
+  cache-first `tools/list` inventory — `daintree.listTools` returns it, `tool.search`
+  filters/ranks it locally. This is the model's normal path — prefer a typed wrapper,
+  then `daintree.call` for a known unwrapped name found this way.
+- **Server-side action introspection** (`actions.search` → `actions.getSchema`):
+  `actions.search({ query, limit? })` returns ranked matches (no schemas);
+  `actions.getSchema({ actionId })` returns the full entry (`{ ok: true, entry }`, or a
+  structured `NOT_FOUND`). Use it for intent search and exact argument schemas. It
+  describes the action catalog — it does **not** make an unlisted tool callable on a
+  lower tier.
+
+**`mcp.surface`** (no args, workbench tier, structured output) is the session's surface
+manifest: `{ manifestVersion, appVersion, tier, hash, tools: [{ id, tier, kind:
+"command"|"query", readOnlyHint, idempotentHint, deprecated? { reason, replacedBy? } }] }`.
+It reports the **static tier-listed surface** — the same tool membership `tools/list`
+advertises for the session (as metadata, not the full descriptor payload) — not live
+per-tool grants, deliberately, so `hash` doesn't flap on short-lived approvals. The
+sha256 `hash` covers structural metadata (tiers, danger, annotations, arg/result
+schemas) but **excludes description/title/example prose** (reworded too often to be a
+drift signal). Call it once at startup, then re-read the hash to detect drift cheaply. The CLI
+does **not** consume it yet — startup drift checks the wrapper-derived baseline and retry
+safety comes from `tools/list` annotations (see "Keeping the references in sync"), while
+`/doctor` probes via `actions.getContext`; `mcp.surface` is the natural future target for
+a whole-surface drift hash and the `/doctor` probe.
+
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
@@ -182,20 +253,64 @@ the useful id/path/branch/issue/PR/status/last-commit metadata.
   its *presence* (not value) signals the exit. `spawnedAt` / `lastTransitionAt` are
   epoch-ms timestamps (`lastTransitionAt` = when the agent entered its CURRENT state, not
   when it last produced output). `lastCheckResult` (when present) is a best-effort parse
-  of the agent's last test/lint/build summary — useful evidence, **not** authoritative.
+  of the agent's last test/lint/build summary — useful evidence, **not** authoritative
+  (for an authoritative exit code, run the check via `project.runCheck` — shape below).
   A per-entry `error` appears for an unknown/dead id. All are read defensively.
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
-  `{ terminalId, location, spawnStatus? }` (no `worktreeId` or `taskId`). Optional
-  `spawnStatus: "missing-cli"` is an atomic negative result: Daintree opened a setup
-  diagnostic panel and did **not** spawn an agent PTY, so the Assistant fails the saga.
-  `model?` (optional string) overrides the model the spawned agent runs under; omit
-  it to use the agent's default.
-- `terminal.armByState` / `terminal.armAll` / `terminal.armDefault` and the whole
-  `fleet.*` family are **renderer-only** (no `mcpOutputSchema`) — **not** callable over
-  MCP, not even via `daintree.call`. The only MCP-exposed arming surface is
-  `terminal.arm` / `terminal.disarm` / `terminal.disarmAll` (each → `{ armed: string[] }`).
+  `{ launched: boolean, terminalId, location: "grid"|"dock"|null, spawnStatus:
+  "missing-cli"|null, worktreeId, worktreePath, branch, cwd }` — the launch now returns
+  the spawned agent's **full worktree/branch identity**. Every key is present (required)
+  and every field after `launched` is nullable; a declined launch is `launched: false`
+  with the identity fields `null`, never a bare `null` result. `spawnStatus:
+  "missing-cli"` is an atomic negative result: Daintree opened a setup diagnostic panel
+  and did **not** spawn an agent PTY (the diagnostic can still carry a `terminalId` /
+  `location`), so the Assistant fails the saga. `model?` (optional string) overrides the
+  model the spawned agent runs under; omit it to use the agent's default. **CLI
+  caveat:** `internal/tools/agenttaskx` consumes `terminalId`, `spawnStatus`, the
+  returned `worktreeId` (falling back to its caller-supplied value when omitted), and
+  the legacy `taskId`; it does not yet consume `launched`, `location`, `worktreePath`,
+  `branch`, or `cwd`.
+- `forge.getCIStatus({ prNumber, worktreeId?|worktreePath?|cwd? })` →
+  `{ ciStatus: { state, total, passed, failed, pending, requiredChecksPassing? } | null }`
+  (wrapped, structured output — the wrapper is never bare; a `null` `ciStatus` means no
+  such PR). `state` is `success|failure|pending|neutral|unknown` and is **the** answer —
+  read it, not the counts. The counts cover **required checks only**, and `total: 0` is
+  ambiguous: it appears when the required-check list could not be read in full, and on
+  GitHub a PR with *no* required contexts falls back to the raw check roll-up (a red PR
+  with no required checks still reports `state: "failure"` with `total: 0`). `neutral`
+  means no recognized CI state at all (commonly: no CI) — there is **no** definitive
+  "nothing gates the merge" discriminator in this result, so never treat `neutral` or
+  `total: 0` as proof the merge is ungated. The built-in GitHub provider caches the
+  status ~60 s, so poll for a settled verdict rather than trusting one read. No
+  `rawData` / `freshnessToken` in the result.
+- `forge.listIssueComments({ issueNumber, cursor?, perPage?, worktreeId?|worktreePath?|cwd? })`
+  → `{ items, hasMore, nextCursor, totalCount? }`, **oldest-first** (the provider has no
+  reliable newest-first sort — page to the end for the latest reply; `perPage` is 1–100,
+  default 20, and `totalCount`, when present, is the authoritative whole-thread count).
+  An empty **first** page means nobody commented: a missing issue or a provider that
+  can't read threads **throws** instead, so silence is never ambiguous.
+- `project.runCheck({ projectId, runnerId, cwd?, timeoutMs? })` (action tier,
+  `danger:"safe"`) → `{ projectId, cwd, runnerId, runnerName, command, passed,
+  exitCode: number|null, signalName: string|null, durationMs, timedOut, aborted,
+  output, outputTruncated }`. Runs the check as a **real child process** (not a PTY),
+  so `exitCode` is authoritative — unlike `lastCheckResult`'s heuristic scrollback
+  parse. `runnerId` comes from `project.detectRunners({ projectId? })` →
+  `{ runners: [...] }` (detection returns every safe runner it finds in supported
+  manifests — ordinary scripts, publish/deploy included, not just checks — so verify
+  what a command is before running an unfamiliar one). A failing check is a normal
+  `passed: false` result; only a genuine inability to run throws. `cwd` must resolve to
+  the project root or a registered worktree, not an arbitrary directory. Timeout
+  defaults to 10 min (max 1 h); output is capped at 50 KiB tail-preserving and
+  secret-scrubbed. Never point it at a long-lived server command — it blocks until the
+  timeout.
+- `terminal.armByState` / `terminal.armAll` / `terminal.armDefault` and the `fleet.*`
+  dispatch family are **renderer-only** — **not** callable over MCP, not even via
+  `daintree.call` (`fleet.getRunStatus`, a read-only snapshot of the user's in-app
+  fleet broadcast, is the one MCP-exposed exception). The only MCP-exposed arming
+  surface is `terminal.arm` / `terminal.disarm` / `terminal.disarmAll` (each →
+  `{ armed: string[] }`).
 - Terminal focus is **not** a `terminal.focus` MCP tool — Daintree uses
   `panel.focus({ panelId })` where the terminal id *is* the `panelId`. The local
   `terminal.focus` wrapper maps onto it.
@@ -221,7 +336,9 @@ the useful id/path/branch/issue/PR/status/last-commit metadata.
   (silence-detected pause) or `"question"` (the agent is asking for input).
 - Exit is the `"exited"` state; `exitCode` is then exposed (tri-state — see shapes above).
   The CLI treats a nonzero code as failure evidence, **not** as a completion trust gate
-  (completion trust still requires the git verification pass — see gaps below).
+  (completion trust still requires the watcher's deterministic git-cleanliness check
+  before any irreversible action is suggested — CLI policy, unchanged by the new
+  `project.runCheck` surface).
 - `agent.getState({ agentId })` **does** exist (keyed by **agent** id, not terminal id) —
   it returns a live single-agent snapshot (`{ state, waitingReason, exitCode, spawnedAt,
   terminalId, found }`; an unknown id returns `found:false` rather than erroring). The CLI
@@ -255,29 +372,24 @@ is gone — stop retrying that session and tell the user.
 
 ## Known Daintree-side gaps
 
-These are limitations in Daintree's MCP surface that the CLI works around locally. They are
-**not fixable in this repo** — they are tracked here so the workarounds can be retired if and
-when Daintree closes the gap.
+Rough edges at the Daintree boundary, tracked here so the local workarounds can be
+retired as the boundary improves. (Four Daintree-side gaps used to live here; two closed
+in mid-2026: `agent.launch` now returns full worktree/branch identity, and
+`project.runCheck` provides an authoritative check-run signal — both documented in the
+contract sections above. What remains below is mostly **CLI-side adoption work**, not
+host limitations.)
 
-1. **No test/lint completion signal.** `terminal.getStatus` now exposes a numeric `exitCode`
-   (plus `spawnedAt` / `lastTransitionAt`), which the watcher consumes as signal evidence — a
-   nonzero exit is surfaced as failure evidence on a `terminal_exited` event
-   (`internal/daemon/watcher.go`). It is **not** a completion trust gate: there is still no
-   test/lint runner signal, so the irreversible-action gate from **issue #3** continues to
-   derive completion trust from a deterministic git-cleanliness check, not the exit code.
-2. **`agent.launch` returns `{ terminalId, location, spawnStatus? }`.** No `worktreeId` or
-   `taskId`, so `internal/tools/agenttaskx` degrades gracefully (caller-supplied
-   `worktreeId`, no `taskId`). `spawnStatus: "missing-cli"` is a clean unavailable failure
-   even though the diagnostic panel has an id. If Daintree returns the missing identity
-   fields later, the spawn tool can stop guessing.
-3. **`DAINTREE_WINDOW_ID` contract.** Daintree injects it but it had been referenced only inside
+1. **`DAINTREE_WINDOW_ID` contract.** Daintree injects it but it had been referenced only inside
    a prompt string; it is now read into config so per-window/per-project state isolation can use
-   it. This overlaps directly with **issue #4** (per-project state isolation) — #4 owns the
-   richer per-window state-dir derivation; this repo only standardizes reading the env into config.
-4. **No live capability probe in the protocol.** A healthy connection + non-empty tool list does
-   not prove the token's tier can actually call anything. `/doctor` works around this by calling
-   `actions.getContext` (workbench tier, read-only) as a functional probe. If Daintree adds a
-   dedicated health/capability endpoint, the probe can target that instead.
+   it. This overlaps directly with **assistant-repo issue #4** (per-project state isolation) —
+   #4 owns the richer per-window state-dir derivation; this repo only standardizes reading the
+   env into config.
+2. **No dedicated capability probe adopted.** A healthy connection + non-empty tool list does
+   not prove the token's tier can actually call anything. `/doctor` covers this today by calling
+   `actions.getContext` (workbench tier, read-only) as a functional probe. Daintree now ships
+   `mcp.surface` (see the discovery section), which reports the session's tier and a stable
+   surface hash — the natural target for both the `/doctor` probe and the startup drift
+   check, but the CLI hasn't adopted it yet.
 
 For discovery beyond the lists above, use `tool.search` / `daintree.listTools` rather than
 guessing tool names.
@@ -307,6 +419,13 @@ matching edit here to stay correct:
 3. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. Illustrative, not an
    allowlist and not load-bearing: nothing in the code reads it, so a stale example here
    cannot change behavior. Update it when it would mislead a reader.
+4. **The backend skills** (`../assistant-backend`,
+   `src/daintree_assistant_server/skills/files/*.md` — e.g. `daintree.foundation.md`) —
+   the model-facing guidance, injected server-side since the backend migration (the old
+   embedded `internal/prompts/daintree_mcp.go` reference was deleted with it). Hand-written
+   like this doc: they name the local wrappers plus a few high-value unwrapped tools and
+   point the model at `tool.search` for the rest — deliberately **not** an enumeration of
+   every server tool; update them when a surface change alters an actual workflow.
 
 The one remaining hand-written list is `DocsToolNames` (`internal/mcp/docs.go`) for the
 public documentation MCP — a fixed third-party surface with no annotations to derive from.
