@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
@@ -116,11 +117,28 @@ type forgeGetPRArgs struct {
 	PRNumber int `json:"prNumber"`
 }
 
-// Validate mirrors the host's Zod refinements (enums + numeric bounds) that
-// strict JSON decoding alone can't express. StrictDecoder runs it at the registry
-// Decode gate; every handler ALSO calls it after its own strictDecode, because
-// that helper is structural only — so a direct Handle call is guarded too.
-func (a *forgeListPagingArgs) Validate() error {
+// Compile-time proof that every typed forge args struct is its own Validator.
+// These are load-bearing together with validatePaging's name (below): they turn a
+// deleted Validate into a build failure rather than silent under-validation.
+var (
+	_ tools.Validator = (*forgeListIssuesArgs)(nil)
+	_ tools.Validator = (*forgeListPRsArgs)(nil)
+	_ tools.Validator = (*forgeGetIssueArgs)(nil)
+	_ tools.Validator = (*forgeGetPRArgs)(nil)
+)
+
+// validatePaging mirrors the host's Zod refinements (enums + numeric bounds) that
+// strict JSON decoding alone can't express. StrictDecoder runs the outer Validate
+// at the registry Decode gate; every handler ALSO calls it after its own
+// strictDecode, because that helper is structural only — so a direct Handle call
+// is guarded too.
+//
+// It is deliberately NOT named Validate. If it were, deleting an outer
+// Validate would silently promote this one instead — the args struct would still
+// satisfy tools.Validator, still compile, and quietly stop checking `state`. With
+// this name, dropping an outer Validate breaks the var block above and the
+// decodeForge call site.
+func (a *forgeListPagingArgs) validatePaging() error {
 	if a.Cursor != nil && *a.Cursor == "" {
 		return fmt.Errorf("cursor must be a non-empty opaque cursor from a previous response's nextCursor")
 	}
@@ -137,16 +155,17 @@ func (a *forgeListPagingArgs) Validate() error {
 }
 
 func (a *forgeListIssuesArgs) Validate() error {
-	if err := a.forgeListPagingArgs.Validate(); err != nil {
+	if err := a.validatePaging(); err != nil {
 		return err
 	}
 	return oneOf("state", a.State, "open", "closed", "all")
 }
 
 func (a *forgeListPRsArgs) Validate() error {
-	if err := a.forgeListPagingArgs.Validate(); err != nil {
+	if err := a.validatePaging(); err != nil {
 		return err
 	}
+	// Issues and PRs differ here: only PRs have a "merged" state.
 	return oneOf("state", a.State, "open", "closed", "merged", "all")
 }
 
@@ -166,16 +185,20 @@ func (a *forgeGetPRArgs) Validate() error {
 
 // oneOf enforces a string enum on an optional field, listing the legal values in
 // the error so the model can correct itself in one retry instead of guessing.
+// Values are quoted and comma-joined to match the house phrasing (agenttaskx) —
+// Go's default %v slice form ([open closed all]) reads like prose, not a value set.
 func oneOf(field string, got *string, allowed ...string) error {
 	if got == nil {
 		return nil
 	}
+	quoted := make([]string, 0, len(allowed))
 	for _, want := range allowed {
 		if *got == want {
 			return nil
 		}
+		quoted = append(quoted, fmt.Sprintf("%q", want))
 	}
-	return fmt.Errorf("%s must be one of %v, got %q", field, allowed, *got)
+	return fmt.Errorf("%s must be one of %s, got %q", field, strings.Join(quoted, ", "), *got)
 }
 
 // addTo copies only the SET location fields into the outgoing call.
@@ -254,9 +277,9 @@ func (a forgeGetPRArgs) forwardArgs() map[string]any {
 // warning from worktree.list on purpose: a model that passes a BRANCH name here
 // gets a silent null target rather than an error.
 const forgeLocationSchemaProps = `
-    "worktreeId": { "type": "string", "description": "Target a specific Daintree worktree by its id — a PATH-like id from worktree.list, NEVER a branch name. Omit all three location fields to use the active worktree." },
-    "worktreePath": { "type": "string", "description": "Target a worktree by its filesystem path. Omit all three location fields to use the active worktree." },
-    "cwd": { "type": "string", "description": "Legacy alias for worktreePath. Prefer worktreeId or worktreePath." }`
+    "worktreeId": { "type": "string", "minLength": 1, "description": "Target a worktree by its id from worktree.list — a PATH-like id, NEVER a branch name. Omit all three location fields to use the active worktree." },
+    "worktreePath": { "type": "string", "minLength": 1, "description": "Target a worktree by its absolute root path instead of its id. worktreeId wins if both are given." },
+    "cwd": { "type": "string", "minLength": 1, "description": "Legacy alias for worktreePath; prefer worktreePath." }`
 
 // forgeListSchemaProps is the shared paging/projection fragment. Every bound is a
 // real JSON-Schema keyword (enum / minimum / maximum / default) because the tool
@@ -267,15 +290,15 @@ const forgeListSchemaProps = `
     "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Items per page." },
     "sort": { "type": "string", "enum": ["created", "updated"], "default": "created", "description": "Which timestamp orders the page." },
     "direction": { "type": "string", "enum": ["asc", "desc"], "default": "desc", "description": "Sort direction." },
-    "bypassCache": { "type": "boolean", "default": false, "description": "Skip the forge's list cache. Use ONLY to observe a write you just made; otherwise omit — the cached listing is fresh enough and bypassing it costs a provider round-trip." },
-    "view": { "type": "string", "enum": ["summary", "full"], "default": "summary", "description": "summary (default) returns compact items — enough to triage, list, or pick one. Ask for full ONLY when you need every field of every row; prefer summary plus a getIssue/getPR on the one row you care about." }`
+    "bypassCache": { "type": "boolean", "default": false, "description": "Skip the provider's list cache and fetch fresh. Use when the list may have changed outside this app — an agent you spawned closed an issue, or the user ran a forge CLI. It costs a provider round-trip, so leave it off for ordinary paging." },
+    "view": { "type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Row detail. summary (default) keeps the fields needed to choose an item and drops each row's body and raw provider payload; full returns the complete provider object and is MUCH larger (a 7-row page measured ~46KB, over half of it redundant raw payload). Prefer summary, then getIssue/getPR on the one row you care about." }`
 
 var forgeListIssuesSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "state": { "type": "string", "enum": ["open", "closed", "all"], "default": "open", "description": "Issue state to include." },
-    "search": { "type": "string", "description": "Provider-native (GitHub) search query, forwarded verbatim — this is where label/assignee/author/text filters go, e.g. \"no:assignee -label:human-review\" or \"label:bug in:title parser\". There are no separate label/assignee/limit arguments." },` +
+    "search": { "type": "string", "description": "Provider-native query FRAGMENT (GitHub issue-search dialect), not a plain-text filter — this is where label/assignee/author/text filters go, e.g. \"no:assignee -label:human-review\" or \"label:bug in:title parser\". There are no separate label/assignee/limit arguments. It is appended AFTER the generated repo/type/state/sort qualifiers, so do not repeat those (no repo:, is:issue, or state: here)." },` +
 	forgeListSchemaProps + `,` + forgeLocationSchemaProps + `
   }
 }`)
@@ -317,7 +340,7 @@ func newForgeListIssuesTool() *tools.Tool {
 		Name: "forge.listIssues",
 		Description: "List the project's GitHub issues through Daintree's forge, with server-side filtering, paging and a compact default projection. " +
 			"Filter HERE rather than listing everything and sifting: state narrows open/closed, and search takes a provider-native GitHub query (\"no:assignee -label:human-review\") — label, assignee and text filters all live in search, not in separate arguments. " +
-			"Rows come back as compact summaries; pass view:\"full\" only when you genuinely need every field. Page with cursor rather than a large perPage. Read-only. " +
+			"Rows default to view:\"summary\" (compact, enough to choose an item); pass view:\"full\" only when you genuinely need every field. Page with cursor rather than a large perPage. Read-only. " +
 			forgeParallelNote,
 		Risk: domain.RiskRead,
 		// Independent, bounded MCP snapshot read with no ordering dependency on its
@@ -340,7 +363,7 @@ func newForgeListPRsTool() *tools.Tool {
 		Name: "forge.listPRs",
 		Description: "List the project's GitHub pull requests through Daintree's forge, with server-side filtering, paging and a compact default projection. " +
 			"state narrows the listing and accepts \"merged\" as a distinct value. This tool has NO search argument — filter by state/sort/direction only. " +
-			"Rows come back as compact summaries; pass view:\"full\" only when you genuinely need every field, and use forge.getPR for one PR's detail. Page with cursor rather than a large perPage. Read-only. " +
+			"Rows default to view:\"summary\" (compact, enough to choose an item); pass view:\"full\" only when you genuinely need every field, and use forge.getPR for one PR's detail. Page with cursor rather than a large perPage. Read-only. " +
 			forgeParallelNote,
 		Risk:           domain.RiskRead,
 		Parallelizable: true,
@@ -403,11 +426,54 @@ func newForgeGetPRTool() *tools.Tool {
 // enum/bound refinements have to be re-asserted here or a direct call could
 // forward perPage:0 to a host that will refuse it.
 func decodeForge(raw json.RawMessage, name string, out tools.Validator) (tools.ToolResult, bool) {
-	if res, ok := strictDecode(raw, name, out); !ok {
-		return res, false
+	if err := tools.DecodeStrict(raw, out); err != nil {
+		// A bare `json: unknown field "labels"` tells the model WHAT was wrong but
+		// not what to do instead, which is how a retry loop starts. forgeArgsHint
+		// names the right field for the mistakes this contract actually invites.
+		msg := fmt.Sprintf("Invalid arguments for %s: %s", name, err.Error())
+		if hint := forgeArgsHint(raw, name); hint != "" {
+			msg += " " + hint
+		}
+		return tools.Fail(codeInvalidArgs, msg), false
 	}
 	if err := out.Validate(); err != nil {
 		return tools.Fail(codeInvalidArgs, fmt.Sprintf("Invalid arguments for %s: %s", name, err.Error())), false
 	}
 	return tools.ToolResult{}, true
+}
+
+// forgeArgsHint maps a rejected argument shape to the ONE correction most likely
+// to fix it. The cases are an ordered switch, not a map range, so the same bad
+// input always produces the same hint. It only ever runs on a decode failure.
+func forgeArgsHint(raw json.RawMessage, name string) string {
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil || len(got) == 0 {
+		return ""
+	}
+	has := func(keys ...string) bool {
+		for _, k := range keys {
+			if _, ok := got[k]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("arguments"):
+		return "Pass these fields at the TOP LEVEL — the forge reads have no `arguments` wrapper."
+	case has("labels", "label", "assignee", "assignees", "author", "milestone"):
+		if name == "forge.listPRs" {
+			return "forge.listPRs filters by state/sort/direction only; it has no label or search field."
+		}
+		return `Label/assignee/author filters go INSIDE search as a provider-native query, e.g. search:"label:bug no:assignee".`
+	case has("limit", "count", "max", "top", "per_page", "pageSize"):
+		return "Page size is perPage (an integer 1-100); fetch further pages with cursor, not a bigger page."
+	case has("search", "query", "q") && name == "forge.listPRs":
+		return "forge.listPRs has NO search field — filter by state/sort/direction only."
+	case has("issueNumber") && name == "forge.getPR":
+		return "forge.getPR takes prNumber; use forge.getIssue for an issue."
+	case has("prNumber") && name == "forge.getIssue":
+		return "forge.getIssue takes issueNumber; use forge.getPR for a pull request."
+	}
+	return ""
 }

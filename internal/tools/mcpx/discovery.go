@@ -255,10 +255,10 @@ var wrappedMCPTools = map[string]string{
 	// validates them with closed schemas and the wrapper mirrors that contract, so
 	// forwarding the raw action through daintree.call trades a local, self-correcting
 	// INVALID_ARGS for an opaque host refusal.
-	"forge.listIssues": `forge.listIssues (typed wrapper — pass state/search/perPage/sort/direction/cursor/view as TOP-LEVEL fields, not an arguments object)`,
-	"forge.listPRs":    `forge.listPRs (typed wrapper — pass state/perPage/sort/direction/cursor/view as TOP-LEVEL fields; it has no search field)`,
-	"forge.getIssue":   "forge.getIssue (typed wrapper — pass issueNumber as a top-level positive integer)",
-	"forge.getPR":      "forge.getPR (typed wrapper — pass prNumber as a top-level positive integer)",
+	"forge.listIssues": `forge.listIssues (typed wrapper — pass its fields, e.g. state/search/perPage/view, as TOP-LEVEL arguments rather than an arguments object; see that tool's schema for the full set)`,
+	"forge.listPRs":    `forge.listPRs (typed wrapper — pass its fields, e.g. state/perPage/view, as TOP-LEVEL arguments; it has NO search field. See that tool's schema for the full set)`,
+	"forge.getIssue":   "forge.getIssue (typed wrapper — pass issueNumber as a top-level positive integer; see that tool's schema for the optional worktree-location fields)",
+	"forge.getPR":      "forge.getPR (typed wrapper — pass prNumber as a top-level positive integer; see that tool's schema for the optional worktree-location fields)",
 }
 
 // directMCPDependencies are raw Daintree MCP tools this build calls by name WITHOUT
