@@ -293,11 +293,11 @@ var directMCPDependencies = []string{
 // here ever called) and went stale on every host change.
 //
 // NOTE: this is deliberately NOT just the keys of wrappedMCPTools. That map is a
-// daintree.call REDIRECT denylist, a different job — several typed wrappers
-// (worktree.list/getCurrent, the forge reads) have no entry because nothing needs
-// redirecting for them. Using it alone silently under-covered
-// the dependency set, so the two are unioned here and a test scans the wrapper
-// sources to catch a new wrapper whose target was never declared.
+// daintree.call REDIRECT denylist, a different job — some typed wrappers
+// (worktree.list/getCurrent) have no entry because nothing needs redirecting for
+// them. Using it alone silently under-covered the dependency set, so the two are
+// unioned here and a test scans the wrapper sources to catch a new wrapper whose
+// target was never declared.
 //
 // Returned as a fresh slice so a caller cannot mutate internal state through it.
 func WrappedMCPToolNames() []string {
@@ -324,13 +324,13 @@ func WrappedMCPToolNames() []string {
 // denylist) because adding them there would change daintree.call's behaviour —
 // it would start refusing raw calls that are currently allowed — which is a
 // separate decision from drift coverage.
+// Two former residents are deliberately absent, both for the same reason: they
+// gained a denylist entry above, so the union already covers them from there and
+// keeping them here too would contradict this list's own definition.
+// copyTree.generate moved out when its curation options became strict-decoded (a
+// raw daintree.call must be redirected so they are validated); the forge reads
+// moved out when their contract became strictly typed on both sides (issue #299).
 var wrapperMCPTargets = []string{
-	// copyTree.generate is deliberately absent: it now HAS a denylist entry (a raw
-	// daintree.call for it must be redirected to the typed wrapper so the curation
-	// options are strict-decoded), so the union already covers it from there.
-	"forge.getIssue",
-	"forge.listIssues",
-	"forge.listPRs",
 	"worktree.getCurrent",
 	"worktree.list",
 }

@@ -518,6 +518,29 @@ func TestForgeInvalidArgsHintsAreSelfCorrecting(t *testing.T) {
 			t.Errorf("%s must not recommend search — it has no such field: %q", tool.Name, err.Error())
 		}
 	}
+
+	// The label/assignee/author case is shared by BOTH getters, so each must be sent
+	// to its OWN list tool. Steering forge.getPR at forge.listIssues would hand the
+	// model the wrong tool family — precisely the misdirection this contract removes.
+	for _, c := range []struct {
+		tool  *tools.Tool
+		want  string
+		avoid string
+	}{
+		{newForgeGetIssueTool(), "forge.listIssues", "forge.listPRs"},
+		{newForgeGetPRTool(), "forge.listPRs", "forge.listIssues"},
+	} {
+		_, err := c.tool.Decode(json.RawMessage(`{"labels":["bug"],"assignee":"x"}`))
+		if err == nil {
+			t.Fatalf("%s should have rejected a label/assignee filter", c.tool.Name)
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s must be steered at %s, got %q", c.tool.Name, c.want, err.Error())
+		}
+		if strings.Contains(err.Error(), c.avoid) {
+			t.Errorf("%s must not be steered at %s (wrong tool family): %q", c.tool.Name, c.avoid, err.Error())
+		}
+	}
 }
 
 // An empty worktree selector must be rejected, not forwarded: the host treats an

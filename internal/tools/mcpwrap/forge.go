@@ -522,7 +522,16 @@ func forgeArgsHint(raw json.RawMessage, name string) string {
 			return `Label/assignee/author filters go INSIDE search as a provider-native query, e.g. search:"label:bug no:assignee".`
 		case "forge.listPRs":
 			return "forge.listPRs filters by state/sort/direction only; it has no label or search field."
+		case "forge.getPR":
+			// The two getters share this case but NOT the correction: steering the PR
+			// getter at forge.listIssues would point it at the wrong tool family, the
+			// exact misdirection this contract exists to remove. Send it to
+			// forge.listPRs — and do NOT promise a search query there, because that
+			// list tool has no search field either.
+			return "This tool fetches ONE item by number; use forge.listPRs to filter a set (it filters by state/sort/direction only)."
 		default:
+			// forge.getIssue: forge.listIssues is its set form, and that one DOES take
+			// a provider-native search query.
 			return "This tool fetches ONE item by number; use forge.listIssues with a search query to filter a set."
 		}
 	case has("limit", "count", "max", "top", "per_page", "pageSize"):
