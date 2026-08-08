@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -13,8 +15,9 @@ import (
 // The wrappers below cover Daintree actions previously reachable only through the
 // raw daintree.call escape hatch. Each carries the risk class Daintree gates the
 // action at, so reads/UI-focus run without the system-tier confirmation the escape
-// hatch always forces. `options` / `arguments` are opaque records forwarded
-// verbatim (we deliberately do NOT model their keys).
+// hatch always forces. Most `arguments` records are opaque and forwarded verbatim
+// (we deliberately do NOT model their keys); copyTree's `options` is the
+// exception — see copyTreeOptions for why it had to be typed.
 
 /* ------------------------------ terminal.focus ---------------------------- */
 
@@ -97,41 +100,225 @@ func newTerminalRenameTool(deps Deps) tools.Tool {
 
 /* ------------------------- copyTree.* shared shapes ----------------------- */
 
-// copyTreeOptions is forwarded verbatim; the keys are Daintree's, not ours.
+// copyTreeOptions mirrors Daintree's CopyTreeOptionsSchema field for field. The
+// authoritative source is
+// daintree/src/services/actions/definitions/schemas.ts (CopyTreeOptionsSchema);
+// the semantics behind each field live in daintree/shared/types/ipc/copyTree.ts.
+//
+// This is deliberately NOT an opaque map any more. The schema below sets
+// "additionalProperties": false, which makes an untyped field an UNREACHABLE
+// field — so the curation surface the model actually needs (includePaths,
+// filter, exclude, scopePaths) has to be spelled out here to exist at all. The
+// previous shape advertised an opaque bag and told the model not to invent
+// keys, which meant there was no path from "these 40 files matter" to a bundle.
+// Keep this struct, the schema fragment, and the host schema in lockstep;
+// TestCopyTreeOptionsSchemaMatchesStruct is the local half of that guard.
+//
+// Pointers are used ONLY where the JSON zero value is both legal to send and
+// dangerous to drop. `omitempty` erases an explicit 0, and a dropped
+// maxFileSize/maxTotalSize/maxFileCount/charLimit reads to the CopyTree SDK as
+// "no budget at all" — turning a malformed narrow request into a whole-worktree
+// bundle. The two booleans need no such care: Daintree defaults both to false,
+// so an explicit false and an omitted field genuinely mean the same thing.
+type copyTreeOptions struct {
+	Format string `json:"format,omitempty"`
+
+	// Daintree types filter/exclude as `string | string[]`. We accept ONLY the
+	// array arm: a lone pattern is a one-element array, which is a perfectly
+	// valid instance of the host union, so nothing is lost. Modelling the union
+	// itself would need a JSON-Schema combinator (oneOf, or a type array) — and
+	// tool schemas are forwarded verbatim to the upstream model, where those are
+	// honoured inconsistently at best. Same reasoning as domain.WatchCondition's
+	// one-key discriminated union: no $ref, no oneOf.
+	Filter       []string `json:"filter,omitempty"`
+	Exclude      []string `json:"exclude,omitempty"`
+	Always       []string `json:"always,omitempty"`
+	IncludePaths []string `json:"includePaths,omitempty"`
+	ScopePaths   []string `json:"scopePaths,omitempty"`
+
+	Modified bool   `json:"modified,omitempty"`
+	Changed  string `json:"changed,omitempty"`
+
+	MaxFileSize  *int `json:"maxFileSize,omitempty"`
+	MaxTotalSize *int `json:"maxTotalSize,omitempty"`
+	MaxFileCount *int `json:"maxFileCount,omitempty"`
+
+	WithLineNumbers bool `json:"withLineNumbers,omitempty"`
+	CharLimit       *int `json:"charLimit,omitempty"`
+
+	Sort string `json:"sort,omitempty"`
+}
+
+// The two enums Daintree advertises. Mirrored here because a schema `enum` is
+// only advisory to the model — nothing rejects an off-menu value until the host
+// does, and by then the user has already confirmed the call.
+var (
+	copyTreeFormats = []string{"xml", "json", "markdown", "tree", "ndjson", "sarif"}
+	copyTreeSorts   = []string{"path", "size", "modified", "name", "extension", "depth"}
+)
+
+// validate enforces the bounds Daintree's Zod schema declares but strict JSON
+// decoding alone can't express.
+//
+// The three selection lists are the load-bearing ones. Daintree rejects an empty
+// filter/includePaths/scopePaths (and a blank entry inside one) rather than
+// normalizing it away, because an empty selection reads as "no filter" to the
+// CopyTree SDK — i.e. the whole worktree. We have to catch that HERE rather than
+// leaning on the host to do it: Validate runs before StrictDecoder's canonical
+// re-marshal, and `omitempty` erases a present-but-empty slice, so left alone
+// `{"includePaths":[]}` would reach Daintree as "no selection was given" and
+// quietly bundle everything — a narrow request silently widened into a full-repo
+// copy, which for generateAndCopyFile lands on the user's clipboard.
+func (o *copyTreeOptions) validate() error {
+	if o == nil {
+		return nil
+	}
+	// Non-empty at both levels, matching the host's .min(1) on the list and on
+	// each item. exclude/always are deliberately absent from this list: neither
+	// carries those refinements host-side, and an empty exclusion set is
+	// harmless (it narrows nothing).
+	for _, sel := range []struct {
+		name string
+		vals []string
+	}{
+		{"filter", o.Filter},
+		{"includePaths", o.IncludePaths},
+		{"scopePaths", o.ScopePaths},
+	} {
+		if sel.vals == nil {
+			continue
+		}
+		if len(sel.vals) == 0 {
+			return fmt.Errorf("options.%s was supplied as an empty list; omit it to select the whole worktree, or name at least one path/pattern", sel.name)
+		}
+		for i, v := range sel.vals {
+			if strings.TrimSpace(v) == "" {
+				return fmt.Errorf("options.%s[%d] is blank; every entry must be a non-empty path or pattern", sel.name, i)
+			}
+		}
+	}
+	for _, budget := range []struct {
+		name string
+		val  *int
+	}{
+		{"maxFileSize", o.MaxFileSize},
+		{"maxTotalSize", o.MaxTotalSize},
+		{"maxFileCount", o.MaxFileCount},
+		{"charLimit", o.CharLimit},
+	} {
+		if budget.val != nil && *budget.val < 1 {
+			return fmt.Errorf("options.%s must be a positive integer (got %d); omit it for no budget", budget.name, *budget.val)
+		}
+	}
+	if o.Format != "" && !slices.Contains(copyTreeFormats, o.Format) {
+		return fmt.Errorf("options.format must be one of: %s", strings.Join(copyTreeFormats, ", "))
+	}
+	if o.Sort != "" && !slices.Contains(copyTreeSorts, o.Sort) {
+		return fmt.Errorf("options.sort must be one of: %s", strings.Join(copyTreeSorts, ", "))
+	}
+	return nil
+}
+
+// wire renders the typed options as the plain JSON object Daintree expects.
+// Going through encoding/json keeps ONE source of truth for the wire key names —
+// the struct tags — because hand-building a second 14-key map is exactly how the
+// two spellings would drift apart. Returns nil when there is nothing to send, so
+// an absent (or entirely default) options object stays absent on the wire rather
+// than arriving as a meaningless empty object.
+func (o *copyTreeOptions) wire() map[string]any {
+	if o == nil {
+		return nil
+	}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil || len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// copyTreeOptionsSchemaJSON is the nested "options" schema, shared verbatim by
+// all three copyTree wrappers so the three local copies can't drift from each
+// other. Expanded inline rather than referenced: tool schemas are forwarded to
+// the model as-is, and $ref would have to be resolved by something that isn't
+// there.
+const copyTreeOptionsSchemaJSON = `{
+    "type": "object",
+    "additionalProperties": false,
+    "description": "Curation and budget settings for the bundle. Once you have worked out WHICH files matter, name them here in ONE call — e.g. {\"includePaths\":[\"internal/a.go\",\"internal/a_test.go\",\"internal/b.go\"]} — rather than bundling the whole worktree and hoping. Omit this object entirely to bundle everything.",
+    "properties": {
+      "includePaths": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "THE curation field: worktree-relative exact paths (or glob patterns) to include. Use it to assemble a bundle of scattered but related files — the sources, the code they lean on, and their tests — in a single call. Unlike scopePaths it does not restrict traversal, so a pattern may match anywhere in the worktree. Combined with filter when both are given." },
+      "filter": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "Worktree-relative glob patterns or exact paths to include. Combined with includePaths when both are given; omit both to include the whole worktree. Always an ARRAY here — pass a single pattern as a one-element array." },
+      "exclude": { "type": "array", "items": { "type": "string" }, "description": "Worktree-relative glob patterns to drop from the selection. Always an ARRAY here — pass a single pattern as a one-element array." },
+      "always": { "type": "array", "items": { "type": "string" }, "description": "Glob patterns to include even when they exceed the per-file maxFileSize gate." },
+      "scopePaths": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "description": "LITERAL worktree-relative file or directory paths that restrict traversal to those subtrees — these are NOT glob patterns; nothing is globbed or escaped. Composes with filter/includePaths rather than replacing them. Omit to traverse the whole worktree; an empty list is rejected rather than read as 'no scoping', which would silently copy everything." },
+      "format": { "type": "string", "enum": ["xml", "json", "markdown", "tree", "ndjson", "sarif"], "description": "Output format for the bundle. Omit for Daintree's default." },
+      "modified": { "type": "boolean", "description": "Include only tracked files modified in the working directory (staged and unstaged changes; untracked files are excluded)." },
+      "changed": { "type": "string", "description": "Include only files changed since this commit or branch." },
+      "maxFileSize": { "type": "integer", "minimum": 1, "description": "Per-file size gate in bytes; larger files are never opened. Patterns listed in 'always' override it. CopyTree's own 10MB memory-safety ceiling applies regardless and cannot be lifted." },
+      "maxTotalSize": { "type": "integer", "minimum": 1, "description": "Total size budget in bytes across every retained file." },
+      "maxFileCount": { "type": "integer", "minimum": 1, "description": "Maximum number of files retained after selection and sorting." },
+      "charLimit": { "type": "integer", "minimum": 1, "description": "Character budget across ALL included file content, not per file." },
+      "withLineNumbers": { "type": "boolean", "description": "Prefix included file content with line numbers." },
+      "sort": { "type": "string", "enum": ["path", "size", "modified", "name", "extension", "depth"], "description": "Decides WHICH files survive when maxFileCount/maxTotalSize/charLimit force a trim: the selection is sorted this way and the head is kept." }
+    },
+    "required": []
+  }`
+
+/* --------------------------- copyTree.generate ---------------------------- */
+
 type copyTreeGenerateArgs struct {
-	WorktreeID string         `json:"worktreeId,omitempty"`
-	Options    map[string]any `json:"options,omitempty"`
+	WorktreeID     string           `json:"worktreeId,omitempty"`
+	WorktreePath   string           `json:"worktreePath,omitempty"`
+	Options        *copyTreeOptions `json:"options,omitempty"`
+	IncludeContent bool             `json:"includeContent,omitempty"`
+}
+
+// Validate rejects an unsafe options bag at DECODE time. copyTree.generate keeps
+// Daintree's active-worktree fallback (unlike generateAndCopyFile below), so
+// there is no target to require here.
+func (a copyTreeGenerateArgs) Validate() error { return a.Options.validate() }
+
+func (a copyTreeGenerateArgs) forwardMap() map[string]any {
+	m := map[string]any{}
+	if a.WorktreeID != "" {
+		m["worktreeId"] = a.WorktreeID
+	}
+	if a.WorktreePath != "" {
+		m["worktreePath"] = a.WorktreePath
+	}
+	if opts := a.Options.wire(); opts != nil {
+		m["options"] = opts
+	}
+	if a.IncludeContent {
+		m["includeContent"] = true
+	}
+	return m
 }
 
 var copyTreeGenerateSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "worktreeId": { "type": "string", "description": "Worktree to generate the copy tree for; Daintree uses the active worktree when omitted." },
-    "options": { "type": "object", "additionalProperties": true, "description": "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys)." }
+    "worktreeId": { "type": "string", "minLength": 1, "description": "Worktree to bundle, by id. Omit this and worktreePath to use the active worktree; the id wins when both are given." },
+    "worktreePath": { "type": "string", "minLength": 1, "description": "Absolute worktree root path, as an alternative to worktreeId." },
+    "options": ` + copyTreeOptionsSchemaJSON + `,
+    "includeContent": { "type": "boolean", "description": "Also return a bounded HEAD of the bundle inline as 'content', with 'contentTruncated' reporting whether it was cut. The file at 'filePath' always holds the whole bundle; set this only when you need to eyeball what was captured." }
   },
   "required": []
 }`)
 
-// copyTreeForwardMap rebuilds the verbatim args map forwarded to Daintree: the
-// whole parsed args object, so worktreeId/options travel as-is; omitted fields are
-// simply absent.
-func (a copyTreeGenerateArgs) forwardMap() map[string]any {
-	m := map[string]any{}
-	if a.WorktreeID != "" {
-		m["worktreeId"] = a.WorktreeID
-	}
-	if a.Options != nil {
-		m["options"] = a.Options
-	}
-	return m
-}
-
 func newCopyTreeGenerateTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "copyTree.generate",
-		Description: "Generate a Daintree 'copy tree' — a concatenated digest of a worktree's files — and return it as text " +
-			"(read-only). Typed wrapper around the Daintree copyTree.generate MCP tool. 'options' is forwarded verbatim; don't invent keys.",
+		Description: "Generate a Daintree 'copy tree' — a curated bundle of a worktree's files — written to a temporary file, and return that " +
+			"file's PATH plus its file count, byte size and budget stats. The bundle is NOT returned inline (it routinely runs to megabytes); " +
+			"pass includeContent:true for a bounded head of it. This is the read-only endpoint: end a curation loop HERE when you just need the " +
+			"reference file, and reach for copyTree.generateAndCopyFile only when the user asked for it on their clipboard. Curate with " +
+			"options.includePaths — the explicit list of files that matter — instead of bundling the whole worktree. The temp file is pruned by age, so read it promptly.",
 		Risk:   domain.RiskRead,
 		Schema: copyTreeGenerateSchema,
 		Decode: tools.StrictDecoder(func() any { return &copyTreeGenerateArgs{} }),
@@ -143,36 +330,113 @@ func newCopyTreeGenerateTool(deps Deps) tools.Tool {
 	}
 }
 
+/* ---------------------- copyTree.generateAndCopyFile ---------------------- */
+
+type copyTreeCopyFileArgs struct {
+	WorktreeID   string           `json:"worktreeId,omitempty"`
+	WorktreePath string           `json:"worktreePath,omitempty"`
+	Options      *copyTreeOptions `json:"options,omitempty"`
+}
+
+// Validate mirrors Daintree's requireExplicitWorktreeForAgentDispatch: every call
+// we make reaches the host as dispatchSource "agent", and an agent caller gets NO
+// active-worktree fallback there — it has to name the worktree it curated the
+// file list against rather than inherit whichever tab happens to be focused when
+// the call lands. Enforcing it here, rather than letting the host reject it,
+// means the user is never asked to confirm a system-tier clipboard overwrite
+// that was always going to fail: StrictDecoder runs Validate before dispatch
+// reaches its confirmation prompt.
+func (a copyTreeCopyFileArgs) Validate() error {
+	if strings.TrimSpace(a.WorktreeID) == "" && strings.TrimSpace(a.WorktreePath) == "" {
+		return errors.New("copyTree.generateAndCopyFile requires an explicit worktreeId (preferred) or worktreePath — assistant calls have no active-worktree fallback; take the id or path from the worktree-listing tool")
+	}
+	return a.Options.validate()
+}
+
+func (a copyTreeCopyFileArgs) forwardMap() map[string]any {
+	m := map[string]any{}
+	if a.WorktreeID != "" {
+		m["worktreeId"] = a.WorktreeID
+	}
+	if a.WorktreePath != "" {
+		m["worktreePath"] = a.WorktreePath
+	}
+	if opts := a.Options.wire(); opts != nil {
+		m["options"] = opts
+	}
+	return m
+}
+
+// Neither selector is `required` in the schema: "exactly one of these two" is a
+// combinator (oneOf/anyOf) that the model's tool-calling surface honours
+// inconsistently, so the constraint is carried by the descriptions and enforced
+// authoritatively by Validate above.
+var copyTreeCopyFileSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worktreeId": { "type": "string", "minLength": 1, "description": "REQUIRED (this or worktreePath): the worktree to bundle, by id. There is no active-worktree fallback for assistant calls — name the worktree you curated the file list against. The id wins when both are given." },
+    "worktreePath": { "type": "string", "minLength": 1, "description": "REQUIRED (this or worktreeId): absolute worktree root path, as an alternative to worktreeId." },
+    "options": ` + copyTreeOptionsSchemaJSON + `
+  },
+  "required": []
+}`)
+
 func newCopyTreeGenerateAndCopyFileTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "copyTree.generateAndCopyFile",
-		Description: "Generate a worktree's copy tree and copy it to the OS clipboard as a file. System tier — always confirms. " +
-			"Typed wrapper around the Daintree copyTree.generateAndCopyFile MCP tool. 'options' is forwarded verbatim.",
-		Consequence: "Writes the generated file digest to the operating-system clipboard, replacing its current contents.",
+		Description: "Generate a worktree's copy tree and put the resulting file on the user's OS clipboard, replacing what they had copied. " +
+			"System tier — always confirms. Requires an EXPLICIT worktreeId (or worktreePath): there is no active-worktree fallback for " +
+			"assistant calls, so name the worktree you curated against. Curate with options.includePaths — the explicit list of files that " +
+			"matter — instead of bundling the whole worktree. Daintree shows the user a 'Context copied' notification once the copy lands. " +
+			"When you only need the reference file and not the user's clipboard, use copyTree.generate instead.",
+		Consequence: "Replaces the operating-system clipboard's current contents with the generated bundle file, and notifies the user that the context was copied.",
 		Risk:        domain.RiskSystem,
-		Schema:      copyTreeGenerateSchema,
-		Decode:      tools.StrictDecoder(func() any { return &copyTreeGenerateArgs{} }),
+		Schema:      copyTreeCopyFileSchema,
+		Decode:      tools.StrictDecoder(func() any { return &copyTreeCopyFileArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
-			var a copyTreeGenerateArgs
+			var a copyTreeCopyFileArgs
 			_ = json.Unmarshal(raw, &a)
+			// Defense in depth for any path that skips Decode — the host would
+			// reject this too, but only after the confirmation prompt.
+			if strings.TrimSpace(a.WorktreeID) == "" && strings.TrimSpace(a.WorktreePath) == "" {
+				return tools.Fail(domain.CodeValidation,
+					"copyTree.generateAndCopyFile: an explicit worktreeId or worktreePath is required (no active-worktree fallback for assistant calls).")
+			}
 			return passthrough(ctx, deps.MCP, "copyTree.generateAndCopyFile", a.forwardMap(), "")
 		},
 	}
 }
 
+/* ----------------------- copyTree.injectToTerminal ------------------------ */
+
 type copyTreeInjectArgs struct {
-	TerminalID string         `json:"terminalId"`
-	WorktreeID string         `json:"worktreeId,omitempty"`
-	Options    map[string]any `json:"options,omitempty"`
+	TerminalID string           `json:"terminalId"`
+	WorktreeID string           `json:"worktreeId,omitempty"`
+	Options    *copyTreeOptions `json:"options,omitempty"`
 }
 
+// Validate runs at decode time, so a blank terminal or an unsafe selection is
+// rejected before dispatch prompts the user to confirm an injection that would
+// fail (or, worse, succeed at pasting the whole worktree). The handler keeps the
+// terminalId guard as defense-in-depth for any path that skips Decode.
+func (a copyTreeInjectArgs) Validate() error {
+	if strings.TrimSpace(a.TerminalID) == "" {
+		return errors.New("terminalId must be a non-empty Daintree terminal id")
+	}
+	return a.Options.validate()
+}
+
+// Daintree's injectToTerminal takes only worktreeId — no worktreePath — and
+// keeps its active-worktree fallback, so this schema stays narrower than
+// generate's on purpose rather than by omission.
 var copyTreeInjectSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalId": { "type": "string", "description": "Terminal to inject the generated copy tree into." },
-    "worktreeId": { "type": "string", "description": "Worktree to generate the copy tree from; Daintree uses the active worktree when omitted." },
-    "options": { "type": "object", "additionalProperties": true, "description": "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys)." }
+    "terminalId": { "type": "string", "minLength": 1, "description": "Terminal to inject the generated bundle into. Target an IDLE terminal — the payload can be enormous." },
+    "worktreeId": { "type": "string", "minLength": 1, "description": "Worktree to bundle, by id; Daintree uses the active worktree when omitted. This action does not accept worktreePath." },
+    "options": ` + copyTreeOptionsSchemaJSON + `
   },
   "required": ["terminalId"]
 }`)
@@ -180,8 +444,10 @@ var copyTreeInjectSchema = json.RawMessage(`{
 func newCopyTreeInjectTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "copyTree.injectToTerminal",
-		Description: "Generate a worktree's copy tree and inject it into a Daintree terminal's input. Mutating (writes into a " +
-			"terminal), so it always confirms. Typed wrapper around the Daintree copyTree.injectToTerminal MCP tool. 'options' is forwarded verbatim.",
+		Description: "Generate a worktree's copy tree and inject it into a Daintree terminal's input — this is how you hand a large codebase " +
+			"context to an agent. Mutating (writes into a terminal), so it always confirms. Curate with options.includePaths — the explicit " +
+			"list of files that matter — instead of injecting the whole worktree into a live pane. Target an IDLE terminal: the payload can be " +
+			"enormous. Omit worktreeId to use the active worktree (this action takes no worktreePath).",
 		Consequence: "Pastes a generated file digest into the named terminal's input. May be large; review the target terminal before approving.",
 		Risk:        domain.RiskTerminal,
 		Schema:      copyTreeInjectSchema,
@@ -198,8 +464,8 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 			if a.WorktreeID != "" {
 				m["worktreeId"] = a.WorktreeID
 			}
-			if a.Options != nil {
-				m["options"] = a.Options
+			if opts := a.Options.wire(); opts != nil {
+				m["options"] = opts
 			}
 			// Attempted input injection invalidates cross-call settle evidence BEFORE
 			// the call, same as terminal.sendCommand (see there for why).
