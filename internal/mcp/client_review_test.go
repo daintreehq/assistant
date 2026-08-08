@@ -215,9 +215,14 @@ func TestRetryGuardMutationSingleShot(t *testing.T) {
 	}
 }
 
-// TestRetryGuardReadOnlyHonored: a read-only tool DOES honor the retry budget.
+// TestRetryGuardReadOnlyHonored: a tool the SERVER annotated read-only DOES honor
+// the retry budget.
 func TestRetryGuardReadOnlyHonored(t *testing.T) {
-	low := &fakeLow{callErrs: []error{&jsonrpc.Error{Code: -32000}, nil}, callResult: rawResult{Text: "ok"}}
+	low := &fakeLow{
+		tools:      []rawTool{readTool("terminal.getStatus")},
+		callErrs:   []error{&jsonrpc.Error{Code: -32000}, nil},
+		callResult: rawResult{Text: "ok"},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2}); err != nil {
@@ -228,29 +233,26 @@ func TestRetryGuardReadOnlyHonored(t *testing.T) {
 	}
 }
 
-// TestReadOnlyAllowlistOnlyDocumentedReads: every name on the read-only allowlist is
-// a real documented tool on EITHER MCP server — the Daintree control plane or the docs
-// server (guards against a typo'd allowlist entry that would never match and silently
-// disable retries).
-func TestReadOnlyAllowlistOnlyDocumentedReads(t *testing.T) {
-	documented := map[string]struct{}{}
-	for _, n := range DocumentedMcpToolNames {
-		documented[n] = struct{}{}
+// TestUnknownToolIsNeverRetrySafe: a tool absent from the live cache is forced
+// single-shot. This is the fail-closed edge of annotation-derived classification —
+// with no local allowlist left, "I have never seen this tool" must mean "do not
+// retry it", never "assume it is a read".
+func TestUnknownToolIsNeverRetrySafe(t *testing.T) {
+	low := &fakeLow{
+		tools:    []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{&jsonrpc.Error{Code: -32000}, nil},
 	}
-	for _, n := range DocsDocumentedToolNames {
-		documented[n] = struct{}{}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	if _, err := c.CallTool(context.Background(), "some.unlisted.tool", nil, CallOptions{Retries: 2}); err == nil {
+		t.Fatal("expected the transport error to surface, not be retried away")
 	}
-	for _, n := range AdditionalReadToolNames {
-		documented[n] = struct{}{}
-	}
-	for n := range readOnlyToolNames {
-		if _, ok := documented[n]; !ok {
-			t.Errorf("read-only allowlist entry %q is not a documented MCP tool", n)
-		}
+	if low.callCalls != 1 {
+		t.Errorf("an unlisted tool must be single-shot, got %d attempts", low.callCalls)
 	}
 }
 
-// (TestDriftBaselineParityWithPrompts was removed: the duplicate documented-tools
-// baseline in internal/models/prompts was deleted with the rest of the server-owned
-// prompt machinery. internal/mcp keeps the single authoritative DocumentedMcpToolNames
-// for drift detection.)
+// (TestReadOnlyAllowlistOnlyDocumentedReads was removed with the readOnlyToolNames
+// allowlist it policed. Retry safety is now read from the live server's annotations,
+// so there is no local list left to typo — the equivalent guard is now
+// TestRetryPolicyDerivedFromAnnotations in tools_test.go.)

@@ -28,7 +28,6 @@ func All() []Scenario {
 		blankTailDeepRead(),
 		hungAgentNoStall(),
 		fastFinisherRelay(),
-		throttledReadsRecover(),
 		questionSurfacedNotHung(),
 		latencyChat(),
 		latencyToolRead(),
@@ -471,36 +470,6 @@ func fastFinisherRelay() Scenario {
 			Under(3 * time.Minute),
 		},
 		Notes: "The relay race: the agent finishes before the first status poll ever sees 'working' — the wait must still settle promptly.",
-	}
-}
-
-func throttledReadsRecover() Scenario {
-	return Scenario{
-		ID:       "throttled-reads-recover",
-		Category: "fault",
-		Prompt:   "The nightly report agent in the report-runner terminal finished — what's the report ID it printed?",
-		Timeout:  4 * time.Minute,
-		Setup: func(w *world.World) {
-			// Blank inline tails force the DEEP getOutput path, so the throttle
-			// fault is guaranteed to be on the road to the answer.
-			w.Faults.BlankStatusTail = true
-			w.Faults.ThrottleGetOutputN = 2
-			w.AddTerminal(world.Terminal{
-				ID: "terminal-report-runner", Name: "Claude: report-runner", AgentID: "claude",
-				SpawnedAt: backdated(),
-				Script: world.Script{Phases: []world.Phase{
-					{After: 0, State: "waiting", WaitingReason: "prompt", Append: "Nightly aggregation complete across 12 datasets.\nREPORT_ID=TH-2231\n"},
-				}},
-			})
-		},
-		Checks: []Check{
-			ResultSuccess(),
-			// 2 throttled attempts + at least 1 successful read.
-			WorldCalled("terminal.getOutput", 3),
-			AnswerContains("TH-2231"),
-			SpawnCount(0),
-		},
-		Notes: "The first two deep reads are rate-limited (real MCP_RATE_LIMITED shape): the client-side retry must recover and still deliver the value.",
 	}
 }
 

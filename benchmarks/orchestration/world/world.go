@@ -82,11 +82,6 @@ type Faults struct {
 	// whitespace padding (the Codex bottom-padded-TUI quirk) while the deep
 	// terminal.getOutput still returns the real scrollback.
 	BlankStatusTail bool
-	// ThrottleGetOutputN makes the first N terminal.getOutput calls (per
-	// terminal) fail with a rate-limit error result before succeeding.
-	ThrottleGetOutputN int
-
-	throttleCount map[string]int
 }
 
 // New builds an empty world with sane defaults.
@@ -300,20 +295,6 @@ func (w *World) rename(id, name string) bool {
 	return true
 }
 
-// throttleTick returns true when this getOutput call should be rejected with a
-// rate-limit result under Faults.ThrottleGetOutputN.
-func (w *World) throttleTick(terminalID string) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.Faults.ThrottleGetOutputN <= 0 {
-		return false
-	}
-	if w.Faults.throttleCount == nil {
-		w.Faults.throttleCount = map[string]int{}
-	}
-	if w.Faults.throttleCount[terminalID] >= w.Faults.ThrottleGetOutputN {
-		return false
-	}
-	w.Faults.throttleCount[terminalID]++
-	return true
-}
+// (throttleTick was removed with the MCP_RATE_LIMITED fault it simulated: Daintree
+// deleted CallTool rate limiting outright, so there is no such result for the client
+// to receive or absorb.)

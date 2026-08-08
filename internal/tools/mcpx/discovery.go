@@ -252,6 +252,26 @@ var wrappedMCPTools = map[string]string{
 	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
 }
 
+// WrappedMCPToolNames returns the raw Daintree MCP tool names this build has typed
+// wrappers for, sorted for a stable order.
+//
+// It is the assistant's DRIFT BASELINE (wired in as mcp.Options.DriftBaseline): these
+// are precisely the host tools whose disappearance or rename would silently break a
+// local wrapper, so a missing one is a real, actionable breakage rather than a
+// documentation nit. Crucially the list maintains ITSELF — an entry cannot go stale
+// because the wrapper it redirects cannot exist without it — which is why this
+// replaced the old hand-transcribed 59-name baseline in internal/mcp.
+//
+// Returned as a fresh slice so a caller cannot mutate the denylist through it.
+func WrappedMCPToolNames() []string {
+	names := make([]string, 0, len(wrappedMCPTools))
+	for name := range wrappedMCPTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // denylistLookup is wrappedMCPTools re-keyed on the lowercased name so the
 // case-insensitive comparison is a single map hit. Built once at init.
 var denylistLookup = func() map[string]string {

@@ -14,6 +14,12 @@ type rawTool struct {
 	Name        string
 	Description string
 	InputSchema any // nil when the live tool advertised none
+	// Annotations is the server's declared behaviour hints, or nil when the tool
+	// carried no annotations object at all. The nil/non-nil distinction is
+	// LOAD-BEARING: it is the only way to tell "this server says nothing about its
+	// tools" (→ a conservative fallback may apply) from "this server declares this
+	// tool mutating" (→ never retry). A bool alone would collapse the two.
+	Annotations *ToolAnnotations
 }
 
 // rawResult is the minimal callTool response shape (the SDK's *mcp.CallToolResult
@@ -63,13 +69,33 @@ func (s *sdkLowLevel) ListTools(ctx context.Context) ([]rawTool, error) {
 		if t == nil {
 			continue
 		}
-		out = append(out, rawTool{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema, // may be nil → high-level mapper substitutes the default
-		})
+		out = append(out, normalizeSDKTool(t))
 	}
 	return out, nil
+}
+
+// normalizeSDKTool reduces one SDK *mcp.Tool to the rawTool shape. Pure (no
+// receiver, no I/O) so the annotation mapping — the part retry safety now depends
+// on — is unit-testable without a session.
+func normalizeSDKTool(t *sdkmcp.Tool) rawTool {
+	rt := rawTool{
+		Name:        t.Name,
+		Description: t.Description,
+		InputSchema: t.InputSchema, // may be nil → high-level mapper substitutes the default
+	}
+	if a := t.Annotations; a != nil {
+		// DestructiveHint is a *bool in the SDK because the MCP spec defaults it to
+		// true; we keep the pointer so "absent" stays distinguishable from an explicit
+		// false. ReadOnlyHint/IdempotentHint are plain bools (spec default false), so
+		// an omitted key and an explicit false are already indistinguishable on the
+		// wire — copying them verbatim loses nothing.
+		rt.Annotations = &ToolAnnotations{
+			ReadOnlyHint:    a.ReadOnlyHint,
+			IdempotentHint:  a.IdempotentHint,
+			DestructiveHint: a.DestructiveHint,
+		}
+	}
+	return rt
 }
 
 func (s *sdkLowLevel) CallTool(ctx context.Context, name string, args map[string]any) (rawResult, error) {

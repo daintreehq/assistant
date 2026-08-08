@@ -145,8 +145,12 @@ looking at:
    carrying `op`, so a stalled turn is distinguishable from a stalled utility task.
    `/doctor` opts out via `backend.WithoutRetry` — a probe reports the hop's state *now*.
 3. **Daintree MCP side.** Read-only tool calls are auto-retried on a transient transport
-   blip or an `MCP_RATE_LIMITED` throttle result (honouring the server's `retryAfter`,
-   capped); mutations are single-shot so a retry can never double-apply.
+   blip; mutations are single-shot so a retry can never double-apply. "Read-only" is the
+   live server's own `readOnlyHint` annotation, not a local list. A tool-level failure
+   (`isError`) is the tool's answer rather than a transport fault, so it is surfaced
+   as-is and never replayed. (Daintree removed MCP `CallTool` rate limiting entirely, so
+   there is no throttle result left to absorb; client-side burst protection is the
+   request governor's job.)
 
 Retries are always bounded by the caller's context: Escape cancels mid-backoff, and a
 call that carries its own deadline (a boot handshake, a scheduler item) never outlives it.

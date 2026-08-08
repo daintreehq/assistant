@@ -5,7 +5,9 @@
 // `Authorization: Bearer <token>` header. The client NEVER throws on
 // construct/connect — it records lastError and reports connected:false; tools that
 // need Daintree then fail cleanly with MCP_UNAVAILABLE. It caches the tool list
-// (warmed once on connect) and warns on documented-vs-live drift.
+// (warmed once on connect), derives each tool's auto-retry safety from the
+// annotations the server ships with it, and warns when a tool this build depends
+// on is missing from the live server.
 package mcp
 
 import (
@@ -100,11 +102,30 @@ type Options struct {
 	// MCP). When true, no Authorization header is sent and an empty token is NOT treated
 	// as a "DAINTREE_MCP_TOKEN not set" misconfiguration.
 	Anonymous bool
-	// DriftBaseline overrides the documented-tool drift baseline. nil ⇒
-	// DocumentedMcpToolNames (the 59 Daintree tools). A second server passes its OWN
-	// short baseline (e.g. DocsDocumentedToolNames) so it never false-warns that the
-	// Daintree tools are missing from it.
+	// DriftBaseline is the set of tool names this client DEPENDS ON — a missing one
+	// is warned at connect. nil ⇒ no drift check for this client.
+	//
+	// There is deliberately no built-in default any more. The old default was a
+	// hand-maintained 59-name transcription of the host's surface, which went stale
+	// on every host change and warned about tools nothing here actually called.
+	// The baseline is now INJECTED by the wiring layer from a list that maintains
+	// itself: internal/app passes mcpx.WrappedMCPToolNames(), the raw names that
+	// have typed local wrappers. Those are exactly the names whose disappearance
+	// would silently break a wrapper, and they cannot go stale because a wrapper
+	// cannot exist without its entry. (internal/mcp cannot import internal/tools/mcpx
+	// — that would be an import cycle — which is why this is a constructor seam.)
 	DriftBaseline []string
+
+	// ReadOnlyFallback names tools to treat as retry-safe ONLY when the live tool
+	// carries no annotations object at all. It exists for a server that predates or
+	// omits MCP annotations (the public docs MCP), so its pure reads keep their
+	// retry budget without re-introducing a hand-maintained allowlist for the
+	// primary Daintree host, which does annotate.
+	//
+	// Narrow by construction: a PRESENT annotations object always wins, even when it
+	// declares the tool mutating. This can only ever restore retry to a server that
+	// declared nothing — it can never override a server that said "do not retry me".
+	ReadOnlyFallback []string
 }
 
 // Client is the high-level DaintreeMcpClient. All mutable state is guarded by mu
@@ -115,12 +136,15 @@ type Client struct {
 	// endpoint, anonymous, and driftBaseline are resolved ONCE in New (immutable
 	// after, so they need no lock). endpoint is the connection URL (cfg.McpURL unless
 	// Options.URL overrides it); anonymous suppresses the bearer header for a no-auth
-	// server; driftBaseline is the documented-tool set the warmToolCache drift check
-	// compares against (DocumentedMcpToolNames for the primary client, a server-specific
-	// list for a second server like the docs MCP).
+	// server; driftBaseline is the depended-on tool set the warmToolCache drift check
+	// compares against (injected per client — the typed-wrapper names for the primary,
+	// DocsToolNames for the docs MCP; nil disables the check).
 	endpoint      string
 	anonymous     bool
 	driftBaseline []string
+	// readOnlyFallback is the Options.ReadOnlyFallback set, consulted ONLY for a
+	// live tool that advertised no annotations at all. Immutable after New.
+	readOnlyFallback map[string]struct{}
 
 	// sdkClient is the SDK client built ONCE in New with the resource-updated
 	// handler wired in. The handler must be present BEFORE Connect (it cannot be
@@ -137,14 +161,21 @@ type Client struct {
 	// server. Immutable after New.
 	gov *governor
 
-	mu             sync.Mutex
-	low            LowLevelClient // active low-level client (nil when disconnected)
-	generation     uint64         // bumped whenever c.low is installed/detached; identity tag for in-flight calls
-	connected      bool
-	transportKind  string
-	lastError      string
-	toolCache      []ToolInfo // nil = cold
-	cacheWarm      bool       // distinguishes nil-empty-cache from cold
+	mu            sync.Mutex
+	low           LowLevelClient // active low-level client (nil when disconnected)
+	generation    uint64         // bumped whenever c.low is installed/detached; identity tag for in-flight calls
+	connected     bool
+	transportKind string
+	lastError     string
+	toolCache     []ToolInfo // nil = cold
+	cacheWarm     bool       // distinguishes nil-empty-cache from cold
+	// retrySafe is the per-tool auto-retry classification DERIVED from the live
+	// annotations in toolCache. It is rebuilt on the same line toolCache is
+	// assigned, under this same lock, so it can never describe a different tool set
+	// than the cache it came from — which is why no separate invalidation on
+	// reconnect/degrade/close is needed. A cold cache yields an empty map, and an
+	// empty map means "nothing is retry-safe" (fail closed).
+	retrySafe      map[string]bool
 	driftWarnings  []string
 	driftToolNames []string
 	serverInfo     *ServerInfo
@@ -179,19 +210,25 @@ func New(cfg config.AppConfig, opts Options) *Client {
 	if opts.URL != nil {
 		endpoint = *opts.URL
 	}
-	driftBaseline := opts.DriftBaseline
-	if driftBaseline == nil {
-		driftBaseline = DocumentedMcpToolNames
+	// No implicit drift baseline: a client that is given none simply does not drift-check
+	// (see Options.DriftBaseline for why the old hand-maintained default was removed).
+	var fallback map[string]struct{}
+	if len(opts.ReadOnlyFallback) > 0 {
+		fallback = make(map[string]struct{}, len(opts.ReadOnlyFallback))
+		for _, n := range opts.ReadOnlyFallback {
+			fallback[n] = struct{}{}
+		}
 	}
 	c := &Client{
-		cfg:             cfg,
-		endpoint:        endpoint,
-		anonymous:       opts.Anonymous,
-		driftBaseline:   driftBaseline,
-		transportKind:   transportNone,
-		resourceUpdates: make(chan string, resourceUpdateBuffer),
-		gov:             newGovernor(governorMaxConcurrent, governorMinInterval),
-		subs:            map[string]int{},
+		cfg:              cfg,
+		endpoint:         endpoint,
+		anonymous:        opts.Anonymous,
+		driftBaseline:    opts.DriftBaseline,
+		readOnlyFallback: fallback,
+		transportKind:    transportNone,
+		resourceUpdates:  make(chan string, resourceUpdateBuffer),
+		gov:              newGovernor(governorMaxConcurrent, governorMinInterval),
+		subs:             map[string]int{},
 	}
 	// Build the SDK client once, with the resource-updated handler wired in before
 	// any Connect. An injected override never connects through it, but constructing
@@ -475,9 +512,10 @@ func (c *Client) runDriftCheck() {
 		return
 	}
 
-	// 4. Missing-only: documented names absent from live, in array order. The baseline is
-	// per-client (DocumentedMcpToolNames for the primary, a server-specific list for a
-	// second server like the docs MCP) so the two never cross-contaminate.
+	// 4. Missing-only: depended-on names absent from live, in array order. The baseline is
+	// injected per-client (the wrapper-derived names for the primary, its own short list
+	// for a second server like the docs MCP) so the two never cross-contaminate. A hit
+	// here is actionable: something this build calls by name is not on the live server.
 	for _, name := range c.driftBaseline {
 		if _, ok := live[name]; !ok {
 			c.driftToolNames = append(c.driftToolNames, name)
@@ -485,6 +523,20 @@ func (c *Client) runDriftCheck() {
 				fmt.Sprintf("MCP drift: tool '%s' is documented but missing from the live server", name))
 		}
 	}
+}
+
+// isRetrySafe reports whether a tool may be auto-retried, per the classification
+// derived from the live server's annotations when the tool cache was last warmed.
+//
+// Fails CLOSED in every uncertain case: a cold cache, a tool absent from the cache
+// (never listed, or listed under a tier that does not expose it), or a tool the
+// server annotated as mutating all return false, forcing a single-shot call. The
+// cost of a false negative is one lost retry; the cost of a false positive is a
+// double-applied mutation, so the asymmetry is deliberate.
+func (c *Client) isRetrySafe(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.retrySafe[name]
 }
 
 // ensure returns the active low-level client AND the generation it was snapshotted
@@ -587,7 +639,7 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 
 	tools := make([]ToolInfo, 0, len(rawTools))
 	for _, rt := range rawTools {
-		ti := ToolInfo{Name: rt.Name, Description: rt.Description}
+		ti := ToolInfo{Name: rt.Name, Description: rt.Description, Annotations: rt.Annotations}
 		if schema, ok := rt.InputSchema.(map[string]any); ok && schema != nil {
 			ti.InputSchema = schema
 		} else {
@@ -595,9 +647,25 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 		}
 		tools = append(tools, ti)
 	}
+	// Derive the auto-retry classification from the SAME slice that becomes the
+	// cache, so the two can never disagree. Computed before the lock (pure work),
+	// installed with the cache atomically below.
+	retrySafe := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		safe := retrySafeFromAnnotations(t.Annotations)
+		if !safe && t.Annotations == nil && c.readOnlyFallback != nil {
+			// The server declared nothing about this tool. Only then may the
+			// per-client fallback speak for it (see Options.ReadOnlyFallback).
+			if _, ok := c.readOnlyFallback[t.Name]; ok {
+				safe = true
+			}
+		}
+		retrySafe[t.Name] = safe
+	}
 
 	c.mu.Lock()
 	c.toolCache = tools
+	c.retrySafe = retrySafe
 	c.cacheWarm = true
 	out := append([]ToolInfo(nil), tools...)
 	c.mu.Unlock()
@@ -608,11 +676,14 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 // RETRY-BEFORE-DEGRADE ordering is load-bearing: degrading first would
 // make the next ensure() throw, killing the retry.
 //
-// READ-ONLY RETRY GUARD: CallOptions.Retries is honored ONLY for tools on the
-// read-only allowlist (readOnlyToolNames). Retrying a mutation (terminal.sendCommand,
-// agent.launch, recipe.run, …) risks a double-apply on a transient transport blip,
-// so a non-read tool is forced single-shot even if a caller mistakenly set Retries>0.
-// This makes retry-safety a property of the tool, not caller discipline.
+// READ-ONLY RETRY GUARD: CallOptions.Retries is honored ONLY for a tool the LIVE
+// SERVER annotated as read-only (see retrySafeFromAnnotations / isRetrySafe).
+// Retrying a mutation (terminal.sendCommand, agent.launch, recipe.run, …) risks a
+// double-apply on a transient transport blip, so any other tool is forced
+// single-shot even if a caller mistakenly set Retries>0. This makes retry-safety a
+// property of the tool as the SERVER declares it, not of caller discipline and no
+// longer of a hand-maintained local allowlist that could drift into claiming a
+// mutation is a read.
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any, opts CallOptions) (result CallResult, err error) {
 	if args == nil {
 		args = map[string]any{}
@@ -621,8 +692,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 	if retries < 0 {
 		retries = 0
 	}
-	// Mutations never auto-retry, regardless of the requested budget.
-	if !isReadOnlyToolName(name) {
+	// Classify ONCE, up front: the loop below must not re-read the classification,
+	// or a concurrent cache refresh mid-retry could change a call's retry budget
+	// halfway through. Mutations (and anything the server did not annotate as a
+	// read) never auto-retry, regardless of the requested budget.
+	readOnly := c.isRetrySafe(name)
+	if !readOnly {
 		retries = 0
 	}
 
@@ -635,7 +710,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 	attempts := 0
 	var queuedMs int64
 	defer func() {
-		c.traceCall(name, retries, attempts, time.Since(start).Milliseconds(), queuedMs, result, err)
+		c.traceCall(name, readOnly, retries, attempts, time.Since(start).Milliseconds(), queuedMs, result, err)
 	}()
 
 	var res rawResult
@@ -685,22 +760,10 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 			return low.CallTool(callCtx, name, args)
 		}()
 		if err == nil {
-			// Transport-level success — but a Daintree READ can come back as a throttle
-			// RESULT (IsError=true + MCP_RATE_LIMITED + details.retryAfter) rather than a
-			// transport error, which CallTool would otherwise hand straight to the model
-			// as a failed read (costing a whole LLM round to re-decide). Absorb it here,
-			// below the model, exactly like a transient transport error. The read-only
-			// guard is already enforced: `retries` was forced to 0 for mutations above,
-			// so `attempt < retries` is false for a non-read tool — a mutation that comes
-			// back IsError is never retried (no double-apply).
-			if res.IsError && attempt < retries {
-				if delay, ok := throttleRetryAfter(res.Text); ok {
-					if sleepErr := abortableSleep(ctx, delay); sleepErr != nil {
-						return CallResult{}, sleepErr // aborted mid-backoff: propagate, no degrade.
-					}
-					continue
-				}
-			}
+			// Transport-level success. A tool-level failure (IsError=true) is the TOOL's
+			// answer, not a transport fault, so it is surfaced verbatim and never
+			// auto-replayed — retry exists to absorb a blip on the wire, and re-issuing a
+			// call the server already answered would just repeat the same result.
 			break
 		}
 
@@ -758,14 +821,17 @@ const mcpTracePreviewMax = 1000
 // makes the underlying call visible. Gated on debug logging (the field-building has
 // cost), panic-guarded, and never throws — a logging fault must not affect a call.
 // Success logs a preview + hash of the payload; failure logs the normalized error.
-func (c *Client) traceCall(name string, retries, attempts int, durationMs, queuedMs int64, result CallResult, err error) {
+func (c *Client) traceCall(name string, readOnly bool, retries, attempts int, durationMs, queuedMs int64, result CallResult, err error) {
 	dbg := debuglog.Config{DebugLog: c.cfg.DebugLog, LogDir: c.cfg.LogDir}
 	if !dbg.DebugLog {
 		return
 	}
 	defer func() { _ = recover() }()
+	// The classification the CALL actually used, passed in rather than re-derived:
+	// re-reading it here could report a different kind than the one that governed
+	// retry if the tool cache refreshed mid-call.
 	kind := "mutation"
-	if isReadOnlyToolName(name) {
+	if readOnly {
 		kind = "read"
 	}
 	// transportOk (not "ok") deliberately: this is transport/API success — NO Go error —
