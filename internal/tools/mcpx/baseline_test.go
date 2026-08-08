@@ -94,7 +94,7 @@ func TestWrappedMCPToolNamesCoversDenylist(t *testing.T) {
 // wrapperSourceGlobs are the files whose raw MCP name literals must all appear in
 // the drift baseline: the typed wrappers in this package and in internal/tools/mcpwrap.
 var wrapperSourceGlobs = []string{
-	"wrappers.go",
+	"*.go",
 	"../mcpwrap/*.go",
 }
 
@@ -107,10 +107,18 @@ var mcpNameLiteral = regexp.MustCompile(`"([a-z][a-zA-Z0-9]*(?:\.[a-z][a-zA-Z0-9
 // action ids (local tool names, arg paths, media types). Listed explicitly so the
 // scan can be strict about everything else.
 var nonMCPLiterals = map[string]bool{
-	// Local typed-tool names registered by this package, not host actions.
-	"terminal.focus": true,
-	// Local wrapper tool ids in internal/tools/mcpwrap.
-	"forge.pr.get": true,
+	// Tool names this build REGISTERS locally (the model calls these; they are not
+	// host MCP actions, so drift must not expect the server to advertise them).
+	//
+	// Keep this list MINIMAL and local-only: every entry is a name the scan will
+	// never check again, so a speculative exemption could silently excuse a real
+	// host dependency later. Never add a name just to quiet the test — if the
+	// literal names a tool the HOST provides, it belongs in the baseline instead.
+	"daintree.status":    true,
+	"daintree.listTools": true,
+	"daintree.call":      true,
+	"tool.search":        true,
+	"terminal.focus":     true,
 }
 
 // TestMCPDependenciesCoverWrapperCallSites is what makes the drift baseline

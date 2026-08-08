@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -195,15 +196,50 @@ func TestRetryClassificationClearedOnReconnect(t *testing.T) {
 		t.Fatal("precondition: the warmed read should be retry-safe")
 	}
 
-	// Invalidate exactly as markDegraded/Reconnect do.
-	c.mu.Lock()
-	c.toolCache = nil
-	c.retrySafe = nil
-	c.cacheWarm = false
-	c.mu.Unlock()
+	// Drive the REAL invalidation path rather than assigning the fields by hand: a
+	// hand-rolled reset would pass even if markDegraded stopped clearing them, which
+	// is precisely the regression this guards.
+	_, gen, err := c.ensure()
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	c.markDegraded(errors.New("fetch failed"), gen)
 
 	if c.isRetrySafe("terminal.getStatus") {
 		t.Error("a classification must not outlive the tool cache it was derived from")
+	}
+	c.mu.Lock()
+	cache, safe, warm := c.toolCache, c.retrySafe, c.cacheWarm
+	c.mu.Unlock()
+	if cache != nil || safe != nil || warm {
+		t.Errorf("markDegraded must clear the cache trio, got cache=%v retrySafe=%v warm=%v", cache, safe, warm)
+	}
+}
+
+// TestRetryClassificationDoesNotCrossSessions is the guard for the subtler hole:
+// applyConnected installs a NEW session but deliberately leaves the old tool cache
+// in place (so the UI does not blink to zero tools while the new one warms). The
+// cache is therefore still "warm", yet it describes a session that is gone — and a
+// remembered read-only verdict must NOT be honoured against the new one.
+func TestRetryClassificationDoesNotCrossSessions(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{readTool("terminal.getStatus")}}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	if !c.isRetrySafe("terminal.getStatus") {
+		t.Fatal("precondition: the warmed read should be retry-safe")
+	}
+
+	// A new session is installed without touching the cache.
+	c.applyConnected(nil, transportStreamableHTTP)
+
+	c.mu.Lock()
+	warm := c.cacheWarm
+	c.mu.Unlock()
+	if !warm {
+		t.Fatal("precondition: applyConnected is expected to leave the cache warm")
+	}
+	if c.isRetrySafe("terminal.getStatus") {
+		t.Error("a verdict from the previous session must not apply to a new one")
 	}
 }
 

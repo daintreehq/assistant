@@ -69,17 +69,18 @@ func IsCredentialTerminalStatus(errText string) bool {
 	if errText == "" {
 		return false
 	}
-	if isBindingTerminal(errText) {
+	// Match on the message OUTSIDE any embedded URL — for the binding markers too.
+	// Transport errors format the full request URL into their text, so a project or
+	// worktree path segment like /forbidden-project/ or /binding_stale/, or a host
+	// named unauthorized.example.com, would otherwise read as a dead credential and
+	// permanently stop reconnecting. Every real marker the server sends sits outside
+	// the URL, so dropping URLs costs no signal. (sanitizeErrText has already removed
+	// credential-bearing query parts; this is about the host/path that survives.)
+	outside := urlishRe.ReplaceAllString(errText, " ")
+	if isBindingTerminal(outside) {
 		return true
 	}
-	// Match on the message OUTSIDE any embedded URL. Transport errors format the
-	// full request URL into their text, so a project or worktree path segment like
-	// /forbidden-project/ or a host named unauthorized.example.com would otherwise
-	// read as a dead credential and permanently stop reconnecting. The status word
-	// the SDK appends always sits outside the URL, so dropping URLs costs no real
-	// signal. (sanitizeErrText has already stripped credential-bearing query parts;
-	// this is about the path/host that survives.)
-	low := strings.ToLower(urlishRe.ReplaceAllString(errText, " "))
+	low := strings.ToLower(outside)
 	return strings.Contains(low, "unauthorized") ||
 		strings.Contains(low, "unauthenticated") ||
 		strings.Contains(low, "forbidden")

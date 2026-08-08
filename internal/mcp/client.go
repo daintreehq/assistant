@@ -172,10 +172,21 @@ type Client struct {
 	// retrySafe is the per-tool auto-retry classification DERIVED from the live
 	// annotations in toolCache. It is rebuilt on the same line toolCache is
 	// assigned, under this same lock, so it can never describe a different tool set
-	// than the cache it came from — which is why no separate invalidation on
-	// reconnect/degrade/close is needed. A cold cache yields an empty map, and an
-	// empty map means "nothing is retry-safe" (fail closed).
-	retrySafe      map[string]bool
+	// than the cache it came from. A cold cache yields an empty map, and an empty
+	// map means "nothing is retry-safe" (fail closed).
+	retrySafe map[string]bool
+	// cacheGen is the session generation toolCache/retrySafe were built from, and is
+	// the real guard on retry safety — stricter than cacheWarm.
+	//
+	// Sessions are installed by applyConnected, which bumps generation WITHOUT
+	// clearing the cache: a reconnect deliberately keeps serving the previous tool
+	// list until the new one is warmed, so the UI does not flicker to zero tools.
+	// That is fine for DISPLAY but not for retry — the new session may expose a
+	// different surface, and honouring the old session's "read-only" verdict against
+	// it is precisely how a mutation gets replayed. Requiring cacheGen == generation
+	// makes a classification valid only for the session it was actually observed on,
+	// which cacheWarm alone cannot express.
+	cacheGen       uint64
 	driftWarnings  []string
 	driftToolNames []string
 	serverInfo     *ServerInfo
@@ -535,20 +546,45 @@ func (c *Client) runDriftCheck() {
 // cost of a false negative is one lost retry; the cost of a false positive is a
 // double-applied mutation, so the asymmetry is deliberate.
 //
-// The cacheWarm gate is what makes "cold" reliable, and it is deliberately the SAME
-// flag the cache itself uses. Every site that invalidates toolCache clears cacheWarm
-// in the same critical section, so a classification can never outlive the listing it
-// came from — including across a Reconnect or markDegraded, after which the surface
-// may legitimately differ and a remembered "read-only" verdict would be a licence to
-// replay a mutation. Checking a separate field here would only work for as long as
-// everyone remembered to clear it too.
+// The generation check is the load-bearing part, and it is STRICTER than cacheWarm.
+// Clearing the cache at each invalidation site is not enough on its own, because
+// applyConnected installs a new session WITHOUT clearing it (a reconnect keeps
+// serving the previous tool list until the new one warms, so the UI does not blink
+// to zero tools). That leaves a genuinely warm cache describing a session that is no
+// longer live — and honouring its "read-only" verdict against the new session is
+// exactly how a mutation gets replayed. Tying the verdict to the generation it was
+// observed on makes that impossible by construction, rather than by remembering to
+// clear a field in every future code path.
 func (c *Client) isRetrySafe(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.cacheWarm {
+	return c.isRetrySafeLocked(name)
+}
+
+// isRetrySafeLocked is isRetrySafe for a caller already holding c.mu.
+func (c *Client) isRetrySafeLocked(name string) bool {
+	if !c.cacheWarm || c.cacheGen != c.generation {
 		return false
 	}
 	return c.retrySafe[name]
+}
+
+// ensureRetrySafe re-snapshots the live session AND confirms the tool is still
+// classified retry-safe ON THAT SESSION, atomically. Used before dispatching a
+// RETRY: between the previous attempt and this one the client may have reconnected,
+// and a separate ensure() + isRetrySafe() pair could straddle another reconnect
+// between the two locks — re-introducing the cross-generation replay this exists to
+// prevent. Returns ok=false when the retry must be abandoned.
+func (c *Client) ensureRetrySafe(name string) (LowLevelClient, uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.connected || c.low == nil {
+		return nil, 0, false
+	}
+	if !c.isRetrySafeLocked(name) {
+		return nil, 0, false
+	}
+	return c.low, c.generation, true
 }
 
 // ensure returns the active low-level client AND the generation it was snapshotted
@@ -690,6 +726,7 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	}
 	c.toolCache = tools
 	c.retrySafe = retrySafe
+	c.cacheGen = gen
 	c.cacheWarm = true
 	out := append([]ToolInfo(nil), tools...)
 	c.mu.Unlock()
@@ -738,11 +775,28 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 	}()
 
 	var res rawResult
+	var lastErr error
 	for attempt := 0; ; attempt++ {
 		attempts = attempt + 1
 		low, gen, err := c.ensure()
 		if err != nil {
 			return CallResult{}, err // UnavailableError: never retried, never degrades.
+		}
+		// RE-CONFIRM RETRY SAFETY IMMEDIATELY BEFORE A REPLAY. The decision to retry
+		// was made against the session that failed; by now a reconnect may have
+		// installed a different one, on which this tool need not be a read. Checking
+		// only in the retry-guard below would leave exactly that window open, since
+		// the backoff sleep and the governor wait both sit between the two points.
+		// Taking the session and its classification under one lock also stops a
+		// reconnect from slipping between an ensure() and a separate check.
+		if attempt > 0 {
+			l2, g2, ok := c.ensureRetrySafe(name)
+			if !ok {
+				// The tool is no longer a known read on the live session — abandon the
+				// replay and surface the failure that prompted it.
+				return CallResult{}, lastErr
+			}
+			low, gen = l2, g2
 		}
 
 		// Per-attempt deadline derived from the caller ctx (don't fuse signals). A caller
@@ -793,16 +847,14 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 
 		aborted := isAborted(ctx)
 
-		// Retry path FIRST (before degrading).
-		//
-		// RE-VERIFY the classification here, not just once up front. Between the
-		// initial check and this point the session can have been replaced (the
-		// governor wait re-snapshots a possibly-new session above, and a concurrent
-		// Reconnect/markDegraded invalidates the cache), and the tool may not be a
-		// read on the new surface — or may not be known at all. Re-checking can only
-		// ever REVOKE the budget, never grant one: `retries` was already forced to 0
-		// for anything not classified read-only, so this cannot turn a mutation into
-		// a retryable call. Fail-closed in the safe direction.
+		// Remember the failure so an abandoned replay (see the ensureRetrySafe guard
+		// at the top of the loop) can surface the real cause rather than a bare nil.
+		lastErr = err
+
+		// Retry path FIRST (before degrading). The classification is re-checked here
+		// AND again immediately before the next dispatch: this check can only REVOKE
+		// the budget, never grant one — `retries` was already forced to 0 for anything
+		// not classified read-only — so it cannot turn a mutation into a retryable call.
 		if !aborted && !isUnavailable(err) && attempt < retries && isRetriableMcpError(err) && c.isRetrySafe(name) {
 			delay := fullJitterDelay(attempt, mcpReadRetryPolicy.BaseDelayMs, mcpReadRetryPolicy.MaxDelayMs)
 			if sleepErr := abortableSleep(ctx, delay); sleepErr != nil {

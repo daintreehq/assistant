@@ -265,7 +265,7 @@ var wrappedMCPTools = map[string]string{
 var directMCPDependencies = []string{
 	"actions.getContext",
 	"agent.launch",
-	"agentSettings.get",
+	"agent.listAvailable",
 	"project.getCurrent",
 	"terminal.getOutput",
 	"terminal.getStatus",
