@@ -61,6 +61,17 @@ var benchReadTools = map[string]bool{
 	"terminal.list":       true,
 	"worktree.getCurrent": true,
 	"worktree.list":       true,
+	// Registered as failing stubs rather than implemented, but still genuine reads
+	// on the real host (kind: "query"). Annotating them as mutations would make the
+	// fake describe a surface Daintree never serves.
+	"git.getProjectPulse":          true,
+	"recipe.list":                  true,
+	"workflow.prepBranchForReview": true,
+	"forge.getPR":                  true,
+	"forge.getIssue":               true,
+	"forge.listIssues":             true,
+	"forge.listPRs":                true,
+	"copyTree.generate":            true,
 }
 
 // benchAnnotations mirrors Daintree's buildAnnotations: a query is read-only and

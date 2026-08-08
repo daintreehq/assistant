@@ -76,7 +76,12 @@ func TestCallToolDefaultTimeoutBackstop(t *testing.T) {
 // TestCallToolNonTransientNotRetried: a non-transport error is never retried even
 // when the read-only caller allows retries — and it degrades the connection.
 func TestCallToolNonTransientNotRetried(t *testing.T) {
-	low := &fakeLow{callErrs: []error{errors.New("invalid params"), errors.New("invalid params")}}
+	// Annotated read, so the retry budget is genuinely live and the assertion tests
+	// the error classifier rather than the read-only guard.
+	low := &fakeLow{
+		tools:    []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{errors.New("invalid params"), errors.New("invalid params")},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	_, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
@@ -96,7 +101,10 @@ func TestCallToolNonTransientNotRetried(t *testing.T) {
 // are never retried regardless of the retry budget.
 func TestCallToolBindingTerminalNotRetried(t *testing.T) {
 	for _, marker := range []string{"SESSION_BINDING_GONE: window closed", "BINDING_STALE"} {
-		low := &fakeLow{callErrs: []error{errors.New(marker), errors.New(marker)}}
+		low := &fakeLow{
+			tools:    []rawTool{readTool("terminal.getStatus")},
+			callErrs: []error{errors.New(marker), errors.New(marker)},
+		}
 		c := newInjected(low)
 		c.Connect(context.Background())
 		_, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})

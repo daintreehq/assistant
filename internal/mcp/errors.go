@@ -72,7 +72,14 @@ func IsCredentialTerminalStatus(errText string) bool {
 	if isBindingTerminal(errText) {
 		return true
 	}
-	low := strings.ToLower(errText)
+	// Match on the message OUTSIDE any embedded URL. Transport errors format the
+	// full request URL into their text, so a project or worktree path segment like
+	// /forbidden-project/ or a host named unauthorized.example.com would otherwise
+	// read as a dead credential and permanently stop reconnecting. The status word
+	// the SDK appends always sits outside the URL, so dropping URLs costs no real
+	// signal. (sanitizeErrText has already stripped credential-bearing query parts;
+	// this is about the path/host that survives.)
+	low := strings.ToLower(urlishRe.ReplaceAllString(errText, " "))
 	return strings.Contains(low, "unauthorized") ||
 		strings.Contains(low, "unauthenticated") ||
 		strings.Contains(low, "forbidden")

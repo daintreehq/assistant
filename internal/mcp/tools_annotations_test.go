@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -152,5 +153,122 @@ func TestNoFallbackByDefault(t *testing.T) {
 	c.Connect(context.Background())
 	if c.isRetrySafe("terminal.getStatus") {
 		t.Error("without an explicit fallback an unannotated tool must be single-shot")
+	}
+}
+
+// TestAnnotatedMutationIsSingleShot: the end-to-end guard that a LISTED, explicitly
+// mutation-annotated tool makes exactly one call even with a retry budget and a
+// retriable transport error. Distinct from the unlisted-tool case: this proves the
+// client honours a present "this mutates" annotation rather than merely failing
+// closed on an unknown name.
+func TestAnnotatedMutationIsSingleShot(t *testing.T) {
+	low := &fakeLow{
+		tools: []rawTool{mutatingTool("terminal.sendCommand")},
+		callErrs: []error{
+			&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
+		},
+	}
+	c := newInjected(low)
+	c.Connect(context.Background())
+
+	if _, err := c.CallTool(context.Background(), "terminal.sendCommand", nil, CallOptions{Retries: 2}); err == nil {
+		t.Fatal("expected the transport error to surface")
+	}
+	if low.callCalls != 1 {
+		t.Errorf("a mutation must never be replayed, got %d attempts", low.callCalls)
+	}
+}
+
+// TestRetryClassificationClearedOnReconnect is the regression guard for a stale
+// verdict outliving the listing it came from.
+//
+// Reconnect (like markDegraded) invalidates the tool cache. If the retry
+// classification survived that, a tool the OLD session called read-only could still
+// be replayed against a NEW session where it is a mutation. The classification is
+// gated on the same cacheWarm flag the cache uses, so an invalidated cache is
+// necessarily an un-classified one.
+func TestRetryClassificationClearedOnReconnect(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{readTool("terminal.getStatus")}}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	if !c.isRetrySafe("terminal.getStatus") {
+		t.Fatal("precondition: the warmed read should be retry-safe")
+	}
+
+	// Invalidate exactly as markDegraded/Reconnect do.
+	c.mu.Lock()
+	c.toolCache = nil
+	c.retrySafe = nil
+	c.cacheWarm = false
+	c.mu.Unlock()
+
+	if c.isRetrySafe("terminal.getStatus") {
+		t.Error("a classification must not outlive the tool cache it was derived from")
+	}
+}
+
+// TestStaleClassificationCannotSurviveColdCache: even if the map were somehow left
+// populated (a future edit forgetting to clear it), the cacheWarm gate must still
+// refuse to serve it. This pins the STRUCTURAL guarantee rather than the bookkeeping.
+func TestStaleClassificationCannotSurviveColdCache(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{readTool("terminal.getStatus")}}
+	c := newInjected(low)
+	c.Connect(context.Background())
+
+	// Cache invalidated, but the map deliberately left behind.
+	c.mu.Lock()
+	c.toolCache = nil
+	c.cacheWarm = false
+	c.mu.Unlock()
+
+	if c.isRetrySafe("terminal.getStatus") {
+		t.Error("cacheWarm must gate the classification, not just the map being cleared")
+	}
+}
+
+// TestRefreshReclassifiesReadToMutation: a forced refresh that re-declares a tool as
+// mutating must revoke its retry budget. This is the "server changed under us"
+// case — a host rollout that corrects a wrong annotation.
+func TestRefreshReclassifiesReadToMutation(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{readTool("worktree.list")}}
+	c := newInjected(low)
+	ctx := context.Background()
+	c.Connect(ctx)
+	if !c.isRetrySafe("worktree.list") {
+		t.Fatal("precondition: should start retry-safe")
+	}
+
+	low.mu.Lock()
+	low.tools = []rawTool{mutatingTool("worktree.list")}
+	low.mu.Unlock()
+	if _, err := c.ListTools(ctx, true); err != nil {
+		t.Fatalf("forced refresh: %v", err)
+	}
+
+	if c.isRetrySafe("worktree.list") {
+		t.Error("a refresh declaring the tool mutating must revoke retry")
+	}
+}
+
+// TestRefreshDroppingToolRevokesRetry: a tool that disappears from the surface
+// entirely must also lose its budget, not keep the last verdict.
+func TestRefreshDroppingToolRevokesRetry(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{readTool("worktree.list"), readTool("terminal.list")}}
+	c := newInjected(low)
+	ctx := context.Background()
+	c.Connect(ctx)
+
+	low.mu.Lock()
+	low.tools = []rawTool{readTool("terminal.list")}
+	low.mu.Unlock()
+	if _, err := c.ListTools(ctx, true); err != nil {
+		t.Fatalf("forced refresh: %v", err)
+	}
+
+	if c.isRetrySafe("worktree.list") {
+		t.Error("a tool dropped from the live surface must lose its retry budget")
+	}
+	if !c.isRetrySafe("terminal.list") {
+		t.Error("a tool still present must keep it")
 	}
 }

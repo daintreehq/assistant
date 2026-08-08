@@ -142,10 +142,15 @@ func TestJSONRPCBindingTerminalNotRetriable(t *testing.T) {
 // returns a binding-terminal jsonrpc.Error is attempted exactly once despite a
 // retry budget.
 func TestCallToolJSONRPCBindingNotRetried(t *testing.T) {
-	low := &fakeLow{callErrs: []error{
-		&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
-		&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
-	}}
+	// The tool must be an annotated read, or the retry budget is already zero before
+	// the error classifier runs and this would pass even if binding errors became retriable.
+	low := &fakeLow{
+		tools: []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{
+			&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
+			&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
+		},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2}); err == nil {
@@ -185,9 +190,15 @@ func TestConcurrentRetriesNoRace(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			low := &fakeLow{callErrs: []error{
-				&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
-			}}
+			// Annotated read: without it the budget is forced to 0 and the retry loop
+			// (and fullJitterDelay with it) is never entered, so -race would have
+			// nothing to inspect here.
+			low := &fakeLow{
+				tools: []rawTool{readTool("terminal.getStatus")},
+				callErrs: []error{
+					&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
+				},
+			}
 			c := newInjected(low)
 			c.Connect(context.Background())
 			_, _ = c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
@@ -203,7 +214,13 @@ func TestConcurrentRetriesNoRace(t *testing.T) {
 // never double-apply a mutation.
 func TestRetryGuardMutationSingleShot(t *testing.T) {
 	for _, name := range []string{"terminal.sendCommand", "agent.launch", "recipe.run"} {
-		low := &fakeLow{callErrs: []error{&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}}}
+		// LIST the tool as an explicitly mutation-annotated one: otherwise this would
+		// only prove an UNKNOWN tool is single-shot, and would still pass if the client
+		// mishandled a present "this mutates" annotation.
+		low := &fakeLow{
+			tools:    []rawTool{mutatingTool(name)},
+			callErrs: []error{&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}},
+		}
 		c := newInjected(low)
 		c.Connect(context.Background())
 		if _, err := c.CallTool(context.Background(), name, nil, CallOptions{Retries: 5}); err == nil {

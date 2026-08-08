@@ -106,14 +106,14 @@ type Options struct {
 	// is warned at connect. nil ⇒ no drift check for this client.
 	//
 	// There is deliberately no built-in default any more. The old default was a
-	// hand-maintained 59-name transcription of the host's surface, which went stale
+	// hand-maintained 59-name transcription of the host's SURFACE, which went stale
 	// on every host change and warned about tools nothing here actually called.
-	// The baseline is now INJECTED by the wiring layer from a list that maintains
-	// itself: internal/app passes mcpx.WrappedMCPToolNames(), the raw names that
-	// have typed local wrappers. Those are exactly the names whose disappearance
-	// would silently break a wrapper, and they cannot go stale because a wrapper
-	// cannot exist without its entry. (internal/mcp cannot import internal/tools/mcpx
-	// — that would be an import cycle — which is why this is a constructor seam.)
+	// The baseline is now INJECTED by the wiring layer and describes OUR
+	// DEPENDENCIES instead: internal/app passes mcpx.WrappedMCPToolNames() — the raw
+	// names reached by a typed wrapper or a direct runtime call. A missing one is a
+	// real breakage, and a test scans the wrapper sources so a newly-wrapped tool
+	// cannot be left undeclared. (internal/mcp cannot import internal/tools/mcpx —
+	// that would be an import cycle — which is why this is a constructor seam.)
 	DriftBaseline []string
 
 	// ReadOnlyFallback names tools to treat as retry-safe ONLY when the live tool
@@ -458,6 +458,7 @@ func (c *Client) Reconnect(ctx context.Context) Status {
 	c.mu.Lock()
 	c.connected = false
 	c.toolCache = nil
+	c.retrySafe = nil
 	c.cacheWarm = false
 	c.transportKind = transportNone
 	c.lastError = ""
@@ -533,9 +534,20 @@ func (c *Client) runDriftCheck() {
 // server annotated as mutating all return false, forcing a single-shot call. The
 // cost of a false negative is one lost retry; the cost of a false positive is a
 // double-applied mutation, so the asymmetry is deliberate.
+//
+// The cacheWarm gate is what makes "cold" reliable, and it is deliberately the SAME
+// flag the cache itself uses. Every site that invalidates toolCache clears cacheWarm
+// in the same critical section, so a classification can never outlive the listing it
+// came from — including across a Reconnect or markDegraded, after which the surface
+// may legitimately differ and a remembered "read-only" verdict would be a licence to
+// replay a mutation. Checking a separate field here would only work for as long as
+// everyone remembered to clear it too.
 func (c *Client) isRetrySafe(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.cacheWarm {
+		return false
+	}
 	return c.retrySafe[name]
 }
 
@@ -572,6 +584,7 @@ func (c *Client) markDegraded(err error, gen uint64) {
 	c.generation++
 	c.connected = false
 	c.toolCache = nil
+	c.retrySafe = nil
 	c.cacheWarm = false
 	c.driftWarnings = nil
 	c.driftToolNames = nil
@@ -664,6 +677,17 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	}
 
 	c.mu.Lock()
+	// GENERATION GUARD: this listing describes the session we snapshotted (gen). If a
+	// Reconnect/markDegraded replaced it while the request was in flight, publishing
+	// now would install a DEAD session's surface over the live one — and with it a
+	// retry classification for tools the new session may expose differently. Drop the
+	// result instead; the new session warms its own cache. (Returning the tools to
+	// this caller is still correct — it is what the server said — but they must not
+	// become the shared cache.)
+	if gen != c.generation {
+		c.mu.Unlock()
+		return append([]ToolInfo(nil), tools...), nil
+	}
 	c.toolCache = tools
 	c.retrySafe = retrySafe
 	c.cacheWarm = true
@@ -770,7 +794,16 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any,
 		aborted := isAborted(ctx)
 
 		// Retry path FIRST (before degrading).
-		if !aborted && !isUnavailable(err) && attempt < retries && isRetriableMcpError(err) {
+		//
+		// RE-VERIFY the classification here, not just once up front. Between the
+		// initial check and this point the session can have been replaced (the
+		// governor wait re-snapshots a possibly-new session above, and a concurrent
+		// Reconnect/markDegraded invalidates the cache), and the tool may not be a
+		// read on the new surface — or may not be known at all. Re-checking can only
+		// ever REVOKE the budget, never grant one: `retries` was already forced to 0
+		// for anything not classified read-only, so this cannot turn a mutation into
+		// a retryable call. Fail-closed in the safe direction.
+		if !aborted && !isUnavailable(err) && attempt < retries && isRetriableMcpError(err) && c.isRetrySafe(name) {
 			delay := fullJitterDelay(attempt, mcpReadRetryPolicy.BaseDelayMs, mcpReadRetryPolicy.MaxDelayMs)
 			if sleepErr := abortableSleep(ctx, delay); sleepErr != nil {
 				// Aborted mid-backoff: propagate without degrading.

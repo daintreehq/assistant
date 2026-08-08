@@ -38,6 +38,15 @@ func TestIsCredentialTerminalStatus(t *testing.T) {
 		{"digits in a request id", "request 1403401 timed out", false},
 		{"tool count", "server advertised 403 tools", false},
 
+		// The status word must be read OUTSIDE any embedded URL. Transport errors
+		// format the whole request URL in, so a path or host that happens to contain
+		// a status word must not permanently park reconnects.
+		{"forbidden in a path segment", "streamable-http: POST http://127.0.0.1/forbidden-project/mcp: fetch failed; sse: ", false},
+		{"unauthorized in a host name", "streamable-http: POST http://unauthorized.example.com/mcp: ECONNREFUSED; sse: ", false},
+		{"forbidden worktree path", "streamable-http: POST http://h/w/forbidden/mcp: timed out; sse: ", false},
+		// ...but a real status word alongside such a URL still counts.
+		{"forbidden path AND real 403", "streamable-http: POST http://h/forbidden-project/mcp: Forbidden; sse: ", true},
+
 		// Ordinary transient failures.
 		{"empty", "", false},
 		{"connection refused", "streamable-http: ECONNREFUSED; sse: ECONNREFUSED", false},
