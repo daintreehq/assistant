@@ -139,6 +139,9 @@ var (
 // this name, dropping an outer Validate breaks the var block above and the
 // decodeForge call site.
 func (a *forgeListPagingArgs) validatePaging() error {
+	if err := a.validateLocation(); err != nil {
+		return err
+	}
 	if a.Cursor != nil && *a.Cursor == "" {
 		return fmt.Errorf("cursor must be a non-empty opaque cursor from a previous response's nextCursor")
 	}
@@ -152,6 +155,27 @@ func (a *forgeListPagingArgs) validatePaging() error {
 		return err
 	}
 	return oneOf("view", a.View, "summary", "full")
+}
+
+// validateLocation rejects an EMPTY selector. The host puts .min(1) on all three
+// for a pointed reason: "absent" means "use the active worktree", so an empty
+// string that parsed successfully would retarget the call at whatever happens to
+// be active instead of failing. Our schema advertises minLength:1, so enforcing
+// it here keeps the local contract and the host's in step.
+func (a *forgeWorktreeLocationArgs) validateLocation() error {
+	for _, f := range []struct {
+		name string
+		val  *string
+	}{
+		{"worktreeId", a.WorktreeID},
+		{"worktreePath", a.WorktreePath},
+		{"cwd", a.CWD},
+	} {
+		if f.val != nil && strings.TrimSpace(*f.val) == "" {
+			return fmt.Errorf("%s must be a non-empty selector — omit it entirely to target the active worktree", f.name)
+		}
+	}
+	return nil
 }
 
 func (a *forgeListIssuesArgs) Validate() error {
@@ -170,6 +194,9 @@ func (a *forgeListPRsArgs) Validate() error {
 }
 
 func (a *forgeGetIssueArgs) Validate() error {
+	if err := a.validateLocation(); err != nil {
+		return err
+	}
 	if a.IssueNumber <= 0 {
 		return fmt.Errorf("issueNumber must be a positive integer")
 	}
@@ -177,6 +204,9 @@ func (a *forgeGetIssueArgs) Validate() error {
 }
 
 func (a *forgeGetPRArgs) Validate() error {
+	if err := a.validateLocation(); err != nil {
+		return err
+	}
 	if a.PRNumber <= 0 {
 		return fmt.Errorf("prNumber must be a positive integer")
 	}
@@ -347,7 +377,7 @@ func newForgeListIssuesTool() *tools.Tool {
 		// batch siblings — see forgeRead's note.
 		Parallelizable: true,
 		Schema:         forgeListIssuesSchema,
-		Decode:         tools.StrictDecoder(func() any { return &forgeListIssuesArgs{} }),
+		Decode:         forgeDecoder("forge.listIssues", func() any { return &forgeListIssuesArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeListIssuesArgs
 			if res, ok := decodeForge(args, "forge.listIssues", &a); !ok {
@@ -368,7 +398,7 @@ func newForgeListPRsTool() *tools.Tool {
 		Risk:           domain.RiskRead,
 		Parallelizable: true,
 		Schema:         forgeListPRsSchema,
-		Decode:         tools.StrictDecoder(func() any { return &forgeListPRsArgs{} }),
+		Decode:         forgeDecoder("forge.listPRs", func() any { return &forgeListPRsArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeListPRsArgs
 			if res, ok := decodeForge(args, "forge.listPRs", &a); !ok {
@@ -388,7 +418,7 @@ func newForgeGetIssueTool() *tools.Tool {
 		Risk:           domain.RiskRead,
 		Parallelizable: true,
 		Schema:         forgeGetIssueSchema,
-		Decode:         tools.StrictDecoder(func() any { return &forgeGetIssueArgs{} }),
+		Decode:         forgeDecoder("forge.getIssue", func() any { return &forgeGetIssueArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeGetIssueArgs
 			if res, ok := decodeForge(args, "forge.getIssue", &a); !ok {
@@ -409,7 +439,7 @@ func newForgeGetPRTool() *tools.Tool {
 		// checking several PRs at once overlaps their round-trips. See terminal.extract.
 		Parallelizable: true,
 		Schema:         forgeGetPRSchema,
-		Decode:         tools.StrictDecoder(func() any { return &forgeGetPRArgs{} }),
+		Decode:         forgeDecoder("forge.getPR", func() any { return &forgeGetPRArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a forgeGetPRArgs
 			if res, ok := decodeForge(args, "forge.getPR", &a); !ok {
@@ -442,9 +472,33 @@ func decodeForge(raw json.RawMessage, name string, out tools.Validator) (tools.T
 	return tools.ToolResult{}, true
 }
 
+// forgeDecoder wraps StrictDecoder so a rejected shape carries its corrective
+// hint at the REGISTRY DECODE GATE. That gate is where a real dispatch fails:
+// Registry.Dispatch returns as soon as Decode errors and never calls Handle, so a
+// hint added only in the handler would never reach the model in production.
+func forgeDecoder(name string, newArgs func() any) tools.DecodeFunc {
+	inner := tools.StrictDecoder(newArgs)
+	return func(raw json.RawMessage) (json.RawMessage, error) {
+		parsed, err := inner(raw)
+		if err == nil {
+			return parsed, nil
+		}
+		hint := forgeArgsHint(raw, name)
+		if hint == "" {
+			return nil, err
+		}
+		return nil, &tools.DecodeError{
+			Message: err.Error() + " " + hint,
+			Issues:  []string{err.Error(), hint},
+		}
+	}
+}
+
 // forgeArgsHint maps a rejected argument shape to the ONE correction most likely
 // to fix it. The cases are an ordered switch, not a map range, so the same bad
-// input always produces the same hint. It only ever runs on a decode failure.
+// input always produces the same hint. It only ever runs on a decode failure, and
+// every hint is scoped to a tool that actually HAS the field it recommends —
+// telling forge.getIssue to use `search` would just trade one refusal for another.
 func forgeArgsHint(raw json.RawMessage, name string) string {
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &got); err != nil || len(got) == 0 {
@@ -458,15 +512,23 @@ func forgeArgsHint(raw json.RawMessage, name string) string {
 		}
 		return false
 	}
+	isList := name == "forge.listIssues" || name == "forge.listPRs"
 	switch {
 	case has("arguments"):
 		return "Pass these fields at the TOP LEVEL — the forge reads have no `arguments` wrapper."
 	case has("labels", "label", "assignee", "assignees", "author", "milestone"):
-		if name == "forge.listPRs" {
+		switch name {
+		case "forge.listIssues":
+			return `Label/assignee/author filters go INSIDE search as a provider-native query, e.g. search:"label:bug no:assignee".`
+		case "forge.listPRs":
 			return "forge.listPRs filters by state/sort/direction only; it has no label or search field."
+		default:
+			return "This tool fetches ONE item by number; use forge.listIssues with a search query to filter a set."
 		}
-		return `Label/assignee/author filters go INSIDE search as a provider-native query, e.g. search:"label:bug no:assignee".`
 	case has("limit", "count", "max", "top", "per_page", "pageSize"):
+		if !isList {
+			return "This tool fetches ONE item by number and does not page; use forge.listIssues / forge.listPRs for a set."
+		}
 		return "Page size is perPage (an integer 1-100); fetch further pages with cursor, not a bigger page."
 	case has("search", "query", "q") && name == "forge.listPRs":
 		return "forge.listPRs has NO search field — filter by state/sort/direction only."

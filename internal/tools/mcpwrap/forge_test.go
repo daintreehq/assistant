@@ -465,6 +465,10 @@ func TestForgeRejectsOutOfContractValues(t *testing.T) {
 
 // A rejected call must tell the model what to do INSTEAD, or it retries the same
 // shape. These are the mistakes this contract actually invites.
+//
+// The hint MUST ride the Decode error: Registry.Dispatch returns as soon as
+// Decode fails and never calls Handle, so a hint that only existed in the handler
+// would never reach a real model. Both gates are asserted.
 func TestForgeInvalidArgsHintsAreSelfCorrecting(t *testing.T) {
 	cases := []struct {
 		tool     *tools.Tool
@@ -474,17 +478,74 @@ func TestForgeInvalidArgsHintsAreSelfCorrecting(t *testing.T) {
 		{newForgeListIssuesTool(), `{"labels":["bug"]}`, "search"},
 		{newForgeListIssuesTool(), `{"limit":10}`, "perPage"},
 		{newForgeListIssuesTool(), `{"arguments":{"state":"open"}}`, "TOP LEVEL"},
-		{newForgeListPRsTool(), `{"search":"x"}`, "no search"},
+		{newForgeListPRsTool(), `{"search":"x"}`, "NO search"},
+		{newForgeListPRsTool(), `{"labels":["bug"]}`, "no label or search"},
 		{newForgeGetIssueTool(), `{"prNumber":5}`, "issueNumber"},
 		{newForgeGetPRTool(), `{"issueNumber":5}`, "prNumber"},
+		// A getter must NOT be told to use `search` — it has no such field, so
+		// that advice would just trade one refusal for another.
+		{newForgeGetIssueTool(), `{"issueNumber":1,"labels":["bug"]}`, "ONE item"},
+		{newForgeGetPRTool(), `{"prNumber":1,"limit":5}`, "ONE item"},
 	}
 	for _, c := range cases {
-		res := c.tool.Handle(context.Background(), json.RawMessage(c.raw), ctxWith(&fakeMCP{connected: true}))
-		if res.Ok {
-			t.Fatalf("%s: %s should have failed", c.tool.Name, c.raw)
+		t.Run(c.tool.Name+c.raw, func(t *testing.T) {
+			// The production gate.
+			_, err := c.tool.Decode(json.RawMessage(c.raw))
+			if err == nil {
+				t.Fatalf("%s should have been rejected at Decode", c.raw)
+			}
+			if !strings.Contains(err.Error(), c.wantHint) {
+				t.Errorf("Decode error must point at %q, got %q", c.wantHint, err.Error())
+			}
+			// The direct-Handle gate keeps the same guidance.
+			res := c.tool.Handle(context.Background(), json.RawMessage(c.raw), ctxWith(&fakeMCP{connected: true}))
+			if res.Ok {
+				t.Fatalf("%s should have failed in Handle", c.raw)
+			}
+			if !strings.Contains(res.Error.Message, c.wantHint) {
+				t.Errorf("Handle error must point at %q, got %q", c.wantHint, res.Error.Message)
+			}
+		})
+	}
+
+	// A getter must never be steered at `search`, which it does not accept.
+	for _, tool := range []*tools.Tool{newForgeGetIssueTool(), newForgeGetPRTool()} {
+		_, err := tool.Decode(json.RawMessage(`{"issueNumber":1,"prNumber":1,"labels":["x"]}`))
+		if err == nil {
+			t.Fatalf("%s should have rejected the mixed shape", tool.Name)
 		}
-		if !strings.Contains(strings.ToLower(res.Error.Message), strings.ToLower(c.wantHint)) {
-			t.Errorf("%s: %s error must point at %q, got %q", c.tool.Name, c.raw, c.wantHint, res.Error.Message)
+		if strings.Contains(err.Error(), "search:") {
+			t.Errorf("%s must not recommend search — it has no such field: %q", tool.Name, err.Error())
+		}
+	}
+}
+
+// An empty worktree selector must be rejected, not forwarded: the host treats an
+// ABSENT selector as "use the active worktree", so an empty string that slipped
+// through would silently retarget the call.
+func TestForgeRejectsEmptyWorktreeSelector(t *testing.T) {
+	for _, tool := range typedForgeTools() {
+		for _, field := range []string{"worktreeId", "worktreePath", "cwd"} {
+			raw := `{"` + field + `":""`
+			switch tool.Name {
+			case "forge.getIssue":
+				raw += `,"issueNumber":299`
+			case "forge.getPR":
+				raw += `,"prNumber":42`
+			}
+			raw += "}"
+
+			if _, err := tool.Decode(json.RawMessage(raw)); err == nil {
+				t.Errorf("%s must reject %s at Decode", tool.Name, raw)
+			}
+			m := &fakeMCP{connected: true, result: tools.MCPCallResult{Text: "ok"}}
+			res := tool.Handle(context.Background(), json.RawMessage(raw), ctxWith(m))
+			if res.Ok || res.Error.Code != codeInvalidArgs {
+				t.Errorf("%s must reject %s in Handle, got %+v", tool.Name, raw, res)
+			}
+			if m.lastName != "" {
+				t.Errorf("%s: an empty selector must never reach the MCP", tool.Name)
+			}
 		}
 	}
 }
@@ -586,9 +647,10 @@ func TestForgeDescriptionsStateTheRealContract(t *testing.T) {
 
 	prs := newForgeListPRsTool()
 	// The model must learn PRs have no search HERE; the host answers with a
-	// strict refusal that carries no such guidance.
-	if !strings.Contains(prs.Description, "search") {
-		t.Error("forge.listPRs description must explicitly say it has NO search field")
+	// strict refusal that carries no such guidance. Assert the NEGATION, not just
+	// the word — "use search to filter PRs" would be exactly backwards.
+	if !strings.Contains(prs.Description, "NO search") {
+		t.Errorf("forge.listPRs description must explicitly say it has NO search field, got %q", prs.Description)
 	}
 
 	for _, tool := range []*tools.Tool{issues, prs} {
@@ -599,7 +661,11 @@ func TestForgeDescriptionsStateTheRealContract(t *testing.T) {
 
 	// A branch name in worktreeId silently targets nothing — the schema is the
 	// only place the model is warned.
-	if !strings.Contains(propSpec(t, issues, "worktreeId")["description"].(string), "branch") {
+	desc, ok := propSpec(t, issues, "worktreeId")["description"].(string)
+	if !ok {
+		t.Fatal("worktreeId has no string description")
+	}
+	if !strings.Contains(desc, "branch") {
 		t.Error("worktreeId description must warn that it is not a branch name")
 	}
 
