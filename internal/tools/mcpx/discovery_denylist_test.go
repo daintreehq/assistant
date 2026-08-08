@@ -42,6 +42,12 @@ func TestDaintreeCallDenylistEvasionAndCoverage(t *testing.T) {
 		{"workflow.prepBranchForReview", "workflow wrapper"},
 		{"WORKFLOW.STARTWORKONISSUE", "case-shifted wrapper"},
 		{"forge.getPR", "forge wrapper"},
+		// The forge reads are strictly typed on both sides (issue #299), so the raw
+		// action must not be reachable around the wrapper's validation.
+		{"forge.listIssues", "forge list wrapper"},
+		{"forge.listPRs", "forge list wrapper"},
+		{"forge.getIssue", "forge get wrapper"},
+		{"FORGE.LISTISSUES", "case-shifted forge wrapper"},
 		{"git.getProjectPulse", "git read wrapper"},
 	}
 	for _, c := range cases {
