@@ -98,7 +98,43 @@ func (f *fakeLow) ReadResource(ctx context.Context, uri string) (string, error) 
 }
 
 func newInjected(low LowLevelClient) *Client {
-	return New(config.AppConfig{McpURL: "http://x/mcp", McpToken: "t"}, Options{ClientOverride: low})
+	return New(testCfg(), Options{ClientOverride: low})
+}
+
+// newInjectedWithBaseline is newInjected plus an explicit drift baseline. There is
+// no implicit default any more (internal/app injects the real one), so a drift test
+// must state the names it expects to depend on.
+func newInjectedWithBaseline(low LowLevelClient, baseline []string) *Client {
+	return New(testCfg(), Options{ClientOverride: low, DriftBaseline: baseline})
+}
+
+// readTool / mutatingTool / unannotatedTool build live-tool fixtures with the
+// annotations a real server ships. Retry safety is now derived from these, so a
+// test that wants a retryable call MUST list the tool as a read — an unlisted or
+// unannotated tool is single-shot by design, not by accident.
+//
+// The shapes mirror Daintree's buildAnnotations: a query is read-only + idempotent
+// + non-destructive; a command is the inverse.
+func readTool(name string) rawTool {
+	no := false
+	return rawTool{
+		Name:        name,
+		Annotations: &ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, DestructiveHint: &no},
+	}
+}
+
+func mutatingTool(name string) rawTool {
+	yes := true
+	return rawTool{
+		Name:        name,
+		Annotations: &ToolAnnotations{ReadOnlyHint: false, IdempotentHint: false, DestructiveHint: &yes},
+	}
+}
+
+// unannotatedTool is a tool the server listed but said nothing about — the only
+// case in which Options.ReadOnlyFallback is allowed to speak.
+func unannotatedTool(name string) rawTool {
+	return rawTool{Name: name}
 }
 
 func TestFullJitterDelayBounds(t *testing.T) {
@@ -218,9 +254,10 @@ func TestConnectInjectedWarmsOnce(t *testing.T) {
 }
 
 func TestStatusDriftCollapseAndCopies(t *testing.T) {
-	// One documented tool present, the rest missing → drift on the missing ones.
+	// One depended-on tool present, the other two missing → drift on the missing ones.
+	baseline := []string{"actions.getContext", "terminal.list", "recipe.run"}
 	low := &fakeLow{tools: []rawTool{{Name: "actions.getContext"}}}
-	c := newInjected(low)
+	c := newInjectedWithBaseline(low, baseline)
 	c.Connect(context.Background())
 	st := c.Status()
 	if len(st.DriftWarnings) == 0 {
@@ -235,13 +272,13 @@ func TestStatusDriftCollapseAndCopies(t *testing.T) {
 		t.Error("status did not return a defensive copy")
 	}
 
-	// No drift (all documented present) → nil, not [].
-	all := make([]rawTool, len(DocumentedMcpToolNames))
-	for i, n := range DocumentedMcpToolNames {
+	// No drift (every depended-on tool present) → nil, not [].
+	all := make([]rawTool, len(baseline))
+	for i, n := range baseline {
 		all[i] = rawTool{Name: n}
 	}
 	low2 := &fakeLow{tools: all}
-	c2 := newInjected(low2)
+	c2 := newInjectedWithBaseline(low2, baseline)
 	c2.Connect(context.Background())
 	st2 := c2.Status()
 	if st2.DriftWarnings != nil || st2.DriftToolNames != nil {
@@ -264,14 +301,14 @@ func TestCallToolRetryThenSucceed(t *testing.T) {
 	// First attempt a retriable transport error, second succeeds. Connection must
 	// stay healthy (retry-before-degrade).
 	low := &fakeLow{
-		tools:      []rawTool{{Name: "x"}},
+		tools:      []rawTool{readTool("terminal.getStatus")},
 		callErrs:   []error{&jsonrpc.Error{Code: -32000}, nil},
 		callResult: rawResult{Text: "done"},
 	}
 	c := newInjected(low)
 	c.Connect(context.Background())
-	// A read-only tool name so the retry budget is honored (the read-only guard
-	// forces mutations single-shot).
+	// The tool is listed with read-only annotations, so the retry budget is honored
+	// (the guard forces anything not annotated as a read single-shot).
 	res, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)

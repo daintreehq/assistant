@@ -142,10 +142,15 @@ func TestJSONRPCBindingTerminalNotRetriable(t *testing.T) {
 // returns a binding-terminal jsonrpc.Error is attempted exactly once despite a
 // retry budget.
 func TestCallToolJSONRPCBindingNotRetried(t *testing.T) {
-	low := &fakeLow{callErrs: []error{
-		&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
-		&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
-	}}
+	// The tool must be an annotated read, or the retry budget is already zero before
+	// the error classifier runs and this would pass even if binding errors became retriable.
+	low := &fakeLow{
+		tools: []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{
+			&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
+			&jsonrpc.Error{Code: -32000, Message: "BINDING_STALE"},
+		},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2}); err == nil {
@@ -185,9 +190,15 @@ func TestConcurrentRetriesNoRace(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			low := &fakeLow{callErrs: []error{
-				&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
-			}}
+			// Annotated read: without it the budget is forced to 0 and the retry loop
+			// (and fullJitterDelay with it) is never entered, so -race would have
+			// nothing to inspect here.
+			low := &fakeLow{
+				tools: []rawTool{readTool("terminal.getStatus")},
+				callErrs: []error{
+					&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
+				},
+			}
 			c := newInjected(low)
 			c.Connect(context.Background())
 			_, _ = c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
@@ -203,7 +214,13 @@ func TestConcurrentRetriesNoRace(t *testing.T) {
 // never double-apply a mutation.
 func TestRetryGuardMutationSingleShot(t *testing.T) {
 	for _, name := range []string{"terminal.sendCommand", "agent.launch", "recipe.run"} {
-		low := &fakeLow{callErrs: []error{&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}}}
+		// LIST the tool as an explicitly mutation-annotated one: otherwise this would
+		// only prove an UNKNOWN tool is single-shot, and would still pass if the client
+		// mishandled a present "this mutates" annotation.
+		low := &fakeLow{
+			tools:    []rawTool{mutatingTool(name)},
+			callErrs: []error{&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}},
+		}
 		c := newInjected(low)
 		c.Connect(context.Background())
 		if _, err := c.CallTool(context.Background(), name, nil, CallOptions{Retries: 5}); err == nil {
@@ -215,9 +232,14 @@ func TestRetryGuardMutationSingleShot(t *testing.T) {
 	}
 }
 
-// TestRetryGuardReadOnlyHonored: a read-only tool DOES honor the retry budget.
+// TestRetryGuardReadOnlyHonored: a tool the SERVER annotated read-only DOES honor
+// the retry budget.
 func TestRetryGuardReadOnlyHonored(t *testing.T) {
-	low := &fakeLow{callErrs: []error{&jsonrpc.Error{Code: -32000}, nil}, callResult: rawResult{Text: "ok"}}
+	low := &fakeLow{
+		tools:      []rawTool{readTool("terminal.getStatus")},
+		callErrs:   []error{&jsonrpc.Error{Code: -32000}, nil},
+		callResult: rawResult{Text: "ok"},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2}); err != nil {
@@ -228,29 +250,26 @@ func TestRetryGuardReadOnlyHonored(t *testing.T) {
 	}
 }
 
-// TestReadOnlyAllowlistOnlyDocumentedReads: every name on the read-only allowlist is
-// a real documented tool on EITHER MCP server — the Daintree control plane or the docs
-// server (guards against a typo'd allowlist entry that would never match and silently
-// disable retries).
-func TestReadOnlyAllowlistOnlyDocumentedReads(t *testing.T) {
-	documented := map[string]struct{}{}
-	for _, n := range DocumentedMcpToolNames {
-		documented[n] = struct{}{}
+// TestUnknownToolIsNeverRetrySafe: a tool absent from the live cache is forced
+// single-shot. This is the fail-closed edge of annotation-derived classification —
+// with no local allowlist left, "I have never seen this tool" must mean "do not
+// retry it", never "assume it is a read".
+func TestUnknownToolIsNeverRetrySafe(t *testing.T) {
+	low := &fakeLow{
+		tools:    []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{&jsonrpc.Error{Code: -32000}, nil},
 	}
-	for _, n := range DocsDocumentedToolNames {
-		documented[n] = struct{}{}
+	c := newInjected(low)
+	c.Connect(context.Background())
+	if _, err := c.CallTool(context.Background(), "some.unlisted.tool", nil, CallOptions{Retries: 2}); err == nil {
+		t.Fatal("expected the transport error to surface, not be retried away")
 	}
-	for _, n := range AdditionalReadToolNames {
-		documented[n] = struct{}{}
-	}
-	for n := range readOnlyToolNames {
-		if _, ok := documented[n]; !ok {
-			t.Errorf("read-only allowlist entry %q is not a documented MCP tool", n)
-		}
+	if low.callCalls != 1 {
+		t.Errorf("an unlisted tool must be single-shot, got %d attempts", low.callCalls)
 	}
 }
 
-// (TestDriftBaselineParityWithPrompts was removed: the duplicate documented-tools
-// baseline in internal/models/prompts was deleted with the rest of the server-owned
-// prompt machinery. internal/mcp keeps the single authoritative DocumentedMcpToolNames
-// for drift detection.)
+// (TestReadOnlyAllowlistOnlyDocumentedReads was removed with the readOnlyToolNames
+// allowlist it policed. Retry safety is now read from the live server's annotations,
+// so there is no local list left to typo — the equivalent guard is now
+// TestRetryPolicyDerivedFromAnnotations in tools_test.go.)

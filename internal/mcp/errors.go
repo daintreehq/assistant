@@ -47,23 +47,43 @@ func redactURLText(raw string) string {
 
 // IsCredentialTerminalStatus reports whether a connection status/error string
 // marks this session's MCP credentials as PERMANENTLY dead: the per-session
-// bearer was revoked (401/unauthorized — Daintree rotates it on every
-// re-provision and revokes on window close/eviction/displacement) or the
-// server declared the binding gone (SESSION_BINDING_GONE / BINDING_STALE).
+// bearer was revoked or refused (401 Unauthorized / 403 Forbidden — Daintree
+// rotates the token on every re-provision and revokes on window
+// close/eviction/displacement) or the server declared the binding gone
+// (SESSION_BINDING_GONE / BINDING_STALE).
 // docs/DAINTREE_HOST.md: repeated auth failures trip Daintree's abuse policy,
 // so a caller seeing this must STOP reconnecting with the same token and wait
 // for fresh credentials (the next assistant launch pushes them). String-level
 // because connect failures surface only through Status().Error text.
+//
+// MATCH ON STATUS WORDS, NEVER ON BARE DIGITS. The go-sdk renders a non-2xx
+// response as `fmt.Errorf("%s: %v", requestSummary, http.StatusText(code))` —
+// http.StatusText(401) is "Unauthorized" and http.StatusText(403) is "Forbidden",
+// so the numeric code never reaches this string at all. The old "401"/"403"
+// substring tests therefore matched nothing the SDK actually emits, while
+// happily firing on any error text that merely CONTAINED those digits — a port,
+// a request id, a file path — which would permanently park reconnects over a
+// transient failure. "forbidden" was also missing entirely, so a genuinely
+// revoked-by-403 bearer retried forever against the abuse policy.
 func IsCredentialTerminalStatus(errText string) bool {
 	if errText == "" {
 		return false
 	}
-	if isBindingTerminal(errText) {
+	// Match on the message OUTSIDE any embedded URL — for the binding markers too.
+	// Transport errors format the full request URL into their text, so a project or
+	// worktree path segment like /forbidden-project/ or /binding_stale/, or a host
+	// named unauthorized.example.com, would otherwise read as a dead credential and
+	// permanently stop reconnecting. Every real marker the server sends sits outside
+	// the URL, so dropping URLs costs no signal. (sanitizeErrText has already removed
+	// credential-bearing query parts; this is about the host/path that survives.)
+	outside := urlishRe.ReplaceAllString(errText, " ")
+	if isBindingTerminal(outside) {
 		return true
 	}
-	low := strings.ToLower(errText)
-	return strings.Contains(low, "401") || strings.Contains(low, "unauthorized") ||
-		strings.Contains(low, "unauthenticated") || strings.Contains(low, "403")
+	low := strings.ToLower(outside)
+	return strings.Contains(low, "unauthorized") ||
+		strings.Contains(low, "unauthenticated") ||
+		strings.Contains(low, "forbidden")
 }
 
 // isUnavailable reports whether err is (or wraps) an UnavailableError. Callers use

@@ -11,7 +11,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	internalmcp "github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/daintree-assistant/internal/tools/mcpx"
 )
 
 // Serve starts the fake Daintree MCP server over the go-sdk's Streamable HTTP
@@ -40,6 +40,52 @@ func (s *Server) Close() { s.srv.Close() }
 // anyObjectSchema is the permissive input schema raw AddTool requires.
 var anyObjectSchema = json.RawMessage(`{"type":"object"}`)
 
+// benchReadTools are the bench world's READ tools — the ones real Daintree
+// declares `kind: "query"` and therefore annotates readOnlyHint=true.
+//
+// The fake MUST reproduce those annotations, because the client now derives its
+// auto-retry classification purely from them (there is no local allowlist any
+// more). A read left unannotated here would be classified single-shot, silently
+// removing retry coverage from every benchmark scenario that exercises a flaky
+// read — the benchmark would still pass while measuring the wrong thing.
+var benchReadTools = map[string]bool{
+	"actions.getContext":  true,
+	"getContext":          true,
+	"agent.listAvailable": true,
+	"agent.listToolbar":   true,
+	"agentSettings.get":   true,
+	"cliAvailability.get": true,
+	"project.getCurrent":  true,
+	"terminal.getOutput":  true,
+	"terminal.getStatus":  true,
+	"terminal.list":       true,
+	"worktree.getCurrent": true,
+	"worktree.list":       true,
+	// Registered as failing stubs rather than implemented, but still genuine reads
+	// on the real host (kind: "query"). Annotating them as mutations would make the
+	// fake describe a surface Daintree never serves.
+	"git.getProjectPulse":          true,
+	"recipe.list":                  true,
+	"workflow.prepBranchForReview": true,
+	"forge.getPR":                  true,
+	"forge.getIssue":               true,
+	"forge.listIssues":             true,
+	"forge.listPRs":                true,
+	"copyTree.generate":            true,
+}
+
+// benchAnnotations mirrors Daintree's buildAnnotations: a query is read-only and
+// idempotent and never destructive; a command is none of those.
+func benchAnnotations(name string) *sdkmcp.ToolAnnotations {
+	readOnly := benchReadTools[name]
+	destructive := !readOnly
+	return &sdkmcp.ToolAnnotations{
+		ReadOnlyHint:    readOnly,
+		IdempotentHint:  readOnly,
+		DestructiveHint: &destructive,
+	}
+}
+
 // Serve wires every tool and starts the server.
 func Serve(w *World) *Server {
 	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "bench-daintree", Version: "v0.0.1"}, nil)
@@ -53,6 +99,7 @@ func Serve(w *World) *Server {
 			Name:        name,
 			Description: "bench-world " + name,
 			InputSchema: anyObjectSchema,
+			Annotations: benchAnnotations(name),
 		}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 			var args map[string]any
 			if len(req.Params.Arguments) > 0 {
@@ -191,12 +238,6 @@ func Serve(w *World) *Server {
 
 	addRich("terminal.getOutput", func(args map[string]any) (string, any, bool) {
 		id, _ := args["terminalId"].(string)
-		if w.throttleTick(id) {
-			// The REAL throttle result shape (internal/mcp/reliability.go): the
-			// client detects the MCP_RATE_LIMITED marker + details.retryAfter and
-			// silently retries reads below the model.
-			return `{"code":"MCP_RATE_LIMITED","message":"Rate limit exceeded for 'terminal.getOutput'","details":{"retryAfter":1}}`, nil, true
-		}
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		t := w.terminals[id]
@@ -279,9 +320,14 @@ func Serve(w *World) *Server {
 	add("agent.listToolbar", func(args map[string]any) (string, bool) { return `{"agents":[]}`, false })
 	add("cliAvailability.get", func(args map[string]any) (string, bool) { return `{"available":true}`, false })
 
-	// --- everything else documented: recorded failing stubs -----------------
-
-	for _, name := range internalmcp.DocumentedMcpToolNames {
+	// --- other host tools the assistant may reach for: failing stubs ---------
+	//
+	// The stub list is the assistant's own typed-wrapper names, NOT a copy of the
+	// production host surface: a bench fake should advertise the tools its scenarios
+	// exercise plus the ones the runtime can plausibly call, and let anything else be
+	// genuinely absent. (This used to iterate internal/mcp's hand-maintained 59-name
+	// baseline, which no longer exists — the client now learns the surface live.)
+	for _, name := range mcpx.WrappedMCPToolNames() {
 		if implemented[name] {
 			continue
 		}

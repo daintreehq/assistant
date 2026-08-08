@@ -76,7 +76,12 @@ func TestCallToolDefaultTimeoutBackstop(t *testing.T) {
 // TestCallToolNonTransientNotRetried: a non-transport error is never retried even
 // when the read-only caller allows retries — and it degrades the connection.
 func TestCallToolNonTransientNotRetried(t *testing.T) {
-	low := &fakeLow{callErrs: []error{errors.New("invalid params"), errors.New("invalid params")}}
+	// Annotated read, so the retry budget is genuinely live and the assertion tests
+	// the error classifier rather than the read-only guard.
+	low := &fakeLow{
+		tools:    []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{errors.New("invalid params"), errors.New("invalid params")},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	_, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
@@ -96,7 +101,10 @@ func TestCallToolNonTransientNotRetried(t *testing.T) {
 // are never retried regardless of the retry budget.
 func TestCallToolBindingTerminalNotRetried(t *testing.T) {
 	for _, marker := range []string{"SESSION_BINDING_GONE: window closed", "BINDING_STALE"} {
-		low := &fakeLow{callErrs: []error{errors.New(marker), errors.New(marker)}}
+		low := &fakeLow{
+			tools:    []rawTool{readTool("terminal.getStatus")},
+			callErrs: []error{errors.New(marker), errors.New(marker)},
+		}
 		c := newInjected(low)
 		c.Connect(context.Background())
 		_, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2})
@@ -112,9 +120,14 @@ func TestCallToolBindingTerminalNotRetried(t *testing.T) {
 // TestCallToolRetriesExhaustBudget: a transient error retried up to the budget makes
 // exactly 1+Retries attempts, then degrades. (jsonrpc -32000 is retriable.)
 func TestCallToolRetriesExhaustBudget(t *testing.T) {
-	low := &fakeLow{callErrs: []error{
-		&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
-	}}
+	low := &fakeLow{
+		// The tool must be LISTED as a server-annotated read, or the retry budget is
+		// (correctly) forced to zero and this test would measure the guard, not the budget.
+		tools: []rawTool{readTool("terminal.getStatus")},
+		callErrs: []error{
+			&jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000}, &jsonrpc.Error{Code: -32000},
+		},
+	}
 	c := newInjected(low)
 	c.Connect(context.Background())
 	if _, err := c.CallTool(context.Background(), "terminal.getStatus", nil, CallOptions{Retries: 2}); err == nil {
@@ -152,3 +165,34 @@ func TestCallToolCancelledDoesNotDegrade(t *testing.T) {
 }
 
 func testCfg() config.AppConfig { return config.AppConfig{McpURL: "http://x/mcp", McpToken: "t"} }
+
+// TestCallToolIsErrorResultNotRetried: a tool-level failure (IsError=true) is the
+// TOOL's answer, not a transport fault, so it surfaces on the first attempt and is
+// never replayed — even for a read with a retry budget.
+//
+// Preserved (and renamed) from the deleted client_throttle_test.go. The throttle
+// absorber around it is gone — Daintree removed MCP CallTool rate limiting outright
+// (daintree#10764) and emits no replacement code — but THIS invariant outlived it and
+// is now the only thing standing between an IsError result and a pointless replay.
+func TestCallToolIsErrorResultNotRetried(t *testing.T) {
+	low := &fakeLow{
+		tools: []rawTool{readTool("terminal.getOutput")},
+		callResults: []rawResult{
+			{Text: `{"code":"TERMINAL_OUTPUT","message":"boom"}`, IsError: true},
+			{Text: "ok"},
+		},
+	}
+	c := newInjected(low)
+	c.Connect(context.Background())
+
+	res, err := c.CallTool(context.Background(), "terminal.getOutput", nil, CallOptions{Retries: 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("a tool error result must surface, not be retried away")
+	}
+	if low.callCalls != 1 {
+		t.Errorf("an IsError result must not retry, got %d attempts", low.callCalls)
+	}
+}

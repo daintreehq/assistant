@@ -140,7 +140,7 @@ func (r terminalReaderAdapter) FetchOpenTerminals(ctx context.Context) []backend
 	// cancel-bounded ctx so the whole inventory stays inside one read budget. A status
 	// failure (OK=false) leaves the list-derived fields intact — degrade, don't drop.
 	// ReadStatuses carries the standard read retries (ReadCallOptions): those fire ONLY on
-	// retriable transport/throttle errors and are still bounded by the cancel timer above,
+	// retriable transport errors and are still bounded by the cancel timer above,
 	// so reusing it keeps a single parse path without busting the metadata-only budget.
 	statuses := r.ReadStatuses(cctx, ids, false)
 

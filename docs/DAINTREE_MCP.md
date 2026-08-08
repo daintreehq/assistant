@@ -284,20 +284,29 @@ guessing tool names.
 
 ## Keeping the references in sync
 
-There are three CLI-side records of the Daintree MCP surface; when Daintree's tool surface
-changes, update them together:
+**There is no longer a hand-maintained transcription of the host's tool surface to keep in
+sync.** The CLI learns the surface from the live server, so a Daintree tool change needs no
+matching edit here to stay correct:
 
-1. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. May list more raw
-   Daintree tools than the model is told about (the catalog above is illustrative, not the
-   model's allowlist).
-2. **The model prompt** (`internal/prompts/daintree_mcp.go`, `daintreeMCPReference`)
-   — the cached, model-facing reference. It names the local wrappers plus a few high-value
-   unwrapped tools, and reminds the model to use `tool.search` for the rest. It deliberately
-   does **not** enumerate every server tool.
-3. **The drift baseline** — `DocumentedMcpToolNames` (`internal/mcp/tools.go`), the single
-   authoritative list, pinned by tests. (The old duplicate prompts-side baseline was deleted
-   with the rest of the server-owned prompt machinery.) This is an **exact, minimal,
-   verified** subset: at startup the CLI checks each name is still on the live
-   server (a missing one signals the doc went stale). Drift is *missing-only* — extra live
-   tools (like `worktree.compareDiff` or the `worktree.resource.*` family) are expected and
-   ignored, so they don't need to be added here to be callable via `daintree.call`.
+1. **Retry safety is read from the server.** Daintree ships MCP `annotations` on every
+   `tools/list` entry (`readOnlyHint` / `idempotentHint` / `destructiveHint`, derived from
+   each action's `kind` and `danger`). `internal/mcp` derives each tool's auto-retry
+   eligibility from those annotations when it warms the tool cache — see
+   `retrySafeFromAnnotations`. A tool is retryable iff the server declares it read-only and
+   does not contradict itself by also declaring it destructive; anything unlisted,
+   unannotated, or declared mutating is forced single-shot. This replaced the former
+   `readOnlyToolNames` allowlist, which covered a fraction of the surface and could drift
+   into claiming a mutation was a read.
+2. **The drift baseline is derived from code, not transcribed.** `internal/app` passes
+   `mcpx.WrappedMCPToolNames()` as `mcp.Options.DriftBaseline` — the raw host tool names
+   that have typed local wrappers (`internal/tools/mcpx/discovery.go`). Those are exactly
+   the names whose removal or rename would silently break a wrapper, and the list cannot go
+   stale because a wrapper cannot exist without its entry. Drift stays *missing-only*: a
+   depended-on name absent from the live server warns; extra live tools are expected and
+   ignored, so they need no entry here to be callable via `daintree.call`.
+3. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. Illustrative, not an
+   allowlist and not load-bearing: nothing in the code reads it, so a stale example here
+   cannot change behavior. Update it when it would mislead a reader.
+
+The one remaining hand-written list is `DocsToolNames` (`internal/mcp/docs.go`) for the
+public documentation MCP — a fixed third-party surface with no annotations to derive from.

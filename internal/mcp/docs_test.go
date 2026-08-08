@@ -14,10 +14,11 @@ import (
 func newInjectedDocs(low LowLevelClient) *Client {
 	url := DefaultDocsURL
 	return New(config.AppConfig{}, Options{
-		URL:            &url,
-		Anonymous:      true,
-		DriftBaseline:  DocsDocumentedToolNames,
-		ClientOverride: low,
+		URL:              &url,
+		Anonymous:        true,
+		DriftBaseline:    DocsToolNames,
+		ReadOnlyFallback: DocsToolNames,
+		ClientOverride:   low,
 	})
 }
 
@@ -41,8 +42,8 @@ func TestDocsClientDriftUsesDocsBaseline(t *testing.T) {
 
 // All three docs tools present → no drift at all.
 func TestDocsClientNoDriftWhenComplete(t *testing.T) {
-	all := make([]rawTool, len(DocsDocumentedToolNames))
-	for i, n := range DocsDocumentedToolNames {
+	all := make([]rawTool, len(DocsToolNames))
+	for i, n := range DocsToolNames {
 		all[i] = rawTool{Name: n}
 	}
 	c := newInjectedDocs(&fakeLow{tools: all})
@@ -65,12 +66,26 @@ func TestDocsClientURLOverride(t *testing.T) {
 	}
 }
 
-// A nil DriftBaseline falls back to the full Daintree baseline (the primary client's
-// behavior is unchanged by the parameterization).
-func TestNilDriftBaselineDefaultsToDaintree(t *testing.T) {
-	c := New(config.AppConfig{McpURL: "http://x/mcp", McpToken: "t"}, Options{ClientOverride: &fakeLow{}})
-	if len(c.driftBaseline) != len(DocumentedMcpToolNames) {
-		t.Fatalf("default baseline len = %d, want %d", len(c.driftBaseline), len(DocumentedMcpToolNames))
+// A nil DriftBaseline means NO drift check. There is no built-in host-surface
+// default any more: internal/app injects the primary client's baseline from the
+// typed-wrapper names, so internal/mcp never carries a copy of the host surface.
+func TestNilDriftBaselineChecksNothing(t *testing.T) {
+	c := New(testCfg(), Options{ClientOverride: &fakeLow{}})
+	if c.driftBaseline != nil {
+		t.Fatalf("nil baseline must stay nil, got %v", c.driftBaseline)
+	}
+}
+
+// The docs client passes DocsToolNames as ReadOnlyFallback so its pure reads keep
+// auto-retry even if that third-party server sends no annotations.
+func TestDocsClientFallbackKeepsReadsRetryable(t *testing.T) {
+	low := &fakeLow{tools: []rawTool{unannotatedTool("search"), unannotatedTool("get_page")}}
+	c := newInjectedDocs(low)
+	c.Connect(context.Background())
+	for _, n := range []string{"search", "get_page"} {
+		if !c.isRetrySafe(n) {
+			t.Errorf("docs read %q must stay retry-safe via the fallback", n)
+		}
 	}
 }
 

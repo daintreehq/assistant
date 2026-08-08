@@ -252,6 +252,78 @@ var wrappedMCPTools = map[string]string{
 	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
 }
 
+// directMCPDependencies are raw Daintree MCP tools this build calls by name WITHOUT
+// going through a typed wrapper — the runtime's core reads (boot identity, the
+// terminal poll/read path the watcher and await loops live on, the worktree/agent
+// probes). They are as load-bearing as the wrapped ones: if the host renames
+// terminal.getStatus, supervision stops working, so drift must warn about them too.
+//
+// Kept here beside the wrapper names so the whole dependency set has ONE home.
+// Unlike the deleted DocumentedMcpToolNames, this is NOT a transcription of the
+// host's surface — it is a statement about OUR call sites, which is ours to own, and
+// TestMCPDependenciesCoverWrapperCallSites keeps it honest against the source.
+var directMCPDependencies = []string{
+	"actions.getContext",
+	"agent.launch",
+	"agent.listAvailable",
+	"project.getCurrent",
+	"terminal.getOutput",
+	"terminal.getStatus",
+	"terminal.list",
+}
+
+// WrappedMCPToolNames returns every raw Daintree MCP tool name this build depends
+// on — the typed wrappers' targets plus the direct call sites — sorted and
+// de-duplicated for a stable order.
+//
+// It is the assistant's DRIFT BASELINE (wired in as mcp.Options.DriftBaseline):
+// exactly the host tools whose disappearance or rename would silently break
+// something here, so a missing one is a real, actionable breakage rather than a
+// documentation nit. That is the whole reason it replaced the old hand-transcribed
+// 59-name baseline, which described the SERVER's surface (including tools nothing
+// here ever called) and went stale on every host change.
+//
+// NOTE: this is deliberately NOT just the keys of wrappedMCPTools. That map is a
+// daintree.call REDIRECT denylist, a different job — several typed wrappers
+// (copyTree.generate, worktree.list/getCurrent, the forge reads) have no entry
+// because nothing needs redirecting for them. Using it alone silently under-covered
+// the dependency set, so the two are unioned here and a test scans the wrapper
+// sources to catch a new wrapper whose target was never declared.
+//
+// Returned as a fresh slice so a caller cannot mutate internal state through it.
+func WrappedMCPToolNames() []string {
+	seen := make(map[string]struct{}, len(wrappedMCPTools)+len(directMCPDependencies))
+	for name := range wrappedMCPTools {
+		seen[name] = struct{}{}
+	}
+	for _, name := range wrapperMCPTargets {
+		seen[name] = struct{}{}
+	}
+	for _, name := range directMCPDependencies {
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// wrapperMCPTargets are raw MCP names that a typed wrapper calls but that
+// wrappedMCPTools does not redirect. Split out (rather than folded into the
+// denylist) because adding them there would change daintree.call's behaviour —
+// it would start refusing raw calls that are currently allowed — which is a
+// separate decision from drift coverage.
+var wrapperMCPTargets = []string{
+	"copyTree.generate",
+	"forge.getIssue",
+	"forge.listIssues",
+	"forge.listPRs",
+	"worktree.getCurrent",
+	"worktree.list",
+}
+
 // denylistLookup is wrappedMCPTools re-keyed on the lowercased name so the
 // case-insensitive comparison is a single map hit. Built once at init.
 var denylistLookup = func() map[string]string {

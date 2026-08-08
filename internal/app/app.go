@@ -28,6 +28,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/queue"
 	"github.com/daintreehq/daintree-assistant/internal/storage"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/daintree-assistant/internal/tools/mcpx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/scratchx"
 	"github.com/daintreehq/daintree-assistant/internal/tools/terminalobs"
 	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
@@ -373,22 +374,38 @@ func Create(opts CreateOptions) (*App, error) {
 	}
 
 	// mcp → docs-mcp → queue → router → registry → skills.
-	a.MCP = mcp.New(cfg, mcp.Options{ClientOverride: opts.MCPClientOverride})
+	//
+	// The primary client's drift baseline is INJECTED from the typed-wrapper denylist
+	// rather than hand-listed inside internal/mcp: those are the raw host tool names
+	// this build actually depends on, so a missing one is a real breakage, and the
+	// list cannot go stale because a wrapper cannot exist without its entry. (The
+	// wiring has to happen here because internal/mcp importing internal/tools/mcpx
+	// would be an import cycle.) Retry classification is NOT listed anywhere — it is
+	// read live from the annotations the host already ships on tools/list.
+	a.MCP = mcp.New(cfg, mcp.Options{
+		ClientOverride: opts.MCPClientOverride,
+		DriftBaseline:  mcpx.WrappedMCPToolNames(),
+	})
 	// The Daintree documentation MCP — a public, no-auth, stateless HTTP server that
 	// answers "how do I use Daintree" help questions via live doc search. Its endpoint is
 	// a fixed product URL (DAINTREE_DOCS_MCP_URL overrides it for dev/test, mirroring the
 	// DAINTREE_BACKEND_URL pattern). Anonymous (no bearer) with its own short drift
-	// baseline so it never warns that the 59 Daintree control-plane tools are "missing".
+	// baseline so it never warns that the Daintree control-plane tools are "missing".
+	// It also passes that list as ReadOnlyFallback: this third-party server is not
+	// guaranteed to send MCP annotations, and its three tools are pure documentation
+	// reads that would otherwise lose auto-retry. The fallback applies only where the
+	// server declared nothing — any annotations it does send win outright.
 	// Connected in parallel with the primary MCP during the boot splash (ConnectMcp).
 	docsURL := mcp.DefaultDocsURL
 	if v := strings.TrimSpace(os.Getenv("DAINTREE_DOCS_MCP_URL")); v != "" {
 		docsURL = v
 	}
 	a.DocsMCP = mcp.New(cfg, mcp.Options{
-		URL:            &docsURL,
-		Anonymous:      true,
-		DriftBaseline:  mcp.DocsDocumentedToolNames,
-		ClientOverride: opts.DocsMCPClientOverride,
+		URL:              &docsURL,
+		Anonymous:        true,
+		DriftBaseline:    mcp.DocsToolNames,
+		ReadOnlyFallback: mcp.DocsToolNames,
+		ClientOverride:   opts.DocsMCPClientOverride,
 	})
 	a.Queue = queue.New(queueEventStore{s: store}, domain.NowMS)
 	// The native Daintree backend: the assistant turn engine + server-owned utility

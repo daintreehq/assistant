@@ -11,6 +11,15 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// NOTE ON ANNOTATIONS: the tools below advertise no MCP `annotations`, so the client
+// classifies every one of them single-shot (retry safety is derived from the live
+// server's readOnlyHint — see internal/mcp/tools.go). That is harmless here because
+// this fake injects no transport faults, so the retry path never runs either way.
+// If you ever add fault injection, annotate the READS
+// (&sdkmcp.ToolAnnotations{ReadOnlyHint: true, ...}) or the retry you mean to
+// exercise will silently not happen and the test will pass for the wrong reason.
+// benchmarks/orchestration/world/server.go does inject faults and annotates properly.
+
 // termScript is one scripted terminal's live state on the scriptable MCP.
 type termScript struct {
 	AgentState    string
