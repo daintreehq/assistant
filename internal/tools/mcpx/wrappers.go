@@ -22,6 +22,12 @@ import (
 
 /* ------------------------------ terminal.focus ---------------------------- */
 
+// mcpPanelFocus is the raw Daintree MCP action behind the terminal.focus
+// wrapper. Named because two places must agree on it: the wrapper's forward
+// below, and wrapperMCPAliases (discovery.go), which lets `tool.schema
+// {"name":"terminal.focus"}` resolve to this tool's advertised schema.
+const mcpPanelFocus = "panel.focus"
+
 type focusArgs struct {
 	TerminalID string `json:"terminalId"`
 }
@@ -47,7 +53,7 @@ func newTerminalFocusTool(deps Deps) tools.Tool {
 			_ = json.Unmarshal(raw, &a)
 			// Daintree has no `terminal.focus` MCP tool — terminals are panels, so the
 			// correct call is `panel.focus` with the terminal id as the panelId.
-			return passthrough(ctx, deps.MCP, "panel.focus", map[string]any{"panelId": a.TerminalID}, "")
+			return passthrough(ctx, deps.MCP, mcpPanelFocus, map[string]any{"panelId": a.TerminalID}, "")
 		},
 	}
 }

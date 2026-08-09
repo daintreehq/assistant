@@ -1,5 +1,5 @@
 // Package mcpx is the Daintree MCP tool family: discovery (daintree.status,
-// daintree.listTools, tool.search), the raw passthrough escape hatch
+// daintree.listTools, tool.search, tool.schema), the raw passthrough escape hatch
 // (daintree.call), and the typed MCP wrappers — terminal
 // focus/input/arming, agent focus, and copyTree. Each wrapper carries the risk
 // class Daintree gates the action at, so reads/UI-focus run without the
@@ -27,9 +27,16 @@ type MCPStatus struct {
 }
 
 // MCPToolInfo is one discovered Daintree MCP tool (listTools entries).
+// InputSchema is the tool's raw MCP-advertised JSON Schema — the arbitrary
+// map the server put on the wire, NOT a normalized/flattened projection. It is
+// what `tool.schema` hands back verbatim. Carrying it here is load-bearing: the
+// concrete client has always cached it (mcp.ToolInfo.InputSchema), but this
+// consumer-side struct used to omit the field, so the app adapter dropped it at
+// the seam and NO local tool could report an MCP tool's argument shape (#311).
 type MCPToolInfo struct {
 	Name        string
 	Description string
+	InputSchema map[string]any
 }
 
 // MCPClient is the slice of the Daintree MCP transport these tools reach. It is a
@@ -80,6 +87,7 @@ func Tools(deps Deps) []tools.Tool {
 		newStatusTool(deps),
 		newListToolsTool(deps),
 		newSearchTool(deps),
+		newSchemaTool(deps),
 		newCallTool(deps),
 		newTerminalFocusTool(deps),
 		newTerminalRenameTool(deps),
