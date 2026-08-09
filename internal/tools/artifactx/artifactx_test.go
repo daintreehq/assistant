@@ -71,6 +71,53 @@ func TestArtifactPagingAndClamp(t *testing.T) {
 	}
 }
 
+func TestArtifactPagingSummaryFrontLoadsProgress(t *testing.T) {
+	// Issue #312: the cockpit truncates an activity row's detail from the TAIL, so
+	// the per-page offset/remaining must live in the head of the summary or every
+	// page of a paged read renders identically. Pin the exact strings — the whole
+	// point of the format is WHERE each field sits, which a looser assertion misses.
+	const total = 56394
+	deps := Deps{Store: fakeStore{"artifact_1091e529": strings.Repeat("a", total)}}
+
+	cases := []struct {
+		args string
+		want string
+	}{
+		{`{"artifactId":"artifact_1091e529"}`,
+			"offset 0: 3500/56394 chars, 52894 remaining — artifact_1091e529"},
+		{`{"artifactId":"artifact_1091e529","offset":3500}`,
+			"offset 3500: 3500/56394 chars, 49394 remaining — artifact_1091e529"},
+		{`{"artifactId":"artifact_1091e529","offset":7000}`,
+			"offset 7000: 3500/56394 chars, 45894 remaining — artifact_1091e529"},
+		{`{"artifactId":"artifact_1091e529","offset":10500}`,
+			"offset 10500: 3500/56394 chars, 42394 remaining — artifact_1091e529"},
+		// Final partial page: the count shrinks and the tail says eof, not "0 remaining".
+		{`{"artifactId":"artifact_1091e529","offset":56000}`,
+			"offset 56000: 394/56394 chars, end of artifact — artifact_1091e529"},
+	}
+	for _, c := range cases {
+		res := handle(deps, json.RawMessage(c.args))
+		if !res.Ok {
+			t.Fatalf("%s: expected ok, got %+v", c.args, res.Error)
+		}
+		if res.Summary != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.args, res.Summary, c.want)
+		}
+	}
+}
+
+func TestArtifactSummaryKeepsFullID(t *testing.T) {
+	// The summary is model-visible (agent/serialize.go feeds it back with the result),
+	// so the id must stay in its full, callable form — a bare hex suffix would invite
+	// the model to echo an unusable id, the way a truncated terminal id once stranded
+	// an awaitAll.
+	deps := Deps{Store: fakeStore{"artifact_1091e529": strings.Repeat("a", 10)}}
+	res := handle(deps, json.RawMessage(`{"artifactId":"artifact_1091e529"}`))
+	if !strings.Contains(res.Summary, "artifact_1091e529") {
+		t.Errorf("summary must carry the full artifact id, got %q", res.Summary)
+	}
+}
+
 func TestArtifactRuneSlicing(t *testing.T) {
 	// Multi-byte runes: indices must be character-based, not byte-based.
 	full := strings.Repeat("é", 10) // 10 runes, 20 bytes

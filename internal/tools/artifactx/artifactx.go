@@ -152,12 +152,22 @@ func handle(deps Deps, raw json.RawMessage) tools.ToolResult {
 	nextOffset := offset + (end - offset)
 	eof := nextOffset >= totalChars
 
-	tail := fmt.Sprintf(", %d remaining", totalChars-nextOffset)
+	// PROGRESS FIRST, identity LAST. A cockpit activity row truncates the detail
+	// from the TAIL (ui.truncateCells → ansi.Truncate), and the "Read artifact"
+	// label leaves only ~50 detail cells at a common 80-column width. So whatever
+	// distinguishes one page from the next MUST sit in the surviving head: with the
+	// offset/remaining at the end, every page of a paged read rendered as the same
+	// clipped line and a linear walk looked like a stuck loop (issue #312).
+	// The artifactId is the one part that is CONSTANT across a paging sequence, so
+	// it is the right thing to let the ellipsis eat — but it stays FULL (never
+	// shortened to its hex suffix), because this summary is model-visible and a
+	// non-callable id form invites the model to echo it back as an argument.
+	status := fmt.Sprintf("%d remaining", totalChars-nextOffset)
 	if eof {
-		tail = ", end of artifact"
+		status = "end of artifact"
 	}
 	return tools.Ok(
-		fmt.Sprintf("Read %d of %d chars from %s (offset %d%s).", end-offset, totalChars, a.ArtifactID, offset, tail),
+		fmt.Sprintf("offset %d: %d/%d chars, %s — %s", offset, end-offset, totalChars, status, a.ArtifactID),
 		map[string]any{
 			"artifactId": a.ArtifactID,
 			"offset":     offset,
