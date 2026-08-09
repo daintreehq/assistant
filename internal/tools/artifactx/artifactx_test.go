@@ -94,6 +94,10 @@ func TestArtifactPagingSummaryFrontLoadsProgress(t *testing.T) {
 		// Final partial page: the count shrinks and the tail says eof, not "0 remaining".
 		{`{"artifactId":"artifact_1091e529","offset":56000}`,
 			"offset 56000: 394/56394 chars, end of artifact — artifact_1091e529"},
+		// Past-the-end offset clamps, so the summary reports the EFFECTIVE offset it
+		// actually read from — never the out-of-range number the caller asked for.
+		{`{"artifactId":"artifact_1091e529","offset":99999}`,
+			"offset 56394: 0/56394 chars, end of artifact — artifact_1091e529"},
 	}
 	for _, c := range cases {
 		res := handle(deps, json.RawMessage(c.args))

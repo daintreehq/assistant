@@ -162,6 +162,9 @@ func handle(deps Deps, raw json.RawMessage) tools.ToolResult {
 	// it is the right thing to let the ellipsis eat — but it stays FULL (never
 	// shortened to its hex suffix), because this summary is model-visible and a
 	// non-callable id form invites the model to echo it back as an argument.
+	// The accepted cost: two DIFFERENT artifacts that happen to share a size read at
+	// the same offset now collapse to the same row until you expand it (^X). Paging
+	// one artifact is the common case and the one that looked broken.
 	status := fmt.Sprintf("%d remaining", totalChars-nextOffset)
 	if eof {
 		status = "end of artifact"
