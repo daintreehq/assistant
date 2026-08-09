@@ -13,6 +13,9 @@ import (
 // without a red test — a nested schema is used because a shallow one would still
 // pass if the mapping degraded to a top-level copy.
 func TestToMcpxToolInfosForwardsNestedInputSchema(t *testing.T) {
+	// Includes root-level combinators/conditionals and $defs deliberately: a
+	// mapper that projected only `type` and `properties` would still pass a
+	// shallow fixture while silently dropping these.
 	nested := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -22,6 +25,15 @@ func TestToMcpxToolInfosForwardsNestedInputSchema(t *testing.T) {
 				"required":   []any{"scopePaths"},
 			},
 		},
+		"required": []any{"options"},
+		"oneOf": []any{
+			map[string]any{"required": []any{"options"}},
+			map[string]any{"required": []any{"worktreeId"}},
+		},
+		"$defs": map[string]any{
+			"pathList": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		"additionalProperties": false,
 	}
 	in := []mcp.ToolInfo{
 		{Name: "copyTree.generate", Description: "Generate a copy tree.", InputSchema: nested},
@@ -61,14 +73,9 @@ func TestToMcpxToolInfosPreservesNilSchema(t *testing.T) {
 	}
 }
 
-// Mapping an empty catalog must yield an empty (non-nil) slice, not a nil that
-// a caller could mistake for an error result.
+// An empty catalog maps to zero entries rather than panicking on the nil input.
 func TestToMcpxToolInfosEmpty(t *testing.T) {
-	out := toMcpxToolInfos(nil)
-	if out == nil {
-		t.Error("empty catalog should map to an empty slice, not nil")
-	}
-	if len(out) != 0 {
-		t.Errorf("want 0 entries, got %d", len(out))
+	if got := len(toMcpxToolInfos(nil)); got != 0 {
+		t.Errorf("want 0 entries, got %d", got)
 	}
 }

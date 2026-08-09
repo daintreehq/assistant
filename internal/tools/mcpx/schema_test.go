@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -77,9 +78,9 @@ func TestSchemaReturnsNestedSchemaVerbatim(t *testing.T) {
 	if result["name"] != "copyTree.generate" {
 		t.Errorf("name = %v, want copyTree.generate", result["name"])
 	}
-	// No alias hop, so no requestedName/note noise.
+	// Lookups are raw-name-only, so a result never carries a redirected name.
 	if _, ok := result["requestedName"]; ok {
-		t.Error("requestedName should be absent for a direct (non-alias) hit")
+		t.Error("results should not carry a requestedName — lookups are raw MCP names only")
 	}
 
 	got := result["inputSchema"].(map[string]any)
@@ -121,43 +122,119 @@ func TestSchemaUsesWarmCacheAndNeverCalls(t *testing.T) {
 	}
 }
 
-// A renamed wrapper resolves through the explicit alias table, and SAYS SO:
-// answering terminal.focus with panel.focus's schema silently would tell the
-// model to pass `panelId` to a wrapper whose own parameter is `terminalId`.
-func TestSchemaResolvesWrapperAliasAndReportsTheHop(t *testing.T) {
+// Lookups are RAW MCP names only. A local wrapper name must NOT resolve to the
+// raw tool it forwards to: terminal.focus takes terminalId where panel.focus
+// takes panelId, so returning panel.focus's structured schema under the local
+// name would have the model build a call its own decoder rejects.
+func TestSchemaDoesNotResolveLocalWrapperNames(t *testing.T) {
 	mcp := &fakeMCP{connected: true, toolList: schemaCatalog()}
 	res := callSchemaTool(t, mcp, `{"name":"terminal.focus"}`)
-	if !res.Ok {
-		t.Fatalf("alias lookup failed: %+v", res)
+	if res.Ok {
+		t.Fatalf("terminal.focus is a local wrapper name and must not resolve, got %+v", res.Result)
 	}
-	result := res.Result.(map[string]any)
-	if result["name"] != "panel.focus" {
-		t.Errorf("name = %v, want panel.focus", result["name"])
+	if res.Error.Code != codeToolNotFound {
+		t.Errorf("code = %q, want %q", res.Error.Code, codeToolNotFound)
 	}
-	if result["requestedName"] != "terminal.focus" {
-		t.Errorf("requestedName = %v, want terminal.focus", result["requestedName"])
-	}
-	note, _ := result["note"].(string)
-	if !strings.Contains(note, "panel.focus") || !strings.Contains(note, "terminal.focus") {
-		t.Errorf("note must name both the wrapper and the raw tool, got %q", note)
-	}
-
-	// The raw name still resolves directly, with no alias annotation.
-	raw := callSchemaTool(t, mcp, `{"name":"panel.focus"}`)
-	if !raw.Ok {
-		t.Fatalf("raw panel.focus lookup failed: %+v", raw)
-	}
-	if _, ok := raw.Result.(map[string]any)["requestedName"]; ok {
-		t.Error("a direct panel.focus hit should not be annotated as an alias hop")
+	// The raw name it forwards to still resolves directly.
+	if raw := callSchemaTool(t, mcp, `{"name":"panel.focus"}`); !raw.Ok {
+		t.Fatalf("raw panel.focus lookup should succeed: %+v", raw)
 	}
 }
 
-// agentTask.spawnForEdits forwards to agent.launch but TRANSFORMS the contract,
-// so it is deliberately not aliased — returning agent.launch's raw schema under
-// the local name would describe arguments the wrapper does not accept.
-func TestSchemaDoesNotAliasTransformingWrappers(t *testing.T) {
-	if target, ok := wrapperMCPAliases["agentTask.spawnForEdits"]; ok {
-		t.Errorf("agentTask.spawnForEdits must not be aliased (it transforms the contract), got %q", target)
+// When a same-named typed wrapper governs the call, the result must SAY the raw
+// schema is not the wrapper's call shape. Several wrappers materially transform
+// the contract (terminal.rename makes optional args required; terminal.close
+// adds a plural batch form; recipe.run nests fields under `arguments`), so an
+// unannotated raw schema is a new version of the bug this tool fixes.
+func TestSchemaAnnotatesWrappedTools(t *testing.T) {
+	catalog := append(schemaCatalog(), MCPToolInfo{
+		Name:        "terminal.close",
+		Description: "Close a terminal.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"terminalId": map[string]any{"type": "string"}},
+			"required":   []any{"terminalId"},
+		},
+	})
+	mcp := &fakeMCP{connected: true, toolList: catalog}
+
+	res := callSchemaTool(t, mcp, `{"name":"terminal.close"}`)
+	if !res.Ok {
+		t.Fatalf("terminal.close lookup failed: %+v", res)
+	}
+	result := res.Result.(map[string]any)
+	note, _ := result["note"].(string)
+	if note == "" {
+		t.Fatal("a wrapped tool's schema must carry a wrapper caveat")
+	}
+	// The caveat must point at the wrapper, not merely mention that one exists.
+	if wrapper, _ := result["localWrapper"].(string); wrapper != "terminal.close" {
+		t.Errorf("localWrapper should name the typed wrapper, got %q", wrapper)
+	}
+	if !strings.Contains(note, "arguments") {
+		t.Errorf("note should warn that wrapper parameters differ (incl. nesting), got %q", note)
+	}
+	// The annotation set is derived from the family's own registration, so every
+	// name it registers is covered — including copyTree.generate, which has a
+	// wrapper but (deliberately) no daintree.call denylist entry.
+	if !getLocalWrapperNames()["copyTree.generate"] || !getLocalWrapperNames()["terminal.close"] {
+		t.Error("the wrapper set should be derived from the registered family")
+	}
+	if getLocalWrapperNames()["terminal.getStatus"] {
+		t.Error("terminal.getStatus has no local wrapper and must not be in the set")
+	}
+
+	// copyTree.generate is wrapped too — the motivating case — so it is annotated
+	// while still returning the raw schema that makes the lookup worth doing.
+	gen := callSchemaTool(t, mcp, `{"name":"copyTree.generate"}`)
+	if !gen.Ok {
+		t.Fatalf("copyTree.generate lookup failed: %+v", gen)
+	}
+	genResult := gen.Result.(map[string]any)
+	if _, ok := genResult["note"]; !ok {
+		t.Error("copyTree.generate is a wrapped tool and should be annotated")
+	}
+	opts := genResult["inputSchema"].(map[string]any)["properties"].(map[string]any)["options"].(map[string]any)
+	if _, ok := opts["properties"]; !ok {
+		t.Error("the raw options schema must still be returned — that is the point of the lookup")
+	}
+
+	// An UNwrapped tool gets no caveat, so the annotation stays a real signal.
+	plain := callSchemaTool(t, mcp, `{"name":"terminal.getStatus"}`)
+	if !plain.Ok {
+		t.Fatalf("terminal.getStatus lookup failed: %+v", plain)
+	}
+	if _, ok := plain.Result.(map[string]any)["note"]; ok {
+		t.Error("an unwrapped tool should carry no wrapper caveat")
+	}
+}
+
+// A catalog advertising one name twice with DIFFERENT schemas is ambiguous —
+// picking either would be the confident contract guess exact matching exists to
+// prevent. Identical duplicates are harmless and must still resolve.
+func TestSchemaRejectsAmbiguousDuplicates(t *testing.T) {
+	conflicting := []MCPToolInfo{
+		{Name: "dup.tool", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}},
+		{Name: "dup.tool", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"b": map[string]any{"type": "number"}}}},
+	}
+	res := callSchemaTool(t, &fakeMCP{connected: true, toolList: conflicting}, `{"name":"dup.tool"}`)
+	if res.Ok {
+		t.Fatal("conflicting duplicate schemas must not silently resolve to one")
+	}
+	if res.Error.Code != codeSchemaInvalid {
+		t.Errorf("code = %q, want %q", res.Error.Code, codeSchemaInvalid)
+	}
+
+	same := map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}
+	agreeing := []MCPToolInfo{{Name: "dup.tool", InputSchema: same}, {Name: "dup.tool", InputSchema: same}}
+	if ok := callSchemaTool(t, &fakeMCP{connected: true, toolList: agreeing}, `{"name":"dup.tool"}`); !ok.Ok {
+		t.Errorf("identical duplicates should resolve normally: %+v", ok)
+	}
+
+	// A duplicated name must also not be suggested twice on a miss.
+	cands := schemaCandidates(agreeing, "dup.too")
+	if len(cands) != 1 {
+		t.Errorf("duplicate names should be deduplicated in candidates, got %v", cands)
 	}
 }
 
@@ -218,18 +295,13 @@ func TestSchemaUnrelatedMissPointsAtSearch(t *testing.T) {
 	}
 }
 
-// A wrapper alias is only suggested when the tool it forwards to is live —
-// suggesting a name that then fails to resolve costs another wasted round.
-func TestSchemaOnlySuggestsAliasesWithLiveTargets(t *testing.T) {
-	// panel.focus present ⇒ terminal.focus is offerable.
-	withTarget := schemaCandidates(schemaCatalog(), "terminal.foc")
-	if !containsString(withTarget, "terminal.focus") {
-		t.Errorf("terminal.focus should be suggested when panel.focus is live, got %v", withTarget)
-	}
-	// panel.focus absent ⇒ terminal.focus must not be suggested.
-	without := schemaCandidates([]MCPToolInfo{{Name: "terminal.getStatus"}}, "terminal.foc")
-	if containsString(without, "terminal.focus") {
-		t.Errorf("terminal.focus must not be suggested when panel.focus is absent, got %v", without)
+// Candidates come from the live catalog only — a local tool name that is not an
+// MCP tool must never be suggested, because retrying with it would just miss
+// again.
+func TestSchemaCandidatesAreCatalogNamesOnly(t *testing.T) {
+	got := schemaCandidates(schemaCatalog(), "terminal.foc")
+	if containsString(got, "terminal.focus") {
+		t.Errorf("terminal.focus is a local tool, not an MCP tool; must not be suggested, got %v", got)
 	}
 }
 
@@ -264,18 +336,27 @@ func TestSchemaOversizeFailsWithoutPartialSchema(t *testing.T) {
 	if res.Error.Recoverable {
 		t.Error("retrying the same name cannot help; should be unrecoverable")
 	}
-	if res.Result != nil {
-		t.Errorf("no partial schema may ride along, got %v", res.Result)
+	// domain.Fail always leaves Result nil, so asserting that proves nothing. The
+	// real risk is a schema FRAGMENT leaking through the message or details, so
+	// assert against the fully serialized failure: none of the filler may appear,
+	// and the details must carry only the documented keys.
+	serialized := agent.SerializeToolResult(res, nil)
+	if strings.Contains(serialized, strings.Repeat("x", 50)) {
+		t.Error("a fragment of the oversized schema leaked into the failure")
 	}
-	// The failure must itself stay inline, or it becomes the artifact-paging
-	// problem this tool exists to remove.
-	encoded, _ := json.Marshal(res)
-	if len(encoded) > domain.MaxToolResultChars {
-		t.Errorf("failure envelope is %d chars, must stay under %d", len(encoded), domain.MaxToolResultChars)
+	assertNotStubbed(t, serialized)
+	details := res.Error.Details.(map[string]any)
+	allowed := map[string]bool{
+		"name": true, "resultChars": true, "maxToolResultChars": true,
+		"topLevelPropertyNames": true, "omittedPropertyNames": true,
+	}
+	for k := range details {
+		if !allowed[k] {
+			t.Errorf("unexpected detail key %q — schema content may be leaking", k)
+		}
 	}
 	// It still names the top-level keys — an index, not a schema — so the model
 	// has a next step rather than being returned to guessing.
-	details := res.Error.Details.(map[string]any)
 	keys := details["topLevelPropertyNames"].([]string)
 	if len(keys) != 3 || keys[0] != "alpha" || keys[2] != "gamma" {
 		t.Errorf("top-level keys should be listed sorted, got %v", keys)
@@ -287,31 +368,179 @@ func TestSchemaOversizeFailsWithoutPartialSchema(t *testing.T) {
 	}
 }
 
-// The cap is measured on the WHOLE result envelope, not the schema alone: the
-// wrapper fields count toward what the turn serializer sees.
-func TestSchemaSizeGuardMeasuresWholeEnvelope(t *testing.T) {
-	// A schema that alone sits just under the cap, but exceeds it once the
-	// alias-hop wrapper fields (requestedName + the explanatory note) are added.
-	filler := strings.Repeat("y", domain.MaxToolResultChars-220)
+// assertNotStubbed fails the test if the serializer converted a result into an
+// overflow stub. Checking for "artifactId" alone is NOT sufficient: with a nil
+// artifact store the stub carries `"truncated":true` and no artifactId at all,
+// so an artifactId-only check passes exactly when the result WAS stubbed.
+func assertNotStubbed(t *testing.T, serialized string) {
+	t.Helper()
+	if !json.Valid([]byte(serialized)) {
+		t.Fatalf("serialized result is not valid JSON: %s", serialized)
+	}
+	var probe struct {
+		Result struct {
+			Truncated  bool   `json:"truncated"`
+			ArtifactID string `json:"artifactId"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(serialized), &probe); err != nil {
+		return // not an object with a result field; nothing to assert
+	}
+	if probe.Result.Truncated || probe.Result.ArtifactID != "" {
+		t.Errorf("result was stubbed by the serializer (truncated=%v artifactId=%q)",
+			probe.Result.Truncated, probe.Result.ArtifactID)
+	}
+}
+
+// THE load-bearing size test: a result this tool calls "fine" must survive the
+// REAL serializer without becoming a paged artifact stub. Measuring only the
+// inner result map under-counts by the {ok,summary,result} wrapper, so a schema
+// landing in that gap would pass the local guard and then be turned into exactly
+// the paged artifact this feature exists to eliminate. This drives a schema up to
+// the boundary from below and asserts the two agree at every step.
+func TestSchemaGuardAgreesWithRealSerializer(t *testing.T) {
+	// Walk sizes across the cap boundary, INCLUDING clearly-small ones: a guard
+	// that rejected everything would satisfy a one-sided "never stubbed" check,
+	// so each case asserts the accept/reject decision independently.
+	var sawAccept, sawReject bool
+	for _, fill := range []int{
+		100,
+		domain.MaxToolResultChars / 2,
+		domain.MaxToolResultChars - 400,
+		domain.MaxToolResultChars - 200,
+		domain.MaxToolResultChars - 120,
+		domain.MaxToolResultChars - 60,
+		domain.MaxToolResultChars - 10,
+		domain.MaxToolResultChars + 500,
+	} {
+		schema := map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"panelId": map[string]any{"type": "string", "description": strings.Repeat("y", fill)}},
+		}
+		mcp := &fakeMCP{connected: true, toolList: []MCPToolInfo{
+			{Name: "panel.focus", Description: "focus", InputSchema: schema},
+		}}
+		res := callSchemaTool(t, mcp, `{"name":"panel.focus"}`)
+		serialized := agent.SerializeToolResult(res, nil)
+
+		// Independently compute what the serializer will do, and require the tool
+		// to have made the matching call.
+		wantOk := len(serialized) <= domain.MaxToolResultChars && res.Ok
+		if res.Ok != wantOk {
+			t.Errorf("fill=%d: accepted=%v but serialized length is %d (cap %d)",
+				fill, res.Ok, len(serialized), domain.MaxToolResultChars)
+		}
+		// Whether accepted or rejected, what reaches the model must never be a
+		// paged stub — that is the outcome this whole feature exists to remove.
+		assertNotStubbed(t, serialized)
+
+		if res.Ok {
+			sawAccept = true
+			// An accepted result must actually carry the schema.
+			if _, ok := res.Result.(map[string]any)["inputSchema"]; !ok {
+				t.Errorf("fill=%d: accepted result is missing inputSchema", fill)
+			}
+		} else {
+			sawReject = true
+			if res.Error.Code != codeSchemaTooLarge {
+				t.Errorf("fill=%d: unexpected failure %q", fill, res.Error.Code)
+			}
+		}
+	}
+	// Both branches must have been exercised, or the sweep proved nothing.
+	if !sawAccept || !sawReject {
+		t.Errorf("sweep did not cross the boundary (accepted=%v rejected=%v)", sawAccept, sawReject)
+	}
+}
+
+// The cap counts CHARACTERS, not bytes (matching the serializer's charLen), so a
+// multibyte schema whose byte length exceeds the cap but whose rune count does
+// not must still be returned inline.
+func TestSchemaCapCountsRunesNotBytes(t *testing.T) {
+	// 3 bytes per rune: comfortably over the cap in bytes, well under in runes.
+	desc := strings.Repeat("あ", domain.MaxToolResultChars/2)
 	schema := map[string]any{
 		"type":       "object",
-		"properties": map[string]any{"panelId": map[string]any{"type": "string", "description": filler}},
+		"properties": map[string]any{"k": map[string]any{"type": "string", "description": desc}},
 	}
-	raw, _ := json.Marshal(schema)
-	if len(raw) > domain.MaxToolResultChars {
-		t.Fatalf("fixture is mis-sized: schema alone is already %d chars", len(raw))
+	mcp := &fakeMCP{connected: true, toolList: []MCPToolInfo{{Name: "wide.rune", InputSchema: schema}}}
+	res := callSchemaTool(t, mcp, `{"name":"wide.rune"}`)
+	serialized := agent.SerializeToolResult(res, nil)
+	if len(serialized) <= domain.MaxToolResultChars {
+		t.Fatalf("fixture is mis-sized: %d bytes should exceed the cap", len(serialized))
+	}
+	if !res.Ok {
+		t.Error("a schema under the cap in RUNES must be returned inline despite its byte length")
+	}
+	assertNotStubbed(t, serialized)
+}
+
+// The envelope we measure must keep the field names the serializer emits — the
+// shape is duplicated (mcpx cannot import internal/agent), so drift is only
+// caught by pinning it.
+func TestSerializedEnvelopeMatchesSerializerShape(t *testing.T) {
+	mine, err := json.Marshal(serializedEnvelope{Ok: true, Summary: "s", Result: map[string]any{"k": "v"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	theirs := agent.SerializeToolResult(domain.Ok("s", map[string]any{"k": "v"}), nil)
+	if string(mine) != theirs {
+		t.Errorf("envelope shape drifted from the serializer:\n mine %s\ntheirs %s", mine, theirs)
+	}
+}
+
+// A schema with a huge number of property names must not turn the "too large"
+// report into something itself too large.
+func TestSchemaOversizeReportIsBounded(t *testing.T) {
+	props := map[string]any{}
+	for i := 0; i < 400; i++ {
+		props[strings.Repeat("k", 30)+itoaTest(i)] = map[string]any{"type": "string", "description": strings.Repeat("z", 60)}
 	}
 	mcp := &fakeMCP{connected: true, toolList: []MCPToolInfo{
-		{Name: "panel.focus", Description: "focus", InputSchema: schema},
+		{Name: "wide.tool", InputSchema: map[string]any{"type": "object", "properties": props}},
 	}}
-	// Requested through the alias, so the extra wrapper fields apply.
-	res := callSchemaTool(t, mcp, `{"name":"terminal.focus"}`)
+	res := callSchemaTool(t, mcp, `{"name":"wide.tool"}`)
 	if res.Ok {
-		t.Fatal("envelope exceeds the cap once wrapper fields are added; must fail")
+		t.Fatal("a schema this wide must exceed the cap")
 	}
-	if res.Error.Code != codeSchemaTooLarge {
-		t.Errorf("code = %q, want %q", res.Error.Code, codeSchemaTooLarge)
+	assertNotStubbed(t, agent.SerializeToolResult(res, nil))
+	details := res.Error.Details.(map[string]any)
+	if omitted := details["omittedPropertyNames"].(int); omitted <= 0 {
+		t.Errorf("with 400 keys the report should omit some, got %d", omitted)
 	}
+}
+
+// Key names that EXPAND under JSON escaping must not blow the report past the
+// cap. A budget computed from raw byte lengths misses this: quotes, backslashes
+// and control characters can multiply a name's encoded size several-fold, and
+// the names are emitted three times (summary, message, details).
+func TestSchemaOversizeReportSurvivesEscaping(t *testing.T) {
+	props := map[string]any{}
+	for i := 0; i < 120; i++ {
+		// Every character escapes to at least two, several to six.
+		nasty := strings.Repeat(`"\`, 15) + strings.Repeat("\x01", 15) + itoaTest(i)
+		props[nasty] = map[string]any{"type": "string", "description": strings.Repeat("z", 200)}
+	}
+	mcp := &fakeMCP{connected: true, toolList: []MCPToolInfo{
+		{Name: "escaping.tool", InputSchema: map[string]any{"type": "object", "properties": props}},
+	}}
+	res := callSchemaTool(t, mcp, `{"name":"escaping.tool"}`)
+	if res.Ok {
+		t.Fatal("this schema must exceed the cap")
+	}
+	assertNotStubbed(t, agent.SerializeToolResult(res, nil))
+}
+
+func itoaTest(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }
 
 // A schema that cannot round-trip through JSON is a broken catalog entry, not
@@ -361,10 +590,58 @@ func TestSchemaRejectsBadArgs(t *testing.T) {
 		`{"name":"` + strings.Repeat("a", maxSchemaNameLen+1) + `"}`,
 		`{"name":"copyTree.generate","extra":1}`,
 		`{"name":["copyTree.generate"]}`,
+		// Padding is REJECTED, not trimmed: the tool promises exact matching, and
+		// silently trimming would make the audit record disagree with the name
+		// actually looked up.
+		`{"name":" copyTree.generate"}`,
+		`{"name":"copyTree.generate "}`,
 	} {
 		if _, err := tool.Decode(json.RawMessage(args)); err == nil {
 			t.Errorf("decode(%s) should have failed", args)
 		}
+	}
+	// The exact name still decodes.
+	if _, err := tool.Decode(json.RawMessage(`{"name":"copyTree.generate"}`)); err != nil {
+		t.Errorf("the exact name should decode: %v", err)
+	}
+}
+
+// Near-miss suggestions must stay signal. A stubby catalog name must not be
+// offered for every miss just because it appears somewhere in the request.
+func TestSchemaCandidatesAvoidNoise(t *testing.T) {
+	catalog := []MCPToolInfo{{Name: "a"}, {Name: "go"}, {Name: "copyTree.generate"}}
+	got := schemaCandidates(catalog, "terminal.getStatus")
+	for _, noise := range []string{"a", "go"} {
+		if containsString(got, noise) {
+			t.Errorf("short name %q should not be suggested for an unrelated request, got %v", noise, got)
+		}
+	}
+	// A real truncation still resolves to a suggestion.
+	if got := schemaCandidates(catalog, "copyTree.gen"); !containsString(got, "copyTree.generate") {
+		t.Errorf("a truncated name should still suggest the full one, got %v", got)
+	}
+	// The list is capped.
+	wide := make([]MCPToolInfo, 0, 20)
+	for i := 0; i < 20; i++ {
+		wide = append(wide, MCPToolInfo{Name: "terminal.thing" + itoaTest(i)})
+	}
+	if got := schemaCandidates(wide, "terminal.thing"); len(got) > maxSchemaCandidates {
+		t.Errorf("candidates should cap at %d, got %d", maxSchemaCandidates, len(got))
+	}
+}
+
+// An empty catalog must not send the model to tool.search, which reads the same
+// empty catalog and can only return nothing.
+func TestSchemaEmptyCatalogMessage(t *testing.T) {
+	res := callSchemaTool(t, &fakeMCP{connected: true}, `{"name":"copyTree.generate"}`)
+	if res.Ok {
+		t.Fatal("an empty catalog cannot resolve anything")
+	}
+	if strings.Contains(res.Error.Message, "tool.search") {
+		t.Errorf("an empty catalog should not point at tool.search, got %q", res.Error.Message)
+	}
+	if !strings.Contains(res.Error.Message, "empty") {
+		t.Errorf("message should say the catalog is empty, got %q", res.Error.Message)
 	}
 }
 

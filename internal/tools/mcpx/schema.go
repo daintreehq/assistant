@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -20,14 +21,15 @@ import (
 // Its only escape was daintree.listTools, whose result is large enough to become
 // a paged artifact (3500 chars/page) — and the schema was never in it anyway.
 //
-// The schema comes from the LOCAL cached catalog (deps.MCP.ListTools with
-// force=false), never from a network probe. That source is wire-authoritative
-// (it is literally what the server advertised), covers every connected tool
-// rather than just Daintree's action registry, and normally costs nothing. We
-// deliberately do NOT fall back to Daintree's actions.getSchema when the cached
-// schema is the empty default: the cache cannot distinguish "the server omitted
-// a schema" from "the server advertised an empty object", so such a fallback
-// would fire unpredictably.
+// The schema comes from the catalog ListTools already maintains, read
+// CACHE-FIRST (force=false): normally a warm-cache hit costing nothing, falling
+// back to the same catalog fetch the sibling discovery tools make when the cache
+// is cold. That source is wire-authoritative — literally what the server
+// advertised — and covers every connected tool rather than just Daintree's
+// action registry. We deliberately do NOT reach for Daintree's actions.getSchema
+// when the cached schema is the empty default: the cache cannot distinguish "the
+// server omitted a schema" from "the server advertised an empty object", so such
+// a fallback would fire unpredictably.
 //
 // The schema is returned VERBATIM. We never flatten it to {key,type,required}:
 // summarizing nested objects, oneOf/anyOf, or conditional requirements misleads
@@ -49,18 +51,54 @@ const maxSchemaNameLen = 128
 // dump (the bloat this family exists to avoid).
 const maxSchemaCandidates = 5
 
-// wrapperMCPAliases maps a LOCAL wrapper tool name onto the raw MCP tool it
-// forwards to, for the cases where the two names DIFFER. Same-named wrappers
-// (copyTree.generate, terminal.rename, terminal.close, recipe.run, …) need no
-// entry — an exact catalog lookup already finds them, which is what makes the
-// motivating copyTree.generate case work.
+// maxOversizeKeys caps how many argument names the over-cap failure lists. A
+// hard count bound on top of the character budget, so a schema with thousands of
+// one-character keys can't produce an unreadable wall of names.
+const maxOversizeKeys = 60
+
+// minCandidateOverlap is how many characters the SHORTER side of a near-miss
+// must have before a reverse prefix/substring relation counts as a signal. Below
+// it, a stubby name matches almost anything and the suggestion list turns into
+// noise the model has to re-check.
+const minCandidateOverlap = 4
+
+// Lookups are RAW MCP names only — there is deliberately no local-wrapper alias
+// table. A wrapper that renames or restructures arguments (terminal.focus takes
+// terminalId where panel.focus takes panelId; terminal.close adds a plural
+// terminalIds batch; recipe.run splits fields between the root and a nested
+// arguments object) would have its raw schema returned under the local name, and
+// a model reading that STRUCTURED schema would build a call the wrapper's strict
+// decoder rejects. A prose caveat does not undo a structured schema. Local
+// wrappers already declare their own schemas in the turn's tool spec, so there
+// is nothing to discover; what needs discovering is the raw shape behind values
+// a wrapper forwards opaquely, which the raw name resolves directly.
+
+// localWrapperNames is the set of tool names this family registers locally,
+// used to flag a raw schema whose same-named typed wrapper actually governs the
+// call. Derived from the family's own registration rather than a hand-kept list
+// so a newly added wrapper is covered automatically — the daintree.call denylist
+// looks like the natural index but is NOT one (copyTree.generate has a wrapper
+// yet no denylist entry, so using it would have silently skipped the annotation
+// for the very tool that motivated this feature).
 //
-// Only thin passthroughs belong here. agentTask.spawnForEdits is deliberately
-// ABSENT even though it forwards to agent.launch: its call contract is
-// materially transformed, so handing back agent.launch's raw schema under the
-// local name would describe arguments the wrapper does not accept.
-var wrapperMCPAliases = map[string]string{
-	"terminal.focus": mcpPanelFocus,
+// Computed at runtime (not package init) to avoid a static initialization cycle:
+// the closure would call Tools(), which constructs this tool, which closes over
+// schemaResult, which would then call localWrapperNames again. Instead, we
+// compute it lazily on first access and cache it. Deps are irrelevant — only
+// names are read.
+var (
+	localWrapperNamesOnce sync.Once
+	localWrapperNamesMap  map[string]bool
+)
+
+func getLocalWrapperNames() map[string]bool {
+	localWrapperNamesOnce.Do(func() {
+		localWrapperNamesMap = make(map[string]bool)
+		for _, t := range Tools(Deps{}) {
+			localWrapperNamesMap[t.Name] = true
+		}
+	})
+	return localWrapperNamesMap
 }
 
 type schemaArgs struct {
@@ -73,6 +111,13 @@ type schemaArgs struct {
 func (a schemaArgs) Validate() error {
 	if strings.TrimSpace(a.Name) == "" {
 		return fmt.Errorf("name is required — pass the exact MCP tool name, e.g. {\"name\":\"copyTree.generate\"}")
+	}
+	// Reject padding rather than trimming it. The tool promises exact matching
+	// and no auto-correction; silently trimming would make that promise false in
+	// one direction, and the audit record would then disagree with the name
+	// actually looked up.
+	if a.Name != strings.TrimSpace(a.Name) {
+		return fmt.Errorf("name has leading or trailing whitespace; pass it exactly, e.g. {\"name\":\"copyTree.generate\"}")
 	}
 	if utf8.RuneCountInString(a.Name) > maxSchemaNameLen {
 		return fmt.Errorf("name is %d characters; MCP tool names are at most %d", utf8.RuneCountInString(a.Name), maxSchemaNameLen)
@@ -102,19 +147,21 @@ const schemaPointer = "To see a tool's ARGUMENT SHAPE (its input schema), call `
 func newSchemaTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "tool.schema",
-		Description: "Look up ONE Daintree MCP tool's input schema (its exact argument shape) from the locally cached catalog. " +
-			"Call it with the literal argument object {\"name\":\"copyTree.generate\"}, replacing the example with an exact name " +
-			"from tool.search or daintree.listTools. Returns the server's real JSON Schema verbatim — never a flattened or " +
-			"guessed summary — and does NOT invoke the tool. Use this before calling any tool whose arguments you are unsure " +
-			"of, especially one whose own parameters are forwarded opaquely (e.g. copyTree.generate's `options`). Names are " +
-			"matched exactly and never auto-corrected; a miss returns close candidates to retry with.",
+		Description: "Look up ONE Daintree MCP tool's input schema — its exact argument shape — without invoking it. Call with " +
+			"the literal argument object {\"name\":\"copyTree.generate\"}, using an exact name from tool.search or " +
+			"daintree.listTools (names are never auto-corrected; a miss returns close candidates). Reach for it whenever you " +
+			"would otherwise guess an argument key, especially for values a tool forwards opaquely such as " +
+			"copyTree.generate's `options`.",
 		Risk:   domain.RiskRead,
 		Schema: schemaSchema,
 		Decode: tools.StrictDecoder(func() any { return &schemaArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a schemaArgs
 			_ = json.Unmarshal(raw, &a)
-			requested := strings.TrimSpace(a.Name)
+			// No trimming here: Validate already rejected a padded name, so the
+			// name looked up is byte-for-byte the one the model sent (and the one
+			// the audit records).
+			requested := a.Name
 
 			if !deps.MCP.Connected() {
 				return tools.Fail(codeMCPUnavailable, "Daintree MCP is not connected; cannot look up tool schemas. Use /reconnect to retry once Daintree is available.")
@@ -127,11 +174,20 @@ func newSchemaTool(deps Deps) tools.Tool {
 				return tools.Fail(codeMCPUnavailable, "Could not read the Daintree MCP tool catalog: "+err.Error()+" Use /reconnect to retry once Daintree is available.")
 			}
 
-			match, mcpName, found := resolveSchemaTool(list, requested)
+			match, found, ambiguous := resolveSchemaTool(list, requested)
+			if ambiguous {
+				// Two catalog entries share this name with DIFFERENT schemas, so
+				// we cannot know which one the server would dispatch. Returning
+				// either would be a confident guess at a contract — the one thing
+				// this tool exists not to do.
+				return tools.Fail(codeSchemaInvalid, fmt.Sprintf(
+					"The Daintree MCP catalog advertises %q more than once with different schemas, so its argument shape is ambiguous. Report this rather than guessing the arguments.", requested),
+					tools.Unrecoverable())
+			}
 			if !found {
 				return schemaNotFound(list, requested)
 			}
-			return schemaResult(requested, mcpName, match.InputSchema)
+			return schemaResult(requested, match.InputSchema)
 		},
 	}
 }
@@ -139,45 +195,76 @@ func newSchemaTool(deps Deps) tools.Tool {
 // resolveSchemaTool finds the catalog entry for requested. Matching is EXACT and
 // case-sensitive: a near match is reported as a suggestion, never silently
 // resolved, because returning the wrong tool's contract is worse than a failure
-// the model can correct. A local wrapper name is accepted only through the
-// explicit wrapperMCPAliases table. Returns the entry, the raw MCP name it was
-// found under, and whether it resolved.
-func resolveSchemaTool(list []MCPToolInfo, requested string) (MCPToolInfo, string, bool) {
-	byName := make(map[string]MCPToolInfo, len(list))
+// the model can correct. Reports ambiguous=true when the catalog advertises the
+// name twice with DIFFERING schemas — silently taking one would be the same
+// confident guess the exact-match rule exists to prevent. Duplicates that agree
+// are harmless and resolve normally.
+func resolveSchemaTool(list []MCPToolInfo, requested string) (match MCPToolInfo, found, ambiguous bool) {
 	for _, t := range list {
-		byName[t.Name] = t
-	}
-	if t, ok := byName[requested]; ok {
-		return t, t.Name, true
-	}
-	if alias, ok := wrapperMCPAliases[requested]; ok {
-		if t, ok := byName[alias]; ok {
-			return t, alias, true
+		if t.Name != requested {
+			continue
+		}
+		if !found {
+			match, found = t, true
+			continue
+		}
+		if !sameSchema(match.InputSchema, t.InputSchema) {
+			return MCPToolInfo{}, false, true
 		}
 	}
-	return MCPToolInfo{}, "", false
+	return match, found, false
+}
+
+// sameSchema compares two schemas by their canonical JSON encoding. Go maps have
+// no ordering, but encoding/json sorts object keys, so equal encodings mean equal
+// schemas. An encoding failure counts as "different" so an unreadable duplicate
+// is reported as ambiguous rather than silently accepted.
+func sameSchema(a, b map[string]any) bool {
+	ab, aerr := json.Marshal(a)
+	bb, berr := json.Marshal(b)
+	if aerr != nil || berr != nil {
+		return false
+	}
+	return string(ab) == string(bb)
+}
+
+// serializedEnvelope mirrors the shape agent.SerializeToolResult actually
+// marshals and measures ({ok,summary,result,error}, result/error omitempty). We
+// re-declare it rather than import it because the cap we must respect is the
+// SERIALIZER's, not our own: measuring the bare result map would under-count by
+// the wrapper and summary, letting a schema land in the gap where our guard says
+// "fine" and the serializer then converts it to a paged artifact stub — the exact
+// outcome this tool exists to prevent. mcpx cannot import internal/agent (the
+// dependency runs the other way), so the shape is duplicated and pinned by test.
+type serializedEnvelope struct {
+	Ok      bool   `json:"ok"`
+	Summary string `json:"summary"`
+	Result  any    `json:"result,omitempty"`
 }
 
 // schemaResult builds the success envelope, then enforces the inline size cap on
-// the WHOLE serialized result rather than the schema alone — the cap that matters
-// is the one the turn serializer applies (domain.MaxToolResultChars), and the
-// wrapper fields count toward it.
-func schemaResult(requested, mcpName string, inputSchema map[string]any) tools.ToolResult {
+// the WHOLE serialized envelope rather than the schema alone.
+func schemaResult(mcpName string, inputSchema map[string]any) tools.ToolResult {
 	result := map[string]any{
 		"name":        mcpName,
 		"inputSchema": inputSchema,
 	}
-	// Report the alias hop explicitly. Silently answering a terminal.focus lookup
-	// with panel.focus's schema would tell the model to pass `panelId` to a
-	// wrapper whose own parameter is `terminalId`.
-	if requested != mcpName {
-		result["requestedName"] = requested
+	// When a typed wrapper of the same name exists, the schema below is NOT the
+	// shape to call it with: wrappers variously make optional args required
+	// (terminal.rename), add batch forms (terminal.close), or nest raw fields
+	// under `arguments` (recipe.run). Without this the model reads a raw schema
+	// and builds a call the wrapper's strict decoder rejects — a new version of
+	// the very bug this tool fixes. The denylist is already the authoritative
+	// wrapper index, so it doubles as the annotation source.
+	if getLocalWrapperNames()[mcpName] {
+		result["localWrapper"] = mcpName
 		result["note"] = fmt.Sprintf(
-			"%s is a local typed wrapper over the Daintree MCP tool %s. The schema below is %s's; call %s with its OWN declared parameters.",
-			requested, mcpName, mcpName, requested)
+			"A local typed tool named %s governs the actual call — invoke THAT with its own declared parameters, which differ from the raw schema below (a wrapper may make optional arguments required, add a batch form, or nest raw fields under `arguments`). Use the raw schema only to fill in values the wrapper forwards opaquely, such as an options object.",
+			mcpName)
 	}
 
-	encoded, err := json.Marshal(result)
+	summary := fmt.Sprintf("Input schema for the %s MCP tool.", mcpName)
+	encoded, err := json.Marshal(serializedEnvelope{Ok: true, Summary: summary, Result: result})
 	if err != nil {
 		// A schema that cannot round-trip through JSON is a broken catalog entry,
 		// not something the model can fix by retrying with different arguments.
@@ -185,10 +272,13 @@ func schemaResult(requested, mcpName string, inputSchema map[string]any) tools.T
 			"The cached input schema for %q could not be encoded as JSON (%v); it cannot be shown.", mcpName, err),
 			tools.Unrecoverable())
 	}
+	// Rune count, matching the serializer's charLen — a multibyte-heavy schema
+	// whose BYTE length exceeds the cap but whose character count does not must
+	// still be returned inline.
 	if n := utf8.RuneCount(encoded); n > domain.MaxToolResultChars {
 		return schemaTooLarge(mcpName, inputSchema, n)
 	}
-	return tools.Ok(fmt.Sprintf("Input schema for the %s MCP tool.", mcpName), result)
+	return tools.Ok(summary, result)
 }
 
 // schemaTooLarge reports an over-cap schema as an honest failure rather than a
@@ -202,19 +292,58 @@ func schemaResult(requested, mcpName string, inputSchema map[string]any) tools.T
 // nesting, and no conditional requirements, so it cannot be mistaken for the
 // real thing the way a flattened summary could.
 func schemaTooLarge(mcpName string, inputSchema map[string]any, resultChars int) tools.ToolResult {
-	keys := topLevelPropertyNames(inputSchema)
+	all := topLevelPropertyNames(inputSchema)
+	// Shrink the key index until the ENCODED failure fits. A character budget
+	// computed from raw name lengths is not a proof: the names appear three times
+	// (summary, message, details) and JSON escaping can expand a name several-fold
+	// (quotes, backslashes, control characters). So we build the real failure and
+	// measure it, dropping keys until it fits — otherwise the "too large" report
+	// itself overflows and the serializer pages IT into an artifact, with the
+	// failure path re-creating the exact problem the success path just refused to
+	// cause.
+	kept := all
+	if len(kept) > maxOversizeKeys {
+		kept = kept[:maxOversizeKeys]
+	}
+	for {
+		res := oversizeFailure(mcpName, resultChars, kept, len(all)-len(kept))
+		if encoded, err := json.Marshal(res); err == nil && utf8.RuneCount(encoded) <= domain.MaxToolResultChars {
+			return res
+		}
+		if len(kept) == 0 {
+			// Even the bare report doesn't fit (or won't encode): fall back to a
+			// fixed minimal failure that cannot overflow.
+			return tools.Fail(codeSchemaTooLarge, fmt.Sprintf(
+				"The input schema for %q is too large to return inline. No partial schema was returned. Do not guess its arguments — say the schema could not be retrieved.", mcpName),
+				tools.Unrecoverable())
+		}
+		// Halve rather than step: a pathological catalog shrinks in log time.
+		kept = kept[:len(kept)/2]
+	}
+}
+
+// oversizeFailure renders one candidate over-cap report. Split out so the size
+// loop above can build and measure it repeatedly.
+func oversizeFailure(mcpName string, resultChars int, keys []string, omitted int) tools.ToolResult {
 	msg := fmt.Sprintf(
 		"The input schema for %q is too large to return inline (%d characters, limit %d). No partial schema was returned — a clipped JSON Schema would be invalid rather than merely shorter.",
 		mcpName, resultChars, domain.MaxToolResultChars)
 	if len(keys) > 0 {
-		msg += fmt.Sprintf(" Its top-level argument keys are: %s. These are NAMES ONLY — no types, nesting, or required flags — so confirm the shape another way before relying on them.",
-			strings.Join(keys, ", "))
+		msg += fmt.Sprintf(" Its top-level argument keys are: %s", strings.Join(keys, ", "))
+		if omitted > 0 {
+			msg += fmt.Sprintf(" (and %d more, omitted to keep this message inline)", omitted)
+		}
+		// Name the actual next step. "Confirm it another way" would be a dead end:
+		// by construction no other tool can supply this schema, so the honest
+		// instruction is to stop rather than to keep looking.
+		msg += ". These are NAMES ONLY — no types, nesting, or required flags. Do NOT build a call from them: state that the schema is too large to retrieve and ask how to proceed."
 	}
 	return tools.Fail(codeSchemaTooLarge, msg, tools.Unrecoverable(), tools.WithDetails(map[string]any{
 		"name":                  mcpName,
 		"resultChars":           resultChars,
 		"maxToolResultChars":    domain.MaxToolResultChars,
 		"topLevelPropertyNames": keys,
+		"omittedPropertyNames":  omitted,
 	}))
 }
 
@@ -242,9 +371,14 @@ func topLevelPropertyNames(inputSchema map[string]any) []string {
 func schemaNotFound(list []MCPToolInfo, requested string) tools.ToolResult {
 	candidates := schemaCandidates(list, requested)
 	msg := fmt.Sprintf("No Daintree MCP tool is named %q. Names are matched exactly and never auto-corrected.", requested)
-	if len(candidates) > 0 {
+	switch {
+	case len(candidates) > 0:
 		msg += fmt.Sprintf(" Did you mean: %s? Retry tool.schema with one of those exact names.", strings.Join(candidates, ", "))
-	} else {
+	case len(list) == 0:
+		// Pointing at tool.search would be a dead end — it reads the same empty
+		// catalog and can only return nothing.
+		msg += " The Daintree MCP catalog is currently empty, so no tool schema can be looked up; report that rather than searching."
+	default:
 		msg += " Find the exact name with tool.search first, then retry tool.schema with it."
 	}
 	return tools.Fail(codeToolNotFound, msg, tools.WithDetails(map[string]any{
@@ -263,18 +397,14 @@ func schemaCandidates(list []MCPToolInfo, requested string) []string {
 	if want == "" {
 		return nil
 	}
-	// Wrapper aliases are offerable names too, but only when the tool they
-	// forward to is actually live — suggesting a name that then fails to resolve
-	// would cost the model another wasted round.
-	names := make([]string, 0, len(list)+len(wrapperMCPAliases))
-	live := make(map[string]bool, len(list))
+	// Deduplicate: a catalog that advertises a name twice must not suggest it
+	// twice, which would waste half a short candidate list on one answer.
+	names := make([]string, 0, len(list))
+	seen := make(map[string]bool, len(list))
 	for _, t := range list {
-		names = append(names, t.Name)
-		live[t.Name] = true
-	}
-	for local, target := range wrapperMCPAliases {
-		if live[target] {
-			names = append(names, local)
+		if !seen[t.Name] {
+			seen[t.Name] = true
+			names = append(names, t.Name)
 		}
 	}
 
@@ -288,9 +418,18 @@ func schemaCandidates(list []MCPToolInfo, requested string) []string {
 		switch {
 		case low == want:
 			ranked = append(ranked, scored{n, 0})
-		case strings.HasPrefix(low, want) || strings.HasPrefix(want, low):
+		// Forward prefix ("copyTree.generat" → copyTree.generate) is the
+		// truncation case and always meaningful. The REVERSE relations (a
+		// catalog name contained in the request) only mean something once the
+		// shorter side is long enough to be distinctive — otherwise a
+		// one-character tool name would be suggested for nearly every miss.
+		case strings.HasPrefix(low, want):
 			ranked = append(ranked, scored{n, 1})
-		case strings.Contains(low, want) || strings.Contains(want, low):
+		case len(low) >= minCandidateOverlap && strings.HasPrefix(want, low):
+			ranked = append(ranked, scored{n, 1})
+		case len(want) >= minCandidateOverlap && strings.Contains(low, want):
+			ranked = append(ranked, scored{n, 2})
+		case len(low) >= minCandidateOverlap && strings.Contains(want, low):
 			ranked = append(ranked, scored{n, 2})
 		}
 	}

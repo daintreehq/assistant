@@ -23,9 +23,9 @@ import (
 /* ------------------------------ terminal.focus ---------------------------- */
 
 // mcpPanelFocus is the raw Daintree MCP action behind the terminal.focus
-// wrapper. Named because two places must agree on it: the wrapper's forward
-// below, and wrapperMCPAliases (discovery.go), which lets `tool.schema
-// {"name":"terminal.focus"}` resolve to this tool's advertised schema.
+// wrapper: Daintree has no `terminal.focus` action, because terminals ARE
+// panels. Named rather than inlined so the rename is greppable from either side
+// (the wrapper takes terminalId; the raw action takes panelId).
 const mcpPanelFocus = "panel.focus"
 
 type focusArgs struct {

@@ -83,7 +83,8 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
 // tools, the three docs.* documentation-search tools, the four async-futures
-// tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
+// tools — terminal.run.async / terminal.await.async / async.list / async.cancel — the
+// tool.schema MCP input-schema lookup, and
 // the user.askMultipleChoice question tool). The local skill.find / skill.load tools are
 // GONE — the backend now owns skill selection (the migration off the client-side
 // selector); skill.run.get / skill.step.advance remain. We assert that exact count so a
