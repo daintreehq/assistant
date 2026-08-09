@@ -261,8 +261,10 @@ func schemaResult(mcpName string, inputSchema map[string]any) tools.ToolResult {
 	// (terminal.rename), add batch forms (terminal.close), or nest raw fields
 	// under `arguments` (recipe.run). Without this the model reads a raw schema
 	// and builds a call the wrapper's strict decoder rejects — a new version of
-	// the very bug this tool fixes. The denylist is already the authoritative
-	// wrapper index, so it doubles as the annotation source.
+	// the very bug this tool fixes. The wrapper set comes from the family's own
+	// registration (getLocalWrapperNames), not the daintree.call denylist — see
+	// the note above localWrapperNamesMap for why the denylist is not a valid
+	// index of the wrappers that exist.
 	if getLocalWrapperNames()[mcpName] {
 		result["localWrapper"] = mcpName
 		result["note"] = fmt.Sprintf(
