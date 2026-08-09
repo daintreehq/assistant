@@ -83,10 +83,10 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	cmd := exec.Command(bin, "--json", "what's in memory?")
 	cmd.Env = append(cmd.Environ(),
 		"DAINTREE_BACKEND_URL="+fake.baseURL(),
-		// The one-shot CLI path still hard-requires a non-empty DEEPSEEK_API_KEY before it
-		// will start a turn (cli/run.go) even though the backend now owns model access — so
-		// a placeholder key clears that gate; the fake backend never uses it.
-		"DEEPSEEK_API_KEY=test-key",
+		// The backend authenticates every request, so the CLI refuses to start a turn
+		// while signed out (cli/run.go ensureSignedIn). DAINTREE_API_KEY satisfies that
+		// gate without touching the real credentials file; the fake backend ignores it.
+		"DAINTREE_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

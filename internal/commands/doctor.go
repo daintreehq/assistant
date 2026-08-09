@@ -10,6 +10,7 @@ import (
 
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/credentials"
 	"github.com/daintreehq/daintree-assistant/internal/mcp"
 )
 
@@ -50,7 +51,10 @@ func boundedProbeCtx(ctx context.Context) (context.Context, context.CancelFunc) 
 // It may opportunistically reconnect when the URL/token are present but the
 // session is cold.
 func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
-	cfg := a.Config
+	// Snapshot under the App's config lock: /doctor runs off the UI loop as a slash
+	// command, and SignIn (/login) mutates the sign-in fields of this same struct from
+	// another goroutine. A direct copy here races that write.
+	cfg := a.SnapshotConfig()
 
 	// 1. Opportunistic reconnect when configured-but-cold.
 	if !a.MCP.IsConnected() && cfg.McpURL != "" && cfg.McpToken != "" {
@@ -84,6 +88,12 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// probe budget replaying a refused socket to reach the same verdict.
 	ctx = backend.WithoutRetry(ctx)
 	push("backend url", true, a.Backend.BaseURL(), "")
+	// Sign-in FIRST: without a key every authenticated probe below 401s, and a wall of
+	// auth failures reads as "the backend is broken" when the real answer is one line.
+	// The unauthenticated probes (health/ready) still run and still mean something, so
+	// a signed-out doctor remains a useful connectivity check.
+	push("signed in", cfg.APIKey != "", credentials.Redact(cfg.APIKey),
+		"run `daintree-assistant login` (or set DAINTREE_API_KEY)")
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)
 	bcancel()

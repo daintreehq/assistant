@@ -103,7 +103,7 @@ func runTailGapTurn(t *testing.T, tokenDelay time.Duration) {
 	cmd.Env = append(env,
 		"LC_ALL=C.UTF-8",
 		"DAINTREE_BACKEND_URL="+fake.baseURL(),
-		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

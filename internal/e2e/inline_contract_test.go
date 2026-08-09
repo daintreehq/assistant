@@ -59,7 +59,7 @@ func TestBinaryRunNeverEmitsAltScreenOrMouse(t *testing.T) {
 	cmd := exec.Command(bin, "--json", "hello")
 	cmd.Env = append(cmd.Environ(),
 		"DAINTREE_BACKEND_URL="+fake.baseURL(),
-		"DEEPSEEK_API_KEY=test-key",
+		"DAINTREE_API_KEY=test-key",
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",

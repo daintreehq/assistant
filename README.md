@@ -16,10 +16,11 @@ prompt assembly, and the upstream model credentials (DeepSeek, spoken internally
 CLI executes the local tool calls the backend asks for and streams the reply. See
 [`docs/BACKEND.md`](docs/BACKEND.md).
 
-> **Development:** the backend endpoint is hardcoded to `http://127.0.0.1:8473` and runs
-> unauthenticated. Run it locally from `../assistant-backend`
-> (`python -m daintree_assistant_server`). The assistant supports exactly this one
-> endpoint for now; a later phase swaps in the production URL and a real login flow.
+> **Sign-in:** the assistant talks to `https://assistant.daintree.org` by default and
+> **authenticates every request** — there is no unauthenticated mode. Run
+> `daintree-assistant login` to pick an endpoint (official, custom, or a local backend
+> from `../assistant-backend`) and store your API key. The key is your own upstream
+> credential: it is what funds the model calls your turns make.
 
 ## Build & install
 
@@ -40,13 +41,23 @@ go build -o bin/daintree-assistant ./cmd/daintree-assistant
 go install ./cmd/daintree-assistant                 # installs to $(go env GOPATH)/bin
 ```
 
-Start the backend (`../assistant-backend`, on `127.0.0.1:8473`), then run:
+Sign in once, then run it:
 
 ```bash
-# The CLI needs no model key — the backend owns the model credentials. Just run it:
-./bin/daintree-assistant            # interactive cockpit (backend must be reachable)
-./bin/daintree-assistant doctor     # environment check (backend / MCP / project / tier)
+./bin/daintree-assistant login      # choose an endpoint, paste your API key (stored 0600)
+./bin/daintree-assistant            # interactive cockpit
+./bin/daintree-assistant doctor     # environment check (sign-in / key validity / backend / MCP / tier)
+./bin/daintree-assistant logout     # forget the stored endpoint and key
 ```
+
+Signing in verifies the key with the provider, so a wrong or unfunded key fails at
+`login` rather than on your first message. Inside the cockpit, `/auth` shows the current
+sign-in and `/login` switches endpoint or key without a restart.
+
+A first interactive launch runs the login flow for you if you skip it. To develop
+against a backend of your own, start it (`cd ../assistant-backend &&
+python -m daintree_assistant_server`) and either pick **Local** at login or export
+`DAINTREE_BACKEND_URL=http://127.0.0.1:8473` — your stored key still applies.
 
 `make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·
 `generate` · `run` · `clean` · `db-reset` (hard-reset the SQLite state dir).

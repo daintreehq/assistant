@@ -15,10 +15,11 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/backend"
 )
 
-// liveBackendURL is the local development backend the live test targets. The CLI's
-// hardcoded dev endpoint (backend.DefaultBaseURL) is this address; a developer runs the
-// backend here, and the live test reaches it WITHOUT a DAINTREE_BACKEND_URL override.
-const liveBackendURL = backend.DefaultBaseURL // http://127.0.0.1:8473
+// liveBackendURL is the LOCAL development backend the live test targets — pinned
+// explicitly, never to backend.DefaultBaseURL, which now points at the deployed
+// endpoint. A test that quietly followed the default would spend real money against
+// production every time someone ran `go test ./...`.
+const liveBackendURL = backend.LocalBaseURL // http://127.0.0.1:8473
 
 // backendReachable probes the backend's liveness endpoint with a short deadline.
 // Returns false (skip the live test) when nothing is listening — so the suite passes
@@ -26,7 +27,7 @@ const liveBackendURL = backend.DefaultBaseURL // http://127.0.0.1:8473
 func backendReachable(url string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/health", nil)
 	if err != nil {
 		return false
 	}
@@ -40,17 +41,18 @@ func backendReachable(url string) bool {
 
 // TestLiveBackendOneShot is the ONE test that proves a real end-to-end turn against the
 // live Daintree backend actually works: it builds the real binary, runs
-// `--json "<prompt>"` against the REAL backend on 127.0.0.1:8473 (no DAINTREE_BACKEND_URL
-// override → the hardcoded dev endpoint), with NO Daintree MCP, and asserts the JSONL
-// schema-v1 stream came back well-formed with non-empty assistant content over the wire.
+// `--json "<prompt>"` against a REAL backend on 127.0.0.1:8473 (pinned via
+// DAINTREE_BACKEND_URL), with NO Daintree MCP, and asserts the JSONL schema-v1 stream
+// came back well-formed with non-empty assistant content over the wire.
 //
 // GATING (so the suite passes offline). It is opt-in on independent guards, each of
 // which SKIPS (never fails) when not met:
 //
 //  1. -short mode — `go test -short` is the "fast, no-network" contract; honor it.
-//  2. backend reachability — if nothing answers /healthz on the dev endpoint, skip.
+//  2. backend reachability — if nothing answers /health on the dev endpoint, skip.
 //     This is what keeps the suite green offline / on CI / on a laptop with no backend.
-//  3. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
+//  3. DAINTREE_API_KEY — the turn is funded by the caller's key; unset means opted out.
+//  4. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
 //     process, so -race adds no coverage and only flakes under load.
 //
 // ASSERTIONS are STRUCTURAL, never on exact text. Model output is nondeterministic, so we
@@ -63,10 +65,19 @@ func TestLiveBackendOneShot(t *testing.T) {
 	}
 	// Guard 2: nothing is serving the dev backend → skip so the suite stays green offline.
 	if !backendReachable(liveBackendURL) {
-		t.Skipf("live backend e2e requires a Daintree backend reachable at %s; none responded to /healthz", liveBackendURL)
+		t.Skipf("live backend e2e requires a Daintree backend reachable at %s; none responded to /health", liveBackendURL)
+	}
+	// Guard 3: a funding key. The backend holds no upstream credential — the bearer
+	// token IS the key that pays for the turn — and this test deliberately isolates
+	// itself from the developer's real sign-in via DAINTREE_ASSISTANT_STATE_DIR, so the
+	// key has to come from the environment. Skip rather than fail: an unset key means
+	// "not opted in", not "broken".
+	liveKey := strings.TrimSpace(os.Getenv("DAINTREE_API_KEY"))
+	if liveKey == "" {
+		t.Skip("live backend e2e requires DAINTREE_API_KEY (the caller key that funds the turn)")
 	}
 
-	// Guard 3 lives inside buildBinary(t): it t.Skip()s under -race.
+	// Guard 4 lives inside buildBinary(t): it t.Skip()s under -race.
 	bin := buildBinary(t)
 
 	// Generous deadline so a hung socket fails CLEANLY (the process is killed and we
@@ -80,14 +91,17 @@ func TestLiveBackendOneShot(t *testing.T) {
 	cmd := exec.CommandContext(ctx, bin, "--json", "Reply with exactly the word: pong, nothing else.")
 
 	// Inherit the real environment FIRST, then layer the test-isolation overrides.
-	// Crucially we do NOT set DAINTREE_BACKEND_URL (so it hits the real default dev
-	// endpoint) and do NOT set DAINTREE_ASSISTANT_OFFLINE (offline would short-circuit
-	// the call). DEEPSEEK_API_KEY is a placeholder only to clear the CLI's vestigial
-	// one-shot key gate (cli/run.go) — the backend, not the CLI, holds the real model key.
+	// DAINTREE_BACKEND_URL is now set EXPLICITLY to the local backend: the default is
+	// the deployed endpoint, and this test must never be the thing that quietly calls
+	// production. DAINTREE_ASSISTANT_OFFLINE stays unset (offline would short-circuit
+	// the call). The real OpenRouter key is inherited from the environment when present
+	// — the local backend holds no upstream credential of its own, so a turn only
+	// completes if the caller supplies a funding key.
 	cmd.Env = append(os.Environ(),
-		"DAINTREE_MCP_URL=",   // no MCP → clean degraded local mode, no Daintree dependency
-		"DAINTREE_MCP_TOKEN=", // …and no stale token
-		"DEEPSEEK_API_KEY=placeholder-cli-gate-only",
+		"DAINTREE_BACKEND_URL="+liveBackendURL,
+		"DAINTREE_API_KEY="+liveKey,
+		"DAINTREE_MCP_URL=",                         // no MCP → clean degraded local mode, no Daintree dependency
+		"DAINTREE_MCP_TOKEN=",                       // …and no stale token
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(), // isolate the SQLite state per run
 		"DAINTREE_ASSISTANT_TIER=supervisor",        // read-only tier: safest, no mutating tools
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",            // keep stdout pure / no log files

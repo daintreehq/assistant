@@ -32,6 +32,9 @@ import (
 func doctorOpts(t *testing.T) Options {
 	t.Helper()
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	// Signed in, so the sign-in gate is not what these tests measure. The temp state
+	// dir already isolates the credentials file from the developer's real sign-in.
+	t.Setenv("DAINTREE_API_KEY", "test-key")
 	// Force the workflow-intelligence flag OFF: with it ambiently on, CheckTasks
 	// would additionally require the three workflow ids and the core-only fixtures
 	// below would fail for an environment reason, not a code one.
@@ -49,11 +52,11 @@ func deadBackendURL(t *testing.T) string {
 	return url
 }
 
-// healthyBackendURL starts a minimal backend answering /healthz ok (cleaned up via t).
+// healthyBackendURL starts a minimal backend answering /health ok (cleaned up via t).
 func healthyBackendURL(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/health" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 			return
@@ -110,6 +113,9 @@ func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
 // through to startRepl, which intentionally detaches itself from that context.
 func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	// Signed in: runInteractive gates on a key before it ever reaches the cockpit seam,
+	// and an unset key would make this test measure the login prompt instead.
+	t.Setenv("DAINTREE_API_KEY", "test-key")
 	t.Setenv(NoDaemonEnv, "1")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,6 +142,7 @@ func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 // that REPL an immediate EOF so the unit test exercises the branch without blocking.
 func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
+	t.Setenv("DAINTREE_API_KEY", "test-key")
 	t.Setenv(NoDaemonEnv, "1")
 
 	stdin, stdinWriter, err := os.Pipe()
@@ -170,13 +177,13 @@ func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 	}
 }
 
-// capsBackendURL starts a backend answering /healthz AND /v1/daintree/capabilities,
+// capsBackendURL starts a backend answering /health AND /v1/daintree/capabilities,
 // advertising exactly the task ids given.
 func capsBackendURL(t *testing.T, taskIDs []string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
+		case "/health":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 		case "/v1/daintree/capabilities":
@@ -231,4 +238,4 @@ func TestRunDoctor_EmptyTaskInventoryFails(t *testing.T) {
 
 // The genuine "cannot verify" case is a capabilities FETCH error (an older backend
 // that 404s the endpoint). That must NOT fail doctor — it is covered by
-// TestRunDoctor_BackendReachableReturnsSuccess, whose stub serves only /healthz.
+// TestRunDoctor_BackendReachableReturnsSuccess, whose stub serves only /health.

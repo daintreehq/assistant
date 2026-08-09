@@ -69,8 +69,18 @@ func (e *Error) Error() string {
 	return b.String()
 }
 
-// IsAuth reports a 401/403 (dev token mismatch in dev; account error later).
+// IsAuth reports a 401/403 — OUR door rejected the bearer token (missing or
+// structurally malformed). The fix is the header: sign in again.
 func (e *Error) IsAuth() bool { return e.HTTPStatus == 401 || e.HTTPStatus == 403 }
+
+// IsUpstreamAuth reports a well-formed key that the UPSTREAM provider then rejected,
+// which the backend maps to 502 upstream_error rather than 401. The two are
+// deliberately distinct: IsAuth means "fix your header", this means "fix your
+// account" (bad/revoked key, no credit). Without the split, a funding problem would
+// read as a broken login and send the user round a re-entry loop that can't help.
+func (e *Error) IsUpstreamAuth() bool {
+	return e.HTTPStatus == 502 && e.Code == "upstream_error"
+}
 
 // IsRateLimited reports an upstream/model rate limit (429).
 //

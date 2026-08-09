@@ -48,6 +48,10 @@ func newDaemonEnv(t *testing.T, backendURL, mcpURL, mcpToken string) (stateDir s
 		"DAINTREE_ASSISTANT_STATE_DIR="+stateDir,
 		ipc.SocketDirEnv+"="+sockDir,
 		"DAINTREE_BACKEND_URL="+backendURL,
+		// The daemon refuses to start signed out (it would adopt work and then 401 in
+		// every autonomous wake turn). The temp state dir isolates this from the real
+		// sign-in; the fake backend ignores the value.
+		"DAINTREE_API_KEY=test-key",
 		"DAINTREE_MCP_URL="+mcpURL,
 		"DAINTREE_MCP_TOKEN="+mcpToken,
 		"DAINTREE_ASSISTANT_TIER=operator",

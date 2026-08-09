@@ -483,7 +483,7 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/healthz":
+		case "/health":
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 		case "/readyz":
 			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","skills":4}`)

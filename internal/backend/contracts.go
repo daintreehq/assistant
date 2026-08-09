@@ -21,14 +21,38 @@ import "encoding/json"
 // mismatch yields HTTP 426.
 const ProtocolVersion = 2
 
-// DefaultBaseURL is the single, HARDCODED backend endpoint.
+// DefaultBaseURL is the deployed backend — the endpoint a fresh install signs in to.
 //
-// DEVELOPMENT-ONLY: during development the assistant supports exactly this one
-// endpoint (the local backend on 127.0.0.1:8473) and there is no authentication. A
-// later phase will swap this constant for the production URL and add the real login
-// flow; until then the CLI does not expose any override (no env var, no config knob)
-// — it always talks to this address.
-const DefaultBaseURL = "http://127.0.0.1:8473"
+// The backend requires authentication in EVERY environment: each request carries the
+// caller's own API key as the bearer token, and that key is also the upstream
+// credential funding the turn's model calls (the server holds none of its own). There
+// is no unauthenticated mode to fall back to, so a CLI without a stored key cannot
+// talk to any endpoint — see internal/credentials and the login flow in
+// internal/cli/login.go.
+const DefaultBaseURL = "https://assistant.daintree.org"
+
+// LocalBaseURL is the local development backend (`python -m daintree_assistant_server`
+// from ../assistant-backend). Offered as an explicit choice at login, and still the
+// value DAINTREE_BACKEND_URL is usually pointed at for e2e tests and benchmarks.
+// It needs a key too — "local" changes where requests go, not whether they authenticate.
+const LocalBaseURL = "http://127.0.0.1:8473"
+
+// EndpointChoice is one selectable endpoint in a sign-in menu.
+type EndpointChoice struct {
+	Label string
+	// URL is empty for "Custom", which prompts for one instead.
+	URL  string
+	Note string
+}
+
+// EndpointChoices is the offered endpoint menu, shared by the startup login flow
+// (internal/cli) and the cockpit's `/login` sheet (internal/ui) so the two surfaces
+// cannot drift into offering different endpoints.
+var EndpointChoices = []EndpointChoice{
+	{Label: "Official", URL: DefaultBaseURL, Note: "the deployed Daintree backend"},
+	{Label: "Custom", URL: "", Note: "enter your own URL"},
+	{Label: "Local", URL: LocalBaseURL, Note: "a backend you are running yourself"},
+}
 
 // --------------------------------------------------------------------------
 // Request: POST /v1/daintree/respond

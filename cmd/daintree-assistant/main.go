@@ -80,6 +80,10 @@ func main() {
 		code = cli.RunDaemonStop(ctx, opts)
 	case routeStatus:
 		code = cli.RunStatus(ctx, opts)
+	case routeLogin:
+		code = cli.RunLoginCommand(ctx, opts)
+	case routeLogout:
+		code = cli.RunLogoutCommand(ctx, opts)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -98,6 +102,8 @@ const (
 	routeDaemon
 	routeDaemonStop
 	routeStatus
+	routeLogin
+	routeLogout
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -192,6 +198,16 @@ func parseArgs(args []string) (parsedArgs, error) {
 				return parsedArgs{}, err
 			}
 			parsed.Route = routeStatus
+		case "login":
+			if err := rejectCommandArgs("login", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeLogin
+		case "logout":
+			if err := rejectCommandArgs("logout", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeLogout
 		}
 		if parsed.Route != routeDefault {
 			if *stdio && parsed.Route != routeHost {
@@ -306,6 +322,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  daintree-assistant [options] <prompt...>     run one prompt and exit")
 	fmt.Fprintln(w, "  daintree-assistant [options] <command>")
 	fmt.Fprintln(w, "\nCommands:")
+	fmt.Fprintln(w, "  login               choose a backend endpoint and store an API key")
+	fmt.Fprintln(w, "  logout              forget the stored endpoint and API key")
 	fmt.Fprintln(w, "  doctor              check backend, MCP, project, and permissions")
 	fmt.Fprintln(w, "  status              show supervisor health and live work")
 	fmt.Fprintln(w, "  daemon              run the project supervisor in the foreground")

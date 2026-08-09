@@ -145,9 +145,15 @@ func RunScenario(ctx context.Context, bin string, sc scenario.Scenario, opts Opt
 		"DAINTREE_ASSISTANT_OFFLINE=",
 		"DAINTREE_PROJECT_ID=",
 		"DAINTREE_WINDOW_ID=",
-		// Clears the CLI's vestigial one-shot key gate; the backend holds the real key.
-		"DEEPSEEK_API_KEY=placeholder-cli-gate-only",
 	)
+	// The CLI refuses to run signed out, and the state-dir override above deliberately
+	// hides the developer's stored sign-in — so DAINTREE_API_KEY must be exported for a
+	// benchmark run. It is inherited from os.Environ() above; fail loudly here rather
+	// than let every scenario fail identically with a sign-in error.
+	if strings.TrimSpace(os.Getenv("DAINTREE_API_KEY")) == "" {
+		res.Error = "benchmark requires DAINTREE_API_KEY (the caller key that funds the backend's model calls)"
+		return res
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

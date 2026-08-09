@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -9,6 +11,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/agent"
 	"github.com/daintreehq/daintree-assistant/internal/app"
 	"github.com/daintreehq/daintree-assistant/internal/commands"
+	"github.com/daintreehq/daintree-assistant/internal/credentials"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/tools"
 )
@@ -197,6 +200,42 @@ func (c *controller) runCommand(parent context.Context, line string) tea.Cmd {
 			SwitchPanel: PanelKey(res.SwitchPanel),
 		}
 	}
+}
+
+// signIn runs a `/login` attempt off the loop: verify, persist, swap the live backend
+// client. It deliberately does NOT go through runCommand's counter — a sheet is already
+// showing its own "Checking …" state, and a second busy cue in the footer would double
+// count. The parent context is the program's, so a cockpit shutdown aborts the probe.
+func (c *controller) signIn(parent context.Context, creds credentials.Credentials) tea.Cmd {
+	return func() tea.Msg {
+		err := c.app.SignIn(parent, creds)
+		return SignInResultMsg{Endpoint: creds.BaseURL, Err: err}
+	}
+}
+
+// lastSignInWarning forwards the App's caveat from the last successful sign-in ("" when
+// fully verified). Nil-App safe for the headless UI harness.
+func (c *controller) lastSignInWarning() string {
+	if c.app == nil {
+		return ""
+	}
+	return c.app.LastSignInWarning()
+}
+
+// currentAPIKey returns the key currently in force, for the sheet's "empty keeps the
+// existing key" path. It reads the App's resolved config rather than the credentials
+// file, so an env-supplied key works the same way as a stored one.
+func (c *controller) currentAPIKey() (string, error) {
+	// The headless UI harness builds a controller with no App; treat that as "nothing
+	// to keep" rather than panicking deep inside a key handler.
+	if c.app != nil {
+		// Through the accessor, not the field: SignIn mutates it under the App's config
+		// lock and this runs on the cockpit's event loop.
+		if k := strings.TrimSpace(c.app.APIKey()); k != "" {
+			return k, nil
+		}
+	}
+	return "", errors.New("no current key to keep — enter one")
 }
 
 // isFailureReply reports whether a Session.Send reply is a failure sentinel (Send

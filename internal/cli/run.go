@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/daintree-assistant/internal/cli/jsonout"
 	"github.com/daintreehq/daintree-assistant/internal/cli/render"
 	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/daintree-assistant/internal/credentials"
 	"github.com/daintreehq/daintree-assistant/internal/debuglog"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/daintreehq/daintree-assistant/internal/projectinstructions"
@@ -97,6 +98,33 @@ func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
 	return o
 }
 
+// ensureSignedIn gates startup on a usable sign-in. The backend authenticates in
+// every environment — there is no unauthenticated mode to degrade into — so a launch
+// without a key would otherwise boot a full cockpit that 401s on the first message.
+//
+// allowPrompt is false wherever prompting would corrupt the output contract or hang:
+// one-shot runs (stdout is the answer, stdin may be a pipe), --json, the stdio host,
+// and the supervisor daemon. Those get the actionable error instead.
+//
+// It re-resolves the config rather than taking one from the caller because the gate
+// runs BEFORE app.Create — which is the point: the key has to exist before the
+// backend client is built. The resolve is cheap and app.Create redoes it against the
+// file RunLogin just wrote.
+func ensureSignedIn(ctx context.Context, overrides config.ConfigOverrides, allowPrompt bool) error {
+	cfg, err := config.LoadConfig(overrides)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return nil
+	}
+	if !allowPrompt {
+		return fmt.Errorf("not signed in — run `daintree-assistant login` to connect to %s (or set DAINTREE_API_KEY)", cfg.BackendURL)
+	}
+	_, err = RunLogin(ctx, cfg, StdLoginIO())
+	return err
+}
+
 // Run routes per the top-level dispatch:
 //
 //	prompt        → RunOneShot
@@ -133,6 +161,15 @@ func RunOneShot(ctx context.Context, opts Options) int {
 
 	overrides := buildOverrides(opts, stderrR)
 	debuglog.BootTrace("oneshot.overrides.loaded")
+	// Never prompt here: stdout is the answer channel (or the JSONL stream) and stdin
+	// is routinely a pipe. Fail with the instruction instead.
+	if err := ensureSignedIn(ctx, overrides, false); err != nil {
+		reportError(err)
+		if sink != nil {
+			return sink.Finish()
+		}
+		return domain.OneShotExitCode.Error
+	}
 	// One-shot takes the owner lease briefly (never spawning a daemon — a script
 	// probe must not litter the machine with supervisors). A held lease means a
 	// live assistant owns the project: fail loudly instead of double-opening.
@@ -244,6 +281,13 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
 	debuglog.BootTrace("boot.overrides.loaded")
+	// Sign-in gate BEFORE the ownership lease: a login that ends in Ctrl-C should
+	// leave no lease behind, and it must not race the daemon handover.
+	if err := ensureSignedIn(ctx, overrides, ttyOK); err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
+	debuglog.BootTrace("boot.signin.ok")
 	// Interactive launch: ensure the project's supervisor daemon exists, attach
 	// (it yields ownership + receives our fresh MCP credentials), and take the
 	// owner lease. Closing this assistant later hands supervision straight back
@@ -340,6 +384,14 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	// turn-time retry budget would make a plainly-dead backend take seconds per row
 	// to report exactly the same thing.
 	ctx = backend.WithoutRetry(ctx)
+	// Sign-in first: signed out, every authenticated row below fails for one reason,
+	// and a wall of 401s reads as a broken backend instead of a missing login.
+	if a.Config.APIKey == "" {
+		r.Line("  signed in      : NO — run `daintree-assistant login`")
+		anyFail = true
+	} else {
+		r.Line("  signed in      : " + credentials.Redact(a.Config.APIKey))
+	}
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	herr := a.Backend.Health(hctx)
 	hcancel()
@@ -349,6 +401,27 @@ func RunDoctor(ctx context.Context, opts Options) int {
 		anyFail = true
 	}
 	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)
+
+	// Whether the key actually WORKS, which nothing else here can tell you: our own
+	// auth is structural, so every other row stays green with a bogus key. Not a gating
+	// failure when the backend has no verify endpoint — that is a missing feature over
+	// there, not a broken sign-in here.
+	if a.Config.APIKey != "" && herr == nil {
+		vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
+		ver, verr := a.Backend.VerifyKey(vctx)
+		vcancel()
+		switch {
+		case errors.Is(verr, backend.ErrVerifyUnsupported):
+			r.Line("  key valid      : unknown (this backend can't check)")
+		case verr != nil:
+			r.Line("  key valid      : could not check — " + verr.Error())
+		case !ver.Valid:
+			r.Line("  key valid      : NO — " + ver.Detail + " (run `daintree-assistant login`)")
+			anyFail = true
+		default:
+			r.Line("  key valid      : yes" + keyLabelSuffix(ver))
+		}
+	}
 
 	// Task-ID drift is a GATING failure: every id in the manifest is one this CLI
 	// will actually send, so a missing one is a guaranteed runtime 404 mid-turn (the

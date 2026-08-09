@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ type Backend interface {
 	RespondStream(ctx context.Context, req RespondRequest, cb StreamCallbacks) (RespondResult, error)
 	RunTask(ctx context.Context, req TaskRequest) (TaskResult, error)
 	Capabilities(ctx context.Context) (Capabilities, error)
+	VerifyKey(ctx context.Context) (KeyVerification, error)
 	Version(ctx context.Context) (Version, error)
 	Health(ctx context.Context) error
 	Ready(ctx context.Context) error
@@ -44,10 +46,12 @@ type Client struct {
 	streamIdleTimeout time.Duration
 }
 
-// ClientConfig configures a Client. APIKey is OPTIONAL — local development runs
-// the backend unauthenticated (no DAINTREE_API_KEY), so an empty key sends no
-// Authorization header. HTTPClient defaults to one with NO global timeout (a
-// streamed turn can run for minutes; cancellation is via context).
+// ClientConfig configures a Client. APIKey is REQUIRED for every real endpoint: the
+// backend authenticates in all environments (local included) and the bearer token is
+// also the upstream credential funding the turn. An empty key sends no Authorization
+// header and is useful only for the unauthenticated probes — it is left permitted so
+// `doctor` can still reach /healthz while signed out. HTTPClient defaults to one with
+// NO global timeout (a streamed turn can run for minutes; cancellation is via context).
 type ClientConfig struct {
 	BaseURL    string
 	APIKey     string
@@ -159,8 +163,9 @@ func NewClient(cfg ClientConfig) *Client {
 // BaseURL returns the configured backend base URL (for diagnostics / doctor).
 func (c *Client) BaseURL() string { return c.baseURL }
 
-// setHeaders applies the common headers. The Authorization header is only set
-// when an API key is configured (local dev runs without one).
+// setHeaders applies the common headers. The Authorization header is set whenever a
+// key is configured; an unkeyed client is only useful for the unauthenticated probes
+// (/healthz, /readyz, /version) — every real endpoint 401s without it.
 func (c *Client) setHeaders(req *http.Request, accept string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
@@ -458,6 +463,48 @@ func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	return out, nil
 }
 
+// KeyVerification is the backend's verdict on the caller's key.
+type KeyVerification struct {
+	// Valid is the provider's answer. False means a definite rejection — not
+	// "we couldn't check", which surfaces as an error from VerifyKey instead.
+	Valid  bool   `json:"valid"`
+	Detail string `json:"detail"`
+	// Label is the provider's own name for the key, when it exposes one — useful for
+	// confirming the RIGHT key was pasted, not just a working one.
+	Label string `json:"label"`
+	// LimitRemaining is credit left on the key when the provider reports it. A pointer
+	// so "not reported" stays distinct from a genuine zero, which is worth warning about.
+	LimitRemaining *float64 `json:"limit_remaining"`
+	IsFreeTier     bool     `json:"is_free_tier"`
+}
+
+// ErrVerifyUnsupported reports a backend with no key-verification endpoint. Sign-in
+// treats it as "could not fully check" and continues — the deployed backend predates
+// this endpoint, and refusing to sign in against it would be a self-inflicted outage.
+var ErrVerifyUnsupported = errors.New("backend does not support key verification")
+
+// VerifyKey asks the backend whether the configured key actually works upstream.
+//
+// This is the ONLY meaningful validity check available. The backend authenticates
+// STRUCTURALLY — it holds no upstream credential — so /v1/daintree/capabilities answers
+// 200 for any well-formed string. Without this call, a wrong key is discovered on the
+// first real turn rather than at sign-in.
+//
+// The CLI must never probe the provider itself: it holds no provider client by design
+// (that is what keeps prompts, model choice, and credentials on the server), and the
+// key becomes a subscription key later, at which point only the backend can resolve it.
+func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
+	var out KeyVerification
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/auth/verify", struct{}{}, &out); err != nil {
+		var berr *Error
+		if errors.As(err, &berr) && berr.HTTPStatus == http.StatusNotFound {
+			return KeyVerification{}, ErrVerifyUnsupported
+		}
+		return KeyVerification{}, err
+	}
+	return out, nil
+}
+
 // Version fetches the unauthenticated /version descriptor.
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var out Version
@@ -467,12 +514,18 @@ func (c *Client) Version(ctx context.Context) (Version, error) {
 	return out, nil
 }
 
-// Health probes /healthz (liveness). Returns nil when the backend reports ok.
+// Health probes liveness. Returns nil when the backend reports ok.
+//
+// The path is /health, NOT /healthz. Both are served by the same handler, but only
+// /health is routed on the deployed edge — /healthz there returns a Google 404 page
+// from the load balancer, which the CLI would report as "backend UNREACHABLE" against
+// a perfectly healthy backend (observed 2026-08-08; the backend repo hit the same trap
+// in its release smoke test, assistant-backend 15264f1).
 func (c *Client) Health(ctx context.Context) error {
 	var out struct {
 		Status string `json:"status"`
 	}
-	if err := c.doJSON(ctx, http.MethodGet, "/healthz", nil, &out); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/health", nil, &out); err != nil {
 		return err
 	}
 	if out.Status != "ok" {

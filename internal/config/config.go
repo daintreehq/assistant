@@ -31,6 +31,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/credentials"
 	"github.com/daintreehq/daintree-assistant/internal/domain"
 	"github.com/joho/godotenv"
 )
@@ -68,6 +70,18 @@ type AppConfig struct {
 	ProjectID string
 	WindowID  string
 
+	// BackendURL is the resolved Daintree backend endpoint, and APIKey the caller's
+	// key sent as its bearer token. Both come from the sign-in stored at
+	// CredentialsPath unless a trusted env var / CLI override overrides them. APIKey
+	// is empty exactly when the user is signed out — the state every entry point must
+	// handle, since the backend has no unauthenticated mode.
+	BackendURL string
+	APIKey     string
+	// CredentialsPath is where the sign-in is read from and written to. PER-USER (the
+	// state ROOT, shared across projects) unless the state dir was explicitly
+	// overridden, in which case it follows the override so tests stay isolated.
+	CredentialsPath string
+
 	Tier        domain.Tier
 	AutoApprove bool
 	Offline     bool
@@ -93,6 +107,8 @@ type ConfigOverrides struct {
 	WindowID             *string
 	McpURL               *string
 	McpToken             *string
+	BackendURL           *string
+	APIKey               *string
 	Tier                 *string
 	AutoApprove          *bool
 	Offline              *bool
@@ -245,9 +261,18 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	cfg.Offline = resolveBool(overrides.Offline, e.trustedGet("DAINTREE_ASSISTANT_OFFLINE"))
 
 	// stateDir (trusted/override → per-project subdir → flat root).
-	home, _ := os.UserHomeDir()
+	home, homeErr := os.UserHomeDir()
+	explicitStateDir := FirstString(deref(overrides.StateDir), e.trustedGet("DAINTREE_ASSISTANT_STATE_DIR"))
+	// A missing home is FATAL unless the state dir was named explicitly. Ignoring the
+	// error yields a RELATIVE stateRoot (".daintree/assistant-cli"), which resolves
+	// against the working directory — i.e. inside the bound project. The state dir now
+	// holds the API key, so that silently writes a spendable secret into the user's
+	// repository, where 0600 does not save it from a stray `git add`. Fail loudly.
+	if (homeErr != nil || strings.TrimSpace(home) == "") && explicitStateDir == "" {
+		return AppConfig{}, fmt.Errorf("cannot resolve a home directory for the state dir (set DAINTREE_ASSISTANT_STATE_DIR): %w", homeErr)
+	}
 	stateRoot := filepath.Join(home, stateRootSubpath)
-	cfg.StateDir = FirstString(deref(overrides.StateDir), e.trustedGet("DAINTREE_ASSISTANT_STATE_DIR"))
+	cfg.StateDir = explicitStateDir
 	if cfg.StateDir == "" {
 		if cfg.ProjectID != "" {
 			cfg.StateDir = filepath.Join(stateRoot, ProjectIDToDir(cfg.ProjectID))
@@ -261,6 +286,45 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 		return AppConfig{}, fmt.Errorf("create state dir: %w", err)
 	}
 	cfg.DBPath = filepath.Join(cfg.StateDir, "state.db")
+
+	// --- sign-in (endpoint + API key) ---
+	// The sign-in is PER-USER: one login serves every project, so it lives at the state
+	// ROOT rather than the per-project subdir. An EXPLICIT state-dir override is the
+	// exception — tests, benchmarks, and `make db-reset` all point the state dir
+	// somewhere disposable, and they must not read (or clobber) the real sign-in.
+	credentialsDir := stateRoot
+	if explicitStateDir != "" {
+		credentialsDir = cfg.StateDir
+	}
+	cfg.CredentialsPath = credentials.Path(credentialsDir)
+	// A malformed credentials file resolves to SIGNED OUT, not a fatal error. Erroring
+	// here would brick the two commands that exist to fix it: `login` and `logout` both
+	// resolve config before they run, so a truncated or hand-edited file would refuse
+	// every recovery path and leave "delete this file yourself" as the only way out.
+	// Signed-out sends the user straight to the login prompt, whose atomic save
+	// overwrites the bad file. `credentials.Load` still reports the error so the login
+	// flow can print it as a warning.
+	stored, _, _ := credentials.Load(cfg.CredentialsPath)
+	// Both are trustedGet, never merged: the API key is a spendable secret (it funds
+	// the upstream model calls), so a bound project's .env must be able neither to read
+	// it nor — via the URL — to redirect where it is sent. DAINTREE_BACKEND_URL stays
+	// the dev/test escape hatch (local backend, fake backend in e2e); the stored
+	// sign-in supplies the endpoint otherwise, falling back to the deployed default.
+	cfg.BackendURL = FirstString(
+		deref(overrides.BackendURL),
+		e.trustedGet("DAINTREE_BACKEND_URL"),
+		stored.BaseURL,
+		backend.DefaultBaseURL,
+	)
+	// The stored key is used whatever the endpoint resolves to, deliberately: it is the
+	// caller's own provider credential, equally valid against the deployed backend and
+	// a local one. Binding it to the stored URL would break the main dev loop — sign in
+	// once, then point DAINTREE_BACKEND_URL at localhost to test a backend change.
+	cfg.APIKey = FirstString(
+		deref(overrides.APIKey),
+		e.trustedGet("DAINTREE_API_KEY"),
+		stored.APIKey,
+	)
 
 	// logDir (trusted/override → ~/.daintree/logs); always absolute. GLOBAL.
 	logDir := FirstString(deref(overrides.LogDir), e.trustedGet("DAINTREE_ASSISTANT_LOG_DIR"))
@@ -338,7 +402,7 @@ func derefOr(p *string, fallback string) string {
 }
 
 // DescribeConfig returns a secret-redacted view for /status.
-// deepseekApiKey and mcpToken are redacted; projectInstructions shown as
+// apiKey and mcpToken are redacted; projectInstructions shown as
 // a byte count; mcpUrl notes degraded mode when unset.
 func DescribeConfig(cfg AppConfig) map[string]string {
 	out := map[string]string{
@@ -346,6 +410,8 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"stateDir":             cfg.StateDir,
 		"dbPath":               cfg.DBPath,
 		"logDir":               cfg.LogDir,
+		"backendUrl":           cfg.BackendURL,
+		"apiKey":               credentials.Redact(cfg.APIKey),
 		"mcpToken":             redactSecret(cfg.McpToken),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),

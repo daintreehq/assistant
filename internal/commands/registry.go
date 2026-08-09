@@ -34,6 +34,8 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "audit", Syntax: "/audit [n]", Palette: "recent tool calls · export", Help: "recent calls (def 15); export <json|csv>"},
 	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},
 	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
+	{Name: "auth", Syntax: "/auth", Palette: "endpoint and sign-in", Help: "show the active endpoint and API key (redacted)"},
+	{Name: "login", Syntax: "/login", Palette: "sign in · switch endpoint", Help: "sign in again: official, custom, or local backend"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
 	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "cockpit tool approvals", Help: "cockpit session approvals; clear resets them"},
 	{Name: "skills", Syntax: "/skills", Palette: "how skills work (backend-managed)", Help: "explain server-owned skill selection (no local catalog)"},

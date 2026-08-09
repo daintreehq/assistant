@@ -1,0 +1,346 @@
+package ui
+
+import (
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/daintreehq/daintree-assistant/internal/app"
+	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/daintree-assistant/internal/credentials"
+	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/daintree-assistant/internal/tools"
+)
+
+// signInModel is the harness model with the sign-in sheet already up, standing in for
+// openSignIn (which needs a live App). The sheet's own mechanics are what these tests
+// cover; the verify/swap behind it is tested in internal/app.
+func signInModel(t *testing.T, current app.SignInStatus) Model {
+	t.Helper()
+	m := harnessModel()
+	m.pendingSignIn = &pendingSignIn{current: current, currentKeySet: current.SignedIn}
+	return m
+}
+
+func key(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
+}
+
+func code(c rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: c} }
+
+// The sheet must REPLACE the composer, exactly like the approval and question sheets —
+// two visible input surfaces would leave no way to tell which has focus.
+func TestSignInSheetReplacesTheComposer(t *testing.T) {
+	// Strip ANSI before matching: the composer renders its placeholder with the first
+	// character separately styled, so a raw substring check for it silently never
+	// matches and the guard below would pass whether or not the composer is showing.
+	const composerCue = "/ for commands"
+	if base := stripAnsi(harnessModel().View().Content); !strings.Contains(base, composerCue) {
+		t.Fatalf("harness precondition: composer cue %q not found — this test cannot detect it:\n%s", composerCue, base)
+	}
+
+	m := signInModel(t, app.SignInStatus{})
+	out := stripAnsi(m.View().Content)
+
+	if !strings.Contains(out, "Daintree sign-in") {
+		t.Fatalf("sheet not rendered:\n%s", out)
+	}
+	if strings.Contains(out, composerCue) {
+		t.Fatalf("composer still visible beneath the sheet:\n%s", out)
+	}
+	// Every offered endpoint must be listed, or the menu silently loses an option.
+	for _, c := range backend.EndpointChoices {
+		if !strings.Contains(out, c.Label) {
+			t.Errorf("endpoint %q missing from the sheet:\n%s", c.Label, out)
+		}
+	}
+}
+
+// SECURITY: the key must never reach the screen. The cockpit runs on the NORMAL screen
+// buffer, so anything rendered also lands in the host's scrollback — a leaked key would
+// persist in the terminal long after the session.
+func TestSignInKeyIsMaskedInTheView(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	s := m.pendingSignIn
+	s.stage, s.baseURL = signInStageKey, "https://endpoint.test"
+	s.keyInput = "sk-or-v1-supersecret"
+
+	out := stripAnsi(m.View().Content)
+	if strings.Contains(out, "supersecret") {
+		t.Fatalf("the raw key was rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "•") {
+		t.Fatalf("masked field should render bullets:\n%s", out)
+	}
+	// The count is how a user confirms a paste landed without seeing the key.
+	if !strings.Contains(out, "(20)") {
+		t.Fatalf("masked field should show the character count:\n%s", out)
+	}
+	// The key prompt names the endpoint it is about to send the key to.
+	if !strings.Contains(out, "https://endpoint.test") {
+		t.Fatalf("key stage must name the target endpoint:\n%s", out)
+	}
+}
+
+// Picking "Custom" opens the URL field; anything else jumps straight to the key.
+func TestSignInEndpointSelectionRouting(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	next, _ := m.onSignInKey(key('2')) // 2 = Custom
+	m = next.(Model)
+	if m.pendingSignIn.stage != signInStageCustomURL {
+		t.Fatalf("Custom must open the URL field, got stage %d", m.pendingSignIn.stage)
+	}
+
+	m = signInModel(t, app.SignInStatus{})
+	next, _ = m.onSignInKey(key('3')) // 3 = Local
+	m = next.(Model)
+	if m.pendingSignIn.stage != signInStageKey {
+		t.Fatalf("a fixed endpoint must skip to the key, got stage %d", m.pendingSignIn.stage)
+	}
+	if m.pendingSignIn.baseURL != backend.LocalBaseURL {
+		t.Fatalf("baseURL = %q, want %q", m.pendingSignIn.baseURL, backend.LocalBaseURL)
+	}
+}
+
+// A bad URL must be caught at the field with a readable reason, keeping the sheet up —
+// not sent off to fail as a confusing transport error.
+func TestSignInRejectsABadCustomURLInline(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageCustomURL
+	m.pendingSignIn.urlInput = "ftp://nope.test"
+
+	next, _ := m.onSignInKey(code(tea.KeyEnter))
+	m = next.(Model)
+	if m.pendingSignIn.stage != signInStageCustomURL {
+		t.Fatal("a rejected URL must keep the field open")
+	}
+	if m.pendingSignIn.errMsg == "" {
+		t.Fatal("a rejected URL must explain why")
+	}
+	if !strings.Contains(stripAnsi(m.View().Content), "scheme") {
+		t.Fatalf("the reason should be visible in the sheet:\n%s", stripAnsi(m.View().Content))
+	}
+}
+
+// A typed URL is normalized on the way through, so a bare host or a trailing slash
+// cannot produce a subtly wrong base URL.
+func TestSignInNormalizesTheTypedURL(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageCustomURL
+	m.pendingSignIn.urlInput = "example.test/"
+
+	next, _ := m.onSignInKey(code(tea.KeyEnter))
+	m = next.(Model)
+	if got := m.pendingSignIn.baseURL; got != "https://example.test" {
+		t.Fatalf("baseURL = %q, want https://example.test", got)
+	}
+}
+
+// Esc steps BACK rather than discarding the sheet: a mistyped URL should not also cost
+// the endpoint choice. Only Esc at the first stage cancels.
+func TestSignInEscStepsBackThenCancels(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+
+	next, _ := m.onSignInKey(code(tea.KeyEscape))
+	m = next.(Model)
+	if m.pendingSignIn == nil {
+		t.Fatal("Esc from the key stage must not close the sheet")
+	}
+	if m.pendingSignIn.stage != signInStageEndpoint {
+		t.Fatalf("Esc should step back to the endpoint stage, got %d", m.pendingSignIn.stage)
+	}
+
+	next, _ = m.onSignInKey(code(tea.KeyEscape))
+	m = next.(Model)
+	if m.pendingSignIn != nil {
+		t.Fatal("Esc at the first stage must cancel the sheet")
+	}
+}
+
+// Typed text edits the field, and backspace removes exactly one rune.
+func TestSignInTextEntryAndBackspace(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+
+	for _, r := range "abc" {
+		next, _ := m.onSignInKey(key(r))
+		m = next.(Model)
+	}
+	if got := m.pendingSignIn.keyInput; got != "abc" {
+		t.Fatalf("keyInput = %q, want abc", got)
+	}
+	next, _ := m.onSignInKey(code(tea.KeyBackspace))
+	m = next.(Model)
+	if got := m.pendingSignIn.keyInput; got != "ab" {
+		t.Fatalf("after backspace keyInput = %q, want ab", got)
+	}
+}
+
+// An empty key with nothing stored is an error, not a silent no-op sign-in.
+func TestSignInEmptyKeyWithNoStoredKeyIsRejected(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{}) // signed out ⇒ currentKeySet false
+	m.pendingSignIn.stage = signInStageKey
+	m.pendingSignIn.baseURL = "https://endpoint.test"
+
+	next, _ := m.onSignInKey(code(tea.KeyEnter))
+	m = next.(Model)
+	if m.pendingSignIn.stage == signInStageVerifying {
+		t.Fatal("an empty key must not start a verification")
+	}
+	if m.pendingSignIn.errMsg == "" {
+		t.Fatal("an empty key must explain that one is required")
+	}
+}
+
+// While verifying, the request is in flight and cannot be steered — keystrokes must be
+// swallowed rather than queued onto whatever stage comes next.
+func TestSignInIgnoresInputWhileVerifying(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageVerifying
+	m.pendingSignIn.keyInput = "abc"
+
+	next, _ := m.onSignInKey(key('z'))
+	m = next.(Model)
+	if m.pendingSignIn.keyInput != "abc" {
+		t.Fatalf("input during verification leaked into the field: %q", m.pendingSignIn.keyInput)
+	}
+	if m.pendingSignIn.stage != signInStageVerifying {
+		t.Fatal("a keystroke must not move the sheet off the verifying stage")
+	}
+}
+
+// A failed attempt returns to the key stage with the reason inline, so the user can fix
+// it without losing the sheet and retyping the endpoint.
+func TestSignInResultFailureKeepsTheSheetWithTheReason(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageVerifying
+	m.pendingSignIn.baseURL = "https://endpoint.test"
+
+	next, _ := m.onSignInResult(SignInResultMsg{Endpoint: "https://endpoint.test", Err: errTest})
+	m = next.(Model)
+	if m.pendingSignIn == nil {
+		t.Fatal("a failed sign-in must keep the sheet open")
+	}
+	if m.pendingSignIn.stage != signInStageKey {
+		t.Fatalf("a failure should return to the key stage, got %d", m.pendingSignIn.stage)
+	}
+	if !strings.Contains(stripAnsi(m.View().Content), errTest.Error()) {
+		t.Fatalf("the failure reason must be visible:\n%s", stripAnsi(m.View().Content))
+	}
+}
+
+// Success pops the sheet and says when the change takes effect — an in-flight turn
+// finishes on the old client, so "from your next message" is the honest promise.
+func TestSignInResultSuccessClosesTheSheet(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageVerifying
+
+	next, _ := m.onSignInResult(SignInResultMsg{Endpoint: "https://endpoint.test"})
+	m = next.(Model)
+	if m.pendingSignIn != nil {
+		t.Fatal("a successful sign-in must close the sheet")
+	}
+}
+
+var errTest = testError("endpoint.test rejected the key")
+
+type testError string
+
+func (e testError) Error() string { return string(e) }
+
+// REGRESSION: pasting is how an API key is actually entered. tea.PasteMsg was routed
+// only to the composer, which the sheet hides — so a pasted key vanished with no
+// feedback and the field stayed empty.
+func TestSignInAcceptsAPastedKey(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+
+	next, _ := m.Update(tea.PasteMsg{Content: "sk-or-v1-pastedkey0123456789"})
+	m = next.(Model)
+	if got := m.pendingSignIn.keyInput; got != "sk-or-v1-pastedkey0123456789" {
+		t.Fatalf("pasted key = %q, want it in the field", got)
+	}
+}
+
+// A key copied from a browser or a wrapped terminal routinely carries a trailing
+// newline or an embedded break. Stripping it here keeps the shape check from reporting
+// a perfectly good key as malformed.
+func TestSignInPasteStripsWhitespace(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+
+	next, _ := m.Update(tea.PasteMsg{Content: "sk-or-v1-split\nkey  \n"})
+	m = next.(Model)
+	if got := m.pendingSignIn.keyInput; got != "sk-or-v1-splitkey" {
+		t.Fatalf("pasted key = %q, want whitespace stripped", got)
+	}
+	if err := credentials.ValidateKeyShape(m.pendingSignIn.keyInput); err != nil {
+		t.Fatalf("a cleaned paste must pass the shape check: %v", err)
+	}
+}
+
+// A paste into the custom-URL field works the same way.
+func TestSignInAcceptsAPastedURL(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageCustomURL
+
+	next, _ := m.Update(tea.PasteMsg{Content: "https://backend.test\n"})
+	m = next.(Model)
+	if got := m.pendingSignIn.urlInput; got != "https://backend.test" {
+		t.Fatalf("pasted URL = %q", got)
+	}
+}
+
+// A paste must not leak into the composer's buffer while the sheet owns input.
+func TestSignInPasteDoesNotReachTheComposer(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+
+	next, _ := m.Update(tea.PasteMsg{Content: "sk-or-v1-secretpaste"})
+	m = next.(Model)
+	if strings.Contains(m.composer.Value(), "secretpaste") {
+		t.Fatalf("the pasted key reached the composer: %q", m.composer.Value())
+	}
+}
+
+// SECURITY REGRESSION: onKey routes to a pending APPROVAL before the sign-in sheet, so
+// rendering sign-in on top of a live approval would send the user's keystrokes into an
+// invisible sheet — `y` blind-approving a mutating tool while the screen shows a key
+// prompt. Render priority must mirror input priority.
+func TestApprovalPreemptsTheSignInSheetInTheView(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	m.pendingSignIn.stage = signInStageKey
+	m.pending = &pendingConfirm{
+		req:     tools.ConfirmRequest{ToolName: "terminal.run", Risk: domain.RiskTerminal},
+		resolve: make(chan bool, 1),
+		shownAt: domain.NowMS(),
+	}
+
+	out := stripAnsi(m.View().Content)
+	if strings.Contains(out, "Daintree sign-in") {
+		t.Fatalf("the sign-in sheet must yield to a live approval:\n%s", out)
+	}
+	if !strings.Contains(out, "terminal.run") {
+		t.Fatalf("the approval must be visible — it is what owns the keyboard:\n%s", out)
+	}
+	// The sheet state survives underneath so it returns once the approval is answered.
+	if m.pendingSignIn == nil {
+		t.Fatal("the sign-in sheet state must be preserved, not discarded")
+	}
+}
+
+// A turn is MULTI-ROUND: Session calls RespondStream again after each tool round. A swap
+// between rounds would send the next round to a different endpoint carrying a state
+// token the previous one signed. Refuse rather than corrupt the turn.
+func TestSignInRefusedWhileATurnIsInFlight(t *testing.T) {
+	m := harnessModel()
+	m.inFlight = true
+
+	next, _ := m.openSignIn()
+	m = next.(Model)
+	if m.pendingSignIn != nil {
+		t.Fatal("/login must not open a sheet while a turn is running")
+	}
+}

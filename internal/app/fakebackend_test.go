@@ -55,6 +55,10 @@ func (f *fakeBackend) RunTask(ctx context.Context, req backend.TaskRequest) (bac
 	return backend.TaskResult{Task: req.Task, Output: json.RawMessage("{}"), Model: "daintree-assistant"}, nil
 }
 
+func (f *fakeBackend) VerifyKey(context.Context) (backend.KeyVerification, error) {
+	return backend.KeyVerification{Valid: true}, nil
+}
+
 func (f *fakeBackend) Capabilities(context.Context) (backend.Capabilities, error) {
 	return backend.Capabilities{}, nil
 }

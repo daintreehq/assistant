@@ -1,8 +1,8 @@
 package backend_test
 
 // Live integration tests against a REAL Daintree assistant backend on
-// 127.0.0.1:8473. They are skip-guarded: every test first probes /healthz with a
-// explicit opt-in and then probe /healthz, so `go test ./...` stays hermetic even
+// 127.0.0.1:8473. They are skip-guarded: every test first probes /health with a
+// explicit opt-in and then probe /health, so `go test ./...` stays hermetic even
 // when a developer happens to have the backend running. Run them deliberately:
 //
 //	DAINTREE_LIVE_TESTS=1 go test ./internal/backend/... -run Live -count=1
@@ -26,7 +26,7 @@ import (
 // liveBaseURL is the hardcoded local backend endpoint (mirrors backend.DefaultBaseURL).
 const liveBaseURL = "http://127.0.0.1:8473"
 
-// requireLiveBackend probes /healthz with a 2s timeout and skips the test when the
+// requireLiveBackend probes /health with a 2s timeout and skips the test when the
 // backend is unreachable or unhealthy. Returns a Client bound to the live endpoint.
 func requireLiveBackend(t *testing.T) *backend.Client {
 	t.Helper()
@@ -37,7 +37,7 @@ func requireLiveBackend(t *testing.T) *backend.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, liveBaseURL+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, liveBaseURL+"/health", nil)
 	if err != nil {
 		t.Skipf("backend not running: build healthz request: %v", err)
 	}
@@ -47,7 +47,7 @@ func requireLiveBackend(t *testing.T) *backend.Client {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Skipf("backend not healthy: /healthz status %d", resp.StatusCode)
+		t.Skipf("backend not healthy: /health status %d", resp.StatusCode)
 	}
 
 	return backend.NewClient(backend.ClientConfig{BaseURL: liveBaseURL})

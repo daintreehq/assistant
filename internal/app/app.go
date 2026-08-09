@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -104,8 +103,9 @@ type CreateOptions struct {
 type ToolBuilder func(a *App) ([]*tools.Tool, error)
 
 // App is the composition root. Fields are effectively read-only after Create
-// except Config.Tier (mutated by /permissions), Hooks (merged by SetHooks), and
-// scheduler (set lazily by StartScheduler).
+// except Config.Tier (mutated by /permissions), Config.BackendURL/APIKey (mutated by
+// SignIn for /login) — both under cfgMu — Hooks (merged by SetHooks), and scheduler
+// (set lazily by StartScheduler).
 type App struct {
 	Config config.AppConfig
 	Store  *storage.Store
@@ -120,11 +120,23 @@ type App struct {
 	// Backend is the native Daintree backend — the assistant turn engine and the
 	// server-owned utility tasks. It replaces the direct model provider. Held as an
 	// interface so tests can inject a fake (CreateOptions.BackendOverride).
+	//
+	// It is ALWAYS the *backend.Swappable below. Consumers capture this value and keep
+	// it for the App's lifetime; `/login` re-authenticates by swapping what it delegates
+	// to, so nothing downstream has to be re-wired or can go on holding a dead endpoint.
 	Backend  backend.Backend
 	Registry *tools.Registry
 
 	SessionID string
 	Session   *agent.Session
+
+	// backendSwap is the same object as Backend, typed so SignIn can swap the delegate.
+	backendSwap *backend.Swappable
+	// lastSignInWarning carries a caveat from the last successful SignIn (e.g. a
+	// backend too old to check the key upstream), so the UI can report a partial
+	// verification honestly instead of implying a full one. Guarded by cfgMu, with
+	// the sign-in fields it describes.
+	lastSignInWarning string
 
 	runRef    *agent.RunIDRef
 	scheduler *daemon.Scheduler
@@ -187,10 +199,11 @@ type App struct {
 	hooksMu sync.RWMutex
 	hooks   AppHooks
 
-	// cfgMu guards Config — specifically Config.Tier, the one field mutated at
-	// runtime (/permissions). buildContext copies the whole Config and PromptContext
-	// reads Tier on agent/tool goroutines, so SetTier (write) and those reads must be
-	// serialized or the race detector flags a torn read of the mutated field.
+	// cfgMu guards Config — the fields mutated at runtime: Tier (/permissions) and the
+	// sign-in pair BackendURL/APIKey (/login, via SignIn). buildContext copies the WHOLE
+	// Config and PromptContext reads it on agent/tool goroutines, so every runtime write
+	// must be serialized against them or the race detector flags a torn read. Any future
+	// runtime-mutable field belongs under this lock too.
 	cfgMu sync.RWMutex
 
 	// InitialTier is the boot-time tier resolved from env/overrides/DEFAULTS, captured
@@ -255,6 +268,12 @@ func (a *App) Tier() domain.Tier {
 
 // snapshotConfig returns a consistent copy of Config under the read lock, so a
 // caller building a per-turn ToolContext can't observe a torn Tier write.
+// SnapshotConfig returns a consistent copy of the resolved config. EVERY whole-Config
+// read outside this package must come through here: Config is an exported struct whose
+// Tier and sign-in fields are mutated at runtime, so a direct `a.Config` copy races
+// SetTier / SignIn.
+func (a *App) SnapshotConfig() config.AppConfig { return a.snapshotConfig() }
+
 func (a *App) snapshotConfig() config.AppConfig {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
@@ -395,63 +414,24 @@ func Create(opts CreateOptions) (*App, error) {
 	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model
 	// credentials, prompt assembly, and skill selection.
 	//
-	// DEVELOPMENT-ONLY: the endpoint is HARDCODED to the single local backend
-	// (backend.DefaultBaseURL, http://127.0.0.1:8473) and there is no authentication.
-	// The assistant supports exactly this one endpoint for now; a later phase replaces
-	// the URL with the production endpoint and adds the real login flow. The only
-	// escape hatch is DAINTREE_BACKEND_URL, which exists for local dev + e2e tests (a
-	// fake backend server) — it is NOT a product config knob, and the default is always
-	// the hardcoded endpoint.
+	// Endpoint AND credentials come from the resolved config (internal/config), which
+	// merges the stored sign-in with the trusted env overrides — app.Create never reads
+	// the environment for them itself, so every entry point (cockpit, one-shot, host,
+	// supervisor daemon) authenticates identically. cfg.APIKey is empty exactly when
+	// the user is signed out; the client still constructs, so `doctor` can reach the
+	// unauthenticated probes and say so, while any real call 401s with a clear code.
+	//
+	// The client is wrapped in a backend.Swappable and that wrapper — never the raw
+	// client — is what every consumer captures. `/login` re-authenticates in place by
+	// swapping the delegate, so Session, the watcher engine, the async coordinator and
+	// the workflow layer all follow without any of them holding a stale endpoint. Test
+	// overrides are wrapped too, so the swap path is identical everywhere.
 	if opts.BackendOverride != nil {
-		a.Backend = opts.BackendOverride
+		a.backendSwap = backend.NewSwappable(opts.BackendOverride)
 	} else {
-		baseURL := backend.DefaultBaseURL
-		if v := strings.TrimSpace(os.Getenv("DAINTREE_BACKEND_URL")); v != "" {
-			baseURL = v
-		}
-		dbg := debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}
-		clientCfg := backend.ClientConfig{
-			BaseURL: baseURL,
-			ClientInfo: backend.ClientInfo{
-				Name:     "daintree-cli",
-				Platform: runtime.GOOS,
-			},
-			// Surface each transient-failure retry to the session log — otherwise a
-			// retried turn leaves no trace and a later log read dead-ends at the last
-			// successful tool call (the gap that hid the wild 502).
-			OnRetry: func(info backend.RetryInfo) {
-				debuglog.LogDebug(dbg, "backend.retry", map[string]any{
-					"op":          info.Op,
-					"attempt":     info.Attempt,
-					"maxAttempts": info.MaxAttempts,
-					"delayMs":     info.Delay.Milliseconds(),
-					"error":       info.Err.Error(),
-				})
-			},
-		}
-		// Every utility-task round trip lands in the session log. Without this the
-		// tasks were the one backend surface the trace couldn't see — a /compact's
-		// checkpoint + memory_distill calls left literally zero log lines (observed
-		// 2026-07-12), so compaction archaeology was impossible. Wired ONLY when debug
-		// logging is on (same rule as the Session trace seam): the hook re-serializes
-		// the task input to measure it, and that must cost nothing in a normal run.
-		if cfg.DebugLog {
-			clientCfg.OnTask = func(info backend.TaskTraceInfo) {
-				fields := map[string]any{
-					"task":        info.Task,
-					"durationMs":  info.Duration.Milliseconds(),
-					"inputBytes":  info.InputBytes,
-					"outputBytes": info.OutputBytes,
-					"ok":          info.Err == nil,
-				}
-				if info.Err != nil {
-					fields["error"] = info.Err.Error()
-				}
-				debuglog.LogDebug(dbg, "backend.task", fields)
-			}
-		}
-		a.Backend = backend.NewClient(clientCfg)
+		a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg)))
 	}
+	a.Backend = a.backendSwap
 	// The async coordinator is built BEFORE the tool registry (the asyncx family
 	// captures it) and started later, alongside the scheduler (StartScheduler).
 	// Its Notify hook pushes a fresh completion to the scheduler's delivery path

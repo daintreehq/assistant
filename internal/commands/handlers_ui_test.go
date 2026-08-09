@@ -534,6 +534,10 @@ func (fakeBackend) RunTask(_ context.Context, req backend.TaskRequest) (backend.
 	return backend.TaskResult{Task: req.Task, Output: out}, nil
 }
 
+func (fakeBackend) VerifyKey(context.Context) (backend.KeyVerification, error) {
+	return backend.KeyVerification{Valid: true}, nil
+}
+
 func (fakeBackend) Capabilities(context.Context) (backend.Capabilities, error) {
 	return backend.Capabilities{}, nil
 }

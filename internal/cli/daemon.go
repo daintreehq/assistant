@@ -56,6 +56,14 @@ func SetVersion(v string) { buildVersion = v }
 func RunDaemon(ctx context.Context, opts Options) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
+	// Gate BEFORE the supervisor starts. A signed-out daemon boots happily, adopts the
+	// project's watchers and async work, and then 401s inside every autonomous wake turn
+	// — supervision that looks alive and silently accomplishes nothing. Never prompt:
+	// this process is detached and normally has no terminal.
+	if err := ensureSignedIn(ctx, overrides, false); err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
 	sOpts := supervisor.Options{
 		Overrides: overrides,
 		Version:   buildVersion,

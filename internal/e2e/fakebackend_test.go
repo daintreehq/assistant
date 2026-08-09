@@ -72,7 +72,7 @@ func newFakeBackend(t *testing.T, rounds ...sseRound) *fakeBackend {
 	mux.HandleFunc("/v1/daintree/respond", f.handleRespond)
 	mux.HandleFunc("/v1/daintree/tasks", f.handleTasks)
 	mux.HandleFunc("/v1/daintree/capabilities", f.handleCapabilities)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"status": "ok"}) })
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"status": "ok"}) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"status": "ready"}) })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{"server_version": "test", "protocol": map[string]any{"min": 2, "max": 2}})

@@ -193,6 +193,20 @@ func (m Model) bottomBand(w int) string {
 		b.WriteString(indentLines(renderQuestion(m.theme, m.pendingQuestion, w), LeftPad))
 		return b.String()
 	}
+	// The sign-in sheet likewise REPLACES the composer: its URL/key fields are the
+	// input surface, and a visible composer beside them would be a second caret with
+	// no way to tell which one has focus.
+	//
+	// It yields to a pending APPROVAL (`m.pending == nil` guard), and that guard is
+	// load-bearing, not cosmetic. onKey routes to the approval FIRST, so rendering
+	// sign-in on top of a live approval would put the user's keystrokes into an
+	// invisible sheet — `y` blind-approving a mutating tool while the screen still
+	// shows a key prompt. Render priority MUST mirror input priority. The sign-in
+	// state survives underneath and reappears once the approval is answered.
+	if m.pendingSignIn != nil && m.pending == nil {
+		b.WriteString(indentLines(renderSignIn(m.theme, m.pendingSignIn, w), LeftPad))
+		return b.String()
+	}
 	if m.pending != nil {
 		b.WriteString(indentLines(renderApproval(m.theme, m.pending, w), LeftPad))
 		b.WriteString("\n\n")

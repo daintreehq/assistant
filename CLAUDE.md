@@ -44,13 +44,32 @@ tool calls the backend asks for and streams the assistant's text. See `docs/BACK
 > shape, fix it directly in `../assistant-backend` (prompt/skill changes land there; local
 > tool-shape changes land here) — no need to ask first.
 
-**Development endpoint:** hardcoded to `http://127.0.0.1:8473`, unauthenticated — the
-assistant supports exactly this one endpoint for now (a later phase swaps in the
-production URL + a real login flow). The only override is the dev/test env var
-`DAINTREE_BACKEND_URL`; there is no product config knob. Run `../assistant-backend`
-locally (`python -m daintree_assistant_server`). The CLI holds **no model credentials
-and no provider client at all** — the direct DeepSeek transport, the tier Router, and the
-model/provider config knobs were deleted once the backend became the only gateway.
+**Endpoint + sign-in.** The default endpoint is the deployed backend,
+`https://assistant.daintree.org` (`backend.DefaultBaseURL`); `backend.LocalBaseURL` is
+the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend`
+(`python -m daintree_assistant_server`). **The backend authenticates every request in
+every environment** — there is no unauthenticated mode — and the bearer token IS the
+caller's own upstream (OpenRouter) key, since the server holds no provider credential of
+its own. So `daintree-assistant login` picks an endpoint (official / custom / local) and
+stores `{backend_url, api_key}` 0600 at the per-user state root
+(`~/.daintree/assistant-cli/credentials.json`, `internal/credentials`); `logout` clears
+it. In the cockpit, `/auth` shows the sign-in read-only and `/login` re-authenticates
+**in place** (sheet → verify → hot swap, no restart) — which is why `App.Backend` is
+always a `backend.Swappable`: every consumer holds the wrapper, so a swap reaches
+Session, watchers, asyncwork and the workflow layer without re-wiring, and an in-flight
+stream finishes on the old client. Sign-in VERIFIES the key with the provider via the
+backend's `POST /v1/daintree/auth/verify` (`backend.CheckSignIn`) — our own auth is
+structural, so capabilities returns 200 for any well-formed string and a bad key would
+otherwise only surface on the first turn. The CLI must never probe the provider itself.
+Startup gates on a key: an interactive launch prompts, a one-shot/`--json`/host/daemon
+launch fails with `not signed in — run daintree-assistant login`. Overrides are the
+trusted env vars `DAINTREE_API_KEY` and `DAINTREE_BACKEND_URL` — a project `.env` can
+supply **neither** (it would redirect or steal a spendable key). Overriding the URL keeps
+the stored key, which is the local dev loop: sign in once, then point
+`DAINTREE_BACKEND_URL` at your local backend. The CLI still holds **no model credentials
+of its own and no provider client at all** — it forwards the caller's key and nothing
+else; the direct DeepSeek transport, the tier Router, and the model/provider config knobs
+were deleted once the backend became the only gateway.
 
 ## Commands
 
@@ -68,7 +87,9 @@ make install                                                  # go install with 
 ./bin/daintree-assistant --classic           # classic line REPL (also used for non-TTY)
 ./bin/daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
-./bin/daintree-assistant doctor              # check backend health / MCP / project / tier
+./bin/daintree-assistant login               # pick an endpoint (official/custom/local), store the API key
+./bin/daintree-assistant logout              # forget the stored sign-in
+./bin/daintree-assistant doctor              # check sign-in / backend health / MCP / project / tier
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
@@ -100,7 +121,10 @@ internal/
   domain/        pure vocabulary (imports only uuid + stdlib): RiskClass, Tier, ModelTier,
                  RunPhase, ToolResult (Ok/Fail), AgentEvent union, DB-row records, constants
                  (MainPromptCacheKey, MaxToolIterations), WatchCondition DSL, IDs
-  config/        LoadConfig(ConfigOverrides) → AppConfig; trusted-env boundary; DEFAULTS
+  config/        LoadConfig(ConfigOverrides) → AppConfig; trusted-env boundary; DEFAULTS;
+                 resolves the sign-in (BackendURL / APIKey / CredentialsPath)
+  credentials/   the stored sign-in {backend_url, api_key} — 0600 JSON at the per-user
+                 state root; Load/Save (atomic rename)/Delete/Redact. Never logged
   ports/         interface seams: EventSink, Store, ToolRegistry, MCPClient, Queue
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
@@ -368,8 +392,10 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 ## Key environment variables
 
-`DAINTREE_BACKEND_URL` (dev/test override of the hardcoded `http://127.0.0.1:8473`; the
-**backend** holds `DEEPSEEK_API_KEY`, not the CLI) · `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
+`DAINTREE_API_KEY` / `DAINTREE_BACKEND_URL` (the sign-in pair — trusted-env ONLY, never a
+project `.env`; both normally come from `daintree-assistant login` instead. Overriding the
+URL keeps the stored key, so a local backend needs only `DAINTREE_BACKEND_URL`) ·
+`DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /

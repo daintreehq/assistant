@@ -16,20 +16,107 @@ User → Daintree CLI ──(structured startup + visible conversation + runtime
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
 ```
 
-## Endpoint (development)
+## Endpoint and sign-in
 
-**Hardcoded** to `http://127.0.0.1:8473`, **unauthenticated**. The assistant supports
-exactly this one endpoint for now; a later phase swaps in the production URL and a real
-login flow. The only override is the dev/test env var `DAINTREE_BACKEND_URL` (used by
-e2e tests to point at a fake backend). There is no product config knob. The constant
-lives at `backend.DefaultBaseURL`.
+Two constants: `backend.DefaultBaseURL` = `https://assistant.daintree.org` (the deployed
+backend, and the default for a fresh install) and `backend.LocalBaseURL` =
+`http://127.0.0.1:8473` (a backend you run yourself).
 
-Run the backend from its sibling repo during local development:
+**Every request authenticates, in every environment.** There is no unauthenticated mode
+to fall back to — not even locally. The `Authorization: Bearer <key>` token is the
+*caller's own* API key, and it doubles as the upstream credential funding that turn's
+model calls: the server holds no provider credential of its own. For early testers the
+key is literally their OpenRouter key (`sk-or-v1-…`); later it becomes a subscription key
+the backend maps server-side, with no wire change. Only `/healthz`, `/readyz` and
+`/version` are open.
+
+The backend validates the key **structurally only** (printable non-space ASCII, bounded
+length). That gives two deliberately distinct failures:
+
+| condition | response | CLI predicate | meaning |
+|---|---|---|---|
+| missing / malformed bearer | `401 invalid_api_key` | `Error.IsAuth()` | fix your header — sign in again |
+| well-formed key the provider rejects | `502 upstream_error` | `Error.IsUpstreamAuth()` | fix your account — bad, revoked, or unfunded key |
+
+Because validation is structural, `/v1/daintree/capabilities` answers **200 for any
+well-formed string**. That is why sign-in also calls:
+
+```
+POST /v1/daintree/auth/verify   →  {"valid": true|false, "detail": "...", "label": "...", "limit_remaining": 1.23}
+```
+
+It asks the provider directly (its key-introspection call — no tokens spent) and is the
+only check that can catch a key that is well-formed but wrong, revoked, or unfunded.
+`valid:false` comes back as **200**, not 401: "this key is invalid" is a successful
+answer to the question, and a 401 would tell the client to retry the same header. A
+provider we cannot reach propagates as 502 `upstream_error`, because then we do not
+know — and "could not check" must never be reported as "invalid".
+
+`backend.CheckSignIn` is the shared client-side helper both entry points run, so the
+startup flow and `/login` cannot diverge on what "verified" means. It gates hard on
+capabilities and on an explicit `valid:false`, and downgrades to a **warning** when the
+backend has no verify endpoint (older deployments), the provider was unreachable, or the
+key is recognised but out of credit — refusing to sign in against a backend that simply
+lacks the route would be a self-inflicted outage. Cancellation and timeout are the
+exception: they are hard failures, since neither is evidence about the key nor consent to
+persist an unverified one.
+
+**The CLI never probes the provider itself.** It holds no provider client by design, and
+the caller key becomes a subscription key later — at which point only the backend can
+resolve it. Adding an OpenRouter call here would break both properties.
+
+### Signing in
+
+```bash
+daintree-assistant login    # choose official / custom / local, paste the key
+daintree-assistant logout   # forget it
+daintree-assistant doctor   # `signed in` + `key valid` rows
+```
+
+Inside the cockpit, `/auth` shows the active sign-in (read-only) and `/login` opens a
+sheet that re-authenticates **in place** — endpoint picker, masked key entry, verify,
+then a hot swap of the live backend client via `App.SignIn`. No restart: every consumer
+holds a `backend.Swappable` (never a raw client), so `agent.Session`, the watcher engine,
+the async coordinator, and the workflow layer all follow the swap. A turn already
+streaming finishes on the old client — an endpoint cannot change mid-stream without
+corrupting the transcript — so the change applies from the next message. `/login` is
+REFUSED while a turn is running: a turn is multi-round (Session re-calls `RespondStream`
+after every tool round), and swapping between rounds would send the next round to a
+different endpoint carrying a `state` token the previous one signed.
+
+A custom endpoint may only use `http://` for **loopback** hosts — every request carries
+the key as a bearer token, so plain HTTP to a remote host would put a spendable secret on
+the wire. Embedded userinfo (`https://user:pass@host`) is rejected for the same reason.
+
+`login` writes `{backend_url, api_key}` as 0600 JSON at the **per-user state root**
+(`~/.daintree/assistant-cli/credentials.json`) — one sign-in serves every project. An
+explicit `DAINTREE_ASSISTANT_STATE_DIR` / `--state-dir` moves it alongside that dir
+instead, which is what keeps tests and benchmarks from reading or clobbering a real
+sign-in. Nothing is written until verification passes, so a typo never persists. Implementation: `internal/credentials` (storage),
+`internal/cli/login.go` (flow), `internal/config` (resolution).
+
+Startup gates on a resolved key (`cli.ensureSignedIn`): an interactive TTY launch runs
+the login flow inline, before the ownership lease and before `app.Create`; every
+non-interactive path (one-shot, `--json`, `host`, `daemon`) fails fast with
+`not signed in — run daintree-assistant login`.
+
+### Overrides
+
+`DAINTREE_API_KEY` and `DAINTREE_BACKEND_URL` are **trusted-env only** — a bound
+project's `.env` can supply neither. That is a security boundary, not tidiness: the key
+is spendable and the URL decides where it is sent, so a cloned repo must not be able to
+inject either. Overriding the URL keeps the stored key (the key is the caller's own
+credential, equally valid against any endpoint), which is exactly the local dev loop:
 
 ```bash
 cd ../assistant-backend
-python -m daintree_assistant_server   # serves on 127.0.0.1:8473 (its .env pins the port)
+python -m daintree_assistant_server            # serves on 127.0.0.1:8473 (its .env pins the port)
+
+DAINTREE_BACKEND_URL=http://127.0.0.1:8473 daintree-assistant   # same sign-in, local backend
 ```
+
+e2e tests use the same override to point at a fake backend, plus `DAINTREE_API_KEY` to
+clear the sign-in gate.
 
 ## Wire contract
 
