@@ -21,6 +21,13 @@ import (
 // Its only escape was daintree.listTools, whose result is large enough to become
 // a paged artifact (3500 chars/page) — and the schema was never in it anyway.
 //
+// The case that surfaced this was copyTree.generate's then-opaque `options` bag
+// (since typed locally), but the gap it exposed is general and still open: every
+// wrapper that forwards an `arguments` record verbatim — recipe.run,
+// forge.getPR, workflow.*, worktree.* — advertises "additionalProperties": true
+// and no keys, so the only written-down source for those keys is the raw MCP
+// schema this tool returns.
+//
 // The schema comes from the catalog ListTools already maintains, read
 // CACHE-FIRST (force=false): normally a warm-cache hit costing nothing, falling
 // back to the same catalog fetch the sibling discovery tools make when the cache
@@ -142,16 +149,16 @@ var schemaSchema = json.RawMessage(`{
 // schemaPointer is appended to the discovery tools' note so a model that just
 // listed or searched tools is told, at the point of use, how to get the argument
 // shape — rather than falling back to paging the listTools artifact out of habit.
-const schemaPointer = "To see a tool's ARGUMENT SHAPE (its input schema), call `tool.schema` with the literal argument object {\"name\":\"copyTree.generate\"}, substituting the exact name you want. Do that instead of guessing argument keys or paging a listTools artifact — neither ever contains the schema."
+const schemaPointer = "To see a tool's ARGUMENT SHAPE (its input schema), call `tool.schema` with the literal argument object {\"name\":\"recipe.run\"}, substituting the exact name you want. Do that instead of guessing argument keys or paging a listTools artifact — neither of these results ever contains a schema."
 
 func newSchemaTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "tool.schema",
 		Description: "Look up ONE Daintree MCP tool's input schema — its exact argument shape — without invoking it. Call with " +
-			"the literal argument object {\"name\":\"copyTree.generate\"}, using an exact name from tool.search or " +
+			"the literal argument object {\"name\":\"recipe.run\"}, using an exact name from tool.search or " +
 			"daintree.listTools (names are never auto-corrected; a miss returns close candidates). Reach for it whenever you " +
-			"would otherwise guess an argument key, especially for values a tool forwards opaquely such as " +
-			"copyTree.generate's `options`.",
+			"would otherwise guess an argument key — above all for a wrapper's opaque `arguments` record, whose keys are " +
+			"Daintree's and are documented nowhere else.",
 		Risk:   domain.RiskRead,
 		Schema: schemaSchema,
 		Decode: tools.StrictDecoder(func() any { return &schemaArgs{} }),
@@ -259,7 +266,7 @@ func schemaResult(mcpName string, inputSchema map[string]any) tools.ToolResult {
 	if getLocalWrapperNames()[mcpName] {
 		result["localWrapper"] = mcpName
 		result["note"] = fmt.Sprintf(
-			"A local typed tool named %s governs the actual call — invoke THAT with its own declared parameters, which differ from the raw schema below (a wrapper may make optional arguments required, add a batch form, or nest raw fields under `arguments`). Use the raw schema only to fill in values the wrapper forwards opaquely, such as an options object.",
+			"A local typed tool named %s governs the actual call — invoke THAT with its own declared parameters, which differ from the raw schema below (a wrapper may make optional arguments required, add a batch form, or nest raw fields under `arguments`). Use the raw schema only to fill in values the wrapper forwards opaquely, such as the contents of an `arguments` record.",
 			mcpName)
 	}
 
@@ -418,7 +425,7 @@ func schemaCandidates(list []MCPToolInfo, requested string) []string {
 		switch {
 		case low == want:
 			ranked = append(ranked, scored{n, 0})
-		// Forward prefix ("copyTree.generat" → copyTree.generate) is the
+		// Forward prefix (a name truncated mid-word → the full name) is the
 		// truncation case and always meaningful. The REVERSE relations (a
 		// catalog name contained in the request) only mean something once the
 		// shorter side is long enough to be distinctive — otherwise a

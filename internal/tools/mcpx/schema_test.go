@@ -12,9 +12,11 @@ import (
 )
 
 // catalog is the fixture the schema tests resolve against. copyTree.generate
-// carries a genuinely nested schema because it IS the motivating case: the local
-// wrapper forwards `options` opaquely ("do not invent keys"), so the underlying
-// MCP schema is the only place those keys are written down.
+// carries a genuinely nested schema because it is the case that surfaced #311:
+// its `options` bag was forwarded opaquely ("do not invent keys"), so the raw
+// MCP schema was the only place those keys were written down. That particular
+// bag has since been typed locally, but the shape of the test still matters —
+// every wrapper forwarding an `arguments` record is in the same position.
 func schemaCatalog() []MCPToolInfo {
 	return []MCPToolInfo{
 		{
@@ -677,7 +679,7 @@ func TestSchemaToolDeclaration(t *testing.T) {
 	if tool.Consequence != "" {
 		t.Error("a pure cache read needs no confirmation consequence")
 	}
-	if !strings.Contains(tool.Description, `{"name":"copyTree.generate"}`) {
+	if !strings.Contains(tool.Description, `{"name":"recipe.run"}`) {
 		t.Error("description must show the literal argument object, not describe it in prose")
 	}
 	// The declared bounds must be real schema keywords (they are forwarded to the
