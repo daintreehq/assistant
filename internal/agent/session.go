@@ -33,6 +33,10 @@ var coreToolNames = []string{
 	"queue.digest",
 	"daintree.status",
 	"tool.search",
+	// tool.schema is core alongside tool.search: the discovery tools' note now
+	// tells the model to look up an argument shape with it, so it must never be
+	// possible to ship a build where that pointer names an absent tool.
+	"tool.schema",
 	"terminal.read",
 	"terminal.extract",
 	// terminal.awaitAll is core: waiting for a spawned cohort to finish is a

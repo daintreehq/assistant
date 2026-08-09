@@ -118,6 +118,7 @@ var nonMCPLiterals = map[string]bool{
 	"daintree.listTools": true,
 	"daintree.call":      true,
 	"tool.search":        true,
+	"tool.schema":        true,
 	"terminal.focus":     true,
 }
 

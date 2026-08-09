@@ -77,13 +77,14 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 84 tools (incl. the agentTask.superviseTerminal
+// over it. The registry currently holds 81 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
 // tools, the three docs.* documentation-search tools, the four async-futures
-// tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
+// tools — terminal.run.async / terminal.await.async / async.list / async.cancel — the
+// tool.schema MCP input-schema lookup, and
 // the user.askMultipleChoice question tool). The local skill.find / skill.load tools are
 // GONE — the backend now owns skill selection (the migration off the client-side
 // selector); skill.run.get / skill.step.advance remain. We assert that exact count so a
@@ -98,12 +99,20 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// 79→80: fs.find, the filename/pattern counterpart to fs.search's content
 	// search. A conscious add — finding files by name previously meant a full
 	// recursive fs.list or falling through to Daintree's files.search.
+	// 80→81: tool.schema, the MCP input-schema lookup (#311) — the discovery
+	// tools report names and prose but never argument shapes, so a wrong guess
+	// had nowhere to be corrected.
 	got := len(a.Registry.List())
-	if got != 80 {
-		t.Errorf("registered tools = %d, want 80", got)
+	if got != 81 {
+		t.Errorf("registered tools = %d, want 81", got)
 	}
+	// Assert each recent add by name so the count guard can't be satisfied by an
+	// unrelated add/drop cancelling out.
 	if !a.Registry.Has("fs.find") {
 		t.Error("fs.find must be registered by the fsx family")
+	}
+	if !a.Registry.Has("tool.schema") {
+		t.Error("tool.schema (MCP input-schema lookup) not registered")
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.

@@ -22,6 +22,10 @@ type fakeMCP struct {
 	// disconnectAfter > 0 makes Connected() flip false once callCount reaches it, so a
 	// batch wrapper can be tested against a link that drops PART-WAY through the loop.
 	disconnectAfter int
+	// listCount / lastListForce record ListTools traffic so a test can prove
+	// tool.schema reads the WARM cache (force=false) and never probes the network.
+	listCount     int
+	lastListForce bool
 }
 
 func (f *fakeMCP) Connected() bool {
@@ -44,7 +48,9 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) 
 	}
 	return f.result, nil
 }
-func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) {
+func (f *fakeMCP) ListTools(_ context.Context, force bool) ([]MCPToolInfo, error) {
+	f.listCount++
+	f.lastListForce = force
 	return f.toolList, f.listErr
 }
 
