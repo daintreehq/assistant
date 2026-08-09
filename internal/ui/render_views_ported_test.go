@@ -109,6 +109,100 @@ func TestActivityRow_LongDetailTruncatesAwayFromDuration(t *testing.T) {
 	}
 }
 
+// The details below are representative artifact.read summaries — four successive
+// pages of one 56394-char artifact plus its final partial page. They are COPIES of
+// the producer's wording, NOT a contract with it: internal/tools/artifactx owns that
+// format and pins it in its own test. What these tests own is the RENDERING property
+// — that a detail whose varying part sits in the head stays distinguishable once the
+// row truncates — so a producer rewording only has to be mirrored here, not caught.
+const artifactPageDetail = "offset 10500: 3500/56394 chars, 42394 remaining — artifact_1091e529"
+
+func TestActivityRow_ArtifactPagingProgressDistinctAtWidth80(t *testing.T) {
+	// Issue #312: paging a large artifact produced a run of rows that all rendered
+	// identically, because the old summary put the offset/remaining — the only varying
+	// part — at the very end, well past the truncation budget. (At this geometry the
+	// old details agreed through cell 56, so all four collapsed to one row.) A linear
+	// walk therefore read as a stuck loop.
+	//
+	// Geometry: embedded 80 columns → chrome 77, minus prefix 5 + "Read artifact"+1 = 14
+	// + duration 8 → 50 detail cells, of which 49 survive alongside the ellipsis. That
+	// is comfortably enough: the offset ends by cell 26 even for a 19-digit value, so
+	// distinct offsets cannot collide here for ANY artifact size. Far narrower terminals
+	// (~40 columns leaves ~11 detail cells) can still collide, but no summary format
+	// distinguishes arbitrary pages in ten cells.
+	th := darkTheme()
+	rowWidth := chromeWidth(80, gutterFor(true))
+
+	cases := []struct{ detail, wantOffset, wantRemaining string }{
+		{"offset 0: 3500/56394 chars, 52894 remaining — artifact_1091e529", "offset 0", "52894"},
+		{"offset 3500: 3500/56394 chars, 49394 remaining — artifact_1091e529", "offset 3500", "49394"},
+		{"offset 7000: 3500/56394 chars, 45894 remaining — artifact_1091e529", "offset 7000", "45894"},
+		{artifactPageDetail, "offset 10500", "42394"},
+	}
+
+	seen := make(map[string]bool, len(cases))
+	for i, c := range cases {
+		// Every field but Detail is identical, so ONLY the summary can distinguish
+		// these rows — exactly the situation the bug arose in.
+		a := Activity{ID: "p", Name: "artifact.read", State: ActDone,
+			Detail: c.detail, StartedAt: 0, EndedAt: 1}
+		row := stripAnsi(renderActivityRow(th, a, true, false, 0, 1, rowWidth))
+		if cellWidth(row) > rowWidth {
+			t.Errorf("page %d: row width %d exceeds %d: %q", i, cellWidth(row), rowWidth, row)
+		}
+		// BOTH varying quantities must survive the truncation, not just one.
+		for _, want := range []string{c.wantOffset, c.wantRemaining} {
+			if !strings.Contains(row, want) {
+				t.Errorf("page %d: %q missing from truncated row %q", i, want, row)
+			}
+		}
+		seen[row] = true
+	}
+	if len(seen) != len(cases) {
+		t.Errorf("successive paged reads must render as %d DISTINCT rows, got %d: %v",
+			len(cases), len(seen), seen)
+	}
+
+	// The final page reads as an ending, not as another identical line.
+	eof := Activity{ID: "p", Name: "artifact.read", State: ActDone,
+		Detail:    "offset 56000: 394/56394 chars, end of artifact — artifact_1091e529",
+		StartedAt: 0, EndedAt: 1}
+	row := stripAnsi(renderActivityRow(th, eof, true, false, 0, 1, rowWidth))
+	if !strings.Contains(row, "offset 56000") || !strings.Contains(row, "end of artifact") {
+		t.Errorf("eof row must show its offset and the end marker: %q", row)
+	}
+}
+
+func TestActivityRow_ArtifactSummaryFullIDRecoveredWhenExpanded(t *testing.T) {
+	// The id is deliberately LAST, so it is what the ellipsis eats once the row is
+	// tight — the deal this format makes to keep the paging numbers visible. Prove
+	// the other half of that deal: expansion gets the callable id back.
+	//
+	// Embedded 90 columns is the geometry that exercises both halves at once: chrome
+	// 87 → collapsed detail budget 60, which clips the 67-cell summary and takes the
+	// id with it, while the expanded (^X) result line gets 87-12 = 75 and fits it whole.
+	th := darkTheme()
+	rowWidth := chromeWidth(90, gutterFor(true))
+	a := Activity{ID: "p", Name: "artifact.read", State: ActDone,
+		Detail: artifactPageDetail, StartedAt: 0, EndedAt: 1}
+
+	collapsed := stripAnsi(renderActivityRow(th, a, true, false, 0, 1, rowWidth))
+	if strings.Contains(collapsed, "artifact_1091e529") {
+		t.Errorf("collapsed row should have clipped the trailing id: %q", collapsed)
+	}
+	if !strings.Contains(collapsed, "offset 10500") || !strings.Contains(collapsed, "42394") {
+		t.Errorf("collapsed row must still carry the paging numbers: %q", collapsed)
+	}
+
+	out := stripAnsi(renderActivityRow(th, a, true, true, 0, 1, rowWidth))
+	if !strings.Contains(out, "result: "+artifactPageDetail) {
+		t.Errorf("expanded view must carry the complete summary: %q", out)
+	}
+	if !strings.Contains(out, "artifact_1091e529") {
+		t.Errorf("expanded view must show the full callable artifact id: %q", out)
+	}
+}
+
 // --- ApprovalSheet ---
 
 func confirmReq(tool string, risk domain.RiskClass, consequence string) tools.ConfirmRequest {
