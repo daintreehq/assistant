@@ -242,7 +242,8 @@ func (o *copyTreeOptions) validate() error {
 
 // copyTreeStrictDecoder is tools.StrictDecoder plus a raw-JSON pre-scan that
 // rejects explicit `null` and blank/whitespace-only strings ANYWHERE in a
-// copyTree argument object.
+// copyTree argument object — with a single carve-out for the top-level
+// free-text `name` label, below.
 //
 // It exists because Go's decoder quietly collapses both into "absent", and
 // StrictDecoder's canonical re-marshal then erases the evidence with omitempty —
@@ -341,6 +342,13 @@ func scanCopyTreeValue(dec *json.Decoder, path string) error {
 				child := key
 				if path != "" {
 					child = path + "." + key
+				} else if key == "" {
+					// An empty top-level key must not leave the child path empty:
+					// its children would then look top-level themselves, and a
+					// nested "name" would wrongly inherit the blank carve-out.
+					// The quoted spelling keeps the path honest (the strict
+					// decoder rejects the unknown "" field regardless).
+					child = `""`
 				}
 				if err := scanCopyTreeValue(dec, child); err != nil {
 					return err

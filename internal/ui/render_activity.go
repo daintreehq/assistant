@@ -251,19 +251,34 @@ func presentToolTarget(name, args string) string {
 			return truncateCells(key, 48)
 		case "rel":
 			if v := strArg(obj, key); v != "" {
-				return truncateCells(relativizePath(v), 48)
+				return truncateCells(previewLine(relativizePath(v)), 48)
 			}
 		case "ids":
 			if v := idsArg(obj, key); v != "" {
-				return truncateCells(v, 48)
+				return truncateCells(previewLine(v), 48)
 			}
 		default:
 			if v := strArg(obj, key); v != "" {
-				return truncateCells(v, 48)
+				return truncateCells(previewLine(v), 48)
 			}
 		}
 	}
 	return ""
+}
+
+// previewLine flattens an arg value to one safe row. Tool args are model- (and
+// sometimes user-) authored free text — a copy-tree name, a command, a queue
+// title — so a newline must not mint an extra activity row and a raw ESC must
+// not restyle or clear the host terminal. Control runes become spaces, then
+// whitespace runs collapse, which also trims padded edges.
+func previewLine(s string) string {
+	mapped := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(mapped), " ")
 }
 
 // strArg returns a non-empty string/number arg, or "".

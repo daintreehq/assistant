@@ -257,7 +257,13 @@ func TestCopyTreeWrappersForwardTypedOptions(t *testing.T) {
 			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 			tool := tc.build(Deps{MCP: mcp})
 
-			decoded, err := tool.Decode(argsWithOptions(t, tc.baseArgs, full))
+			// The label rides along with a maximal options object so a regression
+			// can't make name and options quietly displace each other.
+			base := map[string]any{"name": "auth flow context"}
+			for k, v := range tc.baseArgs {
+				base[k] = v
+			}
+			decoded, err := tool.Decode(argsWithOptions(t, base, full))
 			if err != nil {
 				t.Fatalf("full typed options must decode: %v", err)
 			}
@@ -279,6 +285,9 @@ func TestCopyTreeWrappersForwardTypedOptions(t *testing.T) {
 			}
 			if got["maxFileCount"] != float64(30) || got["sort"] != "size" || got["modified"] != true {
 				t.Errorf("values mangled in transit: %v", got)
+			}
+			if mcp.lastArgs["name"] != "auth flow context" {
+				t.Errorf("top-level name must survive alongside a full options object, got %v", mcp.lastArgs["name"])
 			}
 		})
 	}
@@ -710,6 +719,45 @@ func TestCopyTreeForwardsName(t *testing.T) {
 			}
 		})
 	}
+
+	// A non-string name is a type error, not a label. The raw scan has nothing
+	// to say about numbers/arrays/objects, so the STRICT DECODER must be the
+	// guard — this is what catches a wrapper whose Name field quietly stopped
+	// being a string while every valid-string case stayed green.
+	for _, tc := range copyTreeCases {
+		for _, bad := range []string{`5`, `["auth"]`, `{"label":"auth"}`} {
+			t.Run(tc.name+"/non-string name "+bad, func(t *testing.T) {
+				payload := map[string]any{"name": json.RawMessage(bad)}
+				for k, v := range tc.baseArgs {
+					payload[k] = v
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatalf("marshal args: %v", err)
+				}
+				tool := tc.build(Deps{})
+				_, err = tool.Decode(raw)
+				if err == nil {
+					t.Fatalf("a non-string name must fail the strict decode")
+				}
+				if !strings.Contains(err.Error(), "cannot unmarshal") || !strings.Contains(err.Error(), "name") {
+					t.Errorf("rejected for the wrong reason: want a type error naming the field, got %q", err)
+				}
+			})
+		}
+	}
+
+	// The carve-out is computed from the rendered token path, and an empty
+	// top-level key used to leave its children LOOKING top-level. Pin the fix:
+	// a blank name nested under "" is still a blank string, not the label.
+	t.Run("blank name under an empty top-level key is rejected", func(t *testing.T) {
+		tool := newCopyTreeGenerateTool(Deps{})
+		if _, err := tool.Decode(json.RawMessage(`{"":{"name":""}}`)); err == nil {
+			t.Fatalf("an empty top-level key must not launder a nested blank name")
+		} else if !strings.Contains(err.Error(), "is blank") {
+			t.Errorf("rejected for the wrong reason: %q", err)
+		}
+	})
 }
 
 // An empty exclude/always list is LEGAL host-side and means "clear the project's

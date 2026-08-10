@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -67,6 +68,22 @@ func TestPresentToolTarget_CopyTreePrefersName(t *testing.T) {
 		if got := presentToolTarget(c.tool, c.args); got != c.want {
 			t.Errorf("presentToolTarget(%q, %s) = %q, want %q", c.tool, c.args, got, c.want)
 		}
+	}
+
+	// The label is free text, so the preview must flatten it to one safe row:
+	// newlines/tabs/padding collapse to single spaces (previewLine)…
+	if got := presentToolTarget("copyTree.generate", `{"name":"  auth\nflow\t context "}`); got != "auth flow context" {
+		t.Errorf("multi-line/padded name must collapse to one line, got %q", got)
+	}
+	// …an ESC byte (spelled \u001b in the JSON) becomes a space, leaving the
+	// sequence's residue as inert text — the row can never be restyled/cleared…
+	if got := presentToolTarget("copyTree.generate", `{"name":"auth \u001b[31mflow"}`); got != "auth [31mflow" {
+		t.Errorf("an escape byte must be neutralized to inert text, got %q", got)
+	}
+	// …and an over-long label truncates to the 48-cell budget with an ellipsis.
+	long := strings.Repeat("a", 60)
+	if got := presentToolTarget("copyTree.generate", `{"name":"`+long+`"}`); got != strings.Repeat("a", 47)+"…" {
+		t.Errorf("long name must truncate at 48 cells with an ellipsis, got %q", got)
 	}
 }
 

@@ -245,10 +245,10 @@ func terminalClosePassthrough(ctx context.Context, mcp MCPClient, ids []string) 
 }
 
 // copyTreeInjectPassthrough mirrors terminalSendCommandPassthrough for
-// copyTree.injectToTerminal: the injected payload is a large, unnamed copy-tree
-// digest, so the summary names the destination terminal rather than echoing
-// content — "Injected copy tree into terminal <id>." replacing the generic
-// "Called copyTree.injectToTerminal."
+// copyTree.injectToTerminal: the injected payload is a large copy-tree digest
+// (labelled only by the optional `name` arg), so the summary names the
+// destination terminal rather than echoing content — "Injected copy tree into
+// terminal <id>." replacing the generic "Called copyTree.injectToTerminal."
 func copyTreeInjectPassthrough(ctx context.Context, mcp MCPClient, terminalID string, args map[string]any) tools.ToolResult {
 	res := passthrough(ctx, mcp, "copyTree.injectToTerminal", args, "")
 	if !res.Ok {
