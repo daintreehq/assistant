@@ -23,7 +23,12 @@ type MCPStatus struct {
 	Connected bool   `json:"connected"`
 	Transport string `json:"transport,omitempty"`
 	ToolCount *int   `json:"toolCount,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// URL is the sanitized endpoint this client connects to (no userinfo/query/
+	// fragment — Daintree's per-session URL can carry the bearer as a query param).
+	// It answers "which Daintree am I driving — the local app, or something else?",
+	// which the model previously had to guess at.
+	URL   string `json:"url,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // MCPToolInfo is one discovered Daintree MCP tool (listTools entries).

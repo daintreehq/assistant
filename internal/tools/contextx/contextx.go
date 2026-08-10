@@ -23,7 +23,10 @@ type MCPStatus struct {
 	Connected bool   `json:"connected"`
 	Transport string `json:"transport,omitempty"`
 	ToolCount *int   `json:"toolCount,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// URL is the sanitized endpoint (no userinfo/query/fragment) — which Daintree this
+	// process is actually driving.
+	URL   string `json:"url,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // MCPCallResult is the Daintree MCP call envelope.
@@ -59,6 +62,11 @@ type Deps struct {
 	MCP    MCPClient
 	Router Router
 	Queue  Queue
+	// BackendURL reports the assistant backend this process is signed in to (the
+	// deployed endpoint, a local dev server, …). A func, not a string, because /login
+	// hot-swaps the client mid-session (backend.Swappable) — a captured string would go
+	// stale. Optional: nil (or a blank return) just omits the line.
+	BackendURL func() string
 }
 
 const (

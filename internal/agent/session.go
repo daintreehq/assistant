@@ -2081,6 +2081,7 @@ func (s *Session) refreshWorktreeAsync() {
 func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
 	rc := &backend.RuntimeContext{
 		PermissionTier:  string(pc.Tier),
+		MCPServers:      buildMCPServers(pc.MCPServers),
 		SchedulerActive: pc.SchedulerActive,
 		Worktree:        buildCurrentWorktreeSnapshot(pc.Worktree),
 		OpenTerminals:   openTerminals,
@@ -2102,6 +2103,32 @@ func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminal
 		}
 	}
 	return rc
+}
+
+// buildMCPServers maps the configured integration surface onto the backend contract.
+// The endpoint leads the description because that is the fact the block exists to carry:
+// the backend renders "- <name>: <description>", so this reads
+// "- daintree: endpoint http://127.0.0.1:45454/mcp — Daintree control plane …" and the
+// model can name the server it is driving instead of guessing at a plausible localhost
+// URL (ses_8cb40b4e). Status/transport/tool-count are deliberately left unset here — this
+// block is cached ahead of the tool schemas, so only session-stable facts belong in it;
+// the live link state rides rc.MCP. Fields are clamped to the backend's strict
+// max_lengths (name 128, description 4096) so an odd endpoint can never 400 the turn.
+func buildMCPServers(servers []prompts.MCPServerContext) []backend.MCPServer {
+	var out []backend.MCPServer
+	for _, s := range servers {
+		name := clampRunes(strings.TrimSpace(s.Name), 128)
+		url := strings.TrimSpace(s.URL)
+		if name == "" || url == "" {
+			continue
+		}
+		desc := "endpoint " + url
+		if d := strings.TrimSpace(s.Description); d != "" {
+			desc += " — " + d
+		}
+		out = append(out, backend.MCPServer{Name: name, Description: clampRunes(desc, 4096)})
+	}
+	return out
 }
 
 // buildTurnContext maps the per-turn facts (formerly the prose turn footer) to the

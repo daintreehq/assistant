@@ -14,10 +14,13 @@ type fakeMCP struct {
 	connected bool
 	results   map[string]MCPCallResult
 	errs      map[string]error
+	url       string // endpoint reported by Status()
 }
 
-func (f *fakeMCP) Connected() bool   { return f.connected }
-func (f *fakeMCP) Status() MCPStatus { return MCPStatus{Connected: f.connected} }
+func (f *fakeMCP) Connected() bool { return f.connected }
+func (f *fakeMCP) Status() MCPStatus {
+	return MCPStatus{Connected: f.connected, URL: f.url}
+}
 func (f *fakeMCP) CallTool(_ context.Context, name string, _ map[string]any) (MCPCallResult, error) {
 	if f.errs != nil {
 		if err := f.errs[name]; err != nil {

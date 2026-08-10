@@ -164,6 +164,17 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 				}
 				runtime["mcp"] = mcp
 			}
+			// The integration surface names the ENDPOINTS the model was told about this
+			// round — "was it even pointed at the Daintree the user meant?" is otherwise
+			// unanswerable from the log. Endpoints are already sanitized upstream
+			// (mcp.SanitizeURL), so no credential can reach the log through here.
+			if n := len(rc.MCPServers); n > 0 {
+				servers := make([]string, 0, n)
+				for _, s := range rc.MCPServers {
+					servers = append(servers, s.Name+": "+s.Description)
+				}
+				runtime["mcpServers"] = servers
+			}
 			// The open-terminal roster the model reasons over this round is inert runtime
 			// data, but it is EXACTLY what "the model thought terminal X was closed / still
 			// asking a question" archaeology needs — and Daintree's terminal.list can return

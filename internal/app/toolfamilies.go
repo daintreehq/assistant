@@ -52,7 +52,10 @@ func (m contextMCPAdapter) Connected() bool { return m.c.IsConnected() }
 
 func (m contextMCPAdapter) Status() contextx.MCPStatus {
 	st := m.c.Status()
-	return contextx.MCPStatus{Connected: st.Connected, Transport: st.Transport, ToolCount: st.ToolCount, Error: st.Error}
+	// Sanitize the endpoint at the boundary where it becomes model-visible: Status().URL
+	// is the raw connection URL, which for Daintree can carry the session bearer in its
+	// query string (see mcp.SanitizeURL).
+	return contextx.MCPStatus{Connected: st.Connected, Transport: st.Transport, ToolCount: st.ToolCount, URL: mcp.SanitizeURL(st.URL), Error: st.Error}
 }
 
 func (m contextMCPAdapter) CallTool(ctx context.Context, name string, args map[string]any) (contextx.MCPCallResult, error) {
@@ -93,7 +96,8 @@ func (m mcpxMCPAdapter) Connected() bool { return m.c.IsConnected() }
 
 func (m mcpxMCPAdapter) Status() mcpx.MCPStatus {
 	st := m.c.Status()
-	return mcpx.MCPStatus{Connected: st.Connected, Transport: st.Transport, ToolCount: st.ToolCount, Error: st.Error}
+	// Sanitized endpoint — same reasoning as contextMCPAdapter.Status.
+	return mcpx.MCPStatus{Connected: st.Connected, Transport: st.Transport, ToolCount: st.ToolCount, URL: mcp.SanitizeURL(st.URL), Error: st.Error}
 }
 
 func (m mcpxMCPAdapter) CallTool(ctx context.Context, name string, args map[string]any) (mcpx.MCPCallResult, error) {

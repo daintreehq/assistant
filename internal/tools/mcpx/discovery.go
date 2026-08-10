@@ -38,11 +38,18 @@ func makeCallable(activeToolNames []string) func(string) bool {
 func newStatusTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "daintree.status",
-		Description: "Report the Daintree MCP link: connected, transport, tool count, and the error text when it is down. Works even while disconnected — it never fails on a broken link. The same summary ALREADY rides every round's runtime context, so call this only when diagnosing an MCP_UNAVAILABLE failure or when the user asks whether Daintree is reachable — not to orient yourself each turn.",
+		Description: "Report the Daintree MCP link: the endpoint URL it is connected to, connected, transport, tool count, and the error text when it is down. Works even while disconnected — it never fails on a broken link. The endpoint and the same summary ALREADY ride every round's context, so call this only when diagnosing an MCP_UNAVAILABLE failure or when the user asks whether Daintree is reachable — not to orient yourself each turn.",
 		Risk:        domain.RiskRead,
 		Schema:      noArgs,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			status := deps.MCP.Status()
+			// The endpoint is reported on BOTH branches: "which server is it even trying?"
+			// is exactly the question a disconnected link raises, and answering it from the
+			// error text alone is guesswork.
+			at := ""
+			if status.URL != "" {
+				at = fmt.Sprintf(" at %s", status.URL)
+			}
 			var summary string
 			if status.Connected {
 				transport := status.Transport
@@ -53,11 +60,11 @@ func newStatusTool(deps Deps) tools.Tool {
 				if status.ToolCount != nil {
 					count = fmt.Sprintf(" (%d tools)", *status.ToolCount)
 				}
-				summary = fmt.Sprintf("Daintree MCP connected via %s%s.", transport, count)
+				summary = fmt.Sprintf("Daintree MCP connected%s via %s%s.", at, transport, count)
 			} else if status.Error != "" {
-				summary = fmt.Sprintf("Daintree MCP disconnected: %s", status.Error)
+				summary = fmt.Sprintf("Daintree MCP disconnected%s: %s", at, status.Error)
 			} else {
-				summary = "Daintree MCP disconnected."
+				summary = fmt.Sprintf("Daintree MCP disconnected%s.", at)
 			}
 			return tools.Ok(summary, status)
 		},

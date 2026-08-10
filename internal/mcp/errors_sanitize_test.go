@@ -120,3 +120,36 @@ func TestTransportErrorWithTokenQueryNeverReachesStatusOrDebugLog(t *testing.T) 
 		t.Fatalf("debug log leaks the transport error's token query:\n%s", logged)
 	}
 }
+
+// SanitizeURL is the display path for an endpoint the model may quote back to the user
+// (daintree.status, context.snapshot, the integration surface sent to the backend). It
+// must keep the endpoint identifiable — scheme, host, PORT, path — while dropping every
+// part that can carry a credential, and it must FAIL CLOSED on anything it cannot strip
+// with confidence: publishing a half-sanitized endpoint is worse than publishing none.
+func TestSanitizeURLKeepsIdentityDropsCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"blank", "   ", ""},
+		{"plain endpoint survives whole", "  http://127.0.0.1:45454/mcp  ", "http://127.0.0.1:45454/mcp"},
+		{"session token dropped", "http://127.0.0.1:45454/mcp?session=secret", "http://127.0.0.1:45454/mcp"},
+		{"userinfo + fragment dropped", "https://user:pass@daintree.org/api/mcp#frag", "https://daintree.org/api/mcp"},
+		// url.Parse fails here (space in host). The old best-effort cut at '?' would have
+		// published "http://user:tok@a b/mcp" — userinfo and all — so an unparseable
+		// endpoint must yield nothing at all.
+		{"unparseable fails closed", "http://user:tok@a b/mcp?session=secret", ""},
+		{"invalid escape fails closed", "https://user:supersecret@example.test/%zz", ""},
+		// Opaque (non-hierarchical) URLs park their entire payload in u.Opaque, where
+		// User is nil and stripping is a no-op — so requiring a Host rejects them.
+		{"opaque fails closed", "weird:user:pass@daintree.org/mcp", ""},
+		{"hostless fails closed", "file:///tmp/mcp", ""},
+	}
+	for _, c := range cases {
+		if got := SanitizeURL(c.in); got != c.want {
+			t.Errorf("%s: SanitizeURL(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}

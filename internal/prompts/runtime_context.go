@@ -31,10 +31,31 @@ type MainPromptContext struct {
 	// its "connected (<transport> transport, <n> tools)" line from these when connected
 	// (it only falls back to MCPStatusLine when NOT connected), so they must be populated
 	// or the model is told the MCP has 0 tools.
-	MCPTransport        string
-	MCPToolCount        *int
+	MCPTransport string
+	MCPToolCount *int
+	// MCPServers is the CONFIGURED integration surface: one entry per MCP server this
+	// process is wired to, each naming its ENDPOINT. Without it the model cannot say
+	// WHICH Daintree it is driving — in ses_8cb40b4e it was asked for the MCP URL and
+	// could only guess ("typically served at something like http://localhost:PORT/mcp").
+	// Deliberately identity-only (name + endpoint + role): the backend renders this as a
+	// session-STABLE system block (prompt_assembler build_main_request step 2, ahead of
+	// the tool schemas), so anything that fluctuates mid-session — connected, transport,
+	// tool count — must stay on MCPConnected/MCPTransport/MCPToolCount, which ride the
+	// volatile runtime tail instead. Endpoints are immutable for the life of a client
+	// (mcp.Client resolves them once in New), so this block is constant per session.
+	MCPServers          []MCPServerContext
 	SchedulerActive     bool
 	ProjectInstructions string
+}
+
+// MCPServerContext is one connected-to MCP server as the CLI reports it. URL is the
+// sanitized endpoint (mcp.SanitizeURL — no userinfo/query/fragment, since Daintree's
+// per-session URL can carry the bearer as a query param); Description is the one-line
+// role the backend renders after the name.
+type MCPServerContext struct {
+	Name        string
+	URL         string
+	Description string
 }
 
 // ProjectContext is the small, broadly-useful subset of project.getCurrent. Deliberately

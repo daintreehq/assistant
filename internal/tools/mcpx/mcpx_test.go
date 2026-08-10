@@ -22,6 +22,9 @@ type fakeMCP struct {
 	// disconnectAfter > 0 makes Connected() flip false once callCount reaches it, so a
 	// batch wrapper can be tested against a link that drops PART-WAY through the loop.
 	disconnectAfter int
+	url             string // endpoint reported by Status()
+	transport       string
+	statusErr       string
 }
 
 func (f *fakeMCP) Connected() bool {
@@ -31,7 +34,7 @@ func (f *fakeMCP) Connected() bool {
 	return f.connected
 }
 func (f *fakeMCP) Status() MCPStatus {
-	return MCPStatus{Connected: f.connected}
+	return MCPStatus{Connected: f.connected, Transport: f.transport, URL: f.url, Error: f.statusErr}
 }
 func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) (MCPCallResult, error) {
 	f.lastName = name

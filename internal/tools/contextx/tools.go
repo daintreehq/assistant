@@ -17,7 +17,8 @@ var snapshotSchema = json.RawMessage(`{"type":"object","properties":{},"addition
 func newSnapshotTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "context.snapshot",
-		Description: "Build a compact snapshot of the current workspace: Daintree MCP status, and (when connected) action context, " +
+		Description: "Build a compact snapshot of the current workspace: the endpoints this assistant is wired to (Daintree MCP URL + " +
+			"assistant backend URL), Daintree MCP status, and (when connected) action context, " +
 			"worktrees, terminals, plus the open attention queue. Best-effort and read-only; degrades gracefully when Daintree is offline.",
 		Risk:   domain.RiskRead,
 		Schema: snapshotSchema,
@@ -36,6 +37,11 @@ func newSnapshotTool(deps Deps) tools.Tool {
 
 			var lines []string
 			head := fmt.Sprintf("Daintree MCP: %s", connectedWord(status.Connected))
+			// Name the endpoint on both branches — "which server?" is precisely what a
+			// broken link (and a user asking where this assistant is pointed) needs.
+			if status.URL != "" {
+				head += " at " + status.URL
+			}
 			if status.Transport != "" {
 				head += fmt.Sprintf(" (%s)", status.Transport)
 			}
@@ -46,6 +52,10 @@ func newSnapshotTool(deps Deps) tools.Tool {
 				head += " — " + status.Error
 			}
 			lines = append(lines, head)
+			backendURL := backendURLOf(deps)
+			if backendURL != "" {
+				lines = append(lines, "Assistant backend: "+backendURL)
+			}
 			if !status.Connected {
 				lines = append(lines, "Degraded local mode: worktree/terminal/action context unavailable until Daintree connects.")
 			} else {
@@ -64,6 +74,7 @@ func newSnapshotTool(deps Deps) tools.Tool {
 
 			return tools.Ok(strings.Join(lines, "\n"), map[string]any{
 				"mcp":           status,
+				"backendUrl":    backendURL,
 				"actionContext": contentOrNil(actionContext, acOK),
 				"worktrees":     contentOrNil(worktrees, wtOK),
 				"terminals":     contentOrNil(terminals, tOK),
@@ -71,6 +82,23 @@ func newSnapshotTool(deps Deps) tools.Tool {
 			})
 		},
 	}
+}
+
+// backendURLOf reads the injected backend endpoint without ever letting that side
+// channel break the call. context.snapshot promises it NEVER throws — it is the tool
+// the model reaches for when everything else is broken — and Deps.BackendURL is an
+// arbitrary caller-supplied func (production reads an atomic through backend.Swappable,
+// but an injected or half-built one could panic). A failed read just omits the line.
+func backendURLOf(deps Deps) (url string) {
+	if deps.BackendURL == nil {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			url = ""
+		}
+	}()
+	return strings.TrimSpace(deps.BackendURL())
 }
 
 func connectedWord(c bool) string {

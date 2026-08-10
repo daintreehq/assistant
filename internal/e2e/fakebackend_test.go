@@ -270,6 +270,18 @@ func (f *fakeBackend) requestMessages(n int) []map[string]any {
 	return out
 }
 
+// request returns the WHOLE decoded body of the Nth respond request (0-based), for
+// assertions about the structured envelope outside input.messages — startup, runtime,
+// turn — or about what must never appear anywhere in it.
+func (f *fakeBackend) request(n int) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n >= len(f.requests) {
+		return nil
+	}
+	return f.requests[n]
+}
+
 // requestTools returns the input.tools array sent on the Nth respond request, as
 // generic maps — used to assert the local tool inventory reached the backend.
 func (f *fakeBackend) requestTools(n int) []map[string]any {

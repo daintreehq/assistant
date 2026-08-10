@@ -65,6 +65,7 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 		MCPStatusLine:       mcpStatusLine(st),
 		MCPTransport:        st.Transport,
 		MCPToolCount:        st.ToolCount,
+		MCPServers:          a.mcpServerContexts(st),
 		SchedulerActive:     schedulerActive,
 		ProjectInstructions: cfg.ProjectInstructions,
 	}
@@ -101,6 +102,33 @@ func (a *App) resumedWatchersForFooter() []string {
 		return nil
 	}
 	return a.ownership.ResumedWatcherTitles
+}
+
+// mcpServerContexts lists the MCP servers this process is wired to, each with its
+// endpoint, so the model can answer "which Daintree are you actually talking to?"
+// without guessing (ses_8cb40b4e). The primary status is passed in so PromptContext
+// keeps its single a.MCP.Status() read.
+//
+// Endpoint-only by design: the backend renders this list as a session-stable system
+// block, so it must NOT carry connected/transport/toolCount — those change mid-session
+// (the docs MCP finishes connecting a beat after boot; a reconnect flips transport) and
+// would re-encode the ~18k tool schemas behind it on every change. The live status
+// already rides the volatile runtime tail. An unconfigured server (no URL — no Daintree
+// in the environment) contributes no entry rather than a blank one.
+func (a *App) mcpServerContexts(primary mcp.Status) []prompts.MCPServerContext {
+	var out []prompts.MCPServerContext
+	add := func(name, rawURL, description string) {
+		url := mcp.SanitizeURL(rawURL)
+		if url == "" {
+			return
+		}
+		out = append(out, prompts.MCPServerContext{Name: name, URL: url, Description: description})
+	}
+	add("daintree", primary.URL, "Daintree control plane (terminals, agents, worktrees, actions)")
+	if a.DocsMCP != nil {
+		add("daintree-docs", a.DocsMCP.Status().URL, "public Daintree documentation search (no auth)")
+	}
+	return out
 }
 
 // mcpStatusLine renders the connected/not-connected one-liner.

@@ -45,6 +45,35 @@ func redactURLText(raw string) string {
 	return u.String()
 }
 
+// SanitizeURL strips the credential-bearing parts (userinfo, query, fragment) from a
+// single endpoint URL, leaving scheme://host/path. Every caller that DISPLAYS or SENDS
+// an endpoint — a tool result the model can print, the integration surface shipped to
+// the backend, the assistant backend's own base URL — must route it through here:
+// Daintree's per-session MCP URL may carry its bearer as ?session=<token>, and an
+// endpoint the model can quote is an endpoint that ends up in a transcript, a debug log,
+// or a pasted bug report.
+//
+// Unlike sanitizeErrText's best-effort cut, this FAILS CLOSED. An endpoint that does not
+// parse cannot be stripped reliably — url.Parse's error path leaves userinfo intact, so
+// "https://user:tok@host/%zz" would otherwise be published verbatim — and an opaque
+// (non-hierarchical) URL hides its whole payload in u.Opaque, where User is nil and
+// nothing is stripped at all. Both are rejected by requiring a parse plus a Host. A
+// blank endpoint only costs the model a fact it never had before this existed; a leaked
+// credential is unrecoverable. Real MCP/backend endpoints are ordinary http(s) URLs and
+// pass cleanly.
+func SanitizeURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
+}
+
 // IsCredentialTerminalStatus reports whether a connection status/error string
 // marks this session's MCP credentials as PERMANENTLY dead: the per-session
 // bearer was revoked (401/unauthorized — Daintree rotates it on every
