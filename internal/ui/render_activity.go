@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
 )
@@ -250,16 +251,16 @@ func presentToolTarget(name, args string) string {
 		case "lit":
 			return truncateCells(key, 48)
 		case "rel":
-			if v := strArg(obj, key); v != "" {
-				return truncateCells(previewLine(relativizePath(v)), 48)
+			if v := previewLine(relativizePath(strArg(obj, key))); v != "" {
+				return truncateCells(v, 48)
 			}
 		case "ids":
-			if v := idsArg(obj, key); v != "" {
-				return truncateCells(previewLine(v), 48)
+			if v := previewLine(idsArg(obj, key)); v != "" {
+				return truncateCells(v, 48)
 			}
 		default:
-			if v := strArg(obj, key); v != "" {
-				return truncateCells(previewLine(v), 48)
+			if v := previewLine(strArg(obj, key)); v != "" {
+				return truncateCells(v, 48)
 			}
 		}
 	}
@@ -268,12 +269,15 @@ func presentToolTarget(name, args string) string {
 
 // previewLine flattens an arg value to one safe row. Tool args are model- (and
 // sometimes user-) authored free text — a copy-tree name, a command, a queue
-// title — so a newline must not mint an extra activity row and a raw ESC must
-// not restyle or clear the host terminal. Control runes become spaces, then
-// whitespace runs collapse, which also trims padded edges.
+// title — so a newline must not mint an extra activity row and a raw escape
+// must not restyle or clear the host terminal. Control runes (C0, DEL and the
+// C1 range some terminals honour as 8-bit escapes) become spaces, then
+// whitespace runs collapse, which also trims padded edges. Sanitizing BEFORE
+// the emptiness check matters: a control-only value must fall through to the
+// next preview key, not black-hole the row.
 func previewLine(s string) string {
 	mapped := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r

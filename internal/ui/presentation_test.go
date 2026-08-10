@@ -39,11 +39,6 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 	}
 }
 
-// TestPresentTool_NoRawDottedNames guards against the presentation gap that motivated
-// the verb-map expansion: a first-party tool that renders its raw dotted name (e.g.
-// "scratch.create") next to nicely-verbed neighbours ("Delegated"). Every canonical
-// local tool name should resolve to a human label — never a string still carrying a
-// dot from its namespace.
 // The copy-tree label (`name`) is what the user actually wants to read in the
 // activity row — "auth flow context" beats a worktree id — but it is optional,
 // so the id previews must survive as the fallback when it is absent or blank.
@@ -63,6 +58,9 @@ func TestPresentToolTarget_CopyTreePrefersName(t *testing.T) {
 		// A blank name means "derive a label" and must not eat the fallback.
 		{"copyTree.generate", `{"name":"  ","worktreeId":"wt-1"}`, "wt-1"},
 		{"copyTree.injectToTerminal", `{"name":"","terminalId":"t1"}`, "t1"},
+		// A control-only name sanitizes to nothing and must ALSO fall through
+		// rather than black-hole the row (previewLine runs before the check).
+		{"copyTree.generate", `{"name":"\u001b\u000b","worktreeId":"wt-1"}`, "wt-1"},
 	}
 	for _, c := range cases {
 		if got := presentToolTarget(c.tool, c.args); got != c.want {
@@ -87,6 +85,11 @@ func TestPresentToolTarget_CopyTreePrefersName(t *testing.T) {
 	}
 }
 
+// TestPresentTool_NoRawDottedNames guards against the presentation gap that motivated
+// the verb-map expansion: a first-party tool that renders its raw dotted name (e.g.
+// "scratch.create") next to nicely-verbed neighbours ("Delegated"). Every canonical
+// local tool name should resolve to a human label — never a string still carrying a
+// dot from its namespace.
 func TestPresentTool_NoRawDottedNames(t *testing.T) {
 	names := []string{
 		"scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop",
