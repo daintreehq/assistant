@@ -363,6 +363,14 @@ func (m Model) onTurnComplete(msg TurnCompleteMsg) (tea.Model, tea.Cmd) {
 	}
 	if t := m.activeTurnCell(); t != nil {
 		t.sealProse()
+		// The ORDERED phase is the authoritative failure signal, and the seal is about to
+		// overwrite it — capture it first. A mid-stream failure raises PhaseFailed and
+		// pumpError already put an error note in the transcript, but the completion that
+		// follows can carry plain reply text (e.g. "Model error: …") that neither
+		// isFailureReply nor terminalTurnState recognises, so the turn seals as
+		// TurnComplete. Without this the end-of-turn cue would land directly under that
+		// error note and claim the turn ended cleanly.
+		priorPhase := t.Phase
 		// #8: a surfaced Send failure (e.g. ErrTurnInProgress) seals as a failed turn
 		// with a note rather than masquerading as a clean completion.
 		if msg.Failed && !isFailureReply(msg.Reply) {
@@ -382,10 +390,35 @@ func (m Model) onTurnComplete(msg TurnCompleteMsg) (tea.Model, tea.Cmd) {
 			t.cancelPending()
 			m.addNote(NoteInfo, "Turn cancelled.")
 		}
+		if needsNoActionCue(t, priorPhase) {
+			m.addMutedNote(NoteInfo, noActionCueText)
+		}
 	}
 	m.activeTurn = ""
 	m.inFlight = false
 	return m.drainPending()
+}
+
+// noActionCueText marks the boundary a callless turn otherwise leaves invisible. It is
+// a STATE marker, deliberately not a question or a suggestion: the backend owns the
+// converge-and-stop rule, and a client-side nudge would fight it (#317).
+const noActionCueText = "End of turn — no action taken."
+
+// needsNoActionCue reports whether a just-sealed turn should carry the end-of-turn cue.
+// priorPhase is the turn's phase BEFORE the seal overwrote it with PhaseComplete.
+//
+// Scoped tightly to the gap #317 describes: a turn that COMPLETED normally, said
+// something, and called no tool renders as preamble + prose and nothing else
+// (renderLiveStatus goes silent the instant the turn seals), so it is indistinguishable
+// from one still streaming. Every other shape already carries its own terminal signal —
+// a tool turn settles its ledger row with ✓/×, a cancelled turn gets "Turn cancelled.",
+// and a failed turn (by state OR by ordered phase) is surfaced by the error path — so
+// they must not double up here. A turn whose only output is a skill card or an
+// interjection is deliberately NOT covered: those aren't the callless-prose shape, and
+// "no action taken" would misdescribe them.
+func needsNoActionCue(t *TurnCell, priorPhase domain.RunPhase) bool {
+	return t != nil && t.State == TurnComplete && priorPhase != domain.PhaseFailed &&
+		hasProse(t) && !hasToolStep(t)
 }
 
 // onWakeComplete seals the wake turn; on failure re-queue the burst once (#9: the
@@ -410,6 +443,12 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 			t.State = TurnComplete
 		}
 		t.Phase = domain.PhaseComplete
+		// NO end-of-turn cue here, deliberately (#317 covers USER turns). A watcher wake
+		// that reports on an event without calling a tool is doing exactly its job —
+		// reporting IS the work — so a "no action taken" marker would read as neglect on
+		// the majority of wakes. Nor is anyone waiting on a wake to hand a turn back.
+		// Consecutive wakes are already separated by their own ◆ DAINTREE marker plus the
+		// blank line every sealed cell owns.
 	}
 	burst := m.activeWake
 	m.activeWake = nil

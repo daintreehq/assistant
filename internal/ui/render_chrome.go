@@ -339,7 +339,14 @@ func renderNoteCell(th theme.Theme, n *NoteCell, width int) string {
 	// Tone the │ continuation spine with the note tone (green info / red error)
 	// instead of flat muted gray — matches the greenish MCP-connected row.
 	cont := styleFor(th, tone, g.Continuation)
-	return truncateCells(cont+styleFor(th, tone, glyph)+" "+th.Body().Render(n.Text), width)
+	// A muted note keeps the toned spine + glyph (so it still reads as part of the note
+	// family) but drops the body to DIM — the end-of-turn cue fires on most callless
+	// turns, and at full body weight it would compete with the prose it follows.
+	body := th.Body().Render(n.Text)
+	if n.Muted {
+		body = th.Dim().Render(n.Text)
+	}
+	return truncateCells(cont+styleFor(th, tone, glyph)+" "+body, width)
 }
 
 // renderCommandCell renders a slash-command result into the transcript.
