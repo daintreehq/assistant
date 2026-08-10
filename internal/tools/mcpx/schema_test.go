@@ -177,8 +177,9 @@ func TestSchemaAnnotatesWrappedTools(t *testing.T) {
 		t.Errorf("note should warn that wrapper parameters differ (incl. nesting), got %q", note)
 	}
 	// The annotation set is derived from the family's own registration, so every
-	// name it registers is covered — including copyTree.generate, which has a
-	// wrapper but (deliberately) no daintree.call denylist entry.
+	// name it registers is covered — regardless of whether the name also appears
+	// in the daintree.call denylist, which encodes redirect policy, not
+	// wrapper existence.
 	if !getLocalWrapperNames()["copyTree.generate"] || !getLocalWrapperNames()["terminal.close"] {
 		t.Error("the wrapper set should be derived from the registered family")
 	}

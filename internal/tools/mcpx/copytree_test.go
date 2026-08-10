@@ -257,7 +257,13 @@ func TestCopyTreeWrappersForwardTypedOptions(t *testing.T) {
 			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 			tool := tc.build(Deps{MCP: mcp})
 
-			decoded, err := tool.Decode(argsWithOptions(t, tc.baseArgs, full))
+			// The label rides along with a maximal options object so a regression
+			// can't make name and options quietly displace each other.
+			base := map[string]any{"name": "auth flow context"}
+			for k, v := range tc.baseArgs {
+				base[k] = v
+			}
+			decoded, err := tool.Decode(argsWithOptions(t, base, full))
 			if err != nil {
 				t.Fatalf("full typed options must decode: %v", err)
 			}
@@ -279,6 +285,9 @@ func TestCopyTreeWrappersForwardTypedOptions(t *testing.T) {
 			}
 			if got["maxFileCount"] != float64(30) || got["sort"] != "size" || got["modified"] != true {
 				t.Errorf("values mangled in transit: %v", got)
+			}
+			if mcp.lastArgs["name"] != "auth flow context" {
+				t.Errorf("top-level name must survive alongside a full options object, got %v", mcp.lastArgs["name"])
 			}
 		})
 	}
@@ -558,6 +567,10 @@ func TestCopyTreeRejectsDuplicateKeys(t *testing.T) {
 		{"copyTree.generate", `{"options":{"includePaths":["a.go"]},"options":{}}`, "more than once"},
 		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1","options":{"scopePaths":["internal"]},"options":{}}`, "more than once"},
 		{"copyTree.injectToTerminal", `{"terminalId":"t1","options":{"filter":["*.go"]},"options":{}}`, "more than once"},
+		// A repeated `name` is still a duplicate even though a BLANK name is the
+		// one string the scan tolerates — the carve-out must not weaken duplicate
+		// detection for the same key.
+		{"copyTree.generate", `{"name":"","name":"auth flow"}`, "more than once"},
 		// Duplicate hiding a null/blank in the earlier copy: caught on the way in.
 		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1","options":{"includePaths":null},"options":{}}`, "is null"},
 		{"copyTree.generate", `{"options":{"changed":"","format":"xml"},"options":{"format":"xml"}}`, "is blank"},
@@ -585,6 +598,166 @@ func TestCopyTreeRejectsDuplicateKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The host's optional `name` label (a free-text "2 to 4 words" run-history
+// label, daintree#11734) must be declared on every wrapper schema — a field the
+// closed schema doesn't name is a field the model can never pass — and must
+// stay TOP-LEVEL: the host keeps it out of CopyTreeOptions so it stays out of
+// the run-history dedupe key, which wantCopyTreeOptionKeys pins separately.
+func TestCopyTreeSchemasDeclareName(t *testing.T) {
+	for _, tc := range copyTreeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := parseSchema(t, tc.build(Deps{}).Schema)
+			name, ok := schema.Properties["name"]
+			if !ok {
+				t.Fatalf("schema does not declare top-level name; the closed schema makes it unreachable")
+			}
+			if name.Type != "string" {
+				t.Errorf("name must be a string, got %q", name.Type)
+			}
+			// Blank means "derive a label", so the schema must not contradict that
+			// with a length floor, and the label must never be demanded.
+			if name.MinLength != nil {
+				t.Errorf("name must not carry minLength — blank means 'derive a label', not an error")
+			}
+			for _, r := range schema.Required {
+				if r == "name" {
+					t.Errorf("name must never be required")
+				}
+			}
+			if !strings.Contains(name.Description, "2 to 4 words") || !strings.Contains(name.Description, "derive") {
+				t.Errorf("name description must carry the host's guidance (2 to 4 words; omitted derives a label), got %q", name.Description)
+			}
+		})
+	}
+}
+
+// The wire contract for `name`: a real label is forwarded verbatim, while a
+// blank one decodes fine but stays OFF the wire — the host treats an absent
+// name as "derive a label from the selection", and sending "" would hand it an
+// empty label instead. Null keeps the family-wide rejection: optional means
+// undefined-able, never nullable.
+func TestCopyTreeForwardsName(t *testing.T) {
+	wire := []struct {
+		name     string
+		value    any // nil = omit the field entirely
+		wantWire any // nil = must be absent from the wire
+	}{
+		{"real label forwarded", "auth flow context", "auth flow context"},
+		// Forwarded unchanged — presence is tested with TrimSpace, but the value
+		// is the caller's to spell; the host owns any normalization.
+		{"padded label forwarded verbatim", "  auth flow context ", "  auth flow context "},
+		{"omitted stays absent", nil, nil},
+		{"empty string stays absent", "", nil},
+		{"whitespace-only stays absent", "   ", nil},
+	}
+	for _, tc := range copyTreeCases {
+		for _, w := range wire {
+			t.Run(tc.name+"/"+w.name, func(t *testing.T) {
+				payload := map[string]any{}
+				for k, v := range tc.baseArgs {
+					payload[k] = v
+				}
+				if w.value != nil {
+					payload["name"] = w.value
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatalf("marshal args: %v", err)
+				}
+				mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+				tool := tc.build(Deps{MCP: mcp})
+				decoded, err := tool.Decode(raw)
+				if err != nil {
+					t.Fatalf("name=%#v must decode: %v", w.value, err)
+				}
+				if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+					t.Fatalf("expected ok, got %+v", res.Error)
+				}
+				got, present := mcp.lastArgs["name"]
+				if w.wantWire == nil {
+					if present {
+						t.Errorf("blank/omitted name must stay off the wire so the host derives a label, got %#v", got)
+					}
+				} else if got != w.wantWire {
+					t.Errorf("name mangled in transit: got %#v want %#v", got, w.wantWire)
+				}
+			})
+		}
+	}
+
+	// The blank carve-out is EXACTLY the top-level `name` key. The same key
+	// nested anywhere else is still a blank string in a family where blank is
+	// never meaningful — the pre-scan must reject it before the strict decoder
+	// even reports the unknown field.
+	for _, tc := range copyTreeCases {
+		t.Run(tc.name+"/blank options.name still rejected", func(t *testing.T) {
+			tool := tc.build(Deps{})
+			_, err := tool.Decode(argsWithOptions(t, tc.baseArgs, map[string]any{"name": " "}))
+			if err == nil {
+				t.Fatalf("a blank nested name must not inherit the top-level carve-out")
+			}
+			if !strings.Contains(err.Error(), "options.name is blank") {
+				t.Errorf("rejected for the wrong reason: %q", err)
+			}
+		})
+		t.Run(tc.name+"/null name rejected", func(t *testing.T) {
+			payload := map[string]any{"name": nil}
+			for k, v := range tc.baseArgs {
+				payload[k] = v
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal args: %v", err)
+			}
+			tool := tc.build(Deps{})
+			if _, err := tool.Decode(raw); err == nil {
+				t.Fatalf("null name must be rejected — optional means undefined-able, not nullable")
+			} else if !strings.Contains(err.Error(), "name is null") {
+				t.Errorf("rejected for the wrong reason: %q", err)
+			}
+		})
+	}
+
+	// A non-string name is a type error, not a label. The raw scan has nothing
+	// to say about numbers/arrays/objects, so the STRICT DECODER must be the
+	// guard — this is what catches a wrapper whose Name field quietly stopped
+	// being a string while every valid-string case stayed green.
+	for _, tc := range copyTreeCases {
+		for _, bad := range []string{`5`, `["auth"]`, `{"label":"auth"}`} {
+			t.Run(tc.name+"/non-string name "+bad, func(t *testing.T) {
+				payload := map[string]any{"name": json.RawMessage(bad)}
+				for k, v := range tc.baseArgs {
+					payload[k] = v
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatalf("marshal args: %v", err)
+				}
+				tool := tc.build(Deps{})
+				_, err = tool.Decode(raw)
+				if err == nil {
+					t.Fatalf("a non-string name must fail the strict decode")
+				}
+				if !strings.Contains(err.Error(), "cannot unmarshal") || !strings.Contains(err.Error(), "name") {
+					t.Errorf("rejected for the wrong reason: want a type error naming the field, got %q", err)
+				}
+			})
+		}
+	}
+
+	// The carve-out is computed from the rendered token path, and an empty
+	// top-level key used to leave its children LOOKING top-level. Pin the fix:
+	// a blank name nested under "" is still a blank string, not the label.
+	t.Run("blank name under an empty top-level key is rejected", func(t *testing.T) {
+		tool := newCopyTreeGenerateTool(Deps{})
+		if _, err := tool.Decode(json.RawMessage(`{"":{"name":""}}`)); err == nil {
+			t.Fatalf("an empty top-level key must not launder a nested blank name")
+		} else if !strings.Contains(err.Error(), "is blank") {
+			t.Errorf("rejected for the wrong reason: %q", err)
+		}
+	})
 }
 
 // An empty exclude/always list is LEGAL host-side and means "clear the project's

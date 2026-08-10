@@ -242,7 +242,8 @@ func (o *copyTreeOptions) validate() error {
 
 // copyTreeStrictDecoder is tools.StrictDecoder plus a raw-JSON pre-scan that
 // rejects explicit `null` and blank/whitespace-only strings ANYWHERE in a
-// copyTree argument object.
+// copyTree argument object — with a single carve-out for the top-level
+// free-text `name` label, below.
 //
 // It exists because Go's decoder quietly collapses both into "absent", and
 // StrictDecoder's canonical re-marshal then erases the evidence with omitempty —
@@ -257,9 +258,14 @@ func (o *copyTreeOptions) validate() error {
 // Rejecting both is fidelity, not an invented rule: Daintree's fields are
 // `.optional()` (undefined-able, never nullable) and its worktree selectors are
 // `.min(1)` precisely so an empty selector can't silently become an
-// active-worktree fallback (locationArgs.ts). Every string in this argument
-// family is a path, pattern, git ref, id or enum member, so blank is never
-// meaningful in any of them — which is what lets one flat rule cover the lot.
+// active-worktree fallback (locationArgs.ts). Almost every string in this
+// argument family is a path, pattern, git ref, id or enum member, where blank is
+// never meaningful. The ONE exception is the top-level `name` — a free-text
+// cosmetic label where the host itself treats blank as "absent, derive a label
+// from the selection" — so the blank rule carves that single key out (the
+// forward paths then drop a blank name rather than sending "" as a label).
+// Null stays rejected even for name: optional means undefined-able, not
+// nullable, there as everywhere else.
 func copyTreeStrictDecoder(newArgs func() any) tools.DecodeFunc {
 	inner := tools.StrictDecoder(newArgs)
 	return func(raw json.RawMessage) (json.RawMessage, error) {
@@ -307,6 +313,13 @@ func scanCopyTreeValue(dec *json.Decoder, path string) error {
 		return fmt.Errorf("%s is null; omit the field entirely instead of sending null, which Daintree rejects and which would silently read here as 'no value given'", where)
 	case string:
 		if strings.TrimSpace(t) == "" {
+			// Top-level `name` is the one free-text field in the family: the host
+			// reads a blank one as "absent" and derives a label, so blank is not an
+			// error there. The check is exact — a `name` nested anywhere else (e.g.
+			// options.name, or inside an array) gets no such carve-out.
+			if path == "name" {
+				return nil
+			}
 			return fmt.Errorf("%s is blank; every path, pattern, git ref, id and enum value here must be non-empty (omit the field if you have no value for it)", where)
 		}
 	case json.Delim:
@@ -329,6 +342,13 @@ func scanCopyTreeValue(dec *json.Decoder, path string) error {
 				child := key
 				if path != "" {
 					child = path + "." + key
+				} else if key == "" {
+					// An empty top-level key must not leave the child path empty:
+					// its children would then look top-level themselves, and a
+					// nested "name" would wrongly inherit the blank carve-out.
+					// The quoted spelling keeps the path honest (the strict
+					// decoder rejects the unknown "" field regardless).
+					child = `""`
 				}
 				if err := scanCopyTreeValue(dec, child); err != nil {
 					return err
@@ -400,11 +420,20 @@ const copyTreeOptionsSchemaJSON = `{
     "required": []
   }`
 
+// copyTreeNameSchemaJSON is the top-level "name" property, shared verbatim by
+// all three copyTree wrappers (same drift rationale as the options schema
+// above). Top-level on purpose: the host keeps name out of CopyTreeOptions so
+// the label stays out of the run-history dedupe key. Deliberately no minLength —
+// a blank name means "no label given" and must not fail validation (the host
+// derives a label instead); the forward paths simply drop a blank one.
+const copyTreeNameSchemaJSON = `{ "type": "string", "description": "Short human-readable label for this copy tree, shown in the user's copy-tree run history and in the completion notification. 2 to 4 words describing what the context is for, e.g. 'auth flow context'. Omit it to have Daintree derive a label from the selection." }`
+
 /* --------------------------- copyTree.generate ---------------------------- */
 
 type copyTreeGenerateArgs struct {
 	WorktreeID     string           `json:"worktreeId,omitempty"`
 	WorktreePath   string           `json:"worktreePath,omitempty"`
+	Name           string           `json:"name,omitempty"`
 	Options        *copyTreeOptions `json:"options,omitempty"`
 	IncludeContent bool             `json:"includeContent,omitempty"`
 }
@@ -422,6 +451,11 @@ func (a copyTreeGenerateArgs) forwardMap() map[string]any {
 	if a.WorktreePath != "" {
 		m["worktreePath"] = a.WorktreePath
 	}
+	// A blank name means "no label given" — leave the key off the wire so the
+	// host derives a label from the selection, rather than sending "" as one.
+	if strings.TrimSpace(a.Name) != "" {
+		m["name"] = a.Name
+	}
 	if opts := a.Options.wire(); opts != nil {
 		m["options"] = opts
 	}
@@ -437,6 +471,7 @@ var copyTreeGenerateSchema = json.RawMessage(`{
   "properties": {
     "worktreeId": { "type": "string", "minLength": 1, "description": "Worktree to bundle, by id. Omit this and worktreePath to use the active worktree; the id wins when both are given." },
     "worktreePath": { "type": "string", "minLength": 1, "description": "Absolute worktree root path, as an alternative to worktreeId." },
+    "name": ` + copyTreeNameSchemaJSON + `,
     "options": ` + copyTreeOptionsSchemaJSON + `,
     "includeContent": { "type": "boolean", "description": "Also return a bounded HEAD of the bundle inline as 'content', with 'contentTruncated' reporting whether it was cut. The file at 'filePath' always holds the whole bundle; set this only when you need to eyeball what was captured." }
   },
@@ -490,6 +525,7 @@ func newCopyTreeGenerateTool(deps Deps) tools.Tool {
 type copyTreeCopyFileArgs struct {
 	WorktreeID   string           `json:"worktreeId,omitempty"`
 	WorktreePath string           `json:"worktreePath,omitempty"`
+	Name         string           `json:"name,omitempty"`
 	Options      *copyTreeOptions `json:"options,omitempty"`
 }
 
@@ -516,6 +552,10 @@ func (a copyTreeCopyFileArgs) forwardMap() map[string]any {
 	if a.WorktreePath != "" {
 		m["worktreePath"] = a.WorktreePath
 	}
+	// Blank name = "no label given": omit it so the host derives a label.
+	if strings.TrimSpace(a.Name) != "" {
+		m["name"] = a.Name
+	}
 	if opts := a.Options.wire(); opts != nil {
 		m["options"] = opts
 	}
@@ -532,6 +572,7 @@ var copyTreeCopyFileSchema = json.RawMessage(`{
   "properties": {
     "worktreeId": { "type": "string", "minLength": 1, "description": "REQUIRED (this or worktreePath): the worktree to bundle, by id. There is no active-worktree fallback for assistant calls — name the worktree you curated the file list against. The id wins when both are given." },
     "worktreePath": { "type": "string", "minLength": 1, "description": "REQUIRED (this or worktreeId): absolute worktree root path, as an alternative to worktreeId." },
+    "name": ` + copyTreeNameSchemaJSON + `,
     "options": ` + copyTreeOptionsSchemaJSON + `
   },
   "required": []
@@ -568,6 +609,7 @@ func newCopyTreeGenerateAndCopyFileTool(deps Deps) tools.Tool {
 type copyTreeInjectArgs struct {
 	TerminalID string           `json:"terminalId"`
 	WorktreeID string           `json:"worktreeId,omitempty"`
+	Name       string           `json:"name,omitempty"`
 	Options    *copyTreeOptions `json:"options,omitempty"`
 }
 
@@ -591,6 +633,7 @@ var copyTreeInjectSchema = json.RawMessage(`{
   "properties": {
     "terminalId": { "type": "string", "minLength": 1, "description": "Terminal to inject the generated bundle into. Target an IDLE terminal — the payload can be enormous." },
     "worktreeId": { "type": "string", "minLength": 1, "description": "Worktree to bundle, by id; Daintree uses the active worktree when omitted. This action does not accept worktreePath." },
+    "name": ` + copyTreeNameSchemaJSON + `,
     "options": ` + copyTreeOptionsSchemaJSON + `
   },
   "required": ["terminalId"]
@@ -620,6 +663,10 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 			m := map[string]any{"terminalId": a.TerminalID}
 			if a.WorktreeID != "" {
 				m["worktreeId"] = a.WorktreeID
+			}
+			// Blank name = "no label given": omit it so the host derives a label.
+			if strings.TrimSpace(a.Name) != "" {
+				m["name"] = a.Name
 			}
 			if opts := a.Options.wire(); opts != nil {
 				m["options"] = opts

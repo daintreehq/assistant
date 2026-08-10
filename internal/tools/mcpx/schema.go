@@ -84,9 +84,10 @@ const minCandidateOverlap = 4
 // used to flag a raw schema whose same-named typed wrapper actually governs the
 // call. Derived from the family's own registration rather than a hand-kept list
 // so a newly added wrapper is covered automatically — the daintree.call denylist
-// looks like the natural index but is NOT one (copyTree.generate has a wrapper
-// yet no denylist entry, so using it would have silently skipped the annotation
-// for the very tool that motivated this feature).
+// looks like the natural index but is NOT one: it encodes raw-call redirect
+// policy, which is a different question from "does a local wrapper govern this
+// name", and the two sets have historically diverged (copyTree.generate had a
+// wrapper but no denylist entry until its options became strict-decoded).
 //
 // Computed at runtime (not package init) to avoid a static initialization cycle:
 // the closure would call Tools(), which constructs this tool, which closes over

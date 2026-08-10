@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/daintree-assistant/internal/domain"
@@ -35,6 +36,52 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 		if got := presentTool(name); got != want {
 			t.Errorf("presentTool(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// The copy-tree label (`name`) is what the user actually wants to read in the
+// activity row — "auth flow context" beats a worktree id — but it is optional,
+// so the id previews must survive as the fallback when it is absent or blank.
+func TestPresentToolTarget_CopyTreePrefersName(t *testing.T) {
+	cases := []struct {
+		tool string
+		args string
+		want string
+	}{
+		{"copyTree.generate", `{"name":"auth flow context","worktreeId":"wt-1"}`, "auth flow context"},
+		{"copyTree.generateAndCopyFile", `{"name":"auth flow context","worktreeId":"wt-1"}`, "auth flow context"},
+		{"copyTree.injectToTerminal", `{"name":"auth flow context","terminalId":"t1"}`, "auth flow context"},
+		// No name → fall back to the id the row previewed before the label existed.
+		{"copyTree.generate", `{"worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1"}`, "t1"},
+		// A blank name means "derive a label" and must not eat the fallback.
+		{"copyTree.generate", `{"name":"  ","worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.injectToTerminal", `{"name":"","terminalId":"t1"}`, "t1"},
+		// A control-only name sanitizes to nothing and must ALSO fall through
+		// rather than black-hole the row (previewLine runs before the check).
+		{"copyTree.generate", `{"name":"\u001b\u000b","worktreeId":"wt-1"}`, "wt-1"},
+	}
+	for _, c := range cases {
+		if got := presentToolTarget(c.tool, c.args); got != c.want {
+			t.Errorf("presentToolTarget(%q, %s) = %q, want %q", c.tool, c.args, got, c.want)
+		}
+	}
+
+	// The label is free text, so the preview must flatten it to one safe row:
+	// newlines/tabs/padding collapse to single spaces (previewLine)…
+	if got := presentToolTarget("copyTree.generate", `{"name":"  auth\nflow\t context "}`); got != "auth flow context" {
+		t.Errorf("multi-line/padded name must collapse to one line, got %q", got)
+	}
+	// …an ESC byte (spelled \u001b in the JSON) becomes a space, leaving the
+	// sequence's residue as inert text — the row can never be restyled/cleared…
+	if got := presentToolTarget("copyTree.generate", `{"name":"auth \u001b[31mflow"}`); got != "auth [31mflow" {
+		t.Errorf("an escape byte must be neutralized to inert text, got %q", got)
+	}
+	// …and an over-long label truncates to the 48-cell budget with an ellipsis.
+	long := strings.Repeat("a", 60)
+	if got := presentToolTarget("copyTree.generate", `{"name":"`+long+`"}`); got != strings.Repeat("a", 47)+"…" {
+		t.Errorf("long name must truncate at 48 cells with an ellipsis, got %q", got)
 	}
 }
 
