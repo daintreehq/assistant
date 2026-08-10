@@ -297,3 +297,7 @@ gofmt -l .           # must print nothing
 - Workflows, skills, and persistent memory are implemented tool surfaces (`workflow.*`,
   `skill.*`, `memory.*`). Future phases target Daintree-owned watch-sets over MCP, which
   would let supervision tick without the assistant open.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).
