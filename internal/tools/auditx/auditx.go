@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // AuditFilters is the optional AND-combined filter set for QueryAudit. ms bounds

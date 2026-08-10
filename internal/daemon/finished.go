@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // judgeAgentFinished asks the small model the single byte-stable question

@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // runVerificationPass is a read-only post-completion reconciliation: it

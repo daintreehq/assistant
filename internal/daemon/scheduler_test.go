@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 func newScheduler(store Store, queue Queue, reg Registry, ctxFn func(context.Context, domain.ToolActor, string) *CheckContext) *Scheduler {

@@ -4,14 +4,14 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/prompts"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // PromptContext combines live runtime state with the atomic splash-time Daintree

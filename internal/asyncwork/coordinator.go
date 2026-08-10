@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 )
 
 // Defaults. The poll tick is deliberately 1s (not the scheduler's 3s): an async

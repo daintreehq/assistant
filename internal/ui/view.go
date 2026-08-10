@@ -5,10 +5,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/commands"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ui/composer"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/commands"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui/composer"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // view.go renders ONLY the live footer: the active turn

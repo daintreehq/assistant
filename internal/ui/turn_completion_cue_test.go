@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // turn_completion_cue_test.go locks the #317 contract: a turn that COMPLETES with prose

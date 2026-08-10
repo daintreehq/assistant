@@ -16,9 +16,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/daintreehq/daintree-assistant/internal/cli"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ui"
+	"github.com/daintreehq/assistant/internal/cli"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui"
 )
 
 // version is injected at build time via -ldflags "-X main.version=…" (see Makefile).

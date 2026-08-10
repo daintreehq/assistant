@@ -1,6 +1,6 @@
 package queue
 
-import "github.com/daintreehq/daintree-assistant/internal/domain"
+import "github.com/daintreehq/assistant/internal/domain"
 
 // The severity RANK order is authoritative for both the severityAtLeast filter
 // and ORDER BY ... DESC, and it intentionally DIFFERS from the Severity enum

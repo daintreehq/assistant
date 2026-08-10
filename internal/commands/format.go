@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // FormatRunList renders the /explain run list.

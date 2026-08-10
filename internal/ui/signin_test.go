@@ -6,11 +6,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/credentials"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/credentials"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // signInModel is the harness model with the sign-in sheet already up, standing in for

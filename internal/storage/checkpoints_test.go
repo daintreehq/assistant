@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestCheckpointRoundTrip — a single upsert is reloaded verbatim from the 'latest'

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // maxGrantTTLMs caps a grant's lifetime at 30 days; maxGrantUses caps uses at

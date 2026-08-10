@@ -13,7 +13,7 @@ Guidance for working in this repository.
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.
 
-`github.com/daintreehq/daintree-assistant` — a single native **Go** binary, a local
+`github.com/daintreehq/assistant` — a single native **Go** binary, a local
 CLI **orchestration assistant for Daintree** ("Daintree's local operations officer").
 It plans Daintree operations, spawns and supervises visible agent terminals, watches
 them with cheap models, schedules timers, and keeps the human's main conversation clean.
@@ -110,7 +110,7 @@ in `docs/BUBBLE_TEA.md`.
 
 ## Layout & architecture
 
-Module `github.com/daintreehq/daintree-assistant`, `go 1.25.8`. **Import with full
+Module `github.com/daintreehq/assistant`, `go 1.25.8`. **Import with full
 module paths.** SQLite is `modernc.org/sqlite` (pure Go, **no CGO** — `CGO_ENABLED=0`
 builds work). MCP is `github.com/modelcontextprotocol/go-sdk`. The cockpit is **Bubble
 Tea v2** (`charm.land/bubbletea/v2`, with `bubbles/v2`, `lipgloss/v2`, `glamour/v2`).

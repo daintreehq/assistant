@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // tier_race_test.go locks in the Config.Tier data race fix: /permissions mutates

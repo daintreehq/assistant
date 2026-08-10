@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // queueEventStore implements queue.EventStore over the storage layer's `events`

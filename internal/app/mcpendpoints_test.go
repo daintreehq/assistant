@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // The prompt context must name the endpoints this process is wired to, so the model can

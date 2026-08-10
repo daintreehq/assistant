@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // fakeDocsMCP records the last forwarded call and returns a canned envelope. It is the

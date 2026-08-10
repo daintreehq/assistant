@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 func TestBuildDigestShape(t *testing.T) {

@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // judgeAgentFinished is the shared "is this agent actually done?" confirmation. It

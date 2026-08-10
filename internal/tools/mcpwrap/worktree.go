@@ -1,6 +1,6 @@
 package mcpwrap
 
-import "github.com/daintreehq/daintree-assistant/internal/tools"
+import "github.com/daintreehq/assistant/internal/tools"
 
 // Worktree READS (risk read). The Assistant is a conductor — Daintree owns
 // worktree creation and the agent lifecycle; these wrappers let the model read

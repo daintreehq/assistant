@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // fakeApp is a host.App test double. SetHooks captures the sink so the test can

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // cohortReader scripts a SEQUENCE of multi-terminal status snapshots, one per

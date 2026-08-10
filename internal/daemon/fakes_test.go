@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // --- in-memory fakes ---------------------------------------------------------

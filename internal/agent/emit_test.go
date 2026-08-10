@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // orderSink records the ordered vocabulary of high-level events the loop emits so

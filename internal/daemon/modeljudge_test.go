@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Covers the runTerminalWatcherCheck modelJudge end-to-end behavior and the

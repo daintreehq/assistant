@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // WatcherSignals are the deterministic signals a single check reads for a

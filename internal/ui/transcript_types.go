@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/daintreehq/daintree-assistant/internal/domain"
+import "github.com/daintreehq/assistant/internal/domain"
 
 // transcript_types.go holds the run-oriented transcript model
 // plus the ordered-step turn model. The transcript folds a

@@ -5,7 +5,7 @@ package supervisor
 import (
 	"errors"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/config"
 )
 
 // The supervisor daemon depends on unix process/lock semantics (Setsid, flock).

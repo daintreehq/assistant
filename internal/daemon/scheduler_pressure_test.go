@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // scheduler_pressure_test.go pins the tick's MCP load shape: N due terminal

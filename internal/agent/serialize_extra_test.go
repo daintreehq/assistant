@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Additional serializeToolResult truncation edges not already covered by

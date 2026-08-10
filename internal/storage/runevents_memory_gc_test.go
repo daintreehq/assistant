@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // ---- run_events: round-trip, payload verbatim, UNIQUE(runId,seq), listRuns, scope ----

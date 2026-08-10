@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 func openAsyncTest(t *testing.T, now int64) *Store {

@@ -6,7 +6,7 @@
 // into the backend's structured request.startup and request.runtime blocks.
 package prompts
 
-import "github.com/daintreehq/daintree-assistant/internal/domain"
+import "github.com/daintreehq/assistant/internal/domain"
 
 // MainPromptContext is the CLI-collected environment state. Stable project/agent/
 // instruction fields build request.startup; live tier/MCP/scheduler/worktree

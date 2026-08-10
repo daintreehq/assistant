@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // recordingStore captures persisted conversation rows so seq + marker writes can be

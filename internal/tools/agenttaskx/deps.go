@@ -12,9 +12,9 @@ package agenttaskx
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // MCPCallResult is the Daintree MCP call envelope.

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/credentials"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/credentials"
+	"github.com/daintreehq/assistant/internal/debuglog"
 )
 
 // signin.go owns runtime re-authentication: the `/login` sheet's engine, and the

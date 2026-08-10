@@ -6,10 +6,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/terminal"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/terminal"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // cmds.go holds the out-of-band tea.Cmds (host wipe, BEL) and the App-hook helpers.

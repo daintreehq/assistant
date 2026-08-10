@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // These tests cover the BACKUP side of the stale-schema recovery (app_test.go's

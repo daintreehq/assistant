@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/asyncwork"
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/tools/asyncx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/terminalid"
+	"github.com/daintreehq/assistant/internal/asyncwork"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/tools/asyncx"
+	"github.com/daintreehq/assistant/internal/tools/extractionx"
+	"github.com/daintreehq/assistant/internal/tools/terminalid"
 )
 
 // terminalListTimeout bounds the best-effort terminal.list roster read used for id

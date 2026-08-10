@@ -10,9 +10,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/prompts"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/prompts"
 )
 
 // ptrOf returns a pointer to v — the nullable WorkflowRunRecord fields (issue, branch,

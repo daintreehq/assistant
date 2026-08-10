@@ -24,8 +24,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
 // fixtureRunner returns one canned task output for any task.

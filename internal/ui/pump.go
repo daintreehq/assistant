@@ -6,8 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // pump.go bridges the runtime's agent.EventSink (which the loop calls on its own

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // toolMsg builds a tool-role message with the given tool-call id and serialized body.

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // reducer_ported_test.go exercises the transcript-reducer and controller

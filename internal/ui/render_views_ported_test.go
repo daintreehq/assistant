@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/ui/markdown"
 )
 
 // render_views_ported_test.go exercises the rendered-view assertions for the

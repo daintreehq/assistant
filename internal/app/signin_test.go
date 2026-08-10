@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/credentials"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/credentials"
 )
 
 // capsServer answers the authenticated capabilities probe, recording the bearer it saw.

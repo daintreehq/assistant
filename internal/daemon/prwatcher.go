@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // PrWatcherOptions is the last-seen PR state persisted in WatcherRecord.optionsJson

@@ -1,6 +1,6 @@
 package mcpwrap
 
-import "github.com/daintreehq/daintree-assistant/internal/tools"
+import "github.com/daintreehq/assistant/internal/tools"
 
 // Git READ (risk read). git.getProjectPulse is the ONLY git tool the Daintree MCP
 // exposes to this wrapper set — it reports commits, branch state, and uncommitted

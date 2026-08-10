@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // These tests pin the streaming progress-event → UI phase mapping: the FIRST

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Additional sink behavior: a failed tool call still exits 0 (recoverable

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_question.go renders the multiple-choice question sheet (user.askMultipleChoice)

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
 // The workflow-intelligence graph tools (workflow.plan / getGraph / next /

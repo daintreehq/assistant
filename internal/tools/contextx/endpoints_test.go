@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // The snapshot is the model's "where am I actually pointed?" tool: it must name both

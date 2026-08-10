@@ -6,9 +6,9 @@ package cli
 import (
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/cli/render"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/cli/render"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // consoleSink maps agent events to render calls. It is the human

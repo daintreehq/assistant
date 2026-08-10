@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // "Which URL are you connected to?" used to be unanswerable: daintree.status reported

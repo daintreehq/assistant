@@ -8,12 +8,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/commands"
-	"github.com/daintreehq/daintree-assistant/internal/credentials"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/commands"
+	"github.com/daintreehq/assistant/internal/credentials"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // controller.go bridges the root model to agent.Session. It enforces single-flight

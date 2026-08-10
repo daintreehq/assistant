@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/commands"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/commands"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_chrome_ported_test.go exercises the rendered Go masthead/status strings

@@ -32,8 +32,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // summaryInputCaptureRouter records the FULL message slice handed to the small model,

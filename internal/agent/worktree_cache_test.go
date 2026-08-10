@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
-	"github.com/daintreehq/daintree-assistant/internal/prompts"
-	"github.com/daintreehq/daintree-assistant/internal/waitbudget"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/prompts"
+	"github.com/daintreehq/assistant/internal/waitbudget"
 )
 
 // The current-worktree snapshot is served from a cross-turn cache and refreshed on a

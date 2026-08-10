@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/projectinstructions"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/projectinstructions"
 )
 
 // hostState is the descriptor-handshake state machine. It starts await-descriptor

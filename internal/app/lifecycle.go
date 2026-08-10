@@ -6,13 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/daemon"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/queue"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/daemon"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/queue"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // ConnectMcp connects the MCP transport, rolls up any tool drift to one log line,

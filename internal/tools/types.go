@@ -15,8 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Re-export the ToolResult envelope + constructors from domain so tool families

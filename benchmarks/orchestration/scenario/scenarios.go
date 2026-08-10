@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/world"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/world"
 )
 
 // All returns the full scenario suite: the ~10 core workflows the assistant

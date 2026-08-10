@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/daemon"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/daemon"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Dashboard is the operations snapshot the deck + status rollup render from. It is

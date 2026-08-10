@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // memContents collects the content of a memory slice into a set for membership

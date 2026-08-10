@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // cancel_activity_test.go locks the cancel-resolve fix: a turn the user aborts must not

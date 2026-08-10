@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // memStore is an in-memory EventStore that faithfully reproduces the SQL

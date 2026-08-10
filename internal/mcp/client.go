@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/debuglog"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

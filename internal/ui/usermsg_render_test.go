@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // uiTheme builds a fully-resolved theme pinned to one mode (palette populated), so

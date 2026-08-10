@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
 // /workflow — the workflow-intelligence graph surfaces. All sub-commands are

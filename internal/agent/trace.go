@@ -3,9 +3,9 @@ package agent
 import (
 	"unicode/utf8"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // This file owns the per-session diagnostic trace for the turn engine. The backend

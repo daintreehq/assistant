@@ -3,12 +3,12 @@ package app
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	toolworkflow "github.com/daintreehq/daintree-assistant/internal/tools/workflow"
-	"github.com/daintreehq/daintree-assistant/internal/workflowgraph"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/tools"
+	toolworkflow "github.com/daintreehq/assistant/internal/tools/workflow"
+	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
 // Workflow-intelligence wiring (DAINTREE_WORKFLOW_INTELLIGENCE=1): the

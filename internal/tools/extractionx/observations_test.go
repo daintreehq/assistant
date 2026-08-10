@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools/terminalobs"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools/terminalobs"
 )
 
 // The cross-call settle memory (Deps.Observations) is the fix for the re-await

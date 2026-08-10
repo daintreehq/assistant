@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/mcp"
 )
 
 // fakeTerminalMCP is a scripted mcpToolCaller for the FetchOpenTerminals tests: it returns

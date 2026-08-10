@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/cli/render"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ipc"
-	"github.com/daintreehq/daintree-assistant/internal/supervisor"
+	"github.com/daintreehq/assistant/internal/cli/render"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ipc"
+	"github.com/daintreehq/assistant/internal/supervisor"
 )
 
 // NoDaemonEnv disables daemon auto-spawn (tests, and an operator kill switch).

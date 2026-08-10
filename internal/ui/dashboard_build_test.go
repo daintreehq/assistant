@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/daemon"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/daemon"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // dashboard_build_test.go covers the live-preview + durable-roster wiring: the

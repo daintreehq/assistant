@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
+	"github.com/daintreehq/assistant/internal/ui/markdown"
 )
 
 // render_skill_test.go covers the inline "Skill loaded" card the cockpit folds into a

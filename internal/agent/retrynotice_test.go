@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // The retry budget can now span ~a minute of wall clock while the backend restarts.

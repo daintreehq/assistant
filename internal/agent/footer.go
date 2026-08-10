@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // goalAnchorMaxRunes bounds the originating-ask text copied into the goal anchor.

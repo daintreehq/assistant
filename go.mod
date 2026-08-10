@@ -1,4 +1,4 @@
-module github.com/daintreehq/daintree-assistant
+module github.com/daintreehq/assistant
 
 go 1.25.8
 

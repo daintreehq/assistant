@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // Router is a TEST-ONLY shim. It used to be a production seam on SessionDeps,

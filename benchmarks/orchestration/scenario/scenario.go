@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/world"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/world"
 )
 
 // Scenario is one benchmark case.

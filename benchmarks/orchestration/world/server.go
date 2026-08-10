@@ -11,7 +11,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	internalmcp "github.com/daintreehq/daintree-assistant/internal/mcp"
+	internalmcp "github.com/daintreehq/assistant/internal/mcp"
 )
 
 // Serve starts the fake Daintree MCP server over the go-sdk's Streamable HTTP

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 const workflowCols = `id,issueNumber,issueUrl,issueTitle,branch,worktreeId,prNumber,prUrl,terminalIdsJson,watcherIdsJson,queueEventIdsJson,status,nextActionJson,notesJson,createdAt,updatedAt,completedAt`

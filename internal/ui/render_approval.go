@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_approval.go renders the approval sheet: a full-width

@@ -3,7 +3,7 @@ package contextx
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestSummarizeParallelizable locks terminal.summarize's concurrency opt-in. It is the

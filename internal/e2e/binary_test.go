@@ -34,7 +34,7 @@ func buildBinary(t *testing.T) string {
 			return
 		}
 		out := filepath.Join(dir, "daintree-assistant")
-		cmd := exec.Command("go", "build", "-o", out, "github.com/daintreehq/daintree-assistant/cmd/daintree-assistant")
+		cmd := exec.Command("go", "build", "-o", out, "github.com/daintreehq/assistant/cmd/daintree-assistant")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

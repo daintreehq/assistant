@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // routeRouter records which extraction task was used (ExtractText vs ExtractJSON)

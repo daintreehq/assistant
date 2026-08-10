@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Pre-aborted context: the user cancelled before we issued the launch → CANCELLED

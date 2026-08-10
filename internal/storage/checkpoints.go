@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Two fixed slots back the durable compaction checkpoint: the current one and the

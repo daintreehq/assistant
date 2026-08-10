@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // memoryCols drives every memory SELECT and the positional Scan in scanMemory —

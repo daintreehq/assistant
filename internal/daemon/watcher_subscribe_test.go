@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Covers issue #204: the terminal watcher subscribes to the agent-state resource

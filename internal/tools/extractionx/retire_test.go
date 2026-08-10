@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // retire_test.go pins the in-turn consumption contract: once a wait DIRECTLY
