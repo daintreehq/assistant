@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // buildSecurityFixture lays out the security fixture tree: a .env, a

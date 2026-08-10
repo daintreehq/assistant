@@ -31,9 +31,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/credentials"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/credentials"
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/joho/godotenv"
 )
 

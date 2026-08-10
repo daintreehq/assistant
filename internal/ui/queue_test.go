@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // queue_test.go covers the durable cancelled marker and the queued-turn retract.

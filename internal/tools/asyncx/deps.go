@@ -19,8 +19,8 @@ package asyncx
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // TerminalReader is the id-resolution slice of the terminal read surface

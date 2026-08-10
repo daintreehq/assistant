@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // These are PURE ports of the watcher-engine DSL helpers (daemon/condition.go,

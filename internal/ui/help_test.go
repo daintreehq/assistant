@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/commands"
+	"github.com/daintreehq/assistant/internal/commands"
 )
 
 // help_test.go covers T10: SwitchPanel wiring (the help/ops views are now reachable) and

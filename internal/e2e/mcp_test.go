@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/config"
 )
 
 // TestConnectsToFakeMCP drives App.Create + ConnectMcp against the real go-sdk

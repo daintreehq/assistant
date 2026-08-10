@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // Digest caps — the whole point of the digest is to IMPROVE context, not flood

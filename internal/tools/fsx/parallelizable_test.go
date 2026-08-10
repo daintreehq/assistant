@@ -3,7 +3,7 @@ package fsx
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestFSReadsParallelizable locks the concurrency opt-in for the read-only filesystem

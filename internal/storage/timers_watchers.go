@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // ---- timers ----

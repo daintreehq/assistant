@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // TestClearResetsBackendStateToken guards a real bug: /clear must start a BRAND-NEW

@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // historyLimit caps the recallable prompt history kept for ↑/↓ during a session

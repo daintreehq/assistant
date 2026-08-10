@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 

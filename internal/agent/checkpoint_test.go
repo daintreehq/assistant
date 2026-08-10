@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 // TestValidateCheckpointReinjectsMissingIDs is the issue's core guarantee: an ID present

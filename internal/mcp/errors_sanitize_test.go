@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/config"
 )
 
 // Transport errors (Go *url.Error and the SDK errors wrapping them) format the

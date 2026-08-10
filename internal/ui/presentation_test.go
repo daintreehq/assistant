@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // presentation_test.go: presentTool maps first-party tools to human verbs (never

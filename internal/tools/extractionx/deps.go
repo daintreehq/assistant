@@ -24,8 +24,8 @@ package extractionx
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // TerminalStatusEntry is the per-terminal status the reader returns for one read.

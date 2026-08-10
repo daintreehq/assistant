@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Covers the resource-update fast path (issue #204): a pushed agent-state

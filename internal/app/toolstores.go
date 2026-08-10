@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/storage"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools/memory"
-	queuetools "github.com/daintreehq/daintree-assistant/internal/tools/queue"
-	"github.com/daintreehq/daintree-assistant/internal/tools/skill"
-	"github.com/daintreehq/daintree-assistant/internal/tools/timer"
-	"github.com/daintreehq/daintree-assistant/internal/tools/watcher"
-	"github.com/daintreehq/daintree-assistant/internal/tools/workflow"
+	"github.com/daintreehq/assistant/internal/tools/memory"
+	queuetools "github.com/daintreehq/assistant/internal/tools/queue"
+	"github.com/daintreehq/assistant/internal/tools/skill"
+	"github.com/daintreehq/assistant/internal/tools/timer"
+	"github.com/daintreehq/assistant/internal/tools/watcher"
+	"github.com/daintreehq/assistant/internal/tools/workflow"
 )
 
 // This file bridges the per-family Store/Queue consumer interfaces onto the

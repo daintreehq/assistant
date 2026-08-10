@@ -13,7 +13,7 @@ package docsx
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // MCPClient is the slice of the docs MCP transport these wrappers use. It is a LOCAL

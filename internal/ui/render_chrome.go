@@ -4,8 +4,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_chrome.go renders the masthead, status line, note/command cells.

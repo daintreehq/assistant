@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // consume_test.go pins the in-turn consumption retirement surface: when the main

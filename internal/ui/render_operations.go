@@ -3,8 +3,8 @@ package ui
 import (
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_operations.go renders the operations deck: five sections

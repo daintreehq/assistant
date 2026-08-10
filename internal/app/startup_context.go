@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/prompts"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/prompts"
 )
 
 // startupReadTimeout bounds every best-effort Daintree snapshot read. Use a plain

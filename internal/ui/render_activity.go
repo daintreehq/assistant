@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // render_activity.go renders the activity tree — a turn's delegated work as a

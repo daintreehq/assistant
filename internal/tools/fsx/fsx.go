@@ -17,9 +17,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // Deps is empty: the fs family reaches only the local filesystem and the project

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // fakeBackend is a scripted backend.Backend for the app unit tests. The real client

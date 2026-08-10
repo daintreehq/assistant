@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // seqReader returns a scripted SEQUENCE of statuses, one per ReadStatuses call

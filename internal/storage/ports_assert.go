@@ -1,6 +1,6 @@
 package storage
 
-import "github.com/daintreehq/daintree-assistant/internal/ports"
+import "github.com/daintreehq/assistant/internal/ports"
 
 // Compile-time assertion that *Store satisfies the ports.Store seam the agent
 // loop / daemon depend on (AppendRunEvent, AppendAudit, Close).

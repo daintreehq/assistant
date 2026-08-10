@@ -8,11 +8,11 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/ui/composer"
-	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/ui/composer"
+	"github.com/daintreehq/assistant/internal/ui/markdown"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // testModel builds a root Model WITHOUT a real App (the View/render path never

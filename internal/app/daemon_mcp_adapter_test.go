@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/daemon"
+	"github.com/daintreehq/assistant/internal/daemon"
 )
 
 // TestDaemonReadCallOptions asserts the daemon's read-only MCP seam is wired with

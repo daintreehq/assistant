@@ -11,7 +11,7 @@ package ports
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // EventSink receives structured runtime events. The UiBridge, console sink, and

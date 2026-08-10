@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // liveBackendURL is the LOCAL development backend the live test targets — pinned

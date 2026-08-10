@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // ---- async_invocations (runtime-owned async tool futures) ----

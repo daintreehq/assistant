@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ipc"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
-	"github.com/daintreehq/daintree-assistant/internal/supervisor"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ipc"
+	"github.com/daintreehq/assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/supervisor"
 )
 
 // daemonHarness runs the built binary's `daemon` subcommand as a real detached-

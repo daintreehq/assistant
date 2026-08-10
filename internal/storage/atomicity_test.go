@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestUpsertEventNonPositiveTTLStaysVisible locks the ttlMs guard: a 0/negative ttlMs must

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
 )
 
 // Dispatch error codes (model-facing recovery signals — exact strings).

@@ -3,8 +3,8 @@ package commands
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/cli/render"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/cli/render"
 )
 
 // CommandResult is the REPL slash handler return.

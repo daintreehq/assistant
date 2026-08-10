@@ -6,13 +6,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/host"
-	"github.com/daintreehq/daintree-assistant/internal/supervisor"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/host"
+	"github.com/daintreehq/assistant/internal/supervisor"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // RunHost is the `host --stdio` entry: it builds the embedded-host App factory and

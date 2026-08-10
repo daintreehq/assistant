@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // fakeReader scripts per-tick statuses. Each ReadStatuses call consumes the next

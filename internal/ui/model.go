@@ -3,15 +3,15 @@ package ui
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/commands"
-	"github.com/daintreehq/daintree-assistant/internal/daemon"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/ui/composer"
-	"github.com/daintreehq/daintree-assistant/internal/ui/markdown"
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/commands"
+	"github.com/daintreehq/assistant/internal/daemon"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/ui/composer"
+	"github.com/daintreehq/assistant/internal/ui/markdown"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 // model.go is the root tea.Model state. It

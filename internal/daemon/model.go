@@ -3,7 +3,7 @@ package daemon
 import (
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // lastOutputAtLabel humanizes msSinceOutput as "<floor(ms/1000)>s ago", or "" when

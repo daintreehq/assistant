@@ -25,8 +25,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // Hard bounds (rune counts for the text fields). A scratch pad is ephemeral

@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Autonomous wake-up helpers. A terminal-watcher queue event means a supervised

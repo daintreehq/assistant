@@ -30,11 +30,11 @@ native toolchain or `npm`/`bun`/`node` dependency.
 
 ```bash
 # Install to your Go bin ($(go env GOBIN) or $(go env GOPATH)/bin)
-go install github.com/daintreehq/daintree-assistant/cmd/daintree-assistant@latest
+go install github.com/daintreehq/assistant/cmd/daintree-assistant@latest
 
 # …or from a checkout
-git clone https://github.com/daintreehq/daintree-assistant
-cd daintree-assistant
+git clone https://github.com/daintreehq/assistant
+cd assistant
 make build                                          # → ./bin/daintree-assistant (trimpath + version)
 # or directly:
 go build -o bin/daintree-assistant ./cmd/daintree-assistant

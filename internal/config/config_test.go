@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // strptr / boolptr are tiny helpers for the optional-override pointers.

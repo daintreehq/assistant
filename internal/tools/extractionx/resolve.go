@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
-	"github.com/daintreehq/daintree-assistant/internal/tools/terminalid"
+	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools/terminalid"
 )
 
 // codeUnknownTerminals is the loud-and-fast failure when a caller-supplied terminal id

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // errModelMustNotRun is returned by a guard model whose Classify must never be

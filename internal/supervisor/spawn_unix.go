@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/config"
 )
 
 // spawnDaemon launches `<self> daemon` detached (own session, no controlling

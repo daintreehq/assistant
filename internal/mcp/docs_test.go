@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/config"
 )
 
 // newInjectedDocs builds a docs-style Client (URL override + anonymous + the docs drift

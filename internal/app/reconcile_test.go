@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // fakeReconcileMCP is a scripted terminal.list source for the boot-reconcile tests.

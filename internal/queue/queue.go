@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ports"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ports"
 )
 
 // Queue implements the ports.Queue seam (Publish/Digest/Resolve) so the agent

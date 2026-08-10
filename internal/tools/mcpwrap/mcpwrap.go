@@ -1,6 +1,6 @@
 package mcpwrap
 
-import "github.com/daintreehq/daintree-assistant/internal/tools"
+import "github.com/daintreehq/assistant/internal/tools"
 
 // Tools returns the typed Daintree-MCP wrapper tools requested for this port:
 // recipe.list/run, the worktree reads (worktree.list/getCurrent),

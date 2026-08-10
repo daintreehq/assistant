@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/scenario"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/scenario"
 )
 
 // The pre-release schema exposes only the precise timing dimensions; ambiguous legacy

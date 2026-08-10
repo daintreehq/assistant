@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 var openAINameRePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)

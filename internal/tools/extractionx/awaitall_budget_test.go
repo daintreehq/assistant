@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/waitbudget"
+	"github.com/daintreehq/assistant/internal/waitbudget"
 )
 
 // These tests pin the per-turn cumulative foreground-wait budget contract on

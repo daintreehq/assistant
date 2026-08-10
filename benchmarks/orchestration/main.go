@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/runner"
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/scenario"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/runner"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/scenario"
 )
 
 func main() {

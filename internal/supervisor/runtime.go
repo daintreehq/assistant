@@ -28,12 +28,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/app"
-	"github.com/daintreehq/daintree-assistant/internal/config"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/ipc"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ipc"
+	"github.com/daintreehq/assistant/internal/mcp"
 )
 
 // Timing defaults. Test seams override via Options.

@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 var memIDRe = regexp.MustCompile(`^mem_[0-9a-f]{8}$`)

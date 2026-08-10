@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Cross-subsystem dependencies are declared as SMALL consumer-defined interfaces

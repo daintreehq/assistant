@@ -3,8 +3,8 @@ package agent
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/models"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/models"
 )
 
 func msgRow(seq int, role, content string) domain.ConversationMessageRecord {

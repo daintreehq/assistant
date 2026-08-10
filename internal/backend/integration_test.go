@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // liveBaseURL is the hardcoded local backend endpoint (mirrors backend.DefaultBaseURL).

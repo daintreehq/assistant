@@ -5,19 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/backend"
-	"github.com/daintreehq/daintree-assistant/internal/debuglog"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
-	"github.com/daintreehq/daintree-assistant/internal/storage"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/tools"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools/agenttaskx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/auditx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/contextx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/extractionx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/mcpx"
-	"github.com/daintreehq/daintree-assistant/internal/tools/skill"
+	"github.com/daintreehq/assistant/internal/tools/agenttaskx"
+	"github.com/daintreehq/assistant/internal/tools/auditx"
+	"github.com/daintreehq/assistant/internal/tools/contextx"
+	"github.com/daintreehq/assistant/internal/tools/extractionx"
+	"github.com/daintreehq/assistant/internal/tools/mcpx"
+	"github.com/daintreehq/assistant/internal/tools/skill"
 )
 
 // This file holds the small integrator adapters that bridge each tool family's

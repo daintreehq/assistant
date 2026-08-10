@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // agentIsActionableWake mirrors the host/cockpit wake filter: only terminal-

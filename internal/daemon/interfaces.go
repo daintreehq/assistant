@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // The daemon talks to four other subsystems (store, queue, MCP transport, small

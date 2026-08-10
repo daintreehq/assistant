@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // The daintree.call denylist redirect NAMES the typed wrapper for every wrapped

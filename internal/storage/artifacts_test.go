@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestArtifactInsertGetRoundTrip — InsertArtifact fills id (artifact_<8hex>) and

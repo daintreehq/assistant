@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/safety"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // callableNote explains the per-result `callable` flag so the model treats a

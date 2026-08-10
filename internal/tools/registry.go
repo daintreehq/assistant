@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/safety"
+	"github.com/daintreehq/assistant/internal/safety"
 )
 
 // openAINameRe is the legal OpenAI/DeepSeek function-name pattern. The model

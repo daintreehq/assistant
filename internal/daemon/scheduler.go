@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 )
 
 // SchedulerDeps wires the scheduler to its dependencies.

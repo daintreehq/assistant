@@ -13,8 +13,8 @@ import (
 	"io"
 	"sync"
 
-	"github.com/daintreehq/daintree-assistant/internal/agent"
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/agent"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Clock returns the current epoch-ms; injectable for tests.

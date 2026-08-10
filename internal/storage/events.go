@@ -8,7 +8,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 const eventCols = `id,source,severity,title,summary,targetJson,evidenceJson,recommendedActionsJson,dedupeKey,epistemicKind,createdAt,updatedAt,notifiedAt,expiresAt,resolvedAt,count`

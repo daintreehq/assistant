@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 func ctxDaemon(active *bool) *tools.ToolContext {

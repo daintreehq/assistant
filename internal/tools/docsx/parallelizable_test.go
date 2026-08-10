@@ -3,8 +3,8 @@ package docsx
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // TestDocsReadsParallelizable locks the concurrency opt-in for the documentation

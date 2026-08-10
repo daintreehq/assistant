@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // Finding 1: the extract tools advertise required fields that strict decoding alone

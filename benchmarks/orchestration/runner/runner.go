@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/scenario"
-	"github.com/daintreehq/daintree-assistant/benchmarks/orchestration/world"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/scenario"
+	"github.com/daintreehq/assistant/benchmarks/orchestration/world"
 )
 
 // Options configures a bench run.

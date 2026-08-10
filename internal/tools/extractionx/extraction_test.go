@@ -3,7 +3,7 @@ package extractionx
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 func ptrState(s string) *domain.AgentState { v := domain.AgentState(s); return &v }

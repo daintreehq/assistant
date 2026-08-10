@@ -9,8 +9,8 @@ package mcpwrap
 import (
 	"context"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
-	"github.com/daintreehq/daintree-assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 // MCPClient is the consumer-defined slice of the Daintree MCP transport these

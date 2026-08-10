@@ -3,7 +3,7 @@ package extractionx
 import (
 	"testing"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // TestParallelizableOptInBoundary locks the concurrency opt-in at its source. Only the

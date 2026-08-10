@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	// Aliased: the local `mcp MCP` parameters shadow the package name.
-	mcpclient "github.com/daintreehq/daintree-assistant/internal/mcp"
+	mcpclient "github.com/daintreehq/assistant/internal/mcp"
 )
 
 // TerminalPreview is one preview card. Raw scrollback shown to the human ONLY —

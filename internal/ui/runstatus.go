@@ -3,7 +3,7 @@ package ui
 import (
 	"fmt"
 
-	"github.com/daintreehq/daintree-assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // liveStatusLabel returns the LiveRunStatus label for a phase, or "" when the

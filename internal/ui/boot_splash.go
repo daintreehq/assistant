@@ -11,7 +11,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
-	"github.com/daintreehq/daintree-assistant/internal/ui/theme"
+	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
 const (
