@@ -443,10 +443,10 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 			t.State = TurnComplete
 		}
 		t.Phase = domain.PhaseComplete
-		// NO end-of-turn cue here, deliberately. A watcher wake that reports on an event
-		// without calling a tool is doing exactly its job — reporting IS the work — so
-		// "no action taken" would read as neglect on the majority of wakes. And the human
-		// isn't holding a turn on a wake, so the "over to you" half doesn't apply either.
+		// NO end-of-turn cue here, deliberately (#317 covers USER turns). A watcher wake
+		// that reports on an event without calling a tool is doing exactly its job —
+		// reporting IS the work — so a "no action taken" marker would read as neglect on
+		// the majority of wakes. Nor is anyone waiting on a wake to hand a turn back.
 		// Consecutive wakes are already separated by their own ◆ DAINTREE marker plus the
 		// blank line every sealed cell owns.
 	}

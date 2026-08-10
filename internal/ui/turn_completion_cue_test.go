@@ -292,20 +292,59 @@ func TestTurnComplete_CancelledGetsOnlyTheCancelNote(t *testing.T) {
 func TestTurnComplete_PhaseFailedGetsNoCueUnderTheErrorNote(t *testing.T) {
 	m := liveModel(80)
 	cell := callessTurn("turn_1", "read the terminals", "Model error: upstream returned 500")
-	// The ordered phase the agent last reported — the authoritative failure signal.
+	// Every production events.Error writer emits PhaseFailed first, so reproduce BOTH
+	// halves: the ordered phase (the authoritative failure signal) and the error note
+	// pumpError already put in the transcript. Neither isFailureReply nor
+	// terminalTurnState recognises this plain reply, so the turn seals TurnComplete —
+	// the exact shape that would otherwise print the cue directly under the error.
 	cell.Phase = domain.PhaseFailed
 	m.transcript = []TranscriptCell{{Turn: cell}}
 	m.activeTurn = "turn_1"
 	m.inFlight = true
+	m.addNote(NoteError, "Model error: upstream returned 500")
 
 	next, _ := m.onTurnComplete(TurnCompleteMsg{RunID: "turn_1", Reply: "Model error: upstream returned 500"})
-	if got := countCue(next.(Model)); got != 0 {
+	nm := next.(Model)
+
+	if nm.transcript[0].Turn.State != TurnComplete {
+		t.Fatalf("precondition: this shape must seal TurnComplete (got %v) — otherwise the "+
+			"phase guard isn't what's doing the work", nm.transcript[0].Turn.State)
+	}
+	if got := countCue(nm); got != 0 {
 		t.Fatalf("a phase-failed turn must not carry the end-of-turn cue, got %d", got)
+	}
+	if notes := noteTexts(nm); len(notes) != 1 {
+		t.Fatalf("expected only the pre-existing error note, got %q", notes)
 	}
 }
 
-// A surfaced Send failure seals TurnFailed with its own error note — no cue on top.
-func TestTurnComplete_SurfacedFailureGetsOnlyTheErrorNote(t *testing.T) {
+// The REAL surfaced-failure payload: App.Send passes Session.Send through, whose only
+// non-nil error is ErrTurnInProgress — returned with an EMPTY reply. isFailureReply("")
+// is true, so the "Turn could not start" branch is skipped and terminalTurnState seals
+// TurnFailed. Either way there must be no cue.
+func TestTurnComplete_SurfacedFailureGetsNoCue(t *testing.T) {
+	m := liveModel(80)
+	cell := callessTurn("turn_1", "do a thing", "partial output")
+	m.transcript = []TranscriptCell{{Turn: cell}}
+	m.activeTurn = "turn_1"
+	m.inFlight = true
+
+	next, _ := m.onTurnComplete(TurnCompleteMsg{RunID: "turn_1", Reply: "", Failed: true})
+	nm := next.(Model)
+
+	if nm.transcript[0].Turn.State != TurnFailed {
+		t.Errorf("an empty-reply failure must seal TurnFailed, got %v", nm.transcript[0].Turn.State)
+	}
+	if got := countCue(nm); got != 0 {
+		t.Fatalf("a surfaced failure must not carry the end-of-turn cue, got %d", got)
+	}
+}
+
+// Defensive coverage of the handler's other failure branch (Failed with a NON-sentinel
+// reply). No production caller produces this payload today — Send's only error carries
+// an empty reply — but the branch exists, and if it ever becomes reachable it must add
+// its note and still refuse the cue.
+func TestTurnComplete_FailedWithNonSentinelReplyGetsNoteNotCue(t *testing.T) {
 	m := liveModel(80)
 	cell := callessTurn("turn_1", "do a thing", "partial output")
 	m.transcript = []TranscriptCell{{Turn: cell}}
