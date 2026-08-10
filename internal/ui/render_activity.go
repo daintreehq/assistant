@@ -117,12 +117,15 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Unpinned memory", []string{"id"}
 	case "artifact.read":
 		return "Read artifact", []string{"artifactId", "id"}
+	// The copy-tree label (`name`) is the human-readable thing when present —
+	// "auth flow context" beats a worktree id — and strArg skips blank strings,
+	// so a blank/omitted name falls through to the id previews.
 	case "copyTree.generate":
-		return "Generated tree", []string{"worktreeId"}
+		return "Generated tree", []string{"name", "worktreeId"}
 	case "copyTree.generateAndCopyFile":
-		return "Copied tree", []string{"worktreeId"}
+		return "Copied tree", []string{"name", "worktreeId"}
 	case "copyTree.injectToTerminal":
-		return "Injected tree", []string{"terminalId"}
+		return "Injected tree", []string{"name", "terminalId"}
 	case "docs.search":
 		return "Searched docs", []string{"query"}
 	case "docs.getPage":

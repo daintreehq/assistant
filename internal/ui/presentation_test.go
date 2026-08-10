@@ -43,6 +43,33 @@ func TestPresentTool_FirstPartyVerbs(t *testing.T) {
 // "scratch.create") next to nicely-verbed neighbours ("Delegated"). Every canonical
 // local tool name should resolve to a human label — never a string still carrying a
 // dot from its namespace.
+// The copy-tree label (`name`) is what the user actually wants to read in the
+// activity row — "auth flow context" beats a worktree id — but it is optional,
+// so the id previews must survive as the fallback when it is absent or blank.
+func TestPresentToolTarget_CopyTreePrefersName(t *testing.T) {
+	cases := []struct {
+		tool string
+		args string
+		want string
+	}{
+		{"copyTree.generate", `{"name":"auth flow context","worktreeId":"wt-1"}`, "auth flow context"},
+		{"copyTree.generateAndCopyFile", `{"name":"auth flow context","worktreeId":"wt-1"}`, "auth flow context"},
+		{"copyTree.injectToTerminal", `{"name":"auth flow context","terminalId":"t1"}`, "auth flow context"},
+		// No name → fall back to the id the row previewed before the label existed.
+		{"copyTree.generate", `{"worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.generateAndCopyFile", `{"worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.injectToTerminal", `{"terminalId":"t1"}`, "t1"},
+		// A blank name means "derive a label" and must not eat the fallback.
+		{"copyTree.generate", `{"name":"  ","worktreeId":"wt-1"}`, "wt-1"},
+		{"copyTree.injectToTerminal", `{"name":"","terminalId":"t1"}`, "t1"},
+	}
+	for _, c := range cases {
+		if got := presentToolTarget(c.tool, c.args); got != c.want {
+			t.Errorf("presentToolTarget(%q, %s) = %q, want %q", c.tool, c.args, got, c.want)
+		}
+	}
+}
+
 func TestPresentTool_NoRawDottedNames(t *testing.T) {
 	names := []string{
 		"scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop",
