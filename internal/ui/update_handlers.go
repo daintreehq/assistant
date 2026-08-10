@@ -382,10 +382,29 @@ func (m Model) onTurnComplete(msg TurnCompleteMsg) (tea.Model, tea.Cmd) {
 			t.cancelPending()
 			m.addNote(NoteInfo, "Turn cancelled.")
 		}
+		if needsNoActionCue(t) {
+			m.addMutedNote(NoteInfo, noActionCueText)
+		}
 	}
 	m.activeTurn = ""
 	m.inFlight = false
 	return m.drainPending()
+}
+
+// noActionCueText marks the boundary a callless turn otherwise leaves invisible. It is
+// a STATE marker, deliberately not a question or a suggestion: the backend owns the
+// converge-and-stop rule, and a client-side nudge would fight it (#317).
+const noActionCueText = "End of turn — no action taken."
+
+// needsNoActionCue reports whether a just-sealed turn should carry the end-of-turn cue.
+// Scoped tightly to the gap #317 describes: a turn that COMPLETED normally, said
+// something, and called no tool renders as preamble + prose and nothing else
+// (renderLiveStatus goes silent the instant the turn seals), so it is indistinguishable
+// from one still streaming. Every other shape already carries its own terminal signal —
+// a tool turn settles its ledger row with ✓/×, a cancelled turn gets "Turn cancelled.",
+// and a failed turn is surfaced by the error path — so they must not double up here.
+func needsNoActionCue(t *TurnCell) bool {
+	return t != nil && t.State == TurnComplete && hasProse(t) && !hasToolStep(t)
 }
 
 // onWakeComplete seals the wake turn; on failure re-queue the burst once (#9: the
@@ -410,6 +429,12 @@ func (m Model) onWakeComplete(msg WakeCompleteMsg) (tea.Model, tea.Cmd) {
 			t.State = TurnComplete
 		}
 		t.Phase = domain.PhaseComplete
+		// Same gap, same cue: an autonomous wake that reports on an event without calling
+		// a tool seals into the identical "prose then silence" shape. The marker also
+		// separates two consecutive wake turns, which otherwise run together in scrollback.
+		if needsNoActionCue(t) {
+			m.addMutedNote(NoteInfo, noActionCueText)
+		}
 	}
 	burst := m.activeWake
 	m.activeWake = nil

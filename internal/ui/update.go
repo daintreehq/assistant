@@ -503,16 +503,30 @@ func (m *Model) activeTurnIndex() int {
 
 // addNote appends a standalone NoteCell to the transcript (out-of-band line).
 func (m *Model) addNote(level NoteLevel, text string) {
-	m.addSeverityNote(level, "", text)
+	m.appendNote(NoteCell{Level: level, Text: text})
 }
 
 // addSeverityNote appends a standalone NoteCell that carries its precise queue
 // severity, so the renderer draws ONE precise spine glyph instead of a coarse level
 // glyph plus a duplicate in the text. A "" severity behaves exactly like addNote.
 func (m *Model) addSeverityNote(level NoteLevel, sev domain.Severity, text string) {
-	m.transcript = append(m.transcript, TranscriptCell{Note: &NoteCell{
-		ID: domain.NewID("note_"), Level: level, Severity: sev, Text: text, Ts: domain.NowMS(),
-	}})
+	m.appendNote(NoteCell{Level: level, Severity: sev, Text: text})
+}
+
+// addMutedNote appends a standalone NoteCell whose BODY renders dim (the spine and
+// glyph keep their level tone). For lifecycle markers that fire often enough that
+// full-weight body text would read as noise beside the turn's own prose.
+func (m *Model) addMutedNote(level NoteLevel, text string) {
+	m.appendNote(NoteCell{Level: level, Text: text, Muted: true})
+}
+
+// appendNote stamps the identity fields every standalone note shares and appends the
+// cell — the single place a NoteCell enters the transcript, so the id/timestamp
+// contract can't drift between the note constructors.
+func (m *Model) appendNote(n NoteCell) {
+	n.ID = domain.NewID("note_")
+	n.Ts = domain.NowMS()
+	m.transcript = append(m.transcript, TranscriptCell{Note: &n})
 }
 
 // transcriptHasWork reports whether any turn or slash-command cell has been added to the

@@ -417,6 +417,19 @@ func hasProse(t *TurnCell) bool {
 	return false
 }
 
+// hasToolStep reports whether the turn ATTEMPTED any tool call. A StepTool is appended
+// when the batch is ANNOUNCED (not when it settles), so this is the local equivalent of
+// the backend's toolCallCount > 0 — announced-then-failed still counts as action taken,
+// because the ledger row is visible in scrollback either way.
+func hasToolStep(t *TurnCell) bool {
+	for _, s := range t.Steps {
+		if s.Kind == StepTool {
+			return true
+		}
+	}
+	return false
+}
+
 // renderProse renders one prose step. When withholdGrowing is false (the live footer, a
 // sealed turn, or an earlier prose step a later tool batch has since closed) it renders the
 // WHOLE step as markdown. In the live footer that means the still-growing final paragraph is
