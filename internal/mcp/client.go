@@ -91,20 +91,6 @@ type Status struct {
 // already-connected low-level client for tests (no network).
 type Options struct {
 	ClientOverride LowLevelClient
-
-	// URL overrides the connection endpoint. nil ⇒ cfg.McpURL (the primary Daintree
-	// control-plane MCP). Set (with Anonymous + DriftBaseline) for a SECOND server like
-	// the docs MCP, whose URL is a fixed product constant rather than a Daintree env var.
-	URL *string
-	// Anonymous connects WITHOUT a bearer token — for a public, no-auth server (the docs
-	// MCP). When true, no Authorization header is sent and an empty token is NOT treated
-	// as a "DAINTREE_MCP_TOKEN not set" misconfiguration.
-	Anonymous bool
-	// DriftBaseline overrides the documented-tool drift baseline. nil ⇒
-	// DocumentedMcpToolNames (the 59 Daintree tools). A second server passes its OWN
-	// short baseline (e.g. DocsDocumentedToolNames) so it never false-warns that the
-	// Daintree tools are missing from it.
-	DriftBaseline []string
 }
 
 // Client is the high-level DaintreeMcpClient. All mutable state is guarded by mu
@@ -112,14 +98,10 @@ type Options struct {
 type Client struct {
 	cfg config.AppConfig
 
-	// endpoint, anonymous, and driftBaseline are resolved ONCE in New (immutable
-	// after, so they need no lock). endpoint is the connection URL (cfg.McpURL unless
-	// Options.URL overrides it); anonymous suppresses the bearer header for a no-auth
-	// server; driftBaseline is the documented-tool set the warmToolCache drift check
-	// compares against (DocumentedMcpToolNames for the primary client, a server-specific
-	// list for a second server like the docs MCP).
+	// endpoint and driftBaseline are resolved ONCE in New (immutable after, so they
+	// need no lock). endpoint is the connection URL (cfg.McpURL); driftBaseline is the
+	// documented-tool set the warmToolCache drift check compares against.
 	endpoint      string
-	anonymous     bool
 	driftBaseline []string
 
 	// sdkClient is the SDK client built ONCE in New with the resource-updated
@@ -173,21 +155,10 @@ func closeLowLevel(low LowLevelClient) {
 // from construction with transport "injected" — but the cache is NOT warmed here
 // (Connect warms it once).
 func New(cfg config.AppConfig, opts Options) *Client {
-	// Resolve the connection identity once. URL/Anonymous/DriftBaseline let a SECOND
-	// instance target a different server (the docs MCP) without reading the Daintree env.
-	endpoint := cfg.McpURL
-	if opts.URL != nil {
-		endpoint = *opts.URL
-	}
-	driftBaseline := opts.DriftBaseline
-	if driftBaseline == nil {
-		driftBaseline = DocumentedMcpToolNames
-	}
 	c := &Client{
 		cfg:             cfg,
-		endpoint:        endpoint,
-		anonymous:       opts.Anonymous,
-		driftBaseline:   driftBaseline,
+		endpoint:        cfg.McpURL,
+		driftBaseline:   DocumentedMcpToolNames,
 		transportKind:   transportNone,
 		resourceUpdates: make(chan string, resourceUpdateBuffer),
 		gov:             newGovernor(governorMaxConcurrent, governorMinInterval),
@@ -258,9 +229,8 @@ func (c *Client) Status() Status {
 func (c *Client) statusLocked() Status {
 	s := Status{
 		Connected: c.connected,
-		// Report the ACTUAL connection endpoint (c.endpoint), not cfg.McpURL — for the
-		// primary client they're identical, but a second server (docs) overrides the URL,
-		// so this keeps Status honest for diagnostics on either client.
+		// Report the ACTUAL connection endpoint resolved in New, so Status stays honest
+		// for diagnostics rather than re-deriving it from config.
 		URL:       c.endpoint,
 		Transport: c.transportKind,
 		Error:     c.lastError,
@@ -304,9 +274,9 @@ func (c *Client) Connect(ctx context.Context) Status {
 		return s
 	}
 
-	// 3. Missing URL/token. An anonymous (no-auth) server needs only a URL; the bearer
-	// token requirement applies to the primary Daintree control-plane MCP alone.
-	if c.endpoint == "" || (!c.anonymous && c.cfg.McpToken == "") {
+	// 3. Missing URL/token. The Daintree control plane authenticates every call, so
+	// both halves are required.
+	if c.endpoint == "" || c.cfg.McpToken == "" {
 		c.lastError = "DAINTREE_MCP_URL / DAINTREE_MCP_TOKEN not set"
 		s := c.statusLocked()
 		c.mu.Unlock()
@@ -314,10 +284,7 @@ func (c *Client) Connect(ctx context.Context) Status {
 	}
 
 	rawURL := c.endpoint
-	token := ""
-	if !c.anonymous {
-		token = c.cfg.McpToken
-	}
+	token := c.cfg.McpToken
 	c.mu.Unlock()
 
 	// 4. Parse URL.
@@ -331,9 +298,9 @@ func (c *Client) Connect(ctx context.Context) Status {
 		return s
 	}
 
-	// 5/6. Try Streamable HTTP first. An empty token (anonymous server) gets a plain
-	// client with no Authorization header.
-	httpClient := httpClientFor(token)
+	// 5/6. Try Streamable HTTP first. The token is guaranteed non-empty by the gate
+	// above, so the transport always carries a bearer.
+	httpClient := bearerHTTPClient(token)
 	session, httpErr := c.connectStreamableHTTP(ctx, u.String(), httpClient)
 	if httpErr == nil {
 		c.applyConnected(session, transportStreamableHTTP)
@@ -475,9 +442,7 @@ func (c *Client) runDriftCheck() {
 		return
 	}
 
-	// 4. Missing-only: documented names absent from live, in array order. The baseline is
-	// per-client (DocumentedMcpToolNames for the primary, a server-specific list for a
-	// second server like the docs MCP) so the two never cross-contaminate.
+	// 4. Missing-only: documented names absent from live, in array order.
 	for _, name := range c.driftBaseline {
 		if _, ok := live[name]; !ok {
 			c.driftToolNames = append(c.driftToolNames, name)
@@ -927,17 +892,6 @@ func (b *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 func bearerHTTPClient(token string) *http.Client {
 	return &http.Client{Transport: &bearerRoundTripper{token: token, base: http.DefaultTransport}}
-}
-
-// httpClientFor returns a bearer-injecting client for the primary Daintree MCP, or a
-// plain client (no Authorization header) when token is empty — the public, no-auth docs
-// MCP. Sending "Bearer " with an empty token would be a malformed credential some
-// gateways reject, so an anonymous server gets no auth header at all.
-func httpClientFor(token string) *http.Client {
-	if token == "" {
-		return &http.Client{}
-	}
-	return bearerHTTPClient(token)
 }
 
 // connectStreamableHTTP connects via the SDK's Streamable HTTP transport. It

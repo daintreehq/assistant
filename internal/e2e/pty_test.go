@@ -394,7 +394,6 @@ func runSplashConnectKeepsFooter(
 		"DAINTREE_ASSISTANT_TIER=system",
 		"DAINTREE_MCP_URL="+mcpServer.url(),
 		"DAINTREE_MCP_TOKEN=fake-token",
-		"DAINTREE_DOCS_MCP_URL="+mcpServer.url(),
 	)
 	if embedded {
 		cmd.Env = append(cmd.Env, "DAINTREE_WINDOW_ID=test-window")

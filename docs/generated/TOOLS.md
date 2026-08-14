@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 87 tools in 24 groups
+## Inventory — 84 tools in 23 groups
 
 ### `agentTask.*`
 
@@ -81,14 +81,6 @@ already drifted out of agreement with each other and with the binary.
 | `daintree.status` | read | supervisor | — | not needed | — | serial | — | Report the Daintree MCP link: the endpoint URL it is connected to, connected, transport, tool count, and the error te… |
 | `daintree.listTools` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List the Daintree MCP tools, with their names and descriptions |
 | `daintree.call` | system | system | **typed** | **never** | `daintree-mcp` | serial | — | Raw passthrough to ANY Daintree MCP tool |
-
-### `docs.*`
-
-| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
-|---|---|---|---|---|---|---|---|---|
-| `docs.search` | read | supervisor | — | not needed | `docs-mcp` | read-cohort | — | Search Daintree's live documentation to answer a user's how-to or help question ("how do I…", "what is…", "how do I c… |
-| `docs.getPage` | read | supervisor | — | not needed | `docs-mcp` | read-cohort | — | Fetch the full markdown of a specific Daintree documentation page by its URL path |
-| `docs.getRelatedPages` | read | supervisor | — | not needed | `docs-mcp` | read-cohort | — | Find Daintree documentation pages related to a known page, for suggesting further reading |
 
 ### `forge.*`
 

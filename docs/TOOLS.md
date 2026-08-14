@@ -46,7 +46,7 @@ From [`internal/tools/types.go`](../internal/tools/types.go):
 | `Schema` | `json.RawMessage` | ✅ | The JSON Schema object advertised as the OpenAI `parameters`. **Must set `"additionalProperties": false`.** Use `tools.NoArgs` for a no-argument tool. |
 | `Decode` | `DecodeFunc` | — | Validates/coerces args before the handler runs. Almost always `tools.StrictDecoder(func() any { return &myArgs{} })`. nil ⇒ raw args pass through unvalidated. |
 | `Handle` | `Handler` | ✅ | `func(ctx context.Context, args json.RawMessage, tctx *ToolContext) ToolResult`. Does the work. |
-| `Requires` | `Connection` | — | The external connection the tool needs to do its job (`RequiresDaintreeMCP`, `RequiresDocsMCP`, `RequiresInteractive`; zero value = purely local). **Documentation, not a gate** — dispatch never reads it. It feeds the generated reference, `doctor`, and the degraded-mode banner, so "what still works while Daintree is disconnected?" has one answer. Usually stamped per family in `app.DefaultToolBuilder`. |
+| `Requires` | `Connection` | — | The external connection the tool needs to do its job (`RequiresDaintreeMCP`, `RequiresBackend`, `RequiresInteractive`; zero value = purely local). **Documentation, not a gate** — dispatch never reads it. It feeds the generated reference and its drift tests, so "what still works while Daintree is disconnected?" has one answer derived from the registry (`doctor` and the degraded-mode banner are the intended next readers, not current ones). Usually stamped per family in `app.DefaultToolBuilder`. |
 | `Parallelizable` | bool | — | Opt this tool into concurrent dispatch with any other read-only batch sibling. Only for reads with no side effects and no ordering dependency; double-gated on `RiskRead`. **Never** on a barrier/wait tool. |
 | `ParallelHomogeneous` | bool | — | Narrower: lets a MUTATING tool batch with consecutive same-name siblings that are already fully authorized (the spawn fan-out case). Pair with `ParallelConflictKey` to keep two calls off one shared target. |
 
@@ -206,7 +206,6 @@ what you need when deciding where a NEW tool goes:
 | `memory` · `scratchx` | state that outlives a session, and state scoped inside one |
 | `skill` | local run-tracking only — selection is server-owned ([`SKILLS.md`](SKILLS.md)) |
 | `auditx` · `artifactx` | the audit trail, and paging oversized results |
-| `docsx` | the public no-auth Daintree documentation MCP (a SECOND client) |
 | `questionx` | `user.askMultipleChoice` — one finite question, interactive sessions only |
 
 Each family exposes one `Tools(Deps) []tools.Tool` constructor and reaches its
@@ -214,11 +213,13 @@ dependencies through a small `Deps` struct, never a concrete package import.
 
 ### Declare the connection your tool needs
 
-Set `Tool.Requires` (`RequiresDaintreeMCP`, `RequiresDocsMCP`, `RequiresInteractive`, or
+Set `Tool.Requires` (`RequiresDaintreeMCP`, `RequiresBackend`, `RequiresInteractive`, or
 the zero value for purely local). It gates nothing — a tool whose connection is down still
 runs and returns its own clean "not connected" failure — but it is what lets the generated
-reference, `doctor`, and the degraded-mode banner answer "which of these actually work
-right now?" from one place. `app.DefaultToolBuilder` stamps it per family, so a new tool
+reference answer "which of these actually work right now?" from one place instead of a
+hand-maintained list that drifts. (`doctor` and the degraded-mode banner are the intended
+next readers; until they are wired, don't describe them as reading it.)
+`app.DefaultToolBuilder` stamps it per family, so a new tool
 inherits its family's dependency; override by name there when a family is mixed (as
 `async.list`/`async.cancel` are, being local ledger reads in an otherwise MCP-bound family).
 

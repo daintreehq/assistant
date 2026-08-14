@@ -25,11 +25,6 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	attemptCtx, cancelAttempt := boundedMCPConnectContext(ctx)
 	defer cancelAttempt()
 
-	// Kick off the docs-MCP handshake in PARALLEL (fire-and-forget) so it rides alongside
-	// the Daintree connect during the boot splash WITHOUT sitting on the critical path —
-	// a slow/unreachable public docs server must never add latency to boot, one-shot runs,
-	// doctor, or /reconnect. The docs tools fail cleanly with MCP_UNAVAILABLE until it lands.
-	a.connectDocsAsync(false)
 	wasConnected := a.MCP.Status().Connected
 	st := a.MCP.Connect(attemptCtx)
 	a.logMcpConnectDiagnostics(st)
@@ -60,9 +55,6 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	attemptCtx, cancelAttempt := boundedMCPConnectContext(ctx)
 	defer cancelAttempt()
 
-	// Reconnect the docs MCP in parallel too (fire-and-forget), so /reconnect refreshes
-	// BOTH transports without the docs link gating the primary status it returns.
-	a.connectDocsAsync(true)
 	st := a.MCP.Reconnect(attemptCtx)
 	a.logMcpConnectDiagnostics(st)
 	a.warnOnDrift(st)
@@ -93,52 +85,6 @@ func boundedMCPConnectContext(parent context.Context) (context.Context, context.
 		timer.Stop()
 		cancel()
 	}
-}
-
-// docsConnectTimeout bounds the docs-MCP handshake so a wedged or unreachable docs
-// server can never leave a connect goroutine running indefinitely. docsCloseTimeout
-// bounds the teardown at shutdown for the same reason (a public, un-timed endpoint).
-const docsConnectTimeout = 6 * time.Second
-const docsCloseTimeout = 2 * time.Second
-
-// closeMCPWithTimeout closes an mcp.Client but never blocks process exit longer than d:
-// the close issues a network teardown over an un-timed http.Client, so a wedged public
-// endpoint (the anonymous docs server) could otherwise hang exit. On timeout we abandon
-// the close goroutine — the process is exiting anyway, so the leak is bounded by exit.
-func closeMCPWithTimeout(c *mcp.Client, d time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = c.Close()
-	}()
-	select {
-	case <-done:
-	case <-time.After(d):
-	}
-}
-
-// connectDocsAsync (re)connects the docs MCP on a background goroutine bounded by
-// docsConnectTimeout. FIRE-AND-FORGET (no join handle returned) so it never gates the
-// caller, but tracked on docsConnectWG so Shutdown JOINS it before closing the client —
-// otherwise a late applyConnected could install a session AFTER Close and leak it. The
-// goroutine derives its context from a.baseCtx (not the caller's), so Shutdown's
-// baseCancel aborts an in-flight connect; a failed docs connect is non-fatal and is NOT
-// folded into the primary mcp.Status.
-func (a *App) connectDocsAsync(reconnect bool) {
-	if a.DocsMCP == nil {
-		return
-	}
-	a.docsConnectWG.Add(1)
-	go func() {
-		defer a.docsConnectWG.Done()
-		ctx, cancel := context.WithTimeout(a.baseCtx, docsConnectTimeout)
-		defer cancel()
-		if reconnect {
-			a.DocsMCP.Reconnect(ctx)
-		} else {
-			a.DocsMCP.Connect(ctx)
-		}
-	}()
 }
 
 // logMcpConnectDiagnostics writes one connection-diagnostics line to the debug log on
@@ -326,27 +272,16 @@ func (a *App) Shutdown() error {
 		a.Session.DrainBackgroundWork()
 	}
 	debuglog.BootTrace("shutdown.session.drained")
-	// Network teardown is DETACHED: both MCP closes are pure connection teardown with
-	// zero store coupling, and by this point nothing uses either client (baseCancel +
-	// the drains above joined every consumer). Blocking on them held the measured
-	// ~250ms (worst-case 2s) docs-server round trip inside BOTH the one-shot exit AND
-	// the daemon's attach handover — the lease release sat behind a public-internet
-	// close. Only the store close below must stay synchronous (the next owner may
-	// open the DB the instant the caller releases the flock). The goroutines are
-	// self-terminating; a wedged endpoint leaks one goroutine bounded by process
-	// exit / TCP teardown, the same abandonment policy closeMCPWithTimeout already
-	// accepted.
+	// Network teardown is DETACHED: the MCP close is pure connection teardown with
+	// zero store coupling, and by this point nothing uses the client (baseCancel +
+	// the drains above joined every consumer). Blocking on it put a network round
+	// trip inside BOTH the one-shot exit AND the daemon's attach handover — the lease
+	// release sat behind a close. Only the store close below must stay synchronous
+	// (the next owner may open the DB the instant the caller releases the flock). The
+	// goroutine is self-terminating; a wedged endpoint leaks one goroutine bounded by
+	// process exit / TCP teardown.
 	if a.MCP != nil {
 		go func(c *mcp.Client) { _ = c.Close() }(a.MCP)
-	}
-	if a.DocsMCP != nil {
-		// Join any in-flight docs (re)connect BEFORE closing — baseCancel above already
-		// aborted it, so the join is fast — preserving the "never install a session
-		// after Close" ordering, just off the caller's critical path.
-		go func(c *mcp.Client) {
-			a.docsConnectWG.Wait()
-			closeMCPWithTimeout(c, docsCloseTimeout)
-		}(a.DocsMCP)
 	}
 	debuglog.BootTrace("shutdown.mcp.detached")
 	if a.Store != nil {

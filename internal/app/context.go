@@ -111,8 +111,8 @@ func (a *App) resumedWatchersForFooter() []string {
 //
 // Endpoint-only by design: the backend renders this list as a session-stable system
 // block, so it must NOT carry connected/transport/toolCount — those change mid-session
-// (the docs MCP finishes connecting a beat after boot; a reconnect flips transport) and
-// would re-encode the ~18k tool schemas behind it on every change. The live status
+// (a reconnect flips transport, a dropped link flips connected) and would re-encode the
+// ~18k tool schemas behind it on every change. The live status
 // already rides the volatile runtime tail. An unconfigured server (no URL — no Daintree
 // in the environment) contributes no entry rather than a blank one.
 func (a *App) mcpServerContexts(primary mcp.Status) []prompts.MCPServerContext {
@@ -125,9 +125,6 @@ func (a *App) mcpServerContexts(primary mcp.Status) []prompts.MCPServerContext {
 		out = append(out, prompts.MCPServerContext{Name: name, URL: url, Description: description})
 	}
 	add("daintree", primary.URL, "Daintree control plane (terminals, agents, worktrees, actions)")
-	if a.DocsMCP != nil {
-		add("daintree-docs", a.DocsMCP.Status().URL, "public Daintree documentation search (no auth)")
-	}
 	return out
 }
 

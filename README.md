@@ -220,9 +220,9 @@ token, using `github.com/modelcontextprotocol/go-sdk`. Without these it runs in
 orchestration role is offline.
 
 What still works: filesystem reads, memory, timers, the attention queue, grants, the
-audit trail, the async and workflow ledgers, `daintree.status` and `context.snapshot`
-(both report the outage as part of their answer), and the docs MCP, which is a separate
-public endpoint. What does not: anything that reaches a terminal, agent, or worktree.
+audit trail, the async and workflow ledgers, and `daintree.status` and `context.snapshot`
+(both report the outage as part of their answer). What does not: anything that reaches a
+terminal, agent, or worktree.
 
 **Watchers are the subtle case.** `watcher.terminal.create` will happily write a durable
 row, but the engine polls through the Daintree control plane, so a watcher created while
@@ -348,7 +348,7 @@ The shape worth knowing without reading the table:
 | `workflow.*` | the durable work ledger (plus a flag-gated execution graph) |
 | `worktree.*` `recipe.*` `forge.*` `git.*` `copyTree.*` | Daintree and repository operations |
 | `memory.*` `scratch.*` `skill.*` `audit.*` | state that outlives, or is scoped inside, a turn |
-| `daintree.*` `tool.search` `docs.*` | capability discovery, live documentation, and the raw MCP escape hatch |
+| `daintree.*` `tool.search` | capability discovery and the raw MCP escape hatch |
 | `user.askMultipleChoice` | one finite question, answered in place |
 
 ## Environment variables

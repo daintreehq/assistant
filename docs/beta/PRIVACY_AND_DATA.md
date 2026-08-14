@@ -6,16 +6,16 @@ What leaves your machine, what stays on it, and how to get rid of any of it.
 
 ## What leaves your machine
 
-Three separate destinations, not one:
+Two separate destinations, not one:
 
 ```
 model traffic   you → CLI → Daintree Assistant backend → OpenRouter → the selected model
 Daintree        you → CLI → the local Daintree MCP (terminals, agents, worktrees)
-documentation   you → CLI → the public Daintree docs MCP (no auth, only for docs.* lookups)
 ```
 
-The Daintree MCP is local to your machine. The docs MCP is a public endpoint and sees
-only your documentation search queries.
+The Daintree MCP is local to your machine. Documentation lookups for questions about
+Daintree itself are performed by the backend, not this CLI, so the public docs server
+sees the backend's search query rather than any connection from you.
 
 ### To the Assistant backend, on every turn
 

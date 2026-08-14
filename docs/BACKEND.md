@@ -417,8 +417,9 @@ with something unparseable (usually a provider or compatibility problem).
   and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
   wake, workflow runs, async operations, memories, and session-ended watchers.
 - **The integration surface names its endpoints.** `runtime.mcp_servers` lists every MCP
-  server this process is wired to — the primary Daintree control plane and the public docs
-  MCP — each as `name` + a `description` leading with its endpoint URL, so the model can
+  server this process is wired to — the primary Daintree control plane, and nothing else
+  since the docs client was removed (issue #332) — each as `name` + a `description` leading
+  with its endpoint URL, so the model can
   say WHICH Daintree it is driving instead of guessing (ses_8cb40b4e). The backend renders
   it as a session-**stable** system block ahead of the tool schemas, so the list carries
   endpoints ONLY: connected/transport/tool-count fluctuate mid-session and stay on

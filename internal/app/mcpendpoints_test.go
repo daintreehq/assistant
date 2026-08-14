@@ -36,29 +36,23 @@ func TestPromptContextCarriesSanitizedMCPEndpoints(t *testing.T) {
 	if len(servers) == 0 {
 		t.Fatal("no MCP servers reported — the model cannot name its endpoint")
 	}
-	var primary, docs bool
+	var primary bool
 	for _, s := range servers {
 		if strings.Contains(s.URL, "super-secret-token") {
 			t.Fatalf("credential survived into the prompt context: %q", s.URL)
 		}
-		switch s.Name {
-		case "daintree":
+		if s.Name == "daintree" {
 			primary = true
 			if s.URL != "http://127.0.0.1:45454/mcp" {
 				t.Errorf("primary endpoint = %q", s.URL)
-			}
-		case "daintree-docs":
-			docs = true
-			if s.URL == "" {
-				t.Error("docs endpoint is blank")
 			}
 		}
 		if s.Description == "" {
 			t.Errorf("%s has no role description", s.Name)
 		}
 	}
-	if !primary || !docs {
-		t.Errorf("want both MCP servers listed, got %+v", servers)
+	if !primary {
+		t.Errorf("want the daintree MCP server listed, got %+v", servers)
 	}
 }
 
@@ -156,24 +150,24 @@ func TestSnapshotToolSanitizesBackendURL(t *testing.T) {
 
 // With no Daintree in the environment there is no endpoint to report; an entry with a
 // blank URL would be worse than none (the model would read it as "connected to nothing
-// in particular"). The docs MCP is a fixed product URL, so it stays.
+// in particular").
 func TestPromptContextOmitsUnconfiguredMCPEndpoint(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	var docs bool
-	for _, s := range a.PromptContext().MCPServers {
+	servers := a.PromptContext().MCPServers
+	for _, s := range servers {
 		if s.URL == "" {
 			t.Errorf("blank endpoint reported for %q", s.Name)
 		}
 		if s.Name == "daintree" {
 			t.Errorf("unconfigured primary MCP must not be listed, got %+v", s)
 		}
-		docs = docs || s.Name == "daintree-docs"
 	}
-	// An empty list would satisfy the loop above, so pin what must REMAIN: the docs MCP
-	// is a fixed product endpoint and does not depend on Daintree being configured.
-	if !docs {
-		t.Error("docs MCP dropped along with the unconfigured primary")
+	// The primary control plane is the ONLY MCP this process is wired to now (the docs
+	// client left with issue #332), so an unconfigured Daintree means an empty block —
+	// not a fabricated entry with a blank endpoint, which is what the loop above guards.
+	if len(servers) != 0 {
+		t.Errorf("no MCP is configured, so the block must be empty, got %+v", servers)
 	}
 }

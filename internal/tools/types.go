@@ -57,10 +57,6 @@ const (
 	// it there are no terminals to read, no agents to spawn, and no worktrees to
 	// inspect — the assistant's whole orchestration role is offline.
 	RequiresDaintreeMCP Connection = "daintree-mcp"
-	// RequiresDocsMCP needs the public no-auth Daintree documentation MCP. Independent
-	// of the control plane: docs answers still work when Daintree itself is unreachable,
-	// which is exactly when "how do I…" questions get asked.
-	RequiresDocsMCP Connection = "docs-mcp"
 	// RequiresBackend needs the Daintree Assistant backend beyond the turn itself — a
 	// server-owned utility task (summarize, extract, classify, plan, reconcile). Distinct
 	// from the control plane: the backend can be reachable while Daintree is not, and

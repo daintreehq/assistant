@@ -650,7 +650,7 @@ func taskManifestDoctorCheck(ctx context.Context, a *app.App) DoctorCheck {
 	return c
 }
 
-// daintreeDoctorChecks diagnoses the two MCP connections and the project binding.
+// daintreeDoctorChecks diagnoses the Daintree MCP connection and the project binding.
 func daintreeDoctorChecks(a *app.App) []DoctorCheck {
 	var out []DoctorCheck
 
@@ -690,20 +690,6 @@ func daintreeDoctorChecks(a *app.App) []DoctorCheck {
 		c.Hint = "Daintree may have closed or revoked this session. Reopen the assistant from Daintree, or use /reconnect."
 	}
 	out = append(out, c)
-
-	// The docs MCP is a SECOND, public, no-auth endpoint. Its absence only costs
-	// "how do I use Daintree" answers, so it can never be a failure — but it was
-	// previously invisible, which made a silent docs outage impossible to diagnose.
-	d := DoctorCheck{ID: "mcp.docs", Label: "docs MCP"}
-	if ds := a.DocsMCP.Status(); ds.Connected {
-		d.Status = StatusOK
-		d.Detail = "connected"
-	} else {
-		d.Status = StatusWarn
-		d.Detail = "not connected — Daintree documentation lookups will fail"
-		d.Hint = "Non-blocking: everything except docs.* still works."
-	}
-	out = append(out, d)
 
 	p := DoctorCheck{ID: "project.instructions", Label: "project", Data: map[string]any{"path": a.Config.ProjectPath}}
 	p.Status = StatusOK

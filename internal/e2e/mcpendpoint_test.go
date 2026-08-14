@@ -34,11 +34,11 @@ func TestRespondRequestCarriesMCPEndpoints(t *testing.T) {
 			Tier:        strPtr("operator"),
 			McpURL:      &mcpURL,
 			// Offline, because the first Send joins ensureStartupForTurn → ConnectMcp,
-			// which fires a real handshake at the PUBLIC docs MCP (and, with an inherited
-			// DAINTREE_MCP_TOKEN, at whatever is listening on 45454). Offline short-circuits
-			// mcp.Client.Connect and leaves the backend client untouched, so the turn still
-			// runs against the fake — and a configured-but-never-connected endpoint is
-			// exactly the case worth pinning: the endpoint is reported either way.
+			// which (with an inherited DAINTREE_MCP_TOKEN) would fire a real handshake at
+			// whatever is listening on 45454. Offline short-circuits mcp.Client.Connect and
+			// leaves the backend client untouched, so the turn still runs against the fake —
+			// and a configured-but-never-connected endpoint is exactly the case worth
+			// pinning: the endpoint is reported either way.
 			Offline: boolPtr(true),
 		},
 	})
@@ -60,15 +60,12 @@ func TestRespondRequestCarriesMCPEndpoints(t *testing.T) {
 	if len(servers) == 0 {
 		t.Fatalf("runtime.mcp_servers missing from the request: %+v", runtime)
 	}
-	var primary, docs bool
+	var primary bool
 	for _, s := range servers {
 		entry, _ := s.(map[string]any)
 		desc, _ := entry["description"].(string)
-		switch entry["name"] {
-		case "daintree":
+		if entry["name"] == "daintree" {
 			primary = strings.Contains(desc, "http://127.0.0.1:45454/mcp")
-		case "daintree-docs":
-			docs = strings.Contains(desc, "://")
 		}
 		// The wire entry must stay endpoint-only. Anything else here (transport, status,
 		// tool_count) changes mid-session and would re-encode the ~18k tool schemas
@@ -81,9 +78,6 @@ func TestRespondRequestCarriesMCPEndpoints(t *testing.T) {
 	}
 	if !primary {
 		t.Errorf("no daintree entry naming the endpoint: %+v", servers)
-	}
-	if !docs {
-		t.Errorf("docs MCP missing from the integration surface: %+v", servers)
 	}
 	if strings.Contains(mustJSON(body), "super-secret-token") {
 		t.Error("the MCP session token reached the backend request body")

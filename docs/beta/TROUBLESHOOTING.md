@@ -87,8 +87,7 @@ terminals to read, no agents to spawn, no worktrees to inspect. Launch from insi
 Daintree.
 
 What still works: filesystem reads, memory, timers, the attention inbox, grants, the audit
-trail, the async and workflow ledgers, `daintree.status`, `context.snapshot`, and the docs
-MCP.
+trail, the async and workflow ledgers, `daintree.status`, and `context.snapshot`.
 
 **Watchers are the subtle one.** `watcher.terminal.create` will write a durable row, but
 the engine polls through Daintree — so a watcher created while disconnected observes
@@ -103,10 +102,6 @@ assistant from Daintree, or `/reconnect`.
 Do **not** loop on reconnects with a dead token: repeated auth failures trip Daintree's
 abuse policy. The CLI already latches on a terminal credential failure and waits for fresh
 credentials.
-
-## `mcp.docs` — not connected
-
-Only affects "how do I use Daintree" answers. Everything else is fine.
 
 ---
 

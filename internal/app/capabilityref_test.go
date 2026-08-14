@@ -189,7 +189,6 @@ func TestEveryToolDeclaresAKnownConnection(t *testing.T) {
 	known := map[tools.Connection]bool{
 		tools.RequiresNothing:     true,
 		tools.RequiresDaintreeMCP: true,
-		tools.RequiresDocsMCP:     true,
 		tools.RequiresBackend:     true,
 		tools.RequiresInteractive: true,
 	}
@@ -217,7 +216,6 @@ func TestControlPlaneToolsDeclareTheirDependency(t *testing.T) {
 		"watcher.terminal.create", "watcher.watchPR",
 		"worktree.list", "recipe.run", "forge.getIssue", "git.getProjectPulse",
 	}
-	mustNeedDocs := []string{"docs.search", "docs.getPage", "docs.getRelatedPages"}
 	mustNeedBackend := []string{"workflow.plan", "workflow.reconcile"}
 	// The degraded-mode set. Every name here is something a DISCONNECTED user needs, so
 	// a family-level stamp that swept one of them up would tell them their remaining
@@ -255,7 +253,6 @@ func TestControlPlaneToolsDeclareTheirDependency(t *testing.T) {
 		}
 	}
 	check(mustNeedDaintree, tools.RequiresDaintreeMCP)
-	check(mustNeedDocs, tools.RequiresDocsMCP)
 	check(mustNeedBackend, tools.RequiresBackend)
 	check(mustBeLocal, tools.RequiresNothing)
 }

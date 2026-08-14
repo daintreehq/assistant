@@ -26,10 +26,6 @@ func TestConnectsToFakeMCP(t *testing.T) {
 
 	dir := t.TempDir()
 	url := mcp.url()
-	// Point the SECOND (docs) MCP at the same fake so ConnectMcp's parallel docs
-	// handshake stays on the loopback httptest server and never reaches the real
-	// daintree.org. This test only asserts the PRIMARY link; the docs connect is inert.
-	t.Setenv("DAINTREE_DOCS_MCP_URL", url)
 	token := "fake-token"
 	a, err := app.Create(app.CreateOptions{
 		Overrides: config.ConfigOverrides{

@@ -79,17 +79,18 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The parity worklist expects 84 tools (incl. the agentTask.superviseTerminal
+// over it. The worklist expects 77 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
-// tools, the three docs.* documentation-search tools, the four async-futures
+// tools, the four async-futures
 // tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
 // the user.askMultipleChoice question tool). The local skill.find / skill.load tools are
 // GONE — the backend now owns skill selection (the migration off the client-side
-// selector); skill.run.get / skill.step.advance remain. We assert that exact count so a
-// silent family add/drop is caught.
+// selector); skill.run.get / skill.step.advance remain. The three docs.* tools are GONE
+// too (issue #332): the backend searches the documentation MCP itself. We assert that
+// exact count so a silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
@@ -98,26 +99,27 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// model round (~16k tokens), and inventory size measurably degrades tool-selection
 	// accuracy, so a family that quietly grows must be a conscious decision.
 	got := len(a.Registry.List())
-	// 80 since forge.getChecks (issue #330). A deliberate add: it replaces the ONE common
-	// read that had no typed wrapper, so the model stopped being pushed onto the
-	// system-tier, confirmation-gated daintree.call path on nearly every turn of a CI
-	// fix-and-verify loop.
-	if got != 80 {
-		t.Errorf("registered tools = %d, want 80", got)
+	// 77 since the docs family was removed (issue #332): Daintree usage questions are
+	// answered by the backend now, which searches the public docs MCP itself before the
+	// model opens. Offering a local docs tool alongside that would give the model two
+	// ways to answer the same question, and it would use both.
+	if got != 77 {
+		t.Errorf("registered tools = %d, want 77", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
 	if a.Registry.Has("skill.find") || a.Registry.Has("skill.load") {
 		t.Error("skill.find/skill.load must NOT be registered (skill selection is backend-owned)")
 	}
-	// The count bump from 79→82 is the docs-MCP family (documentation search). Assert
-	// the new tools by name so the count guard can't be satisfied by an unrelated add/drop.
 	if !a.Registry.Has("terminal.extract.json") {
 		t.Error("terminal.extract.json (structured extract) not registered")
 	}
+	// The docs family is backend-owned now. Assert its ABSENCE by name so a
+	// re-introduction (or a stale wiring) is caught here rather than as a model that
+	// answers usage questions two different ways.
 	for _, name := range []string{"docs.search", "docs.getPage", "docs.getRelatedPages"} {
-		if !a.Registry.Has(name) {
-			t.Errorf("%s (docs documentation family) not registered", name)
+		if a.Registry.Has(name) {
+			t.Errorf("%s must NOT be registered — docs lookups are backend-owned", name)
 		}
 	}
 	// The async-futures family (the 82→86 bump): assert by name so the count guard
@@ -130,14 +132,6 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// The 84→85 bump is user.askMultipleChoice (the multiple-choice question tool).
 	if !a.Registry.Has("user.askMultipleChoice") {
 		t.Error("user.askMultipleChoice (question tool) not registered")
-	}
-	// The docs MCP is a SECOND, always-constructed transport (never nil), independent of
-	// the primary Daintree control-plane client.
-	if a.DocsMCP == nil {
-		t.Error("DocsMCP is nil — the docs MCP transport must always be constructed")
-	}
-	if a.DocsMCP == a.MCP {
-		t.Error("DocsMCP must be a distinct client from the primary Daintree MCP")
 	}
 	// AssertSafe ran inside Create (boot would have failed otherwise); re-run it to
 	// pin the invariant that the full wired set carries no file-edit tool.

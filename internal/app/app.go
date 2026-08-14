@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -61,9 +60,6 @@ type CreateOptions struct {
 	SessionID string
 	// MCPClientOverride injects a pre-connected low-level MCP client (tests).
 	MCPClientOverride mcp.LowLevelClient
-	// DocsMCPClientOverride injects a pre-connected low-level docs-MCP client (tests),
-	// so the docs tool family can be exercised without hitting the live docs server.
-	DocsMCPClientOverride mcp.LowLevelClient
 	// BackendOverride injects a fake Daintree backend (tests), bypassing the real
 	// HTTP client so unit tests need no live server. nil ⇒ the real client to the
 	// hardcoded dev endpoint.
@@ -112,13 +108,7 @@ type App struct {
 	Config config.AppConfig
 	Store  *storage.Store
 	MCP    *mcp.Client
-	// DocsMCP is the SECOND MCP transport: the public, no-auth Daintree documentation
-	// server (docs.search / docs.getPage / docs.getRelatedPages). Always constructed
-	// (never nil) and connected in PARALLEL with MCP during the boot splash; it answers
-	// "how do I use Daintree" help questions and is fully independent of the primary
-	// control-plane MCP. Immutable after Create.
-	DocsMCP *mcp.Client
-	Queue   *queue.Queue
+	Queue  *queue.Queue
 	// Backend is the native Daintree backend — the assistant turn engine and the
 	// server-owned utility tasks. It replaces the direct model provider. Held as an
 	// interface so tests can inject a fake (CreateOptions.BackendOverride).
@@ -244,11 +234,6 @@ type App struct {
 	// read failure stays retryable by the normal bootstrap. A completed attempt never reruns.
 	reconcileLedgerMu   sync.Mutex
 	reconcileLedgerDone bool
-
-	// docsConnectWG tracks in-flight docs-MCP (re)connect goroutines (connectDocsAsync).
-	// Shutdown waits on it AFTER baseCancel so a late applyConnected can't install a docs
-	// session after the client is Closed (which would leak the session goroutine).
-	docsConnectWG sync.WaitGroup
 }
 
 // snapshotHooks returns a consistent copy of the current hooks under the read lock.
@@ -410,24 +395,8 @@ func Create(opts CreateOptions) (*App, error) {
 		terminalObs:  terminalobs.NewMemory(),
 	}
 
-	// mcp → docs-mcp → queue → router → registry → skills.
+	// mcp → queue → router → registry → skills.
 	a.MCP = mcp.New(cfg, mcp.Options{ClientOverride: opts.MCPClientOverride})
-	// The Daintree documentation MCP — a public, no-auth, stateless HTTP server that
-	// answers "how do I use Daintree" help questions via live doc search. Its endpoint is
-	// a fixed product URL (DAINTREE_DOCS_MCP_URL overrides it for dev/test, mirroring the
-	// DAINTREE_BACKEND_URL pattern). Anonymous (no bearer) with its own short drift
-	// baseline so it never warns that the 59 Daintree control-plane tools are "missing".
-	// Connected in parallel with the primary MCP during the boot splash (ConnectMcp).
-	docsURL := mcp.DefaultDocsURL
-	if v := strings.TrimSpace(os.Getenv("DAINTREE_DOCS_MCP_URL")); v != "" {
-		docsURL = v
-	}
-	a.DocsMCP = mcp.New(cfg, mcp.Options{
-		URL:            &docsURL,
-		Anonymous:      true,
-		DriftBaseline:  mcp.DocsDocumentedToolNames,
-		ClientOverride: opts.DocsMCPClientOverride,
-	})
 	a.Queue = queue.New(queueEventStore{s: store}, domain.NowMS)
 	// The native Daintree backend: the assistant turn engine + server-owned utility
 	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model

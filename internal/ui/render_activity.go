@@ -121,12 +121,6 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Copied tree", []string{"worktreeId"}
 	case "copyTree.injectToTerminal":
 		return "Injected tree", []string{"terminalId"}
-	case "docs.search":
-		return "Searched docs", []string{"query"}
-	case "docs.getPage":
-		return "Read doc", []string{"path", "url"}
-	case "docs.getRelatedPages":
-		return "Related docs", []string{"path", "url"}
 	case "recipe.list":
 		return "Listed recipes", nil
 	case "recipe.run":

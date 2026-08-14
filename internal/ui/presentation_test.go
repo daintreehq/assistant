@@ -50,7 +50,6 @@ func TestPresentTool_NoRawDottedNames(t *testing.T) {
 		"terminal.run.async", "terminal.await.async", "async.list", "async.cancel",
 		"memory.recall", "memory.list", "memory.save", "memory.forget", "memory.pin", "memory.unpin",
 		"artifact.read", "copyTree.generate", "copyTree.injectToTerminal",
-		"docs.search", "docs.getPage", "docs.getRelatedPages",
 		"forge.getPR", "watcher.watchPR", "audit.export",
 		"agentTask.status", "agentTask.list", "agentTask.superviseTerminal",
 		"user.askMultipleChoice",

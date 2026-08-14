@@ -487,7 +487,7 @@ func TestObserveRosterMutation_InvalidatesOnlyRosterMutators(t *testing.T) {
 		{"worktree.createWithRecipe ok", "worktree.createWithRecipe", "{}", domain.Ok("created", nil), true},
 		{"prepBranchForReview is read-only", "workflow.prepBranchForReview", "{}", domain.Ok("ready", nil), false},
 		{"daintree.call inner terminal mutation", "daintree.call", `{"name":"terminal.kill","arguments":{}}`, domain.Ok("ok", nil), true},
-		{"daintree.call inner read tool", "daintree.call", `{"name":"docs.search"}`, domain.Ok("ok", nil), false},
+		{"daintree.call inner read tool", "daintree.call", `{"name":"actions.getContext"}`, domain.Ok("ok", nil), false},
 		{"daintree.call failed never ran", "daintree.call", `{"name":"terminal.new"}`, domain.Fail("mcp_tool_error", "nope"), false},
 		// A read-only unwrapped terminal.* raw call (e.g. terminal.list) is a KNOWN,
 		// accepted false positive: a spare refresh is harmless, a missed mutation is not.

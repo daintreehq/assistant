@@ -17,7 +17,9 @@ import (
 func TestBuildMCPServersCarriesEndpoint(t *testing.T) {
 	out := buildMCPServers([]prompts.MCPServerContext{
 		{Name: "daintree", URL: "http://127.0.0.1:45454/mcp", Description: "Daintree control plane"},
-		{Name: "daintree-docs", URL: "https://daintree.org/api/mcp"},
+		// A second, description-less entry: the mapper takes N servers, and a role-less
+		// one must still carry its endpoint through.
+		{Name: "example-mcp", URL: "https://example.test/mcp"},
 	})
 	if len(out) != 2 {
 		t.Fatalf("want 2 servers, got %+v", out)
@@ -26,7 +28,7 @@ func TestBuildMCPServersCarriesEndpoint(t *testing.T) {
 		!strings.Contains(out[0].Description, "Daintree control plane") {
 		t.Errorf("description = %q", out[0].Description)
 	}
-	if !strings.Contains(out[1].Description, "https://daintree.org/api/mcp") {
+	if !strings.Contains(out[1].Description, "https://example.test/mcp") {
 		t.Errorf("description without a role must still carry the endpoint: %q", out[1].Description)
 	}
 	// The block is cached ahead of the tool schemas, so nothing that fluctuates
@@ -91,7 +93,7 @@ func TestBuildMCPServersOmittedFromWireWhenEmpty(t *testing.T) {
 func TestRuntimeMCPServersStableAcrossLiveStateChange(t *testing.T) {
 	servers := []prompts.MCPServerContext{
 		{Name: "daintree", URL: "http://127.0.0.1:45454/mcp", Description: "Daintree control plane"},
-		{Name: "daintree-docs", URL: "https://daintree.org/api/mcp", Description: "docs"},
+		{Name: "example-mcp", URL: "https://example.test/mcp", Description: "second server"},
 	}
 	cold := prompts.MainPromptContext{MCPServers: servers, MCPConnected: false, MCPStatusLine: "not connected — no url/token"}
 	warm := prompts.MainPromptContext{
