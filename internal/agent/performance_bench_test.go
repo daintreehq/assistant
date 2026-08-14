@@ -33,7 +33,7 @@ func BenchmarkToBackendTools85(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		out, err := toBackendTools(tools)
+		out, err := ToBackendTools(tools)
 		if err != nil || len(out) != len(tools) {
 			b.Fatalf("toBackendTools: tools=%d err=%v", len(out), err)
 		}

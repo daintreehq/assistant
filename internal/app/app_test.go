@@ -31,6 +31,11 @@ func newOfflineApp(t *testing.T) *App {
 			StateDir:    &dir,
 			ProjectPath: &dir,
 			Tier:        strPtr("operator"),
+			// Force the flag OFF rather than inheriting it. Config resolution reads the
+			// real process env, so a developer with DAINTREE_WORKFLOW_INTELLIGENCE=1
+			// exported would otherwise get seven extra tools in the "unflagged" App and
+			// fail the tests that compare the two states against each other.
+			WorkflowIntelligence: boolPtr(false),
 		},
 	})
 	if err != nil {

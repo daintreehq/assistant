@@ -136,9 +136,9 @@ func coerceToolArgs(args string) string {
 	return args
 }
 
-// toBackendTools converts projected model tool specs to the backend tool inventory
+// ToBackendTools converts projected model tool specs to the backend tool inventory
 // and validates names. nil tools project to nil (no tools offered).
-func toBackendTools(tools []models.ChatTool) ([]backend.Tool, error) {
+func ToBackendTools(tools []models.ChatTool) ([]backend.Tool, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}

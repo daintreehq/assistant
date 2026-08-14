@@ -299,6 +299,36 @@ read tool that touches the filesystem should use both.
       `go test ./internal/app -run TestGeneratedDocsAreCurrent -update`
       (and `go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update`
       if you touched `COMMAND_REGISTRY`). Commit the regenerated files.
+- [ ] **Removed or renamed a tool?** Hand the backend a refreshed inventory
+      (`go run ./cmd/tooldump`) — see below.
+
+## Exporting the tool inventory
+
+The backend pins a captured copy of the projection we send in `input.tools`, and its
+skill bodies name the tools in it. When a tool leaves the registry and that pin is not
+refreshed, a runbook goes on instructing the model to call something that is no longer
+offered — which is worse than a stale doc, because the base prompt forbids inventing a
+tool, so the turn stalls on a contradiction it cannot report. That has already happened
+once: six removed tools, five skills still naming them, nothing detecting it.
+
+```bash
+go run ./cmd/tooldump                         # → stdout, the projection a normal launch sends
+go run ./cmd/tooldump -o tools.json
+go run ./cmd/tooldump -workflow-intelligence  # …plus the DAINTREE_WORKFLOW_INTELLIGENCE=1 tools
+```
+
+The default output deliberately EXCLUDES the flag-gated execution-graph tools: pinning
+them would promise the backend that `workflow.plan` is always offered, and a skill
+written against that promise would name an unoffered tool for everyone who has not opted
+in.
+
+Output is deterministic and indented, so a refresh reads as an additive diff. It is the
+same JSON value the wire carries — including JSON's HTML escaping, which the real request
+also applies — so compacting it reproduces the payload exactly and it can be diffed
+against what the backend received. Indentation and a trailing newline are the only
+differences. The construction lives in
+[`internal/app/toolinventory.go`](../internal/app/toolinventory.go); `cmd/tooldump` is a
+thin main over it.
 
 ## Reference internals
 

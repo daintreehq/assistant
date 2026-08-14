@@ -164,7 +164,7 @@ func TestToBackendTools_Conversion(t *testing.T) {
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
 	}
-	out, err := toBackendTools(in)
+	out, err := ToBackendTools(in)
 	if err != nil {
 		t.Fatalf("toBackendTools: %v", err)
 	}

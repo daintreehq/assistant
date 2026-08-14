@@ -113,6 +113,17 @@ go test ./internal/app -run TestGeneratedDocsAreCurrent -update
 go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
 ```
 
+The backend pins a captured copy of our tool projection (its skills name the tools in
+it), so after a tool add/remove/rename, export the refreshed inventory for it — the same
+JSON value we send as `input.tools` (indented; compacting it reproduces the wire bytes),
+taken from a real boot rather than re-derived, and needing no source edits:
+
+```bash
+go run ./cmd/tooldump                      # the projection a normal launch sends → stdout
+go run ./cmd/tooldump -o tools.json        # …to a file
+go run ./cmd/tooldump -workflow-intelligence  # …plus the flag-gated graph tools
+```
+
 CI additionally runs on **macOS and Linux** (PTY harness on macOS, race detector on
 Linux), diffs the generated docs, runs `govulncheck`, and scans the working tree for
 literal credentials with both `gitleaks` and a scan-grade SUBSET of the project's own

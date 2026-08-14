@@ -2288,7 +2288,7 @@ func (s *Session) toBackendToolsCached(tools []models.ChatTool) ([]backend.Tool,
 	if c.backendValid {
 		return c.backendTools, nil
 	}
-	btools, err := toBackendTools(tools)
+	btools, err := ToBackendTools(tools)
 	if err != nil {
 		return nil, err
 	}
