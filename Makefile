@@ -14,16 +14,6 @@ LDFLAGS   := -X main.version=$(VERSION)
 # Reproducible builds: -trimpath strips local filesystem paths from the binary.
 GOFLAGS   := -trimpath
 
-# State directory hard-reset target (db-reset). Mirrors internal/config's
-# resolution: honour the DAINTREE_ASSISTANT_STATE_DIR override (used verbatim
-# there) and otherwise fall back to the flat root ~/.daintree/assistant-cli.
-# $(strip) collapses a whitespace-only override to empty so $(or) still picks
-# the default instead of passing garbage to rm -rf. Immediate (:=) so the path
-# is fixed and can be echoed before the recipe runs. We reset the whole root,
-# not a per-project subdir — replicating config's project-slug logic here would
-# duplicate Go, and the issue's intent is a clean slate.
-STATE_DIR := $(or $(strip $(DAINTREE_ASSISTANT_STATE_DIR)),$(HOME)/.daintree/assistant-cli)
-
 # Install location. Daintree's host does NOT hardcode a path — it locates the
 # binary by a shell PATH lookup (`which` on Unix, `where` on Windows), with the
 # DAINTREE_CLI_PATH_PREPEND env var taking precedence and an npm-global-prefix
@@ -107,16 +97,25 @@ run: build
 clean:
 	rm -rf $(BIN_DIR)
 
-## db-reset: hard-reset the assistant SQLite state dir (respects DAINTREE_ASSISTANT_STATE_DIR).
-# The schema is a single clean baseline (one schemaUserVersion, not a chain), so a
-# schema change is handled by wiping and rebuilding rather than a migration chain.
-# Honours the state-dir override; falls back to ~/.daintree/assistant-cli. The
-# empty-string guard is a safety net so a misconfigured STATE_DIR never expands
-# into a bare `rm -rf`. Idempotent: rm -rf on a missing dir exits 0. Safe to run
-# while the assistant is open — POSIX unlink keeps the live session's open file
-# descriptors valid until it exits; the next launch creates a fresh state.db.
-# The `--` stops a STATE_DIR that begins with `-` from being read as a flag.
-db-reset:
-	@if [ -z "$(STATE_DIR)" ]; then echo "db-reset: STATE_DIR is empty, refusing to rm -rf" >&2; exit 1; fi
-	@echo "db-reset: removing $(STATE_DIR)"
-	rm -rf -- "$(STATE_DIR)"
+## db-reset: reset this project's local state (KEEPS your sign-in).
+#
+# DELEGATES to the CLI. It used to be `rm -rf "$(STATE_DIR)"` straight from the shell,
+# which was wrong in ways make cannot see:
+#
+#   - it deleted credentials.json along with the project state, silently signing you out;
+#   - it unlinked owner.lock while a live process still held a flock on that INODE, so
+#     the next process created a different file, acquired it trivially, and the
+#     single-owner invariant protecting the database was gone with no error anywhere;
+#   - it left a running assistant writing to an unlinked database;
+#   - it removed the daemon's socket and lock while the daemon was still alive;
+#   - it duplicated internal/config's state-path resolution in shell, so the two could
+#     disagree about which directory to destroy.
+#
+# `reset project-state` stops the daemon, ACQUIRES the owner lease (and refuses if
+# something else holds it), backs up to a timestamped directory, and removes only this
+# project's state. --yes because a make target has nobody to prompt.
+#
+# Use `daintree-assistant reset all-data` for the nuclear option, or
+# `reset credentials` to drop only the sign-in.
+db-reset: build
+	$(BIN) reset project-state --yes

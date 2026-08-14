@@ -84,6 +84,8 @@ func main() {
 		code = cli.RunLoginCommand(ctx, opts)
 	case routeLogout:
 		code = cli.RunLogoutCommand(ctx, opts)
+	case routeReset:
+		code = cli.RunReset(ctx, opts, parsed.ResetScope, parsed.ResetOptions)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -104,6 +106,7 @@ const (
 	routeStatus
 	routeLogin
 	routeLogout
+	routeReset
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -113,6 +116,10 @@ type parsedArgs struct {
 	Route   route
 	Help    bool
 	Version bool
+	// Reset carries the `reset <scope>` subcommand's arguments. Only meaningful when
+	// Route is routeReset.
+	ResetScope   cli.ResetScope
+	ResetOptions cli.ResetOptions
 }
 
 // parseArgs parses the CLI surface while preserving two useful properties that
@@ -134,6 +141,10 @@ func parseArgs(args []string) (parsedArgs, error) {
 		jsonOut  = fs.Bool("json", false, "")
 		stdio    = fs.Bool("stdio", false, "") // host compatibility spelling
 		showVer  = fs.Bool("version", false, "")
+		// `reset` flags. Parsed always (a FlagSet cannot be conditional here) but only
+		// consulted on the reset route, like every other subcommand-specific option.
+		yes      = fs.Bool("yes", false, "")
+		noBackup = fs.Bool("no-backup", false, "")
 	)
 
 	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
@@ -208,6 +219,23 @@ func parseArgs(args []string) (parsedArgs, error) {
 				return parsedArgs{}, err
 			}
 			parsed.Route = routeLogout
+		case "reset":
+			// The scope is REQUIRED and has no default. A bare `reset` that silently
+			// picked one would be the most dangerous possible convenience: the scopes
+			// differ by whether they destroy your sign-in and every other project.
+			if len(positionals) < 2 {
+				return parsedArgs{}, fmt.Errorf("reset needs a scope:\n%s", cli.ResetUsage())
+			}
+			if len(positionals) > 2 {
+				return parsedArgs{}, fmt.Errorf("reset accepts one scope, got: %s", strings.Join(positionals[1:], " "))
+			}
+			scope, ok := cli.ParseResetScope(positionals[1])
+			if !ok {
+				return parsedArgs{}, fmt.Errorf("unknown reset scope %q:\n%s", positionals[1], cli.ResetUsage())
+			}
+			parsed.Route = routeReset
+			parsed.ResetScope = scope
+			parsed.ResetOptions = cli.ResetOptions{Yes: *yes, NoBackup: *noBackup}
 		}
 		if parsed.Route != routeDefault {
 			if *stdio && parsed.Route != routeHost {
@@ -329,6 +357,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  daemon              run the project supervisor in the foreground")
 	fmt.Fprintln(w, "  daemon stop         stop the project supervisor")
 	fmt.Fprintln(w, "  host [--stdio]      serve embedded-host NDJSON over stdio")
+	fmt.Fprint(w, cli.ResetUsage())
 	fmt.Fprintln(w, "\nOptions:")
 	fmt.Fprintln(w, "  --project PATH      project root (default: current directory)")
 	fmt.Fprintln(w, "  --tier TIER         supervisor, operator, or system")
@@ -337,6 +366,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --json              emit JSONL for a one-shot prompt")
 	fmt.Fprintln(w, "  --mcp-url URL       Daintree MCP URL (env: DAINTREE_MCP_URL)")
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
+	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
+	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --version           print the version and exit")
 	fmt.Fprintln(w, "  -h, --help          show this help")
 	fmt.Fprintln(w, "  --                  end option parsing; before the first word, force a prompt")
