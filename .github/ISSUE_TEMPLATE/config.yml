@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Unsafe action, security vulnerability, or leaked credential
+    url: https://github.com/daintreehq/assistant/security/advisories/new
+    about: >-
+      A mutation that ran without its confirmation, authority obtained that should not
+      have been, or a credential seen anywhere it should not be. Report PRIVATELY — rotate
+      the credential first. Do not open a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/daintreehq/assistant/blob/main/docs/beta/TROUBLESHOOTING.md
+    about: A doctor-driven decision tree — most problems are named there by check id.
+  - name: Privacy and data
+    url: https://github.com/daintreehq/assistant/blob/main/docs/beta/PRIVACY_AND_DATA.md
+    about: What leaves your machine, what is stored locally, and how to delete it.

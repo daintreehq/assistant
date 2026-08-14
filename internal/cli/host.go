@@ -61,6 +61,16 @@ func RunHost(ctx context.Context, opts Options) int {
 			return nil, err
 		}
 		a.AdoptAsCurrentSession()
+		// Same trap as the one-shot path: the host runs as the `main` actor, so
+		// AUTO_APPROVE bypasses its confirmation bridge entirely — Daintree would be
+		// driving a runtime that performs tier-allowed mutations without ever asking.
+		// stderr, not the NDJSON stream: the protocol has no warning frame, and inventing
+		// one would break the transport contract for the sake of a message.
+		if a.Config.AutoApprove {
+			fmt.Fprintf(os.Stderr,
+				"daintree-assistant host: AUTO-APPROVE is ON — mutating actions will run WITHOUT confirmation (tier %q).\n",
+				a.Tier())
+		}
 		return &hostAppAdapter{app: a, ctx: fctx, own: own}, nil
 	}
 	return host.Run(ctx, factory)

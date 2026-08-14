@@ -488,6 +488,7 @@ func (m Model) statusView(w int) string {
 		ActiveTone:       aTone,
 		ActiveLabel:      aLabel,
 		ActiveGoal:       aGoal,
+		AutoApprove:      m.autoApprove,
 	}, w)
 }
 

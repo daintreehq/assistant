@@ -207,8 +207,28 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// owns them). If the backend is unreachable the turn fails with a clear
 	// "could not reach assistant backend" error from the backend client.
 
+	// AUTO_APPROVE reaches HERE too, and that is easy to miss. One-shot is
+	// non-interactive, so it installs an auto-DECLINE confirm hook below — but dispatch
+	// skips the hook entirely when AutoApprove is set, because a one-shot run is still
+	// the `main` actor. The net effect is that an inherited
+	// DAINTREE_ASSISTANT_AUTO_APPROVE=1 makes a scripted run perform tier-allowed
+	// mutations with nothing on screen to say so. The cockpit has a persistent badge for
+	// exactly this; a scripted run has no footer, so it gets a loud line instead —
+	// on stderr, and as a structured event in JSON mode, so neither output contract
+	// breaks.
+	if a.Config.AutoApprove {
+		const warn = "AUTO-APPROVE is ON: mutating actions will run WITHOUT confirmation (tier '%s'). " +
+			"Unset DAINTREE_ASSISTANT_AUTO_APPROVE unless this is an automated harness."
+		if sink != nil {
+			sink.Error(fmt.Sprintf(warn, a.Tier()))
+		} else {
+			stderrR.Warn(fmt.Sprintf(warn, a.Tier()))
+		}
+	}
+
 	confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
-		// One-shot is non-interactive → auto-decline.
+		// One-shot is non-interactive → auto-decline. Reached ONLY when AutoApprove is
+		// off; see the warning above for why that distinction matters.
 		msg := fmt.Sprintf("Skipping %s (%s) — confirmation needed; run interactively to approve.", req.ToolName, req.Risk)
 		if sink != nil {
 			fmt.Fprint(os.Stderr, "  "+msg+"\n")

@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/commands"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
@@ -317,12 +318,21 @@ func printBanner(r *render.Renderer, a *app.App, connected bool, transport strin
 	if connected {
 		mcpLine = "connected (" + transport + ")"
 	}
+	tierLine := "tier      " + string(a.Tier())
+	// The cockpit raises a persistent AUTO-APPROVE badge; the classic REPL has no live
+	// footer to put one in, so it goes on the tier line — which is where it belongs
+	// anyway, since it is a statement ABOUT the tier: the gate is unchanged, but nothing
+	// inside it will ask first. Without this, `--classic` was the one surface where a
+	// session running unattended looked exactly like one that was not.
+	if a.Config.AutoApprove {
+		tierLine += "  " + r.Bold("AUTO-APPROVE: mutating actions will NOT ask first")
+	}
 	lines := []string{
 		r.Bold("Daintree Assistant") + "  — local operations officer",
 		"project   " + a.Config.ProjectPath,
-		"backend   " + a.Backend.BaseURL(),
+		"backend   " + mcp.SanitizeURL(a.Backend.BaseURL()),
 		"mcp       " + mcpLine,
-		"tier      " + string(a.Tier()),
+		tierLine,
 		r.Gray("Type /help for commands; Ctrl+D or /quit exits."),
 		r.Gray("I never edit files directly — I spawn and supervise agents."),
 	}

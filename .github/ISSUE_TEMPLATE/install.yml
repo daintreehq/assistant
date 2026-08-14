@@ -1,0 +1,31 @@
+name: Install or environment problem
+description: It will not start, will not sign in, or doctor reports a failure you cannot resolve.
+labels: ["install", "internal-beta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `daintree-assistant doctor` first and paste its output below — it names most
+        problems precisely, and [TROUBLESHOOTING.md](https://github.com/daintreehq/assistant/blob/main/docs/beta/TROUBLESHOOTING.md)
+        has an entry per check id.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor output
+      description: >-
+        `daintree-assistant doctor`, or `doctor --json`. Credentials are redacted and
+        endpoints are stripped of query tokens, but it does include local paths and error
+        text from other services — have a look before pasting.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+      description: Including the hint doctor printed, if you followed it.
+  - type: input
+    id: install
+    attributes:
+      label: How you installed it
+      placeholder: "make install / go install / other"

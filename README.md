@@ -40,13 +40,14 @@ direct transport from here. There is no `DEEPSEEK_API_KEY` in this process.
 | --- | --- | --- | --- |
 | macOS (arm64, amd64) | supported | supported | supported |
 | Linux (amd64, arm64) | supported | supported | supported |
-| Windows | builds, untested | builds, untested | **not supported** |
+| Windows | **unsupported** | **unsupported** | **unsupported** |
 
-Background supervision is built on `flock` ownership leases and `setsid` detachment
-(`internal/ipc`, `internal/supervisor`), which have no Windows port. On Windows those
-paths fail loudly rather than silently running without exclusion, so timers, watchers,
-and async operations stop when the cockpit exits. CI runs macOS and Linux only; treat
-Windows as unsupported until the ownership model is ported. See
+Windows is not "untested" — it does not run. Exactly one process at a time may own a
+project's `state.db`, and that lease is an `flock` (`internal/ipc/lock_unix.go`), which has
+no Windows port; the `!unix` build returns an error rather than silently running without
+exclusion. Every stateful mode takes the lease before doing anything, so all of them fail
+at that step. The daemon additionally needs `Setsid`. CI runs Linux today (macOS is being
+added); treat Windows as unsupported until the ownership model is ported. See
 [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
 
 ## Build & install
@@ -108,9 +109,10 @@ file contents, or the logs themselves — those are what you cannot safely send.
 is redacted, the archive carries a scan of itself (`redaction-report.json`), and the whole
 manifest is printed for you to approve **before** anything is written.
 
-Signing in verifies the key with the provider, so a wrong or unfunded key fails at
-`login` rather than on your first message. Inside the cockpit, `/auth` shows the current
-sign-in and `/login` switches endpoint or key without a restart.
+Signing in asks the provider whether the key works. A definite rejection fails; "no credit
+remaining" and "could not reach the provider" warn and still save, since neither means the
+key is wrong and refusing would leave you unable to configure the CLI. Inside the cockpit,
+`/auth` shows the current sign-in and `/login` switches endpoint or key without a restart.
 
 A first interactive launch runs the login flow for you if you skip it. To develop
 against a backend of your own, start it (`cd ../assistant-backend &&
@@ -251,6 +253,20 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
 - **Permission tiers**: `supervisor` (read-only), `operator` (+spawn/create), `system`
   (+git/destructive). Mutating actions confirm; file edits are forbidden and delegated to
   a spawned agent (`agentTask.spawnForEdits`).
+
+## Internal beta
+
+Running it as a tester rather than working on it? Start here:
+
+| Document | Read it for |
+| --- | --- |
+| [`docs/beta/INTERNAL_BETA.md`](docs/beta/INTERNAL_BETA.md) | Scope, supported platforms, known limitations, what it costs you |
+| [`docs/beta/FIRST_RUN.md`](docs/beta/FIRST_RUN.md) | Install → sign in → first useful result, in five minutes |
+| [`docs/beta/PRIVACY_AND_DATA.md`](docs/beta/PRIVACY_AND_DATA.md) | What leaves your machine, what is stored, how to delete it |
+| [`docs/beta/TROUBLESHOOTING.md`](docs/beta/TROUBLESHOOTING.md) | A decision tree keyed to `doctor`'s check ids |
+| [`docs/beta/SUPPORT_BUNDLE.md`](docs/beta/SUPPORT_BUNDLE.md) | What a bundle contains, and what it deliberately omits |
+| [`SECURITY.md`](SECURITY.md) | Reporting a leaked secret or an unsafe action |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/BACKEND.md`](docs/BACKEND.md) (the model/skill/prompt story — start here),

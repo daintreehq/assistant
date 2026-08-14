@@ -1,0 +1,31 @@
+name: Crash or hang
+description: The process exited unexpectedly, or stopped responding.
+labels: ["crash", "internal-beta"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you were doing
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Crash or hang?
+      options:
+        - "Crashed — the process exited"
+        - "Hung — it stopped responding but stayed running"
+        - "The turn never finished, but the UI was alive"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Terminal output
+      description: Any panic or stack trace. Please check it for credentials before pasting.
+      render: text
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle
+      description: "`daintree-assistant support-bundle` — run it after the crash; it reports daemon state too."

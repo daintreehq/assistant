@@ -214,6 +214,11 @@ type Model struct {
 	// health badge; cleared on the next successful Usage event (the model resumed).
 	modelRateLimited bool
 
+	// autoApprove mirrors config so the live status line can raise the persistent
+	// confirmation-bypass badge without reaching into the App on every repaint. Read
+	// once at construction: AUTO_APPROVE is trusted-env only and cannot change in-session.
+	autoApprove bool
+
 	// out-of-band cues.
 	clearNonce    int
 	redrawNonce   int
@@ -292,7 +297,11 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 			// surface it in the badge so the operator sees exactly where the trace
 			// goes. Empty when logging is off; the badge is gated on Logging anyway.
 			LogFile: debuglog.CurrentDebugLogPath(),
+			// Read once at construction: AUTO_APPROVE is trusted-env only, so it cannot
+			// change while the cockpit runs.
+			AutoApprove: a.Config.AutoApprove,
 		},
+		autoApprove: a.Config.AutoApprove,
 	}
 	m.splash = newSplash(m.columns)
 

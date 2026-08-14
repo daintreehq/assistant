@@ -18,6 +18,11 @@ type mastheadParams struct {
 	Logging     bool
 	LogFile     string
 	Destructive bool // a git/system action awaiting confirmation → red tier
+	// AutoApprove raises the confirmation-bypass banner. It is on the masthead AND the
+	// live status line for different reasons: the masthead is the permanent record in
+	// scrollback (so a pasted transcript shows the session was running unattended), the
+	// status line is what the user can actually see right now.
+	AutoApprove bool
 }
 
 // renderMasthead renders the committed masthead. The closing rule
@@ -56,6 +61,20 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 		tierLine += th.Dim().Render(" " + g.Bullet + " " + gloss)
 	}
 	b.WriteString(truncateCells(tierLine, width))
+	if p.AutoApprove {
+		// Its OWN row, not appended to the tier line. Appending put the safety text at the
+		// right-hand end, where truncation eats it first — on a narrow terminal the tier
+		// survived and the warning did not, which is exactly backwards. A left-anchored
+		// row is the last thing to be cut, and it can carry the full sentence.
+		//
+		// It still sits next to the tier because it is a statement ABOUT the tier: the
+		// gate is unchanged, but nothing inside it will ask first. Note the tier shown
+		// here is the one at LAUNCH — `/permissions` can change it later, and this
+		// masthead was already committed to scrollback by then.
+		b.WriteByte('\n')
+		b.WriteString(truncateCells(th.Danger().Render(g.Alert+" AUTO-APPROVE — mutating actions will not ask first"), width))
+	}
+	b.WriteString("")
 
 	// 5. Full-width closing rule (end-to-end). Re-rendered fresh at the new width on every
 	// resize via the nuclear redraw (onRedraw), so it can't wrap on shrink.
@@ -195,6 +214,9 @@ type statusParams struct {
 	// ActiveAgent is a back-compat fallback: a pre-formatted badge string used only
 	// when ActiveLabel is empty (legacy callers / tests). Prefer the ingredients.
 	ActiveAgent string
+
+	// AutoApprove raises the persistent confirmation-bypass badge.
+	AutoApprove bool
 }
 
 // renderStatusLine renders the ≤56-cell compact rollup; it speaks ONLY when it has
@@ -206,6 +228,28 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 		cap = LiveChromeMaxWidth
 	}
 	var segs []string
+
+	// FIRST, before everything, and never suppressed. This is the one piece of status
+	// that changes what the assistant may do to the user's machine WITHOUT asking, and it
+	// is invisible from every other surface — it comes from an env var set in another
+	// terminal, possibly days ago. The status line is otherwise a rollup that speaks only
+	// when it has something to say; this always has something to say.
+	if p.AutoApprove {
+		// Abbreviate rather than truncate. The full label is 14 cells, so a narrow pane
+		// would cut it to "AUTO-APPRO…" or worse — and a half-rendered safety warning is
+		// arguably worse than none, because it reads as a glitch. Below the threshold the
+		// alert glyph alone survives, which is at least unambiguous once you know to look
+		// for it. A narrow terminal must never be the way this warning disappears.
+		label := g.Alert + " AUTO-APPROVE"
+		switch {
+		case cap >= cellWidth(label):
+			segs = append(segs, th.Danger().Render(label))
+		case cap >= cellWidth(g.Alert+" AUTO"):
+			segs = append(segs, th.Danger().Render(g.Alert+" AUTO"))
+		default:
+			segs = append(segs, th.Danger().Render(g.Alert))
+		}
+	}
 
 	// Legacy/general callers may still supply degraded MCP state here. The cockpit's
 	// primary path uses compact composer status plus the prominent warning in view.go.

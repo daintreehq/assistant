@@ -1,0 +1,59 @@
+name: Behaviour — it did the wrong thing
+description: The assistant misread, misjudged, stopped early, or reported work it did not do.
+labels: ["behaviour", "internal-beta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **The most valuable report is "it said it did something it did not do."** A loud
+        failure is a small bug; a confident false success is the one we most need to see.
+
+        Please attach a `support-bundle` rather than a debug log — the log contains your
+        whole conversation, and the bundle exists so you do not have to send it:
+        `daintree-assistant support-bundle --include-audit`
+  - type: textarea
+    id: prompt
+    attributes:
+      label: What you asked
+      description: >-
+        The exact prompt, verbatim — paraphrasing loses the detail that usually explains
+        the behaviour. Replace anything private (credentials, customer names, internal
+        hostnames) with placeholders first; this issue is public.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: What it said, and what it actually did. If those differ, say so explicitly.
+    validations:
+      required: true
+  - type: dropdown
+    id: mutation
+    attributes:
+      label: Did anything change as a result?
+      description: Files, branches, terminals, PRs — anything outside the conversation.
+      options:
+        - "No — nothing was modified"
+        - "Yes, and it was what I asked for"
+        - "Yes, and it was NOT what I asked for"
+        - "I am not sure"
+    validations:
+      required: true
+  - type: input
+    id: runid
+    attributes:
+      label: Run ID
+      description: From the error, or `/explain` in the cockpit. It ties the report to a specific turn.
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle
+      description: Attach the zip. Do not attach a debug log.
