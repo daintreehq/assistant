@@ -7,6 +7,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/redact"
 	"github.com/daintreehq/assistant/internal/safety"
 )
 
@@ -287,7 +288,13 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 			ArgsJson:   capJSON(safeJSON(args)),
 			Outcome:    outcome,
 			DurationMs: durationMs,
-			Summary:    res.Summary,
+			// The summary needs redacting too, and it is easy to miss because the args
+			// and result columns beside it already are. Summaries are free prose written
+			// by the handler and several quote their input verbatim — terminal.sendCommand
+			// answers "Sent to terminal t7: export TOKEN=…" — so a row with scrubbed args
+			// could still carry the same credential one column over, and `audit.export`
+			// would hand it to the model.
+			Summary: redact.String(res.Summary),
 		}
 		if res.Result != nil {
 			rj := capJSON(safeJSON(res.Result))

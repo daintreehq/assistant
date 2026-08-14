@@ -1,9 +1,21 @@
-// Package debuglog writes a per-session, full-fidelity, append-only human-readable
-// trace. It is a no-op when disabled and NEVER panics into the caller: a write
-// failure warns ONCE on stderr, then is swallowed.
+// Package debuglog writes a per-session, append-only, human-readable trace. It is a
+// no-op when disabled and NEVER panics into the caller: a write failure warns ONCE on
+// stderr, then is swallowed.
 //
-// Full-fidelity logs contain model messages, tool args, and terminal output, so
-// the dir is 0700 and files are 0600 (owner-only).
+// # Redaction
+//
+// Every value is passed through internal/redact before it is written, and every block
+// value is capped. That happens HERE, at the write boundary, rather than at the ~30 call
+// sites, for two reasons: a call site that forgets is invisible until the day it matters,
+// and new call sites get the protection without knowing the rule exists.
+//
+// What redaction does and does not buy: credential SHAPES and this process's own
+// registered secrets are removed, so a bearer token, an `export API_KEY=…`, or a PEM
+// block will not survive into the file. Everything else does. The trace still contains
+// the conversation, terminal output, file excerpts, issue bodies, and memory contents,
+// which is exactly what makes it useful for archaeology and exactly why it is an
+// owner-only local artifact (dir 0700, file 0600, pruned after 7 days) and NOT a support
+// artifact. `daintree-assistant support-bundle` is the thing to hand to someone else.
 package debuglog
 
 import (
@@ -18,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 const (
@@ -26,6 +40,17 @@ const (
 	// inlineMax: a string ≤120 chars with no newline renders inline as key=value;
 	// otherwise it renders as an indented block.
 	inlineMax = 120
+	// blockValueMax caps a single block value (a tool's args, a result payload, a
+	// terminal excerpt). Generous — the whole point of this trace is that you can read
+	// what the model actually saw, and a stingy cap would cut off the interesting part
+	// of exactly the payload you opened the log for.
+	//
+	// But unbounded was worse. One terminal dump can be megabytes; a turn that reads
+	// several of them wrote a log nobody could open, and the value that mattered was
+	// buried under a screenful of build output. The overflow is replaced by a size and a
+	// content hash, so two occurrences of the same payload are still recognisably the
+	// same without either being stored.
+	blockValueMax = 64 * 1024
 )
 
 // sessionLogRe matches the only filenames eligible for pruning.
@@ -139,7 +164,12 @@ func resolveTarget(logDir string) string {
 //
 // Inline scalars: null/number/bool, or a string ≤120 chars without newline.
 // Nil-valued fields are omitted (noise). Block values: objects/arrays via indented
-// JSON, strings as-is. Values are NEVER truncated.
+// JSON, strings as-is.
+//
+// EVERY rendered string — inline and block alike — passes through redact.String before
+// it is written, and block values are additionally capped at blockValueMax. Numbers and
+// booleans skip redaction: they cannot carry a credential, and running a dozen regexes
+// over "durationMs=38" on every line of a chatty trace is pure cost.
 func formatLine(event string, fields map[string]any) string {
 	ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 
@@ -168,7 +198,10 @@ func formatLine(event string, fields map[string]any) string {
 			fmt.Fprintf(&inline, "  %s=%s", k, scalar)
 			continue
 		}
-		blocks = append(blocks, block{key: k, val: blockValue(v)})
+		// blockValue redacts as it renders (see there), so only the cap is applied here.
+		// Redacting again would run 15 regexes a second time over the largest values in
+		// the trace — precisely the payloads where that costs the most.
+		blocks = append(blocks, block{key: k, val: redact.Cap(blockValue(v), blockValueMax)})
 	}
 
 	var b strings.Builder
@@ -206,8 +239,12 @@ func inlineScalar(v any) (string, bool) {
 	case float64:
 		return strconv.FormatFloat(t, 'g', -1, 64), true
 	case string:
-		if len(t) <= inlineMax && !strings.ContainsRune(t, '\n') {
-			return t, true
+		// Redact BEFORE the length test, not after: masking can change the length, and a
+		// 130-char string that redacts to 110 should render inline like any other short
+		// value rather than becoming an indented block for no visible reason.
+		r := redact.String(t)
+		if len(r) <= inlineMax && !strings.ContainsRune(r, '\n') {
+			return r, true
 		}
 		return "", false
 	default:
@@ -215,15 +252,21 @@ func inlineScalar(v any) (string, bool) {
 	}
 }
 
-// blockValue renders a non-inline value: strings as-is, everything else as
-// indented JSON.
+// blockValue renders a non-inline value, REDACTED: a string through the free-text
+// patterns, everything else walked structurally and re-marshaled as indented JSON.
+//
+// Structured values are walked rather than regexed for the same reason the audit path is:
+// running the patterns over serialized JSON corrupted it (an env-assignment value ran to
+// the next whitespace, and minified JSON has none). The caller applies the size cap.
 func blockValue(v any) string {
 	if s, ok := v.(string); ok {
-		return s
+		return redact.String(s)
 	}
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.MarshalIndent(redact.Value(v), "", "  ")
 	if err != nil {
-		return fmt.Sprintf("%v", v)
+		// %v on an unmarshalable value can still print struct fields verbatim, so the
+		// fallback gets the free-text pass rather than escaping redaction entirely.
+		return redact.String(fmt.Sprintf("%v", v))
 	}
 	return string(data)
 }

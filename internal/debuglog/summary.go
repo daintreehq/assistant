@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // Summary is a bounded, hashable description of a possibly-large payload.
@@ -16,9 +17,9 @@ import (
 // a short content hash so two identical payloads are recognisable across events
 // without re-printing either, and a bounded preview of the head.
 //
-// This is deliberately NOT used for the full-fidelity tool.call event, which stays
-// untruncated (it is logged once per call and is the ground truth the dev loop
-// greps) — Summary is for the events that repeat every round.
+// This is deliberately NOT used for the tool.call event, which carries its args and
+// result in full up to the 64 KiB block cap (it is logged once per call and is the
+// ground truth the dev loop greps) — Summary is for the events that repeat every round.
 type Summary struct {
 	Bytes     int    `json:"bytes"`
 	SHA       string `json:"sha,omitempty"`
@@ -38,6 +39,14 @@ func Summarize(s string, max int) Summary {
 	if max <= 0 {
 		max = defaultPreviewMax
 	}
+	// Redact BEFORE measuring and hashing. formatLine would redact the preview on its way
+	// to the file, but Bytes and SHA are computed here — so a raw hash would ship a
+	// 64-bit verifier for a credential the preview no longer shows. That is a real
+	// weakening: an attacker holding the log could confirm a guessed key by hashing it,
+	// which is exactly the property "removed before write" is supposed to deny them. The
+	// reported byte length is likewise the redacted form's, which is the honest number
+	// for what this record actually describes.
+	s = redact.String(s)
 	sum := Summary{Bytes: len(s)}
 	if s == "" {
 		return sum

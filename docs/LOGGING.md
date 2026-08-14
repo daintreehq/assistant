@@ -1,13 +1,14 @@
 # Logging / the per-session diagnostic trace
 
-> **Dev-only, owner-only.** This is the full-fidelity debug trace gated behind
+> **Dev-only, owner-only.** This is the session diagnostic trace gated behind
 > `DAINTREE_ASSISTANT_DEBUG_LOG=1` — it is a development aid, not a product surface.
 > It writes one append-only human-readable file per session under `~/.daintree/logs`
 > (`<date>-<sessionId>.log`, dir 0700 / file 0600, pruned after 7 days). Disabled, it
 > is a no-op and never throws. See `internal/debuglog`.
 >
-> **It is not a support artifact.** Credential *shapes* are redacted before anything is
-> written, but the trace still contains your conversation, terminal output, file
+> **It is not a support artifact.** Credentials are redacted before anything is written
+> (shapes, plus this process own key and MCP token by exact value), but the trace still
+> contains your conversation, terminal output, file
 > excerpts, issue/PR bodies, and memory contents. Never paste one into an issue or hand
 > it to someone else — use `daintree-assistant support-bundle`, which is redacted,
 > bounded, and shows you what it will include before it writes.
@@ -48,11 +49,23 @@ Every turn-scoped line carries the ids you grep by:
 The per-round events (`backend.respond.*`) and every `mcp.call` would, if dumped in
 full, re-print the entire conversation / prompt / terminal scrollback every round — the
 O(turns²) blowup. So they carry a **`debuglog.Summary`** instead: `{bytes, sha, preview,
-truncated}` — full byte length, a sha256 prefix (so an unchanged payload is recognisable
-round-to-round without re-printing it), and a bounded preview. Two deliberate exceptions
-stay full-fidelity: the `tool.call` args + result (logged once per call, the thing the
-dev loop greps) and the conversation persisted in SQLite. **No per-token lines** are ever
-written — only first-token timing + aggregate stats.
+truncated}` — byte length, a sha256 prefix (so an unchanged payload is recognisable
+round-to-round without re-printing it), and a bounded preview. The `tool.call` args +
+result are the deliberate exception: logged once per call, they are the thing the dev
+loop greps, so they are written in full up to a **64 KiB per-value cap**. Beyond that the
+middle is elided, keeping the head AND the tail — build and test output puts the failure
+at the *end*, so a head-only cut discards the one line you opened the log for — with the
+true size and a content hash in between. **No per-token lines** are ever written; only
+first-token timing + aggregate stats.
+
+> **Everything is redacted before it is written.** `internal/redact` runs at the write
+> boundary (`debuglog.formatLine`), not at the call sites, so no event can opt out.
+> Structured values are walked and re-marshaled; free text goes through the credential
+> patterns. `Summary`'s byte count and sha256 describe the **redacted** form — hashing the
+> raw payload would leave a verifier that could confirm a guessed credential, which is
+> exactly what redaction is meant to deny. See [`../internal/redact`](../internal/redact)
+> for what is deliberately NOT redacted (the conversation, artifacts, and scheduled job
+> payloads, all of which need their raw values to function).
 
 ## Event reference
 
@@ -81,7 +94,7 @@ it **produced**.
 ### Tools
 | event | when | key fields |
 |---|---|---|
-| `tool.call` | every dispatched call (full-fidelity; args are post-decode) | `tool` `toolCallId` `runId` `sessionId` `risk` `actor` `actorId` `outcome` `ok` `durationMs` `summary` `args` `result` `error` |
+| `tool.call` | every dispatched call (args post-decode, redacted, 64 KiB cap) | `tool` `toolCallId` `runId` `sessionId` `risk` `actor` `actorId` `outcome` `ok` `durationMs` `summary` `args` `result` `error` |
 | `tool.args.invalid` | args weren't valid JSON (never reached dispatch) | `runId` `toolCallId` `tool` `argsPreview` |
 | `tool.not_offered` | tool excluded by an explicit allowlist (dormant today) | `runId` `toolCallId` `tool` |
 | `tool.cancelled_stub` | calls given a synthetic CANCELLED result on abort | `runId` `count` |

@@ -309,9 +309,19 @@ lives under `~/.daintree/assistant-cli/`.
 
 ## Debug logging
 
-A full-fidelity trace for debugging the assistant itself. When enabled it appends
-**everything** — every model request and response, every tool/function call with its
-arguments and result, and the whole watcher lifecycle — to a single human-readable log.
+A trace for debugging the assistant itself. When enabled it appends every model request
+and response, every tool call with its arguments and result, and the whole watcher
+lifecycle to a single human-readable log.
+
+**Secrets are redacted before anything is written** (`internal/redact`, applied at the
+write boundary so no call site can opt out): credential shapes — bearer tokens, `sk-`
+keys, PATs, JWTs, `export API_KEY=…`, URL userinfo, PEM blocks — plus this process's own
+API key and Daintree MCP token, which are registered by exact value because neither is
+guaranteed to match a shape. Oversized values are capped with a size and a content hash.
+
+That still leaves your conversation, terminal output, file excerpts, issue bodies, and
+memory contents in the file. It is an **owner-only local artifact**, not something to
+paste into an issue — use `daintree-assistant support-bundle` for that.
 
 **Enable it** with `DAINTREE_ASSISTANT_DEBUG_LOG=1` (read from the process environment or
 the assistant's own `.env`, never the bound project's `.env`). It writes to a **global**

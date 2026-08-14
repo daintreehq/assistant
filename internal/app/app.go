@@ -25,6 +25,7 @@ import (
 	"github.com/daintreehq/assistant/internal/models"
 	"github.com/daintreehq/assistant/internal/prompts"
 	"github.com/daintreehq/assistant/internal/queue"
+	"github.com/daintreehq/assistant/internal/redact"
 	"github.com/daintreehq/assistant/internal/storage"
 	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/daintreehq/assistant/internal/tools/scratchx"
@@ -287,6 +288,17 @@ func Create(opts CreateOptions) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Register this process's real credentials for redaction, FIRST — before anything can
+	// log. Shape matching alone is not enough for these two: the API key becomes a
+	// subscription key later and the Daintree MCP token has no fixed format, so either
+	// could match none of the patterns while being the single most expensive value in the
+	// process to leak (one funds model calls, the other authorises system-tier Daintree
+	// actions for its validity window). Registration is additive, so a later `/login`
+	// swap or MCP reconnect adds the new value without un-protecting the old one — which
+	// is correct, since a log written before the swap still contains it.
+	redact.RegisterSecret(cfg.APIKey)
+	redact.RegisterSecret(cfg.McpToken)
 
 	store, err := storage.Open(cfg.DBPath, nil)
 	if err != nil {

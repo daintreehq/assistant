@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // maxAuditJSON caps the audited JSON length; preview keeps the stored row near
@@ -15,8 +17,24 @@ const (
 
 // safeJSON marshals v to a string; on a marshal error returns the sentinel
 // "<unserializable>" so the audit path never throws.
+//
+// The value is REDACTED STRUCTURALLY — walked before marshaling, never regexed after.
+//
+// Why redact at all: audit rows are the most durable copy of a tool call in the system.
+// They outlive the conversation, they are queryable, and `audit.export` hands them to the
+// model as JSON or CSV — so a credential in an argument gets re-read into a later prompt.
+// Args and results carry whatever the model and the terminal put there: an
+// `export TOKEN=…`, a git remote with an inline credential, an agent echoing its
+// environment. This one helper covers both the args and the result column.
+//
+// Why structurally: running the patterns over serialized JSON CORRUPTED it. The
+// env-assignment pattern's value ran to the next whitespace, and minified JSON has none,
+// so `{"command":"export API_KEY=abc","path":"keep"}` lost everything after the key and
+// stopped being parseable. `redact.Value` walks the decoded value instead, so a string is
+// redacted within its own boundary and re-marshaling always yields valid JSON — which
+// matters here more than anywhere, because `audit.export` promises exactly that.
 func safeJSON(v any) string {
-	data, err := json.Marshal(v)
+	data, err := json.Marshal(redact.Value(v))
 	if err != nil {
 		return `"<unserializable>"`
 	}

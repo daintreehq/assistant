@@ -34,6 +34,7 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/ipc"
 	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // Timing defaults. Test seams override via Options.
@@ -781,6 +782,12 @@ func (r *Runtime) applyCredsLocked(c ipc.Credentials) (changed bool) {
 	if c.McpToken != "" && c.McpToken != r.creds.McpToken {
 		r.creds.McpToken = c.McpToken
 		changed = true
+		// Protect the refreshed token from the trace immediately. The daemon outlives
+		// many Daintree sessions and is handed a NEW token on each attach, so unless
+		// every one is registered as it arrives, the log covers only the token the
+		// process happened to boot with. Additive: the superseded token stays registered,
+		// because a log line written under it is still on disk.
+		redact.RegisterSecret(c.McpToken)
 	}
 	if c.BackendURL != "" && c.BackendURL != r.creds.BackendURL {
 		r.creds.BackendURL = c.BackendURL

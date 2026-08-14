@@ -13,6 +13,7 @@ import (
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/debuglog"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // signin.go owns runtime re-authentication: the `/login` sheet's engine, and the
@@ -167,6 +168,12 @@ func (a *App) SignIn(ctx context.Context, c credentials.Credentials) error {
 		return signInVerifyError(c.BaseURL, err, c.APIKey)
 	}
 	warning = backend.ScrubKey(warning, c.APIKey)
+
+	// Protect the NEW key from the trace before it is stored anywhere or used for
+	// anything. Additive, so the outgoing key stays registered too — a log line written
+	// before this swap still contains it, and un-protecting it would expose it the next
+	// time that file is read or bundled.
+	redact.RegisterSecret(c.APIKey)
 
 	if err := credentials.Save(a.snapshotConfig().CredentialsPath, c); err != nil {
 		return err

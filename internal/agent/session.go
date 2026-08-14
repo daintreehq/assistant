@@ -1053,7 +1053,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		batch = append(batch, BatchedToolCall{ID: call.ID, Name: internalName, Args: call.Function.Arguments})
 	}
 	s.events.Phase(domain.PhaseToolQueued)
-	s.events.ToolBatch(batch)
+	s.events.ToolBatch(redactBatchedToolCalls(batch))
 
 	// A multiple-choice question must be asked ALONE: if the model bundled it with other
 	// tools, run only the FIRST question and skip every sibling, so no side-effecting tool
@@ -1157,7 +1157,7 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 		trimmedArgs := strings.TrimSpace(call.Function.Arguments)
 		argsEmpty := trimmedArgs == "" || trimmedArgs == "{}"
 
-		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt})
+		s.events.ToolCall(redactToolCallEvent(ToolCallEvent{ID: call.ID, Name: internalName, Args: call.Function.Arguments, StartedAt: startedAt}))
 
 		switch {
 		case questionSkip:
@@ -1326,7 +1326,7 @@ func (s *Session) emitToolSettled(ctx context.Context, call models.ToolCallReque
 	if !res.Ok && ctx.Err() == nil && !synthetic {
 		failCount = s.recordToolFailure(internalName)
 	}
-	s.events.ToolResult(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: endedAt, FailureCount: failCount})
+	s.events.ToolResult(redactToolResultEvent(ToolResultEvent{ID: call.ID, Name: internalName, Result: res, EndedAt: endedAt, FailureCount: failCount}))
 	if res.Ok {
 		s.events.ToolState(call.ID, ToolStateDone)
 	} else {
@@ -1541,7 +1541,7 @@ func (s *Session) runParallelGroup(ctx context.Context, calls []models.ToolCallR
 		call := calls[from+i]
 		names[i] = s.resolveInternal(call.Function.Name)
 		s.events.ToolState(call.ID, ToolStateActive)
-		s.events.ToolCall(ToolCallEvent{ID: call.ID, Name: names[i], Args: call.Function.Arguments, StartedAt: domain.NowMS()})
+		s.events.ToolCall(redactToolCallEvent(ToolCallEvent{ID: call.ID, Name: names[i], Args: call.Function.Arguments, StartedAt: domain.NowMS()}))
 	}
 
 	type completion struct {

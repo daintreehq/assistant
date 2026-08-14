@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/daintreehq/assistant/internal/redact"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ func TestRedactArgs_MasksTokenInShellCommand(t *testing.T) {
 	if strings.Contains(out, "sk-ant-abc123DEF456ghi789jkl") {
 		t.Fatalf("token leaked through redaction: %q", out)
 	}
-	if !strings.Contains(out, redactionMark) {
+	if !strings.Contains(out, redact.Mark) {
 		t.Fatalf("expected a redaction mark: %q", out)
 	}
 	// The command context survives so the user can still judge the action.
@@ -67,7 +68,7 @@ func TestArgsBlockRedactsSecrets(t *testing.T) {
 	if strings.Contains(out, "ghp_abcdefghijklmnopqrstuvwxyz0123") {
 		t.Fatalf("approval args leaked a token: %q", out)
 	}
-	if !strings.Contains(out, redactionMark) {
+	if !strings.Contains(out, redact.Mark) {
 		t.Fatalf("approval args should show the redaction mark: %q", out)
 	}
 }

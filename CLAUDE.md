@@ -312,9 +312,19 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
 
 ## Debug logging
 
-Set `DAINTREE_ASSISTANT_DEBUG_LOG=1` to append a full-fidelity trace (every model
-request/response, every tool call with args+result, the watcher lifecycle) to a
-**global** dir (default `~/.daintree/logs`, override `DAINTREE_ASSISTANT_LOG_DIR`).
+Set `DAINTREE_ASSISTANT_DEBUG_LOG=1` to append a trace (every model request/response,
+every tool call with args+result, the watcher lifecycle) to a **global** dir (default
+`~/.daintree/logs`, override `DAINTREE_ASSISTANT_LOG_DIR`).
+
+**Secrets are redacted at the write boundary** — inside `debuglog.formatLine`, not at the
+~30 call sites, so a new call site inherits the protection without knowing the rule
+exists. `internal/redact` does the work: credential SHAPES (bearer, `sk-`, PATs, JWTs,
+`NAME=value` env assignments, URL userinfo, PEM blocks) plus EXACT values registered via
+`redact.RegisterSecret` — the API key at boot and on `/login`, the MCP token at boot and
+on every daemon credential refresh. Registration is additive: a rotated key stays
+registered, because a log line written under it is still on disk. Block values are capped
+at 64 KiB with a size + sha256 prefix. The same redactor also guards the durable audit
+rows (`tools.safeJSON`) and the cockpit's approval sheet (`internal/ui/redact.go`).
 The flag is read from the process env, the bound project's `.env`, or the assistant's
 own `.env` fallback. `debuglog.StartDebugLog(cfg, sessionId)` runs once per process at
 boot: it deletes logs older than 7 days, opens a **per-session** `<date>-<sessionId>.log`

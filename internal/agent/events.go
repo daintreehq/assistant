@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // --- Event vocabulary (liveness) ---
@@ -527,4 +528,70 @@ func rawArgsAsAny(raw string) any {
 		return raw
 	}
 	return v
+}
+
+// --- Redaction at the event source -------------------------------------------------
+//
+// Tool call args and tool results carry whatever the model and the terminal put there:
+// a `terminal.sendCommand` of `export TOKEN=…`, an agent echoing its environment into
+// stdout, a git remote with an inline credential. The EventSink fan-out then copies that
+// material into six places at once, several of them durable or permanent:
+//
+//	run_events (SQLite, 14 days / 500 runs — and `/explain` replays them)
+//	the console sink (stdout, and any terminal scrollback capturing it)
+//	the JSONL --json stream (whatever automation is consuming it)
+//	the embedded host's NDJSON transport (Daintree's process)
+//	the cockpit's collapsed activity rows, which SEAL INTO NATIVE SCROLLBACK
+//	the ops deck's terminal previews
+//
+// Redacting at each sink means six chances to forget and six places to keep in step. The
+// events are display and diagnostics only — the model receives the real, unredacted
+// result through the conversation, so nothing downstream of these structs needs the raw
+// value — so the honest place to do it is once, here, where they are built.
+
+// redactToolCallEvent returns ev with its arguments sanitized.
+//
+// Args are a JSON string, so they go through JSONBytes (structure-aware) rather than the
+// free-text patterns: regexing serialized JSON was corrupting it — an env-assignment
+// value ran to the next whitespace, and minified JSON has none.
+func redactToolCallEvent(ev ToolCallEvent) ToolCallEvent {
+	ev.Args = string(redact.JSONBytes([]byte(ev.Args)))
+	return ev
+}
+
+// redactToolResultEvent returns ev with its human-facing text and structured payload
+// sanitized.
+//
+// Summary and Error.Message are free prose written by the handler, and several quote
+// their input verbatim ("Sent to terminal t7: export TOKEN=…"). Result is walked
+// structurally, which preserves every key and non-string value — so the ops deck's
+// terminal previews and the dashboard still find the fields they read, with only
+// credential-shaped strings masked.
+func redactToolResultEvent(ev ToolResultEvent) ToolResultEvent {
+	ev.Result.Summary = redact.String(ev.Result.Summary)
+	if ev.Result.Result != nil {
+		ev.Result.Result = redact.Value(ev.Result.Result)
+	}
+	if ev.Result.Error != nil {
+		// Copy before mutating: the ToolResult is shared with the caller, which feeds the
+		// REAL error back to the model. Redacting in place would silently degrade what the
+		// model is told, which is a correctness bug, not a security improvement.
+		errCopy := *ev.Result.Error
+		errCopy.Message = redact.String(errCopy.Message)
+		if errCopy.Details != nil {
+			errCopy.Details = redact.Value(errCopy.Details)
+		}
+		ev.Result.Error = &errCopy
+	}
+	return ev
+}
+
+// redactBatchedToolCalls sanitizes a whole batch announcement.
+func redactBatchedToolCalls(in []BatchedToolCall) []BatchedToolCall {
+	out := make([]BatchedToolCall, len(in))
+	for i, c := range in {
+		c.Args = string(redact.JSONBytes([]byte(c.Args)))
+		out[i] = c
+	}
+	return out
 }
