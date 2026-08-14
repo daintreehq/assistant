@@ -75,6 +75,27 @@ type EndpointChoice struct {
 	Note string
 }
 
+// KeyPurposeNotice is what a user is told, at the moment they are asked for a key, about
+// WHAT the key is and WHO it bills.
+//
+// It is here rather than duplicated in each prompt because both sign-in surfaces have to
+// say the same thing, and this particular sentence is one a tester acts on: they are
+// about to paste a credential that spends their own money, and nothing else in the flow
+// tells them so. Someone who thinks they are entering a Daintree account password will
+// paste the wrong thing, and — worse — will not know to watch their balance.
+//
+// The billing clause leads because it is the half a reader acts on. The backend holds no
+// provider credential of its own; the key travels with every request and funds every
+// model call the session makes, including the ones background supervision fires while
+// nobody is watching — which is the spend a tester would otherwise never think to
+// expect.
+//
+// Kept SHORT on purpose. The cockpit sheet wraps it into a bounded number of rows and
+// ELLIPSIZES past them, and a disclosure cut off mid-sentence at 40 columns is worse
+// than a terser one that always lands whole. Each surface adds its own framing around
+// this sentence; the sentence itself stays the shared, load-bearing part.
+const KeyPurposeNotice = "OpenRouter bills this key for every model call, including background supervision."
+
 // EndpointChoices is the offered endpoint menu, shared by the startup login flow
 // (internal/cli) and the cockpit's `/login` sheet (internal/ui) so the two surfaces
 // cannot drift into offering different endpoints.

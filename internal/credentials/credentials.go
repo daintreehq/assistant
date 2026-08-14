@@ -166,6 +166,18 @@ func Save(path string, c Credentials) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create credentials dir: %w", err)
 	}
+	// MkdirAll's mode applies only to directories it CREATES. A pre-existing
+	// ~/.daintree — made by an older build, an installer, a restored backup, or a
+	// permissive umask — keeps whatever mode it already had, so the 0700 above is a
+	// promise about new installs only.
+	//
+	// The stored file itself is 0600, so a merely traversable directory does not expose
+	// the key — that repair is defence in depth. A group- or world-WRITABLE one is a
+	// different problem, and tightenDirMode refuses the save outright rather than
+	// pretending otherwise.
+	if err := tightenDirMode(dir); err != nil {
+		return err
+	}
 	raw, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode credentials: %w", err)
@@ -196,6 +208,88 @@ func Save(path string, c Credentials) error {
 	}
 	return nil
 }
+
+// tightenDirMode clears group and world permissions on the directory holding the
+// credentials file, and reports an error only when the directory remains WRITABLE by
+// someone else afterwards.
+//
+// The split between "quietly tighten" and "refuse" is the point:
+//
+//   - A merely traversable directory (0755) does not expose the file — that is 0600 —
+//     so tightening it is defence in depth and failing to would be a bad trade against
+//     a user who cannot chmod a managed or shared home.
+//   - A group- or world-WRITABLE directory is different in kind. Another local account
+//     can unlink and replace credentials.json, and the replacement need not even carry a
+//     key to be dangerous: with DAINTREE_API_KEY supplying the victim's key, an attacker
+//     who controls only the stored backend_url receives every request that key funds.
+//     Saving into that and reporting success would be the wrong answer.
+//
+// Two hazards this deliberately avoids. It operates on an OPEN DESCRIPTOR, so the stat
+// and the chmod address the same object — a separate Stat-then-Chmod pair re-resolves
+// the path, and a symlink swapped in between could redirect the chmod onto a different
+// directory entirely (which is also how a "never loosens" pass can end up ADDING owner
+// bits to something else). And it refuses to touch a directory that is not plausibly
+// ours: DAINTREE_ASSISTANT_STATE_DIR is user-supplied, so pointing it at $HOME must not
+// silently make the home directory owner-only.
+func tightenDirMode(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil // unreadable is not our problem to diagnose here; the write will say so
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	mode := info.Mode()
+	// The CHECK below runs for any directory — it is free, and the hazard it names does
+	// not care whose directory it is. Only the silent MUTATION is restricted to one we
+	// created by convention.
+	if isHardenableDir(dir) && mode.Perm()&0o077 != 0 {
+		// Clear group/world, preserve owner bits AND setuid/setgid/sticky — dropping a
+		// sticky bit from a shared directory would be a change we were never asked to
+		// make. Errors are tolerated here (an ACL-managed or mode-less filesystem can
+		// refuse); the check below is what actually gates the save.
+		_ = f.Chmod(mode.Perm()&0o700 | mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
+		if again, err := f.Stat(); err == nil {
+			mode = again.Mode()
+		}
+	}
+	if mode.Perm()&0o022 != 0 {
+		return fmt.Errorf(
+			"refusing to store credentials in %s: it is writable by other users (mode %04o) and they could replace the file — fix with: chmod go-w %s",
+			dir, mode.Perm(), dir)
+	}
+	return nil
+}
+
+// isHardenableDir reports whether dir is a place this package may silently chmod.
+//
+// The state directory is user-configurable, so `filepath.Dir(credentialsPath)` can be
+// anything — including $HOME or /. Changing the mode of either would be a surprising,
+// system-wide side effect of signing in. Restricted to a directory that looks like ours:
+// a real subdirectory whose name is one Daintree creates.
+func isHardenableDir(dir string) bool {
+	clean := filepath.Clean(dir)
+	if clean == "" || clean == "." {
+		return false
+	}
+	// A filesystem root: Dir(p) == p.
+	if filepath.Dir(clean) == clean {
+		return false
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.Clean(home) == clean {
+		return false
+	}
+	return filepath.Base(clean) == StateDirName
+}
+
+// StateDirName is the leaf directory name this CLI creates under ~/.daintree. It is the
+// only directory tightenDirMode will silently chmod: an explicitly configured state dir
+// (tests, benchmarks, `make db-reset`) can be anywhere, and quietly changing the mode of
+// a path the user chose is not this package's business.
+const StateDirName = "assistant-cli"
 
 // isLoopbackHost reports whether a hostname addresses this machine. Covers the literal
 // names as well as any address in 127.0.0.0/8 and ::1, so 127.0.0.2 and friends work.

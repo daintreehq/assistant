@@ -142,6 +142,14 @@ func RunLogin(ctx context.Context, cfg config.AppConfig, tio LoginIO) (credentia
 		return credentials.Credentials{}, err
 	}
 
+	// Restate the RESOLVED endpoint before asking for the key, and say what the key is.
+	// The endpoint matters because a custom URL is normalized on the way through
+	// (scheme added, trailing slash dropped), so what was typed is not necessarily what
+	// the key is about to be sent to — and the key is spendable, so "which host am I
+	// handing this to" is the question to answer before it is typed, not after.
+	fmt.Fprintf(tio.Out, "\nSigning in to %s\n", baseURL)
+	fmt.Fprintf(tio.Out, "Use your own OpenRouter API key (sk-or-v1-…). %s\n\n", backend.KeyPurposeNotice)
+
 	apiKey, err := promptAPIKey(tio, current.APIKey)
 	if err != nil {
 		return credentials.Credentials{}, err
@@ -329,7 +337,7 @@ func verifySignIn(ctx context.Context, tio LoginIO, c credentials.Credentials) e
 	if warning != "" {
 		fmt.Fprintf(tio.Out, "  note: %s\n", warning)
 	} else {
-		fmt.Fprintf(tio.Out, "  key accepted by the provider%s\n", keyLabelSuffix(v))
+		fmt.Fprintf(tio.Out, "  key accepted by the provider%s\n", keyLabelSuffix(v, c.APIKey))
 	}
 	fmt.Fprintln(tio.Out)
 	return nil
@@ -338,10 +346,10 @@ func verifySignIn(ctx context.Context, tio LoginIO, c credentials.Credentials) e
 // keyLabelSuffix renders the provider's own metadata about the key, when it offers any.
 // The label is what tells a user they pasted the RIGHT key rather than merely a working
 // one; remaining credit turns "signed in but every turn fails" into a warning up front.
-func keyLabelSuffix(v backend.KeyVerification) string {
+func keyLabelSuffix(v backend.KeyVerification, key string) string {
 	var parts []string
-	if v.Label != "" {
-		parts = append(parts, v.Label)
+	if label := safeKeyLabel(v.Label, key); label != "" {
+		parts = append(parts, label)
 	}
 	if v.LimitRemaining != nil {
 		parts = append(parts, fmt.Sprintf("%.2f remaining", *v.LimitRemaining))
@@ -351,6 +359,42 @@ func keyLabelSuffix(v backend.KeyVerification) string {
 	}
 	return " (" + strings.Join(parts, " · ") + ")"
 }
+
+// safeKeyLabel returns the provider's own name for the key, or "" when that "name" is
+// really a piece of the key.
+//
+// OpenRouter defaults a key's label to a TRUNCATED form of the key itself
+// ("sk-or-v1-abc…c99"). ScrubKey only catches the complete bearer, so without this the
+// login and doctor output would print a partial secret — and leave a durable fingerprint
+// of it in the host's native scrollback, which the cockpit never clears.
+//
+// The test is deliberately blunt rather than clever: if any run of the label long enough
+// to matter also appears in the key, it is treated as key material and dropped. A
+// genuinely user-chosen label ("work laptop") shares no such run, and the cost of a false
+// positive is one missing confirmation line — against the cost of a false negative, which
+// is a secret on screen.
+func safeKeyLabel(label, key string) string {
+	label = strings.TrimSpace(label)
+	key = strings.TrimSpace(key)
+	if label == "" || key == "" {
+		return label
+	}
+	// Split on the ellipsis the provider uses, and on nothing else: each side is then a
+	// literal prefix/suffix of the key if this is a truncated rendering of it.
+	for _, part := range strings.FieldsFunc(label, func(r rune) bool {
+		return r == '…' || r == '.' || r == '*' || r == ' '
+	}) {
+		if len(part) >= minKeyFragmentRunes && strings.Contains(key, part) {
+			return ""
+		}
+	}
+	return label
+}
+
+// minKeyFragmentRunes is how much overlap with the key makes a label suspect. Low enough
+// to catch a provider's truncated rendering, high enough that a short common word in a
+// hand-written label cannot coincidentally appear inside a key.
+const minKeyFragmentRunes = 6
 
 // loginCheckError turns a failed verification into a message that names the likely
 // cause and the next action, rather than surfacing the raw transport error.

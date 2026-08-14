@@ -344,3 +344,49 @@ func TestSignInRefusedWhileATurnIsInFlight(t *testing.T) {
 		t.Fatal("/login must not open a sheet while a turn is running")
 	}
 }
+
+// The cockpit sheet must make the same claim the CLI flow does, at the same moment: this
+// is an OpenRouter key and OpenRouter bills it. Both surfaces read the wording from one
+// constant, so this pins that the sheet actually renders it — the failure mode is a
+// sheet that quietly drops the sentence and asks for a spendable credential unlabelled.
+func TestSignInSheetNamesTheKeyAndItsBilling(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{})
+	s := m.pendingSignIn
+	s.stage, s.baseURL = signInStageKey, "https://endpoint.test"
+
+	out := stripAnsi(m.View().Content)
+	// The exact shared constant, not a paraphrase — both surfaces render it, and
+	// asserting fragments would let the wording drift into something that no longer says
+	// who pays.
+	if !strings.Contains(out, backend.KeyPurposeNotice) {
+		t.Errorf("the key stage never renders the billing notice:\n%s", out)
+	}
+
+	// It is stage-specific: the endpoint chooser has no key to explain, and repeating
+	// the billing sentence on every stage would train the reader to skip it.
+	s.stage = signInStageEndpoint
+	if endpointView := stripAnsi(m.View().Content); strings.Contains(endpointView, "bills this key") {
+		t.Errorf("the billing notice appears on the endpoint stage too:\n%s", endpointView)
+	}
+}
+
+// The notice must land WHOLE at a realistically narrow width. capWrap ELLIPSIZES past
+// its row budget, and the clause it would drop first — "including background
+// supervision" — is the one a reader most needs, since that is the spend that happens
+// while nobody is looking.
+func TestSignInSheetNoticeSurvivesNarrowWidths(t *testing.T) {
+	for _, width := range []int{40, 50, 60, 80} {
+		m := testModel(width)
+		m.pendingSignIn = &pendingSignIn{}
+		s := m.pendingSignIn
+		s.stage, s.baseURL = signInStageKey, "https://endpoint.test"
+
+		out := stripAnsi(m.View().Content)
+		// Wrapping inserts newlines, so compare on a whitespace-collapsed form.
+		flat := strings.Join(strings.Fields(out), " ")
+		want := strings.Join(strings.Fields(backend.KeyPurposeNotice), " ")
+		if !strings.Contains(flat, want) {
+			t.Errorf("width %d truncated the billing notice:\n%s", width, out)
+		}
+	}
+}

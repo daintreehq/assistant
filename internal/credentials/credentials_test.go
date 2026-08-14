@@ -213,3 +213,145 @@ func TestNormalizeBaseURLRejectsUserinfo(t *testing.T) {
 		t.Fatalf("NormalizeBaseURL = %q, want a refusal for embedded credentials", got)
 	}
 }
+
+// MkdirAll's mode applies only to directories it CREATES, so a pre-existing
+// ~/.daintree/assistant-cli — from an older build, an installer, a restored backup, or a
+// permissive umask — keeps whatever mode it had. The file is 0600 regardless, but the
+// directory mode is defence in depth around something that carries spend authority.
+func TestSaveTightensAPreExistingLooseDirectory(t *testing.T) {
+	credDir := filepath.Join(t.TempDir(), StateDirName)
+	if err := os.MkdirAll(credDir, 0o755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Defeat any umask so the precondition is genuinely loose.
+	if err := os.Chmod(credDir, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	path := filepath.Join(credDir, FileName)
+	if err := Save(path, Credentials{BaseURL: "https://example.test", APIKey: "sk-or-v1-fake-test-key"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	info, err := os.Stat(credDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("credentials dir is %04o — group/world bits survived the write", perm)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("credentials file is %04o, want 0600", perm)
+	}
+}
+
+// Tightening clears group/world bits and PRESERVES the owner's. Seeded at 0577 rather
+// than 0500: a mode with no group/world bits returns before the chmod runs, so it would
+// pass even with the hardening deleted — the assertion has to reach the masking itself.
+func TestSaveTighteningPreservesOwnerBits(t *testing.T) {
+	credDir := filepath.Join(t.TempDir(), StateDirName)
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(credDir, 0o577); err != nil { // owner r-x, group/world rwx
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(credDir, 0o700) })
+
+	// Owner has no write bit, so the save itself fails. What matters is the mode left
+	// behind: group/world cleared, the owner's own bits untouched (NOT widened to 0700).
+	_ = Save(filepath.Join(credDir, FileName),
+		Credentials{BaseURL: "https://example.test", APIKey: "sk-or-v1-fake-test-key"})
+
+	info, err := os.Stat(credDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o500 {
+		t.Errorf("credentials dir is %04o, want 0500 (group/world cleared, owner bits unchanged)", perm)
+	}
+}
+
+// A directory OTHER users can write to is not a permissions nuisance, it is a different
+// hazard: they can unlink and replace credentials.json, and with DAINTREE_API_KEY
+// supplying the victim's key an attacker who controls only the stored backend_url
+// receives every request that key funds. Saving into it and reporting success would be
+// the wrong answer, so the save is refused.
+func TestSaveRefusesAWorldWritableDirectory(t *testing.T) {
+	// Deliberately NOT named StateDirName: the refusal is unconditional, while the
+	// silent chmod is restricted to a directory we created. A user-chosen state dir must
+	// still be checked.
+	credDir := filepath.Join(t.TempDir(), "custom-state")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(credDir, 0o777); err != nil {
+		t.Skipf("cannot set 0777 here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(credDir, 0o700) })
+
+	path := filepath.Join(credDir, FileName)
+	err := Save(path, Credentials{BaseURL: "https://example.test", APIKey: "sk-or-v1-fake-test-key"})
+	if err == nil {
+		t.Fatal("Save accepted a world-writable credentials directory")
+	}
+	if !strings.Contains(err.Error(), "writable by other users") {
+		t.Errorf("error %q does not name the hazard", err)
+	}
+	if !strings.Contains(err.Error(), "chmod go-w") {
+		t.Errorf("error %q does not tell the user how to fix it", err)
+	}
+	// And nothing was written — refusing must not leave a key in an unsafe place.
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("the credentials file was written despite the refusal")
+	}
+}
+
+// The state directory is user-configurable, so filepath.Dir(credentialsPath) can be
+// anything the user named — including $HOME. Signing in must not silently chmod a
+// directory we did not create.
+func TestSaveDoesNotChmodADirectoryItDoesNotOwn(t *testing.T) {
+	credDir := filepath.Join(t.TempDir(), "my-own-directory")
+	if err := os.MkdirAll(credDir, 0o755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(credDir, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	// 0755 is traversable but not writable by others, so the save proceeds — the FILE is
+	// 0600, which is what actually protects the key.
+	if err := Save(filepath.Join(credDir, FileName),
+		Credentials{BaseURL: "https://example.test", APIKey: "sk-or-v1-fake-test-key"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(credDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("a user-chosen directory was silently chmod'ed from 0755 to %04o", perm)
+	}
+}
+
+// isHardenableDir must refuse the paths where a silent chmod would be a surprising,
+// system-wide side effect of signing in.
+func TestIsHardenableDirRefusesSurprisingTargets(t *testing.T) {
+	if home, err := os.UserHomeDir(); err == nil {
+		if isHardenableDir(home) {
+			t.Error("the home directory is hardenable — signing in would chmod it")
+		}
+	}
+	for _, dir := range []string{"/", ".", "", "/tmp", "/Users"} {
+		if isHardenableDir(dir) {
+			t.Errorf("%q is hardenable", dir)
+		}
+	}
+	if !isHardenableDir(filepath.Join(t.TempDir(), StateDirName)) {
+		t.Errorf("our own %q directory is not hardenable", StateDirName)
+	}
+}

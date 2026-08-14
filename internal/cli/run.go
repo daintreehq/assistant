@@ -122,7 +122,11 @@ func ensureSignedIn(ctx context.Context, overrides config.ConfigOverrides, allow
 		return nil
 	}
 	if !allowPrompt {
-		return fmt.Errorf("not signed in — run `daintree-assistant login` to connect to %s (or set DAINTREE_API_KEY)", cfg.BackendURL)
+		// Names what DAINTREE_API_KEY actually IS. A user who takes the env-var route
+		// never sees the login flow's disclosure, and "set DAINTREE_API_KEY" on its own
+		// reads like a service token rather than a credential OpenRouter bills.
+		return fmt.Errorf("not signed in — run `daintree-assistant login` to connect to %s (or set DAINTREE_API_KEY to your own OpenRouter key; %s)",
+			cfg.BackendURL, backend.KeyPurposeNotice)
 	}
 	_, err = RunLogin(ctx, cfg, StdLoginIO())
 	return err
@@ -602,7 +606,7 @@ func verifyKeyDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCh
 		return c
 	}
 	c.Status = StatusOK
-	c.Detail = "yes" + keyLabelSuffix(ver)
+	c.Detail = "yes" + keyLabelSuffix(ver, a.APIKey())
 	if ver.LimitRemaining != nil {
 		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
 	}

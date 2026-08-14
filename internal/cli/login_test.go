@@ -316,3 +316,92 @@ func TestLoginCheckErrorKeepsGenericAdviceWithoutACode(t *testing.T) {
 		t.Errorf("message %q lost the generic fallback advice", got)
 	}
 }
+
+// The disclosure must be on screen BEFORE the key is typed, not merely present in the
+// final transcript. Asserted at the moment `ReadSecret` is called — a flow that read the
+// key first and printed the notice after would satisfy any check on the finished output
+// while giving the user nothing to act on.
+//
+// It also pins the RESOLVED endpoint, exactly. A custom URL is normalized on the way
+// through (trailing slash dropped), so what was typed is not necessarily what the
+// spendable key is about to be sent to.
+func TestRunLoginNamesTheKeyAndItsBillingBeforeAsking(t *testing.T) {
+	srv := newCapsServer(t)
+	cfg := loginCfg(t)
+
+	out := &bytes.Buffer{}
+	answers := []string{"2", srv.URL + "/"} // trailing slash: normalization has work to do
+	var atSecret string
+	i := 0
+	tio := LoginIO{
+		Out: out,
+		ReadLine: func() (string, error) {
+			if i >= len(answers) {
+				return "", io.EOF
+			}
+			v := answers[i]
+			i++
+			return v, nil
+		},
+		ReadSecret: func() (string, error) {
+			atSecret = out.String() // everything the user could see at this instant
+			return "sk-or-v1-testkey0123456789", nil
+		},
+	}
+
+	if _, err := RunLogin(context.Background(), cfg, tio); err != nil {
+		t.Fatalf("login: %v (output:\n%s)", err, out.String())
+	}
+	if atSecret == "" {
+		t.Fatal("ReadSecret was never called")
+	}
+
+	// The SHARED sentence, not an invented paraphrase — both surfaces render this exact
+	// constant, and asserting fragments would let the wording drift into something that
+	// no longer says who pays.
+	if !strings.Contains(atSecret, backend.KeyPurposeNotice) {
+		t.Errorf("the billing notice was not on screen when the key was requested:\n%s", atSecret)
+	}
+	if !strings.Contains(atSecret, "OpenRouter API key") {
+		t.Errorf("the prompt never says which kind of key it wants:\n%s", atSecret)
+	}
+	// Exact line: srv.URL is a PREFIX of srv.URL+"/", so a Contains on the bare URL
+	// would pass even if the trailing slash had survived normalization.
+	if !strings.Contains(atSecret, "\nSigning in to "+srv.URL+"\n") {
+		t.Errorf("the resolved endpoint line %q is missing:\n%s", "Signing in to "+srv.URL, atSecret)
+	}
+}
+
+// A provider label that is really a truncated copy of the key must not be printed.
+// OpenRouter defaults a key's label to exactly that, and ScrubKey only catches the
+// complete bearer — so without suppression a partial secret lands in the host's native
+// scrollback, which the cockpit never clears.
+func TestKeyLabelSuffixSuppressesAKeyShapedLabel(t *testing.T) {
+	const key = "sk-or-v1-abcdef0123456789abcdef0123456789c99"
+	limit := 15.5
+
+	leaky := keyLabelSuffix(backend.KeyVerification{Label: "sk-or-v1-abcdef0123…89c99"}, key)
+	if strings.Contains(leaky, "abcdef0123") {
+		t.Errorf("a truncated copy of the key was printed: %q", leaky)
+	}
+
+	// A human-chosen label is useful — it confirms WHICH key was pasted — and must
+	// survive.
+	kept := keyLabelSuffix(backend.KeyVerification{Label: "work laptop", LimitRemaining: &limit}, key)
+	if !strings.Contains(kept, "work laptop") {
+		t.Errorf("a genuine label was suppressed: %q", kept)
+	}
+	if !strings.Contains(kept, "15.50 remaining") {
+		t.Errorf("the remaining limit was dropped: %q", kept)
+	}
+
+	// With the label gone, the remaining-limit half still renders on its own rather than
+	// leaving an empty "()".
+	onlyLimit := keyLabelSuffix(backend.KeyVerification{Label: "sk-or-v1-abcdef0123…89c99", LimitRemaining: &limit}, key)
+	if strings.Contains(onlyLimit, "()") || strings.Contains(onlyLimit, "abcdef") {
+		t.Errorf("malformed or leaky suffix: %q", onlyLimit)
+	}
+	if !strings.Contains(onlyLimit, "15.50 remaining") {
+		t.Errorf("the remaining limit was dropped with the label: %q", onlyLimit)
+	}
+}

@@ -47,6 +47,15 @@ func renderSignIn(th theme.Theme, s *pendingSignIn, width int) string {
 	case signInStageKey:
 		b.WriteString(th.Body().Render(truncateCells("API key for "+s.baseURL, width)))
 		b.WriteByte('\n')
+		// Who bills the key, at the moment it is asked for. Shared wording with the CLI
+		// flow so the two surfaces cannot drift on a claim about the user's money.
+		//
+		// The row budget is deliberately generous. capWrap ELLIPSIZES past its cap, and
+		// at 40 columns a longer notice lost "including background supervision" — the
+		// clause a reader most needs, since it is the spend that happens while nobody is
+		// looking. The sentence is short enough to land whole well below that width.
+		b.WriteString(th.Dim().Render(capWrap(backend.KeyPurposeNotice, width, 4)))
+		b.WriteByte('\n')
 		b.WriteString(renderSignInField(th, s.keyInput, true, width))
 	case signInStageVerifying:
 		b.WriteString(th.Body().Render(truncateCells("Checking "+s.baseURL+" …", width)))
