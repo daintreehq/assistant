@@ -43,6 +43,53 @@ func Unrecoverable() domain.FailOption { return domain.Unrecoverable() }
 // WithDetails attaches a structured details payload to a Fail.
 func WithDetails(details any) domain.FailOption { return domain.WithDetails(details) }
 
+// Connection names an external service a tool depends on. Used to describe the toolset
+// truthfully in degraded mode, where the Daintree control plane is unreachable and a
+// large fraction of the registry cannot actually do anything.
+type Connection string
+
+const (
+	// RequiresNothing is purely local: filesystem, SQLite, or in-memory state. Works in
+	// degraded mode exactly as it does normally. The zero value, so a family that never
+	// thinks about this is correctly described by default.
+	RequiresNothing Connection = ""
+	// RequiresDaintreeMCP needs the Daintree control plane (DAINTREE_MCP_URL). Without
+	// it there are no terminals to read, no agents to spawn, and no worktrees to
+	// inspect — the assistant's whole orchestration role is offline.
+	RequiresDaintreeMCP Connection = "daintree-mcp"
+	// RequiresDocsMCP needs the public no-auth Daintree documentation MCP. Independent
+	// of the control plane: docs answers still work when Daintree itself is unreachable,
+	// which is exactly when "how do I…" questions get asked.
+	RequiresDocsMCP Connection = "docs-mcp"
+	// RequiresBackend needs the Daintree Assistant backend beyond the turn itself — a
+	// server-owned utility task (summarize, extract, classify, plan, reconcile). Distinct
+	// from the control plane: the backend can be reachable while Daintree is not, and
+	// vice versa, and the two failures want different fixes.
+	RequiresBackend Connection = "assistant-backend"
+	// RequiresInteractive needs a human at a TTY. A one-shot, `--json`, host, or
+	// unattended-wake run has no surface to ask on, and the handler fails cleanly rather
+	// than blocking forever.
+	RequiresInteractive Connection = "interactive-session"
+)
+
+// SetRequires stamps a connection dependency onto every tool in a family's slice. Family
+// constructors call it once instead of repeating the field per tool, so a newly added
+// tool inherits its family's dependency rather than silently defaulting to "local".
+func SetRequires(in []Tool, c Connection) []Tool {
+	for i := range in {
+		in[i].Requires = c
+	}
+	return in
+}
+
+// SetRequiresPtr is SetRequires for the families that already return []*Tool.
+func SetRequiresPtr(in []*Tool, c Connection) []*Tool {
+	for _, t := range in {
+		t.Requires = c
+	}
+	return in
+}
+
 // NoArgs is the standard empty-object JSON Schema for no-argument tools.
 var NoArgs = map[string]any{
 	"type":                 "object",
@@ -155,6 +202,30 @@ type Tool struct {
 	Decode DecodeFunc
 	// Handle is the implementation.
 	Handle Handler
+
+	// Requires names the connection whose absence makes this tool UNABLE TO DO ITS JOB.
+	// The zero value (RequiresNothing) means purely local — filesystem, SQLite, or
+	// in-memory — and therefore fully working in degraded mode.
+	//
+	// It is deliberately the PRIMARY dependency, not a set. A tool that reads a terminal
+	// and then summarizes it needs both the control plane and the backend, but without
+	// the control plane there is nothing to summarize, so `daintree-mcp` is the answer a
+	// reader needs. A tool that merely degrades without a connection — returning less
+	// detail, or reporting the outage as its result — declares RequiresNothing: it still
+	// works, and `context.snapshot` and `daintree.status` are most useful precisely when
+	// Daintree is down.
+	//
+	// It is DOCUMENTATION, not a gate: dispatch does not consult it, and a tool whose
+	// connection is down still runs and returns its own clean "not connected" failure.
+	// Gating on it would be actively wrong — it would block the diagnostic tools a
+	// disconnected user reaches for first. What it buys is honesty at the surfaces that
+	// describe the toolset, so "which of these actually work right now?" has one answer
+	// derived from the registry instead of hand-maintained lists that drift apart.
+	//
+	// Consumed today by the generated capability reference (docs/generated/TOOLS.md) and
+	// its drift tests. The degraded-mode banner and `doctor` are the intended next
+	// readers; until they are wired, do not describe them as reading it.
+	Requires Connection
 
 	// Parallelizable opts this tool INTO concurrent dispatch: when the model emits a
 	// batch containing a consecutive run of parallelizable calls, the turn loop runs

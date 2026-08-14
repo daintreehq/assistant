@@ -64,6 +64,12 @@ const (
 	schemaUserVersion = 10
 )
 
+// SchemaVersion exposes the on-disk schema baseline to callers that need to REPORT it
+// rather than act on it — the generated compatibility manifest, `doctor`, and the
+// support bundle. Kept as an accessor over the unexported constant so nothing outside
+// this package can compare against a copy that has drifted.
+func SchemaVersion() int { return schemaUserVersion }
+
 // Retention bounds the append-only tables. Each plain log table keeps the newer
 // of MaxAge OR the last KeepN rows.
 type Retention struct {

@@ -179,6 +179,20 @@ func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *
 	if tctx.ActorID == "" || tctx.DB == nil {
 		return nil
 	}
+	// An ungrantable tool can NEVER be authorized by a grant, whatever the grant says.
+	//
+	// This check has to live here, on the enforcement path, not only on grant.create's
+	// minting path: grant.create rejects an ungrantable tool by NAME, but it accepts
+	// `allowedRiskClasses`, and ConsumeGrant authorizes on `toolName OR riskClass`
+	// (storage.grantAuthorizes). So a grant scoped to the `system` risk class matched
+	// daintree.call — the raw, unbounded MCP escape hatch — and a watcher, timer, or
+	// unattended wake turn could reach ANY Daintree MCP method with no human present,
+	// bypassing exactly the typed-wrapper gating the ungrantable list exists to enforce.
+	// The blocked-item recommender already consulted IsUngrantableTool, so the CLI was
+	// declining to SUGGEST the grant while still HONOURING one.
+	if domain.IsUngrantableTool(name) {
+		return nil
+	}
 	actorType := domain.AutomationGrantActorType(tctx.Actor) // watcher | timer
 	grant, err := tctx.DB.ConsumeGrant(ctx, tctx.ActorID, actorType, name, tool.Risk, domain.NowMS())
 	if err != nil {

@@ -204,7 +204,10 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
 - **No file edits.** `tools.Registry.AssertSafe()` (via `safety.AssertNoFileEditTools`)
   rejects, at startup, any tool whose name contains a forbidden fragment (`write_file`,
   `edit_file`, `fs.write`, `apply_patch`, `file.edit`, …). Edits go through
-  `agentTask.spawnForEdits` (mode `edit` | `explore`) — the only agent-spawn path.
+  `agentTask.spawnForEdits` (mode `edit` | `explore`) — the primary agent-spawn path.
+  (`workflow.startWorkOnIssue` also spawns, via Daintree's recipe path: it creates the
+  worktree AND launches an agent into it. Both are visible-terminal delegation; neither
+  writes a file from this process.)
 - **Tool results use the `ToolResult` envelope** via `domain.Ok(summary, result)` /
   `domain.Fail(code, message, opts…)`. Handlers never throw to the caller — `Dispatch`
   recovers panics and returns a `Fail`. Side-channels (audit, debug log) must never

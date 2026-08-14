@@ -172,9 +172,21 @@ DAINTREE_PROJECT_ID=<id>
 
 The CLI connects over **Streamable HTTP** (falling back to legacy SSE) with the bearer
 token, using `github.com/modelcontextprotocol/go-sdk`. Without these it runs in
-**degraded local mode**: filesystem, timer, watcher, and queue tools work; Daintree
-orchestration tools report a clean "not connected" error. Pass them explicitly with
-`--mcp-url` / `--mcp-token`.
+**degraded local mode**, which is not a normal launch — the assistant's whole
+orchestration role is offline.
+
+What still works: filesystem reads, memory, timers, the attention queue, grants, the
+audit trail, the async and workflow ledgers, `daintree.status` and `context.snapshot`
+(both report the outage as part of their answer), and the docs MCP, which is a separate
+public endpoint. What does not: anything that reaches a terminal, agent, or worktree.
+
+**Watchers are the subtle case.** `watcher.terminal.create` will happily write a durable
+row, but the engine polls through the Daintree control plane, so a watcher created while
+disconnected observes nothing until the link returns. Creating one is bookkeeping, not
+supervision. Every tool's dependency is listed in
+[`docs/generated/TOOLS.md`](docs/generated/TOOLS.md)'s **Needs** column.
+
+Pass the credentials explicitly with `--mcp-url` / `--mcp-token`.
 
 ## Architecture
 
@@ -219,12 +231,19 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ## Commands (cockpit or classic REPL)
 
+**→ [`docs/generated/COMMANDS.md`](docs/generated/COMMANDS.md)** — generated from
+`COMMAND_REGISTRY`, the same table that drives the composer palette and `/help`.
+
+The ones worth knowing on day one:
+
 ```
-/status  /inbox [sev]  /tools [query]  /timers  /watchers  /grants
-/workflows [status]  /workflow [id|sub]  /launches  /audit [n]  /explain [runId]  /models
-/permissions [tier]  /approvals [clear]  /skills
-/memory [list|pin <id>|unpin <id>|forget <id>]  /compact  /clear  /doctor
-/reconnect  /help  /quit
+/doctor      environment check — start here when something is wrong
+/auth        the active endpoint and API key (redacted)
+/login       sign in again: official, custom, or a local backend — no restart
+/status      backend, MCP, project, session, tier
+/inbox       whatever needs your attention
+/permissions supervisor | operator | system
+/help        everything else
 ```
 
 In the cockpit these render as command cards (and may focus a deck view); in `--classic`
@@ -248,31 +267,31 @@ Skills never narrow the toolset. Authoring lives in `../assistant-backend`. See
 
 ## Tools the model can call
 
-A current snapshot; the registry (`internal/tools`) is the source of truth, and
-[`docs/TOOLS.md`](docs/TOOLS.md) is the contributor reference for adding one.
+**→ [`docs/generated/TOOLS.md`](docs/generated/TOOLS.md)** — every registered tool with
+its risk class, minimum tier, confirmation behaviour, grantability, connection
+dependency, parallel-safety class, and feature flag.
 
-| Group             | Tools                                                                       |
-| ----------------- | --------------------------------------------------------------------------- |
-| Project read      | `fs.list` `fs.read` `fs.search`                                             |
-| Daintree (raw)    | `daintree.status` `daintree.listTools` `tool.search` `daintree.call`       |
-| Terminal control  | `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` |
-| Focus (UI)        | `terminal.focus`                                                          |
-| Context           | `context.snapshot` `terminal.read` `terminal.summarize`                    |
-| Extraction        | `terminal.extract` `terminal.extract.json`                                |
-| Timers            | `timer.schedule` `timer.list` `timer.cancel`                               |
-| Watchers          | `watcher.terminal.create` `watcher.watchPR` `watcher.list` `watcher.cancel` |
-| Queue             | `queue.publish` `queue.digest` `queue.resolve`                             |
-| Workflows         | `workflow.create` `workflow.get` `workflow.list` `workflow.update` `workflow.startWorkOnIssue` `workflow.prepBranchForReview` |
-| Recipes/worktrees | `recipe.list` `recipe.run` `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` |
-| Git               | `git.getProjectPulse`                                                       |
-| Context export    | `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` |
-| Forge             | `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR`         |
-| Agent tasks       | `agentTask.spawnForEdits` (no-file-edit escape hatch) `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
-| Grants            | `grant.create` `grant.list` `grant.revoke`                                 |
-| Skill runs        | `skill.run.get` `skill.step.advance` (selection is server-owned)          |
-| Audit             | `audit.export`                                                             |
-| Memory            | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
-| Artifacts         | `artifact.read`                                                            |
+That file is **generated from the live registry** and diffed in CI, so it cannot drift
+from the binary. This README deliberately no longer restates it: the hand-maintained
+version had fallen to 67 tools while the registry held 86, and listed several that had
+been deleted. [`docs/TOOLS.md`](docs/TOOLS.md) remains the contributor guide for *adding*
+a tool; [`docs/generated/COMPATIBILITY.md`](docs/generated/COMPATIBILITY.md) pins the
+protocol, schema, and backend-task versions a release negotiates on.
+
+The shape worth knowing without reading the table:
+
+| Group | What it covers |
+| --- | --- |
+| `fs.*` `artifact.*` `context.*` | read-only project and transcript access |
+| `agentTask.*` | spawn and supervise **visible** agents — the only path to a code change |
+| `terminal.*` | focus, rename, send, read, summarize, extract, wait, close, arm/disarm |
+| `async.*` | durable background supervision that survives closing the cockpit |
+| `watcher.*` `timer.*` `queue.*` `grant.*` | unattended supervision and the authority it needs |
+| `workflow.*` | the durable work ledger (plus a flag-gated execution graph) |
+| `worktree.*` `recipe.*` `forge.*` `git.*` `copyTree.*` | Daintree and repository operations |
+| `memory.*` `scratch.*` `skill.*` `audit.*` | state that outlives, or is scoped inside, a turn |
+| `daintree.*` `tool.search` `docs.*` | capability discovery, live documentation, and the raw MCP escape hatch |
+| `user.askMultipleChoice` | one finite question, answered in place |
 
 ## Environment variables
 

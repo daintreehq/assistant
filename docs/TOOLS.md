@@ -46,6 +46,9 @@ From [`internal/tools/types.go`](../internal/tools/types.go):
 | `Schema` | `json.RawMessage` | ✅ | The JSON Schema object advertised as the OpenAI `parameters`. **Must set `"additionalProperties": false`.** Use `tools.NoArgs` for a no-argument tool. |
 | `Decode` | `DecodeFunc` | — | Validates/coerces args before the handler runs. Almost always `tools.StrictDecoder(func() any { return &myArgs{} })`. nil ⇒ raw args pass through unvalidated. |
 | `Handle` | `Handler` | ✅ | `func(ctx context.Context, args json.RawMessage, tctx *ToolContext) ToolResult`. Does the work. |
+| `Requires` | `Connection` | — | The external connection the tool needs to do its job (`RequiresDaintreeMCP`, `RequiresDocsMCP`, `RequiresInteractive`; zero value = purely local). **Documentation, not a gate** — dispatch never reads it. It feeds the generated reference, `doctor`, and the degraded-mode banner, so "what still works while Daintree is disconnected?" has one answer. Usually stamped per family in `app.DefaultToolBuilder`. |
+| `Parallelizable` | bool | — | Opt this tool into concurrent dispatch with any other read-only batch sibling. Only for reads with no side effects and no ordering dependency; double-gated on `RiskRead`. **Never** on a barrier/wait tool. |
+| `ParallelHomogeneous` | bool | — | Narrower: lets a MUTATING tool batch with consecutive same-name siblings that are already fully authorized (the spawn fan-out case). Pair with `ParallelConflictKey` to keep two calls off one shared target. |
 
 ### The handler contract
 
@@ -176,38 +179,58 @@ Cross-subsystem deps are reached through the small consumer-defined interfaces i
 `internal/tools` (`Store`, `MCPClient`, `Queue`, `Router`) — never the concrete packages —
 so the package compiles in isolation and a family's `Deps` adapter is a thin shim.
 
-## Tool families (current snapshot)
+## Tool families
 
-The registry is the source of truth (`internal/tools` + the wiring in
-`internal/app/tools.go`); keep this table in step when you add or rename a tool.
+**The inventory is generated: [`generated/TOOLS.md`](generated/TOOLS.md).** Every
+registered tool, with its risk, minimum tier, confirmation behaviour, grantability,
+connection dependency, parallel-safety class, and feature flag — projected from the live
+registry and diffed in CI. Do not restate it here, and do not hand-edit it: this section
+used to carry a per-tool table, and it rotted into naming four tools that no longer exist
+(`agent.focusNextWaiting`, `terminal.extract.async`, `workflow.focusNextAttention`) while
+omitting three whole families.
 
-| Family (`internal/tools/…`) | Tools |
+What belongs here instead is the structural map — which sub-package owns what, which is
+what you need when deciding where a NEW tool goes:
+
+| Family (`internal/tools/…`) | Owns |
 |---|---|
-| `fsx` | `fs.list` `fs.read` `fs.search` |
-| `mcpx` | `daintree.status` `daintree.listTools` `tool.search` `daintree.call` · `terminal.focus` `terminal.sendCommand` `terminal.arm` `terminal.disarm` `terminal.disarmAll` · `copyTree.generate` `copyTree.generateAndCopyFile` `copyTree.injectToTerminal` · `agent.focusNextWaiting` `agent.focusNextWorking` `agent.focusNextAgent` `agent.focusPreviousAgent` |
-| `mcpwrap` | `recipe.list` `recipe.run` · `worktree.list` `worktree.getCurrent` `worktree.createWithRecipe` · `forge.listIssues` `forge.getIssue` `forge.listPRs` `forge.getPR` · `git.getProjectPulse` · `workflow.startWorkOnIssue` `workflow.prepBranchForReview` `workflow.focusNextAttention` |
-| `contextx` | `context.snapshot` `terminal.read` `terminal.summarize` |
-| `extractionx` | `terminal.extract` `terminal.extract.async` |
-| `timer` | `timer.schedule` `timer.list` `timer.cancel` |
-| `watcher` | `watcher.terminal.create` `watcher.watchPR` `watcher.list` `watcher.cancel` |
-| `queue` | `queue.publish` `queue.digest` `queue.resolve` |
-| `grant` | `grant.create` `grant.list` `grant.revoke` |
-| `workflow` | `workflow.create` `workflow.get` `workflow.list` `workflow.update` |
-| `skill` | `skill.run.get` `skill.step.advance` (stepwise run-tracking; selection is server-owned — see [`SKILLS.md`](SKILLS.md)) |
-| `auditx` | `audit.export` |
-| `memory` | `memory.recall` `memory.list` `memory.save` `memory.forget` `memory.pin` `memory.unpin` |
-| `artifactx` | `artifact.read` |
-| `agenttaskx` | `agentTask.spawnForEdits` `agentTask.superviseTerminal` `agentTask.status` `agentTask.list` |
-| `questionx` | `user.askMultipleChoice` (ask the human ONE multiple-choice question and block on the answer; `RiskUI`, interactive-only, must be called alone) |
+| `fsx` | read-only project filesystem (`fs.*`) — never writes, refuses credential-bearing paths |
+| `mcpx` | raw Daintree MCP: discovery, `daintree.call`, terminal control, copy-tree |
+| `mcpwrap` | typed wrappers over Daintree MCP actions: recipes, worktrees, forge, git |
+| `contextx` | operational overview + verbatim/summarized terminal reads |
+| `extractionx` | fact extraction from terminal output, and the foreground cohort wait |
+| `asyncx` | durable background supervision (`terminal.run.async`, the async ledger) |
+| `agenttaskx` | the ONLY agent-spawn path, plus its durable launch sagas |
+| `watcher` · `timer` · `queue` · `grant` | unattended supervision and the authority it requires |
+| `workflow` | the durable work ledger, plus the flag-gated execution graph |
+| `memory` · `scratchx` | state that outlives a session, and state scoped inside one |
+| `skill` | local run-tracking only — selection is server-owned ([`SKILLS.md`](SKILLS.md)) |
+| `auditx` · `artifactx` | the audit trail, and paging oversized results |
+| `docsx` | the public no-auth Daintree documentation MCP (a SECOND client) |
+| `questionx` | `user.askMultipleChoice` — one finite question, interactive sessions only |
 
-`mcpwrap` are typed wrappers over Daintree MCP actions. Forwarding many of these raw
+Each family exposes one `Tools(Deps) []tools.Tool` constructor and reaches its
+dependencies through a small `Deps` struct, never a concrete package import.
+
+### Declare the connection your tool needs
+
+Set `Tool.Requires` (`RequiresDaintreeMCP`, `RequiresDocsMCP`, `RequiresInteractive`, or
+the zero value for purely local). It gates nothing — a tool whose connection is down still
+runs and returns its own clean "not connected" failure — but it is what lets the generated
+reference, `doctor`, and the degraded-mode banner answer "which of these actually work
+right now?" from one place. `app.DefaultToolBuilder` stamps it per family, so a new tool
+inherits its family's dependency; override by name there when a family is mixed (as
+`async.list`/`async.cancel` are, being local ledger reads in an otherwise MCP-bound family).
+
+### Prefer the wrapper to the raw call
+
+`mcpwrap` tools are typed wrappers over Daintree MCP actions. Forwarding many of these raw
 through `daintree.call` is refused with `USE_TYPED_WRAPPER` and redirected to the wrapper
-(the exact denylist is `wrappedMCPTools` in `internal/tools/mcpx/discovery.go` — it covers
-the tools whose wrapper does validation worth protecting, so a few simple read passthroughs
-aren't on it). Reach for the wrapper, not the raw call. The model-facing reference for the
-Daintree MCP surface is
-[`DAINTREE_MCP.md`](DAINTREE_MCP.md) (and the embedded prompt in
-`internal/prompts/daintree_mcp.go`).
+(the denylist is `wrappedMCPTools` in `internal/tools/mcpx/discovery.go` — it covers the
+tools whose wrapper does validation worth protecting, so a few simple read passthroughs
+are not on it). The human-facing reference for the Daintree MCP surface is
+[`DAINTREE_MCP.md`](DAINTREE_MCP.md); the model-facing one is **backend-owned** and lives
+in `../assistant-backend`.
 
 ## Worked example
 
@@ -270,8 +293,12 @@ read tool that touches the filesystem should use both.
 - [ ] `Handle` returns `Ok`/`Fail`, never panics, honors `ctx` cancellation.
 - [ ] Mutating tool: set a clear `Consequence` for the approval sheet.
 - [ ] Family wired into `internal/app/tools.go`; `AssertSafe` still passes at startup.
+- [ ] `Requires` is right — inherited from the family, or overridden by name if the family is mixed.
 - [ ] Table-driven handler test added; `go build ./... && go test ./...` is green.
-- [ ] This doc's family table updated if you added/renamed a tool.
+- [ ] **Regenerated the capability reference**, or CI will fail on the drift:
+      `go test ./internal/app -run TestGeneratedDocsAreCurrent -update`
+      (and `go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update`
+      if you touched `COMMAND_REGISTRY`). Commit the regenerated files.
 
 ## Reference internals
 

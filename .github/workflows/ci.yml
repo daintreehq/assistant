@@ -52,6 +52,29 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # The generated capability reference and compatibility manifest are projected from
+      # the live registry and the protocol constants. Regenerating here and diffing means
+      # a tool, command, or version added without regenerating fails the build instead of
+      # shipping documentation that describes a different binary — the drift that left
+      # three hand-maintained inventories disagreeing with each other and with the code.
+      - name: Generated docs are current
+        run: |
+          go test ./internal/app -run TestGeneratedDocsAreCurrent -update
+          go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
+          # `git status --porcelain`, NOT `git diff`: a brand-new generated file is
+          # UNTRACKED, and `git diff` reports nothing for untracked paths — so a whole
+          # new generated document could be missing from the repo and this gate would
+          # pass. --porcelain reports modified, deleted, and untracked alike.
+          drift="$(git status --porcelain -- docs/generated)"
+          if [ -n "$drift" ]; then
+            echo "::error::docs/generated is stale. Regenerate and commit:"
+            echo "  go test ./internal/app -run TestGeneratedDocsAreCurrent -update"
+            echo "  go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update"
+            echo "$drift"
+            git --no-pager diff -- docs/generated
+            exit 1
+          fi
+
       # The race detector is Linux-friendly; run it here as the stricter gate.
       - name: Test (race)
         run: go test -race ./...

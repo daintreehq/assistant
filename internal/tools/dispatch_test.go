@@ -467,3 +467,39 @@ func TestDispatchPanicRecovered(t *testing.T) {
 		t.Fatal("TOOL_THREW is recoverable")
 	}
 }
+
+// An ungrantable tool must be blocked for an unattended actor even when the store
+// would hand back a perfectly valid grant.
+//
+// The store's authorization rule is "toolName OR riskClass", and grant.create only
+// refuses ungrantable tools by NAME — so a grant scoped to the `system` risk class
+// matched daintree.call, the raw unbounded MCP escape hatch, and a watcher/timer/wake
+// could reach any Daintree MCP method unattended. The fake here returns a grant
+// unconditionally, which is exactly the situation that bug produced: dispatch must
+// refuse on the tool's identity, not on the store's answer.
+func TestDispatchNeverConsumesAGrantForAnUngrantableTool(t *testing.T) {
+	for _, name := range []string{"daintree.call", "grant.create", "grant.revoke"} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRegistry()
+			_ = r.Register(echoTool(name, domain.RiskSystem))
+			s := &fakeStore{grant: &domain.AutomationGrantRecord{ID: "grt_abc", Source: domain.GrantSourceLocal}}
+			q := &fakeQueue{}
+			ctx := baseCtx(s, q, domain.TierSystem, domain.ActorWatcher)
+			ctx.ActorID = "wch_1"
+
+			res := r.Dispatch(context.Background(), name, json.RawMessage(`{"x":1}`), ctx)
+			if res.Ok {
+				t.Fatalf("%s must never run under a grant", name)
+			}
+			if res.Error == nil || res.Error.Code != codeConfirmRequired {
+				t.Fatalf("want a confirmation-required refusal, got %+v", res.Error)
+			}
+			if s.consumeCalled {
+				t.Errorf("%s must not even attempt a grant consume — that spends a use of a real grant", name)
+			}
+			if a := lastAudit(s); a.Outcome != outcomeDenied {
+				t.Errorf("want a denied audit row, got %s", a.Outcome)
+			}
+		})
+	}
+}

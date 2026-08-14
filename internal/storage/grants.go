@@ -230,6 +230,14 @@ func (s *Store) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 // list. JSON parsing is tolerant — null/garbage ⇒ an empty list (no panic, no
 // false grant).
 func grantAuthorizes(g domain.AutomationGrantRecord, toolName string, riskClass domain.RiskClass) bool {
+	// No grant authorizes an ungrantable tool, however it was scoped. Belt-and-braces
+	// with the same check in tools.tryGrant: the union rule below means a RISK-CLASS
+	// grant can match a tool whose NAME grant.create would have refused, so relying on
+	// mint-time validation alone left `system`-scoped grants authorizing daintree.call.
+	// Re-checking at the point of authorization makes that unreachable from any caller.
+	if domain.IsUngrantableTool(toolName) {
+		return false
+	}
 	names := parseStringList(g.AllowedToolNamesJson)
 	for _, n := range names {
 		if n == toolName {
