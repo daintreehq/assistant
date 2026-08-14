@@ -3,11 +3,16 @@
 The CLI connects to Daintree's **local MCP server** as an external client. In production
 Daintree launches the CLI and passes the connection details via environment / flags.
 
-> **Source of truth.** The CLI-side verified contract lives in
-> [`internal/prompts`](../internal/prompts) — it is embedded in the
-> cached system prompt, so it is what the model actually reasons against. This doc is
-> the human-facing companion; keep the two in sync. If they ever disagree, the prompt
-> source wins.
+> **Source of truth.** There is no longer a local prompt surface here — the base prompt,
+> the developer instructions, and every skill body are **backend-owned**
+> (`../assistant-backend/src/daintree_assistant_server/prompts/` and
+> `.../skills/files/*.md`), so what the model reasons against is authored over there.
+> The CLI-side verified contract is
+> [`DocumentedMcpToolNames`](../internal/mcp/tools.go) — the exact, ordered, test-pinned
+> drift baseline the CLI checks against the live server at startup. This doc is the
+> human-facing companion to that list; if they disagree, `internal/mcp/tools.go` wins.
+> A prompt or skill that describes an MCP tool wrongly is fixed in the **backend** repo,
+> not here.
 
 ## Connection
 
@@ -290,13 +295,14 @@ changes, update them together:
 1. **This doc** (`docs/DAINTREE_MCP.md`) — the human-facing companion. May list more raw
    Daintree tools than the model is told about (the catalog above is illustrative, not the
    model's allowlist).
-2. **The model prompt** (`internal/prompts/daintree_mcp.go`, `daintreeMCPReference`)
-   — the cached, model-facing reference. It names the local wrappers plus a few high-value
-   unwrapped tools, and reminds the model to use `tool.search` for the rest. It deliberately
-   does **not** enumerate every server tool.
+2. **The model-facing reference** — now in the **backend** repo
+   (`../assistant-backend/src/daintree_assistant_server/prompts/`), not here. It names the
+   local wrappers plus a few high-value unwrapped tools and points the model at
+   `tool.search` for the rest; it deliberately does **not** enumerate every server tool.
+   The old `internal/prompts/daintree_mcp.go` was deleted with the rest of the local
+   prompt machinery — a wrong description there is a backend fix.
 3. **The drift baseline** — `DocumentedMcpToolNames` (`internal/mcp/tools.go`), the single
-   authoritative list, pinned by tests. (The old duplicate prompts-side baseline was deleted
-   with the rest of the server-owned prompt machinery.) This is an **exact, minimal,
+   authoritative CLI-side list, pinned by tests. This is an **exact, minimal,
    verified** subset: at startup the CLI checks each name is still on the live
    server (a missing one signals the doc went stale). Drift is *missing-only* — extra live
    tools (like `worktree.compareDiff` or the `worktree.resource.*` family) are expected and

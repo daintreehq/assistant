@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/daintreehq/assistant/internal/credentials"
 )
 
 // Backend is the full client surface the app depends on (satisfied by *Client, and
@@ -101,12 +104,34 @@ const (
 	streamResponseHeaderTimeout = 10 * time.Second
 )
 
+// proxyExceptLoopback is http.ProxyFromEnvironment with one guarantee added: a URL this
+// package classifies as loopback is NEVER sent to a proxy.
+//
+// Without it, routing and classification disagree. Go's own proxy bypass fires only for
+// the exact lowercase host "localhost" and for parseable loopback IP literals, whereas
+// AllowsUnverifiedSignIn (credentials.IsLoopbackURL) also accepts "LOCALHOST",
+// "localhost.", "dev.localhost", and "127.0.0.1." — every one of which genuinely
+// addresses this machine, and every one of which stock ProxyFromEnvironment would hand
+// to HTTP_PROXY. That gap is exactly wrong in two ways at once: over plain http the
+// proxy would receive the spendable bearer token in clear text, and a proxy answering
+// capabilities-then-404 would put the request back on the LENIENT sign-in path it was
+// classified onto, persisting an unverified key.
+//
+// Deriving both from the same predicate makes the two agree by construction, so
+// widening the loopback definition later cannot silently reopen this.
+func proxyExceptLoopback(req *http.Request) (*url.URL, error) {
+	if req != nil && req.URL != nil && credentials.IsLoopbackURL(req.URL.String()) {
+		return nil, nil
+	}
+	return http.ProxyFromEnvironment(req)
+}
+
 // newTransport builds the structured default transport: bounded dial + TLS
 // handshake, keep-alives on (connection reuse matters — every turn round-trips),
 // and an optional response-header bound (0 = none).
 func newTransport(responseHeaderTimeout time.Duration) *http.Transport {
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: proxyExceptLoopback,
 		DialContext: (&net.Dialer{
 			Timeout:   transportDialTimeout,
 			KeepAlive: 30 * time.Second,
@@ -403,7 +428,10 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 			Stream:  true,
 		}
 	}
-	return result, perr
+	// A terminal SSE `error` event carries an upstream-controlled message that reaches
+	// the turn's error rendering and the debug log; parseRespondStream is a free
+	// function with no access to the key, so the scrub happens here. See scrubError.
+	return result, c.scrubError(perr)
 }
 
 // Respond runs a non-streaming generation round (used for tests / simple callers).
@@ -478,10 +506,29 @@ type KeyVerification struct {
 	IsFreeTier     bool     `json:"is_free_tier"`
 }
 
-// ErrVerifyUnsupported reports a backend with no key-verification endpoint. Sign-in
-// treats it as "could not fully check" and continues — the deployed backend predates
-// this endpoint, and refusing to sign in against it would be a self-inflicted outage.
+// ErrVerifyUnsupported reports a backend that does not serve the key-verification
+// route at all — as opposed to serving it and answering. Sign-in fails on it for any
+// REMOTE endpoint (an obsolete deployment or an intercepting proxy is a compatibility
+// failure) and downgrades it to a warning only for loopback, so the local development
+// loop keeps working. See CheckSignIn and AllowsUnverifiedSignIn.
 var ErrVerifyUnsupported = errors.New("backend does not support key verification")
+
+// verifyUnsupportedStatuses are the HTTP responses that mean "this deployment does not
+// implement the route", as distinct from "the route ran and something went wrong".
+//
+// 404 is the obvious one. 405 and 501 matter just as much: the client issues the
+// contractually correct POST, so a Method Not Allowed or Not Implemented answer is
+// itself evidence that the required contract is absent or intercepted — and mapping
+// them to an ordinary error would send them down CheckSignIn's soft "could not confirm"
+// branch, quietly restoring the warn-and-persist behaviour this gate exists to remove.
+//
+// Deliberately NOT included: transport failures and 5xx other than 501. Those mean
+// "could not check", which must never be reported as a verdict about the key.
+var verifyUnsupportedStatuses = map[int]bool{
+	http.StatusNotFound:         true,
+	http.StatusMethodNotAllowed: true,
+	http.StatusNotImplemented:   true,
+}
 
 // VerifyKey asks the backend whether the configured key actually works upstream.
 //
@@ -497,11 +544,20 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	var out KeyVerification
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/auth/verify", struct{}{}, &out); err != nil {
 		var berr *Error
-		if errors.As(err, &berr) && berr.HTTPStatus == http.StatusNotFound {
+		if errors.As(err, &berr) && verifyUnsupportedStatuses[berr.HTTPStatus] {
 			return KeyVerification{}, ErrVerifyUnsupported
 		}
 		return KeyVerification{}, err
 	}
+	// Scrub the key out of the free-text fields BEFORE anyone can render them. Detail
+	// and Label are backend-controlled strings that ride a 200 response — the success
+	// path, which no error-scrubbing wrapper covers — and they land in the login
+	// confirmation, the /auth view, the cockpit's sign-in sheet, and the debug log. A
+	// provider that echoes the submitted key into its rejection reason ("rejected
+	// sk-or-v1-…") would otherwise persist that key in the host's native scrollback,
+	// which the cockpit never clears. One choke point here beats N display-site fixes.
+	out.Detail = ScrubKey(out.Detail, c.apiKey)
+	out.Label = ScrubKey(out.Label, c.apiKey)
 	return out, nil
 }
 
@@ -573,6 +629,13 @@ const jsonAttemptTimeout = 60 * time.Second
 // The request body is marshaled ONCE and replayed from the same bytes — a fresh
 // reader per attempt, since each is consumed.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	// One scrub point for every JSON endpoint. readErrorResponse already scrubs the
+	// HTTP-error path (so the retry hook sees a clean error too); this additionally
+	// covers marshal/decode errors, whose text can echo the payload. See scrubError.
+	return c.scrubError(c.doJSONRetry(ctx, method, path, body, out))
+}
+
+func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any, out any) error {
 	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -685,14 +748,63 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 
 // readErrorResponse decodes a non-2xx response into an *Error, preferring the
 // stable Daintree error envelope and falling back to the raw body.
+//
+// The result is scrubbed before it leaves: the body is attacker- or upstream-controlled
+// text that lands in terminal scrollback, the debug log, and the retry-observability
+// hook. See scrubError.
 func (c *Client) readErrorResponse(resp *http.Response) *Error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err == nil && (env.Error.Code != "" || env.Error.Message != "" || env.Error.Type != "") {
-		return newError(resp.StatusCode, env, retryAfter, false)
+		return c.scrubBackendError(newError(resp.StatusCode, env, retryAfter, false))
 	}
 	e := httpError(resp.StatusCode, string(raw))
 	e.RetryAfter = retryAfter
+	return c.scrubBackendError(e)
+}
+
+// scrubError removes the API key from any error on its way out of the client.
+//
+// The bearer token IS the caller's spendable credential, and an upstream we do not
+// control can echo the Authorization header into an error body — a 502 from the
+// provider, a proxy's error page, a terminal SSE `error` event. Those become
+// Error.Message and flow straight to surfaces that persist them: the cockpit renders on
+// the NORMAL screen buffer, so a leak stays in the host's native scrollback long after
+// the session, and the same text is appended to the 0600 debug log.
+//
+// Scrubbing at the client boundary rather than at each display site is deliberate:
+// there are many sinks (turn error rendering, doctor rows, login messages, the trace
+// writer, the retry hook) and exactly one place all of them get their errors from.
+// This is defense-in-depth, not a substitute for the backend not leaking — but custom
+// endpoints and proxies are outside our control, so the client cannot assume good
+// behaviour upstream.
+func (c *Client) scrubError(err error) error {
+	var be *Error
+	if err == nil || !errors.As(err, &be) {
+		// Not a structured backend error: scrub the flat message. A wrapped
+		// fmt.Errorf can still carry a decoder's echo of the payload.
+		if err == nil || c.apiKey == "" {
+			return err
+		}
+		if scrubbed := ScrubKey(err.Error(), c.apiKey); scrubbed != err.Error() {
+			return errors.New(scrubbed)
+		}
+		return err
+	}
+	return c.scrubBackendError(be)
+}
+
+// scrubBackendError scrubs the free-text fields of a structured *Error in place. Code
+// and Type are stable machine identifiers, but they are backend-controlled strings, so
+// they are scrubbed too rather than trusted to be well-behaved.
+func (c *Client) scrubBackendError(e *Error) *Error {
+	if e == nil || c.apiKey == "" {
+		return e
+	}
+	e.Message = ScrubKey(e.Message, c.apiKey)
+	e.Param = ScrubKey(e.Param, c.apiKey)
+	e.Code = ScrubKey(e.Code, c.apiKey)
+	e.Type = ScrubKey(e.Type, c.apiKey)
 	return e
 }

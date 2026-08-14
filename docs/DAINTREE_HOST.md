@@ -336,6 +336,36 @@ The assistant is also **excluded from Daintree's crash/session snapshot restore*
 ephemeral panel), which is why the pending-hibernation store — not the normal panel-restore
 path — is its only recovery channel.
 
+### State survival — the CLI's own answer
+
+The table above is what happens to the **process**. This is what happens to the **state**,
+which is the question a tester actually asks ("if I close this, does my agent keep being
+watched?"). Four distinct things survive independently, so keep the words apart — do not use
+"session", "conversation", "project state", and "supervision state" interchangeably:
+
+| | **Terminal transcript** (host scrollback) | **Conversation** (`state.db` history) | **Project state** (memory, workflows, audit, inbox) | **Background supervision** (watchers, async, timers) |
+| --- | --- | --- | --- | --- |
+| Panel hidden / project switch | survives | survives | survives | runs (cockpit owns the lease) |
+| Cockpit exits normally (`^C`, `/quit`) | cleared by the host | survives | survives | **continues** — the daemon re-acquires the lease and adopts the live rows |
+| Cockpit crashes / PTY killed | cleared by the host | survives | survives | **continues** — flock is kernel-released, so handover needs no cleanup |
+| Host **"+ New session"** | dropped deliberately | new conversation; the old one stays in `state.db` | survives | **continues**, and completions land in the attention inbox |
+| Daintree app quits | gone | survives | survives | **stops** — the daemon loses the MCP token, so supervision *pauses* with a blocked inbox item rather than fabricating outcomes; it resumes on the next launch |
+| Machine sleeps | survives | survives | survives | pauses, then does timer catch-up on wake |
+| Machine restarts | gone | survives | survives | **stops**; the next launch adopts the persisted rows |
+| `/clear` | wiped (the only scrollback wipe path) | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
+| `reset project-state` | untouched | cleared | cleared | cancelled |
+| CLI upgrade with a schema bump | untouched | moved aside to a timestamped backup, then recreated | same | cancelled with the old DB |
+| **Windows** | as above | as above | as above | **never survives cockpit exit** — no supervisor on this platform |
+
+The one-time **"While you were away"** notice (`App.AttachSummaryLines`, consumed on read)
+is how the second and third rows become visible: a fresh cockpit starts with a clean
+transcript, but it tells you what the supervisor did while you were detached. It never
+repeats.
+
+So the honest promise to a tester is: **"this survives closing the Assistant panel"** — not
+"this survives closing Daintree", and never "this runs overnight" unless Daintree stays up
+on a Unix machine.
+
 ---
 
 ## 8. What the user can configure

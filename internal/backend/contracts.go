@@ -1,20 +1,27 @@
-// Package backend is the native Daintree Assistant backend client. It replaces
-// the direct DeepSeek/OpenAI model client for assistant turns and utility tasks.
+// Package backend is the native Daintree Assistant backend client — the CLI's ONLY
+// model gateway. It replaces the direct provider model client for assistant turns and
+// utility tasks.
 //
 // The CLI is a thin local runtime: it stores the visible conversation, exposes and
 // executes local function tools, and ships structured startup/runtime/turn context.
 // The backend owns the system prompt, developer instructions, skill/runbook
-// selection, model choice, prompt assembly, and the utility-model prompts — and
-// it talks to DeepSeek/OpenAI internally. The wire contract here is
-// Daintree-native (NOT OpenAI-compatible) and strict: the request schema rejects
-// system/developer messages and unknown fields, so these structs deliberately
-// emit only the fields the backend accepts.
+// selection, model choice, prompt assembly, and the utility-model prompts — and it
+// reaches every model THROUGH OPENROUTER, using the caller's own key on a per-request
+// basis. Model names that appear in this repo are OpenRouter route ids, never direct
+// provider integrations. The wire contract here is Daintree-native (NOT
+// OpenAI-compatible) and strict: the request schema rejects system/developer messages
+// and unknown fields, so these structs deliberately emit only the fields the backend
+// accepts.
 //
 // Reference: ../assistant-backend/docs/DAINTREE_API.md and the pydantic models in
 // ../assistant-backend/src/daintree_assistant_server/contracts/.
 package backend
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/daintreehq/assistant/internal/credentials"
+)
 
 // ProtocolVersion is the Daintree wire protocol the CLI speaks. The backend
 // advertises a supported range via /version and /v1/daintree/capabilities; a
@@ -36,6 +43,29 @@ const DefaultBaseURL = "https://assistant.daintree.org"
 // value DAINTREE_BACKEND_URL is usually pointed at for e2e tests and benchmarks.
 // It needs a key too — "local" changes where requests go, not whether they authenticate.
 const LocalBaseURL = "http://127.0.0.1:8473"
+
+// AllowsUnverifiedSignIn reports whether an endpoint may be signed in to WITHOUT
+// proving the key works upstream — i.e. whether a missing /v1/daintree/auth/verify
+// route downgrades to a warning instead of failing sign-in outright (see CheckSignIn).
+//
+// Only a LOOPBACK endpoint qualifies. The reasoning is about which way the test fails
+// when it is wrong:
+//
+//   - The obvious formulation, "is this the official endpoint?", fails OPEN. Its alias
+//     surface is unbounded — `:443`, an empty port, a trailing DNS root dot, an IDNA
+//     spelling, userinfo — and every spelling the check does not anticipate silently
+//     takes the LENIENT path and persists an unverified, spendable key against a remote
+//     host. Getting that check wrong is a security bug.
+//   - "Is this loopback?" fails CLOSED. There is no `evil.com` spelling that parses to
+//     127.0.0.1, an unparseable URL is treated as remote, and the worst outcome of a
+//     miss is that a developer's own backend has to serve one more route.
+//
+// So every REMOTE endpoint — official, staging, or custom — is held to the full
+// contract, and the lenient path exists only for the `python -m daintree_assistant_server`
+// development loop, where there is no network to intercept and no third party to trust.
+func AllowsUnverifiedSignIn(baseURL string) bool {
+	return credentials.IsLoopbackURL(baseURL)
+}
 
 // EndpointChoice is one selectable endpoint in a sign-in menu.
 type EndpointChoice struct {

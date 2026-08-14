@@ -403,16 +403,25 @@ func RunDoctor(ctx context.Context, opts Options) int {
 	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)
 
 	// Whether the key actually WORKS, which nothing else here can tell you: our own
-	// auth is structural, so every other row stays green with a bogus key. Not a gating
-	// failure when the backend has no verify endpoint — that is a missing feature over
-	// there, not a broken sign-in here.
+	// auth is structural, so every other row stays green with a bogus key.
 	if a.Config.APIKey != "" && herr == nil {
 		vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
 		ver, verr := a.Backend.VerifyKey(vctx)
 		vcancel()
 		switch {
+		// A backend that does not serve the route AT ALL. This must agree with
+		// backend.CheckSignIn, or doctor would bless an endpoint that `login` refuses:
+		// a gating failure for any remote host (obsolete deployment or intercepting
+		// proxy — see AllowsUnverifiedSignIn), a benign gap on loopback, where the
+		// local dev backend is simply allowed to be behind.
 		case errors.Is(verr, backend.ErrVerifyUnsupported):
-			r.Line("  key valid      : unknown (this backend can't check)")
+			if !backend.AllowsUnverifiedSignIn(a.Backend.BaseURL()) {
+				r.Line("  key valid      : CANNOT CHECK — this backend does not serve /v1/daintree/auth/verify")
+				r.Line("                   (it may be out of date, or a proxy may be intercepting it)")
+				anyFail = true
+				break
+			}
+			r.Line("  key valid      : unknown (this local backend can't check)")
 		case verr != nil:
 			r.Line("  key valid      : could not check — " + verr.Error())
 		case !ver.Valid:

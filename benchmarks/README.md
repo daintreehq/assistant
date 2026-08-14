@@ -102,9 +102,12 @@ dump every upstream request body as numbered JSON, then diff two dumps to find
 the exact divergence byte. This is how the 2026-07-08 cache-busting layout bug
 was found (volatile system-role runtime context serialized before the tool
 schemas — 36% cache hit on byte-identical turns; 99% after the fix). The rule it
-established: **only stable content may ride a system-role message** — DeepSeek
-serializes [all system messages] → [tools] → [conversation] regardless of array
-order. The raw-meta / skill-cue / committed-meta / first-token split is also the
+established: **only stable content may ride a system-role message** — the DeepSeek
+route serializes [all system messages] → [tools] → [conversation] regardless of array
+order. That measurement was taken against `deepseek/deepseek-v4-flash-0731` **through
+OpenRouter**; it is a property of that route, not of OpenRouter generally, so re-measure
+before assuming it transfers to another model the backend may select. The raw-meta /
+skill-cue / committed-meta / first-token split is also the
 measurement surface for prior-skill speculation: it shows separately when selection
 finishes, when the user sees the capability cue, and when kept generation becomes visible.
 

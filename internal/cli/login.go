@@ -291,11 +291,15 @@ func promptAPIKey(tio LoginIO, currentKey string) (string, error) {
 // /healthz is unauthenticated, so it stays green with a completely bogus key and the
 // failure would surface later, mid-turn.
 //
-// Note what this can and cannot prove. The backend only checks the key's SHAPE — it
-// holds no upstream credential and cannot tell whether the key actually funds a model
-// call. So a pass here means "endpoint reachable, key well-formed"; a key that the
-// provider later rejects surfaces on the first real turn as 502 upstream_error
-// (backend.Error.IsUpstreamAuth), which is why that code carries its own message.
+// Note what each half proves. Capabilities only checks the key's SHAPE — the backend
+// holds no upstream credential of its own — so on its own a pass means just "endpoint
+// reachable, key well-formed". `backend.CheckSignIn` therefore follows it with
+// /v1/daintree/auth/verify, which asks the PROVIDER and is the only check that catches
+// a key that is well-formed but wrong, revoked, or unfunded. A remote backend that does
+// not serve that route fails sign-in (backend.ErrBackendIncompatible); loopback keeps
+// the lenient warning path for local development. A key the provider rejects only after
+// sign-in still surfaces mid-turn as 502 upstream_error (backend.Error.IsUpstreamAuth),
+// which is why that code carries its own message.
 func verifySignIn(ctx context.Context, tio LoginIO, c credentials.Credentials) error {
 	fmt.Fprintf(tio.Out, "\nChecking %s … ", c.BaseURL)
 
@@ -355,6 +359,15 @@ func loginCheckError(baseURL string, err error, key string) error {
 	// wrapping it in "could not verify <url>", which reads as a connectivity problem.
 	if errors.Is(err, backend.ErrKeyRejected) {
 		return fmt.Errorf("%s did not accept this key: %v — check it is active and funded", baseURL, err)
+	}
+	// Nothing wrong with the key: the endpoint is missing a capability the release
+	// contract requires. Re-pasting will not help, so say so and point at the fix.
+	if errors.Is(err, backend.ErrBackendIncompatible) {
+		// Deliberately NOT "your key is fine" — we never got a verdict on the key, and
+		// asserting one we do not have is exactly the failure this gate exists to stop.
+		// What IS certain is that re-pasting cannot fix an endpoint problem.
+		return fmt.Errorf("%s: %v\n  This is an endpoint problem, not a verdict about your key — re-pasting it will\n  not help. Retry off any proxy/VPN, or point at a backend you run yourself\n  (`login` → Local) while this is fixed.",
+			baseURL, backend.ErrBackendIncompatible)
 	}
 	var berr *backend.Error
 	if errors.As(err, &berr) {

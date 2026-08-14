@@ -8,6 +8,21 @@ engines) and [`DAINTREE_HOST.md`](DAINTREE_HOST.md) (how Daintree launches the C
 several design decisions below exist because of that document; read its §7 lifecycle
 matrix first if you touch credential handling).
 
+> **Platform support: Unix only (macOS, Linux).** The whole model rests on two POSIX
+> primitives with no Windows equivalent in this codebase: `flock` for the ownership lease
+> (`internal/ipc/lock_unix.go`) and `Setsid` detachment for the daemon
+> (`internal/supervisor/spawn_unix.go`). The `!unix` builds exist and compile, but they
+> return `errFlockUnsupported` / "the supervisor daemon is not supported on this platform"
+> rather than pretend — a lock that does not exclude is worse than no lock, because the
+> single-owner invariant is what keeps two processes from writing the same `state.db`.
+>
+> Consequence for a Windows tester: timers, watchers, and async operations run only while
+> the cockpit is open and **stop when it exits**. Nothing is corrupted and nothing is
+> abandoned — the rows persist and are adopted on the next launch — but there is no
+> background supervision, so "I'll tell you when it's done" cannot be honoured after the
+> panel closes. Windows is not a supported platform until the ownership model is ported
+> (owner lock, process lifetime, a named-pipe control transport, detached spawn).
+
 ## TL;DR
 
 - **Exactly one process at a time owns a project's `state.db`** — an open assistant

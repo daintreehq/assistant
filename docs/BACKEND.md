@@ -3,18 +3,34 @@
 The CLI is a **thin local runtime**. It no longer acts as a model client; instead it
 talks to the **Daintree Assistant backend** (a Daintree-native HTTP API — *not*
 OpenAI-compatible). The backend owns the system prompt, developer instructions, skill /
-runbook selection, model choice, prompt assembly, the utility-model prompts, prompt
-caching, and the upstream model credentials (DeepSeek). The CLI owns the terminal UI,
-the visible conversation, the local tool registry + execution, permissions, runtime /
-project context collection, memory + scheduler state, stream rendering, and the opaque
-backend state token.
+runbook selection, model choice, prompt assembly, the utility-model prompts, and prompt
+caching. The CLI owns the terminal UI, the visible conversation, the local tool registry
++ execution, permissions, runtime / project context collection, memory + scheduler state,
+stream rendering, and the opaque backend state token.
 
 ```
 User → Daintree CLI ──(structured startup + visible conversation + runtime/turn + tools)──► Daintree backend
         │  stores conversation, exposes & runs local tools,                            owns prompts, skills,
-        │  streams assistant text, persists backend state                              model routing, DeepSeek
+        │  streams assistant text, persists backend state                              model routing
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
+                                                                                             │
+                                                                            (caller's key, request-scoped)
+                                                                                             ▼
+                                                                                         OpenRouter
+                                                                                             │
+                                                                                             ▼
+                                                                                   the selected model
 ```
+
+**OpenRouter is the only upstream transport.** The backend reaches every model — the main
+orchestration model and every utility model behind summarize / extract / classify /
+checkpoint / workflow tasks — through OpenRouter, using the caller's own key on a
+per-request basis. Model *identities* in this repo (DeepSeek V4 Flash, GPT-5.6 Sol) are
+OpenRouter route ids, not direct provider integrations, and where a comment names
+model-specific protocol behaviour it means "that model's behaviour when reached through
+OpenRouter." The CLI carries no provider key, no provider client, and no pricing table;
+reintroducing one would let a handler bypass the backend that owns prompts, skills, and
+credentials.
 
 ## Endpoint and sign-in
 
@@ -55,11 +71,68 @@ know — and "could not check" must never be reported as "invalid".
 `backend.CheckSignIn` is the shared client-side helper both entry points run, so the
 startup flow and `/login` cannot diverge on what "verified" means. It gates hard on
 capabilities and on an explicit `valid:false`, and downgrades to a **warning** when the
-backend has no verify endpoint (older deployments), the provider was unreachable, or the
-key is recognised but out of credit — refusing to sign in against a backend that simply
-lacks the route would be a self-inflicted outage. Cancellation and timeout are the
-exception: they are hard failures, since neither is evidence about the key nor consent to
-persist an unverified one.
+provider was unreachable or the key is recognised but out of credit. Cancellation and
+timeout are the exception: they are hard failures, since neither is evidence about the
+key nor consent to persist an unverified one.
+
+**A backend that does not serve the route at all is a compatibility failure**, scoped by
+`backend.AllowsUnverifiedSignIn`:
+
+| endpoint | `/v1/daintree/auth/verify` absent (404 / 405 / 501) | rationale |
+|---|---|---|
+| any **remote** host — Official, staging, custom | **hard failure** — `ErrBackendIncompatible` | the deployed backend has served the route since 2026-08, so its absence means an obsolete deployment or an intercepting proxy. Warning through would persist an unverified *spendable* key — the exact thing verification exists to prevent |
+| **loopback** (`127.0.0.0/8`, `::1`, `localhost`) | warning, sign-in proceeds | the `python -m daintree_assistant_server` development loop; there is no network to intercept and no third party to trust |
+
+The predicate is deliberately **"is this local?"**, never "is this the official
+endpoint?". The latter fails **open**: its alias surface is unbounded — `:443`, an empty
+port, a trailing DNS root dot, an IDNA spelling, userinfo — and every spelling the check
+failed to anticipate would silently take the lenient path against a *remote* host. The
+loopback test fails **closed**: no `evil.example` spelling parses to `127.0.0.1`, and an
+unparseable URL is treated as remote. Both are pinned by `TestAllowsUnverifiedSignIn`.
+
+404, 405, and 501 all map to `ErrVerifyUnsupported`: the client issues the contractually
+correct `POST`, so any of the three is evidence the route is absent or intercepted.
+Transport failures and other 5xx do **not** — those mean "could not check", which stays a
+warning and must never be reported as a verdict about the key.
+
+`ErrBackendIncompatible` is deliberately distinct from `ErrKeyRejected` because the fixes
+are opposite: re-pasting the key cannot help, so both sign-in surfaces say "your key is
+fine — retry off any proxy, or point at a Local backend meanwhile" rather than sending a
+tester hunting for a credential problem they do not have.
+
+### Key hygiene: the client scrubs on the way out
+
+The bearer token is the caller's spendable credential, and an upstream we do not control
+can echo the `Authorization` header back at us. Every path where that could happen is
+scrubbed **inside the client**, not at the display sites — there are many sinks (turn
+error rendering, doctor rows, login messages, the retry hook, the debug-log writer) and
+exactly one place they all get their values from:
+
+| path | where | why it needs its own scrub |
+|---|---|---|
+| `verify` **200** body (`detail`, `label`) | `VerifyKey` | the *success* path — no error wrapper covers it, and it feeds the login confirmation, `/auth`, and the cockpit sheet |
+| any JSON endpoint's error body | `readErrorResponse` → `scrubBackendError` | scrubbing here also cleans the error handed to the retry-observability hook |
+| marshal / decode errors | `doJSON` → `scrubError` | a decoder's message can echo the payload |
+| terminal SSE `error` event | `respondStreamOnce` → `scrubError` | `parseRespondStream` is a free function with no access to the key |
+
+`Message`, `Param`, `Code`, and `Type` are all scrubbed: the last two are nominally
+stable machine identifiers, but they are still backend-controlled strings. This is
+defense-in-depth, not a licence for the backend to leak — but custom endpoints and
+proxies are outside our control, so the client cannot assume good behaviour upstream.
+
+### Loopback URLs never take a proxy
+
+The default transports use `proxyExceptLoopback`, not `http.ProxyFromEnvironment`. Go's
+stock bypass fires only for the exact lowercase host `localhost` and parseable loopback
+IP literals, while `AllowsUnverifiedSignIn` also accepts `LOCALHOST`, `localhost.`,
+`dev.localhost`, and `127.0.0.1.` — all of which genuinely address this machine. Left
+unaligned, those four spellings would be classified onto the *lenient* sign-in path while
+being *routed* through `HTTP_PROXY`: over plain http the proxy would receive the spendable
+token in clear text, and a proxy answering capabilities-then-404 could push the request
+back onto the lenient path and persist an unverified key. Deriving both from the same
+predicate makes them agree by construction, so widening the loopback definition later
+cannot silently reopen the gap. Pinned by
+`TestProxyIsBypassedForEverySpellingClassifiedAsLocal`.
 
 **The CLI never probes the provider itself.** It holds no provider client by design, and
 the caller key becomes a subscription key later — at which point only the backend can

@@ -199,8 +199,13 @@ func Save(path string, c Credentials) error {
 
 // isLoopbackHost reports whether a hostname addresses this machine. Covers the literal
 // names as well as any address in 127.0.0.0/8 and ::1, so 127.0.0.2 and friends work.
+//
+// A trailing DNS root dot is stripped first: "localhost." resolves identically to
+// "localhost", and a check that missed it would classify the same destination two
+// different ways depending on spelling.
 func isLoopbackHost(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
+	h = strings.TrimSuffix(h, ".")
 	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
 	}
@@ -208,6 +213,27 @@ func isLoopbackHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// IsLoopbackURL reports whether a base URL addresses THIS machine, whatever its
+// spelling — scheme, port, case, bracketed IPv6, and a trailing DNS root dot are all
+// normalised away by url.Parse + isLoopbackHost.
+//
+// Callers use it to decide how much to trust an endpoint. "Loopback" is the one
+// property that is decidable from a URL alone and cannot be spoofed by a similar-looking
+// hostname: there is no `evil.com` spelling that parses to 127.0.0.1. Contrast an
+// "is this OUR host" test, which has an unbounded alias surface (default ports, IDNA,
+// trailing dots, userinfo) and fails OPEN on every spelling it hasn't thought of — so
+// security decisions here are phrased as "is this local?", never "is this official?".
+//
+// A URL that does not parse is NOT loopback: an unparseable endpoint gets the strict
+// treatment, not the lenient one.
+func IsLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
 }
 
 // Delete removes the credentials file. A missing file is not an error — logging out

@@ -18,19 +18,29 @@ import (
 //  2. Does the provider actually accept this key? (`/v1/daintree/auth/verify` — the only
 //     check that can catch a key that is well-formed but wrong, revoked, or unfunded.)
 //
-// The second is a hard gate too WHEN THE BACKEND SUPPORTS IT. Older backends — including
-// the currently deployed one — have no verify endpoint, and refusing to sign in against
-// them would be a self-inflicted outage, so an unsupported endpoint downgrades to a
-// warning rather than a failure. `warning` is non-empty exactly in that case.
+// The second is a hard gate too, and a backend that does not serve the route AT ALL is
+// a COMPATIBILITY FAILURE for every REMOTE endpoint — official, staging, or custom.
+// The deployed backend has served /v1/daintree/auth/verify since 2026-08, so its absence
+// means an obsolete deployment or something intercepting the request; warning through
+// would hand a tester exactly what verification exists to prevent — a well-formed but
+// wrong / revoked / unfunded key, persisted, failing only on the first real turn.
 //
-// A provider we could not REACH is likewise a warning, never a rejection: "we could
-// not check" must not be reported as "your key is bad", which would send the user
-// hunting for a problem they do not have. Cancellation and timeout are the exception —
-// they are hard failures, because neither is evidence about the key and neither is
-// consent to persist an unverified one.
+// The single exception is a LOOPBACK endpoint (`AllowsUnverifiedSignIn`), where the
+// lenient warning path survives so the `python -m daintree_assistant_server` development
+// loop keeps working. The predicate is deliberately "is this local?" rather than
+// "is this official?" — see AllowsUnverifiedSignIn for why the latter fails open.
 //
-// A recognised key with no credit left also warns: it is a real, fixable state, and
-// refusing the sign-in would leave no way to configure the CLI while topping up.
+// A non-empty `warning` means the sign-in was PERSISTED but something about it is worth
+// saying out loud. Exactly three cases produce one:
+//
+//  1. an unverifiable LOOPBACK backend (above);
+//  2. a provider we could not REACH — never a rejection, because "we could not check"
+//     must not be reported as "your key is bad", which sends the user hunting for a
+//     problem they do not have. Cancellation and timeout are the exception: they are
+//     hard failures, since neither is evidence about the key nor consent to persist an
+//     unverified one;
+//  3. a recognised key with no credit left — a real, fixable state, where refusing the
+//     sign-in would leave no way to configure the CLI while topping the account up.
 func CheckSignIn(ctx context.Context, c *Client) (verification KeyVerification, warning string, err error) {
 	if _, err := c.Capabilities(ctx); err != nil {
 		return KeyVerification{}, "", err
@@ -45,6 +55,10 @@ func CheckSignIn(ctx context.Context, c *Client) (verification KeyVerification, 
 	case ctx.Err() != nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return KeyVerification{}, "", fmt.Errorf("key verification did not complete: %w", err)
 	case errors.Is(err, ErrVerifyUnsupported):
+		if !AllowsUnverifiedSignIn(c.BaseURL()) {
+			return KeyVerification{}, "", fmt.Errorf("%w: %s did not serve /v1/daintree/auth/verify",
+				ErrBackendIncompatible, c.BaseURL())
+		}
 		return KeyVerification{}, "this backend can't check whether the key actually works — a bad key will surface on your first message", nil
 	case err != nil:
 		var berr *Error
@@ -86,6 +100,17 @@ func ScrubKey(text, key string) string {
 // the actionable thing it is ("this key doesn't work") instead of burying it inside a
 // generic "could not verify <url>" wrapper, which reads like a connectivity problem.
 var ErrKeyRejected = errors.New("the provider rejected this API key")
+
+// ErrBackendIncompatible is a remote endpoint failing a capability the release contract
+// requires. Distinct from ErrKeyRejected because the fix is the opposite: nothing is
+// wrong with the key and re-pasting it will not help. Sign-in surfaces it as an endpoint
+// problem so a tester doesn't go hunting for a credential problem they don't have.
+//
+// The wording names both plausible causes rather than only the first. From the client
+// there is no way to tell an obsolete deployment from a proxy, CDN, or captive portal
+// eating the route — and for the hosted service "update the deployment" is not something
+// the tester can act on, whereas "try without the proxy" often is.
+var ErrBackendIncompatible = errors.New("this Daintree backend did not answer the key-verification request — it may be out of date, or a proxy may be intercepting it")
 
 // verdictDetail appends the backend's own wording when it adds anything beyond the
 // sentinel's, so a provider-specific reason (expired, over quota) is not thrown away.

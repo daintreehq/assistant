@@ -2,12 +2,23 @@
 // tool registry, and the backend client: the message/tool/result shapes a turn is
 // built from.
 //
-// It is NOT a model client. The DeepSeek HTTP transport, the tier Router, the SSE
-// parser, the retry/reliability layer, and the pricing table all used to live here;
+// It is NOT a model client. The direct provider HTTP transport, the tier Router, the
+// SSE parser, the retry/reliability layer, and the pricing table all used to live here;
 // they were deleted once the backend became the CLI's only model gateway
 // (internal/backend). Nothing in this package talks to a provider, and nothing
 // should: adding a transport back here would let a handler bypass the backend that
 // owns prompt assembly, skill selection, and the provider credentials.
+//
+// # Reading the "DeepSeek" comments in this repo
+//
+// The backend reaches EVERY model through OpenRouter, using the caller's own key. So
+// wherever a comment here or in internal/agent / internal/backend says "DeepSeek 400s
+// if …" or "DeepSeek requires …", read it as *the behaviour of the DeepSeek route
+// (`deepseek/deepseek-v4-flash-0731`) as observed through OpenRouter* — the constraint
+// is real and load-bearing, but it belongs to that model route, not to OpenRouter and
+// not to a direct provider integration this binary has never had. A different model the
+// backend selects may not share it; verify before generalising, and never treat such a
+// note as licence to add provider-specific transport code here.
 
 package models
 

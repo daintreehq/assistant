@@ -234,8 +234,9 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	cfg := AppConfig{ProjectPath: projectPath}
 
 	// --- merged-env-OK settings ---
-	// DEEPSEEK_BASE_URL is trustedOrOwn (NOT mergedGet): the API key is a trusted secret,
-	// so a project .env must never redirect where it is sent (exfiltration).
+	// Nothing here is mergedGet. Every endpoint below is trustedOrOwn because a bearer
+	// token travels to it: a project .env must never be able to redirect where a trusted
+	// secret is sent (exfiltration).
 	// The MCP endpoint + token are the Daintree connection credentials (injected by Daintree
 	// into the real env). They are trustedOrOwn so a project .env can't redirect the link or
 	// inject a token: no default → degraded local mode when genuinely unset.

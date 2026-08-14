@@ -11,16 +11,43 @@ spawns a *visible* agent terminal inside Daintree and supervises it.
 Powered by the **Daintree Assistant backend** — a Daintree-native HTTP API (not
 OpenAI-compatible). The CLI is a thin local runtime: it sends only the visible
 conversation, structured runtime/turn context, and its tool inventory; the backend owns
-the system prompt, developer instructions, **skill/runbook selection**, model choice,
-prompt assembly, and the upstream model credentials (DeepSeek, spoken internally). The
-CLI executes the local tool calls the backend asks for and streams the reply. See
-[`docs/BACKEND.md`](docs/BACKEND.md).
+the system prompt, developer instructions, **skill/runbook selection**, model choice, and
+prompt assembly. The CLI executes the local tool calls the backend asks for and streams
+the reply. See [`docs/BACKEND.md`](docs/BACKEND.md).
+
+**Every model call takes exactly one path:**
+
+```
+you → Daintree Assistant CLI → Daintree Assistant backend → OpenRouter → the selected model
+                              (your bearer key)            (the same key, request-scoped)
+```
+
+The CLI has **no provider client and no provider credential of its own**. DeepSeek,
+GPT, and anything else are *models the backend routes to through OpenRouter* — never a
+direct transport from here. There is no `DEEPSEEK_API_KEY` in this process.
 
 > **Sign-in:** the assistant talks to `https://assistant.daintree.org` by default and
 > **authenticates every request** — there is no unauthenticated mode. Run
 > `daintree-assistant login` to pick an endpoint (official, custom, or a local backend
-> from `../assistant-backend`) and store your API key. The key is your own upstream
-> credential: it is what funds the model calls your turns make.
+> from `../assistant-backend`) and store your API key. During the internal-tester phase
+> that key is **your own OpenRouter key**, and it is what funds every model call your
+> turns make — including background watcher and async supervision work. Use a dedicated
+> low-limit key, not your main one.
+
+## Supported platforms
+
+| Platform | Interactive cockpit | One-shot / `--json` | Persistent supervisor (daemon) |
+| --- | --- | --- | --- |
+| macOS (arm64, amd64) | supported | supported | supported |
+| Linux (amd64, arm64) | supported | supported | supported |
+| Windows | builds, untested | builds, untested | **not supported** |
+
+Background supervision is built on `flock` ownership leases and `setsid` detachment
+(`internal/ipc`, `internal/supervisor`), which have no Windows port. On Windows those
+paths fail loudly rather than silently running without exclusion, so timers, watchers,
+and async operations stop when the cockpit exits. CI runs macOS and Linux only; treat
+Windows as unsupported until the ownership model is ported. See
+[`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
 
 ## Build & install
 
@@ -165,7 +192,10 @@ User ↔ Bubble Tea cockpit ↔ event pump ↔ agent.Session (large model)
             queue.Queue / inbox ──► main thread (digest only, never raw logs)
 ```
 
-- **Three model tiers** (`small` / `medium` / `large`); v1 routes medium → large.
+- **No model routing here.** The backend picks the model (and the utility models behind
+  summarize / extract / classify / checkpoint) and reaches all of them through
+  OpenRouter. The CLI's `internal/models` package is conversation *wire vocabulary*
+  only — there is no provider client, router, or pricing table in this binary.
 - **Durable state** in SQLite (`modernc.org/sqlite`, pure Go, no CGO) under
   `~/.daintree/assistant-cli/state.db` — timers, watchers, events, audit, conversation,
   grants, memory. Survives restarts; timers do sleep catch-up. Single clean schema
@@ -277,7 +307,7 @@ tail -f ~/.daintree/logs/2026-06-21-ses_ab12cd34.log
 ## Testing
 
 ```bash
-go test ./...        # all tests (2200+ across 58 packages), no network — fakes for MCP + backend
+go test ./...        # the whole suite, no network — fakes for MCP + backend
 go test -race ./...
 go vet ./...
 gofmt -l .           # must print nothing
@@ -290,7 +320,7 @@ gofmt -l .           # must print nothing
   then yields ownership when an assistant attaches. Use `status` and `daemon stop` to
   inspect or stop it; see [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
 - **UI boundary:** the runtime (App, Session, Registry, Scheduler, Store, Queue, MCP,
-  Router) emits structured events and exposes state; only `internal/ui` imports Bubble
+  Backend) emits structured events and exposes state; only `internal/ui` imports Bubble
   Tea. Tools never render, the watcher engine never paints, and the model loop never
   writes to stdout — it emits through an `agent.EventSink` consumed by the cockpit's
   event pump or the console / JSONL sink.

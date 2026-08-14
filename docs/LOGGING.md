@@ -1,10 +1,23 @@
 # Logging / the per-session diagnostic trace
 
-> **Temporary, dev-only.** This is the full-fidelity debug trace gated behind
+> **Dev-only, owner-only.** This is the full-fidelity debug trace gated behind
 > `DAINTREE_ASSISTANT_DEBUG_LOG=1` — it is a development aid, not a product surface.
 > It writes one append-only human-readable file per session under `~/.daintree/logs`
 > (`<date>-<sessionId>.log`, dir 0700 / file 0600, pruned after 7 days). Disabled, it
 > is a no-op and never throws. See `internal/debuglog`.
+>
+> **It is not a support artifact.** Credential *shapes* are redacted before anything is
+> written, but the trace still contains your conversation, terminal output, file
+> excerpts, issue/PR bodies, and memory contents. Never paste one into an issue or hand
+> it to someone else — use `daintree-assistant support-bundle`, which is redacted,
+> bounded, and shows you what it will include before it writes.
+>
+> The raw Daintree MCP URL + bearer token used to be written to the top of every log as
+> an `mcp.credentials` line, so a session log could be replayed by hand against the live
+> MCP. **That was removed** — a short-lived MCP token still authorises system-tier
+> Daintree actions for its whole validity window, and log files outlive it. To replay MCP
+> calls, take the credentials from the running process's environment
+> (`DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN`) while it still owns them.
 
 ## Why this exists
 
@@ -95,7 +108,7 @@ it **produced**.
 | `async.read.backoff` | consecutive status-read failures triggered the 5s backoff | `consecutiveFailures` |
 
 ### Other (pre-existing)
-`session.start`, `mcp.credentials` (temporary debug aid), `backend.retry`
+`session.start`, `backend.retry`
 (`op` `attempt` `maxAttempts` `delayMs` `error` — fires per transient-failure replay on
 **any** backend call; `op` is `respond` or the JSON method+path, so a stalled turn and a
 stalled utility task are distinguishable),

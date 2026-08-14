@@ -21,27 +21,43 @@ import (
 type capsServer struct {
 	*httptest.Server
 	gotAuth string
+	// verifyHits counts POSTs to the key-verification route, so a test can prove the
+	// sign-in took the VERIFIED path rather than the loopback leniency path.
+	verifyHits int
 }
 
+// newCapsServer serves BOTH halves of the sign-in contract: capabilities and a
+// successful key verification.
+//
+// Serving verify matters even though this server is loopback (and would therefore be
+// forgiven for omitting it — see backend.AllowsUnverifiedSignIn). Without it, every
+// login test here would pass through the lenient downgrade branch, so the tests would
+// prove only that an UNVERIFIED sign-in persists, and a regression that broke real
+// verification would not fail a single one of them.
 func newCapsServer(t *testing.T) *capsServer {
 	t.Helper()
 	cs := &capsServer{}
 	cs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/daintree/capabilities" {
+		switch r.URL.Path {
+		case "/v1/daintree/capabilities":
+			cs.gotAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			if cs.gotAuth == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"missing key"}}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"server_version": "test-1.2.3",
+				"protocol":       map[string]int{"min": 2, "max": 2},
+			})
+		case "/v1/daintree/auth/verify":
+			cs.verifyHits++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"valid": true, "label": "test-key"})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		cs.gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		if cs.gotAuth == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"missing key"}}`)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"server_version": "test-1.2.3",
-			"protocol":       map[string]int{"min": 2, "max": 2},
-		})
 	}))
 	t.Cleanup(cs.Close)
 	return cs
@@ -81,6 +97,15 @@ func TestRunLoginCustomEndpointIsVerifiedAndSaved(t *testing.T) {
 	// probe would pass with a bogus key and defer the failure to the first real turn.
 	if want := "Bearer sk-or-v1-testkey0123456789"; srv.gotAuth != want {
 		t.Fatalf("capabilities Authorization = %q, want %q", srv.gotAuth, want)
+	}
+	// And it must go on to ask the PROVIDER, which is the only check that catches a
+	// well-formed but wrong / revoked / unfunded key. A test that skipped this would
+	// pass on the loopback leniency path and prove nothing about verification.
+	if srv.verifyHits != 1 {
+		t.Fatalf("key verification hit %d times, want exactly 1", srv.verifyHits)
+	}
+	if strings.Contains(out.String(), "can't check") {
+		t.Fatalf("sign-in fell back to the unverified path:\n%s", out.String())
 	}
 
 	stored, ok, err := credentials.Load(cfg.CredentialsPath)

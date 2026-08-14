@@ -7,8 +7,8 @@ layer that replaces fine-tuning: a growing, validated library, selected cheaply.
 > **Skills are owned by the Daintree Assistant backend now.** This CLI does **not**
 > select, store, embed, or inject skill bodies. The old local `internal/skills`
 > package, the `skill.find`/`skill.load` tools, and the `SelectSkills`/`SkillRegistry`
-> machinery were **deleted** in the DeepSeek→backend migration. Authoring + selection
-> live in `../assistant-backend`. See [`BACKEND.md`](BACKEND.md).
+> machinery were **deleted** in the backend migration. Authoring + selection live in
+> `../assistant-backend`. See [`BACKEND.md`](BACKEND.md).
 
 ## How it works end to end
 
@@ -16,7 +16,10 @@ Per `respond` request, the backend's selector (a small model) classifies the
 conversation against the catalog and picks the runbook(s); the backend then:
 
 1. Renders the **active skill bodies** into a cached system message (in the stable
-   prefix, so they ride DeepSeek's prefix cache across a turn's rounds).
+   prefix, so they ride the model's prefix cache across a turn's rounds). Cache
+   semantics are a property of the model route the backend picked through OpenRouter,
+   not a universal guarantee — treat a measured cache result as valid for the route it
+   was measured on.
 2. Opens the response stream with a first-class `skills` block (`active` +
    `newly_loaded` + a vestigial `prelude`) plus
    a refreshed opaque **state token** in the first SSE `meta` event. That event is

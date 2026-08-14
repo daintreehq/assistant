@@ -18,12 +18,14 @@ internal/
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath
   storage/       Store (store.go) over modernc.org/sqlite — durable state
-  backend/       Daintree backend client — the CLI's model gateway. client.go (Respond/
-                 RunTask/Health), contracts.go (wire envelope), sse.go (named-event parser),
+  backend/       Daintree backend client — the CLI's ONLY model gateway; the backend
+                 reaches every model through OpenRouter. client.go (Respond/RunTask/
+                 Health), contracts.go (wire envelope), sse.go (named-event parser),
                  tasks.go (server-owned utility tasks). See BACKEND.md
   models/        conversation wire VOCABULARY only (ChatMessage/ChatTool/ToolCallRequest/
-                 ChatResult/Usage) — NOT a model client; the DeepSeek transport, Router,
-                 SSE parser, retry layer and pricing were deleted with the backend migration
+                 ChatResult/Usage) — NOT a model client; the direct provider transport,
+                 Router, SSE parser, retry layer and pricing were deleted with the backend
+                 migration. Do NOT add a provider client back here
   prompts/       MainPromptContext (structured runtime facts; the prompt-text +
                  loaded-skills builders were deleted, the backend owns them)
   mcp/           Daintree MCP client (go-sdk: Streamable HTTP, SSE fallback) + typed wrappers

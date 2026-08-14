@@ -32,9 +32,16 @@ Powered by the **Daintree Assistant backend** (`../assistant-backend`,
 HTTP API — **not** OpenAI-compatible. The CLI is a thin local runtime: it sends only a
 structured stable startup snapshot + visible conversation + structured runtime/turn context + its tool inventory, and the
 backend owns the system prompt, developer instructions, **skill/runbook selection**, model
-choice, prompt assembly, the utility-model prompts, and the upstream model credentials
-(DeepSeek, spoken internally behind a provider abstraction). The CLI executes the local
+choice, prompt assembly, and the utility-model prompts. The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
+
+**Upstream transport is OpenRouter, and only OpenRouter.** The backend reaches every model
+— main and utility alike — through OpenRouter, request-scoped with the caller's own key
+(currently the tester's own OpenRouter key, which funds the turn). Model identities in this
+repo (`deepseek/deepseek-v4-flash-0731`, `openai/gpt-5.6-sol`) are **OpenRouter route ids**,
+not direct provider integrations; where a comment names model-specific protocol behaviour,
+read it as "that model's behaviour when reached through OpenRouter". There is no
+`DEEPSEEK_API_KEY` anywhere in this process.
 
 > **You have standing permission to edit the backend at `../assistant-backend`.** Many
 > fixes here are really backend changes — the base/system prompt, developer instructions,
@@ -68,7 +75,7 @@ supply **neither** (it would redirect or steal a spendable key). Overriding the 
 the stored key, which is the local dev loop: sign in once, then point
 `DAINTREE_BACKEND_URL` at your local backend. The CLI still holds **no model credentials
 of its own and no provider client at all** — it forwards the caller's key and nothing
-else; the direct DeepSeek transport, the tier Router, and the model/provider config knobs
+else; the direct provider transport, the tier Router, and the model/provider config knobs
 were deleted once the backend became the only gateway.
 
 ## Commands
@@ -93,7 +100,7 @@ make install                                                  # go install with 
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
-go test ./...                # all tests (1700+ across 45 packages), no network — fakes for MCP + backend
+go test ./...                # the whole suite, no network — fakes for MCP + backend
 go vet ./...                 # static checks
 make test-race               # go test -race ./...
 gofmt -l .                   # must print nothing (CI fails on unformatted files)
@@ -134,7 +141,7 @@ internal/
                  RunTask/Health), contracts.go (strict wire envelope), sse.go (named-event
                  meta/delta/done/error parser), tasks.go (server-owned utility tasks). See docs/BACKEND.md
   models/        conversation WIRE VOCABULARY only (ChatMessage/ChatTool/ToolCallRequest/
-                 ChatResult/Usage) — NOT a model client. The DeepSeek transport, Router,
+                 ChatResult/Usage) — NOT a model client. The direct provider transport, Router,
                  SSE parser, retry layer and pricing table were deleted with the backend
                  migration; do not add a provider client back here (it would let a handler
                  bypass the backend that owns prompts, skills, and credentials)
@@ -168,7 +175,7 @@ internal/
   host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
   deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
-  e2e/           end-to-end tests only: built-binary, fake DeepSeek/MCP, inline-contract, turn/race
+  e2e/           end-to-end tests only: built-binary, fake backend/MCP, inline-contract, turn/race
 ```
 
 **Data flow:** `app.App.Create()` builds every dependency once (Store, MCP, Queue,
@@ -211,7 +218,7 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   and consume grants keyed to the well-known actor id `wake` (else the call becomes a
   blocked pending-approval inbox item).
 - **Prompt assembly + caching are the BACKEND's job now.** The CLI sends NO system/developer
-  prompt; the backend owns the base prompt, skill bodies, prompt assembly, and the DeepSeek
+  prompt; the backend owns the base prompt, skill bodies, prompt assembly, and the upstream
   `prompt_cache_key`. The CLI's only contribution to cache stability is keeping the
   conversation prefix stable: no client-side control prefix
   (`domain.ControlMessageCount == 0`), only `user`/`assistant`/`tool` roles reach the wire,
@@ -219,10 +226,12 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   while volatile per-turn facts ride `request.runtime` / `request.turn` (inert data the
   backend renders). See `docs/BACKEND.md`. The effective order is stable backend system
   layers → tools → stable startup block → append-only conversation → fresh runtime/
-  turn user block LAST. Only STABLE content may be system-role: DeepSeek
+  turn user block LAST. Only STABLE content may be system-role: the DeepSeek route
   serializes [all system messages] → [tools] → [conversation], so a volatile system message
   anywhere in the array lands before the ~18k-token tool schemas and busts their cache —
-  measured 2026-07-08 by the latency benchmark, 36% → 99% prompt-cache hit after the fix.
+  measured 2026-07-08 by the latency benchmark against `deepseek/deepseek-v4-flash-0731`
+  THROUGH OpenRouter, 36% → 99% prompt-cache hit after the fix. That is a property of that
+  route; re-measure before assuming it transfers to another model the backend may select.
 - **Single-owner, durable supervision (the persistent supervisor).** Exactly ONE
   process at a time owns a project's `state.db` — an open assistant or the
   `daintree-assistant daemon` — serialized by the flock owner lease (`internal/ipc`).
@@ -232,10 +241,13 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   teardown. When the assistant closes, the daemon re-acquires the lease, adopts the
   live rows, keeps the 3s scheduler + 1s coordinator ticking, and runs autonomous
   wake turns that continue the SAME conversation (runtime_state session pointer +
-  persisted backend state token). Background supervision is REAL now — the honest
-  caveat is credentials: supervision pauses (blocked inbox item, never abandoned)
+  persisted backend state token). Background supervision is REAL now — with two honest
+  caveats. (1) Credentials: supervision pauses (blocked inbox item, never abandoned)
   when Daintree closes or revokes the per-session MCP token, and resumes on the next
-  launch. See docs/SUPERVISOR.md.
+  launch. (2) **Platform: Unix only.** flock + Setsid have no Windows port, so the
+  `!unix` builds fail loudly rather than run without exclusion, and background
+  supervision simply does not exist there. Never promise overnight work on Windows.
+  See docs/SUPERVISOR.md.
 - **Async tool futures are runtime-owned, queue-delivered.** `terminal.run.async` /
   `terminal.await.async` return an IMMEDIATE "accepted" result carrying a typed
   `ToolResult.Async` handle (`asy_…`); the `asyncwork.Coordinator` (1s tick, started
@@ -310,14 +322,15 @@ throws. Tests pin `DAINTREE_ASSISTANT_DEBUG_LOG=0` / pass an explicit `logDir`.
 
 ### Replaying MCP calls by hand (live debugging)
 
-When debug logging is enabled, the **raw Daintree MCP URL + bearer token** are written to
-the top of every session log as an `mcp.credentials` line (right after `session.start`,
-emitted on each connect/reconnect). With those you can hit the **same** MCP the assistant
-uses and see the exact responses a tool got — invaluable when a tool (e.g.
-`terminal.extract` / `terminal.awaitAll`) behaves wrong but the model loop only shows the
-post-parse result. (This credential line is a TEMPORARY debug aid — see the `TODO: remove`
-on `App.logMcpCredentials` in `internal/app/lifecycle.go`; it only writes under
-`DAINTREE_ASSISTANT_DEBUG_LOG=1`, never in normal runs.)
+Hitting the **same** MCP the assistant uses shows you the exact responses a tool got —
+invaluable when a tool (e.g. `terminal.extract` / `terminal.awaitAll`) behaves wrong but
+the model loop only shows the post-parse result.
+
+Take the URL + token from the **running process's environment** (`DAINTREE_MCP_URL` /
+`DAINTREE_MCP_TOKEN`, injected by Daintree) while it still owns them. They are **NOT** in
+the session log: the old `mcp.credentials` line and `App.logMcpCredentials` were removed,
+because a short-lived MCP token still authorises system-tier Daintree actions for its whole
+validity window and a log file outlives it. Do not add credential material back to the log.
 
 Connecting (Streamable HTTP, `github.com/modelcontextprotocol/go-sdk`): POST JSON-RPC to
 the URL with `Authorization: Bearer <token>`, `Content-Type: application/json`, and
@@ -402,9 +415,10 @@ URL keeps the stored key, so a local backend needs only `DAINTREE_BACKEND_URL`) 
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the
 workflow execution-graph layer, off by default — needs a backend carrying the matching
 `workflow_state` turn-context contract + workflow tasks; see docs/WORKFLOW_INTELLIGENCE.md).
-(`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` are
-**backend-only** now — the CLI reads none of them, and its `AppConfig` carries no model
-or provider fields at all.)
+(Model/provider variables — `OPENROUTER_API_KEY`, the legacy `DEEPSEEK_*` pair, and
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` — are **backend-only**. The CLI reads none of them,
+its `AppConfig` carries no model or provider fields at all, and the only credential it
+holds is the caller's own key, which it forwards verbatim to the backend.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project

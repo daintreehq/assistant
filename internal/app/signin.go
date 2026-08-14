@@ -203,6 +203,14 @@ func signInVerifyError(baseURL string, err error, key string) error {
 	if errors.Is(err, backend.ErrKeyRejected) {
 		return fmt.Errorf("%s did not accept this key: %v — check it is active and funded", baseURL, err)
 	}
+	// Nothing wrong with the key: the endpoint is missing a capability the release
+	// contract requires. Re-pasting will not help, so say so and point at the fix.
+	if errors.Is(err, backend.ErrBackendIncompatible) {
+		// Not "your key is fine": no verdict on the key was obtained. Only the endpoint
+		// is known-bad, and only that is claimed.
+		return fmt.Errorf("%s: %v — an endpoint problem, not a verdict about your key; retry off any proxy, or pick a Local endpoint while this is fixed",
+			baseURL, backend.ErrBackendIncompatible)
+	}
 	var berr *backend.Error
 	if errors.As(err, &berr) {
 		switch {
