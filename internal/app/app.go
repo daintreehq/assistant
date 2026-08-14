@@ -18,6 +18,7 @@ import (
 	"github.com/daintreehq/assistant/internal/asyncwork"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/costledger"
 	"github.com/daintreehq/assistant/internal/daemon"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -127,6 +128,12 @@ type App struct {
 	// to, so nothing downstream has to be re-wired or can go on holding a dead endpoint.
 	Backend  backend.Backend
 	Registry *tools.Registry
+
+	// CostLedger accumulates what this process has spent on the caller's own upstream
+	// key — turns and utility tasks alike. It is wired into the backend client's OnCost
+	// hook and deliberately OUTLIVES that client, so a `/login` endpoint swap does not
+	// silently reset the session's bill to zero. Surfaced by `/cost` and `/doctor`.
+	CostLedger *costledger.Ledger
 
 	SessionID string
 	Session   *agent.Session
@@ -438,10 +445,12 @@ func Create(opts CreateOptions) (*App, error) {
 	// swapping the delegate, so Session, the watcher engine, the async coordinator and
 	// the workflow layer all follow without any of them holding a stale endpoint. Test
 	// overrides are wrapped too, so the swap path is identical everywhere.
+	// Built before the client, which captures its Record method as the OnCost hook.
+	a.CostLedger = costledger.New()
 	if opts.BackendOverride != nil {
 		a.backendSwap = backend.NewSwappable(opts.BackendOverride)
 	} else {
-		a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg)))
+		a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger)))
 	}
 	a.Backend = a.backendSwap
 	// The async coordinator is built BEFORE the tool registry (the asyncx family

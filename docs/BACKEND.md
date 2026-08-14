@@ -244,6 +244,64 @@ The Go client mirrors it in `internal/backend`:
   [RUNTIME.md](RUNTIME.md#model-errors-rate-limit-backend-down-unavailable) for how it
   layers with the backend's own provider retries and the MCP read retries.
 
+### Cost reporting
+
+Every upstream call is funded by the caller's own OpenRouter key, so what a request cost
+is **their** money. The backend reports OpenRouter's own figures — never a token-price
+estimate, because the router knows which of ~24 endpoints served the call and what cache
+discount applied, and anything derived client-side would be a guess presented as a bill.
+
+| where | field | meaning |
+|---|---|---|
+| `/respond` body, and the terminal SSE `done` event | `cost: {total, main, selector, complete}` | the whole request, across every upstream call it made |
+| `/respond` `usage.cost` | float | the MAIN completion only |
+| `/tasks` `usage.cost` | float | that task's total (a repair pass is included) |
+| `/v1/daintree/capabilities` | `respond.cost_reporting` | the contract, advertised so a client can degrade |
+
+Two rules the CLI **implements** rather than infers, because getting either wrong
+under-reports someone's actual bill while looking like a receipt:
+
+1. **Absent means unknown, never free.** The block is omitted rather than zero-filled.
+   Test key PRESENCE, not `!= null`.
+2. **`complete: false` means `total` is a floor.** A call ran whose cost could not be
+   measured — an unreported selector, or a speculative generation cancelled mid-flight
+   (OpenRouter reports usage only in a stream's final chunk, which a cancelled stream
+   never sends). A turn that *skipped* selection stays `complete: true`: no call
+   happened, so nothing is missing.
+
+Collapsed to one client rule: **a session total is a lower bound if any request in it was
+incomplete or carried no cost block at all.**
+
+Two gaps `complete` does not currently close, both of which the CLI handles on its own
+side. A **retried** respond call bills once per attempt, but each attempt's `cost.total`
+covers only its own request — the backend aggregates re-rolls *within* a request, never
+across HTTP attempts — so the client forces `Complete=false` when an earlier attempt got
+as far as `meta` (i.e. the selector already ran) and then failed. And a **failed** call
+still bills: `task_output_invalid` is raised only after a billed completion, often after
+a second billed repair, so a failed task reports unknown spend unless the failure is one
+where no generation can have run (a refused socket, a 400, an unfunded or unroutable
+request).
+
+One gap remains on the backend side and is tracked as
+[assistant-backend#31](https://github.com/daintreehq/assistant-backend/issues/31): a
+re-rolled generation where only one attempt reported its cost yields a partial `total`
+still flagged `complete: true`, and `/tasks` has no completeness field at all. Small in
+magnitude, but it means `complete` is a floor on how conservative to be, not a guarantee.
+
+`backend.ClientConfig.OnCost` is the single seam — it fires for every respond turn AND
+every utility task, because the client is the only layer they both pass through. A day of
+orchestration spends real money on summarize/extract/classify tasks fired from tools and
+watchers that never appear as a turn. `internal/costledger` accumulates; `/cost` and
+`/doctor` render, hedging an incomplete total as `≥ $x` (truncated, never rounded up) and
+naming why. The ledger is deliberately unpersisted and counts from process launch or the
+last `/clear`; it outlives a `/login` client swap, so changing endpoint mid-session does
+not silently zero the bill.
+
+Not counted anywhere: **skill learning**, which runs fire-and-forget on a stronger model
+after the response and can cost more than the turn that triggered it. It is off by
+default and forbidden in production, so no beta tester is exposed — but a local developer
+who enables it will see dashboard spend that no field here accounts for.
+
 ### The upstream-failure taxonomy
 
 The backend used to collapse every upstream 401/402/403/404 and every 5xx into one

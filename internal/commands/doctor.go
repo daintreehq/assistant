@@ -130,6 +130,18 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 				fmt.Sprintf("%d of %d required task(s) MISSING: %s", len(av.Missing), av.Required, joinNames(av.Missing)),
 				"CLI/backend task-id drift — these calls will fail at runtime; update the CLI or backend")
 		}
+
+		// Cost reporting. Not a failure either way — an older backend simply cannot tell
+		// you what a turn cost — but a tester whose /cost panel is empty deserves to
+		// learn WHY here rather than assume the feature is broken.
+		if caps.Respond.CostReporting != nil {
+			push("cost reporting", true,
+				"supported ("+caps.Respond.CostReporting.Currency+", on the "+
+					caps.Respond.CostReporting.StreamEvent+" event) — see /cost", "")
+		} else {
+			push("cost reporting", true,
+				"not advertised by this backend — /cost will have nothing to total", "")
+		}
 	}
 	// forbidden tools must never be exposed to the backend (skill find/load are reserved).
 	exposed, forbidden := exposedAndForbiddenTools(a)
@@ -228,6 +240,32 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// tools loaded.
 	n := len(a.Registry.List())
 	push("tools loaded", n > 0, fmt.Sprintf("%d", n), "")
+
+	// session cost — informational, never a failure. It belongs in a diagnostic because
+	// "why is this expensive?" is a real support question, and because the cache ratio
+	// on the same line is the first place a prompt-assembly regression shows up. A
+	// support bundle that answered every connectivity question and could not say what
+	// the session had spent would be missing the one number the tester paid for.
+	if cs := a.CostLedger.Snapshot(); cs.Calls > 0 {
+		var detail string
+		switch {
+		// Nothing reported at ALL — an older backend, most likely. Say that rather than
+		// "≥ $0.0000 over 12 requests", which reads as a malfunction and hides the
+		// actual explanation. Same branch /cost takes, for the same reason.
+		case cs.Unreported == cs.Calls:
+			detail = fmt.Sprintf("not reported by this backend (%d billed request(s))", cs.Calls)
+		default:
+			detail = formatUSD(cs.Observed, cs.LowerBound) +
+				fmt.Sprintf(" over %d billed request(s)", cs.Calls)
+			if ratio, ok := cs.CacheHitRatio(); ok {
+				detail += fmt.Sprintf(", %.1f%% prompt-cache hit on the main call", ratio*100)
+			}
+			if cs.LowerBound {
+				detail += " (lower bound — see /cost)"
+			}
+		}
+		push("session cost", true, detail, "")
+	}
 
 	return checks
 }

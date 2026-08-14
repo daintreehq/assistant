@@ -55,7 +55,7 @@ func signInApp(t *testing.T, startURL string) *App {
 		APIKey:          "sk-old-0123456789",
 		CredentialsPath: credentials.Path(t.TempDir()),
 	}}
-	a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(a.Config)))
+	a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(a.Config, a.CostLedger)))
 	a.Backend = a.backendSwap
 	return a
 }

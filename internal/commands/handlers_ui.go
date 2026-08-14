@@ -98,6 +98,8 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		return UICommandResult{Handled: true, Title: "Explain", Text: explainText(a, arg)}
 	case "models":
 		return UICommandResult{Handled: true, Title: "Models", Text: modelsText(a)}
+	case "cost":
+		return UICommandResult{Handled: true, Title: "Cost", Text: costText(a)}
 	case "auth":
 		return UICommandResult{Handled: true, Title: "Auth", Text: authText(a)}
 	case "login":
@@ -134,6 +136,9 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		_, _ = a.ClearWatchers()
 		_, _ = a.ClearAsyncWork()
 		_, _ = a.ClearInbox()
+		// The bill belongs to the conversation being discarded. Carrying it into a
+		// deliberately fresh start would make /cost answer a question nobody asked.
+		a.CostLedger.Reset()
 		return UICommandResult{Handled: true, ClearTranscript: true, Title: "Clear", Text: "Conversation cleared — watchers, async operations, and inbox cleared — starting fresh."}
 	case "doctor":
 		return UICommandResult{Handled: true, Title: "Doctor", Text: FormatDoctor(RunDoctor(ctx, a))}

@@ -84,12 +84,21 @@ first-token timing + aggregate stats.
 | `backend.respond.raw_meta` | each HTTP attempt's SSE meta arrives | `backendRequestId` `model` `newlyLoadedCount`; transport observation only, so a retried logical round can contain more than one |
 | `backend.respond.skill_cue` | eager skill-loaded cue reaches the sinks | `skills`; absent when no new skill is surfaced and de-duplicated across retries |
 | `backend.respond.meta` | retry-safe meta commits | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}`; normally fires with first content or successful tool-only completion |
-| `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `reasoningPresent` |
+| `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `cost` `reasoningPresent` |
 | `backend.respond.error` | non-cancel respond failure | `durationMs` `error` |
 
 `request` = what the backend was **shown**; `meta` = what it **decided** (incl. which
 skill it loaded — the surface that says "fix the selector, not the tool"); `done` = what
 it **produced**.
+
+`done`'s `cost` block (`{total, main, selector, complete}`, in USD, on the caller's own
+OpenRouter key) is present only when the backend reported one — its **absence means
+unknown, never free**, and it is never zero-filled. It is logged per round rather than
+only as a session total because "why was that turn expensive?" is a question you answer
+by reading a log, and because `selector` is the share prompt work can actually move.
+Read it next to `usage.cachedTokens / usage.promptTokens`: the prompt-cache hit ratio is
+what the backend's byte-stable prompt assembly buys, and a collapse in it is the first
+symptom of a regression that costs the user money directly.
 
 ### Tools
 | event | when | key fields |

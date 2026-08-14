@@ -332,6 +332,21 @@ func (s *Session) traceBackendDone(runID, turnID string, round int, result backe
 		if firstTokenMs > 0 {
 			fields["firstTokenMs"] = firstTokenMs
 		}
+		// Cost, when the backend reported it. Logged per round rather than only in the
+		// session total because "why was that turn expensive?" is a question you answer
+		// by reading a log — and because the selector share is the one number prompt
+		// work can actually move. Absent stays absent: an unreported cost must not
+		// appear here as a zero any more than it may in the running total.
+		if c := result.Cost; c != nil {
+			cost := map[string]any{"total": c.Total, "complete": c.IsComplete()}
+			if c.Main != nil {
+				cost["main"] = *c.Main
+			}
+			if c.Selector != nil {
+				cost["selector"] = *c.Selector
+			}
+			fields["cost"] = cost
+		}
 		if rc := result.Message.ReasoningContent; rc != "" {
 			fields["reasoningPresent"] = true
 			fields["reasoningChars"] = utf8.RuneCountInString(rc)

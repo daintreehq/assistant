@@ -505,11 +505,13 @@ type RespondResponse struct {
 	Message         RespondMessage `json:"message"`
 	FinishReason    string         `json:"finish_reason"`
 	Usage           Usage          `json:"usage"`
-	Skills          SkillsBlock    `json:"skills"`
-	State           string         `json:"state"`
-	CatalogRevision string         `json:"catalog_revision"`
-	PromptVersion   string         `json:"prompt_version"`
-	Warnings        []string       `json:"warnings"`
+	// Cost is the whole request's spend. Absent ⇒ unknown, never free. See TurnCost.
+	Cost            *TurnCost   `json:"cost"`
+	Skills          SkillsBlock `json:"skills"`
+	State           string      `json:"state"`
+	CatalogRevision string      `json:"catalog_revision"`
+	PromptVersion   string      `json:"prompt_version"`
+	Warnings        []string    `json:"warnings"`
 }
 
 // RespondMessage is the assistant message in a non-streaming response.
@@ -528,6 +530,54 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 	CachedTokens     int `json:"cached_tokens"`
+	// Cost is what this ONE call charged the caller, in USD — their own key funds every
+	// upstream call, so it is their money. A POINTER because nil means "the provider
+	// reported nothing", which is emphatically not "free": coercing it to 0 would
+	// quietly under-report a running total. Never compute this client-side; the router
+	// knows which of ~24 endpoints served the call and what cache discount applied, and
+	// anything we derived from a token price would be a guess presented as a bill.
+	//
+	// On a /respond body this covers the MAIN completion only — the turn total is the
+	// separate `cost` block. On a /tasks result it IS that task's total (a task may
+	// still make two calls when a malformed response needs a repair pass).
+	Cost *float64 `json:"cost"`
+}
+
+// TurnCost is what a whole /respond request charged the caller, in USD, across every
+// upstream call it made: the skill selector, its repair pass, a losing speculative
+// generation, the main completion, and a re-rolled round the user never saw.
+//
+// Two rules a client must IMPLEMENT rather than infer, and both exist to stop a session
+// accumulator from quietly under-reporting someone's bill:
+//
+//   - The whole block is ABSENT when nothing was reported. Absent means unknown, never
+//     free.
+//   - `complete: false` means a call that RAN did not report its cost, so Total is a
+//     floor rather than a sum. (A turn that SKIPPED the selector stays complete: no call
+//     happened, so nothing is missing.) One case is structurally unobservable — a
+//     speculative generation cancelled mid-flight was billed, but OpenRouter reports
+//     usage only in a stream's final chunk, which a cancelled stream never sends.
+//
+// The practical consequence is one rule: render a session total as a lower bound if ANY
+// turn in it was incomplete or reported no cost at all. These figures are for proportion
+// and trend; the OpenRouter dashboard is the authority on the actual bill.
+type TurnCost struct {
+	Total    float64  `json:"total"`
+	Main     *float64 `json:"main"`
+	Selector *float64 `json:"selector"`
+	// Complete is a pointer only so an older backend's omission can default to TRUE
+	// (the backend's own default) instead of decoding as "incomplete" and marking every
+	// turn a lower bound. Read it through IsComplete.
+	Complete *bool `json:"complete"`
+}
+
+// IsComplete reports whether Total is a full sum rather than a floor. Absent ⇒ true,
+// matching the backend's default for a field it only started sending recently.
+func (c *TurnCost) IsComplete() bool {
+	if c == nil || c.Complete == nil {
+		return true
+	}
+	return *c.Complete
 }
 
 // --------------------------------------------------------------------------
@@ -584,6 +634,9 @@ type ToolCallDelta struct {
 type StreamDone struct {
 	FinishReason string `json:"finish_reason"`
 	Usage        Usage  `json:"usage"`
+	// Cost rides the TERMINAL event because that is the earliest it can be known:
+	// OpenRouter reports a stream's usage only in its final chunk. Absent ⇒ unknown.
+	Cost *TurnCost `json:"cost"`
 }
 
 // --------------------------------------------------------------------------
@@ -672,6 +725,9 @@ type RespondResult struct {
 	Message      RespondMessage
 	FinishReason string
 	Usage        Usage
+	// Cost is the turn's total spend, carried up from the terminal `done` event. nil
+	// when the backend reported none — the caller must not read that as zero.
+	Cost *TurnCost
 }
 
 // HasToolCalls reports whether the assistant asked to run any tools.
@@ -740,6 +796,28 @@ type RespondCapsBlock struct {
 	SystemMessagesAccepted bool     `json:"system_messages_accepted"`
 	MaxActiveSkills        int      `json:"max_active_skills"`
 	MetadataTransport      string   `json:"metadata_transport"`
+	// CostReporting is present when this backend reports what each request charged the
+	// caller. Absent on an older deployment — which the CLI handles without needing to
+	// ask, since an unreported cost is already indistinguishable from a backend that
+	// reports none, and both are rendered as "unknown". Advertised here so `/doctor`
+	// can name the contract rather than leave a tester guessing why /cost is empty.
+	CostReporting *CostReportingCaps `json:"cost_reporting"`
+}
+
+// CostReportingCaps describes the backend's cost-reporting contract.
+type CostReportingCaps struct {
+	Field    string `json:"field"`
+	Currency string `json:"currency"`
+	// Components names the sub-fields of the cost block ("total", "main", "selector",
+	// "complete").
+	Components  []string `json:"components"`
+	StreamEvent string   `json:"stream_event"`
+	// AbsentWhenUnknown states the rule the client must implement rather than infer:
+	// the block is omitted rather than zero-filled when nothing was reported.
+	AbsentWhenUnknown bool `json:"absent_when_unknown"`
+	// TotalMayBeIncomplete states that `complete: false` can occur, i.e. that a total
+	// is sometimes a floor.
+	TotalMayBeIncomplete bool `json:"total_may_be_incomplete"`
 }
 
 // Version is the GET /version body.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/costledger"
 	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/redact"
@@ -28,7 +29,11 @@ const signInVerifyTimeout = 30 * time.Second
 // Create and SignIn so a re-authenticated client is configured identically to the one
 // built at boot — the debug-log hooks especially, which are easy to silently drop on a
 // rebuild and whose absence only shows up much later as a session log with a hole in it.
-func backendClientConfig(cfg config.AppConfig) backend.ClientConfig {
+// ledger, when non-nil, receives a CostEvent for every billed upstream call the built
+// client makes. It is passed in rather than read off the App because this function also
+// builds the throwaway sign-in probe, whose calls (capabilities, auth/verify) spend
+// nothing and must not appear in the session's bill.
+func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backend.ClientConfig {
 	baseURL := strings.TrimSpace(cfg.BackendURL)
 	if baseURL == "" {
 		baseURL = backend.DefaultBaseURL
@@ -74,6 +79,13 @@ func backendClientConfig(cfg config.AppConfig) backend.ClientConfig {
 			}
 			debuglog.LogDebug(dbg, "backend.task", fields)
 		}
+	}
+	// One hook, at the only layer every billed call passes through. The ledger outlives
+	// the client on purpose: a /login swap rebuilds the client mid-session, and a total
+	// that reset itself when the endpoint changed would quietly forget everything spent
+	// before it.
+	if ledger != nil {
+		clientCfg.OnCost = ledger.Record
 	}
 	return clientCfg
 }
@@ -153,7 +165,7 @@ func (a *App) SignIn(ctx context.Context, c credentials.Credentials) error {
 	// Verify against a THROWAWAY client: nothing observable changes until it passes.
 	// One attempt — the user is watching, and the default policy would replay a refused
 	// socket for a minute before reaching the same verdict.
-	probeCfg := backendClientConfig(a.snapshotConfig())
+	probeCfg := backendClientConfig(a.snapshotConfig(), nil)
 	probeCfg.BaseURL, probeCfg.APIKey = c.BaseURL, c.APIKey
 	probeCfg.Retry = backend.RetryPolicy{MaxAttempts: 1}
 	probe := backend.NewClient(probeCfg)
@@ -193,7 +205,7 @@ func (a *App) SignIn(ctx context.Context, c credentials.Credentials) error {
 	// The swap itself happens OUTSIDE the lock: building a client is cheap but the
 	// Swappable is its own synchronization, and holding cfgMu across unrelated work is
 	// how lock-ordering bugs start (see the startupMu nesting warning in app.go).
-	a.backendSwap.Swap(backend.NewClient(backendClientConfig(updated)))
+	a.backendSwap.Swap(backend.NewClient(backendClientConfig(updated, a.CostLedger)))
 
 	// Redacted, always — this line exists so a session log shows WHEN the endpoint
 	// changed, which is otherwise invisible archaeology. It must never carry the key.

@@ -44,6 +44,7 @@ type Client struct {
 	retry    RetryPolicy
 	onRetry  func(RetryInfo)
 	onTask   func(TaskTraceInfo)
+	onCost   func(CostEvent)
 	// streamIdleTimeout overrides sseIdleTimeout for the respond stream's idle
 	// watchdog. Zero selects the default; tests shrink it to exercise the abort.
 	streamIdleTimeout time.Duration
@@ -76,6 +77,47 @@ type ClientConfig struct {
 	// memory_distill calls (and every watcher classify/judge/extract) would leave no
 	// trace at all.
 	OnTask func(TaskTraceInfo)
+	// OnCost, if set, is invoked once for every billed upstream call this client makes
+	// — every respond turn AND every utility task. Observability only; it must not
+	// block.
+	//
+	// It lives on the CLIENT rather than on the agent session because a session sees
+	// only turns. A day of orchestration also spends money on dozens of
+	// terminal.summarize / terminal.extract / watcher-classify tasks, fired from tools,
+	// watchers and compaction alike — real spend on the user's own key, outside any
+	// turn. One hook at the layer every call passes through is the only way to count
+	// all of it without every future caller remembering to.
+	OnCost func(CostEvent)
+}
+
+// CostEvent is one billed backend REQUEST, reported to ClientConfig.OnCost.
+//
+// One event is not one provider call: a single turn can bill the skill selector, a
+// repair pass, a losing speculative generation and the main completion. Amount is the
+// request's total across all of them, which is the number the caller is charged.
+//
+// It is emitted even when Amount is nil — "this request happened and reported no cost"
+// is the fact that turns a session total into a LOWER BOUND, and an accumulator that
+// only heard about the requests carrying numbers would present a partial sum as a
+// receipt.
+type CostEvent struct {
+	// Op is "respond" for a turn, or the task id ("terminal_summarize", "checkpoint", …).
+	Op string
+	// Amount is USD for the whole request, or nil when nothing was reported.
+	// nil means UNKNOWN. It never means zero.
+	Amount *float64
+	// Complete is false when this request ran work whose cost could not be measured, so
+	// Amount is a floor rather than a sum. Set from the backend's own `cost.complete`,
+	// and forced false when an earlier retried attempt of the same call already billed.
+	Complete bool
+	// CachedTokens/PromptTokens back the prompt-cache hit ratio. They cover the MAIN
+	// completion only — the selector's usage is not exposed per call — so the ratio is
+	// about the main call, not the whole request, and consumers should say so. It rides
+	// here because it EXPLAINS the spend beside it: the backend's byte-stable prompt
+	// assembly exists to keep ~18k tokens of tool schemas cached, and a collapse in this
+	// ratio is the first symptom of a regression that costs the user money directly.
+	CachedTokens int
+	PromptTokens int
 }
 
 // TaskTraceInfo describes one completed RunTask round trip for the OnTask hook.
@@ -182,6 +224,7 @@ func NewClient(cfg ClientConfig) *Client {
 		retry:    retry,
 		onRetry:  cfg.OnRetry,
 		onTask:   cfg.OnTask,
+		onCost:   cfg.OnCost,
 	}
 }
 
@@ -322,17 +365,58 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		}
 	}
 
+	// Cost accounting spans the whole retried call, not one attempt, and it is the one
+	// piece of bookkeeping that must survive EVERY exit path — the caller is paying for
+	// this with their own key.
+	//
+	// abandonedSpend records that some earlier attempt reached the point of billing
+	// (it got a meta event, which means the skill selector already ran and charged)
+	// and then failed. That money is invisible: a failed attempt never reaches its
+	// `done` event, and the succeeding attempt's `cost.total` covers only ITS OWN
+	// request — the backend aggregates re-rolls within one request, never across
+	// separate HTTP attempts. So a replayed turn's reported total is a floor, and
+	// saying otherwise would present a number below the caller's real bill as exact.
+	abandonedSpend := false
+	// finalize emits EXACTLY ONE cost event for this RespondStream call, whatever
+	// happens. Every return below routes through it.
+	reported := false
+	finalize := func(result RespondResult, failed bool) {
+		if reported {
+			return
+		}
+		reported = true
+		switch {
+		case !failed:
+			c.reportRespondCost(result, abandonedSpend)
+		case abandonedSpend:
+			// Failed, cancelled, or gave up — but money was already spent that nothing
+			// will ever report. An unknown amount, which is what makes a session total
+			// a lower bound rather than silently omitting a turn that cost real money.
+			c.reportCost(CostEvent{Op: RespondOp, Complete: false})
+		}
+		// A failure with no billing (a refused socket, a 400, a key the provider never
+		// accepted) reports nothing: there is no spend to account for, and inventing an
+		// "unknown" would caveat a total that has nothing wrong with it.
+	}
+
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		pendingMeta = nil // each attempt brings its own meta
 		result, serr := c.respondStreamOnce(ctx, body, cb)
 		if serr == nil {
 			flushMeta() // committed success (incl. pure tool-call turns with no content)
+			finalize(result, false)
 			return result, nil
+		}
+		// This attempt billed if it got far enough for the selector to have run. Recorded
+		// BEFORE every failure exit, so an attempt that dies on the way out still counts.
+		if pendingMeta != nil || lastReceivedMeta != nil || contentStreamed {
+			abandonedSpend = true
 		}
 		// Caller cancellation (Escape / shutdown) is a clean stop, never a retry.
 		if ctx.Err() != nil {
 			flushMeta()
+			finalize(result, true)
 			return result, serr
 		}
 		be, ok := serr.(*Error)
@@ -340,6 +424,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		// transient class, retries are disabled, or the attempt budget is spent.
 		if contentStreamed || !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
 			flushMeta()
+			finalize(result, true)
 			return result, serr
 		}
 		// Selection already completed if this attempt delivered meta. Pin that signed
@@ -353,6 +438,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			nextBody, marshalErr := json.Marshal(req)
 			if marshalErr != nil {
 				flushMeta()
+				finalize(result, true)
 				return result, fmt.Errorf("backend: marshal retry request: %w", marshalErr)
 			}
 			body = nextBody
@@ -364,9 +450,10 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		// the restart-recovery window is spent and surface the failure.
 		if c.retry.exhausted(time.Since(started), delay) {
 			flushMeta()
+			finalize(result, true)
 			return result, serr
 		}
-		info := RetryInfo{Attempt: attempt, MaxAttempts: c.retry.MaxAttempts, Delay: delay, Op: "respond", Err: be}
+		info := RetryInfo{Attempt: attempt, MaxAttempts: c.retry.MaxAttempts, Delay: delay, Op: RespondOp, Err: be}
 		if c.onRetry != nil {
 			c.onRetry(info)
 		}
@@ -379,6 +466,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			// Cancelled mid-backoff: surface the last failure (the caller reads
 			// ctx.Err() and treats it as a clean cancel).
 			flushMeta()
+			finalize(result, true)
 			return result, serr
 		}
 	}
@@ -470,6 +558,10 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/respond", req, &out); err != nil {
 		return RespondResponse{}, err
 	}
+	// The non-streaming path spends the caller's money exactly like the streamed one,
+	// so it reports through the same seam. Reusing RespondResult keeps the two from
+	// growing different accounting rules for the same request.
+	c.reportRespondCost(RespondResult{Usage: out.Usage, Cost: out.Cost}, false)
 	return out, nil
 }
 
@@ -495,9 +587,94 @@ func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, erro
 		}()
 	}
 	if err != nil {
+		// A FAILED task still costs money more often than not: `task_output_invalid` is
+		// raised only after a billed completion, usually after a second billed repair
+		// pass. Report it as unknown spend so the session total becomes a lower bound
+		// rather than silently omitting it — but only when a generation can actually
+		// have run (see taskMayHaveBilled), so a 400 or a refused key does not caveat a
+		// total that is perfectly accurate.
+		if taskMayHaveBilled(err) {
+			c.reportCost(CostEvent{Op: req.Task, Complete: false})
+		}
 		return TaskResult{}, err
 	}
+	// A task's usage.cost IS that task's total — the figure covers a repair pass too.
+	c.reportCost(CostEvent{
+		Op:           req.Task,
+		Amount:       out.Usage.Cost,
+		Complete:     true,
+		CachedTokens: out.Usage.CachedTokens,
+		PromptTokens: out.Usage.PromptTokens,
+	})
 	return out, nil
+}
+
+// RespondOp is the CostEvent.Op value for a conversation turn. Every other value is a
+// utility task, named by its task id.
+const RespondOp = "respond"
+
+// reportRespondCost emits the turn's spend. A missing `cost` block becomes an event with
+// a nil Amount rather than no event at all: the turn definitely happened and definitely
+// cost something, so the honest accumulator answer is "the running total is now a lower
+// bound", never "nothing to add".
+//
+// abandonedSpend forces Complete=false. An earlier attempt of this same call billed and
+// then failed, and the reported total covers only the succeeding request — the backend
+// aggregates re-rolls WITHIN one request, never across separate HTTP attempts.
+func (c *Client) reportRespondCost(res RespondResult, abandonedSpend bool) {
+	ev := CostEvent{
+		Op:           RespondOp,
+		Complete:     res.Cost.IsComplete() && !abandonedSpend,
+		CachedTokens: res.Usage.CachedTokens,
+		PromptTokens: res.Usage.PromptTokens,
+	}
+	if res.Cost != nil {
+		total := res.Cost.Total
+		ev.Amount = &total
+	}
+	c.reportCost(ev)
+}
+
+// taskMayHaveBilled reports whether a FAILED task call could already have charged the
+// caller — the difference between "nothing to account for" and "spend we cannot see".
+//
+// It matters because the most common task failure is not a rejection: `task_output_invalid`
+// is raised only AFTER a billed completion, and often after a second billed repair pass.
+// Treating that as free would let a session run dozens of paid extractions and report a
+// total that omits every one of them.
+//
+// The listed conditions are the ones where no generation can have run: we never reached
+// the backend, it refused the request at its own door, or the provider refused before
+// generating. Everything else — a 5xx, a malformed output verdict, a client-side timeout
+// on an accepted request — is counted as unknown spend.
+func taskMayHaveBilled(err error) bool {
+	var be *Error
+	if !errors.As(err, &be) {
+		// Not a backend error at all: a context cancellation or deadline on a request the
+		// backend may well have accepted and be billing right now. Assume it billed —
+		// over-caveating a total is recoverable, under-reporting a bill is not.
+		return true
+	}
+	switch {
+	case be.IsConnect(), be.IsContract(), be.IsProtocolMismatch():
+		return false
+	case be.HTTPStatus == http.StatusUnauthorized, be.HTTPStatus == http.StatusForbidden:
+		return false
+	case be.Code == CodeProviderInsufficientCredit, be.Code == CodeUpstreamNoCompliantProvider:
+		// Refused before any generation: no credit to spend, or no endpoint to spend it at.
+		return false
+	}
+	return true
+}
+
+// reportCost delivers a CostEvent to the OnCost hook, guarded: an accounting side-channel
+// must never be able to fail the call it is narrating.
+func (c *Client) reportCost(ev CostEvent) {
+	if c.onCost == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.onCost(ev)
 }
 
 // Capabilities fetches the backend's capability descriptor. Cache the result —
