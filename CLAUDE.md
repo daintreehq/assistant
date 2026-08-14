@@ -101,12 +101,28 @@ make install                                                  # go install with 
 ./bin/daintree-assistant reset <scope>       # project-state | credentials | all-data (lease-aware, backs up)
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
-# Gates (run both before considering work done)
+# Gates (run before considering work done)
 go test ./...                # the whole suite, no network — fakes for MCP + backend
 go vet ./...                 # static checks
 make test-race               # go test -race ./...
 gofmt -l .                   # must print nothing (CI fails on unformatted files)
+
+# If you touched the tool registry, COMMAND_REGISTRY, or a protocol/schema constant,
+# regenerate the capability reference or CI fails on the drift:
+go test ./internal/app -run TestGeneratedDocsAreCurrent -update
+go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
 ```
+
+CI additionally runs on **macOS and Linux** (PTY harness on macOS, race detector on
+Linux), diffs the generated docs, runs `govulncheck`, and scans the working tree for
+literal credentials with both `gitleaks` and a scan-grade SUBSET of the project's own
+patterns (`redact.FindLiteralSecrets`, pinned by `TestRepositoryContainsNoCredentials`).
+The subset is narrower on purpose: redaction errs toward masking, but a scanner that fires
+on this repo's own prose about credential shapes gets switched off. A credential-shaped
+string in the tree must announce itself as a fixture ("fake", "test", "example") — so a
+real key, which never does, still trips it. A tagged push builds macOS/Linux archives with
+checksums and an SBOM (`.github/workflows/release.yml`); it does not sign or notarize,
+because that needs an Apple certificate this repo cannot provision.
 
 `make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
 `generate` (`go generate ./...`) · `run` · `clean` · `db-reset` (delegates to

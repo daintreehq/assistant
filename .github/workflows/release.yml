@@ -1,0 +1,267 @@
+name: Release
+
+# Tag-driven. `git tag v0.4.0 && git push origin v0.4.0` produces the artifacts a tester
+# installs, so nobody has to have Go to run this.
+#
+# Deliberately NOT signed or notarized yet. Doing that needs an Apple Developer ID
+# certificate and an app-specific password held as repository secrets, which this
+# workflow cannot provision — and a workflow that CLAIMS to notarize while silently
+# skipping it is worse than one that says it does not. macOS users will see Gatekeeper's
+# unidentified-developer warning; docs/beta/FIRST_RUN.md's `make install` path avoids it.
+# When the certificate exists, add the `codesign`/`notarytool` steps to the package job
+# and delete this paragraph.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+# READ by default. `contents: write` is granted to the `publish` job alone — the other
+# jobs run the repository's own tests and a third-party SBOM action, and handing those a
+# token that can create tags and releases means a malicious tagged commit or a compromised
+# action inherits publish authority.
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.8"
+  # ONE definition of the version being built, used by every job.
+  #
+  # `${GITHUB_REF_NAME:-${{ inputs.tag }}}` looked equivalent and was not: on a
+  # workflow_dispatch run GITHUB_REF_NAME is the WORKFLOW's ref — normally `main` — and is
+  # never empty, so the fallback never fired. A "build v0.4.0" run checked out v0.4.0
+  # correctly and then published it as `daintree-assistant_main_darwin_arm64.tar.gz`, with
+  # `--version` reporting `main`. Interpolating the input into shell was also a needless
+  # injection surface; routing it through the environment removes both problems at once.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # Everything the ordinary CI gate checks, from a CLEAN checkout, before anything is
+  # built for distribution. A release that skips the gates is how a broken build reaches
+  # the people least able to diagnose it.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # On a tag push this is already right; on workflow_dispatch it is NOT — the
+          # default checkout takes the default branch, so the "build tag X" run would
+          # have built main and published it under X's name.
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The same gates the ordinary CI job runs, so "release verifies everything CI does"
+      # is a true statement rather than an aspiration. The macOS matrix and the PTY
+      # harness are NOT repeated here — they run per-commit on the branch, and a tag
+      # points at a commit that already passed them.
+      - name: Gates
+        run: |
+          go mod verify
+          go mod download
+          git diff --exit-code -- go.mod go.sum
+          if grep -nE '^[[:space:]]*replace([[:space:]]|\()' go.mod; then
+            echo "::error::go.mod contains a replace directive"
+            exit 1
+          fi
+          test -z "$(gofmt -l .)"
+          CGO_ENABLED=0 go build ./...
+          go vet ./...
+          go test ./...
+          go test -race ./...
+
+      # A release must not ship a known vulnerability or a committed credential, even if
+      # the branch was green when the commit landed — an advisory published since then is
+      # exactly the case this catches.
+      - name: Known vulnerabilities
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+          repo-checkout: false
+
+      - name: Secret scan
+        run: go test ./internal/redact -run TestRepositoryContainsNoCredentials -count=1
+
+      - name: Generated docs are current
+        run: |
+          go test ./internal/app -run TestGeneratedDocsAreCurrent -update
+          go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
+          test -z "$(git status --porcelain -- docs/generated)"
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          # No Windows target. The ownership lease every stateful mode takes is an
+          # flock, which has no Windows port, so the binary would build and then refuse
+          # to start — shipping it would be a promise the code cannot keep.
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # Pure-Go SQLite, so cross-compilation needs no C toolchain — and the result
+          # is genuinely static, which is what the docs claim.
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${RELEASE_TAG}"
+          NAME="daintree-assistant_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          # -trimpath strips local filesystem paths; the ldflags stamp the version the
+          # binary reports, which doctor compares against every other copy on PATH.
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/${NAME}/daintree-assistant" \
+            ./cmd/daintree-assistant
+          cp README.md LICENSE "dist/${NAME}/"
+          cp -r docs/beta "dist/${NAME}/docs"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          rm -rf "dist/${NAME}"
+
+      - name: Checksum
+        run: |
+          cd dist
+          # sha256sum, not shasum: every build job runs on ubuntu, where this is the
+          # native tool. The line records a BARE filename, so `sha256sum -c SHA256SUMS`
+          # verifies correctly from whatever directory the archives are downloaded into.
+          sha256sum *.tar.gz > "$(ls *.tar.gz).sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 7
+
+  sbom:
+    name: sbom
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # An SBOM is what makes "which version of what am I running" answerable after the
+      # fact — including for a vulnerability disclosed months from now, against a
+      # dependency nobody remembers adding.
+      #
+      # This describes the SOURCE tree, not the four shipped binaries. For a pure-Go
+      # module with no vendored C that is the same dependency set, but the distinction
+      # matters if that ever stops being true.
+      #
+      # The action uploads its own workflow artifact, so there is no second upload step
+      # here — the publish job collects it by name from the artifact download.
+      - name: Generate SBOM (source)
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom.spdx.json
+
+  publish:
+    name: publish
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The ONLY job with write authority, and it runs no repository code — just artifact
+    # assembly and the release upload.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name '*.json' \) \
+            -exec cp {} release/ \;
+          # One combined checksum file is what a human actually verifies against.
+          cd release && cat *.sha256 > SHA256SUMS && rm -f *.tar.gz.sha256
+          # Verify the combined file in the FLAT layout a tester downloads into, not the
+          # per-job layout it was written in. A checksum file that does not verify is
+          # worse than none: it teaches people the check is unreliable and to skip it.
+          sha256sum -c SHA256SUMS
+          ls -la
+
+      - name: Release notes
+        run: |
+          VERSION="${RELEASE_TAG}"
+          {
+            echo "## Daintree Assistant ${VERSION}"
+            echo
+            echo "### Install"
+            echo
+            echo '```bash'
+            echo "# macOS (Apple Silicon) — adjust for your platform"
+            echo "tar xzf daintree-assistant_${VERSION}_darwin_arm64.tar.gz"
+            echo "sudo mv daintree-assistant_${VERSION}_darwin_arm64/daintree-assistant /opt/homebrew/bin/"
+            echo "daintree-assistant doctor"
+            echo '```'
+            echo
+            echo "Verify first: \`sha256sum -c SHA256SUMS\` (macOS: \`shasum -a 256 -c SHA256SUMS\`)."
+            echo
+            echo "**Not code-signed or notarized.** macOS will warn about an unidentified"
+            echo "developer; clear it with \`xattr -d com.apple.quarantine <path>\` if you trust"
+            echo "this build, or install from source with \`make install\`."
+            echo
+            echo "### Supported platforms"
+            echo
+            echo "macOS and Linux. **Windows is not supported and is not shipped** — the"
+            echo "single-owner lease every stateful mode takes is an \`flock\`, which has no"
+            echo "Windows port, so the binary would refuse to start."
+            echo
+            echo "### First run"
+            echo
+            echo "See \`docs/FIRST_RUN.md\` in the archive, or"
+            echo "[docs/beta/](https://github.com/daintreehq/assistant/tree/main/docs/beta)."
+            echo
+            echo "### Compatibility"
+            echo
+            echo "This build negotiates the protocol, schema, and backend-task versions listed in"
+            echo "[COMPATIBILITY.md](https://github.com/daintreehq/assistant/blob/main/docs/generated/COMPATIBILITY.md)."
+            echo "\`doctor\` fails if the backend does not match."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: release-notes.md
+          tag_name: ${{ env.RELEASE_TAG }}
+          # A tester cohort should see the release notes before the artifacts are final.
+          draft: true
+          fail_on_unmatched_files: true

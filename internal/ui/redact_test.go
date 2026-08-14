@@ -11,9 +11,9 @@ import (
 // approval detail (commands, push targets, paths).
 
 func TestRedactArgs_MasksTokenInShellCommand(t *testing.T) {
-	in := `{"input":"export ANTHROPIC_API_KEY=sk-ant-abc123DEF456ghi789jkl"}`
+	in := `{"input":"export ANTHROPIC_API_KEY=sk-ant-fake123DEF456ghi789jkl"}`
 	out := redactArgs(in)
-	if strings.Contains(out, "sk-ant-abc123DEF456ghi789jkl") {
+	if strings.Contains(out, "sk-ant-fake123DEF456ghi789jkl") {
 		t.Fatalf("token leaked through redaction: %q", out)
 	}
 	if !strings.Contains(out, redact.Mark) {
@@ -74,8 +74,8 @@ func TestArgsBlockRedactsSecrets(t *testing.T) {
 }
 
 func TestCompactArgsRedactsSecrets(t *testing.T) {
-	out := compactArgs(`{"authorization":"Bearer sk-verylongsecrettoken1234567"}`, 200)
-	if strings.Contains(out, "sk-verylongsecrettoken1234567") {
+	out := compactArgs(`{"authorization":"Bearer sk-fake-verylongsecrettoken12345"}`, 200)
+	if strings.Contains(out, "sk-fake-verylongsecrettoken12345") {
 		t.Fatalf("expanded (^X) args leaked a token: %q", out)
 	}
 }

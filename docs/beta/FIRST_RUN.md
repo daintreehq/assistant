@@ -6,6 +6,22 @@ Five minutes from nothing to a useful answer. No `.env` file to edit.
 
 ## 1. Get the binary onto your PATH
 
+Download the archive for your platform from
+[Releases](https://github.com/daintreehq/assistant/releases), verify it, and put the
+binary somewhere on your PATH:
+
+```bash
+sha256sum -c SHA256SUMS          # macOS: shasum -a 256 -c SHA256SUMS
+tar xzf daintree-assistant_<version>_darwin_arm64.tar.gz
+sudo mv daintree-assistant_<version>_darwin_arm64/daintree-assistant /opt/homebrew/bin/
+```
+
+The builds are **not code-signed**, so macOS will warn about an unidentified developer.
+Clear it with `xattr -d com.apple.quarantine /opt/homebrew/bin/daintree-assistant` if you
+trust the build — or use the source path below, which Gatekeeper does not question.
+
+**From source** (needs Go 1.25.8+, `git`, and `make`):
+
 ```bash
 git clone https://github.com/daintreehq/assistant
 cd assistant
@@ -16,11 +32,9 @@ make install      # → /opt/homebrew/bin (Apple Silicon) or /usr/local/bin
 and the symptom is not "wrong version", it is a feature that mysteriously doesn't exist.
 `doctor` lists every copy it finds and what each one reports.
 
-Requires Go 1.25.8+, `git`, `make`, and write access to the install directory. No native
-toolchain and no npm: SQLite is the pure-Go driver, so `CGO_ENABLED=0` builds work.
-
-`make install` forces `GOBIN` so *this* invocation cannot add a second copy. It cannot
-remove one that is already there — `doctor` finds those.
+No native toolchain and no npm either way: SQLite is the pure-Go driver, so the binary is
+self-contained. `make install` forces `GOBIN` so *this* invocation cannot add a second
+copy — it cannot remove one that is already there, which is what `doctor` finds.
 
 ---
 

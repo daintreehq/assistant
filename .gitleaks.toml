@@ -1,0 +1,61 @@
+# gitleaks configuration.
+#
+# The default rules are the baseline. What this file adds is one idea: a
+# credential-shaped string in this repository is acceptable ONLY IF IT SAYS IT IS
+# INVENTED.
+#
+# That rule replaced a list of allowlisted test-file paths, which was the obvious approach
+# and the wrong one. A path allowlist suppresses EVERY rule for those paths forever, so a
+# genuine key pasted into any allowlisted test file becomes invisible — and the repository's
+# own scanner had the same blind spot from the other direction (it skipped `_test.go`
+# wholesale), which meant a real credential in a test fixture would have been caught by
+# nothing at all.
+#
+# A marker requirement has neither problem. Fixtures already look like `sk-or-v1-testkey…`
+# and `…-fake123…`; making that mandatory costs nothing and documents intent. A real
+# credential does not contain the word "fake", so it still trips the scan wherever it sits.
+#
+# Keep this in step with `fixtureMarkers` in internal/redact/repo_scan_test.go — the two
+# scanners cover different ground (gitleaks reads git HISTORY, the Go test reads the
+# WORKING TREE) and should agree on what an obvious fixture looks like.
+#
+# NOTE the SINGULAR [allowlist]. The plural [[allowlists]] form arrived in gitleaks v8.25;
+# the version pinned in .github/workflows/ci.yml is older, and its decoder silently ignores
+# a table it does not recognise — so the plural form would have produced an allowlist that
+# looked present and did nothing.
+
+title = "daintree-assistant"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Obviously-invented test fixtures, plus the few files whose purpose is to enumerate
+credential shapes. A finding is allowed when the SECRET ITSELF carries a fixture marker —
+not because of where it lives.
+"""
+
+# regexTarget = "match" would test the whole matched line; "secret" tests the captured
+# credential, which is what we actually want to classify.
+regexTarget = "secret"
+regexes = [
+  '''(?i)(test|fake|planted|example|dummy|sample|placeholder|notreal|bogus|invalid)''',
+  # Sequential filler is a fixture tell: nobody's real credential is "…abcdef0123456789".
+  '''abcdef''',
+  '''0123456789''',
+  # `dev-secret-…`, `some-secret-value` — a value that names itself a secret is a stand-in
+  # for one. Weak on its own, which is why it sits beside the stronger markers above; a
+  # real base62 token containing "secret" by chance is vanishingly unlikely.
+  '''(?i)secret''',
+]
+
+# The only PATH exemptions: files that exist to define or demonstrate credential shapes,
+# where the "invented marker" rule cannot apply because the content is the pattern itself.
+paths = [
+  '''internal/redact/redact\.go''',
+  '''internal/redact/redact_test\.go''',
+  '''internal/redact/repo_scan_test\.go''',
+  '''\.gitleaks\.toml''',
+  '''\.env\.example''',
+]

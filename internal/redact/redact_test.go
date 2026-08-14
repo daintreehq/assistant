@@ -59,6 +59,10 @@ func TestStringPreservesOrdinaryText(t *testing.T) {
 		"MAX_TOKENS=4096",     // a limit, not a credential
 		"RETRY_COUNT=3",       // no credential marker in the name
 		"see docs/BACKEND.md", // plain prose
+		// "sk-" is a two-letter fragment; without a word boundary it matched inside
+		// perfectly ordinary words and garbled the sentence around it.
+		"the risk-class-and-confirmation matrix",
+		"a task-scheduler-and-supervisor design",
 	} {
 		if got := String(in); got != in {
 			t.Errorf("ordinary text was altered\n  in:  %q\n  out: %q", in, got)

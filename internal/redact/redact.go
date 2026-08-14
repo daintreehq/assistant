@@ -76,6 +76,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -129,11 +130,14 @@ var pemBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?----
 // inside a shell command — so each whole token is masked in place while the surrounding
 // text survives.
 var secretValuePatterns = []*regexp.Regexp{
-	// No leading \b on the sk- prefix, deliberately. It is distinctive enough not to need
-	// one, and requiring a word boundary meant a key glued to preceding text (an unquoted
-	// concatenation, a log line with no separator) matched nothing at all. For a secret
-	// scanner, matching too eagerly inside a word is the safe direction to err.
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),                                           // OpenAI / OpenRouter / Anthropic style
+	// \b on the sk- prefix. It was omitted at first so a key glued to preceding text would
+	// still match — but "sk-" is a two-letter fragment, and the cost showed up immediately
+	// in ordinary prose: "risk-class-and-confirmation" contains "sk-class-and-confirmation"
+	// and was being masked out of log lines and approval sheets. A redactor that garbles
+	// the sentence explaining an approval is not erring safely; it is destroying what the
+	// reader needs. A real key is delimited by a quote, space, or `=` essentially always,
+	// so the boundary costs almost nothing.
+	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`),                                         // OpenAI / OpenRouter / Anthropic style
 	regexp.MustCompile(`\bgh[opsu]_[A-Za-z0-9]{20,}\b`),                                   // GitHub PAT / OAuth
 	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`),                                // GitHub fine-grained PAT
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),                                            // AWS access key id
@@ -142,12 +146,19 @@ var secretValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{16,}\b`),                                    // GitLab PAT
 	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{30,}\b`),                                      // Google API key
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b`), // JWT
-	// The credential must LOOK like one: at least one digit or token punctuation.
+	// Two bounds, each fixing a real false positive:
+	//
+	// The credential must LOOK like one — at least one digit or token punctuation.
 	// Requiring only length matched the prose "use Bearer authentication for this
-	// endpoint" — a false positive that redacts a sentence explaining how to
-	// authenticate, which is both useless and alarming to read in a log.
-	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]*[0-9._~+/=-][A-Za-z0-9._~+/=-]*`), // Authorization: Bearer …
-	regexp.MustCompile(`(?i)\bbasic\s+[A-Za-z0-9+/]*[0-9+/=][A-Za-z0-9+/=]*`),               // Authorization: Basic …
+	// endpoint", redacting a sentence that explains how to authenticate.
+	//
+	// The separator is [ \t]+, NOT \s+. \s matches a NEWLINE, so a comment ending in
+	// "…the bearer" followed by a line starting "// token requirement…" matched across
+	// the line break and masked the start of the next line. A real Authorization header
+	// never has a newline between the scheme and the credential, and mangling prose is
+	// how a redactor loses the reader's trust.
+	regexp.MustCompile(`(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]*[0-9._~+/=-][A-Za-z0-9._~+/=-]*`), // Authorization: Bearer …
+	regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]*[0-9+/=][A-Za-z0-9+/=]*`),               // Authorization: Basic …
 }
 
 // exact holds the literal secrets this process is holding. Guarded because
@@ -298,3 +309,81 @@ func runeBoundaryAfter(s string, i int) int {
 // surviving prefix in the output, unmatched by any pattern because it is no longer a
 // well-formed token.
 func StringCapped(s string, max int) string { return Cap(String(s), max) }
+
+// --- Scanning, as distinct from redacting -------------------------------------------
+
+// highConfidencePatterns are the shapes that essentially never appear except as a REAL
+// credential: an issuer-prefixed token, or a PEM block.
+//
+// This is a deliberately different set from the one String uses, and the difference is
+// the point. Redaction runs over a log line and should err toward masking — a false
+// positive there costs a little readability. SCANNING runs over source code and should
+// err toward silence: the keyed-field, env-assignment, and Authorization-header patterns
+// all match ordinary prose that DESCRIBES those shapes, and this repository is full of
+// such prose because it implements the redactor. A scanner that cries wolf on its own
+// documentation gets switched off, and then it protects nothing.
+//
+// So a scan asks the narrower question: is there a literal token here?
+var highConfidencePatterns = []*regexp.Regexp{
+	// \b here, unlike the redaction pattern above. Scanning must be PRECISE: without a
+	// left boundary, the ordinary phrase "risk-class-and-confirmation" contains
+	// "sk-class-and-confirmation" and trips the scan on this project's own documentation.
+	// Redaction keeps the loose form on purpose — there, a glued-on secret matters more
+	// than a rare false mask.
+	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`\bgh[opsu]_[A-Za-z0-9]{30,}\b`),
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{30,}\b`),
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{20,}\b`),
+	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
+	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b`),
+	// The header PLUS real key material. Matching the header alone flagged every
+	// document that MENTIONS a PEM block and every test that writes a stub file — a
+	// mention is not a leak, and a scanner that cannot tell the difference is one people
+	// route around. A genuine key body runs to hundreds of base64 characters.
+	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.{32,}?-----END [A-Z ]*PRIVATE KEY-----`),
+}
+
+// FindLiteralSecrets returns every high-confidence credential found in s.
+//
+// For scanning a repository, a build artifact, or anything else where a finding must be
+// worth acting on. Use String to REDACT; use this to ASK.
+func FindLiteralSecrets(s string) []string {
+	raw := FindLiteralSecretsRaw(s)
+	out := make([]string, 0, len(raw))
+	for _, m := range raw {
+		// A scanner that prints the secret it found puts it in CI logs, which is the same
+		// disclosure by another route. Report enough to locate it, and no more.
+		out = append(out, previewSecret(m))
+	}
+	return out
+}
+
+// FindLiteralSecretsRaw is FindLiteralSecrets without the redaction, for the one caller
+// that must INSPECT a match to classify it (the repository scan, deciding whether a hit
+// is an obviously-invented fixture). Never print its results.
+func FindLiteralSecretsRaw(s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, re := range highConfidencePatterns {
+		for _, m := range re.FindAllString(s, -1) {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// previewSecret renders enough of a finding to locate it, and no more.
+func previewSecret(s string) string {
+	if len(s) <= 12 {
+		return "[redacted-short-token]"
+	}
+	return s[:8] + "…[" + itoaLen(len(s)) + " chars]"
+}
+
+func itoaLen(n int) string { return strconv.Itoa(n) }

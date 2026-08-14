@@ -46,15 +46,23 @@ Windows is not "untested" — it does not run. Exactly one process at a time may
 project's `state.db`, and that lease is an `flock` (`internal/ipc/lock_unix.go`), which has
 no Windows port; the `!unix` build returns an error rather than silently running without
 exclusion. Every stateful mode takes the lease before doing anything, so all of them fail
-at that step. The daemon additionally needs `Setsid`. CI runs Linux today (macOS is being
-added); treat Windows as unsupported until the ownership model is ported. See
-[`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
+at that step. The daemon additionally needs `Setsid`. CI builds and tests macOS and Linux
+(the PTY harness runs on macOS, the race detector on Linux); Windows is neither built nor
+shipped. See [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md).
 
 ## Build & install
 
 **Prerequisite:** Go **1.25.8 or newer** (`go version`). Nothing else — SQLite is the
 pure-Go `modernc.org/sqlite` driver, so `CGO_ENABLED=0` builds work and there is no
 native toolchain or `npm`/`bun`/`node` dependency.
+
+**Testers:** download a prebuilt archive from
+[Releases](https://github.com/daintreehq/assistant/releases) — macOS (arm64/amd64) and
+Linux (amd64/arm64), with `SHA256SUMS` to verify against. No Go required. The builds are
+not yet code-signed, so macOS will warn about an unidentified developer; `make install`
+from source avoids that.
+
+**Contributors:**
 
 ```bash
 # Install to your Go bin ($(go env GOBIN) or $(go env GOPATH)/bin)
@@ -390,7 +398,16 @@ go test ./...        # the whole suite, no network — fakes for MCP + backend
 go test -race ./...
 go vet ./...
 gofmt -l .           # must print nothing
+make test-pty        # real pseudoterminal render harness (not in the default suite)
 ```
+
+CI runs all of the above on **macOS and Linux**, plus three gates that are easy to forget
+locally: the generated capability reference is regenerated and diffed, `govulncheck` scans
+the dependency graph, and the working tree is scanned for literal credentials — by
+`gitleaks` and by a scan-grade subset of this project's own patterns
+(`go test ./internal/redact -run TestRepositoryContainsNoCredentials`). The subset is
+deliberately narrower than the runtime redactor: redaction errs toward masking, while a
+scanner that fires on the repository's own documentation gets switched off.
 
 ## Notes / roadmap
 

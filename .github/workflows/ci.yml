@@ -19,9 +19,21 @@ env:
   GO_VERSION: "1.25.8"
 
 jobs:
+  # The main gate, on every platform we claim to support.
+  #
+  # Linux alone was not enough: the supervisor is built on unix primitives whose
+  # behaviour differs between Linux and macOS, the PTY harness exercises real terminal
+  # allocation, and file-permission checks depend on the filesystem. Claiming macOS
+  # support while testing only Linux is exactly the kind of gap the release audit was
+  # meant to close.
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Check out repository
@@ -33,15 +45,41 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # Pure-Go SQLite (modernc.org/sqlite) — no CGO needed.
+      # go.sum must be complete and unmodified. A missing or stale entry means the build
+      # that passes here is not the build a contributor gets from a clean clone.
+      - name: Verify modules
+        run: |
+          go mod verify
+          go mod download
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum changed during download — commit the result"
+            git --no-pager diff -- go.mod go.sum
+            exit 1
+          fi
+
+      # A `replace` directive pointing at a local path builds here and nowhere else.
+      - name: No replace directives
+        run: |
+          # POSIX character classes, not \s: that is a GNU extension, and BSD grep on the
+          # macOS runner would silently match nothing — a gate that passes by failing to
+          # look is worse than no gate.
+          if grep -nE '^[[:space:]]*replace([[:space:]]|\()' go.mod; then
+            echo "::error::go.mod contains a replace directive — remove it before merging"
+            exit 1
+          fi
+
+      # Pure-Go SQLite (modernc.org/sqlite) — no CGO needed. Building with it OFF proves
+      # the static-binary claim rather than assuming it.
       - name: Build
+        env:
+          CGO_ENABLED: 0
         run: go build ./...
 
       - name: gofmt check
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-clean:"
+            echo "::error::These files are not gofmt-clean:"
             echo "$unformatted"
             exit 1
           fi
@@ -52,12 +90,34 @@ jobs:
       - name: Test
         run: go test ./...
 
-      # The generated capability reference and compatibility manifest are projected from
-      # the live registry and the protocol constants. Regenerating here and diffing means
-      # a tool, command, or version added without regenerating fails the build instead of
-      # shipping documentation that describes a different binary — the drift that left
-      # three hand-maintained inventories disagreeing with each other and with the code.
-      - name: Generated docs are current
+      # The race detector is the stricter gate; one platform is enough for it, and Linux
+      # is the faster runner.
+      - name: Test (race)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./...
+
+      # The cockpit's whole design rests on terminal behaviour — inline rendering on the
+      # normal screen buffer, scrollback commits, resize redraws — none of which a
+      # non-PTY test can observe. Run it on macOS, where testers actually are.
+      - name: Test (PTY)
+        if: matrix.os == 'macos-latest'
+        run: make test-pty
+
+  # The generated capability reference is projected from the live registry. Regenerating
+  # and diffing means a tool, command, or protocol version added without regenerating
+  # fails the build instead of shipping documentation that describes a different binary.
+  generated-docs:
+    name: generated docs are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Regenerate and diff
         run: |
           go test ./internal/app -run TestGeneratedDocsAreCurrent -update
           go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
@@ -75,15 +135,70 @@ jobs:
             exit 1
           fi
 
-      # The race detector is Linux-friendly; run it here as the stricter gate.
-      - name: Test (race)
-        run: go test -race ./...
+  # Security gates. Separate from `test` so a vulnerability advisory published overnight
+  # shows up as its own red job rather than as a mysterious test failure.
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history: a secret scan that only sees the tip commit misses the case
+          # that matters — a credential committed earlier and "removed" later, which is
+          # still in the history and still needs rotating.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # gitleaks' GitHub Action requires a paid licence for organisation-owned repos, but
+      # the tool itself is Go and installs freely. Running the binary keeps the gate
+      # working without a licence key or a third-party wrapper action.
+      #
+      # `gitleaks git`, not the deprecated `detect` (v8.19 split the CLI into git/dir/stdin).
+      # Scanning HISTORY rather than the working tree is the point, and why the checkout
+      # above uses fetch-depth: 0 — a credential committed and "removed" a week later is
+      # still in the history and still needs rotating; only a history scan finds it.
+      #
+      # The module path is zricethezav/… even though the repo moved to the gitleaks org:
+      # go.mod still declares the original path, and `go install` matches on that.
+      # PINNED, not @latest: a security gate that silently changes version between runs
+      # can start failing on an unrelated commit, and that is how gates get disabled.
+      - name: Secret scan (gitleaks)
+        env:
+          GITLEAKS_VERSION: v8.24.3
+        run: |
+          go install "github.com/zricethezav/gitleaks/v8@${GITLEAKS_VERSION}"
+          "$(go env GOPATH)/bin/gitleaks" git . \
+            --redact \
+            --no-banner \
+            --exit-code 1 \
+            --config .gitleaks.toml
+
+      - name: Known vulnerabilities (govulncheck)
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+          # This action checks the repo out AGAIN by default, at default depth — which
+          # would discard the full history the secret scan above depends on. Hence both
+          # the flag and the ordering.
+          repo-checkout: false
+
+      # This project's own redactor knows the shapes it promises to remove. Turning it on
+      # the working tree catches the failure the redactor exists to prevent, one layer
+      # earlier: a real credential committed as a test fixture, which would then be
+      # published in the repository AND used by every test that reads it.
+      - name: Secret scan (own patterns)
+        run: go test ./internal/redact -run TestRepositoryContainsNoCredentials -count=1
 
   # Gate job — use this as the sole required status check in branch protection.
   # Insulates against job name changes breaking required checks.
   ci-ok:
     if: always()
-    needs: [test]
+    needs: [test, generated-docs, security]
     runs-on: ubuntu-latest
     timeout-minutes: 2
 

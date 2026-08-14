@@ -43,6 +43,14 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
 - **Generated capability reference** — `docs/generated/TOOLS.md`, `COMMANDS.md`, and
   `COMPATIBILITY.md`, projected from the live registry and diffed in CI.
 - **Internal beta documentation** under `docs/beta/`.
+- **Prebuilt release archives** for macOS (arm64/amd64) and Linux (amd64/arm64), with
+  `SHA256SUMS` and an SPDX SBOM, so a tester needs no Go toolchain. Not yet code-signed
+  or notarized — that needs an Apple certificate, and a pipeline that claimed to notarize
+  while skipping it would be worse than one that says it does not.
+- **CI on macOS and Linux**, with the PTY render harness on macOS and the race detector on
+  Linux; plus `govulncheck`, a `gitleaks` scan, and a scan of the working tree using this
+  project's own redactor, so the scanner and the runtime cannot disagree about what a
+  credential looks like.
 
 ### Changed
 
