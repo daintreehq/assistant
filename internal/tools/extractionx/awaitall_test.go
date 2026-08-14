@@ -574,9 +574,12 @@ func TestAwaitCohort_NoInjectorNeverInterrupts(t *testing.T) {
 }
 
 // Issue #239: the tool surface itself must carry the re-await bound, so the ceiling is
-// visible at point-of-use even when no orchestration skill is loaded. Lock both the tool
-// Description and the terminalIds schema description so a future doc edit can't silently
-// drop the bound or the escalation path.
+// visible at point-of-use even when no orchestration skill is loaded.
+//
+// Locked on the tool DESCRIPTION only. It was previously repeated verbatim in the
+// terminalIds schema too, and a rule stated twice is paid for on every model round —
+// what matters is that it is somewhere the model reads before calling, not that it
+// appears in both places.
 func TestAwaitAllTool_DocumentsReawaitBound(t *testing.T) {
 	tool := newAwaitAllTool(Deps{})
 	if !strings.Contains(tool.Description, "at most twice") {
@@ -585,9 +588,12 @@ func TestAwaitAllTool_DocumentsReawaitBound(t *testing.T) {
 	if !strings.Contains(tool.Description, "queue.publish") {
 		t.Errorf("awaitAll Description should name the queue.publish escalation path")
 	}
-	schema := string(tool.Schema)
-	if !strings.Contains(schema, "at most twice") {
-		t.Errorf("awaitAll terminalIds schema description should document the re-await bound")
+	// The schema's job is the SHAPE: full ids, never invented or abbreviated. No negative
+	// assertion on the bound — forbidding an exact phrase tests wording placement rather
+	// than whether the rule survives, and would fail a legitimate short reminder while a
+	// paraphrased duplicate slipped through.
+	if !strings.Contains(string(tool.Schema), "terminal-<uuid>") {
+		t.Errorf("awaitAll terminalIds schema should still state the id SHAPE")
 	}
 }
 

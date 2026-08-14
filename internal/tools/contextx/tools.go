@@ -157,11 +157,9 @@ var summarizeSchema = json.RawMessage(`{
 func newSummarizeTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.summarize",
-		Description: "Read a bounded tail of a Daintree terminal's output and summarize it with the small model. This is the DEFAULT way to " +
-			"relay what an agent said: a coding agent's raw scrollback is garbled, repainted TUI output, so summarizing it gives clean prose " +
-			"and keeps it out of your context. Prefer this over terminal.read unless the user needs the exact literal text. PARALLEL: " +
-			"summarize/extract calls batched in ONE reply run CONCURRENTLY — to relay a whole cohort, emit one summarize per terminal as one " +
-			"batch of calls, not one per turn; the total wait is roughly the slowest single call. Read-only; requires Daintree MCP.",
+		Description: "Read a bounded tail of a Daintree terminal and summarize it with the small model. The DEFAULT way to relay what an agent said: raw scrollback is garbled, repainted TUI output, so summarizing gives clean prose and keeps it out of your context. " +
+			"Prefer it over terminal.read unless the user needs the exact literal text. " +
+			"PARALLEL: summarize/extract calls batched in ONE reply run CONCURRENTLY — relay a whole cohort as one batch, not one per turn. Read-only; needs Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read + small-model call, the same cost profile
 		// as terminal.extract (seconds each): a cohort relay (one summarize per agent)

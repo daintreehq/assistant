@@ -170,7 +170,11 @@ func TestAwaitAllTool_DocumentsEnforcedBudget(t *testing.T) {
 	if !strings.Contains(tool.Description, "120s") || !strings.Contains(tool.Description, "budgetExhausted") {
 		t.Error("awaitAll Description should state the enforced 120s cumulative budget and the budgetExhausted marker")
 	}
-	if !strings.Contains(string(tool.Schema), "budgetExhausted") {
-		t.Error("awaitAll maxAttempts schema description should mention the enforced budget cutoff")
+	// Stated ONCE, in the tool description — the schema used to repeat it under
+	// maxAttempts, and the duplication was a meaningful share of a payload sent on every
+	// round. What matters is that the rule is somewhere the model reads before calling,
+	// not that it appears twice.
+	if !strings.Contains(string(tool.Schema), "budget") {
+		t.Error("awaitAll maxAttempts should still note that the turn's shared wait budget can end the wait early")
 	}
 }

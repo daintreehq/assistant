@@ -147,12 +147,9 @@ var listSchema = json.RawMessage(`{
 func newListTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "agentTask.list",
-		Description: "List recent spawn sagas (newest first) with their stage, bound terminal/watcher, and any error. Use it to see " +
-			"what agentTask.spawnForEdits launches happened and where they stand. By default it lists ONLY this session's launches — " +
-			"the usual 'did my spawns land?' check — so stale terminal ids from earlier sessions (whose titles can collide with " +
-			"today's) never mix into the answer; pass scope:\"all\" when the user asks about older history. Read-only. Any launch " +
-			"still in a non-terminal stage belongs to THIS session — a prior session's in-flight sagas are swept to 'failed' when " +
-			"the DB opens, so a live-looking stage is always current.",
+		Description: "List recent spawn sagas (newest first) with their stage, bound terminal/watcher, and any error — the 'did my spawns land?' check for agentTask.spawnForEdits. " +
+			"Defaults to THIS session's launches, so stale terminal ids from earlier sessions (whose titles can collide) never mix in; pass scope:\"all\" for older history. " +
+			"Any non-terminal stage belongs to this session — a prior session's in-flight sagas are swept to 'failed' when the DB opens. Read-only.",
 		Risk:   domain.RiskRead,
 		Schema: listSchema,
 		Decode: tools.StrictDecoder(func() any { return &listArgs{} }),

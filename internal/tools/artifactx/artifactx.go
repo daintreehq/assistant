@@ -90,11 +90,9 @@ var readSchema = json.RawMessage(`{
 func Tools(deps Deps) []tools.Tool {
 	return []tools.Tool{{
 		Name: "artifact.read",
-		Description: "Read ONE page of an archived artifact: a large tool result that overflowed the inline size limit, " +
-			"or the full pre-compaction transcript a [checkpoint] note's breadcrumb points at (page a few relevant pages surgically — never replay the whole transcript). " +
-			"A page is at most 3500 characters — a single call NEVER returns the whole artifact. " +
-			"To read it: call with the artifactId and offset 0 (omit limit; it defaults to the 3500 max), then call again with offset set to the returned nextOffset, repeating until eof is true. " +
-			"Do NOT set limit to totalChars (or any value above 3500) to grab it all at once — that still returns just one 3500-char page; page with offset/nextOffset instead.",
+		Description: "Read ONE page of an archived artifact: a large tool result that overflowed the inline limit, or the full pre-compaction transcript a [checkpoint] breadcrumb points at (page the relevant parts surgically — never replay the whole transcript). " +
+			"A page is at most 3500 characters, so ONE call never returns the whole artifact. Call with the artifactId and offset 0 (omit limit), then repeat with offset set to the returned nextOffset until eof is true. " +
+			"Setting limit above 3500 does NOT grab it all at once — it still returns one page.",
 		Risk:   domain.RiskRead,
 		Schema: readSchema,
 		Decode: tools.StrictDecoder(func() any { return &readArgs{} }),

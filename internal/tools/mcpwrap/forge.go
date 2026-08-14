@@ -177,9 +177,8 @@ func newForgeGetChecksTool() *tools.Tool {
 	return &tools.Tool{
 		Name: "forge.getChecks",
 		Description: "Read a pull request's CI check state by PR number. " +
-			"Gate on `conclusive`, NOT on `state`: conclusive=false means the check state could not be determined — either the forge returned nothing, or it reported ZERO required checks, which it also does when it could not read the required-check list. A conclusive=false result is never evidence that a merge is safe, even when state is \"success\". " +
-			"Counts cover REQUIRED checks only. Readings are provider-cached and can already be ~1 minute old, so an immediate re-read may return the same value. " +
-			"No per-check breakdown exists, so this cannot say WHICH check failed. " +
+			"Gate on `conclusive`, NOT on `state`: conclusive=false means the state could not be determined — the forge returned nothing, or reported ZERO required checks, which it also does when it could not read the required list. That is never evidence a merge is safe, even when state is \"success\". " +
+			"Counts cover REQUIRED checks only. Readings are provider-cached (~1m), so an immediate re-read may return the same value. No per-check breakdown exists, so this cannot say WHICH check failed. " +
 			"PARALLEL: forge.* reads batched in ONE reply run concurrently.",
 		Risk:           domain.RiskRead,
 		Parallelizable: true,

@@ -110,7 +110,7 @@ var spawnSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Usually OMIT this: Daintree then runs the agent in the active worktree (the common case). To target a specific worktree, prefer its id — a PATH like \"/Users/you/Projects/app\". A branch name (e.g. \"main\") is accepted only as a fallback and is resolved to that worktree's id; a value that resolves to no worktree is rejected with the available list." },
+    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Usually OMIT it — Daintree uses the active worktree. The id is a PATH (\"/Users/you/Projects/app\"); a branch name is accepted only as a fallback, and an unresolvable value is rejected with the available list." },
     "agentId": { "type": "string", "description": "Agent to launch (default \"claude\")." },
     "mode": { "type": "string", "enum": ["edit", "explore"], "description": "Spawn intent (default \"edit\"). \"edit\" tells the agent to make code changes; \"explore\" tells it to investigate read-only and not touch any files." },
     "title": { "type": "string", "description": "Short title for the task and any watcher." },

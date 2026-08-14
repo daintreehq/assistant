@@ -75,14 +75,10 @@ var askSchema = json.RawMessage(`{
   }
 }`)
 
-const askDescription = "Ask the human ONE multiple-choice question and wait for their " +
-	"answer, then continue the same turn using it. Provide a concise `question` and " +
-	"2–26 plain-text `options` (no A/B/C prefixes — the client assigns the letters). " +
-	"The user answers with the arrow keys + Enter or by typing the option letter. Use " +
-	"this whenever you need a finite decision from the user before proceeding, INSTEAD " +
-	"of asking in prose. Call it ALONE — never in the same tool batch as any other tool " +
-	"— and re-plan once the answer comes back. Only works during an interactive session; " +
-	"a watcher, timer, or non-interactive run cannot ask."
+const askDescription = "Ask the human ONE multiple-choice question and wait for the answer, then continue the same turn using it. " +
+	"Give a concise `question` and 2–26 plain-text `options` (no A/B/C prefixes — the client assigns letters). " +
+	"Use it whenever you need a finite decision before proceeding, INSTEAD of asking in prose. Call it ALONE — never in a batch with other tools — and re-plan once the answer arrives. " +
+	"Interactive sessions only: a watcher, timer or non-interactive run cannot ask."
 
 func newAskMultipleChoiceTool() *tools.Tool {
 	return &tools.Tool{

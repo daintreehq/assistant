@@ -302,6 +302,32 @@ read tool that touches the filesystem should use both.
 - [ ] **Removed or renamed a tool?** Hand the backend a refreshed inventory
       (`go run ./cmd/tooldump`) — see below.
 
+## Size budgets (enforced)
+
+The inventory is sent on **every** model round and the tester pays for it on their own
+OpenRouter key — measured at ~61% of a representative request, more than double the
+permanent system prompt. `internal/app/toolbudget_test.go` bounds it:
+
+| budget | limit |
+|---|---|
+| ordinary tool description | 600 chars |
+| orchestrator tool description | 1,200 chars (named exemptions only) |
+| one parameter description | 300 chars |
+| whole projection, compact wire bytes | 80,000 (88,000 with `DAINTREE_WORKFLOW_INTELLIGENCE=1`) |
+
+Exceeding one is allowed and must be a **decision**: add the tool to `orchestratorTools`
+or the argument to `parameterBudgetExceptions`, each with a reason. Both lists are
+themselves gated: an entry fails if its tool/argument no longer exists, AND if the
+description has since shrunk back within the ordinary budget — so an exemption cannot
+outlive its justification, only its subject.
+
+What the budgets must NOT do is push a load-bearing rule into nowhere. A rule about ONE
+tool belongs in that tool's description, beside the thing it governs; a rule spanning
+several tools belongs in a backend-owned skill. Deleting it to hit a byte count is the
+failure mode, and no test can catch that — only review can. The usual win is not deleting
+rules but **stating each one once**: a rule repeated in both the description and a
+parameter is paid for on every round, twice.
+
 ## Exporting the tool inventory
 
 The backend pins a captured copy of the projection we send in `input.tools`, and its

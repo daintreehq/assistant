@@ -82,9 +82,9 @@ var awaitSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "All the agent terminals to wait on — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids). Polls their agentState (NO model call, NO output read) and returns when EVERY one has returned to an idle prompt. Each result's status is one of \"finished\" | \"failed\" | \"question\" | \"working\". Use ONE awaitAll for the whole cohort, never one wait per agent. The result also carries top-level stillWorking and askingQuestion arrays of terminal IDs — re-await stillWorking directly (no need to scan perTerminal) and route answers to askingQuestion. AFTER it returns, peek the tail (a no-wait terminal.extract/read) to confirm — a terminal can briefly read 'waiting' while still working; if a 'finished' one still looks busy, re-await or watch it. BOUND the re-await loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal). After that a still-working terminal is HUNG — escalate (publish a blocked inbox item with queue.publish and attach a watcher with watcher.terminal.create) and end the turn rather than awaiting it again." },
+    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "The whole cohort to wait on, as full terminal-<uuid> ids exactly as listed. Never invent or abbreviate an id (a unique prefix resolves only as a fallback)." },
     "pollIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 2000, "description": "Delay between poll rounds in ms." },
-    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 240, "default": 30, "description": "Hard cap on poll rounds (default 30 ≈ 60s, max 240 ≈ 480s — durations assume the default 2s pollIntervalMs). Bounded so it cannot hang. Raise it only for a known-slow cohort whose agents need a single round past 120s — most waits should leave it at the default. Independent of the cap, the turn's ENFORCED cumulative foreground-wait budget (shared across all awaitAll calls this turn — see the tool description) can end the wait earlier with budgetExhausted:true." }
+    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 240, "default": 30, "description": "Hard cap on poll rounds (default 30 ≈ 60s at the default 2s interval; max 240). Leave it at the default unless the cohort is known-slow. The turn's shared wait budget can still end the wait sooner." }
   },
   "required": ["terminalIds"]
 }`)
@@ -92,20 +92,15 @@ var awaitSchema = json.RawMessage(`{
 func newAwaitAllTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.awaitAll",
-		Description: "Wait (bounded) for a COHORT of agent terminals to all return to an idle prompt. Pure state-machine: it polls " +
-			"agentState only — NO model call, NO output read — so it is fast and light. Returns allFinished plus a perTerminal " +
-			"array whose status is exactly one of \"finished\" | \"failed\" | \"question\" | \"working\" — and NO content. It also " +
-			"returns top-level stillWorking and askingQuestion arrays of terminal IDs, so when the wait budget runs out you can " +
-			"re-await exactly the stillWorking stragglers (and route answers to askingQuestion) without scanning perTerminal. Use this " +
-			"ONCE for the whole cohort instead of one wait per agent. Terminals that settle finished/failed automatically RETIRE their " +
-			"spawn-attached supervising watcher (watchersRetired in the result) — the completion is in your hands now, so do NOT " +
-			"watcher.cancel them yourself and do NOT expect a later completion notification for those agents. IMPORTANT: a bare 'waiting' is an imperfect signal — an agent " +
-			"can momentarily read idle while still working. So AFTER awaitAll returns, read each output yourself (a no-wait " +
-			"terminal.extract/read of the last few lines) to confirm the result makes sense; if a terminal reported 'finished' but " +
-			"its tail shows it is still mid-work, re-await just that one or set a watcher on it and poll. Bound the outer loop: re-await stillWorking IDs at most twice (three awaitAll calls total on the same terminal); after that a still-working terminal is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn instead of awaiting it again. " +
-			fmt.Sprintf("ENFORCED BUDGET: all awaitAll calls in one turn share a cumulative foreground-wait budget of %ds — this is enforced, not advisory. ", int(waitbudget.TurnBudget/time.Second)) +
-			"When it runs out mid-wait the call returns early with budgetExhausted:true (still-working agents in stillWorking), and every further awaitAll this turn returns immediately with the same marker — so on budgetExhausted do NOT re-await: hand the stragglers to the async path (watcher.terminal.create + queue.publish) and end the turn. " +
-			"INTERRUPTIBLE: if the user sends a message while you are waiting, awaitAll returns EARLY with interruptedByUser:true plus whatever has settled so far — their message is already folded into the conversation, so READ IT and adapt (they may want to redirect, e.g. 'that agent errored, re-spawn it') before deciding whether to re-await the stillWorking agents. Read-only; requires Daintree MCP.",
+		Description: "Wait for a COHORT of agent terminals to reach an idle prompt. Polls agentState only — no model call, no output read. Call ONCE for the whole cohort, not once per agent. " +
+			"Returns allFinished, a perTerminal array whose status is \"finished\" | \"failed\" | \"question\" | \"working\" (no content), plus top-level stillWorking / askingQuestion id arrays. " +
+			"Terminals settling finished/failed RETIRE their spawn-attached watcher (watchersRetired) — do not watcher.cancel them; expect no later completion notification. " +
+			"An idle reading is imperfect: peek each tail afterwards (no-wait terminal.extract/read) and re-await any 'finished' terminal still looking busy. " +
+			"Re-await stillWorking at most twice (three calls per terminal); past that it is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn. " +
+			fmt.Sprintf("ENFORCED: all awaitAll calls in a turn share a cumulative %ds foreground-wait budget. ", int(waitbudget.TurnBudget/time.Second)) +
+			"On budgetExhausted:true do NOT re-await — hand the stragglers to watcher.terminal.create + queue.publish and end the turn. " +
+			"On interruptedByUser:true the user messaged mid-wait — it is already in the conversation, so read it and adapt before re-awaiting. " +
+			"Read-only; needs Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitArgs{} }),

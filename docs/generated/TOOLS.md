@@ -39,13 +39,13 @@ already drifted out of agreement with each other and with the binary.
 | `agentTask.spawnForEdits` | project | operator | yes | grantable | `daintree-mcp` | same-tool cohort | — | Spawn a visible Daintree agent in a worktree |
 | `agentTask.superviseTerminal` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Adopt an ALREADY-RUNNING agent terminal into supervision without re-spawning it |
 | `agentTask.status` | read | supervisor | — | not needed | — | serial | — | Read back the durable spawn saga for one launch by its launchId (the agt_… id returned by agentTask.spawnForEdits) |
-| `agentTask.list` | read | supervisor | — | not needed | — | serial | — | List recent spawn sagas (newest first) with their stage, bound terminal/watcher, and any error |
+| `agentTask.list` | read | supervisor | — | not needed | — | serial | — | List recent spawn sagas (newest first) with their stage, bound terminal/watcher, and any error — the 'did my spawns l… |
 
 ### `artifact.*`
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `artifact.read` | read | supervisor | — | not needed | — | serial | — | Read ONE page of an archived artifact: a large tool result that overflowed the inline size limit, or the full pre-com… |
+| `artifact.read` | read | supervisor | — | not needed | — | serial | — | Read ONE page of an archived artifact: a large tool result that overflowed the inline limit, or the full pre-compacti… |
 
 ### `async.*`
 
@@ -169,13 +169,13 @@ already drifted out of agreement with each other and with the binary.
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `terminal.run.async` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command (or a prompt to an agent) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY: the comm… |
+| `terminal.run.async` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command (or an agent prompt) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY |
 | `terminal.await.async` | local | supervisor | — | not needed | `daintree-mcp` | serial | — | Watch agent terminal(s) to completion ASYNCHRONOUSLY — the out-of-turn twin of terminal.awaitAll |
-| `terminal.summarize` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of a Daintree terminal's output and summarize it with the small model |
+| `terminal.summarize` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of a Daintree terminal and summarize it with the small model |
 | `terminal.read` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap |
-| `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of one or more Daintree terminals and extract caller-specified content as plain TEXT with the sma… |
-| `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of one or more Daintree terminals and extract STRUCTURED JSON with the small model — use this whe… |
-| `terminal.awaitAll` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Wait (bounded) for a COHORT of agent terminals to all return to an idle prompt |
+| `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of one or more Daintree terminals and extract content as plain TEXT with the small model — the de… |
+| `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model |
+| `terminal.awaitAll` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Wait for a COHORT of agent terminals to reach an idle prompt |
 | `terminal.focus` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Bring ONE Daintree terminal to the front in the UI (forwards to Daintree's panel.focus with the terminal id as the pa… |
 | `terminal.rename` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Set a terminal/agent tab's title |
 | `terminal.sendCommand` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command line to a Daintree terminal — types it into the terminal's input and runs it |
@@ -202,7 +202,7 @@ already drifted out of agreement with each other and with the binary.
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `user.askMultipleChoice` | ui | supervisor | — | not needed | `interactive-session` | serial | — | Ask the human ONE multiple-choice question and wait for their answer, then continue the same turn using it |
+| `user.askMultipleChoice` | ui | supervisor | — | not needed | `interactive-session` | serial | — | Ask the human ONE multiple-choice question and wait for the answer, then continue the same turn using it |
 
 ### `watcher.*`
 

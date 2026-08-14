@@ -317,13 +317,10 @@ var terminalCloseSchema = json.RawMessage(`{
 func newTerminalCloseTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.close",
-		Description: "Close Daintree terminal(s) — moves each to the trash and ends the agent or process running in it. ONLY call this when the USER has " +
-			"explicitly asked you to close a terminal or terminals; closing is never your own decision. Do NOT call it to tidy up, to retire agents you " +
-			"spawned, or to recover from a failed/ambiguous/'no terminalId' spawn — a spawn that returned no terminalId is retried or reported, never " +
-			"'fixed' by closing terminals. A terminal you did not just spawn yourself may be the user's own live work or another agent mid-task " +
-			"(agentState 'working'/'waiting'), so closing it ends that work irreversibly. Pass a single terminalId, or terminalIds:[...] to close a whole " +
-			"cohort the user asked you to retire in ONE call. Typed wrapper around the Daintree terminal.close MCP tool. (terminal.kill, reachable via " +
-			"daintree.call, deletes PERMANENTLY instead of trashing — prefer close.)",
+		Description: "Close Daintree terminal(s) — moves each to the trash and ends the agent or process running in it. " +
+			"ONLY when the USER has explicitly asked; closing is never your own decision. Do NOT call it to tidy up, to retire agents you spawned, or to recover from a failed or 'no terminalId' spawn — retry or report that instead. " +
+			"A terminal you did not just spawn may be the user's own live work or another agent mid-task, and closing it ends that work irreversibly. " +
+			"Pass one terminalId, or terminalIds:[...] for a cohort, in ONE call. (terminal.kill deletes PERMANENTLY — prefer close.)",
 		Consequence: "Closes the named Daintree terminal(s) — only ever at the user's explicit request — moving them to the trash and ending whatever agent or process is running in each (irreversible for in-flight work).",
 		Risk:        domain.RiskTerminal,
 		Schema:      terminalCloseSchema,

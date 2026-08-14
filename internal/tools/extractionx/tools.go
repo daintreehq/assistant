@@ -227,7 +227,7 @@ var sharedBaseProps = `
       "type": "object",
       "maxProperties": 1,
       "additionalProperties": false,
-      "description": "Poll until this condition is met before extracting; omit to read once. A WatchCondition object with EXACTLY ONE of the keys below — or the empty object {} to wait until the agent has genuinely FINISHED its turn. Prefer {} for 'wait for the agent to finish': a bare stateIs:'waiting' is an unreliable proxy (a pre-start prompt or a backgrounded window also reads as 'waiting'), while {} prefers a real working->waiting transition (or a stable idle past a short grace) and ALWAYS confirms with a small-model check on the tail before it resolves; completed/exited resolve immediately. {} is single-terminal (one agent's state) — for a COHORT use terminal.awaitAll, then read with a no-wait extract over the same ids. modelJudge is NOT supported here (watcher-only).",
+      "description": "Poll until this holds before extracting; omit to read once. EXACTLY ONE key below, or {} for a genuine FINISH — prefer {} over stateIs:'waiting', which a pre-start prompt also matches. {} is single-terminal; for a cohort use terminal.awaitAll. No modelJudge here.",
       "properties": {
         "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. Do NOT use stateIs:'waiting' to mean finished — pass {} instead (it confirms a real finish)." },
         "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
@@ -248,7 +248,7 @@ var extractSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, the agent's answer to relay). Omit to run a wait/finished gate only (no EXTRACTION model call; a wait:{} settle still uses the cheap small-model finished judge). Need several NAMED fields at once, or one answer PER terminal across a cohort? Use terminal.extract.json — a plain-TEXT extract over multiple terminalIds MERGES them into ONE answer, it does not return one per agent." },` + sharedBaseProps + `
+    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, an agent's answer). Omit to run a wait gate only. Over several terminalIds this MERGES them into ONE answer — for named fields, or one answer per terminal, use terminal.extract.json." },` + sharedBaseProps + `
   },
   "required": ["terminalIds"]
 }`)
@@ -256,18 +256,12 @@ var extractSchema = json.RawMessage(`{
 func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
-		Description: "Read a bounded tail of one or more Daintree terminals and extract caller-specified content as plain TEXT with " +
-			"the small model — the default way to read what an agent said. Over MULTIPLE terminalIds it MERGES every terminal's tail " +
-			"into ONE answer (it does NOT return one answer per terminal); to collect a DISTINCT answer per agent — each one's fact/vote/draft " +
-			"— use terminal.extract.json with an array schema keyed by terminalId, or extract a single id at a time. PARALLEL: no-wait " +
-			"terminal.extract/.json calls batched in ONE reply run CONCURRENTLY — when you need several independent extractions (a different " +
-			"question per terminal, or one answer per agent), emit them ALL as one batch of calls instead of one per turn; the total wait is " +
-			"roughly the slowest single call. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a " +
-			"barrier and runs serially). Omit `instruction` to use it as a finished/condition gate (returns booleans, no " +
-			"extraction model call). A wait that observes the agent FINISH also auto-retires that terminal's spawn-attached supervising " +
-			"watcher (watchersRetired in the result) — the completion is in your hands, so no completion notification will follow. " +
-			"For STRUCTURED output (several named fields, or one entry per terminal) use terminal.extract.json instead. " +
-			"Read-only; requires Daintree MCP.",
+		Description: "Read a bounded tail of one or more Daintree terminals and extract content as plain TEXT with the small model — the default way to read what an agent said. " +
+			"Over MULTIPLE terminalIds it MERGES every tail into ONE answer. For a distinct answer per agent, or several named fields, use terminal.extract.json with an array schema keyed by terminalId. " +
+			"PARALLEL: no-wait extract/.json calls batched in ONE reply run CONCURRENTLY — emit several independent extractions as one batch, not one per turn; the wait is roughly the slowest single call. A wait-bearing call is a barrier and runs serially. " +
+			"Omit `instruction` to use it as a finished/condition gate (booleans only, no extraction model call). " +
+			"A wait that observes the agent FINISH auto-retires that terminal's spawn-attached watcher (watchersRetired) — the completion is in your hands, so no notification follows. " +
+			"Read-only; needs Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read: a batch of extracts (one per agent) can run
 		// concurrently instead of one backend round-trip at a time. Safe because each call
@@ -386,7 +380,7 @@ var extractJSONSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "instruction": { "type": "string", "description": "What to extract as STRUCTURED JSON (e.g. each player's vote and reasoning)." },
-    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema object describing the value to extract (the same kind you put under a tool's \"parameters\") — NOT an example of the value. ONLY these keywords are accepted: type, properties, required, items, enum, const, additionalProperties, anyOf, oneOf, allOf, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, minItems, maxItems, uniqueItems. Any OTHER key is REJECTED — in particular no description, title, default, format, examples, $ref, or $schema anywhere in it; put explanation in the instruction argument instead, and there is NO output-size knob (no maxTokens; to make a field optional just leave it out of \"required\"). The small model returns the value under 'result'. For one entry PER terminal across a cohort, make the value an array of objects each carrying its own terminalId. Correct: {\"type\":\"object\",\"properties\":{\"answers\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"terminalId\":{\"type\":\"string\"},\"fact\":{\"type\":\"string\"}},\"required\":[\"terminalId\",\"fact\"]}}},\"required\":[\"answers\"]}. WRONG and REJECTED (a value example, not a schema): {\"answers\":[{\"terminalId\":\"string\",\"fact\":\"string\"}]}." },` + sharedBaseProps + `
+    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema (the kind you put under a tool's \"parameters\"), NOT an example value. Accepted keywords ONLY: type, properties, required, items, enum, const, additionalProperties, anyOf, oneOf, allOf, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, minItems, maxItems, uniqueItems. Any other key is REJECTED — no description, title, default, format, examples, $ref or $schema anywhere. Put explanation in instruction. For one entry per terminal, make the value an array of objects each carrying its own terminalId." },` + sharedBaseProps + `
   },
   "required": ["terminalIds", "instruction", "jsonSchema"]
 }`)
@@ -394,16 +388,10 @@ var extractJSONSchema = json.RawMessage(`{
 func newExtractJSONTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract.json",
-		Description: "Read a bounded tail of one or more Daintree terminals and extract STRUCTURED JSON with the small model — use " +
-			"this when you need several NAMED fields at once, OR one entry PER terminal when reading a COHORT: the multi-terminal tail is " +
-			"labelled by terminalId, so an array schema keyed by terminalId attributes each agent's answer in ONE call (e.g. collecting " +
-			"every agent's fact, or tallying a cohort's votes into one object). Both `instruction` and `jsonSchema` are required. PARALLEL: " +
-			"no-wait terminal.extract/.json calls batched in ONE reply run CONCURRENTLY — for several INDEPENDENT extractions (a different " +
-			"question per terminal), emit them all as one batch of calls; use the single multi-id call above only when one question spans " +
-			"the whole cohort. Optionally wait (poll) until a condition is met before extracting (a wait-bearing call is a barrier and runs " +
-			"serially); a wait that observes the agent FINISH also auto-retires that terminal's spawn-attached supervising watcher " +
-			"(watchersRetired in the result) — no completion notification will follow. For a single value or plain text to relay from ONE terminal, use " +
-			"terminal.extract instead. Read-only; requires Daintree MCP.",
+		Description: "Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model. Use it for several NAMED fields at once, or one entry PER terminal across a cohort: the multi-terminal tail is labelled by terminalId, so an array schema keyed by terminalId attributes each agent's answer in ONE call. " +
+			"Both `instruction` and `jsonSchema` are required. " +
+			"Same wait, watcher-retirement and PARALLEL batching rules as terminal.extract — use that one for a single value or plain text to relay. " +
+			"Read-only; needs Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read — see terminal.extract: a cohort of these can
 		// run concurrently, no ordering dependency between calls.

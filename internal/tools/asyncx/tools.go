@@ -211,17 +211,13 @@ var runAsyncSchema = json.RawMessage(`{
 func newRunAsyncTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.run.async",
-		Description: "Send a command (or a prompt to an agent) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY: the " +
-			"command is typed and run exactly like terminal.sendCommand, then this returns IMMEDIATELY with an async handle (asy_…) and the " +
-			"runtime takes over — cheap 1-second agent-state polls (no model cost, no output reads) until the terminal settles, then an " +
-			"attention-queue event that WAKES you with the outcome. Use it instead of terminal.sendCommand + terminal.awaitAll whenever the " +
-			"work will take more than a minute or two, or the user should get your reply now while the work continues. AFTER calling it: " +
-			"tell the user what is running and END the turn (or move on to other work) — do NOT awaitAll/extract-wait the same terminal, do " +
-			"NOT poll async.list for it, and do NOT re-send the command. When the completion wake arrives, read the output then (terminal.summarize " +
-			"or terminal.extract) and continue the task. Finish detection tracks agent state, so it is built for agent terminals. " +
-			"PROJECT-SCOPED AND DURABLE: the watch keeps running after the assistant closes — the background supervisor adopts it and " +
-			"integrates the completion, so you MAY promise the user an after-close or overnight result (it pauses only if Daintree itself " +
-			"closes, and resumes on the next launch). Mutating (it runs a command), so it confirms like terminal.sendCommand.",
+		Description: "Send a command (or an agent prompt) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY. " +
+			"Types and runs it exactly like terminal.sendCommand, then returns IMMEDIATELY with an async handle (asy_…); the runtime polls agent state every second (no model cost, no output reads) until the terminal settles, then WAKES you through the attention queue. " +
+			"Use it instead of terminal.sendCommand + terminal.awaitAll whenever the work will take more than a minute or two, or the user should get your reply now. " +
+			"AFTER calling it, say what is running and END the turn: do NOT awaitAll or extract-wait the same terminal, do NOT poll async.list for it, do NOT re-send. Read the output when the wake arrives. " +
+			"Finish detection tracks agent state, so it is built for agent terminals. " +
+			"DURABLE and project-scoped: the watch survives the assistant closing — the supervisor adopts it — so you MAY promise an after-close or overnight result. It pauses only if Daintree itself closes, and resumes next launch. " +
+			"Mutating (it runs a command), so it confirms like terminal.sendCommand.",
 		Consequence: "Runs a command in the named terminal (as if typed), then watches it — including after the assistant closes — and notifies when it finishes. Effects depend on the command and may not be reversible.",
 		Risk:        domain.RiskTerminal,
 		Schema:      runAsyncSchema,
@@ -357,18 +353,12 @@ var awaitAsyncSchema = json.RawMessage(`{
 func newAwaitAsyncTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.await.async",
-		Description: "Watch agent terminal(s) to completion ASYNCHRONOUSLY — the out-of-turn twin of terminal.awaitAll. Returns IMMEDIATELY " +
-			"with an async handle (asy_…); the runtime polls the cohort's agent state every second (no model cost, no output reads) and WAKES " +
-			"you through the attention queue once EVERY terminal has finished, failed, or asked a question (or the deadline passes — you are " +
-			"woken with whatever settled). Choose by wait length and user experience: terminal.awaitAll BLOCKS the turn and is right for short " +
-			"waits whose results you need immediately to continue; terminal.await.async lets you reply to the user NOW and end the turn while " +
-			"agents keep working — right after spawning a cohort with agentTask.spawnForEdits, or after sending long work with " +
-			"terminal.sendCommand. AFTER calling it: report what is running and end the turn — do NOT also awaitAll/extract-wait the same " +
-			"terminals, and do NOT attach a watcher just for finish detection (watchers are for goal-based observation with classification). " +
-			"When the wake arrives, read outputs with terminal.summarize/terminal.extract and continue. PROJECT-SCOPED AND DURABLE: the " +
-			"watch keeps running after the assistant closes — the background supervisor adopts it and integrates the completion, so you MAY " +
-			"promise the user an after-close or overnight result (it pauses only if Daintree itself closes, and resumes on the next launch). " +
-			"Read-only; requires Daintree MCP.",
+		Description: "Watch agent terminal(s) to completion ASYNCHRONOUSLY — the out-of-turn twin of terminal.awaitAll. " +
+			"Returns IMMEDIATELY with an async handle (asy_…); the runtime polls agent state every second (no model cost, no output reads) and WAKES you through the attention queue once every terminal has finished, failed, or asked a question, or the deadline passes. " +
+			"Choose by wait length: awaitAll BLOCKS the turn and suits short waits whose results you need to continue; this one lets you reply NOW and end the turn while agents work — right after spawning a cohort, or after sending long work. " +
+			"AFTER calling it, report what is running and END the turn: do NOT also awaitAll or extract-wait the same terminals, and do NOT attach a watcher just for finish detection (watchers are for goal-based observation). Read outputs when the wake arrives. " +
+			"DURABLE and project-scoped: the watch survives the assistant closing — the supervisor adopts it — so you MAY promise an after-close or overnight result. It pauses only if Daintree itself closes, and resumes next launch. " +
+			"Read-only; needs Daintree MCP.",
 		Risk:   domain.RiskLocal,
 		Schema: awaitAsyncSchema,
 		Decode: tools.StrictDecoder(func() any { return &awaitAsyncArgs{} }),
