@@ -86,6 +86,8 @@ func main() {
 		code = cli.RunLogoutCommand(ctx, opts)
 	case routeReset:
 		code = cli.RunReset(ctx, opts, parsed.ResetScope, parsed.ResetOptions)
+	case routeSupportBundle:
+		code = cli.RunSupportBundle(ctx, opts, parsed.SupportBundle)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -107,6 +109,7 @@ const (
 	routeLogin
 	routeLogout
 	routeReset
+	routeSupportBundle
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -120,6 +123,8 @@ type parsedArgs struct {
 	// Route is routeReset.
 	ResetScope   cli.ResetScope
 	ResetOptions cli.ResetOptions
+	// SupportBundle carries the `support-bundle` subcommand's arguments.
+	SupportBundle cli.SupportBundleOptions
 }
 
 // parseArgs parses the CLI surface while preserving two useful properties that
@@ -145,6 +150,9 @@ func parseArgs(args []string) (parsedArgs, error) {
 		// consulted on the reset route, like every other subcommand-specific option.
 		yes      = fs.Bool("yes", false, "")
 		noBackup = fs.Bool("no-backup", false, "")
+		// `support-bundle` flags.
+		bundleOut   = fs.String("out", "", "")
+		bundleAudit = fs.Bool("include-audit", false, "")
 	)
 
 	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
@@ -178,9 +186,20 @@ func parseArgs(args []string) (parsedArgs, error) {
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
-	// --json is unambiguously a one-shot request, so a prompt that happens to be
-	// named "status" or "doctor" remains a prompt. `--` provides the same escape
-	// for the human-output path.
+	// `doctor --json` is a real thing: doctor is the release gate, and a gate that can
+	// only be read by a human is not one. It is carved out BEFORE the --json rule below
+	// because that rule exists to keep a PROMPT named "doctor" working — and `-- doctor`
+	// still forces the prompt for anyone who genuinely wants to ask about doctors.
+	if len(positionals) == 1 && positionals[0] == "doctor" && !forcePrompt {
+		parsed.Route = routeDoctor
+		if *stdio {
+			return parsedArgs{}, stdioRequiresHostError()
+		}
+		return parsed, nil
+	}
+	// --json is otherwise unambiguously a one-shot request, so a prompt that happens to
+	// be named "status" remains a prompt. `--` provides the same escape for the
+	// human-output path.
 	if len(positionals) > 0 && !forcePrompt && !*jsonOut {
 		switch positionals[0] {
 		case "doctor":
@@ -236,6 +255,12 @@ func parseArgs(args []string) (parsedArgs, error) {
 			parsed.Route = routeReset
 			parsed.ResetScope = scope
 			parsed.ResetOptions = cli.ResetOptions{Yes: *yes, NoBackup: *noBackup}
+		case "support-bundle":
+			if err := rejectCommandArgs("support-bundle", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeSupportBundle
+			parsed.SupportBundle = cli.SupportBundleOptions{Out: *bundleOut, Yes: *yes, IncludeAudit: *bundleAudit}
 		}
 		if parsed.Route != routeDefault {
 			if *stdio && parsed.Route != routeHost {
@@ -357,6 +382,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  daemon              run the project supervisor in the foreground")
 	fmt.Fprintln(w, "  daemon stop         stop the project supervisor")
 	fmt.Fprintln(w, "  host [--stdio]      serve embedded-host NDJSON over stdio")
+	fmt.Fprintln(w, "  support-bundle      write a redacted diagnostics archive to send to a maintainer")
 	fmt.Fprint(w, cli.ResetUsage())
 	fmt.Fprintln(w, "\nOptions:")
 	fmt.Fprintln(w, "  --project PATH      project root (default: current directory)")
@@ -368,6 +394,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
 	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
+	fmt.Fprintln(w, "  --out PATH          support-bundle destination")
+	fmt.Fprintln(w, "  --include-audit     add recent tool names + outcomes to the support bundle")
 	fmt.Fprintln(w, "  --version           print the version and exit")
 	fmt.Fprintln(w, "  -h, --help          show this help")
 	fmt.Fprintln(w, "  --                  end option parsing; before the first word, force a prompt")

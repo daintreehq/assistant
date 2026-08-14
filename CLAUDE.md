@@ -96,7 +96,9 @@ make install                                                  # go install with 
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
 ./bin/daintree-assistant login               # pick an endpoint (official/custom/local), store the API key
 ./bin/daintree-assistant logout              # forget the stored sign-in
-./bin/daintree-assistant doctor              # check sign-in / backend health / MCP / project / tier
+./bin/daintree-assistant doctor              # environment gate; `doctor --json` for the structured form
+./bin/daintree-assistant support-bundle      # redacted diagnostics archive to send to a maintainer
+./bin/daintree-assistant reset <scope>       # project-state | credentials | all-data (lease-aware, backs up)
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run both before considering work done)
@@ -107,8 +109,8 @@ gofmt -l .                   # must print nothing (CI fails on unformatted files
 ```
 
 `make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
-`generate` (`go generate ./...`) · `run` · `clean` · `db-reset` (hard-reset the
-state dir). `rtk` can mask the real `go` output, so verify a clean build/test
+`generate` (`go generate ./...`) · `run` · `clean` · `db-reset` (delegates to
+`reset project-state`, which keeps your sign-in). `rtk` can mask the real `go` output, so verify a clean build/test
 with the real binary if a result looks off.
 
 There is **no ESLint/Prettier/Biome equivalent**: the only gates are `go build`,

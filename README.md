@@ -73,9 +73,40 @@ Sign in once, then run it:
 ```bash
 ./bin/daintree-assistant login      # choose an endpoint, paste your API key (stored 0600)
 ./bin/daintree-assistant            # interactive cockpit
-./bin/daintree-assistant doctor     # environment check (sign-in / key validity / backend / MCP / tier)
+./bin/daintree-assistant doctor     # environment check — start here when something is wrong
 ./bin/daintree-assistant logout     # forget the stored endpoint and key
 ```
+
+**`doctor` is the gate.** It diagnoses the install (which binary is on PATH, whether this
+platform supports background supervision, whether the state dir is writable and private),
+the sign-in (stored, structurally valid, and *actually accepted by the provider* — with
+"no credit left" as its own distinct verdict), the backend (reachable, protocol, and every
+task id this build will send), and both MCP connections. It exits non-zero **only** when
+something genuinely failed, so it works as a CI or installer gate:
+
+```bash
+daintree-assistant doctor --json | jq '.checks[] | select(.status=="fail")'
+
+# As a gate, note the pipe: jq's exit status is what the shell sees, so you need
+# BOTH `set -o pipefail` (to see doctor's own non-zero) and `jq -e` (to fail on a
+# false result). Without them the pipeline reports success no matter what.
+set -o pipefail
+daintree-assistant doctor --json | jq -e '.summary.healthy'
+```
+
+Every check has a stable id, a status, and one next action. When something is wrong and
+you need a maintainer:
+
+```bash
+./bin/daintree-assistant support-bundle          # a redacted diagnostics archive
+```
+
+It collects versions, protocol/schema numbers, the environment settings that change
+behaviour, the full doctor diagnosis, supervisor state, and a *listing* of your session
+logs. It deliberately does **not** include your conversation, memories, terminal output,
+file contents, or the logs themselves — those are what you cannot safely send. Every value
+is redacted, the archive carries a scan of itself (`redaction-report.json`), and the whole
+manifest is printed for you to approve **before** anything is written.
 
 Signing in verifies the key with the provider, so a wrong or unfunded key fails at
 `login` rather than on your first message. Inside the cockpit, `/auth` shows the current
@@ -87,7 +118,7 @@ python -m daintree_assistant_server`) and either pick **Local** at login or expo
 `DAINTREE_BACKEND_URL=http://127.0.0.1:8473` — your stored key still applies.
 
 `make` targets: `build` · `install` · `test` · `test-race` · `test-pty` · `vet` · `fmt` ·
-`generate` · `run` · `clean` · `db-reset` (hard-reset the SQLite state dir).
+`generate` · `run` · `clean` · `db-reset` (delegates to `reset project-state`).
 
 ## Running it
 
@@ -101,6 +132,9 @@ python -m daintree_assistant_server`) and either pick **Local** at login or expo
 ./bin/daintree-assistant daemon stop                      # stop the project supervisor
 ./bin/daintree-assistant status                           # supervisor health and live work
 ./bin/daintree-assistant host --stdio                     # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
+./bin/daintree-assistant doctor --json                    # machine-readable environment check
+./bin/daintree-assistant support-bundle --include-audit   # redacted diagnostics archive
+./bin/daintree-assistant reset project-state              # safe local reset (keeps your sign-in)
 ```
 
 ## The cockpit (and why it's not a full-screen takeover)

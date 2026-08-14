@@ -164,6 +164,38 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 	return s, nil
 }
 
+// OpenReadOnly opens an EXISTING database for querying only — no schema exec, no
+// retention sweep, no journal-mode change.
+//
+// It exists because `Open` is not a read: it applies PRAGMAs (including `journal_mode =
+// WAL`, which rewrites the file header), execs the schema, and runs a retention sweep
+// that DELETES rows. A diagnostic that wants to look at the audit trail — the support
+// bundle — would therefore mutate a database whose owner lease it does not hold, racing
+// a live cockpit or the daemon. A tool that changes the thing it is diagnosing is not a
+// diagnostic.
+//
+// `mode=ro` makes that structural rather than a matter of discipline: SQLite itself
+// refuses any write on this handle, so a future caller cannot accidentally reintroduce
+// one. A missing file is an error here rather than a fresh database — "there is nothing
+// to read" is the honest answer, not an empty file the caller did not ask for.
+func OpenReadOnly(dbPath string) (*Store, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db, now: domain.NowMS, retention: DefaultRetention}
+	// busy_timeout only. Everything else Open applies is a WRITE.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMS)); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	return s, nil
+}
+
 // applyPragmas runs the three connection PRAGMAs in order; busy_timeout first so
 // it covers the WAL write lock on a fresh file.
 func (s *Store) applyPragmas() error {

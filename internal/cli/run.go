@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,7 +18,9 @@ import (
 	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/projectinstructions"
+	"github.com/daintreehq/assistant/internal/storage"
 	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/mattn/go-isatty"
 )
@@ -352,143 +355,341 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	return startRepl(ctx, a)
 }
 
-// RunDoctor is the TERSE doctor subcommand banner — distinct from
-// the rich /doctor slash checklist.
+// RunDoctor is the `doctor` subcommand: the environment gate.
+//
+// It builds a structured DoctorReport and renders it as either the human banner or
+// `--json`. Every condition is a typed check with an id, a status, and a next action —
+// see doctorreport.go for why that replaced prose.
+//
+// The exit code is the contract: non-zero iff something FAILED. Warnings and unknowns
+// never gate, because a gate that fires on "could not check" is a gate people learn to
+// ignore.
 func RunDoctor(ctx context.Context, opts Options) int {
-	r := render.Stdout()
-	overrides := buildOverrides(opts, r)
-	// Doctor opens the DB, so it needs the lease too (briefly, never spawning).
-	own, err := acquireOwnership(ctx, overrides, false, 10*time.Second,
-		func(m string) { r.Line(r.Gray(m)) })
+	report, err := buildDoctorReport(ctx, opts)
 	if err != nil {
-		r.Error(err.Error())
+		if opts.JSON {
+			// Even a fatal setup error answers in JSON when JSON was asked for: a caller
+			// parsing stdout must never receive prose on the one path it cannot handle.
+			fatal := &DoctorReport{Version: buildVersion, Platform: runtime.GOOS + "/" + runtime.GOARCH}
+			fatal.Add(DoctorCheck{ID: "doctor.setup", Label: "doctor", Status: StatusFail, Detail: err.Error()})
+			fatal.Finalize()
+			_ = fatal.WriteJSON(os.Stdout)
+		} else {
+			render.Stdout().Error(err.Error())
+		}
 		return domain.OneShotExitCode.Error
+	}
+
+	if opts.JSON {
+		if werr := report.WriteJSON(os.Stdout); werr != nil {
+			render.Stdout().Error(werr.Error())
+			return domain.OneShotExitCode.Error
+		}
+	} else {
+		renderDoctorHuman(os.Stdout, report)
+	}
+	if !report.Summary.Healthy {
+		return domain.OneShotExitCode.Error
+	}
+	return domain.OneShotExitCode.Success
+}
+
+// buildDoctorReport runs every check. It returns an error only when the diagnosis itself
+// cannot start (config or App construction) — every other condition is a check.
+func buildDoctorReport(ctx context.Context, opts Options) (*DoctorReport, error) {
+	// STDERR in JSON mode. buildOverrides prints a warning when DAINTREE.md cannot be
+	// read, and `doctor --json` promises stdout is a single JSON document — one
+	// unreadable project file would otherwise emit prose ahead of it and break every
+	// parser downstream.
+	r := render.Stdout()
+	if opts.JSON {
+		r = render.New(os.Stderr)
+	}
+	overrides := buildOverrides(opts, r)
+
+	report := &DoctorReport{
+		Version:  buildVersion,
+		Platform: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+
+	// Environment checks first, and BEFORE the lease: they need no App, they are the ones
+	// that explain a broken install, and they must still report when the DB cannot open.
+	report.Add(CheckPlatform())
+	report.Add(CheckBinaryOnPath(buildVersion))
+
+	// Doctor opens the DB, so it needs the lease too (briefly, never spawning). A failure
+	// here is itself a finding — "something else owns this project" is exactly what a
+	// stuck user needs told — so it becomes a check rather than an abort.
+	own, oerr := acquireOwnership(ctx, overrides, false, 10*time.Second, func(string) {})
+	if oerr != nil {
+		// Deliberately does NOT assert "another process owns it": acquiring the lease can
+		// also fail on a read-only mount, a bad state path, or a permissions problem, and
+		// naming the wrong cause sends the user to fix something that is not broken.
+		report.Add(DoctorCheck{
+			ID: "state.owner", Label: "state ownership", Status: StatusFail,
+			Detail: "could not take the project's owner lease: " + oerr.Error(),
+			Hint:   "Usually another assistant is open — close it, or run `daintree-assistant daemon stop`. If not, check that the state dir is writable.",
+		})
+		report.Finalize()
+		return report, nil
 	}
 	defer own.Release()
+	report.Add(DoctorCheck{
+		ID: "state.owner", Label: "state ownership", Status: StatusOK,
+		Detail: "acquired (no other assistant is using this project)",
+	})
+
 	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
-		r.Error(err.Error())
-		return domain.OneShotExitCode.Error
+		// state.schema, not a second id: a stale schema is the overwhelmingly common
+		// reason App.Create fails, and a caller keying off the documented id must find it
+		// here rather than having to know about a sibling.
+		report.Add(DoctorCheck{
+			ID: "state.schema", Label: "state database", Status: StatusFail,
+			Detail: err.Error(),
+			Hint:   "If the schema is stale, run `daintree-assistant reset project-state` (it keeps your sign-in).",
+		})
+		report.Finalize()
+		return report, nil
 	}
+	defer a.Shutdown()
+
+	report.Add(CheckStateDir(a.Config.StateDir))
+	report.Add(CheckCredentialsFile(a.Config.CredentialsPath))
+	report.Add(DoctorCheck{
+		ID: "state.schema", Label: "state schema", Status: StatusOK,
+		Detail: fmt.Sprintf("version %d at %s", storage.SchemaVersion(), a.Config.DBPath),
+		Data:   map[string]any{"version": storage.SchemaVersion(), "path": a.Config.DBPath},
+	})
+
 	a.ConnectMcp(ctx)
-	st := a.MCP.Status()
 
-	// Track whether any gating check failed so the exit code reflects health instead
-	// of always reporting success — scripts and CI gate on `doctor`'s exit code. An
-	// UNREACHABLE backend is the one hard failure here (it is the CLI's model gateway);
-	// a disconnected MCP is a valid degraded local mode, not a doctor failure.
-	anyFail := false
-
-	r.Line("Daintree Assistant — doctor")
-	// One-shot probes: a diagnostic reports the hop's CURRENT state. The patient
-	// turn-time retry budget would make a plainly-dead backend take seconds per row
-	// to report exactly the same thing.
+	// One-shot probes: a diagnostic reports the hop's CURRENT state. The patient turn-time
+	// retry budget would make a plainly-dead backend take seconds per row to report
+	// exactly the same thing.
 	ctx = backend.WithoutRetry(ctx)
-	// Sign-in first: signed out, every authenticated row below fails for one reason,
+	for _, c := range backendDoctorChecks(ctx, a) {
+		report.Add(c)
+	}
+	for _, c := range daintreeDoctorChecks(a) {
+		report.Add(c)
+	}
+	report.Add(CheckAutoApprove(a.Config.AutoApprove, string(a.Tier())))
+	report.Add(DoctorCheck{
+		ID: "tools.registered", Label: "tools", Status: StatusOK,
+		Detail: fmt.Sprintf("%d registered, tier '%s'", len(a.Registry.List()), a.Tier()),
+		Data:   map[string]any{"count": len(a.Registry.List()), "tier": string(a.Tier())},
+	})
+
+	report.Extra = map[string]any{
+		"project":     a.Config.ProjectPath,
+		"stateDir":    a.Config.StateDir,
+		"sessionId":   a.SessionID,
+		"debugLog":    a.Config.DebugLog,
+		"workflowInt": a.Config.WorkflowIntelligence,
+	}
+	report.Finalize()
+	return report, nil
+}
+
+// backendDoctorChecks diagnoses the sign-in and the backend hop.
+func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
+	var out []DoctorCheck
+
+	// Sign-in first: signed out, every authenticated check below fails for one reason,
 	// and a wall of 401s reads as a broken backend instead of a missing login.
 	if a.Config.APIKey == "" {
-		r.Line("  signed in      : NO — run `daintree-assistant login`")
-		anyFail = true
+		out = append(out, DoctorCheck{
+			ID: "auth.signedIn", Label: "signed in", Status: StatusFail,
+			Detail: "no API key stored",
+			Hint:   "Run `daintree-assistant login`.",
+		})
 	} else {
-		r.Line("  signed in      : " + credentials.Redact(a.Config.APIKey))
+		out = append(out, DoctorCheck{
+			ID: "auth.signedIn", Label: "signed in", Status: StatusOK,
+			Detail: credentials.Redact(a.Config.APIKey),
+		})
 	}
+
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	herr := a.Backend.Health(hctx)
 	hcancel()
-	backendLine := "ok"
+	// Sanitized for the same reason as the MCP URL: a custom backend URL arrives from the
+	// trusted env or the stored sign-in, neither of which passes through
+	// credentials.NormalizeBaseURL, so it can carry userinfo.
+	base := mcp.SanitizeURL(a.Backend.BaseURL())
 	if herr != nil {
-		backendLine = "UNREACHABLE — " + herr.Error()
-		anyFail = true
+		out = append(out, DoctorCheck{
+			ID: "backend.reachable", Label: "backend", Status: StatusFail,
+			Detail: base + " — UNREACHABLE: " + herr.Error(),
+			Hint:   "Check your network. For a local backend, start it: cd ../assistant-backend && python -m daintree_assistant_server",
+			Data:   map[string]any{"url": base},
+		})
+		// Everything below needs the backend; reporting each as its own failure would
+		// bury the one cause under four symptoms.
+		return out
 	}
-	r.Line("  backend        : " + a.Backend.BaseURL() + " — " + backendLine)
+	out = append(out, DoctorCheck{
+		ID: "backend.reachable", Label: "backend", Status: StatusOK,
+		Detail: base, Data: map[string]any{"url": base},
+	})
 
-	// Whether the key actually WORKS, which nothing else here can tell you: our own
-	// auth is structural, so every other row stays green with a bogus key.
-	if a.Config.APIKey != "" && herr == nil {
-		vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
-		ver, verr := a.Backend.VerifyKey(vctx)
-		vcancel()
-		switch {
-		// A backend that does not serve the route AT ALL. This must agree with
-		// backend.CheckSignIn, or doctor would bless an endpoint that `login` refuses:
-		// a gating failure for any remote host (obsolete deployment or intercepting
-		// proxy — see AllowsUnverifiedSignIn), a benign gap on loopback, where the
-		// local dev backend is simply allowed to be behind.
-		case errors.Is(verr, backend.ErrVerifyUnsupported):
-			if !backend.AllowsUnverifiedSignIn(a.Backend.BaseURL()) {
-				r.Line("  key valid      : CANNOT CHECK — this backend does not serve /v1/daintree/auth/verify")
-				r.Line("                   (it may be out of date, or a proxy may be intercepting it)")
-				anyFail = true
-				break
-			}
-			r.Line("  key valid      : unknown (this local backend can't check)")
-		case verr != nil:
-			r.Line("  key valid      : could not check — " + verr.Error())
-		case !ver.Valid:
-			r.Line("  key valid      : NO — " + ver.Detail + " (run `daintree-assistant login`)")
-			anyFail = true
-		default:
-			r.Line("  key valid      : yes" + keyLabelSuffix(ver))
+	if a.Config.APIKey != "" {
+		out = append(out, verifyKeyDoctorCheck(ctx, a, base))
+	}
+	out = append(out, taskManifestDoctorCheck(ctx, a))
+	return out
+}
+
+// verifyKeyDoctorCheck asks whether the key actually WORKS — which nothing else here can
+// tell you, since our own auth is structural and every other row stays green with a
+// bogus key.
+func verifyKeyDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCheck {
+	c := DoctorCheck{ID: "auth.keyValid", Label: "key valid"}
+	vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
+	ver, verr := a.Backend.VerifyKey(vctx)
+	vcancel()
+
+	switch {
+	case errors.Is(verr, backend.ErrVerifyUnsupported):
+		// Must agree with backend.CheckSignIn, or doctor would bless an endpoint `login`
+		// refuses: a gating failure for any remote host, a benign gap on loopback.
+		if !backend.AllowsUnverifiedSignIn(base) {
+			c.Status = StatusFail
+			c.Detail = "this backend does not serve /v1/daintree/auth/verify"
+			c.Hint = "Your key is fine — the endpoint is out of date or a proxy is intercepting it. Retry off any proxy, or use a Local backend."
+			return c
 		}
+		c.Status = StatusUnknown
+		c.Detail = "this local backend can't check"
+		return c
+	case verr != nil:
+		c.Status = StatusUnknown
+		c.Detail = "could not check — " + verr.Error()
+		return c
+	case !ver.Valid:
+		c.Status = StatusFail
+		c.Detail = "the provider rejected this key: " + ver.Detail
+		c.Hint = "Run `daintree-assistant login` with an active, funded key."
+		return c
+	case ver.LimitRemaining != nil && *ver.LimitRemaining <= 0:
+		// Recognised but empty fails every turn just as surely as a wrong key — but the
+		// fix is topping up, not re-pasting, so it is its own state.
+		c.Status = StatusFail
+		c.Detail = "the key is valid but has NO CREDIT remaining"
+		c.Hint = "Top up the account — every turn will fail until you do."
+		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
+		return c
 	}
+	c.Status = StatusOK
+	c.Detail = "yes" + keyLabelSuffix(ver)
+	if ver.LimitRemaining != nil {
+		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
+	}
+	return c
+}
 
-	// Task-ID drift is a GATING failure: every id in the manifest is one this CLI
-	// will actually send, so a missing one is a guaranteed runtime 404 mid-turn (the
-	// 2026-07-07 de-versioning incident, which a count-only check could not see).
-	// A capabilities FETCH error is not a failure — /v1/daintree/capabilities sits
-	// behind require_ready, so a warming backend legitimately yields nothing and the
-	// honest verdict is "cannot verify".
+// taskManifestDoctorCheck compares the task ids this CLI sends against what the backend
+// advertises. Drift is GATING: every id is one the CLI will actually send, so a missing
+// one is a guaranteed 404 mid-turn (the 2026-07-07 de-versioning incident, which a
+// count-only check could not see).
+func taskManifestDoctorCheck(ctx context.Context, a *app.App) DoctorCheck {
+	c := DoctorCheck{ID: "backend.tasks", Label: "backend tasks"}
 	cctx, ccancel := context.WithTimeout(ctx, 3*time.Second)
 	caps, cerr := a.Backend.Capabilities(cctx)
 	ccancel()
-	switch {
-	case cerr != nil:
-		r.Line("  backend tasks  : cannot verify — " + cerr.Error())
-	default:
-		av := backend.CheckTasks(caps, a.Config.WorkflowIntelligence)
-		switch {
-		case !av.Reported:
-			r.Line("  backend tasks  : NONE advertised — every task call will fail")
-			anyFail = true
-		case av.OK():
-			r.Line(fmt.Sprintf("  backend tasks  : ok (%d/%d required present)", av.Required, av.Required))
-		default:
-			r.Line(fmt.Sprintf("  backend tasks  : DRIFT — %d of %d missing: %s",
-				len(av.Missing), av.Required, strings.Join(av.Missing, ", ")))
-			anyFail = true
-		}
-	}
 
-	mcpURL := a.Config.McpURL
-	if mcpURL == "" {
-		mcpURL = "(unset)"
+	if cerr != nil {
+		// A capabilities FETCH error is not drift: /v1/daintree/capabilities sits behind
+		// require_ready, so a warming backend legitimately yields nothing.
+		c.Status = StatusUnknown
+		c.Detail = "cannot verify — " + cerr.Error()
+		return c
 	}
-	r.Line("  mcp url        : " + mcpURL)
-	conn := "not connected"
-	if st.Connected {
+	av := backend.CheckTasks(caps, a.Config.WorkflowIntelligence)
+	switch {
+	case !av.Reported:
+		c.Status = StatusFail
+		c.Detail = "the backend advertises NO tasks — every utility task call will fail"
+		c.Hint = "The backend is misconfigured or mid-deploy. Check its /v1/daintree/capabilities."
+		return c
+	case av.OK():
+		c.Status = StatusOK
+		c.Detail = fmt.Sprintf("all %d required tasks present", av.Required)
+		c.Data = map[string]any{"required": av.Required}
+		return c
+	}
+	c.Status = StatusFail
+	c.Detail = fmt.Sprintf("DRIFT — %d of %d missing: %s", len(av.Missing), av.Required, strings.Join(av.Missing, ", "))
+	c.Hint = "This CLI and the backend disagree about task ids. Update whichever is older."
+	c.Data = map[string]any{"missing": av.Missing, "required": av.Required}
+	return c
+}
+
+// daintreeDoctorChecks diagnoses the two MCP connections and the project binding.
+func daintreeDoctorChecks(a *app.App) []DoctorCheck {
+	var out []DoctorCheck
+
+	st := a.MCP.Status()
+	// SANITIZED, always. Daintree's per-session MCP URL carries its bearer as
+	// ?session=<token> (see mcp.SanitizeURL), and this value goes into `doctor --json`
+	// and straight into a support bundle — i.e. into a file a tester is being encouraged
+	// to send to someone else. The generic redactor cannot save us here: an opaque query
+	// token matches no shape, and the field name "url" is not credential-marked, so it
+	// would sail through both passes. Endpoints get stripped at the source, never trusted
+	// to a downstream scrubber.
+	mcpURL := mcp.SanitizeURL(a.Config.McpURL)
+	c := DoctorCheck{ID: "mcp.daintree", Label: "Daintree MCP", Data: map[string]any{"url": mcpURL, "connected": st.Connected}}
+	switch {
+	case a.Config.Offline:
+		// Explicitly asked for. Reporting a deliberate choice as a failure would make
+		// every offline test run look broken.
+		c.Status = StatusSkip
+		c.Detail = "offline mode — Daintree MCP not attempted"
+	case a.Config.McpURL == "":
+		// Not a failure — degraded local mode is a supported way to run — but the
+		// assistant cannot do its actual job, so it must not read as healthy either.
+		c.Status = StatusWarn
+		c.Detail = "not configured — DEGRADED LOCAL MODE"
+		c.Hint = "Launch from inside Daintree, or pass --mcp-url/--mcp-token. Without it there are no terminals, agents or worktrees."
+	case st.Connected:
 		count := 0
 		if st.ToolCount != nil {
 			count = *st.ToolCount
 		}
-		conn = fmt.Sprintf("ok (%s, %d tools)", st.Transport, count)
-	} else if st.Error != "" {
-		conn = st.Error
+		c.Status = StatusOK
+		c.Detail = fmt.Sprintf("connected (%s, %d tools)", st.Transport, count)
+		c.Data["transport"], c.Data["toolCount"] = st.Transport, count
+	default:
+		c.Status = StatusFail
+		c.Detail = "configured but NOT connected: " + st.Error
+		c.Hint = "Daintree may have closed or revoked this session. Reopen the assistant from Daintree, or use /reconnect."
 	}
-	r.Line("  mcp connection : " + conn)
-	r.Line("  project        : " + a.Config.ProjectPath)
-	instr := "(none)"
-	if a.Config.ProjectInstructions != "" {
-		instr = fmt.Sprintf("DAINTREE.md (%d bytes)", len(a.Config.ProjectInstructions))
-	}
-	r.Line("  instructions   : " + instr)
-	r.Line(fmt.Sprintf("  tools loaded   : %d", len(a.Registry.List())))
-	r.Line("  tier           : " + string(a.Tier()))
+	out = append(out, c)
 
-	_ = a.Shutdown()
-	if anyFail {
-		return domain.OneShotExitCode.Error
+	// The docs MCP is a SECOND, public, no-auth endpoint. Its absence only costs
+	// "how do I use Daintree" answers, so it can never be a failure — but it was
+	// previously invisible, which made a silent docs outage impossible to diagnose.
+	d := DoctorCheck{ID: "mcp.docs", Label: "docs MCP"}
+	if ds := a.DocsMCP.Status(); ds.Connected {
+		d.Status = StatusOK
+		d.Detail = "connected"
+	} else {
+		d.Status = StatusWarn
+		d.Detail = "not connected — Daintree documentation lookups will fail"
+		d.Hint = "Non-blocking: everything except docs.* still works."
 	}
-	return domain.OneShotExitCode.Success
+	out = append(out, d)
+
+	p := DoctorCheck{ID: "project.instructions", Label: "project", Data: map[string]any{"path": a.Config.ProjectPath}}
+	p.Status = StatusOK
+	if a.Config.ProjectInstructions != "" {
+		p.Detail = fmt.Sprintf("%s (DAINTREE.md, %d bytes)", a.Config.ProjectPath, len(a.Config.ProjectInstructions))
+	} else {
+		p.Detail = a.Config.ProjectPath + " (no DAINTREE.md)"
+	}
+	out = append(out, p)
+	return out
 }
 
 // announceDebugLog opens the log and prints a gray notice when active.

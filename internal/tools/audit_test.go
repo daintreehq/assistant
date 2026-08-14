@@ -49,9 +49,36 @@ func TestSafeJSONRedactsCredentialsBeforeTheyArePersisted(t *testing.T) {
 
 // safeJSON must never throw — the audit path is a side-channel that must not be able to
 // break a tool call.
-func TestSafeJSONNeverThrowsOnUnserializableInput(t *testing.T) {
-	got := safeJSON(map[string]any{"fn": func() {}})
-	if got != `"<unserializable>"` {
-		t.Errorf("want the unserializable sentinel, got %s", got)
+//
+// The structural walker also made this STRICTLY better: an unserializable member used to
+// collapse the whole record to "<unserializable>", losing every argument beside it. Now
+// only the offending field is replaced, and it is replaced by its TYPE rather than by the
+// pointer address %v would print — an address helps nobody and leaks a memory-layout
+// detail into a durable row.
+func TestSafeJSONHandlesUnserializableMembersWithoutLosingTheRecord(t *testing.T) {
+	got := safeJSON(map[string]any{"fn": func() {}, "terminalId": "terminal-2b9f4c8e", "lines": 200})
+
+	var back map[string]any
+	if err := json.Unmarshal([]byte(got), &back); err != nil {
+		t.Fatalf("audit JSON must stay parseable: %v\n%s", err, got)
+	}
+	if back["terminalId"] != "terminal-2b9f4c8e" || back["lines"] != float64(200) {
+		t.Errorf("serializable fields beside an unserializable one were lost: %s", got)
+	}
+	fn, _ := back["fn"].(string)
+	if !strings.HasPrefix(fn, "<unserializable ") {
+		t.Errorf("the unserializable member should be marked, got %q", fn)
+	}
+	if strings.Contains(got, "0x") {
+		t.Errorf("a pointer address reached the audit row: %s", got)
+	}
+}
+
+// A top-level value that cannot be marshaled at all still yields valid JSON.
+func TestSafeJSONNeverThrows(t *testing.T) {
+	got := safeJSON(func() {})
+	var back any
+	if err := json.Unmarshal([]byte(got), &back); err != nil {
+		t.Errorf("safeJSON produced unparseable output: %v (%s)", err, got)
 	}
 }

@@ -123,7 +123,15 @@ func TestIsSensitiveKey(t *testing.T) {
 	for _, k := range []string{
 		"password", "passwd", "api_key", "apiKey", "x-api-key", "API-KEY",
 		"secret", "client_secret", "authorization", "Authorization",
-		"token", "sessionToken", "session_id", "private_key", "cookie", "signature",
+		"token", "sessionToken", "private_key", "cookie", "signature",
+		// The exemption rules must not open a hole. Each of these was exempted at some
+		// point by an over-broad rule, and each holds the actual secret:
+		"accessTokens",    // a LIST of credentials, not a count
+		"refreshTokens",   //
+		"privateKeyBytes", // the key material, not its size
+		"secretBytes",     //
+		"hashedPassword",  // begins with the letters "has" but is not a predicate
+		"hasherSecret",    //
 	} {
 		if !IsSensitiveKey(k) {
 			t.Errorf("IsSensitiveKey(%q) = false, want true", k)
@@ -134,6 +142,19 @@ func TestIsSensitiveKey(t *testing.T) {
 		// Metadata ABOUT credentials — masking these hides the numbers a reader needs.
 		"tokenCount", "promptTokens", "cachedTokens", "maxTokens", "signatureAlgorithm",
 		"tokenPresent", "tokenLength", "keyRedacted", "secretPath",
+		// The suffix/prefix rule, not an enumeration: these must all survive without
+		// anyone adding them to a list.
+		"apiKeyPresent", "apiKeyLength", "mcpTokenPresent", "mcpTokenLength",
+		"hasToken", "isSecret", "totalTokens", "credentialPath", "tokenSource",
+		// A credential-shaped name ending in "id" is a REFERENCE to a credential, not the
+		// credential — the thing that authenticates is the cookie or the session TOKEN,
+		// both of which stay masked by their own markers.
+		"session_id", "sessionId", "apiKeyId", "credentialId",
+		// The exact token-COUNT names, spelled out rather than matched by the "tokens"
+		// suffix that accessTokens shares.
+		"promptTokens", "completionTokens", "totalTokens", "inputTokens", "tokens",
+		// Predicates: the marker must start immediately after the prefix.
+		"hasToken", "isSecret", "numApiKeys",
 	} {
 		if IsSensitiveKey(k) {
 			t.Errorf("IsSensitiveKey(%q) = true, want false", k)

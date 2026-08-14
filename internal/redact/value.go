@@ -2,6 +2,7 @@ package redact
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -61,9 +62,20 @@ func redactValue(v any, keyIsSensitive bool, depth int) any {
 		out := make(map[string]any, len(t))
 		for k, sub := range t {
 			// The KEY itself can carry a secret in a pathological payload (an env dump
-			// keyed by its own value), so it is redacted as free text — but never
-			// dropped, because a missing key changes the shape of the record.
-			out[String(k)] = redactValue(sub, keyIsSensitive || IsSensitiveKey(k), depth+1)
+			// keyed by its own value), so it is redacted as free text — but never dropped,
+			// because a missing key changes the shape of the record.
+			//
+			// Redacted keys are made UNIQUE. Two different secret-bearing keys both
+			// collapsing to "[redacted]" would silently overwrite each other, and the
+			// record would lose entries — a redactor that deletes data is a bug, not a
+			// stricter redactor.
+			rk := String(k)
+			if rk != k {
+				if _, clash := out[rk]; clash {
+					rk = fmt.Sprintf("%s-%d", rk, len(out))
+				}
+			}
+			out[rk] = redactValue(sub, keyIsSensitive || IsSensitiveKey(k), depth+1)
 		}
 		return out
 	case []any:
@@ -84,14 +96,38 @@ func redactValue(v any, keyIsSensitive bool, depth int) any {
 			return Mark
 		}
 		return json.RawMessage(encoded)
-	default:
-		// Numbers, bools, and anything else the decoder produced. Masked only when the
-		// key says so; otherwise they cannot carry a credential and masking them would
-		// destroy the durations, counts, and ids that make a record worth keeping.
+	case bool, float64, float32,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64:
+		// Scalars cannot carry a credential, and masking them would destroy the
+		// durations, counts, and ids that make a record worth keeping — unless the key
+		// says otherwise, where a numeric PIN is still a secret.
 		if keyIsSensitive {
 			return Mark
 		}
 		return v
+	default:
+		// A STRUCT, a pointer, or any other Go value a caller passed directly.
+		//
+		// These used to fall through untouched, which was a silent hole: the support
+		// bundle marshals a *DoctorReport, so every string inside it — including nested
+		// maps — bypassed redaction entirely while the code appeared to redact. Round-trip
+		// through JSON to get the map/slice form, then walk that. Slower than the direct
+		// cases, but this is the cold path, and "we redact except for types we did not
+		// anticipate" is not a property worth having.
+		raw, err := json.Marshal(v)
+		if err != nil {
+			// Genuinely unmarshalable (a func, a channel, a cycle). Emit a typed
+			// placeholder rather than %v: the default rendering of those is a pointer
+			// ADDRESS, which tells a reader nothing and quietly discloses a memory layout
+			// detail. Naming the type is the useful half.
+			return fmt.Sprintf("<unserializable %T>", v)
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return String(string(raw))
+		}
+		return redactValue(decoded, keyIsSensitive, depth+1)
 	}
 }
 
@@ -125,29 +161,87 @@ var sensitiveKeyParts = []string{
 	"cookie", "session_id", "sessionid", "sessiontoken", "signature",
 }
 
-// benignKeyCompounds are field names that contain a sensitive marker but describe
-// METADATA about a credential rather than the credential itself. Masking these hides
-// exactly the numbers a reader opened the record to see.
-var benignKeyCompounds = []string{
-	"tokencount", "tokens", "tokenlimit", "maxtokens", "prompttokens", "completiontokens",
-	"cachedtokens", "tokenusage", "signaturealgorithm", "secretpath", "secretname",
-	"secretref", "credentialpath", "cookiepreferences", "hastoken", "tokenpresent",
-	"tokenlength", "keyredacted",
+// metadataSuffixes mark a credential-named field as describing a credential rather than
+// being one.
+//
+// A suffix rule rather than a list of exact names — `apiKeyPresent`, `mcpTokenLength`,
+// `tokenCount` and every future variant follow one shape, and enumerating them
+// individually guarantees the next one is missed. `apiKeyLength` in particular must
+// survive: it is what tells support a key was pasted truncated.
+//
+// The list is deliberately CONSERVATIVE, because every entry is a hole. Two that were
+// here and had to go:
+//
+//	"bytes"  — `privateKeyBytes` and `secretBytes` hold the actual secret, not its size.
+//	"tokens" — `accessTokens` and `refreshTokens` are a LIST OF CREDENTIALS. Only the
+//	           specific token-count names below are metadata (see tokenCountKeys).
+//
+// The remaining entries describe a quantity, a location, or a label — never a value.
+var metadataSuffixes = []string{
+	"present", "length", "count", "counts", "size", "path", "name", "names",
+	"algorithm", "redacted", "expiry", "expiresat", "usage", "limit", "ref",
+	"preferences", "enabled", "required", "type", "kind", "source", "version",
+	// A credential-shaped name ending in "id" is a REFERENCE to a credential, not the
+	// credential: sessionId, apiKeyId, credentialId. The thing that authenticates is the
+	// cookie or the session TOKEN, both of which are caught by their own markers.
+	"id",
 }
+
+// tokenCountKeys are the exact plural-"tokens" names that mean a COUNT. Spelled out
+// rather than matched by suffix, because `accessTokens` and `refreshTokens` share that
+// suffix and are the credentials themselves.
+var tokenCountKeys = map[string]bool{
+	"tokens": true, "prompttokens": true, "completiontokens": true, "cachedtokens": true,
+	"totaltokens": true, "maxtokens": true, "inputtokens": true, "outputtokens": true,
+	"reasoningtokens": true, "tokencount": true, "tokencounts": true,
+}
+
+// metadataPrefixes mark a field as a PREDICATE about a credential (`hasToken`,
+// `isSecret`, `numApiKeys`).
+//
+// The prefix must be followed by a credential marker, not merely present at the start.
+// Without that, `hashedPassword` was exempted because it happens to begin with the
+// letters "has" — the single most dangerous false exemption available, since a password
+// hash is exactly what an attacker wants.
+var metadataPrefixes = []string{"has", "is", "max", "min", "num", "total", "count"}
 
 // IsSensitiveKey reports whether a field name marks its value as a credential.
 func IsSensitiveKey(key string) bool {
-	k := strings.ToLower(strings.TrimSpace(key))
-	k = strings.NewReplacer("-", "", "_", "", " ", "").Replace(k)
-	for _, benign := range benignKeyCompounds {
-		if k == strings.NewReplacer("-", "", "_", "", " ", "").Replace(benign) {
+	k := normalizeKey(key)
+	if k == "" {
+		return false
+	}
+	marker := ""
+	for _, part := range sensitiveKeyParts {
+		if p := normalizeKey(part); strings.Contains(k, p) {
+			marker = p
+			break
+		}
+	}
+	if marker == "" {
+		return false
+	}
+	if tokenCountKeys[k] {
+		return false
+	}
+	for _, suffix := range metadataSuffixes {
+		if strings.HasSuffix(k, suffix) {
 			return false
 		}
 	}
-	for _, part := range sensitiveKeyParts {
-		if strings.Contains(k, strings.NewReplacer("-", "", "_", "", " ", "").Replace(part)) {
-			return true
+	// A predicate prefix counts ONLY when the marker starts immediately after it, so
+	// "has"+"token" exempts hasToken while "has"+"hedpassword" leaves hashedPassword
+	// masked.
+	for _, prefix := range metadataPrefixes {
+		if rest := strings.TrimPrefix(k, prefix); rest != k && strings.HasPrefix(rest, marker) {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// normalizeKey lowercases and strips separators so apiKey, api_key and API-KEY compare
+// equal.
+func normalizeKey(s string) string {
+	return strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(s)))
 }

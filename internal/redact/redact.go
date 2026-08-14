@@ -88,7 +88,7 @@ const Mark = "[redacted]"
 // sensitiveKeyValue matches a JSON `"key": "value"` whose KEY names a credential, and
 // captures the key half so only the value is masked. Case-insensitive; the key may carry
 // the marker as a substring ("client_secret", "x-api-key", "sessionToken").
-var sensitiveKeyValue = regexp.MustCompile(`(?i)("[^"]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|authorization|bearer|credential|client[_-]?secret|cookie|session[_-]?(?:id|token)|signature)[^"]*"\s*:\s*)"[^"]*"`)
+var sensitiveKeyValue = regexp.MustCompile(`(?i)("[^"]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|authorization|bearer|credential|client[_-]?secret|cookie|session[_-]?token|signature)[^"]*"\s*:\s*)"[^"]*"`)
 
 // envAssignment matches a shell-style `NAME=value` where NAME names a credential — the
 // shape a terminal prints when an agent dumps its environment, or when the model sends
