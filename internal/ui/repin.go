@@ -33,9 +33,28 @@ import (
 //     a visible blank band into scrollback is worse than the pre-existing strand,
 //     and the next real commit heals those organically.
 
-// repinDebtCap bounds what the ledger will heal with blank rows. Turn-end chrome
-// frees only a few rows; anything larger is forgiven (see the file comment).
-const repinDebtCap = 4
+// repinHealCap is the largest debt the ledger will heal with blank rows; anything bigger
+// is forgiven (see the file comment).
+//
+// ONE, not four. The ledger over-estimates: it accrues debt for shrinks that a commit has
+// already physically covered, so healing up to four rows filled the real gap AND added
+// surplus blanks — measured at FIVE blank rows between consecutive turns, on every
+// exchange, which is most of what a session's scrollback consists of.
+//
+// Both properties are now pinned by PTY tests against the real binary rather than by
+// reasoning about the arithmetic: internal/e2e/pty_turngap_test.go measures the inter-turn
+// gap, and pty_tailgap_test.go measures the dead scroll area below the composer that this
+// ledger exists to prevent. At this cap the gap is one row and the tail gap is zero — the
+// forgiven debt was not backed by real dead rows. If forgiveness ever does strand the
+// footer, the tail-gap test is what will say so.
+const repinHealCap = 1
+
+// shortNoteRows is the height below which a sealed NOTE keeps the in-flight footer cell
+// for its barrier frame. Unrelated to the heal bound above — it answers "is this cell
+// short enough that dropping it early would be wasted work?" — and kept separate so
+// tuning one cannot silently retune the other. (They were one constant; changing the heal
+// bound would otherwise have quietly changed commit geometry too.)
+const shortNoteRows = 4
 
 // footerRepinMsg closes a re-pin barrier. Nonce guards against a stale tick: every
 // scheduled (or re-armed) barrier bumps repinNonce, and only the newest may act.
@@ -95,7 +114,7 @@ func (m *Model) settleFooterDebt() bool {
 		m.repinCredit = 0
 		return false
 	}
-	if m.footerDebt > repinDebtCap {
+	if m.footerDebt > repinHealCap {
 		m.footerDebt = 0 // forgive big shrinks (sheet/deck close) — see the file comment
 		return false
 	}

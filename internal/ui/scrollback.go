@@ -148,7 +148,7 @@ func (q *scrollbackQueue) nextCommit(
 		// Turns and command cards can occupy far more live rows than their immutable
 		// commit tail suggests, so they always take the early-drop geometry path.
 		// Only genuinely short system notes stay for the distinct barrier frame.
-		q.dropInFlightCell = cells[i].Note == nil || lineCount(text) > repinDebtCap
+		q.dropInFlightCell = cells[i].Note == nil || lineCount(text) > shortNoteRows
 		return commitCmd(blk, selectionBound)
 	}
 	return nil

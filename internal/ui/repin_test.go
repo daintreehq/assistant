@@ -31,13 +31,13 @@ func repinModel(t *testing.T, rendered int) Model {
 func TestFooterRepin_ShrinkSchedulesOneBarrierAndHeals(t *testing.T) {
 	m := repinModel(t, 10)
 
-	*m.footerRows = 8 // the run-status chrome left the footer (rendered shrink of 2)
+	*m.footerRows = 9 // one row of run-status chrome left the footer
 	cmd := m.scheduleFooterRepin()
 	if cmd == nil {
 		t.Fatal("a small rendered shrink must arm the re-pin barrier")
 	}
-	if m.footerDebt != 2 || !m.repinPending {
-		t.Fatalf("debt=%d pending=%v, want 2/true", m.footerDebt, m.repinPending)
+	if m.footerDebt != 1 || !m.repinPending {
+		t.Fatalf("debt=%d pending=%v, want 1/true", m.footerDebt, m.repinPending)
 	}
 	// The barrier is single-flight: another pass must not arm a second one.
 	if extra := m.scheduleFooterRepin(); extra != nil {
@@ -58,40 +58,35 @@ func TestFooterRepin_ShrinkSchedulesOneBarrierAndHeals(t *testing.T) {
 	}
 }
 
-func TestFooterRepin_HeightChangeDuringBarrierReArms(t *testing.T) {
+// A footer that keeps shrinking while the barrier waits accumulates past the heal cap,
+// and the closing tick then FORGIVES rather than printing a blank band. That is the
+// intended trade: a band of blanks dumped into scrollback is more visible damage than the
+// dead rows it would reclaim, and the next real commit reclaims them organically anyway.
+//
+// The property under test is that the tick never prints in this case — not that it
+// re-arms. (It re-arms only while there is still healable debt to settle.)
+func TestFooterRepin_AccumulatedShrinkDuringBarrierIsForgiven(t *testing.T) {
 	m := repinModel(t, 10)
-	*m.footerRows = 8
+	*m.footerRows = 9
 	if cmd := m.scheduleFooterRepin(); cmd == nil {
-		t.Fatal("shrink must arm the barrier")
+		t.Fatal("a one-row shrink must arm the re-pin barrier")
 	}
-	// The footer shrinks AGAIN while the barrier waits: the new frame needs its own
-	// settle delay, so the closing tick must re-arm rather than print immediately.
-	*m.footerRows = 7
+	// The footer shrinks AGAIN while the barrier waits: 2 rows total, past repinHealCap.
+	*m.footerRows = 8
 	nonce := m.repinNonce
 	next, cmd := m.Update(footerRepinMsg{Nonce: nonce})
 	nm := next.(Model)
-	if cmd == nil {
-		t.Fatal("the re-arm must schedule a fresh barrier")
+	if cmd != nil {
+		t.Fatal("a debt past the heal cap must not print a blank band")
 	}
-	if !nm.repinPending || nm.repinNonce == nonce {
-		t.Fatalf("pending=%v nonce=%d, want a re-armed barrier under a new nonce", nm.repinPending, nm.repinNonce)
-	}
-	if nm.footerDebt != 3 {
-		t.Fatalf("debt=%d, want 3 (both shrinks) carried into the fresh barrier", nm.footerDebt)
-	}
-	// The stable frame closes the fresh barrier and heals everything.
-	next, heal := nm.Update(footerRepinMsg{Nonce: nm.repinNonce})
-	if heal == nil {
-		t.Fatal("the fresh barrier must heal once the footer is stable")
-	}
-	if fm := next.(Model); fm.footerDebt != 0 {
-		t.Fatalf("debt=%d after heal, want 0", fm.footerDebt)
+	if nm.footerDebt != 0 {
+		t.Fatalf("debt=%d, want 0 — accumulated shrink past the cap is forgiven", nm.footerDebt)
 	}
 }
 
 func TestFooterRepin_GrowthRepaysDebt(t *testing.T) {
 	m := repinModel(t, 10)
-	*m.footerRows = 8
+	*m.footerRows = 9
 	if cmd := m.scheduleFooterRepin(); cmd == nil {
 		t.Fatal("shrink must arm the barrier")
 	}
@@ -140,7 +135,7 @@ func TestFooterRepin_LargeShrinkIsForgiven(t *testing.T) {
 	m := repinModel(t, 38)
 	*m.footerRows = 8 // an ops/help deck or approval sheet closed: 30 freed rows
 	if cmd := m.scheduleFooterRepin(); cmd != nil {
-		t.Fatal("a shrink beyond repinDebtCap must be forgiven, not healed with a blank band")
+		t.Fatal("a shrink beyond repinHealCap must be forgiven, not healed with a blank band")
 	}
 	if m.footerDebt != 0 {
 		t.Fatalf("debt=%d after forgiveness, want 0", m.footerDebt)
@@ -150,18 +145,18 @@ func TestFooterRepin_LargeShrinkIsForgiven(t *testing.T) {
 func TestFooterRepin_InFlightCommitDefersHealing(t *testing.T) {
 	m := repinModel(t, 10)
 	m.queue.inFlight = true
-	*m.footerRows = 8
+	*m.footerRows = 9
 	if cmd := m.scheduleFooterRepin(); cmd != nil {
 		t.Fatal("an in-flight commit must defer healing to its own print")
 	}
-	if m.footerDebt != 2 {
-		t.Fatalf("debt=%d, want 2 carried until the commit acks", m.footerDebt)
+	if m.footerDebt != 1 {
+		t.Fatalf("debt=%d, want 1 carried until the commit acks", m.footerDebt)
 	}
 }
 
 func TestFooterRepin_ResetInvalidatesPendingBarrier(t *testing.T) {
 	m := repinModel(t, 10)
-	*m.footerRows = 8
+	*m.footerRows = 9
 	if cmd := m.scheduleFooterRepin(); cmd == nil {
 		t.Fatal("shrink must arm the barrier")
 	}
@@ -181,7 +176,7 @@ func TestRepinText(t *testing.T) {
 	if got := repinText(1); got != " " {
 		t.Fatalf("repinText(1) = %q, want a single visually-blank row", got)
 	}
-	for n := 2; n <= repinDebtCap; n++ {
+	for n := 2; n <= 4; n++ {
 		if got := lineCount(repinText(n)); got != n {
 			t.Fatalf("repinText(%d) renders %d rows, want %d", n, got, n)
 		}
