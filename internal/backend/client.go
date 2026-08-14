@@ -45,6 +45,7 @@ type Client struct {
 	onRetry  func(RetryInfo)
 	onTask   func(TaskTraceInfo)
 	onCost   func(CostEvent)
+	routing  func() Routing
 	// streamIdleTimeout overrides sseIdleTimeout for the respond stream's idle
 	// watchdog. Zero selects the default; tests shrink it to exercise the abort.
 	streamIdleTimeout time.Duration
@@ -88,6 +89,12 @@ type ClientConfig struct {
 	// turn. One hook at the layer every call passes through is the only way to count
 	// all of it without every future caller remembering to.
 	OnCost func(CostEvent)
+	// RoutingPreference, if set, is read for every request this client makes — turns AND
+	// utility tasks. It lives on the client for the same reason OnCost does: a task
+	// sends the caller's content upstream just as a turn does, and a privacy choice that
+	// covered only the visible path would be the most misleading kind of half-measure.
+	// A zero Routing means "no preference" and omits the block.
+	RoutingPreference func() Routing
 }
 
 // CostEvent is one billed backend REQUEST, reported to ClientConfig.OnCost.
@@ -225,6 +232,7 @@ func NewClient(cfg ClientConfig) *Client {
 		onRetry:  cfg.OnRetry,
 		onTask:   cfg.OnTask,
 		onCost:   cfg.OnCost,
+		routing:  cfg.RoutingPreference,
 	}
 }
 
@@ -267,6 +275,11 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	if req.Client == nil && c.info != (ClientInfo{}) {
 		info := c.info
 		req.Client = &info
+	}
+	// Same single stamping point as RunTask, so turns and tasks cannot end up under
+	// different policies.
+	if req.Routing == nil {
+		req.Routing = c.routingPreference()
 	}
 
 	body, err := json.Marshal(req)
@@ -554,6 +567,9 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 		info := c.info
 		req.Client = &info
 	}
+	if req.Routing == nil {
+		req.Routing = c.routingPreference()
+	}
 	var out RespondResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/respond", req, &out); err != nil {
 		return RespondResponse{}, err
@@ -569,6 +585,14 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 // sends task DATA only; the backend owns the prompt, model, schema, and output
 // mode. Decode TaskResult.Output into the task-specific output struct.
 func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, error) {
+	// Stamp the routing preference HERE rather than at each call site. Tasks are fired
+	// from tools, watchers, the async coordinator and compaction; a per-call-site
+	// convention would be forgotten by the next one added, and the failure mode is
+	// silent — the content still goes upstream, just under a weaker policy than the
+	// user asked for.
+	if req.Routing == nil {
+		req.Routing = c.routingPreference()
+	}
 	start := time.Now()
 	var out TaskResult
 	err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/tasks", req, &out)
@@ -612,6 +636,20 @@ func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, erro
 // RespondOp is the CostEvent.Op value for a conversation turn. Every other value is a
 // utility task, named by its task id.
 const RespondOp = "respond"
+
+// routingPreference returns the caller's endpoint-routing block, or nil when they
+// expressed none — which omits the block and leaves the server default in force. Sending
+// an empty object instead would be a different statement on the wire.
+func (c *Client) routingPreference() *Routing {
+	if c.routing == nil {
+		return nil
+	}
+	r := c.routing()
+	if r.IsZero() {
+		return nil
+	}
+	return &r
+}
 
 // reportRespondCost emits the turn's spend. A missing `cost` block becomes an event with
 // a nil Amount rather than no event at all: the turn definitely happened and definitely

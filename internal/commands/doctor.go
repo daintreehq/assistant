@@ -131,6 +131,20 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 				"CLI/backend task-id drift — these calls will fail at runtime; update the CLI or backend")
 		}
 
+		// Routing. GATING when the user asked for a non-default policy and the backend
+		// does not accept one: the request still goes upstream, just under a weaker
+		// filter than they chose, and nothing else in the product would ever say so.
+		// That is the failure mode a privacy setting must not have.
+		if r := cfg.Routing; !r.IsDefault() {
+			if caps.Routing.ClientSelectable != nil {
+				push("routing", true, "backend accepts a routing preference — see /routing", "")
+			} else {
+				push("routing", false,
+					"you have configured a non-default routing policy, but this backend does not accept one — the server default applies instead",
+					"Update the backend, or unset DAINTREE_ROUTING_* so the policy in force is the one you expect")
+			}
+		}
+
 		// Cost reporting. Not a failure either way — an older backend simply cannot tell
 		// you what a turn cost — but a tester whose /cost panel is empty deserves to
 		// learn WHY here rather than assume the feature is broken.

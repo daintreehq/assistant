@@ -94,6 +94,19 @@ type AppConfig struct {
 	// tasks). Rollout flag: the backend must carry the matching TurnContext
 	// contract before this is on, so it defaults off.
 	WorkflowIntelligence bool
+
+	// Routing is the caller's endpoint-selection preference, sent to the backend on
+	// every turn. The zero value means "no preference" and is what almost every
+	// install runs: the server default is a no-training privacy floor ranked by
+	// throughput.
+	//
+	// Resolved from TRUSTED env only, never a project .env — the same boundary the
+	// sign-in pair sits behind. A bound repository cannot drop the no-training floor
+	// (the backend sends that unconditionally and does not derive it from this block),
+	// but it COULD pin every request to an endpoint of its choosing, or quietly stop a
+	// user's zero-retention choice from taking effect. Which compliant endpoint sees
+	// someone's source is not a decision a checked-in file should make.
+	Routing backend.Routing
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
@@ -255,6 +268,18 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// the backend is sent (workflow_state would 422 on a backend without the
 	// matching contract).
 	cfg.WorkflowIntelligence = resolveBool(overrides.WorkflowIntelligence, e.trustedOrOwnGet("DAINTREE_WORKFLOW_INTELLIGENCE"))
+
+	// Endpoint routing. Validated HERE so a typo is a startup error naming the valid
+	// choices, rather than a 400 that lands mid-turn after the user has typed a message.
+	cfg.Routing = backend.Routing{
+		Privacy: strings.TrimSpace(e.trustedGet("DAINTREE_ROUTING_PRIVACY")),
+		Sort:    strings.TrimSpace(e.trustedGet("DAINTREE_ROUTING_SORT")),
+		Only:    backend.ParseEndpointList(e.trustedGet("DAINTREE_ROUTING_ONLY")),
+		Ignore:  backend.ParseEndpointList(e.trustedGet("DAINTREE_ROUTING_IGNORE")),
+	}
+	if err := cfg.Routing.Validate(); err != nil {
+		return AppConfig{}, fmt.Errorf("invalid endpoint routing: %w", err)
+	}
 
 	// --- trusted-only settings (NEVER from a loaded .env) ---
 	cfg.Tier = resolveTier(overrides.Tier, e.trustedGet("DAINTREE_ASSISTANT_TIER"))

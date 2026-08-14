@@ -1812,7 +1812,7 @@ func upstreamFailureAdvice(be *backend.Error) string {
 		// fresh sign-in with the same key changes nothing.
 		return "Model unavailable: your OpenRouter key isn't permitted to use this model. Check its model permissions, spend limit and guardrails — signing in again won't help."
 	case backend.CodeUpstreamNoCompliantProvider:
-		return "Model unavailable: no OpenRouter endpoint matched your routing policy. A stricter privacy mode or a narrow endpoint list can empty the pool — relax it and try again."
+		return "Model unavailable: no OpenRouter endpoint matched your routing policy. Run /routing to see it — a stricter privacy mode or a narrow endpoint list can empty the pool, and it is never relaxed automatically to find a route."
 	case backend.CodeUpstreamUnavailable:
 		// Deliberately does NOT say "did not recover while retrying". This code is
 		// retryable, but a turn can reach here without any replay having happened — a

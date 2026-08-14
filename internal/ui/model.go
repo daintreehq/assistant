@@ -300,6 +300,9 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 			// Read once at construction: AUTO_APPROVE is trusted-env only, so it cannot
 			// change while the cockpit runs.
 			AutoApprove: a.Config.AutoApprove,
+			// Same: routing is trusted-env only. Empty for the default policy, which
+			// needs no announcement.
+			Routing: mastheadRouting(a.Config.Routing),
 		},
 		autoApprove: a.Config.AutoApprove,
 	}

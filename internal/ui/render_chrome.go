@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/ui/theme"
 )
@@ -18,11 +19,16 @@ type mastheadParams struct {
 	Logging     bool
 	LogFile     string
 	Destructive bool // a git/system action awaiting confirmation → red tier
-	// AutoApprove raises the confirmation-bypass banner. It is on the masthead AND the
-	// live status line for different reasons: the masthead is the permanent record in
-	// scrollback (so a pasted transcript shows the session was running unattended), the
-	// status line is what the user can actually see right now.
+	// AutoApprove raises the confirmation-bypass banner. Stated ONCE, here — the
+	// masthead is the permanent record in scrollback, so a pasted transcript shows the
+	// session was running unattended, and the flag cannot change mid-session anyway.
 	AutoApprove bool
+	// Routing describes a NON-DEFAULT endpoint-routing policy, or "" for the default.
+	// It belongs in the permanent record because the privacy posture is part of the
+	// trust decision a tester makes before their first message — and because a policy
+	// set in another terminal days ago is otherwise invisible. The default needs no
+	// announcement: it is what every install runs and what capabilities describes.
+	Routing string
 }
 
 // renderMasthead renders the committed masthead. The closing rule
@@ -61,6 +67,13 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 		tierLine += th.Dim().Render(" " + g.Bullet + " " + gloss)
 	}
 	b.WriteString(truncateCells(tierLine, width))
+	if p.Routing != "" {
+		// Below the tier, above the auto-approve warning: same class of fact (what this
+		// session is permitted to do and under what terms), and it must not push the
+		// safety row further from the tier it qualifies.
+		b.WriteByte('\n')
+		b.WriteString(truncateCells(th.Dim().Render("routing "+p.Routing), width))
+	}
 	if p.AutoApprove {
 		// Its OWN row, not appended to the tier line. Appending put the safety text at the
 		// right-hand end, where truncation eats it first — on a narrow terminal the tier
@@ -411,4 +424,41 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// mastheadRouting renders a NON-DEFAULT routing policy as one compact masthead line, or
+// "" when the policy is the server default.
+//
+// Only a deviation is announced. The default posture (no-training privacy, ranked by
+// throughput) is what every install runs and what `/routing` describes in full; stating
+// it on every launch would add a line that is always the same, which is how a masthead
+// stops being read. A deviation is the opposite: it was set somewhere else, possibly
+// days ago, and it changes where the user's source code is sent.
+func mastheadRouting(r backend.Routing) string {
+	if r.IsDefault() {
+		return ""
+	}
+	var parts []string
+	if r.Privacy == backend.PrivacyZDR {
+		parts = append(parts, "zero data retention")
+	}
+	switch r.Sort {
+	case backend.SortPrice:
+		parts = append(parts, "cheapest endpoint")
+	case backend.SortLatency:
+		parts = append(parts, "lowest latency")
+	}
+	if n := len(r.Only); n > 0 {
+		parts = append(parts, "only "+strings.Join(r.Only, ", "))
+	}
+	if n := len(r.Ignore); n > 0 {
+		parts = append(parts, "excluding "+strings.Join(r.Ignore, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	// "requested" is the honest word. We cannot observe the upstream request, so the
+	// masthead cannot claim a mode is IN FORCE — only that this CLI asked for it.
+	// `/routing` says whether the backend even accepts the field.
+	return "requested " + strings.Join(parts, " · ") + "  (/routing)"
 }

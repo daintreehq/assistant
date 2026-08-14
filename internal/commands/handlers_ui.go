@@ -100,6 +100,8 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		return UICommandResult{Handled: true, Title: "Models", Text: modelsText(a)}
 	case "cost":
 		return UICommandResult{Handled: true, Title: "Cost", Text: costText(a)}
+	case "routing":
+		return UICommandResult{Handled: true, Title: "Routing", Text: routingText(ctx, a)}
 	case "auth":
 		return UICommandResult{Handled: true, Title: "Auth", Text: authText(a)}
 	case "login":

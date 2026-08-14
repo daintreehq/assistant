@@ -125,6 +125,9 @@ type RespondRequest struct {
 	Selection       *Selection      `json:"selection,omitempty"`
 	Generation      *Generation     `json:"generation,omitempty"`
 	Client          *ClientInfo     `json:"client,omitempty"`
+	// Routing is the caller's endpoint-selection preference. Omitted by almost every
+	// request, which is what keeps the server default in force. See routing.go.
+	Routing *Routing `json:"routing,omitempty"`
 }
 
 // StartupContext is the stable, cache-friendly Daintree snapshot collected while the
@@ -766,6 +769,13 @@ type TaskRequest struct {
 	RequestID    string         `json:"request_id,omitempty"`
 	Input        map[string]any `json:"input,omitempty"`
 	ResultSchema map[string]any `json:"result_schema,omitempty"` // only terminal_extract_json
+	// Routing carries the SAME endpoint preference a turn sends, and carrying it here is
+	// not a nicety. A task ships the caller's content upstream exactly as a turn does —
+	// terminal tails, conversation transcripts, memories — so a privacy choice honoured
+	// only on /respond would be kept precisely where the user can see it and dropped
+	// everywhere else. Stamped by the client for every task (see Client.RunTask), so a
+	// new task call site cannot forget it.
+	Routing *Routing `json:"routing,omitempty"`
 }
 
 // TaskResult is the typed utility-task response. Output is raw JSON decoded by the
@@ -791,7 +801,13 @@ type Capabilities struct {
 	ServerVersion string           `json:"server_version"`
 	Protocol      ProtocolRange    `json:"protocol"`
 	Respond       RespondCapsBlock `json:"respond"`
-	Skills        struct {
+	// Routing reports the ACTIVE endpoint-routing posture and the values a client may
+	// select. The description is served rather than composed locally so a client
+	// cannot invent its own privacy wording — the difference between "does not train
+	// on" and "does not store" is a claim about the user's data, and only one of them
+	// is true under the default mode.
+	Routing RoutingCapsBlock `json:"routing"`
+	Skills  struct {
 		CatalogRevision string `json:"catalog_revision"`
 		ManualResolve   bool   `json:"manual_resolve"`
 	} `json:"skills"`
@@ -800,6 +816,25 @@ type Capabilities struct {
 		RequestBytes int `json:"request_bytes"`
 		Tools        int `json:"tools"`
 	} `json:"limits"`
+}
+
+// RoutingCapsBlock is the backend's advertised routing posture.
+type RoutingCapsBlock struct {
+	PrivacyMode        string `json:"privacy_mode"`
+	PrivacyDescription string `json:"privacy_description"`
+	Sort               string `json:"sort"`
+	// ClientSelectable is absent on a backend that does not accept a `routing` block,
+	// which is how the CLI knows not to send one.
+	ClientSelectable *RoutingSelectable `json:"client_selectable"`
+}
+
+// RoutingSelectable enumerates what a client may choose.
+type RoutingSelectable struct {
+	Field         string   `json:"field"`
+	Privacy       []string `json:"privacy"`
+	Sort          []string `json:"sort"`
+	EndpointLists []string `json:"endpoint_lists"`
+	MaxEndpoints  int      `json:"max_endpoints"`
 }
 
 // ProtocolRange is the inclusive supported protocol-version range.

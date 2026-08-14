@@ -80,6 +80,13 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backen
 			debuglog.LogDebug(dbg, "backend.task", fields)
 		}
 	}
+	// The routing preference rides the same seam: read live so a future runtime change
+	// reaches the next request, and applied by the client to turns AND utility tasks
+	// alike — a privacy choice honoured only on the visible path would be worse than
+	// none. Captured from the config passed in rather than off the App, so the sign-in
+	// probe (which passes no ledger either) stays a plain unconfigured client.
+	routing := cfg.Routing
+	clientCfg.RoutingPreference = func() backend.Routing { return routing }
 	// One hook, at the only layer every billed call passes through. The ledger outlives
 	// the client on purpose: a /login swap rebuilds the client mid-session, and a total
 	// that reset itself when the endpoint changed would quietly forget everything spent

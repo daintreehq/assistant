@@ -31,6 +31,10 @@ func isolatedHome(t *testing.T) string {
 		// real endpoint/key into every config test's expectations.
 		"DAINTREE_BACKEND_URL", "DAINTREE_API_KEY",
 		"DAINTREE_LARGE_MODEL", "DAINTREE_MEDIUM_MODEL", "DAINTREE_SMALL_MODEL",
+		// Routing is VALIDATED at load, so an ambient invalid value here would fail
+		// every unrelated config test with a message about endpoint routing.
+		"DAINTREE_ROUTING_PRIVACY", "DAINTREE_ROUTING_SORT",
+		"DAINTREE_ROUTING_ONLY", "DAINTREE_ROUTING_IGNORE",
 	} {
 		os.Unsetenv(k)
 	}
@@ -556,5 +560,57 @@ func TestLoadConfig_TraversalProjectIdStaysInsideRoot(t *testing.T) {
 	}
 	if strings.Contains(cfg.StateDir, "..") {
 		t.Errorf("stateDir = %q contains traversal", cfg.StateDir)
+	}
+}
+
+// Routing is resolved from TRUSTED env only. A bound repository cannot drop the
+// no-training floor (the backend sends that unconditionally), but a project .env able to
+// set these could pin every request to an endpoint of its choosing, or quietly cancel a
+// user's zero-retention choice — so the project .env must not be a source at all.
+func TestRoutingIsTrustedEnvOnly(t *testing.T) {
+	isolatedHome(t)
+	dir := t.TempDir()
+
+	// A project .env asking for a policy: must be ignored entirely.
+	envBody := "DAINTREE_ROUTING_PRIVACY=zdr\nDAINTREE_ROUTING_SORT=price\nDAINTREE_ROUTING_ONLY=someendpoint\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(envBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(ConfigOverrides{ProjectPath: &dir})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Routing.IsZero() {
+		t.Errorf("a project .env set the routing policy: %+v", cfg.Routing)
+	}
+
+	// The real environment IS a source.
+	t.Setenv("DAINTREE_ROUTING_PRIVACY", "zdr")
+	t.Setenv("DAINTREE_ROUTING_SORT", "price")
+	t.Setenv("DAINTREE_ROUTING_ONLY", "deepinfra, together-ai")
+	cfg, err = LoadConfig(ConfigOverrides{ProjectPath: &dir})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Routing.Privacy != "zdr" || cfg.Routing.Sort != "price" {
+		t.Errorf("trusted env was ignored: %+v", cfg.Routing)
+	}
+	if len(cfg.Routing.Only) != 2 || cfg.Routing.Only[0] != "deepinfra" {
+		t.Errorf("endpoint list not parsed: %+v", cfg.Routing.Only)
+	}
+}
+
+// A mistyped value must fail at STARTUP naming the valid choices. The alternative is a
+// 400 that lands mid-turn, after the user has typed a message and waited for it.
+func TestInvalidRoutingFailsAtStartup(t *testing.T) {
+	isolatedHome(t)
+	dir := t.TempDir()
+	t.Setenv("DAINTREE_ROUTING_SORT", "cheapest")
+	_, err := LoadConfig(ConfigOverrides{ProjectPath: &dir})
+	if err == nil {
+		t.Fatal("an invalid routing sort was accepted")
+	}
+	if !strings.Contains(err.Error(), "throughput") {
+		t.Errorf("error %q does not name the valid choices", err)
 	}
 }

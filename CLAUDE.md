@@ -452,6 +452,12 @@ project `.env`; both normally come from `daintree-assistant login` instead. Over
 URL keeps the stored key, so a local backend needs only `DAINTREE_BACKEND_URL`) ·
 `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
+`DAINTREE_ROUTING_PRIVACY` / `DAINTREE_ROUTING_SORT` / `DAINTREE_ROUTING_ONLY` /
+`DAINTREE_ROUTING_IGNORE` (endpoint routing — trusted-env ONLY, never a project `.env`:
+they decide how strictly the privacy filter is applied and which endpoints see the
+user's source. Closed set, validated at startup so a typo fails there rather than as a
+mid-turn 400; `/routing` shows the active posture using the BACKEND's own privacy
+wording) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the

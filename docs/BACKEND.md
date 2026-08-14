@@ -244,6 +244,56 @@ The Go client mirrors it in `internal/backend`:
   [RUNTIME.md](RUNTIME.md#model-errors-rate-limit-backend-down-unavailable) for how it
   layers with the backend's own provider retries and the MCP read retries.
 
+### Endpoint routing
+
+The backend picks which OpenRouter endpoint serves a request. Two of those decisions are
+legitimately the CALLER's, since the key and the bill are theirs, so `/v1/daintree/respond`
+accepts an optional `routing` block:
+
+```jsonc
+"routing": {
+  "privacy": "no_training",   // "no_training" (default) | "zdr"
+  "sort":    "throughput",    // "throughput" (default) | "price" | "latency"
+  "only":    ["deepinfra"],   // optional endpoint allowlist (≤24 slugs)
+  "ignore":  ["some-slow-one"]
+}
+```
+
+A **closed set, not a pass-through** — an arbitrary provider block would let a client drop
+the no-training floor or pin an endpoint that ignores `response_format`, each failing as
+an inscrutable upstream error rather than a validation one. The CLI validates the same
+closed set locally (`internal/backend/routing.go`), so a mistyped `DAINTREE_ROUTING_SORT`
+fails at startup naming the valid choices instead of 400-ing mid-turn.
+
+Two things a caller cannot do, by the backend's design: **weaken privacy** (the
+no-training filter is sent unconditionally and is not derived from this block; `zdr` is
+additive), and **guarantee a route** (a strict mode plus a narrow allowlist can empty the
+pool, which fails closed as `upstream_no_compliant_provider` rather than quietly relaxing
+the filter).
+
+Config is **trusted-env only** — never a project `.env`, the same boundary the sign-in
+pair sits behind. A bound repository cannot drop the no-training floor (the backend sends
+that unconditionally), but it could pin every request to an endpoint of its choosing, or
+quietly cancel a user's zero-retention choice. Which compliant endpoint sees someone's
+source is not a decision a checked-in file should make.
+
+The preference is stamped by the CLIENT (`internal/backend/client.go`), so it rides
+**both** `/respond` and `/tasks`. A task ships the caller's content upstream exactly as a
+turn does — terminal tails, transcripts, memories — so a privacy choice honoured only on
+the visible path would be the most misleading kind of half-measure.
+
+The CLI cannot observe the upstream request, so it never claims a mode is *in force*: the
+masthead says "requested", and `/routing` and `/doctor` report whether the backend accepts
+the field at all. A configured non-default policy against a backend that does not accept
+one is a **failing** `/doctor` row, not a silent downgrade.
+
+The privacy **wording** is served, never composed locally: `capabilities.routing.
+privacy_description`. OpenRouter models "does not collect or train on" and "does not
+retain" as two separate filters, and only the first holds under the default — a client
+that summarised in its own words would eventually write "does not store", which would be
+false. `/routing` renders the served sentence; the masthead announces only a
+NON-DEFAULT policy, since the default is what every install runs.
+
 ### Cost reporting
 
 Every upstream call is funded by the caller's own OpenRouter key, so what a request cost
