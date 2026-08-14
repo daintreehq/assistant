@@ -513,13 +513,6 @@ func (m *Model) addSeverityNote(level NoteLevel, sev domain.Severity, text strin
 	m.appendNote(NoteCell{Level: level, Severity: sev, Text: text})
 }
 
-// addMutedNote appends a standalone NoteCell whose BODY renders dim (the spine and
-// glyph keep their level tone). For lifecycle markers that fire often enough that
-// full-weight body text would read as noise beside the turn's own prose.
-func (m *Model) addMutedNote(level NoteLevel, text string) {
-	m.appendNote(NoteCell{Level: level, Text: text, Muted: true})
-}
-
 // appendNote stamps the identity fields every standalone note shares and appends the
 // cell — the single place a NoteCell enters the transcript, so the id/timestamp
 // contract can't drift between the note constructors.

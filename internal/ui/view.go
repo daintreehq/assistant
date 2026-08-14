@@ -460,7 +460,38 @@ func (m Model) composerView(w int) string {
 		Attention:   m.attentionN > 0,
 		Placeholder: "Ask Daintree…  ·  / for commands",
 		MCPStatus:   mcpStatus,
+		Cost:        m.sessionCostLine(),
 	})
+}
+
+// sessionCostLine renders the session-spend row above the composer, or "" before
+// anything has been billed (a session that has spent nothing has nothing to say).
+//
+// It reads the REAL ledger rather than a UI-side running sum, because the ledger is the
+// only thing that sees the whole bill: utility tasks — summarize, extract,
+// watcher-classify — fire from tools and background supervision without ever producing a
+// turn event, and a busy session runs dozens of them. It also knows when the total is a
+// LOWER BOUND, which a bare float cannot express and which this line must not hide.
+func (m *Model) sessionCostLine() string {
+	if m.app == nil {
+		return ""
+	}
+	s := m.app.CostLedger.Snapshot()
+	if s.Calls == 0 {
+		return ""
+	}
+	// Nothing reported at all (an older backend): stay silent rather than show a "$0.00"
+	// that would read as "this has been free".
+	if s.Unreported == s.Calls {
+		return ""
+	}
+	// No label: the figure sits at the right edge of the connection row, where a leading
+	// "session" would spend cells on something the "$" already implies. `/cost` is the
+	// surface that explains it.
+	if s.LowerBound {
+		return "≥ " + formatCost(s.Observed)
+	}
+	return formatCost(s.Observed)
 }
 
 // statusView renders the compact ≤56-cell status rollup (renders "" when idle with

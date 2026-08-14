@@ -166,13 +166,8 @@ type NoteCell struct {
 	// rather than the coarse level glyph plus a duplicate baked into Text. Empty for
 	// ordinary notes (log lines, "Turn cancelled"), which fall back to the level glyph.
 	Severity domain.Severity
-	// Muted renders the note BODY at reduced weight (dim) while keeping the
-	// level-derived spine + glyph. Presentation only — it never changes Level
-	// semantics. For high-frequency lifecycle markers (the end-of-turn cue) that
-	// must be legible without competing with the turn's own prose.
-	Muted bool
-	Text  string
-	Ts    int64
+	Text     string
+	Ts       int64
 }
 
 // CommandCell is the result of a slash command rendered into the transcript.

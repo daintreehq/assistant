@@ -19,6 +19,11 @@ type ViewParams struct {
 	ContextHint string // right-aligned session summary
 	Placeholder string // shown when the buffer is empty
 	MCPStatus   MCPStatus
+	// Cost is the pre-rendered session-spend figure ("$0.0123" / "≥ $0.0123"), shown
+	// right-aligned on the MCP row, or "" to omit it. Pre-rendered by the caller because
+	// the honest phrasing depends on the ledger's lower-bound state, which the composer
+	// has no business knowing about.
+	Cost string
 }
 
 type MCPStatus int
@@ -395,20 +400,54 @@ func (m *Model) renderHints(p ViewParams) string {
 		row.WriteString(m.theme.Info().Render(h.Key))
 		row.WriteString(m.theme.Dim().Render(" " + h.Action))
 	}
-	if p.MCPStatus != MCPHidden {
-		row.WriteString(sep)
-		dot := g.Async
-		label := " MCP"
-		switch p.MCPStatus {
-		case MCPConnected:
-			row.WriteString(m.theme.Body().Foreground(m.theme.Color.Accent).Render(dot + label))
-		case MCPDegraded:
-			row.WriteString(m.theme.Danger().Render(dot + label))
-		default:
-			row.WriteString(m.theme.Warning().Render(dot + label))
+	out := truncateCells(row.String(), p.Width)
+
+	// The connection light gets its OWN row rather than riding the end of the key hints,
+	// where it was the first thing truncation ate on a narrow pane — and it is the one
+	// fact down here that is not about keyboard shortcuts: whether the assistant can act
+	// at all.
+	//
+	// The session bill shares that row, pushed RIGHT. It belongs beside the connection
+	// state (both are "what is true right now" rather than "what you can press") and it
+	// is a number, which reads better against a hard edge than trailing a label. A third
+	// row for one short figure would spend more of a cramped band than it is worth.
+	if p.MCPStatus != MCPHidden || p.Cost != "" {
+		var left string
+		if p.MCPStatus != MCPHidden {
+			dot := g.Async
+			label := " MCP"
+			switch p.MCPStatus {
+			case MCPConnected:
+				left = m.theme.Body().Foreground(m.theme.Color.Accent).Render(dot + label)
+			case MCPDegraded:
+				left = m.theme.Danger().Render(dot + label)
+			default:
+				left = m.theme.Warning().Render(dot + label)
+			}
 		}
+		out += "\n" + m.statusRow(left, p.Cost, p.Width)
 	}
-	return truncateCells(row.String(), p.Width)
+	return out
+}
+
+// statusRow lays out one row with `left` anchored and `right` pushed to the far edge.
+//
+// Right-alignment is measured in CELLS, not bytes: both sides carry SGR sequences and
+// may hold wide runes, so len() would misplace the gap by however many escape bytes the
+// theme emitted. When the two cannot both fit, the right side is dropped rather than
+// wrapped or squeezed — the left side is the connection state, which is the more
+// important of the two on a pane too narrow for both.
+func (m *Model) statusRow(left, right string, width int) string {
+	if right == "" {
+		return truncateCells(left, width)
+	}
+	styledRight := m.theme.Dim().Render(right)
+	lw, rw := ansi.StringWidth(left), ansi.StringWidth(styledRight)
+	// One space minimum between them, or they read as a single token.
+	if lw+rw+1 > width {
+		return truncateCells(left, width)
+	}
+	return left + strings.Repeat(" ", width-lw-rw) + styledRight
 }
 
 // padCells right-pads s with spaces to at least w cells (cell-measured).

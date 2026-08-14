@@ -229,28 +229,15 @@ func renderStatusLine(th theme.Theme, p statusParams, width int) string {
 	}
 	var segs []string
 
-	// FIRST, before everything, and never suppressed. This is the one piece of status
-	// that changes what the assistant may do to the user's machine WITHOUT asking, and it
-	// is invisible from every other surface — it comes from an env var set in another
-	// terminal, possibly days ago. The status line is otherwise a rollup that speaks only
-	// when it has something to say; this always has something to say.
-	if p.AutoApprove {
-		// Abbreviate rather than truncate. The full label is 14 cells, so a narrow pane
-		// would cut it to "AUTO-APPRO…" or worse — and a half-rendered safety warning is
-		// arguably worse than none, because it reads as a glitch. Below the threshold the
-		// alert glyph alone survives, which is at least unambiguous once you know to look
-		// for it. A narrow terminal must never be the way this warning disappears.
-		label := g.Alert + " AUTO-APPROVE"
-		switch {
-		case cap >= cellWidth(label):
-			segs = append(segs, th.Danger().Render(label))
-		case cap >= cellWidth(g.Alert+" AUTO"):
-			segs = append(segs, th.Danger().Render(g.Alert+" AUTO"))
-		default:
-			segs = append(segs, th.Danger().Render(g.Alert))
-		}
-	}
-
+	// AUTO-APPROVE is stated ONCE, in the masthead, and deliberately not repeated here.
+	//
+	// It used to appear in both places on the theory that a scrolled-away masthead
+	// leaves no warning. But the flag comes from an env var read at process start and
+	// cannot change mid-session, so the masthead's statement is permanently accurate —
+	// and a warning repeated on every frame beside the composer stops being read, which
+	// costs more than the scrollback risk it was insuring against. `/status` and
+	// `/permissions` both still report it on demand.
+	//
 	// Legacy/general callers may still supply degraded MCP state here. The cockpit's
 	// primary path uses compact composer status plus the prominent warning in view.go.
 	if p.Degraded {
@@ -383,14 +370,7 @@ func renderNoteCell(th theme.Theme, n *NoteCell, width int) string {
 	// Tone the │ continuation spine with the note tone (green info / red error)
 	// instead of flat muted gray — matches the greenish MCP-connected row.
 	cont := styleFor(th, tone, g.Continuation)
-	// A muted note keeps the toned spine + glyph (so it still reads as part of the note
-	// family) but drops the body to DIM — the end-of-turn cue fires on most callless
-	// turns, and at full body weight it would compete with the prose it follows.
-	body := th.Body().Render(n.Text)
-	if n.Muted {
-		body = th.Dim().Render(n.Text)
-	}
-	return truncateCells(cont+styleFor(th, tone, glyph)+" "+body, width)
+	return truncateCells(cont+styleFor(th, tone, glyph)+" "+th.Body().Render(n.Text), width)
 }
 
 // renderCommandCell renders a slash-command result into the transcript.
