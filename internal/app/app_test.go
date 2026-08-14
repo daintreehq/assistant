@@ -98,8 +98,12 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// model round (~16k tokens), and inventory size measurably degrades tool-selection
 	// accuracy, so a family that quietly grows must be a conscious decision.
 	got := len(a.Registry.List())
-	if got != 79 {
-		t.Errorf("registered tools = %d, want 79", got)
+	// 80 since forge.getChecks (issue #330). A deliberate add: it replaces the ONE common
+	// read that had no typed wrapper, so the model stopped being pushed onto the
+	// system-tier, confirmation-gated daintree.call path on nearly every turn of a CI
+	// fix-and-verify loop.
+	if got != 80 {
+		t.Errorf("registered tools = %d, want 80", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.

@@ -19,6 +19,7 @@ func Tools(deps Deps) []*tools.Tool {
 		newForgeGetIssueTool(),
 		newForgeListPRsTool(),
 		newForgeGetPRTool(),
+		newForgeGetChecksTool(),
 
 		newGitGetProjectPulseTool(),
 

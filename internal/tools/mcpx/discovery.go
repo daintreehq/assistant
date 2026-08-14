@@ -257,6 +257,11 @@ var wrappedMCPTools = map[string]string{
 	"workflow.startWorkOnIssue":    "workflow.startWorkOnIssue (typed wrapper — pass arguments; it also attaches a supervisor watcher)",
 	"workflow.prepBranchForReview": "workflow.prepBranchForReview (typed wrapper — pass arguments)",
 	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
+	// The most-asked question in a CI fix-and-verify loop. Until forge.getChecks existed
+	// this was the one common read with no wrapper, so the base prompt's "prefer the
+	// typed wrapper" rule pointed the model at this confirmation-gated escape hatch on
+	// nearly every turn — and two skills grew prose documenting the exception.
+	"forge.getCIStatus": "forge.getChecks (typed wrapper — pass prNumber; it also flags the null-vs-no-checks and required-only-counts traps)",
 }
 
 // denylistLookup is wrappedMCPTools re-keyed on the lowercased name so the

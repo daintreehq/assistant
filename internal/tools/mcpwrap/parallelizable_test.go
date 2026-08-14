@@ -20,6 +20,7 @@ func TestForgeReadsParallelizable(t *testing.T) {
 		tool  *tools.Tool
 	}{
 		{"forge.getPR", newForgeGetPRTool()},
+		{"forge.getChecks", newForgeGetChecksTool()},
 		{"forge.getIssue", newForgeGetIssueTool()},
 		{"forge.listPRs", newForgeListPRsTool()},
 		{"worktree.list", newWorktreeListTool()},

@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 86 tools in 24 groups
+## Inventory — 87 tools in 24 groups
 
 ### `agentTask.*`
 
@@ -98,6 +98,7 @@ already drifted out of agreement with each other and with the binary.
 | `forge.getIssue` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Fetch ONE GitHub issue's detail through Daintree's forge integration |
 | `forge.listPRs` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List the project's GitHub pull requests through Daintree's forge integration |
 | `forge.getPR` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get a single forge (GitHub) pull request by number |
+| `forge.getChecks` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a pull request's CI check state by PR number |
 
 ### `fs.*`
 
