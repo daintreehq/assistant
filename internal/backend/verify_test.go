@@ -508,3 +508,177 @@ func TestProxyIsBypassedForEverySpellingClassifiedAsLocal(t *testing.T) {
 		t.Error("a remote endpoint must still use the configured proxy")
 	}
 }
+
+// `usable` answers a different question from `valid`, and the CLI must prefer the
+// backend's own answer while still working against a deployment that predates the field.
+// The absent case is the one that bites: `usable` is a pointer because decoding a
+// missing field as `false` would tell every user of an older backend that their working
+// key has no credit.
+func TestKeyVerificationIsUsable(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	b := func(v bool) *bool { return &v }
+
+	cases := []struct {
+		name string
+		v    KeyVerification
+		want bool
+	}{
+		{"backend says usable", KeyVerification{Valid: true, Usable: b(true), Reason: "ok"}, true},
+		{"backend says exhausted", KeyVerification{Valid: true, Usable: b(false), Reason: "credits_exhausted"}, false},
+		// The server's verdict wins over our own arithmetic: it judges conservatively and
+		// knows things about the account shape that a bare number does not.
+		{"backend verdict beats a stale limit", KeyVerification{Valid: true, Usable: b(true), LimitRemaining: f(0)}, true},
+		{"backend verdict beats a healthy limit", KeyVerification{Valid: true, Usable: b(false), LimitRemaining: f(99)}, false},
+
+		// Older backend: fall back to the limit, and treat "not reported" as fine — an
+		// unlimited or pay-as-you-go key reports no limit at all.
+		{"older backend, credit left", KeyVerification{Valid: true, LimitRemaining: f(1.5)}, true},
+		{"older backend, spent", KeyVerification{Valid: true, LimitRemaining: f(0)}, false},
+		{"older backend, negative", KeyVerification{Valid: true, LimitRemaining: f(-2)}, false},
+		{"older backend, no limit reported", KeyVerification{Valid: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.v.IsUsable(); got != tc.want {
+				t.Errorf("IsUsable() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Narrowing IsAuth() to exclude the provider-account codes opened a hole here: those
+// codes stopped matching the hard-failure branch and would have fallen into the soft
+// "could not confirm" branch, which PERSISTS the sign-in. Persisting a key the provider
+// has just told us is unusable is precisely what verification exists to prevent.
+//
+// The route is contracted to report a rejection as 200 {"valid": false} instead, so this
+// is defence against the contract moving rather than a live path — which is exactly why
+// it needs a test: nothing else would notice.
+func TestCheckSignInTreatsProviderAccountErrorsAsVerdicts(t *testing.T) {
+	cases := []struct {
+		name      string
+		code      string
+		status    int
+		wantErr   bool
+		wantWarn  bool
+		wantInErr string
+	}{
+		{"revoked key is a hard failure", CodeProviderInvalidAPIKey, 401, true, false, "does not recognise this key"},
+		{"forbidden key is a hard failure", CodeProviderKeyForbidden, 403, true, false, "will not let this key use this model"},
+		// Fixable, so it warns and persists — the same treatment a `usable:false`
+		// verdict gets, and for the same reason.
+		{"no credit warns and persists", CodeProviderInsufficientCredit, 402, false, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/auth/verify") {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, `{"error":{"type":"authentication_error","code":"`+tc.code+`","message":"nope"}}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"server_version":"1","protocol":{"min":2,"max":2}}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 1}})
+			_, warning, err := CheckSignIn(context.Background(), c)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%s was accepted — an unusable key would have been persisted", tc.code)
+				}
+				if !errors.Is(err, ErrKeyRejected) {
+					t.Errorf("error is %v, want it to wrap ErrKeyRejected so sign-in renders it as a key verdict", err)
+				}
+				// The precise reason must survive the wrap. Both sign-in surfaces
+				// recover it exactly this way to say WHICH account problem it was;
+				// wrapping only the sentinel would silently re-generalise the verdict
+				// one line after computing it.
+				var berr *Error
+				if !errors.As(err, &berr) {
+					t.Fatalf("the underlying *backend.Error did not survive wrapping: %v", err)
+				}
+				if tc.wantInErr != "" && !strings.Contains(berr.ProviderAccountReason(), tc.wantInErr) {
+					t.Errorf("reason %q does not name the specific problem (%q)", berr.ProviderAccountReason(), tc.wantInErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected hard failure: %v", err)
+			}
+			if tc.wantWarn && warning == "" {
+				t.Error("persisted with no warning — the user gets no hint that turns will fail")
+			}
+		})
+	}
+}
+
+// `Usable` must decode through the REAL response path, not just as a struct literal.
+// The pointer exists to keep "absent" distinct from "false", and that distinction only
+// holds if the JSON tag and type survive — a plain bool here would silently declare
+// every key on an older deployment unusable, and a literal-only test cannot see it.
+func TestVerifyKeyDecodesUsableAndReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantUsable *bool
+		wantReason string
+		wantIsable bool
+	}{
+		{
+			name:       "usable true",
+			body:       `{"valid":true,"usable":true,"reason":"ok","detail":"fine"}`,
+			wantUsable: boolPtrForTest(true),
+			wantReason: "ok",
+			wantIsable: true,
+		},
+		{
+			// The case a plain bool cannot distinguish from the one below it.
+			name:       "explicitly unusable",
+			body:       `{"valid":true,"usable":false,"reason":"credits_exhausted","detail":"empty"}`,
+			wantUsable: boolPtrForTest(false),
+			wantReason: "credits_exhausted",
+			wantIsable: false,
+		},
+		{
+			name:       "older backend omits both",
+			body:       `{"valid":true,"detail":"fine"}`,
+			wantUsable: nil,
+			wantReason: "",
+			wantIsable: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+
+			v, err := NewClient(ClientConfig{BaseURL: srv.URL}).VerifyKey(context.Background())
+			if err != nil {
+				t.Fatalf("VerifyKey: %v", err)
+			}
+			switch {
+			case tc.wantUsable == nil && v.Usable != nil:
+				t.Errorf("Usable = %v, want nil (absent must not decode as false)", *v.Usable)
+			case tc.wantUsable != nil && v.Usable == nil:
+				t.Errorf("Usable = nil, want %v", *tc.wantUsable)
+			case tc.wantUsable != nil && *v.Usable != *tc.wantUsable:
+				t.Errorf("Usable = %v, want %v", *v.Usable, *tc.wantUsable)
+			}
+			if v.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", v.Reason, tc.wantReason)
+			}
+			if got := v.IsUsable(); got != tc.wantIsable {
+				t.Errorf("IsUsable() = %v, want %v", got, tc.wantIsable)
+			}
+		})
+	}
+}
+
+func boolPtrForTest(b bool) *bool { return &b }

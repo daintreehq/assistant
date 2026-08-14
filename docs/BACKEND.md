@@ -52,13 +52,20 @@ length). That gives two deliberately distinct failures:
 | condition | response | CLI predicate | meaning |
 |---|---|---|---|
 | missing / malformed bearer | `401 invalid_api_key` | `Error.IsAuth()` | fix your header — sign in again |
-| well-formed key the provider rejects | `502 upstream_error` | `Error.IsUpstreamAuth()` | fix your account — bad, revoked, or unfunded key |
+| well-formed key the provider rejects | `401 provider_invalid_api_key` | `Error.IsUpstreamAuth()` | fix your account — bad or revoked key |
+
+Note the two 401s. They mean opposite things and are separated by **code**, never by
+status: `IsAuth()` deliberately excludes the provider codes, because telling someone
+whose key the provider revoked to "check you pasted it in full" sends them round a
+re-entry loop that cannot work. See the upstream taxonomy below.
 
 Because validation is structural, `/v1/daintree/capabilities` answers **200 for any
 well-formed string**. That is why sign-in also calls:
 
 ```
-POST /v1/daintree/auth/verify   →  {"valid": true|false, "detail": "...", "label": "...", "limit_remaining": 1.23}
+POST /v1/daintree/auth/verify
+  →  {"valid": true, "usable": true, "reason": "ok", "detail": "...",
+      "label": "...", "limit_remaining": 1.23}
 ```
 
 It asks the provider directly (its key-introspection call — no tokens spent) and is the
@@ -67,6 +74,15 @@ only check that can catch a key that is well-formed but wrong, revoked, or unfun
 answer to the question, and a 401 would tell the client to retry the same header. A
 provider we cannot reach propagates as 502 `upstream_error`, because then we do not
 know — and "could not check" must never be reported as "invalid".
+
+`valid` and `usable` answer different questions — "does the provider recognise this
+credential" versus "can the account behind it fund a turn" — and `reason` (`ok` /
+`provider_rejected` / `credits_exhausted`) is the stable outcome to branch on. A
+recognised key with a spent balance is `valid: true, usable: false`; a client reading
+only `valid` shows a successful sign-in and then fails on the first real request.
+`KeyVerification.Usable` is a `*bool` so a backend that predates the field decodes as
+"not reported" rather than as `false`, with `IsUsable()` falling back to
+`limit_remaining`.
 
 `backend.CheckSignIn` is the shared client-side helper both entry points run, so the
 startup flow and `/login` cannot diverge on what "verified" means. It gates hard on
@@ -227,6 +243,53 @@ The Go client mirrors it in `internal/backend`:
   makes a call one-shot, for `/doctor`'s probes. See
   [RUNTIME.md](RUNTIME.md#model-errors-rate-limit-backend-down-unavailable) for how it
   layers with the backend's own provider retries and the MCP read retries.
+
+### The upstream-failure taxonomy
+
+The backend used to collapse every upstream 401/402/403/404 and every 5xx into one
+`502 upstream_error`. It now names each condition, because they have different fixes and
+only three of them are transient. **`retryable` is server-side and is NOT serialised** —
+the CLI classifies from the code itself, so this table is the contract:
+
+| code | status | retried? | whose problem |
+|---|---|---|---|
+| `provider_invalid_api_key` | 401 | no | your key — replace or rotate it, then `/login` |
+| `provider_insufficient_credits` | 402 | no | your balance — add credit |
+| `provider_key_forbidden` | 403 | no | your key's model permissions / spend limit / guardrails (signing in again cannot help) |
+| `upstream_no_compliant_provider` | 503 | no | your routing policy matched no endpoint |
+| `upstream_rate_limited` | 429 | **yes** | transient (honours `Retry-After`) |
+| `upstream_timeout` | 504 | **yes** | transient |
+| `upstream_unavailable` | 503 | **yes** | transient provider outage |
+| `upstream_request_rejected` | 502 | no | **ours** — report it with the request id |
+| `upstream_protocol_error` | 502 | no | **ours** — report it with the request id |
+| `upstream_error` | 502 | stream only | the pre-split catch-all — still emitted for a stream error the backend could not classify, and by the key-verification path when the provider could not be reached; a genuine "we don't know", which is why the stream form is worth one more attempt while the pre-stream form (an application verdict) is not |
+
+Two rules make this work, and both are easy to get wrong:
+
+1. **Classify on the code, never the status.** The backend emits `meta` before it opens
+   the upstream stream, so most of this taxonomy arrives as a terminal SSE `error` event
+   with `HTTPStatus == 0`. A status-based rule reverses its answer depending only on how
+   far the request got — and a routing dead end (a 503) reads as a transient gateway,
+   burning the entire retry budget to re-derive the same empty endpoint pool.
+2. **Deterministic ≠ our verdict.** `nonRetriableAppCodes` is pre-stream only (it means
+   "the work ran, this is its answer"); `deterministicUpstreamCodes` applies on **both**
+   transports (it means "this will hold identically on every replay").
+
+`internal/agent/session.go`'s `upstreamFailureAdvice` renders a distinct reply for each
+of these codes except `upstream_rate_limited` (caught earlier by `IsRateLimited()`, which
+also raises the health badge) and `upstream_timeout` (which falls through to the generic
+`Model error:` with its detail intact). Every reply starts with a registered
+wake-failure prefix, so an unattended supervisor wake cannot mistake a failed turn for an
+answer. `Error.RequestID` carries the backend's `X-Request-Id` — validated against a
+conservative id alphabet and scrubbed like any other field we did not author, since it is
+rendered into terminal scrollback — stamped from the HTTP error response and from the
+streamed 200's headers for a mid-stream failure, so the two reportable codes produce a
+report someone can act on.
+
+The two reportable codes are grouped by their next step, NOT by their culprit, and the
+copy says so: `upstream_request_rejected` means the provider judged the request Daintree
+built to be malformed (our bug); `upstream_protocol_error` means the provider answered
+with something unparseable (usually a provider or compatibility problem).
 - `tasks.go` — typed helpers for the server-owned utility tasks.
 
 ## Invariants the CLI upholds

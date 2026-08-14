@@ -62,10 +62,32 @@ func CheckSignIn(ctx context.Context, c *Client) (verification KeyVerification, 
 		return KeyVerification{}, "this backend can't check whether the key actually works — a bad key will surface on your first message", nil
 	case err != nil:
 		var berr *Error
-		if errors.As(err, &berr) && berr.IsAuth() {
-			// Our own door rejecting the header at this point means the key is
-			// structurally broken; that IS a definite verdict.
-			return KeyVerification{}, "", fmt.Errorf("the backend rejected the key: %s", berr.Message)
+		if errors.As(err, &berr) {
+			switch {
+			case berr.IsAuth():
+				// Our own door rejecting the header at this point means the key is
+				// structurally broken; that IS a definite verdict.
+				return KeyVerification{}, "", fmt.Errorf("the backend rejected the key: %s", berr.Message)
+			// An empty balance is definite AND fixable, so it takes the same warn-and-
+			// persist path as a `usable:false` verdict below — refusing here would leave
+			// no way to configure the CLI while topping the account up. Listed before
+			// the general account case, which is a hard failure.
+			case berr.Code == CodeProviderInsufficientCredit:
+				return KeyVerification{}, "the provider accepted this key but reports no credit remaining — turns will fail until the account is topped up", nil
+			// The route is contracted to answer a rejection as 200 {"valid": false}
+			// rather than as one of these codes, so reaching here means the contract
+			// moved. Treat it as the definite verdict it is rather than letting it fall
+			// into the soft "could not confirm" branch below — which persists the
+			// sign-in, and would persist a key we were just told is unusable. This is
+			// exactly the failure verification exists to prevent.
+			// Wraps BOTH identities: the sentinel, so every existing "this is a key
+			// verdict, not a connectivity problem" check keeps firing, and the *Error,
+			// so a caller can still reach ProviderAccountReason() and say WHICH of the
+			// three it was. Wrapping only the sentinel would have thrown that away one
+			// line after computing it.
+			case berr.IsProviderAccount():
+				return KeyVerification{}, "", fmt.Errorf("%w: %w", ErrKeyRejected, berr)
+			}
 		}
 		return KeyVerification{}, "could not confirm the key with the provider (" + err.Error() + ")", nil
 	case !v.Valid:
@@ -74,10 +96,28 @@ func CheckSignIn(ctx context.Context, c *Client) (verification KeyVerification, 
 	// just as surely as a wrong one. Warn rather than reject: "recognised but empty" is
 	// a real, fixable state, and refusing the sign-in would leave no way to configure
 	// the CLI while topping the account up.
-	case v.LimitRemaining != nil && *v.LimitRemaining <= 0:
+	case !v.IsUsable():
 		return v, "the provider accepted this key but reports no credit remaining — turns will fail until the account is topped up", nil
 	}
 	return v, "", nil
+}
+
+// IsUsable reports whether the account behind a VALID key can actually fund a turn.
+//
+// The backend answers this directly now (`usable`, with a stable `reason`), and its
+// answer is the one to trust: it judges conservatively — only a positively reported
+// zero-or-negative balance counts as exhausted, so an unlimited or pay-as-you-go key,
+// which reports no limit at all, stays usable.
+//
+// The LimitRemaining fallback is for a backend that predates the field. It cannot simply
+// be deleted in favour of the new one: `usable` is a pointer precisely because absent
+// must not decode as false, and treating "not reported" as "unusable" would warn every
+// user of an older deployment that their working key has no credit.
+func (v KeyVerification) IsUsable() bool {
+	if v.Usable != nil {
+		return *v.Usable
+	}
+	return v.LimitRemaining == nil || *v.LimitRemaining > 0
 }
 
 // ScrubKey removes every occurrence of a secret from text destined for a human.

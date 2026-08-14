@@ -291,6 +291,44 @@ func TestIsRetriableClassification(t *testing.T) {
 		{"oversized line", &Error{Code: "stream_line_too_large", Stream: true}, false},
 		{"oversized event", &Error{Code: "stream_event_too_large", Stream: true}, false},
 		{"nil", nil, false},
+
+		// The split upstream taxonomy. Each deterministic code is asserted on BOTH
+		// transports, because that is precisely where the old classification went wrong:
+		// the same condition arrives with its HTTP status pre-stream and with
+		// HTTPStatus 0 mid-stream (the backend emits `meta` before it opens the upstream
+		// stream), and a status-based rule silently reverses its answer between the two.
+		{"invalid provider key", &Error{HTTPStatus: 401, Code: CodeProviderInvalidAPIKey}, false},
+		{"invalid provider key mid-stream", &Error{Code: CodeProviderInvalidAPIKey, Stream: true}, false},
+		{"no credit", &Error{HTTPStatus: 402, Code: CodeProviderInsufficientCredit}, false},
+		{"no credit mid-stream", &Error{Code: CodeProviderInsufficientCredit, Stream: true}, false},
+		{"key forbidden", &Error{HTTPStatus: 403, Code: CodeProviderKeyForbidden}, false},
+		{"key forbidden mid-stream", &Error{Code: CodeProviderKeyForbidden, Stream: true}, false},
+
+		// A routing dead end is a 503, so the status switch would call it transient and
+		// replay it through the whole budget to re-derive the same empty endpoint pool.
+		{"routing dead end", &Error{HTTPStatus: http.StatusServiceUnavailable, Code: CodeUpstreamNoCompliantProvider}, false},
+		{"routing dead end mid-stream", &Error{Code: CodeUpstreamNoCompliantProvider, Stream: true}, false},
+
+		// Our bug: 502, which the status switch would also replay.
+		{"request rejected", &Error{HTTPStatus: http.StatusBadGateway, Code: CodeUpstreamRequestRejected}, false},
+		{"protocol error", &Error{HTTPStatus: http.StatusBadGateway, Code: CodeUpstreamProtocolError}, false},
+		{"protocol error mid-stream", &Error{Code: CodeUpstreamProtocolError, Stream: true}, false},
+
+		// The transient half of the old `upstream_error` blob must STILL be replayed.
+		// A provider outage arriving mid-stream under its precise new name would
+		// otherwise have quietly stopped being retried the day the backend split the
+		// taxonomy — a regression with no symptom other than more failed turns.
+		{"upstream unavailable", &Error{HTTPStatus: http.StatusServiceUnavailable, Code: CodeUpstreamUnavailable}, true},
+		{"upstream unavailable mid-stream", &Error{Code: CodeUpstreamUnavailable, Stream: true}, true},
+		{"upstream timeout mid-stream", &Error{Code: CodeUpstreamTimeout, Stream: true}, true},
+		{"upstream rate limit mid-stream", &Error{Code: CodeUpstreamRateLimited, Stream: true}, true},
+
+		// The deterministic gate must sit ABOVE IsRateLimited(), which ORs in a bare
+		// `rate_limit_error` type. Without this case, moving the gate below it would
+		// still pass the whole table while quietly making an unfundable account
+		// retryable — the single most expensive misclassification in the set.
+		{"deterministic code wearing a rate-limit type", &Error{Type: "rate_limit_error", Code: CodeProviderInsufficientCredit}, false},
+		{"request rejected mid-stream", &Error{Code: CodeUpstreamRequestRejected, Stream: true}, false},
 	}
 	for _, tc := range cases {
 		if got := isRetriable(tc.err); got != tc.want {

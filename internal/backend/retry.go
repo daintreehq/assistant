@@ -130,8 +130,33 @@ func retriesDisabled(ctx context.Context) bool {
 // to PRE-stream errors only (see isRetriable).
 var nonRetriableAppCodes = map[string]bool{
 	"task_output_invalid": true,
-	"upstream_error":      true,
+	CodeUpstreamError:     true,
 	"internal_error":      true,
+}
+
+// deterministicUpstreamCodes are final on BOTH transports. Unlike the set above, these
+// are not verdicts about work that ran — they are conditions that will hold identically
+// on every replay: a key the provider does not recognise, an account with no credit, a
+// key without permission for this model, a routing policy that matches no endpoint, and
+// the two malformed-exchange codes that mean our own bug.
+//
+// The transport-independence is the point. The backend emits `meta` before it opens the
+// upstream stream, so a deterministic rejection usually arrives as an SSE error with
+// HTTPStatus 0 rather than as an HTTP status at all. Classifying those by status would
+// see a 503-shaped routing dead end as "transient gateway", and the retry loop would sit
+// through the full ~50-75s backoff to re-derive the same empty pool — the user waiting
+// out a budget for an answer that was final the first time.
+//
+// `upstream_unavailable` and `upstream_timeout` are deliberately NOT here: those are the
+// genuinely transient half of the old `upstream_error` blob, and giving up on them would
+// trade one wrong behaviour for another.
+var deterministicUpstreamCodes = map[string]bool{
+	CodeProviderInvalidAPIKey:       true,
+	CodeProviderInsufficientCredit:  true,
+	CodeProviderKeyForbidden:        true,
+	CodeUpstreamNoCompliantProvider: true,
+	CodeUpstreamRequestRejected:     true,
+	CodeUpstreamProtocolError:       true,
 }
 
 // isRetriable reports whether a backend failure is a transient class worth retrying.
@@ -146,6 +171,15 @@ func isRetriable(e *Error) bool {
 	}
 	// Deterministic — retrying cannot help.
 	if e.IsAuth() || e.IsContract() || e.IsProtocolMismatch() {
+		return false
+	}
+	// Deterministic upstream conditions, on either transport. Checked BEFORE everything
+	// below it, because three of those would otherwise misread one of these: the status
+	// switch sees a routing dead end as a transient 503, the stream allowlist sees an
+	// unrecognised key arriving with no status at all, and IsRateLimited() ORs in a
+	// `rate_limit_error` type that a future backend could plausibly attach to one of
+	// these. A code in this set is final; nothing after here should get a say.
+	if deterministicUpstreamCodes[e.Code] {
 		return false
 	}
 	// Never reached the backend (DNS failure, connection refused/reset): safe to retry.
@@ -192,10 +226,17 @@ func isRetriable(e *Error) bool {
 	// stream that died before its meta event. The size-bound protocol errors
 	// (stream_line_too_large / stream_event_too_large) are deliberately NOT here: an
 	// oversized payload would replay identically.
+	// `upstream_unavailable` is in this list because the taxonomy split moved it here:
+	// a provider outage used to arrive as `upstream_error` and be replayed, and would
+	// otherwise have silently stopped being replayed the day the backend started naming
+	// it precisely. `upstream_error` itself survives as the backend's last-resort
+	// mapping for a stream error it could not classify — a real "we don't know", which
+	// is the one case where a replay is worth the attempt.
 	if e.Stream {
 		switch e.Code {
-		case "upstream_error", "upstream_timeout", "upstream_rate_limited", "stream_read",
-			"stream_interrupted", "stream_no_meta", "stream_error", "stream_idle_timeout":
+		case CodeUpstreamError, CodeUpstreamTimeout, CodeUpstreamRateLimited,
+			CodeUpstreamUnavailable, "stream_read", "stream_interrupted",
+			"stream_no_meta", "stream_error", "stream_idle_timeout":
 			return true
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -258,5 +259,60 @@ func TestEnsureSignedInPassesWithAnEnvKey(t *testing.T) {
 
 	if err := ensureSignedIn(context.Background(), config.ConfigOverrides{}, false); err != nil {
 		t.Fatalf("an env key must satisfy the gate: %v", err)
+	}
+}
+
+// The sign-in surfaces render the verdict a user actually reads. `ErrKeyRejected` is
+// matched before the per-code branches further down, so a rejection carrying a precise
+// reason has to be recognised THERE or it gets re-generalised to "check it is active and
+// funded" — advice that covers all three account problems and resolves none of them.
+func TestLoginCheckErrorNamesTheSpecificAccountProblem(t *testing.T) {
+	cases := []struct {
+		name    string
+		code    string
+		want    string
+		notWant string
+	}{
+		{
+			name:    "revoked key",
+			code:    backend.CodeProviderInvalidAPIKey,
+			want:    "does not recognise this key",
+			notWant: "active and funded",
+		},
+		{
+			name: "no credit",
+			code: backend.CodeProviderInsufficientCredit,
+			want: "no credit left",
+		},
+		{
+			name: "not permitted for this model",
+			code: backend.CodeProviderKeyForbidden,
+			want: "model permissions",
+			// The one case where re-entering the same key is guaranteed not to help.
+			notWant: "active and funded",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("%w: %w", backend.ErrKeyRejected, &backend.Error{
+				HTTPStatus: 401, Code: tc.code, Message: "nope",
+			})
+			got := loginCheckError("https://assistant.example", wrapped, "sk-or-v1-test-key").Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("message %q does not contain %q", got, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("message %q still carries the generic advice %q", got, tc.notWant)
+			}
+		})
+	}
+}
+
+// A rejection with no per-code reason — an older backend, or a verdict from the 200
+// {"valid": false} path — must still get the generic advice rather than an empty clause.
+func TestLoginCheckErrorKeepsGenericAdviceWithoutACode(t *testing.T) {
+	got := loginCheckError("https://assistant.example", backend.ErrKeyRejected, "sk-or-v1-test-key").Error()
+	if !strings.Contains(got, "active and funded") {
+		t.Errorf("message %q lost the generic fallback advice", got)
 	}
 }

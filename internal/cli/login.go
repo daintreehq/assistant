@@ -357,7 +357,14 @@ func keyLabelSuffix(v backend.KeyVerification) string {
 func loginCheckError(baseURL string, err error, key string) error {
 	// A definite provider verdict is the actionable case: say so plainly rather than
 	// wrapping it in "could not verify <url>", which reads as a connectivity problem.
+	// When the verdict names WHICH account problem it was, that wins — "check it is
+	// active and funded" covers all three and helps with none, and a rejection carrying
+	// a precise reason must not be re-generalised on the way to the user.
 	if errors.Is(err, backend.ErrKeyRejected) {
+		var berr *backend.Error
+		if errors.As(err, &berr) && berr.ProviderAccountReason() != "" {
+			return fmt.Errorf("%s did not accept this key: the provider %s", baseURL, berr.ProviderAccountReason())
+		}
 		return fmt.Errorf("%s did not accept this key: %v — check it is active and funded", baseURL, err)
 	}
 	// Nothing wrong with the key: the endpoint is missing a capability the release
@@ -374,6 +381,11 @@ func loginCheckError(baseURL string, err error, key string) error {
 		switch {
 		case berr.IsAuth():
 			return fmt.Errorf("%s rejected the key (%s) — check you pasted it in full", baseURL, berr.Code)
+		// Named account problems first: the generic line below covers all three and
+		// helps with none, and the three fixes are mutually exclusive — telling someone
+		// whose balance ran out that their key was rejected gets a good key replaced.
+		case berr.ProviderAccountReason() != "":
+			return fmt.Errorf("%s accepted the key, but the provider %s", baseURL, berr.ProviderAccountReason())
 		case berr.IsUpstreamAuth():
 			return fmt.Errorf("%s accepted the key but the upstream provider rejected it — check the key is active and funded", baseURL)
 		case berr.IsConnect():

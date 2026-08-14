@@ -420,18 +420,37 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	watchdog := newIdleWatchdog(idle, cancelAttempt)
 	defer watchdog.Stop()
 
+	// The request id rides the 200's headers, which parseRespondStream never sees — so
+	// without stamping it here, a mid-stream failure (the COMMON case for an upstream
+	// problem, since the backend emits `meta` before it opens the upstream stream) would
+	// be the one class of failure with no correlation id at all. Read once, before the
+	// early return below, so the idle-timeout path gets it too.
+	requestID := safeRequestID(resp.Header.Get(requestIDHeader))
+
 	result, perr := parseRespondStream(&idleResetReader{r: resp.Body, reset: watchdog.Reset}, cb)
 	if perr != nil && watchdog.Fired() && ctx.Err() == nil {
 		return result, &Error{
-			Code:    "stream_idle_timeout",
-			Message: fmt.Sprintf("stream idle: no bytes from the backend for %s", idle),
-			Stream:  true,
+			Code:      "stream_idle_timeout",
+			Message:   fmt.Sprintf("stream idle: no bytes from the backend for %s", idle),
+			Stream:    true,
+			RequestID: requestID,
 		}
 	}
 	// A terminal SSE `error` event carries an upstream-controlled message that reaches
 	// the turn's error rendering and the debug log; parseRespondStream is a free
 	// function with no access to the key, so the scrub happens here. See scrubError.
-	return result, c.scrubError(perr)
+	return result, c.scrubError(withRequestID(perr, requestID))
+}
+
+// withRequestID stamps a correlation id onto a *Error, leaving any other error (and an
+// already-stamped one) untouched.
+func withRequestID(err error, id string) error {
+	var be *Error
+	if id == "" || !errors.As(err, &be) || be.RequestID != "" {
+		return err
+	}
+	be.RequestID = id
+	return err
 }
 
 // Respond runs a non-streaming generation round (used for tests / simple callers).
@@ -497,6 +516,19 @@ type KeyVerification struct {
 	// "we couldn't check", which surfaces as an error from VerifyKey instead.
 	Valid  bool   `json:"valid"`
 	Detail string `json:"detail"`
+	// Usable answers a DIFFERENT question from Valid: not "does the provider recognise
+	// this credential" but "can the account behind it actually fund a turn". A key with
+	// a spent balance is valid and unusable, and a client reading only Valid shows a
+	// successful sign-in and then fails on the first real request with what looks like
+	// an unrelated error.
+	//
+	// A POINTER because an older backend omits the field entirely, and a plain bool
+	// would decode that absence as `false` — declaring every key on every older
+	// deployment unusable. nil means "not reported"; fall back to LimitRemaining.
+	Usable *bool `json:"usable"`
+	// Reason is the stable machine-readable outcome — `ok`, `provider_rejected`,
+	// `credits_exhausted`. Branch on this, never on Detail, which is prose.
+	Reason string `json:"reason"`
 	// Label is the provider's own name for the key, when it exposes one — useful for
 	// confirming the RIGHT key was pasted, not just a working one.
 	Label string `json:"label"`
@@ -755,13 +787,50 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 func (c *Client) readErrorResponse(resp *http.Response) *Error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+	requestID := safeRequestID(resp.Header.Get(requestIDHeader))
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err == nil && (env.Error.Code != "" || env.Error.Message != "" || env.Error.Type != "") {
-		return c.scrubBackendError(newError(resp.StatusCode, env, retryAfter, false))
+		e := newError(resp.StatusCode, env, retryAfter, false)
+		e.RequestID = requestID
+		return c.scrubBackendError(e)
 	}
 	e := httpError(resp.StatusCode, string(raw))
 	e.RetryAfter = retryAfter
+	e.RequestID = requestID
 	return c.scrubBackendError(e)
+}
+
+// requestIDHeader is the backend's per-request correlation id. It is the only handle a
+// user has on a failure whose real detail lives in the server's log — which is exactly
+// the situation for the codes that mean a bug to report rather than an account or
+// policy problem the caller could fix themselves.
+const requestIDHeader = "X-Request-Id"
+
+// maxRequestIDLen bounds what we will echo. Real ids are ~20 characters.
+const maxRequestIDLen = 128
+
+// safeRequestID accepts only what a correlation id can legitimately be.
+//
+// The value is a header from whatever answered the request — for a custom endpoint or
+// an intercepting proxy, not necessarily our backend — and it is rendered straight into
+// terminal scrollback by the "report this with request id X" advice. The cockpit draws
+// on the NORMAL screen buffer, so an ANSI escape smuggled through here would still be
+// repainting the user's terminal long after the session ended. Anything outside the
+// conservative id alphabet is dropped whole rather than sanitised: a mangled id is
+// useless for correlation anyway, and the advice reads fine without one.
+func safeRequestID(v string) string {
+	if v == "" || len(v) > maxRequestIDLen {
+		return ""
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.', r == ':':
+		default:
+			return ""
+		}
+	}
+	return v
 }
 
 // scrubError removes the API key from any error on its way out of the client.
@@ -806,5 +875,10 @@ func (c *Client) scrubBackendError(e *Error) *Error {
 	e.Param = ScrubKey(e.Param, c.apiKey)
 	e.Code = ScrubKey(e.Code, c.apiKey)
 	e.Type = ScrubKey(e.Type, c.apiKey)
+	// RequestID is header text from whatever answered — which for a custom endpoint or
+	// an intervening proxy is not necessarily the backend. It is rendered verbatim into
+	// terminal scrollback and the debug log by the "report this bug" advice, so it gets
+	// the same treatment as every other field we did not author.
+	e.RequestID = ScrubKey(e.RequestID, c.apiKey)
 	return e
 }

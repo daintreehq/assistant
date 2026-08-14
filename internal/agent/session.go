@@ -1771,10 +1771,73 @@ func (s *Session) classifyBackendError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	if errors.As(err, &be) {
+		if msg := upstreamFailureAdvice(be); msg != "" {
+			s.events.Phase(domain.PhaseFailed)
+			s.events.Error(msg)
+			return msg
+		}
+	}
 	msg := "Model error: " + err.Error()
 	s.events.Phase(domain.PhaseFailed)
 	s.events.Error(msg)
 	return msg
+}
+
+// upstreamFailureAdvice renders the user-facing reply for the backend's upstream-failure
+// taxonomy, or "" when the error is not one of those codes (leaving the generic
+// "Model error:" fallback in place).
+//
+// Every one of these used to arrive as the same 502 `upstream_error` and read as the
+// same "Model error: backend: http 502 upstream_error: …", which is the least useful
+// possible answer to five genuinely different questions. The three account codes in
+// particular are the ones a tester can actually fix — and the fixes are mutually
+// exclusive, so a message that names the wrong one is worse than none: telling someone
+// whose balance ran out to re-enter their key gets a good key replaced.
+//
+// Each returned string starts with a registered WAKE_FAILURE_PREFIX (wake.go). That
+// registration is load-bearing, not bookkeeping: an unregistered prefix would let the
+// supervisor's unattended wake mistake a failed turn for a real answer and record the
+// work as summarized.
+func upstreamFailureAdvice(be *backend.Error) string {
+	switch be.Code {
+	case backend.CodeProviderInvalidAPIKey:
+		return "Model unavailable: OpenRouter rejected your API key. Replace or rotate it, then run /login."
+	case backend.CodeProviderInsufficientCredit:
+		// The most likely failure of the lot, and the easiest to fix — so it gets the
+		// place to go, not just the diagnosis.
+		return "Model unavailable: your OpenRouter account is out of credit. Add credits at https://openrouter.ai/credits, then try again."
+	case backend.CodeProviderKeyForbidden:
+		// Deliberately does NOT suggest /login. The key is recognised and funded; a
+		// fresh sign-in with the same key changes nothing.
+		return "Model unavailable: your OpenRouter key isn't permitted to use this model. Check its model permissions, spend limit and guardrails — signing in again won't help."
+	case backend.CodeUpstreamNoCompliantProvider:
+		return "Model unavailable: no OpenRouter endpoint matched your routing policy. A stricter privacy mode or a narrow endpoint list can empty the pool — relax it and try again."
+	case backend.CodeUpstreamUnavailable:
+		// Deliberately does NOT say "did not recover while retrying". This code is
+		// retryable, but a turn can reach here without any replay having happened — a
+		// one-shot context, an exhausted elapsed budget, or visible tokens already
+		// streamed all skip the retry loop. Asserting a retry we may not have made
+		// would be a small lie in the one message a user reads to decide what to do.
+		return "Model unavailable: OpenRouter is having trouble reaching a provider for this model. Nothing is wrong with your account — try again shortly."
+	}
+	// Both reportable codes carry the same next step and OPPOSITE directions of fault,
+	// so they get the same request id and different sentences. Attributing a provider's
+	// malformed reply to a Daintree bug would send someone hunting through our code for
+	// something that is not there.
+	if be.IsReportable() {
+		var msg string
+		if be.Code == backend.CodeUpstreamRequestRejected {
+			msg = "Model error: OpenRouter rejected the request Daintree built, which is a Daintree bug rather than a problem with your account. Please report it"
+		} else {
+			msg = "Model error: OpenRouter's reply could not be parsed — usually a provider or compatibility problem, not your account. Please report it"
+		}
+		if be.RequestID != "" {
+			msg += " with request id " + be.RequestID
+		}
+		return msg + " (run 'daintree-assistant support-bundle' for redacted diagnostics)."
+	}
+	return ""
 }
 
 // backendAssistantMessage builds the local assistant message for a backend result:
