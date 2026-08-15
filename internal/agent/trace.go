@@ -157,6 +157,12 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 				}
 				runtime["worktree"] = worktree
 			}
+			if d := rc.Display; d != nil {
+				// The width the reply was shaped for. Without it, "why did it draw a table
+				// that wrapped?" is unanswerable from the log — the geometry is the one
+				// input to the output contract that lives entirely on the user's screen.
+				runtime["display"] = map[string]any{"columns": d.Columns, "contentWidth": d.ContentWidth}
+			}
 			if rc.MCP != nil {
 				mcp := map[string]any{"connected": rc.MCP.Connected, "transport": rc.MCP.Transport, "status": rc.MCP.Status}
 				if rc.MCP.ToolCount != nil {

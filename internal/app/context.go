@@ -54,6 +54,14 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 	if project != nil && project.Path == "" {
 		project.Path = cfg.ProjectPath
 	}
+	// The measured geometry is withheld from a backend that does not advertise it: the
+	// runtime block is validated with extra="forbid", so an unknown field 422s the turn
+	// outright. Reported only when the front end measured a terminal AND the backend
+	// said it accepts the block.
+	var display *prompts.DisplayContext
+	if a.backendAcceptsDisplayContext() {
+		display = a.display.Load()
+	}
 	return prompts.MainPromptContext{
 		Tier:                cfg.Tier,
 		ProjectPath:         cfg.ProjectPath,
@@ -67,6 +75,7 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 		MCPToolCount:        st.ToolCount,
 		MCPServers:          a.mcpServerContexts(st),
 		SchedulerActive:     schedulerActive,
+		Display:             display,
 		ProjectInstructions: cfg.ProjectInstructions,
 	}
 }

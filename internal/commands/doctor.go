@@ -105,7 +105,10 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	push("backend ready", rerr == nil, errDetail(rerr, "ready"),
 		"backend is up but not ready (config/secrets/catalog/provider)")
 	cctx, ccancel := context.WithTimeout(ctx, doctorProbeTimeout)
-	caps, cerr := a.Backend.Capabilities(cctx)
+	// Through the App so a successful probe REFRESHES the cached descriptor: if the boot
+	// handshake missed (a slow endpoint, a blip), running /doctor is the natural moment
+	// for capability-gated behaviour to come back, rather than waiting for a relaunch.
+	caps, cerr := a.BackendCapabilities(cctx)
 	ccancel()
 	if cerr == nil {
 		protoOK := caps.Protocol.Min <= backend.ProtocolVersion && caps.Protocol.Max >= backend.ProtocolVersion

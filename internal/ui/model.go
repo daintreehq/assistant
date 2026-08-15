@@ -351,3 +351,23 @@ func (m *Model) composerFocus() bool {
 func (m *Model) gutter() int   { return gutterFor(m.embedded) }
 func (m *Model) chromeW() int  { return chromeWidth(m.columns, m.gutter()) }
 func (m *Model) contentW() int { return contentWidth(m.chromeW()) }
+
+// publishDisplaySize hands the current geometry to the App so the next turn tells the
+// backend how wide the reply will actually be. contentW() — not m.columns — is the
+// honest number: it is the width prose is glamour-wrapped at, so the model is shaping
+// output for the line it really gets. Called on every resize (cheap: one atomic store)
+// and never from the render path.
+func (m *Model) publishDisplaySize() {
+	if m.app == nil {
+		return
+	}
+	// A host that reports zero columns (a detached or repainting PTY) leaves us with
+	// nothing measured. CLEAR rather than return: holding the previous geometry would
+	// keep shaping replies for a window we can no longer see, and "unknown" is the only
+	// claim still true. The next real size republishes.
+	if m.columns <= 0 {
+		m.app.SetDisplaySize(0, 0)
+		return
+	}
+	m.app.SetDisplaySize(m.columns, m.contentW())
+}

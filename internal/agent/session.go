@@ -2149,6 +2149,11 @@ func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminal
 		Worktree:        buildCurrentWorktreeSnapshot(pc.Worktree),
 		OpenTerminals:   openTerminals,
 	}
+	if d := pc.Display; d != nil {
+		// Live like the rest of this block: the cockpit republishes on every resize, so
+		// a window dragged narrower mid-session reaches the very next round.
+		rc.Display = backend.NewDisplayInfo(d.Columns, d.ContentWidth)
+	}
 	if pc.MCPConnected || strings.TrimSpace(pc.MCPStatusLine) != "" {
 		// When connected the backend builds its status line from transport + tool_count
 		// (Status is only consulted when NOT connected), so send all three.

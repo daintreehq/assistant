@@ -413,7 +413,7 @@ with something unparseable (usually a provider or compatibility problem).
   The catalog has a 16 KiB encoded-row budget; any row that does not fit is omitted whole
   while `total_count` retains the discovered total, rather than emitting a truncated,
   unusable agent id. `request.runtime` carries tier, MCP, scheduler, a freshly read typed
-  worktree snapshot, and open terminals. Stable project
+  worktree snapshot, open terminals, and the terminal geometry the reply renders at. Stable project
   and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
   wake, workflow runs, async operations, memories, and session-ended watchers.
 - **The integration surface names its endpoints.** `runtime.mcp_servers` lists every MCP
@@ -444,6 +444,19 @@ with something unparseable (usually a provider or compatibility problem).
   following conversation, but leaves the backend's system prompts and large tool schemas
   cached. Raw `project.getSettings` is never injected because its open-ended values may
   include environment or other sensitive configuration.
+- **The reply's own width is reported.** `runtime.display` carries `{columns,
+  content_width}` in terminal cells: `columns` is the window, `content_width` the narrower
+  measure the assistant's markdown is actually wrapped at (after the cockpit's left inset,
+  the autowrap gutter, and the `ui.ContentMax` prose cap) — the one the backend's response
+  contract is written against. The cockpit republishes on every resize
+  (`App.SetDisplaySize`), so a dragged window lands on the next round. An omitted block
+  means "unmeasured" — a piped one-shot, the stdio host, the headless daemon — and the
+  backend applies its own default width rather than being handed a fabricated 80×24.
+  **Gated on `capabilities.respond.display_context`:** `runtime` is validated with
+  `extra="forbid"`, so a backend that predates the field would 422 the whole turn; the CLI
+  fails closed and withholds the geometry until a handshake advertises support (the
+  descriptor is cached by `App.BackendCapabilities`, cleared and re-fetched on a `/login`
+  endpoint swap). Delete the gate once no such deployment is reachable.
 - **Worktree read state is explicit.** An omitted `runtime.worktree` means the live read was
   unavailable, `{current:null}` means Daintree definitively reports no current worktree,
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.

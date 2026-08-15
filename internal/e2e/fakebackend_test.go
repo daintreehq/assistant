@@ -224,6 +224,10 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 			"system_messages_accepted": false,
 			"max_active_skills":        3,
 			"metadata_transport":       "sse",
+			// Advertise the terminal-geometry contract so the PTY runs exercise the OPEN
+			// gate. A fake that withheld it would leave every end-to-end path testing only
+			// the fail-closed branch, which is the branch that cannot regress.
+			"display_context": true,
 		},
 		"skills": map[string]any{"catalog_revision": "sha256:test", "manual_resolve": false},
 		"tasks": []string{

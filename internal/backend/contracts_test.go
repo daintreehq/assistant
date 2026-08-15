@@ -118,6 +118,51 @@ func TestOpenTerminal_Clamp(t *testing.T) {
 	}
 }
 
+// The geometry serializes under the keys the backend reads, and an unmeasured surface
+// omits the block entirely — the backend distinguishes "no display block" (fall back to
+// its own default width) from a reported one, so a zero-filled block would be a lie.
+func TestDisplayInfo_WireShape(t *testing.T) {
+	b, err := json.Marshal(RuntimeContext{PermissionTier: "operator", Display: NewDisplayInfo(120, 97)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"display":{"columns":120,"content_width":97}`) {
+		t.Fatalf("display wire mismatch: %s", b)
+	}
+
+	absent, err := json.Marshal(RuntimeContext{PermissionTier: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(absent), "display") {
+		t.Fatalf("an unmeasured surface must omit display: %s", absent)
+	}
+}
+
+// NewDisplayInfo is the boundary that keeps a bad measurement off the wire: the backend
+// VALIDATES runtime before it uses it, so an out-of-range width would 422 the whole turn
+// rather than degrade to a default.
+func TestNewDisplayInfoBounds(t *testing.T) {
+	if got := NewDisplayInfo(80, 0); got != nil {
+		t.Errorf("a zero content width means unmeasured, want nil, got %+v", got)
+	}
+	if got := NewDisplayInfo(80, -5); got != nil {
+		t.Errorf("a negative content width must not reach the wire, got %+v", got)
+	}
+	got := NewDisplayInfo(1<<30, 1<<30)
+	if got == nil || got.Columns != displayWidthMax || got.ContentWidth != displayWidthMax {
+		t.Errorf("absurd geometry must clamp to the contract bound, got %+v", got)
+	}
+	// A terminal so narrow only one column remains is still a real, reportable state, so
+	// the CLI reports it: clamping here is for nonsense, not for a genuinely tiny window.
+	// What the server then DOES with a hostile width is its own call (it floors anything
+	// under 20 cells back to its default), and that judgement belongs there, not in a
+	// client that quietly rewrote the measurement first.
+	if got := NewDisplayInfo(1, 1); got == nil || got.ContentWidth != 1 || got.Columns != 1 {
+		t.Errorf("a 1-cell terminal is measurable and must survive, got %+v", got)
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

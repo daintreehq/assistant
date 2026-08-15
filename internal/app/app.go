@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/asyncwork"
@@ -229,6 +230,28 @@ type App struct {
 	startupReady            bool
 	startupGeneration       uint64
 
+	// display is the surface's live render geometry, published by the front end that
+	// owns the terminal — today only the cockpit, which measures at boot and on every
+	// resize. An atomic POINTER, not two counters: the pair must move together, so a
+	// turn building its runtime context reads one coherent geometry rather than a new
+	// column count against a stale content width. It stays nil everywhere the reply is
+	// not wrapped by us (the classic REPL streams raw tokens the host wraps itself, a
+	// piped one-shot, the stdio host, the headless daemon) — the backend is told
+	// "unknown" and picks its own default rather than being handed a fabricated 80x24.
+	display atomic.Pointer[prompts.DisplayContext]
+
+	// backendCaps is the last capability descriptor a backend answered with, cached
+	// because it is fetched once at boot and then read per turn. nil until a handshake
+	// succeeds, and a capability read fails CLOSED (see backendAcceptsDisplayContext).
+	//
+	// It is PINNED TO THE ENDPOINT that answered, because `/login` can swap the delegate
+	// underneath a fetch that is still in flight: a slow boot handshake completing after
+	// a swap would otherwise publish the OLD deployment's answer as if it described the
+	// new one, and a gate opened on that lie sends a field the new backend rejects —
+	// 422ing every subsequent turn, permanently. Readers compare the pin against the live
+	// endpoint, so a mismatched answer is simply not believed.
+	backendCaps atomic.Pointer[backendCapsSnapshot]
+
 	// reconcileLedgerMu/done guard the boot ledger reconcile. `done` is committed only
 	// after terminal.list returned a parseable inventory; launch cancellation or a transient
 	// read failure stays retryable by the normal bootstrap. A completed attempt never reruns.
@@ -250,6 +273,81 @@ func (a *App) SetTier(t domain.Tier) {
 	a.cfgMu.Lock()
 	a.Config.Tier = t
 	a.cfgMu.Unlock()
+}
+
+// SetDisplaySize publishes the front end's live render geometry: `columns` is the
+// terminal, `contentWidth` the measure the assistant's own text is wrapped at (the
+// cockpit's content width, which is narrower than the terminal and capped). Called
+// from the UI's Update loop on every resize while turns read it on their own
+// goroutines, hence the atomic pointer.
+//
+// A non-positive contentWidth CLEARS the geometry rather than publishing a nonsense
+// one: "we can't measure this surface" and "the reply renders in 0 columns" are
+// different claims, and only the first is ever true.
+func (a *App) SetDisplaySize(columns, contentWidth int) {
+	if contentWidth <= 0 {
+		a.display.Store(nil)
+		return
+	}
+	if columns < 0 {
+		columns = 0
+	}
+	// Text cannot render wider than the window it renders in. A caller that reports
+	// otherwise measured one of the two wrong, and the terminal is the value to trust —
+	// the content width is derived from it. (columns == 0 means the window itself was
+	// not measured, which is a different, permitted state.)
+	if columns > 0 && contentWidth > columns {
+		contentWidth = columns
+	}
+	a.display.Store(&prompts.DisplayContext{Columns: columns, ContentWidth: contentWidth})
+}
+
+// DisplaySize returns the last published geometry, or nil when no front end has
+// measured a terminal. The returned pointer addresses an immutable value — callers
+// must never mutate it in place; publish a new one instead.
+func (a *App) DisplaySize() *prompts.DisplayContext { return a.display.Load() }
+
+// backendCapsSnapshot is one capability descriptor together with the endpoint that
+// answered it. The pairing is the point: a descriptor alone cannot say WHICH backend
+// it describes, and this session's backend can be replaced mid-flight by `/login`.
+type backendCapsSnapshot struct {
+	baseURL string
+	caps    backend.Capabilities
+}
+
+// BackendCapabilities fetches the live backend's capability descriptor and caches it
+// for the per-turn readers. Every capability fetch should come through here so the
+// cache reflects the backend actually in use; a failed fetch leaves the previous
+// answer alone and returns the error, since "we could not ask" is not evidence that
+// anything changed.
+//
+// The endpoint is read BEFORE the call and stored with the answer, so a descriptor
+// that arrives after a `/login` swap is filed under the endpoint it actually came
+// from and the readers below discard it.
+func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, error) {
+	if a.Backend == nil {
+		return backend.Capabilities{}, errors.New("no backend client")
+	}
+	asked := a.Backend.BaseURL()
+	caps, err := a.Backend.Capabilities(ctx)
+	if err != nil {
+		return backend.Capabilities{}, err
+	}
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps})
+	return caps, nil
+}
+
+// backendAcceptsDisplayContext reports whether it is SAFE to attach the terminal
+// geometry to a request. Fails closed on an unknown backend, and on one whose cached
+// answer came from a DIFFERENT endpoint than the one about to be called: `runtime` is
+// validated with extra="forbid", so guessing wrong costs the entire turn, while
+// withholding the block costs only the width-aware wording of one reply.
+func (a *App) backendAcceptsDisplayContext() bool {
+	snap := a.backendCaps.Load()
+	if snap == nil || a.Backend == nil {
+		return false
+	}
+	return snap.baseURL == a.Backend.BaseURL() && snap.caps.Respond.DisplayContext
 }
 
 // Tier returns the current permission tier under the read lock.

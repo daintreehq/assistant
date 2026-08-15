@@ -212,7 +212,39 @@ func (a *App) SignIn(ctx context.Context, c credentials.Credentials) error {
 	// The swap itself happens OUTSIDE the lock: building a client is cheap but the
 	// Swappable is its own synchronization, and holding cfgMu across unrelated work is
 	// how lock-ordering bugs start (see the startupMu nesting warning in app.go).
+	// Drop the cached capability descriptor BEFORE the swap, never after. The per-turn
+	// gates that read it decide what this CLI may put on the wire, and carrying a stale
+	// "this backend accepts runtime.display" across a swap toward an older deployment
+	// would 422 the turn. Clearing first means the gate is already closed by the moment
+	// the new client can receive anything, instead of leaving a window where a turn
+	// builds a request for the old backend and sends it to the new one.
+	a.backendCaps.Store(nil)
 	a.backendSwap.Swap(backend.NewClient(backendClientConfig(updated, a.CostLedger)))
+
+	// Re-ask the new endpoint in the background so `/login` returns the instant the
+	// sheet is done. Scoped to the App's own lifecycle context so the refresh dies with
+	// the process rather than outliving a Shutdown; an App assembled without Create
+	// (tests) has no such context and therefore no detached work, leaving the gates
+	// closed, which is the safe direction.
+	if base := a.baseCtx; base != nil {
+		go func() {
+			rctx, rcancel := context.WithTimeout(base, signInVerifyTimeout)
+			defer rcancel()
+			// Logged rather than swallowed: a failure here is invisible in the cockpit
+			// (turns keep working) but silently costs every capability-gated extra for
+			// the rest of the session, which is exactly the kind of thing a session log
+			// has to be able to explain.
+			if _, err := a.BackendCapabilities(rctx); err != nil {
+				debuglog.LogDebug(debuglog.Config{DebugLog: updated.DebugLog, LogDir: updated.LogDir},
+					"backend.capabilities.refresh", map[string]any{
+						"endpoint": c.BaseURL,
+						"ok":       false,
+						"error":    err.Error(),
+						"detail":   "capability-gated request extras stay off until the next launch",
+					})
+			}
+		}()
+	}
 
 	// Redacted, always — this line exists so a session log shows WHEN the endpoint
 	// changed, which is otherwise invisible archaeology. It must never carry the key.

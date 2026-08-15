@@ -35,7 +35,9 @@ func routingText(ctx context.Context, a *app.App) string {
 	// One-shot: a diagnostic panel must answer now, not spend the patient turn budget
 	// replaying a refused socket to reach the same verdict.
 	cctx, cancel := context.WithTimeout(backend.WithoutRetry(ctx), routingProbeTimeout)
-	caps, capsErr := a.Backend.Capabilities(cctx)
+	// Through the App, so a successful probe also refreshes the cached descriptor the
+	// per-turn capability gates read (see App.BackendCapabilities).
+	caps, capsErr := a.BackendCapabilities(cctx)
 	cancel()
 
 	var b strings.Builder

@@ -488,7 +488,7 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 		case "/readyz":
 			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","skills":4}`)
 		case "/v1/daintree/capabilities":
-			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":2,"max":2},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_skills":3},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
+			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":2,"max":2},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_skills":3,"display_context":true},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -513,6 +513,12 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 	}
 	if caps.Respond.SystemMessagesAccepted {
 		t.Errorf("system messages should not be accepted")
+	}
+	// The gate that decides whether the CLI may attach runtime.display is only as good
+	// as this decode: a mistyped key would silently read as "unsupported" forever, and
+	// the symptom (replies shaped for a default width) never looks like a JSON bug.
+	if !caps.Respond.DisplayContext {
+		t.Errorf("display_context did not decode: %+v", caps.Respond)
 	}
 }
 

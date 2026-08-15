@@ -20,6 +20,9 @@ type fakeBackend struct {
 	respond func(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error)
 	// task overrides RunTask; nil ⇒ an empty-object output for the requested task.
 	task func(ctx context.Context, req backend.TaskRequest) (backend.TaskResult, error)
+	// caps overrides Capabilities; nil ⇒ a zero descriptor (a backend that advertises
+	// nothing, which is what every capability gate must fail closed against).
+	caps func() (backend.Capabilities, error)
 
 	mu       sync.Mutex
 	lastReq  backend.RespondRequest
@@ -60,6 +63,9 @@ func (f *fakeBackend) VerifyKey(context.Context) (backend.KeyVerification, error
 }
 
 func (f *fakeBackend) Capabilities(context.Context) (backend.Capabilities, error) {
+	if f.caps != nil {
+		return f.caps()
+	}
 	return backend.Capabilities{}, nil
 }
 func (f *fakeBackend) Version(context.Context) (backend.Version, error) {

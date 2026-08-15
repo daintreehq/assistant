@@ -1150,6 +1150,10 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	unchanged := m.sizedOnce && msg.Width == m.columns && msg.Height == m.rows
 	m.columns = msg.Width
 	m.rows = msg.Height
+	// Publish BEFORE the early returns below: a duplicate SIGWINCH is skipped for
+	// rendering, but the very first size arrives on a path that returns early too, and
+	// that one is the geometry every turn of the session is shaped for.
+	m.publishDisplaySize()
 	if unchanged {
 		return m, nil
 	}

@@ -36,6 +36,10 @@ func Run(ctx context.Context, a *app.App) error {
 	if cols, rows, ok := terminalSize(os.Stdout); ok {
 		m.columns = cols
 		m.rows = rows
+		// Report the geometry from the same measurement the splash paints at, so a turn
+		// started the instant the cockpit is live is already shaped for this terminal
+		// rather than waiting on Bubble Tea's first size probe.
+		m.publishDisplaySize()
 	}
 	debuglog.BootTrace("boot.splash.start")
 	bootPrefetch := startBootPrefetch(ctx, a)
@@ -52,6 +56,7 @@ func Run(ctx context.Context, a *app.App) error {
 		if cols > 0 && rows > 0 {
 			m.columns = cols
 			m.rows = rows
+			m.publishDisplaySize()
 		}
 		m.syncComposer()
 		return m.bootHandoffFrame()
@@ -163,7 +168,10 @@ func bootHandshakeBackend(ctx context.Context, a *app.App) error {
 	started := time.Now()
 	hctx, cancel := context.WithTimeout(ctx, bootBackendHandshakeTimeout)
 	defer cancel()
-	caps, err := a.Backend.Capabilities(hctx)
+	// Through the App, not the client, so the descriptor is CACHED: the per-turn
+	// capability gates (currently `runtime.display`) read it on every round and must
+	// not each pay an HTTP call.
+	caps, err := a.BackendCapabilities(hctx)
 	logBootBackendHandshake(a, time.Since(started), err)
 	if err == nil {
 		// The handshake already has the task inventory in hand, so auditing it here

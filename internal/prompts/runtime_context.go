@@ -43,9 +43,25 @@ type MainPromptContext struct {
 	// tool count — must stay on MCPConnected/MCPTransport/MCPToolCount, which ride the
 	// volatile runtime tail instead. Endpoints are immutable for the life of a client
 	// (mcp.Client resolves them once in New), so this block is constant per session.
-	MCPServers          []MCPServerContext
-	SchedulerActive     bool
+	MCPServers      []MCPServerContext
+	SchedulerActive bool
+	// Display is the live render geometry of the surface this reply will be drawn in
+	// — nil when there is no terminal to measure (a piped one-shot, the stdio host,
+	// the headless daemon), which the backend reads as "unknown" and answers with its
+	// own default width. Republished by the cockpit on every resize, so it is as live
+	// as the tier/MCP fields beside it.
+	Display             *DisplayContext
 	ProjectInstructions string
+}
+
+// DisplayContext is how wide the assistant's own output actually is. Columns is the
+// terminal; ContentWidth is the narrower measure the reply is WRAPPED at, after the
+// cockpit's left inset, autowrap gutter, and the prose cap (ui.ContentMax) — so on a
+// maximized window the two differ a lot and only ContentWidth describes the line the
+// model is really writing into.
+type DisplayContext struct {
+	Columns      int
+	ContentWidth int
 }
 
 // MCPServerContext is one connected-to MCP server as the CLI reports it. URL is the

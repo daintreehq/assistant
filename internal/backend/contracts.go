@@ -239,6 +239,52 @@ type RuntimeContext struct {
 	SchedulerActive bool                     `json:"scheduler_active"`
 	Worktree        *CurrentWorktreeSnapshot `json:"worktree,omitempty"`
 	OpenTerminals   []OpenTerminal           `json:"open_terminals,omitempty"`
+	// Display is how wide the reply will actually render. Omitted when the CLI has no
+	// terminal to measure, which the backend answers with its own default width — so
+	// an absent block means "unknown", never "narrow".
+	Display *DisplayInfo `json:"display,omitempty"`
+}
+
+// DisplayInfo is the client's live render geometry. content_width is the load-bearing
+// value — the measure the assistant's own markdown is wrapped at — and the backend
+// shapes the response contract (prose length, whether a pipe table can fit) around it;
+// columns is the raw terminal, sent so the model can answer questions about the window
+// it is running in without inferring one number from the other. Both are cells, and
+// both are optional on the backend: a surface that knows its wrap width but not its
+// window (a future non-cockpit publisher) sends content_width alone rather than a
+// guessed pair.
+//
+// Bounded by displayWidthMax to mirror the backend's validation: the request is
+// validated BEFORE it is used, so an absurd width from a confused terminal probe would
+// 422 the whole turn rather than degrade to a default.
+type DisplayInfo struct {
+	Columns      int `json:"columns,omitempty"`
+	ContentWidth int `json:"content_width,omitempty"`
+}
+
+// displayWidthMax mirrors the backend contract's DisplayInfo bound (extensions.py).
+// Far above any real terminal, low enough that a garbage value is clamped, not sent.
+const displayWidthMax = 10000
+
+// NewDisplayInfo builds the wire block from a measured geometry, clamping both values
+// into the range the backend validates. Returns nil when the content width is
+// unmeasured or unusable, so an unknown surface omits the block entirely instead of
+// asserting a width nobody measured.
+func NewDisplayInfo(columns, contentWidth int) *DisplayInfo {
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v > displayWidthMax {
+			return displayWidthMax
+		}
+		return v
+	}
+	contentWidth = clamp(contentWidth)
+	if contentWidth == 0 {
+		return nil
+	}
+	return &DisplayInfo{Columns: clamp(columns), ContentWidth: contentWidth}
 }
 
 // CurrentWorktreeSnapshot preserves the three states of the live read. A nil Runtime
@@ -858,6 +904,14 @@ type RespondCapsBlock struct {
 	// reports none, and both are rendered as "unknown". Advertised here so `/doctor`
 	// can name the contract rather than leave a tester guessing why /cost is empty.
 	CostReporting *CostReportingCaps `json:"cost_reporting"`
+	// DisplayContext reports that this backend accepts `runtime.display` — the client's
+	// terminal geometry — and shapes its response contract around it. It is a GATE, not
+	// a nicety: the backend validates `runtime` with extra="forbid", so sending the block
+	// to a deployment that predates it 422s the WHOLE turn before the model ever runs.
+	// False/absent on an older backend, which is why the CLI withholds the geometry until
+	// a handshake says otherwise (App.PromptContext). Delete the gate once no such
+	// deployment is reachable.
+	DisplayContext bool `json:"display_context"`
 }
 
 // CostReportingCaps describes the backend's cost-reporting contract.
