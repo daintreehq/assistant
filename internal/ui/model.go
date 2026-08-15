@@ -185,7 +185,8 @@ type Model struct {
 	activeTurn string // id of the live TurnCell (for streaming routing)
 	// pendingInject counts messages typed while busy that the Session has buffered but
 	// not yet folded into the running turn (InjectPrompt). It drives the composer's
-	// "queued for next step" cue; it is incremented on submit-while-busy, decremented
+	// "N follow-ups queued for this turn" cue AND its Escape hint (a buffered follow-up
+	// makes Esc a retract, not a cancel); it is incremented on submit-while-busy, decremented
 	// on a successful Esc-retract, and zeroed by the inline interjection event (delivery)
 	// or on cancel/clear. The buffered TEXT lives in the Session, not here.
 	pendingInject int
@@ -308,7 +309,7 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 	}
 	m.splash = newSplash(m.columns)
 
-	// No standalone welcome line: the composer placeholder ("Ask Daintree… · / for commands"),
+	// No standalone welcome line: the composer placeholder ("Ask Daintree…"),
 	// the hint row, and "?" for help already cover discoverability, so a banner would just be
 	// clutter under the masthead. There is no model-key boot note anymore — the CLI holds no
 	// model credentials (the backend owns them); a turn surfaces a clear backend error if the

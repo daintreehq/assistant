@@ -17,8 +17,11 @@ type Hint struct {
 // (the contract needs modifier combinations and offset-aware behavior that a
 // flat binding table can't capture); these exist so the hint row's labels are a
 // single source of truth via Bubbles' key.Help.
+//
+// Escape is deliberately NOT in here. Its label depends on the composer's live state
+// (clear draft / edit follow-up / cancel turn), so a static binding would be a second,
+// permanently-stale source of truth for it; hints.go derives the label instead.
 type keymap struct {
-	cancel  key.Binding
 	ops     key.Binding
 	palette key.Binding
 	history key.Binding
@@ -26,7 +29,6 @@ type keymap struct {
 
 func defaultKeymap() keymap {
 	return keymap{
-		cancel:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
 		ops:     key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "inspect ops")),
 		palette: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "commands")),
 		history: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
@@ -35,16 +37,19 @@ func defaultKeymap() keymap {
 
 // hintRow builds the adaptive hint row. The ORDER adapts but the SET is stable
 // (promotion, not new chrome):
-//   - cancelActive = cancellable (fall back to busy when the caller doesn't
-//     distinguish turn kinds).
+//   - esc is the state-derived Escape action; EscapeHintHidden omits it entirely
+//     (idle with an empty buffer, where Escape does nothing).
 //   - leadWithOps = actionable attention pending AND no cancellable turn in
 //     flight. Cancel takes precedence over attention.
 //   - "^O inspect ops" is emitted EXACTLY ONCE, promoted to the front only when
 //     leadWithOps, else appended last.
-func (k keymap) hintRow(cancelActive, leadWithOps bool) []Hint {
+//
+// The slice is in PRIORITY order, because the renderer drops from the tail when the
+// row won't fit: the state-specific Escape action must outlive generic discovery hints.
+func (k keymap) hintRow(esc EscapeHintMode, leadWithOps bool) []Hint {
 	hints := make([]Hint, 0, 5)
-	if cancelActive {
-		hints = append(hints, bindingHint(k.cancel))
+	if h, ok := escapeHint(esc); ok {
+		hints = append(hints, h)
 	}
 	if leadWithOps {
 		hints = append(hints, bindingHint(k.ops))

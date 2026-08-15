@@ -35,7 +35,9 @@ func TestSignInSheetReplacesTheComposer(t *testing.T) {
 	// Strip ANSI before matching: the composer renders its placeholder with the first
 	// character separately styled, so a raw substring check for it silently never
 	// matches and the guard below would pass whether or not the composer is showing.
-	const composerCue = "/ for commands"
+	// The idle placeholder is composer-only chrome (the masthead never says it), so its
+	// presence is a reliable "the composer is on screen" probe.
+	const composerCue = "Ask Daintree"
 	if base := stripAnsi(harnessModel().View().Content); !strings.Contains(base, composerCue) {
 		t.Fatalf("harness precondition: composer cue %q not found — this test cannot detect it:\n%s", composerCue, base)
 	}

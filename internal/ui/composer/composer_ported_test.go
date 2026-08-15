@@ -111,9 +111,10 @@ func TestView_SinglePromptGlyph(t *testing.T) {
 func TestView_QueuedCountSurfacesAndOmits(t *testing.T) {
 	m := newModel()
 	m.SetBusy(true)
-	// Queued > 0 → "N queued" surfaces.
+	// Queued > 0 → the count surfaces (grammar and width behavior are pinned in detail
+	// by TestQueuedFollowupLabel; this one only guards presence/absence).
 	withQ := stripAnsiC(m.View(ViewParams{Width: 60, QueueDepth: 2}))
-	if !strings.Contains(withQ, "2 queued") {
+	if !strings.Contains(withQ, "2 follow-ups queued") {
 		t.Errorf("queued count must surface while busy: %q", withQ)
 	}
 	// Queued == 0 → no queued suffix.

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
@@ -60,6 +62,38 @@ func TestEscWhileBusy_RetractsNewestPendingInjection(t *testing.T) {
 	// The active turn is untouched (retract never cancels).
 	if at := mm.activeTurnCell(); at == nil || at.Phase == domain.PhaseCancelling {
 		t.Fatal("retract wrongly cancelled the active turn")
+	}
+}
+
+// The Session folds buffered follow-ups in on its own schedule, and the interjection
+// event that zeroes our count arrives later — so pendingInject can outlive the thing it
+// counts. A retract in that window fails, and leaving the count up would keep the
+// composer advertising "Esc edit follow-up" for a retract that can never succeed.
+func TestEscWhileBusy_FailedRetractClearsTheStaleCount(t *testing.T) {
+	m := harnessModel()
+	active := &TurnCell{ID: "turn_a", State: TurnActive, Phase: domain.PhaseGenerating, PhaseStartedAt: domain.NowMS()}
+	m.transcript = append(m.transcript, TranscriptCell{Turn: active})
+	m.activeTurn = active.ID
+	m.inFlight = true
+	// The Session already folded it in: nothing buffered, but our count says otherwise.
+	m.controller.inject.(*fakeInjector).buf = nil
+	m.pendingInject = 1
+
+	mm := asModel(t, mustModel(m.onEscWhileBusy()))
+
+	if mm.pendingInject != 0 {
+		t.Fatalf("pendingInject = %d after a failed retract, want 0", mm.pendingInject)
+	}
+	if mm.composer.Value() != "" {
+		t.Fatalf("a failed retract must not put text in the composer; got %q", mm.composer.Value())
+	}
+	// A failed retract still is NOT a cancel — Ctrl+C owns that.
+	if at := mm.activeTurnCell(); at == nil || at.Phase == domain.PhaseCancelling {
+		t.Fatal("a failed retract wrongly cancelled the active turn")
+	}
+	// And the cue it was driving is gone.
+	if out := ansi.Strip(mm.footer()); strings.Contains(out, "follow-up queued") {
+		t.Errorf("the phantom queue cue survived:\n%s", out)
 	}
 }
 

@@ -272,7 +272,7 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 		// ("between tasks") instead of deferring it to a fresh turn. The Session buffers
 		// it (so Esc can still retract it before the model sees it) and emits an inline
 		// interjection step when it is actually folded in; until then the composer shows a
-		// "queued for next step" cue driven by pendingInject.
+		// "N follow-ups queued for this turn" cue driven by pendingInject.
 		m.controller.injectPrompt(text)
 		m.pendingInject++
 		return m.afterStateChange(nil)
@@ -343,6 +343,12 @@ func (m Model) onEscWhileBusy() (tea.Model, tea.Cmd) {
 func (m Model) retractPendingInject() (tea.Model, tea.Cmd) {
 	text, ok := m.controller.retractPendingInjection()
 	if !ok {
+		// Nothing was retractable, and the Session reports that ONLY when its buffer is
+		// empty — every follow-up has already been folded into the running turn. Our count
+		// is therefore stale: the interjection event that zeroes it is still in flight.
+		// Self-correct now, or the composer keeps advertising "Esc edit follow-up" for a
+		// retract that can no longer happen, and every further press is a silent no-op.
+		m.pendingInject = 0
 		return m.afterStateChange(nil)
 	}
 	if m.pendingInject > 0 {

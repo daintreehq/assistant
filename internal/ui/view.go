@@ -444,6 +444,18 @@ func (m Model) composerView(w int) string {
 		}
 	}
 	cancellable := m.inFlight
+	// The field's PURPOSE changes mid-turn: idle it starts a request, busy it steers the
+	// one already running (submitted text is folded into that same turn at the next safe
+	// boundary, never queued as a second turn). A static "Ask Daintree…" makes it look
+	// like an independent second request box.
+	//
+	// The slash cue is deliberately NOT repeated here: the hint row below already carries
+	// "/ commands" and the palette opens the moment "/" is typed, so duplicating it only
+	// makes the input itself noisier.
+	placeholder := "Ask Daintree…"
+	if m.inFlight {
+		placeholder = "Add a follow-up…"
+	}
 	mcpStatus := composer.MCPConnecting
 	if m.mcpResolved {
 		if m.degraded {
@@ -458,7 +470,7 @@ func (m Model) composerView(w int) string {
 		QueueDepth:  m.pendingInject,
 		Cancellable: &cancellable,
 		Attention:   m.attentionN > 0,
-		Placeholder: "Ask Daintree…  ·  / for commands",
+		Placeholder: placeholder,
 		MCPStatus:   mcpStatus,
 		Cost:        m.sessionCostLine(),
 	})

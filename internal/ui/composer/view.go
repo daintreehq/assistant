@@ -107,10 +107,12 @@ func (m *Model) View(p ViewParams) string {
 	// The LIVE run status (Generating / tool tree …) belongs in the TRANSCRIPT
 	// under the DAINTREE marker, NOT here under the input. The input stays clean;
 	// we only surface messages buffered to fold into the running turn so they aren't
-	// invisible: when busy and some are pending, show "N queued for next step".
+	// invisible. queuedFollowupLabel owns the grammar and the width fallback.
 	if m.busy && p.QueueDepth > 0 {
-		b.WriteByte('\n')
-		b.WriteString(m.theme.Dim().Render(truncateCells(itoa(p.QueueDepth)+" queued for next step · Esc edits last", p.Width)))
+		if label := queuedFollowupLabel(p.QueueDepth, p.Width); label != "" {
+			b.WriteByte('\n')
+			b.WriteString(m.theme.Dim().Render(label))
+		}
 	}
 
 	// --- rule BELOW the input ---
@@ -384,23 +386,50 @@ func (m *Model) renderHints(p ViewParams) string {
 	if p.Cancellable != nil {
 		cancelActive = *p.Cancellable
 	}
-	leadWithOps := p.Attention && !cancelActive
-	hints := m.keys.hintRow(cancelActive, leadWithOps)
+	// An UNFOCUSED composer gets no key hints at all. The approval sheet renders ABOVE
+	// the composer rather than replacing it, and onKey routes every key to the approval
+	// first — so "/ commands", "↑ history" and the Escape action all belong to a surface
+	// that is not going to receive them (there, Escape DECLINES the tool). The connection
+	// light below is not a shortcut, so it stays.
+	var hints []Hint
+	if m.focus {
+		leadWithOps := p.Attention && !cancelActive
+		hints = m.keys.hintRow(m.escapeState(p), leadWithOps)
+	}
 
 	g := m.theme.Glyphs
 	// Build the row span-by-span so only the keys carry the info color while the
 	// action labels and the " · " separators stay dim (matching the original's
 	// per-<span> styling, where a flat Dim() wrap would also dim the cyan keys).
+	//
+	// Fitting is done per HINT, not by truncating the finished row: hintRow returns
+	// priority order, so once one entry won't fit, every lower-priority entry behind it
+	// is dropped whole. Truncating the joined string instead would leave a half-word
+	// ("^O inspect o…") in the row, and — worse, on a very narrow pane — could eat the
+	// state-specific Escape action while a generic "/ commands" survived ahead of it.
 	var row strings.Builder
 	sep := m.theme.Dim().Render(" " + g.Bullet + " ")
+	sepW := ansi.StringWidth(sep)
+	used := 0
 	for i, h := range hints {
-		if i > 0 {
-			row.WriteString(sep)
+		span := m.theme.Info().Render(h.Key) + m.theme.Dim().Render(" "+h.Action)
+		if i == 0 {
+			// The lead hint is the highest-priority one; if even it overflows, show as much
+			// of it as fits rather than rendering nothing at all.
+			lead := truncateCells(span, p.Width)
+			row.WriteString(lead)
+			used = ansi.StringWidth(lead)
+			continue
 		}
-		row.WriteString(m.theme.Info().Render(h.Key))
-		row.WriteString(m.theme.Dim().Render(" " + h.Action))
+		w := ansi.StringWidth(span)
+		if used+sepW+w > p.Width {
+			break
+		}
+		row.WriteString(sep)
+		row.WriteString(span)
+		used += sepW + w
 	}
-	out := truncateCells(row.String(), p.Width)
+	out := row.String()
 
 	// The connection light gets its OWN row rather than riding the end of the key hints,
 	// where it was the first thing truncation ate on a narrow pane — and it is the one
@@ -425,7 +454,16 @@ func (m *Model) renderHints(p ViewParams) string {
 				left = m.theme.Warning().Render(dot + label)
 			}
 		}
-		out += "\n" + m.statusRow(left, p.Cost, p.Width)
+		// Join defensively: with no hints (unfocused) or a width too small to render the
+		// status row, a bare "out + \n + row" would contribute an EMPTY row — and empty
+		// rows still count against the fixed-height footer budget.
+		if status := m.statusRow(left, p.Cost, p.Width); status != "" {
+			if out == "" {
+				out = status
+			} else {
+				out += "\n" + status
+			}
+		}
 	}
 	return out
 }
