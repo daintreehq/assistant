@@ -261,14 +261,25 @@ func (m Model) mcpDegradedView(w int) string {
 	if !m.degraded {
 		return ""
 	}
+	// Name the recovery this cockpit actually has, and separate the causes — because they
+	// have different fixes and only one of them is retryable.
+	//
+	// "Check the MCP server, then restart the assistant" named none of them: it pointed at
+	// a server the tester does not run, and reached for the most destructive recovery
+	// first. /reconnect fixes a dropped link in place. It CANNOT fix a session Daintree
+	// closed or replaced, because that token is dead — only Daintree can inject a fresh
+	// one, which it does when the panel is reopened. And it cannot fix an absent endpoint
+	// at all, so offline / launched-outside-Daintree must not be told to run it.
+	head, body := "Daintree MCP unavailable",
+		"Run /reconnect. If Daintree closed or replaced this session, reopen the Assistant panel."
+	if m.mcpUnconfigured {
+		head, body = "Daintree MCP not configured",
+			"Degraded local mode — no terminals, agents or worktrees. Launch the assistant from Daintree to enable them."
+	}
 	title := m.theme.Warning().Bold(true).Render(
-		truncateCells(m.theme.Glyphs.Alert+" Daintree MCP unavailable", w),
+		truncateCells(m.theme.Glyphs.Alert+" "+head, w),
 	)
-	detail := wrapCells(
-		"Daintree tools are unavailable. Check the MCP server, then restart the assistant.",
-		w,
-	)
-	return title + "\n" + m.theme.Warning().Render(detail)
+	return title + "\n" + m.theme.Warning().Render(wrapCells(body, w))
 }
 
 // deckBody renders the scrollable body for whichever footer deck is active (operations or

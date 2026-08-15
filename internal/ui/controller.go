@@ -37,6 +37,10 @@ type controller struct {
 	app    *app.App
 	pump   *eventPump
 	inject sessionInjector // mid-turn injection seam (c.app.Session in production)
+	// mcpLink reports the authoritative link state (ok=false when there is nothing to
+	// ask). A FIELD rather than a method so UI tests can substitute one, exactly like
+	// `inject` — reading it through the App would need a live, connected mcp.Client.
+	mcpLink func() (connected bool, ok bool)
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc // the in-flight turn's cancel (per user turn)
@@ -48,6 +52,12 @@ type controller struct {
 // goroutine on a resolve channel until the user decides (or shutdown auto-declines).
 func newController(a *app.App, pump *eventPump, send func(tea.Msg)) *controller {
 	c := &controller{app: a, pump: pump, inject: a.Session}
+	c.mcpLink = func() (bool, bool) {
+		if a == nil || a.MCP == nil {
+			return false, false
+		}
+		return a.MCP.Status().Connected, true
+	}
 	a.SetHooks(app.AppHooks{
 		AgentEvents: pump,
 		// Confirm blocks the dispatching goroutine: it pushes the request to the UI
@@ -167,6 +177,15 @@ func (c *controller) retractPendingInjection() (string, bool) {
 		return "", false
 	}
 	return c.inject.RetractPendingInjection()
+}
+
+// mcpConnected reports the authoritative link state; ok is false when there is nothing to
+// ask (the headless UI harness, or a controller with no App).
+func (c *controller) mcpConnected() (connected, ok bool) {
+	if c == nil || c.mcpLink == nil {
+		return false, false
+	}
+	return c.mcpLink()
 }
 
 // discardPendingInjections drops every buffered injection (cancel / clear).

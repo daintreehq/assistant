@@ -34,6 +34,12 @@ type MCPConnectedMsg struct {
 // badge.
 type MCPDegradedMsg struct {
 	Reason string
+	// Unconfigured separates the two situations "degraded" covers, because only one of
+	// them has a recovery. A CONFIGURED link that dropped is retryable with /reconnect;
+	// no endpoint at all — offline mode, or a launch from outside Daintree — is the
+	// supported "degraded local mode", where /reconnect has nothing to retry and telling
+	// the user to run it would send them in a circle.
+	Unconfigured bool
 }
 
 // ProjectNameMsg carries the authoritative project name from Daintree's

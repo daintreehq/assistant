@@ -121,7 +121,15 @@ func startRepl(ctx context.Context, a *app.App) int {
 		r.Line(r.Gray("· " + line))
 	}
 	if !st.Connected {
-		r.Warn("Running in degraded local mode — Daintree MCP not connected. Use /reconnect once Daintree is up.")
+		// Same split the cockpit makes (internal/ui/view.go mcpDegradedView): /reconnect
+		// retries a dropped link, a session Daintree closed or replaced needs a fresh token
+		// that only reopening the panel supplies, and with no endpoint configured at all
+		// there is nothing for /reconnect to retry.
+		if a.Config.Offline || strings.TrimSpace(a.Config.McpURL) == "" {
+			r.Warn("Degraded local mode — no Daintree link, so no terminals, agents or worktrees. Launch the assistant from Daintree to enable them.")
+		} else {
+			r.Warn("Daintree MCP not connected. Run /reconnect. If Daintree closed or replaced this session, reopen the Assistant panel.")
+		}
 	}
 	// The CLI no longer holds model credentials (the backend owns them), so there is no
 	// key to preflight. If the backend is unreachable, a turn surfaces a clear backend

@@ -50,8 +50,10 @@ func TestMCPConnectionRowDegradedAlsoKeepsGeometry(t *testing.T) {
 
 	m, _ = step(t, m, MCPDegradedMsg{Reason: "timeout"})
 	line := stripAnsi(m.mcpDegradedView(w))
+	// The recovery wording itself is pinned by mcpwarning_test.go; this test only cares
+	// that the warning renders and that it expands the band.
 	if !strings.Contains(line, "Daintree MCP unavailable") ||
-		!strings.Contains(line, "Daintree tools are unavailable") {
+		!strings.Contains(line, "/reconnect") {
 		t.Fatalf("degraded MCP warning = %q", line)
 	}
 	if len(m.transcript) != 0 {

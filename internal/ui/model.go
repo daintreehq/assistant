@@ -211,6 +211,11 @@ type Model struct {
 	previewCache         []daemon.TerminalPreview
 	cost                 float64
 	degraded             bool
+	// mcpUnconfigured distinguishes "no Daintree endpoint at all" (offline mode, or a
+	// launch from outside Daintree) from a configured link that dropped. Both are
+	// `degraded`, but only the second one can be recovered with /reconnect, so the
+	// warning must not offer the same next action for both.
+	mcpUnconfigured bool
 	// modelRateLimited latches a provider 429 (retry budget exhausted) as a footer
 	// health badge; cleared on the next successful Usage event (the model resumed).
 	modelRateLimited bool

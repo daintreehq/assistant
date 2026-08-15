@@ -92,6 +92,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MCPDegradedMsg:
 		m.degraded = true
+		m.mcpUnconfigured = msg.Unconfigured
 		return m.onMcpResolved()
 
 	case ProjectNameMsg:

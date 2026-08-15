@@ -502,6 +502,19 @@ func terminalTurnState(phase domain.RunPhase, reply string) TurnState {
 // --- slash command completion ---
 
 func (m Model) onCommandComplete(msg CommandCompleteMsg) (tea.Model, tea.Cmd) {
+	// Re-read the authoritative link state: a slash command can change it, and /reconnect
+	// is the whole point of the degraded warning's primary instruction. The handlers
+	// return prose rather than messages, so nothing else clears m.degraded — a SUCCESSFUL
+	// /reconnect used to print "Reconnected (…)" while the red warning telling the user to
+	// run /reconnect stayed on screen, inviting them to run it again forever.
+	//
+	// Gated on mcpResolved: before the boot connect settles, the async connect owns the
+	// flag and a mid-flight read here would race it.
+	if m.mcpResolved {
+		if connected, ok := m.controller.mcpConnected(); ok {
+			m.degraded = !connected
+		}
+	}
 	// Retire the liveness cue ONLY for tracked completions (controller.runCommand),
 	// whose submit incremented the counter. The synchronous /approvals shortcut also
 	// lands here without ever incrementing — decrementing for it would retire a
@@ -1300,7 +1313,11 @@ func (m Model) bootstrapCmd() tea.Cmd {
 			if reason == "" {
 				reason = "no url/token"
 			}
-			return MCPDegradedMsg{Reason: reason}
+			// Offline mode and a launch outside Daintree both mean there is no endpoint to
+			// reconnect TO — a supported way to run, not a broken link. The warning needs
+			// to know which of the two it is describing.
+			unconfigured := a.Config.Offline || strings.TrimSpace(a.Config.McpURL) == ""
+			return MCPDegradedMsg{Reason: reason, Unconfigured: unconfigured}
 		}
 		count := 0
 		if st.ToolCount != nil {
