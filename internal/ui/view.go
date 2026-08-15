@@ -485,9 +485,14 @@ func (m Model) liveCellsView(w int) string {
 // queue depth, attention flag, context hint).
 func (m Model) composerView(w int) string {
 	stage := ""
+	cancelling := false
 	if m.inFlight {
 		if t := m.activeTurnCell(); t != nil {
 			stage = runStageLabel(t.Phase)
+			// A turn already tearing down cannot absorb a mid-turn follow-up: the Session
+			// drains buffered injections into the NEXT turn instead. The composer needs to
+			// know so its submit verb doesn't promise otherwise.
+			cancelling = t.Phase == domain.PhaseCancelling
 		}
 		if stage == "" {
 			stage = "Processing…"
@@ -519,6 +524,7 @@ func (m Model) composerView(w int) string {
 		Stage:       stage,
 		QueueDepth:  m.pendingInject,
 		Cancellable: &cancellable,
+		Cancelling:  cancelling,
 		Attention:   m.attentionN > 0,
 		Placeholder: placeholder,
 		MCPStatus:   mcpStatus,

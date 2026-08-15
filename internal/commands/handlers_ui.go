@@ -169,13 +169,19 @@ func HelpTextUI() string {
 // (update_handlers + composer). One list so the help can never drift from the keymap.
 func KeyHelpLines() []string {
 	return []string{
-		"Keys",
-		"  Enter           send · Shift/Alt+Enter → newline",
-		`                  trailing \ then Enter → newline`,
-		"  ↑ / ↓           recall prompt history",
+		// Scoped to the COMPOSER on purpose: the help and operations decks rebind Esc
+		// (back) and ↑/↓ (scroll), and their own footer says so. An unscoped "Keys" header
+		// put this table and that footer on screen together making opposite claims.
+		"Composer keys",
+		"  Enter           send · mid-turn: add the text to the running turn",
+		"                  · a leading / runs a command instead",
+		`                  newline: modifier+Enter where your terminal supports`,
+		`                  it, or a trailing \ then Enter (needs no modifier)`,
+		"  ↑ / ↓           move by line, then recall prompt history",
 		"  /               command palette  ·  Tab complete  ·  ↑/↓ navigate",
-		"  Esc             clear input · busy: retract latest queued turn",
-		"                  otherwise cancel the running turn",
+		"  Esc             with a draft: clear it · mid-turn with an empty",
+		"                  composer: edit the latest queued follow-up, else",
+		"                  cancel the running turn",
 		"  Ctrl+C          cancel the running turn  ·  press again to exit",
 		"  Ctrl+D          exit at an empty prompt",
 		"  Ctrl+O          toggle the operations deck",

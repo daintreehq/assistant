@@ -74,7 +74,9 @@ func TestQuestionMark_WithTextTypesLiterally(t *testing.T) {
 
 func TestHelpText_IncludesKeyCheatSheet(t *testing.T) {
 	help := commands.HelpTextUI()
-	for _, want := range []string{"Keys", "Ctrl+C", "Ctrl+R", "command palette", "Ctrl+A/E", "/q, /exit"} {
+	// The table is scoped to "Composer keys" on purpose: the help/ops decks rebind Esc and
+	// ↑/↓, and their own footer row says so.
+	for _, want := range []string{"Composer keys", "Ctrl+C", "Ctrl+R", "command palette", "Ctrl+A/E", "/q, /exit"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("help text is missing the key cheat-sheet entry %q", want)
 		}

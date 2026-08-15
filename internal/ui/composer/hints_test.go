@@ -284,6 +284,197 @@ func TestComposerHints_OnlyOneEscapeClaimOnScreen(t *testing.T) {
 	}
 }
 
+// With text in the buffer the row switches from discovery to dispatch: how to send it,
+// and how to add a line. Multiline input always worked; nothing advertised it.
+func TestComposerHints_DraftRowDescribesSubmitAndNewline(t *testing.T) {
+	cases := []struct {
+		name       string
+		busy       bool
+		draft      string
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			// Nothing to send, so Enter has nothing to promise; discovery leads instead.
+			name: "idle empty", want: []string{"/ commands", "↑ history", "^O inspect ops"},
+			wantAbsent: []string{"Enter", "newline"},
+		},
+		{
+			name: "idle draft", draft: "check the windows fallback",
+			want: []string{"Esc clear draft", "Enter send", `\↵ newline`, "^O inspect ops"},
+			// Mid-word "/" types a literal slash rather than opening the palette, and ↑
+			// walks the draft's own rows first — neither is honest here.
+			wantAbsent: []string{"Enter add", "/ commands", "↑ history"},
+		},
+		{
+			// Submitting mid-turn folds into the RUNNING turn; "send" would overstate it.
+			name: "busy draft", busy: true, draft: "check the windows fallback",
+			want:       []string{"Esc clear draft", "Enter add", `\↵ newline`},
+			wantAbsent: []string{"Enter send", "/ commands", "↑ history"},
+		},
+		{
+			name: "busy empty", busy: true,
+			want:       []string{"Esc cancel turn", "/ commands", "^O inspect ops"},
+			wantAbsent: []string{"Enter add", "Enter send", "newline"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, p := escapeHintFixture(tc.busy, tc.draft, 0)
+			frame := ansi.Strip(m.View(p))
+			for _, w := range tc.want {
+				if !strings.Contains(frame, w) {
+					t.Errorf("hint %q missing:\n%s", w, frame)
+				}
+			}
+			for _, w := range tc.wantAbsent {
+				if strings.Contains(frame, w) {
+					t.Errorf("hint %q must not appear here:\n%s", w, frame)
+				}
+			}
+		})
+	}
+}
+
+// Enter's verb must match the route onSubmit actually takes. Three of these were wrong
+// when the row first shipped: a slash draft runs a command (it never joins the turn), a
+// trailing backslash arms the newline fallback ahead of every other branch, and a turn
+// already cancelling cannot absorb a follow-up.
+func TestComposerHints_SubmitVerbMatchesTheRealRoute(t *testing.T) {
+	cases := []struct {
+		name       string
+		busy       bool
+		cancelling bool
+		draft      string
+		want       string
+		wantAbsent []string
+	}{
+		{name: "idle prose", draft: "ship it", want: "Enter send",
+			wantAbsent: []string{"Enter add", "Enter run", "Enter newline"}},
+		{name: "busy prose", busy: true, draft: "ship it", want: "Enter add",
+			wantAbsent: []string{"Enter send", "Enter run", "Enter newline"}},
+		// onSubmit tests the TRIMMED text, so leading space still routes as a command.
+		{name: "busy slash command", busy: true, draft: "/clear", want: "Enter run",
+			wantAbsent: []string{"Enter add", "Enter send"}},
+		{name: "busy slash command with leading space", busy: true, draft: "  /compact now", want: "Enter run",
+			wantAbsent: []string{"Enter add", "Enter send"}},
+		// The turn is tearing down; the Session drains buffered injections into the NEXT
+		// turn, so "add" would be a promise about a turn that is going away.
+		{name: "cancelling turn", busy: true, cancelling: true, draft: "ship it", want: "Enter send",
+			wantAbsent: []string{"Enter add"}},
+		// A trailing backslash beats everything: handleKey checks it before it submits.
+		{name: "armed newline", draft: `ship it\`, want: "Enter newline",
+			wantAbsent: []string{"Enter send", "Enter add", "Enter run", `\↵ newline`}},
+		{name: "armed newline mid-turn", busy: true, draft: `ship it\`, want: "Enter newline",
+			wantAbsent: []string{"Enter add"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, p := escapeHintFixture(tc.busy, tc.draft, 0)
+			p.Cancelling = tc.cancelling
+			frame := ansi.Strip(m.View(p))
+			if !strings.Contains(frame, tc.want) {
+				t.Errorf("submit verb %q missing:\n%s", tc.want, frame)
+			}
+			for _, w := range tc.wantAbsent {
+				if strings.Contains(frame, w) {
+					t.Errorf("competing claim %q present:\n%s", w, frame)
+				}
+			}
+		})
+	}
+}
+
+// The armed-newline claim must win in the PALETTE's own hint row too — that row is the
+// only Enter cue on screen while the palette is open.
+func TestComposerHints_PaletteRowYieldsToTheArmedNewline(t *testing.T) {
+	m, p := escapeHintFixture(false, "", 0)
+	m.SetCommands([]Command{{Name: "/audit", Desc: "recent tool calls"}})
+	m.insert("/audit 5")
+	if frame := ansi.Strip(m.View(p)); !strings.Contains(frame, "Enter run") {
+		t.Fatalf("precondition: the palette should promise to run the command:\n%s", frame)
+	}
+	m.insert(`\`)
+	frame := ansi.Strip(m.View(p))
+	if !strings.Contains(frame, "Enter newline") {
+		t.Errorf("an armed backslash must retract the palette's run promise:\n%s", frame)
+	}
+	if strings.Contains(frame, "Enter run") {
+		t.Errorf("the palette still promises to run while Enter would insert a newline:\n%s", frame)
+	}
+}
+
+// An open slash palette prints its own "Enter run" cue directly above the input. A second,
+// differently-worded claim on Enter one row below would be the same contradiction the
+// queue cue used to make about Escape.
+func TestComposerHints_PaletteOwnsEnterWhileOpen(t *testing.T) {
+	m, p := escapeHintFixture(false, "", 0)
+	m.SetCommands([]Command{{Name: "/clear", Desc: "clear the transcript"}})
+	m.insert("/cl")
+	frame := ansi.Strip(m.View(p))
+	if !strings.Contains(frame, "Enter run") {
+		t.Fatalf("precondition: the palette's own hint row should be showing:\n%s", frame)
+	}
+	if strings.Contains(frame, "Enter send") || strings.Contains(frame, "Enter add") {
+		t.Errorf("the hint row must not make a second claim on Enter:\n%s", frame)
+	}
+	// Escape still belongs to the composer here (it clears the draft).
+	if !strings.Contains(frame, "Esc clear draft") {
+		t.Errorf("Escape hint missing while the palette is open:\n%s", frame)
+	}
+}
+
+// The newline cue must be drawable. An ASCII glyph set gets a spelled-out key rather than
+// a "↵" the terminal cannot render.
+func TestComposerHints_NewlineCueHonorsTheGlyphSet(t *testing.T) {
+	m, p := escapeHintFixture(false, "draft", 0)
+	th := m.theme
+	th.Glyphs.Active = "*" // any non-unicode marker selects the ASCII cues
+	m.SetTheme(th)
+	frame := ansi.Strip(m.View(p))
+	if strings.Contains(frame, "↵") {
+		t.Errorf("ASCII glyph set must not emit the return glyph:\n%s", frame)
+	}
+	if !strings.Contains(frame, `\Enter newline`) {
+		t.Errorf("ASCII newline cue missing:\n%s", frame)
+	}
+}
+
+// Width priority: Escape first, then the way to send what was typed, then the newline
+// fallback, then discovery. The row must stay calm and one line in a 40-56 column pane.
+func TestComposerHints_DraftRowStaysCalmAtNarrowWidths(t *testing.T) {
+	// Both glyph sets: the ASCII newline cue is "\Enter newline" (14 cells) against the
+	// unicode "\↵ newline" (10), so ASCII is where the row runs out of space first.
+	for _, glyphs := range []struct {
+		name   string
+		active string
+	}{{"unicode", "◌"}, {"ascii", "*"}} {
+		for _, w := range []int{32, 40, 48, 56, 80} {
+			m, p := escapeHintFixture(true, "check the windows fallback", 0)
+			th := m.theme
+			th.Glyphs.Active = glyphs.active
+			m.SetTheme(th)
+			p.Width = w
+
+			hints := ansi.Strip(m.renderHints(p))
+			if !strings.Contains(hints, "Esc clear draft") {
+				t.Errorf("%s@%d: the Escape action must survive:\n%s", glyphs.name, w, hints)
+			}
+			if !strings.Contains(hints, "Enter add") {
+				t.Errorf("%s@%d: the submit action must outlive discovery hints:\n%s", glyphs.name, w, hints)
+			}
+			// With no MCP light or cost to add, the hints are ONE explicit row. A second row
+			// here would silently cost the live region a line of its height budget.
+			if strings.Contains(hints, "\n") {
+				t.Errorf("%s@%d: hint row must stay one row:\n%q", glyphs.name, w, hints)
+			}
+			if got := ansi.StringWidth(hints); got > w {
+				t.Errorf("%s@%d: hint row is %d cells: %q", glyphs.name, w, got, hints)
+			}
+		}
+	}
+}
+
 // An approval sheet renders ABOVE the composer and takes every key, so the composer's
 // hints would be pointing at a surface that will not receive them.
 func TestComposerHints_SuppressedWhileUnfocused(t *testing.T) {

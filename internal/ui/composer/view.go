@@ -15,6 +15,10 @@ type ViewParams struct {
 	Stage       string // live stage label while busy (NEVER "Thinking"; "Processing…" fallback)
 	QueueDepth  int    // messages typed while busy, buffered to fold into the running turn
 	Cancellable *bool  // whether the in-flight turn can be aborted; nil → defaults to busy
+	// Cancelling marks the in-flight turn as already tearing down (PhaseCancelling).
+	// Submitted text can no longer join it — the Session drains buffered injections into
+	// the NEXT turn — so the submit verb must not claim otherwise.
+	Cancelling  bool
 	Attention   bool   // actionable attention pending (promotes ^O)
 	ContextHint string // right-aligned session summary
 	Placeholder string // shown when the buffer is empty
@@ -78,9 +82,16 @@ func (m *Model) View(p ViewParams) string {
 			b.WriteByte('\n')
 		}
 		// Inline usage + accept hint for the highlighted command (surfaces the arg form).
-		hint := "Tab complete · ↑↓ history · Enter run"
+		// "Enter run" is only true while the newline fallback is unarmed: a trailing
+		// backslash makes handleKey insert a line break BEFORE it would accept this
+		// suggestion, so the palette must not keep promising to run the command.
+		enter := "Enter run"
+		if m.newlineArmed() {
+			enter = "Enter newline"
+		}
+		hint := "Tab complete · ↑↓ history · " + enter
 		if len(sugg) > 1 {
-			hint = "Tab complete · ↑↓ move · Enter run"
+			hint = "Tab complete · ↑↓ move · " + enter
 		}
 		if len(sugg) > paletteCap {
 			hint = itoa(sel+1) + "/" + itoa(len(sugg)) + " · " + hint
@@ -147,6 +158,32 @@ func (m *Model) renderRule(width int) string {
 		width = 1
 	}
 	return m.theme.Muted().Render(strings.Repeat(m.theme.Glyphs.Rule, width))
+}
+
+// newlineArmed reports whether the rune immediately left of the cursor is a backslash —
+// the state in which Enter inserts a NEWLINE rather than submitting. handleKey checks this
+// fallback BEFORE it accepts a palette suggestion or submits, so while it holds it beats
+// every other claim anyone could make about Enter.
+func (m *Model) newlineArmed() bool {
+	rs := runesOf(m.buffer)
+	return m.cursor > 0 && m.cursor <= len(rs) && rs[m.cursor-1] == '\\'
+}
+
+// isCommandDraft reports whether a submit would be routed as a slash COMMAND rather than
+// as prose. It mirrors onSubmit, which tests the TRIMMED submit text for a leading "/".
+func isCommandDraft(buffer string) bool {
+	return strings.HasPrefix(trim(buffer), "/")
+}
+
+// newlineCue is the key cue for the TERMINAL-INDEPENDENT newline: a trailing backslash
+// then Enter. Modifier+Enter inserts one too, but only where the terminal actually reports
+// the modifier (the kitty keyboard protocol and friends), so advertising Shift+Enter as
+// though it were universal would be a promise the row cannot keep. /help documents both.
+func (m *Model) newlineCue() string {
+	if m.theme.Glyphs.Active == "◌" {
+		return `\↵`
+	}
+	return `\Enter`
 }
 
 // promptStr resolves the prompt glyph for the active glyph set
@@ -401,8 +438,46 @@ func (m *Model) renderHints(p ViewParams) string {
 	// light below is not a shortcut, so it stays.
 	var hints []Hint
 	if m.focus {
-		leadWithOps := p.Attention && !cancelActive
-		hints = m.keys.hintRow(m.escapeState(p), leadWithOps)
+		// With a draft in the buffer the row switches from DISCOVERY ("what can I do here")
+		// to DISPATCH ("how do I send this, how do I add a line"). Multiline input has always
+		// worked; nothing advertised it, so it may as well not have.
+		drafting := !m.trimEmpty()
+		st := hintState{
+			escape:      m.escapeState(p),
+			discovery:   !drafting,
+			leadWithOps: p.Attention && !cancelActive,
+		}
+		// An open slash palette carries its own "Enter run" cue directly above the input;
+		// a second, differently-worded claim on Enter one row below it is the same
+		// contradiction the queue cue used to make about Escape.
+		if drafting && len(m.activeSuggestions()) == 0 {
+			switch {
+			case m.newlineArmed():
+				// A trailing backslash ARMS the newline fallback, and handleKey checks it
+				// before it submits — so right now Enter breaks the line, whatever the buffer
+				// would otherwise do. Say that, and drop the separate cue for a fallback that
+				// is no longer a fallback.
+				st.submit = "newline"
+			case isCommandDraft(m.buffer):
+				// onSubmit routes a leading slash as a COMMAND before it ever considers the
+				// running turn, so this is "run" — never "send" or "add". It matters most
+				// mid-turn, where the palette is suppressed and this row is the only cue.
+				st.submit = "run"
+				st.newlineCue = m.newlineCue()
+			case cancelActive && !p.Cancelling:
+				// Submitting mid-turn folds the text into the RUNNING turn at its next safe
+				// boundary; it does not start a second one, so "send" would overstate it.
+				st.submit = "add"
+				st.newlineCue = m.newlineCue()
+			default:
+				// Idle, or a turn already tearing down — a cancelling turn cannot take the
+				// text, so it rides the next one, which is what "send" means everywhere else
+				// in this row.
+				st.submit = "send"
+				st.newlineCue = m.newlineCue()
+			}
+		}
+		hints = m.keys.hintRow(st)
 	}
 
 	g := m.theme.Glyphs
