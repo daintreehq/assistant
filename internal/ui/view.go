@@ -226,14 +226,60 @@ func (m Model) bottomBand(w int) string {
 		b.WriteString(indentLines(cl, LeftPad))
 		b.WriteString("\n\n")
 	}
+	// The rest of the band is built FIRST, so the queued card — the one part of the band
+	// whose height is discretionary — can be sized against what is actually left over. See
+	// queuedInjectionsView.
+	var rest strings.Builder
 	// Staged-Ctrl+C cue: a single warning line directly above the composer while the
 	// quit is armed, so the confirming second press is discoverable.
 	if m.quitArmed {
-		b.WriteString(indentLines(m.theme.Warning().Render("Press Ctrl+C again to exit"), LeftPad))
-		b.WriteByte('\n')
+		rest.WriteString(indentLines(m.theme.Warning().Render("Press Ctrl+C again to exit"), LeftPad))
+		rest.WriteByte('\n')
 	}
-	b.WriteString(indentLines(m.composerView(w), LeftPad))
+	rest.WriteString(indentLines(m.composerView(w), LeftPad))
+
+	if q := m.queuedInjectionsView(w, lineCount(b.String())+lineCount(rest.String())); q != "" {
+		b.WriteString(indentLines(q, LeftPad))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(rest.String())
 	return b.String()
+}
+
+// queuedInjectionsView renders the card for messages typed while the model is working and
+// still buffered for the running turn. They sit directly above the composer — the place the
+// user just typed them — so submitting mid-stream visibly PARKS the text rather than
+// swallowing it. The card leaves the footer the moment the Session folds the message in,
+// where the same card reappears in the transcript (renderInterjection) at the point the
+// model actually read it.
+//
+// bandRows is the height of the rest of the fixed bottom band, and it is a HARD constraint,
+// not a hint. The band is never truncated: if it grows to exactly fill the viewport, a
+// scrollback commit has no row left to insert into and Bubble Tea's insertAbove clamps,
+// freezing a copy of the footer into scrollback (the #1613 failure class — see
+// scrollbackChunkRows). So the card claims only what is spare after the band, the blank
+// separator, one live-region row, and one row kept free for that insert. Out of room, it
+// degrades to its anchor alone (the one-row cue it replaced), then vanishes: it is a cue,
+// and the composer and the live turn have the prior claim on a small viewport.
+func (m Model) queuedInjectionsView(w, bandRows int) string {
+	// Gated on a live turn, like the count cue it replaced. A message submitted in the
+	// window between the turn's LAST fold boundary and inFlight going false stays in the
+	// Session's buffer for the NEXT turn — so with nothing running, a card reading "queued
+	// for this turn" would name a turn that has already ended. It reappears, correctly,
+	// when that next turn starts. A turn already tearing down (PhaseCancelling) counts as
+	// over: the composer says "Enter send" there because the text belongs to the next turn,
+	// and the card must not contradict it by claiming the dying one.
+	if !m.inFlight || len(m.pendingInjects) == 0 {
+		return ""
+	}
+	if t := m.activeTurnCell(); t != nil && t.Phase == domain.PhaseCancelling {
+		return ""
+	}
+	spare := m.rows - bandRows - 3 // blank separator + one live row + one insert row
+	if spare < 1 {
+		return ""
+	}
+	return renderQueuedInjections(m.theme, m.pendingInjects, w, spare)
 }
 
 // bandFits reports whether the fixed bottom band fits the terminal height: its own rows
@@ -522,7 +568,7 @@ func (m Model) composerView(w int) string {
 	return m.composer.View(composer.ViewParams{
 		Width:       w,
 		Stage:       stage,
-		QueueDepth:  m.pendingInject,
+		QueueDepth:  len(m.pendingInjects),
 		Cancellable: &cancellable,
 		Cancelling:  cancelling,
 		Attention:   m.attentionN > 0,

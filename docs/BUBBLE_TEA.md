@@ -330,8 +330,14 @@ and call `resetRepinLedger()`.
 - **Never render markdown async from `View`.** `View()` is pure and synchronous; do
   markdown/glamour work in `Update` (or once when a cell seals), never as a side effect of
   rendering.
-- **Single-flight `Send`.** Only one turn runs at a time; a follow-up typed while busy is
-  a visible dimmed queued turn, promoted in place — not a second concurrent `Send`.
+- **Single-flight `Send`.** Only one turn runs at a time, and a follow-up typed while busy
+  is never a second concurrent `Send`. It folds into the RUNNING turn: the Session buffers
+  it (`InjectPrompt`, still retractable with Esc) and the cockpit mirrors the buffered text
+  in `pendingInjects`, rendering it as a **queued card directly above the composer** so the
+  user can see what is waiting rather than trusting a count. When the turn reaches its next
+  round boundary the Session folds it in and emits `Interjection`; the card leaves the
+  footer and the SAME card reappears in the transcript (`StepInterject`, blank line above
+  and below) at the point the model actually read it.
 - **Never mutate the model outside `Update`.** All state changes flow through messages.
   The one sanctioned cross-goroutine path is `Program.Send` (the confirm-hook callback).
 - **Never `tea.Println` a block taller than the rows above the footer.** Always go through

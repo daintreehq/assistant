@@ -59,7 +59,7 @@ func TestReducer_ClearWipesThenFreshCard(t *testing.T) {
 		{Turn: &TurnCell{ID: "t1", State: TurnComplete}},
 		{Turn: &TurnCell{ID: "t2", State: TurnComplete}},
 	}
-	m.pendingInject = 1
+	m.pendingInjects = []string{"x"}
 	m.controller.inject.(*fakeInjector).buf = []string{"x"}
 	m.pendingWake = []domain.QueueEvent{{Title: "w"}}
 
@@ -73,7 +73,7 @@ func TestReducer_ClearWipesThenFreshCard(t *testing.T) {
 		t.Errorf("clear card wrong: %+v", nm.transcript[0])
 	}
 	// Pending injection + wake + active turn are dropped.
-	if nm.pendingInject != 0 || len(nm.controller.inject.(*fakeInjector).buf) != 0 {
+	if len(nm.pendingInjects) != 0 || len(nm.controller.inject.(*fakeInjector).buf) != 0 {
 		t.Error("clear must drop buffered injections")
 	}
 	if len(nm.pendingWake) != 0 || nm.activeTurn != "" {
@@ -146,8 +146,8 @@ func TestInject_BuffersFollowupsWhileBusyInOrder(t *testing.T) {
 	if len(m.transcript) != before {
 		t.Fatalf("typed-while-busy messages wrongly created new cells: %d → %d", before, len(m.transcript))
 	}
-	if m.pendingInject != 2 {
-		t.Fatalf("pendingInject = %d, want 2", m.pendingInject)
+	if len(m.pendingInjects) != 2 || m.pendingInjects[0] != "second" || m.pendingInjects[1] != "third" {
+		t.Fatalf("pendingInjects = %+v, want [second third]", m.pendingInjects)
 	}
 	fi := m.controller.inject.(*fakeInjector)
 	if len(fi.buf) != 2 || fi.buf[0] != "second" || fi.buf[1] != "third" {
@@ -169,11 +169,11 @@ func TestInject_SlashCommandNotBuffered(t *testing.T) {
 	m := liveModel(80)
 	next, _ := m.startTurn("first")
 	m = next.(Model)
-	depth := m.pendingInject
+	depth := len(m.pendingInjects)
 	next, _ = m.onSubmit("/help")
 	m = next.(Model)
-	if m.pendingInject != depth {
-		t.Errorf("slash command must not buffer as an injection: pendingInject %d", m.pendingInject)
+	if len(m.pendingInjects) != depth {
+		t.Errorf("slash command must not buffer as an injection: pendingInjects %+v", m.pendingInjects)
 	}
 }
 
@@ -190,9 +190,9 @@ func TestInject_CancelSetsCancellingAndDropsPending(t *testing.T) {
 	if c := m.activeTurnCell(); c == nil || c.Phase != domain.PhaseCancelling {
 		t.Fatalf("cancel must set Cancelling synchronously: %v", c)
 	}
-	if m.pendingInject != 0 || len(m.controller.inject.(*fakeInjector).buf) != 0 {
-		t.Errorf("cancel must drop buffered injections; pendingInject=%d buf=%+v",
-			m.pendingInject, m.controller.inject.(*fakeInjector).buf)
+	if len(m.pendingInjects) != 0 || len(m.controller.inject.(*fakeInjector).buf) != 0 {
+		t.Errorf("cancel must drop buffered injections; pendingInjects=%+v buf=%+v",
+			m.pendingInjects, m.controller.inject.(*fakeInjector).buf)
 	}
 }
 
@@ -202,11 +202,12 @@ func TestInject_PendingCueShownWhileBusy(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.onSubmit("second task")
 	m = next.(Model)
-	// No separate cell; the pending cue surfaces in the composer.
-	if m.pendingInject != 1 {
-		t.Fatalf("pendingInject = %d, want 1", m.pendingInject)
+	// No separate cell; the queued card surfaces in the footer, carrying the text itself.
+	if len(m.pendingInjects) != 1 || m.pendingInjects[0] != "second task" {
+		t.Fatalf("pendingInjects = %+v, want [second task]", m.pendingInjects)
 	}
-	if !strings.Contains(stripAnsi(m.composerView(80)), "queued") {
-		t.Error("composer must surface the pending-injection cue while busy")
+	footer := stripAnsi(m.footer())
+	if !strings.Contains(footer, "queued") || !strings.Contains(footer, "second task") {
+		t.Errorf("footer must surface the pending injection and its text while busy:\n%s", footer)
 	}
 }

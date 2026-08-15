@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ui/composer"
 	"github.com/daintreehq/assistant/internal/ui/markdown"
 	"github.com/daintreehq/assistant/internal/ui/theme"
 )
@@ -31,116 +32,12 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	// paste ending in "\n" would collapse one line sooner than the same paste without
 	// it) and leave a stray blank fill row at the bottom of the card.
 	text = strings.TrimRight(text, "\n")
-	g := th.Glyphs
 	// Colors come from the theme's UserMessageSurface (a cool neutral gray, NOT accent
-	// green — green is reserved for Daintree's identity).
-	surface := th.UserMessageSurface()
-	barStyle := th.Muted()
-	if surface.Bar != nil {
-		barStyle = th.Dim().Foreground(surface.Bar)
-	}
-	// When there's a fill, the bar shares the fill background so the block reaches
-	// all the way to the accent line — the line becomes the block's left edge rather
-	// than a separate spine with an unfilled seam beside it.
-	if surface.Fill != nil {
-		barStyle = barStyle.Background(surface.Fill)
-	}
-	bar := barStyle.Render(g.Bar)
-	// Body text color: the surface text color, falling back to plain body fg.
-	textStyle := th.Body()
-	if surface.Text != nil {
-		textStyle = textStyle.Foreground(surface.Text)
-	}
-	// The "YOU" anchor is a notch LIGHTER than the body — the fill block below now
-	// carries the "this is yours" signal, so the label recedes (faint, NOT bold).
-	labelStyle := th.Dim()
-	if surface.Label != nil {
-		labelStyle = th.Body().Foreground(surface.Label)
-	}
-
-	var b strings.Builder
-	b.WriteString(labelStyle.Render("YOU"))
-
-	// Per-row budget: every rendered row must stay within `width` (the chrome width
-	// chromeW = columns - gutter - LeftPad). The card is LeftPad-indented at commit,
-	// and the gutter reserves the host autowrap column, so a row <= width can never
-	// wrap a frozen scrollback line. rowBudget = width-1 keeps one extra column spare.
-	// Deriving the geometry from rowBudget (NOT a fixed `inner >= 10` floor, which
-	// could push a sub-14-col row past width and wrap) makes every width safe.
-	rowBudget := width - 1
-	if rowBudget < 1 {
-		rowBudget = 1
-	}
-	// Uniform geometry in EVERY mode: reserve bar(1) + gap(1) + a 1-col right margin,
-	// so the text wrap width is identical whether or not a fill is drawn (the fill
-	// just paints that right margin; the fallback leaves it as spare). Keeping `inner`
-	// mode-independent makes the rendered row count stable across themes.
-	inner := rowBudget - 3
-	if inner < 1 {
-		inner = 1
-	}
-	// Fill needs room for the whole block (bar + gap + text + margin); below that, fall
-	// back to the plain bar.
-	useFill := surface.Fill != nil && rowBudget >= 5
-	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
-	// writeRow emits one body row: bar + (fill block | bar-only fallback). Factored
-	// out so the head, the tail, and the middle trim rule all share the exact same
-	// geometry — every row is bar + blockW == rowBudget cells, with the fill (or the
-	// lone bar) carrying the cue.
-	writeRow := func(content string, style lipgloss.Style) {
-		b.WriteByte('\n')
-		if useFill {
-			// Fixed-width fill: a leading space is the gap after the bar; lipgloss
-			// pads the remainder of blockW with the background, producing a clean
-			// rectangle that meets the bar with no unfilled seam.
-			block := style.Background(surface.Fill).Width(blockW).
-				Render(" " + truncateCells(content, inner))
-			b.WriteString(bar + block)
-		} else {
-			// No fill (ansi/none, or a terminal too narrow for a block): the bar
-			// alone carries the cue.
-			b.WriteString(bar + " " + style.Render(truncateCells(content, inner)))
-		}
-	}
-	// writeParagraph wraps one explicit paragraph (hard \n breaks preserved, matching
-	// wrapText) to inner, one bar + block per visual row so the gutter stays aligned.
-	writeParagraph := func(para string) {
-		for _, line := range strings.Split(wrapCells(para, inner), "\n") {
-			writeRow(line, textStyle)
-		}
-	}
-
-	// A very long paste is shown as head + a "N lines hidden" rule + tail instead of
-	// in full, so it can't bury the conversation in scrollback (the committed YOU card
-	// is otherwise as tall as the paste — see flush.go's chunked commit). Trimming is
-	// by LOGICAL line — what the human actually pasted — and the split deliberately
-	// favors the TAIL: a pasted log or stack trace usually carries its payoff at the
-	// bottom, while the head only has to be enough to recognize what was pasted. We
-	// collapse only when it hides at least 2 lines (len > head+tail+1) — replacing a
-	// single hidden line with a one-row rule would save nothing. The rule itself rides
-	// the same fill block (renderHiddenRule), so the card stays one contiguous surface.
-	lines := strings.Split(text, "\n")
-	if len(lines) > userMsgHeadLines+userMsgTailLines+1 {
-		for _, para := range lines[:userMsgHeadLines] {
-			writeParagraph(para)
-		}
-		// The rule recedes to chrome: the faint Label tone (the same quiet hue as the
-		// "YOU" anchor), or a plain dim attribute where the theme has no Label color.
-		ruleStyle := th.Dim()
-		if surface.Label != nil {
-			ruleStyle = th.Body().Foreground(surface.Label)
-		}
-		hidden := len(lines) - userMsgHeadLines - userMsgTailLines
-		writeRow(renderHiddenRule(g, hidden, inner), ruleStyle)
-		for _, para := range lines[len(lines)-userMsgTailLines:] {
-			writeParagraph(para)
-		}
-	} else {
-		for _, para := range lines {
-			writeParagraph(para)
-		}
-	}
-	return b.String()
+	// green — green is reserved for Daintree's identity). The "YOU" anchor sits ABOVE
+	// the block (inlineLabel=false): the turn-opening card is the widest thing on the
+	// screen, so a floating anchor reads as a heading for the exchange rather than as
+	// the card's first row.
+	return renderCard(th, th.UserMessageSurface(), "YOU", strings.Split(text, "\n"), width, false)
 }
 
 // userMsgHeadLines / userMsgTailLines bound a long YOU-card paste: a message of more
@@ -172,6 +69,166 @@ func renderHiddenRule(g theme.GlyphSet, hidden, width int) string {
 	pad := width - lw
 	left := pad / 2
 	return strings.Repeat(g.Rule, left) + label + strings.Repeat(g.Rule, pad-left)
+}
+
+// renderCard draws the cockpit's ONE card idiom: a labelled body where every body row is
+// a left accent bar (▏) butted against a contiguous fill block. It backs all three cards —
+// the turn-opening "YOU" message, the human's mid-turn message, and the inline "Skill
+// loaded" note — so their geometry can never drift apart, and any width fix lands once.
+//
+// inlineLabel picks the label's home. false puts it on its OWN bare line above the block
+// (the turn-opening YOU card: a heading for the whole exchange, faint and unbold, because
+// the block below already carries the "this is yours" signal). true makes it the block's
+// first row, bold (the compact inline cards folded into a running turn, where a floating
+// anchor would read as detached from the round it belongs to).
+//
+// Every row is bar + blockW == width-1 cells regardless of mode, so a card committed to
+// scrollback can never wrap a frozen row when the host shrinks — the geometry is derived
+// from the width, never from a fixed minimum that could outrun it.
+// cardRowBudget is the total cell width of ONE rendered card row (bar + block). Every
+// rendered row must stay within `width` (the chrome width chromeW = columns - gutter -
+// LeftPad): the card is LeftPad-indented at commit and the gutter reserves the host
+// autowrap column, so a row <= width can never wrap a frozen scrollback line. width-1
+// keeps one extra column spare. Deriving the geometry from the width (NOT from a fixed
+// minimum, which could outrun it on a narrow terminal and wrap) makes every width safe.
+func cardRowBudget(width int) int {
+	if width-1 < 1 {
+		return 1
+	}
+	return width - 1
+}
+
+// cardInner is the text width inside a card row. Uniform geometry in EVERY mode: reserve
+// bar(1) + gap(1) + a 1-col right margin, so the text wrap width is identical whether or
+// not a fill is drawn (the fill just paints that right margin; the fallback leaves it as
+// spare). Keeping it mode-independent makes the rendered row count stable across themes.
+// Exported to the package so a caller that must pre-fit its own text to one row
+// (renderQueuedInjections) measures against the same budget the renderer will apply.
+func cardInner(width int) int {
+	inner := cardRowBudget(width) - 3
+	if inner < 1 {
+		return 1
+	}
+	return inner
+}
+
+func renderCard(th theme.Theme, surface theme.UserMessageSurface, label string, lines []string, width int, inlineLabel bool) string {
+	g := th.Glyphs
+	barStyle := th.Muted()
+	if surface.Bar != nil {
+		barStyle = th.Dim().Foreground(surface.Bar)
+	}
+	// When there's a fill, the bar shares the fill background so the block reaches
+	// all the way to the accent line — the line becomes the block's left edge rather
+	// than a separate spine with an unfilled seam beside it.
+	if surface.Fill != nil {
+		barStyle = barStyle.Background(surface.Fill)
+	}
+	bar := barStyle.Render(g.Bar)
+	// Body text color: the surface text color, falling back to plain body fg.
+	textStyle := th.Body()
+	if surface.Text != nil {
+		textStyle = textStyle.Foreground(surface.Text)
+	}
+	labelStyle := th.Dim()
+	if surface.Label != nil {
+		labelStyle = th.Body().Foreground(surface.Label)
+	}
+	if inlineLabel {
+		// Inside the block the label has to out-rank the body rows beside it.
+		labelStyle = labelStyle.Bold(true)
+	}
+
+	rowBudget := cardRowBudget(width)
+	inner := cardInner(width)
+	// Fill needs room for the whole block (bar + gap + text + margin); below that, fall
+	// back to the plain bar.
+	useFill := surface.Fill != nil && rowBudget >= 5
+	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
+	// …and below TWO cells even the plain bar overflows: `inner` floors at 1, so bar + gap +
+	// one content cell is 3 cells however narrow the terminal gets. At width 1-2 (chromeWidth
+	// floors at 1, so this is reachable) the chrome itself is what breaks the row, and an
+	// over-wide row is the one defect that outlives its frame — committed to scrollback it
+	// wraps forever. So the chrome goes and the text stays.
+	useChrome := rowBudget >= 2
+
+	var b strings.Builder
+	// first suppresses the row separator before the very first line written, so the
+	// result carries no leading or trailing newline either way.
+	first := true
+	// writeRow emits one body row: bar + (fill block | bar-only fallback). Factored
+	// out so the label, the head, the tail, and the middle trim rule all share the exact
+	// same geometry — every row is bar + blockW == rowBudget cells, with the fill (or the
+	// lone bar) carrying the cue.
+	writeRow := func(content string, style lipgloss.Style) {
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		if useFill {
+			// Fixed-width fill: a leading space is the gap after the bar; lipgloss
+			// pads the remainder of blockW with the background, producing a clean
+			// rectangle that meets the bar with no unfilled seam.
+			block := style.Background(surface.Fill).Width(blockW).
+				Render(" " + truncateCells(content, inner))
+			b.WriteString(bar + block)
+		} else if useChrome {
+			// No fill (ansi/none, or a terminal too narrow for a block): the bar
+			// alone carries the cue.
+			b.WriteString(bar + " " + style.Render(truncateCells(content, inner)))
+		} else {
+			// No room for chrome at all — text only, clipped to the row.
+			b.WriteString(style.Render(truncateCells(content, rowBudget)))
+		}
+	}
+	// writeParagraph wraps one explicit paragraph (hard \n breaks preserved, matching
+	// wrapText) to inner, one bar + block per visual row so the gutter stays aligned.
+	writeParagraph := func(para string) {
+		for _, line := range strings.Split(wrapCells(para, inner), "\n") {
+			writeRow(line, textStyle)
+		}
+	}
+
+	if inlineLabel {
+		writeRow(label, labelStyle)
+	} else {
+		// The bare label carries no bar or gap, so its budget is the full width — but it
+		// still has to be clipped: an un-truncated "YOU" is 3 cells and would overflow a
+		// 1-2 column terminal exactly like a body row would.
+		b.WriteString(labelStyle.Render(truncateCells(label, width)))
+		first = false // the next row still needs its separator
+	}
+
+	// A very long paste is shown as head + a "N lines hidden" rule + tail instead of
+	// in full, so it can't bury the conversation in scrollback (the committed card
+	// is otherwise as tall as the paste — see flush.go's chunked commit). Trimming is
+	// by LOGICAL line — what the human actually pasted — and the split deliberately
+	// favors the TAIL: a pasted log or stack trace usually carries its payoff at the
+	// bottom, while the head only has to be enough to recognize what was pasted. We
+	// collapse only when it hides at least 2 lines (len > head+tail+1) — replacing a
+	// single hidden line with a one-row rule would save nothing. The rule itself rides
+	// the same fill block (renderHiddenRule), so the card stays one contiguous surface.
+	if len(lines) > userMsgHeadLines+userMsgTailLines+1 {
+		for _, para := range lines[:userMsgHeadLines] {
+			writeParagraph(para)
+		}
+		// The rule recedes to chrome: the faint Label tone (the same quiet hue as the
+		// anchor), or a plain dim attribute where the theme has no Label color.
+		ruleStyle := th.Dim()
+		if surface.Label != nil {
+			ruleStyle = th.Body().Foreground(surface.Label)
+		}
+		hidden := len(lines) - userMsgHeadLines - userMsgTailLines
+		writeRow(renderHiddenRule(g, hidden, inner), ruleStyle)
+		for _, para := range lines[len(lines)-userMsgTailLines:] {
+			writeParagraph(para)
+		}
+	} else {
+		for _, para := range lines {
+			writeParagraph(para)
+		}
+	}
+	return b.String()
 }
 
 // renderMarker renders the "◆ DAINTREE" marker line, with a dim "· received" only
@@ -331,16 +388,24 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 	var b strings.Builder
 	groups := collectToolGroups(sub)
 	gi := 0
+	// prevRendered is the kind of the last step that actually PUT SOMETHING on screen, not
+	// simply the previous step. A step can render nothing — a whitespace-only prose step is
+	// the reachable case (appendProse rejects only "") — and keying the separator off the raw
+	// predecessor let such a step stand between a block and its gap, silently eating the
+	// blank line. Tracking what was rendered makes the spacing depend on what the reader can
+	// actually see. It is derived from steps [from..g) exactly like the raw index was, and
+	// every caller renders from step 0, so flush and seal still agree row for row.
+	prevRendered := TurnStepKind(-1) // nothing rendered yet
 	for li := range sub {
 		step := sub[li]
 		g := from + li
-		// A blank line AFTER a "block" step — a tool group OR a skill card — separates the
-		// function-call ledger / capability card from the prose or note that follows it. The
-		// blank rides the FOLLOWING step (a leading blank) so it survives the flush boundary:
-		// when the block flushes alone, the blank flushes with the prose later, keeping spacing
-		// identical across streaming and seal (a TRAILING blank would be stripped by the final
-		// TrimRight and lost).
-		afterBlock := g > 0 && (steps[g-1].Kind == StepTool || steps[g-1].Kind == StepSkill)
+		// A blank line AFTER a "block" step — a tool group, a skill card, OR the human's
+		// mid-turn message — separates the function-call ledger / card from the prose or note
+		// that follows it. The blank rides the FOLLOWING step (a leading blank) so it survives
+		// the flush boundary: when the block flushes alone, the blank flushes with the prose
+		// later, keeping spacing identical across streaming and seal (a TRAILING blank would be
+		// stripped by the final TrimRight and lost).
+		afterBlock := prevRendered == StepTool || prevRendered == StepSkill || prevRendered == StepInterject
 		switch step.Kind {
 		case StepProse:
 			withhold := withholdGrowingLast && g == lastIdx
@@ -352,6 +417,7 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				if !strings.HasSuffix(rendered, "\n") {
 					b.WriteByte('\n')
 				}
+				prevRendered = StepProse
 			}
 		case StepTool:
 			// A contiguous run of tool steps renders as one branch tree; only the
@@ -364,6 +430,9 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				b.WriteByte('\n')
 				gi++
 			}
+			// Every step of the run counts as rendered: the group's own rows are already on
+			// screen, so a step that only folded into it must not reset the separator state.
+			prevRendered = StepTool
 		case StepNote:
 			if step.Note != nil {
 				if afterBlock {
@@ -371,14 +440,27 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				}
 				b.WriteString(renderInlineNote(th, *step.Note, width))
 				b.WriteByte('\n')
+				prevRendered = StepNote
 			}
 		case StepInterject:
 			if rendered := renderInterjection(th, step.Text, width); rendered != "" {
-				if afterBlock {
-					b.WriteByte('\n')
-				}
+				// The human's mid-turn message is the ONE step that takes a blank line above it
+				// unconditionally — not just after a block (afterBlock), the way a skill card
+				// does. A skill card belongs to the round below it, so gluing it to the content
+				// above reads correctly; a message typed while the model was streaming is a hard
+				// break in the narrative, and butted against the paragraph above it, it read as
+				// one more line of the model's own prose.
+				//
+				// UNCONDITIONAL, including as the turn's first step: an injection folds in at the
+				// TOP of a round, so it can land before any prose or tool step exists, and the
+				// blank is what then separates it from the "◆ DAINTREE" marker the preamble
+				// renders directly above (callers join preamble and body with a single newline,
+				// so without this the card butts against the marker). Position-independent, so
+				// flush and seal — which both render from step 0 — always agree.
+				b.WriteByte('\n')
 				b.WriteString(rendered)
 				b.WriteByte('\n')
+				prevRendered = StepInterject
 			}
 		case StepSkill:
 			if rendered := renderSkillCard(th, step.Text, width); rendered != "" {
@@ -392,6 +474,7 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				}
 				b.WriteString(rendered)
 				b.WriteByte('\n')
+				prevRendered = StepSkill
 			}
 		}
 	}
@@ -658,44 +741,103 @@ func renderInlineNote(th theme.Theme, n SystemNote, width int) string {
 	return truncateCells(spine+th.Body().Render(n.Text), width)
 }
 
-// renderInterjection renders a message the user typed mid-turn as an inline aside in
-// the running turn: the continuation spine + the user accent bar (▏, the same cue the
-// YOU card uses) + the wrapped text, one spine+bar per visual row. It reuses the
-// user-message surface so a mid-turn steer reads unmistakably as the human's, distinct
-// from the model's prose or a system note. Text is fixed once folded in, so the row
-// count is stable across streaming and seal (the flush boundary relies on that).
+// interjectLabel anchors the mid-turn message card. It leads with the same "YOU" token as
+// the turn-opening card (so the human's own words are recognizable at a glance wherever
+// they appear) and names WHEN it arrived, because that is the one thing the position alone
+// cannot say: the message was typed while the model was working and folded in HERE, at the
+// round boundary the model actually read it — not at the top of a new exchange.
+const interjectLabel = "YOU · MID-TURN"
+
+// renderInterjection renders a message the user typed mid-turn as an inline card folded
+// into the running turn: the interjectLabel anchor over the wrapped text, both riding the
+// same accent bar + fill block the YOU card uses (renderCard).
+//
+// The card, rather than the lone bar this used to draw, is the point. A bar'd row alone
+// reads as one more branch of the tool tree or a continuation of the paragraph above it —
+// exactly why the YOU card grew a fill in the first place (see theme.UserMessageSurface)
+// — so a steer typed mid-stream vanished into the model's prose. The fill makes the
+// human's words a distinct surface no matter where in the turn they land; renderTurnSteps
+// gives the card a blank line on BOTH sides so it can't be glued to that prose either.
+//
+// Text is fixed once folded in, so the row count is stable across streaming and seal (the
+// flush boundary relies on that).
 func renderInterjection(th theme.Theme, text string, width int) string {
+	// Trailing newlines would leave a stray blank fill row at the bottom of the card.
+	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
-	g := th.Glyphs
-	surface := th.UserMessageSurface()
-	barStyle := th.Muted()
-	if surface.Bar != nil {
-		barStyle = th.Dim().Foreground(surface.Bar)
+	return renderCard(th, th.InterjectionSurface(), interjectLabel, strings.Split(text, "\n"), width, true)
+}
+
+// queuedPreviewMax bounds how many queued messages the footer card lists. Beyond it the
+// tail collapses to a "+N more" row, so the card is at most 1 anchor + 3 rows however many
+// follow-ups are stacked up. The bound is a HEIGHT contract, not a style choice: this card
+// rides the fixed bottom band, which is never truncated — an unbounded list would push the
+// composer off a short terminal and trip footer()'s too-small fallback. maxRows narrows it
+// further on a short terminal (see queuedInjectionsView).
+const queuedPreviewMax = 3
+
+// renderQueuedInjections renders the messages typed while the model is working that the
+// Session has buffered but not yet folded into the running turn — the footer's "this is
+// waiting to go in" card, shown directly above the composer. Returns "" when nothing is
+// queued.
+//
+// It is deliberately the SAME card as the delivered one (renderInterjection): identical
+// bar, fill and surface, differing only in the anchor. A queued message and the mid-turn
+// card it later becomes are the same object at two stages of its life, so they should look
+// like it — the card slides out of the footer and into the transcript when the model
+// actually reads it. Showing the TEXT is the point: a bare count said something was waiting
+// without showing what, leaving the user to trust that their message had landed at all.
+//
+// Each message is flattened to ONE row (newlines to spaces, ellipsized past the card width).
+// The band is fixed-height, so a queued paste must cost one row, not its full height.
+//
+// maxRows caps the WHOLE card, anchor included: 1 leaves the anchor alone (the one-row cue
+// this replaced), and 0 or less renders nothing. Rows are spent anchor-first, because the
+// count is the part that must survive — a preview with no anchor would not say what it is.
+func renderQueuedInjections(th theme.Theme, texts []string, width, maxRows int) string {
+	if len(texts) == 0 || maxRows < 1 {
+		return ""
 	}
-	textStyle := th.Body()
-	if surface.Text != nil {
-		textStyle = textStyle.Foreground(surface.Text)
+	inner := cardInner(width)
+	// bound is how many BODY rows are available: the standing cap, narrowed by whatever the
+	// terminal can spare once the anchor has taken its row.
+	bound := queuedPreviewMax
+	if r := maxRows - 1; r < bound {
+		bound = r
 	}
-	prefix := th.Dim().Render(g.Continuation) + barStyle.Render(g.Bar) + " "
-	// Reserve the spine (2) + bar (1) + gap (1); one prefix per wrapped row.
-	inner := width - 4
-	if inner < 10 {
-		inner = 10
-	}
-	var b strings.Builder
-	first := true
-	for _, para := range strings.Split(text, "\n") {
-		for _, line := range strings.Split(wrapCells(para, inner), "\n") {
-			if !first {
-				b.WriteByte('\n')
-			}
-			first = false
-			b.WriteString(prefix + textStyle.Render(truncateCells(line, inner)))
+	var shown []string
+	switch {
+	case bound < 1:
+		// Anchor only — the card degrades to exactly the one-row cue it replaced.
+	case len(texts) <= bound:
+		for _, text := range texts {
+			shown = append(shown, truncateCells(flattenToRow(text), inner))
 		}
+	default:
+		// Over the bound, the LAST row is spent on the overflow count instead of a message,
+		// so the card holds its height and the count still accounts for every message the
+		// preview does not show. At bound 1 that leaves the count alone.
+		preview := bound - 1
+		for _, text := range texts[:preview] {
+			shown = append(shown, truncateCells(flattenToRow(text), inner))
+		}
+		shown = append(shown, truncateCells(fmt.Sprintf("+%d more", len(texts)-preview), inner))
 	}
-	return b.String()
+	// The anchor is the composer's own cue copy (grammar + width fallback), relocated.
+	label := composer.QueuedFollowupLabel(len(texts), inner)
+	if label == "" {
+		return ""
+	}
+	return renderCard(th, th.InterjectionSurface(), label, shown, width, true)
+}
+
+// flattenToRow collapses a message to a single line: every newline (and any run of
+// whitespace around it) becomes one space, so a multi-line paste occupies exactly one row
+// of the fixed bottom band instead of its full height.
+func flattenToRow(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // renderSkillCard renders a server-side skill load as a compact inline card folded into
@@ -711,62 +853,8 @@ func renderSkillCard(th theme.Theme, title string, width int) string {
 	if title == "" {
 		return ""
 	}
-	g := th.Glyphs
-	surface := th.SkillLoadedSurface()
-	barStyle := th.Muted()
-	if surface.Bar != nil {
-		barStyle = th.Dim().Foreground(surface.Bar)
-	}
-	// With a fill, the bar shares the fill background so the block reaches the accent line.
-	if surface.Fill != nil {
-		barStyle = barStyle.Background(surface.Fill)
-	}
-	bar := barStyle.Render(g.Bar)
-
-	textStyle := th.Body()
-	if surface.Text != nil {
-		textStyle = textStyle.Foreground(surface.Text)
-	}
-	// "Skill loaded" anchor: the surface's quiet label hue, bold so it heads the card.
-	labelStyle := th.Dim().Bold(true)
-	if surface.Label != nil {
-		labelStyle = th.Body().Foreground(surface.Label).Bold(true)
-	}
-
-	// Identical per-row geometry to the YOU card (renderUserMessage), so the fill block
-	// stays within `width` and never wraps a frozen row: bar(1) + gap(1) + text + margin(1).
-	rowBudget := width - 1
-	if rowBudget < 1 {
-		rowBudget = 1
-	}
-	inner := rowBudget - 3
-	if inner < 1 {
-		inner = 1
-	}
-	useFill := surface.Fill != nil && rowBudget >= 5
-	blockW := inner + 2 // gap + text + right margin; bar + blockW == rowBudget
-
-	var b strings.Builder
-	first := true
-	writeRow := func(content string, style lipgloss.Style) {
-		if !first {
-			b.WriteByte('\n')
-		}
-		first = false
-		if useFill {
-			block := style.Background(surface.Fill).Width(blockW).
-				Render(" " + truncateCells(content, inner))
-			b.WriteString(bar + block)
-		} else {
-			b.WriteString(bar + " " + style.Render(truncateCells(content, inner)))
-		}
-	}
-	// Row 1: the "Skill loaded" anchor. Row 2+: the skill's full name, wrapped to width.
-	writeRow("Skill loaded", labelStyle)
-	for _, line := range strings.Split(wrapCells(title, inner), "\n") {
-		writeRow(line, textStyle)
-	}
-	return b.String()
+	// Row 1 is the "Skill loaded" anchor; row 2+ is the skill's full name, wrapped.
+	return renderCard(th, th.SkillLoadedSurface(), "Skill loaded", []string{title}, width, true)
 }
 
 // noteGlyph maps a note level to (glyph, tone):

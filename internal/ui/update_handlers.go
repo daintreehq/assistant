@@ -271,10 +271,10 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 		// Busy → fold this into the RUNNING turn at its next tool-iteration boundary
 		// ("between tasks") instead of deferring it to a fresh turn. The Session buffers
 		// it (so Esc can still retract it before the model sees it) and emits an inline
-		// interjection step when it is actually folded in; until then the composer shows a
-		// "N follow-ups queued for this turn" cue driven by pendingInject.
+		// interjection step when it is actually folded in; until then the footer shows the
+		// queued text itself, driven by pendingInjects.
 		m.controller.injectPrompt(text)
-		m.pendingInject++
+		m.pendingInjects = append(m.pendingInjects, text)
 		return m.afterStateChange(nil)
 	}
 
@@ -321,7 +321,7 @@ func (m Model) onCancel() (tea.Model, tea.Cmd) {
 	}
 	m.controller.cancelTurn()
 	m.controller.discardPendingInjections()
-	m.pendingInject = 0
+	m.pendingInjects = nil
 	return m.afterStateChange(nil)
 }
 
@@ -331,7 +331,7 @@ func (m Model) onCancel() (tea.Model, tea.Cmd) {
 // active turn. Ctrl-C always cancels regardless, so Esc owning the retract here never
 // strands the user.
 func (m Model) onEscWhileBusy() (tea.Model, tea.Cmd) {
-	if m.pendingInject > 0 {
+	if len(m.pendingInjects) > 0 {
 		return m.retractPendingInject()
 	}
 	return m.onCancel()
@@ -348,11 +348,13 @@ func (m Model) retractPendingInject() (tea.Model, tea.Cmd) {
 		// is therefore stale: the interjection event that zeroes it is still in flight.
 		// Self-correct now, or the composer keeps advertising "Esc edit follow-up" for a
 		// retract that can no longer happen, and every further press is a silent no-op.
-		m.pendingInject = 0
+		m.pendingInjects = nil
 		return m.afterStateChange(nil)
 	}
-	if m.pendingInject > 0 {
-		m.pendingInject--
+	// LIFO, mirroring Session.RetractPendingInjection: the newest is the one coming back
+	// into the composer, so it is the one that must leave the queued card.
+	if n := len(m.pendingInjects); n > 0 {
+		m.pendingInjects = m.pendingInjects[:n-1]
 	}
 	m.composer.Restore(text)
 	return m.afterStateChange(nil)
@@ -580,7 +582,7 @@ func (m Model) onClear(title, text string) (tea.Model, tea.Cmd) {
 	// Drop any message buffered mid-turn but not yet folded in — a reset wipes pending
 	// input too, so it can't resurface on the next turn.
 	m.controller.discardPendingInjections()
-	m.pendingInject = 0
+	m.pendingInjects = nil
 	m.pendingWake = nil
 	// The handler already resolved every open inbox event (ClearInbox), so drop the
 	// live attention badge to 0 immediately rather than waiting for the next dashboard

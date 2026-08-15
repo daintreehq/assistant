@@ -114,17 +114,11 @@ func (m *Model) View(p ViewParams) string {
 	// --- the input line(s) with an explicit cell-placed caret ---
 	b.WriteString(m.renderInput(p))
 
-	// --- queued follow-ups cue (under the input) ---
-	// The LIVE run status (Generating / tool tree …) belongs in the TRANSCRIPT
-	// under the DAINTREE marker, NOT here under the input. The input stays clean;
-	// we only surface messages buffered to fold into the running turn so they aren't
-	// invisible. queuedFollowupLabel owns the grammar and the width fallback.
-	if m.busy && p.QueueDepth > 0 {
-		if label := queuedFollowupLabel(p.QueueDepth, p.Width); label != "" {
-			b.WriteByte('\n')
-			b.WriteString(m.theme.Dim().Render(label))
-		}
-	}
+	// (Buffered follow-ups are NOT cued here. A count under the input said something was
+	// waiting without showing WHAT, so the user had to trust it landed; the cockpit now
+	// renders the queued text itself as a card directly ABOVE the composer — see
+	// ui.renderQueuedInjections, which reuses QueuedFollowupLabel for that card's anchor.
+	// QueueDepth stays: the Escape hint is still derived from it.)
 
 	// --- rule BELOW the input ---
 	// Brackets the input bottom; the hints below sit OUTSIDE the rule.

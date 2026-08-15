@@ -99,7 +99,7 @@ func escapeHint(mode EscapeHintMode) (Hint, bool) {
 	return Hint{}, false
 }
 
-// queuedFollowupLabel renders the buffered-follow-up cue for a queue depth at a given
+// QueuedFollowupLabel renders the buffered-follow-up cue for a queue depth at a given
 // width, or "" when nothing is buffered. It states what the old
 // "N queued for next step · Esc edits last" left the reader to infer: the queued item is
 // a user FOLLOW-UP, and it belongs to the RUNNING turn, not some separate future one.
@@ -113,7 +113,12 @@ func escapeHint(mode EscapeHintMode) (Hint, bool) {
 // Width is absorbed by dropping the qualifier before reaching for an ellipsis: the cue is
 // one explicit row in a fixed-height band, so it must never soft-wrap, and the count is
 // the part that must survive.
-func queuedFollowupLabel(n, width int) string {
+//
+// Exported because the cue's HOME moved out of the composer box: the cockpit renders it as
+// the anchor row of the queued-follow-up card above the composer (ui.renderQueuedInjections),
+// where the queued text is shown alongside it. The grammar and the width fallback stay here
+// with their tests.
+func QueuedFollowupLabel(n, width int) string {
 	if n <= 0 {
 		return ""
 	}

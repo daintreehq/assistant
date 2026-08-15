@@ -58,6 +58,25 @@ func (t Theme) UserMessageSurface() UserMessageSurface {
 	}
 }
 
+// InterjectionSurface resolves the colors for the card the cockpit folds into a running
+// turn when the human types while the model is working. It is the SAME neutral grey as the
+// YOU card — same voice, same surface — and differs in exactly one place: the anchor is
+// brighter. The YOU card's Label is deliberately recessive because it floats ABOVE the fill
+// as a heading, with the block below carrying the signal; here the anchor rides INSIDE the
+// block (renderCard inlineLabel), where that tone sits too close to the fill to read.
+func (t Theme) InterjectionSurface() UserMessageSurface {
+	s := t.UserMessageSurface()
+	switch t.Mode {
+	case ModeANSI, ModeNone:
+		// No fill to read against — the dim attribute alone carries the anchor.
+	case ModeLight:
+		s.Label = lipgloss.Color("#5A5A5A") // legible on the light-grey block
+	default: // ModeDark
+		s.Label = lipgloss.Color("#9A9A9A") // a notch ABOVE the bar, not below it
+	}
+	return s
+}
+
 // SkillLoadedSurface resolves the colors for the inline "Skill loaded" card — the same
 // left-bar-over-fill idiom as the YOU card, but tinted a calm blue/turquoise so a
 // server-side capability load reads as its own distinct, quiet event (neither the human's

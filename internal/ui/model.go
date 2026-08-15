@@ -183,16 +183,22 @@ type Model struct {
 	// work serialization.
 	inFlight   bool   // exactly one Session.Send outstanding
 	activeTurn string // id of the live TurnCell (for streaming routing)
-	// pendingInject counts messages typed while busy that the Session has buffered but
-	// not yet folded into the running turn (InjectPrompt). It drives the composer's
-	// "N follow-ups queued for this turn" cue AND its Escape hint (a buffered follow-up
-	// makes Esc a retract, not a cancel); it is incremented on submit-while-busy, decremented
-	// on a successful Esc-retract, and zeroed by the inline interjection event (delivery)
-	// or on cancel/clear. The buffered TEXT lives in the Session, not here.
-	pendingInject int
-	pendingWake   []domain.QueueEvent // autonomous wakes drained after a turn settles
-	activeWake    []domain.QueueEvent // the burst the in-flight wake turn is reacting to (kept for one retry, #9)
-	wakeRetried   bool                // per-burst wake retry budget
+	// pendingInjects mirrors, IN SEND ORDER, the messages typed while busy that the Session
+	// has buffered but not yet folded into the running turn (InjectPrompt). It drives the
+	// footer's queued-follow-up card — which shows the actual TEXT waiting, not just a count,
+	// so the user can see what they queued instead of trusting that it landed — and the
+	// composer's Escape hint (a buffered follow-up makes Esc a retract, not a cancel).
+	//
+	// It is a MIRROR, not the source of truth: the Session owns the real buffer (it must, to
+	// stay retractable across goroutines). We keep the texts here only to render them, and
+	// every mutation shadows a Session one — appended on submit-while-busy, popped LIFO on a
+	// successful Esc-retract (matching Session.RetractPendingInjection), popped FIFO on the
+	// interjection event (matching drainPendingInjections' in-order delivery), and emptied on
+	// cancel / clear / a retract the Session reports it can no longer honour.
+	pendingInjects []string
+	pendingWake    []domain.QueueEvent // autonomous wakes drained after a turn settles
+	activeWake     []domain.QueueEvent // the burst the in-flight wake turn is reacting to (kept for one retry, #9)
+	wakeRetried    bool                // per-burst wake retry budget
 	// summarizedTerminals is the cross-burst memory the wake prompt builder reads so a
 	// terminal already reported this session is downgraded to a one-line ack (mirrors
 	// the host's Host.summarizedTerminals) — recorded only on a real (non-failure) wake.

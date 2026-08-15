@@ -270,9 +270,8 @@ func (m Model) scrollbackChunkRows() int {
 // display rows, so no single insertAbove exceeds the viewport (see scrollbackChunkRows).
 // One "\n"-line is one display row — committed rows are pre-wrapped to the content width and
 // LeftPad-indented to within the terminal width — so splitting on newlines bounds the
-// on-screen height exactly. (The codebase-wide invariant that a committed line fits the width
-// can only break on a sub-~12-column terminal, where renderUserMessage's inner>=10 floor
-// outruns the content width; at that size the cockpit is already unusable.)
+// on-screen height exactly. (Every card derives its row width from the content width itself —
+// see renderCard — so no fixed minimum can outrun it at any terminal size.)
 func chunkPrintlns(text string, maxRows int) []tea.Cmd {
 	chunks := splitRowChunks(text, maxRows)
 	cmds := make([]tea.Cmd, len(chunks))

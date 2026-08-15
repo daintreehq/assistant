@@ -108,19 +108,25 @@ func TestView_SinglePromptGlyph(t *testing.T) {
 	}
 }
 
-func TestView_QueuedCountSurfacesAndOmits(t *testing.T) {
+// The buffered-follow-up cue no longer lives INSIDE the composer box. Its home is the
+// cockpit's queued card above the composer, which shows the queued TEXT alongside the count
+// (ui.renderQueuedInjections) — a bare count under the input said something was waiting
+// without showing what. The composer must not restate it: two "queued" rows a line apart
+// is the duplication the state-truth pass exists to prevent. QueueDepth stays in ViewParams
+// because the Escape hint is still derived from it (TestComposerHints_EscapeMatchesNextPress).
+func TestView_QueuedCountDoesNotLiveInTheComposer(t *testing.T) {
 	m := newModel()
 	m.SetBusy(true)
-	// Queued > 0 → the count surfaces (grammar and width behavior are pinned in detail
-	// by TestQueuedFollowupLabel; this one only guards presence/absence).
-	withQ := stripAnsiC(m.View(ViewParams{Width: 60, QueueDepth: 2}))
-	if !strings.Contains(withQ, "2 follow-ups queued") {
-		t.Errorf("queued count must surface while busy: %q", withQ)
+	for _, depth := range []int{0, 1, 2} {
+		frame := stripAnsiC(m.View(ViewParams{Width: 60, QueueDepth: depth}))
+		if strings.Contains(frame, "queued") {
+			t.Errorf("depth %d: the composer must not restate the queued cue: %q", depth, frame)
+		}
 	}
-	// Queued == 0 → no queued suffix.
-	noQ := stripAnsiC(m.View(ViewParams{Width: 60, QueueDepth: 0}))
-	if strings.Contains(noQ, "queued") {
-		t.Errorf("no queued suffix when nothing waits: %q", noQ)
+	// The grammar itself still lives here, with its own tests (TestQueuedFollowupLabel);
+	// the cockpit renders it as the queued card's anchor.
+	if got := QueuedFollowupLabel(2, 60); !strings.Contains(got, "2 follow-ups queued") {
+		t.Errorf("QueuedFollowupLabel must still own the cue grammar, got %q", got)
 	}
 }
 

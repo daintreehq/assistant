@@ -292,15 +292,16 @@ func TestTypedWhileBusy_FoldsIntoRunningTurn(t *testing.T) {
 	if len(m.transcript) != before {
 		t.Fatalf("a typed-while-busy message wrongly created a new transcript cell (was %d, now %d)", before, len(m.transcript))
 	}
-	if m.pendingInject != 1 {
-		t.Fatalf("pendingInject = %d, want 1", m.pendingInject)
+	if len(m.pendingInjects) != 1 || m.pendingInjects[0] != "second task" {
+		t.Fatalf("pendingInjects = %+v, want [second task]", m.pendingInjects)
 	}
 	if fi, ok := m.controller.inject.(*fakeInjector); !ok || len(fi.buf) != 1 || fi.buf[0] != "second task" {
 		t.Fatalf("message was not buffered for injection: %+v", m.controller.inject)
 	}
-	// The composer surfaces the pending cue.
-	if !strings.Contains(ansi.Strip(m.composerView(80)), "queued") {
-		t.Error("composer did not surface the pending-injection cue")
+	// The footer surfaces the pending cue AND the queued text itself.
+	footer := ansi.Strip(m.footer())
+	if !strings.Contains(footer, "queued") || !strings.Contains(footer, "second task") {
+		t.Errorf("footer did not surface the pending injection and its text:\n%s", footer)
 	}
 
 	// When the loop folds it in (the Interjection event), it appears INLINE in the
@@ -319,8 +320,12 @@ func TestTypedWhileBusy_FoldsIntoRunningTurn(t *testing.T) {
 	if !found {
 		t.Fatalf("interjection did not render as an inline step: %+v", at.Steps)
 	}
-	if m.pendingInject != 0 {
-		t.Errorf("pendingInject = %d after delivery, want 0", m.pendingInject)
+	if len(m.pendingInjects) != 0 {
+		t.Errorf("pendingInjects = %+v after delivery, want empty", m.pendingInjects)
+	}
+	// Delivered: the queued card leaves the footer (the transcript card above owns it now).
+	if footer := ansi.Strip(m.footer()); strings.Contains(footer, "queued") {
+		t.Errorf("the queued card must clear once the message is folded in:\n%s", footer)
 	}
 }
 

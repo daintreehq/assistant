@@ -296,6 +296,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// dropDeliveredInjection acknowledges one delivered message against the queued mirror:
+// it removes the FIRST entry whose text matches and returns the rest, or returns the
+// mirror untouched when nothing matches.
+//
+// It matches on text rather than blindly popping the head, because the mirror can legally
+// be AHEAD of the event stream. Interjection events cross a goroutine boundary through the
+// pump, so one can still be in flight when the mirror is force-cleared (a retract the
+// Session can no longer honour, a cancel, a /clear) and a NEW message is typed on top: a
+// blind pop would then acknowledge the newcomer, taking its card off screen and its Escape
+// hint with it while the Session still holds it — leaving Esc to cancel the turn instead of
+// retracting the message the user just typed.
+//
+// Duplicate texts are fine: matching the FIRST occurrence is the same message the Session's
+// in-order drain delivers, so two identical follow-ups still retire one at a time. The
+// residual is narrow and self-correcting — a delayed event for text that matches a NEWER
+// identical message retires the newer one's row early; the message itself is unaffected and
+// lands in the transcript when it folds in.
+func dropDeliveredInjection(queued []string, delivered string) []string {
+	for i, text := range queued {
+		if text == delivered {
+			return append(queued[:i:i], queued[i+1:]...)
+		}
+	}
+	return queued
+}
+
 // applyPumpEvent fans one pump event into a model mutation. Returns any follow-up
 // cmd (none for most). It mutates the active TurnCell's ordered steps + phase.
 func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
@@ -344,9 +370,7 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 			t.sealProse()
 			t.Steps = append(t.Steps, TurnStep{Kind: StepInterject, Text: ev.text})
 		}
-		if m.pendingInject > 0 {
-			m.pendingInject--
-		}
+		m.pendingInjects = dropDeliveredInjection(m.pendingInjects, ev.text)
 	case pumpSkill:
 		// The backend loaded one or more skills for this round. Append an inline skill card
 		// per (trimmed, non-blank) title in chronological place; the round's response opens a

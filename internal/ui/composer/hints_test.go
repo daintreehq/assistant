@@ -212,8 +212,8 @@ func TestQueuedFollowupLabel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := queuedFollowupLabel(tc.n, tc.width); got != tc.want {
-				t.Errorf("queuedFollowupLabel(%d, %d) = %q, want %q", tc.n, tc.width, got, tc.want)
+			if got := QueuedFollowupLabel(tc.n, tc.width); got != tc.want {
+				t.Errorf("QueuedFollowupLabel(%d, %d) = %q, want %q", tc.n, tc.width, got, tc.want)
 			}
 		})
 	}
@@ -225,7 +225,7 @@ func TestQueuedFollowupLabel(t *testing.T) {
 func TestQueuedFollowupLabel_NeverExceedsWidthWrapsOrVanishes(t *testing.T) {
 	for _, n := range []int{1, 2, 9, 137} {
 		for _, w := range []int{1, 2, 8, 16, 24, 32, 38, 40, 56, 80} {
-			got := queuedFollowupLabel(n, w)
+			got := QueuedFollowupLabel(n, w)
 			if got == "" {
 				t.Errorf("n=%d w=%d: buffered work must never render as nothing", n, w)
 			}
@@ -261,10 +261,10 @@ func TestComposerHints_OnlyOneEscapeClaimOnScreen(t *testing.T) {
 			m, p := escapeHintFixture(true, tc.draft, 1)
 			m.searching = tc.searching
 			m.SetFocus(!tc.unfocused)
+			// (That the buffered follow-up stays VISIBLE is a cockpit-level contract now —
+			// the queued card above the composer owns it; see
+			// ui.TestQueuedCard_ShowsTheQueuedTextItself. Here we only pin the Escape claim.)
 			frame := ansi.Strip(m.View(p))
-			if !tc.searching && !strings.Contains(frame, "1 follow-up queued") {
-				t.Fatalf("the buffered follow-up must stay visible:\n%s", frame)
-			}
 			var claims []string
 			for _, c := range []string{"Esc clear draft", "Esc cancel turn", "Esc edit follow-up", "Esc edit latest", "Esc edits"} {
 				if strings.Contains(frame, c) {

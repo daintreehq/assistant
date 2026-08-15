@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestComposerEscapeHint_ReflectsCockpitState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := harnessModel()
 			m.inFlight = tc.inFlight
-			m.pendingInject = tc.queue
+			m.pendingInjects = queuedTexts(tc.queue)
 			m.syncComposer()
 			out := ansi.Strip(m.footer())
 			if tc.want != "" && !strings.Contains(out, tc.want) {
@@ -77,12 +78,21 @@ func TestComposerEscapeHint_ReflectsCockpitState(t *testing.T) {
 	}
 }
 
+// queuedTexts builds n distinct buffered follow-ups for the footer fixtures.
+func queuedTexts(n int) []string {
+	var out []string
+	for i := 0; i < n; i++ {
+		out = append(out, fmt.Sprintf("queued follow-up %d", i+1))
+	}
+	return out
+}
+
 // The buffered follow-ups must be visible AS follow-ups belonging to the running turn —
 // the count alone reads as a separate queue of future requests.
 func TestComposerQueueCue_NamesTheFollowupAndItsTurn(t *testing.T) {
 	m := harnessModel()
 	m.inFlight = true
-	m.pendingInject = 1
+	m.pendingInjects = queuedTexts(1)
 	m.syncComposer()
 	one := ansi.Strip(m.footer())
 	if !strings.Contains(one, "1 follow-up queued for this turn") {
@@ -93,7 +103,7 @@ func TestComposerQueueCue_NamesTheFollowupAndItsTurn(t *testing.T) {
 		t.Errorf("hint row must own the retract copy:\n%s", one)
 	}
 
-	m.pendingInject = 2
+	m.pendingInjects = queuedTexts(2)
 	m.syncComposer()
 	two := ansi.Strip(m.footer())
 	if !strings.Contains(two, "2 follow-ups queued for this turn") {
@@ -102,9 +112,14 @@ func TestComposerQueueCue_NamesTheFollowupAndItsTurn(t *testing.T) {
 	if !strings.Contains(two, "Esc edit latest") {
 		t.Errorf("hint row must own the retract copy:\n%s", two)
 	}
+	// The cue is stated ONCE. It used to live under the input; it now anchors the queued
+	// card above the composer, and the composer must not restate it.
+	if n := strings.Count(two, "queued for this turn"); n != 1 {
+		t.Errorf("the queued cue must appear exactly once, got %d:\n%s", n, two)
+	}
 
 	// Nothing buffered → no cue at all.
-	m.pendingInject = 0
+	m.pendingInjects = nil
 	m.syncComposer()
 	if none := ansi.Strip(m.footer()); strings.Contains(none, "queued") {
 		t.Errorf("queue cue must vanish when nothing is buffered:\n%s", none)
