@@ -660,14 +660,24 @@ func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pending == nil {
 		return m, nil
 	}
+	// FAIL CLOSED WHEN THE SHEET IS NOT ON SCREEN. On a pane too short or too narrow for
+	// the band, footer() shows a one-line notice instead of the sheet — but keys still
+	// route here, so an affirmative would approve a mutating call the user cannot see:
+	// no consequence, no tool name, no args. Declining still works (that is the safe
+	// direction, and the notice says so), and resizing restores the sheet unharmed.
+	legible := m.approvalLegible()
+
 	// Typed-confirmation mode (system / git history-rewrite): single-key approval is
 	// disabled; the user types confirmPhrase + Enter. Esc still declines.
 	if m.pending.requireType {
-		return m.onTypedApprovalKey(k)
+		return m.onTypedApprovalKey(k, legible)
 	}
 
 	switch {
 	case k.Code == 'y' || k.Code == 'Y':
+		if !legible {
+			return m, bellCmd()
+		}
 		return m.approveAfterDebounce(0)
 	case k.Code == 'a' || k.Code == 'A':
 		// Approve AND remember this tool for a BOUNDED number of further calls (eligible
@@ -676,14 +686,14 @@ func (m Model) onApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// non-rememberable classes (git/system) already route to typed-confirm above and
 		// never reach this switch, but a future non-typed-confirm class would still be
 		// kept off the allow-list.
-		if !rememberable(m.pending.req.Risk) {
+		if !rememberable(m.pending.req.Risk) || !legible {
 			return m, bellCmd()
 		}
 		return m.approveAfterDebounce(approveDefaultCount)
 	case k.Code == 'f' || k.Code == 'F':
 		// Approve AND remember this tool for the WHOLE session, unbounded (eligible risks
 		// only) — the pre-bounded-A behavior, now an explicit opt-in.
-		if !rememberable(m.pending.req.Risk) {
+		if !rememberable(m.pending.req.Risk) || !legible {
 			return m, bellCmd()
 		}
 		return m.approveAfterDebounce(allowForeverCount)
@@ -784,15 +794,18 @@ func approvalsListText(approved map[string]int) string {
 // onTypedApprovalKey drives the typed-confirmation sheet for the highest-risk actions.
 // Esc declines; Enter approves only when the typed phrase matches; Backspace edits; any
 // other printable rune builds the phrase ('n' is a valid letter, so only Esc declines).
-func (m Model) onTypedApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+// legible carries onApprovalKey's "the sheet is actually on screen" check: the typed
+// phrase is the highest-friction approval there is, so it must not be completable against
+// a sheet the user cannot read. Escape still declines.
+func (m Model) onTypedApprovalKey(k tea.KeyPressMsg, legible bool) (tea.Model, tea.Cmd) {
 	switch {
 	case k.Code == tea.KeyEscape || k.Code == tea.KeyEsc:
 		return m.resolveApproval(false)
 	case k.Code == tea.KeyEnter || k.Code == tea.KeyKpEnter:
-		if strings.EqualFold(strings.TrimSpace(m.pending.confirmInput), confirmPhrase) {
+		if legible && strings.EqualFold(strings.TrimSpace(m.pending.confirmInput), confirmPhrase) {
 			return m.resolveApproval(true)
 		}
-		return m, bellCmd() // phrase not yet matched
+		return m, bellCmd() // phrase not yet matched, or the sheet is not on screen
 	case k.Code == tea.KeyBackspace:
 		if r := []rune(m.pending.confirmInput); len(r) > 0 {
 			m.pending.confirmInput = string(r[:len(r)-1])

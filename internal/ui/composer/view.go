@@ -172,6 +172,14 @@ func (m *Model) renderInput(p ViewParams) string {
 	rs := runesOf(m.buffer)
 	prompt := m.promptStr()
 
+	// Width floor: the prompt glyph is 2 cells and the caret another 1, so on a pane
+	// narrower than that the input line overran its budget no matter which branch below
+	// ran — and an overrun line is soft-wrapped by the host, inflating the fixed band.
+	// Nothing useful is renderable at 1-2 cells; emit a bounded caret and stop.
+	if p.Width < ansi.StringWidth(prompt)+1 {
+		return truncateCells(m.caretCell(' '), p.Width)
+	}
+
 	if len(rs) == 0 {
 		// Empty buffer:
 		//   focused + placeholder → the placeholder's FIRST char is the inverse

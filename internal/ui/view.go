@@ -137,11 +137,15 @@ func (m Model) footer() string {
 	// separator line; when a turn is in flight it is +2, because the live region is floored to
 	// at least one row (budget < 1 → 1, below) plus that separator. If even that minimum
 	// overflows, collapse to the one-liner instead of letting View() exceed the terminal.
-	needed := lineCount(bottom) + 1
-	if live != "" {
-		needed = lineCount(bottom) + 2
-	}
-	if needed > m.rows {
+	if !bandFits(bottom, live, m.rows) {
+		// A pending approval is BLOCKING a mutating tool call, and the generic notice gives
+		// no hint that a decision is waiting behind it. Say so, and say which key is safe:
+		// onApprovalKey refuses affirmatives while the sheet is illegible, so declining is
+		// the only thing that still works from here.
+		if m.pending != nil {
+			return indentLines(truncateCells(
+				m.theme.Warning().Render("terminal too small to show a pending approval — resize, or Esc declines"), w), LeftPad)
+		}
 		return tooSmall
 	}
 
@@ -230,6 +234,41 @@ func (m Model) bottomBand(w int) string {
 	}
 	b.WriteString(indentLines(m.composerView(w), LeftPad))
 	return b.String()
+}
+
+// bandFits reports whether the fixed bottom band fits the terminal height: its own rows
+// plus 1 for the blank separator, or plus 2 when a turn is in flight (the live region is
+// floored to at least one row). Shared by footer() — which collapses to a one-liner rather
+// than let View() exceed the terminal — and by the approval gate, which must know whether
+// the sheet the user would be answering is actually on screen. One definition, because a
+// second copy drifting from this one is how a blind approval gets through.
+func bandFits(bottom, live string, rows int) bool {
+	needed := lineCount(bottom) + 1
+	if live != "" {
+		needed = lineCount(bottom) + 2
+	}
+	return needed <= rows
+}
+
+// minApprovalCells is the content width below which the approval controls can no longer
+// render the core "Y approve / N decline" pair whole (see renderActionRows): 9 + 2 + 11.
+// Below it the sheet is not a decision surface, it is a smear.
+const minApprovalCells = 22
+
+// approvalLegible reports whether a pending approval is actually READABLE on screen —
+// the band fits the height AND the pane is wide enough for the decision pair. When it is
+// false the cockpit is showing the too-small notice instead of the sheet, so an affirmative
+// keypress would approve a mutating action the user cannot see. Declining stays available;
+// that is the fail-closed direction.
+func (m Model) approvalLegible() bool {
+	if m.pending == nil {
+		return false
+	}
+	if m.rows < minCockpitRows || m.contentW() < minApprovalCells {
+		return false
+	}
+	w := m.contentW()
+	return bandFits(m.bottomBand(w), m.liveCellsView(w), m.rows)
 }
 
 // commandLiveView renders the in-flight slash command's status line — the same

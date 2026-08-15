@@ -89,8 +89,10 @@ func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
 	var b strings.Builder
 	g := th.Glyphs
 
-	// Top border + title.
-	b.WriteString(th.Blocked().Render(g.Approval + " " + truncateCells(titleFor(req), width-2)))
+	// Top border + title. The glyph prefix is measured WITH the title, not bolted on after
+	// a `width-2` truncate: at a width under 2 cells that arithmetic goes non-positive and
+	// the prefix alone then overruns the budget.
+	b.WriteString(th.Blocked().Render(truncateCells(g.Approval+" "+titleFor(req), width)))
 	b.WriteByte('\n')
 	// Affects (the consequence to lead with).
 	b.WriteString(th.Body().Render(truncateCells("affects  "+consequenceFor(req), width)))
@@ -112,7 +114,7 @@ func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
 		}
 		if len(req.Args) > 0 {
 			b.WriteByte('\n')
-			b.WriteString(th.Dim().Render("args"))
+			b.WriteString(th.Dim().Render(truncateCells("args", width)))
 			b.WriteByte('\n')
 			// Show the FULL args wrapped across rows (capped) rather than one squashed,
 			// truncated blob — the load-bearing detail (command text, push target, call
@@ -125,26 +127,79 @@ func renderApproval(th theme.Theme, p *pendingConfirm, width int) string {
 	if p.requireType {
 		b.WriteString(renderTypedConfirm(th, p, width))
 	} else {
-		b.WriteString(renderActionRow(th, req))
+		b.WriteString(renderActionRows(th, req, width))
 	}
 	return b.String()
 }
 
-// renderActionRow renders the standard single-key action row — DECLINE is the visual
-// default (inverse). The A (allow a bounded number of further calls) and F (allow for the
-// whole session) affordances appear only for risk classes eligible for the session
-// allow-list.
-func renderActionRow(th theme.Theme, req tools.ConfirmRequest) string {
+// actionGap separates two controls sharing a row. Two spaces, not one: at one space
+// "N decline V inspect" reads as a single phrase.
+const actionGap = "  "
+
+// actionRows renders a chosen layout, one explicit "\n"-delimited row per group, each
+// bounded to width. Explicit rows are the whole point: the footer's height budget counts
+// "\n"s, so a row the host soft-wraps makes the fixed bottom band taller than the model
+// believes and corrupts the inline layout.
+func actionRows(rows [][]string, width int) string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, truncateCells(strings.Join(row, actionGap), width))
+	}
+	return strings.Join(out, "\n")
+}
+
+// rowsFit reports whether every row of a layout is within width (cell-measured — the
+// controls carry SGR bytes, so len() would over-count by however many the theme emitted).
+func rowsFit(rows [][]string, width int) bool {
+	for _, row := range rows {
+		if cellWidth(strings.Join(row, actionGap)) > width {
+			return false
+		}
+	}
+	return true
+}
+
+// renderActionRows renders the standard single-key controls — DECLINE is the visual
+// default (inverse) — into one or more EXPLICITLY measured rows. The A (allow a bounded
+// number of further calls) and F (allow for the whole session) affordances appear only for
+// risk classes eligible for the session allow-list.
+//
+// Laid out from a fixed set of candidates rather than word-wrapped, because these are
+// semantic units: a generic wrapper would happily break "A allow 5×" in half or strand a
+// key from its verb. The candidates are ordered widest-first and are chosen by measurement,
+// and every one of them leads with the immediate approve/decline decision so the thing the
+// user is actually being asked survives at the top of a cramped sheet.
+func renderActionRows(th theme.Theme, req tools.ConfirmRequest, width int) string {
 	approve := th.Body().Render("Y approve")
 	decline := th.Body().Reverse(true).Render(" N decline ")
 	inspect := th.Dim().Render("V inspect")
-	esc := th.Dim().Render("Esc")
+	// Spell out what Escape does. The bare "Esc" was readable in context, but naming the
+	// verb costs a few cells and restates the fail-closed default at the point of decision.
+	esc := th.Dim().Render("Esc decline")
+
+	layouts := [][][]string{
+		{{approve, decline, inspect, esc}},
+		{{approve, decline}, {inspect, esc}},
+	}
 	if rememberable(req.Risk) {
 		allow := th.Dim().Render(fmt.Sprintf("A allow %d×", approveDefaultCount))
 		always := th.Dim().Render("F always")
-		return approve + "  " + decline + "  " + allow + "  " + always + "  " + inspect + "  " + esc
+		layouts = [][][]string{
+			{{approve, decline, allow, always, inspect, esc}},
+			{{approve, decline, inspect}, {allow, always, esc}},
+			{{approve, decline}, {inspect, esc}, {allow, always}},
+		}
 	}
-	return approve + "  " + decline + "  " + inspect + "  " + esc
+	for _, l := range layouts {
+		if rowsFit(l, width) {
+			return actionRows(l, width)
+		}
+	}
+	// Narrower than the core approve/decline pair (~22 cells) — a terminal already at or
+	// below the height/width floor that has its own "terminal too small" fallback. Keep the
+	// narrowest layout and let each row truncate rather than invent a cryptic keys-only UI:
+	// truncation still guarantees explicit, width-bounded rows.
+	return actionRows(layouts[len(layouts)-1], width)
 }
 
 // renderTypedConfirm renders the high-risk typed-confirmation prompt: the expected
@@ -154,15 +209,29 @@ func renderTypedConfirm(th theme.Theme, p *pendingConfirm, width int) string {
 	var b strings.Builder
 	b.WriteString(th.Danger().Render(truncateCells(`This action is irreversible. Type "`+confirmPhrase+`" to approve:`, width)))
 	b.WriteByte('\n')
-	caret := th.Body().Reverse(true).Render(" ")
-	b.WriteString(th.Body().Render(truncateCells("› "+p.confirmInput, width-1)) + caret)
+	// The caret is one more cell beyond the typed text, so the text gets width-1 — and at
+	// a width under 1 there is no room for even the caret.
+	line := th.Body().Render(truncateCells("› "+p.confirmInput, width-1))
+	if width >= 1 {
+		line += th.Body().Reverse(true).Render(" ")
+	}
+	b.WriteString(line)
 	b.WriteByte('\n')
 	enter := th.Dim().Render("Enter approve")
 	if strings.EqualFold(strings.TrimSpace(p.confirmInput), confirmPhrase) {
 		enter = th.Body().Render("Enter approve")
 	}
 	// In typed mode N is a typeable letter, so only Esc declines.
-	b.WriteString(enter + "  " + th.Body().Reverse(true).Render(" Esc decline "))
+	//
+	// Measured and stacked rather than joined blind: this is the sheet guarding git
+	// history rewrites and system-level actions, so it is the last place that may hand the
+	// host terminal a line to soft-wrap and quietly outgrow the footer's row budget.
+	decline := th.Body().Reverse(true).Render(" Esc decline ")
+	rows := [][]string{{enter, decline}}
+	if !rowsFit(rows, width) {
+		rows = [][]string{{enter}, {decline}}
+	}
+	b.WriteString(actionRows(rows, width))
 	return b.String()
 }
 

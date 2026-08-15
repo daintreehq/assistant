@@ -88,7 +88,14 @@ func stripAnsi(s string) string { return ansi.Strip(s) }
 // breaking on spaces where possible (used for the streaming in-progress prose line,
 // which isn't run through glamour's wrapper). Long unbroken tokens are split.
 func wrapCells(s string, w int) string {
-	if w < 1 || cellWidth(s) <= w {
+	// A non-positive budget has room for nothing. Returning s unchanged used to hand the
+	// caller a line wider than the width it asked for — every caller then trusted it and
+	// let the host terminal soft-wrap, which is the one thing the cell measuring exists
+	// to prevent.
+	if w < 1 {
+		return ""
+	}
+	if cellWidth(s) <= w {
 		return s
 	}
 	var out []string
