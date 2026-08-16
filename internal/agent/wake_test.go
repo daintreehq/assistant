@@ -55,6 +55,10 @@ func TestIsActionableWake(t *testing.T) {
 		{"empty terminalId", makeWakeEvent(func(e *domain.QueueEvent) { e.Target = &domain.EventTarget{TerminalID: ""} }), false},
 		{"non-watcher source user", termWakeEvent("t1", func(e *domain.QueueEvent) { e.Source = domain.SourceUser }), false},
 		{"non-watcher source system", termWakeEvent("t1", func(e *domain.QueueEvent) { e.Source = domain.SourceSystem }), false},
+		// timer.schedule's description promises that a timer's own event never starts a
+		// model turn — for BOTH payload types, and even when the timer carries a terminal
+		// target that would otherwise look watcher-shaped. Pin it so the prose stays true.
+		{"timer never wakes", termWakeEvent("t1", func(e *domain.QueueEvent) { e.Source = domain.SourceTimer }), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
