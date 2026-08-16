@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -178,11 +179,16 @@ func TestWatchPRPersistsCwdAndStopAfter(t *testing.T) {
 type grantRevokingStore struct {
 	memStore
 	revokedActors []string
+	revokeErr     error
 }
 
 func (s *grantRevokingStore) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {
 	s.revokedActors = append(s.revokedActors, actorID)
-	return 1, nil
+	if s.revokeErr != nil {
+		return 0, s.revokeErr
+	}
+	// Not 1: a handler that hard-coded the count would pass an assertion of 1.
+	return 5, nil
 }
 
 func TestWatcherCancelRevokesGrants(t *testing.T) {
@@ -196,8 +202,32 @@ func TestWatcherCancelRevokesGrants(t *testing.T) {
 	if len(st.revokedActors) != 1 || st.revokedActors[0] != "wch_1" {
 		t.Fatalf("expected grant revoke for cancelled watcher, got %v", st.revokedActors)
 	}
-	// The cascade is only useful to the model if the result says it happened.
-	if got := res.Result.(map[string]any)["revokedGrants"]; got != 1 {
-		t.Fatalf("expected revokedGrants=1 in the result, got %v", got)
+	// The cascade is only useful to the model if the result says it happened, with the
+	// store's own number rather than a constant baked into the handler.
+	if got := res.Result.(map[string]any)["revokedGrants"]; got != 5 {
+		t.Fatalf("expected revokedGrants=5 (the store's count) in the result, got %v", got)
+	}
+	if got := res.Result.(map[string]any)["grantRevokeFailed"]; got != false {
+		t.Fatalf("a successful cascade must report grantRevokeFailed=false, got %v", got)
+	}
+}
+
+// watcher.cancel is worse than timer.cancel for a swallowed cascade failure: the
+// watcher is already terminal, so re-running the tool hits the already-ended guard
+// and the cascade can never be retried through it. A confident revokedGrants:0 would
+// therefore strand a live grant permanently.
+func TestWatcherCancelSurfacesCascadeFailure(t *testing.T) {
+	st := &grantRevokingStore{revokeErr: errors.New("db locked")}
+	st.inserted = []domain.WatcherRecord{{ID: "wch_1", Status: "active"}}
+	tool := find(Tools(Deps{Store: st}), "watcher.cancel")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"id":"wch_1"}`), &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("a failed cascade must not fail the cancel, got %+v", res.Error)
+	}
+	if got := res.Result.(map[string]any)["grantRevokeFailed"]; got != true {
+		t.Fatalf("want grantRevokeFailed=true, got %v", got)
+	}
+	if !strings.Contains(res.Summary, "grant.revoke") {
+		t.Fatalf("the summary must point at the recovery, got %q", res.Summary)
 	}
 }

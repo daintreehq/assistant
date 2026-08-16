@@ -75,31 +75,35 @@ func TestRevokeGrantIdempotentAndByActorCount(t *testing.T) {
 		return g
 	}
 	g := mk("wch_solo")
-	if found, didRevoke, _ := s.RevokeGrant(g.ID, now); !found || !didRevoke {
-		t.Fatalf("first revoke should find and change the row, got found=%v didRevoke=%v", found, didRevoke)
+	found, didRevoke, err := s.RevokeGrant(g.ID, now)
+	if err != nil || !found || !didRevoke {
+		t.Fatalf("first revoke should find and change the row, got found=%v didRevoke=%v err=%v", found, didRevoke, err)
 	}
 	if c, _ := s.ConsumeGrant("wch_solo", domain.GrantActorWatcher, "git.commit", domain.RiskGit, now); c != nil {
 		t.Fatalf("revoked grant must not consume")
 	}
 	// The second revoke is the case that used to be indistinguishable from a typo'd
 	// id: the row is right there, already in the requested state. found stays true so
-	// the tool can answer "already revoked" instead of "no such grant".
-	if found, didRevoke, _ := s.RevokeGrant(g.ID, now); !found || didRevoke {
-		t.Fatalf("second revoke: want found=true didRevoke=false, got found=%v didRevoke=%v", found, didRevoke)
+	// the tool can answer "already revoked" instead of "no such grant". Deliberately at
+	// now+1 — with the same `now` a buggy re-stamp would write the identical value and
+	// the assertion below could not tell it from a genuine no-op.
+	found, didRevoke, err = s.RevokeGrant(g.ID, now+1)
+	if err != nil || !found || didRevoke {
+		t.Fatalf("second revoke: want found=true didRevoke=false err=nil, got found=%v didRevoke=%v err=%v", found, didRevoke, err)
 	}
-	// The revokedAt stamp from the FIRST revoke must survive the second call verbatim.
 	if again, _ := s.GetGrant(g.ID); again.RevokedAt == nil || *again.RevokedAt != now {
-		t.Fatalf("second revoke must not restamp revokedAt, got %v", again.RevokedAt)
+		t.Fatalf("second revoke must leave the first stamp verbatim, want %d got %v", now, again.RevokedAt)
 	}
-	if found, _, _ := s.RevokeGrant("grt_does_not_exist", now); found {
-		t.Fatalf("an unknown id must report found=false")
+	found, didRevoke, err = s.RevokeGrant("grt_does_not_exist", now)
+	if err != nil || found || didRevoke {
+		t.Fatalf("unknown id: want found=false didRevoke=false err=nil, got found=%v didRevoke=%v err=%v", found, didRevoke, err)
 	}
 
 	mk("wch_x")
 	mk("wch_x")
 	mk("wch_y")
-	if n, _ := s.RevokeGrantsByActor("wch_x", now); n != 2 {
-		t.Fatalf("revokeGrantsByActor want 2, got %d", n)
+	if n, err := s.RevokeGrantsByActor("wch_x", now); err != nil || n != 2 {
+		t.Fatalf("revokeGrantsByActor want 2 err=nil, got %d err=%v", n, err)
 	}
 	if got, _ := s.ListGrants("wch_x", now); len(got) != 0 {
 		t.Fatalf("wch_x grants should all be revoked")
@@ -110,9 +114,10 @@ func TestRevokeGrantIdempotentAndByActorCount(t *testing.T) {
 }
 
 // A grant that is dead by EXPIRY or by EXHAUSTION — never explicitly revoked — is
-// reported, never written. revokedAt is an explicit-revoke marker only
-// (domain.AutomationGrantRecord), so neither revoke path may stamp it, and neither
-// may count such a grant as authority it withdrew.
+// still STAMPED (an explicit revoke is exactly what revokedAt records, and the stamp
+// is the only kill that survives a backwards wall-clock step), but it must NOT be
+// counted as authority the call withdrew: didRevoke and the cascade count answer
+// "was there still authority here?", which is what the model acts on.
 func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
 	now := int64(10_000_000)
 	s := openTest(t, now)
@@ -140,6 +145,8 @@ func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
 		t.Fatalf("setup: g_used should consume to 0 uses, got %+v", c)
 	}
 
+	// Explicitly revoking an inert grant answers didRevoke=false (no authority was
+	// there) while still laying down the permanent stamp.
 	for _, g := range []domain.AutomationGrantRecord{expired, exhausted} {
 		found, didRevoke, err := s.RevokeGrant(g.ID, now)
 		if err != nil {
@@ -149,30 +156,121 @@ func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
 			t.Fatalf("%s: want found=true didRevoke=false, got found=%v didRevoke=%v", g.ID, found, didRevoke)
 		}
 		got, _ := s.GetGrant(g.ID)
-		if got.RevokedAt != nil {
-			t.Fatalf("%s: an inert grant must NOT be stamped revoked, got %v", g.ID, *got.RevokedAt)
+		if got.RevokedAt == nil || *got.RevokedAt != now {
+			t.Fatalf("%s: an explicit revoke must stamp revokedAt even on an inert grant, got %v", g.ID, got.RevokedAt)
 		}
 	}
 
-	// A live grant for the same actor, so the cascade has something real to withdraw.
-	mk("g_live", "wch_dead", nil)
-	n, err := s.RevokeGrantsByActor("wch_dead", now)
+	// The cascade: a live grant plus two never-revoked inert ones for one actor.
+	mk("g_live", "wch_cascade", nil)
+	mk("g_cascade_exp", "wch_cascade", func(r *domain.AutomationGrantRecord) { r.ExpiresAt = now - 1 })
+	n, err := s.RevokeGrantsByActor("wch_cascade", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 1, not 3: the count is model-visible as timer.cancel/watcher.cancel's
+	// 1, not 2: the count is model-visible as timer.cancel/watcher.cancel's
 	// revokedGrants, so it must mean "authority actually withdrawn".
 	if n != 1 {
 		t.Fatalf("revokeGrantsByActor should count only the live grant, want 1 got %d", n)
 	}
-	for _, id := range []string{"g_expired", "g_used"} {
+	// …but every row still gets stamped, so nothing can be resurrected by a clock step.
+	for _, id := range []string{"g_live", "g_cascade_exp"} {
 		got, _ := s.GetGrant(id)
-		if got.RevokedAt != nil {
-			t.Fatalf("%s: cascade must not stamp an already-inert grant", id)
+		if got.RevokedAt == nil {
+			t.Fatalf("%s: the cascade must stamp every not-yet-revoked row", id)
 		}
 	}
-	if got, _ := s.GetGrant("g_live"); got.RevokedAt == nil {
-		t.Fatalf("g_live: cascade must revoke the live grant")
+}
+
+// The live predicate is `expiresAt > now`, so a grant expiring exactly AT now is
+// already dead. Pinned because a `>=` slip would pass every other fixture in this
+// file (they all sit a comfortable distance either side of the boundary).
+func TestRevokeGrantExpiryBoundaryIsExclusive(t *testing.T) {
+	now := int64(10_000_000)
+	s := openTest(t, now)
+	g, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ID: "g_boundary", ActorID: "wch_b", ActorType: domain.GrantActorWatcher,
+		AllowedRiskClassesJson: strPtr(`["git"]`), ExpiresAt: now, MaxUses: 3, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, didRevoke, err := s.RevokeGrant(g.ID, now)
+	if err != nil || !found || didRevoke {
+		t.Fatalf("expiresAt == now is expired: want found=true didRevoke=false, got found=%v didRevoke=%v err=%v",
+			found, didRevoke, err)
+	}
+}
+
+// Expired AND already explicitly revoked — the two inert reasons at once. The
+// original stamp must survive, and the call must still report the row as present.
+func TestRevokeGrantOnExpiredAndAlreadyRevokedGrant(t *testing.T) {
+	now := int64(10_000_000)
+	s := openTest(t, now)
+	g, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ID: "g_both", ActorID: "wch_b", ActorType: domain.GrantActorWatcher,
+		AllowedRiskClassesJson: strPtr(`["git"]`), ExpiresAt: now + 60_000, MaxUses: 3, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, didRevoke, err := s.RevokeGrant(g.ID, now); err != nil || !didRevoke {
+		t.Fatalf("setup revoke: didRevoke=%v err=%v", didRevoke, err)
+	}
+	// Now well past its expiry, and already carrying a stamp.
+	later := now + 120_000
+	found, didRevoke, err := s.RevokeGrant(g.ID, later)
+	if err != nil || !found || didRevoke {
+		t.Fatalf("want found=true didRevoke=false err=nil, got found=%v didRevoke=%v err=%v", found, didRevoke, err)
+	}
+	if got, _ := s.GetGrant(g.ID); got.RevokedAt == nil || *got.RevokedAt != now {
+		t.Fatalf("the original stamp must survive, want %d got %v", now, got.RevokedAt)
+	}
+}
+
+// Two revokes racing the same grant. The single connection serializes them, but the
+// new method holds a transaction across a read and a write, so this pins that it
+// neither deadlocks nor hands BOTH callers a didRevoke=true (which would report the
+// same authority as withdrawn twice).
+func TestRevokeGrantConcurrent(t *testing.T) {
+	now := int64(10_000_000)
+	s := openTest(t, now)
+	g, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ID: "g_race", ActorID: "wch_r", ActorType: domain.GrantActorWatcher,
+		AllowedRiskClassesJson: strPtr(`["git"]`), ExpiresAt: now + 60_000, MaxUses: 3, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		found, didRevoke bool
+		err              error
+	}
+	results := make(chan outcome, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			f, d, e := s.RevokeGrant(g.ID, now)
+			results <- outcome{f, d, e}
+		}()
+	}
+	close(start)
+	revoked := 0
+	for i := 0; i < 2; i++ {
+		got := <-results
+		if got.err != nil {
+			t.Fatalf("concurrent revoke errored: %v", got.err)
+		}
+		if !got.found {
+			t.Fatalf("both callers must find the grant, got found=false")
+		}
+		if got.didRevoke {
+			revoked++
+		}
+	}
+	if revoked != 1 {
+		t.Fatalf("exactly one caller may report didRevoke, got %d", revoked)
 	}
 }
 

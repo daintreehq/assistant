@@ -3,6 +3,7 @@ package grant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/domain"
@@ -10,10 +11,15 @@ import (
 )
 
 // liveStore models the real grant store closely enough to assert list filtering,
-// source provenance, and idempotent revocation. ListGrants(actorID) filters by
-// actor (empty actorID ⇒ all); RevokeGrant zeroes a live grant once.
+// source provenance, and idempotent revocation. ListGrants(actorID) filters by actor
+// (empty actorID ⇒ all — it does NOT filter to live grants; the handler does that).
+// RevokeGrant stamps revokedAt whenever it is unset and reports the PRE-call
+// liveness, exactly like storage.Store.RevokeGrant.
 type liveStore struct {
 	grants []domain.AutomationGrantRecord
+	// revokeErr, when set, makes RevokeGrant fail — so the handler's storage-error
+	// branch is reachable and provably distinct from GRANT_NOT_FOUND.
+	revokeErr error
 }
 
 func (s *liveStore) InsertGrant(_ context.Context, rec domain.AutomationGrantRecord) (string, error) {
@@ -36,22 +42,29 @@ func (s *liveStore) ListGrants(_ context.Context, actorID string) ([]domain.Auto
 }
 
 func (s *liveStore) RevokeGrant(_ context.Context, id string) (found, didRevoke bool, err error) {
+	if s.revokeErr != nil {
+		return false, false, s.revokeErr
+	}
+	// One captured timestamp for both the liveness test and the stamp, matching the
+	// real adapter (which passes a single domain.NowMS() into the store).
 	now := domain.NowMS()
 	for i := range s.grants {
 		g := &s.grants[i]
 		if g.ID != id {
 			continue
 		}
-		// Live = not revoked, not expired, uses remaining — the same predicate the real
-		// store applies. Revoking stamps revokedAt and NOTHING else: the real store never
-		// zeroes usesRemaining (exhaustion and revocation are separate states), and an
-		// inert grant is reported rather than written.
-		if g.RevokedAt == nil && g.ExpiresAt > now && g.UsesRemaining > 0 {
+		// Live = not revoked, not expired, uses remaining — the real store's predicate.
+		live := g.RevokedAt == nil && g.ExpiresAt > now && g.UsesRemaining > 0
+		// The stamp lands whenever revokedAt is unset, INCLUDING for an expired or
+		// used-up grant: that is the explicit revoke the column exists to record, and
+		// it is the only kill a backwards clock step cannot undo. Note what is NOT
+		// touched — usesRemaining. Revocation and exhaustion are separate states, and
+		// the real store never conflates them.
+		if g.RevokedAt == nil {
 			stamp := now
 			g.RevokedAt = &stamp
-			return true, true, nil
 		}
-		return true, false, nil
+		return true, live, nil
 	}
 	return false, false, nil
 }
@@ -188,9 +201,31 @@ func TestGrantRevokeSucceedsOnExpiredAndExhaustedGrants(t *testing.T) {
 			t.Fatalf("%s: want alreadyRevoked=true, got %v", id, got)
 		}
 	}
+	// alreadyRevoked says "there was no authority left", NOT "nothing was written":
+	// the explicit revoke still lands its permanent stamp.
 	for i := range st.grants {
-		if st.grants[i].RevokedAt != nil {
-			t.Fatalf("%s: an inert grant must not be stamped revoked", st.grants[i].ID)
+		if st.grants[i].RevokedAt == nil {
+			t.Fatalf("%s: an explicit revoke must stamp revokedAt", st.grants[i].ID)
 		}
+	}
+}
+
+// A storage failure is not a missing grant. The tool promises that GRANT_NOT_FOUND
+// means exactly one thing, so every other failure has to come back as CodeInternal —
+// otherwise the model is told, unrecoverably, to stop asking about a grant that may
+// still be live.
+func TestGrantRevokeStorageFailureIsInternalNotNotFound(t *testing.T) {
+	st := &liveStore{revokeErr: errors.New("disk on fire")}
+	revoke := find(Tools(Deps{Store: st}), "grant.revoke")
+	res := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"grt_x"}`), mainCtx())
+	if res.Ok || res.Error.Code != domain.CodeInternal {
+		t.Fatalf("want CodeInternal on a storage error, got %+v", res)
+	}
+
+	// Same reasoning for an entirely absent store.
+	nilStore := find(Tools(Deps{}), "grant.revoke")
+	res = nilStore.Handle(context.Background(), decode(t, nilStore, `{"id":"grt_x"}`), mainCtx())
+	if res.Ok || res.Error.Code != domain.CodeInternal {
+		t.Fatalf("want CodeInternal when storage is unavailable, got %+v", res)
 	}
 }

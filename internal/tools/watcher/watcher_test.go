@@ -177,6 +177,9 @@ func TestCancelStampsUserCancelledReason(t *testing.T) {
 	if !ok || got != 0 {
 		t.Fatalf("revokedGrants must be present and 0, got %v (present=%v)", got, ok)
 	}
+	if failed := res.Result.(map[string]any)["grantRevokeFailed"]; failed != false {
+		t.Fatalf("want grantRevokeFailed=false on a clean cascade, got %v", failed)
+	}
 }
 
 // Cancelling a supervisor that back-links a workflow run closes that ledger row
