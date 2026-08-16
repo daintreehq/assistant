@@ -182,8 +182,13 @@ func TestComposerView_UsesDashboardSupervisionCounts(t *testing.T) {
 		Agents: nil,
 	}
 	out := ansi.Strip(m.composerView(m.contentW()))
-	if !strings.Contains(out, "◷ 1 timer · 2 watchers") {
-		t.Errorf("supervision counts missing from the composer:\n%s", out)
+	// Built from the THEME's glyphs rather than hard-coded runes: theme.Resolve() hands
+	// back the ASCII set under DAINTREE_ASCII=1 or a non-UTF locale, and this test is
+	// about the wiring, not about which glyph set the environment picked.
+	g := m.theme.Glyphs
+	want := g.Waiting + " 1 timer " + g.Bullet + " 2 watchers"
+	if !strings.Contains(out, want) {
+		t.Errorf("supervision counts missing from the composer (want %q):\n%s", want, out)
 	}
 }
 
@@ -199,7 +204,9 @@ func TestComposerView_DoesNotCountAsyncAsSupervision(t *testing.T) {
 		},
 	}
 	out := ansi.Strip(m.composerView(m.contentW()))
-	if strings.Contains(out, "◷") || strings.Contains(out, "timer") || strings.Contains(out, "watcher") {
+	// The nouns are the whole claim and they carry no glyph-set dependency; the segment
+	// can never render one without the other.
+	if strings.Contains(out, "timer") || strings.Contains(out, "watcher") {
 		t.Errorf("live async work rendered as supervision:\n%s", out)
 	}
 }
@@ -234,8 +241,10 @@ func TestViewWidths_HomeWithSupervision(t *testing.T) {
 		Timers:   []domain.TimerRecord{{Title: "nightly digest", FireAt: 1_000_000_000_000}},
 		Watchers: []domain.WatcherRecord{{ID: "wch_1", Status: "active"}},
 	}
-	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "◷ 1 timer · 1 watcher") {
-		t.Errorf("supervision missing from the assembled frame:\n%s", out)
+	g := m.theme.Glyphs
+	want := g.Waiting + " 1 timer " + g.Bullet + " 1 watcher"
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, want) {
+		t.Errorf("supervision missing from the assembled frame (want %q):\n%s", want, out)
 	}
 }
 

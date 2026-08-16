@@ -603,9 +603,11 @@ func countLabel(n int, noun string) string {
 // theme emitted.
 //
 // The three slots have a strict priority — primary (the connection state, i.e. whether
-// the assistant can act at all) > secondary (live supervision) > right (the session bill)
-// — and a slot that does not fit is dropped WHOLE rather than wrapped or squeezed: a
-// half-rendered "◷ 1 ti…" reads as corruption rather than as a fact.
+// the assistant can act at all) > secondary (live supervision) > right (the session bill).
+// Secondary and right are dropped WHOLE rather than wrapped or squeezed: a half-rendered
+// "◷ 1 ti…" reads as corruption rather than as a fact. Primary is the deliberate
+// exception — on a pane too narrow even for it, it ellipsizes instead of vanishing,
+// because a truncated hint that the link exists still beats an empty row.
 //
 // Dropping is also MONOTONIC in width: once supervision is dropped, the bill does not
 // move into the cells it freed. Otherwise shrinking the pane by a single column would

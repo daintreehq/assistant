@@ -577,7 +577,8 @@ func (m Model) composerView(w int) string {
 		Cost:        m.sessionCostLine(),
 		// Read straight off the dashboard snapshot rather than mirrored into Model
 		// counters: buildDashboard already filters these to the live sets (scheduled
-		// timers, active watchers) and the ~1s tick already replaces the snapshot, which
+		// timers; watchers that are created, active or paused — i.e. still supervising,
+		// not merely running) and the ~1s tick already replaces the snapshot, which
 		// is exactly the cadence this row needs. A cached copy would be a second source
 		// of truth free to drift from the operations deck reading the same slices.
 		//

@@ -357,9 +357,11 @@ func TestView_SupervisionCountsOnTheMCPRow(t *testing.T) {
 			if strings.Contains(hintLineC(frame), "◷") {
 				t.Errorf("supervision leaked onto the hint row: %q", hintLineC(frame))
 			}
-			// The connection light keeps the left anchor; supervision follows it.
-			if !strings.HasPrefix(row, "● MCP · "+tc.want) {
-				t.Errorf("want the row to open %q, got %q", "● MCP · "+tc.want, row)
+			// The connection light keeps the left anchor and supervision follows it —
+			// pinned by EQUALITY, not a prefix, so a dangling trailing separator or a
+			// silently appended extra category cannot slip through.
+			if want := "● MCP · " + tc.want; strings.TrimRight(row, " ") != want {
+				t.Errorf("want the row to be %q, got %q", want, strings.TrimRight(row, " "))
 			}
 		})
 	}
