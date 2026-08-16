@@ -174,6 +174,9 @@ func TestOpenTerminals_RefreshDedupedAcrossTurns(t *testing.T) {
 		return []backend.OpenTerminal{{ID: "terminal-1"}}
 	}
 	s := NewSession(deps)
+	// Open the gate and THEN join, in that order (cleanups run LIFO), so an early
+	// t.Fatal leaves no refresher running into the next test.
+	t.Cleanup(func() { once.Do(func() { close(release) }); s.DrainBackgroundWork() })
 
 	// Turn 1 kicks the refresh (sets rosterRefreshing=true synchronously, spawns it).
 	if _, err := s.Send(context.Background(), "one", SendOptions{}); err != nil {
@@ -281,6 +284,13 @@ func TestOpenTerminals_StaleFetchCannotResurrectClosedTerminals(t *testing.T) {
 		return []backend.OpenTerminal{{ID: "terminal-1"}} // post-close truth
 	}
 	s := NewSession(deps)
+	// Open both gates and THEN join, in that order (cleanups run LIFO), so an early
+	// t.Fatal leaves no refresher running into the next test.
+	t.Cleanup(func() {
+		once1.Do(func() { close(release1) })
+		once2.Do(func() { close(release2) })
+		s.DrainBackgroundWork()
+	})
 
 	// Seed the warmed cache directly (whitebox): the pre-close roster an earlier
 	// completed refresh would have left. Fetch #1 below is held open, so nothing else
@@ -424,6 +434,9 @@ func TestOpenTerminals_SpawnSettleInvalidatesInFlightFetch(t *testing.T) {
 		return []backend.OpenTerminal{{ID: "terminal-new", AgentID: "claude"}} // post-spawn truth
 	}
 	s := NewSession(deps)
+	// Open the gate and THEN join, in that order (cleanups run LIFO), so an early
+	// t.Fatal leaves no refresher running into the next test.
+	t.Cleanup(func() { once.Do(func() { close(release) }); s.DrainBackgroundWork() })
 
 	s.WarmOpenTerminals()
 	select {
