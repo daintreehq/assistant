@@ -21,7 +21,7 @@ func (m *memStore) InsertGrant(_ context.Context, rec domain.AutomationGrantReco
 func (m *memStore) ListGrants(context.Context, string) ([]domain.AutomationGrantRecord, error) {
 	return m.inserted, nil
 }
-func (m *memStore) RevokeGrant(context.Context, string) (bool, error) { return true, nil }
+func (m *memStore) RevokeGrant(context.Context, string) (bool, bool, error) { return true, true, nil }
 
 func find(ts []*tools.Tool, name string) *tools.Tool {
 	for _, t := range ts {

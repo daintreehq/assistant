@@ -3,6 +3,8 @@ package timer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/domain"
@@ -10,8 +12,10 @@ import (
 )
 
 type memStore struct {
-	inserted []domain.TimerRecord
-	revoked  []string
+	inserted    []domain.TimerRecord
+	revoked     []string
+	revokeCount int
+	revokeErr   error
 }
 
 func (m *memStore) InsertTimer(_ context.Context, rec domain.TimerRecord) (string, error) {
@@ -30,9 +34,16 @@ func (m *memStore) GetTimer(_ context.Context, id string) (*domain.TimerRecord, 
 	return nil, nil
 }
 func (m *memStore) UpdateTimerStatus(context.Context, string, string) error { return nil }
+
+// revokeCount is deliberately NOT 1: a handler that hard-coded the count, or read it
+// from the wrong place, would sail past an assertion of 1. revokeErr, when set, drives
+// the cascade-failure branch.
 func (m *memStore) RevokeGrantsByActor(_ context.Context, id string) (int, error) {
 	m.revoked = append(m.revoked, id)
-	return 1, nil
+	if m.revokeErr != nil {
+		return 0, m.revokeErr
+	}
+	return m.revokeCount, nil
 }
 
 func find(ts []*tools.Tool, name string) *tools.Tool {
@@ -84,7 +95,7 @@ func TestScheduleCallSafeToolRequiresName(t *testing.T) {
 
 // cancel of a known timer revokes its grants; an unknown id is non-recoverable.
 func TestCancel(t *testing.T) {
-	st := &memStore{inserted: []domain.TimerRecord{{ID: "tmr_1", Status: "scheduled"}}}
+	st := &memStore{inserted: []domain.TimerRecord{{ID: "tmr_1", Status: "scheduled"}}, revokeCount: 7}
 	tool := find(Tools(Deps{Store: st}), "timer.cancel")
 	res := tool.Handle(context.Background(), json.RawMessage(`{"id":"tmr_1"}`), &tools.ToolContext{})
 	if !res.Ok {
@@ -93,9 +104,61 @@ func TestCancel(t *testing.T) {
 	if len(st.revoked) != 1 || st.revoked[0] != "tmr_1" {
 		t.Fatalf("expected grant revoke for cancelled timer, got %v", st.revoked)
 	}
+	// The cascade has to be OBSERVABLE, not just performed: without revokedGrants in
+	// the result the model's only record of it is a sentence in the tool description,
+	// and it revokes the grant again — which used to fail. 7 is the store's number, so
+	// a hard-coded count cannot satisfy this.
+	if got := res.Result.(map[string]any)["revokedGrants"]; got != 7 {
+		t.Fatalf("expected revokedGrants=7 (the store's count) in the result, got %v", got)
+	}
+	if got := res.Result.(map[string]any)["grantRevokeFailed"]; got != false {
+		t.Fatalf("a successful cascade must report grantRevokeFailed=false, got %v", got)
+	}
 
 	res = tool.Handle(context.Background(), json.RawMessage(`{"id":"nope"}`), &tools.ToolContext{})
 	if res.Ok || res.Error.Code != codeTimerNotFound || res.Error.Recoverable {
 		t.Fatalf("expected non-recoverable TIMER_NOT_FOUND, got %+v", res)
 	}
+}
+
+// A cascade that found nothing still reports the field, and one that FAILED must not
+// report a confident 0 — the description tells the model that 0 means "no follow-up
+// grant.revoke needed", so a swallowed storage error would strand a live grant behind
+// a tool result that says everything is clean.
+func TestCancelReportsCascadeOutcomeHonestly(t *testing.T) {
+	t.Run("no grants held", func(t *testing.T) {
+		st := &memStore{inserted: []domain.TimerRecord{{ID: "tmr_1", Status: "scheduled"}}, revokeCount: 0}
+		tool := find(Tools(Deps{Store: st}), "timer.cancel")
+		res := tool.Handle(context.Background(), json.RawMessage(`{"id":"tmr_1"}`), &tools.ToolContext{})
+		if !res.Ok {
+			t.Fatalf("expected ok, got %+v", res.Error)
+		}
+		got, present := res.Result.(map[string]any)["revokedGrants"]
+		if !present || got != 0 {
+			t.Fatalf("revokedGrants must be present and 0, got %v (present=%v)", got, present)
+		}
+		if failed := res.Result.(map[string]any)["grantRevokeFailed"]; failed != false {
+			t.Fatalf("want grantRevokeFailed=false, got %v", failed)
+		}
+	})
+
+	t.Run("cascade failed", func(t *testing.T) {
+		st := &memStore{
+			inserted:  []domain.TimerRecord{{ID: "tmr_1", Status: "scheduled"}},
+			revokeErr: errors.New("db locked"),
+		}
+		tool := find(Tools(Deps{Store: st}), "timer.cancel")
+		res := tool.Handle(context.Background(), json.RawMessage(`{"id":"tmr_1"}`), &tools.ToolContext{})
+		// Still Ok: the timer really is cancelled, and failing the call would be the
+		// bigger lie. The failure rides the result instead.
+		if !res.Ok {
+			t.Fatalf("a failed cascade must not fail the cancel, got %+v", res.Error)
+		}
+		if failed := res.Result.(map[string]any)["grantRevokeFailed"]; failed != true {
+			t.Fatalf("want grantRevokeFailed=true, got %v", failed)
+		}
+		if !strings.Contains(res.Summary, "grant.revoke") {
+			t.Fatalf("the summary must point at the recovery, got %q", res.Summary)
+		}
+	})
 }

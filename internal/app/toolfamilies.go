@@ -291,7 +291,7 @@ func (a grantStoreAdapter) ListGrants(_ context.Context, actorID string) ([]doma
 	return a.s.ListGrants(actorID, domain.NowMS())
 }
 
-func (a grantStoreAdapter) RevokeGrant(_ context.Context, id string) (bool, error) {
+func (a grantStoreAdapter) RevokeGrant(_ context.Context, id string) (found, didRevoke bool, err error) {
 	return a.s.RevokeGrant(id, domain.NowMS())
 }
 

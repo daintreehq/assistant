@@ -190,39 +190,120 @@ func (s *Store) ConsumeGrant(actorID string, actorType domain.AutomationGrantAct
 	return nil, nil
 }
 
-// RevokeGrant stamps revokedAt WHERE revokedAt IS NULL; reports whether changed.
-func (s *Store) RevokeGrant(id string, now int64) (bool, error) {
+// RevokeGrant withdraws a grant by id. found reports whether the id exists at all;
+// didRevoke reports whether THIS call took live authority away.
+//
+// The two are separate because "no such grant" and "the grant is right there and
+// already inert" are different answers, and one rows-affected count cannot tell
+// them apart — which is what made grant.revoke report a bogus GRANT_NOT_FOUND for a
+// grant that timer.cancel had already cascaded away.
+//
+// The STAMP and the ANSWER are deliberately decoupled. revokedAt is written
+// whenever it is NULL — including for a grant that had already expired or run out
+// of uses — because this call IS the explicit revoke that domain.AutomationGrantRecord
+// reserves the column for, and because the stamp is the only PERMANENT kill: expiry
+// is judged against domain.NowMS(), which is wall time and can step backwards (NTP
+// correction, VM resume), so an unstamped expired grant would come back to life on a
+// rewind. didRevoke instead reports the PRE-call liveness, which is what the caller
+// actually asked about ("was there still authority here?") and what grant.revoke
+// turns into alreadyRevoked.
+//
+// Lookup + update run in ONE transaction (single-conn store rules out interleave),
+// mirroring ConsumeGrant. Only tx-scoped statements inside: calling s.GetGrant here
+// would take the same single connection and deadlock.
+func (s *Store) RevokeGrant(id string, now int64) (found, didRevoke bool, err error) {
 	if now <= 0 {
 		now = s.now()
 	}
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, false, fmt.Errorf("begin revoke grant: %w", err)
+	}
+	var notRevoked, live int
+	err = tx.QueryRow(`
+		SELECT CASE WHEN revokedAt IS NULL THEN 1 ELSE 0 END,
+		       CASE WHEN revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0
+		            THEN 1 ELSE 0 END
+		  FROM automation_grants
+		 WHERE id = ?`, now, id).Scan(&notRevoked, &live)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return false, false, nil
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant lookup: %w", err)
+	}
+	if notRevoked == 0 {
+		// Already explicitly revoked: the stamp stands as-is, so nothing is written and
+		// the original revokedAt survives verbatim. Pure read — roll back.
+		_ = tx.Rollback()
+		return true, false, nil
+	}
+	res, err := tx.Exec(
 		"UPDATE automation_grants SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL", now, id)
 	if err != nil {
-		return false, fmt.Errorf("revoke grant: %w", err)
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("revoke grant rows affected: %w", err)
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant rows affected: %w", err)
 	}
-	return n > 0, nil
+	// The probe just saw revokedAt NULL inside this same transaction, so the update
+	// MUST have landed. Failing loudly beats returning didRevoke=true for a row that
+	// was never stamped — that direction of error hands out a false "authority gone".
+	if n == 0 {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant %s: update matched no row despite a live probe", id)
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("commit revoke grant: %w", cerr)
+	}
+	return true, live == 1, nil
 }
 
-// RevokeGrantsByActor revokes all live grants for an actor; returns the count.
+// RevokeGrantsByActor revokes every not-yet-revoked grant for an actor and returns
+// how many of them were still LIVE.
+//
+// Same split as RevokeGrant, for the same reasons: the UPDATE stamps every row whose
+// revokedAt is NULL (a permanent kill that survives a backwards clock step), while the
+// returned count is only the grants that still held authority. The count is
+// model-visible — timer.cancel and watcher.cancel report it as revokedGrants — so
+// counting rows that were already dead would claim authority that was never there to
+// withdraw. So the UPDATE deliberately touches MORE rows than the count reports.
+// Counting and stamping share ONE transaction not for the row arithmetic but because
+// the sole connection is otherwise free between two separate statements — the count
+// has to describe the same snapshot the UPDATE then writes.
 func (s *Store) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 	if now <= 0 {
 		now = s.now()
 	}
-	res, err := s.db.Exec(
-		"UPDATE automation_grants SET revokedAt = ? WHERE actorId = ? AND revokedAt IS NULL",
-		now, actorID)
+	tx, err := s.db.Begin()
 	if err != nil {
+		return 0, fmt.Errorf("begin revoke grants by actor: %w", err)
+	}
+	var live int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM automation_grants
+		 WHERE actorId = ? AND revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0`,
+		actorID, now).Scan(&live); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("count live grants by actor: %w", err)
+	}
+	if _, err := tx.Exec(
+		"UPDATE automation_grants SET revokedAt = ? WHERE actorId = ? AND revokedAt IS NULL",
+		now, actorID); err != nil {
+		_ = tx.Rollback()
 		return 0, fmt.Errorf("revoke grants by actor: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("revoke grants by actor rows affected: %w", err)
+	if cerr := tx.Commit(); cerr != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("commit revoke grants by actor: %w", cerr)
 	}
-	return int(n), nil
+	return live, nil
 }
 
 // grantAuthorizes reports whether a grant authorizes (toolName, riskClass) by the
