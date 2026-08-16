@@ -238,7 +238,10 @@ type SessionDeps struct {
 	// block's open-terminal inventory, so the model sees the live roster as inert data
 	// instead of tool-calling terminal.list to discover it. It is invoked on a DETACHED
 	// goroutine (refreshRosterAsync), NOT on the turn's critical path: the turn serves the
-	// last cached snapshot and never blocks on this read. It is therefore given the
+	// last cached snapshot and never performs this read inline. (Round 0 alone may wait a
+	// bounded rosterRoundZeroGrace on an in-flight refresh's completion signal before it
+	// would otherwise serve an unverified snapshot — a wait on already-running work, not
+	// on a call this goroutine issues.) It is therefore given the
 	// app-scoped background context (bgCtx), which must NOT carry a deadline — mcp.Client
 	// tears the connection down on a DeadlineExceeded, so the fetcher self-bounds with its
 	// own cancel timer instead. Best-effort: nil ⇒ the inventory is omitted (the default in
