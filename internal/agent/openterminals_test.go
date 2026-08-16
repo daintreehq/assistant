@@ -18,11 +18,15 @@ import (
 // turn). These tests pin that contract: non-blocking, cached-and-refreshed per turn,
 // stable across the rounds of a turn, and a harmless nil-fetcher path.
 
-// TestOpenTerminals_FetchDoesNotBlockTurn is the marquee guarantee: with a fetcher that
-// blocks indefinitely, Send must still finish the turn — the refresh runs detached and
-// the turn streams against whatever the cache already held (nil, on this cold first turn).
+// TestOpenTerminals_FetchDoesNotBlockTurn is the marquee guarantee, as narrowed by the
+// issue #334 fix: with a fetcher that blocks indefinitely, Send must still finish the
+// turn. "Does not block" now means "never waits for the FETCH" rather than "never waits
+// at all" — round 0 pays at most rosterRoundZeroGrace on the refresh's completion signal
+// and then proceeds, here with no roster (the cache is cold and the fetch is still out).
 func TestOpenTerminals_FetchDoesNotBlockTurn(t *testing.T) {
 	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
 	entered := make(chan struct{}, 1)
 
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
@@ -35,6 +39,7 @@ func TestOpenTerminals_FetchDoesNotBlockTurn(t *testing.T) {
 	s := NewSession(deps)
 
 	done := make(chan string, 1)
+	start := time.Now()
 	go func() {
 		reply, _ := s.Send(context.Background(), "hi", SendOptions{})
 		done <- reply
@@ -48,6 +53,8 @@ func TestOpenTerminals_FetchDoesNotBlockTurn(t *testing.T) {
 	}
 
 	// The turn must finish WITHOUT the fetcher returning — it is still blocked on release.
+	// The ceiling is a deadlock guard, an order of magnitude above the grace, not a tight
+	// timing assertion.
 	select {
 	case reply := <-done:
 		if reply != "ok" {
@@ -56,13 +63,18 @@ func TestOpenTerminals_FetchDoesNotBlockTurn(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Send blocked on the roster fetch — the inventory read must be detached")
 	}
+	// ...but it DID wait out the round-0 grace, since the fetch never landed. This is the
+	// bounded wait itself: without it, round 0 would have raced past the refresh.
+	if elapsed := time.Since(start); elapsed < rosterRoundZeroGrace {
+		t.Errorf("round 0 returned after %v — it must wait out rosterRoundZeroGrace (%v) on an unresolved refresh", elapsed, rosterRoundZeroGrace)
+	}
 
 	// Cold first round carried no roster (the refresh is still in flight).
 	if rc := be.runtimeAt(0); len(rc.OpenTerminals) != 0 {
 		t.Errorf("cold first round should carry no roster, got %d entries", len(rc.OpenTerminals))
 	}
 
-	close(release)
+	once.Do(func() { close(release) })
 	s.DrainBackgroundWork() // join the detached refresh so the test leaks no goroutine
 }
 
@@ -548,6 +560,330 @@ func TestClosedTerminalIDs_Shapes(t *testing.T) {
 			}
 		}
 	}
+}
+
+// seedRoster whiteboxes a COMPLETED refresh into the cache: the snapshot a fetch issued
+// `age` ago would have left behind. Content and age are set together and never
+// separately — the serving policy withholds anything older than rosterSnapshotMaxAge, so
+// a roster seeded without its timestamp would model a state no real refresh can produce
+// (and would be silently withheld).
+func seedRoster(s *Session, age time.Duration, entries ...backend.OpenTerminal) {
+	s.rosterMu.Lock()
+	defer s.rosterMu.Unlock()
+	s.roster = entries
+	s.rosterFetchedAt = time.Now().Add(-age)
+}
+
+// TestOpenTerminals_Issue334_StaleWarmRosterIsNotServedWhileTheRefreshLands replays the
+// issue verbatim. The boot warm listed terminal-f9aec2b2 at 04:56:53; the human then
+// closed it in the Daintree UI (no local tool call, so no tombstone can help); the turn
+// started at 04:57:14 and its kicked refresh returned {"terminals":[]} 15ms LATER than
+// round 0's request was built. Round 0 therefore served a 21-second-old roster as live
+// fact, and the model both named the dead terminal to the human and armed a 60-minute
+// durable timer against it. Round 0 must now wait out that refresh and carry nothing.
+func TestOpenTerminals_Issue334_StaleWarmRosterIsNotServedWhileTheRefreshLands(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+
+	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
+	deps, be := recordingDeps(r, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		entered <- struct{}{}
+		<-release
+		return nil // the turn kick's truth: {"terminals":[]}
+	}
+	s := NewSession(deps)
+	seedRoster(s, 21*time.Second,
+		backend.OpenTerminal{ID: "terminal-f9aec2b2", Kind: "agent", AgentState: "waiting"})
+
+	done := make(chan string, 1)
+	go func() {
+		reply, _ := s.Send(context.Background(), "what is that agent waiting on?", SendOptions{})
+		done <- reply
+	}()
+
+	// The turn kicked the refresh; round 0 is parked on its completion signal.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the turn never kicked the roster refresh")
+	}
+	once.Do(func() { close(release) }) // the empty snapshot commits
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send never returned")
+	}
+
+	if got := be.runtimeAt(0).OpenTerminals; len(got) != 0 {
+		t.Fatalf("round 0 served the stale boot-warm roster the in-flight refresh was about to blank: %+v", got)
+	}
+	s.DrainBackgroundWork()
+}
+
+// The round-0 wait triggers on "a refresh is IN FLIGHT", not on the sibling worktree
+// cache's "the cache is cold" — so it must fire for a cache young enough that the
+// rosterSnapshotMaxAge cap cannot be what produced the answer. Here a 1s-old snapshot is
+// comfortably servable, yet round 0 still waits and carries the refresh's truth instead.
+func TestOpenTerminals_RoundZeroServesTheRefreshOverAYoungCache(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+
+	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
+	deps, be := recordingDeps(r, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		entered <- struct{}{}
+		<-release
+		return []backend.OpenTerminal{{ID: "terminal-new", Kind: "agent"}}
+	}
+	s := NewSession(deps)
+	seedRoster(s, time.Second, backend.OpenTerminal{ID: "terminal-old", Kind: "agent"})
+
+	done := make(chan string, 1)
+	go func() {
+		reply, _ := s.Send(context.Background(), "which terminals are open?", SendOptions{})
+		done <- reply
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the turn never kicked the roster refresh")
+	}
+	once.Do(func() { close(release) })
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send never returned")
+	}
+
+	got := be.runtimeAt(0).OpenTerminals
+	if len(got) != 1 || got[0].ID != "terminal-new" {
+		t.Fatalf("round 0 should carry the refresh's snapshot, not the young cached one; got %+v", got)
+	}
+	s.DrainBackgroundWork()
+}
+
+// The absolute cap is the backstop for when the grace cannot help — no refresh in
+// flight at all (here: a drained session, whose kicks bail immediately). A snapshot past
+// rosterSnapshotMaxAge is withheld; one inside it is still served, so the assertion
+// cannot pass for the trivial reason that the cache was empty.
+func TestOpenTerminals_SnapshotPastMaxAgeIsWithheldWithNoRefreshInFlight(t *testing.T) {
+	r := &fakeRouter{results: []models.ChatResult{{Content: "a"}, {Content: "b"}}}
+	deps, be := recordingDeps(r, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		return []backend.OpenTerminal{{ID: "terminal-fetched"}}
+	}
+	s := NewSession(deps)
+	// Terminal: every later kick bails on draining, so nothing can refresh the cache
+	// underneath the two turns below and only the age policy decides.
+	s.DrainBackgroundWork()
+
+	seedRoster(s, rosterSnapshotMaxAge+time.Second, backend.OpenTerminal{ID: "terminal-1"})
+	if _, err := s.Send(context.Background(), "one", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := be.runtimeAt(0).OpenTerminals; len(got) != 0 {
+		t.Fatalf("a snapshot past rosterSnapshotMaxAge must be withheld, got %+v", got)
+	}
+
+	seedRoster(s, time.Second, backend.OpenTerminal{ID: "terminal-1"})
+	if _, err := s.Send(context.Background(), "two", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got := be.runtimeAt(1).OpenTerminals
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("a snapshot inside rosterSnapshotMaxAge must still be served, got %+v", got)
+	}
+}
+
+// Withholding an aged snapshot also KICKS a refresh, so the next round self-heals rather
+// than the rest of the turn going roster-blind. Driven through the helper directly (not a
+// turn) so the kick under test is the policy's own, not runTurn's turn-start kick.
+func TestOpenTerminals_WithheldSnapshotKicksASelfHealingRefresh(t *testing.T) {
+	var calls atomic.Int32
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		calls.Add(1)
+		return []backend.OpenTerminal{{ID: "terminal-live"}}
+	}
+	s := NewSession(deps)
+	seedRoster(s, rosterSnapshotMaxAge+time.Second, backend.OpenTerminal{ID: "terminal-aged"})
+
+	// A LATER round (no grace wait) still applies the cap and still self-heals.
+	if got := s.currentRosterForRound(context.Background(), false); len(got) != 0 {
+		t.Fatalf("an aged snapshot must be withheld from every round, got %+v", got)
+	}
+	s.DrainBackgroundWork() // join the kicked refresh
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("withholding an aged snapshot should kick exactly one refresh, got %d", n)
+	}
+	if got := s.currentRoster(); len(got) != 1 || got[0].ID != "terminal-live" {
+		t.Fatalf("the self-healing refresh should have replaced the cache, got %+v", got)
+	}
+}
+
+// Only round 0 pays the grace. A later round reads the cache straight through, which is
+// also what keeps a close settled MID-turn visible on the very next round — the
+// synchronous prune must never be held up behind an unrelated in-flight fetch.
+func TestOpenTerminals_OnlyRoundZeroWaitsOnTheInFlightRefresh(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		entered <- struct{}{}
+		<-release // never lands during the assertions below
+		return nil
+	}
+	s := NewSession(deps)
+	seedRoster(s, time.Second, backend.OpenTerminal{ID: "terminal-1"})
+
+	s.refreshRosterAsync()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never entered the fetcher")
+	}
+
+	start := time.Now()
+	got := s.currentRosterForRound(context.Background(), false)
+	if elapsed := time.Since(start); elapsed >= rosterRoundZeroGrace {
+		t.Fatalf("a later round waited %v — only round 0 may pay the grace", elapsed)
+	}
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("a later round should serve the young cache unchanged, got %+v", got)
+	}
+
+	start = time.Now()
+	got = s.currentRosterForRound(context.Background(), true)
+	if elapsed := time.Since(start); elapsed < rosterRoundZeroGrace {
+		t.Fatalf("round 0 returned after %v — it must wait out the unresolved refresh", elapsed)
+	}
+	// The grace expired without an answer, but the snapshot is still inside the cap, so
+	// withholding it would be a false negative the policy does not ask for.
+	if len(got) != 1 || got[0].ID != "terminal-1" {
+		t.Fatalf("after an expired grace round 0 should still serve the in-cap cache, got %+v", got)
+	}
+
+	once.Do(func() { close(release) })
+	s.DrainBackgroundWork()
+}
+
+// A cancelled turn abandons the grace at once — the wait is a courtesy, never something
+// that outlives the turn asking for it.
+func TestOpenTerminals_RoundZeroGraceEndsOnCancellation(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		entered <- struct{}{}
+		<-release
+		return nil
+	}
+	s := NewSession(deps)
+
+	s.refreshRosterAsync()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never entered the fetcher")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	s.currentRosterForRound(ctx, true)
+	if elapsed := time.Since(start); elapsed >= rosterRoundZeroGrace {
+		t.Fatalf("a cancelled round waited %v on the grace, want an immediate return", elapsed)
+	}
+
+	once.Do(func() { close(release) })
+	s.DrainBackgroundWork()
+}
+
+// The done signal reports the refresher's FINAL outcome, so it must survive the
+// gen-mismatch discard loop: a discarded attempt decides nothing, and releasing round 0
+// on it would hand back exactly the pre-mutation cache the discard exists to reject.
+// rosterFetchedAt follows the same rule — only the accepted attempt dates the cache.
+func TestOpenTerminals_RefreshDoneClosesOnlyOnTheFinalGenStableCommit(t *testing.T) {
+	release1, release2 := make(chan struct{}), make(chan struct{})
+	entered1, entered2 := make(chan struct{}, 1), make(chan struct{}, 1)
+	var once1, once2 sync.Once
+	t.Cleanup(func() { once1.Do(func() { close(release1) }); once2.Do(func() { close(release2) }) })
+	var calls atomic.Int32
+
+	deps, _ := recordingDeps(&fakeRouter{results: []models.ChatResult{{Content: "ok"}}}, &fakeTools{})
+	deps.OpenTerminalsFetcher = func(context.Context) []backend.OpenTerminal {
+		if calls.Add(1) == 1 {
+			entered1 <- struct{}{}
+			<-release1
+			return []backend.OpenTerminal{{ID: "terminal-1"}, {ID: "terminal-2"}} // pre-close
+		}
+		entered2 <- struct{}{}
+		<-release2
+		return []backend.OpenTerminal{{ID: "terminal-1"}} // post-close
+	}
+	s := NewSession(deps)
+
+	s.WarmOpenTerminals()
+	select {
+	case <-entered1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never entered the fetcher")
+	}
+	s.rosterMu.Lock()
+	done := s.rosterRefreshDone
+	s.rosterMu.Unlock()
+	if done == nil {
+		t.Fatal("an in-flight refresh must publish its completion signal for round 0 to wait on")
+	}
+
+	// A close lands mid-fetch: attempt 1 now predates a local mutation and is discarded.
+	s.observeRosterMutation("terminal.close", "{}",
+		domain.Ok("Closed 1 terminal(s): terminal-2.", map[string]any{"closed": []string{"terminal-2"}}))
+	once1.Do(func() { close(release1) })
+
+	// Attempt 2 being in flight proves attempt 1 was fully decided (discarded).
+	select {
+	case <-entered2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the refresher never refetched after the discarded attempt")
+	}
+	select {
+	case <-done:
+		t.Fatal("the completion signal fired on a DISCARDED attempt — round 0 would read pre-mutation truth")
+	default:
+	}
+	s.rosterMu.Lock()
+	stamped := s.rosterFetchedAt
+	s.rosterMu.Unlock()
+	if !stamped.IsZero() {
+		t.Fatal("a discarded attempt must not date the cache")
+	}
+
+	once2.Do(func() { close(release2) })
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the completion signal never fired after the final gen-stable commit")
+	}
+	s.rosterMu.Lock()
+	stamped = s.rosterFetchedAt
+	s.rosterMu.Unlock()
+	if stamped.IsZero() {
+		t.Fatal("the accepted attempt must date the cache")
+	}
+	s.DrainBackgroundWork()
 }
 
 // TestOpenTerminals_NilFetcherOmitsInventory: a nil fetcher (the default and the non-MCP

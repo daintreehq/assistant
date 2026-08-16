@@ -205,9 +205,32 @@ type Session struct {
 	// still tool-call terminal.list, exactly as before this inventory existed.
 	roster []backend.OpenTerminal
 
+	// rosterFetchedAt is when the fetch behind the cached roster STARTED (zero ⇒ never
+	// fetched). It exists so a round can refuse to serve a snapshot it cannot claim is
+	// live: currentRosterForRound omits any roster older than rosterSnapshotMaxAge
+	// rather than assert it as fact (issue #334). Stamped from the start of the ACCEPTED
+	// fetch attempt, not from its commit, so a slow fetch arrives already carrying its
+	// true age — terminal.list captures membership at the head of the fetcher, and
+	// dating the snapshot from the commit would understate its age by the whole
+	// round-trip, the unsafe direction under a serving cap. A discarded (gen-mismatched)
+	// attempt never stamps, and a local prune (pruneRosterTerminals) deliberately does
+	// not re-stamp: dropping a confirmed-closed id makes the snapshot safer but does not
+	// recapture the entries that remain. Guarded by rosterMu.
+	rosterFetchedAt time.Time
+
 	// rosterRefreshing dedupes concurrent refreshers so a slow fetch spanning two turns
 	// cannot stack a second one behind it. Guarded by rosterMu.
 	rosterRefreshing bool
+
+	// rosterRefreshDone is closed when the in-flight refresh reaches its FINAL outcome —
+	// a gen-stable commit, or a definitive abandonment — and is nil when none is in
+	// flight. The gen-mismatch discard loop inside refreshRosterAsync must NOT close it
+	// per attempt: a discarded attempt decides nothing, and releasing a waiter on it
+	// would hand back the very pre-mutation cache the discard exists to reject. Round 0
+	// waits on it (bounded by rosterRoundZeroGrace) so the turn-start refresh already in
+	// flight gets a moment to land before the request asserts a roster — the race behind
+	// issue #334. Guarded by rosterMu.
+	rosterRefreshDone chan struct{}
 
 	// rosterGen is bumped by every LOCAL roster mutation (a terminal.close pruning ids,
 	// a spawn adding terminals) so an in-flight detached fetch that STARTED before the
@@ -697,13 +720,22 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	//     SYNCHRONOUS terminal.list + getStatus MCP round-trip run here, gating the first
 	//     model round of EVERY MCP-connected turn on up to 5s of network latency. It is now
 	//     served from a cross-turn cache and refreshed on a DETACHED goroutine, so the turn
-	//     never blocks on it: kick the refresh now (no-op if one is already in flight), and
-	//     each round below reads the freshest cached snapshot (buildRuntimeContext runs per
-	//     round, so a refresh that lands mid-turn is picked up on the next round). The one
-	//     cost is that a brand-new session serves no roster until its first detached refresh
-	//     completes (usually within the first turn, longer if the MCP read is slow) —
-	//     harmless: the roster is a convenience, and the model can still tool-call
-	//     terminal.list to discover it.
+	//     never performs the MCP read inline: kick the refresh now (no-op if one is already
+	//     in flight), and each round below reads the freshest cached snapshot
+	//     (buildRuntimeContext runs per round, so a refresh that lands mid-turn is picked up
+	//     on the next round). The one cost is that a brand-new session serves no roster until
+	//     its first detached refresh completes (usually within the first turn, longer if the
+	//     MCP read is slow) — harmless: the roster is a convenience, and the model can still
+	//     tool-call terminal.list to discover it.
+	//
+	//     Round 0 alone may WAIT a bounded moment on the refresh kicked here before it
+	//     builds its request (currentRosterForRound) — never on the MCP call itself, only
+	//     on the completion signal of work already in flight, capped at
+	//     rosterRoundZeroGrace. Without that, round 0 systematically outraced this kick and
+	//     served the PREVIOUS snapshot as live fact (issue #334: a boot-warm roster 21s old
+	//     named a terminal the human had since closed in the Daintree UI; the refresh that
+	//     would have blanked it landed 15ms too late, and the model both reported the dead
+	//     id and scheduled a 60-minute durable timer against it).
 	s.refreshRosterAsync()
 
 	// 3e′. Current-worktree snapshot: same cached/detached pattern as the roster
@@ -847,6 +879,19 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			// mid-round (no post-read promptContext re-snapshot needed anymore).
 			promptContext.Worktree = s.currentWorktreeContext(ctx)
 		}
+		// Served from the same cross-turn cache, under a policy that would rather omit the
+		// roster than assert a stale one (issue #334). Round 0 passes true so it — and only
+		// it — may wait out the turn-start refresh kicked above; later rounds read whatever
+		// is cached, which is also what keeps a close settled MID-turn visible on the very
+		// next round (observeRosterMutation patches the cache synchronously).
+		openTerminals := s.currentRosterForRound(ctx, iter == 0)
+		// Both consults above can park for up to their grace, so re-check cancellation
+		// before committing to a backend round — the same shape as the post-compact check.
+		if ctx.Err() != nil {
+			s.events.Phase(domain.PhaseCancelled)
+			s.events.AssistantCancelled("")
+			return domain.CancelledReply
+		}
 		req := backend.RespondRequest{
 			Session: backend.RespondSession{
 				ID:                  s.deps.SessionID,
@@ -861,7 +906,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				Tools:      btools,
 				ToolChoice: "auto",
 			},
-			Runtime:    s.buildRuntimeContext(promptContext, s.currentRoster()),
+			Runtime:    s.buildRuntimeContext(promptContext, openTerminals),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
 			Selection:  &backend.Selection{Policy: "new_instruction"},
 			Generation: &backend.Generation{ResponseFormat: "text"},
@@ -2138,9 +2183,11 @@ func (s *Session) refreshWorktreeAsync() {
 // the backend's fresh runtime tail. The context is pulled live
 // every round, so a mid-session MCP connect / tier change / scheduler start reaches the
 // next request. The
-// openTerminals snapshot is read from the cross-turn cache (currentRoster) fresh EACH
-// round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn is
-// reflected on the next round without ever blocking the turn on an MCP read.
+// openTerminals snapshot is read from the cross-turn cache (currentRosterForRound) fresh
+// EACH round — never fetched inline — so a detached refresh (step 3e) that lands mid-turn
+// is reflected on the next round without ever blocking the turn on an MCP read. A nil
+// slice is a deliberate value, not a gap: the caller withholds any snapshot it cannot
+// claim is live, and the backend simply renders no open-terminals block.
 func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminals []backend.OpenTerminal) *backend.RuntimeContext {
 	rc := &backend.RuntimeContext{
 		PermissionTier:  string(pc.Tier),
@@ -2759,9 +2806,10 @@ func (s *Session) truncateLocked(keepN int) {
 	}
 }
 
-// currentRoster returns the cached open-terminal snapshot under rosterMu — a shallow
-// copy so a caller can hold it past the lock while a concurrent refresh swaps the field.
-// nil when no refresh has completed yet (a fresh session's cold start).
+// currentRoster returns the RAW cached open-terminal snapshot under rosterMu — a
+// shallow copy so a caller can hold it past the lock while a concurrent refresh swaps
+// the field. nil when no refresh has completed yet (a fresh session's cold start).
+// It applies no freshness policy: the model-facing read is currentRosterForRound.
 func (s *Session) currentRoster() []backend.OpenTerminal {
 	s.rosterMu.Lock()
 	defer s.rosterMu.Unlock()
@@ -2769,6 +2817,101 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 		return nil
 	}
 	return append([]backend.OpenTerminal(nil), s.roster...)
+}
+
+const (
+	// rosterRoundZeroGrace bounds how long ROUND 0 waits on an already-in-flight roster
+	// refresh before building its request. It is a wait on a completion signal, never on
+	// an MCP call: the fetch is detached and self-bounded either way, and every other
+	// round reads the cache without waiting at all.
+	//
+	// The trigger is deliberately "a refresh is in flight", NOT the sibling worktree
+	// cache's "the cache was never fetched" (currentWorktreeContext). Issue #334's
+	// failure was a WARM cache — 21s old, a terminal since closed in the Daintree UI —
+	// losing a race to the turn-start refresh by 15ms; a cold-cache trigger would not
+	// have fired at all.
+	//
+	// 250ms matches worktreeFirstFetchGrace: enough for a healthy MCP (the fetch is two
+	// round-trips, typically tens of ms — the issue's own trace missed by 15ms), and a
+	// twentieth of the 5s synchronous gate this cache replaced. Unlike the worktree's
+	// grace there is NO latch suppressing it after one timeout, because the two graces
+	// have different blast radii: the worktree's fires on every consult while the cache
+	// is cold, so an unbounded first fetch would tax every round of every turn, whereas
+	// this one fires only at iter==0 — at most once per turn (plus once per mid-turn
+	// injection, each of which is itself a fresh user instruction that deserves a fresh
+	// roster). Latching it would leave every later turn's round 0 back where #334 found
+	// it: asserting an unverified snapshot, or dropping the roster outright for the rest
+	// of the session.
+	rosterRoundZeroGrace = 250 * time.Millisecond
+
+	// rosterSnapshotMaxAge is how old a cached roster may be and still be served to the
+	// model as live state. Past it the round carries NO roster rather than a snapshot it
+	// cannot vouch for — the "missing roster is a safe false negative, stale roster is an
+	// unsafe false positive" posture the refresher already takes on a failed fetch (see
+	// refreshRosterAsync's commit comment), extended from "this fetch failed" to "this
+	// snapshot is too old to assert". The model recovers from an absent roster by
+	// tool-calling terminal.list; it does not recover from a confidently-wrong one — in
+	// #334 it named a dead terminal to the human and armed a 60-minute durable timer
+	// against it.
+	//
+	// 15s mirrors worktreeSnapshotTTL and sits ~two orders of magnitude above a healthy
+	// refresh, so it never bites in normal operation: the turn-start kick plus the
+	// round-0 grace keep the served snapshot sub-second whenever the MCP is answering.
+	// It is the backstop for when it is not — and it independently rejects #334's 21s
+	// boot-warm roster even if the grace expires.
+	rosterSnapshotMaxAge = 15 * time.Second
+)
+
+// currentRosterForRound is the MODEL-FACING roster read: the cached snapshot if it can
+// still be claimed live, otherwise nothing.
+//
+// roundZero rounds first wait up to rosterRoundZeroGrace on any in-flight refresh (the
+// one runTurn kicks at the top of the turn), so the round usually builds its request on
+// truth fetched for THIS turn instead of outracing it — issue #334. The wait ends early
+// on the refresh landing or on ctx cancellation, and never blocks on the MCP read
+// itself, which stays detached and parented off bgCtx.
+//
+// Every round then applies the age cap: a snapshot older than rosterSnapshotMaxAge is
+// omitted and a detached refresh is kicked, so the next round self-heals rather than the
+// turn going roster-blind for good. Deliberately NOT done here: reporting the age to the
+// model instead of withholding the roster. The block travels the backend's strict typed
+// wire contract (backend.OpenTerminal / RuntimeContext, mirrored server-side with
+// extra="forbid") which has no staleness field and no free-text slot to carry one, so an
+// age stamp means a lockstep backend contract change — the same reason the sibling
+// worktree snapshot carries none.
+func (s *Session) currentRosterForRound(ctx context.Context, roundZero bool) []backend.OpenTerminal {
+	if roundZero {
+		s.rosterMu.Lock()
+		done := s.rosterRefreshDone
+		s.rosterMu.Unlock()
+		if done != nil {
+			t := time.NewTimer(rosterRoundZeroGrace)
+			select {
+			case <-done: // the refresh reached its final outcome — read what it committed
+			case <-t.C: // still unresolved: fall through to the age cap on what we hold
+			case <-ctx.Done():
+			}
+			t.Stop()
+		}
+	}
+
+	s.rosterMu.Lock()
+	// A zero rosterFetchedAt means no fetch has ever committed, so anything in the cache
+	// was seeded (tests) rather than observed — treat it as unservable, not as ageless.
+	live := !s.rosterFetchedAt.IsZero() && time.Since(s.rosterFetchedAt) <= rosterSnapshotMaxAge
+	var out []backend.OpenTerminal
+	if live && len(s.roster) > 0 {
+		out = append([]backend.OpenTerminal(nil), s.roster...)
+	}
+	// Only worth a kick when something was actually withheld: an empty cache is already
+	// the value we serve, and refreshRosterAsync is single-flight anyway.
+	withheld := !live && len(s.roster) > 0
+	s.rosterMu.Unlock()
+
+	if withheld {
+		s.refreshRosterAsync()
+	}
+	return out
 }
 
 // observeRosterMutation keeps the cached open-terminal roster consistent with the
@@ -2977,10 +3120,12 @@ func (s *Session) WarmOpenTerminals() {
 
 // refreshRosterAsync starts a detached, best-effort refresh of the cached open-terminal
 // roster unless one is already running (deduped via rosterRefreshing), so the turn loop
-// NEVER blocks on the terminal.list + getStatus MCP round-trip. The result replaces the
-// cache the moment it lands, so the next round's runtime block (rebuilt every round)
-// picks it up; the turn itself streams immediately against whatever snapshot the last
-// refresh left. Tracked by s.wg + the draining gate exactly like startDistill so
+// NEVER performs the terminal.list + getStatus MCP round-trip inline. The result replaces
+// the cache the moment it lands, so the next round's runtime block (rebuilt every round)
+// picks it up; the turn itself streams against whatever snapshot the last refresh left —
+// except that round 0 may wait up to rosterRoundZeroGrace on rosterRefreshDone, this
+// refresher's completion signal, rather than assert a snapshot the refresh is about to
+// contradict (issue #334). Tracked by s.wg + the draining gate exactly like startDistill so
 // App.Shutdown joins it before the MCP client it touches is closed. It parents off bgCtx
 // (NOT the turn ctx) so a short or cancelled turn's refresh still completes and warms the
 // cache for the next turn; the fetcher self-bounds via its own cancel timer, and bgCtx
@@ -2998,13 +3143,22 @@ func (s *Session) refreshRosterAsync() {
 		return
 	}
 	s.rosterRefreshing = true
+	// Published with the flag so a deduped kick and a round-0 waiter observe the SAME
+	// channel: whoever waits is waiting on this refresher's final outcome.
+	done := make(chan struct{})
+	s.rosterRefreshDone = done
 	s.rosterMu.Unlock()
 
 	// Clear the in-flight flag on EVERY exit path (draining bail-out included) so a
 	// refusal here can never wedge the dedupe flag true and starve all later refreshes.
+	// The channel identity check keeps this honest even if it somehow ran after a NEWER
+	// refresher claimed the flag: it may only retract its own publication.
 	clearInFlight := func() {
 		s.rosterMu.Lock()
 		s.rosterRefreshing = false
+		if s.rosterRefreshDone == done {
+			s.rosterRefreshDone = nil
+		}
 		s.rosterMu.Unlock()
 	}
 
@@ -3015,6 +3169,9 @@ func (s *Session) refreshRosterAsync() {
 	if s.draining {
 		s.mu.Unlock()
 		clearInFlight()
+		// A refusal is still a final outcome: release any waiter rather than make it
+		// sleep out the full grace for a refresh that will never run.
+		close(done)
 		return
 	}
 	s.wg.Add(1)
@@ -3022,6 +3179,12 @@ func (s *Session) refreshRosterAsync() {
 
 	go func() {
 		defer s.wg.Done()
+		// Runs after the commit/abandon defer below (LIFO) and before wg.Done, so a
+		// waiter released here always observes the settled cache, and a drain that
+		// joins this goroutine cannot leave one parked. Exactly one close: this
+		// goroutine and the draining bail-out above are mutually exclusive, and the
+		// gen-mismatch loop never closes per attempt.
+		defer close(done)
 		// Safety net only (a fetcher panic): the normal exit clears the flag INSIDE
 		// the commit critical section (see why at the bottom of the loop) and must
 		// then leave it ALONE — an unconditional deferred clear would run after that
@@ -3046,6 +3209,10 @@ func (s *Session) refreshRosterAsync() {
 			s.rosterMu.Lock()
 			startGen := s.rosterGen
 			s.rosterMu.Unlock()
+			// Dates the snapshot from the moment the fetch was ISSUED — see the
+			// rosterFetchedAt field doc. Per-attempt, so only the accepted attempt's
+			// stamp is ever committed; a discarded one leaves the cache's age alone.
+			attemptStartedAt := time.Now()
 			fresh := s.deps.OpenTerminalsFetcher(s.bgCtx)
 			// Replace unconditionally (nil included): the fetcher returns nil both for a
 			// transient failure AND for a genuinely-empty roster (all terminals closed), and
@@ -3068,11 +3235,15 @@ func (s *Session) refreshRosterAsync() {
 				// it. Without this filter that snapshot resurrects the closed terminals
 				// until the next natural refresh (see the rosterTombstones field doc).
 				s.roster = dropTombstoned(fresh, s.rosterTombstones, time.Now())
+				s.rosterFetchedAt = attemptStartedAt
 				// Retire the single-flight flag ATOMICALLY with the commit. Clearing it
 				// later (the deferred path) would open a window where a mutation settles
 				// after the commit, its refresh kick dedupes against this already-decided
-				// refresher, and the mutation is never serviced — a lost refresh.
+				// refresher, and the mutation is never serviced — a lost refresh. The
+				// done channel is retracted here too but CLOSED by the deferred close
+				// above, so a waiter released by it always reads this committed state.
 				s.rosterRefreshing = false
+				s.rosterRefreshDone = nil
 				committed = true
 				return true
 			}() {
