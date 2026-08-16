@@ -55,6 +55,47 @@ func TestBuildAgentLaunchNamePrefixSurvivesCap(t *testing.T) {
 	}
 }
 
+// Every surface that describes `title` shows the RENDERED tab label, so the model
+// writes the agent name into the title itself and the wrapper prefixes it again —
+// "Claude: Claude: prs merge target" (issue #337). Exactly one prefix must survive,
+// and only for a leading label that really is this agent's.
+func TestBuildAgentLaunchNameStripsRedundantAgentPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		title   string
+		agentID string
+		want    string
+	}{
+		// The verbatim ses_6738e54c regression.
+		{"exact self-prefix", "Claude: prs merge target", "claude", "Claude: prs merge target"},
+		{"any casing", "cLaUdE: prs merge target", "claude", "Claude: prs merge target"},
+		{"no space after colon", "Claude:prs merge target", "claude", "Claude: prs merge target"},
+		{"messy whitespace", " \tCLAUDE:\n prs\t merge  target ", "claude", "Claude: prs merge target"},
+		{"repeated prefixes collapse", "Claude: claude:CLAUDE: foo", "claude", "Claude: foo"},
+		{"prefix only falls back to task", "Claude:", "claude", "Claude: task"},
+		{"default agent still strips", "CLAUDE: y", "", "Claude: y"},
+		{"non-default agent strips its own", "Codex: y", "codex", "Codex: y"},
+
+		// Narrowness: these are plausible task text, not the wrapper's syntax.
+		{"another agent's name is kept", "Claude: foo", "codex", "Codex: Claude: foo"},
+		{"no colon is not a prefix", "Claude foo", "claude", "Claude: Claude foo"},
+		{"space before the colon is not a prefix", "Claude : foo", "claude", "Claude: Claude : foo"},
+		{"a later colon is untouched", "fix the claude: parser", "claude", "Claude: fix the claude: parser"},
+	} {
+		if got := buildAgentLaunchName(tc.title, tc.agentID); got != tc.want {
+			t.Errorf("%s: buildAgentLaunchName(%q, %q) = %q, want %q", tc.name, tc.title, tc.agentID, got, tc.want)
+		}
+	}
+
+	// The stripped title rejoins the SAME add-and-truncate path an unprefixed one
+	// takes — one cap implementation, so an over-long prefixed title can never be
+	// double-cut or lose its prefix.
+	long := strings.Repeat("x", 200)
+	if prefixed, bare := buildAgentLaunchName("Claude: "+long, "claude"), buildAgentLaunchName(long, "claude"); prefixed != bare {
+		t.Errorf("prefixed long title = %q, want identical to bare %q", prefixed, bare)
+	}
+}
+
 func TestExtractFieldSources(t *testing.T) {
 	// Direct structuredContent field.
 	if got := extractField(MCPCallResult{StructuredContent: map[string]any{"terminalId": "t1"}}, "terminalId"); got != "t1" {

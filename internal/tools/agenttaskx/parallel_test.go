@@ -45,6 +45,16 @@ func TestSpawnParallelConflictKeys(t *testing.T) {
 		t.Errorf("explore keys = %v, want exactly [name:Claude: same task]", implicitAgent)
 	}
 
+	// A self-prefixed title ("Claude: same task") normalizes to the same launch name,
+	// so it must land on the same key: the two spellings reconcile against ONE terminal
+	// name and share an idempotency key, and letting them run concurrently would race
+	// a single saga row. They only ran concurrently before because the redundant prefix
+	// accidentally produced a different (doubled) label.
+	selfPrefixed := keysOf(t, `{"mode":"explore","title":"Claude: same task","taskPrompt":"p3"}`)
+	if !reflect.DeepEqual(selfPrefixed, implicitAgent) {
+		t.Errorf("self-prefixed title must share conflict keys: %v vs %v", selfPrefixed, implicitAgent)
+	}
+
 	// Distinct titles → distinct name keys → freely concurrent explores.
 	other := keysOf(t, `{"mode":"explore","title":"other task","taskPrompt":"p"}`)
 	if reflect.DeepEqual(implicitAgent, other) {

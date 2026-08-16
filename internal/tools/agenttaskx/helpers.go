@@ -71,15 +71,59 @@ func buildAgentPrompt(a *spawnArgs) string {
 	return strings.Join(lines, "\n")
 }
 
-// buildAgentLaunchName derives the "<Agent>: <task>" terminal/tab label, hard-
-// capped at agentLaunchNameMaxLen so the "<Agent>: " prefix always survives.
-func buildAgentLaunchName(title, agentID string) string {
+// resolveLaunchAgentID applies the same trim/default spawn() does, so every
+// title/name derivation keys off ONE id — the raw model spelling, since
+// resolveAgentID only canonicalizes later (spawn.go).
+func resolveLaunchAgentID(agentID string) string {
 	id := strings.TrimSpace(agentID)
 	if id == "" {
 		id = defaultAgentID
 	}
-	prefix := strings.ToUpper(id[:1]) + id[1:] + ": "
+	return id
+}
+
+// normalizeTaskTitle collapses whitespace runs and strips any leading
+// "<agentId>:" label the caller wrote into the title itself.
+//
+// The tab the user sees is already "<Agent>: <title>", and every surface that
+// describes `title` shows that RENDERED label — so the model copies it into the
+// argument ("Claude: prs merge target") and the wrapper prefixes it again,
+// producing "Claude: Claude: prs merge target" (issue #337). Stripping here,
+// rather than skipping the prepend, keeps buildAgentLaunchName's cap arithmetic
+// a single code path: a title that already carries the prefix rejoins the exact
+// add-and-truncate flow an unprefixed one takes, so it can never be double-cut
+// and non-matching titles stay byte-identical to before — they ARE dedupe
+// identity (computeIdempotencyKey embeds the name, reconcileViaTerminalList
+// matches it exactly).
+//
+// The match is deliberately narrow: the FIRST colon-delimited token must equal
+// the resolved agentId under EqualFold. Case and a missing space after the colon
+// are tolerated (the colon is the delimiter that matters); a repeated prefix is
+// collapsed by looping, since each pass must clear the same bar. A space BEFORE
+// the colon, a different agent's name ("Claude: …" launched as codex), or the id
+// without a colon are all left alone — those are plausible task text, not the
+// wrapper's syntax. Returns "" for a title that is nothing but prefixes;
+// callers decide the fallback.
+func normalizeTaskTitle(title, agentID string) string {
+	id := resolveLaunchAgentID(agentID)
 	task := strings.TrimSpace(wsRun.ReplaceAllString(title, " "))
+	for {
+		label, rest, found := strings.Cut(task, ":")
+		if !found || !strings.EqualFold(label, id) {
+			return task
+		}
+		task = strings.TrimSpace(rest)
+	}
+}
+
+// buildAgentLaunchName derives the "<Agent>: <task>" terminal/tab label, hard-
+// capped at agentLaunchNameMaxLen so the "<Agent>: " prefix always survives.
+// Exactly one prefix: a title that already carries it is normalized away first
+// (see normalizeTaskTitle).
+func buildAgentLaunchName(title, agentID string) string {
+	id := resolveLaunchAgentID(agentID)
+	prefix := strings.ToUpper(id[:1]) + id[1:] + ": "
+	task := normalizeTaskTitle(title, id)
 	if task == "" {
 		task = "task"
 	}
