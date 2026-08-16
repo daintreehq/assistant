@@ -28,6 +28,13 @@ type ViewParams struct {
 	// the honest phrasing depends on the ledger's lower-bound state, which the composer
 	// has no business knowing about.
 	Cost string
+	// TimerCount and WatcherCount are the LIVE background-supervision counts — scheduled
+	// timers and active watchers — already filtered by the caller from the snapshot it
+	// refreshes on its own tick. Raw ints rather than a pre-rendered string (the way Cost
+	// is) because the wording here is pure presentation: there is no honesty caveat for
+	// the parent to encode, so the composer owns how a count is phrased.
+	TimerCount   int
+	WatcherCount int
 }
 
 type MCPStatus int
@@ -517,7 +524,13 @@ func (m *Model) renderHints(p ViewParams) string {
 	// state (both are "what is true right now" rather than "what you can press") and it
 	// is a number, which reads better against a hard edge than trailing a label. A third
 	// row for one short figure would spend more of a cramped band than it is worth.
-	if p.MCPStatus != MCPHidden || p.Cost != "" {
+	//
+	// Live supervision sits between them: a scheduled timer or a polling watcher is the
+	// one other thing down here that is true whether or not anyone is typing, and it was
+	// previously invisible — a durable 60-minute timer left the footer looking exactly
+	// like an idle one.
+	supervision := m.supervisionSegment(p.TimerCount, p.WatcherCount)
+	if p.MCPStatus != MCPHidden || p.Cost != "" || supervision != "" {
 		var left string
 		if p.MCPStatus != MCPHidden {
 			dot := g.Async
@@ -534,7 +547,7 @@ func (m *Model) renderHints(p ViewParams) string {
 		// Join defensively: with no hints (unfocused) or a width too small to render the
 		// status row, a bare "out + \n + row" would contribute an EMPTY row — and empty
 		// rows still count against the fixed-height footer budget.
-		if status := m.statusRow(left, p.Cost, p.Width); status != "" {
+		if status := m.statusRow(left, supervision, p.Cost, p.Width); status != "" {
 			if out == "" {
 				out = status
 			} else {
@@ -545,24 +558,87 @@ func (m *Model) renderHints(p ViewParams) string {
 	return out
 }
 
-// statusRow lays out one row with `left` anchored and `right` pushed to the far edge.
+// supervisionSegment renders the live background-supervision counts — "◷ 1 timer",
+// "◷ 2 watchers", "◷ 1 timer · 2 watchers" — or "" when nothing is being supervised.
 //
-// Right-alignment is measured in CELLS, not bytes: both sides carry SGR sequences and
+// Hidden at zero on purpose: an idle session must stay exactly as quiet as it was before
+// this row learned to talk about supervision, which makes the segment APPEARING the
+// signal. That is also why it is dim rather than a warning tone — a scheduled timer is
+// healthy, expected state, and this row already spends its one alarm colour on a degraded
+// MCP link. A category at zero is omitted individually, so a session with only watchers
+// does not claim "0 timers".
+//
+// The glyph is the theme's existing Waiting mark (◷, ASCII "~"), already the vocabulary
+// for watcher-shaped activity elsewhere in the cockpit; a second clock glyph would only
+// add a rune to keep aligned across both glyph sets.
+func (m *Model) supervisionSegment(timers, watchers int) string {
+	var parts []string
+	if timers > 0 {
+		parts = append(parts, countLabel(timers, "timer"))
+	}
+	if watchers > 0 {
+		parts = append(parts, countLabel(watchers, "watcher"))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	g := m.theme.Glyphs
+	return m.theme.Dim().Render(g.Waiting + " " + strings.Join(parts, " "+g.Bullet+" "))
+}
+
+// countLabel renders "1 timer" / "2 timers" — the singular only at exactly one. Both
+// nouns this serves pluralize regularly, so a bare "s" is honest here.
+func countLabel(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return itoa(n) + " " + noun + "s"
+}
+
+// statusRow lays out one row: `primary` anchored left, the optional `secondary` segment
+// beside it, and `right` pushed to the far edge.
+//
+// Right-alignment is measured in CELLS, not bytes: every slot carries SGR sequences and
 // may hold wide runes, so len() would misplace the gap by however many escape bytes the
-// theme emitted. When the two cannot both fit, the right side is dropped rather than
-// wrapped or squeezed — the left side is the connection state, which is the more
-// important of the two on a pane too narrow for both.
-func (m *Model) statusRow(left, right string, width int) string {
+// theme emitted.
+//
+// The three slots have a strict priority — primary (the connection state, i.e. whether
+// the assistant can act at all) > secondary (live supervision) > right (the session bill).
+// Secondary and right are dropped WHOLE rather than wrapped or squeezed: a half-rendered
+// "◷ 1 ti…" reads as corruption rather than as a fact. Primary is the deliberate
+// exception — on a pane too narrow even for it, it ellipsizes instead of vanishing,
+// because a truncated hint that the link exists still beats an empty row.
+//
+// Dropping is also MONOTONIC in width: once supervision is dropped, the bill does not
+// move into the cells it freed. Otherwise shrinking the pane by a single column would
+// swap one fact for another, and a supervision segment that vanished for want of space
+// would read as "supervision ended" — the exact misreading this row exists to prevent.
+func (m *Model) statusRow(primary, secondary, right string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	left, leftW := primary, ansi.StringWidth(primary)
+	if secondary != "" {
+		joined, joinedW := secondary, ansi.StringWidth(secondary)
+		if primary != "" {
+			sep := m.theme.Dim().Render(" " + m.theme.Glyphs.Bullet + " ")
+			joined, joinedW = primary+sep+secondary, leftW+ansi.StringWidth(sep)+joinedW
+		}
+		if joinedW > width {
+			return truncateCells(left, width)
+		}
+		left, leftW = joined, joinedW
+	}
 	if right == "" {
 		return truncateCells(left, width)
 	}
 	styledRight := m.theme.Dim().Render(right)
-	lw, rw := ansi.StringWidth(left), ansi.StringWidth(styledRight)
+	rw := ansi.StringWidth(styledRight)
 	// One space minimum between them, or they read as a single token.
-	if lw+rw+1 > width {
+	if leftW+rw+1 > width {
 		return truncateCells(left, width)
 	}
-	return left + strings.Repeat(" ", width-lw-rw) + styledRight
+	return left + strings.Repeat(" ", width-leftW-rw) + styledRight
 }
 
 // padCells right-pads s with spaces to at least w cells (cell-measured).

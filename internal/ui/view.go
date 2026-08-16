@@ -575,6 +575,18 @@ func (m Model) composerView(w int) string {
 		Placeholder: placeholder,
 		MCPStatus:   mcpStatus,
 		Cost:        m.sessionCostLine(),
+		// Read straight off the dashboard snapshot rather than mirrored into Model
+		// counters: buildDashboard already filters these to the live sets (scheduled
+		// timers; watchers that are created, active or paused — i.e. still supervising,
+		// not merely running) and the ~1s tick already replaces the snapshot, which
+		// is exactly the cadence this row needs. A cached copy would be a second source
+		// of truth free to drift from the operations deck reading the same slices.
+		//
+		// Async futures are deliberately NOT folded in: they are short-lived execution
+		// state with their own in-turn activity line, and they would make a row meant for
+		// durable, otherwise-invisible supervision churn.
+		TimerCount:   len(m.dashboard.Timers),
+		WatcherCount: len(m.dashboard.Watchers),
 	})
 }
 

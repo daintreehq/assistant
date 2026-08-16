@@ -165,6 +165,89 @@ func TestViewWidths_Operations(t *testing.T) {
 	}
 }
 
+// The composer's supervision counts read STRAIGHT off the dashboard snapshot rather than
+// from mirrored Model counters — buildDashboard already filters them to the live sets and
+// the ~1s tick already replaces the snapshot, so a cached copy would only be a second
+// source of truth free to drift from the operations deck reading the same slices.
+func TestComposerView_UsesDashboardSupervisionCounts(t *testing.T) {
+	m := testModel(100)
+	m.dashboard = Dashboard{
+		Timers: []domain.TimerRecord{{Title: "nightly digest", FireAt: 1_000_000_000_000}},
+		Watchers: []domain.WatcherRecord{
+			{ID: "wch_1", Status: "active"},
+			{ID: "wch_2", Status: "active"},
+		},
+		// Deliberately empty: Agents is a BUILT roster (watchers ⟕ launches), so counting
+		// it instead of Watchers would be a plausible slip that this leaves exposed.
+		Agents: nil,
+	}
+	out := ansi.Strip(m.composerView(m.contentW()))
+	// Built from the THEME's glyphs rather than hard-coded runes: theme.Resolve() hands
+	// back the ASCII set under DAINTREE_ASCII=1 or a non-UTF locale, and this test is
+	// about the wiring, not about which glyph set the environment picked.
+	g := m.theme.Glyphs
+	want := g.Waiting + " 1 timer " + g.Bullet + " 2 watchers"
+	if !strings.Contains(out, want) {
+		t.Errorf("supervision counts missing from the composer (want %q):\n%s", want, out)
+	}
+}
+
+// Async futures are deliberately NOT supervision for this row: they are short-lived
+// execution state with their own in-turn activity line, and folding them in would make a
+// row meant for durable, otherwise-invisible work churn.
+func TestComposerView_DoesNotCountAsyncAsSupervision(t *testing.T) {
+	m := testModel(100)
+	m.dashboard = Dashboard{
+		Async: []domain.AsyncInvocationRecord{
+			{ID: "asy_1", Status: "running"},
+			{ID: "asy_2", Status: "settling"},
+		},
+	}
+	out := ansi.Strip(m.composerView(m.contentW()))
+	// The nouns are the whole claim and they carry no glyph-set dependency; the segment
+	// can never render one without the other.
+	if strings.Contains(out, "timer") || strings.Contains(out, "watcher") {
+		t.Errorf("live async work rendered as supervision:\n%s", out)
+	}
+}
+
+// The supervision segment must obey the live footer's width contract through the FULL
+// View() assembly — indentation, gutter and all — at every golden width. The ops-deck
+// width test cannot cover this: viewOperations returns from footer() before the composer
+// is ever rendered, so the counts it seeds never reach the status row.
+func TestViewWidths_HomeWithSupervision(t *testing.T) {
+	for _, w := range goldenWidths {
+		m := testModel(w)
+		m.dashboard = Dashboard{
+			Timers: []domain.TimerRecord{
+				{Title: "nightly digest", FireAt: 1_000_000_000_000},
+				{Title: "retry the failed push", FireAt: 1_000_000_060_000},
+			},
+			Watchers: []domain.WatcherRecord{
+				{ID: "wch_1", Status: "active"},
+				{ID: "wch_2", Status: "active"},
+				{ID: "wch_3", Status: "paused"},
+			},
+		}
+		v := m.View()
+		assertNoOverflow(t, "home+supervision@"+itoa(w), v.Content, m.usableWidth())
+		assertNoForbiddenEscapes(t, "home+supervision@"+itoa(w), v.Content)
+	}
+
+	// The widest golden width is comfortably enough for the whole segment, so this also
+	// pins that the counts reach the real frame rather than only the direct composer call.
+	m := testModel(goldenWidths[len(goldenWidths)-1])
+	m.dashboard = Dashboard{
+		Timers:   []domain.TimerRecord{{Title: "nightly digest", FireAt: 1_000_000_000_000}},
+		Watchers: []domain.WatcherRecord{{ID: "wch_1", Status: "active"}},
+	}
+	g := m.theme.Glyphs
+	want := g.Waiting + " 1 timer " + g.Bullet + " 1 watcher"
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, want) {
+		t.Errorf("supervision missing from the assembled frame (want %q):\n%s", want, out)
+	}
+}
+
 // tallApprovalConfirm builds a representative multi-row approval sheet (the tallest thing
 // the fixed bottom band can hold) for the height-floor tests.
 func tallApprovalConfirm() *pendingConfirm {
