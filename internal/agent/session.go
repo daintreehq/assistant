@@ -882,8 +882,12 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// Served from the same cross-turn cache, under a policy that would rather omit the
 		// roster than assert a stale one (issue #334). Round 0 passes true so it — and only
 		// it — may wait out the turn-start refresh kicked above; later rounds read whatever
-		// is cached, which is also what keeps a close settled MID-turn visible on the very
-		// next round (observeRosterMutation patches the cache synchronously).
+		// is cached, so a close settled MID-turn reaches the very next round without waiting
+		// on anything (observeRosterMutation patches the cache synchronously). That prune is
+		// monotonic but does NOT re-date the snapshot, so in a turn long enough to age the
+		// cache past rosterSnapshotMaxAge the next round carries no roster rather than the
+		// pruned one — the closed ids still never reappear, and the kicked refresh restores
+		// the list a round or two later.
 		openTerminals := s.currentRosterForRound(ctx, iter == 0)
 		// Both consults above can park for up to their grace, so re-check cancellation
 		// before committing to a backend round — the same shape as the post-compact check.
@@ -2819,31 +2823,36 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 	return append([]backend.OpenTerminal(nil), s.roster...)
 }
 
-const (
-	// rosterRoundZeroGrace bounds how long ROUND 0 waits on an already-in-flight roster
-	// refresh before building its request. It is a wait on a completion signal, never on
-	// an MCP call: the fetch is detached and self-bounded either way, and every other
-	// round reads the cache without waiting at all.
-	//
-	// The trigger is deliberately "a refresh is in flight", NOT the sibling worktree
-	// cache's "the cache was never fetched" (currentWorktreeContext). Issue #334's
-	// failure was a WARM cache — 21s old, a terminal since closed in the Daintree UI —
-	// losing a race to the turn-start refresh by 15ms; a cold-cache trigger would not
-	// have fired at all.
-	//
-	// 250ms matches worktreeFirstFetchGrace: enough for a healthy MCP (the fetch is two
-	// round-trips, typically tens of ms — the issue's own trace missed by 15ms), and a
-	// twentieth of the 5s synchronous gate this cache replaced. Unlike the worktree's
-	// grace there is NO latch suppressing it after one timeout, because the two graces
-	// have different blast radii: the worktree's fires on every consult while the cache
-	// is cold, so an unbounded first fetch would tax every round of every turn, whereas
-	// this one fires only at iter==0 — at most once per turn (plus once per mid-turn
-	// injection, each of which is itself a fresh user instruction that deserves a fresh
-	// roster). Latching it would leave every later turn's round 0 back where #334 found
-	// it: asserting an unverified snapshot, or dropping the roster outright for the rest
-	// of the session.
-	rosterRoundZeroGrace = 250 * time.Millisecond
+// rosterRoundZeroGrace bounds how long ROUND 0 waits on an already-in-flight roster
+// refresh before building its request. It is a wait on a completion signal, never on
+// an MCP call: the fetch is detached and self-bounded either way, and every other
+// round reads the cache without waiting at all.
+//
+// The trigger is deliberately "a refresh is in flight", NOT the sibling worktree
+// cache's "the cache was never fetched" (currentWorktreeContext). Issue #334's
+// failure was a WARM cache — 21s old, a terminal since closed in the Daintree UI —
+// losing a race to the turn-start refresh by 15ms; a cold-cache trigger would not
+// have fired at all.
+//
+// 250ms matches worktreeFirstFetchGrace: enough for a healthy MCP (the fetch is two
+// round-trips, typically tens of ms — the issue's own trace missed by 15ms), and a
+// twentieth of the 5s synchronous gate this cache replaced. Unlike the worktree's
+// grace there is NO latch suppressing it after one timeout, because the two graces
+// have different blast radii: the worktree's fires on every consult while the cache
+// is cold, so an unbounded first fetch would tax every round of every turn, whereas
+// this one fires only at iter==0 — at most once per turn (plus once per mid-turn
+// injection, each of which is itself a fresh user instruction that deserves a fresh
+// roster). Latching it would leave every later turn's round 0 back where #334 found
+// it: asserting an unverified snapshot, or dropping the roster outright for the rest
+// of the session.
+//
+// A var, not a const, ONLY so tests can widen it (withRosterGrace): at 250ms "waited"
+// and "did not wait" are one scheduler hiccup apart, so asserting either way against
+// the real value measures machine load rather than behaviour. Production never writes
+// it, and the swap is unsynchronized — tests that widen it must not use t.Parallel().
+var rosterRoundZeroGrace = 250 * time.Millisecond
 
+const (
 	// rosterSnapshotMaxAge is how old a cached roster may be and still be served to the
 	// model as live state. Past it the round carries NO roster rather than a snapshot it
 	// cannot vouch for — the "missing roster is a safe false negative, stale roster is an
