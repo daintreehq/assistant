@@ -332,6 +332,77 @@ func TestSpawnReadsTerminalIDAndAttachesWatcher(t *testing.T) {
 	}
 }
 
+// Issue #337: the model copies the rendered tab label into `title`, so the wrapper
+// used to prefix it twice — "Claude: Claude: prs merge target". The redundant label
+// is stripped ONCE at the argument, which has to clean every surface the raw title
+// reaches, not just the tab: the watcher title and goal (visible in the attention
+// queue) and the persisted saga record.
+func TestSpawnStripsSelfPrefixedTitleFromEverySurface(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_337")}
+	st := newSagaStore()
+	deps := Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}
+
+	a := baseSpawn()
+	a.Title = "Claude: prs merge target"
+	a.WorktreeID = "wt-1"
+	a.Watcher = &spawnWatcher{Create: true}
+
+	res := runSpawn(deps, a)
+	if !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if name := mcp.lastLaunchArgs()["name"]; name != "Claude: prs merge target" {
+		t.Errorf("launch name = %v, want %q (not doubled)", name, "Claude: prs merge target")
+	}
+	if rec := st.get(res.Result.(map[string]any)["launchId"].(string)); rec.Title != "prs merge target" {
+		t.Errorf("saga record title = %q, want the stripped title", rec.Title)
+	}
+	if len(st.watchers) != 1 {
+		t.Fatalf("expected exactly one watcher, got %d", len(st.watchers))
+	}
+	if got := st.watchers[0].Title; got != "watch prs merge target" {
+		t.Errorf("watcher title = %q, want %q", got, "watch prs merge target")
+	}
+	if got := st.watchers[0].Goal; got != "Supervise: prs merge target" {
+		t.Errorf("watcher goal = %q, want %q", got, "Supervise: prs merge target")
+	}
+	// The success summary quotes the title back to the user; it must not be the one
+	// surface still showing the doubled name.
+	if strings.Contains(res.Summary, "Claude: prs merge target") {
+		t.Errorf("summary still carries the redundant label: %q", res.Summary)
+	}
+}
+
+// A title that is NOTHING but the agent label carries no task text. Whatever stands in
+// for it has to stand in everywhere: the tab, the saga record and the watcher reading
+// three different names for one task is worse than the doubled label this fixes.
+func TestSpawnCanonicalizesALabelOnlyTitle(t *testing.T) {
+	for _, title := range []string{"Claude:", "claude: claude:"} {
+		mcp := &scriptMCP{connected: true, launchResult: launchOK("term_338")}
+		st := newSagaStore()
+		deps := Deps{MCP: mcp, DB: st, DaemonActive: func() bool { return true }}
+
+		a := baseSpawn()
+		a.Title = title
+		a.WorktreeID = "wt-1"
+		a.Watcher = &spawnWatcher{Create: true}
+
+		res := runSpawn(deps, a)
+		if !res.Ok {
+			t.Fatalf("%q: expected ok, got %+v", title, res.Error)
+		}
+		if name := mcp.lastLaunchArgs()["name"]; name != "Claude: task" {
+			t.Errorf("%q: launch name = %v, want %q", title, name, "Claude: task")
+		}
+		if rec := st.get(res.Result.(map[string]any)["launchId"].(string)); rec.Title != "task" {
+			t.Errorf("%q: saga title = %q, want %q", title, rec.Title, "task")
+		}
+		if got := st.watchers[0].Title; got != "watch task" {
+			t.Errorf("%q: watcher title = %q, want %q", title, got, "watch task")
+		}
+	}
+}
+
 func TestSpawnAmbiguousWhenNoTerminalID(t *testing.T) {
 	mcp := &scriptMCP{connected: true, launchResult: launchNoTerminal(), listResult: terminalListResult()}
 	st := newSagaStore()

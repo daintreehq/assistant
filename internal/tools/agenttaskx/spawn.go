@@ -113,7 +113,7 @@ var spawnSchema = json.RawMessage(`{
     "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Usually OMIT it — Daintree uses the active worktree. The id is a PATH (\"/Users/you/Projects/app\"); a branch name is accepted only as a fallback, and an unresolvable value is rejected with the available list." },
     "agentId": { "type": "string", "description": "Agent to launch (default \"claude\")." },
     "mode": { "type": "string", "enum": ["edit", "explore"], "description": "Spawn intent (default \"edit\"). \"edit\" tells the agent to make code changes; \"explore\" tells it to investigate read-only and not touch any files." },
-    "title": { "type": "string", "description": "Short title for the task and any watcher." },
+    "title": { "type": "string", "description": "Short title for the task and any watcher — the task alone, e.g. \"auth refactor\". The agent name is added to the tab for you, so never write an agent name into this title yourself." },
     "taskPrompt": { "type": "string", "description": "The instructions for the agent. Constraints are appended automatically." },
     "acceptanceCriteria": { "type": "string", "description": "Task-specific contract that defines 'done'. When set on an edit-mode task, a supervising watcher verifies completion against these criteria (not git cleanliness alone) before reporting success. Provide it whenever there is a concrete, checkable definition of done. Ignored for mode:\"explore\"." },
     "context": { "type": "object", "additionalProperties": false, "properties": { "filePaths": { "type": "array", "items": { "type": "string" } }, "includeDiff": { "type": "boolean" } } },
@@ -181,10 +181,7 @@ func spawnParallelConflictKeys(raw json.RawMessage) ([]string, bool) {
 	}
 	// Mirror spawn()'s own normalization so every key is a function of the
 	// identity the handler acts on, not the model's spelling.
-	agentID := strings.TrimSpace(a.AgentID)
-	if agentID == "" {
-		agentID = defaultAgentID
-	}
+	agentID := resolveLaunchAgentID(a.AgentID)
 	if a.Mode == "" {
 		a.Mode = "edit"
 	}
@@ -219,9 +216,22 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	// "settled" logic in finishBoundLaunch key off the SAME decision (see wantsWatcher).
 	wantWatcher := wantsWatcher(a)
 
-	agentID := strings.TrimSpace(a.AgentID)
-	if agentID == "" {
-		agentID = defaultAgentID
+	agentID := resolveLaunchAgentID(a.AgentID)
+	// Strip a self-prefixed title ("Claude: fix auth") here, at the argument, so every
+	// downstream surface reads it clean — not just the tab. a.Title also becomes the
+	// watcher title ("watch <title>"), the default watcher goal ("Supervise: <title>"),
+	// the saga record, and the success summary, and normalizing inside
+	// buildAgentLaunchName alone would leave the redundant agent name on all of them.
+	// Fall back to the SAME sentinel the name builder uses: a title that is nothing but
+	// the label ("Claude:") would otherwise show as "Claude:" in the saga and
+	// "watch Claude:" on the watcher while the tab read "Claude: task" — three surfaces
+	// disagreeing about one task. buildAgentLaunchName keeps normalizing too, because
+	// spawnParallelConflictKeys derives the cohort key from the RAW args before this
+	// runs and the two must agree on the name; the strip is idempotent, so the second
+	// application is a no-op.
+	a.Title = normalizeTaskTitle(a.Title, agentID)
+	if a.Title == "" {
+		a.Title = fallbackTaskTitle
 	}
 	mode := a.Mode
 	if mode == "" {

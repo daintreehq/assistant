@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -15,6 +17,10 @@ const (
 	agentLaunchNameMaxLen = 60
 	// defaultAgentID is the name prefix when the caller omits an agentId.
 	defaultAgentID = "claude"
+	// fallbackTaskTitle stands in for a title that carries no task text once the
+	// redundant agent label is stripped ("Claude:"). Shared, because the tab, the
+	// saga record, the watcher and the summary must all land on the same word.
+	fallbackTaskTitle = "task"
 )
 
 // editConstraintsBlock is appended to an edit-mode spawned-agent prompt.
@@ -71,32 +77,99 @@ func buildAgentPrompt(a *spawnArgs) string {
 	return strings.Join(lines, "\n")
 }
 
-// buildAgentLaunchName derives the "<Agent>: <task>" terminal/tab label, hard-
-// capped at agentLaunchNameMaxLen so the "<Agent>: " prefix always survives.
-func buildAgentLaunchName(title, agentID string) string {
+// resolveLaunchAgentID applies the same trim/default spawn() does, so every
+// title/name derivation keys off ONE id. It stays the caller's own spelling:
+// resolveAgentID (spawn.go) runs later and only CHECKS the id against the live
+// roster — it never rewrites one — so this is the id the launch will carry.
+func resolveLaunchAgentID(agentID string) string {
 	id := strings.TrimSpace(agentID)
 	if id == "" {
 		id = defaultAgentID
 	}
-	prefix := strings.ToUpper(id[:1]) + id[1:] + ": "
+	return id
+}
+
+// normalizeTaskTitle collapses whitespace runs and strips any leading
+// "<agentId>:" label the caller wrote into the title itself.
+//
+// The tab the user sees is already "<Agent>: <title>", and every surface that
+// describes `title` shows that RENDERED label — so the model copies it into the
+// argument ("Claude: prs merge target") and the wrapper prefixes it again,
+// producing "Claude: Claude: prs merge target" (issue #337). Stripping here,
+// rather than skipping the prepend, keeps buildAgentLaunchName's cap arithmetic
+// a single code path: a title that already carries the prefix rejoins the exact
+// add-and-truncate flow an unprefixed one takes, so it can never be double-cut,
+// and the LAUNCH NAME a non-matching title produces stays byte-identical to
+// before — that name IS dedupe identity (computeIdempotencyKey embeds it,
+// reconcileViaTerminalList matches it exactly). The title's other surfaces do
+// shift: spawn() now shows every one of them the whitespace-collapsed form the
+// tab has always displayed, instead of the raw spelling.
+//
+// The match is deliberately narrow: the FIRST colon-delimited token must equal
+// the resolved agentId under EqualFold. Case and a missing space after the colon
+// are tolerated (the colon is the delimiter that matters); a repeated prefix is
+// collapsed by looping, since each pass must clear the same bar. A space BEFORE
+// the colon, a different agent's name ("Claude: …" launched as codex), or the id
+// without a colon are all left alone — those are plausible task text, not the
+// wrapper's syntax. Returns "" for a title that is nothing but prefixes —
+// callers substitute fallbackTaskTitle, and every caller must, so the tab, the
+// saga record and the watcher never disagree about what the task is called.
+func normalizeTaskTitle(title, agentID string) string {
+	id := resolveLaunchAgentID(agentID)
 	task := strings.TrimSpace(wsRun.ReplaceAllString(title, " "))
+	for {
+		label, rest, found := strings.Cut(task, ":")
+		if !found || !strings.EqualFold(label, id) {
+			return task
+		}
+		task = strings.TrimSpace(rest)
+	}
+}
+
+// buildAgentLaunchName derives the "<Agent>: <task>" terminal/tab label, hard-
+// capped at agentLaunchNameMaxLen so the "<Agent>: " prefix always survives.
+// Exactly one prefix: a title that already carries it is normalized away first
+// (see normalizeTaskTitle).
+func buildAgentLaunchName(title, agentID string) string {
+	id := resolveLaunchAgentID(agentID)
+	// Capitalize the leading RUNE, not the leading byte: id[:1] on a non-ASCII
+	// id ("émile") slices a multi-byte rune in half and corrupts the prefix.
+	first, sz := utf8.DecodeRuneInString(id)
+	prefix := string(unicode.ToUpper(first)) + id[sz:] + ": "
+	task := normalizeTaskTitle(title, id)
 	if task == "" {
-		task = "task"
+		task = fallbackTaskTitle
 	}
 	room := agentLaunchNameMaxLen - len(prefix)
 	if room < 0 {
 		room = 0
 	}
-	head := task
-	if len(task) > room {
-		head = task[:room]
-	}
+	head := truncateBytes(task, room)
 	// Final hard cap so the invariant holds even for a pathologically long agentId.
 	full := prefix + head
 	if len(full) > agentLaunchNameMaxLen {
-		full = full[:agentLaunchNameMaxLen]
+		full = truncateBytes(full, agentLaunchNameMaxLen)
 	}
 	return full
+}
+
+// truncateBytes cuts s to at most max BYTES without splitting a rune.
+//
+// The cap is a byte budget (Daintree's tab label limit), but a plain s[:max]
+// can land mid-rune and yield invalid UTF-8 — and that silently breaks
+// reconciliation, not just the label: encoding/json replaces the broken bytes
+// with U+FFFD on the way out, so the name Daintree receives (and echoes back
+// through terminal.list) is NOT the name we kept locally, and
+// reconcileViaTerminalList's exact match can never bind. Backing off to the
+// last rune boundary keeps the transmitted and retained names identical.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
 }
 
 // fieldRe builds the text-body regex extractField uses ("?key"? : "?value"?).
