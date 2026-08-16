@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -268,6 +269,21 @@ func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, boo
 		}
 		rows = append(rows, row)
 	}
+	// Source first, id as the tiebreak. Daintree's discovery order is only stable WITHIN a
+	// session (plugin scans race, registry walks differ per machine), and this roster rides
+	// the cacheable startup block that sits ahead of the entire conversation — so an
+	// order-only reshuffle of an otherwise unchanged registry would rewrite that prefix and
+	// throw the prompt cache away. Sorting the fully merged rows (never `order`, which is
+	// mid-accumulation: a text row's empty source is often filled by a later structured one)
+	// also makes the projection's byte budget deterministic about WHICH rows survive a
+	// catalog that overflows it. Ids are unique by construction here, so this is a total
+	// order and needs no stable sort.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Source != rows[j].Source {
+			return rows[i].Source < rows[j].Source
+		}
+		return rows[i].ID < rows[j].ID
+	})
 	return rows, complete, availabilityComplete, true
 }
 
