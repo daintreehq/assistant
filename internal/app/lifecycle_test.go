@@ -237,16 +237,17 @@ func TestParseAvailableAgentsUnionsTextAndStructuredRows(t *testing.T) {
 }
 
 // The roster rides the cacheable startup block, so an unchanged registry must serialize
-// byte-identically no matter what order Daintree's discovery happened to report. The
-// fixture ids and display names are deliberately anti-correlated with the expected
-// sequence: sorting by id alone, by display name, or by (source, displayName) each yields
-// a different order, so the literal wantOrder pins the real key rather than merely proving
-// the permutations agree with each other.
+// byte-identically no matter what order Daintree's discovery happened to report. Every
+// fixture field is deliberately anti-correlated with the expected sequence: sorting by id
+// alone, by display name, by availability, or by (source, displayName) / (source,
+// availability) each yields a DIFFERENT order. So the literal wantOrder pins the real key,
+// where merely proving the permutations agree with each other would also accept a sort on
+// the wrong field.
 func TestParseAvailableAgentsProducesStablePayloadAcrossDiscoveryOrder(t *testing.T) {
 	const (
-		builtinZ = `{"id":"z-built-in","displayName":"Alpha display","source":"built-in","availability":"ready"}`
+		builtinZ = `{"id":"z-built-in","displayName":"Alpha display","source":"built-in","availability":"blocked"}`
 		userA    = `{"id":"a-user","displayName":"Bravo display","source":"user","availability":"missing"}`
-		builtinB = `{"id":"b-built-in","displayName":"Zulu display","source":"built-in","availability":"blocked"}`
+		builtinB = `{"id":"b-built-in","displayName":"Zulu display","source":"built-in","availability":"ready"}`
 		pluginA  = `{"id":"a-plugin","displayName":"Middle display","source":"plugin","availability":"unauthenticated"}`
 
 		pluginWithoutSource = `{"id":"a-plugin","displayName":"Middle display","availability":"unauthenticated"}`
@@ -267,9 +268,12 @@ func TestParseAvailableAgentsProducesStablePayloadAcrossDiscoveryOrder(t *testin
 		{name: "reverse", res: textResult(pluginA, builtinB, userA, builtinZ)},
 		{name: "rotation", res: textResult(builtinB, pluginA, builtinZ, userA)},
 		{
-			// The split case is the one that proves the sort runs AFTER the merge: a-plugin
-			// arrives from text with no source at all, and only the structured channel
-			// supplies the "plugin" value the primary sort key needs.
+			// The split case proves the order is computed from MERGED field values, not from
+			// whatever each channel saw on its own: a-plugin arrives from text with no source
+			// at all, and only the structured channel supplies the "plugin" the primary key
+			// needs. The structured rows are ordered so the last thing that happens is that
+			// source patch, never a new id — otherwise a sorter that re-ran on every append
+			// would be re-sorting after the fix and would survive with the right answer.
 			name: "split across text and structured channels",
 			res: mcp.CallResult{
 				Text: `{"complete":true,"availabilityComplete":true,"agents":[` +
@@ -278,13 +282,13 @@ func TestParseAvailableAgentsProducesStablePayloadAcrossDiscoveryOrder(t *testin
 					"complete":             true,
 					"availabilityComplete": true,
 					"agents": []any{
-						map[string]any{"id": "a-plugin", "source": "plugin"},
 						map[string]any{
 							"id":           "b-built-in",
 							"displayName":  "Zulu display",
 							"source":       "built-in",
-							"availability": "blocked",
+							"availability": "ready",
 						},
+						map[string]any{"id": "a-plugin", "source": "plugin"},
 					},
 				},
 			},
