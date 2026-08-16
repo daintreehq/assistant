@@ -165,6 +165,45 @@ func TestViewWidths_Operations(t *testing.T) {
 	}
 }
 
+// The composer's supervision counts read STRAIGHT off the dashboard snapshot rather than
+// from mirrored Model counters — buildDashboard already filters them to the live sets and
+// the ~1s tick already replaces the snapshot, so a cached copy would only be a second
+// source of truth free to drift from the operations deck reading the same slices.
+func TestComposerView_UsesDashboardSupervisionCounts(t *testing.T) {
+	m := testModel(100)
+	m.dashboard = Dashboard{
+		Timers: []domain.TimerRecord{{Title: "nightly digest", FireAt: 1_000_000_000_000}},
+		Watchers: []domain.WatcherRecord{
+			{ID: "wch_1", Status: "active"},
+			{ID: "wch_2", Status: "active"},
+		},
+		// Deliberately empty: Agents is a BUILT roster (watchers ⟕ launches), so counting
+		// it instead of Watchers would be a plausible slip that this leaves exposed.
+		Agents: nil,
+	}
+	out := ansi.Strip(m.composerView(m.usableWidth()))
+	if !strings.Contains(out, "◷ 1 timer · 2 watchers") {
+		t.Errorf("supervision counts missing from the composer:\n%s", out)
+	}
+}
+
+// Async futures are deliberately NOT supervision for this row: they are short-lived
+// execution state with their own in-turn activity line, and folding them in would make a
+// row meant for durable, otherwise-invisible work churn.
+func TestComposerView_DoesNotCountAsyncAsSupervision(t *testing.T) {
+	m := testModel(100)
+	m.dashboard = Dashboard{
+		Async: []domain.AsyncInvocationRecord{
+			{ID: "asy_1", Status: "running"},
+			{ID: "asy_2", Status: "settling"},
+		},
+	}
+	out := ansi.Strip(m.composerView(m.usableWidth()))
+	if strings.Contains(out, "◷") || strings.Contains(out, "timer") || strings.Contains(out, "watcher") {
+		t.Errorf("live async work rendered as supervision:\n%s", out)
+	}
+}
+
 // tallApprovalConfirm builds a representative multi-row approval sheet (the tallest thing
 // the fixed bottom band can hold) for the height-floor tests.
 func tallApprovalConfirm() *pendingConfirm {
