@@ -273,8 +273,10 @@ func (s *Store) RevokeGrant(id string, now int64) (found, didRevoke bool, err er
 // returned count is only the grants that still held authority. The count is
 // model-visible — timer.cancel and watcher.cancel report it as revokedGrants — so
 // counting rows that were already dead would claim authority that was never there to
-// withdraw. Counting and stamping happen in ONE transaction so the number describes
-// exactly the rows the UPDATE went on to touch.
+// withdraw. So the UPDATE deliberately touches MORE rows than the count reports.
+// Counting and stamping share ONE transaction not for the row arithmetic but because
+// the sole connection is otherwise free between two separate statements — the count
+// has to describe the same snapshot the UPDATE then writes.
 func (s *Store) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 	if now <= 0 {
 		now = s.now()

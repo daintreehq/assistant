@@ -45,8 +45,11 @@ type Store interface {
 	// dedupe key — the lost-claim mop-up above (a consumed watcher's pre-claim stop
 	// publish is a stale duplicate of a completion the conversation already holds).
 	ResolveOpenEventsByDedupeKey(key string) (int, error)
-	// RevokeGrantsByActor revokes all live automation grants for an actor id
-	// (called on every timer/watcher terminal state). Returns rows changed.
+	// RevokeGrantsByActor revokes an actor's automation grants (called on every
+	// timer/watcher terminal state). It stamps every not-yet-revoked row, but returns
+	// only how many were still LIVE — so one live plus one expired grant returns 1
+	// while updating both. Callers here discard the count; timer.cancel and
+	// watcher.cancel report it to the model as revokedGrants.
 	RevokeGrantsByActor(actorID string, now int64) (int, error)
 	// UpdateWorkflowRun applies an allowlisted column patch to a workflow ledger row.
 	// Called best-effort when a supervisor watcher that back-links a workflow run

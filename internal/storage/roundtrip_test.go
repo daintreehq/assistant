@@ -118,7 +118,7 @@ func TestRevokeGrantIdempotentAndByActorCount(t *testing.T) {
 // is the only kill that survives a backwards wall-clock step), but it must NOT be
 // counted as authority the call withdrew: didRevoke and the cascade count answer
 // "was there still authority here?", which is what the model acts on.
-func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
+func TestRevokeGrantStampsInertGrantsButDoesNotCountThem(t *testing.T) {
 	now := int64(10_000_000)
 	s := openTest(t, now)
 	mk := func(id, actor string, over func(*domain.AutomationGrantRecord)) domain.AutomationGrantRecord {
@@ -161,20 +161,28 @@ func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
 		}
 	}
 
-	// The cascade: a live grant plus two never-revoked inert ones for one actor.
+	// The cascade, over one live grant and BOTH kinds of inert one. The exhausted row
+	// is drained first, while it is the actor's only grant, so ConsumeGrant cannot pick
+	// anything else — covering it matters because a cascade guarded on
+	// `usesRemaining > 0` would pass an expired-only fixture while silently leaving
+	// exhausted rows unstamped.
+	usedUp := mk("g_cascade_used", "wch_cascade", func(r *domain.AutomationGrantRecord) { r.MaxUses = 1 })
+	if c, _ := s.ConsumeGrant("wch_cascade", domain.GrantActorWatcher, "git.commit", domain.RiskGit, now); c == nil || c.ID != usedUp.ID || c.UsesRemaining != 0 {
+		t.Fatalf("setup: g_cascade_used should consume to 0 uses, got %+v", c)
+	}
 	mk("g_live", "wch_cascade", nil)
 	mk("g_cascade_exp", "wch_cascade", func(r *domain.AutomationGrantRecord) { r.ExpiresAt = now - 1 })
 	n, err := s.RevokeGrantsByActor("wch_cascade", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 1, not 2: the count is model-visible as timer.cancel/watcher.cancel's
+	// 1, not 3: the count is model-visible as timer.cancel/watcher.cancel's
 	// revokedGrants, so it must mean "authority actually withdrawn".
 	if n != 1 {
 		t.Fatalf("revokeGrantsByActor should count only the live grant, want 1 got %d", n)
 	}
 	// …but every row still gets stamped, so nothing can be resurrected by a clock step.
-	for _, id := range []string{"g_live", "g_cascade_exp"} {
+	for _, id := range []string{"g_live", "g_cascade_exp", "g_cascade_used"} {
 		got, _ := s.GetGrant(id)
 		if got.RevokedAt == nil {
 			t.Fatalf("%s: the cascade must stamp every not-yet-revoked row", id)
